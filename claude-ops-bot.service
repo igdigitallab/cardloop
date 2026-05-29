@@ -1,0 +1,19 @@
+[Unit]
+Description=Claude-Ops-Bot (Claude Code via Telegram, forum-topics per project)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=igor
+Group=igor
+WorkingDirectory=/home/igor/claude-ops-bot
+Environment=HOME=/home/igor
+Environment=PATH=/home/igor/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+# ANTHROPIC_API_KEY НЕ задаём — работаем на OAuth подписки (~/.claude/.credentials.json)
+ExecStart=/home/igor/claude-ops-bot/venv/bin/python -u /home/igor/claude-ops-bot/bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

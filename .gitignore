@@ -1,0 +1,29 @@
+# --- секреты и локальный конфиг ---
+.env
+*.env
+!.env.example
+
+# --- рантайм-состояние и данные (chat IDs, сессии, логи, audit, timeline) ---
+data/
+*.log
+*.session
+*.session-journal
+
+# --- python ---
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# --- node / web build ---
+web/node_modules/
+web/dist/
+
+# --- worktrees (для агентов) ---
+.worktrees/
+
+# --- os ---
+.DS_Store
+Thumbs.db
