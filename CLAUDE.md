@@ -11,6 +11,12 @@
 - `data/sessions.json` — **СЛОЙ 2**: `"chat:thread" → session_id`. Чистит только `/reset`.
 - `claude-ops-bot.service` → `/etc/systemd/system/`.
 
+## Git (с 2026-05-29)
+- Репо: `github.com/Zira777ru/claude-ops-bot` — **PRIVATE** (инфра-контрол-плейн: внутр. IP/тоннели/OPSEC-зоны в этом файле; публиковать только после санитизации — будущий OSS-шаг из vision-strategy.md).
+- `.gitignore` исключает: `.env`, `data/` (chat IDs/сессии/audit/логи), `venv/`, `web/node_modules`, `web/dist`, `.worktrees/`. Захардкоженных секретов в коде нет (всё через `os.environ`). `.env.example` — ключи-плейсхолдеры.
+- ⚠️ Перед коммитом нового: проверить, что секрет/значение не попало в трекаемые файлы.
+- Агенты-параллель → `git worktree add .worktrees/<name> -b <branch>`; после — `git worktree prune`.
+
 ## Операции
 - Логи: `sudo journalctl -u claude-ops-bot -f`
 - Рестарт: `sudo systemctl restart claude-ops-bot`
