@@ -260,7 +260,7 @@ def _render_code_block(body: str, lang: str = "") -> str:
         head = "\n".join(lines[:CODE_PREVIEW_LINES])
         tag = f"{lang} · " if lang else ""
         return f"<pre>{html.escape(head)}\n…</pre><i>‹{tag}{n} строк кода свёрнуто›</i>"
-    return f"<pre>{html.escape('\n'.join(lines))}</pre>"
+    return f"<pre>{html.escape(chr(10).join(lines))}</pre>"
 
 
 def md_to_html(text: str) -> str:
@@ -360,7 +360,6 @@ def short(cmd: str, limit=90) -> str:
     return cmd if len(cmd) <= limit else cmd[:limit] + "…"
 
 
-# ─────────────────────────── core: run agent ───────────────────────────
 # ─────────────────────────── audit + watchdog ───────────────────────────
 AUDIT_DIR = DATA / "audit"
 STALL_SECONDS = int(os.environ.get("STALL_SECONDS", "300"))   # нет событий N сек -> прервать
@@ -387,6 +386,104 @@ def audit(project: str, kind: str, text: str):
         pass
 
 
+# ─────────────────────────── ДВИЖОК (async-генератор событий) ───────────────────────────
+#
+# run_engine — независимый генератор событий. Не знает про Telegram, aiohttp или любой транспорт.
+# Транспорты (TG-адаптер run_agent, glasses-адаптер run_for_glasses) потребляют его события.
+#
+# Схема событий:
+#   {"type": "tool",       "name": str, "input": dict}        — инструмент запущен агентом
+#   {"type": "text",       "text": str}                        — текстовый блок ответа модели
+#   {"type": "result",     "session_id": str|None,
+#                          "cost_usd": float|None}             — финальный ResultMessage
+#   {"type": "rate_limit", "rate_limit_type": str, ...}        — RateLimitEvent (пассивное)
+#   {"type": "error",      "exc": BaseException}               — исключение из SDK
+#
+# ВАЖНО — running[session_key]:
+#   Адаптер (on_message) ставит running[k] = True СИНХРОННО до первого await (гонка!).
+#   run_engine заменяет его реальным ClaudeSDKClient сразу после создания.
+#   Снятие running.pop(k) — ответственность адаптера (в finally).
+
+async def run_engine(
+    project_name: str,
+    cwd: str,
+    prompt: str,
+    session_key: str,
+    model: str = None,
+    system_prompt: dict = None,
+    env: dict = None,
+    resume_session_id: str = None,
+):
+    """Async-генератор событий SDK. Единственный источник истины для выполнения промпта.
+
+    Аргументы:
+        project_name      — имя проекта (для audit-лога)
+        cwd               — рабочая директория
+        prompt            — промпт пользователя
+        session_key       — ключ в running/sessions (напр. "chat:thread" или "glasses:proj")
+        model             — модель (алиас из MODELS или строка напрямую)
+        system_prompt     — dict {type,preset,append}, по умолчанию — TG-preset
+        env               — доп. env-переменные для агента (TG_CHAT_ID и т.п.)
+        resume_session_id — session_id для resume (None = новая сессия)
+
+    Yields dict событий. Исключения SDK оборачиваются в {"type": "error", "exc": ...}.
+    """
+    if system_prompt is None:
+        system_prompt = {"type": "preset", "preset": "claude_code", "append": TELEGRAM_NUDGE}
+
+    resolved_model = MODELS.get(model, model) if model else MODELS.get(DEFAULT_MODEL, DEFAULT_MODEL)
+
+    opts = ClaudeAgentOptions(
+        model=resolved_model,
+        permission_mode="bypassPermissions",
+        cwd=cwd,
+        setting_sources=["user", "project"],
+        resume=resume_session_id,
+        disallowed_tools=DISALLOWED_TOOLS,
+        system_prompt=system_prompt,
+        env=env or {},
+    )
+
+    audit(project_name, "TASK", short(prompt, 300))
+
+    try:
+        async with ClaudeSDKClient(options=opts) as client:
+            running[session_key] = client   # заменяем True-placeholder реальным клиентом (для /stop)
+            await client.query(prompt)
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for blk in msg.content:
+                        if isinstance(blk, TextBlock) and blk.text.strip():
+                            yield {"type": "text", "text": blk.text}
+                        elif isinstance(blk, ToolUseBlock):
+                            yield {"type": "tool", "name": blk.name, "input": blk.input or {}}
+                elif isinstance(msg, RateLimitEvent):
+                    i = msg.rate_limit_info
+                    yield {
+                        "type": "rate_limit",
+                        "rate_limit_type": i.rate_limit_type,
+                        "status": i.status,
+                        "resets_at": i.resets_at,
+                        "utilization": i.utilization,
+                    }
+                elif isinstance(msg, ResultMessage):
+                    yield {
+                        "type": "result",
+                        "session_id": getattr(msg, "session_id", None),
+                        "cost_usd": getattr(msg, "total_cost_usd", None),
+                    }
+                elif isinstance(msg, SystemMessage):
+                    pass   # системные сообщения SDK — не транслируем
+    except Exception as exc:
+        yield {"type": "error", "exc": exc}
+
+
+# ─────────────────────────── TG-адаптер ───────────────────────────
+#
+# run_agent — потребитель run_engine для Telegram-канала.
+# Рендерит статус-сообщение (edit), watchdog, heartbeat, audit-лог, финальный ответ.
+# Поведение 1-в-1 с оригиналом — только источник событий заменён на генератор.
+
 async def run_agent(context, update, prompt: str):
     chat = update.effective_chat.id
     thread = update.effective_message.message_thread_id or 0
@@ -404,7 +501,6 @@ async def run_agent(context, update, prompt: str):
     t_start = time.time()
     last_event = [t_start]        # обновляется на каждом событии SDK (для watchdog)
     stalled = {"reason": None}
-    audit(b["project"], "TASK", short(prompt, 300))
 
     def _elapsed():
         s = int(time.time() - t_start)
@@ -452,72 +548,77 @@ async def run_agent(context, update, prompt: str):
         except asyncio.CancelledError:
             pass
 
-    opts = ClaudeAgentOptions(
-        model=MODELS.get(model, model),
-        permission_mode="bypassPermissions",
-        cwd=cwd,
-        setting_sources=["user", "project"],
-        resume=sessions.get(k),
-        disallowed_tools=DISALLOWED_TOOLS,
-        system_prompt={"type": "preset", "preset": "claude_code", "append": TELEGRAM_NUDGE},
-        # Прокинуто для скрипта tg-reply: агент шлёт файлы в свой топик без знания chat/thread
-        env={"TG_CHAT_ID": str(chat), "TG_THREAD_ID": str(thread or 0)},
-    )
-
     hb = asyncio.create_task(heartbeat())
     wd = asyncio.create_task(watchdog())
+    engine_exc = None
     try:
-        async with ClaudeSDKClient(options=opts) as client:
-            running[k] = client
-            await client.query(prompt)
-            async for msg in client.receive_response():
-                last_event[0] = time.time()   # любое событие SDK = «живо» для watchdog
-                if isinstance(msg, AssistantMessage):
-                    for blk in msg.content:
-                        if isinstance(blk, TextBlock) and blk.text.strip():
-                            answer.append(blk.text)
-                            log_lines.append("💬 " + short(blk.text.replace("\n", " "), 70))
-                        elif isinstance(blk, ToolUseBlock):
-                            name = blk.name
-                            inp = blk.input or {}
-                            if name == "Bash":
-                                cmd = inp.get("command", "")
-                                log_lines.append(f"$ {short(cmd, 70)}")
-                                audit(b["project"], "BASH⚠️" if _is_destructive(cmd) else "BASH", cmd)
-                            elif name in ("Edit", "Write", "NotebookEdit"):
-                                n_edits += 1
-                                fp = str(inp.get("file_path", ""))
-                                log_lines.append(f"✏️ {name}: {short(fp, 60)}")
-                                audit(b["project"], name.upper(), fp)
-                            else:
-                                log_lines.append(f"🔧 {name}")
-                            await push_status()
-                elif isinstance(msg, RateLimitEvent):
-                    i = msg.rate_limit_info
-                    if i.rate_limit_type:
-                        rate_limits[i.rate_limit_type] = {
-                            "status": i.status, "resets_at": i.resets_at,
-                            "utilization": i.utilization, "ts": time.time(),
-                        }
-                elif isinstance(msg, SystemMessage):
-                    pass
-                elif isinstance(msg, ResultMessage):
-                    if getattr(msg, "session_id", None):
-                        sessions[k] = msg.session_id
-                        save_sessions()
-                    if getattr(msg, "total_cost_usd", None) is not None:
-                        costs[k] = msg.total_cost_usd
-    except Exception:
-        # чистим статус и пробрасываем — полный трейсбек отправит safe_run/report_error
-        try:
-            await context.bot.delete_message(chat, status.message_id)
-        except Exception:
-            pass
-        raise
+        async for event in run_engine(
+            project_name=b["project"],
+            cwd=cwd,
+            prompt=prompt,
+            session_key=k,
+            model=model,
+            system_prompt={"type": "preset", "preset": "claude_code", "append": TELEGRAM_NUDGE},
+            env={"TG_CHAT_ID": str(chat), "TG_THREAD_ID": str(thread or 0)},
+            resume_session_id=sessions.get(k),
+        ):
+            last_event[0] = time.time()   # любое событие SDK = «живо» для watchdog
+            etype = event["type"]
+
+            if etype == "text":
+                answer.append(event["text"])
+                log_lines.append("💬 " + short(event["text"].replace("\n", " "), 70))
+
+            elif etype == "tool":
+                name = event["name"]
+                inp = event["input"]
+                if name == "Bash":
+                    cmd = inp.get("command", "")
+                    log_lines.append(f"$ {short(cmd, 70)}")
+                    audit(b["project"], "BASH⚠️" if _is_destructive(cmd) else "BASH", cmd)
+                elif name in ("Edit", "Write", "NotebookEdit"):
+                    n_edits += 1
+                    fp = str(inp.get("file_path", ""))
+                    log_lines.append(f"✏️ {name}: {short(fp, 60)}")
+                    audit(b["project"], name.upper(), fp)
+                else:
+                    log_lines.append(f"🔧 {name}")
+                await push_status()
+
+            elif etype == "result":
+                if event.get("session_id"):
+                    sessions[k] = event["session_id"]
+                    save_sessions()
+                if event.get("cost_usd") is not None:
+                    costs[k] = event["cost_usd"]
+
+            elif etype == "rate_limit":
+                rl_type = event.get("rate_limit_type")
+                if rl_type:
+                    rate_limits[rl_type] = {
+                        "status": event.get("status"),
+                        "resets_at": event.get("resets_at"),
+                        "utilization": event.get("utilization"),
+                        "ts": time.time(),
+                    }
+
+            elif etype == "error":
+                engine_exc = event["exc"]
+
+    except Exception as exc:
+        engine_exc = exc
     finally:
         hb.cancel()
         wd.cancel()
         running.pop(k, None)
+
+    # Если движок упал — удаляем статус и пробрасываем (safe_run/report_error обработает)
+    if engine_exc is not None:
+        try:
+            await context.bot.delete_message(chat, status.message_id)
+        except Exception:
+            pass
+        raise engine_exc
 
     # финал: СНАЧАЛА шлём ответ, и только ПОТОМ убираем статус-сообщение.
     # Порядок критичен: если отправка ответа упадёт даже после ретраев — на экране
@@ -544,6 +645,7 @@ async def run_agent(context, update, prompt: str):
 # Ключ сессии — "glasses:<project>" (не пересекается с TG-ключами "<chat>:<thread>").
 # Запросы голосовые: STT уже сделан на стороне очков через deepseek-bridge /stt,
 # сюда приходит уже текст.
+# Переиспользует run_engine (единый движок), адаптируя формат ответа под HUD (≤300 символов).
 async def run_for_glasses(project_name: str, prompt: str) -> dict:
     r = resolve_project(project_name)
     if not r:
@@ -552,34 +654,33 @@ async def run_for_glasses(project_name: str, prompt: str) -> dict:
     key = f"glasses:{display}"
     if key in running:
         raise RuntimeError("уже работаю в этом проекте через очки")
+    # Гонка: резервируем слот СИНХРОННО до первого await
     running[key] = True
     answer_parts = []
     sid = sessions.get(key)
     try:
-        opts = ClaudeAgentOptions(
-            model=MODELS.get(GLASSES_MODEL, GLASSES_MODEL),
-            permission_mode="bypassPermissions",
+        async for event in run_engine(
+            project_name=display,
             cwd=cwd,
-            setting_sources=["user", "project"],
-            resume=sid,
-            disallowed_tools=DISALLOWED_TOOLS,
+            prompt=prompt,
+            session_key=key,
+            model=GLASSES_MODEL,
             system_prompt={"type": "preset", "preset": "claude_code", "append": GLASSES_NUDGE},
-        )
-        async with ClaudeSDKClient(options=opts) as client:
-            running[key] = client
-            await client.query(prompt)
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    for blk in msg.content:
-                        if isinstance(blk, TextBlock) and blk.text.strip():
-                            answer_parts.append(blk.text)
-                elif isinstance(msg, ResultMessage):
-                    if getattr(msg, "session_id", None):
-                        sid = msg.session_id
-                        sessions[key] = sid
-                        save_sessions()
-                    if getattr(msg, "total_cost_usd", None) is not None:
-                        costs[key] = msg.total_cost_usd
+            env={},
+            resume_session_id=sid,
+        ):
+            etype = event["type"]
+            if etype == "text":
+                answer_parts.append(event["text"])
+            elif etype == "result":
+                if event.get("session_id"):
+                    sid = event["session_id"]
+                    sessions[key] = sid
+                    save_sessions()
+                if event.get("cost_usd") is not None:
+                    costs[key] = event["cost_usd"]
+            elif etype == "error":
+                raise event["exc"]
     finally:
         running.pop(key, None)
     reply = "\n".join(answer_parts).strip() or "(агент завершил без текста)"
@@ -725,7 +826,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send(context, update.effective_chat.id, msg.message_thread_id,
                    "⏳ Уже работаю в этом топике. /stop чтобы прервать.")
         return
-    running[k] = True  # placeholder; run_agent заменит на реальный client
+    running[k] = True  # placeholder; run_engine заменит на реальный client
     cid, tid = update.effective_chat.id, msg.message_thread_id
     # вложения -> скачиваем, путь отдаём агенту
     files = []
