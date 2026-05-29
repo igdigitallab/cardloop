@@ -5,7 +5,7 @@
 > ⚠️ **HTTP-транспорт для очков G2 — заглушен 2026-05-28.** Код функций (`run_for_glasses`, эндпоинты `/projects`/`/run`/`/reset`, CORS middleware) **в `bot.py` оставлен**, но отключён через пустой `GLASSES_TOKEN` в `.env` (`#disabled-2026-05-28# GLASSES_TOKEN=...`). HTTP-сервер сам не поднимается. Чтобы включить обратно: раскомментить токен в `.env` + восстановить CF tunnel ingress на pve + CNAME в Cloudflare → рестарт бота. Контекст почему свернули — `~/vault/01-Projects/even-g2/specs/claude-glasses.md`.
 
 ## Что где
-- `bot.py` — весь бот (один файл, минимальная структура).
+- `bot.py` — весь бот (один файл, минимальная структура). **Движок = `run_engine()`** (async-генератор событий `{tool|text|result|rate_limit|error}`, транспорт-независимый, F0 done 2026-05-29). Транспорты-потребители: `run_agent` (TG-адаптер: статус-сообщение/watchdog/audit/финал) и `run_for_glasses` (HUD-адаптер, ≤300 chars). `running[k]=True` резервируется СИНХРОННо в адаптере до первого await; `run_engine` заменяет на реальный client. Новые триггеры (web-чат C1, авто-запуск карточки F1) подключаются как потребители `run_engine`, НЕ дублируют SDK-цикл.
 - `.env` — секреты (BOT_TOKEN, GROUP_CHAT_ID, ALLOWED_USERS). НЕ в git.
 - `data/topics.json` — **СЛОЙ 1**: привязка `"chat:thread" → {project,cwd,model}`. Вечная, `/reset` не трогает.
 - `data/sessions.json` — **СЛОЙ 2**: `"chat:thread" → session_id`. Чистит только `/reset`.
@@ -55,7 +55,7 @@
 - **Auth:** cookie `cops_auth` = `sha256(password+"cops")`, middleware на `/api/*` кроме `/api/health` и `/api/login`. Фронт — React+Vite SPA в `web/`, билд в `web/dist` (`npm run build`), aiohttp отдаёт статику с SPA-fallback.
 - **Фаза 1 (готово):** read-only — список проектов + git-health, табы Обзор / README (`/api/projects/{id}/readme`, перебор имён файла) / CLAUDE.md / Specs (из vault) / Активность (audit-лог).
 - **Доска (готово 2026-05-29, Spec=Kanban=2 файла):** таб «Доска» рендерит `TASKS.md` (в КОРНЕ репо проекта, не vault) как канбан. Секции `## Backlog / In Progress / Review / Failed` = колонки; строка `- [x] текст <!--ops:ID-->` = карточка (статус-символ ` ~ ? !`, `ops:ID` — стабильный якорь, дописывается автоматически при первом GET). **Истина = markdown, БД для плана НЕТ.** Завершённое уходит в `DONE.md` (append-only, дата; **сессии его НЕ читают** — гигиена контекста). Преамбула файла (до первой колонки) сохраняется; прочий текст внутри секций канонизируется при перезаписи. API: `GET/POST /api/projects/{id}/tasks`, `POST .../tasks/{card}/move {to}` (`to`=колонка или `done`→архив), `DELETE .../tasks/{card}`, `GET .../tasks/done`. UI: кнопки ←→ (перенос), ✓ (в Done), ✕ (удалить); добавление — в колонке Backlog. **Авто-запуск карточки движком ещё НЕ сделан** (нужен engine-from-web из фазы 0/2) — пока доска ручная.
-- **Фаза 2** — стрим-чат (SSE), **Фаза 3** — карточка Backlog→In Progress запускает движок. Движок пока НЕ рефакторен в генератор событий (фаза 0 отложена ради безопасности TG) — чат фазы 2 будет переиспользовать паттерн `run_for_glasses`/новую функцию, делящую `running`.
+- **Фаза 2 (C1)** — стрим-чат (SSE), **Фаза 3 (F1)** — карточка Backlog→In Progress запускает движок. **Движок уже рефакторен в генератор `run_engine` (F0 done 2026-05-29)** — чат и авто-запуск подключаются как потребители `run_engine`, делящие `running`-замок.
 - ⚠️ После правки `web/` — пересобрать (`cd web && npm run build`); после правки `webapp.py`/`bot.py` — рестарт сервиса.
 
 ## HTTP-транспорт для очков G2 (с 2026-05-28)
