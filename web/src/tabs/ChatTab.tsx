@@ -8,13 +8,68 @@ import {
   ChatSSEEvent,
   ChatToolCall,
   HistoryMessage,
+  Project,
   RichTool,
   SessionContext,
   SessionInfo,
 } from '../types'
 
 interface Props {
-  projectId: string
+  project: Project
+  onProjectsReload: () => void
+}
+
+type ModelKey = 'opus' | 'sonnet' | 'haiku'
+const MODEL_OPTIONS: ModelKey[] = ['sonnet', 'opus', 'haiku']
+
+/** Грубая оценка токенов: ~4 символа на токен (общепринятый эвристик для англ/русск). */
+function estimateTokens(messages: ChatMessage[]): number {
+  let total = 0
+  for (const m of messages) {
+    total += m.text.length
+    for (const t of m.tools) {
+      // короткий вес для tool — обычно компактные структуры
+      total += JSON.stringify(t).length
+    }
+  }
+  return Math.round(total / 4)
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return `${n}`
+  if (n < 10000) return `${(n / 1000).toFixed(1)}K`
+  return `${Math.round(n / 1000)}K`
+}
+
+/** Форматирует длительность: 0:05, 1:23, 12:45. */
+function formatDuration(sec: number): string {
+  const s = Math.max(0, Math.floor(sec))
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m}:${r.toString().padStart(2, '0')}`
+}
+
+/** Короткая подсказка для tool — что именно сейчас крутится. */
+function toolHint(tool: RichTool): string {
+  if (tool.kind === 'bash') {
+    const cmd = tool.cmd.trim().split('\n')[0]
+    return cmd.length > 50 ? cmd.slice(0, 50) + '…' : cmd
+  }
+  if (tool.kind === 'edit' || tool.kind === 'write' || tool.kind === 'read') {
+    const fname = tool.file.split('/').pop() || tool.file
+    return fname
+  }
+  if (tool.kind === 'search') {
+    return tool.pattern.length > 40 ? tool.pattern.slice(0, 40) + '…' : tool.pattern
+  }
+  return ''
+}
+
+interface RunIndicator {
+  startedAt: number
+  lastEventAt: number
+  currentTool: RichTool | null
+  source: 'chat' | 'card'
 }
 
 let _msgCounter = 0
@@ -408,13 +463,20 @@ function SessionContextPanel({ projectId, refreshKey }: SessionContextPanelProps
 
 // ─── ChatTab ──────────────────────────────────────────────────────────────
 
-export function ChatTab({ projectId }: Props) {
+export function ChatTab({ project, onProjectsReload }: Props) {
+  const projectId = project.id
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState('')
   // Bump to trigger SessionContextPanel reload (after run_end)
   const [ctxRefreshKey, setCtxRefreshKey] = useState(0)
+  const [changingModel, setChangingModel] = useState(false)
+  // Единый индикатор активного прогона (для chat-POST и для card-run из шины).
+  const [run, setRun] = useState<RunIndicator | null>(null)
+  // Тикающее "сейчас" — обновляется каждую секунду, пока есть активный прогон.
+  // Используется для расчёта elapsed/silence в статус-баре.
+  const [tick, setTick] = useState<number>(Date.now())
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -429,10 +491,17 @@ export function ChatTab({ projectId }: Props) {
     streamingRef.current = streaming
   }, [streaming])
 
-  // Auto-scroll to bottom when messages update
+  // Мгновенный скролл к последнему сообщению — без анимации (раздражает на длинной истории/стриминге)
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
   }, [messages])
+
+  // Тик каждую секунду, пока есть активный run — для перерисовки таймера/тишины в статус-баре.
+  useEffect(() => {
+    if (!run) return
+    const id = setInterval(() => setTick(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [run])
 
   // Маппинг истории сессии → сообщения ленты
   function histToMessages(items: HistoryMessage[]): ChatMessage[] {
@@ -449,6 +518,7 @@ export function ChatTab({ projectId }: Props) {
     setInput('')
     setStreaming(false)
     setError('')
+    setRun(null)
     busAssistantIdRef.current = null
     api.sessionHistory(projectId)
       .then(res => { if (!cancelled) setMessages(histToMessages(res.messages)) })
@@ -487,6 +557,8 @@ export function ChatTab({ projectId }: Props) {
               // никогда не пересекаются, но флаг — дополнительная страховка.
               if (streamingRef.current) return
 
+              const now = Date.now()
+
               if (evt.kind === 'run_start') {
                 // Добавляем user-сообщение с промптом карточки
                 const prefix = evt.source === 'card' ? '🗂 карточка: ' : ''
@@ -495,10 +567,12 @@ export function ChatTab({ projectId }: Props) {
                 const assistantMsg = makeAssistantMsg()
                 busAssistantIdRef.current = assistantMsg.id
                 setMessages(prev => [...prev, userMsg, assistantMsg])
+                setRun({ startedAt: now, lastEventAt: now, currentTool: null, source: 'card' })
 
               } else if (evt.kind === 'text') {
                 const aid = busAssistantIdRef.current
                 if (!aid) return
+                setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
                 setMessages(prev => {
                   const msgs = [...prev]
                   const idx = msgs.findIndex(m => m.id === aid)
@@ -511,6 +585,7 @@ export function ChatTab({ projectId }: Props) {
                 const aid = busAssistantIdRef.current
                 if (!aid) return
                 const tool: ChatToolCall = evt.tool
+                setRun(r => r ? { ...r, lastEventAt: now, currentTool: tool } : r)
                 setMessages(prev => {
                   const msgs = [...prev]
                   const idx = msgs.findIndex(m => m.id === aid)
@@ -522,6 +597,7 @@ export function ChatTab({ projectId }: Props) {
               } else if (evt.kind === 'run_end') {
                 const aid = busAssistantIdRef.current
                 busAssistantIdRef.current = null
+                setRun(null)
                 if (!aid) return
                 setMessages(prev => {
                   const msgs = [...prev]
@@ -560,6 +636,7 @@ export function ChatTab({ projectId }: Props) {
     setMessages([])
     setStreaming(false)
     setError('')
+    setRun(null)
     busAssistantIdRef.current = null
     api.sessionHistory(projectId)
       .then(res => setMessages(histToMessages(res.messages)))
@@ -573,6 +650,8 @@ export function ChatTab({ projectId }: Props) {
     setInput('')
     setError('')
     setStreaming(true)
+    const startTs = Date.now()
+    setRun({ startedAt: startTs, lastEventAt: startTs, currentTool: null, source: 'chat' })
 
     const userMsg = makeUserMsg(text)
     const assistantMsg = makeAssistantMsg()
@@ -601,6 +680,17 @@ export function ChatTab({ projectId }: Props) {
         (line) => {
           const evt = parseLine(line)
           if (!evt) return
+
+          // Обновляем run-индикатор (тишина/таймер/текущий инструмент)
+          const now = Date.now()
+          if (evt.type === 'text') {
+            setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
+          } else if (evt.type === 'tool') {
+            const { type: _t, ...toolFields } = evt as any
+            setRun(r => r ? { ...r, lastEventAt: now, currentTool: toolFields as RichTool } : r)
+          } else if (evt.type === 'result' || evt.type === 'done' || evt.type === 'error') {
+            setRun(null)
+          }
 
           setMessages(prev => {
             const msgs = [...prev]
@@ -664,12 +754,15 @@ export function ChatTab({ projectId }: Props) {
       })
     } finally {
       setStreaming(false)
+      setRun(null)
       abortRef.current = null
       textareaRef.current?.focus()
       // Refresh context panel after any chat run completes
       setCtxRefreshKey(k => k + 1)
+      // Освежаем проекты — git.dirty/unpushed могли измениться от агента
+      onProjectsReload()
     }
-  }, [input, projectId, streaming])
+  }, [input, projectId, streaming, onProjectsReload])
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -677,6 +770,19 @@ export function ChatTab({ projectId }: Props) {
       sendMessage()
     }
   }
+
+  const handleModelChange = useCallback(async (m: ModelKey) => {
+    if (m === project.model) return
+    setChangingModel(true)
+    try {
+      await api.setModel(projectId, m)
+      onProjectsReload()
+    } catch {
+      // тихо игнорим — UI вернётся к старой модели после refetch
+    } finally {
+      setChangingModel(false)
+    }
+  }, [project.model, projectId, onProjectsReload])
 
   async function stopStream() {
     // Signal server to interrupt the running agent (best-effort)
@@ -691,9 +797,34 @@ export function ChatTab({ projectId }: Props) {
 
   return (
     <div className="chat-wrap">
-      {/* Session selector bar */}
+      {/* Session selector bar + stats + model selector */}
       <div className="chat-session-bar">
         <SessionSelector projectId={projectId} onSessionChange={handleSessionChange} />
+        {messages.length > 0 && (() => {
+          const tokens = estimateTokens(messages)
+          const lvl = tokens > 180_000 ? 'high' : tokens > 100_000 ? 'mid' : 'low'
+          const lvlHint =
+            lvl === 'high' ? ' · близко к лимиту' :
+            lvl === 'mid' ? ' · контекст наполовину' : ''
+          return (
+            <span className={`chat-stats-inline lvl-${lvl}`} title="Грубая оценка: 4 символа ≈ 1 токен. Лимит модели ~200K.">
+              💬 {messages.length} · ~{formatTokens(tokens)}{lvlHint}
+            </span>
+          )
+        })()}
+        <div className="chat-model-selector" title="Модель применяется со следующего запроса">
+          <span className="chat-model-label">🧠</span>
+          <select
+            className="chat-model-select"
+            value={MODEL_OPTIONS.includes(project.model as ModelKey) ? project.model : 'sonnet'}
+            onChange={e => handleModelChange(e.target.value as ModelKey)}
+            disabled={changingModel || streaming}
+          >
+            {MODEL_OPTIONS.map(m => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* Session context panel (Feature A) */}
@@ -743,12 +874,41 @@ export function ChatTab({ projectId }: Props) {
       )}
 
       <div className="chat-input-area">
-        {streaming && (
-          <div className="chat-status-bar">
-            <span className="chat-status-text">агент думает…</span>
-            <button className="chat-stop-btn" onClick={stopStream} title="Прервать стрим">✕ стоп</button>
-          </div>
-        )}
+        {run && (() => {
+          const elapsedSec = (tick - run.startedAt) / 1000
+          const silenceSec = (tick - run.lastEventAt) / 1000
+          const lvl = silenceSec > 120 ? 'silence-red' : silenceSec > 30 ? 'silence-yellow' : 'silence-ok'
+          const tool = run.currentTool
+          let icon = '💭'
+          let label: string
+          if (tool) {
+            icon = '🔧'
+            const hint = toolHint(tool)
+            label = hint ? `${tool.name} · ${hint}` : tool.name
+          } else if (silenceSec < 3 && elapsedSec > 1) {
+            icon = '✍'
+            label = 'пишет ответ'
+          } else {
+            label = run.source === 'card' ? 'карточка работает' : 'агент думает'
+          }
+          const canStop = run.source === 'chat'
+          return (
+            <div className={`chat-status-bar ${lvl}`}>
+              <span className="chat-status-icon">{icon}</span>
+              <span className="chat-status-text">{label}</span>
+              <span className="chat-status-time">· {formatDuration(elapsedSec)}</span>
+              {silenceSec > 30 && (
+                <span className="chat-status-silence">
+                  ⚠ тишина {formatDuration(silenceSec)}
+                  {silenceSec > 120 && ' · возможно завис'}
+                </span>
+              )}
+              {canStop && (
+                <button className="chat-stop-btn" onClick={stopStream} title="Прервать стрим">✕ стоп</button>
+              )}
+            </div>
+          )
+        })()}
         <div className="chat-input-row">
           <textarea
             ref={textareaRef}

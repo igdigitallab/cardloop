@@ -112,6 +112,17 @@ export const api = {
   memory: (id: string) =>
     apiFetch<import('./types').ProjectMemory>(`/api/projects/${id}/memory`),
 
+  // Сменить модель проекта (опус/сонет/хайку) — применится со следующего запроса
+  setModel: (id: string, model: 'opus' | 'sonnet' | 'haiku') =>
+    apiFetch<{ ok: boolean; model: string; topics_updated: number }>(
+      `/api/projects/${id}/model`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      }
+    ),
+
   // Git: commit (если dirty) + push одной кнопкой
   gitSync: (id: string, message?: string) =>
     apiFetch<{ ok: boolean; committed: boolean; pushed: boolean; message: string | null; log: string }>(

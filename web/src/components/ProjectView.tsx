@@ -299,7 +299,7 @@ export function ProjectView({ project, onProjectsReload }: Props) {
             </button>
           )}
         </div>
-        <ChatTab projectId={project.id} />
+        <ChatTab project={project} onProjectsReload={onProjectsReload} />
       </div>
 
       {/* COLLAPSED STUB — narrow vertical button when chat is collapsed */}

@@ -948,6 +948,47 @@ async def api_activity_stream_all(req: web.Request):
     return resp
 
 
+# ─────────────────────────── смена модели проекта ───────────────────────────
+#
+# POST /api/projects/{id}/model  {model: "opus"|"sonnet"|"haiku"}
+# Обновляет model во ВСЕХ topics с тем же cwd (один проект может иметь несколько TG-топиков),
+# persist через save_topics() из ctx. Применится со следующего запроса (текущая сессия не трогается).
+
+_ALLOWED_MODELS: set[str] = {"opus", "sonnet", "haiku"}
+
+
+async def api_project_set_model(req: web.Request):
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+
+    model = (body.get("model") or "").strip().lower()
+    if model not in _ALLOWED_MODELS:
+        return web.json_response(
+            {"error": f"model must be one of: {', '.join(sorted(_ALLOWED_MODELS))}"},
+            status=400,
+        )
+
+    cwd = project["cwd"]
+    changed = 0
+    for b in ctx["topics"].values():
+        if b.get("cwd") == cwd:
+            b["model"] = model
+            changed += 1
+
+    if changed:
+        save_topics = ctx.get("save_topics")
+        if callable(save_topics):
+            save_topics()
+
+    return web.json_response({"ok": True, "model": model, "topics_updated": changed})
+
+
 # ─────────────────────────── git sync (commit + push) ───────────────────────────
 #
 # POST /api/projects/{id}/git/sync  {message?: str}
@@ -1772,6 +1813,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/activity-stream", api_activity_stream_all)
         # Git sync — commit (если dirty) + push одной кнопкой
         app.router.add_post("/api/projects/{id}/git/sync", api_project_git_sync)
+        # Смена модели проекта (применяется со следующего запроса)
+        app.router.add_post("/api/projects/{id}/model", api_project_set_model)
         # C2: управление сессиями проекта
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)

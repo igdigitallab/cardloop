@@ -1113,7 +1113,7 @@ async def _on_start(app):
         "topics": topics, "sessions": sessions, "running": running,
         "costs": costs, "rate_limits": rate_limits,
         "resolve_project": resolve_project, "REGISTRY": REGISTRY,
-        "run_for_glasses": run_for_glasses, "save_sessions": save_sessions,
+        "run_for_glasses": run_for_glasses, "save_sessions": save_sessions, "save_topics": save_topics,
         "DATA": DATA, "DEFAULT_CWD": DEFAULT_CWD, "DEFAULT_MODEL": DEFAULT_MODEL,
         "VAULT_PROJECTS": Path("/home/igor/vault/01-Projects"), "HERE": HERE,
         # F1: движок и модели для авто-запуска карточек канбана
