@@ -23,15 +23,24 @@ function fmtReset(resetsAt: number | null, now: number): string {
   return h > 0 ? `${h}ч ${m}м` : `${m}м`
 }
 
-/** Цвет по utilization (или по status). */
+/** Цвет по utilization: <50% зелёный, 50–80% жёлтый, ≥80% красный. */
 function pickClass(d: RawLimit | undefined): string {
   if (!d) return 'usage-dim'
   if (d.status === 'rejected') return 'usage-red'
   if (d.status === 'allowed_warning') return 'usage-yellow'
   const u = d.utilization ?? 0
-  if (u > 0.85) return 'usage-red'
-  if (u > 0.6) return 'usage-yellow'
+  if (u >= 0.8) return 'usage-red'
+  if (u >= 0.5) return 'usage-yellow'
   return 'usage-green'
+}
+
+const USAGE_URL = 'https://claude.ai/settings/usage'
+
+/** Открыть в новой вкладке. В установленном PWA `target=_blank` навигирует внутри окна —
+ *  явный window.open на жесте пользователя надёжнее выкидывает во внешний браузер. */
+function openUsage(e: React.MouseEvent) {
+  e.preventDefault()
+  window.open(USAGE_URL, '_blank', 'noopener,noreferrer')
 }
 
 function fmtPct(u: number | null): string {
@@ -41,7 +50,7 @@ function fmtPct(u: number | null): string {
 
 export function UsageBadge() {
   const [data, setData] = useState<UsageData | null>(null)
-  const [open, setOpen] = useState(false)
+  const [hover, setHover] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -73,37 +82,46 @@ export function UsageBadge() {
   // Если ничего ещё не прилетало с SDK — placeholder
   if (!fiveH && !week) {
     return (
-      <div className="usage-badge usage-dim" title="Лимиты придут с первым ответом от Claude">
+      <a
+        className="usage-badge usage-dim"
+        href={USAGE_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={openUsage}
+        title="Лимиты загружаются… (клик — claude.ai/settings/usage)"
+      >
         ⏱ —
-      </div>
+      </a>
     )
   }
 
-  return (
-    <div className="usage-badge-wrap">
-      <button
-        className={`usage-badge ${pickClass(fiveH)}`}
-        onClick={() => setOpen(o => !o)}
-        title="Лимиты подписки Claude Code (клик — детали)"
-      >
-        {fiveH && (
-          <>
-            <span className="usage-icon">⏱</span>
-            <span>5ч {fmtPct(fiveH.utilization)}</span>
-            <span className="usage-sep">·</span>
-            <span>{fmtReset(fiveH.resets_at, now)}</span>
-          </>
-        )}
-        {!fiveH && week && (
-          <>
-            <span className="usage-icon">📅</span>
-            <span>7д {fmtPct(week.utilization)}</span>
-          </>
-        )}
-      </button>
+  // Основной показатель — 5-часовое окно, иначе недельное.
+  const primary = fiveH ?? week!
+  const icon = fiveH ? '⏱' : '📅'
+  const pct = fmtPct(primary.utilization)
 
-      {open && (
-        <div className="usage-dropdown" onClick={() => setOpen(false)}>
+  return (
+    <div
+      className="usage-badge-wrap"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <a
+        className={`usage-badge ${pickClass(primary)}`}
+        href={USAGE_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={openUsage}
+        title="Лимиты подписки Claude Code (клик — claude.ai/settings/usage)"
+      >
+        <span className="usage-icon">{icon}</span>
+        {pct && <span>{pct}</span>}
+        {pct && <span className="usage-sep">—</span>}
+        <span>{fmtReset(primary.resets_at, now)}</span>
+      </a>
+
+      {hover && (
+        <div className="usage-dropdown">
           {['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'overage'].map(k => {
             const d = data.limits[k]
             if (!d) return null

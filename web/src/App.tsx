@@ -9,28 +9,21 @@ import { Spinner } from './components/Spinner'
 
 type AuthState = 'loading' | 'unauthed' | 'authed'
 
-const LS_RECENT = 'cops.recentProjects'
 const LS_UNREAD = 'cops.unreadBySession'
 const LS_SIDEBAR_COLLAPSED = 'cops.sidebarCollapsed'
 const LS_OPEN = 'cops.openProjects'
 const LS_ACTIVE = 'cops.activeProject'
 const LS_SPLIT_PAIRS = 'cops.splitPairs'
 const LS_SPLIT_WIDTH = 'cops.splitWidth'
-const RECENT_MAX = 50
+const LS_SIDEBAR_ORDER = 'cops.sidebarOrder'
 
-function readRecent(): string[] {
+function readSidebarOrder(): string[] {
   try {
-    const raw = localStorage.getItem(LS_RECENT)
+    const raw = localStorage.getItem(LS_SIDEBAR_ORDER)
     if (!raw) return []
     const arr = JSON.parse(raw)
     return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-function writeRecent(ids: string[]) {
-  try { localStorage.setItem(LS_RECENT, JSON.stringify(ids.slice(0, RECENT_MAX))) } catch {}
+  } catch { return [] }
 }
 
 function readUnread(): Record<string, number> {
@@ -101,7 +94,7 @@ export default function App() {
   const [projectsLoading, setProjectsLoading] = useState(false)
   const [openIds, setOpenIds] = useState<string[]>(() => readStringList(LS_OPEN))
   const [activeId, setActiveId] = useState<string | null>(() => readString(LS_ACTIVE))
-  const [recentIds, setRecentIds] = useState<string[]>(() => readRecent())
+  const [sidebarOrder, setSidebarOrder] = useState<string[]>(() => readSidebarOrder())
   const [unreadBySession, setUnreadBySession] = useState<Record<string, number>>(() => readUnread())
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => readBool(LS_SIDEBAR_COLLAPSED, false))
   // Split-view: leftId → rightId (только для free-чатов)
@@ -163,8 +156,11 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem(LS_SPLIT_WIDTH, String(splitWidth)) } catch {}
   }, [splitWidth])
+  useEffect(() => {
+    try { localStorage.setItem(LS_SIDEBAR_ORDER, JSON.stringify(sidebarOrder)) } catch {}
+  }, [sidebarOrder])
 
-  // Чистим openIds и splitPairs от мёртвых проектов после загрузки списка
+  // Чистим openIds / splitPairs / sidebarOrder от мёртвых проектов после загрузки списка
   useEffect(() => {
     if (!projects.length) return
     const valid = new Set(projects.map(p => p.id))
@@ -181,6 +177,13 @@ export default function App() {
         else changed = true
       }
       return changed ? next : prev
+    })
+    setSidebarOrder(prev => {
+      const filtered = prev.filter(id => valid.has(id))
+      const existingSet = new Set(filtered)
+      const added = projects.filter(p => !existingSet.has(p.id)).map(p => p.id)
+      if (filtered.length === prev.length && added.length === 0) return prev
+      return [...added, ...filtered]
     })
   }, [projects])
 
@@ -254,13 +257,14 @@ export default function App() {
   const handleSelect = useCallback((id: string) => {
     setOpenIds(prev => prev.includes(id) ? prev : [...prev, id])
     setActiveId(id)
-    setRecentIds(prev => {
-      const next = [id, ...prev.filter(x => x !== id)].slice(0, RECENT_MAX)
-      writeRecent(next)
-      return next
-    })
     clearUnread(id)
   }, [clearUnread])
+
+  // Drag-and-drop порядок сайдбара. ВАЖНО: hook — выше любых ранних return
+  // (return <LoginScreen> и т.п.), иначе нарушаются Rules of Hooks → чёрный экран.
+  const handleSidebarReorder = useCallback((ids: string[]) => {
+    setSidebarOrder(ids)
+  }, [])
 
   // Активировать вкладку (клик по табу)
   const handleTabActivate = useCallback((id: string) => {
@@ -332,11 +336,6 @@ export default function App() {
       await loadProjects()
       setOpenIds(prev => prev.includes(res.id) ? prev : [...prev, res.id])
       setActiveId(res.id)
-      setRecentIds(prev => {
-        const next = [res.id, ...prev.filter(x => x !== res.id)].slice(0, RECENT_MAX)
-        writeRecent(next)
-        return next
-      })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       alert(`Не удалось создать свободный чат: ${msg}`)
@@ -416,13 +415,12 @@ export default function App() {
     return <LoginScreen onLogin={() => setAuthState('authed')} />
   }
 
-  // Sort: recently opened first (in recency order), then the rest in original order
-  const recentRank = new Map(recentIds.map((id, i) => [id, i]))
+  // Sort: manual order from sidebarOrder (drag-and-drop), new items go to end
+  const orderRank = new Map(sidebarOrder.map((id, i) => [id, i]))
   const sortedProjects = [...projects].sort((a, b) => {
-    const ra = recentRank.has(a.id) ? recentRank.get(a.id)! : Infinity
-    const rb = recentRank.has(b.id) ? recentRank.get(b.id)! : Infinity
-    if (ra !== rb) return ra - rb
-    return 0
+    const ra = orderRank.get(a.id) ?? Infinity
+    const rb = orderRank.get(b.id) ?? Infinity
+    return ra - rb
   })
 
   // Открытые проекты в порядке их открытия (как в LS — не перетасовываем при unread)
@@ -444,6 +442,7 @@ export default function App() {
         unreadBySession={unreadBySession}
         collapsed={sidebarCollapsed}
         onToggleCollapse={toggleSidebar}
+        onReorder={handleSidebarReorder}
       />
 
       <div className="main-area">

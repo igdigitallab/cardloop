@@ -12,6 +12,7 @@ interface Props {
   unreadBySession: Record<string, number>
   collapsed: boolean
   onToggleCollapse: () => void
+  onReorder: (ids: string[]) => void
 }
 
 function unreadFor(p: Project, map: Record<string, number>): number {
@@ -21,13 +22,13 @@ function unreadFor(p: Project, map: Record<string, number>): number {
 
 export function Sidebar({
   projects, selectedId, onSelect, onLogout, onDeleteFree, loading,
-  unreadBySession, collapsed, onToggleCollapse,
+  unreadBySession, collapsed, onToggleCollapse, onReorder,
 }: Props) {
   const [search, setSearch] = useState('')
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
 
-  const matchesSearch = (p: Project) => p.name.toLowerCase().includes(search.toLowerCase())
-  const realProjects = projects.filter(p => !p.is_free).filter(matchesSearch)
-  const freeChats    = projects.filter(p => p.is_free).filter(matchesSearch)
+  const filtered = projects.filter(p => p.name.toLowerCase().includes(search.toLowerCase()))
 
   if (collapsed) {
     return (
@@ -62,6 +63,42 @@ export function Sidebar({
     )
   }
 
+  function handleDragStart(e: React.DragEvent, id: string) {
+    setDragId(id)
+    e.dataTransfer.effectAllowed = 'move'
+  }
+
+  function handleDragOver(e: React.DragEvent, id: string) {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    if (id !== dragId) setDragOverId(id)
+  }
+
+  function handleDrop(e: React.DragEvent, targetId: string) {
+    e.preventDefault()
+    if (!dragId || dragId === targetId) {
+      setDragId(null)
+      setDragOverId(null)
+      return
+    }
+    const ids = projects.map(p => p.id)
+    const fromIdx = ids.indexOf(dragId)
+    const toIdx = ids.indexOf(targetId)
+    if (fromIdx !== -1 && toIdx !== -1) {
+      const next = [...ids]
+      next.splice(fromIdx, 1)
+      next.splice(toIdx, 0, dragId)
+      onReorder(next)
+    }
+    setDragId(null)
+    setDragOverId(null)
+  }
+
+  function handleDragEnd() {
+    setDragId(null)
+    setDragOverId(null)
+  }
+
   return (
     <div className="sidebar">
       <div className="sidebar-header">
@@ -85,30 +122,52 @@ export function Sidebar({
         />
       </div>
 
-      {/* Свободные чаты — отдельная секция (если есть) */}
-      {freeChats.length > 0 && (
-        <>
-          <div className="sidebar-section-label">Свободные чаты</div>
-          <div className="projects-list">
-            {freeChats.map(p => {
-              const unread = unreadFor(p, unreadBySession)
-              return (
-                <div
-                  key={p.id}
-                  className={`project-item project-item-free ${selectedId === p.id ? 'active' : ''} ${unread ? 'has-unread' : ''}`}
-                  onClick={() => onSelect(p.id)}
-                  title={p.cwd}
-                >
-                  <span className="free-icon">🏠</span>
-                  <span className="project-name">{p.name}</span>
-                  {unread > 0 && (
-                    <span className="unread-badge" title={`${unread} новых событий`}>
-                      {unread > 99 ? '99+' : unread}
-                    </span>
-                  )}
+      <div className="projects-list">
+        {loading ? (
+          <div className="projects-empty">Загрузка...</div>
+        ) : filtered.length === 0 ? (
+          <div className="projects-empty">
+            {search ? 'Ничего не найдено' : 'Нет проектов'}
+          </div>
+        ) : (
+          filtered.map(p => {
+            const unread = unreadFor(p, unreadBySession)
+            const isDragging = dragId === p.id
+            const isDragOver = dragOverId === p.id
+            return (
+              <div
+                key={p.id}
+                draggable
+                onDragStart={e => handleDragStart(e, p.id)}
+                onDragOver={e => handleDragOver(e, p.id)}
+                onDragLeave={() => setDragOverId(null)}
+                onDrop={e => handleDrop(e, p.id)}
+                onDragEnd={handleDragEnd}
+                className={[
+                  'project-item',
+                  p.is_free ? 'project-item-free' : '',
+                  selectedId === p.id ? 'active' : '',
+                  unread ? 'has-unread' : '',
+                  isDragging ? 'sidebar-item-dragging' : '',
+                  isDragOver ? 'sidebar-item-drag-over' : '',
+                ].filter(Boolean).join(' ')}
+                onClick={() => onSelect(p.id)}
+                title={p.cwd}
+              >
+                {p.is_free
+                  ? <span className="free-icon">🏠</span>
+                  : <HealthDot health={p.health} />
+                }
+                <span className="project-name">{p.name}</span>
+                {unread > 0 && (
+                  <span className="unread-badge" title={`${unread} новых событий`}>
+                    {unread > 99 ? '99+' : unread}
+                  </span>
+                )}
+                {p.is_free && (
                   <button
                     className="free-delete-btn"
-                    onClick={(e) => {
+                    onClick={e => {
                       e.stopPropagation()
                       if (confirm(`Удалить свободный чат «${p.name}» (история стирается)?`)) {
                         onDeleteFree(p.id)
@@ -116,38 +175,6 @@ export function Sidebar({
                     }}
                     title="Удалить свободный чат"
                   >✕</button>
-                </div>
-              )
-            })}
-          </div>
-        </>
-      )}
-
-      <div className="sidebar-section-label">Проекты</div>
-
-      <div className="projects-list">
-        {loading ? (
-          <div className="projects-empty">Загрузка...</div>
-        ) : realProjects.length === 0 ? (
-          <div className="projects-empty">
-            {search ? 'Ничего не найдено' : 'Нет проектов'}
-          </div>
-        ) : (
-          realProjects.map(p => {
-            const unread = unreadFor(p, unreadBySession)
-            return (
-              <div
-                key={p.id}
-                className={`project-item ${selectedId === p.id ? 'active' : ''} ${unread ? 'has-unread' : ''}`}
-                onClick={() => onSelect(p.id)}
-                title={p.cwd}
-              >
-                <HealthDot health={p.health} />
-                <span className="project-name">{p.name}</span>
-                {unread > 0 && (
-                  <span className="unread-badge" title={`${unread} новых событий`}>
-                    {unread > 99 ? '99+' : unread}
-                  </span>
                 )}
               </div>
             )

@@ -15,8 +15,10 @@ import re
 import secrets
 import time
 import traceback as _tb
+from datetime import datetime
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
 
 
@@ -1145,14 +1147,93 @@ async def api_free_delete(req: web.Request):
 
 # ─────────────────────────── лимиты подписки Claude Code ───────────────────────────
 #
-# GET /api/usage  → текущий снимок rate_limits (5ч окно, недельные, opus/sonnet, overage).
-# Источник — bot.py:rate_limits, заполняется пассивно из RateLimitEvent SDK на каждом ответе.
+# GET /api/usage  → текущий снимок лимитов подписки (5ч окно, недельные, opus/sonnet, overage).
+# Источник истины для ПРОЦЕНТОВ — официальный oauth-эндпоинт https://api.anthropic.com/api/oauth/usage
+# (тот же, что бьёт `/usage` в самом Claude Code). Пассивный RateLimitEvent SDK даёт только
+# status+resets_at, БЕЗ utilization на этой подписке (проверено 2026-05-30) — потому % раньше не было.
+# Токен берём из ~/.claude/.credentials.json (SDK его сам рефрешит). Кэш 60с — фронт поллит каждые 30с.
+
+_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_CREDS_PATH = os.path.expanduser("~/.claude/.credentials.json")
+_usage_cache: dict = {"data": None, "ts": 0.0}
+_usage_lock = asyncio.Lock()
+_USAGE_TTL = 60.0
+
+
+def _read_oauth_token() -> str | None:
+    try:
+        with open(_CREDS_PATH) as f:
+            return json.load(f)["claudeAiOauth"]["accessToken"]
+    except Exception:
+        return None
+
+
+def _iso_to_unix(s):
+    if not s:
+        return None
+    try:
+        return int(datetime.fromisoformat(s).timestamp())
+    except Exception:
+        return None
+
+
+def _norm_window(d):
+    """oauth-окно {utilization:0-100, resets_at:ISO} → формат фронта {utilization:0-1, resets_at:unix}."""
+    if not isinstance(d, dict):
+        return None
+    util = d.get("utilization")
+    return {
+        "status": "allowed",
+        "resets_at": _iso_to_unix(d.get("resets_at")),
+        "utilization": (util / 100.0) if isinstance(util, (int, float)) else None,
+        "ts": time.time(),
+    }
+
+
+async def _fetch_oauth_usage():
+    token = _read_oauth_token()
+    if not token:
+        return None
+    headers = {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(_OAUTH_USAGE_URL, headers=headers,
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    return None
+                return await r.json()
+    except Exception:
+        return None
+
 
 async def api_usage(req: web.Request):
     ctx = req.app["ctx"]
-    rl = ctx.get("rate_limits") or {}
-    # Простой shallow-snapshot — клиент сам форматирует
-    return web.json_response({"limits": rl, "now": time.time()})
+    now = time.time()
+    async with _usage_lock:
+        cached = _usage_cache["data"]
+        if cached is None or (now - _usage_cache["ts"]) > _USAGE_TTL:
+            raw = await _fetch_oauth_usage()
+            if raw is not None:
+                limits = {}
+                for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+                    nv = _norm_window(raw.get(k))
+                    if nv:
+                        limits[k] = nv
+                eu = raw.get("extra_usage")
+                if isinstance(eu, dict) and eu.get("is_enabled") and eu.get("utilization") is not None:
+                    limits["overage"] = {
+                        "status": "allowed",
+                        "resets_at": None,
+                        "utilization": eu["utilization"] / 100.0,
+                        "ts": now,
+                    }
+                _usage_cache["data"] = limits
+                _usage_cache["ts"] = now
+                cached = limits
+        # oauth недоступен (нет токена / 401 / сеть) → фоллбэк на пассивный снимок SDK
+        if not cached:
+            cached = ctx.get("rate_limits") or {}
+    return web.json_response({"limits": cached, "now": time.time()})
 
 
 # ─────────────────────────── смена модели проекта ───────────────────────────

@@ -358,6 +358,11 @@ body {
 .project-item-free:hover .free-delete-btn { opacity: 1; }
 .free-delete-btn:hover { color: var(--red); background: var(--bg4); }
 
+/* Sidebar drag-and-drop reordering */
+.project-item { cursor: grab; }
+.project-item.sidebar-item-dragging { opacity: 0.35; cursor: grabbing; }
+.project-item.sidebar-item-drag-over { border-top: 2px solid var(--accent); margin-top: -2px; }
+
 .project-icon-btn.free.active { border-color: var(--accent-h); }
 
 /* Кнопка «+» в полосе вкладок — открывает новый свободный чат (как в браузерах) */
@@ -569,6 +574,7 @@ body {
   align-items: center;
   gap: 4px;
   white-space: nowrap;
+  text-decoration: none;
   transition: background var(--transition), color var(--transition), border-color var(--transition);
 }
 .usage-badge:hover { background: var(--bg3); color: var(--text); }
