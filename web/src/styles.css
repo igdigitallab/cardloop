@@ -358,31 +358,28 @@ body {
 .project-item-free:hover .free-delete-btn { opacity: 1; }
 .free-delete-btn:hover { color: var(--red); background: var(--bg4); }
 
-/* Кнопка «Новый свободный» в шапке сайдбара */
-.sidebar-new-free-btn {
-  display: block; width: 100%;
-  margin-top: 10px; padding: 6px 10px;
-  background: var(--bg3); border: 1px dashed var(--border2);
-  color: var(--text2); font-size: 12px;
-  border-radius: var(--radius-sm); cursor: pointer;
-  transition: background var(--transition), color var(--transition), border-color var(--transition);
-}
-.sidebar-new-free-btn:hover {
-  background: var(--bg4); color: var(--accent-h); border-color: var(--accent);
-}
-
-/* В свёрнутом сайдбаре кнопка «+ free» */
-.sidebar-new-free-collapsed {
-  width: 44px; height: 30px;
-  margin: 0 auto 6px;
-  background: var(--bg3); border: 1px dashed var(--border2);
-  color: var(--text2); font-size: 11px; cursor: pointer;
-  border-radius: 4px;
-  display: flex; align-items: center; justify-content: center;
-}
-.sidebar-new-free-collapsed:hover { background: var(--bg4); color: var(--accent-h); }
-
 .project-icon-btn.free.active { border-color: var(--accent-h); }
+
+/* Кнопка «+» в полосе вкладок — открывает новый свободный чат (как в браузерах) */
+.ptab-new {
+  background: transparent;
+  border: none;
+  color: var(--text3);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  transition: background var(--transition), color var(--transition);
+  flex-shrink: 0;
+}
+.ptab-new:hover {
+  background: var(--bg3);
+  color: var(--accent-h);
+}
 
 .unread-badge {
   margin-left: auto;
@@ -603,6 +600,31 @@ body {
   transition: background var(--transition), color var(--transition);
 }
 .ptab-close:hover { background: var(--bg4); color: var(--red); }
+
+/* Свободные чаты — лёгкий пунктир в подсветке активного */
+.ptab.ptab-free.active { box-shadow: inset 0 -2px 0 var(--accent-h); }
+
+/* Inline-input для переименования вкладки */
+.ptab-rename-input {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  outline: none;
+  min-width: 100px;
+  max-width: 200px;
+}
+
+/* Свободный чат — чат на всю ширину, без левой панели и сплита */
+.project-free-layout {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 
 /* ── Main Content ──────────────────────────────────────────── */
 .main-content {
@@ -1263,9 +1285,47 @@ body {
 
 .board-columns {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 12px;
   align-items: start;
+}
+
+/* Тогглы видимых колонок — над доской */
+.board-col-toggles {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.board-col-toggles-label {
+  font-size: 11px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  margin-right: 4px;
+}
+.board-col-toggle {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border2);
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.board-col-toggle.on {
+  background: var(--bg3);
+  color: var(--text);
+  border-color: var(--accent);
+}
+.board-col-toggle.off:hover { color: var(--text2); border-color: var(--text3); }
+.board-col-toggle.has-cards {
+  /* В скрытой колонке есть карточки — подсветить чтобы не пропустить */
+  color: var(--yellow);
+  border-color: var(--yellow);
+  background: rgba(245,166,35,0.08);
 }
 
 .board-col {
@@ -1555,6 +1615,14 @@ body {
   color: var(--text3);
   white-space: nowrap;
 }
+
+/* Подпись (preview) рядом с label в session-dropdown */
+.session-item-sub {
+  color: var(--text3);
+  font-weight: normal;
+  font-family: var(--mono);
+}
+.session-item-preview strong { color: var(--text); font-family: var(--sans); font-weight: 500; }
 
 .session-dropdown-sep {
   height: 1px;

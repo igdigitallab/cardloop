@@ -3,7 +3,6 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
 import {
-  ActivityEvent,
   ChatMessage,
   ChatSSEEvent,
   ChatToolCall,
@@ -13,6 +12,7 @@ import {
   SessionContext,
   SessionInfo,
 } from '../types'
+import { useProjectActivity } from '../hooks/useProjectActivity'
 
 interface Props {
   project: Project
@@ -133,18 +133,6 @@ function parseLine(line: string): ChatSSEEvent | null {
   if (!line.startsWith('data: ')) return null
   try {
     return JSON.parse(line.slice(6)) as ChatSSEEvent
-  } catch {
-    return null
-  }
-}
-
-/** Parse an activity-stream line: "data: {...}" → ActivityEvent or null.
- *  Lines starting with ":" are heartbeat comments — return null (ignored). */
-function parseActivityLine(line: string): ActivityEvent | null {
-  if (line.startsWith(':')) return null  // heartbeat comment ": ping"
-  if (!line.startsWith('data: ')) return null
-  try {
-    return JSON.parse(line.slice(6)) as ActivityEvent
   } catch {
     return null
   }
@@ -343,7 +331,7 @@ function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
 
   const activeSession = sessions.find(s => s.is_active)
   const activeLabel = activeSession
-    ? activeSession.session_id.slice(0, 8) + '…'
+    ? (activeSession.label || (activeSession.session_id.slice(0, 8) + '…'))
     : 'новая'
 
   async function switchSession(action: 'new' | 'resume', session_id?: string) {
@@ -400,9 +388,14 @@ function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
               className={`session-dropdown-item${s.is_active ? ' active' : ''}`}
               onClick={() => switchSession('resume', s.session_id)}
               disabled={busy}
+              title={s.label ? `${s.label}\n— ${s.preview}` : s.preview}
             >
               <span className="session-item-check">{s.is_active ? '✓' : ''}</span>
-              <span className="session-item-preview">{s.preview}</span>
+              <span className="session-item-preview">
+                {s.label
+                  ? <><strong>{s.label}</strong> <span className="session-item-sub">— {s.preview}</span></>
+                  : s.preview}
+              </span>
               <span className="session-item-time">{relTime(s.last_used)}</span>
             </button>
           ))}
@@ -584,86 +577,41 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     return () => { cancelled = true }
   }, [projectId])
 
-  // ─── Activity-stream subscription ──────────────────────────────────────
-  // Открываем постоянный SSE-поток к /activity-stream при монтировании / смене проекта.
-  // Закрываем при unmount или смене проекта через AbortController.
-  // Reconnect через ~2с при обрыве.
-  useEffect(() => {
-    const ac = new AbortController()
-    let active = true
+  // Подписка на активность проекта (общий SSE через ProjectActivityProvider).
+  // Card-run приходят сюда: render как обычные ассистент-сообщения.
+  useProjectActivity(evt => {
+    // Пропускаем, если идёт собственный POST-стрим пользователя — события не должны мешать
+    if (streamingRef.current) return
 
-    async function connect() {
-      while (active) {
-        try {
-          const res = await fetch(`/api/projects/${projectId}/activity-stream`, {
-            credentials: 'include',
-            signal: ac.signal,
-          })
-          if (!res.ok || !res.body) {
-            // Ждём и повторяем при ошибке
-            await new Promise(r => setTimeout(r, 2000))
-            continue
-          }
-          await readStream(
-            res.body,
-            (line) => {
-              const evt = parseActivityLine(line)
-              if (!evt) return  // heartbeat или невалидный JSON
+    const now = Date.now()
 
-              // Пропускаем, если панель занята собственным POST-стримом пользователя.
-              // Замок гарантирует, что события карточки и набранное сообщение
-              // никогда не пересекаются, но флаг — дополнительная страховка.
-              if (streamingRef.current) return
+    if (evt.kind === 'run_start') {
+      const prefix = evt.source === 'card' ? '🗂 карточка: ' : ''
+      const userMsg = makeUserMsg(prefix + evt.prompt)
+      const assistantMsg = makeAssistantMsg()
+      busActiveRef.current = true
+      setMessages(prev => [...prev, userMsg, assistantMsg])
+      setRun({ startedAt: now, lastEventAt: now, currentTool: null, source: 'card' })
 
-              const now = Date.now()
+    } else if (evt.kind === 'text') {
+      if (!busActiveRef.current) return
+      setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
+      setMessages(prev => appendChunk(prev, { kind: 'text', text: evt.text }))
 
-              if (evt.kind === 'run_start') {
-                // Добавляем user-сообщение с промптом карточки + пустой placeholder-assistant
-                const prefix = evt.source === 'card' ? '🗂 карточка: ' : ''
-                const userMsg = makeUserMsg(prefix + evt.prompt)
-                const assistantMsg = makeAssistantMsg()
-                busActiveRef.current = true
-                setMessages(prev => [...prev, userMsg, assistantMsg])
-                setRun({ startedAt: now, lastEventAt: now, currentTool: null, source: 'card' })
+    } else if (evt.kind === 'tool') {
+      if (!busActiveRef.current) return
+      const tool: ChatToolCall = evt.tool
+      setRun(r => r ? { ...r, lastEventAt: now, currentTool: tool } : r)
+      setMessages(prev => appendChunk(prev, { kind: 'tool', tool }))
 
-              } else if (evt.kind === 'text') {
-                if (!busActiveRef.current) return
-                setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
-                setMessages(prev => appendChunk(prev, { kind: 'text', text: evt.text }))
-
-              } else if (evt.kind === 'tool') {
-                if (!busActiveRef.current) return
-                const tool: ChatToolCall = evt.tool
-                setRun(r => r ? { ...r, lastEventAt: now, currentTool: tool } : r)
-                setMessages(prev => appendChunk(prev, { kind: 'tool', tool }))
-
-              } else if (evt.kind === 'run_end') {
-                if (!busActiveRef.current) return
-                busActiveRef.current = false
-                setRun(null)
-                setMessages(prev => finalizeStreaming(prev))
-                setCtxRefreshKey(k => k + 1)
-              }
-            },
-            ac.signal,
-          )
-        } catch (err: any) {
-          if (!active || err?.name === 'AbortError') break
-          // Ждём перед переподключением при случайном обрыве
-          await new Promise(r => setTimeout(r, 2000))
-        }
-      }
-    }
-
-    connect()
-
-    return () => {
-      active = false
-      ac.abort()
-      // Сбрасываем текущее bus-сообщение при смене проекта / unmount
+    } else if (evt.kind === 'run_end') {
+      if (!busActiveRef.current) return
       busActiveRef.current = false
+      setRun(null)
+      setMessages(prev => finalizeStreaming(prev))
+      setCtxRefreshKey(k => k + 1)
     }
-  }, [projectId])
+  })
 
   // Сессия переключена → грузим историю новой активной сессии (для «новой» придёт пусто)
   const handleSessionChange = useCallback(() => {

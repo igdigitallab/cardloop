@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Project, TabId } from '../types'
 import { api } from '../api'
+import { ProjectActivityProvider } from '../hooks/useProjectActivity'
 import { OverviewTab } from '../tabs/OverviewTab'
 import { ReadmeTab } from '../tabs/ReadmeTab'
 import { ClaudeMdTab } from '../tabs/ClaudeMdTab'
@@ -191,7 +192,19 @@ export function ProjectView({ project, onProjectsReload }: Props) {
       ? { flex: '0 0 0', overflow: 'hidden', minWidth: 0 }
       : { flex: `0 0 ${chatWidth}%`, maxWidth: `${chatWidth}%` }
 
+  // Свободный чат — без левой панели табов, чат на всю ширину.
+  if (project.is_free) {
+    return (
+      <ProjectActivityProvider projectId={project.id}>
+        <div className="main-content project-free-layout">
+          <ChatTab project={project} onProjectsReload={onProjectsReload} />
+        </div>
+      </ProjectActivityProvider>
+    )
+  }
+
   return (
+    <ProjectActivityProvider projectId={project.id}>
     <div className="main-content project-split-layout" ref={containerRef}>
       {/* LEFT: header + tabs + content */}
       <div className="project-left-pane" style={leftStyle}>
@@ -313,6 +326,7 @@ export function ProjectView({ project, onProjectsReload }: Props) {
         </button>
       )}
     </div>
+    </ProjectActivityProvider>
   )
 }
 

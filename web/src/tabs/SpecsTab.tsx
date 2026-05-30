@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
 import { Spec } from '../types'
 import { Spinner } from '../components/Spinner'
+import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 
 interface Props {
   projectId: string
@@ -17,6 +18,21 @@ export function SpecsTab({ projectId }: Props) {
   const [specContent, setSpecContent] = useState<string | null>(null)
   const [specLoading, setSpecLoading] = useState(false)
   const [specError, setSpecError] = useState('')
+
+  // Ref на текущий выбранный спек — нужен в reload, чтобы перечитать содержимое
+  const selectedRef = useRef<string | null>(null)
+  selectedRef.current = selected
+
+  const reload = useCallback(() => {
+    api.specs(projectId).then(d => {
+      setSpecs(d.specs); setError('')
+      // Если активный спек ещё существует — обновляем содержимое
+      const cur = selectedRef.current
+      if (cur && d.specs.some(s => s.name === cur)) {
+        api.spec(projectId, cur).then(r => setSpecContent(r.content)).catch(() => {})
+      }
+    }).catch(e => setError(String(e.message || e)))
+  }, [projectId])
 
   useEffect(() => {
     let cancelled = false
@@ -34,6 +50,9 @@ export function SpecsTab({ projectId }: Props) {
 
     return () => { cancelled = true }
   }, [projectId])
+
+  useOnRunEnd(reload)
+  useFocusRefresh(reload)
 
   function selectSpec(name: string) {
     if (selected === name) return

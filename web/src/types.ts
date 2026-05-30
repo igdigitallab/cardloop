@@ -109,6 +109,7 @@ export interface SessionInfo {
   last_used: string   // ISO datetime string
   preview: string
   is_active: boolean
+  label?: string | null
 }
 
 // ─── C1: Chat SSE events ───────────────────────────────────────────────────

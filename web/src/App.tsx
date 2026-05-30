@@ -268,6 +268,19 @@ export default function App() {
     }
   }, [loadProjects])
 
+  // Переименование вкладки — поддерживается только для free-чатов
+  const handleRenameTab = useCallback(async (id: string, label: string) => {
+    const proj = projectsRef.current.find(p => p.id === id)
+    if (!proj?.is_free) return
+    try {
+      await api.freeRename(id, label)
+      loadProjects()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      alert(`Не удалось переименовать: ${msg}`)
+    }
+  }, [loadProjects])
+
   // Удалить свободный чат — закрыть вкладку, убрать с бэка
   const handleDeleteFree = useCallback(async (id: string) => {
     try {
@@ -351,7 +364,6 @@ export default function App() {
         selectedId={activeId}
         onSelect={handleSelect}
         onLogout={handleLogout}
-        onNewFree={handleNewFree}
         onDeleteFree={handleDeleteFree}
         loading={projectsLoading}
         unreadBySession={unreadBySession}
@@ -360,15 +372,15 @@ export default function App() {
       />
 
       <div className="main-area">
-        {hasOpen && (
-          <ProjectTabBar
-            projects={openProjects}
-            activeId={activeId}
-            unreadBySession={unreadBySession}
-            onActivate={handleTabActivate}
-            onClose={handleTabClose}
-          />
-        )}
+        <ProjectTabBar
+          projects={openProjects}
+          activeId={activeId}
+          unreadBySession={unreadBySession}
+          onActivate={handleTabActivate}
+          onClose={handleTabClose}
+          onRename={handleRenameTab}
+          onNewFree={handleNewFree}
+        />
 
         {hasOpen ? (
           // Рендерим ВСЕ открытые ProjectView, скрываем неактивные через display:none —

@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
 import { FileContent, FileEntry } from '../types'
 import { Spinner } from '../components/Spinner'
+import { useOnRunEnd } from '../hooks/useProjectActivity'
 
 interface Props {
   projectId: string
@@ -31,6 +32,19 @@ function buildNodes(entries: FileEntry[], parentPath: string, depth: number): Tr
     path: parentPath ? `${parentPath}/${e.name}` : e.name,
     depth,
   }))
+}
+
+/** Рекурсивный поиск узла по path в дереве (для сохранения open-state при refresh). */
+function findByPath(nodes: TreeNode[] | null, path: string): TreeNode | null {
+  if (!nodes) return null
+  for (const n of nodes) {
+    if (n.path === path) return n
+    if (n.children) {
+      const r = findByPath(n.children, path)
+      if (r) return r
+    }
+  }
+  return null
 }
 
 function formatSize(bytes: number): string {
@@ -175,6 +189,44 @@ export function FilesTab({ projectId }: Props) {
       forceUpdate()
     })
   }
+
+  // ── Refresh root tree (после run_end / ручного refresh) ─────────────────
+  //    Перечитываем корень и все РАСКРЫТЫЕ директории, сохраняя их open-state.
+  const refreshTree = useCallback(async () => {
+    if (!nodesRef.current) return
+    try {
+      const root = await api.files(projectId, '')
+      const oldNodes = nodesRef.current
+      const newRoot = buildNodes(root.entries, '', 0)
+      // Копируем open/children/loading из старого дерева для совпадающих путей
+      const merge = async (newOnes: TreeNode[]) => {
+        for (const n of newOnes) {
+          const old = findByPath(oldNodes, n.path)
+          if (old && old.type === 'dir' && old.open) {
+            n.open = true
+            try {
+              const sub = await api.files(projectId, n.path)
+              n.children = buildNodes(sub.entries, n.path, n.depth + 1)
+              await merge(n.children)
+            } catch { /* skip */ }
+          }
+        }
+      }
+      await merge(newRoot)
+      nodesRef.current = newRoot
+      setRootNodes([...newRoot])
+    } catch { /* тихо игнорим — на следующий run_end попробуем */ }
+
+    // Селектед файл — тоже перечитать (агент мог изменить его содержимое)
+    if (selectedPath) {
+      try {
+        const d = await api.file(projectId, selectedPath)
+        setFileContent(d)
+      } catch { /* skip */ }
+    }
+  }, [projectId, selectedPath])
+
+  useOnRunEnd(() => { refreshTree() })
 
   // ── File click ────────────────────────────────────────────────────────────
 

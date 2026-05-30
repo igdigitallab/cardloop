@@ -7,7 +7,6 @@ interface Props {
   selectedId: string | null
   onSelect: (id: string) => void
   onLogout: () => void
-  onNewFree: () => void
   onDeleteFree: (id: string) => void
   loading: boolean
   unreadBySession: Record<string, number>
@@ -21,7 +20,7 @@ function unreadFor(p: Project, map: Record<string, number>): number {
 }
 
 export function Sidebar({
-  projects, selectedId, onSelect, onLogout, onNewFree, onDeleteFree, loading,
+  projects, selectedId, onSelect, onLogout, onDeleteFree, loading,
   unreadBySession, collapsed, onToggleCollapse,
 }: Props) {
   const [search, setSearch] = useState('')
@@ -39,13 +38,6 @@ export function Sidebar({
           title="Развернуть сайдбар"
         >
           ☰
-        </button>
-        <button
-          className="sidebar-new-free-collapsed"
-          onClick={onNewFree}
-          title="Новый свободный чат"
-        >
-          🏠+
         </button>
         <div className="projects-list-collapsed">
           {projects.map(p => {
@@ -91,9 +83,6 @@ export function Sidebar({
           value={search}
           onChange={e => setSearch(e.target.value)}
         />
-        <button className="sidebar-new-free-btn" onClick={onNewFree} title="Создать новый свободный чат (cwd=/home/igor)">
-          🏠 Новый свободный
-        </button>
       </div>
 
       {/* Свободные чаты — отдельная секция (если есть) */}

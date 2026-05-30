@@ -207,6 +207,43 @@ def _project_id(cwd: str) -> str:
     return Path(cwd.rstrip("/")).name
 
 
+def _session_labels_path(ctx: dict) -> Path:
+    return ctx["DATA"] / "session_labels.json"
+
+
+def _load_session_labels(ctx: dict) -> dict:
+    """{session_id → user_label}. SDK сам lable не умеет — это наш слой."""
+    p = _session_labels_path(ctx)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_session_labels(ctx: dict, data: dict) -> None:
+    _session_labels_path(ctx).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+
+
+def _inherit_label_from_free_chat(ctx: dict, session_key: str, sid: str) -> None:
+    """Если session_key — это free-чат с label, и у sid ещё нет своего лейбла —
+    наследует label вкладки. Вызывается когда SDK впервые присвоил session_id."""
+    if not (session_key and session_key.startswith("free-") and sid):
+        return
+    free = _load_free_chats(ctx)
+    entry = free.get(session_key)
+    if not entry or not entry.get("label"):
+        return
+    labels = _load_session_labels(ctx)
+    if sid in labels:
+        return  # уже подписана (ручной rename) — не трогаем
+    labels[sid] = entry["label"]
+    _save_session_labels(ctx, labels)
+
+
 def _free_chats_path(ctx: dict) -> Path:
     return ctx["DATA"] / "free_chats.json"
 
@@ -713,6 +750,7 @@ async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_ke
                     if event.get("session_id"):
                         ctx["sessions"][session_key] = event["session_id"]
                         ctx["save_sessions"]()
+                        _inherit_label_from_free_chat(ctx, session_key, event["session_id"])
                 elif etype == "error":
                     raise event["exc"]
 
@@ -1008,10 +1046,10 @@ async def api_free_create(req: web.Request):
     if model not in _ALLOWED_MODELS:
         model = ctx.get("DEFAULT_MODEL", "sonnet")
 
-    # Лейбл — пользовательский или авто «🏠 Свободный HH:MM»
+    # Лейбл — пользовательский или авто «Свободный HH:MM»
     label = (body.get("label") or "").strip()
     if not label:
-        label = f"🏠 Свободный {time.strftime('%H:%M')}"
+        label = f"Свободный {time.strftime('%H:%M')}"
 
     fid = f"free-{_uuid.uuid4().hex[:8]}"
     free = _load_free_chats(ctx)
@@ -1023,6 +1061,35 @@ async def api_free_create(req: web.Request):
     }
     _save_free_chats(ctx, free)
     return web.json_response({"id": fid, **free[fid]})
+
+
+async def api_free_rename(req: web.Request):
+    ctx = req.app["ctx"]
+    fid = req.match_info["id"]
+    free = _load_free_chats(ctx)
+    if fid not in free:
+        return web.json_response({"error": "free chat not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    label = (body.get("label") or "").strip()
+    if not label:
+        return web.json_response({"error": "label is empty"}, status=400)
+    if len(label) > 100:
+        label = label[:100]
+    free[fid]["label"] = label
+    _save_free_chats(ctx, free)
+
+    # Если у вкладки уже есть активная Claude-сессия — прокидываем тот же label на неё,
+    # чтобы переименование вкладки автоматически переименовало и сессию в SessionSelector.
+    active_sid = ctx["sessions"].get(fid)
+    if active_sid:
+        labels = _load_session_labels(ctx)
+        labels[active_sid] = label
+        _save_session_labels(ctx, labels)
+
+    return web.json_response({"ok": True, "id": fid, "label": label})
 
 
 async def api_free_delete(req: web.Request):
@@ -1414,6 +1481,8 @@ async def api_project_sessions(req: web.Request):
     if not sdk_dir.is_dir():
         return web.json_response({"sessions": []})
 
+    labels = _load_session_labels(ctx)
+
     sessions = []
     try:
         for f in sdk_dir.glob("*.jsonl"):
@@ -1430,6 +1499,7 @@ async def api_project_sessions(req: web.Request):
                 "last_used": last_used,
                 "preview": preview,
                 "is_active": sid == active_sid,
+                "label": labels.get(sid) or None,
             })
     except Exception:
         pass
@@ -1674,6 +1744,7 @@ async def api_project_chat(req: web.Request):
                 if sid:
                     ctx["sessions"][session_key] = sid
                     ctx["save_sessions"]()
+                    _inherit_label_from_free_chat(ctx, session_key, sid)
                 await _send({"type": "result"})
             elif etype == "error":
                 exc = event.get("exc")
@@ -1938,6 +2009,7 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/usage", api_usage)
         # Свободные чаты (без привязки к проекту, cwd=$HOME)
         app.router.add_post("/api/free", api_free_create)
+        app.router.add_post("/api/free/{id}/rename", api_free_rename)
         app.router.add_delete("/api/free/{id}", api_free_delete)
         # C2: управление сессиями проекта
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)

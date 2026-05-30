@@ -4,13 +4,34 @@ import remarkGfm from 'remark-gfm'
 import { api } from '../api'
 import { Board, BoardColumn, RunResult } from '../types'
 import { Spinner } from '../components/Spinner'
+import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 
 interface Props {
   projectId: string
 }
 
 const ORDER = ['backlog', 'in_progress', 'review', 'failed']
-const POLL_INTERVAL_MS = 3000
+const POLL_FAST_MS = 3000   // когда есть карточки в In Progress (агент работает)
+const POLL_SLOW_MS = 10000  // фоновый poll (правки TASKS.md от агента через чат, внешние правки)
+
+const LS_BOARD_COLS = 'cops.boardVisibleCols'
+const DEFAULT_VISIBLE: string[] = ['backlog']  // дефолт — только Backlog
+
+function readVisibleCols(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LS_BOARD_COLS)
+    if (!raw) return new Set(DEFAULT_VISIBLE)
+    const arr = JSON.parse(raw)
+    if (!Array.isArray(arr) || arr.length === 0) return new Set(DEFAULT_VISIBLE)
+    return new Set(arr.filter((x): x is string => typeof x === 'string'))
+  } catch {
+    return new Set(DEFAULT_VISIBLE)
+  }
+}
+
+function writeVisibleCols(s: Set<string>) {
+  try { localStorage.setItem(LS_BOARD_COLS, JSON.stringify([...s])) } catch {}
+}
 
 export function BoardTab({ projectId }: Props) {
   const [board, setBoard] = useState<Board | null>(null)
@@ -26,30 +47,60 @@ export function BoardTab({ projectId }: Props) {
   const [runResultLoading, setRunResultLoading] = useState(false)
   const [showRunModal, setShowRunModal] = useState(false)
 
+  // Видимые колонки (persist в localStorage). Дефолт — только Backlog.
+  const [visibleCols, setVisibleCols] = useState<Set<string>>(() => readVisibleCols())
+
+  function toggleCol(key: string) {
+    setVisibleCols(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) {
+        if (next.size <= 1) return prev  // нельзя скрыть последнюю
+        next.delete(key)
+      } else {
+        next.add(key)
+      }
+      writeVisibleCols(next)
+      return next
+    })
+  }
+
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const projectIdRef = useRef(projectId)
   projectIdRef.current = projectId
 
-  // F1: есть ли карточки в In Progress — нужен поллинг
+  // F1: есть ли карточки в In Progress — частим polling
   function hasInProgress(b: Board | null): boolean {
     if (!b) return false
     const col = b.columns.find(c => c.key === 'in_progress')
     return (col?.cards.length ?? 0) > 0
   }
 
-  // F1: поллинг пока in_progress непуст
+  // Polling: 3с пока есть in_progress, 10с в покое; не тикает когда вкладка скрыта
   function schedulePoll(b: Board | null) {
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
-    if (!hasInProgress(b)) return
+    const delay = hasInProgress(b) ? POLL_FAST_MS : POLL_SLOW_MS
     pollTimerRef.current = setTimeout(async () => {
+      if (document.visibilityState !== 'visible') {
+        schedulePoll(b)  // ждём до следующего тика; обновим при visibility change
+        return
+      }
       try {
         const fresh = await api.tasks(projectIdRef.current)
         setBoard(fresh)
         schedulePoll(fresh)
       } catch {
-        schedulePoll(b) // при ошибке поллинга — попробуем снова
+        schedulePoll(b)
       }
-    }, POLL_INTERVAL_MS)
+    }, delay)
+  }
+
+  // Мгновенный refresh (focus, visibility, run_end из шины)
+  async function refreshNow() {
+    try {
+      const fresh = await api.tasks(projectIdRef.current)
+      setBoard(fresh)
+      schedulePoll(fresh)
+    } catch { /* тихо игнорим — следующий poll-тик попробует */ }
   }
 
   useEffect(() => {
@@ -72,6 +123,11 @@ export function BoardTab({ projectId }: Props) {
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
     }
   }, [projectId])
+
+  // Refresh на focus/visibility (общий хук)
+  useFocusRefresh(refreshNow)
+  // Refresh на run_end из общей шины проекта — агент мог изменить TASKS.md, карточка могла уйти Review/Failed
+  useOnRunEnd(refreshNow)
 
   async function run(p: Promise<Board>) {
     setBusy(true); setError('')
@@ -131,12 +187,36 @@ export function BoardTab({ projectId }: Props) {
   const cols = board?.columns ?? []
   const colByKey = (k: string): BoardColumn | undefined => cols.find(c => c.key === k)
 
+  const visibleOrder = ORDER.filter(k => visibleCols.has(k))
+
   return (
     <div className="board-wrap">
       {error && <div className="error-state" style={{ marginBottom: 10 }}>⚠ {error}</div>}
 
+      {/* Тогглы колонок — показать/скрыть. Если в скрытой колонке есть карточки, подсвечиваем счётчик. */}
+      <div className="board-col-toggles">
+        <span className="board-col-toggles-label">колонки:</span>
+        {ORDER.map(k => {
+          const col = colByKey(k)
+          const label = col?.label || k
+          const count = col?.cards.length ?? 0
+          const isOn = visibleCols.has(k)
+          const hidden = !isOn && count > 0
+          return (
+            <button
+              key={k}
+              className={`board-col-toggle ${isOn ? 'on' : 'off'} ${hidden ? 'has-cards' : ''}`}
+              onClick={() => toggleCol(k)}
+              title={isOn ? `Скрыть «${label}»` : `Показать «${label}»`}
+            >
+              {label}{count > 0 ? ` (${count})` : ''}
+            </button>
+          )
+        })}
+      </div>
+
       <div className="board-columns">
-        {ORDER.map(key => {
+        {visibleOrder.map(key => {
           const col = colByKey(key)
           if (!col) return null
           const idx = ORDER.indexOf(key)

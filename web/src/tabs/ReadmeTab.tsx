@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
 import { ClaudeMd } from '../types'
 import { Spinner } from '../components/Spinner'
+import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 
 interface Props {
   projectId: string
@@ -13,6 +14,12 @@ export function ReadmeTab({ projectId }: Props) {
   const [data, setData] = useState<ClaudeMd | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+
+  const reload = useCallback(() => {
+    api.readme(projectId).then(d => {
+      setData(d); setError('')
+    }).catch(e => setError(String(e.message || e)))
+  }, [projectId])
 
   useEffect(() => {
     let cancelled = false
@@ -28,6 +35,10 @@ export function ReadmeTab({ projectId }: Props) {
 
     return () => { cancelled = true }
   }, [projectId])
+
+  // Live: агент изменил README → перечитываем; возврат фокуса → тоже
+  useOnRunEnd(reload)
+  useFocusRefresh(reload)
 
   if (loading) return <Spinner label="Загрузка README..." />
   if (error) return <div className="error-state">⚠ {error}</div>

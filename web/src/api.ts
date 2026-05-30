@@ -123,6 +123,13 @@ export const api = {
       }
     ),
 
+  freeRename: (id: string, label: string) =>
+    apiFetch<{ ok: boolean; id: string; label: string }>(`/api/free/${id}/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    }),
+
   freeDelete: (id: string) =>
     apiFetch<{ ok: boolean }>(`/api/free/${id}`, { method: 'DELETE' }),
 

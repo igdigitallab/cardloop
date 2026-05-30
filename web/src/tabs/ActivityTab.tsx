@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { Spinner } from '../components/Spinner'
+import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 
 interface Props {
   projectId: string
@@ -10,6 +11,12 @@ export function ActivityTab({ projectId }: Props) {
   const [lines, setLines] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+
+  const reload = useCallback(() => {
+    api.activity(projectId).then(d => {
+      setLines([...d.lines].reverse()); setError('')
+    }).catch(e => setError(String(e.message || e)))
+  }, [projectId])
 
   useEffect(() => {
     let cancelled = false
@@ -29,6 +36,9 @@ export function ActivityTab({ projectId }: Props) {
 
     return () => { cancelled = true }
   }, [projectId])
+
+  useOnRunEnd(reload)
+  useFocusRefresh(reload)
 
   if (loading) return <Spinner label="Загрузка активности..." />
   if (error) return <div className="error-state">⚠ {error}</div>
