@@ -367,11 +367,6 @@ export function ChatTab({ projectId }: Props) {
 
         {messages.map(msg => (
           <div key={msg.id} className={`chat-msg chat-msg-${msg.role}`}>
-            <div className="chat-msg-label">
-              {msg.role === 'user' ? 'Вы' : 'Агент'}
-              {msg.streaming && <span className="chat-streaming-dot" title="агент думает…">●</span>}
-            </div>
-
             {/* Tool calls */}
             {msg.tools.length > 0 && (
               <div className="chat-tools">
