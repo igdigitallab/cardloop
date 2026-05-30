@@ -189,6 +189,20 @@ export const api = {
       }
     ),
 
+  // Шаблоны промтов
+  prompts: () =>
+    apiFetch<{ prompts: import('./types').Prompt[] }>('/api/prompts'),
+
+  createPrompt: (body: { title: string; text: string }) =>
+    apiFetch<{ prompt: import('./types').Prompt }>('/api/prompts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  deletePrompt: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/prompts/${id}`, { method: 'DELETE' }),
+
   // Git: commit (если dirty) + push одной кнопкой
   gitSync: (id: string, message?: string) =>
     apiFetch<{ ok: boolean; committed: boolean; pushed: boolean; message: string | null; log: string }>(

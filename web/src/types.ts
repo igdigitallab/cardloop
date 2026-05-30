@@ -188,6 +188,14 @@ export interface ChatMessage {
   error?: string
 }
 
+// ─── Prompt templates ─────────────────────────────────────────────────────
+
+export interface Prompt {
+  id: string
+  title: string
+  text: string
+}
+
 // ─── Activity bus events (server → client via /activity-stream) ────────────
 
 export interface ActivityEventRunStart {

@@ -250,6 +250,48 @@ def _free_chats_path(ctx: dict) -> Path:
     return ctx["DATA"] / "free_chats.json"
 
 
+# ── Prompt templates ──────────────────────────────────────────────────────────
+
+def _prompts_path(ctx: dict) -> Path:
+    return ctx["DATA"] / "prompts.json"
+
+def _load_prompts(ctx: dict) -> list:
+    p = _prompts_path(ctx)
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return []
+
+def _save_prompts(ctx: dict, prompts: list):
+    _prompts_path(ctx).write_text(json.dumps(prompts, ensure_ascii=False, indent=2))
+
+async def api_prompts_list(req: web.Request):
+    ctx = req.app["ctx"]
+    return web.json_response({"prompts": _load_prompts(ctx)})
+
+async def api_prompt_create(req: web.Request):
+    ctx = req.app["ctx"]
+    data = await req.json()
+    title = (data.get("title") or "").strip()
+    text  = (data.get("text")  or "").strip()
+    if not title or not text:
+        raise web.HTTPBadRequest(text="title and text required")
+    prompt = {"id": str(_uuid.uuid4())[:8], "title": title, "text": text}
+    prompts = _load_prompts(ctx)
+    prompts.append(prompt)
+    _save_prompts(ctx, prompts)
+    return web.json_response({"prompt": prompt})
+
+async def api_prompt_delete(req: web.Request):
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    prompts = [p for p in _load_prompts(ctx) if p.get("id") != pid]
+    _save_prompts(ctx, prompts)
+    return web.json_response({"ok": True})
+
+
 def _load_free_chats(ctx: dict) -> dict:
     """{free_id → {label, cwd, model, created_at}}. Файл может отсутствовать — вернёт {}."""
     p = _free_chats_path(ctx)
@@ -2365,6 +2407,10 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/model", api_project_set_model)
         # Лимиты подписки (5ч + недельные) — для значка в полосе вкладок
         app.router.add_get("/api/usage", api_usage)
+        # Шаблоны промтов (глобальные, data/prompts.json)
+        app.router.add_get("/api/prompts", api_prompts_list)
+        app.router.add_post("/api/prompts", api_prompt_create)
+        app.router.add_delete("/api/prompts/{id}", api_prompt_delete)
         # Свободные чаты (без привязки к проекту, cwd=$HOME)
         app.router.add_post("/api/free", api_free_create)
         app.router.add_post("/api/free/{id}/rename", api_free_rename)

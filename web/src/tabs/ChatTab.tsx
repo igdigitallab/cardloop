@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
+import { PromptPicker } from '../components/PromptPicker'
 import {
   ChatMessage,
   ChatSSEEvent,
@@ -575,6 +576,8 @@ export function ChatTab({ project, onProjectsReload }: Props) {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Панель шаблонов промтов
+  const [showPrompts, setShowPrompts] = useState(false)
 
   // Keep streamingRef in sync with the streaming state
   useEffect(() => {
@@ -832,6 +835,21 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     }
   }
 
+  function handlePromptSelect(text: string) {
+    setInput(text)
+    setShowPrompts(false)
+    setTimeout(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      ta.focus()
+      // Выделяем первую переменную [ПЕРЕМЕННАЯ] чтобы сразу вводить
+      const match = text.match(/\[[^\]]+\]/)
+      if (match && match.index !== undefined) {
+        ta.setSelectionRange(match.index, match.index + match[0].length)
+      }
+    }, 0)
+  }
+
   const handleModelChange = useCallback(async (m: ModelKey) => {
     if (m === project.model) return
     setChangingModel(true)
@@ -1012,12 +1030,23 @@ export function ChatTab({ project, onProjectsReload }: Props) {
             </div>
           )
         })()}
+        {showPrompts && (
+          <PromptPicker
+            onSelect={handlePromptSelect}
+            onClose={() => setShowPrompts(false)}
+          />
+        )}
         <div className="chat-input-row">
           <button
             className="chat-attach-btn"
             onClick={() => fileInputRef.current?.click()}
             title="Прикрепить файл (или перетащи / Ctrl+V)"
           >📎</button>
+          <button
+            className={`chat-attach-btn${showPrompts ? ' active' : ''}`}
+            onClick={() => setShowPrompts(s => !s)}
+            title="Шаблоны промтов"
+          >📋</button>
           <textarea
             ref={textareaRef}
             className="chat-textarea"
