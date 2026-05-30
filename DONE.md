@@ -3,6 +3,7 @@
 Архив завершённых карточек (append-only). **Сессии его НЕ читают** — гигиена контекста.
 
 ## 2026-05-29
+- [x] C1: чат по проекту в кокпите (SSE-стрим, сессия общая с TG) <!--ops:d616af--> — E2E на проде (sandbox резюмит session topic 369)
 - [x] F1: авто-запуск карточки — перенос Backlog→In Progress запускает run_engine, авто→Review/Failed + сайдкар + TG-пинг <!--ops:8c3888--> — E2E на проде (sandbox)
 - [x] F1: кросс-пинг в TG-топик при завершении карточки (внутри F1) <!--ops:650fb7-->
 - [x] F0: рефактор run_agent → async-генератор `run_engine` (TG/glasses/web — один движок) <!--ops:f65e6e--> — E2E на проде, sandbox+Networking-OS
