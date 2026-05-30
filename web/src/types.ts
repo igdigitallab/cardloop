@@ -76,7 +76,28 @@ export interface FileContent {
   error?: string
 }
 
-export type TabId = 'overview' | 'readme' | 'claude-md' | 'specs' | 'activity' | 'chat' | 'board' | 'files'
+export type TabId = 'overview' | 'readme' | 'claude-md' | 'specs' | 'activity' | 'chat' | 'board' | 'files' | 'memory'
+
+// ─── Session Context (Feature A) ──────────────────────────────────────────
+
+export interface SessionContext {
+  read: string[]
+  edited: string[]
+  commands: string[]
+  session_id: string | null
+}
+
+// ─── Project Memory (Feature B) ───────────────────────────────────────────
+
+export interface MemoryFile {
+  name: string
+  content: string
+}
+
+export interface ProjectMemory {
+  files: MemoryFile[]
+  exists: boolean
+}
 
 // ─── C2: Session management ────────────────────────────────────────────────
 

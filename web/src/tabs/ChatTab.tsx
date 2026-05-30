@@ -8,6 +8,7 @@ import {
   ChatSSEEvent,
   ChatToolCall,
   HistoryMessage,
+  SessionContext,
   SessionInfo,
 } from '../types'
 
@@ -207,6 +208,101 @@ function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
   )
 }
 
+// ─── SessionContextPanel ──────────────────────────────────────────────────
+
+interface SessionContextPanelProps {
+  projectId: string
+  refreshKey: number  // increment to trigger reload
+}
+
+function SessionContextPanel({ projectId, refreshKey }: SessionContextPanelProps) {
+  const [ctx, setCtx] = useState<SessionContext | null>(null)
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  const load = useCallback(() => {
+    setLoading(true)
+    api.sessionContext(projectId).then(d => {
+      setCtx(d)
+      setLoading(false)
+    }).catch(() => {
+      setLoading(false)
+    })
+  }, [projectId])
+
+  // Reload on mount, project change, or when refreshKey changes
+  useEffect(() => {
+    load()
+  }, [load, refreshKey])
+
+  const totalFiles = (ctx?.read.length ?? 0) + (ctx?.edited.length ?? 0)
+  const hasData = totalFiles > 0 || (ctx?.commands.length ?? 0) > 0
+
+  if (!ctx || (!hasData && !loading)) return null
+
+  return (
+    <div className="ctx-panel">
+      <button
+        className="ctx-panel-toggle"
+        onClick={() => setOpen(o => !o)}
+        title={open ? 'Свернуть контекст сессии' : 'Развернуть контекст сессии'}
+      >
+        <span className="ctx-panel-icon">📎</span>
+        <span className="ctx-panel-label">
+          Контекст: {totalFiles} файл{totalFiles === 1 ? '' : totalFiles >= 2 && totalFiles <= 4 ? 'а' : 'ов'}
+          {ctx.commands.length > 0 && `, ${ctx.commands.length} команд`}
+        </span>
+        <span className="ctx-panel-chevron">{open ? '▲' : '▼'}</span>
+        <button
+          className="ctx-refresh-btn"
+          onClick={e => { e.stopPropagation(); load() }}
+          title="Обновить контекст"
+          disabled={loading}
+        >↺</button>
+      </button>
+
+      {open && (
+        <div className="ctx-panel-body">
+          {loading && <div className="ctx-loading">обновление…</div>}
+
+          {ctx.read.length > 0 && (
+            <div className="ctx-section">
+              <div className="ctx-section-label">📖 Прочитано ({ctx.read.length})</div>
+              <div className="ctx-list">
+                {ctx.read.map((f, i) => (
+                  <div key={i} className="ctx-item">{f}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {ctx.edited.length > 0 && (
+            <div className="ctx-section">
+              <div className="ctx-section-label">✏️ Изменено ({ctx.edited.length})</div>
+              <div className="ctx-list">
+                {ctx.edited.map((f, i) => (
+                  <div key={i} className="ctx-item ctx-item-edited">{f}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {ctx.commands.length > 0 && (
+            <div className="ctx-section">
+              <div className="ctx-section-label">⚙ Команды ({ctx.commands.length})</div>
+              <div className="ctx-list">
+                {ctx.commands.map((c, i) => (
+                  <div key={i} className="ctx-item ctx-item-cmd">{c}</div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── ChatTab ──────────────────────────────────────────────────────────────
 
 export function ChatTab({ projectId }: Props) {
@@ -214,6 +310,8 @@ export function ChatTab({ projectId }: Props) {
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState('')
+  // Bump to trigger SessionContextPanel reload (after run_end)
+  const [ctxRefreshKey, setCtxRefreshKey] = useState(0)
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -329,6 +427,8 @@ export function ChatTab({ projectId }: Props) {
                   const updated = { ...msgs[idx], streaming: false }
                   return [...msgs.slice(0, idx), updated, ...msgs.slice(idx + 1)]
                 })
+                // Refresh context panel after run completes
+                setCtxRefreshKey(k => k + 1)
               }
             },
             ac.signal,
@@ -461,6 +561,8 @@ export function ChatTab({ projectId }: Props) {
       setStreaming(false)
       abortRef.current = null
       textareaRef.current?.focus()
+      // Refresh context panel after any chat run completes
+      setCtxRefreshKey(k => k + 1)
     }
   }, [input, projectId, streaming])
 
@@ -471,7 +573,13 @@ export function ChatTab({ projectId }: Props) {
     }
   }
 
-  function stopStream() {
+  async function stopStream() {
+    // Signal server to interrupt the running agent (best-effort)
+    try {
+      await api.stopChat(projectId)
+    } catch {
+      // non-critical — client abort follows regardless
+    }
     abortRef.current?.abort()
     setStreaming(false)
   }
@@ -482,6 +590,9 @@ export function ChatTab({ projectId }: Props) {
       <div className="chat-session-bar">
         <SessionSelector projectId={projectId} onSessionChange={handleSessionChange} />
       </div>
+
+      {/* Session context panel (Feature A) */}
+      <SessionContextPanel projectId={projectId} refreshKey={ctxRefreshKey} />
 
       <div className="chat-feed">
         {messages.length === 0 && (

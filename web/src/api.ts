@@ -95,4 +95,20 @@ export const api = {
     apiFetch<{ messages: import('./types').HistoryMessage[]; session_id: string | null }>(
       `/api/projects/${id}/session-history${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`
     ),
+
+  // C1-stop: interrupt the running agent on the server
+  stopChat: (id: string) =>
+    apiFetch<{ ok: boolean; stopped: boolean }>(`/api/projects/${id}/chat/stop`, {
+      method: 'POST',
+    }),
+
+  // Feature A: session context (read/edited/commands)
+  sessionContext: (id: string, sessionId?: string) =>
+    apiFetch<import('./types').SessionContext>(
+      `/api/projects/${id}/session-context${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`
+    ),
+
+  // Feature B: project memory files
+  memory: (id: string) =>
+    apiFetch<import('./types').ProjectMemory>(`/api/projects/${id}/memory`),
 }

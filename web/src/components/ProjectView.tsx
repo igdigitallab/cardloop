@@ -8,6 +8,7 @@ import { ActivityTab } from '../tabs/ActivityTab'
 import { BoardTab } from '../tabs/BoardTab'
 import { ChatTab } from '../tabs/ChatTab'
 import { FilesTab } from '../tabs/FilesTab'
+import { MemoryTab } from '../tabs/MemoryTab'
 
 interface Tab {
   id: TabId
@@ -24,6 +25,7 @@ const TABS: Tab[] = [
   { id: 'activity',   label: 'Активность' },
   { id: 'board',      label: 'Доска' },
   { id: 'files',      label: 'Файлы' },
+  { id: 'memory',     label: 'Память' },
 ]
 
 // localStorage keys
@@ -213,6 +215,7 @@ export function ProjectView({ project }: Props) {
           {activeTab === 'activity'  && <ActivityTab projectId={project.id} />}
           {activeTab === 'board'     && <BoardTab projectId={project.id} />}
           {activeTab === 'files'     && <FilesTab projectId={project.id} />}
+          {activeTab === 'memory'    && <MemoryTab projectId={project.id} />}
         </div>
       </div>
 

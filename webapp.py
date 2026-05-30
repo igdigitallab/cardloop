@@ -1357,6 +1357,169 @@ async def api_project_chat(req: web.Request):
     return resp
 
 
+# ─────────────────────────── Стоп-эндпоинт (chat/stop) ───────────────────────
+
+async def api_project_chat_stop(req: web.Request):
+    """POST /api/projects/{id}/chat/stop — прерывает текущий прогон агента.
+    Кладёт вызов client.interrupt() на реальный SDK-клиент из ctx["running"].
+    Возвращает {ok, stopped}; stopped=false если нечего прерывать."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    session_key = project["tg_thread"]
+    client = ctx["running"].get(session_key)
+
+    if client is not None and hasattr(client, "interrupt"):
+        try:
+            await client.interrupt()
+        except Exception:
+            pass
+        return web.json_response({"ok": True, "stopped": True})
+
+    return web.json_response({"ok": True, "stopped": False})
+
+
+# ─────────────────────────── Контекст сессии (session-context) ─────────────
+
+_CTX_TOOL_READ  = {"Read", "Glob", "Grep"}
+_CTX_TOOL_EDIT  = {"Edit", "Write", "NotebookEdit"}
+_CTX_TOOL_BASH  = {"Bash"}
+_CTX_LIST_LIMIT = 200
+
+
+def _session_context(jsonl_path: Path) -> dict:
+    """Парсит SDK-транскрипт: извлекает read/edited/commands из tool_use блоков ассистента.
+    Дедуп по значению, первое вхождение wins. Лимит ~200 на категорию."""
+    read: list[str]     = []
+    edited: list[str]   = []
+    commands: list[str] = []
+    seen_read: set[str]     = set()
+    seen_edited: set[str]   = set()
+    seen_commands: set[str] = set()
+
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if o.get("type") != "assistant":
+                    continue
+                m = o.get("message")
+                if not isinstance(m, dict):
+                    continue
+                c = m.get("content")
+                if not isinstance(c, list):
+                    continue
+                for block in c:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    name = block.get("name", "")
+                    inp  = block.get("input") or {}
+                    if not isinstance(inp, dict):
+                        continue
+
+                    if name in _CTX_TOOL_READ:
+                        # Read → file_path; Glob/Grep → pattern or path
+                        val = (inp.get("file_path") or inp.get("path") or inp.get("pattern") or "").strip()
+                        if val and val not in seen_read and len(read) < _CTX_LIST_LIMIT:
+                            seen_read.add(val)
+                            read.append(val)
+
+                    elif name in _CTX_TOOL_EDIT:
+                        val = (inp.get("file_path") or "").strip()
+                        if val and val not in seen_edited and len(edited) < _CTX_LIST_LIMIT:
+                            seen_edited.add(val)
+                            edited.append(val)
+
+                    elif name in _CTX_TOOL_BASH:
+                        raw = (inp.get("command") or "").strip()
+                        val = (raw[:80] + "…") if len(raw) > 80 else raw
+                        if val and val not in seen_commands and len(commands) < _CTX_LIST_LIMIT:
+                            seen_commands.add(val)
+                            commands.append(val)
+    except Exception:
+        pass
+
+    return {"read": read, "edited": edited, "commands": commands}
+
+
+async def api_project_session_context(req: web.Request):
+    """GET /api/projects/{id}/session-context?session_id=<опц.>
+    Возвращает {read, edited, commands, session_id} для активной (или указанной) сессии."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    sid = req.rel_url.query.get("session_id", "") or ctx["sessions"].get(project["tg_thread"])
+    if not sid:
+        return web.json_response({"read": [], "edited": [], "commands": [], "session_id": None})
+
+    # Санитизация basename-only (как в session-history)
+    if sid != Path(sid).name or sid in (".", ".."):
+        return web.json_response({"error": "invalid session_id"}, status=400)
+
+    jsonl = _sdk_sessions_dir(project["cwd"]) / f"{sid}.jsonl"
+    if not jsonl.is_file():
+        return web.json_response({"read": [], "edited": [], "commands": [], "session_id": sid})
+
+    data = _session_context(jsonl)
+    data["session_id"] = sid
+    return web.json_response(data)
+
+
+# ─────────────────────────── Память проекта (memory) ─────────────────────────
+
+_MEMORY_MAX_SIZE = 256 * 1024  # 256 КБ
+
+
+async def api_project_memory(req: web.Request):
+    """GET /api/projects/{id}/memory
+    Возвращает {files:[{name, content}], exists} из ~/.claude/projects/<cwd>/memory/*.md.
+    MEMORY.md — первым в списке (индекс)."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    mem_dir = _sdk_sessions_dir(project["cwd"]) / "memory"
+    if not mem_dir.is_dir():
+        return web.json_response({"files": [], "exists": False})
+
+    files: list[dict] = []
+    try:
+        md_files = sorted(mem_dir.glob("*.md"), key=lambda p: p.name)
+        # MEMORY.md первым
+        md_files_sorted = sorted(
+            md_files,
+            key=lambda p: (0 if p.name == "MEMORY.md" else 1, p.name),
+        )
+        for f in md_files_sorted:
+            try:
+                size = f.stat().st_size
+                if size > _MEMORY_MAX_SIZE:
+                    content = f"[файл слишком большой: {size} байт]"
+                else:
+                    content = f.read_text(encoding="utf-8", errors="replace")
+                files.append({"name": f.name, "content": content})
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return web.json_response({"files": files, "exists": True})
+
+
 # ─────────────────────────── статика (SPA) ───────────────────────────
 
 PLACEHOLDER_HTML = (
@@ -1426,6 +1589,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
         # C1: SSE-чат по проекту
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
+        # C1-stop: прерывание текущего прогона агента
+        app.router.add_post("/api/projects/{id}/chat/stop", api_project_chat_stop)
         # Activity-stream: живой поток событий шины (карточки, внешние прогоны)
         app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)
         # C2: управление сессиями проекта
@@ -1435,6 +1600,10 @@ async def start(ptb_app, ctx: dict) -> None:
         # Файловый проводник (read-only)
         app.router.add_get("/api/projects/{id}/files", api_project_files)
         app.router.add_get("/api/projects/{id}/file", api_project_file)
+        # Контекст сессии (read: Фича A)
+        app.router.add_get("/api/projects/{id}/session-context", api_project_session_context)
+        # Память проекта (read: Фича B)
+        app.router.add_get("/api/projects/{id}/memory", api_project_memory)
 
         # Статика — всё остальное (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
