@@ -78,6 +78,15 @@ export interface FileContent {
 
 export type TabId = 'overview' | 'readme' | 'claude-md' | 'specs' | 'activity' | 'chat' | 'board' | 'files'
 
+// ─── C2: Session management ────────────────────────────────────────────────
+
+export interface SessionInfo {
+  session_id: string
+  last_used: string   // ISO datetime string
+  preview: string
+  is_active: boolean
+}
+
 // ─── C1: Chat SSE events ───────────────────────────────────────────────────
 
 export interface ChatEventText {

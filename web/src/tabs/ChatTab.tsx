@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ChatMessage, ChatSSEEvent, ChatToolCall } from '../types'
+import { api } from '../api'
+import { ChatMessage, ChatSSEEvent, ChatToolCall, SessionInfo } from '../types'
 
 interface Props {
   projectId: string
@@ -56,6 +57,139 @@ async function readStream(
   }
 }
 
+/** Format ISO datetime as relative time */
+function relTime(iso: string): string {
+  try {
+    const diff = Date.now() - new Date(iso).getTime()
+    const mins = Math.floor(diff / 60000)
+    if (mins < 2) return 'только что'
+    if (mins < 60) return `${mins} мин назад`
+    const hrs = Math.floor(mins / 60)
+    if (hrs < 24) return `${hrs} ч назад`
+    const days = Math.floor(hrs / 24)
+    return `${days} дн назад`
+  } catch {
+    return ''
+  }
+}
+
+// ─── Session Selector ─────────────────────────────────────────────────────
+
+interface SessionSelectorProps {
+  projectId: string
+  onSessionChange: () => void
+}
+
+function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
+  const [sessions, setSessions] = useState<SessionInfo[]>([])
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const dropRef = useRef<HTMLDivElement>(null)
+
+  const loadSessions = useCallback(async () => {
+    try {
+      const res = await api.sessions(projectId)
+      setSessions(res.sessions)
+    } catch {
+      // non-critical — silently ignore
+    }
+  }, [projectId])
+
+  useEffect(() => {
+    loadSessions()
+    setOpen(false)
+    setError('')
+  }, [projectId, loadSessions])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!open) return
+    function handler(e: MouseEvent) {
+      if (dropRef.current && !dropRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const activeSession = sessions.find(s => s.is_active)
+  const activeLabel = activeSession
+    ? activeSession.session_id.slice(0, 8) + '…'
+    : 'новая'
+
+  async function switchSession(action: 'new' | 'resume', session_id?: string) {
+    setBusy(true)
+    setError('')
+    try {
+      if (action === 'new') {
+        await api.setSession(projectId, { action: 'new' })
+      } else {
+        await api.setSession(projectId, { action: 'resume', session_id: session_id! })
+      }
+      await loadSessions()
+      onSessionChange()
+      setOpen(false)
+    } catch (err: any) {
+      if (err?.status === 409) {
+        setError('проект занят')
+      } else {
+        setError(err?.message || 'ошибка')
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="session-selector" ref={dropRef}>
+      <button
+        className="session-selector-btn"
+        onClick={() => { setOpen(o => !o); if (!open) loadSessions() }}
+        disabled={busy}
+        title="Выбрать сессию"
+      >
+        <span className="session-icon">◉</span>
+        <span className="session-label">{activeLabel}</span>
+        <span className="session-chevron">{open ? '▲' : '▼'}</span>
+      </button>
+
+      {error && <div className="session-error">{error}</div>}
+
+      {open && (
+        <div className="session-dropdown">
+          <button
+            className="session-dropdown-item session-new-item"
+            onClick={() => switchSession('new')}
+            disabled={busy}
+          >
+            ➕ Новая сессия
+          </button>
+          {sessions.length > 0 && <div className="session-dropdown-sep" />}
+          {sessions.map(s => (
+            <button
+              key={s.session_id}
+              className={`session-dropdown-item${s.is_active ? ' active' : ''}`}
+              onClick={() => switchSession('resume', s.session_id)}
+              disabled={busy}
+            >
+              <span className="session-item-check">{s.is_active ? '✓' : ''}</span>
+              <span className="session-item-preview">{s.preview}</span>
+              <span className="session-item-time">{relTime(s.last_used)}</span>
+            </button>
+          ))}
+          {sessions.length === 0 && (
+            <div className="session-dropdown-empty">нет сохранённых сессий</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── ChatTab ──────────────────────────────────────────────────────────────
+
 export function ChatTab({ projectId }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
@@ -79,6 +213,14 @@ export function ChatTab({ projectId }: Props) {
     setStreaming(false)
     setError('')
   }, [projectId])
+
+  // Session switched → clear message feed (different conversation)
+  const handleSessionChange = useCallback(() => {
+    abortRef.current?.abort()
+    setMessages([])
+    setStreaming(false)
+    setError('')
+  }, [])
 
   const sendMessage = useCallback(async () => {
     const text = input.trim()
@@ -142,7 +284,6 @@ export function ChatTab({ projectId }: Props) {
                 }]
 
               case 'rate_limit':
-                // informational — не меняем UI
                 return msgs
 
               default:
@@ -167,7 +308,6 @@ export function ChatTab({ projectId }: Props) {
       if (err?.name === 'AbortError') return
       const msg = err?.message || String(err)
       setError(msg)
-      // Mark last assistant msg as errored
       setMessages(prev => {
         const msgs = [...prev]
         const last = msgs[msgs.length - 1]
@@ -197,6 +337,11 @@ export function ChatTab({ projectId }: Props) {
 
   return (
     <div className="chat-wrap">
+      {/* Session selector bar */}
+      <div className="chat-session-bar">
+        <SessionSelector projectId={projectId} onSessionChange={handleSessionChange} />
+      </div>
+
       <div className="chat-feed">
         {messages.length === 0 && (
           <div className="chat-empty">

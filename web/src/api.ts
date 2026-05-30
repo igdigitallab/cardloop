@@ -79,4 +79,15 @@ export const api = {
     apiFetch<import('./types').FileContent>(
       `/api/projects/${id}/file?path=${encodeURIComponent(path)}`
     ),
+
+  // C2: session management
+  sessions: (id: string) =>
+    apiFetch<{ sessions: import('./types').SessionInfo[] }>(`/api/projects/${id}/sessions`),
+
+  setSession: (id: string, body: { action: 'new' } | { action: 'resume'; session_id: string }) =>
+    apiFetch<{ active: string | null }>(`/api/projects/${id}/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
 }

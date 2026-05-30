@@ -327,6 +327,7 @@ body {
 .project-split-layout {
   flex-direction: row !important;
   align-items: stretch;
+  position: relative;
 }
 
 .project-left-pane {
@@ -336,6 +337,7 @@ body {
   flex-direction: column;
   overflow: hidden;
   border-right: 1px solid var(--border);
+  transition: flex 0.15s ease, max-width 0.15s ease;
 }
 
 .project-chat-pane {
@@ -345,10 +347,11 @@ body {
   flex-direction: column;
   overflow: hidden;
   background: var(--bg);
+  transition: flex 0.15s ease, max-width 0.15s ease;
 }
 
 .project-chat-pane-header {
-  padding: 12px 16px 11px;
+  padding: 8px 12px 8px 16px;
   font-size: 13px;
   font-weight: 600;
   color: var(--text2);
@@ -356,6 +359,87 @@ body {
   background: var(--bg2);
   flex-shrink: 0;
   letter-spacing: -0.1px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* ── Resize divider ─────────────────────────────────────────── */
+.project-split-divider {
+  width: 6px;
+  flex-shrink: 0;
+  background: transparent;
+  cursor: col-resize;
+  position: relative;
+  z-index: 10;
+  transition: background var(--transition);
+}
+
+.project-split-divider::after {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  left: 2px; right: 2px;
+  background: var(--border);
+  transition: background var(--transition);
+}
+
+.project-split-divider:hover::after,
+.project-split-divider:active::after {
+  background: var(--accent);
+}
+
+/* When chat is collapsed, divider acts as expand button */
+.project-split-divider.divider-collapsed {
+  cursor: pointer;
+  width: 4px;
+}
+
+.project-split-divider.divider-collapsed::after {
+  background: var(--border2);
+}
+
+/* ── Chat collapse button (in header) ───────────────────────── */
+.chat-collapse-btn {
+  background: none;
+  border: 1px solid var(--border2);
+  color: var(--text3);
+  font-size: 12px;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), color var(--transition);
+  flex-shrink: 0;
+}
+
+.chat-collapse-btn:hover {
+  background: var(--bg4);
+  color: var(--text);
+}
+
+/* ── Collapsed stub (vertical pill at right edge) ───────────── */
+.chat-collapsed-stub {
+  width: 28px;
+  flex-shrink: 0;
+  background: var(--bg2);
+  border: none;
+  border-left: 1px solid var(--border);
+  color: var(--text3);
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), color var(--transition);
+}
+
+.chat-collapsed-stub:hover {
+  background: var(--bg3);
+  color: var(--text);
 }
 
 /* Responsive: stack vertically on narrow screens */
@@ -375,6 +459,11 @@ body {
     flex: none;
     height: 45vh;
     min-height: 280px;
+  }
+
+  .project-split-divider,
+  .chat-collapsed-stub {
+    display: none;
   }
 }
 
@@ -976,6 +1065,136 @@ body {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+/* ── C2: Session selector bar ────────────────────────────────── */
+.chat-session-bar {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+}
+
+.session-selector {
+  position: relative;
+  display: inline-block;
+}
+
+.session-selector-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-sm);
+  color: var(--text2);
+  font-size: 12px;
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.session-selector-btn:hover:not(:disabled) {
+  background: var(--bg4);
+  color: var(--text);
+}
+
+.session-selector-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.session-icon { font-size: 10px; color: var(--accent); }
+.session-label { font-family: var(--mono); font-size: 11px; }
+.session-chevron { font-size: 8px; color: var(--text3); }
+
+.session-error {
+  font-size: 11px;
+  color: var(--red);
+  margin-top: 3px;
+}
+
+.session-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 200;
+  min-width: 320px;
+  max-width: 440px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.session-dropdown-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text2);
+  text-align: left;
+  transition: background var(--transition), color var(--transition);
+}
+
+.session-dropdown-item:hover:not(:disabled) {
+  background: var(--bg3);
+  color: var(--text);
+}
+
+.session-dropdown-item:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.session-dropdown-item.active {
+  background: var(--bg4);
+  color: var(--text);
+}
+
+.session-new-item {
+  color: var(--accent-h);
+  font-weight: 500;
+}
+
+.session-item-check {
+  width: 14px;
+  flex-shrink: 0;
+  color: var(--green);
+  font-size: 11px;
+}
+
+.session-item-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+
+.session-item-time {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text3);
+  white-space: nowrap;
+}
+
+.session-dropdown-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 0;
+}
+
+.session-dropdown-empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text3);
+  font-style: italic;
 }
 
 .chat-feed {

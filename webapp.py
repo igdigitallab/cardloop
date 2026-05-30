@@ -901,6 +901,144 @@ async def api_card_run(req: web.Request):
     return web.json_response({"content": "", "exists": False})
 
 
+# ─────────────────────────── C2: сессии проекта ───────────────────────────
+
+def _sdk_sessions_dir(cwd: str) -> Path:
+    """Папка SDK с .jsonl-сессиями для данного cwd."""
+    return Path.home() / ".claude" / "projects" / cwd.replace("/", "-")
+
+
+def _session_preview(jsonl_path: Path) -> str:
+    """Извлечь первое человекочитаемое сообщение из jsonl-файла сессии (~70 симв.)."""
+    try:
+        lines_read = 0
+        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                lines_read += 1
+                if lines_read > 80:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                # Вариант 1: операция enqueue с content-строкой
+                if obj.get("operation") == "enqueue":
+                    content = obj.get("content")
+                    if isinstance(content, str) and content.strip():
+                        text = content.strip()
+                        return (text[:70] + "…") if len(text) > 70 else text
+                # Вариант 2: message с role=user
+                msg = obj.get("message", {})
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        text = content.strip()
+                        return (text[:70] + "…") if len(text) > 70 else text
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = (block.get("text") or "").strip()
+                                if text:
+                                    return (text[:70] + "…") if len(text) > 70 else text
+    except Exception:
+        pass
+    return "(без названия)"
+
+
+async def api_project_sessions(req: web.Request):
+    """GET /api/projects/{id}/sessions — список сессий SDK для проекта."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    tg_thread = project["tg_thread"]
+    active_sid = ctx["sessions"].get(tg_thread)
+    sdk_dir = _sdk_sessions_dir(project["cwd"])
+
+    if not sdk_dir.is_dir():
+        return web.json_response({"sessions": []})
+
+    sessions = []
+    try:
+        for f in sdk_dir.glob("*.jsonl"):
+            sid = f.stem
+            try:
+                mtime = f.stat().st_mtime
+            except Exception:
+                mtime = 0
+            import datetime
+            last_used = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
+            preview = _session_preview(f)
+            sessions.append({
+                "session_id": sid,
+                "last_used": last_used,
+                "preview": preview,
+                "is_active": sid == active_sid,
+            })
+    except Exception:
+        pass
+
+    sessions.sort(key=lambda s: s["last_used"], reverse=True)
+    if len(sessions) > 30:
+        sessions = sessions[:30]
+
+    return web.json_response({"sessions": sessions})
+
+
+async def api_project_set_session(req: web.Request):
+    """POST /api/projects/{id}/session — переключить или сбросить сессию."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    tg_thread = project["tg_thread"]
+
+    # Замок: нельзя менять сессию пока проект занят
+    if ctx["running"].get(tg_thread) is not None:
+        return web.json_response(
+            {"error": "проект занят, смена сессии недоступна"},
+            status=409,
+        )
+
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+
+    action = body.get("action")
+
+    if action == "new":
+        ctx["sessions"].pop(tg_thread, None)
+        ctx["save_sessions"]()
+        return web.json_response({"active": None})
+
+    elif action == "resume":
+        session_id = body.get("session_id", "")
+        if not session_id:
+            return web.json_response({"error": "session_id required"}, status=400)
+        # Санитизация: только basename (без / и ..) — против выхода на чужой .jsonl
+        if session_id != Path(session_id).name or session_id in ("", ".", ".."):
+            return web.json_response({"error": "invalid session_id"}, status=400)
+        # Валидируем — файл должен существовать
+        sdk_dir = _sdk_sessions_dir(project["cwd"])
+        candidate = sdk_dir / f"{session_id}.jsonl"
+        if not candidate.is_file():
+            return web.json_response({"error": "session not found"}, status=400)
+        ctx["sessions"][tg_thread] = session_id
+        ctx["save_sessions"]()
+        return web.json_response({"active": session_id})
+
+    else:
+        return web.json_response({"error": "action must be 'new' or 'resume'"}, status=400)
+
+
 # ─────────────────────────── C1: SSE-чат ───────────────────────────
 #
 # POST /api/projects/{id}/chat  body: {"prompt": str}
@@ -1108,6 +1246,9 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
         # C1: SSE-чат по проекту
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
+        # C2: управление сессиями проекта
+        app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
+        app.router.add_post("/api/projects/{id}/session", api_project_set_session)
         # Файловый проводник (read-only)
         app.router.add_get("/api/projects/{id}/files", api_project_files)
         app.router.add_get("/api/projects/{id}/file", api_project_file)
