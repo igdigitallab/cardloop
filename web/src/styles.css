@@ -867,3 +867,47 @@ body {
   margin-top: 8px; padding: 12px 14px;
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
 }
+
+/* F1: авто-запуск карточки */
+.board-col-running {
+  margin-left: 6px; font-size: 13px; opacity: 0.7;
+  animation: spin 2s linear infinite; display: inline-block;
+}
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.board-card-running {
+  border-color: var(--yellow);
+  background: rgba(255, 200, 0, 0.04);
+}
+
+.card-running-icon { opacity: 0.6; font-size: 11px; }
+
+.board-card-actions .act-result:hover:not(:disabled) {
+  background: rgba(100, 150, 255, 0.18); color: var(--accent);
+}
+
+/* F1: модалка результата */
+.run-modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.run-modal {
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius);
+  width: min(820px, 94vw); max-height: 80vh;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.run-modal-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 14px;
+}
+.run-modal-close {
+  background: none; border: none; color: var(--text3);
+  cursor: pointer; font-size: 16px; padding: 2px 6px; border-radius: 4px;
+}
+.run-modal-close:hover { color: var(--text); background: var(--border); }
+.run-modal-body {
+  padding: 16px; overflow-y: auto; flex: 1;
+}

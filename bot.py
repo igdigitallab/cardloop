@@ -1116,6 +1116,10 @@ async def _on_start(app):
         "run_for_glasses": run_for_glasses, "save_sessions": save_sessions,
         "DATA": DATA, "DEFAULT_CWD": DEFAULT_CWD, "DEFAULT_MODEL": DEFAULT_MODEL,
         "VAULT_PROJECTS": Path("/home/igor/vault/01-Projects"), "HERE": HERE,
+        # F1: движок и модели для авто-запуска карточек канбана
+        "run_engine": run_engine, "MODELS": MODELS,
+        # F1: ссылка на PTB-приложение для пинга в TG
+        "ptb_app": app,
     })
 
 

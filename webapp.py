@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import time
+import traceback as _tb
 from pathlib import Path
 
 from aiohttp import web
@@ -470,6 +471,141 @@ def _pop_card(cols: dict, card_id: str):
     return None
 
 
+# ─────────────────────────── F1: авто-запуск карточки ───────────────────────────
+
+async def _git_diff_card(cwd: str) -> tuple[str, str]:
+    """Возвращает (diff_full, diff_stat) через asyncio subprocess. Пустые строки при ошибке."""
+    async def _run(*args):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", cwd, *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            return stdout.decode(errors="replace").strip() if proc.returncode == 0 else ""
+        except Exception:
+            return ""
+    diff_full, diff_stat = await asyncio.gather(
+        _run("diff"),
+        _run("diff", "--stat"),
+    )
+    return diff_full, diff_stat
+
+
+async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_key: str) -> None:
+    """Фоновая задача F1: выполняет карточку через run_engine, пишет сайдкар, переносит карточку."""
+    run_engine = ctx.get("run_engine")
+    cwd = project["cwd"]
+    name = project["name"]
+    model = project.get("model", ctx.get("DEFAULT_MODEL", "sonnet"))
+    prompt = card["text"]
+    card_id = card["id"]
+    DATA: Path = ctx["DATA"]
+
+    answer_parts: list[str] = []
+    exc_info: str | None = None
+    ok = False
+
+    try:
+        try:
+            if run_engine is None:
+                raise RuntimeError("run_engine недоступен в ctx (старый запуск без F1)")
+
+            resume_sid = ctx["sessions"].get(session_key)
+            async for event in run_engine(
+                project_name=name,
+                cwd=cwd,
+                prompt=prompt,
+                session_key=session_key,
+                model=model,
+                resume_session_id=resume_sid,
+            ):
+                etype = event["type"]
+                if etype == "text":
+                    answer_parts.append(event["text"])
+                elif etype == "result":
+                    if event.get("session_id"):
+                        ctx["sessions"][session_key] = event["session_id"]
+                        ctx["save_sessions"]()
+                elif etype == "error":
+                    raise event["exc"]
+
+            ok = True
+
+        except Exception as e:
+            exc_info = f"{type(e).__name__}: {e}\n\n{_tb.format_exc()}"
+
+        # git diff после выполнения
+        diff_full, diff_stat = await _git_diff_card(cwd)
+
+        # сайдкар DATA/runs/<card_id>.md (защищён — его падение НЕ должно держать замок)
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        answer_text = "\n".join(answer_parts).strip() or "(агент завершил без текстового ответа)"
+        outcome = "ok" if ok else "fail"
+        try:
+            runs_dir = DATA / "runs"
+            runs_dir.mkdir(exist_ok=True)
+            sidecar_lines = [
+                f"# Результат карточки {card_id}",
+                "",
+                f"**Проект:** {name}",
+                f"**Время:** {ts}",
+                f"**Исход:** {outcome}",
+                "",
+                "## Задача",
+                "",
+                prompt,
+                "",
+                "## Ответ агента",
+                "",
+                answer_text,
+            ]
+            if exc_info:
+                sidecar_lines += ["", "## Ошибка", "", f"```\n{exc_info}\n```"]
+            if diff_stat:
+                sidecar_lines += ["", "## Git diff --stat", "", f"```\n{diff_stat}\n```"]
+            if diff_full:
+                sidecar_lines += ["", "## Git diff (полный)", "", f"```diff\n{diff_full}\n```"]
+            (runs_dir / f"{card_id}.md").write_text("\n".join(sidecar_lines), encoding="utf-8")
+        except Exception as e:
+            print(f"[_run_card] ошибка записи сайдкара {card_id}: {e}")
+
+        # перенос карточки (перезагружаем доску — могла измениться пока агент работал)
+        try:
+            _, preamble, cols = _load_board(cwd)
+            moved = _pop_card(cols, card_id)
+            if moved is None:
+                moved = card  # карточки уже нет в in_progress, но добавим в целевую колонку
+            target_col = "review" if ok else "failed"
+            cols[target_col].append(moved)
+            _save_board(cwd, name, preamble, cols)
+        except Exception as e:
+            print(f"[_run_card] ошибка переноса карточки {card_id}: {e}")
+
+        # TG-пинг (некритичен — оборачиваем в try/except)
+        try:
+            ptb = ctx.get("ptb_app")
+            if ptb is not None:
+                parts = session_key.split(":", 1)
+                chat_id = int(parts[0])
+                thread_id = int(parts[1]) if len(parts) > 1 and parts[1] not in ("0", "") else None
+                icon = "✅" if ok else "❌"
+                short_text = (prompt[:60] + "…") if len(prompt) > 60 else prompt
+                target_label = "Review" if ok else "Failed"
+                await ptb.bot.send_message(
+                    chat_id,
+                    f"{icon} Карточка «{short_text}» → {target_label}",
+                    message_thread_id=thread_id,
+                )
+        except Exception as e:
+            print(f"[_run_card] TG-пинг не удался: {e}")
+
+    finally:
+        # замок снимается ГАРАНТИРОВАННО, даже если запись сайдкара/перенос упали
+        ctx["running"].pop(session_key, None)
+
+
 async def api_move_task(req: web.Request):
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -482,6 +618,49 @@ async def api_move_task(req: web.Request):
         return web.json_response({"error": "bad request"}, status=400)
     to = body.get("to", "")
     cwd, name = project["cwd"], project["name"]
+
+    # ── F1: авто-запуск при переносе в in_progress ──
+    if to == "in_progress":
+        session_key = project["tg_thread"]
+        run_engine = ctx.get("run_engine")
+
+        # Деградация: если движок недоступен (старый запуск) — работаем как обычный перенос
+        if run_engine is None:
+            print("[api_move_task] run_engine не в ctx — деградируем к ручному переносу")
+            _, preamble, cols = _load_board(cwd)
+            card = _pop_card(cols, card_id)
+            if card is None:
+                return web.json_response({"error": "card not found"}, status=404)
+            cols["in_progress"].append(card)
+            _save_board(cwd, name, preamble, cols)
+            return web.json_response(_board_payload(cwd))
+
+        # Проверка замка — занят ли проект (TG или другая карточка)
+        if ctx["running"].get(session_key) is not None:
+            return web.json_response(
+                {"error": "проект занят (TG или другая карточка)"},
+                status=409,
+            )
+
+        # Резервируем слот СИНХРОННО до первого await (против гонки)
+        ctx["running"][session_key] = True
+
+        _, preamble, cols = _load_board(cwd)
+        card = _pop_card(cols, card_id)
+        if card is None:
+            # карточка не найдена — снимаем резерв и возвращаем 404
+            ctx["running"].pop(session_key, None)
+            return web.json_response({"error": "card not found"}, status=404)
+
+        cols["in_progress"].append(card)
+        _save_board(cwd, name, preamble, cols)
+
+        # Запускаем фоновую задачу (не ждём завершения)
+        asyncio.create_task(_run_card(ctx, req.app, project, card, session_key))
+
+        return web.json_response(_board_payload(cwd))
+
+    # ── Обычный перенос (backlog / review / failed / done) ──
     _, preamble, cols = _load_board(cwd)
     card = _pop_card(cols, card_id)
     if card is None:
@@ -531,6 +710,21 @@ async def api_tasks_done(req: web.Request):
     return web.json_response({"content": content, "exists": dp.exists()})
 
 
+async def api_card_run(req: web.Request):
+    """GET /api/projects/{id}/tasks/{card}/run — сайдкар из DATA/runs/<card>.md (404-safe)."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    card_id = req.match_info["card"]
+    DATA: Path = ctx["DATA"]
+    sidecar = DATA / "runs" / f"{card_id}.md"
+    if sidecar.exists():
+        content = sidecar.read_text(encoding="utf-8", errors="replace")
+        return web.json_response({"content": content, "exists": True})
+    return web.json_response({"content": "", "exists": False})
+
+
 # ─────────────────────────── статика (SPA) ───────────────────────────
 
 PLACEHOLDER_HTML = (
@@ -574,6 +768,11 @@ async def start(ptb_app, ctx: dict) -> None:
         app = web.Application(middlewares=[auth_middleware], client_max_size=4 * 1024 * 1024)
         app["ctx"] = ctx
 
+        # F1: сохраняем ссылку на PTB-приложение для пинга в TG из _run_card
+        app["ptb_app"] = ptb_app
+        # Также кладём в ctx для доступа из _run_card через ctx["ptb_app"]
+        ctx["ptb_app"] = ptb_app
+
         # API-роуты
         app.router.add_get("/api/health", api_health)
         app.router.add_post("/api/login", api_login)
@@ -591,6 +790,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/tasks/done", api_tasks_done)
         app.router.add_post("/api/projects/{id}/tasks/{card}/move", api_move_task)
         app.router.add_delete("/api/projects/{id}/tasks/{card}", api_delete_task)
+        # F1: сайдкар результата карточки
+        app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
 
         # Статика — всё остальное (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)

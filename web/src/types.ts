@@ -50,4 +50,9 @@ export interface Board {
   exists: boolean
 }
 
+export interface RunResult {
+  content: string
+  exists: boolean
+}
+
 export type TabId = 'overview' | 'readme' | 'claude-md' | 'specs' | 'activity' | 'chat' | 'board'

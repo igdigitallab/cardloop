@@ -66,4 +66,7 @@ export const api = {
 
   tasksDone: (id: string) =>
     apiFetch<{ content: string; exists: boolean }>(`/api/projects/${id}/tasks/done`),
+
+  cardRun: (id: string, card: string) =>
+    apiFetch<import('./types').RunResult>(`/api/projects/${id}/tasks/${card}/run`),
 }
