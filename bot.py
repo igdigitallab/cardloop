@@ -446,12 +446,21 @@ async def run_engine(
 
     audit(project_name, "TASK", short(prompt, 300))
 
+    last_ctx_tokens = 0   # реальный размер контекста = prompt-токены последнего AssistantMessage
     try:
         async with ClaudeSDKClient(options=opts) as client:
             running[session_key] = client   # заменяем True-placeholder реальным клиентом (для /stop)
             await client.query(prompt)
             async for msg in client.receive_response():
                 if isinstance(msg, AssistantMessage):
+                    # usage последнего ассистент-сообщения = весь промпт текущего хода:
+                    # input + cache_read + cache_creation == get_context_usage().totalTokens (проверено)
+                    u = getattr(msg, "usage", None) or {}
+                    pt = (u.get("input_tokens", 0)
+                          + u.get("cache_read_input_tokens", 0)
+                          + u.get("cache_creation_input_tokens", 0))
+                    if pt:
+                        last_ctx_tokens = pt
                     for blk in msg.content:
                         if isinstance(blk, TextBlock) and blk.text.strip():
                             yield {"type": "text", "text": blk.text}
@@ -471,6 +480,7 @@ async def run_engine(
                         "type": "result",
                         "session_id": getattr(msg, "session_id", None),
                         "cost_usd": getattr(msg, "total_cost_usd", None),
+                        "context_tokens": last_ctx_tokens,
                     }
                 elif isinstance(msg, SystemMessage):
                     pass   # системные сообщения SDK — не транслируем

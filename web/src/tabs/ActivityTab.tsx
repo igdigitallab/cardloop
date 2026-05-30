@@ -14,7 +14,7 @@ export function ActivityTab({ projectId }: Props) {
 
   const reload = useCallback(() => {
     api.activity(projectId).then(d => {
-      setLines([...d.lines].reverse()); setError('')
+      setLines(d.lines); setError('')
     }).catch(e => setError(String(e.message || e)))
   }, [projectId])
 
@@ -26,8 +26,8 @@ export function ActivityTab({ projectId }: Props) {
 
     api.activity(projectId).then(d => {
       if (!cancelled) {
-        // новые сверху
-        setLines([...d.lines].reverse())
+        // новые сверху — backend уже разворачивает
+        setLines(d.lines)
         setLoading(false)
       }
     }).catch(e => {

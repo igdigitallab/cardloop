@@ -663,7 +663,7 @@ async def api_create_task(req: web.Request):
     _, preamble, cols = _load_board(cwd)
     if column not in cols:
         column = "backlog"
-    cols[column].append({"id": _new_card_id(), "text": text})
+    cols[column].insert(0, {"id": _new_card_id(), "text": text})
     _save_board(cwd, name, preamble, cols)
     return web.json_response(_board_payload(cwd))
 
@@ -923,6 +923,36 @@ async def api_delete_task(req: web.Request):
     cwd, name = project["cwd"], project["name"]
     _, preamble, cols = _load_board(cwd)
     if _pop_card(cols, req.match_info["card"]) is None:
+        return web.json_response({"error": "card not found"}, status=404)
+    _save_board(cwd, name, preamble, cols)
+    return web.json_response(_board_payload(cwd))
+
+
+async def api_update_task(req: web.Request):
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    text = (body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "empty text"}, status=400)
+    cwd, name = project["cwd"], project["name"]
+    _, preamble, cols = _load_board(cwd)
+    card_id = req.match_info["card"]
+    found = False
+    for col_cards in cols.values():
+        for card in col_cards:
+            if card["id"] == card_id:
+                card["text"] = text
+                found = True
+                break
+        if found:
+            break
+    if not found:
         return web.json_response({"error": "card not found"}, status=404)
     _save_board(cwd, name, preamble, cols)
     return web.json_response(_board_payload(cwd))
@@ -1605,6 +1635,34 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
     return msgs[-limit:] if len(msgs) > limit else msgs
 
 
+def _session_context_tokens(jsonl_path: Path) -> int:
+    """Реальный размер контекста сессии = prompt-токены последнего assistant-хода
+    (input + cache_read + cache_creation). Совпадает с get_context_usage().totalTokens.
+    0 если транскрипта/usage нет."""
+    last = 0
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or '"assistant"' not in line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if o.get("type") != "assistant":
+                    continue
+                u = (o.get("message") or {}).get("usage") or {}
+                pt = (u.get("input_tokens", 0)
+                      + u.get("cache_read_input_tokens", 0)
+                      + u.get("cache_creation_input_tokens", 0))
+                if pt:
+                    last = pt
+    except Exception:
+        pass
+    return last
+
+
 async def api_project_session_history(req: web.Request):
     """GET /api/projects/{id}/session-history?session_id=<опц.> — лента активной (или указанной) сессии."""
     ctx = req.app["ctx"]
@@ -1624,7 +1682,11 @@ async def api_project_session_history(req: web.Request):
     if not jsonl.is_file():
         return web.json_response({"messages": [], "session_id": sid})
 
-    return web.json_response({"messages": _session_history(jsonl), "session_id": sid})
+    return web.json_response({
+        "messages": _session_history(jsonl),
+        "session_id": sid,
+        "context_tokens": _session_context_tokens(jsonl),
+    })
 
 
 # ─────────────────────────── C1: SSE-чат ───────────────────────────
@@ -1745,12 +1807,19 @@ async def api_project_chat(req: web.Request):
                     ctx["sessions"][session_key] = sid
                     ctx["save_sessions"]()
                     _inherit_label_from_free_chat(ctx, session_key, sid)
-                await _send({"type": "result"})
+                await _send({"type": "result", "context_tokens": event.get("context_tokens", 0)})
             elif etype == "error":
                 exc = event.get("exc")
                 await _send({"type": "error", "error": str(exc) if exc else "unknown error"})
             elif etype == "rate_limit":
-                # Пробрасываем как информацию (не блокирует)
+                rl_type = event.get("rate_limit_type")
+                if rl_type:
+                    ctx["rate_limits"][rl_type] = {
+                        "status": event.get("status"),
+                        "resets_at": event.get("resets_at"),
+                        "utilization": event.get("utilization"),
+                        "ts": time.time(),
+                    }
                 await _send({"type": "rate_limit", "status": event.get("status", "")})
             # прочие типы — игнорируем
 
@@ -1991,6 +2060,7 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/tasks/done", api_tasks_done)
         app.router.add_post("/api/projects/{id}/tasks/{card}/move", api_move_task)
         app.router.add_delete("/api/projects/{id}/tasks/{card}", api_delete_task)
+        app.router.add_route("PATCH", "/api/projects/{id}/tasks/{card}", api_update_task)
         # F1: сайдкар результата карточки
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
         # C1: SSE-чат по проекту

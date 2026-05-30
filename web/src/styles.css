@@ -597,8 +597,12 @@ body {
   padding: 2px 4px;
   border-radius: 3px;
   line-height: 1;
-  transition: background var(--transition), color var(--transition);
+  opacity: 0;
+  transition: background var(--transition), color var(--transition), opacity var(--transition);
 }
+.ptab:hover .ptab-close { opacity: 1; }
+.ptab.active .ptab-close { opacity: 0.45; }
+.ptab.active:hover .ptab-close { opacity: 1; }
 .ptab-close:hover { background: var(--bg4); color: var(--red); }
 
 /* Свободные чаты — лёгкий пунктир в подсветке активного */
@@ -1367,6 +1371,22 @@ body {
 .board-card-text {
   font-size: 13px; line-height: 1.4; color: var(--text);
   white-space: pre-wrap; word-break: break-word; margin-bottom: 8px;
+  cursor: default;
+}
+.board-card-edit-input {
+  width: 100%;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--bg3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  resize: vertical;
+  margin-bottom: 8px;
+  box-sizing: border-box;
+  font-family: inherit;
+  outline: none;
 }
 .board-card-actions { display: flex; gap: 4px; }
 .board-card-actions button {
@@ -1532,6 +1552,28 @@ body {
 }
 
 .session-selector-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.session-reset-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-sm);
+  color: var(--text3);
+  font-size: 14px;
+  width: 26px;
+  height: 26px;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+  margin-right: 4px;
+}
+.session-reset-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--bg4);
+}
+.session-reset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .session-icon { font-size: 10px; color: var(--accent); }
 .session-label { font-family: var(--mono); font-size: 11px; }

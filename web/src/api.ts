@@ -64,6 +64,13 @@ export const api = {
       method: 'DELETE',
     }),
 
+  updateTask: (id: string, card: string, text: string) =>
+    apiFetch<import('./types').Board>(`/api/projects/${id}/tasks/${card}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }),
+
   tasksDone: (id: string) =>
     apiFetch<{ content: string; exists: boolean }>(`/api/projects/${id}/tasks/done`),
 
@@ -92,7 +99,7 @@ export const api = {
     }),
 
   sessionHistory: (id: string, sessionId?: string) =>
-    apiFetch<{ messages: import('./types').HistoryMessage[]; session_id: string | null }>(
+    apiFetch<{ messages: import('./types').HistoryMessage[]; session_id: string | null; context_tokens?: number }>(
       `/api/projects/${id}/session-history${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`
     ),
 

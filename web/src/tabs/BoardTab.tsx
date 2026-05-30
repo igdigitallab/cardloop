@@ -41,6 +41,8 @@ export function BoardTab({ projectId }: Props) {
   const [newText, setNewText] = useState('')
   const [showArchive, setShowArchive] = useState(false)
   const [archive, setArchive] = useState<string | null>(null)
+  // Инлайн-редактирование карточки: двойной клик → textarea
+  const [editingCard, setEditingCard] = useState<{ id: string; text: string } | null>(null)
 
   // F1: модалка результата карточки
   const [runResult, setRunResult] = useState<RunResult | null>(null)
@@ -157,6 +159,15 @@ export function BoardTab({ projectId }: Props) {
   function move(card: string, to: string) { run(api.moveTask(projectId, card, to)) }
   function del(card: string) { run(api.deleteTask(projectId, card)) }
 
+  async function saveCardEdit() {
+    if (!editingCard) return
+    const { id, text } = editingCard
+    setEditingCard(null)
+    const trimmed = text.trim()
+    if (!trimmed) return
+    run(api.updateTask(projectId, id, trimmed))
+  }
+
   function toggleArchive() {
     if (showArchive) { setShowArchive(false); return }
     setShowArchive(true)
@@ -234,38 +245,6 @@ export function BoardTab({ projectId }: Props) {
               </div>
 
               <div className="board-col-body">
-                {col.cards.map(card => (
-                  <div
-                    className={`board-card${isInProgress ? ' board-card-running' : ''}`}
-                    key={card.id}
-                  >
-                    <div className="board-card-text">
-                      {/* F1: иконка на карточке в работе */}
-                      {isInProgress && <span className="card-running-icon" title="Выполняется агентом">⚙ </span>}
-                      {card.text}
-                    </div>
-                    <div className="board-card-actions">
-                      <button title="← влево" disabled={busy || idx === 0}
-                        onClick={() => move(card.id, ORDER[idx - 1])}>←</button>
-                      <button title="вправо →" disabled={busy || idx === ORDER.length - 1}
-                        onClick={() => move(card.id, ORDER[idx + 1])}>→</button>
-                      {/* F1: кнопка результата для review/failed */}
-                      {canShowResult && (
-                        <button
-                          title="Результат выполнения"
-                          className="act-result"
-                          disabled={busy}
-                          onClick={() => showResult(card.id)}
-                        >📄</button>
-                      )}
-                      <button title="✓ в Done (архив)" className="act-done" disabled={busy}
-                        onClick={() => move(card.id, 'done')}>✓</button>
-                      <button title="удалить" className="act-del" disabled={busy}
-                        onClick={() => del(card.id)}>✕</button>
-                    </div>
-                  </div>
-                ))}
-
                 {key === 'backlog' && (
                   <div className="board-add">
                     <textarea
@@ -281,6 +260,55 @@ export function BoardTab({ projectId }: Props) {
                       onClick={addCard}>+ Добавить</button>
                   </div>
                 )}
+
+                {col.cards.map(card => (
+                  <div
+                    className={`board-card${isInProgress ? ' board-card-running' : ''}`}
+                    key={card.id}
+                  >
+                    {editingCard?.id === card.id ? (
+                      <textarea
+                        className="board-card-edit-input"
+                        value={editingCard.text}
+                        autoFocus
+                        rows={3}
+                        onChange={e => setEditingCard({ id: card.id, text: e.target.value })}
+                        onBlur={saveCardEdit}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveCardEdit() }
+                          if (e.key === 'Escape') setEditingCard(null)
+                        }}
+                      />
+                    ) : (
+                      <div
+                        className="board-card-text"
+                        onDoubleClick={() => !isInProgress && setEditingCard({ id: card.id, text: card.text })}
+                        title={isInProgress ? '' : 'Двойной клик — редактировать'}
+                      >
+                        {isInProgress && <span className="card-running-icon" title="Выполняется агентом">⚙ </span>}
+                        {card.text}
+                      </div>
+                    )}
+                    <div className="board-card-actions">
+                      <button title="← влево" disabled={busy || idx === 0}
+                        onClick={() => move(card.id, ORDER[idx - 1])}>←</button>
+                      <button title="вправо →" disabled={busy || idx === ORDER.length - 1}
+                        onClick={() => move(card.id, ORDER[idx + 1])}>→</button>
+                      {canShowResult && (
+                        <button
+                          title="Результат выполнения"
+                          className="act-result"
+                          disabled={busy}
+                          onClick={() => showResult(card.id)}
+                        >📄</button>
+                      )}
+                      <button title="✓ в Done (архив)" className="act-done" disabled={busy}
+                        onClick={() => move(card.id, 'done')}>✓</button>
+                      <button title="удалить" className="act-del" disabled={busy}
+                        onClick={() => del(card.id)}>✕</button>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )

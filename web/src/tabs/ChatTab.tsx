@@ -360,6 +360,12 @@ function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
   return (
     <div className="session-selector" ref={dropRef}>
       <button
+        className="session-reset-btn"
+        onClick={() => switchSession('new')}
+        disabled={busy}
+        title="Новая сессия (сброс контекста)"
+      >↺</button>
+      <button
         className="session-selector-btn"
         onClick={() => { setOpen(o => !o); if (!open) loadSessions() }}
         disabled={busy}
@@ -508,6 +514,9 @@ function SessionContextPanel({ projectId, refreshKey }: SessionContextPanelProps
 export function ChatTab({ project, onProjectsReload }: Props) {
   const projectId = project.id
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  // Реальный размер контекста сессии (prompt-токены последнего хода), из бэкенда.
+  // null = ещё не знаем (нет завершённых ходов) → бейдж не показываем.
+  const [contextTokens, setContextTokens] = useState<number | null>(null)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState('')
@@ -571,8 +580,9 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     queueRef.current = []
     setQueueLen(0)
     busActiveRef.current = false
+    setContextTokens(null)
     api.sessionHistory(projectId)
-      .then(res => { if (!cancelled) setMessages(histToMessages(res.messages)) })
+      .then(res => { if (!cancelled) { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens || null) } })
       .catch(() => { if (!cancelled) setMessages([]) })
     return () => { cancelled = true }
   }, [projectId])
@@ -623,8 +633,9 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     queueRef.current = []
     setQueueLen(0)
     busActiveRef.current = false
+    setContextTokens(null)
     api.sessionHistory(projectId)
-      .then(res => setMessages(histToMessages(res.messages)))
+      .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens || null) })
       .catch(() => setMessages([]))
   }, [projectId])
 
@@ -683,6 +694,10 @@ export function ChatTab({ project, onProjectsReload }: Props) {
             setRun(r => r ? { ...r, lastEventAt: now, currentTool: toolFields as RichTool } : r)
           } else if (evt.type === 'result' || evt.type === 'done' || evt.type === 'error') {
             setRun(null)
+          }
+          // Реальный размер контекста приходит в result-событии (bot.py)
+          if (evt.type === 'result' && typeof (evt as any).context_tokens === 'number' && (evt as any).context_tokens > 0) {
+            setContextTokens((evt as any).context_tokens)
           }
 
           setMessages(prev => {
@@ -777,14 +792,22 @@ export function ChatTab({ project, onProjectsReload }: Props) {
       <div className="chat-session-bar">
         <SessionSelector projectId={projectId} onSessionChange={handleSessionChange} />
         {messages.length > 0 && (() => {
-          const tokens = estimateTokens(messages)
-          const lvl = tokens > 180_000 ? 'high' : tokens > 100_000 ? 'mid' : 'low'
+          // Честный размер: реальные prompt-токены последнего хода (из бэкенда).
+          // Пока их нет (история без usage / до первого ответа) — грубая оценка со знаком ~.
+          const real = contextTokens != null && contextTokens > 0
+          const tokens = real ? contextTokens! : estimateTokens(messages)
+          // Пороги по запросу: 🔴 200k, 🟡 120k. Каждый ход переотправляет весь контекст —
+          // чем больше, тем дороже ре-якорь кэша (см. разбор расхода лимита).
+          const lvl = tokens >= 200_000 ? 'high' : tokens >= 120_000 ? 'mid' : 'low'
           const lvlHint =
-            lvl === 'high' ? ' · близко к лимиту' :
-            lvl === 'mid' ? ' · контекст наполовину' : ''
+            lvl === 'high' ? ' · контекст раздут — /reset' :
+            lvl === 'mid' ? ' · контекст растёт' : ''
+          const title = real
+            ? `Реальный размер контекста сессии: ${tokens.toLocaleString('ru')} токенов (весь промпт уходит в модель каждый ход). 🟡 от 120K · 🔴 от 200K.`
+            : 'Грубая оценка (4 символа ≈ 1 токен) — точные токены появятся после первого ответа.'
           return (
-            <span className={`chat-stats-inline lvl-${lvl}`} title="Грубая оценка: 4 символа ≈ 1 токен. Лимит модели ~200K.">
-              💬 {messages.length} · ~{formatTokens(tokens)}{lvlHint}
+            <span className={`chat-stats-inline lvl-${lvl}`} title={title}>
+              💬 {messages.length} · {real ? '' : '~'}{formatTokens(tokens)}{lvlHint}
             </span>
           )
         })()}
