@@ -323,6 +323,61 @@ body {
   overflow: hidden;
 }
 
+/* ── Project split layout (left tabs + right chat) ─────────── */
+.project-split-layout {
+  flex-direction: row !important;
+  align-items: stretch;
+}
+
+.project-left-pane {
+  flex: 55;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+
+.project-chat-pane {
+  flex: 45;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.project-chat-pane-header {
+  padding: 12px 16px 11px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+  letter-spacing: -0.1px;
+}
+
+/* Responsive: stack vertically on narrow screens */
+@media (max-width: 900px) {
+  .project-split-layout {
+    flex-direction: column !important;
+  }
+
+  .project-left-pane {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    flex: none;
+    /* let left pane take natural height, chat gets 45vh below */
+  }
+
+  .project-chat-pane {
+    flex: none;
+    height: 45vh;
+    min-height: 280px;
+  }
+}
+
 /* ── Welcome ───────────────────────────────────────────────── */
 .welcome {
   display: flex;
@@ -912,21 +967,15 @@ body {
   padding: 16px; overflow-y: auto; flex: 1;
 }
 
-/* ── C1: Chat tab ─────────────────────────────────────────────── */
+/* ── C1: Chat panel ───────────────────────────────────────────── */
 
-/* Override tab-content defaults for chat: remove padding, keep overflow managed by inner layout */
-.tab-content:has(.chat-wrap) {
-  padding: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
+/* chat-wrap fills the right pane (flex column, full height) */
 .chat-wrap {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 
 .chat-feed {
@@ -1116,7 +1165,8 @@ body {
 }
 
 .chat-textarea {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   background: var(--bg3);
   border: 1px solid var(--border2);
   border-radius: var(--radius);
@@ -1127,7 +1177,7 @@ body {
   padding: 8px 12px;
   resize: none;
   transition: border-color var(--transition);
-  min-height: 60px;
+  min-height: 64px;
 }
 
 .chat-textarea:focus { outline: none; border-color: var(--accent); }
@@ -1135,10 +1185,13 @@ body {
 .chat-textarea::placeholder { color: var(--text3); }
 
 .chat-send-btn {
-  padding: 8px 18px;
+  flex: 0 0 auto;
+  width: 90px;
+  padding: 8px 10px;
   white-space: nowrap;
-  flex-shrink: 0;
   align-self: flex-end;
+  /* override btn-primary width:100% for standalone context */
+  width: 90px !important;
 }
 
 .chat-error-banner {

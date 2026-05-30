@@ -14,6 +14,7 @@ interface Tab {
   disabled?: boolean
 }
 
+// Chat is no longer a tab — it lives in the permanent right panel
 const TABS: Tab[] = [
   { id: 'overview',   label: 'Обзор' },
   { id: 'readme',     label: 'README' },
@@ -21,7 +22,6 @@ const TABS: Tab[] = [
   { id: 'specs',      label: 'Specs' },
   { id: 'activity',   label: 'Активность' },
   { id: 'board',      label: 'Доска' },
-  { id: 'chat',       label: 'Чат' },
 ]
 
 interface Props {
@@ -33,67 +33,77 @@ export function ProjectView({ project }: Props) {
   const git = project.health.git
 
   return (
-    <div className="main-content">
-      <div className="project-header">
-        <div className="project-header-top">
-          <div className="project-header-icon">
-            {project.name.charAt(0).toUpperCase()}
-          </div>
-          <div>
-            <div className="project-title">{project.name}</div>
-            <div className="project-meta-row">
-              <span className="meta-chip">
-                <code>{project.cwd}</code>
-              </span>
-              <span className="meta-chip">{project.model}</span>
-              {git && (
-                <span className="git-status">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                    style={{ opacity: 0.5 }}>
-                    <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
-                    <path d="M6 21V9a9 9 0 0 0 9 9"/>
-                  </svg>
-                  <span className="git-branch">{git.branch}</span>
-                  {git.dirty > 0 && (
-                    <span className="git-dirty" title={`${git.dirty} изменённых файлов`}>
-                      ~{git.dirty}
-                    </span>
-                  )}
-                  {git.unpushed > 0 && (
-                    <span className="git-unpushed" title={`${git.unpushed} не отправлено`}>
-                      ↑{git.unpushed}
-                    </span>
-                  )}
+    <div className="main-content project-split-layout">
+      {/* LEFT: header + tabs + content (~55%) */}
+      <div className="project-left-pane">
+        <div className="project-header">
+          <div className="project-header-top">
+            <div className="project-header-icon">
+              {project.name.charAt(0).toUpperCase()}
+            </div>
+            <div>
+              <div className="project-title">{project.name}</div>
+              <div className="project-meta-row">
+                <span className="meta-chip">
+                  <code>{project.cwd}</code>
                 </span>
-              )}
+                <span className="meta-chip">{project.model}</span>
+                {git && (
+                  <span className="git-status">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+                      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                      style={{ opacity: 0.5 }}>
+                      <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
+                      <path d="M6 21V9a9 9 0 0 0 9 9"/>
+                    </svg>
+                    <span className="git-branch">{git.branch}</span>
+                    {git.dirty > 0 && (
+                      <span className="git-dirty" title={`${git.dirty} изменённых файлов`}>
+                        ~{git.dirty}
+                      </span>
+                    )}
+                    {git.unpushed > 0 && (
+                      <span className="git-unpushed" title={`${git.unpushed} не отправлено`}>
+                        ↑{git.unpushed}
+                      </span>
+                    )}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
+
+          <nav className="tabs">
+            {TABS.map(tab => (
+              <button
+                key={tab.id}
+                className={`tab-btn ${activeTab === tab.id ? 'active' : ''}`}
+                disabled={tab.disabled}
+                onClick={() => !tab.disabled && setActiveTab(tab.id)}
+              >
+                {tab.label}
+                {tab.disabled && <span className="tab-soon">скоро</span>}
+              </button>
+            ))}
+          </nav>
         </div>
 
-        <nav className="tabs">
-          {TABS.map(tab => (
-            <button
-              key={tab.id}
-              className={`tab-btn ${activeTab === tab.id ? 'active' : ''}`}
-              disabled={tab.disabled}
-              onClick={() => !tab.disabled && setActiveTab(tab.id)}
-            >
-              {tab.label}
-              {tab.disabled && <span className="tab-soon">скоро</span>}
-            </button>
-          ))}
-        </nav>
+        <div className="tab-content">
+          {activeTab === 'overview'  && <OverviewTab project={project} />}
+          {activeTab === 'readme'    && <ReadmeTab projectId={project.id} />}
+          {activeTab === 'claude-md' && <ClaudeMdTab projectId={project.id} />}
+          {activeTab === 'specs'     && <SpecsTab projectId={project.id} />}
+          {activeTab === 'activity'  && <ActivityTab projectId={project.id} />}
+          {activeTab === 'board'     && <BoardTab projectId={project.id} />}
+        </div>
       </div>
 
-      <div className="tab-content">
-        {activeTab === 'overview'  && <OverviewTab project={project} />}
-        {activeTab === 'readme'    && <ReadmeTab projectId={project.id} />}
-        {activeTab === 'claude-md' && <ClaudeMdTab projectId={project.id} />}
-        {activeTab === 'specs'     && <SpecsTab projectId={project.id} />}
-        {activeTab === 'activity'  && <ActivityTab projectId={project.id} />}
-        {activeTab === 'board'     && <BoardTab projectId={project.id} />}
-        {activeTab === 'chat'      && <ChatTab projectId={project.id} />}
+      {/* RIGHT: permanent chat panel (~45%) */}
+      <div className="project-chat-pane">
+        <div className="project-chat-pane-header">
+          💬 Чат по проекту
+        </div>
+        <ChatTab projectId={project.id} />
       </div>
     </div>
   )
