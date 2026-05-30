@@ -1777,6 +1777,17 @@ body {
   padding-left: 8px;
 }
 
+.chat-status-queue {
+  font-size: 11px;
+  color: var(--accent-h);
+  background: rgba(107,104,245,0.15);
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-weight: 500;
+  margin-left: auto;
+}
+.chat-status-silence + .chat-status-queue { margin-left: 8px; }
+
 @keyframes chat-pulse-red {
   0%, 100% { background: rgba(245,97,74,0.15); }
   50%      { background: rgba(245,97,74,0.28); }

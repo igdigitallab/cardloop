@@ -532,6 +532,13 @@ export function ChatTab({ project, onProjectsReload }: Props) {
   const abortRef = useRef<AbortController | null>(null)
   // True while a card-run is being streamed into this chat via the activity bus
   const busActiveRef = useRef<boolean>(false)
+  // Очередь сообщений: пока агент работает, новые жмут «Отправить» → встают сюда.
+  // queueRef — источник истины (для рекурсивного запуска без stale-замыканий),
+  // queueLen — только для UI.
+  const queueRef = useRef<string[]>([])
+  const [queueLen, setQueueLen] = useState<number>(0)
+  // Ref на актуальную sendMessage — sendMessage сам себя дозапускает из finally.
+  const sendMessageRef = useRef<((text?: string) => Promise<void>) | null>(null)
   // Stable ref so the activity-stream loop always sees the current streaming flag
   const streamingRef = useRef(false)
 
@@ -568,6 +575,8 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     setStreaming(false)
     setError('')
     setRun(null)
+    queueRef.current = []
+    setQueueLen(0)
     busActiveRef.current = false
     api.sessionHistory(projectId)
       .then(res => { if (!cancelled) setMessages(histToMessages(res.messages)) })
@@ -663,17 +672,27 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     setStreaming(false)
     setError('')
     setRun(null)
+    queueRef.current = []
+    setQueueLen(0)
     busActiveRef.current = false
     api.sessionHistory(projectId)
       .then(res => setMessages(histToMessages(res.messages)))
       .catch(() => setMessages([]))
   }, [projectId])
 
-  const sendMessage = useCallback(async () => {
-    const text = input.trim()
-    if (!text || streaming) return
+  const sendMessage = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim()
+    if (!text) return
 
-    setInput('')
+    // Стрим активен И это пользовательский вызов (не дозапуск из очереди) → встаём в очередь
+    if (streaming && overrideText === undefined) {
+      queueRef.current.push(text)
+      setQueueLen(queueRef.current.length)
+      setInput('')
+      return
+    }
+
+    if (overrideText === undefined) setInput('')
     setError('')
     setStreaming(true)
     const startTs = Date.now()
@@ -758,8 +777,17 @@ export function ChatTab({ project, onProjectsReload }: Props) {
       setCtxRefreshKey(k => k + 1)
       // Освежаем проекты — git.dirty/unpushed могли измениться от агента
       onProjectsReload()
+      // Если в очереди есть сообщения — отправляем следующее (через тик чтобы бэкенд успел снять замок)
+      if (queueRef.current.length > 0) {
+        const next = queueRef.current.shift()!
+        setQueueLen(queueRef.current.length)
+        setTimeout(() => { sendMessageRef.current?.(next) }, 150)
+      }
     }
   }, [input, projectId, streaming, onProjectsReload])
+
+  // Держим ref на актуальную sendMessage, чтобы дозапуск из finally работал без stale-замыканий
+  useEffect(() => { sendMessageRef.current = sendMessage }, [sendMessage])
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -790,6 +818,9 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     }
     abortRef.current?.abort()
     setStreaming(false)
+    // При остановке очищаем очередь — иначе после прерывания текущего отправятся «забытые» сообщения
+    queueRef.current = []
+    setQueueLen(0)
   }
 
   return (
@@ -904,8 +935,13 @@ export function ChatTab({ project, onProjectsReload }: Props) {
                   {silenceSec > 120 && ' · возможно завис'}
                 </span>
               )}
+              {queueLen > 0 && (
+                <span className="chat-status-queue" title={`${queueLen} сообщ. в очереди, отправятся автоматически`}>
+                  ⏭ в очереди: {queueLen}
+                </span>
+              )}
               {canStop && (
-                <button className="chat-stop-btn" onClick={stopStream} title="Прервать стрим">✕ стоп</button>
+                <button className="chat-stop-btn" onClick={stopStream} title="Прервать стрим (очередь очистится)">✕ стоп</button>
               )}
             </div>
           )
@@ -914,19 +950,21 @@ export function ChatTab({ project, onProjectsReload }: Props) {
           <textarea
             ref={textareaRef}
             className="chat-textarea"
-            placeholder={streaming ? 'Агент работает…' : 'Сообщение агенту… (Enter — отправить, Shift+Enter — перенос)'}
+            placeholder={streaming
+              ? 'Агент работает — сообщение встанет в очередь, отправится после завершения…'
+              : 'Сообщение агенту… (Enter — отправить, Shift+Enter — перенос)'}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={streaming}
             rows={3}
           />
           <button
             className="btn-primary chat-send-btn"
-            disabled={streaming || !input.trim()}
-            onClick={sendMessage}
+            disabled={!input.trim()}
+            onClick={() => sendMessage()}
+            title={streaming ? 'Поставить в очередь' : 'Отправить'}
           >
-            Отправить
+            {streaming ? 'В очередь' : 'Отправить'}
           </button>
         </div>
       </div>
