@@ -20,6 +20,43 @@ from pathlib import Path
 from aiohttp import web
 
 
+# ─────────────────────────── activity bus ───────────────────────────
+#
+# Лёгкая in-process шина событий: dict[session_key -> set[asyncio.Queue]].
+# Всё в одном event loop → обычные set/dict, без asyncio.Lock.
+# Очередь maxsize=100: переполнена → drop (put_nowait в try/except), продюсер не блокируется.
+
+_bus: dict[str, set[asyncio.Queue]] = {}
+
+
+def _bus_subscribe(session_key: str) -> "asyncio.Queue[dict]":
+    """Создаёт очередь и регистрирует подписчика на session_key."""
+    q: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
+    _bus.setdefault(session_key, set()).add(q)
+    return q
+
+
+def _bus_unsubscribe(session_key: str, q: "asyncio.Queue[dict]") -> None:
+    """Удаляет подписчика; очищает ключ, если подписчиков не осталось."""
+    subscribers = _bus.get(session_key)
+    if subscribers is not None:
+        subscribers.discard(q)
+        if not subscribers:
+            _bus.pop(session_key, None)
+
+
+def _bus_publish(session_key: str, event: dict) -> None:
+    """Публикует событие во все очереди подписчиков. Переполнена → drop (не блокирует)."""
+    subscribers = _bus.get(session_key)
+    if not subscribers:
+        return
+    for q in list(subscribers):  # list() — снимок, т.к. _bus_unsubscribe может вызываться параллельно
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass  # slow consumer — drop, не блокировать продюсера
+
+
 # ─────────────────────────── auth ───────────────────────────
 
 def _make_token(password: str) -> str:
@@ -526,6 +563,14 @@ async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_ke
             if run_engine is None:
                 raise RuntimeError("run_engine недоступен в ctx (старый запуск без F1)")
 
+            # Публикуем старт прогона в шину (подписчики activity-stream увидят вживую)
+            _bus_publish(session_key, {
+                "kind": "run_start",
+                "source": "card",
+                "prompt": prompt,
+                "run_id": card_id,
+            })
+
             resume_sid = ctx["sessions"].get(session_key)
             async for event in run_engine(
                 project_name=name,
@@ -538,6 +583,18 @@ async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_ke
                 etype = event["type"]
                 if etype == "text":
                     answer_parts.append(event["text"])
+                    _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": card_id})
+                elif etype == "tool":
+                    inp = event.get("input") or {}
+                    inp_short = next(iter(inp.values()), "") if isinstance(inp, dict) else ""
+                    if isinstance(inp_short, str) and len(inp_short) > 120:
+                        inp_short = inp_short[:120] + "…"
+                    _bus_publish(session_key, {
+                        "kind": "tool",
+                        "name": event.get("name", "?"),
+                        "input": str(inp_short),
+                        "run_id": card_id,
+                    })
                 elif etype == "result":
                     if event.get("session_id"):
                         ctx["sessions"][session_key] = event["session_id"]
@@ -616,6 +673,12 @@ async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_ke
             print(f"[_run_card] TG-пинг не удался: {e}")
 
     finally:
+        # Публикуем завершение прогона в шину (ПЕРЕД снятием замка)
+        _bus_publish(session_key, {
+            "kind": "run_end",
+            "outcome": "ok" if ok else "fail",
+            "run_id": card_id,
+        })
         # замок снимается ГАРАНТИРОВАННО, даже если запись сайдкара/перенос упали
         ctx["running"].pop(session_key, None)
 
@@ -722,6 +785,54 @@ async def api_tasks_done(req: web.Request):
     dp = _done_path(project["cwd"])
     content = dp.read_text(encoding="utf-8", errors="replace") if dp.exists() else ""
     return web.json_response({"content": content, "exists": dp.exists()})
+
+
+# ─────────────────────────── activity-stream SSE ───────────────────────────
+#
+# GET /api/projects/{id}/activity-stream
+# Живой поток событий шины для данного проекта (session_key = tg_thread).
+# Клиент держит соединение; при разрыве finally гарантирует отписку.
+
+async def api_project_activity_stream(req: web.Request):
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    session_key = project["tg_thread"]
+
+    resp = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    await resp.prepare(req)
+
+    q = _bus_subscribe(session_key)
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=25.0)
+                payload = json.dumps(event, ensure_ascii=False)
+                await resp.write(f"data: {payload}\n\n".encode())
+            except asyncio.TimeoutError:
+                # Heartbeat — держим соединение живым через туннель (Cloudflare / nginx)
+                await resp.write(b": ping\n\n")
+            except (ConnectionResetError, ConnectionAbortedError):
+                break
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                break
+    finally:
+        # ГАРАНТИРОВАННАЯ отписка — иначе утечка очередей
+        _bus_unsubscribe(session_key, q)
+
+    return resp
 
 
 # ─────────────────────────── файловый проводник ───────────────────────────
@@ -1315,6 +1426,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
         # C1: SSE-чат по проекту
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
+        # Activity-stream: живой поток событий шины (карточки, внешние прогоны)
+        app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)
         # C2: управление сессиями проекта
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)

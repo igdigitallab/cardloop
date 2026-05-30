@@ -151,3 +151,37 @@ export interface ChatMessage {
   /** Error message if the turn ended with an error */
   error?: string
 }
+
+// ─── Activity bus events (server → client via /activity-stream) ────────────
+
+export interface ActivityEventRunStart {
+  kind: 'run_start'
+  source: 'card' | string
+  prompt: string
+  run_id: string
+}
+
+export interface ActivityEventText {
+  kind: 'text'
+  text: string
+  run_id: string
+}
+
+export interface ActivityEventTool {
+  kind: 'tool'
+  name: string
+  input: string
+  run_id: string
+}
+
+export interface ActivityEventRunEnd {
+  kind: 'run_end'
+  outcome: 'ok' | 'fail'
+  run_id: string
+}
+
+export type ActivityEvent =
+  | ActivityEventRunStart
+  | ActivityEventText
+  | ActivityEventTool
+  | ActivityEventRunEnd

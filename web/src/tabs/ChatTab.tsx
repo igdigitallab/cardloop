@@ -2,7 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
-import { ChatMessage, ChatSSEEvent, ChatToolCall, SessionInfo, HistoryMessage } from '../types'
+import {
+  ActivityEvent,
+  ChatMessage,
+  ChatSSEEvent,
+  ChatToolCall,
+  HistoryMessage,
+  SessionInfo,
+} from '../types'
 
 interface Props {
   projectId: string
@@ -29,7 +36,19 @@ function parseLine(line: string): ChatSSEEvent | null {
   }
 }
 
-/** Read a ReadableStream line-by-line, calling onLine for each "data: ..." line. */
+/** Parse an activity-stream line: "data: {...}" → ActivityEvent or null.
+ *  Lines starting with ":" are heartbeat comments — return null (ignored). */
+function parseActivityLine(line: string): ActivityEvent | null {
+  if (line.startsWith(':')) return null  // heartbeat comment ": ping"
+  if (!line.startsWith('data: ')) return null
+  try {
+    return JSON.parse(line.slice(6)) as ActivityEvent
+  } catch {
+    return null
+  }
+}
+
+/** Read a ReadableStream line-by-line, calling onLine for each line. */
 async function readStream(
   body: ReadableStream<Uint8Array>,
   onLine: (line: string) => void,
@@ -47,11 +66,11 @@ async function readStream(
       const parts = buf.split('\n')
       buf = parts.pop() ?? ''
       for (const part of parts) {
-        if (part.startsWith('data: ')) onLine(part)
+        if (part.startsWith('data: ') || part.startsWith(':')) onLine(part)
       }
     }
     // flush remaining buffer
-    if (buf.startsWith('data: ')) onLine(buf)
+    if (buf.startsWith('data: ') || buf.startsWith(':')) onLine(buf)
   } finally {
     reader.releaseLock()
   }
@@ -199,6 +218,15 @@ export function ChatTab({ projectId }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  // Tracks the id of the current card-assistant message being built by the bus
+  const busAssistantIdRef = useRef<string | null>(null)
+  // Stable ref so the activity-stream loop always sees the current streaming flag
+  const streamingRef = useRef(false)
+
+  // Keep streamingRef in sync with the streaming state
+  useEffect(() => {
+    streamingRef.current = streaming
+  }, [streaming])
 
   // Auto-scroll to bottom when messages update
   useEffect(() => {
@@ -220,10 +248,107 @@ export function ChatTab({ projectId }: Props) {
     setInput('')
     setStreaming(false)
     setError('')
+    busAssistantIdRef.current = null
     api.sessionHistory(projectId)
       .then(res => { if (!cancelled) setMessages(histToMessages(res.messages)) })
       .catch(() => { if (!cancelled) setMessages([]) })
     return () => { cancelled = true }
+  }, [projectId])
+
+  // ─── Activity-stream subscription ──────────────────────────────────────
+  // Открываем постоянный SSE-поток к /activity-stream при монтировании / смене проекта.
+  // Закрываем при unmount или смене проекта через AbortController.
+  // Reconnect через ~2с при обрыве.
+  useEffect(() => {
+    const ac = new AbortController()
+    let active = true
+
+    async function connect() {
+      while (active) {
+        try {
+          const res = await fetch(`/api/projects/${projectId}/activity-stream`, {
+            credentials: 'include',
+            signal: ac.signal,
+          })
+          if (!res.ok || !res.body) {
+            // Ждём и повторяем при ошибке
+            await new Promise(r => setTimeout(r, 2000))
+            continue
+          }
+          await readStream(
+            res.body,
+            (line) => {
+              const evt = parseActivityLine(line)
+              if (!evt) return  // heartbeat или невалидный JSON
+
+              // Пропускаем, если панель занята собственным POST-стримом пользователя.
+              // Замок гарантирует, что события карточки и набранное сообщение
+              // никогда не пересекаются, но флаг — дополнительная страховка.
+              if (streamingRef.current) return
+
+              if (evt.kind === 'run_start') {
+                // Добавляем user-сообщение с промптом карточки
+                const prefix = evt.source === 'card' ? '🗂 карточка: ' : ''
+                const userMsg = makeUserMsg(prefix + evt.prompt)
+                // Добавляем пустое assistant-сообщение в режиме streaming
+                const assistantMsg = makeAssistantMsg()
+                busAssistantIdRef.current = assistantMsg.id
+                setMessages(prev => [...prev, userMsg, assistantMsg])
+
+              } else if (evt.kind === 'text') {
+                const aid = busAssistantIdRef.current
+                if (!aid) return
+                setMessages(prev => {
+                  const msgs = [...prev]
+                  const idx = msgs.findIndex(m => m.id === aid)
+                  if (idx === -1) return msgs
+                  const updated = { ...msgs[idx], text: msgs[idx].text + evt.text }
+                  return [...msgs.slice(0, idx), updated, ...msgs.slice(idx + 1)]
+                })
+
+              } else if (evt.kind === 'tool') {
+                const aid = busAssistantIdRef.current
+                if (!aid) return
+                const tool: ChatToolCall = { name: evt.name, input: evt.input }
+                setMessages(prev => {
+                  const msgs = [...prev]
+                  const idx = msgs.findIndex(m => m.id === aid)
+                  if (idx === -1) return msgs
+                  const updated = { ...msgs[idx], tools: [...msgs[idx].tools, tool] }
+                  return [...msgs.slice(0, idx), updated, ...msgs.slice(idx + 1)]
+                })
+
+              } else if (evt.kind === 'run_end') {
+                const aid = busAssistantIdRef.current
+                busAssistantIdRef.current = null
+                if (!aid) return
+                setMessages(prev => {
+                  const msgs = [...prev]
+                  const idx = msgs.findIndex(m => m.id === aid)
+                  if (idx === -1) return msgs
+                  const updated = { ...msgs[idx], streaming: false }
+                  return [...msgs.slice(0, idx), updated, ...msgs.slice(idx + 1)]
+                })
+              }
+            },
+            ac.signal,
+          )
+        } catch (err: any) {
+          if (!active || err?.name === 'AbortError') break
+          // Ждём перед переподключением при случайном обрыве
+          await new Promise(r => setTimeout(r, 2000))
+        }
+      }
+    }
+
+    connect()
+
+    return () => {
+      active = false
+      ac.abort()
+      // Сбрасываем текущее bus-сообщение при смене проекта / unmount
+      busAssistantIdRef.current = null
+    }
   }, [projectId])
 
   // Сессия переключена → грузим историю новой активной сессии (для «новой» придёт пусто)
@@ -232,6 +357,7 @@ export function ChatTab({ projectId }: Props) {
     setMessages([])
     setStreaming(false)
     setError('')
+    busAssistantIdRef.current = null
     api.sessionHistory(projectId)
       .then(res => setMessages(histToMessages(res.messages)))
       .catch(() => setMessages([]))
