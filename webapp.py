@@ -724,6 +724,168 @@ async def api_tasks_done(req: web.Request):
     return web.json_response({"content": content, "exists": dp.exists()})
 
 
+# ─────────────────────────── файловый проводник ───────────────────────────
+
+# Директории и имена файлов, скрытые из листинга
+_FS_EXCLUDE_DIRS: set[str] = {
+    ".git", "node_modules", "venv", ".venv", "__pycache__",
+    "dist", ".worktrees", ".mypy_cache", ".pytest_cache",
+}
+
+# Файлы/паттерны, скрытые из листинга и чтения.
+# Правило: имя начинается с ".env" — НО ".env.example" разрешён.
+def _is_secret_name(name: str) -> bool:
+    """True если имя файла считается секретным (не должно отображаться/читаться)."""
+    if name.startswith(".env") and name != ".env.example":
+        return True
+    return False
+
+
+def _resolve_safe(cwd: str, rel: str):
+    """Возвращает (resolved_path, cwd_resolved) или поднимает ValueError при traversal."""
+    cwd_resolved = Path(cwd).resolve()
+    # Убираем ведущий / если есть — rel должен быть относительным
+    rel_clean = rel.lstrip("/")
+    target = (cwd_resolved / rel_clean).resolve()
+    if not str(target).startswith(str(cwd_resolved) + "/") and target != cwd_resolved:
+        raise ValueError("path traversal detected")
+    return target, cwd_resolved
+
+
+async def api_project_files(req: web.Request):
+    """GET /api/projects/{id}/files?path=<rel> — листинг директории."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    rel = req.rel_url.query.get("path", "")
+
+    try:
+        target, cwd_resolved = _resolve_safe(project["cwd"], rel)
+    except ValueError:
+        return web.json_response({"error": "invalid path"}, status=400)
+
+    if not target.exists() or not target.is_dir():
+        return web.json_response({"error": "not a directory"}, status=404)
+
+    # Нормализуем rel для ответа (относительно cwd)
+    try:
+        rel_norm = str(target.relative_to(cwd_resolved))
+        if rel_norm == ".":
+            rel_norm = ""
+    except ValueError:
+        return web.json_response({"error": "invalid path"}, status=400)
+
+    # Не пускаем навигацию ВНУТРЬ исключённых директорий (.git/venv/node_modules…) напрямую
+    if any(part in _FS_EXCLUDE_DIRS for part in target.relative_to(cwd_resolved).parts):
+        return web.json_response({"error": "directory hidden"}, status=404)
+
+    entries = []
+    try:
+        items = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        for item in items:
+            name = item.name
+            # Исключаем скрытые директории и секреты
+            if item.is_dir() and name in _FS_EXCLUDE_DIRS:
+                continue
+            if item.is_file() and _is_secret_name(name):
+                continue
+            # Также скрываем секреты в папках
+            if item.is_dir() and _is_secret_name(name):
+                continue
+            if item.is_symlink():
+                # Разрешаем симлинк и проверяем, не выходит ли он за пределы cwd
+                try:
+                    linked = item.resolve()
+                    if not str(linked).startswith(str(cwd_resolved)):
+                        continue  # симлинк наружу — скрываем
+                except Exception:
+                    continue
+            entry_type = "dir" if item.is_dir() else "file"
+            size = 0
+            if item.is_file():
+                try:
+                    size = item.stat().st_size
+                except Exception:
+                    size = 0
+            entries.append({"name": name, "type": entry_type, "size": size})
+    except PermissionError:
+        return web.json_response({"error": "permission denied"}, status=403)
+
+    return web.json_response({"path": rel_norm, "entries": entries})
+
+
+async def api_project_file(req: web.Request):
+    """GET /api/projects/{id}/file?path=<rel> — содержимое файла."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    rel = req.rel_url.query.get("path", "")
+    if not rel:
+        return web.json_response({"error": "path required"}, status=400)
+
+    try:
+        target, cwd_resolved = _resolve_safe(project["cwd"], rel)
+    except ValueError:
+        return web.json_response({"error": "invalid path"}, status=400)
+
+    # Проверяем имя на секреты
+    if _is_secret_name(target.name):
+        return web.json_response({"error": "access denied"}, status=403)
+
+    # Запрещаем читать внутри исключённых директорий (.git/venv/node_modules…)
+    try:
+        rel_parts = target.relative_to(cwd_resolved).parts
+        if any(part in _FS_EXCLUDE_DIRS for part in rel_parts):
+            return web.json_response({"error": "access denied"}, status=403)
+    except ValueError:
+        return web.json_response({"error": "invalid path"}, status=400)
+
+    if not target.exists() or not target.is_file():
+        return web.json_response({"error": "not a file"}, status=404)
+
+    # Размер
+    try:
+        size = target.stat().st_size
+    except Exception:
+        return web.json_response({"error": "stat failed"}, status=500)
+
+    MAX_SIZE = 1 * 1024 * 1024  # 1 МБ
+    if size > MAX_SIZE:
+        return web.json_response({"error": "файл слишком большой", "size": size})
+
+    # Бинарный файл: проверяем первые 8 КБ на нулевые байты
+    try:
+        with open(target, "rb") as f:
+            head = f.read(8192)
+        if b"\x00" in head:
+            return web.json_response({"error": "бинарный файл", "size": size})
+    except Exception:
+        return web.json_response({"error": "read failed"}, status=500)
+
+    # Читаем текст
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return web.json_response({"error": f"read error: {e}"}, status=500)
+
+    # Расширение без точки
+    lang = target.suffix.lstrip(".") if target.suffix else ""
+
+    # rel для ответа (относительно cwd)
+    try:
+        rel_norm = str(target.relative_to(cwd_resolved))
+    except ValueError:
+        rel_norm = rel
+
+    return web.json_response({"path": rel_norm, "content": content, "lang": lang, "size": size})
+
+
 async def api_card_run(req: web.Request):
     """GET /api/projects/{id}/tasks/{card}/run — сайдкар из DATA/runs/<card>.md (404-safe)."""
     ctx = req.app["ctx"]
@@ -946,6 +1108,9 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
         # C1: SSE-чат по проекту
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
+        # Файловый проводник (read-only)
+        app.router.add_get("/api/projects/{id}/files", api_project_files)
+        app.router.add_get("/api/projects/{id}/file", api_project_file)
 
         # Статика — всё остальное (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)

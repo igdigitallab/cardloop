@@ -1197,3 +1197,171 @@ body {
 .chat-error-banner {
   margin: 0 16px 8px;
 }
+
+/* ── Files Tab ─────────────────────────────────────────────── */
+.files-layout {
+  display: flex;
+  gap: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Left tree pane: ~38% of tab, fixed width */
+.files-tree-pane {
+  width: 38%;
+  min-width: 160px;
+  max-width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.files-tree-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text3);
+  padding: 0 10px 8px;
+  flex-shrink: 0;
+}
+
+.files-tree-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+/* Tree rows */
+.file-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  padding-right: 8px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition);
+  user-select: none;
+  font-size: 12px;
+  color: var(--text2);
+  min-height: 24px;
+}
+
+.file-tree-row:hover {
+  background: var(--bg3);
+  color: var(--text);
+}
+
+.file-tree-row.active {
+  background: var(--bg4);
+  color: var(--text);
+}
+
+.file-tree-caret {
+  width: 12px;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text3);
+  text-align: center;
+}
+
+.file-tree-icon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.file-tree-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.file-tree-spinner {
+  font-size: 11px;
+  color: var(--text3);
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+.file-tree-err {
+  font-size: 11px;
+  color: var(--yellow);
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+/* Right viewer pane */
+.files-viewer-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-left: 16px;
+}
+
+.files-viewer-hint {
+  margin-top: 4px;
+}
+
+.files-viewer-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.files-viewer-path {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent-h);
+  word-break: break-all;
+  flex: 1;
+}
+
+.files-viewer-size {
+  font-size: 11px;
+  color: var(--text3);
+  flex-shrink: 0;
+}
+
+.files-viewer-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Mono code viewer (non-markdown files) */
+.files-code-block {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  margin: 0;
+}
+
+.files-code-block code {
+  font-family: inherit;
+  font-size: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+}

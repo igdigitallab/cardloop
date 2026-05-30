@@ -7,6 +7,7 @@ import { SpecsTab } from '../tabs/SpecsTab'
 import { ActivityTab } from '../tabs/ActivityTab'
 import { BoardTab } from '../tabs/BoardTab'
 import { ChatTab } from '../tabs/ChatTab'
+import { FilesTab } from '../tabs/FilesTab'
 
 interface Tab {
   id: TabId
@@ -22,6 +23,7 @@ const TABS: Tab[] = [
   { id: 'specs',      label: 'Specs' },
   { id: 'activity',   label: 'Активность' },
   { id: 'board',      label: 'Доска' },
+  { id: 'files',      label: 'Файлы' },
 ]
 
 interface Props {
@@ -95,6 +97,7 @@ export function ProjectView({ project }: Props) {
           {activeTab === 'specs'     && <SpecsTab projectId={project.id} />}
           {activeTab === 'activity'  && <ActivityTab projectId={project.id} />}
           {activeTab === 'board'     && <BoardTab projectId={project.id} />}
+          {activeTab === 'files'     && <FilesTab projectId={project.id} />}
         </div>
       </div>
 

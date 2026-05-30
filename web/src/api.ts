@@ -69,4 +69,14 @@ export const api = {
 
   cardRun: (id: string, card: string) =>
     apiFetch<import('./types').RunResult>(`/api/projects/${id}/tasks/${card}/run`),
+
+  files: (id: string, path: string) =>
+    apiFetch<import('./types').FileListing>(
+      `/api/projects/${id}/files?path=${encodeURIComponent(path)}`
+    ),
+
+  file: (id: string, path: string) =>
+    apiFetch<import('./types').FileContent>(
+      `/api/projects/${id}/file?path=${encodeURIComponent(path)}`
+    ),
 }

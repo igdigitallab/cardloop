@@ -55,7 +55,28 @@ export interface RunResult {
   exists: boolean
 }
 
-export type TabId = 'overview' | 'readme' | 'claude-md' | 'specs' | 'activity' | 'chat' | 'board'
+// ─── File Explorer ────────────────────────────────────────────────────────
+
+export interface FileEntry {
+  name: string
+  type: 'dir' | 'file'
+  size: number
+}
+
+export interface FileListing {
+  path: string
+  entries: FileEntry[]
+}
+
+export interface FileContent {
+  path: string
+  content: string
+  lang: string
+  size: number
+  error?: string
+}
+
+export type TabId = 'overview' | 'readme' | 'claude-md' | 'specs' | 'activity' | 'chat' | 'board' | 'files'
 
 // ─── C1: Chat SSE events ───────────────────────────────────────────────────
 
