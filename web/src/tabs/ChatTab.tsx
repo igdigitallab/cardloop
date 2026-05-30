@@ -72,6 +72,51 @@ interface RunIndicator {
   source: 'chat' | 'card'
 }
 
+// Сегментация потокового ответа: на границе text↔tool открывается НОВОЕ ассистент-сообщение.
+// Это сохраняет реальный порядок «текст → файл → текст → файл» как видно после reload
+// (когда история парсится из SDK-транскрипта по отдельным assistant-блокам).
+type StreamChunk =
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; tool: ChatToolCall }
+
+function appendChunk(messages: ChatMessage[], chunk: StreamChunk): ChatMessage[] {
+  const last = messages[messages.length - 1]
+  const lastIsAsstStreaming = !!(last && last.role === 'assistant' && last.streaming)
+
+  if (chunk.kind === 'text') {
+    // Продолжаем текущий текстовый сегмент (нет инструментов в нём)
+    if (lastIsAsstStreaming && last!.tools.length === 0) {
+      return [...messages.slice(0, -1), { ...last!, text: last!.text + chunk.text }]
+    }
+    // Граница tool→text: закрываем прошлый сегмент, открываем новый текстовый
+    const closed = lastIsAsstStreaming
+      ? [...messages.slice(0, -1), { ...last!, streaming: false }]
+      : messages
+    return [...closed, { id: nextId(), role: 'assistant', text: chunk.text, tools: [], streaming: true }]
+  }
+
+  // tool
+  if (lastIsAsstStreaming && last!.text === '') {
+    // Первый или продолжение tool-only сегмента
+    return [...messages.slice(0, -1), { ...last!, tools: [...last!.tools, chunk.tool] }]
+  }
+  // Граница text→tool: новый сегмент с инструментом
+  const closed = lastIsAsstStreaming
+    ? [...messages.slice(0, -1), { ...last!, streaming: false }]
+    : messages
+  return [...closed, { id: nextId(), role: 'assistant', text: '', tools: [chunk.tool], streaming: true }]
+}
+
+function finalizeStreaming(messages: ChatMessage[], err?: string): ChatMessage[] {
+  const last = messages[messages.length - 1]
+  if (last && last.role === 'assistant' && last.streaming) {
+    const updated: ChatMessage = { ...last, streaming: false }
+    if (err) updated.error = err
+    return [...messages.slice(0, -1), updated]
+  }
+  return messages
+}
+
 let _msgCounter = 0
 function nextId() { return `msg-${++_msgCounter}` }
 
@@ -485,8 +530,8 @@ export function ChatTab({ project, onProjectsReload }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
-  // Tracks the id of the current card-assistant message being built by the bus
-  const busAssistantIdRef = useRef<string | null>(null)
+  // True while a card-run is being streamed into this chat via the activity bus
+  const busActiveRef = useRef<boolean>(false)
   // Stable ref so the activity-stream loop always sees the current streaming flag
   const streamingRef = useRef(false)
 
@@ -523,7 +568,7 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     setStreaming(false)
     setError('')
     setRun(null)
-    busAssistantIdRef.current = null
+    busActiveRef.current = false
     api.sessionHistory(projectId)
       .then(res => { if (!cancelled) setMessages(histToMessages(res.messages)) })
       .catch(() => { if (!cancelled) setMessages([]) })
@@ -564,53 +609,30 @@ export function ChatTab({ project, onProjectsReload }: Props) {
               const now = Date.now()
 
               if (evt.kind === 'run_start') {
-                // Добавляем user-сообщение с промптом карточки
+                // Добавляем user-сообщение с промптом карточки + пустой placeholder-assistant
                 const prefix = evt.source === 'card' ? '🗂 карточка: ' : ''
                 const userMsg = makeUserMsg(prefix + evt.prompt)
-                // Добавляем пустое assistant-сообщение в режиме streaming
                 const assistantMsg = makeAssistantMsg()
-                busAssistantIdRef.current = assistantMsg.id
+                busActiveRef.current = true
                 setMessages(prev => [...prev, userMsg, assistantMsg])
                 setRun({ startedAt: now, lastEventAt: now, currentTool: null, source: 'card' })
 
               } else if (evt.kind === 'text') {
-                const aid = busAssistantIdRef.current
-                if (!aid) return
+                if (!busActiveRef.current) return
                 setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
-                setMessages(prev => {
-                  const msgs = [...prev]
-                  const idx = msgs.findIndex(m => m.id === aid)
-                  if (idx === -1) return msgs
-                  const updated = { ...msgs[idx], text: msgs[idx].text + evt.text }
-                  return [...msgs.slice(0, idx), updated, ...msgs.slice(idx + 1)]
-                })
+                setMessages(prev => appendChunk(prev, { kind: 'text', text: evt.text }))
 
               } else if (evt.kind === 'tool') {
-                const aid = busAssistantIdRef.current
-                if (!aid) return
+                if (!busActiveRef.current) return
                 const tool: ChatToolCall = evt.tool
                 setRun(r => r ? { ...r, lastEventAt: now, currentTool: tool } : r)
-                setMessages(prev => {
-                  const msgs = [...prev]
-                  const idx = msgs.findIndex(m => m.id === aid)
-                  if (idx === -1) return msgs
-                  const updated = { ...msgs[idx], tools: [...msgs[idx].tools, tool] }
-                  return [...msgs.slice(0, idx), updated, ...msgs.slice(idx + 1)]
-                })
+                setMessages(prev => appendChunk(prev, { kind: 'tool', tool }))
 
               } else if (evt.kind === 'run_end') {
-                const aid = busAssistantIdRef.current
-                busAssistantIdRef.current = null
+                if (!busActiveRef.current) return
+                busActiveRef.current = false
                 setRun(null)
-                if (!aid) return
-                setMessages(prev => {
-                  const msgs = [...prev]
-                  const idx = msgs.findIndex(m => m.id === aid)
-                  if (idx === -1) return msgs
-                  const updated = { ...msgs[idx], streaming: false }
-                  return [...msgs.slice(0, idx), updated, ...msgs.slice(idx + 1)]
-                })
-                // Refresh context panel after run completes
+                setMessages(prev => finalizeStreaming(prev))
                 setCtxRefreshKey(k => k + 1)
               }
             },
@@ -630,7 +652,7 @@ export function ChatTab({ project, onProjectsReload }: Props) {
       active = false
       ac.abort()
       // Сбрасываем текущее bus-сообщение при смене проекта / unmount
-      busAssistantIdRef.current = null
+      busActiveRef.current = false
     }
   }, [projectId])
 
@@ -641,7 +663,7 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     setStreaming(false)
     setError('')
     setRun(null)
-    busAssistantIdRef.current = null
+    busActiveRef.current = false
     api.sessionHistory(projectId)
       .then(res => setMessages(histToMessages(res.messages)))
       .catch(() => setMessages([]))
@@ -697,37 +719,22 @@ export function ChatTab({ project, onProjectsReload }: Props) {
           }
 
           setMessages(prev => {
-            const msgs = [...prev]
-            const last = msgs[msgs.length - 1]
-            if (!last || last.id !== assistantMsg.id) return msgs
-
             switch (evt.type) {
               case 'text':
-                return [...msgs.slice(0, -1), { ...last, text: last.text + evt.text }]
-
+                return appendChunk(prev, { kind: 'text', text: evt.text })
               case 'tool': {
-                // evt is ChatEventTool which extends RichTool; strip 'type'
                 const { type: _t, ...toolFields } = evt as any
-                const tool: ChatToolCall = toolFields
-                return [...msgs.slice(0, -1), { ...last, tools: [...last.tools, tool] }]
+                return appendChunk(prev, { kind: 'tool', tool: toolFields as ChatToolCall })
               }
-
               case 'result':
               case 'done':
-                return [...msgs.slice(0, -1), { ...last, streaming: false }]
-
+                return finalizeStreaming(prev)
               case 'error':
-                return [...msgs.slice(0, -1), {
-                  ...last,
-                  streaming: false,
-                  error: evt.error,
-                }]
-
+                return finalizeStreaming(prev, evt.error)
               case 'rate_limit':
-                return msgs
-
+                return prev
               default:
-                return msgs
+                return prev
             }
           })
         },
@@ -735,27 +742,13 @@ export function ChatTab({ project, onProjectsReload }: Props) {
       )
 
       // Ensure streaming flag is cleared after stream ends normally
-      setMessages(prev => {
-        const msgs = [...prev]
-        const last = msgs[msgs.length - 1]
-        if (last && last.id === assistantMsg.id && last.streaming) {
-          return [...msgs.slice(0, -1), { ...last, streaming: false }]
-        }
-        return msgs
-      })
+      setMessages(prev => finalizeStreaming(prev))
 
     } catch (err: any) {
       if (err?.name === 'AbortError') return
       const msg = err?.message || String(err)
       setError(msg)
-      setMessages(prev => {
-        const msgs = [...prev]
-        const last = msgs[msgs.length - 1]
-        if (last && last.id === assistantMsg.id) {
-          return [...msgs.slice(0, -1), { ...last, streaming: false, error: msg }]
-        }
-        return msgs
-      })
+      setMessages(prev => finalizeStreaming(prev, msg))
     } finally {
       setStreaming(false)
       setRun(null)
