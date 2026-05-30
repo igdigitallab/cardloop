@@ -173,19 +173,21 @@ function ToolBlock({ tool }: { tool: RichTool }) {
       <div className="chat-tool-row chat-tool-edit">
         <span className="chat-tool-icon">✏</span>
         <div className="chat-tool-edit-body">
-          <span className="chat-tool-file">{tool.file}</span>
-          {count !== undefined && (
-            <span className="chat-tool-desc">{count} правок</span>
-          )}
-          {'cell_type' in tool && tool.cell_type && (
-            <span className="chat-tool-desc">cell: {tool.cell_type}</span>
-          )}
-          {hasOldNew && (
-            <button
-              className="chat-tool-expand-btn"
-              onClick={() => setExpanded(e => !e)}
-            >{expanded ? '▲ скрыть' : '▼ diff'}</button>
-          )}
+          <div className="chat-tool-edit-line">
+            <span className="chat-tool-file">{tool.file}</span>
+            {count !== undefined && (
+              <span className="chat-tool-desc">{count} правок</span>
+            )}
+            {'cell_type' in tool && tool.cell_type && (
+              <span className="chat-tool-desc">cell: {tool.cell_type}</span>
+            )}
+            {hasOldNew && (
+              <button
+                className="chat-tool-expand-btn chat-tool-expand-inline"
+                onClick={() => setExpanded(e => !e)}
+              >{expanded ? '▲ скрыть' : '▼ diff'}</button>
+            )}
+          </div>
           {hasOldNew && expanded && (
             <div className="chat-tool-diff">
               {tool.old && (
@@ -206,13 +208,15 @@ function ToolBlock({ tool }: { tool: RichTool }) {
       <div className="chat-tool-row chat-tool-write">
         <span className="chat-tool-icon">📝</span>
         <div className="chat-tool-write-body">
-          <span className="chat-tool-file">{tool.file}</span>
-          {tool.preview && (
-            <button
-              className="chat-tool-expand-btn"
-              onClick={() => setExpanded(e => !e)}
-            >{expanded ? '▲ скрыть' : '▼ содержимое'}</button>
-          )}
+          <div className="chat-tool-edit-line">
+            <span className="chat-tool-file">{tool.file}</span>
+            {tool.preview && (
+              <button
+                className="chat-tool-expand-btn chat-tool-expand-inline"
+                onClick={() => setExpanded(e => !e)}
+              >{expanded ? '▲ скрыть' : '▼ содержимое'}</button>
+            )}
+          </div>
           {expanded && tool.preview && (
             <pre className="chat-tool-preview">{tool.preview}</pre>
           )}

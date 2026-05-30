@@ -1,4 +1,5 @@
 import { Project } from '../types'
+import { UsageBadge } from './UsageBadge'
 
 interface Props {
   projects: Project[]
@@ -11,6 +12,7 @@ interface Props {
 export function ProjectTabBar({ projects, activeId, unreadBySession, onActivate, onClose }: Props) {
   return (
     <div className="project-tabbar">
+      <div className="ptab-list">
       {projects.map(p => {
         const sk = p.tg_thread != null ? String(p.tg_thread) : null
         const unread = sk ? (unreadBySession[sk] || 0) : 0
@@ -36,6 +38,9 @@ export function ProjectTabBar({ projects, activeId, unreadBySession, onActivate,
           </div>
         )
       })}
+      </div>
+      <div className="ptab-spacer" />
+      <UsageBadge />
     </div>
   )
 }

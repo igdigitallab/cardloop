@@ -431,21 +431,84 @@ body {
   align-items: stretch;
   background: var(--bg2);
   border-bottom: 1px solid var(--border);
-  overflow-x: auto;
   flex-shrink: 0;
-  min-height: 34px;
+  min-height: 36px;
 }
 
-.project-tabbar::before {
-  content: '🗂';
+.ptab-list {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  min-width: 0;
+}
+
+.ptab-spacer { flex: 1; }
+
+/* Usage Badge — в правом углу полосы вкладок */
+.usage-badge-wrap {
+  position: relative;
   display: flex;
   align-items: center;
   padding: 0 10px;
-  font-size: 13px;
-  color: var(--text3);
-  border-right: 1px solid var(--border);
+  border-left: 1px solid var(--border);
   flex-shrink: 0;
 }
+
+.usage-badge {
+  background: transparent;
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.usage-badge:hover { background: var(--bg3); color: var(--text); }
+.usage-badge.usage-green  { color: var(--green);  border-color: rgba(52,199,123,0.4); }
+.usage-badge.usage-yellow { color: var(--yellow); border-color: rgba(245,166,35,0.4); }
+.usage-badge.usage-red    { color: var(--red);    border-color: rgba(245,97,74,0.4); }
+.usage-badge.usage-dim    { color: var(--text3); }
+.usage-icon { font-size: 12px; }
+.usage-sep { opacity: 0.4; }
+
+.usage-dropdown {
+  position: absolute;
+  right: 8px;
+  top: calc(100% + 4px);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  min-width: 240px;
+  z-index: 100;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.usage-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 3px;
+}
+.usage-row.usage-green  { color: var(--green); }
+.usage-row.usage-yellow { color: var(--yellow); }
+.usage-row.usage-red    { color: var(--red); }
+.usage-row.usage-dim    { color: var(--text3); }
+.usage-row-label  { font-weight: 500; }
+.usage-row-pct    { font-family: var(--mono); }
+.usage-row-reset  { opacity: 0.65; font-size: 10px; }
 
 .ptab {
   display: flex;
@@ -1616,6 +1679,9 @@ body {
 /* edit: file path + expandable diff */
 .chat-tool-edit { flex-direction: row; gap: 6px; }
 .chat-tool-edit-body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.chat-tool-edit-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chat-tool-edit-line .chat-tool-file { flex: 1; min-width: 0; }
+.chat-tool-expand-inline { margin-left: auto; flex-shrink: 0; }
 .chat-tool-file { font-family: var(--mono); font-size: 11px; color: var(--text2); word-break: break-all; }
 .chat-tool-expand-btn {
   background: none; border: none; cursor: pointer;

@@ -112,6 +112,13 @@ export const api = {
   memory: (id: string) =>
     apiFetch<import('./types').ProjectMemory>(`/api/projects/${id}/memory`),
 
+  // Лимиты подписки Claude Code (rate_limits SDK, обновляются пассивно)
+  usage: () =>
+    apiFetch<{
+      limits: Record<string, { status: string; resets_at: number | null; utilization: number | null; ts: number }>
+      now: number
+    }>('/api/usage'),
+
   // Сменить модель проекта (опус/сонет/хайку) — применится со следующего запроса
   setModel: (id: string, model: 'opus' | 'sonnet' | 'haiku') =>
     apiFetch<{ ok: boolean; model: string; topics_updated: number }>(

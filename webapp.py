@@ -948,6 +948,18 @@ async def api_activity_stream_all(req: web.Request):
     return resp
 
 
+# ─────────────────────────── лимиты подписки Claude Code ───────────────────────────
+#
+# GET /api/usage  → текущий снимок rate_limits (5ч окно, недельные, opus/sonnet, overage).
+# Источник — bot.py:rate_limits, заполняется пассивно из RateLimitEvent SDK на каждом ответе.
+
+async def api_usage(req: web.Request):
+    ctx = req.app["ctx"]
+    rl = ctx.get("rate_limits") or {}
+    # Простой shallow-snapshot — клиент сам форматирует
+    return web.json_response({"limits": rl, "now": time.time()})
+
+
 # ─────────────────────────── смена модели проекта ───────────────────────────
 #
 # POST /api/projects/{id}/model  {model: "opus"|"sonnet"|"haiku"}
@@ -1815,6 +1827,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/git/sync", api_project_git_sync)
         # Смена модели проекта (применяется со следующего запроса)
         app.router.add_post("/api/projects/{id}/model", api_project_set_model)
+        # Лимиты подписки (5ч + недельные) — для значка в полосе вкладок
+        app.router.add_get("/api/usage", api_usage)
         # C2: управление сессиями проекта
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)
