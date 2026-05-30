@@ -133,6 +133,12 @@ export interface ChatToolCall {
   input: string
 }
 
+export interface HistoryMessage {
+  role: 'user' | 'assistant'
+  text: string
+  tools: ChatToolCall[]
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'

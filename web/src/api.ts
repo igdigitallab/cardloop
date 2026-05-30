@@ -90,4 +90,9 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
+
+  sessionHistory: (id: string, sessionId?: string) =>
+    apiFetch<{ messages: import('./types').HistoryMessage[]; session_id: string | null }>(
+      `/api/projects/${id}/session-history${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`
+    ),
 }

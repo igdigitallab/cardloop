@@ -1039,6 +1039,75 @@ async def api_project_set_session(req: web.Request):
         return web.json_response({"error": "action must be 'new' or 'resume'"}, status=400)
 
 
+def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
+    """Парсит SDK-транскрипт сессии → лента [{role, text, tools}].
+    user(str)=реплика человека; user(list)=tool_result, пропуск.
+    assistant(list)=блоки text/tool_use. Прочие type — мусор."""
+    msgs: list[dict] = []
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                t = o.get("type")
+                m = o.get("message")
+                if not isinstance(m, dict):
+                    continue
+                if t == "user":
+                    c = m.get("content")
+                    if isinstance(c, str) and c.strip():
+                        msgs.append({"role": "user", "text": c.strip(), "tools": []})
+                    # content-list у user = tool_result → пропускаем (не реплика человека)
+                elif t == "assistant":
+                    c = m.get("content")
+                    if not isinstance(c, list):
+                        continue
+                    text_parts, tools = [], []
+                    for b in c:
+                        if not isinstance(b, dict):
+                            continue
+                        if b.get("type") == "text" and (b.get("text") or "").strip():
+                            text_parts.append(b["text"])
+                        elif b.get("type") == "tool_use":
+                            inp = b.get("input") or {}
+                            first = next(iter(inp.values()), "") if isinstance(inp, dict) else ""
+                            if isinstance(first, str) and len(first) > 120:
+                                first = first[:120] + "…"
+                            tools.append({"name": b.get("name", "?"), "input": str(first)})
+                    if text_parts or tools:
+                        msgs.append({"role": "assistant", "text": "\n".join(text_parts), "tools": tools})
+    except Exception:
+        pass
+    return msgs[-limit:] if len(msgs) > limit else msgs
+
+
+async def api_project_session_history(req: web.Request):
+    """GET /api/projects/{id}/session-history?session_id=<опц.> — лента активной (или указанной) сессии."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    sid = req.rel_url.query.get("session_id", "") or ctx["sessions"].get(project["tg_thread"])
+    if not sid:
+        return web.json_response({"messages": [], "session_id": None})
+    # Санитизация (basename-only)
+    if sid != Path(sid).name or sid in (".", ".."):
+        return web.json_response({"error": "invalid session_id"}, status=400)
+
+    jsonl = _sdk_sessions_dir(project["cwd"]) / f"{sid}.jsonl"
+    if not jsonl.is_file():
+        return web.json_response({"messages": [], "session_id": sid})
+
+    return web.json_response({"messages": _session_history(jsonl), "session_id": sid})
+
+
 # ─────────────────────────── C1: SSE-чат ───────────────────────────
 #
 # POST /api/projects/{id}/chat  body: {"prompt": str}
@@ -1249,6 +1318,7 @@ async def start(ptb_app, ctx: dict) -> None:
         # C2: управление сессиями проекта
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)
+        app.router.add_get("/api/projects/{id}/session-history", api_project_session_history)
         # Файловый проводник (read-only)
         app.router.add_get("/api/projects/{id}/files", api_project_files)
         app.router.add_get("/api/projects/{id}/file", api_project_file)

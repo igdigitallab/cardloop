@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
-import { ChatMessage, ChatSSEEvent, ChatToolCall, SessionInfo } from '../types'
+import { ChatMessage, ChatSSEEvent, ChatToolCall, SessionInfo, HistoryMessage } from '../types'
 
 interface Props {
   projectId: string
@@ -205,22 +205,37 @@ export function ChatTab({ projectId }: Props) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Reset state when project changes
+  // Маппинг истории сессии → сообщения ленты
+  function histToMessages(items: HistoryMessage[]): ChatMessage[] {
+    return items.map((m, i) => ({
+      id: `hist-${i}`, role: m.role, text: m.text, tools: m.tools, streaming: false,
+    }))
+  }
+
+  // Reset + загрузка истории активной сессии при смене проекта
   useEffect(() => {
+    let cancelled = false
     abortRef.current?.abort()
     setMessages([])
     setInput('')
     setStreaming(false)
     setError('')
+    api.sessionHistory(projectId)
+      .then(res => { if (!cancelled) setMessages(histToMessages(res.messages)) })
+      .catch(() => { if (!cancelled) setMessages([]) })
+    return () => { cancelled = true }
   }, [projectId])
 
-  // Session switched → clear message feed (different conversation)
+  // Сессия переключена → грузим историю новой активной сессии (для «новой» придёт пусто)
   const handleSessionChange = useCallback(() => {
     abortRef.current?.abort()
     setMessages([])
     setStreaming(false)
     setError('')
-  }, [])
+    api.sessionHistory(projectId)
+      .then(res => setMessages(histToMessages(res.messages)))
+      .catch(() => setMessages([]))
+  }, [projectId])
 
   const sendMessage = useCallback(async () => {
     const text = input.trim()
