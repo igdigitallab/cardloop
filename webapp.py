@@ -246,6 +246,22 @@ async def api_project_readme(req: web.Request):
     return web.json_response({"path": str(path), "content": content, "exists": exists})
 
 
+def _spec_dirs(ctx: dict, project: dict) -> list[tuple[Path, str]]:
+    """Папки со спеками проекта: ЛОКАЛЬНАЯ <cwd>/specs/ (приоритет) + vault <name>/specs/.
+    Возвращает [(dir, source)] только существующих. Агент часто пишет спеки локально,
+    а человек — в vault; кокпит показывает и то, и то."""
+    dirs: list[tuple[Path, str]] = []
+    local = Path(project["cwd"]) / "specs"
+    if local.is_dir():
+        dirs.append((local, "local"))
+    vault_proj = _find_vault_specs_dir(ctx, project["name"], project["cwd"])
+    if vault_proj is not None:
+        vdir = vault_proj / "specs"
+        if vdir.is_dir():
+            dirs.append((vdir, "vault"))
+    return dirs
+
+
 async def api_project_specs(req: web.Request):
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -253,12 +269,15 @@ async def api_project_specs(req: web.Request):
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    specs_dir = _find_vault_specs_dir(ctx, project["name"], project["cwd"])
     specs = []
-    if specs_dir is not None:
+    seen: set[str] = set()  # дедуп по имени; локальная папка идёт первой → выигрывает
+    for d, src in _spec_dirs(ctx, project):
         try:
-            for f in sorted(specs_dir.glob("specs/*.md")):
-                specs.append({"name": f.name, "path": str(f)})
+            for f in sorted(d.glob("*.md")):
+                if f.name in seen:
+                    continue
+                seen.add(f.name)
+                specs.append({"name": f.name, "path": str(f), "source": src})
         except Exception:
             pass
     return web.json_response({"specs": specs})
@@ -278,24 +297,18 @@ async def api_project_spec_content(req: web.Request):
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    specs_dir = _find_vault_specs_dir(ctx, project["name"], project["cwd"])
-    if specs_dir is None:
-        return web.json_response({"error": "specs dir not found"}, status=404)
-
-    spec_path = specs_dir / "specs" / spec_name
-    try:
-        # Нормализуем и проверяем, что файл внутри specs_dir
-        resolved = spec_path.resolve()
-        expected_parent = (specs_dir / "specs").resolve()
-        if not str(resolved).startswith(str(expected_parent)):
-            return web.json_response({"error": "path traversal denied"}, status=400)
-        content = resolved.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return web.json_response({"error": "not found"}, status=404)
-    except Exception as e:
-        return web.json_response({"error": f"read error: {e}"}, status=500)
-
-    return web.json_response({"name": spec_name, "content": content})
+    # Ищем по имени в локальной, затем в vault (та же приоритетность, что в списке)
+    for d, _src in _spec_dirs(ctx, project):
+        try:
+            candidate = (d / spec_name).resolve()
+            if not str(candidate).startswith(str(d.resolve())):
+                continue  # path traversal — пропускаем
+            if candidate.is_file():
+                content = candidate.read_text(encoding="utf-8")
+                return web.json_response({"name": spec_name, "content": content})
+        except Exception:
+            continue
+    return web.json_response({"error": "not found"}, status=404)
 
 
 async def api_project_activity(req: web.Request):
