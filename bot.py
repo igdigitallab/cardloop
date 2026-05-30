@@ -561,6 +561,7 @@ async def run_agent(context, update, prompt: str):
     hb = asyncio.create_task(heartbeat())
     wd = asyncio.create_task(watchdog())
     engine_exc = None
+    webapp._bus_publish(k, {"kind": "run_start", "source": "tg", "prompt": prompt, "run_id": None})
     try:
         async for event in run_engine(
             project_name=b["project"],
@@ -578,6 +579,7 @@ async def run_agent(context, update, prompt: str):
             if etype == "text":
                 answer.append(event["text"])
                 log_lines.append("💬 " + short(event["text"].replace("\n", " "), 70))
+                webapp._bus_publish(k, {"kind": "text", "text": event["text"], "run_id": None})
 
             elif etype == "tool":
                 name = event["name"]
@@ -593,6 +595,10 @@ async def run_agent(context, update, prompt: str):
                     audit(b["project"], name.upper(), fp)
                 else:
                     log_lines.append(f"🔧 {name}")
+                webapp._bus_publish(k, {
+                    "kind": "tool", "run_id": None,
+                    "tool": webapp._format_tool(name, inp if isinstance(inp, dict) else {}),
+                })
                 await push_status()
 
             elif etype == "result":
@@ -620,6 +626,11 @@ async def run_agent(context, update, prompt: str):
     finally:
         hb.cancel()
         wd.cancel()
+        webapp._bus_publish(k, {
+            "kind": "run_end",
+            "outcome": "ok" if engine_exc is None else "fail",
+            "run_id": None,
+        })
         running.pop(k, None)
 
     # Если движок упал — удаляем статус и пробрасываем (safe_run/report_error обработает)

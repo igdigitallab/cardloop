@@ -62,11 +62,13 @@ function readLSBool(key: string, fallback: boolean): boolean {
 interface Props {
   project: Project
   onProjectsReload: () => void
+  onSplitCreate?: () => void   // показать кнопку ⊞ (только для левого free-чата)
+  onSplitClose?: () => void    // показать кнопку ✕ Закрыть (только для правого)
 }
 
 type GitSyncState = 'idle' | 'busy' | 'ok' | 'err'
 
-export function ProjectView({ project, onProjectsReload }: Props) {
+export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitClose }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
   const git = project.health.git
 
@@ -197,6 +199,21 @@ export function ProjectView({ project, onProjectsReload }: Props) {
     return (
       <ProjectActivityProvider projectId={project.id}>
         <div className="main-content project-free-layout">
+          {(onSplitCreate || onSplitClose) && (
+            <div className="free-chat-toolbar">
+              <span className="free-chat-name">{project.name}</span>
+              {onSplitCreate && (
+                <button className="split-create-btn" onClick={onSplitCreate} title="Открыть второй чат рядом">
+                  ⊞ Split
+                </button>
+              )}
+              {onSplitClose && (
+                <button className="split-close-btn" onClick={onSplitClose} title="Закрыть эту панель">
+                  ✕ Закрыть
+                </button>
+              )}
+            </div>
+          )}
           <ChatTab project={project} onProjectsReload={onProjectsReload} />
         </div>
       </ProjectActivityProvider>

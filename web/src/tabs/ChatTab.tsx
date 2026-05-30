@@ -72,6 +72,14 @@ interface RunIndicator {
   source: 'chat' | 'card'
 }
 
+interface Attachment {
+  id: string
+  name: string
+  path?: string
+  uploading: boolean
+  error?: string
+}
+
 // Сегментация потокового ответа: на границе text↔tool открывается НОВОЕ ассистент-сообщение.
 // Это сохраняет реальный порядок «текст → файл → текст → файл» как видно после reload
 // (когда история парсится из SDK-транскрипта по отдельным assistant-блокам).
@@ -544,6 +552,11 @@ export function ChatTab({ project, onProjectsReload }: Props) {
   // Stable ref so the activity-stream loop always sees the current streaming flag
   const streamingRef = useRef(false)
 
+  // Прикреплённые файлы (до отправки)
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
   // Keep streamingRef in sync with the streaming state
   useEffect(() => {
     streamingRef.current = streaming
@@ -581,6 +594,7 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     setQueueLen(0)
     busActiveRef.current = false
     setContextTokens(null)
+    setAttachments([])
     api.sessionHistory(projectId)
       .then(res => { if (!cancelled) { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens || null) } })
       .catch(() => { if (!cancelled) setMessages([]) })
@@ -596,7 +610,7 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     const now = Date.now()
 
     if (evt.kind === 'run_start') {
-      const prefix = evt.source === 'card' ? '🗂 карточка: ' : ''
+      const prefix = evt.source === 'card' ? '🗂 карточка: ' : evt.source === 'tg' ? '📱 TG: ' : ''
       const userMsg = makeUserMsg(prefix + evt.prompt)
       const assistantMsg = makeAssistantMsg()
       busActiveRef.current = true
@@ -634,30 +648,62 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     setQueueLen(0)
     busActiveRef.current = false
     setContextTokens(null)
+    setAttachments([])
+    setCtxRefreshKey(k => k + 1)
     api.sessionHistory(projectId)
       .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens || null) })
       .catch(() => setMessages([]))
   }, [projectId])
 
+  async function uploadFile(file: File): Promise<string> {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch(`/api/projects/${projectId}/upload`, {
+      method: 'POST', credentials: 'include', body: form,
+    })
+    if (!res.ok) throw new Error(await res.text().catch(() => res.statusText))
+    const data = await res.json()
+    return data.path as string
+  }
+
+  function addFiles(files: FileList | File[]) {
+    Array.from(files).forEach(file => {
+      const id = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      setAttachments(prev => [...prev, { id, name: file.name, uploading: true }])
+      uploadFile(file)
+        .then(path => setAttachments(prev => prev.map(a => a.id === id ? { ...a, uploading: false, path } : a)))
+        .catch(e => setAttachments(prev => prev.map(a => a.id === id ? { ...a, uploading: false, error: String(e?.message || e) } : a)))
+    })
+  }
+
   const sendMessage = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim()
-    if (!text) return
+    // файлы доступны только в прямых вызовах (не из очереди — там текст уже содержит пути)
+    const readyFiles = overrideText === undefined ? attachments.filter(a => a.path) : []
+    const effectiveText = text || (readyFiles.length > 0 ? 'Посмотри прикреплённые файлы.' : '')
+    if (!effectiveText) return
 
     // Стрим активен И это пользовательский вызов (не дозапуск из очереди) → встаём в очередь
     if (streaming && overrideText === undefined) {
-      queueRef.current.push(text)
+      const filePaths = readyFiles.map(a => `прикреплён файл: ${a.path}`)
+      const fullText = filePaths.length > 0 ? `${effectiveText}\n\n${filePaths.join('\n')}` : effectiveText
+      queueRef.current.push(fullText)
       setQueueLen(queueRef.current.length)
       setInput('')
+      setAttachments([])
       return
     }
 
-    if (overrideText === undefined) setInput('')
+    const filePaths = readyFiles.map(a => `прикреплён файл: ${a.path}`)
+    const fullPrompt = filePaths.length > 0 ? `${effectiveText}\n\n${filePaths.join('\n')}` : effectiveText
+
+    if (overrideText === undefined) { setInput(''); setAttachments([]) }
     setError('')
     setStreaming(true)
     const startTs = Date.now()
     setRun({ startedAt: startTs, lastEventAt: startTs, currentTool: null, source: 'chat' })
 
-    const userMsg = makeUserMsg(text)
+    const userMsg = makeUserMsg(fullPrompt)
     const assistantMsg = makeAssistantMsg()
 
     setMessages(prev => [...prev, userMsg, assistantMsg])
@@ -670,7 +716,7 @@ export function ChatTab({ project, onProjectsReload }: Props) {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: text }),
+        body: JSON.stringify({ prompt: fullPrompt }),
         signal: ac.signal,
       })
 
@@ -756,6 +802,14 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
+    }
+  }
+
+  function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(e.clipboardData.files)
+    if (files.length > 0) {
+      e.preventDefault()
+      addFiles(files)
     }
   }
 
@@ -876,7 +930,29 @@ export function ChatTab({ project, onProjectsReload }: Props) {
         <div className="error-state chat-error-banner">⚠ {error}</div>
       )}
 
-      <div className="chat-input-area">
+      <div
+        className={`chat-input-area${dragOver ? ' chat-input-drag-over' : ''}`}
+        onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+        onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false) }}
+        onDrop={e => { e.preventDefault(); setDragOver(false); addFiles(Array.from(e.dataTransfer.files)) }}
+      >
+        <input
+          ref={fileInputRef} type="file" multiple hidden
+          onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }}
+        />
+        {attachments.length > 0 && (
+          <div className="chat-attachments">
+            {attachments.map(a => (
+              <div key={a.id} className={`chat-att-chip${a.error ? ' att-error' : a.uploading ? ' att-uploading' : ''}`}>
+                <span className="att-name" title={a.name}>{a.name}</span>
+                {a.uploading && <span className="att-spinner">↻</span>}
+                {a.error && <span className="att-err-icon" title={a.error}>⚠</span>}
+                <button className="att-remove" onClick={() => setAttachments(prev => prev.filter(x => x.id !== a.id))} title="Убрать">✕</button>
+              </div>
+            ))}
+          </div>
+        )}
+        {dragOver && <div className="chat-drop-hint">📎 Отпустите файлы здесь</div>}
         {run && (() => {
           const elapsedSec = (tick - run.startedAt) / 1000
           const silenceSec = (tick - run.lastEventAt) / 1000
@@ -918,6 +994,11 @@ export function ChatTab({ project, onProjectsReload }: Props) {
           )
         })()}
         <div className="chat-input-row">
+          <button
+            className="chat-attach-btn"
+            onClick={() => fileInputRef.current?.click()}
+            title="Прикрепить файл (или перетащи / Ctrl+V)"
+          >📎</button>
           <textarea
             ref={textareaRef}
             className="chat-textarea"
@@ -927,11 +1008,12 @@ export function ChatTab({ project, onProjectsReload }: Props) {
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             rows={3}
           />
           <button
             className="btn-primary chat-send-btn"
-            disabled={!input.trim()}
+            disabled={!input.trim() && attachments.filter(a => a.path).length === 0}
             onClick={() => sendMessage()}
             title={streaming ? 'Поставить в очередь' : 'Отправить'}
           >

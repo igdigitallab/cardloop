@@ -460,6 +460,73 @@ body {
   overflow: hidden;
 }
 
+/* Split-view: два free-чата рядом */
+.project-tab-slot.has-split {
+  flex-direction: row;
+}
+.split-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  height: 100%;
+}
+.split-pane-full {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.free-split-divider {
+  flex: 0 0 5px;
+  background: var(--border);
+  cursor: col-resize;
+  transition: background 0.15s;
+}
+.free-split-divider:hover, .free-split-divider:active {
+  background: var(--accent);
+}
+.free-chat-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+}
+.free-chat-name {
+  font-size: 12px;
+  color: var(--text2);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.split-create-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.split-create-btn:hover { background: var(--bg3); color: var(--text); }
+.split-close-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.split-close-btn:hover { background: rgba(245,97,74,0.1); color: var(--red); border-color: var(--red); }
+
 /* ── Project Tab Bar (открытые проекты как вкладки) ─────────── */
 .project-tabbar {
   display: flex;
@@ -1437,6 +1504,17 @@ body {
 
 .card-running-icon { opacity: 0.6; font-size: 11px; }
 
+/* Drag-and-drop */
+.board-card:not(.board-card-running) { cursor: grab; }
+.board-card.board-card-dragging { opacity: 0.35; cursor: grabbing; }
+.board-col-body.board-col-drag-over {
+  background: rgba(99,102,241,0.07);
+  border-radius: var(--radius-sm);
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+  min-height: 48px;
+}
+
 .board-card-actions .act-result:hover:not(:disabled) {
   background: rgba(100, 150, 255, 0.18); color: var(--accent);
 }
@@ -1996,6 +2074,46 @@ body {
 .chat-error-banner {
   margin: 0 16px 8px;
 }
+
+/* ── Chat file attachments ───────────────────────────────── */
+.chat-input-area { position: relative; transition: background var(--transition); }
+.chat-input-drag-over {
+  background: rgba(99,102,241,0.06);
+  border-top-color: var(--accent);
+}
+.chat-drop-hint {
+  position: absolute; inset: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; color: var(--accent); pointer-events: none;
+  background: rgba(99,102,241,0.08);
+  border: 2px dashed var(--accent); border-radius: var(--radius);
+}
+.chat-attachments {
+  display: flex; flex-wrap: wrap; gap: 5px; padding: 0 0 2px;
+}
+.chat-att-chip {
+  display: flex; align-items: center; gap: 4px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 11px; padding: 3px 6px; max-width: 180px;
+}
+.chat-att-chip.att-uploading { opacity: 0.65; border-style: dashed; }
+.chat-att-chip.att-error { border-color: var(--red); }
+.att-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; color: var(--text2); }
+.att-spinner { animation: spin 1.2s linear infinite; display: inline-block; font-size: 11px; color: var(--text3); }
+.att-err-icon { color: var(--red); font-size: 11px; }
+.att-remove {
+  background: none; border: none; color: var(--text3); cursor: pointer;
+  font-size: 10px; padding: 0; line-height: 1; flex: 0 0 auto;
+}
+.att-remove:hover { color: var(--red); }
+.chat-attach-btn {
+  flex: 0 0 auto;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text2); cursor: pointer; font-size: 15px;
+  padding: 0 10px; align-self: stretch;
+  transition: background var(--transition), color var(--transition);
+}
+.chat-attach-btn:hover { background: var(--border2); color: var(--text); }
 
 /* ── Files Tab ─────────────────────────────────────────────── */
 .files-layout {

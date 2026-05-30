@@ -14,6 +14,8 @@ const LS_UNREAD = 'cops.unreadBySession'
 const LS_SIDEBAR_COLLAPSED = 'cops.sidebarCollapsed'
 const LS_OPEN = 'cops.openProjects'
 const LS_ACTIVE = 'cops.activeProject'
+const LS_SPLIT_PAIRS = 'cops.splitPairs'
+const LS_SPLIT_WIDTH = 'cops.splitWidth'
 const RECENT_MAX = 50
 
 function readRecent(): string[] {
@@ -76,6 +78,23 @@ function readString(key: string): string | null {
   try { return localStorage.getItem(key) } catch { return null }
 }
 
+function readSplitPairs(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(LS_SPLIT_PAIRS)
+    if (!raw) return {}
+    const obj = JSON.parse(raw)
+    return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : {}
+  } catch { return {} }
+}
+
+function readSplitWidth(): number {
+  try {
+    const v = localStorage.getItem(LS_SPLIT_WIDTH)
+    if (v) { const n = parseFloat(v); if (!isNaN(n)) return Math.max(20, Math.min(80, n)) }
+  } catch {}
+  return 50
+}
+
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>('loading')
   const [projects, setProjects] = useState<Project[]>([])
@@ -85,6 +104,9 @@ export default function App() {
   const [recentIds, setRecentIds] = useState<string[]>(() => readRecent())
   const [unreadBySession, setUnreadBySession] = useState<Record<string, number>>(() => readUnread())
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => readBool(LS_SIDEBAR_COLLAPSED, false))
+  // Split-view: leftId → rightId (только для free-чатов)
+  const [splitPairs, setSplitPairs] = useState<Record<string, string>>(() => readSplitPairs())
+  const [splitWidth, setSplitWidth] = useState<number>(() => readSplitWidth())
   // Текущий активный проект — для SSE-обработчика, без перепересоздания подписки на каждом select
   const activeIdRef = useRef<string | null>(null)
   const projectsRef = useRef<Project[]>([])
@@ -125,7 +147,7 @@ export default function App() {
   useEffect(() => { activeIdRef.current = activeId }, [activeId])
   useEffect(() => { projectsRef.current = projects }, [projects])
 
-  // Persist openIds + activeId
+  // Persist openIds + activeId + split state
   useEffect(() => {
     try { localStorage.setItem(LS_OPEN, JSON.stringify(openIds)) } catch {}
   }, [openIds])
@@ -135,8 +157,14 @@ export default function App() {
       else localStorage.removeItem(LS_ACTIVE)
     } catch {}
   }, [activeId])
+  useEffect(() => {
+    try { localStorage.setItem(LS_SPLIT_PAIRS, JSON.stringify(splitPairs)) } catch {}
+  }, [splitPairs])
+  useEffect(() => {
+    try { localStorage.setItem(LS_SPLIT_WIDTH, String(splitWidth)) } catch {}
+  }, [splitWidth])
 
-  // Чистим openIds от мёртвых проектов после загрузки списка
+  // Чистим openIds и splitPairs от мёртвых проектов после загрузки списка
   useEffect(() => {
     if (!projects.length) return
     const valid = new Set(projects.map(p => p.id))
@@ -145,6 +173,15 @@ export default function App() {
       return next.length === prev.length ? prev : next
     })
     setActiveId(prev => (prev && valid.has(prev)) ? prev : null)
+    setSplitPairs(prev => {
+      const next: Record<string, string> = {}
+      let changed = false
+      for (const [k, v] of Object.entries(prev)) {
+        if (valid.has(k) && valid.has(v)) next[k] = v
+        else changed = true
+      }
+      return changed ? next : prev
+    })
   }, [projects])
 
   // Глобальный SSE-стрим активности → unread-индикаторы + live-refresh git-статуса
@@ -233,6 +270,7 @@ export default function App() {
 
   // Закрыть вкладку — убрать из openIds; если была активной — соседняя становится активной
   const handleTabClose = useCallback((id: string) => {
+    setSplitPairs(prev => { const { [id]: _, ...rest } = prev; return rest })
     setOpenIds(prev => {
       const idx = prev.indexOf(id)
       if (idx === -1) return prev
@@ -247,6 +285,43 @@ export default function App() {
       })
       return next
     })
+  }, [])
+
+  // Split-view: создать второй free-чат рядом с активным
+  const handleSplitCreate = useCallback(async (leftId: string) => {
+    try {
+      const res = await api.freeCreate()
+      await loadProjects()
+      // партнёр НЕ добавляется в openIds — управляется через splitPairs
+      setSplitPairs(prev => ({ ...prev, [leftId]: res.id }))
+    } catch (e) {
+      alert(`Не удалось открыть split: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }, [loadProjects])
+
+  const handleSplitClose = useCallback((leftId: string) => {
+    setSplitPairs(prev => { const { [leftId]: _, ...rest } = prev; return rest })
+  }, [])
+
+  const onSplitDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const parent = (e.currentTarget as HTMLElement).parentElement
+    if (!parent) return
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    function onMove(ev: MouseEvent) {
+      const rect = parent!.getBoundingClientRect()
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100
+      setSplitWidth(Math.max(20, Math.min(80, pct)))
+    }
+    function onUp() {
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
   }, [])
 
   // Создать новый свободный чат (cwd=$HOME) и сразу открыть его как вкладку
@@ -385,15 +460,37 @@ export default function App() {
         {hasOpen ? (
           // Рендерим ВСЕ открытые ProjectView, скрываем неактивные через display:none —
           // это сохраняет состояние чата/SSE при переключении между вкладками.
-          openProjects.map(p => (
-            <div
-              key={p.id}
-              className="project-tab-slot"
-              style={{ display: p.id === activeId ? 'flex' : 'none' }}
-            >
-              <ProjectView project={p} onProjectsReload={loadProjects} />
-            </div>
-          ))
+          openProjects.map(p => {
+            const splitId = splitPairs[p.id]
+            const splitProject = splitId ? projects.find(x => x.id === splitId) : undefined
+            return (
+              <div
+                key={p.id}
+                className={`project-tab-slot${splitProject ? ' has-split' : ''}`}
+                style={{ display: p.id === activeId ? 'flex' : 'none' }}
+              >
+                <div className={splitProject ? 'split-pane' : 'split-pane-full'} style={splitProject ? { flex: `0 0 ${splitWidth}%`, maxWidth: `${splitWidth}%` } : {}}>
+                  <ProjectView
+                    project={p}
+                    onProjectsReload={loadProjects}
+                    onSplitCreate={p.is_free && !splitId ? () => handleSplitCreate(p.id) : undefined}
+                  />
+                </div>
+                {splitProject && (
+                  <>
+                    <div className="free-split-divider" onMouseDown={onSplitDividerMouseDown} />
+                    <div className="split-pane" style={{ flex: 1 }}>
+                      <ProjectView
+                        project={splitProject}
+                        onProjectsReload={loadProjects}
+                        onSplitClose={() => handleSplitClose(p.id)}
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+            )
+          })
         ) : (
           <div className="main-content">
             <div className="welcome">

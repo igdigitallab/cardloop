@@ -82,7 +82,7 @@ function TabItem({
       {!editing && unread > 0 && !isActive && (
         <span className="ptab-unread" title={`${unread} новых`}>{unread > 99 ? '99+' : unread}</span>
       )}
-      {!editing && (
+      {!editing && isActive && (
         <button
           className="ptab-close"
           onClick={(e) => { e.stopPropagation(); onClose() }}

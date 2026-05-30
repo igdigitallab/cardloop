@@ -1212,6 +1212,52 @@ async def api_project_set_model(req: web.Request):
 # Дефолтное сообщение: "wip: YYYY-MM-DD HH:MM" (если поле message пустое).
 # Возвращает {ok, committed, pushed, log}; на ошибке status 500 + {error, log}.
 
+async def api_project_upload(req: web.Request):
+    """POST /api/projects/{id}/upload — multipart файл → data/inbox/ → {path, name, size}."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    DATA: Path = ctx["DATA"]
+    inbox = DATA / "inbox"
+    inbox.mkdir(exist_ok=True)
+
+    try:
+        reader = await req.multipart()
+    except Exception:
+        return web.json_response({"error": "ожидается multipart/form-data"}, status=400)
+
+    field = await reader.next()
+    if field is None:
+        return web.json_response({"error": "нет поля file"}, status=400)
+
+    filename = field.filename or "upload"
+    safe_name = re.sub(r'[^\w.\-]', '_', filename)
+    ts = int(time.time() * 1000)
+    dest = inbox / f"web_{ts}_{safe_name}"
+
+    MAX_UPLOAD = 20 * 1024 * 1024
+    size = 0
+    try:
+        with open(dest, "wb") as fh:
+            while True:
+                chunk = await field.read_chunk(65536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_UPLOAD:
+                    fh.close()
+                    dest.unlink(missing_ok=True)
+                    return web.json_response({"error": "файл слишком большой (макс 20 МБ)"}, status=413)
+                fh.write(chunk)
+    except Exception as e:
+        dest.unlink(missing_ok=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+    return web.json_response({"path": str(dest), "name": filename, "size": size})
+
+
 async def api_project_git_sync(req: web.Request):
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -2035,7 +2081,7 @@ async def start(ptb_app, ctx: dict) -> None:
     """Поднимает aiohttp-сервер кокпита в том же процессе/loop, что и бот. НЕ блокирует."""
     port = ctx["port"]
     try:
-        app = web.Application(middlewares=[auth_middleware], client_max_size=4 * 1024 * 1024)
+        app = web.Application(middlewares=[auth_middleware], client_max_size=20 * 1024 * 1024)
         app["ctx"] = ctx
 
         # F1: сохраняем ссылку на PTB-приложение для пинга в TG из _run_card
@@ -2073,6 +2119,7 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/activity-stream", api_activity_stream_all)
         # Git sync — commit (если dirty) + push одной кнопкой
         app.router.add_post("/api/projects/{id}/git/sync", api_project_git_sync)
+        app.router.add_post("/api/projects/{id}/upload", api_project_upload)
         # Смена модели проекта (применяется со следующего запроса)
         app.router.add_post("/api/projects/{id}/model", api_project_set_model)
         # Лимиты подписки (5ч + недельные) — для значка в полосе вкладок

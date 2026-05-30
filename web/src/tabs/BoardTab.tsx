@@ -44,6 +44,10 @@ export function BoardTab({ projectId }: Props) {
   // Инлайн-редактирование карточки: двойной клик → textarea
   const [editingCard, setEditingCard] = useState<{ id: string; text: string } | null>(null)
 
+  // Drag-and-drop
+  const [dragCardId, setDragCardId] = useState<string | null>(null)
+  const [dragOverCol, setDragOverCol] = useState<string | null>(null)
+
   // F1: модалка результата карточки
   const [runResult, setRunResult] = useState<RunResult | null>(null)
   const [runResultLoading, setRunResultLoading] = useState(false)
@@ -244,7 +248,27 @@ export function BoardTab({ projectId }: Props) {
                 )}
               </div>
 
-              <div className="board-col-body">
+              <div
+                className={`board-col-body${dragOverCol === key && dragCardId ? ' board-col-drag-over' : ''}`}
+                onDragOver={(e) => {
+                  if (!dragCardId) return
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                  if (dragOverCol !== key) setDragOverCol(key)
+                }}
+                onDragLeave={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOverCol(null)
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  if (dragCardId) {
+                    const fromCol = cols.find(c => c.cards.some(card => card.id === dragCardId))
+                    if (fromCol?.key !== key) move(dragCardId, key)
+                  }
+                  setDragCardId(null)
+                  setDragOverCol(null)
+                }}
+              >
                 {key === 'backlog' && (
                   <div className="board-add">
                     <textarea
@@ -263,8 +287,15 @@ export function BoardTab({ projectId }: Props) {
 
                 {col.cards.map(card => (
                   <div
-                    className={`board-card${isInProgress ? ' board-card-running' : ''}`}
+                    className={`board-card${isInProgress ? ' board-card-running' : ''}${dragCardId === card.id ? ' board-card-dragging' : ''}`}
                     key={card.id}
+                    draggable={!isInProgress}
+                    onDragStart={(e) => {
+                      setDragCardId(card.id)
+                      e.dataTransfer.effectAllowed = 'move'
+                      e.dataTransfer.setData('text/plain', card.id)
+                    }}
+                    onDragEnd={() => { setDragCardId(null); setDragOverCol(null) }}
                   >
                     {editingCard?.id === card.id ? (
                       <textarea
