@@ -6,6 +6,7 @@ import { ClaudeMdTab } from '../tabs/ClaudeMdTab'
 import { SpecsTab } from '../tabs/SpecsTab'
 import { ActivityTab } from '../tabs/ActivityTab'
 import { BoardTab } from '../tabs/BoardTab'
+import { ChatTab } from '../tabs/ChatTab'
 
 interface Tab {
   id: TabId
@@ -20,7 +21,7 @@ const TABS: Tab[] = [
   { id: 'specs',      label: 'Specs' },
   { id: 'activity',   label: 'Активность' },
   { id: 'board',      label: 'Доска' },
-  { id: 'chat',       label: 'Чат',   disabled: true },
+  { id: 'chat',       label: 'Чат' },
 ]
 
 interface Props {
@@ -92,13 +93,14 @@ export function ProjectView({ project }: Props) {
         {activeTab === 'specs'     && <SpecsTab projectId={project.id} />}
         {activeTab === 'activity'  && <ActivityTab projectId={project.id} />}
         {activeTab === 'board'     && <BoardTab projectId={project.id} />}
-        {activeTab === 'chat'      && <DisabledTab name="Чат" icon="💬" />}
+        {activeTab === 'chat'      && <ChatTab projectId={project.id} />}
       </div>
     </div>
   )
 }
 
-function DisabledTab({ name, icon }: { name: string; icon: string }) {
+// DisabledTab reserved for future tabs that are not yet implemented
+export function DisabledTab({ name, icon }: { name: string; icon: string }) {
   return (
     <div className="tab-placeholder">
       <div className="tab-placeholder-icon">{icon}</div>

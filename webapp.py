@@ -9,6 +9,7 @@ webapp.py — браузерный кокпит Claude-Ops-Bot.
 import asyncio
 import glob
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -725,6 +726,144 @@ async def api_card_run(req: web.Request):
     return web.json_response({"content": "", "exists": False})
 
 
+# ─────────────────────────── C1: SSE-чат ───────────────────────────
+#
+# POST /api/projects/{id}/chat  body: {"prompt": str}
+# Ответ: text/event-stream с событиями:
+#   data: {"type":"text","text":"..."}
+#   data: {"type":"tool","name":"...","input":"..."}
+#   data: {"type":"result"}
+#   data: {"type":"error","error":"..."}
+#   data: {"type":"done"}
+#
+# Замок ОБЩИЙ с TG и F1-карточками (session_key = project["tg_thread"]).
+# Disconnect-устойчивость: если клиент закрыл вкладку (ConnectionResetError при write),
+# генератор run_engine продолжает работу до конца, session_id сохраняется, замок снимается.
+
+async def api_project_chat(req: web.Request):
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+
+    # Проверяем run_engine заранее (деградация: старый запуск без F1/C1)
+    run_engine = ctx.get("run_engine")
+    if run_engine is None:
+        resp = web.StreamResponse(
+            status=200,
+            headers={"Content-Type": "text/event-stream",
+                     "Cache-Control": "no-cache",
+                     "X-Accel-Buffering": "no"},
+        )
+        await resp.prepare(req)
+        payload = json.dumps({"type": "error", "error": "run_engine недоступен"}, ensure_ascii=False)
+        await resp.write(f"data: {payload}\n\n".encode())
+        return resp
+
+    # Парсим тело запроса
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        return web.json_response({"error": "empty prompt"}, status=400)
+
+    # Резолвим проект
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    cwd = project["cwd"]
+    name = project["name"]
+    model = project.get("model", ctx.get("DEFAULT_MODEL", "sonnet"))
+    session_key = project["tg_thread"]  # ОБЩИЙ ключ с TG и F1
+
+    # Проверка замка (СИНХРОННО — до первого await, против гонки)
+    if ctx["running"].get(session_key) is not None:
+        resp = web.StreamResponse(
+            status=200,
+            headers={"Content-Type": "text/event-stream",
+                     "Cache-Control": "no-cache",
+                     "X-Accel-Buffering": "no"},
+        )
+        await resp.prepare(req)
+        payload = json.dumps(
+            {"type": "error", "error": "проект занят (TG/карточка/чат)"},
+            ensure_ascii=False,
+        )
+        await resp.write(f"data: {payload}\n\n".encode())
+        return resp
+
+    # Резервируем слот СИНХРОННО до первого await
+    ctx["running"][session_key] = True
+
+    resp = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    await resp.prepare(req)
+
+    client_gone = False
+
+    async def _send(payload_dict: dict):
+        nonlocal client_gone
+        if client_gone:
+            return
+        try:
+            line = f"data: {json.dumps(payload_dict, ensure_ascii=False)}\n\n"
+            await resp.write(line.encode())
+        except (ConnectionResetError, ConnectionAbortedError, Exception) as exc:
+            # Клиент закрыл вкладку — помечаем, но НЕ прерываем генератор
+            # (задача доигрывает в фоне, session_id сохранится)
+            client_gone = True
+            print(f"[api_project_chat] клиент отключился ({type(exc).__name__}), задача продолжается в фоне")
+
+    try:
+        resume_sid = ctx["sessions"].get(session_key)
+        async for event in run_engine(
+            project_name=name,
+            cwd=cwd,
+            prompt=prompt,
+            session_key=session_key,
+            model=model,
+            resume_session_id=resume_sid,
+        ):
+            etype = event.get("type")
+            if etype == "text":
+                await _send({"type": "text", "text": event["text"]})
+            elif etype == "tool":
+                # Кратко: только имя и первый значимый параметр
+                inp = event.get("input") or {}
+                inp_short = next(iter(inp.values()), "") if inp else ""
+                if isinstance(inp_short, str) and len(inp_short) > 120:
+                    inp_short = inp_short[:120] + "…"
+                await _send({"type": "tool", "name": event["name"], "input": str(inp_short)})
+            elif etype == "result":
+                sid = event.get("session_id")
+                if sid:
+                    ctx["sessions"][session_key] = sid
+                    ctx["save_sessions"]()
+                await _send({"type": "result"})
+            elif etype == "error":
+                exc = event.get("exc")
+                await _send({"type": "error", "error": str(exc) if exc else "unknown error"})
+            elif etype == "rate_limit":
+                # Пробрасываем как информацию (не блокирует)
+                await _send({"type": "rate_limit", "status": event.get("status", "")})
+            # прочие типы — игнорируем
+
+        await _send({"type": "done"})
+
+    finally:
+        # Замок снимается ГАРАНТИРОВАННО (даже если генератор бросил исключение)
+        ctx["running"].pop(session_key, None)
+
+    return resp
+
+
 # ─────────────────────────── статика (SPA) ───────────────────────────
 
 PLACEHOLDER_HTML = (
@@ -792,6 +931,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_delete("/api/projects/{id}/tasks/{card}", api_delete_task)
         # F1: сайдкар результата карточки
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
+        # C1: SSE-чат по проекту
+        app.router.add_post("/api/projects/{id}/chat", api_project_chat)
 
         # Статика — всё остальное (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)

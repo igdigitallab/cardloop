@@ -56,3 +56,62 @@ export interface RunResult {
 }
 
 export type TabId = 'overview' | 'readme' | 'claude-md' | 'specs' | 'activity' | 'chat' | 'board'
+
+// ─── C1: Chat SSE events ───────────────────────────────────────────────────
+
+export interface ChatEventText {
+  type: 'text'
+  text: string
+}
+
+export interface ChatEventTool {
+  type: 'tool'
+  name: string
+  input: string
+}
+
+export interface ChatEventResult {
+  type: 'result'
+}
+
+export interface ChatEventError {
+  type: 'error'
+  error: string
+}
+
+export interface ChatEventDone {
+  type: 'done'
+}
+
+export interface ChatEventRateLimit {
+  type: 'rate_limit'
+  status: string
+}
+
+export type ChatSSEEvent =
+  | ChatEventText
+  | ChatEventTool
+  | ChatEventResult
+  | ChatEventError
+  | ChatEventDone
+  | ChatEventRateLimit
+
+// ─── Chat message (UI state) ───────────────────────────────────────────────
+
+export interface ChatToolCall {
+  name: string
+  input: string
+}
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  /** Accumulated text content */
+  text: string
+  /** Tool calls that happened during this turn */
+  tools: ChatToolCall[]
+  /** True while the SSE stream is still active for this message */
+  streaming: boolean
+  /** Error message if the turn ended with an error */
+  error?: string
+}
