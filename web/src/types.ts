@@ -115,11 +115,16 @@ export interface ChatEventText {
   text: string
 }
 
-export interface ChatEventTool {
-  type: 'tool'
-  name: string
-  input: string
-}
+// Rich tool call — kind discriminates rendering
+export interface RichToolBash   { name: string; kind: 'bash';   cmd: string; desc?: string }
+export interface RichToolEdit   { name: string; kind: 'edit';   file: string; old?: string; new?: string; count?: number; cell_type?: string }
+export interface RichToolWrite  { name: string; kind: 'write';  file: string; preview: string }
+export interface RichToolRead   { name: string; kind: 'read';   file: string }
+export interface RichToolSearch { name: string; kind: 'search'; pattern: string; path?: string }
+export interface RichToolOther  { name: string; kind: 'other';  summary: string }
+export type RichTool = RichToolBash | RichToolEdit | RichToolWrite | RichToolRead | RichToolSearch | RichToolOther
+
+export type ChatEventTool = RichTool & { type: 'tool' }
 
 export interface ChatEventResult {
   type: 'result'
@@ -149,15 +154,12 @@ export type ChatSSEEvent =
 
 // ─── Chat message (UI state) ───────────────────────────────────────────────
 
-export interface ChatToolCall {
-  name: string
-  input: string
-}
+export type ChatToolCall = RichTool
 
 export interface HistoryMessage {
   role: 'user' | 'assistant'
   text: string
-  tools: ChatToolCall[]
+  tools: RichTool[]
 }
 
 export interface ChatMessage {
@@ -190,9 +192,8 @@ export interface ActivityEventText {
 
 export interface ActivityEventTool {
   kind: 'tool'
-  name: string
-  input: string
   run_id: string
+  tool: RichTool
 }
 
 export interface ActivityEventRunEnd {

@@ -57,6 +57,64 @@ def _bus_publish(session_key: str, event: dict) -> None:
             pass  # slow consumer — drop, не блокировать продюсера
 
 
+# ─────────────────────────── tool formatter ───────────────────────────
+
+def _format_tool(name: str, inp: dict) -> dict:
+    """Единый форматтер tool-события: возвращает богатую структуру по типу инструмента.
+    Используется во всех трёх точках: chat SSE, bus publish, session-history."""
+    if not isinstance(inp, dict):
+        inp = {}
+
+    if name == "Bash":
+        cmd = inp.get("command", "")
+        desc = inp.get("description", "")
+        return {"name": name, "kind": "bash", "cmd": cmd, "desc": desc}
+
+    elif name in ("Edit", "MultiEdit", "NotebookEdit"):
+        file_path = inp.get("file_path", "")
+        if name == "Edit":
+            old_str = inp.get("old_string", "")
+            new_str = inp.get("new_string", "")
+            if isinstance(old_str, str) and len(old_str) > 400:
+                old_str = old_str[:400] + "…"
+            if isinstance(new_str, str) and len(new_str) > 400:
+                new_str = new_str[:400] + "…"
+            return {"name": name, "kind": "edit", "file": file_path, "old": old_str, "new": new_str}
+        elif name == "MultiEdit":
+            edits = inp.get("edits", [])
+            count = len(edits) if isinstance(edits, list) else 0
+            return {"name": name, "kind": "edit", "file": file_path, "count": count}
+        else:  # NotebookEdit
+            cell_type = inp.get("cell_type", "")
+            return {"name": name, "kind": "edit", "file": file_path, "cell_type": cell_type}
+
+    elif name == "Write":
+        file_path = inp.get("file_path", "")
+        content = inp.get("content", "")
+        if isinstance(content, str) and len(content) > 600:
+            preview = content[:600] + "…"
+        else:
+            preview = content if isinstance(content, str) else ""
+        return {"name": name, "kind": "write", "file": file_path, "preview": preview}
+
+    elif name == "Read":
+        file_path = inp.get("file_path", "")
+        return {"name": name, "kind": "read", "file": file_path}
+
+    elif name in ("Glob", "Grep"):
+        pattern = inp.get("pattern", "")
+        path = inp.get("path", "")
+        return {"name": name, "kind": "search", "pattern": pattern, "path": path}
+
+    else:
+        # прочее: берём первое значение как summary
+        first = next(iter(inp.values()), "") if inp else ""
+        summary = str(first)
+        if len(summary) > 200:
+            summary = summary[:200] + "…"
+        return {"name": name, "kind": "other", "summary": summary}
+
+
 # ─────────────────────────── auth ───────────────────────────
 
 def _make_token(password: str) -> str:
@@ -586,14 +644,11 @@ async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_ke
                     _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": card_id})
                 elif etype == "tool":
                     inp = event.get("input") or {}
-                    inp_short = next(iter(inp.values()), "") if isinstance(inp, dict) else ""
-                    if isinstance(inp_short, str) and len(inp_short) > 120:
-                        inp_short = inp_short[:120] + "…"
+                    tool_data = _format_tool(event.get("name", "?"), inp if isinstance(inp, dict) else {})
                     _bus_publish(session_key, {
                         "kind": "tool",
-                        "name": event.get("name", "?"),
-                        "input": str(inp_short),
                         "run_id": card_id,
+                        "tool": tool_data,
                     })
                 elif etype == "result":
                     if event.get("session_id"):
@@ -1186,10 +1241,8 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
                             text_parts.append(b["text"])
                         elif b.get("type") == "tool_use":
                             inp = b.get("input") or {}
-                            first = next(iter(inp.values()), "") if isinstance(inp, dict) else ""
-                            if isinstance(first, str) and len(first) > 120:
-                                first = first[:120] + "…"
-                            tools.append({"name": b.get("name", "?"), "input": str(first)})
+                            tool_name = b.get("name", "?")
+                            tools.append(_format_tool(tool_name, inp if isinstance(inp, dict) else {}))
                     if text_parts or tools:
                         msgs.append({"role": "assistant", "text": "\n".join(text_parts), "tools": tools})
     except Exception:
@@ -1328,12 +1381,9 @@ async def api_project_chat(req: web.Request):
             if etype == "text":
                 await _send({"type": "text", "text": event["text"]})
             elif etype == "tool":
-                # Кратко: только имя и первый значимый параметр
                 inp = event.get("input") or {}
-                inp_short = next(iter(inp.values()), "") if inp else ""
-                if isinstance(inp_short, str) and len(inp_short) > 120:
-                    inp_short = inp_short[:120] + "…"
-                await _send({"type": "tool", "name": event["name"], "input": str(inp_short)})
+                tool_data = _format_tool(event["name"], inp if isinstance(inp, dict) else {})
+                await _send({"type": "tool", **tool_data})
             elif etype == "result":
                 sid = event.get("session_id")
                 if sid:

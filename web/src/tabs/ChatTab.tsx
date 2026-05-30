@@ -8,6 +8,7 @@ import {
   ChatSSEEvent,
   ChatToolCall,
   HistoryMessage,
+  RichTool,
   SessionContext,
   SessionInfo,
 } from '../types'
@@ -91,6 +92,108 @@ function relTime(iso: string): string {
   } catch {
     return ''
   }
+}
+
+// ─── ToolBlock: rich terminal-style rendering of a single tool call ───────
+
+function ToolBlock({ tool }: { tool: RichTool }) {
+  const [expanded, setExpanded] = useState(false)
+
+  if (tool.kind === 'bash') {
+    return (
+      <div className="chat-tool-row chat-tool-bash">
+        <span className="chat-tool-icon">$</span>
+        <div className="chat-tool-bash-body">
+          <pre className="chat-tool-cmd">{tool.cmd}</pre>
+          {tool.desc && <span className="chat-tool-desc">{tool.desc}</span>}
+        </div>
+      </div>
+    )
+  }
+
+  if (tool.kind === 'edit') {
+    const hasOldNew = 'old' in tool && 'new' in tool
+    const count = 'count' in tool ? tool.count : undefined
+    return (
+      <div className="chat-tool-row chat-tool-edit">
+        <span className="chat-tool-icon">✏</span>
+        <div className="chat-tool-edit-body">
+          <span className="chat-tool-file">{tool.file}</span>
+          {count !== undefined && (
+            <span className="chat-tool-desc">{count} правок</span>
+          )}
+          {'cell_type' in tool && tool.cell_type && (
+            <span className="chat-tool-desc">cell: {tool.cell_type}</span>
+          )}
+          {hasOldNew && (
+            <button
+              className="chat-tool-expand-btn"
+              onClick={() => setExpanded(e => !e)}
+            >{expanded ? '▲ скрыть' : '▼ diff'}</button>
+          )}
+          {hasOldNew && expanded && (
+            <div className="chat-tool-diff">
+              {tool.old && (
+                <pre className="chat-tool-diff-old">- {tool.old}</pre>
+              )}
+              {tool.new && (
+                <pre className="chat-tool-diff-new">+ {tool.new}</pre>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  if (tool.kind === 'write') {
+    return (
+      <div className="chat-tool-row chat-tool-write">
+        <span className="chat-tool-icon">📝</span>
+        <div className="chat-tool-write-body">
+          <span className="chat-tool-file">{tool.file}</span>
+          {tool.preview && (
+            <button
+              className="chat-tool-expand-btn"
+              onClick={() => setExpanded(e => !e)}
+            >{expanded ? '▲ скрыть' : '▼ содержимое'}</button>
+          )}
+          {expanded && tool.preview && (
+            <pre className="chat-tool-preview">{tool.preview}</pre>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  if (tool.kind === 'read') {
+    return (
+      <div className="chat-tool-row chat-tool-read">
+        <span className="chat-tool-icon">📖</span>
+        <span className="chat-tool-file">{tool.file}</span>
+      </div>
+    )
+  }
+
+  if (tool.kind === 'search') {
+    return (
+      <div className="chat-tool-row chat-tool-search">
+        <span className="chat-tool-icon">🔍</span>
+        <span className="chat-tool-name">{tool.name}</span>
+        <span className="chat-tool-pattern">{tool.pattern}</span>
+        {tool.path && <span className="chat-tool-desc">{tool.path}</span>}
+      </div>
+    )
+  }
+
+  // other / fallback
+  return (
+    <div className="chat-tool-row chat-tool-other">
+      <span className="chat-tool-icon">⚙</span>
+      <span className="chat-tool-name">{tool.name}</span>
+      {tool.summary && <span className="chat-tool-input">{tool.summary}</span>}
+    </div>
+  )
 }
 
 // ─── Session Selector ─────────────────────────────────────────────────────
@@ -407,7 +510,7 @@ export function ChatTab({ projectId }: Props) {
               } else if (evt.kind === 'tool') {
                 const aid = busAssistantIdRef.current
                 if (!aid) return
-                const tool: ChatToolCall = { name: evt.name, input: evt.input }
+                const tool: ChatToolCall = evt.tool
                 setMessages(prev => {
                   const msgs = [...prev]
                   const idx = msgs.findIndex(m => m.id === aid)
@@ -509,7 +612,9 @@ export function ChatTab({ projectId }: Props) {
                 return [...msgs.slice(0, -1), { ...last, text: last.text + evt.text }]
 
               case 'tool': {
-                const tool: ChatToolCall = { name: evt.name, input: evt.input }
+                // evt is ChatEventTool which extends RichTool; strip 'type'
+                const { type: _t, ...toolFields } = evt as any
+                const tool: ChatToolCall = toolFields
                 return [...msgs.slice(0, -1), { ...last, tools: [...last.tools, tool] }]
               }
 
@@ -608,11 +713,7 @@ export function ChatTab({ projectId }: Props) {
             {msg.tools.length > 0 && (
               <div className="chat-tools">
                 {msg.tools.map((t, i) => (
-                  <div key={i} className="chat-tool-row">
-                    <span className="chat-tool-icon">⚙</span>
-                    <span className="chat-tool-name">{t.name}</span>
-                    {t.input && <span className="chat-tool-input">{t.input}</span>}
-                  </div>
+                  <ToolBlock key={i} tool={t} />
                 ))}
               </div>
             )}
