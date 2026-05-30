@@ -8,10 +8,12 @@ interface Props {
   unreadBySession: Record<string, number>
   onActivate: (id: string) => void
   onClose: (id: string) => void
-  /** Переименование (поддерживается только для is_free вкладок) */
   onRename: (id: string, label: string) => void
-  /** Создать новый свободный чат (кнопка «+» в полосе вкладок) */
   onNewFree: () => void
+  globalFilesOpen: boolean
+  globalFilesActive: boolean
+  onOpenGlobalFiles: () => void
+  onCloseGlobalFiles: () => void
 }
 
 function TabItem({
@@ -35,7 +37,6 @@ function TabItem({
     }
   }, [editing])
 
-  // Sync draft когда родительский label меняется (например, после внешнего rename)
   useEffect(() => { setDraft(project.name) }, [project.name])
 
   function commit() {
@@ -58,7 +59,6 @@ function TabItem({
       className={`ptab ${isActive ? 'active' : ''} ${project.is_free ? 'ptab-free' : ''}`}
       onClick={() => !editing && onActivate()}
       onDoubleClick={() => {
-        // Переименовывать можно только free-чаты (у обычных имя = basename cwd)
         if (project.is_free) setEditing(true)
       }}
       title={editing ? '' : (project.is_free ? `${project.cwd} (двойной клик — переименовать)` : project.cwd)}
@@ -95,7 +95,10 @@ function TabItem({
   )
 }
 
-export function ProjectTabBar({ projects, activeId, unreadBySession, onActivate, onClose, onRename, onNewFree }: Props) {
+export function ProjectTabBar({
+  projects, activeId, unreadBySession, onActivate, onClose, onRename, onNewFree,
+  globalFilesOpen, globalFilesActive, onOpenGlobalFiles, onCloseGlobalFiles,
+}: Props) {
   return (
     <div className="project-tabbar">
       <div className="ptab-list">
@@ -114,6 +117,23 @@ export function ProjectTabBar({ projects, activeId, unreadBySession, onActivate,
             />
           )
         })}
+        {/* Специальная вкладка "Файлы сервера" */}
+        {globalFilesOpen && (
+          <div
+            className={`ptab ptab-global-files ${globalFilesActive ? 'active' : ''}`}
+            onClick={onOpenGlobalFiles}
+            title="Файлы сервера (~)"
+          >
+            <span className="ptab-name">📁 Файлы</span>
+            {globalFilesActive && (
+              <button
+                className="ptab-close"
+                onClick={e => { e.stopPropagation(); onCloseGlobalFiles() }}
+                title="Закрыть"
+              >✕</button>
+            )}
+          </div>
+        )}
         <button
           className="ptab-new"
           onClick={onNewFree}
@@ -123,6 +143,14 @@ export function ProjectTabBar({ projects, activeId, unreadBySession, onActivate,
         </button>
       </div>
       <div className="ptab-spacer" />
+      {/* Кнопка глобального файлового браузера */}
+      <button
+        className={`ptab-folder-btn${globalFilesActive ? ' active' : ''}`}
+        onClick={onOpenGlobalFiles}
+        title="Файлы сервера (~)"
+      >
+        📁
+      </button>
       <UsageBadge />
     </div>
   )

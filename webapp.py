@@ -1732,6 +1732,116 @@ async def api_project_file(req: web.Request):
     return web.json_response({"path": rel_norm, "content": content, "lang": lang, "size": size})
 
 
+# ── Глобальный файловый браузер (от $HOME) ────────────────────────────────────
+# Не привязан к проекту — листинг/чтение от /home/igor/ с теми же правилами безопасности.
+
+_GLOBAL_FS_EXCLUDE: set[str] = {
+    "node_modules", "venv", ".venv", "__pycache__",
+    "dist", ".worktrees", ".mypy_cache", ".pytest_cache",
+}
+
+
+def _resolve_global_safe(home: Path, rel: str):
+    """Как _resolve_safe, но root = $HOME. Поднимает ValueError при traversal."""
+    rel_clean = rel.lstrip("/")
+    target = (home / rel_clean).resolve()
+    if not str(target).startswith(str(home) + "/") and target != home:
+        raise ValueError("path traversal detected")
+    return target
+
+
+async def api_global_files(req: web.Request):
+    """GET /api/global/files?path=<rel> — листинг от $HOME."""
+    home = Path.home()
+    rel = req.rel_url.query.get("path", "")
+    try:
+        target = _resolve_global_safe(home, rel)
+    except ValueError:
+        return web.json_response({"error": "invalid path"}, status=400)
+
+    if not target.exists() or not target.is_dir():
+        return web.json_response({"error": "not a directory"}, status=404)
+
+    try:
+        rel_norm = str(target.relative_to(home))
+        if rel_norm == ".":
+            rel_norm = ""
+    except ValueError:
+        return web.json_response({"error": "invalid path"}, status=400)
+
+    entries = []
+    try:
+        items = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        for item in items:
+            name = item.name
+            if item.is_dir() and name in _GLOBAL_FS_EXCLUDE:
+                continue
+            if item.is_file() and _is_secret_name(name):
+                continue
+            entry_type = "dir" if item.is_dir() else "file"
+            size = 0
+            if item.is_file():
+                try:
+                    size = item.stat().st_size
+                except Exception:
+                    size = 0
+            entries.append({"name": name, "type": entry_type, "size": size})
+    except PermissionError:
+        return web.json_response({"error": "permission denied"}, status=403)
+
+    return web.json_response({"path": rel_norm, "entries": entries})
+
+
+async def api_global_file(req: web.Request):
+    """GET /api/global/file?path=<rel> — содержимое файла от $HOME."""
+    home = Path.home()
+    rel = req.rel_url.query.get("path", "")
+    if not rel:
+        return web.json_response({"error": "path required"}, status=400)
+
+    try:
+        target = _resolve_global_safe(home, rel)
+    except ValueError:
+        return web.json_response({"error": "invalid path"}, status=400)
+
+    if _is_secret_name(target.name):
+        return web.json_response({"error": "access denied"}, status=403)
+
+    if not target.exists() or not target.is_file():
+        return web.json_response({"error": "not a file"}, status=404)
+
+    try:
+        size = target.stat().st_size
+    except Exception:
+        return web.json_response({"error": "stat failed"}, status=500)
+
+    MAX_SIZE = 1 * 1024 * 1024
+    if size > MAX_SIZE:
+        return web.json_response({"error": "файл слишком большой", "size": size})
+
+    try:
+        with open(target, "rb") as f:
+            head = f.read(8192)
+        if b"\x00" in head:
+            return web.json_response({"error": "бинарный файл", "size": size})
+    except Exception:
+        return web.json_response({"error": "read failed"}, status=500)
+
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return web.json_response({"error": f"read error: {e}"}, status=500)
+
+    lang = target.suffix.lstrip(".") if target.suffix else ""
+    try:
+        rel_norm = str(target.relative_to(home))
+    except ValueError:
+        rel_norm = rel
+
+    return web.json_response({"path": rel_norm, "content": content, "lang": lang, "size": size})
+
+
+
 async def api_card_run(req: web.Request):
     """GET /api/projects/{id}/tasks/{card}/run — сайдкар из DATA/runs/<card>.md (404-safe)."""
     ctx = req.app["ctx"]
@@ -2423,6 +2533,9 @@ async def start(ptb_app, ctx: dict) -> None:
         # Файловый проводник (read-only)
         app.router.add_get("/api/projects/{id}/files", api_project_files)
         app.router.add_get("/api/projects/{id}/file", api_project_file)
+        # Глобальный файловый браузер (от $HOME, без привязки к проекту)
+        app.router.add_get("/api/global/files", api_global_files)
+        app.router.add_get("/api/global/file", api_global_file)
         # Контекст сессии (read: Фича A)
         app.router.add_get("/api/projects/{id}/session-context", api_project_session_context)
         # Память проекта (read: Фича B)

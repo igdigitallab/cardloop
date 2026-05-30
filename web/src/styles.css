@@ -551,6 +551,23 @@ body {
 
 .ptab-spacer { flex: 1; }
 
+/* Кнопка глобального файлового браузера (📁) в правой части таббара */
+.ptab-folder-btn {
+  background: transparent; border: none; cursor: pointer;
+  color: var(--text3); font-size: 16px; padding: 0 10px;
+  display: flex; align-items: center; min-height: 36px; flex-shrink: 0;
+  transition: color var(--transition), background var(--transition);
+  border-left: 1px solid var(--border);
+}
+.ptab-folder-btn:hover { color: var(--accent-h); background: var(--bg3); }
+.ptab-folder-btn.active { color: var(--accent-h); }
+
+/* Специальная вкладка файлового браузера */
+.ptab-global-files { font-style: normal; }
+
+/* Метка корня в файловом браузере */
+.files-root-hint { color: var(--text3); font-size: 11px; font-family: var(--mono); margin-left: 4px; }
+
 /* Usage Badge — в правом углу полосы вкладок */
 .usage-badge-wrap {
   position: relative;

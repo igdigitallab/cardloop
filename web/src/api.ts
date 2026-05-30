@@ -189,6 +189,17 @@ export const api = {
       }
     ),
 
+  // Глобальный файловый браузер (от $HOME)
+  globalFiles: (path: string) =>
+    apiFetch<import('./types').FileListing>(
+      `/api/global/files?path=${encodeURIComponent(path)}`
+    ),
+
+  globalFile: (path: string) =>
+    apiFetch<import('./types').FileContent>(
+      `/api/global/file?path=${encodeURIComponent(path)}`
+    ),
+
   // Шаблоны промтов
   prompts: () =>
     apiFetch<{ prompts: import('./types').Prompt[] }>('/api/prompts'),

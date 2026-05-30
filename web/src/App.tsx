@@ -6,6 +6,9 @@ import { Sidebar } from './components/Sidebar'
 import { ProjectView } from './components/ProjectView'
 import { ProjectTabBar } from './components/ProjectTabBar'
 import { Spinner } from './components/Spinner'
+import { GlobalFilesTab } from './tabs/GlobalFilesTab'
+
+const GLOBAL_FILES_ID = '__global__'
 
 type AuthState = 'loading' | 'unauthed' | 'authed'
 
@@ -100,6 +103,8 @@ export default function App() {
   // Split-view: leftId → rightId (только для free-чатов)
   const [splitPairs, setSplitPairs] = useState<Record<string, string>>(() => readSplitPairs())
   const [splitWidth, setSplitWidth] = useState<number>(() => readSplitWidth())
+  // Глобальный файловый браузер
+  const [globalFilesOpen, setGlobalFilesOpen] = useState(false)
   // Текущий активный проект — для SSE-обработчика, без перепересоздания подписки на каждом select
   const activeIdRef = useRef<string | null>(null)
   const projectsRef = useRef<Project[]>([])
@@ -262,6 +267,16 @@ export default function App() {
 
   // Drag-and-drop порядок сайдбара. ВАЖНО: hook — выше любых ранних return
   // (return <LoginScreen> и т.п.), иначе нарушаются Rules of Hooks → чёрный экран.
+  const handleOpenGlobalFiles = useCallback(() => {
+    setGlobalFilesOpen(true)
+    setActiveId(GLOBAL_FILES_ID)
+  }, [])
+
+  const handleCloseGlobalFiles = useCallback(() => {
+    setGlobalFilesOpen(false)
+    setActiveId(prev => prev === GLOBAL_FILES_ID ? (openIds[0] || null) : prev)
+  }, [openIds])
+
   const handleSidebarReorder = useCallback((ids: string[]) => {
     setSidebarOrder(ids)
   }, [])
@@ -433,7 +448,7 @@ export default function App() {
   return (
     <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
       <Sidebar
-        projects={sortedProjects}
+        projects={sortedProjects.filter(p => !p.is_free)}
         selectedId={activeId}
         onSelect={handleSelect}
         onLogout={handleLogout}
@@ -454,9 +469,17 @@ export default function App() {
           onClose={handleTabClose}
           onRename={handleRenameTab}
           onNewFree={handleNewFree}
+          globalFilesOpen={globalFilesOpen}
+          globalFilesActive={activeId === GLOBAL_FILES_ID}
+          onOpenGlobalFiles={handleOpenGlobalFiles}
+          onCloseGlobalFiles={handleCloseGlobalFiles}
         />
 
-        {hasOpen ? (
+        {activeId === GLOBAL_FILES_ID ? (
+          <div className="main-content" style={{ padding: 0, overflow: 'hidden' }}>
+            <GlobalFilesTab />
+          </div>
+        ) : hasOpen ? (
           // Рендерим ВСЕ открытые ProjectView, скрываем неактивные через display:none —
           // это сохраняет состояние чата/SSE при переключении между вкладками.
           openProjects.map(p => {
