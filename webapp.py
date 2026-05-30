@@ -27,6 +27,9 @@ from aiohttp import web
 # Очередь maxsize=100: переполнена → drop (put_nowait в try/except), продюсер не блокируется.
 
 _bus: dict[str, set[asyncio.Queue]] = {}
+# Глобальные подписчики — получают ВСЕ события всех сессий, с инжектированным session_key.
+# Используется для общего activity-stream приложения (unread-индикаторы в сайдбаре).
+_bus_global: set[asyncio.Queue] = set()
 
 
 def _bus_subscribe(session_key: str) -> "asyncio.Queue[dict]":
@@ -45,16 +48,34 @@ def _bus_unsubscribe(session_key: str, q: "asyncio.Queue[dict]") -> None:
             _bus.pop(session_key, None)
 
 
+def _bus_subscribe_global() -> "asyncio.Queue[dict]":
+    """Подписка на ВСЕ события всех сессий (события приходят с полем session_key)."""
+    q: asyncio.Queue[dict] = asyncio.Queue(maxsize=200)
+    _bus_global.add(q)
+    return q
+
+
+def _bus_unsubscribe_global(q: "asyncio.Queue[dict]") -> None:
+    _bus_global.discard(q)
+
+
 def _bus_publish(session_key: str, event: dict) -> None:
     """Публикует событие во все очереди подписчиков. Переполнена → drop (не блокирует)."""
     subscribers = _bus.get(session_key)
-    if not subscribers:
-        return
-    for q in list(subscribers):  # list() — снимок, т.к. _bus_unsubscribe может вызываться параллельно
-        try:
-            q.put_nowait(event)
-        except asyncio.QueueFull:
-            pass  # slow consumer — drop, не блокировать продюсера
+    if subscribers:
+        for q in list(subscribers):  # list() — снимок, т.к. _bus_unsubscribe может вызываться параллельно
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass  # slow consumer — drop, не блокировать продюсера
+    # Глобальная рассылка — обогащаем событие session_key, чтобы фронт мог сматчить с проектом
+    if _bus_global:
+        enriched = {**event, "session_key": session_key}
+        for q in list(_bus_global):
+            try:
+                q.put_nowait(enriched)
+            except asyncio.QueueFull:
+                pass
 
 
 # ─────────────────────────── tool formatter ───────────────────────────
@@ -890,6 +911,110 @@ async def api_project_activity_stream(req: web.Request):
     return resp
 
 
+# ─────────────────────────── GLOBAL activity-stream SSE ───────────────────────────
+#
+# GET /api/activity-stream  — единый поток ВСЕХ событий шины (для unread-индикаторов в сайдбаре).
+# Каждое событие приходит с инжектированным session_key, фронт мапит его на проект.
+
+async def api_activity_stream_all(req: web.Request):
+    resp = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    await resp.prepare(req)
+
+    q = _bus_subscribe_global()
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=25.0)
+                payload = json.dumps(event, ensure_ascii=False)
+                await resp.write(f"data: {payload}\n\n".encode())
+            except asyncio.TimeoutError:
+                await resp.write(b": ping\n\n")
+            except (ConnectionResetError, ConnectionAbortedError):
+                break
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                break
+    finally:
+        _bus_unsubscribe_global(q)
+
+    return resp
+
+
+# ─────────────────────────── git sync (commit + push) ───────────────────────────
+#
+# POST /api/projects/{id}/git/sync  {message?: str}
+# Если есть локальные правки → git add -A + git commit -m <msg>. Затем git push.
+# Дефолтное сообщение: "wip: YYYY-MM-DD HH:MM" (если поле message пустое).
+# Возвращает {ok, committed, pushed, log}; на ошибке status 500 + {error, log}.
+
+async def api_project_git_sync(req: web.Request):
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    cwd = project["cwd"]
+
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    msg = (body.get("message") or "").strip() or f"wip: {time.strftime('%Y-%m-%d %H:%M')}"
+
+    async def _git(*args) -> tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", cwd, *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await proc.communicate()
+        return proc.returncode or 0, out.decode(errors="replace")
+
+    log_parts: list[str] = []
+    committed = False
+    pushed = False
+
+    # 1. Проверяем статус
+    rc, status = await _git("status", "--porcelain")
+    if rc != 0:
+        return web.json_response({"error": "git status failed", "log": status}, status=500)
+
+    # 2. Если есть dirty — стейджим и коммитим
+    if status.strip():
+        rc, out = await _git("add", "-A")
+        log_parts.append(f"$ git add -A\n{out}".rstrip())
+        if rc != 0:
+            return web.json_response({"error": "git add failed", "log": "\n\n".join(log_parts)}, status=500)
+
+        rc, out = await _git("commit", "-m", msg)
+        log_parts.append(f"$ git commit -m {msg!r}\n{out}".rstrip())
+        if rc != 0:
+            return web.json_response({"error": "git commit failed", "log": "\n\n".join(log_parts)}, status=500)
+        committed = True
+
+    # 3. Push (даже если коммита не было — могли быть локальные коммиты не отправлены)
+    rc, out = await _git("push")
+    log_parts.append(f"$ git push\n{out}".rstrip())
+    if rc != 0:
+        return web.json_response({"error": "git push failed", "log": "\n\n".join(log_parts)}, status=500)
+    pushed = True
+
+    return web.json_response({
+        "ok": True,
+        "committed": committed,
+        "pushed": pushed,
+        "message": msg if committed else None,
+        "log": "\n\n".join(log_parts),
+    })
+
+
 # ─────────────────────────── файловый проводник ───────────────────────────
 
 # Директории и имена файлов, скрытые из листинга
@@ -1643,6 +1768,10 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/chat/stop", api_project_chat_stop)
         # Activity-stream: живой поток событий шины (карточки, внешние прогоны)
         app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)
+        # Глобальный поток всех событий (для unread-индикаторов в сайдбаре)
+        app.router.add_get("/api/activity-stream", api_activity_stream_all)
+        # Git sync — commit (если dirty) + push одной кнопкой
+        app.router.add_post("/api/projects/{id}/git/sync", api_project_git_sync)
         # C2: управление сессиями проекта
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)

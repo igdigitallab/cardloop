@@ -8,14 +8,58 @@ interface Props {
   onSelect: (id: string) => void
   onLogout: () => void
   loading: boolean
+  unreadBySession: Record<string, number>
+  collapsed: boolean
+  onToggleCollapse: () => void
 }
 
-export function Sidebar({ projects, selectedId, onSelect, onLogout, loading }: Props) {
+function unreadFor(p: Project, map: Record<string, number>): number {
+  if (p.tg_thread == null) return 0
+  return map[String(p.tg_thread)] || 0
+}
+
+export function Sidebar({
+  projects, selectedId, onSelect, onLogout, loading,
+  unreadBySession, collapsed, onToggleCollapse,
+}: Props) {
   const [search, setSearch] = useState('')
 
   const filtered = projects.filter(p =>
     p.name.toLowerCase().includes(search.toLowerCase())
   )
+
+  if (collapsed) {
+    return (
+      <div className="sidebar sidebar-collapsed-mode">
+        <button
+          className="sidebar-toggle-btn collapsed"
+          onClick={onToggleCollapse}
+          title="Развернуть сайдбар"
+        >
+          ☰
+        </button>
+        <div className="projects-list-collapsed">
+          {projects.map(p => {
+            const unread = unreadFor(p, unreadBySession)
+            const isActive = selectedId === p.id
+            return (
+              <button
+                key={p.id}
+                className={`project-icon-btn ${isActive ? 'active' : ''}`}
+                onClick={() => onSelect(p.id)}
+                title={`${p.name}${unread ? ` (${unread} нов.)` : ''}`}
+              >
+                <span className="project-icon-letter">
+                  {p.name.charAt(0).toUpperCase()}
+                </span>
+                {unread > 0 && <span className="unread-dot-collapsed" />}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="sidebar">
@@ -23,6 +67,13 @@ export function Sidebar({ projects, selectedId, onSelect, onLogout, loading }: P
         <div className="sidebar-logo">
           <div className="sidebar-logo-icon">⚡</div>
           <span className="sidebar-logo-text">Claude-Ops</span>
+          <button
+            className="sidebar-toggle-btn"
+            onClick={onToggleCollapse}
+            title="Свернуть сайдбар"
+          >
+            ⟨
+          </button>
         </div>
         <input
           className="search-input"
@@ -43,17 +94,25 @@ export function Sidebar({ projects, selectedId, onSelect, onLogout, loading }: P
             {search ? 'Ничего не найдено' : 'Нет проектов'}
           </div>
         ) : (
-          filtered.map(p => (
-            <div
-              key={p.id}
-              className={`project-item ${selectedId === p.id ? 'active' : ''}`}
-              onClick={() => onSelect(p.id)}
-              title={p.cwd}
-            >
-              <HealthDot health={p.health} />
-              <span className="project-name">{p.name}</span>
-            </div>
-          ))
+          filtered.map(p => {
+            const unread = unreadFor(p, unreadBySession)
+            return (
+              <div
+                key={p.id}
+                className={`project-item ${selectedId === p.id ? 'active' : ''} ${unread ? 'has-unread' : ''}`}
+                onClick={() => onSelect(p.id)}
+                title={p.cwd}
+              >
+                <HealthDot health={p.health} />
+                <span className="project-name">{p.name}</span>
+                {unread > 0 && (
+                  <span className="unread-badge" title={`${unread} новых событий`}>
+                    {unread > 99 ? '99+' : unread}
+                  </span>
+                )}
+              </div>
+            )
+          })
         )}
       </div>
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Project, TabId } from '../types'
+import { api } from '../api'
 import { OverviewTab } from '../tabs/OverviewTab'
 import { ReadmeTab } from '../tabs/ReadmeTab'
 import { ClaudeMdTab } from '../tabs/ClaudeMdTab'
@@ -59,11 +60,50 @@ function readLSBool(key: string, fallback: boolean): boolean {
 
 interface Props {
   project: Project
+  onProjectsReload: () => void
 }
 
-export function ProjectView({ project }: Props) {
-  const [activeTab, setActiveTab] = useState<TabId>('overview')
+type GitSyncState = 'idle' | 'busy' | 'ok' | 'err'
+
+export function ProjectView({ project, onProjectsReload }: Props) {
+  const [activeTab, setActiveTab] = useState<TabId>('board')
   const git = project.health.git
+
+  // ── Git sync (commit + push одной кнопкой) ────────────────────────────────
+  const [syncState, setSyncState] = useState<GitSyncState>('idle')
+  const [syncMsg, setSyncMsg] = useState<string>('')
+
+  const gitDirty = (git?.dirty ?? 0) > 0
+  const gitUnpushed = (git?.unpushed ?? 0) > 0
+  const gitNeedsSync = gitDirty || gitUnpushed
+  // Цвет точки: серый если git недоступен, жёлтый если есть что синхронизировать, зелёный если чисто
+  const gitDotClass = !git ? 'gray' : gitNeedsSync ? 'yellow' : 'green'
+  const gitDotTitle = !git
+    ? 'Git недоступен'
+    : gitNeedsSync
+      ? `${gitDirty ? `${git!.dirty} изменено` : ''}${gitDirty && gitUnpushed ? ', ' : ''}${gitUnpushed ? `${git!.unpushed} не отправлено` : ''}`
+      : 'Чисто, всё запушено'
+
+  const onGitSync = useCallback(async () => {
+    if (syncState === 'busy') return
+    setSyncState('busy')
+    setSyncMsg('')
+    try {
+      const res = await api.gitSync(project.id)
+      const parts: string[] = []
+      if (res.committed) parts.push(`коммит: ${res.message}`)
+      if (res.pushed) parts.push('запушено')
+      setSyncMsg(parts.join(' · ') || 'нечего синхронизировать')
+      setSyncState('ok')
+      onProjectsReload()
+      setTimeout(() => setSyncState(s => (s === 'ok' ? 'idle' : s)), 3000)
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setSyncMsg(msg.slice(0, 200))
+      setSyncState('err')
+      setTimeout(() => setSyncState(s => (s === 'err' ? 'idle' : s)), 6000)
+    }
+  }, [project.id, syncState, onProjectsReload])
 
   // ── Resize / collapse state (persisted in localStorage) ──────────────────
   const [chatWidth, setChatWidth] = useState<number>(() =>
@@ -169,6 +209,7 @@ export function ProjectView({ project }: Props) {
                 <span className="meta-chip">{project.model}</span>
                 {git && (
                   <span className="git-status">
+                    <span className={`git-sync-dot ${gitDotClass}`} title={gitDotTitle} />
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
                       stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
                       style={{ opacity: 0.5 }}>
@@ -184,6 +225,21 @@ export function ProjectView({ project }: Props) {
                     {git.unpushed > 0 && (
                       <span className="git-unpushed" title={`${git.unpushed} не отправлено`}>
                         ↑{git.unpushed}
+                      </span>
+                    )}
+                    {gitNeedsSync && (
+                      <button
+                        className={`git-sync-btn ${syncState}`}
+                        onClick={onGitSync}
+                        disabled={syncState === 'busy'}
+                        title={gitDirty ? 'Закоммитить всё и запушить' : 'Запушить коммиты'}
+                      >
+                        {syncState === 'busy' ? '…' : '↑ Sync'}
+                      </button>
+                    )}
+                    {syncState !== 'idle' && syncMsg && (
+                      <span className={`git-sync-msg ${syncState}`} title={syncMsg}>
+                        {syncState === 'ok' ? '✓ ' : syncState === 'err' ? '✗ ' : ''}{syncMsg}
                       </span>
                     )}
                   </span>

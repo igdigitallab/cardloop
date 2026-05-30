@@ -111,4 +111,15 @@ export const api = {
   // Feature B: project memory files
   memory: (id: string) =>
     apiFetch<import('./types').ProjectMemory>(`/api/projects/${id}/memory`),
+
+  // Git: commit (если dirty) + push одной кнопкой
+  gitSync: (id: string, message?: string) =>
+    apiFetch<{ ok: boolean; committed: boolean; pushed: boolean; message: string | null; log: string }>(
+      `/api/projects/${id}/git/sync`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(message ? { message } : {}),
+      }
+    ),
 }

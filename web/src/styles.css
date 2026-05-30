@@ -218,6 +218,84 @@ body {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.3px;
+  flex: 1;
+}
+
+/* Кнопка свернуть/развернуть сайдбар */
+.sidebar-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 14px;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), color var(--transition);
+}
+.sidebar-toggle-btn:hover { background: var(--bg3); color: var(--text); }
+
+.sidebar-toggle-btn.collapsed {
+  width: 44px;
+  height: 44px;
+  margin: 8px auto 4px;
+  font-size: 16px;
+}
+
+/* Свёрнутый сайдбар — узкая полоса с иконками проектов */
+.sidebar.sidebar-collapsed-mode {
+  width: 56px;
+  min-width: 56px;
+  padding-top: 4px;
+}
+
+.projects-list-collapsed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 6px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.project-icon-btn {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  background: var(--bg3);
+  border: 1px solid transparent;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), border-color var(--transition);
+}
+.project-icon-btn:hover { background: var(--bg4); }
+.project-icon-btn.active {
+  background: var(--bg4);
+  border-color: var(--accent);
+}
+
+.project-icon-letter {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+.unread-dot-collapsed {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-h);
+  box-shadow: 0 0 6px rgba(133, 130, 255, 0.7);
 }
 
 .search-input {
@@ -266,6 +344,21 @@ body {
 
 .project-item:hover { background: var(--bg3); }
 .project-item.active { background: var(--bg4); }
+.project-item.has-unread .project-name { color: var(--accent-h); font-weight: 500; }
+
+.unread-badge {
+  margin-left: auto;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 9px;
+  min-width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
 
 .health-dot {
   width: 7px;
@@ -571,6 +664,48 @@ body {
 
 .git-dirty { color: var(--yellow); font-size: 11px; }
 .git-unpushed { color: var(--text2); font-size: 11px; }
+
+/* Большая яркая точка статуса git перед веткой */
+.git-sync-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.git-sync-dot.green  { background: var(--green);  box-shadow: 0 0 6px rgba(52,199,123,0.7); }
+.git-sync-dot.yellow { background: var(--yellow); box-shadow: 0 0 6px rgba(245,166,35,0.7); }
+.git-sync-dot.gray   { background: var(--text3); }
+
+.git-sync-btn {
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  color: var(--accent-h);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: 6px;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+}
+.git-sync-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.git-sync-btn:disabled { opacity: 0.6; cursor: wait; }
+.git-sync-btn.busy { color: var(--text2); }
+
+.git-sync-msg {
+  font-size: 11px;
+  margin-left: 6px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-sync-msg.ok  { color: var(--green); }
+.git-sync-msg.err { color: var(--red); }
 
 /* ── Tabs ──────────────────────────────────────────────────── */
 .tabs {
