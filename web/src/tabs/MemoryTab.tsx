@@ -53,13 +53,31 @@ export function MemoryTab({ projectId }: Props) {
 
   if (!data || !data.exists || data.files.length === 0) {
     return (
-      <div className="no-content">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-          stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/>
-          <path d="M12 8v4l3 3"/>
-        </svg>
-        У проекта пока нет памяти
+      <div className="memory-empty">
+        <div className="memory-empty-icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/>
+            <path d="M12 8v4l3 3"/>
+          </svg>
+        </div>
+        <div className="memory-empty-title">Память проекта пуста</div>
+        <p className="memory-empty-text">
+          Это файлы из <code>~/.claude/projects/&lt;проект&gt;/memory/</code> — долговременная
+          память агента <strong>между сессиями</strong> (в отличие от контекста, который живёт
+          только внутри одной сессии и обнуляется при <code>/reset</code>).
+        </p>
+        <p className="memory-empty-text">
+          Папка появляется сама, когда агент решит что-то запомнить: устойчивый факт о проекте,
+          твоё предпочтение, повторяемый подход. Индекс <code>MEMORY.md</code> — одна строка на
+          запись, сами факты — в отдельных <code>.md</code>. Пусто = агент пока ничего не
+          закрепил. Можно прямо попросить в чате: «запомни, что…».
+        </p>
+        <p className="memory-empty-note">
+          💡 Контекст сессии (счётчик 💬 в чате) обычно держит ~11–14K токенов даже на «пустой»
+          сессии — это системный промпт Claude Code + определения инструментов, они уходят в
+          модель каждый ход. <code>/reset</code> чистит разговор, но этот базовый пол остаётся.
+        </p>
       </div>
     )
   }

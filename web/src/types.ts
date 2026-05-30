@@ -58,6 +58,15 @@ export interface RunResult {
   exists: boolean
 }
 
+export interface TestResult {
+  detected: boolean
+  ok: boolean
+  cmd: string | null
+  exit_code: number | null
+  timed_out?: boolean
+  output: string
+}
+
 // ─── File Explorer ────────────────────────────────────────────────────────
 
 export interface FileEntry {

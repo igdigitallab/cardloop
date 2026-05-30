@@ -30,8 +30,22 @@ export const api = {
   claudeMd: (id: string) =>
     apiFetch<import('./types').ClaudeMd>(`/api/projects/${id}/claude-md`),
 
+  saveClaudeMd: (id: string, content: string) =>
+    apiFetch<import('./types').ClaudeMd>(`/api/projects/${id}/claude-md`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    }),
+
   readme: (id: string) =>
     apiFetch<import('./types').ClaudeMd>(`/api/projects/${id}/readme`),
+
+  saveReadme: (id: string, content: string) =>
+    apiFetch<import('./types').ClaudeMd>(`/api/projects/${id}/readme`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    }),
 
   specs: (id: string) =>
     apiFetch<{ specs: import('./types').Spec[] }>(`/api/projects/${id}/specs`),
@@ -96,6 +110,23 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+    }),
+
+  // #2: ручной лейбл любой сессии (пустой — снять)
+  setSessionLabel: (id: string, sid: string, label: string) =>
+    apiFetch<{ ok: boolean; session_id: string; label: string | null }>(
+      `/api/projects/${id}/sessions/${encodeURIComponent(sid)}/label`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label }),
+      }
+    ),
+
+  // #4: запуск тестов проекта
+  runTests: (id: string) =>
+    apiFetch<import('./types').TestResult>(`/api/projects/${id}/test`, {
+      method: 'POST',
     }),
 
   sessionHistory: (id: string, sessionId?: string) =>

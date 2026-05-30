@@ -2377,3 +2377,160 @@ body {
 
 .ctx-item-edited { color: var(--yellow); }
 .ctx-item-cmd { color: var(--text3); }
+
+/* ── Общие кнопки документ/тест-панелей ─────────────────────────── */
+.doc-btn {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 5px;
+  cursor: pointer;
+  border: 1px solid var(--border2);
+  background: transparent;
+  color: var(--text2);
+  white-space: nowrap;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.doc-btn:hover:not(:disabled) { background: var(--bg3); color: var(--text); }
+.doc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.doc-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.doc-btn.primary:hover:not(:disabled) { background: var(--accent-h); border-color: var(--accent-h); color: #fff; }
+.doc-btn.ghost { background: transparent; }
+
+/* ── #1 Inline-редактор CLAUDE.md / README ──────────────────────── */
+.doc-view { position: relative; }
+.doc-edit-fab {
+  position: absolute;
+  top: 6px; right: 10px;
+  width: 28px; height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border2);
+  background: var(--bg2);
+  color: var(--text3);
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition), color var(--transition), background var(--transition);
+  z-index: 5;
+}
+.doc-view:hover .doc-edit-fab { opacity: 0.8; }
+.doc-edit-fab:hover { opacity: 1; color: var(--text); background: var(--bg3); }
+
+.doc-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 8px;
+  min-height: 0;
+}
+.doc-editor-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.doc-editor-hint { font-size: 11px; color: var(--text3); }
+.doc-editor-actions { display: flex; gap: 8px; }
+.doc-textarea {
+  flex: 1;
+  min-height: 300px;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  tab-size: 2;
+}
+.doc-textarea:focus { outline: none; border-color: var(--accent); }
+.doc-create-btn { margin-left: 12px; }
+
+/* ── #2 Переименование сессии ───────────────────────────────────── */
+.session-dropdown-row { display: flex; align-items: stretch; gap: 2px; }
+.session-dropdown-row .session-dropdown-item { flex: 1; min-width: 0; }
+.session-rename-btn {
+  flex-shrink: 0;
+  width: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  font-size: 12px;
+  border-radius: 4px;
+  transition: background var(--transition), color var(--transition);
+}
+.session-rename-btn:hover:not(:disabled) { background: var(--bg3); color: var(--text); }
+.session-rename-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── #3 Пустое состояние «Память» ───────────────────────────────── */
+.memory-empty {
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 32px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.memory-empty-icon { color: var(--text3); opacity: 0.6; align-self: center; }
+.memory-empty-title { font-size: 15px; font-weight: 600; color: var(--text); align-self: center; }
+.memory-empty-text { font-size: 13px; line-height: 1.6; color: var(--text2); margin: 0; }
+.memory-empty-note {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text2);
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.memory-empty code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: var(--bg3);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* ── #4 Запуск тестов ───────────────────────────────────────────── */
+.test-card { margin-top: 16px; }
+.test-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.test-status {
+  font-size: 12.5px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.test-status.ok   { color: var(--green); }
+.test-status.fail { color: var(--red); }
+.test-status.dim  { color: var(--text3); }
+.test-status .mono { font-family: var(--mono); font-size: 11.5px; opacity: 0.85; }
+.test-output {
+  max-height: 360px;
+  overflow: auto;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}

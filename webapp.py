@@ -439,6 +439,47 @@ async def api_project_readme(req: web.Request):
     return web.json_response({"path": str(path), "content": content, "exists": exists})
 
 
+_README_CANDIDATES = ["README.md", "readme.md", "Readme.md", "README.MD",
+                      "README.markdown", "README.rst", "README.txt", "README"]
+
+
+async def _write_doc(req: web.Request, resolve_path):
+    """Общий писатель для CLAUDE.md/README: POST {content} → перезаписать файл.
+    resolve_path(cwd)→Path выбирает целевой файл (учитывает существующий вариант имени)."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    content = body.get("content")
+    if not isinstance(content, str):
+        return web.json_response({"error": "content must be a string"}, status=400)
+    path = resolve_path(Path(project["cwd"]))
+    try:
+        path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        return web.json_response({"error": f"ошибка записи: {e}"}, status=500)
+    return web.json_response({"path": str(path), "content": content, "exists": True})
+
+
+async def api_project_claude_md_write(req: web.Request):
+    """POST /api/projects/{id}/claude-md — перезаписать CLAUDE.md."""
+    return await _write_doc(req, lambda cwd: cwd / "CLAUDE.md")
+
+
+async def api_project_readme_write(req: web.Request):
+    """POST /api/projects/{id}/readme — перезаписать существующий README (или создать README.md)."""
+    def _pick(cwd: Path) -> Path:
+        for name in _README_CANDIDATES:
+            if (cwd / name).exists():
+                return cwd / name
+        return cwd / "README.md"
+    return await _write_doc(req, _pick)
+
+
 def _spec_dirs(ctx: dict, project: dict) -> list[tuple[Path, str]]:
     """Папки со спеками проекта: ЛОКАЛЬНАЯ <cwd>/specs/ (приоритет) + vault <name>/specs/.
     Возвращает [(dir, source)] только существующих. Агент часто пишет спеки локально,
@@ -1399,6 +1440,94 @@ async def api_project_git_sync(req: web.Request):
     })
 
 
+# ─────────────────────────── запуск тестов проекта ───────────────────────────
+#
+# POST /api/projects/{id}/test → автодетект тест-команды, прогон, вывод в кокпит.
+# Детект по убыванию специфичности: pytest-конфиг/tests/ → npm test → make test.
+
+def _detect_test_cmd(cwd: str):
+    """Возвращает (cmd:list[str], human:str) или None если не нашли как тестировать."""
+    p = Path(cwd)
+    # Python / pytest
+    has_pytest_cfg = any((p / n).exists() for n in
+                         ("pytest.ini", "tox.ini", "setup.cfg")) \
+        or (p / "tests").is_dir() or (p / "test").is_dir()
+    if (p / "pyproject.toml").exists():
+        try:
+            if "pytest" in (p / "pyproject.toml").read_text(errors="replace"):
+                has_pytest_cfg = True
+        except Exception:
+            pass
+    if has_pytest_cfg:
+        if (p / "venv" / "bin" / "pytest").exists():
+            return (["venv/bin/pytest", "-q"], "venv/bin/pytest -q")
+        if (p / "venv" / "bin" / "python").exists():
+            return (["venv/bin/python", "-m", "pytest", "-q"], "venv/bin/python -m pytest -q")
+        return (["python3", "-m", "pytest", "-q"], "python3 -m pytest -q")
+    # Node
+    pkg = p / "package.json"
+    if pkg.exists():
+        try:
+            data = json.loads(pkg.read_text(errors="replace"))
+            if (data.get("scripts") or {}).get("test"):
+                return (["npm", "test", "--silent"], "npm test")
+        except Exception:
+            pass
+    # Make
+    mk = p / "Makefile"
+    if mk.exists():
+        try:
+            if re.search(r"^test:", mk.read_text(errors="replace"), re.M):
+                return (["make", "test"], "make test")
+        except Exception:
+            pass
+    return None
+
+
+async def api_project_test(req: web.Request):
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    cwd = project["cwd"]
+    detected = _detect_test_cmd(cwd)
+    if detected is None:
+        return web.json_response({
+            "detected": False, "ok": False, "cmd": None, "exit_code": None,
+            "output": "Не нашёл как запускать тесты: нет pytest-конфига/tests/, "
+                      "скрипта test в package.json или цели test в Makefile.",
+        })
+    cmd, human = detected
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=os.environ.copy(),
+        )
+    except Exception as e:
+        return web.json_response({"error": f"запуск не удался: {e}", "cmd": human}, status=500)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+        rc = proc.returncode or 0
+        timed_out = False
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        out, rc, timed_out = b"", -1, True
+    text = out.decode(errors="replace")
+    if len(text) > 20000:
+        text = "…(начало обрезано)\n" + text[-20000:]
+    if timed_out:
+        text = (text + "\n⏱ прервано по таймауту 300с").strip()
+    return web.json_response({
+        "detected": True, "ok": (rc == 0 and not timed_out),
+        "cmd": human, "exit_code": rc, "timed_out": timed_out, "output": text,
+    })
+
+
 # ─────────────────────────── файловый проводник ───────────────────────────
 
 # Директории и имена файлов, скрытые из листинга
@@ -1666,6 +1795,33 @@ async def api_project_sessions(req: web.Request):
         sessions = sessions[:30]
 
     return web.json_response({"sessions": sessions})
+
+
+async def api_project_session_label(req: web.Request):
+    """POST /api/projects/{id}/sessions/{sid}/label  {label}
+    Ручной лейбл ЛЮБОЙ сессии (наш слой поверх SDK). Пустой label → снять лейбл.
+    Хранилище глобальное по session_id (data/session_labels.json), id проекта — только маршрут."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    sid = os.path.basename(req.match_info["sid"])  # анти-traversal: только basename
+    if not sid:
+        return web.json_response({"error": "bad session id"}, status=400)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    label = (body.get("label") or "").strip()
+    if len(label) > 100:
+        label = label[:100]
+    labels = _load_session_labels(ctx)
+    if label:
+        labels[sid] = label
+    else:
+        labels.pop(sid, None)
+    _save_session_labels(ctx, labels)
+    return web.json_response({"ok": True, "session_id": sid, "label": label or None})
 
 
 async def api_project_set_session(req: web.Request):
@@ -2177,7 +2333,9 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/me", api_me)
         app.router.add_get("/api/projects", api_projects)
         app.router.add_get("/api/projects/{id}/claude-md", api_project_claude_md)
+        app.router.add_post("/api/projects/{id}/claude-md", api_project_claude_md_write)
         app.router.add_get("/api/projects/{id}/readme", api_project_readme)
+        app.router.add_post("/api/projects/{id}/readme", api_project_readme_write)
         app.router.add_get("/api/projects/{id}/specs", api_project_specs)
         app.router.add_get("/api/projects/{id}/specs/{name}", api_project_spec_content)
         app.router.add_get("/api/projects/{id}/activity", api_project_activity)
@@ -2200,6 +2358,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/activity-stream", api_activity_stream_all)
         # Git sync — commit (если dirty) + push одной кнопкой
         app.router.add_post("/api/projects/{id}/git/sync", api_project_git_sync)
+        # Запуск тестов проекта (автодетект pytest/npm/make)
+        app.router.add_post("/api/projects/{id}/test", api_project_test)
         app.router.add_post("/api/projects/{id}/upload", api_project_upload)
         # Смена модели проекта (применяется со следующего запроса)
         app.router.add_post("/api/projects/{id}/model", api_project_set_model)
@@ -2211,6 +2371,7 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_delete("/api/free/{id}", api_free_delete)
         # C2: управление сессиями проекта
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
+        app.router.add_post("/api/projects/{id}/sessions/{sid}/label", api_project_session_label)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)
         app.router.add_get("/api/projects/{id}/session-history", api_project_session_history)
         # Файловый проводник (read-only)

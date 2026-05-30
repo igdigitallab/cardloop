@@ -365,6 +365,18 @@ function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
     }
   }
 
+  async function renameSession(s: SessionInfo) {
+    const next = window.prompt('Имя сессии (пусто — убрать лейбл):', s.label || '')
+    if (next === null) return  // отмена
+    try {
+      await api.setSessionLabel(projectId, s.session_id, next.trim())
+      await loadSessions()
+      onSessionChange()  // лейбл активной мог измениться → обновить заголовок
+    } catch (err: any) {
+      setError(err?.message || 'ошибка переименования')
+    }
+  }
+
   return (
     <div className="session-selector" ref={dropRef}>
       <button
@@ -397,21 +409,28 @@ function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
           </button>
           {sessions.length > 0 && <div className="session-dropdown-sep" />}
           {sessions.map(s => (
-            <button
-              key={s.session_id}
-              className={`session-dropdown-item${s.is_active ? ' active' : ''}`}
-              onClick={() => switchSession('resume', s.session_id)}
-              disabled={busy}
-              title={s.label ? `${s.label}\n— ${s.preview}` : s.preview}
-            >
-              <span className="session-item-check">{s.is_active ? '✓' : ''}</span>
-              <span className="session-item-preview">
-                {s.label
-                  ? <><strong>{s.label}</strong> <span className="session-item-sub">— {s.preview}</span></>
-                  : s.preview}
-              </span>
-              <span className="session-item-time">{relTime(s.last_used)}</span>
-            </button>
+            <div key={s.session_id} className="session-dropdown-row">
+              <button
+                className={`session-dropdown-item${s.is_active ? ' active' : ''}`}
+                onClick={() => switchSession('resume', s.session_id)}
+                disabled={busy}
+                title={s.label ? `${s.label}\n— ${s.preview}` : s.preview}
+              >
+                <span className="session-item-check">{s.is_active ? '✓' : ''}</span>
+                <span className="session-item-preview">
+                  {s.label
+                    ? <><strong>{s.label}</strong> <span className="session-item-sub">— {s.preview}</span></>
+                    : s.preview}
+                </span>
+                <span className="session-item-time">{relTime(s.last_used)}</span>
+              </button>
+              <button
+                className="session-rename-btn"
+                onClick={(e) => { e.stopPropagation(); renameSession(s) }}
+                disabled={busy}
+                title="Переименовать сессию"
+              >✎</button>
+            </div>
           ))}
           {sessions.length === 0 && (
             <div className="session-dropdown-empty">нет сохранённых сессий</div>
@@ -857,7 +876,7 @@ export function ChatTab({ project, onProjectsReload }: Props) {
             lvl === 'high' ? ' · контекст раздут — /reset' :
             lvl === 'mid' ? ' · контекст растёт' : ''
           const title = real
-            ? `Реальный размер контекста сессии: ${tokens.toLocaleString('ru')} токенов (весь промпт уходит в модель каждый ход). 🟡 от 120K · 🔴 от 200K.`
+            ? `Реальный размер контекста сессии: ${tokens.toLocaleString('ru')} токенов (весь промпт уходит в модель каждый ход). Базовый пол ~11–14K — системный промпт Claude Code + инструменты, остаётся даже после /reset. 🟡 от 120K · 🔴 от 200K.`
             : 'Грубая оценка (4 символа ≈ 1 токен) — точные токены появятся после первого ответа.'
           return (
             <span className={`chat-stats-inline lvl-${lvl}`} title={title}>

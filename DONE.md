@@ -58,3 +58,7 @@
 - [x] M1/O2+O3: перепись парка + реестр → ~/vault/01-Projects/_park-inventory.md + _registry.yaml <!--ops:o2o3-->
 - [x] git репо создан (PRIVATE Zira777ru/claude-ops-bot), гигиена секретов <!--ops:gitinit-->
 - [x] кокпит: MD-таблицы в Specs/README/CLAUDE/Board (remark-gfm) <!--ops:gfm-->
+- [x] кокпит: inline-редактор CLAUDE.md/README во вкладке (двойной клик→textarea, POST-запись, Ctrl+Enter/Esc) <!--ops:455557--> — 2026-05-30, round-trip проверен на проде
+- [x] кокпит: ручной rename ЛЮБОЙ сессии из SessionSelector (✎ → label, POST /sessions/{sid}/label, sidecar) <!--ops:3c9499--> — 2026-05-30, set/clear проверен на проде
+- [x] кокпит: пустое состояние «Память» (что это/как создаётся) + пояснение пола контекста ~11-14K (системный промпт+инструменты) <!--ops:fa3c3a--> — 2026-05-30
+- [x] кокпит: запуск тестов проекта (автодетект pytest/npm/make, POST /test, вывод в Обзоре) <!--ops:f30032--> — 2026-05-30, детект+роутинг+not-detected проверены; реальный прогон суиты — на usere

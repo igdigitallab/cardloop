@@ -1,7 +1,51 @@
-import { Project } from '../types'
+import { useState } from 'react'
+import { Project, TestResult } from '../types'
+import { api } from '../api'
 
 interface Props {
   project: Project
+}
+
+function TestRunner({ projectId }: { projectId: string }) {
+  const [running, setRunning] = useState(false)
+  const [res, setRes] = useState<TestResult | null>(null)
+  const [err, setErr] = useState('')
+
+  async function run() {
+    setRunning(true); setErr(''); setRes(null)
+    try {
+      setRes(await api.runTests(projectId))
+    } catch (e: any) {
+      setErr(String(e?.message || e))
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="git-card test-card">
+      <div className="test-card-header">
+        <span className="git-card-header" style={{ margin: 0 }}>Тесты</span>
+        <button className="doc-btn primary" onClick={run} disabled={running}>
+          {running ? 'Запускаю…' : '▶ Запустить'}
+        </button>
+      </div>
+      {err && <div className="error-state">⚠ {err}</div>}
+      {res && !res.detected && (
+        <div className="test-status dim">{res.output}</div>
+      )}
+      {res && res.detected && (
+        <>
+          <div className={`test-status ${res.ok ? 'ok' : 'fail'}`}>
+            {res.ok ? '✓ прошли' : (res.timed_out ? '⏱ таймаут' : '✗ упали')}
+            {' · '}<span className="mono">{res.cmd}</span>
+            {res.exit_code != null && res.exit_code >= 0 ? ` · exit ${res.exit_code}` : ''}
+          </div>
+          <pre className="test-output">{res.output || '(пустой вывод)'}</pre>
+        </>
+      )}
+    </div>
+  )
 }
 
 export function OverviewTab({ project }: Props) {
@@ -67,6 +111,8 @@ export function OverviewTab({ project }: Props) {
           Git недоступен для этого проекта
         </div>
       )}
+
+      <TestRunner projectId={project.id} />
     </div>
   )
 }
