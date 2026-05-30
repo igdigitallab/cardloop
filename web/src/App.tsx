@@ -249,6 +249,55 @@ export default function App() {
     })
   }, [])
 
+  // Создать новый свободный чат (cwd=$HOME) и сразу открыть его как вкладку
+  const handleNewFree = useCallback(async () => {
+    try {
+      const res = await api.freeCreate()
+      // Обновляем список проектов и сразу открываем новый чат
+      await loadProjects()
+      setOpenIds(prev => prev.includes(res.id) ? prev : [...prev, res.id])
+      setActiveId(res.id)
+      setRecentIds(prev => {
+        const next = [res.id, ...prev.filter(x => x !== res.id)].slice(0, RECENT_MAX)
+        writeRecent(next)
+        return next
+      })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      alert(`Не удалось создать свободный чат: ${msg}`)
+    }
+  }, [loadProjects])
+
+  // Удалить свободный чат — закрыть вкладку, убрать с бэка
+  const handleDeleteFree = useCallback(async (id: string) => {
+    try {
+      await api.freeDelete(id)
+    } catch (e: unknown) {
+      const status = (e as { status?: number }).status
+      if (status === 409) {
+        alert('Свободный чат сейчас занят — сначала останови агента')
+        return
+      }
+      const msg = e instanceof Error ? e.message : String(e)
+      alert(`Не удалось удалить: ${msg}`)
+      return
+    }
+    // Локально закрываем вкладку (та же логика, что handleTabClose)
+    setOpenIds(prev => {
+      const idx = prev.indexOf(id)
+      if (idx === -1) return prev
+      const next = prev.filter(x => x !== id)
+      setActiveId(curActive => {
+        if (curActive !== id) return curActive
+        if (next.length === 0) return null
+        const newIdx = Math.min(idx, next.length - 1)
+        return next[newIdx]
+      })
+      return next
+    })
+    loadProjects()
+  }, [loadProjects])
+
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed(prev => {
       const next = !prev
@@ -302,6 +351,8 @@ export default function App() {
         selectedId={activeId}
         onSelect={handleSelect}
         onLogout={handleLogout}
+        onNewFree={handleNewFree}
+        onDeleteFree={handleDeleteFree}
         loading={projectsLoading}
         unreadBySession={unreadBySession}
         collapsed={sidebarCollapsed}

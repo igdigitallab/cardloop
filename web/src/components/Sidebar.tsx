@@ -7,6 +7,8 @@ interface Props {
   selectedId: string | null
   onSelect: (id: string) => void
   onLogout: () => void
+  onNewFree: () => void
+  onDeleteFree: (id: string) => void
   loading: boolean
   unreadBySession: Record<string, number>
   collapsed: boolean
@@ -19,14 +21,14 @@ function unreadFor(p: Project, map: Record<string, number>): number {
 }
 
 export function Sidebar({
-  projects, selectedId, onSelect, onLogout, loading,
+  projects, selectedId, onSelect, onLogout, onNewFree, onDeleteFree, loading,
   unreadBySession, collapsed, onToggleCollapse,
 }: Props) {
   const [search, setSearch] = useState('')
 
-  const filtered = projects.filter(p =>
-    p.name.toLowerCase().includes(search.toLowerCase())
-  )
+  const matchesSearch = (p: Project) => p.name.toLowerCase().includes(search.toLowerCase())
+  const realProjects = projects.filter(p => !p.is_free).filter(matchesSearch)
+  const freeChats    = projects.filter(p => p.is_free).filter(matchesSearch)
 
   if (collapsed) {
     return (
@@ -38,6 +40,13 @@ export function Sidebar({
         >
           ☰
         </button>
+        <button
+          className="sidebar-new-free-collapsed"
+          onClick={onNewFree}
+          title="Новый свободный чат"
+        >
+          🏠+
+        </button>
         <div className="projects-list-collapsed">
           {projects.map(p => {
             const unread = unreadFor(p, unreadBySession)
@@ -45,12 +54,12 @@ export function Sidebar({
             return (
               <button
                 key={p.id}
-                className={`project-icon-btn ${isActive ? 'active' : ''}`}
+                className={`project-icon-btn ${isActive ? 'active' : ''} ${p.is_free ? 'free' : ''}`}
                 onClick={() => onSelect(p.id)}
                 title={`${p.name}${unread ? ` (${unread} нов.)` : ''}`}
               >
                 <span className="project-icon-letter">
-                  {p.name.charAt(0).toUpperCase()}
+                  {p.is_free ? '🏠' : p.name.charAt(0).toUpperCase()}
                 </span>
                 {unread > 0 && <span className="unread-dot-collapsed" />}
               </button>
@@ -82,19 +91,60 @@ export function Sidebar({
           value={search}
           onChange={e => setSearch(e.target.value)}
         />
+        <button className="sidebar-new-free-btn" onClick={onNewFree} title="Создать новый свободный чат (cwd=/home/igor)">
+          🏠 Новый свободный
+        </button>
       </div>
+
+      {/* Свободные чаты — отдельная секция (если есть) */}
+      {freeChats.length > 0 && (
+        <>
+          <div className="sidebar-section-label">Свободные чаты</div>
+          <div className="projects-list">
+            {freeChats.map(p => {
+              const unread = unreadFor(p, unreadBySession)
+              return (
+                <div
+                  key={p.id}
+                  className={`project-item project-item-free ${selectedId === p.id ? 'active' : ''} ${unread ? 'has-unread' : ''}`}
+                  onClick={() => onSelect(p.id)}
+                  title={p.cwd}
+                >
+                  <span className="free-icon">🏠</span>
+                  <span className="project-name">{p.name}</span>
+                  {unread > 0 && (
+                    <span className="unread-badge" title={`${unread} новых событий`}>
+                      {unread > 99 ? '99+' : unread}
+                    </span>
+                  )}
+                  <button
+                    className="free-delete-btn"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      if (confirm(`Удалить свободный чат «${p.name}» (история стирается)?`)) {
+                        onDeleteFree(p.id)
+                      }
+                    }}
+                    title="Удалить свободный чат"
+                  >✕</button>
+                </div>
+              )
+            })}
+          </div>
+        </>
+      )}
 
       <div className="sidebar-section-label">Проекты</div>
 
       <div className="projects-list">
         {loading ? (
           <div className="projects-empty">Загрузка...</div>
-        ) : filtered.length === 0 ? (
+        ) : realProjects.length === 0 ? (
           <div className="projects-empty">
             {search ? 'Ничего не найдено' : 'Нет проектов'}
           </div>
         ) : (
-          filtered.map(p => {
+          realProjects.map(p => {
             const unread = unreadFor(p, unreadBySession)
             return (
               <div

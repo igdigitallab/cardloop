@@ -207,8 +207,29 @@ def _project_id(cwd: str) -> str:
     return Path(cwd.rstrip("/")).name
 
 
+def _free_chats_path(ctx: dict) -> Path:
+    return ctx["DATA"] / "free_chats.json"
+
+
+def _load_free_chats(ctx: dict) -> dict:
+    """{free_id → {label, cwd, model, created_at}}. Файл может отсутствовать — вернёт {}."""
+    p = _free_chats_path(ctx)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_free_chats(ctx: dict, data: dict) -> None:
+    p = _free_chats_path(ctx)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _collect_projects(ctx: dict) -> list[dict]:
-    """Дедуп по cwd, собирает список проектов из ctx["topics"]."""
+    """Дедуп по cwd, собирает список проектов из ctx["topics"].
+    Добавляет free-чаты как virtual projects (id=free-<uuid>, tg_thread=сам id)."""
     seen: set[str] = set()
     out = []
     for key, b in ctx["topics"].items():
@@ -224,8 +245,22 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "cwd": cwd,
             "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
             "tg_thread": key,
+            "is_free": False,
         })
     out.sort(key=lambda x: x["name"].lower())
+
+    # Free chats — отдельная секция, сортировка по времени создания
+    free = _load_free_chats(ctx)
+    free_items = sorted(free.items(), key=lambda kv: kv[1].get("created_at", 0))
+    for fid, b in free_items:
+        out.append({
+            "id": fid,
+            "name": b.get("label", fid),
+            "cwd": b.get("cwd", "/home/igor"),
+            "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
+            "tg_thread": fid,  # session_key для free = его id (строка с префиксом free-)
+            "is_free": True,
+        })
     return out
 
 
@@ -306,6 +341,9 @@ async def api_projects(req: web.Request):
     projects = _collect_projects(ctx)
 
     async def enrich(p: dict) -> dict:
+        # Для свободных чатов git-проверка бессмысленна (cwd обычно $HOME, не репо проекта)
+        if p.get("is_free"):
+            return {**p, "health": {"git": None}}
         try:
             git = await _git_info(p["cwd"])
         except Exception:
@@ -948,6 +986,66 @@ async def api_activity_stream_all(req: web.Request):
     return resp
 
 
+# ─────────────────────────── свободные чаты (без привязки к проекту) ───────────────────────────
+#
+# Free-чат — виртуальный «проект» с cwd=$HOME, без git, без TG-привязки.
+# Каждый клик «новый свободный» создаёт отдельную вкладку со своим session_id.
+# Хранятся в data/free_chats.json: {free-<uuid>: {label, cwd, model, created_at}}.
+
+import uuid as _uuid
+
+_FREE_DEFAULT_CWD = "/home/igor"
+
+
+async def api_free_create(req: web.Request):
+    ctx = req.app["ctx"]
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    cwd = (body.get("cwd") or _FREE_DEFAULT_CWD).rstrip("/")
+    model = (body.get("model") or ctx.get("DEFAULT_MODEL", "sonnet")).strip().lower()
+    if model not in _ALLOWED_MODELS:
+        model = ctx.get("DEFAULT_MODEL", "sonnet")
+
+    # Лейбл — пользовательский или авто «🏠 Свободный HH:MM»
+    label = (body.get("label") or "").strip()
+    if not label:
+        label = f"🏠 Свободный {time.strftime('%H:%M')}"
+
+    fid = f"free-{_uuid.uuid4().hex[:8]}"
+    free = _load_free_chats(ctx)
+    free[fid] = {
+        "label": label,
+        "cwd": cwd,
+        "model": model,
+        "created_at": time.time(),
+    }
+    _save_free_chats(ctx, free)
+    return web.json_response({"id": fid, **free[fid]})
+
+
+async def api_free_delete(req: web.Request):
+    ctx = req.app["ctx"]
+    fid = req.match_info["id"]
+    free = _load_free_chats(ctx)
+    if fid not in free:
+        return web.json_response({"error": "free chat not found"}, status=404)
+
+    # Нельзя удалить если в нём идёт работа — клиент должен сначала остановить
+    if ctx["running"].get(fid) is not None:
+        return web.json_response({"error": "chat is busy, stop it first"}, status=409)
+
+    free.pop(fid)
+    _save_free_chats(ctx, free)
+    # Подчищаем session_id если был
+    if ctx["sessions"].pop(fid, None) is not None:
+        save = ctx.get("save_sessions")
+        if callable(save):
+            save()
+    return web.json_response({"ok": True})
+
+
 # ─────────────────────────── лимиты подписки Claude Code ───────────────────────────
 #
 # GET /api/usage  → текущий снимок rate_limits (5ч окно, недельные, opus/sonnet, overage).
@@ -986,6 +1084,15 @@ async def api_project_set_model(req: web.Request):
             status=400,
         )
 
+    # Free-чат: модель хранится в free_chats.json по его id
+    if project.get("is_free"):
+        free = _load_free_chats(ctx)
+        if project["id"] in free:
+            free[project["id"]]["model"] = model
+            _save_free_chats(ctx, free)
+        return web.json_response({"ok": True, "model": model, "topics_updated": 1})
+
+    # Обычный проект — обновляем все topics с тем же cwd
     cwd = project["cwd"]
     changed = 0
     for b in ctx["topics"].values():
@@ -1829,6 +1936,9 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/model", api_project_set_model)
         # Лимиты подписки (5ч + недельные) — для значка в полосе вкладок
         app.router.add_get("/api/usage", api_usage)
+        # Свободные чаты (без привязки к проекту, cwd=$HOME)
+        app.router.add_post("/api/free", api_free_create)
+        app.router.add_delete("/api/free/{id}", api_free_delete)
         # C2: управление сессиями проекта
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)

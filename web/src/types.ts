@@ -13,8 +13,11 @@ export interface Project {
   name: string
   cwd: string
   model: string
-  tg_thread: number | null
+  /** Для обычных проектов = number (chat:thread из TG). Для свободных чатов = их строковый id. */
+  tg_thread: number | string | null
   health: ProjectHealth
+  /** True для свободных чатов (без TG/git, cwd=$HOME). */
+  is_free?: boolean
 }
 
 export interface ClaudeMd {

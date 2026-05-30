@@ -112,6 +112,20 @@ export const api = {
   memory: (id: string) =>
     apiFetch<import('./types').ProjectMemory>(`/api/projects/${id}/memory`),
 
+  // Свободные чаты (без привязки к проекту)
+  freeCreate: (body?: { cwd?: string; model?: string; label?: string }) =>
+    apiFetch<{ id: string; label: string; cwd: string; model: string; created_at: number }>(
+      '/api/free',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      }
+    ),
+
+  freeDelete: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/free/${id}`, { method: 'DELETE' }),
+
   // Лимиты подписки Claude Code (rate_limits SDK, обновляются пассивно)
   usage: () =>
     apiFetch<{

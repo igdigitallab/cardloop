@@ -346,6 +346,44 @@ body {
 .project-item.active { background: var(--bg4); }
 .project-item.has-unread .project-name { color: var(--accent-h); font-weight: 500; }
 
+/* Свободные чаты — тот же project-item, но компактнее + крестик удаления */
+.project-item-free { padding-right: 4px; }
+.project-item-free .free-icon { font-size: 12px; flex-shrink: 0; }
+.free-delete-btn {
+  background: transparent; border: none; color: var(--text3);
+  font-size: 11px; cursor: pointer; padding: 2px 6px;
+  border-radius: 3px;
+  opacity: 0; transition: opacity var(--transition), color var(--transition), background var(--transition);
+}
+.project-item-free:hover .free-delete-btn { opacity: 1; }
+.free-delete-btn:hover { color: var(--red); background: var(--bg4); }
+
+/* Кнопка «Новый свободный» в шапке сайдбара */
+.sidebar-new-free-btn {
+  display: block; width: 100%;
+  margin-top: 10px; padding: 6px 10px;
+  background: var(--bg3); border: 1px dashed var(--border2);
+  color: var(--text2); font-size: 12px;
+  border-radius: var(--radius-sm); cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.sidebar-new-free-btn:hover {
+  background: var(--bg4); color: var(--accent-h); border-color: var(--accent);
+}
+
+/* В свёрнутом сайдбаре кнопка «+ free» */
+.sidebar-new-free-collapsed {
+  width: 44px; height: 30px;
+  margin: 0 auto 6px;
+  background: var(--bg3); border: 1px dashed var(--border2);
+  color: var(--text2); font-size: 11px; cursor: pointer;
+  border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+}
+.sidebar-new-free-collapsed:hover { background: var(--bg4); color: var(--accent-h); }
+
+.project-icon-btn.free.active { border-color: var(--accent-h); }
+
 .unread-badge {
   margin-left: auto;
   background: var(--accent);
