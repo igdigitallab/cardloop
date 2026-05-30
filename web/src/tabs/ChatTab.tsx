@@ -835,32 +835,36 @@ export function ChatTab({ project, onProjectsReload }: Props) {
           </div>
         )}
 
-        {messages.map(msg => (
-          <div key={msg.id} className={`chat-msg chat-msg-${msg.role}`}>
-            {/* Tool calls */}
-            {msg.tools.length > 0 && (
-              <div className="chat-tools">
-                {msg.tools.map((t, i) => (
-                  <ToolBlock key={i} tool={t} />
-                ))}
-              </div>
-            )}
+        {messages.map(msg => {
+          // Пустой placeholder-assistant (text=='', tools=[]) НЕ рендерим — статус «работает»
+          // показывается богатым status-bar внизу (chat-pulse), дубликат внутри чата лишний.
+          const isEmpty = !msg.text && msg.tools.length === 0 && !msg.error
+          if (isEmpty && msg.role === 'assistant') return null
+          return (
+            <div key={msg.id} className={`chat-msg chat-msg-${msg.role}`}>
+              {/* Tool calls */}
+              {msg.tools.length > 0 && (
+                <div className="chat-tools">
+                  {msg.tools.map((t, i) => (
+                    <ToolBlock key={i} tool={t} />
+                  ))}
+                </div>
+              )}
 
-            {/* Message text */}
-            {msg.text ? (
-              <div className="chat-msg-body markdown-wrap">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
-              </div>
-            ) : msg.streaming ? (
-              <div className="chat-msg-body chat-thinking">агент думает…</div>
-            ) : null}
+              {/* Message text */}
+              {msg.text && (
+                <div className="chat-msg-body markdown-wrap">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+                </div>
+              )}
 
-            {/* Error */}
-            {msg.error && (
-              <div className="chat-msg-error">⚠ {msg.error}</div>
-            )}
-          </div>
-        ))}
+              {/* Error */}
+              {msg.error && (
+                <div className="chat-msg-error">⚠ {msg.error}</div>
+              )}
+            </div>
+          )
+        })}
 
         <div ref={bottomRef} />
       </div>
