@@ -231,6 +231,7 @@ export default function App() {
     }
     es.onerror = () => { /* EventSource сам переподключится */ }
     return () => { es.close() }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- incrementUnread is stable (useCallback)
   }, [authState, loadProjects])
 
   // Live-refresh git-статуса: polling каждые 15с + при возврате фокуса на окно/вкладку
@@ -324,7 +325,7 @@ export default function App() {
     } catch (e) {
       showToast(`Не удалось открыть split: ${e instanceof Error ? e.message : String(e)}`)
     }
-  }, [loadProjects])
+  }, [loadProjects, showToast])
 
   const handleSplitClose = useCallback((leftId: string) => {
     setSplitPairs(prev => { const { [leftId]: _, ...rest } = prev; return rest })
@@ -367,7 +368,7 @@ export default function App() {
     } finally {
       setNewProjectBusy(false)
     }
-  }, [loadProjects, newProjectBusy])
+  }, [loadProjects, newProjectBusy, showToast])
 
   // Создать новый свободный чат (cwd=$HOME) и сразу открыть его как вкладку
   const handleNewFree = useCallback(async () => {
@@ -381,7 +382,7 @@ export default function App() {
       const msg = e instanceof Error ? e.message : String(e)
       showToast(`Не удалось создать свободный чат: ${msg}`)
     }
-  }, [loadProjects])
+  }, [loadProjects, showToast])
 
   // Переименование проекта (slug) — обновляет активный проект + открытые вкладки
   const handleRenameSuccess = useCallback((oldId: string, newId: string) => {
@@ -409,7 +410,7 @@ export default function App() {
       const msg = e instanceof Error ? e.message : String(e)
       showToast(`Не удалось переименовать: ${msg}`)
     }
-  }, [loadProjects])
+  }, [loadProjects, showToast])
 
   // Удалить свободный чат — закрыть вкладку, убрать с бэка
   const handleDeleteFree = useCallback(async (id: string) => {
@@ -439,7 +440,7 @@ export default function App() {
       return next
     })
     loadProjects()
-  }, [loadProjects])
+  }, [loadProjects, showToast])
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed(prev => {

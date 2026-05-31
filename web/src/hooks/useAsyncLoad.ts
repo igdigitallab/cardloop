@@ -30,7 +30,6 @@ function asyncReducer<T>(_state: AsyncState<T>, action: AsyncAction<T>): AsyncSt
  */
 export function useAsyncLoad<T>(
   fetchFn: () => Promise<T> | null,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   deps: any[],
 ): [AsyncState<T>, () => void] {
   const [state, dispatch] = useReducer(
@@ -47,12 +46,11 @@ export function useAsyncLoad<T>(
     dispatch({ type: 'start' })
     p.then(d => dispatch({ type: 'success', payload: d }))
      .catch(e => dispatch({ type: 'error', message: e instanceof Error ? e.message : String(e) }))
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: deps is a variable array
   }, deps)
 
   useEffect(() => {
     reload()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reload])
 
   return [state, reload]

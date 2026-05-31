@@ -91,6 +91,7 @@ export function ProjectActivityProvider({ projectId, children }: ProviderProps) 
 }
 
 /** Подписаться на ВСЕ события шины. handler нестабильным быть может (внутри используем ref). */
+// eslint-disable-next-line react-refresh/only-export-components -- hooks + provider co-located by design
 export function useProjectActivity(handler: Handler) {
   const ctx = useContext(BusContext)
   const handlerRef = useRef(handler)
@@ -103,6 +104,7 @@ export function useProjectActivity(handler: Handler) {
 }
 
 /** Удобный хук: вызывает callback на каждом run_end из шины. */
+// eslint-disable-next-line react-refresh/only-export-components -- hooks + provider co-located by design
 export function useOnRunEnd(callback: () => void) {
   useProjectActivity(evt => {
     if (evt.kind === 'run_end') callback()
@@ -110,6 +112,7 @@ export function useOnRunEnd(callback: () => void) {
 }
 
 /** Хук: refresh при возврате фокуса/видимости + опционально через polling. */
+// eslint-disable-next-line react-refresh/only-export-components -- hooks + provider co-located by design
 export function useFocusRefresh(callback: () => void, pollMs?: number) {
   const cbRef = useRef(callback)
   useEffect(() => { cbRef.current = callback }, [callback])

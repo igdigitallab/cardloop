@@ -373,7 +373,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           if (evt.type === 'text') {
             setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
           } else if (evt.type === 'tool') {
-            // eslint-disable-next-line @typescript-eslint/no-unused-vars
             const { type: _t, ...toolFields } = evt as unknown as Record<string, unknown>
             setRun(r => r ? { ...r, lastEventAt: now, currentTool: toolFields as unknown as RichTool } : r)
           } else if (evt.type === 'result' || evt.type === 'done' || evt.type === 'error') {
@@ -391,7 +390,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
               case 'text':
                 return appendChunk(prev, { kind: 'text', text: evt.text })
               case 'tool': {
-                // eslint-disable-next-line @typescript-eslint/no-unused-vars
                 const { type: _t, ...toolFields } = evt as unknown as Record<string, unknown>
                 return appendChunk(prev, { kind: 'tool', tool: toolFields as unknown as ChatToolCall })
               }
@@ -430,7 +428,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
         setTimeout(() => { sendMessageRef.current?.(next) }, 150)
       }
     }
-  }, [input, projectId, streaming, onProjectsReload])
+  }, [input, projectId, streaming, onProjectsReload, attachments])
 
   useEffect(() => { sendMessageRef.current = sendMessage }, [sendMessage])
 

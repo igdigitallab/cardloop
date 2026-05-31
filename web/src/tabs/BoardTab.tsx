@@ -140,6 +140,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       cancelled = true
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- schedulePoll uses refs only, stable
   }, [projectId])
 
   // Refresh на focus/visibility (общий хук)

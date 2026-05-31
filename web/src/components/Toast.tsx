@@ -15,6 +15,7 @@ export interface Toast {
 
 let _toastCounter = 0
 
+// eslint-disable-next-line react-refresh/only-export-components -- hook + component intentionally co-located
 export function useToast() {
   const [toasts, setToasts] = useState<Toast[]>([])
 

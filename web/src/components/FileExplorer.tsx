@@ -77,7 +77,7 @@ function TreeView({ nodes, selectedPath, onFileClick, onDirToggle }: TreeProps) 
             onKeyDown={e => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()
-                node.type === 'dir' ? onDirToggle(node) : onFileClick(node)
+                if (node.type === 'dir') onDirToggle(node); else onFileClick(node)
               }
             }}
           >
@@ -178,7 +178,6 @@ export function FileExplorer({
     })
 
     return () => { cancelled = true }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchDir])
 
   // ── Mutable tree helpers ──────────────────────────────────────────────────
