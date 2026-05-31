@@ -63,11 +63,13 @@ interface Props {
   onRenameSuccess?: (oldId: string, newId: string) => void
   onSplitCreate?: () => void   // показать кнопку ⊞ (только для левого free-чата)
   onSplitClose?: () => void    // показать кнопку ✕ Закрыть (только для правого)
+  /** Передаётся в ChatTab для восстановления running-state при возврате на вкладку. */
+  isActive?: boolean
 }
 
 type GitSyncState = 'idle' | 'busy' | 'ok' | 'err'
 
-export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose }: Props) {
+export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose, isActive }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
   const git = project.health.git
 
@@ -261,7 +263,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
               )}
             </div>
           )}
-          <ChatTab project={project} onProjectsReload={onProjectsReload} />
+          <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
         </div>
       </ProjectActivityProvider>
     )
@@ -414,7 +416,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
             </button>
           )}
         </div>
-        <ChatTab project={project} onProjectsReload={onProjectsReload} />
+        <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
       </div>
 
       {/* COLLAPSED STUB — narrow vertical button when chat is collapsed */}

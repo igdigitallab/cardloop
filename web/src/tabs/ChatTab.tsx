@@ -18,6 +18,8 @@ import { useProjectActivity } from '../hooks/useProjectActivity'
 interface Props {
   project: Project
   onProjectsReload: () => void
+  /** Когда вкладка проекта становится видимой (false→true) — проверяем running-статус. */
+  isActive?: boolean
 }
 
 type ModelKey = 'opus' | 'sonnet' | 'haiku'
@@ -539,7 +541,7 @@ function SessionContextPanel({ projectId, refreshKey }: SessionContextPanelProps
 
 // ─── ChatTab ──────────────────────────────────────────────────────────────
 
-export function ChatTab({ project, onProjectsReload }: Props) {
+export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const projectId = project.id
   const [messages, setMessages] = useState<ChatMessage[]>([])
   // Реальный размер контекста сессии (prompt-токены последнего хода), из бэкенда.
@@ -636,6 +638,30 @@ export function ChatTab({ project, onProjectsReload }: Props) {
 
     return () => { cancelled = true }
   }, [projectId])
+
+  // Восстановление running-state при возврате на вкладку (isActive: false→true).
+  // Покрывает случай «уходили на другой проект пока шёл агент»:
+  // — TG-run не публикует run_start в шину → frontend не знал что занято
+  // — Card-run мог пропустить run_start если шина ещё не подключилась
+  // — Любой иной пропуск события пока вкладка была display:none
+  //
+  // При возврате проверяем бэкенд; если running=true, а у нас run=null — восстанавливаем.
+  const prevIsActiveRef = useRef<boolean | undefined>(undefined)
+  useEffect(() => {
+    const prev = prevIsActiveRef.current
+    prevIsActiveRef.current = isActive
+    // Срабатываем только на переходе false/undefined → true
+    if (!isActive || prev === true) return
+    // Если уже есть активный run-индикатор — не мешаем
+    // (streaming = идёт наш собственный fetch; run ≠ null = уже восстановлено или активно)
+    if (streaming || busActiveRef.current) return
+    api.projectRunning(projectId).then(res => {
+      if (!res.running) return
+      // Бэкенд говорит «занято», а у нас нет индикатора → восстанавливаем
+      busActiveRef.current = true
+      setRun({ startedAt: Date.now(), lastEventAt: Date.now(), currentTool: null, source: 'card' })
+    }).catch(() => { /* non-critical */ })
+  }, [isActive, projectId, streaming])
 
   // Подписка на активность проекта (общий SSE через ProjectActivityProvider).
   // Card-run приходят сюда: render как обычные ассистент-сообщения.
