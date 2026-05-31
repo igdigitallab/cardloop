@@ -88,7 +88,13 @@ export interface FileContent {
   error?: string
 }
 
-export type TabId = 'overview' | 'readme' | 'claude-md' | 'specs' | 'activity' | 'chat' | 'board' | 'files' | 'memory'
+export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory'
+
+export interface ProjectLogs {
+  lines: string[]
+  configured: boolean
+  cmd?: string | null
+}
 
 // ─── Session Context (Feature A) ──────────────────────────────────────────
 

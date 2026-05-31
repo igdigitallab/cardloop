@@ -56,6 +56,9 @@ export const api = {
   activity: (id: string) =>
     apiFetch<{ lines: string[] }>(`/api/projects/${id}/activity`),
 
+  projectLogs: (id: string) =>
+    apiFetch<import('./types').ProjectLogs>(`/api/projects/${id}/logs`),
+
   tasks: (id: string) =>
     apiFetch<import('./types').Board>(`/api/projects/${id}/tasks`),
 

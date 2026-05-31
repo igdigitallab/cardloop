@@ -3,10 +3,8 @@ import { Project, TabId } from '../types'
 import { api } from '../api'
 import { ProjectActivityProvider } from '../hooks/useProjectActivity'
 import { OverviewTab } from '../tabs/OverviewTab'
-import { ReadmeTab } from '../tabs/ReadmeTab'
 import { ClaudeMdTab } from '../tabs/ClaudeMdTab'
-import { SpecsTab } from '../tabs/SpecsTab'
-import { ActivityTab } from '../tabs/ActivityTab'
+import { LogsTab } from '../tabs/LogsTab'
 import { BoardTab } from '../tabs/BoardTab'
 import { ChatTab } from '../tabs/ChatTab'
 import { FilesTab } from '../tabs/FilesTab'
@@ -20,14 +18,12 @@ interface Tab {
 
 // Chat is no longer a tab — it lives in the permanent right panel
 const TABS: Tab[] = [
-  { id: 'overview',   label: 'Обзор' },
-  { id: 'readme',     label: 'README' },
-  { id: 'claude-md',  label: 'CLAUDE.md' },
-  { id: 'specs',      label: 'Specs' },
-  { id: 'activity',   label: 'Активность' },
-  { id: 'board',      label: 'Доска' },
-  { id: 'files',      label: 'Файлы' },
-  { id: 'memory',     label: 'Память' },
+  { id: 'overview',  label: 'Обзор' },
+  { id: 'claude-md', label: 'CLAUDE.md' },
+  { id: 'logs',      label: 'Логи' },
+  { id: 'board',     label: 'Доска' },
+  { id: 'files',     label: 'Файлы' },
+  { id: 'memory',    label: 'Память' },
 ]
 
 // localStorage keys
@@ -295,10 +291,8 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
 
         <div className="tab-content">
           {activeTab === 'overview'  && <OverviewTab project={project} />}
-          {activeTab === 'readme'    && <ReadmeTab projectId={project.id} />}
           {activeTab === 'claude-md' && <ClaudeMdTab projectId={project.id} />}
-          {activeTab === 'specs'     && <SpecsTab projectId={project.id} />}
-          {activeTab === 'activity'  && <ActivityTab projectId={project.id} />}
+          {activeTab === 'logs'      && <LogsTab projectId={project.id} projectName={project.name} />}
           {activeTab === 'board'     && <BoardTab projectId={project.id} />}
           {activeTab === 'files'     && <FilesTab projectId={project.id} />}
           {activeTab === 'memory'    && <MemoryTab projectId={project.id} />}

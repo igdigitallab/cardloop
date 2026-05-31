@@ -605,6 +605,41 @@ async def api_project_spec_content(req: web.Request):
     return web.json_response({"error": "not found"}, status=404)
 
 
+async def api_project_logs(req: web.Request):
+    """GET /api/projects/{id}/logs — runtime logs via log_cmd from topics.json."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    log_cmd: str | None = project.get("log_cmd") or None
+    if not log_cmd:
+        return web.json_response({"lines": [], "configured": False, "cmd": None})
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            log_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return web.json_response({"error": "log_cmd timed out"}, status=504)
+
+        raw = stdout.decode("utf-8", errors="replace")
+        lines = raw.splitlines()
+        # last 300 lines, newest first
+        tail = lines[-300:] if len(lines) > 300 else lines
+        tail.reverse()
+        return web.json_response({"lines": tail, "configured": True, "cmd": log_cmd})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def api_project_activity(req: web.Request):
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -2546,6 +2581,7 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/readme", api_project_readme_write)
         app.router.add_get("/api/projects/{id}/specs", api_project_specs)
         app.router.add_get("/api/projects/{id}/specs/{name}", api_project_spec_content)
+        app.router.add_get("/api/projects/{id}/logs", api_project_logs)
         app.router.add_get("/api/projects/{id}/activity", api_project_activity)
         # Доска задач (TASKS.md / DONE.md)
         app.router.add_get("/api/projects/{id}/tasks", api_project_tasks)
