@@ -67,11 +67,11 @@ export const api = {
   tasks: (id: string) =>
     apiFetch<import('./types').Board>(`/api/projects/${id}/tasks`),
 
-  createTask: (id: string, text: string, column?: string) =>
+  createTask: (id: string, text: string, column?: string, description?: string | null) =>
     apiFetch<import('./types').Board>(`/api/projects/${id}/tasks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, column }),
+      body: JSON.stringify({ text, column, ...(description != null ? { description } : {}) }),
     }),
 
   moveTask: (id: string, card: string, to: string) =>
@@ -86,11 +86,11 @@ export const api = {
       method: 'DELETE',
     }),
 
-  updateTask: (id: string, card: string, text: string) =>
+  updateTask: (id: string, card: string, text: string, description?: string | null) =>
     apiFetch<import('./types').Board>(`/api/projects/${id}/tasks/${card}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, ...(description !== undefined ? { description } : {}) }),
     }),
 
   tasksDone: (id: string) =>

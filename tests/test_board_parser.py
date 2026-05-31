@@ -295,3 +295,115 @@ def test_serialize_adds_default_preamble_if_empty():
     _, cols = _parse_tasks("")
     serialized = _serialize_tasks("", cols, "my-project")
     assert "# Tasks — my-project" in serialized
+
+
+# ─────────────────────────── 8. Description (новое) ───────────────────────────
+
+def test_parse_card_with_description():
+    """Строки '  > текст' сразу после карточки собираются в description."""
+    text = """\
+## Backlog
+- [ ] Короткий заголовок <!--ops:abc111-->
+  > Первая строка описания.
+  > Вторая строка описания.
+- [ ] Карточка без описания <!--ops:abc222-->
+"""
+    _, cols = _parse_tasks(text)
+    assert len(cols["backlog"]) == 2
+
+    card_with_desc = cols["backlog"][0]
+    assert card_with_desc["id"] == "abc111"
+    assert card_with_desc["text"] == "Короткий заголовок"
+    assert card_with_desc["description"] == "Первая строка описания.\nВторая строка описания."
+
+    card_no_desc = cols["backlog"][1]
+    assert card_no_desc["id"] == "abc222"
+    assert card_no_desc.get("description") is None
+
+
+def test_parse_card_without_description_still_works():
+    """Обратная совместимость: карточки без description парсятся как раньше."""
+    _, cols = _parse_tasks(CANONICAL_TASKS_MD)
+    for col_cards in cols.values():
+        for card in col_cards:
+            # description должен отсутствовать (None или ключ не существует)
+            assert card.get("description") is None, (
+                f"Карточка '{card['text']}' не должна иметь description в каноничном файле"
+            )
+
+
+def test_serialize_round_trip_with_description():
+    """Карточка с description: parse → serialize → parse сохраняет description точно."""
+    original = """\
+## Backlog
+- [ ] Title карточки <!--ops:xyz789-->
+  > Описание первая строка.
+  > Описание вторая строка.
+- [ ] Без описания <!--ops:nnn000-->
+"""
+    _, cols1 = _parse_tasks(original)
+    serialized = _serialize_tasks("", cols1, "test-project")
+
+    # Проверяем что сериализованный файл содержит description-строки
+    assert "  > Описание первая строка." in serialized
+    assert "  > Описание вторая строка." in serialized
+
+    # Round-trip: парсим обратно
+    _, cols2 = _parse_tasks(serialized)
+    assert len(cols2["backlog"]) == 2
+
+    card_with = cols2["backlog"][0]
+    assert card_with["id"] == "xyz789"
+    assert card_with["text"] == "Title карточки"
+    assert card_with["description"] == "Описание первая строка.\nОписание вторая строка."
+
+    card_without = cols2["backlog"][1]
+    assert card_without.get("description") is None
+
+    # Второй serialize: идемпотентен
+    serialized2 = _serialize_tasks("", cols2, "test-project")
+    assert serialized == serialized2, "Сериализация с description нестабильна"
+
+
+def test_parse_description_stops_at_new_card():
+    """Description прерывается при встрече новой карточки."""
+    text = """\
+## Backlog
+- [ ] Первая <!--ops:aaa001-->
+  > Описание первой.
+- [ ] Вторая <!--ops:aaa002-->
+  > Описание второй.
+"""
+    _, cols = _parse_tasks(text)
+    assert len(cols["backlog"]) == 2
+    assert cols["backlog"][0]["description"] == "Описание первой."
+    assert cols["backlog"][1]["description"] == "Описание второй."
+
+
+def test_parse_description_stops_at_section_boundary():
+    """Description карточки не переходит в следующую секцию."""
+    text = """\
+## Backlog
+- [ ] Задача <!--ops:bbb001-->
+  > Описание.
+
+## In Progress
+- [ ] Другая задача <!--ops:bbb002-->
+"""
+    _, cols = _parse_tasks(text)
+    assert cols["backlog"][0]["description"] == "Описание."
+    assert cols["in_progress"][0].get("description") is None
+
+
+def test_count_potential_cards_description_lines_not_counted():
+    """Строки description '  > ...' не считаются как потенциальные карточки."""
+    text = """\
+## Backlog
+- [ ] Карточка <!--ops:ccc001-->
+  > Описание строка 1.
+  > Описание строка 2.
+"""
+    potential = _count_potential_cards(text)
+    assert potential == 1, (
+        f"Description строки не должны считаться как карточки: potential={potential}"
+    )
