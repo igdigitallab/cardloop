@@ -1,0 +1,279 @@
+/* ── App Layout ────────────────────────────────────────────── */
+.app-layout {
+  display: flex;
+  height: 100%;
+}
+
+/* ── Main Area (taborn project panels) ────────────────────── */
+.main-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.project-tab-slot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Split-view: два free-чата рядом */
+.project-tab-slot.has-split {
+  flex-direction: row;
+}
+.split-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  height: 100%;
+}
+.split-pane-full {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.free-split-divider {
+  flex: 0 0 5px;
+  background: var(--border);
+  cursor: col-resize;
+  transition: background 0.15s;
+}
+.free-split-divider:hover, .free-split-divider:active {
+  background: var(--accent);
+}
+.free-chat-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+}
+.free-chat-name {
+  font-size: 12px;
+  color: var(--text2);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.split-create-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.split-create-btn:hover { background: var(--bg3); color: var(--text); }
+.split-close-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.split-close-btn:hover { background: rgba(245,97,74,0.1); color: var(--red); border-color: var(--red); }
+
+/* ── Main Content ──────────────────────────────────────────── */
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Project split layout (left tabs + right chat) ─────────── */
+.project-split-layout {
+  flex-direction: row !important;
+  align-items: stretch;
+  position: relative;
+}
+
+.project-left-pane {
+  flex: 55;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  transition: flex 0.15s ease, max-width 0.15s ease;
+}
+
+.project-chat-pane {
+  flex: 45;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+  transition: flex 0.15s ease, max-width 0.15s ease;
+}
+
+.project-chat-pane-header {
+  padding: 8px 12px 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+  letter-spacing: -0.1px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* ── Resize divider ─────────────────────────────────────────── */
+.project-split-divider {
+  width: 6px;
+  flex-shrink: 0;
+  background: transparent;
+  cursor: col-resize;
+  position: relative;
+  z-index: 10;
+  transition: background var(--transition);
+}
+
+.project-split-divider::after {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  left: 2px; right: 2px;
+  background: var(--border);
+  transition: background var(--transition);
+}
+
+.project-split-divider:hover::after,
+.project-split-divider:active::after {
+  background: var(--accent);
+}
+
+/* When chat is collapsed, divider acts as expand button */
+.project-split-divider.divider-collapsed {
+  cursor: pointer;
+  width: 4px;
+}
+
+.project-split-divider.divider-collapsed::after {
+  background: var(--border2);
+}
+
+/* ── Chat collapse button (in header) ───────────────────────── */
+.chat-collapse-btn {
+  background: none;
+  border: 1px solid var(--border2);
+  color: var(--text3);
+  font-size: 12px;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), color var(--transition);
+  flex-shrink: 0;
+}
+
+.chat-collapse-btn:hover {
+  background: var(--bg4);
+  color: var(--text);
+}
+
+/* ── Collapsed stub (vertical pill at right edge) ───────────── */
+.chat-collapsed-stub {
+  width: 28px;
+  flex-shrink: 0;
+  background: var(--bg2);
+  border: none;
+  border-left: 1px solid var(--border);
+  color: var(--text3);
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), color var(--transition);
+}
+
+.chat-collapsed-stub:hover {
+  background: var(--bg3);
+  color: var(--text);
+}
+
+/* Responsive: stack vertically on narrow screens */
+@media (max-width: 900px) {
+  .project-split-layout {
+    flex-direction: column !important;
+  }
+
+  .project-left-pane {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    flex: none;
+    /* let left pane take natural height, chat gets 45vh below */
+  }
+
+  .project-chat-pane {
+    flex: none;
+    height: 45vh;
+    min-height: 280px;
+  }
+
+  .project-split-divider,
+  .chat-collapsed-stub {
+    display: none;
+  }
+}
+
+/* ── Welcome ───────────────────────────────────────────────── */
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 12px;
+  color: var(--text3);
+}
+
+.welcome-icon {
+  font-size: 40px;
+  opacity: 0.4;
+}
+
+.welcome h2 {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text2);
+}
+
+.welcome p {
+  font-size: 13px;
+  text-align: center;
+  max-width: 260px;
+  line-height: 1.6;
+}
+
+/* ── Свободный чат — чат на всю ширину, без левой панели и сплита */
+.project-free-layout {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}

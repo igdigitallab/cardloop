@@ -1,0 +1,318 @@
+/* ── Sidebar ───────────────────────────────────────────────── */
+.sidebar {
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  padding: 20px 16px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.sidebar-logo-icon {
+  width: 26px;
+  height: 26px;
+  background: var(--accent);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.sidebar-logo-text {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  flex: 1;
+}
+
+/* Кнопка свернуть/развернуть сайдбар */
+.sidebar-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 14px;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), color var(--transition);
+}
+.sidebar-toggle-btn:hover { background: var(--bg3); color: var(--text); }
+
+.sidebar-toggle-btn.collapsed {
+  width: 44px;
+  height: 44px;
+  margin: 8px auto 4px;
+  font-size: 16px;
+}
+
+/* Свёрнутый сайдбар — узкая полоса с иконками проектов */
+.sidebar.sidebar-collapsed-mode {
+  width: 56px;
+  min-width: 56px;
+  padding-top: 4px;
+}
+
+.projects-list-collapsed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 6px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.project-icon-btn {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  background: var(--bg3);
+  border: 1px solid transparent;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), border-color var(--transition);
+}
+.project-icon-btn:hover { background: var(--bg4); }
+.project-icon-btn.active {
+  background: var(--bg4);
+  border-color: var(--accent);
+}
+
+.project-icon-letter {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+.unread-dot-collapsed {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-h);
+  box-shadow: 0 0 6px rgba(133, 130, 255, 0.7);
+}
+
+.search-input {
+  width: 100%;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px 7px 30px;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--transition);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%235c5c6e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 9px center;
+}
+
+.search-input:focus { border-color: var(--accent); }
+.search-input::placeholder { color: var(--text3); }
+
+.sidebar-section-label {
+  padding: 12px 16px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text3);
+}
+
+.new-project-btn {
+  margin: 10px 12px 6px;
+  padding: 8px 12px;
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px dashed var(--border2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  text-align: center;
+}
+.new-project-btn:hover:not(:disabled) {
+  background: var(--bg4);
+  border-color: var(--accent);
+  color: var(--accent-h);
+}
+.new-project-btn:disabled { opacity: 0.55; cursor: wait; }
+
+.new-project-btn-collapsed {
+  width: 36px;
+  height: 36px;
+  margin: 4px auto 6px;
+  background: var(--bg3);
+  color: var(--text2);
+  border: 1px dashed var(--border2);
+  border-radius: 8px;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.new-project-btn-collapsed:hover:not(:disabled) {
+  background: var(--bg4);
+  border-color: var(--accent);
+  color: var(--accent-h);
+}
+.new-project-btn-collapsed:disabled { opacity: 0.55; cursor: wait; }
+
+.projects-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px;
+}
+
+.project-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition);
+  user-select: none;
+}
+
+.project-item:hover { background: var(--bg3); }
+.project-item.active { background: var(--bg4); }
+.project-item.has-unread .project-name { color: var(--accent-h); font-weight: 500; }
+
+/* Свободные чаты — тот же project-item, но компактнее + крестик удаления */
+.project-item-free { padding-right: 4px; }
+.project-item-free .free-icon { font-size: 12px; flex-shrink: 0; }
+.free-delete-btn {
+  background: transparent; border: none; color: var(--text3);
+  font-size: 11px; cursor: pointer; padding: 2px 6px;
+  border-radius: 3px;
+  opacity: 0; transition: opacity var(--transition), color var(--transition), background var(--transition);
+}
+.project-item-free:hover .free-delete-btn { opacity: 1; }
+.free-delete-btn:hover { color: var(--red); background: var(--bg4); }
+
+/* Sidebar drag-and-drop reordering */
+.project-item { cursor: grab; }
+.project-item.sidebar-item-dragging { opacity: 0.35; cursor: grabbing; }
+.project-item.sidebar-item-drag-over { border-top: 2px solid var(--accent); margin-top: -2px; }
+
+.project-icon-btn.free.active { border-color: var(--accent-h); }
+
+.incidents-badge {
+  margin-left: auto;
+  background: var(--red, #dc2626);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 9px;
+  min-width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  letter-spacing: 0.2px;
+  animation: incident-pulse 2s ease-in-out infinite;
+}
+@keyframes incident-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.5); }
+  50%      { box-shadow: 0 0 0 4px rgba(220,38,38,0); }
+}
+.incidents-dot-collapsed {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.unread-badge {
+  margin-left: auto;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 9px;
+  min-width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.health-dot.green  { background: var(--green); box-shadow: 0 0 5px rgba(52,199,123,0.5); }
+.health-dot.yellow { background: var(--yellow); box-shadow: 0 0 5px rgba(245,166,35,0.5); }
+.health-dot.gray   { background: var(--text3); }
+
+.project-name {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.projects-empty {
+  padding: 24px 16px;
+  color: var(--text3);
+  font-size: 13px;
+  text-align: center;
+}
+
+.sidebar-footer {
+  padding: 12px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.logout-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.logout-btn:hover { background: var(--bg3); color: var(--red); }
