@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
 import { PromptPicker } from '../components/PromptPicker'
+import { SkillPicker } from '../components/SkillPicker'
 import {
   ChatMessage,
   ChatSSEEvent,
@@ -642,6 +643,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   // Панель шаблонов промтов
   const [showPrompts, setShowPrompts] = useState(false)
+  // Панель скиллов агента (глобальные + проектные)
+  const [showSkills, setShowSkills] = useState(false)
 
   // Keep streamingRef in sync with the streaming state
   useEffect(() => {
@@ -701,29 +704,46 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     return () => { cancelled = true }
   }, [projectId])
 
-  // Восстановление running-state при возврате на вкладку (isActive: false→true).
-  // Покрывает случай «уходили на другой проект пока шёл агент»:
-  // — TG-run не публикует run_start в шину → frontend не знал что занято
-  // — Card-run мог пропустить run_start если шина ещё не подключилась
-  // — Любой иной пропуск события пока вкладка была display:none
-  //
-  // При возврате проверяем бэкенд; если running=true, а у нас run=null — восстанавливаем.
-  const prevIsActiveRef = useRef<boolean | undefined>(undefined)
+  // Синхронизация run-индикатора с реальным состоянием бэкенда.
+  // Зачем периодический поллинг, а не разовая проверка при возврате на вкладку:
+  // — api_project_chat и TG-run НЕ публикуют события в шину (только card-run),
+  //   поэтому шина может пропустить run_start/run_end и фронт рассинхронизируется
+  //   (индикатор висит после реального завершения ИЛИ пропадает на работающем агенте).
+  // — Полл /running каждые 5с пока вкладка активна — дешёвый источник истины,
+  //   восстанавливает индикатор в обе стороны.
+  // НЕ полим если идёт наш собственный chat-stream (streaming=true) — там состояние
+  // ведётся через POST-SSE напрямую, перетирать бессмысленно.
   useEffect(() => {
-    const prev = prevIsActiveRef.current
-    prevIsActiveRef.current = isActive
-    // Срабатываем только на переходе false/undefined → true
-    if (!isActive || prev === true) return
-    // Если уже есть активный run-индикатор — не мешаем
-    // (streaming = идёт наш собственный fetch; run ≠ null = уже восстановлено или активно)
-    if (streaming || busActiveRef.current) return
-    api.projectRunning(projectId).then(res => {
-      if (!res.running) return
-      // Бэкенд говорит «занято», а у нас нет индикатора → восстанавливаем
-      busActiveRef.current = true
-      setRun({ startedAt: Date.now(), lastEventAt: Date.now(), currentTool: null, source: 'card' })
-    }).catch(() => { /* non-critical */ })
-  }, [isActive, projectId, streaming])
+    if (!isActive) return
+    let cancelled = false
+
+    async function sync() {
+      if (cancelled || streamingRef.current) return
+      try {
+        const res = await api.projectRunning(projectId)
+        if (cancelled) return
+        if (res.running) {
+          // Бэк работает, а у нас нет индикатора → восстанавливаем
+          if (!busActiveRef.current) {
+            busActiveRef.current = true
+            const now = Date.now()
+            setRun(r => r ?? { startedAt: now, lastEventAt: now, currentTool: null, source: 'card' })
+          }
+        } else {
+          // Бэк свободен, а индикатор висит → шина пропустила run_end, гасим
+          if (busActiveRef.current) {
+            busActiveRef.current = false
+            setRun(null)
+            setMessages(prev => finalizeStreaming(prev))
+          }
+        }
+      } catch { /* non-critical */ }
+    }
+
+    sync()  // первая проверка сразу при активации
+    const id = setInterval(sync, 5000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [isActive, projectId])
 
   // Подписка на активность проекта (общий SSE через ProjectActivityProvider).
   // Card-run приходят сюда: render как обычные ассистент-сообщения.
@@ -952,6 +972,20 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     }, 0)
   }
 
+  function handleSkillSelect(text: string) {
+    // Скилл вставляется как «используй скилл <name>: » — нужно поставить курсор
+    // в конец (после двоеточия), чтобы юзер сразу дописал задачу.
+    setInput(text)
+    setShowSkills(false)
+    setTimeout(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      ta.focus()
+      const pos = text.length
+      ta.setSelectionRange(pos, pos)
+    }, 0)
+  }
+
   const handleModelChange = useCallback(async (m: ModelKey) => {
     if (m === project.model) return
     setChangingModel(true)
@@ -1151,17 +1185,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             onClose={() => setShowPrompts(false)}
           />
         )}
-        <div className="chat-input-row">
-          <button
-            className="chat-attach-btn"
-            onClick={() => fileInputRef.current?.click()}
-            title="Прикрепить файл (или перетащи / Ctrl+V)"
-          >📎</button>
-          <button
-            className={`chat-attach-btn${showPrompts ? ' active' : ''}`}
-            onClick={() => setShowPrompts(s => !s)}
-            title="Шаблоны промтов"
-          >📋</button>
+        {showSkills && (
+          <SkillPicker
+            projectId={projectId}
+            onSelect={handleSkillSelect}
+            onClose={() => setShowSkills(false)}
+          />
+        )}
+        <div className="chat-composer">
           <textarea
             ref={textareaRef}
             className="chat-textarea"
@@ -1174,14 +1205,36 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             onPaste={handlePaste}
             rows={3}
           />
-          <button
-            className="btn-primary chat-send-btn"
-            disabled={!input.trim() && attachments.filter(a => a.path).length === 0}
-            onClick={() => sendMessage()}
-            title={streaming ? 'Поставить в очередь' : 'Отправить'}
-          >
-            {streaming ? 'В очередь' : 'Отправить'}
-          </button>
+          <div className="chat-toolbar">
+            <div className="chat-toolbar-tools">
+              <button
+                className="chat-tool-btn"
+                onClick={() => fileInputRef.current?.click()}
+                title="Прикрепить файл (или перетащи / Ctrl+V)"
+                aria-label="Прикрепить файл"
+              >📎</button>
+              <button
+                className={`chat-tool-btn${showPrompts ? ' active' : ''}`}
+                onClick={() => { setShowPrompts(s => !s); setShowSkills(false) }}
+                title="Шаблоны промтов"
+                aria-label="Шаблоны промтов"
+              >📋</button>
+              <button
+                className={`chat-tool-btn${showSkills ? ' active' : ''}`}
+                onClick={() => { setShowSkills(s => !s); setShowPrompts(false) }}
+                title="Скиллы агента (глобальные + проекта)"
+                aria-label="Скиллы агента"
+              >🛠</button>
+            </div>
+            <button
+              className="btn-primary chat-send-btn"
+              disabled={!input.trim() && attachments.filter(a => a.path).length === 0}
+              onClick={() => sendMessage()}
+              title={streaming ? 'Поставить в очередь' : 'Отправить (Enter)'}
+            >
+              {streaming ? 'В очередь' : 'Отправить ↵'}
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
-import { Board, BoardColumn, RunResult, TaskCard } from '../types'
+import { Board, BoardColumn, RunResult, TaskCard, isIncidentCard } from '../types'
 import { Spinner } from '../components/Spinner'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 
@@ -332,9 +332,16 @@ export function BoardTab({ projectId }: Props) {
                   </div>
                 )}
 
-                {col.cards.map(card => (
+                {col.cards.map(card => {
+                  const isIncident = isIncidentCard(card)
+                  return (
                   <div
-                    className={`board-card${isInProgress ? ' board-card-running' : ''}${dragCardId === card.id ? ' board-card-dragging' : ''}`}
+                    className={[
+                      'board-card',
+                      isInProgress ? 'board-card-running' : '',
+                      dragCardId === card.id ? 'board-card-dragging' : '',
+                      isIncident ? 'board-card-incident' : '',
+                    ].filter(Boolean).join(' ')}
                     key={card.id}
                     draggable={!isInProgress}
                     onDragStart={(e) => {
@@ -363,6 +370,7 @@ export function BoardTab({ projectId }: Props) {
                         onDoubleClick={() => !isInProgress && setEditingCard({ id: card.id, text: card.text })}
                         title={isInProgress ? '' : 'Двойной клик — редактировать'}
                       >
+                        {isIncident && <span className="card-incident-icon" title="Инцидент (источник: log/test)">⚠ </span>}
                         {isInProgress && <span className="card-running-icon" title="Выполняется агентом">⚙ </span>}
                         <span className="board-card-title">{card.text}</span>
                         {card.description && (
@@ -379,6 +387,14 @@ export function BoardTab({ projectId }: Props) {
                         onClick={() => move(card.id, ORDER[idx - 1])}>←</button>
                       <button title="вправо →" disabled={busy || idx === ORDER.length - 1}
                         onClick={() => move(card.id, ORDER[idx + 1])}>→</button>
+                      {isIncident && col.key !== 'in_progress' && (
+                        <button
+                          title="🤖 Передать агенту (в In Progress → авто-запуск)"
+                          className="act-handoff"
+                          disabled={busy}
+                          onClick={() => move(card.id, 'in_progress')}
+                        >🤖</button>
+                      )}
                       {canShowResult && (
                         <button
                           title="Результат выполнения"
@@ -393,7 +409,8 @@ export function BoardTab({ projectId }: Props) {
                         onClick={() => del(card.id)}>✕</button>
                     </div>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
           )

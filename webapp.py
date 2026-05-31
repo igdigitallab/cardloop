@@ -345,6 +345,9 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
             "tg_thread": key,
             "is_free": False,
+            "log_cmd": b.get("log_cmd"),
+            "test_cmd": b.get("test_cmd"),
+            "notify_on_error": bool(b.get("notify_on_error", False)),
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -439,15 +442,22 @@ async def api_projects(req: web.Request):
     ctx = req.app["ctx"]
     projects = _collect_projects(ctx)
 
+    def _count_incidents(cwd: str) -> int:
+        try:
+            _, _, cols = _load_board(cwd)
+        except Exception:
+            return 0
+        return sum(1 for col_cards in cols.values() for c in col_cards if _is_incident_card(c))
+
     async def enrich(p: dict) -> dict:
         # Для свободных чатов git-проверка бессмысленна (cwd обычно $HOME, не репо проекта)
         if p.get("is_free"):
-            return {**p, "health": {"git": None}}
+            return {**p, "health": {"git": None}, "incidents": 0}
         try:
             git = await _git_info(p["cwd"])
         except Exception:
             git = None
-        return {**p, "health": {"git": git}}
+        return {**p, "health": {"git": git}, "incidents": _count_incidents(p["cwd"])}
 
     try:
         enriched = await asyncio.gather(*[enrich(p) for p in projects])
@@ -640,6 +650,73 @@ async def api_project_logs(req: web.Request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+# ─────────────────────────── Skills picker ───────────────────────────
+
+def _parse_skill_frontmatter(text: str) -> dict | None:
+    """Парсит YAML-frontmatter SKILL.md → {name, description}.
+    Минимальный парсер: ищет '---\n...---', берёт строки 'key: value'.
+    Многострочные values (через '|' или '>') не поддерживаем — в SKILL.md они редки в шапке."""
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 4)
+    if end < 0:
+        return None
+    block = text[4:end]
+    out: dict[str, str] = {}
+    for line in block.split("\n"):
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip()
+        val = val.strip()
+        if key and val:
+            out[key] = val
+    if "name" not in out:
+        return None
+    return {"name": out["name"], "description": out.get("description", "")}
+
+
+def _scan_skills_dir(skills_dir: Path) -> list[dict]:
+    """Возвращает список {name, description} из <dir>/<skill>/SKILL.md (case-insensitive имя файла)."""
+    out: list[dict] = []
+    if not skills_dir.is_dir():
+        return out
+    for sub in sorted(skills_dir.iterdir()):
+        if not sub.is_dir():
+            continue
+        # SKILL.md или skill.md
+        skill_file = None
+        for candidate in ("SKILL.md", "skill.md"):
+            p = sub / candidate
+            if p.is_file():
+                skill_file = p
+                break
+        if skill_file is None:
+            continue
+        try:
+            text = skill_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        meta = _parse_skill_frontmatter(text)
+        if meta:
+            out.append(meta)
+    return out
+
+
+async def api_project_skills(req: web.Request):
+    """GET /api/projects/{id}/skills → {global: [...], project: [...]}.
+    Парсит SKILL.md из ~/.claude/skills/ (global) и <cwd>/.claude/skills/ (project)."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    global_skills = _scan_skills_dir(Path.home() / ".claude" / "skills")
+    cwd = Path(project["cwd"])
+    project_skills = _scan_skills_dir(cwd / ".claude" / "skills")
+    return web.json_response({"global": global_skills, "project": project_skills})
+
+
 async def api_project_activity(req: web.Request):
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -829,6 +906,381 @@ def _load_board(cwd: str):
 
 def _save_board(cwd: str, name: str, preamble: str, cols: dict) -> None:
     _tasks_path(cwd).write_text(_serialize_tasks(preamble, cols, name), encoding="utf-8")
+
+
+# ─────────────────────────── Error scanner (incidents) ───────────────────────────
+#
+# Сканер падений (логи + тесты) → карточки в Failed-секции TASKS.md.
+# Карточка-инцидент = обычная карточка с маркером ID вида "err-<hash6>".
+# Метаданные (source, seen, first, last, excerpt) хранятся в description ('  > ' строки)
+# в виде key=value — это переживает round-trip парсера и видно агенту в plain-md.
+#
+# Дедуп: хеш по (source_type, normalized_message, file?, line?). Если карточка с таким
+# err-<hash> уже есть в Failed/Review/InProgress — обновляем seen+last в description,
+# новую НЕ создаём (иначе один зависший воркер плодит 1000 карточек за ночь).
+
+# Python traceback: "Traceback (most recent call last):" ... последняя строка с типом
+_PY_TRACEBACK_RE = re.compile(
+    r"Traceback \(most recent call last\):\n((?:.+\n)+?)([A-Z][\w.]*(?:Error|Exception|Warning|Exit)):\s*(.+)",
+    re.MULTILINE,
+)
+# Generic ERROR/CRITICAL: строка лога вида "... ERROR ... msg" / "... CRITICAL ... msg"
+_GENERIC_ERR_RE = re.compile(
+    r"^.*\b(ERROR|CRITICAL|FATAL)\b[:\s]+(.+?)$", re.MULTILINE,
+)
+# pytest: "FAILED tests/test_x.py::test_y - AssertionError: msg"
+_PYTEST_FAILED_RE = re.compile(
+    r"^FAILED\s+([\w./\-]+)::([\w\[\]\-]+)(?:\s+-\s+(.+))?$", re.MULTILINE,
+)
+# Шумовые сообщения которые часто встречаются в логах но не являются ошибками
+_LOG_NOISE_SUBSTRINGS = (
+    "deprecat",         # DeprecationWarning
+    "GET /api/health",  # health-checks
+    "200 OK",
+)
+
+
+def _hash6(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8", "replace")).hexdigest()[:6]
+
+
+def _norm_msg(msg: str) -> str:
+    """Нормализация сообщения для хеша: убираем числа, временные id, пути.
+    Цель — '<id=42>' и '<id=99>' дают один хеш, а '<KeyError>' и '<ValueError>' разные."""
+    s = msg.lower()
+    s = re.sub(r"0x[0-9a-f]+", "0xN", s)            # адреса
+    s = re.sub(r"\b\d{4,}\b", "N", s)               # длинные числа (PID/timestamp)
+    s = re.sub(r"/[\w/.\-]+", "/PATH", s)           # пути
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:300]
+
+
+def _parse_log_errors(log_text: str, source: str = "log") -> list[dict]:
+    """Извлекает ошибки из лог-текста. Возвращает list[{source, type, message, excerpt, hash}].
+    Дедуп ВНУТРИ списка: одинаковые ошибки в одном прогоне → одна запись (seen считается выше)."""
+    out: list[dict] = []
+    seen_hashes: set[str] = set()
+
+    # Сначала Python tracebacks (более структурированные)
+    for m in _PY_TRACEBACK_RE.finditer(log_text):
+        trace_body = m.group(1)
+        exc_type = m.group(2)
+        exc_msg = m.group(3).strip()
+        excerpt_lines = trace_body.strip().split("\n")[-3:] + [f"{exc_type}: {exc_msg}"]
+        excerpt = "\n".join(ln.strip()[:200] for ln in excerpt_lines)
+        h = _hash6(f"{source}|{exc_type}|{_norm_msg(exc_msg)}")
+        if h in seen_hashes:
+            continue
+        seen_hashes.add(h)
+        out.append({
+            "source": source, "type": exc_type, "message": exc_msg,
+            "excerpt": excerpt, "hash": h,
+        })
+
+    # Generic ERROR/CRITICAL — фильтруем дубли python-трейсов (они уже в out)
+    for m in _GENERIC_ERR_RE.finditer(log_text):
+        level = m.group(1)
+        msg = m.group(2).strip()
+        if any(noise in msg.lower() for noise in _LOG_NOISE_SUBSTRINGS):
+            continue
+        # Если строка содержит "Traceback" — уже учтено выше
+        if "Traceback" in msg:
+            continue
+        h = _hash6(f"{source}|{level}|{_norm_msg(msg)}")
+        if h in seen_hashes:
+            continue
+        seen_hashes.add(h)
+        out.append({
+            "source": source, "type": level, "message": msg[:300],
+            "excerpt": msg[:300], "hash": h,
+        })
+
+    return out
+
+
+def _parse_pytest_failures(pytest_output: str) -> list[dict]:
+    """Извлекает FAILED-строки из pytest-output."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for m in _PYTEST_FAILED_RE.finditer(pytest_output):
+        file_ = m.group(1)
+        test = m.group(2)
+        reason = (m.group(3) or "").strip()
+        h = _hash6(f"test|{file_}|{test}|{_norm_msg(reason)}")
+        if h in seen:
+            continue
+        seen.add(h)
+        out.append({
+            "source": "test", "type": "FAILED", "message": f"{test} — {reason}" if reason else test,
+            "excerpt": f"{file_}::{test}\n{reason}".strip(), "hash": h,
+            "file": file_, "test": test,
+        })
+    return out
+
+
+# Маркер ID для err-карточек: 'err-<hash6>'. Описание — k=v строки.
+_ERR_DESC_RE = re.compile(r"^(source|seen|first|last|excerpt)=(.*)$")
+
+
+def _parse_incident_desc(desc: str | None) -> dict:
+    """Парсит description err-карточки в dict. Неизвестные строки игнорируем."""
+    out: dict = {}
+    if not desc:
+        return out
+    for line in desc.splitlines():
+        m = _ERR_DESC_RE.match(line)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def _format_incident_desc(meta: dict) -> str:
+    """Сериализует metadata err-карточки в description-строки.
+    Excerpt идёт ПОСЛЕДНИМ — может быть многострочным, но для нас это одна логическая
+    запись (хранится как одна строка с \\n заменёнными на ' / ' для компактности)."""
+    lines: list[str] = []
+    for key in ("source", "seen", "first", "last"):
+        if key in meta:
+            lines.append(f"{key}={meta[key]}")
+    excerpt = meta.get("excerpt", "")
+    if excerpt:
+        # Многострочный excerpt сворачиваем в одну строку для description
+        compact = excerpt.replace("\n", " / ")[:400]
+        lines.append(f"excerpt={compact}")
+    return "\n".join(lines)
+
+
+def _is_incident_card(card: dict) -> bool:
+    """Карточка-инцидент = id начинается с 'err-'."""
+    return card.get("id", "").startswith("err-")
+
+
+def _incident_title(err: dict) -> str:
+    """Короткий заголовок карточки: '[ERR] AttributeError: msg' / '[TEST] test_name — reason'."""
+    msg = err["message"][:80]
+    if err["source"] == "test":
+        return f"[TEST] {msg}"
+    if err["source"] == "log":
+        return f"[ERR] {err['type']}: {msg}" if err.get("type") else f"[ERR] {msg}"
+    return f"[{err['source'].upper()}] {msg}"
+
+
+async def _run_log_cmd(log_cmd: str, timeout: float = 10.0) -> str:
+    """Запускает log_cmd, возвращает stdout (+ stderr)."""
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            log_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return ""
+        return stdout.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+async def _run_test_cmd(test_cmd: str, cwd: str, timeout: float = 120.0) -> str:
+    """Запускает test_cmd в cwd проекта."""
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            test_cmd,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return ""
+        return stdout.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+async def _scan_project_errors(project: dict) -> list[dict]:
+    """Сканирует один проект: log_cmd + test_cmd → list[errors]. БЕЗ записи на диск."""
+    errors: list[dict] = []
+    log_cmd = project.get("log_cmd")
+    test_cmd = project.get("test_cmd")
+
+    if log_cmd:
+        log_text = await _run_log_cmd(log_cmd)
+        if log_text:
+            # Берём только последние ~500 строк — старые ошибки уже учтены прошлыми сканами
+            tail = "\n".join(log_text.splitlines()[-500:])
+            errors.extend(_parse_log_errors(tail, source="log"))
+
+    if test_cmd:
+        test_text = await _run_test_cmd(test_cmd, project["cwd"])
+        if test_text:
+            errors.extend(_parse_pytest_failures(test_text))
+            # Generic ERROR строки из test-output тоже учитываем
+            errors.extend(_parse_log_errors(test_text, source="test"))
+
+    return errors
+
+
+async def _ingest_errors_to_board(cwd: str, name: str, errors: list[dict]) -> tuple[int, int]:
+    """Записывает/обновляет err-карточки в TASKS.md. Возвращает (added, updated).
+    Под board-lock. Дедуп: карточка err-<hash> уже есть → обновляем seen/last в description."""
+    if not errors:
+        return (0, 0)
+
+    lock = _get_board_lock(cwd)
+    async with lock:
+        raw, preamble, cols = _load_board(cwd)
+        # Guard: если файл нет/не парсится — лучше не трогать
+        potential = _count_potential_cards(raw)
+        parsed_count = sum(len(v) for v in cols.values())
+        if raw.strip() and parsed_count < potential:
+            return (0, 0)  # подозрительный файл — не пишем
+
+        now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M")
+        added = 0
+        updated = 0
+
+        # Индекс существующих err-карточек: hash → (column, card)
+        existing: dict[str, tuple[str, dict]] = {}
+        for col_key, col_cards in cols.items():
+            for card in col_cards:
+                cid = card.get("id", "")
+                if cid.startswith("err-"):
+                    h = cid[4:]
+                    existing[h] = (col_key, card)
+
+        for err in errors:
+            h = err["hash"]
+            if h in existing:
+                # Update seen+last, не двигаем колонку (юзер мог уже перенести)
+                col_key, card = existing[h]
+                meta = _parse_incident_desc(card.get("description"))
+                try:
+                    seen_n = int(meta.get("seen", "1")) + 1
+                except ValueError:
+                    seen_n = 2
+                meta["seen"] = str(seen_n)
+                meta["last"] = now_iso
+                # first / source / excerpt — оставляем из первой встречи
+                card["description"] = _format_incident_desc(meta)
+                updated += 1
+            else:
+                # Новая карточка в Failed
+                meta = {
+                    "source": err["source"],
+                    "seen": "1",
+                    "first": now_iso,
+                    "last": now_iso,
+                    "excerpt": err.get("excerpt", ""),
+                }
+                cols["failed"].append({
+                    "id": f"err-{h}",
+                    "text": _incident_title(err),
+                    "description": _format_incident_desc(meta),
+                })
+                added += 1
+
+        if added or updated:
+            _save_board(cwd, name, preamble, cols)
+        return (added, updated)
+
+
+async def _scan_and_ingest(project: dict, ctx: dict | None = None) -> dict:
+    """Полный цикл: сканируем проект, заливаем в доску, опц. TG-нотификация.
+    Возвращает {ok, added, updated, scanned}."""
+    try:
+        errors = await _scan_project_errors(project)
+    except Exception as e:
+        return {"ok": False, "error": str(e), "scanned": 0, "added": 0, "updated": 0}
+
+    try:
+        added, updated = await _ingest_errors_to_board(project["cwd"], project["name"], errors)
+    except Exception as e:
+        return {"ok": False, "error": str(e), "scanned": len(errors), "added": 0, "updated": 0}
+
+    # TG-нотификация про НОВЫЕ инциденты (не дедуп-updates)
+    if added > 0 and ctx and project.get("notify_on_error"):
+        try:
+            ptb_app = ctx.get("ptb_app")
+            tg_thread_str = project.get("tg_thread", "")
+            if ptb_app and ":" in tg_thread_str:
+                chat_s, thread_s = tg_thread_str.split(":", 1)
+                chat_id = int(chat_s)
+                thread_id = int(thread_s) if thread_s.isdigit() else None
+                msg = f"🚨 <b>{added}</b> новых инцидентов в <b>{project['name']}</b> — см. доску."
+                await ptb_app.bot.send_message(
+                    chat_id, msg, message_thread_id=thread_id, parse_mode="HTML",
+                )
+        except Exception as e:
+            print(f"[scan_and_ingest] tg notify failed for {project['name']}: {e}")
+
+    return {"ok": True, "scanned": len(errors), "added": added, "updated": updated}
+
+
+async def api_project_scan_errors(req: web.Request):
+    """POST /api/projects/{id}/scan-errors — ручной запуск сканера для одного проекта."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    if not project.get("log_cmd") and not project.get("test_cmd"):
+        return web.json_response({
+            "ok": False, "error": "ни log_cmd, ни test_cmd не настроены в topics.json",
+        }, status=400)
+    res = await _scan_and_ingest(project, ctx)
+    return web.json_response(res)
+
+
+async def api_project_incidents(req: web.Request):
+    """GET /api/projects/{id}/incidents — счётчик активных инцидентов (для бейджа в сайдбаре).
+    Активные = err-карточки в Failed/Review/InProgress (не в Done)."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        _, _, cols = _load_board(project["cwd"])
+    except Exception:
+        return web.json_response({"count": 0, "by_column": {}})
+    by_col = {}
+    total = 0
+    for key, col_cards in cols.items():
+        n = sum(1 for c in col_cards if _is_incident_card(c))
+        if n:
+            by_col[key] = n
+            total += n
+    return web.json_response({"count": total, "by_column": by_col})
+
+
+# Фоновая задача: сканер всех проектов каждые SCAN_INTERVAL_SEC секунд.
+_SCAN_INTERVAL_SEC = int(os.environ.get("ERROR_SCAN_INTERVAL", "300"))  # 5 мин
+
+
+async def _error_scanner_loop(ctx: dict):
+    """Фоновая задача: периодически сканирует все проекты с log_cmd/test_cmd."""
+    # Первый прогон через 30с после старта (дать боту устаканиться)
+    await asyncio.sleep(30)
+    while True:
+        try:
+            projects = _collect_projects(ctx)
+            for proj in projects:
+                if proj.get("is_free"):
+                    continue
+                if not (proj.get("log_cmd") or proj.get("test_cmd")):
+                    continue
+                res = await _scan_and_ingest(proj, ctx)
+                if res.get("added") or res.get("updated"):
+                    print(f"[scanner] {proj['name']}: +{res['added']} new, "
+                          f"~{res['updated']} updated (из {res['scanned']} событий)")
+        except Exception as e:
+            print(f"[scanner] loop error: {e}")
+        await asyncio.sleep(_SCAN_INTERVAL_SEC)
 
 
 def _board_payload(cwd: str) -> dict:
@@ -3185,6 +3637,11 @@ async def start(ptb_app, ctx: dict) -> None:
         # C1-stop: прерывание текущего прогона агента
         app.router.add_post("/api/projects/{id}/chat/stop", api_project_chat_stop)
         app.router.add_get("/api/projects/{id}/running", api_project_running)
+        # Скиллы агента: глобальные (~/.claude/skills/) + проектные (<cwd>/.claude/skills/)
+        app.router.add_get("/api/projects/{id}/skills", api_project_skills)
+        # Сканер инцидентов: ручной запуск + счётчик активных err-карточек
+        app.router.add_post("/api/projects/{id}/scan-errors", api_project_scan_errors)
+        app.router.add_get("/api/projects/{id}/incidents", api_project_incidents)
         # Activity-stream: живой поток событий шины (карточки, внешние прогоны)
         app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)
         # Глобальный поток всех событий (для unread-индикаторов в сайдбаре)
@@ -3242,5 +3699,9 @@ async def start(ptb_app, ctx: dict) -> None:
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
         print(f"[webapp] слушаю 0.0.0.0:{port}")
+
+        # Фоновый сканер инцидентов: log_cmd/test_cmd → карточки в Failed
+        asyncio.create_task(_error_scanner_loop(ctx))
+        print(f"[webapp] сканер инцидентов запущен (интервал {_SCAN_INTERVAL_SEC}с)")
     except Exception as e:
         print(f"[webapp] ОШИБКА при запуске: {e}")

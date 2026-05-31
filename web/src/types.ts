@@ -25,6 +25,11 @@ export interface Project {
   health: ProjectHealth
   /** True для свободных чатов (без TG/git, cwd=$HOME). */
   is_free?: boolean
+  /** Активные инциденты (err-карточки на доске вне Done). Бейдж 🚨 в сайдбаре. */
+  incidents?: number
+  /** Сконфигурированы ли источники для сканера ошибок. */
+  log_cmd?: string | null
+  test_cmd?: string | null
 }
 
 export interface ClaudeMd {
@@ -47,6 +52,11 @@ export interface TaskCard {
   id: string
   text: string
   description?: string | null
+}
+
+/** Карточка-инцидент = id начинается с 'err-'. UI подсвечивает её красной рамкой. */
+export function isIncidentCard(card: TaskCard): boolean {
+  return card.id.startsWith('err-')
 }
 
 export interface BoardColumn {

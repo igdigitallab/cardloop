@@ -66,6 +66,9 @@ export function Sidebar({
                   {p.is_free ? '🏠' : p.name.charAt(0).toUpperCase()}
                 </span>
                 {unread > 0 && <span className="unread-dot-collapsed" />}
+                {(p.incidents ?? 0) > 0 && (
+                  <span className="incidents-dot-collapsed" title={`${p.incidents} инцидентов`}>🚨</span>
+                )}
               </button>
             )
           })}
@@ -179,6 +182,14 @@ export function Sidebar({
                   : <HealthDot health={p.health} />
                 }
                 <span className="project-name">{p.name}</span>
+                {(p.incidents ?? 0) > 0 && (
+                  <span
+                    className="incidents-badge"
+                    title={`${p.incidents} активных инцидентов на доске`}
+                  >
+                    🚨 {p.incidents}
+                  </span>
+                )}
                 {unread > 0 && (
                   <span className="unread-badge" title={`${unread} новых событий`}>
                     {unread > 99 ? '99+' : unread}

@@ -152,6 +152,23 @@ export const api = {
   projectRunning: (id: string) =>
     apiFetch<{ running: boolean }>(`/api/projects/${id}/running`),
 
+  // Скиллы агента (глобальные + проектные)
+  projectSkills: (id: string) =>
+    apiFetch<{
+      global: { name: string; description: string }[]
+      project: { name: string; description: string }[]
+    }>(`/api/projects/${id}/skills`),
+
+  // Сканер инцидентов: ручной запуск + счётчик активных err-карточек на доске
+  scanErrors: (id: string) =>
+    apiFetch<{ ok: boolean; scanned: number; added: number; updated: number; error?: string }>(
+      `/api/projects/${id}/scan-errors`, { method: 'POST' }
+    ),
+  projectIncidents: (id: string) =>
+    apiFetch<{ count: number; by_column: Record<string, number> }>(
+      `/api/projects/${id}/incidents`
+    ),
+
   // Feature A: session context (read/edited/commands)
   sessionContext: (id: string, sessionId?: string) =>
     apiFetch<import('./types').SessionContext>(

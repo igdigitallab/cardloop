@@ -34,6 +34,69 @@ function WelcomeBanner({ projectId }: { projectId: string }) {
   )
 }
 
+function IncidentScanner({ project }: { project: Project }) {
+  const [running, setRunning] = useState(false)
+  const [res, setRes] = useState<{ ok: boolean; scanned: number; added: number; updated: number; error?: string } | null>(null)
+  const [lastScan, setLastScan] = useState<string | null>(null)
+
+  const hasSource = !!(project.log_cmd || project.test_cmd)
+
+  async function scan() {
+    setRunning(true)
+    setRes(null)
+    try {
+      const r = await api.scanErrors(project.id)
+      setRes(r)
+      setLastScan(new Date().toLocaleTimeString('ru'))
+    } catch (e: unknown) {
+      setRes({ ok: false, scanned: 0, added: 0, updated: 0, error: String(e instanceof Error ? e.message : e) })
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="git-card test-card">
+      <div className="test-card-header">
+        <span className="git-card-header" style={{ margin: 0 }}>🩺 Сканер инцидентов</span>
+        <button
+          className="doc-btn primary"
+          onClick={scan}
+          disabled={running || !hasSource}
+          title={hasSource ? 'Прогнать log_cmd + test_cmd, новые ошибки → карточки в Failed' : 'Сначала задай log_cmd или test_cmd в topics.json'}
+        >
+          {running ? 'Сканирую…' : '▶ Сканировать'}
+        </button>
+      </div>
+      {!hasSource && (
+        <div className="test-status dim">
+          Не настроены источники. Добавь <code>log_cmd</code> и/или <code>test_cmd</code> в <code>data/topics.json</code> для этого проекта.
+          <br />
+          Пример: <code>"log_cmd": "journalctl -u my-svc -n 300 --no-pager"</code>, <code>"test_cmd": "venv/bin/python -m pytest -q"</code>.
+        </div>
+      )}
+      {hasSource && !res && !running && (
+        <div className="test-status dim">
+          Источники: {project.log_cmd ? '📜 logs' : ''}{project.log_cmd && project.test_cmd ? ' + ' : ''}{project.test_cmd ? '🧪 tests' : ''}.
+          Авто-скан каждые 5 мин в фоне.
+        </div>
+      )}
+      {res && (
+        <div className={`test-status ${res.ok ? (res.added > 0 ? 'warn' : 'ok') : 'fail'}`}>
+          {res.error ? `⚠ ${res.error}` : (
+            <>
+              {res.added > 0 ? `🚨 ${res.added} новых` : '✓ новых инцидентов нет'}
+              {res.updated > 0 && ` · ↻ ${res.updated} обновлено`}
+              {res.scanned > 0 && ` · просмотрено ${res.scanned} событий`}
+              {lastScan && ` · в ${lastScan}`}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function TestRunner({ projectId }: { projectId: string }) {
   const [running, setRunning] = useState(false)
   const [res, setRes] = useState<TestResult | null>(null)
@@ -143,6 +206,8 @@ export function OverviewTab({ project }: Props) {
       )}
 
       <ProjectStructureCard projectId={project.id} />
+
+      <IncidentScanner project={project} />
 
       <TestRunner projectId={project.id} />
     </div>
