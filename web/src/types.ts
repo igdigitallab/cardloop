@@ -194,6 +194,7 @@ export interface Prompt {
   id: string
   title: string
   text: string
+  category?: string
 }
 
 // ─── Activity bus events (server → client via /activity-stream) ────────────

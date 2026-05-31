@@ -2200,6 +2200,25 @@ body {
 }
 .prompt-picker-empty { padding: 16px; text-align: center; color: var(--text3); font-size: 13px; }
 
+.prompt-group { display: flex; flex-direction: column; }
+.prompt-group-header {
+  display: flex; align-items: center; gap: 6px;
+  background: none; border: none; border-radius: var(--radius-sm);
+  color: var(--text2); cursor: pointer; font-size: 12px; font-weight: 600;
+  padding: 5px 6px; text-align: left; width: 100%;
+  transition: background var(--transition), color var(--transition);
+  letter-spacing: .02em; text-transform: uppercase;
+}
+.prompt-group-header:hover { background: var(--bg3); color: var(--text); }
+.prompt-group-header.open { color: var(--accent-h); }
+.prompt-group-caret { font-size: 10px; flex-shrink: 0; }
+.prompt-group-name { flex: 1; }
+.prompt-group-count {
+  background: var(--bg4); color: var(--text3); border-radius: 10px;
+  font-size: 10px; padding: 1px 6px; font-weight: 500;
+}
+.prompt-group-items { display: flex; flex-direction: column; gap: 3px; padding: 2px 0 4px 10px; }
+
 .prompt-card {
   display: flex; align-items: flex-start; gap: 6px;
   padding: 8px 10px; border-radius: var(--radius-sm);

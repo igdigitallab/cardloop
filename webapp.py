@@ -278,7 +278,8 @@ async def api_prompt_create(req: web.Request):
     text  = (data.get("text")  or "").strip()
     if not title or not text:
         raise web.HTTPBadRequest(text="title and text required")
-    prompt = {"id": str(_uuid.uuid4())[:8], "title": title, "text": text}
+    category = (data.get("category") or "").strip() or None
+    prompt = {"id": str(_uuid.uuid4())[:8], "title": title, "text": text, **({"category": category} if category else {})}
     prompts = _load_prompts(ctx)
     prompts.append(prompt)
     _save_prompts(ctx, prompts)
@@ -722,12 +723,18 @@ async def api_project_tasks(req: web.Request):
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     cwd, name = project["cwd"], project["name"]
-    # Нормализация: дочиняем недостающие ops-маркеры, если файл уже есть и изменился
+    # Нормализация: добавляем ops-маркеры к строкам без них.
+    # Оптимистичная защита от гонки: перечитываем файл перед записью —
+    # если он изменился (агент писал параллельно), пропускаем цикл и ждём следующего.
+    tp = _tasks_path(cwd)
     raw, preamble, cols = _load_board(cwd)
-    if _tasks_path(cwd).exists():
+    if tp.exists():
         canon = _serialize_tasks(preamble, cols, name)
         if canon != raw:
-            _tasks_path(cwd).write_text(canon, encoding="utf-8")
+            current = tp.read_text(encoding="utf-8") if tp.exists() else ""
+            if current == raw:  # файл не изменился снаружи — безопасно писать
+                tp.write_text(canon, encoding="utf-8")
+            # иначе: внешняя правка, пропускаем; следующий poll подхватит новый контент
     return web.json_response(_board_payload(cwd))
 
 

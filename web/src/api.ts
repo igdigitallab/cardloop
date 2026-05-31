@@ -214,7 +214,7 @@ export const api = {
   prompts: () =>
     apiFetch<{ prompts: import('./types').Prompt[] }>('/api/prompts'),
 
-  createPrompt: (body: { title: string; text: string }) =>
+  createPrompt: (body: { title: string; text: string; category?: string }) =>
     apiFetch<{ prompt: import('./types').Prompt }>('/api/prompts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
