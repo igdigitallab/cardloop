@@ -15,6 +15,7 @@ import {
   SessionInfo,
 } from '../types'
 import { useProjectActivity } from '../hooks/useProjectActivity'
+import { useClickOutside } from '../hooks/useClickOutside'
 
 interface Props {
   project: Project
@@ -342,16 +343,7 @@ function SessionSelector({ projectId, onSessionChange, onInsertResetPrompt }: Se
   }, [projectId, loadSessions])
 
   // Close dropdown on outside click
-  useEffect(() => {
-    if (!open) return
-    function handler(e: MouseEvent) {
-      if (dropRef.current && !dropRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [open])
+  useClickOutside(dropRef, () => setOpen(false), open)
 
   const activeSession = sessions.find(s => s.is_active)
   const activeLabel = activeSession

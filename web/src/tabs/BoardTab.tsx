@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { api } from '../api'
 import { Board, BoardColumn, RunResult, TaskCard, isIncidentCard } from '../types'
 import { Spinner } from '../components/Spinner'
+import { Modal, ModalHead } from '../components/Modal'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 
 interface Props {
@@ -436,82 +437,77 @@ export function BoardTab({ projectId }: Props) {
 
       {/* F1: модалка результата карточки */}
       {showRunModal && (
-        <div className="run-modal-overlay" onClick={() => setShowRunModal(false)}>
-          <div className="run-modal" onClick={e => e.stopPropagation()}>
-            <div className="run-modal-head">
-              <span>Результат выполнения</span>
-              <button className="run-modal-close" onClick={() => setShowRunModal(false)}>✕</button>
-            </div>
-            <div className="run-modal-body">
-              {runResultLoading && <Spinner label="Загрузка..." />}
-              {!runResultLoading && runResult && !runResult.exists && (
-                <div className="error-state">
-                  Сайдкар не найден — карточка ещё не выполнялась или результат удалён.
-                </div>
-              )}
-              {!runResultLoading && runResult?.exists && (
-                <div className="markdown-wrap">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{runResult.content}</ReactMarkdown>
-                </div>
-              )}
-            </div>
+        <Modal onClose={() => setShowRunModal(false)}>
+          <ModalHead title="Результат выполнения" onClose={() => setShowRunModal(false)} />
+          <div className="run-modal-body">
+            {runResultLoading && <Spinner label="Загрузка..." />}
+            {!runResultLoading && runResult && !runResult.exists && (
+              <div className="error-state">
+                Сайдкар не найден — карточка ещё не выполнялась или результат удалён.
+              </div>
+            )}
+            {!runResultLoading && runResult?.exists && (
+              <div className="markdown-wrap">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{runResult.content}</ReactMarkdown>
+              </div>
+            )}
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Description модалка */}
       {descModal && (
-        <div className="run-modal-overlay" onClick={closeDescModal}>
-          <div className="run-modal" onClick={e => e.stopPropagation()}>
-            <div className="run-modal-head">
+        <Modal onClose={closeDescModal}>
+          <ModalHead
+            title={
               <span style={{ fontWeight: 600, maxWidth: '80%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {descModal.card.text}
               </span>
-              <div style={{ display: 'flex', gap: 6 }}>
-                {editingDesc === null ? (
-                  <button
-                    className="run-modal-close"
-                    title="Редактировать описание"
-                    style={{ fontSize: 14 }}
-                    onClick={() => setEditingDesc(descModal.card.description ?? '')}
-                  >✎</button>
-                ) : (
-                  <button
-                    className="btn-primary"
-                    style={{ padding: '2px 10px', fontSize: 13 }}
-                    disabled={busy}
-                    onClick={saveDescEdit}
-                  >Сохранить</button>
-                )}
-                <button className="run-modal-close" onClick={closeDescModal}>✕</button>
-              </div>
-            </div>
-            <div className="run-modal-body">
-              {editingDesc !== null ? (
-                <textarea
-                  className="board-desc-edit-input"
-                  value={editingDesc}
-                  autoFocus
-                  rows={8}
-                  onChange={e => setEditingDesc(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Escape') setEditingDesc(null)
-                  }}
-                  placeholder="Описание задачи (markdown)…"
-                  style={{ width: '100%', resize: 'vertical', fontFamily: 'monospace', fontSize: 13 }}
-                />
-              ) : descModal.card.description ? (
-                <div className="markdown-wrap">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{descModal.card.description}</ReactMarkdown>
-                </div>
+            }
+            onClose={closeDescModal}
+            extra={
+              editingDesc === null ? (
+                <button
+                  className="run-modal-close"
+                  title="Редактировать описание"
+                  style={{ fontSize: 14 }}
+                  onClick={() => setEditingDesc(descModal.card.description ?? '')}
+                >✎</button>
               ) : (
-                <div style={{ color: 'var(--text-dim, #888)', fontStyle: 'italic' }}>
-                  Описание не задано. Нажмите ✎ чтобы добавить.
-                </div>
-              )}
-            </div>
+                <button
+                  className="btn-primary"
+                  style={{ padding: '2px 10px', fontSize: 13 }}
+                  disabled={busy}
+                  onClick={saveDescEdit}
+                >Сохранить</button>
+              )
+            }
+          />
+          <div className="run-modal-body">
+            {editingDesc !== null ? (
+              <textarea
+                className="board-desc-edit-input"
+                value={editingDesc}
+                autoFocus
+                rows={8}
+                onChange={e => setEditingDesc(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Escape') setEditingDesc(null)
+                }}
+                placeholder="Описание задачи (markdown)…"
+                style={{ width: '100%', resize: 'vertical', fontFamily: 'monospace', fontSize: 13 }}
+              />
+            ) : descModal.card.description ? (
+              <div className="markdown-wrap">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{descModal.card.description}</ReactMarkdown>
+              </div>
+            ) : (
+              <div style={{ color: 'var(--text-dim, #888)', fontStyle: 'italic' }}>
+                Описание не задано. Нажмите ✎ чтобы добавить.
+              </div>
+            )}
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   )
