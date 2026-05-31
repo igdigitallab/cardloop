@@ -4,7 +4,6 @@
 Тестируем только публичные/анонимные эндпоинты и auth-механизм.
 SDK и PTB не инициализируются — только aiohttp-приложение с fake ctx.
 """
-import hashlib
 import sys
 from pathlib import Path
 
@@ -13,9 +12,7 @@ import pytest
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-
-def _make_token(password: str) -> str:
-    return hashlib.sha256((password + "cops").encode()).hexdigest()
+import webapp as _webapp
 
 
 # ─── Пробуем собрать aiohttp-приложение из webapp.start ──────────────────────
@@ -27,11 +24,12 @@ def fake_ctx_for_app(tmp_path):
     """ctx, достаточный для создания aiohttp-приложения."""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    return {
+    password = "testpass"
+    ctx = {
         "topics": {},
         "sessions": {},
         "running": {},
-        "password": "testpass",
+        "password": password,
         "DATA": data_dir,
         "HERE": ROOT,
         "VAULT_PROJECTS": tmp_path / "vault" / "01-Projects",
@@ -42,6 +40,9 @@ def fake_ctx_for_app(tmp_path):
         "ptb_app": None,
         "rate_limits": {},
     }
+    # Pre-compute auth token (mirrors what start() does)
+    ctx["_auth_token"] = _webapp._derive_token(password)
+    return ctx
 
 
 @pytest.fixture
@@ -92,7 +93,7 @@ async def test_login_correct_password(aiohttp_client, web_app):
     # Проверяем что cookie выставлена
     cookies = resp.cookies
     assert "cops_auth" in cookies, f"Cookie cops_auth должна быть в ответе, cookies={dict(cookies)}"
-    expected_token = _make_token("testpass")
+    expected_token = _webapp._derive_token("testpass")
     assert cookies["cops_auth"].value == expected_token
 
 
@@ -103,16 +104,13 @@ async def test_login_wrong_password(aiohttp_client, web_app):
     assert resp.status == 401
 
 
-async def test_projects_with_valid_cookie(aiohttp_client, web_app):
-    """GET /api/projects с валидным cookie → 200 + список проектов."""
+async def test_projects_with_valid_cookie(aiohttp_client, web_app, fake_ctx_for_app):
+    """GET /api/projects с валидным cookie → 200 + список проектов.
+    В тестах (HTTP, не HTTPS) Secure cookie не шлётся браузером автоматически,
+    поэтому передаём токен в заголовке Cookie напрямую."""
     client = await aiohttp_client(web_app)
-
-    # Сначала логинимся, чтобы получить cookie
-    login_resp = await client.post("/api/login", json={"password": "testpass"})
-    assert login_resp.status == 200
-
-    # Теперь запрашиваем проекты с тем же клиентом (cookie сохраняется автоматически)
-    resp = await client.get("/api/projects")
+    token = fake_ctx_for_app["_auth_token"]
+    resp = await client.get("/api/projects", headers={"Cookie": f"cops_auth={token}"})
     assert resp.status == 200
     data = await resp.json()
     assert "projects" in data
@@ -120,11 +118,11 @@ async def test_projects_with_valid_cookie(aiohttp_client, web_app):
     assert data["projects"] == []
 
 
-async def test_me_with_valid_cookie(aiohttp_client, web_app):
-    """GET /api/me после логина → 200 {authed: true}."""
+async def test_me_with_valid_cookie(aiohttp_client, web_app, fake_ctx_for_app):
+    """GET /api/me с валидным cookie → 200 {authed: true}."""
     client = await aiohttp_client(web_app)
-    await client.post("/api/login", json={"password": "testpass"})
-    resp = await client.get("/api/me")
+    token = fake_ctx_for_app["_auth_token"]
+    resp = await client.get("/api/me", headers={"Cookie": f"cops_auth={token}"})
     assert resp.status == 200
     data = await resp.json()
     assert data.get("authed") is True

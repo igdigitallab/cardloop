@@ -139,11 +139,66 @@ def _format_tool(name: str, inp: dict) -> dict:
         return {"name": name, "kind": "other", "summary": summary}
 
 
-# ─────────────────────────── auth ───────────────────────────
+COOKIE_MAX_AGE = 2592000  # 30 дней в секундах
 
+
+# ─────────────────────────── auth ───────────────────────────
+#
+# Схема: cookie cops_auth = hex(scrypt(password, salt=AUTH_SALT, n=2^14, r=8, p=1)).
+# Соль — AUTH_SALT из env (первый запуск → авто-генерация и вывод в stderr).
+# Сравнение — hmac.compare_digest (constant-time).
+# Rate-limit: ≥5 неудачных попыток с одного IP за 5 мин → 429 на 5 мин.
+
+import hmac as _hmac
+
+# Соль для scrypt: берётся из env WEB_COOKIE_SALT или генерируется при старте.
+AUTH_SALT: bytes = os.environ.get("WEB_COOKIE_SALT", "").encode() or (
+    lambda s: (print(f"[auth] сгенерирована соль WEB_COOKIE_SALT={s} — добавь в .env", flush=True), s.encode())[1]
+)(secrets.token_hex(16))
+
+
+def _derive_token(password: str) -> str:
+    """Деривация cookie-токена через scrypt (stdlib, без новых зависимостей)."""
+    dk = hashlib.scrypt(
+        password.encode(),
+        salt=AUTH_SALT,
+        n=1 << 14,  # 16384 — баланс скорости и безопасности (< 100ms на сервере)
+        r=8,
+        p=1,
+        dklen=32,
+    )
+    return dk.hex()
+
+
+# Обратная совместимость для middleware (используется в тестах)
 def _make_token(password: str) -> str:
-    """Хэш для cookie cops_auth."""
-    return hashlib.sha256((password + "cops").encode()).hexdigest()
+    return _derive_token(password)
+
+
+# Rate-limit: {ip: [(timestamp, ok:bool), ...]}
+_login_attempts: dict[str, list[tuple[float, bool]]] = {}
+_LOGIN_WINDOW = 300   # 5 минут
+_LOGIN_MAX_FAIL = 5   # макс неудачных попыток
+
+
+def _check_rate_limit(ip: str) -> bool:
+    """True если IP превысил лимит неудачных попыток. Чистит старые записи."""
+    now = time.monotonic()
+    attempts = _login_attempts.get(ip, [])
+    # Оставляем только записи в пределах окна
+    attempts = [(t, ok) for t, ok in attempts if now - t < _LOGIN_WINDOW]
+    _login_attempts[ip] = attempts
+    fails = sum(1 for _, ok in attempts if not ok)
+    return fails >= _LOGIN_MAX_FAIL
+
+
+def _record_attempt(ip: str, success: bool) -> None:
+    now = time.monotonic()
+    bucket = _login_attempts.setdefault(ip, [])
+    bucket.append((now, success))
+    # Не даём расти бесконечно (атака с одного IP)
+    if len(bucket) > 200:
+        _login_attempts[ip] = bucket[-200:]
 
 
 @web.middleware
@@ -156,9 +211,9 @@ async def auth_middleware(request: web.Request, handler):
     # Только пути /api/* проверяем
     if path.startswith("/api/"):
         password = request.app["ctx"]["password"]
-        expected = _make_token(password)
+        expected = request.app["ctx"]["_auth_token"]
         token = request.cookies.get("cops_auth", "")
-        if token != expected:
+        if not _hmac.compare_digest(token, expected):
             return web.json_response({"error": "unauthorized"}, status=401)
     return await handler(request)
 
@@ -410,20 +465,28 @@ async def api_health(req: web.Request):
 
 async def api_login(req: web.Request):
     ctx = req.app["ctx"]
+    # Rate-limit по IP (пеерд чтением тела)
+    ip = req.remote or "unknown"
+    if _check_rate_limit(ip):
+        return web.json_response({"error": "too many attempts, try later"}, status=429)
     try:
         body = await req.json()
         password = body.get("password", "")
     except Exception:
+        _record_attempt(ip, False)
         return web.json_response({"error": "bad request"}, status=400)
-    if password != ctx["password"]:
+    if not _hmac.compare_digest(password, ctx["password"]):
+        _record_attempt(ip, False)
         return web.json_response({"error": "bad password"}, status=401)
-    token = _make_token(password)
+    _record_attempt(ip, True)
+    token = ctx["_auth_token"]
     resp = web.json_response({"ok": True})
     resp.set_cookie(
         "cops_auth", token,
         httponly=True,
+        secure=True,
         path="/",
-        max_age=2592000,  # 30 дней
+        max_age=COOKIE_MAX_AGE,
         samesite="Lax",
     )
     return resp
@@ -3546,6 +3609,9 @@ async def start(ptb_app, ctx: dict) -> None:
     """Поднимает aiohttp-сервер кокпита в том же процессе/loop, что и бот. НЕ блокирует."""
     port = ctx["port"]
     try:
+        # Деривируем токен один раз при старте (scrypt медленный — не на каждый запрос)
+        ctx["_auth_token"] = _derive_token(ctx["password"])
+
         app = web.Application(middlewares=[auth_middleware], client_max_size=20 * 1024 * 1024)
         app["ctx"] = ctx
 
