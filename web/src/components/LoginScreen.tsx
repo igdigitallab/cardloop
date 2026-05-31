@@ -1,5 +1,6 @@
 import { useState, FormEvent } from 'react'
 import { api } from '../api'
+import { t } from '../i18n'
 
 interface Props {
   onLogin: () => void
@@ -19,7 +20,7 @@ export function LoginScreen({ onLogin }: Props) {
       await api.login(password)
       onLogin()
     } catch {
-      setError('Неверная парольная фраза')
+      setError(t['login.error_wrong_password'])
     } finally {
       setLoading(false)
     }
@@ -32,14 +33,14 @@ export function LoginScreen({ onLogin }: Props) {
           <div className="login-logo-icon">⚡</div>
           <span className="login-logo-text">Claude-Ops</span>
         </div>
-        <h2>Вход</h2>
-        <p className="login-sub">Панель управления проектами</p>
+        <h2>{t['login.title']}</h2>
+        <p className="login-sub">{t['login.subtitle']}</p>
 
         {error && <div className="error-msg">{error}</div>}
 
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label htmlFor="password">Парольная фраза</label>
+            <label htmlFor="password">{t['login.password_label']}</label>
             <input
               id="password"
               type="password"
@@ -51,7 +52,7 @@ export function LoginScreen({ onLogin }: Props) {
             />
           </div>
           <button className="btn btn-primary" type="submit" disabled={loading || !password.trim()}>
-            {loading ? 'Проверяю...' : 'Войти'}
+            {loading ? t['login.submit_loading'] : t['login.submit']}
           </button>
         </form>
       </div>

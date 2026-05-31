@@ -5,6 +5,7 @@ import { api } from '../api'
 import { MemoryFile, ProjectMemory } from '../types'
 import { Spinner } from '../components/Spinner'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
+import { t } from '../i18n'
 
 interface Props {
   projectId: string
@@ -48,7 +49,7 @@ export function MemoryTab({ projectId }: Props) {
   useOnRunEnd(reload)
   useFocusRefresh(reload)
 
-  if (loading) return <Spinner label="Загрузка памяти проекта..." />
+  if (loading) return <Spinner label={t['memory.loading']} />
   if (error) return <div className="error-state">⚠ {error}</div>
 
   if (!data || !data.exists || data.files.length === 0) {
@@ -61,7 +62,7 @@ export function MemoryTab({ projectId }: Props) {
             <path d="M12 8v4l3 3"/>
           </svg>
         </div>
-        <div className="memory-empty-title">Память проекта пуста</div>
+        <div className="memory-empty-title">{t['memory.empty_title']}</div>
         <p className="memory-empty-text">
           Это файлы из <code>~/.claude/projects/&lt;проект&gt;/memory/</code> — долговременная
           память агента <strong>между сессиями</strong> (в отличие от контекста, который живёт
@@ -88,7 +89,7 @@ export function MemoryTab({ projectId }: Props) {
     <div className="specs-layout">
       {/* File list sidebar */}
       <div className="specs-list">
-        <div className="specs-list-label">Файлы памяти</div>
+        <div className="specs-list-label">{t['memory.files_label']}</div>
         {data.files.map(f => (
           <div
             key={f.name}
@@ -104,7 +105,7 @@ export function MemoryTab({ projectId }: Props) {
             </svg>
             {f.name}
             {f.name === 'MEMORY.md' && (
-              <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--text3)' }}>индекс</span>
+              <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--text3)' }}>{t['memory.index']}</span>
             )}
           </div>
         ))}

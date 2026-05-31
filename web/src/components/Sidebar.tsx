@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Project } from '../types'
 import { HealthDot } from './HealthDot'
 import { ConfirmModal } from './ConfirmModal'
+import { t } from '../i18n'
 
 interface Props {
   projects: Project[]
@@ -42,7 +43,7 @@ export function Sidebar({
         <button
           className="sidebar-toggle-btn collapsed"
           onClick={onToggleCollapse}
-          title="Развернуть сайдбар"
+          title={t['sidebar.expand']}
         >
           ☰
         </button>
@@ -50,7 +51,7 @@ export function Sidebar({
           className="new-project-btn-collapsed"
           onClick={onNewProject}
           disabled={newProjectBusy}
-          title="Новый проект"
+          title={t['sidebar.new_project']}
         >
           {newProjectBusy ? '…' : '+'}
         </button>
@@ -125,7 +126,7 @@ export function Sidebar({
           <button
             className="sidebar-toggle-btn"
             onClick={onToggleCollapse}
-            title="Свернуть сайдбар"
+            title={t['sidebar.collapse']}
           >
             ⟨
           </button>
@@ -133,7 +134,7 @@ export function Sidebar({
         <input
           className="search-input"
           type="text"
-          placeholder="Поиск проектов..."
+          placeholder={t['sidebar.search_placeholder']}
           value={search}
           onChange={e => setSearch(e.target.value)}
         />
@@ -143,17 +144,17 @@ export function Sidebar({
         className="new-project-btn"
         onClick={onNewProject}
         disabled={newProjectBusy}
-        title="Создать новый проект — агент сам расспросит и оформит"
+        title={t['sidebar.new_project_hint']}
       >
-        {newProjectBusy ? '⏳ создаю…' : '＋ Новый проект'}
+        {newProjectBusy ? '⏳ создаю…' : `＋ ${t['sidebar.new_project']}`}
       </button>
 
       <div className="projects-list">
         {loading ? (
-          <div className="projects-empty">Загрузка...</div>
+          <div className="projects-empty">{t['sidebar.loading']}</div>
         ) : filtered.length === 0 ? (
           <div className="projects-empty">
-            {search ? 'Ничего не найдено' : 'Нет проектов'}
+            {search ? t['sidebar.no_results'] : t['sidebar.empty']}
           </div>
         ) : (
           filtered.map(p => {
@@ -205,7 +206,7 @@ export function Sidebar({
                       e.stopPropagation()
                       setConfirmDelete({ id: p.id, name: p.name })
                     }}
-                    title="Удалить свободный чат"
+                    title={t['sidebar.delete_free_chat']}
                   >✕</button>
                 )}
               </div>
@@ -228,9 +229,9 @@ export function Sidebar({
 
       {confirmDelete && (
         <ConfirmModal
-          title="Удалить чат"
+          title={t['sidebar.delete_chat']}
           message={`Удалить свободный чат «${confirmDelete.name}»? История стирается.`}
-          confirmLabel="Удалить"
+          confirmLabel={t['common.delete']}
           danger
           onConfirm={() => { onDeleteFree(confirmDelete.id); setConfirmDelete(null) }}
           onCancel={() => setConfirmDelete(null)}

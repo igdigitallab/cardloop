@@ -1,4 +1,5 @@
 import { Modal, ModalHead } from './Modal'
+import { t } from '../i18n'
 
 interface Props {
   title: string
@@ -13,8 +14,8 @@ interface Props {
 export function ConfirmModal({
   title,
   message,
-  confirmLabel = 'Подтвердить',
-  cancelLabel = 'Отмена',
+  confirmLabel = t['common.confirm'],
+  cancelLabel = t['common.cancel'],
   onConfirm,
   onCancel,
   danger = false,

@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { ClaudeMd } from '../types'
 import { Spinner } from './Spinner'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
+import { t } from '../i18n'
 
 interface Props {
   projectId: string
@@ -78,9 +79,9 @@ export function EditableMarkdown({ projectId, load, save, spinnerLabel, emptyLab
         <div className="doc-editor-bar">
           <span className="doc-editor-hint">Ctrl+Enter — сохранить · Esc — отмена</span>
           <div className="doc-editor-actions">
-            <button className="doc-btn ghost" onClick={cancel} disabled={saving}>Отмена</button>
+            <button className="doc-btn ghost" onClick={cancel} disabled={saving}>{t['common.cancel']}</button>
             <button className="doc-btn primary" onClick={doSave} disabled={saving}>
-              {saving ? 'Сохраняю…' : 'Сохранить'}
+              {saving ? t['editable.saving'] : t['common.save']}
             </button>
           </div>
         </div>
@@ -119,8 +120,8 @@ export function EditableMarkdown({ projectId, load, save, spinnerLabel, emptyLab
 
   return (
     <div className="markdown-wrap doc-view" onDoubleClick={startEdit}
-      title="Двойной клик — редактировать">
-      <button className="doc-edit-fab" onClick={startEdit} title="Редактировать">✎</button>
+      title={t['editable.dblclick_title']}>
+      <button className="doc-edit-fab" onClick={startEdit} title={t['editable.edit_title']}>✎</button>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.content}</ReactMarkdown>
     </div>
   )

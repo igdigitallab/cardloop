@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { Prompt } from '../types'
+import { t } from '../i18n'
 
 interface Props {
   onSelect: (text: string) => void
   onClose: () => void
 }
 
-const NO_CATEGORY = 'Без категории'
+const NO_CATEGORY = t['prompts.no_category']
 
 function groupPrompts(prompts: Prompt[]): [string, Prompt[]][] {
   const map = new Map<string, Prompt[]>()
@@ -134,13 +135,13 @@ export function PromptPicker({ onSelect, onClose }: Props) {
     <div className="prompt-picker" ref={ref}>
       <div className="prompt-picker-header">
         <span className="prompt-picker-title">📋 Шаблоны</span>
-        <button className="prompt-picker-close" onClick={onClose} title="Закрыть">✕</button>
+        <button className="prompt-picker-close" onClick={onClose} title={t['prompts.close']}>✕</button>
       </div>
 
       <div className="prompt-picker-list">
-        {loading && <div className="prompt-picker-empty">Загрузка…</div>}
+        {loading && <div className="prompt-picker-empty">{t['prompts.loading']}</div>}
         {!loading && prompts.length === 0 && formMode === 'idle' && (
-          <div className="prompt-picker-empty">Нет шаблонов. Добавьте первый!</div>
+          <div className="prompt-picker-empty">{t['prompts.empty']}</div>
         )}
         {!loading && groups.map(([cat, items]) => (
           <div key={cat} className="prompt-group">
@@ -170,12 +171,12 @@ export function PromptPicker({ onSelect, onClose }: Props) {
                     <button
                       className="prompt-edit-btn"
                       onClick={e => openEdit(p, e)}
-                      title="Редактировать"
+                      title={t['common.edit']}
                     >✎</button>
                     <button
                       className="prompt-delete-btn"
                       onClick={e => handleDelete(p.id, e)}
-                      title="Удалить"
+                      title={t['common.delete']}
                     >✕</button>
                   </div>
                 ))}
@@ -187,17 +188,17 @@ export function PromptPicker({ onSelect, onClose }: Props) {
 
       {formMode !== 'idle' ? (
         <div className="prompt-add-form" onKeyDown={handleKeyDownForm}>
-          <div className="prompt-form-label">{formMode === 'add' ? 'Новый шаблон' : 'Редактировать'}</div>
+          <div className="prompt-form-label">{formMode === 'add' ? t['prompts.new'] : t['common.edit']}</div>
           <input
             ref={titleRef}
             className="prompt-add-title"
-            placeholder="Название шаблона"
+            placeholder={t['prompts.name_placeholder']}
             value={formTitle}
             onChange={e => setFormTitle(e.target.value)}
           />
           <input
             className="prompt-add-title"
-            placeholder="Категория (необязательно)"
+            placeholder={t['prompts.category_placeholder']}
             list="prompt-categories"
             value={formCategory}
             onChange={e => setFormCategory(e.target.value)}
@@ -207,7 +208,7 @@ export function PromptPicker({ onSelect, onClose }: Props) {
           </datalist>
           <textarea
             className="prompt-add-text"
-            placeholder={"Текст промта…\nИспользуй [ПЕРЕМЕННАЯ] для мест заполнения"}
+            placeholder={t['prompts.text_placeholder']}
             value={formText}
             onChange={e => setFormText(e.target.value)}
             rows={5}
@@ -217,13 +218,13 @@ export function PromptPicker({ onSelect, onClose }: Props) {
               className="btn-primary"
               onClick={handleSave}
               disabled={saving || !formTitle.trim() || !formText.trim()}
-            >{saving ? '…' : 'Сохранить'}</button>
-            <button className="btn-secondary" onClick={closeForm} disabled={saving}>Отмена</button>
+            >{saving ? '…' : t['prompts.save']}</button>
+            <button className="btn-secondary" onClick={closeForm} disabled={saving}>{t['prompts.cancel']}</button>
           </div>
         </div>
       ) : (
         <button className="prompt-add-btn" onClick={openAdd}>
-          ＋ Новый шаблон
+          ＋ {t['prompts.new']}
         </button>
       )}
     </div>

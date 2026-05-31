@@ -10,6 +10,7 @@ import { BoardTab } from '../tabs/BoardTab'
 import { ChatTab } from '../tabs/ChatTab'
 import { FilesTab } from '../tabs/FilesTab'
 import { MemoryTab } from '../tabs/MemoryTab'
+import { t } from '../i18n'
 
 interface Tab {
   id: TabId
@@ -19,12 +20,12 @@ interface Tab {
 
 // Chat is no longer a tab — it lives in the permanent right panel
 const TABS: Tab[] = [
-  { id: 'overview',  label: 'Обзор' },
-  { id: 'claude-md', label: 'CLAUDE.md' },
-  { id: 'logs',      label: 'Логи' },
-  { id: 'board',     label: 'Доска' },
-  { id: 'files',     label: 'Файлы' },
-  { id: 'memory',    label: 'Память' },
+  { id: 'overview',  label: t['tab.overview'] },
+  { id: 'claude-md', label: t['tab.claude_md'] },
+  { id: 'logs',      label: t['tab.logs'] },
+  { id: 'board',     label: t['tab.board'] },
+  { id: 'files',     label: t['tab.files'] },
+  { id: 'memory',    label: t['tab.memory'] },
 ]
 
 // localStorage keys
@@ -94,7 +95,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   async function commitRename() {
     const slug = renameValue.trim()
     if (!SLUG_RE.test(slug)) {
-      setRenameError('Только строчные a-z, 0-9, дефис; 2-42 символа; не начинать/заканчивать на дефис')
+      setRenameError(t['project.rename_error_format'])
       return
     }
     if (slug === project.id) { cancelRename(); return }
@@ -107,7 +108,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     } catch (e: unknown) {
       const status = (e as { status?: number }).status
       if (status === 409) {
-        setRenameError('Проект занят — останови агента')
+        setRenameError(t['project.rename_error_busy'])
       } else {
         setRenameError(e instanceof Error ? e.message : String(e))
       }
@@ -135,7 +136,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     ? 'Git недоступен'
     : gitNeedsSync
       ? `${gitDirty ? `${git!.dirty} изменено` : ''}${gitDirty && gitUnpushed ? ', ' : ''}${gitUnpushed ? `${git!.unpushed} не отправлено` : ''}`
-      : 'Чисто, всё запушено'
+      : t['git.sync_clean']
 
   const onGitSync = useCallback(async () => {
     if (syncState === 'busy') return
@@ -145,8 +146,8 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
       const res = await api.gitSync(project.id)
       const parts: string[] = []
       if (res.committed) parts.push(`коммит: ${res.message}`)
-      if (res.pushed) parts.push('запушено')
-      setSyncMsg(parts.join(' · ') || 'нечего синхронизировать')
+      if (res.pushed) parts.push(t['git.sync_pushed'])
+      setSyncMsg(parts.join(' · ') || t['git.sync_nothing'])
       setSyncState('ok')
       onProjectsReload()
       setTimeout(() => setSyncState(s => (s === 'ok' ? 'idle' : s)), 3000)
@@ -299,8 +300,8 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                       placeholder="new-slug"
                       style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.4px', flex: 1, minWidth: 0 }}
                     />
-                    <button className="rename-confirm-btn" onClick={commitRename} title="Применить">✓</button>
-                    <button className="rename-cancel-btn" onClick={cancelRename} title="Отмена">✕</button>
+                    <button className="rename-confirm-btn" onClick={commitRename} title={t['project.rename_apply']}>✓</button>
+                    <button className="rename-cancel-btn" onClick={cancelRename} title={t['project.rename_cancel']}>✕</button>
                   </div>
                   {renameError && <div style={{ fontSize: 11, color: 'var(--red)' }}>{renameError}</div>}
                 </div>
@@ -310,7 +311,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                   <button
                     className="rename-edit-btn"
                     onClick={startRename}
-                    title="Переименовать проект"
+                    title={t['project.rename_title']}
                   >✏️</button>
                 </div>
               )}
@@ -323,7 +324,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                   <button
                     className={`health-badge health-badge-${structHealth.color}`}
                     onClick={() => setActiveTab('overview')}
-                    title={structHealth.items.find(i => !i.ok)?.label ?? 'Все проверки пройдены'}
+                    title={structHealth.items.find(i => !i.ok)?.label ?? t['project.health_all_ok']}
                   >
                     <span className={`git-sync-dot ${structHealth.color === 'red' ? 'yellow' : structHealth.color}`} />
                     health {structHealth.score}/{structHealth.total}
@@ -354,7 +355,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                         className={`git-sync-btn ${syncState}`}
                         onClick={onGitSync}
                         disabled={syncState === 'busy'}
-                        title={gitDirty ? 'Закоммитить всё и запушить' : 'Запушить коммиты'}
+                        title={gitDirty ? t['git.commit_and_push'] : t['git.push']}
                       >
                         {syncState === 'busy' ? '…' : '↑ Sync'}
                       </button>
@@ -370,7 +371,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
             </div>
           </div>
 
-          <nav className="tabs" role="tablist" aria-label="Разделы проекта">
+          <nav className="tabs" role="tablist" aria-label={t['tab.sections_aria']}>
             {TABS.map(tab => (
               <button
                 key={tab.id}
@@ -381,7 +382,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                 onClick={() => !tab.disabled && setActiveTab(tab.id)}
               >
                 {tab.label}
-                {tab.disabled && <span className="tab-soon">скоро</span>}
+                {tab.disabled && <span className="tab-soon">{t['common.soon']}</span>}
               </button>
             ))}
           </nav>
@@ -402,7 +403,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
         <div
           className={`project-split-divider${collapsed ? ' divider-collapsed' : ''}`}
           onMouseDown={onDividerMouseDown}
-          title={collapsed ? 'Развернуть чат' : 'Перетащить для изменения размера'}
+          title={collapsed ? t['split.expand_chat'] : t['split.drag_to_resize']}
           onClick={collapsed ? toggleCollapse : undefined}
         />
       )}
@@ -415,8 +416,8 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
             <button
               className="chat-collapse-btn"
               onClick={toggleCollapse}
-              title={collapsed ? 'Развернуть чат' : 'Свернуть чат'}
-              aria-label={collapsed ? 'Развернуть чат' : 'Свернуть чат'}
+              title={collapsed ? t['split.expand_chat'] : t['split.collapse_chat']}
+              aria-label={collapsed ? t['split.expand_chat'] : t['split.collapse_chat']}
               aria-expanded={!collapsed}
             >
               {collapsed ? '⟨' : '⟩'}
@@ -433,7 +434,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
         <button
           className="chat-collapsed-stub"
           onClick={toggleCollapse}
-          title="Развернуть чат"
+          title={t['split.expand_chat']}
         >
           💬
         </button>
@@ -449,7 +450,7 @@ export function DisabledTab({ name, icon }: { name: string; icon: string }) {
     <div className="tab-placeholder">
       <div className="tab-placeholder-icon">{icon}</div>
       <h3>{name}</h3>
-      <p>Эта функция появится в следующих фазах</p>
+      <p>{t['project.tab_disabled_hint']}</p>
     </div>
   )
 }

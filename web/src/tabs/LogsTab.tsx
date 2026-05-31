@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { Spinner } from '../components/Spinner'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
+import { t } from '../i18n'
 
 interface Props {
   projectId: string
@@ -66,7 +67,7 @@ export function LogsTab({ projectId, projectName }: Props) {
     }
   }
 
-  if (loading) return <Spinner label="Загрузка логов…" />
+  if (loading) return <Spinner label={t['logs.loading']} />
 
   if (error) return <div className="error-state">⚠ {error}</div>
 
@@ -74,7 +75,7 @@ export function LogsTab({ projectId, projectName }: Props) {
     return (
       <div className="logs-empty-state">
         <div className="logs-empty-icon">📋</div>
-        <h3>Логи не настроены</h3>
+        <h3>{t['logs.not_configured_title']}</h3>
         <p>
           Для этого проекта не указан источник логов.<br />
           Добавьте поле <code>log_cmd</code> в <code>data/topics.json</code> для этого проекта.
@@ -101,12 +102,12 @@ export function LogsTab({ projectId, projectName }: Props) {
   return (
     <div className="logs-container">
       <div className="logs-toolbar">
-        <button className="btn-secondary logs-refresh-btn" onClick={reload} title="Обновить">↺ Обновить</button>
+        <button className="btn-secondary logs-refresh-btn" onClick={reload} title={t['logs.refresh_title']}>{t['logs.refresh']}</button>
         <span className="logs-count">{lines.length} строк</span>
       </div>
       <div className="logs-output">
         {lines.length === 0
-          ? <div className="logs-no-output">Нет вывода</div>
+          ? <div className="logs-no-output">{t['logs.no_output']}</div>
           : lines.map((line, i) => (
             <div key={i} className="log-line">{line}</div>
           ))

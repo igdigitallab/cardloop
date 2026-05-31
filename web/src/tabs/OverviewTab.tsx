@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Project, TestResult } from '../types'
 import { api } from '../api'
 import { ProjectStructureCard } from '../components/ProjectStructureCard'
+import { t } from '../i18n'
 
 interface Props {
   project: Project
@@ -26,7 +27,7 @@ function WelcomeBanner({ projectId }: { projectId: string }) {
 
   return (
     <div className="welcome-banner">
-      <div style={{ fontWeight: 600, marginBottom: 4 }}>Идёт инициализация</div>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>{t['overview.initializing']}</div>
       <div style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.5 }}>
         Claude задаёт вопросы в чате справа → ответь, чтобы оформить проект.
       </div>
@@ -63,9 +64,9 @@ function IncidentScanner({ project }: { project: Project }) {
           className="doc-btn primary"
           onClick={scan}
           disabled={running || !hasSource}
-          title={hasSource ? 'Прогнать log_cmd + test_cmd, новые ошибки → карточки в Failed' : 'Сначала задай log_cmd или test_cmd в topics.json'}
+          title={hasSource ? t['overview.scan_hint_with_source'] : t['overview.scan_hint_no_source']}
         >
-          {running ? 'Сканирую…' : '▶ Сканировать'}
+          {running ? t['overview.scanning'] : t['overview.scan']}
         </button>
       </div>
       {!hasSource && (
@@ -116,9 +117,9 @@ function TestRunner({ projectId }: { projectId: string }) {
   return (
     <div className="git-card test-card">
       <div className="test-card-header">
-        <span className="git-card-header" style={{ margin: 0 }}>Тесты</span>
+        <span className="git-card-header" style={{ margin: 0 }}>{t['overview.tests']}</span>
         <button className="doc-btn primary" onClick={run} disabled={running}>
-          {running ? 'Запускаю…' : '▶ Запустить'}
+          {running ? t['overview.running_tests'] : t['overview.run_tests']}
         </button>
       </div>
       {err && <div className="error-state">⚠ {err}</div>}
@@ -148,12 +149,12 @@ export function OverviewTab({ project }: Props) {
 
       <div className="overview-grid">
         <div className="info-card">
-          <div className="info-card-label">Рабочая директория</div>
+          <div className="info-card-label">{t['overview.cwd']}</div>
           <div className="info-card-value mono">{project.cwd}</div>
         </div>
 
         <div className="info-card">
-          <div className="info-card-label">Модель</div>
+          <div className="info-card-label">{t['overview.model']}</div>
           <div className="info-card-value">{project.model}</div>
         </div>
 
@@ -163,7 +164,7 @@ export function OverviewTab({ project }: Props) {
             {project.tg_thread !== null ? (
               <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>#{project.tg_thread}</span>
             ) : (
-              <span style={{ color: 'var(--text3)' }}>не привязан</span>
+              <span style={{ color: 'var(--text3)' }}>{t['overview.not_bound']}</span>
             )}
           </div>
         </div>
@@ -174,19 +175,19 @@ export function OverviewTab({ project }: Props) {
           <div className="git-card-header">Git состояние</div>
           <div className="git-stats">
             <div className="git-stat">
-              <span className="git-stat-label">Ветка</span>
+              <span className="git-stat-label">{t['overview.git_branch']}</span>
               <span className="git-stat-value" style={{ fontSize: 14, fontWeight: 500, color: 'var(--accent-h)' }}>
                 {git.branch}
               </span>
             </div>
             <div className="git-stat">
-              <span className="git-stat-label">Изменений</span>
+              <span className="git-stat-label">{t['overview.git_changes']}</span>
               <span className={`git-stat-value ${git.dirty > 0 ? 'warn' : 'ok'}`}>
                 {git.dirty}
               </span>
             </div>
             <div className="git-stat">
-              <span className="git-stat-label">Не отправлено</span>
+              <span className="git-stat-label">{t['overview.git_unpushed']}</span>
               <span className={`git-stat-value ${git.unpushed > 0 ? 'warn' : 'ok'}`}>
                 {git.unpushed}
               </span>

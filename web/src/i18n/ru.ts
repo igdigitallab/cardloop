@@ -1,0 +1,255 @@
+/** Russian UI strings — source of truth for all visible text.
+ *  Keys use dot-notation: <component>.<element>
+ *  Text is Russian (translation-ready but not yet translated).
+ */
+export const ru = {
+  // ── General ──────────────────────────────────────────────────
+  'common.loading': 'Загрузка...',
+  'common.saving': 'Сохраняю…',
+  'common.save': 'Сохранить',
+  'common.cancel': 'Отмена',
+  'common.close': 'Закрыть',
+  'common.delete': 'Удалить',
+  'common.confirm': 'Подтвердить',
+  'common.edit': 'Редактировать',
+  'common.error': 'Ошибка',
+  'common.soon': 'скоро',
+
+  // ── Login ────────────────────────────────────────────────────
+  'login.title': 'Вход',
+  'login.subtitle': 'Панель управления проектами',
+  'login.password_label': 'Парольная фраза',
+  'login.submit_loading': 'Проверяю...',
+  'login.submit': 'Войти',
+  'login.error_wrong_password': 'Неверная парольная фраза',
+
+  // ── App / Welcome ────────────────────────────────────────────
+  'app.connecting': 'Соединение...',
+  'app.welcome_hint': 'Выберите проект в левом сайдбаре для просмотра деталей',
+  'app.free_chat_busy': 'Свободный чат сейчас занят — сначала останови агента',
+
+  // ── Sidebar ──────────────────────────────────────────────────
+  'sidebar.expand': 'Развернуть сайдбар',
+  'sidebar.collapse': 'Свернуть сайдбар',
+  'sidebar.new_project': 'Новый проект',
+  'sidebar.new_project_hint': 'Создать новый проект — агент сам расспросит и оформит',
+  'sidebar.search_placeholder': 'Поиск проектов...',
+  'sidebar.loading': 'Загрузка...',
+  'sidebar.empty': 'Нет проектов',
+  'sidebar.no_results': 'Ничего не найдено',
+  'sidebar.delete_free_chat': 'Удалить свободный чат',
+  'sidebar.delete_chat': 'Удалить чат',
+
+  // ── Project Tab Bar ──────────────────────────────────────────
+  'tabbar.new_free_chat': 'Новый свободный чат',
+  'tabbar.server_files': 'Файлы сервера (~)',
+  'tabbar.close_tab': 'Закрыть вкладку',
+  'tabbar.close': 'Закрыть',
+
+  // ── Project tabs labels ──────────────────────────────────────
+  'tab.overview': 'Обзор',
+  'tab.claude_md': 'CLAUDE.md',
+  'tab.logs': 'Логи',
+  'tab.board': 'Доска',
+  'tab.files': 'Файлы',
+  'tab.memory': 'Память',
+  'tab.sections_aria': 'Разделы проекта',
+
+  // ── Project header / rename ──────────────────────────────────
+  'project.rename_title': 'Переименовать проект',
+  'project.rename_apply': 'Применить',
+  'project.rename_cancel': 'Отмена',
+  'project.rename_error_format': 'Только строчные a-z, 0-9, дефис; 2-42 символа; не начинать/заканчивать на дефис',
+  'project.rename_error_busy': 'Проект занят — останови агента',
+  'project.health_all_ok': 'Все проверки пройдены',
+  'project.tab_disabled_hint': 'Эта функция появится в следующих фазах',
+
+  // ── Git sync ─────────────────────────────────────────────────
+  'git.sync_clean': 'Чисто, всё запушено',
+  'git.sync_pushed': 'запушено',
+  'git.sync_nothing': 'нечего синхронизировать',
+  'git.commit_and_push': 'Закоммитить всё и запушить',
+  'git.push': 'Запушить коммиты',
+
+  // ── Split view ───────────────────────────────────────────────
+  'split.open_second_chat': 'Открыть второй чат рядом',
+  'split.close_panel': 'Закрыть эту панель',
+  'split.expand_chat': 'Развернуть чат',
+  'split.collapse_chat': 'Свернуть чат',
+  'split.drag_to_resize': 'Перетащить для изменения размера',
+
+  // ── Overview tab ─────────────────────────────────────────────
+  'overview.initializing': 'Идёт инициализация',
+  'overview.scan_hint_with_source': 'Прогнать log_cmd + test_cmd, новые ошибки → карточки в Failed',
+  'overview.scan_hint_no_source': 'Сначала задай log_cmd или test_cmd в topics.json',
+  'overview.scan': '▶ Сканировать',
+  'overview.scanning': 'Сканирую…',
+  'overview.tests': 'Тесты',
+  'overview.run_tests': '▶ Запустить',
+  'overview.running_tests': 'Запускаю…',
+  'overview.cwd': 'Рабочая директория',
+  'overview.model': 'Модель',
+  'overview.not_bound': 'не привязан',
+  'overview.git_branch': 'Ветка',
+  'overview.git_changes': 'Изменений',
+  'overview.git_unpushed': 'Не отправлено',
+
+  // ── Board tab ────────────────────────────────────────────────
+  'board.loading': 'Загрузка доски...',
+  'board.columns_label': 'колонки:',
+  'board.agent_running': 'Агент работает, авто-обновление...',
+  'board.new_task_placeholder': 'Новая задача… (Enter — добавить)',
+  'board.edit_hint': 'Двойной клик — редактировать',
+  'board.incident_title': 'Инцидент (источник: log/test)',
+  'board.card_running_title': 'Выполняется агентом',
+  'board.show_description': 'Показать описание',
+  'board.move_left': '← влево',
+  'board.move_left_aria': 'Переместить влево',
+  'board.move_right': 'вправо →',
+  'board.move_right_aria': 'Переместить вправо',
+  'board.handoff_aria': 'Передать агенту',
+  'board.show_result': 'Результат выполнения',
+  'board.show_result_aria': 'Показать результат',
+  'board.archive': '✓ в Done (архив)',
+  'board.archive_aria': 'Архивировать карточку',
+  'board.delete': 'удалить',
+  'board.delete_aria': 'Удалить карточку',
+  'board.loading_archive': 'Загрузка архива...',
+  'board.result_modal_title': 'Результат выполнения',
+  'board.edit_description': 'Редактировать описание',
+  'board.save_description': 'Сохранить',
+  'board.description_placeholder': 'Описание задачи (markdown)…',
+
+  // ── Chat tab ─────────────────────────────────────────────────
+  'chat.empty_hint': 'Начни чат с агентом по проекту.',
+  'chat.empty_session_hint': 'Сессия общая с Telegram-топиком.',
+  'chat.model_hint': 'Модель применяется со следующего запроса',
+  'chat.token_count_rough': 'Грубая оценка (4 символа ≈ 1 токен) — точные токены появятся после первого ответа.',
+  'chat.attach_file_title': 'Прикрепить файл (или перетащи / Ctrl+V)',
+  'chat.attach_file_aria': 'Прикрепить файл',
+  'chat.prompts_title': 'Шаблоны промтов',
+  'chat.prompts_aria': 'Шаблоны промтов',
+  'chat.skills_title': 'Скиллы агента (глобальные + проекта)',
+  'chat.skills_aria': 'Скиллы агента',
+  'chat.send': 'Отправить ↵',
+  'chat.queue': 'В очередь',
+  'chat.send_title': 'Отправить (Enter)',
+  'chat.queue_title': 'Поставить в очередь',
+  'chat.remove_file': 'Убрать',
+  'chat.remove_file_aria': 'Убрать прикреплённый файл',
+  'chat.status_writing': 'пишет ответ',
+  'chat.status_card_running': 'карточка работает',
+  'chat.status_thinking': 'агент думает',
+  'chat.stop_btn': '✕ стоп',
+  'chat.stop_title': 'Прервать стрим (очередь очистится)',
+  'chat.stop_aria': 'Остановить агента',
+  'chat.input_placeholder_busy': 'Агент работает — сообщение встанет в очередь, отправится после завершения…',
+  'chat.input_placeholder': 'Сообщение агенту… (Enter — отправить, Shift+Enter — перенос)',
+  'chat.look_at_files': 'Посмотри прикреплённые файлы.',
+
+  // ── Session selector ─────────────────────────────────────────
+  'session.new': 'новая',
+  'session.just_now': 'только что',
+  'session.new_label': 'Новая сессия',
+  'session.new_title': 'Новая сессия (с подтверждением)',
+  'session.select_title': 'Выбрать сессию',
+  'session.rename_title': 'Переименовать сессию',
+  'session.rename_aria': 'Переименовать сессию',
+  'session.name_placeholder': 'Имя сессии (пусто — убрать лейбл)',
+  'session.save': 'Сохранить',
+  'session.cancel': 'Отмена',
+  'session.just_new': 'Просто новая сессия',
+  'session.just_new_title': 'Сбросить сессию без отправки промта',
+  'session.insert_prompt_title': 'Вставить промт в чат — отправь его, потом нажми ↺ ещё раз для новой сессии',
+  'session.empty': 'нет сохранённых сессий',
+  'session.error_busy': 'проект занят',
+  'session.error_rename': 'ошибка переименования',
+  'session.error_generic': 'ошибка',
+  'session.reset_prompt': "Заканчиваем сессию. Перед тем как уйти:\n",
+  'session.reset_prompt_suffix': "Не пиши код, просто проверь и доложи.",
+
+  // ── Session context panel ────────────────────────────────────
+  'ctx.collapse': 'Свернуть контекст сессии',
+  'ctx.expand': 'Развернуть контекст сессии',
+  'ctx.refresh': 'Обновить контекст',
+  'ctx.refresh_aria': 'Обновить контекст сессии',
+  'ctx.updating': 'обновление…',
+
+  // ── ClaudeMd tab ─────────────────────────────────────────────
+  'claude_md.loading': 'Загрузка CLAUDE.md...',
+  'claude_md.empty': 'Нет CLAUDE.md для этого проекта',
+
+  // ── Files tab ────────────────────────────────────────────────
+  'files.tree_label': 'Файлы проекта',
+  'files.loading': 'Загрузка файлов...',
+  'files.loading_file': 'Загрузка...',
+  'files.empty_dir': 'Директория пуста',
+  'files.edit_btn': 'Редактировать (или двойной клик на тексте)',
+  'files.edit_dblclick_hint': 'Двойной клик для редактирования',
+  'files.save_error': 'Ошибка сохранения',
+
+  // ── Logs tab ─────────────────────────────────────────────────
+  'logs.loading': 'Загрузка логов…',
+  'logs.not_configured_title': 'Логи не настроены',
+  'logs.refresh': '↺ Обновить',
+  'logs.refresh_title': 'Обновить',
+  'logs.no_output': 'Нет вывода',
+
+  // ── Memory tab ───────────────────────────────────────────────
+  'memory.loading': 'Загрузка памяти проекта...',
+  'memory.empty_title': 'Память проекта пуста',
+  'memory.files_label': 'Файлы памяти',
+  'memory.index': 'индекс',
+
+  // ── Prompt picker ────────────────────────────────────────────
+  'prompts.loading': 'Загрузка…',
+  'prompts.empty': 'Нет шаблонов. Добавьте первый!',
+  'prompts.close': 'Закрыть',
+  'prompts.new': 'Новый шаблон',
+  'prompts.name_placeholder': 'Название шаблона',
+  'prompts.category_placeholder': 'Категория (необязательно)',
+  'prompts.text_placeholder': 'Текст промта…\nИспользуй [ПЕРЕМЕННАЯ] для мест заполнения',
+  'prompts.save': 'Сохранить',
+  'prompts.cancel': 'Отмена',
+  'prompts.no_category': 'Без категории',
+
+  // ── Skill picker ─────────────────────────────────────────────
+  'skills.loading': 'Загрузка…',
+  'skills.close': 'Закрыть',
+  'skills.section_project': 'Проекта',
+  'skills.section_global': 'Глобальные',
+  'skills.empty_project': 'нет проектных скиллов (добавь в <cwd>/.claude/skills/<name>/SKILL.md)',
+  'skills.empty_global': 'нет глобальных скиллов',
+  'skills.error_loading': 'ошибка загрузки',
+
+  // ── EditableMarkdown ─────────────────────────────────────────
+  'editable.edit_title': 'Редактировать',
+  'editable.dblclick_title': 'Двойной клик — редактировать',
+  'editable.cancel': 'Отмена',
+  'editable.save': 'Сохранить',
+  'editable.saving': 'Сохраняю…',
+
+  // ── ProjectStructureCard ─────────────────────────────────────
+  'structure.title': 'Структура проекта',
+  'structure.audit_title': 'Запустить аудит проекта',
+  'structure.upgrade_title': 'Дополнить CLAUDE.md/TASKS.md/README/.gitignore по шаблону, не переписывая существующее',
+  'structure.audit_created': 'Карточка создана',
+  'structure.upgrade_created': 'Карточка апгрейда создана',
+  'structure.busy': 'Проект занят — попробуй позже',
+
+  // ── Usage badge ──────────────────────────────────────────────
+  'usage.loading_title': 'Лимиты загружаются… (клик — claude.ai/settings/usage)',
+  'usage.title': 'Лимиты подписки Claude Code (клик — claude.ai/settings/usage)',
+  'usage.seven_day': 'Неделя (всё)',
+  'usage.seven_day_opus': 'Неделя Opus',
+  'usage.seven_day_sonnet': 'Неделя Sonnet',
+  'usage.overage': 'Перерасход',
+  'usage.reset_soon': 'скоро',
+
+  // ── Modal / Toast / Common UI ────────────────────────────────
+  'modal.close_aria': 'Закрыть',
+  'toast.close_aria': 'Закрыть уведомление',
+  'spinner.default': 'Загрузка...',
+} as const
+
+export type TKey = keyof typeof ru
