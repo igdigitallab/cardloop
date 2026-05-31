@@ -304,14 +304,26 @@ function ToolBlock({ tool }: { tool: RichTool }) {
 interface SessionSelectorProps {
   projectId: string
   onSessionChange: () => void
+  /** Вызывается когда юзер хочет вставить «промт-завершения» в чат-инпут ДО сброса сессии (ops:a01372). */
+  onInsertResetPrompt?: (text: string) => void
 }
 
-function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
+const DEFAULT_RESET_PROMPT =
+  "Заканчиваем сессию. Перед тем как уйти:\n" +
+  "1. Просмотри список карточек в TASKS.md, отметь выполненные (передвинь в Done через мою команду или скажи мне).\n" +
+  "2. Проверь нет ли мусорных временных файлов в cwd (untitled, scratch, .bak) — предложи удалить.\n" +
+  "3. Если есть незакоммиченные правки — короткое описание что и зачем (commit-сообщение).\n" +
+  "Не пиши код, просто проверь и доложи."
+
+function SessionSelector({ projectId, onSessionChange, onInsertResetPrompt }: SessionSelectorProps) {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const dropRef = useRef<HTMLDivElement>(null)
+  // Confirm-модалка перед /reset (ops:a01372) — даёт юзеру шанс отправить промт-завершение
+  const [confirmReset, setConfirmReset] = useState(false)
+  const [resetPromptText, setResetPromptText] = useState(DEFAULT_RESET_PROMPT)
 
   const loadSessions = useCallback(async () => {
     try {
@@ -380,13 +392,19 @@ function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
     }
   }
 
+  function requestReset() {
+    setResetPromptText(DEFAULT_RESET_PROMPT)
+    setConfirmReset(true)
+    setOpen(false)
+  }
+
   return (
     <div className="session-selector" ref={dropRef}>
       <button
         className="session-reset-btn"
-        onClick={() => switchSession('new')}
+        onClick={requestReset}
         disabled={busy}
-        title="Новая сессия (сброс контекста)"
+        title="Новая сессия (с подтверждением)"
       >↺</button>
       <button
         className="session-selector-btn"
@@ -405,7 +423,7 @@ function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
         <div className="session-dropdown">
           <button
             className="session-dropdown-item session-new-item"
-            onClick={() => switchSession('new')}
+            onClick={requestReset}
             disabled={busy}
           >
             ➕ Новая сессия
@@ -438,6 +456,50 @@ function SessionSelector({ projectId, onSessionChange }: SessionSelectorProps) {
           {sessions.length === 0 && (
             <div className="session-dropdown-empty">нет сохранённых сессий</div>
           )}
+        </div>
+      )}
+
+      {confirmReset && (
+        <div className="reset-confirm-overlay" onClick={() => setConfirmReset(false)}>
+          <div className="reset-confirm-modal" onClick={e => e.stopPropagation()}>
+            <div className="reset-confirm-head">
+              <span>Новая сессия</span>
+              <button className="reset-confirm-close" onClick={() => setConfirmReset(false)}>✕</button>
+            </div>
+            <div className="reset-confirm-body">
+              <p className="reset-confirm-hint">
+                Контекст текущей сессии сбросится. Перед закрытием можно отправить агенту промт-«завершение» (отметит сделанные карточки, проверит мусор):
+              </p>
+              <textarea
+                className="reset-confirm-textarea"
+                value={resetPromptText}
+                onChange={e => setResetPromptText(e.target.value)}
+                rows={7}
+              />
+              <div className="reset-confirm-actions">
+                <button
+                  className="reset-confirm-btn-cancel"
+                  onClick={() => setConfirmReset(false)}
+                  disabled={busy}
+                >Отмена</button>
+                <button
+                  className="reset-confirm-btn-skip"
+                  onClick={() => { setConfirmReset(false); switchSession('new') }}
+                  disabled={busy}
+                  title="Сбросить сессию без отправки промта"
+                >Просто новая сессия</button>
+                <button
+                  className="reset-confirm-btn-send"
+                  onClick={() => {
+                    if (onInsertResetPrompt) onInsertResetPrompt(resetPromptText)
+                    setConfirmReset(false)
+                  }}
+                  disabled={busy || !onInsertResetPrompt}
+                  title="Вставить промт в чат — отправь его, потом нажми ↺ ещё раз для новой сессии"
+                >📋 Вставить в чат</button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -921,7 +983,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     <div className="chat-wrap">
       {/* Session selector bar + stats + model selector */}
       <div className="chat-session-bar">
-        <SessionSelector projectId={projectId} onSessionChange={handleSessionChange} />
+        <SessionSelector
+          projectId={projectId}
+          onSessionChange={handleSessionChange}
+          onInsertResetPrompt={(text) => {
+            setInput(text)
+            setTimeout(() => textareaRef.current?.focus(), 0)
+          }}
+        />
         {messages.length > 0 && (() => {
           // Честный размер: реальные prompt-токены последнего хода (из бэкенда).
           // Пока их нет (история без usage / до первого ответа) — грубая оценка со знаком ~.

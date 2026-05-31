@@ -2890,3 +2890,50 @@ body {
   font-size: 13px;
   font-weight: 500;
 }
+
+/* ── Reset confirm modal (ops:a01372) ───────────────────────────── */
+.reset-confirm-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.reset-confirm-modal {
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: 10px;
+  width: min(560px, 92vw); max-height: 86vh; display: flex; flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+}
+.reset-confirm-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  font-weight: 600; color: var(--text);
+}
+.reset-confirm-close {
+  background: transparent; border: none; color: var(--text2); cursor: pointer;
+  font-size: 16px; padding: 4px 8px; border-radius: 4px;
+}
+.reset-confirm-close:hover { background: var(--bg3); color: var(--text); }
+.reset-confirm-body { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.reset-confirm-hint { color: var(--text2); font-size: 13px; line-height: 1.45; }
+.reset-confirm-textarea {
+  width: 100%; min-height: 140px; resize: vertical;
+  background: var(--bg3); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 10px 12px; font-family: var(--mono); font-size: 12px;
+  line-height: 1.5; outline: none;
+}
+.reset-confirm-textarea:focus { border-color: var(--accent); }
+.reset-confirm-actions {
+  display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap;
+}
+.reset-confirm-btn-cancel, .reset-confirm-btn-skip, .reset-confirm-btn-send {
+  padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  border: 1px solid var(--border2); background: var(--bg3); color: var(--text);
+  transition: background var(--transition), border-color var(--transition);
+}
+.reset-confirm-btn-cancel:hover { background: var(--bg4); }
+.reset-confirm-btn-skip { color: var(--yellow); border-color: var(--yellow); }
+.reset-confirm-btn-skip:hover { background: rgba(245,166,35,0.1); }
+.reset-confirm-btn-send {
+  background: var(--accent); border-color: var(--accent); color: white;
+}
+.reset-confirm-btn-send:hover:not(:disabled) { background: var(--accent-h); border-color: var(--accent-h); }
+.reset-confirm-btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
