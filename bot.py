@@ -30,7 +30,6 @@ from claude_agent_sdk import (
 )
 from aiohttp import web
 import webapp          # браузерный кокпит (webapp.py) — поднимается в post_init рядом с ботом, состояние через ctx
-import glasses_transport  # HTTP-транспорт для очков G2 (заглушен, включается через GLASSES_TOKEN)
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
@@ -69,18 +68,13 @@ ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") 
 DEFAULT_CWD = os.environ.get("DEFAULT_CWD", str(Path.home()))
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "opus")
 
-# Glasses HTTP transport (claude-glasses plugin on Even G2)
-GLASSES_TOKEN = os.environ.get("GLASSES_TOKEN", "")
-GLASSES_PORT = int(os.environ.get("GLASSES_PORT", "8765"))
 WEB_PORT = int(os.environ.get("WEB_PORT", "8787"))           # браузерный кокпит
 WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")            # парольная фраза для входа в кокпит
-GLASSES_MODEL = os.environ.get("GLASSES_MODEL", "sonnet")  # короткие ответы → sonnet быстрее
 
 MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku"}  # CLI резолвит алиасы в latest
 
 # ─────────────────────────── именованные константы ───────────────────────────
 TG_CHUNK = 4000          # макс. размер одного TG-сообщения (символы)
-GLASSES_REPLY_MAX = 300  # макс. ответ для G2 HUD (один экран ≈ 400, но оставляем место на статус-строки)
 
 # Operating-brief: инжектится в КАЖДУЮ сессию (все топики), поверх главного и проектного CLAUDE.md.
 # ⚠️ nudge — ТОЛЬКО то, что реально отличает Telegram от терминала. Всё про «как работать»
@@ -98,19 +92,6 @@ TELEGRAM_NUDGE = (
 )
 # AskUserQuestion = интерактивная голосовалка (нет ответа в TG -> агент зависает/решает сам).
 DISALLOWED_TOOLS = ["AskUserQuestion"]
-
-# Operating-brief для канала «очки G2». Экран 576×288 px, ответ показывается на стекле.
-GLASSES_NUDGE = (
-    "Ты — Claude-Ops, помощник Игоря, но сейчас канал — смарт-очки Even G2 (НЕ Telegram). "
-    "Экран 576×288 px, 4-битный grayscale. Команды приходят голосом (Whisper STT), ответ "
-    "выводится на стекле как текст.\n\n"
-    "ОТВЕЧАЙ ОЧЕНЬ КРАТКО: 1–2 фразы, ≤250 символов, plain text, БЕЗ markdown, без code-блоков, "
-    "без перечислений. Тон — телеграфный, информативный.\n\n"
-    "Вопросов НЕ задавай — на очках нет интерактива. Если задача неясна или рискованна — сделай "
-    "разумное допущение и коротко скажи что сделал, либо ответь «нужен Telegram для уточнений».\n\n"
-    "Полные права: правь файлы, чини, деплой. Необратимое (push/deploy/rm/drop) — делай и "
-    "одним предложением отчитайся что именно сделал."
-)
 
 TOPICS_F = DATA / "topics.json"      # СЛОЙ 1: привязка thread -> проект (вечная)
 SESSIONS_F = DATA / "sessions.json"  # СЛОЙ 2: thread -> session_id (чистит /reset)
@@ -401,7 +382,7 @@ def audit(project: str, kind: str, text: str):
 # ─────────────────────────── ДВИЖОК (async-генератор событий) ───────────────────────────
 #
 # run_engine — независимый генератор событий. Не знает про Telegram, aiohttp или любой транспорт.
-# Транспорты (TG-адаптер run_agent, glasses-адаптер run_for_glasses) потребляют его события.
+# Транспорты (TG-адаптер run_agent) потребляют его события.
 #
 # Схема событий:
 #   {"type": "tool",       "name": str, "input": dict}        — инструмент запущен агентом
@@ -432,7 +413,7 @@ async def run_engine(  # type: ignore[return]
         project_name      — имя проекта (для audit-лога)
         cwd               — рабочая директория
         prompt            — промпт пользователя
-        session_key       — ключ в running/sessions (напр. "chat:thread" или "glasses:proj")
+        session_key       — ключ в running/sessions (напр. "chat:thread")
         model             — модель (алиас из MODELS или строка напрямую)
         system_prompt     — dict {type,preset,append}, по умолчанию — TG-preset
         env               — доп. env-переменные для агента (TG_CHAT_ID и т.п.)
@@ -672,73 +653,6 @@ async def run_agent(context, update, prompt: str):
         pass
     audit(b["project"], "DONE", f"edits={n_edits}" + (f" STALLED:{stalled['reason']}" if stalled["reason"] else ""))
 
-
-# ─────────────────────────── glasses (HTTP transport) ───────────────────────────
-# Очки G2 (Even Realities) — отдельный канал параллельно с Telegram.
-# Ключ сессии — "glasses:<project>" (не пересекается с TG-ключами "<chat>:<thread>").
-# Запросы голосовые: STT уже сделан на стороне очков через deepseek-bridge /stt,
-# сюда приходит уже текст.
-# Переиспользует run_engine (единый движок), адаптируя формат ответа под HUD (≤300 символов).
-#
-# ⚠️ Вынесено в glasses_transport.py (ops:s03dead-be 2026-05-31).
-# run_for_glasses живёт здесь — тесно связана с module-level состоянием (running/sessions/costs).
-# HTTP-роуты/CORS/старт — в glasses_transport.start(ctx).
-
-async def run_for_glasses(project_name: str, prompt: str) -> dict:
-    r = resolve_project(project_name)
-    if not r:
-        raise ValueError(f"unknown project: {project_name}")
-    display, cwd = r
-    key = f"glasses:{display}"
-    if key in running:
-        raise RuntimeError("уже работаю в этом проекте через очки")
-    # Гонка: резервируем слот СИНХРОННО до первого await
-    running[key] = True
-    answer_parts = []
-    sid = sessions.get(key)
-    try:
-        async for event in run_engine(
-            project_name=display,
-            cwd=cwd,
-            prompt=prompt,
-            session_key=key,
-            model=GLASSES_MODEL,
-            system_prompt={"type": "preset", "preset": "claude_code", "append": GLASSES_NUDGE},
-            env={},
-            resume_session_id=sid,
-        ):
-            etype = event["type"]
-            if etype == "text":
-                answer_parts.append(event["text"])
-            elif etype == "result":
-                if event.get("session_id"):
-                    sid = event["session_id"]
-                    sessions[key] = sid
-                    save_sessions()
-                if event.get("cost_usd") is not None:
-                    costs[key] = event["cost_usd"]
-            elif etype == "error":
-                raise event["exc"]
-    finally:
-        running.pop(key, None)
-    reply = "\n".join(answer_parts).strip() or "(агент завершил без текста)"
-    # G2 HUD: жёстко режем до GLASSES_REPLY_MAX символов
-    if len(reply) > GLASSES_REPLY_MAX:
-        reply = reply[:GLASSES_REPLY_MAX - 3] + "..."
-    return {"reply": reply, "session_id": sid, "project": display, "cwd": cwd}
-
-
-async def start_glasses_http(_app):
-    """Запуск HTTP-транспорта очков G2. Делегирует в glasses_transport.start(ctx)."""
-    await glasses_transport.start({
-        "GLASSES_TOKEN": GLASSES_TOKEN,
-        "GLASSES_PORT": GLASSES_PORT,
-        "topics": topics,
-        "sessions": sessions,
-        "save_sessions": save_sessions,
-        "resolve_project": resolve_project,
-        "run_for_glasses": run_for_glasses,
-    })
 
 
 # ─────────────────────────── handlers ───────────────────────────
@@ -1062,13 +976,12 @@ async def cmd_stop(update, context):
 async def _on_start(app):
     """post_init: поднимаем внутрипроцессные HTTP-каналы рядом с ботом.
     Каждый обёрнут в собственный try/except — падение веба НЕ роняет Telegram."""
-    await start_glasses_http(app)          # очки G2 (сам выключается при пустом GLASSES_TOKEN)
     await webapp.start(app, {              # браузерный кокпит
         "port": WEB_PORT, "password": WEB_PASSWORD,
         "topics": topics, "sessions": sessions, "running": running,
         "costs": costs, "rate_limits": rate_limits,
         "resolve_project": resolve_project, "REGISTRY": REGISTRY,
-        "run_for_glasses": run_for_glasses, "save_sessions": save_sessions, "save_topics": save_topics,
+        "save_sessions": save_sessions, "save_topics": save_topics,
         "DATA": DATA, "DEFAULT_CWD": DEFAULT_CWD, "DEFAULT_MODEL": DEFAULT_MODEL,
         "VAULT_PROJECTS": Path.home() / "vault" / "01-Projects", "HERE": HERE,
         # F1: движок и модели для авто-запуска карточек канбана

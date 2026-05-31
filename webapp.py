@@ -1495,7 +1495,6 @@ class AppCtx(TypedDict, total=False):
     save_topics: object     # callable
     resolve_project: object  # callable
     run_engine: object      # async generator factory
-    run_for_glasses: object  # callable
     ptb_app: object
     MODELS: dict
     REGISTRY: dict
