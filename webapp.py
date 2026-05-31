@@ -1844,19 +1844,13 @@ async def api_tasks_done(req: web.Request):
 
 # ─────────────────────────── activity-stream SSE ───────────────────────────
 #
-# GET /api/projects/{id}/activity-stream
-# Живой поток событий шины для данного проекта (session_key = tg_thread).
+# GET /api/projects/{id}/activity-stream  — поток событий проекта (session-specific)
+# GET /api/activity-stream                — глобальный поток всех сессий
 # Клиент держит соединение; при разрыве finally гарантирует отписку.
 
-async def api_project_activity_stream(req: web.Request):
-    ctx = req.app["ctx"]
-    pid = req.match_info["id"]
-    project = _find_project_by_id(ctx, pid)
-    if project is None:
-        return web.json_response({"error": "project not found"}, status=404)
-
-    session_key = project["tg_thread"]
-
+async def _sse_stream(req: web.Request, q: "asyncio.Queue[dict]", unsubscribe) -> web.StreamResponse:
+    """Общий SSE-цикл: читает из очереди q, пишет в StreamResponse.
+    unsubscribe — callable(q) для ГАРАНТИРОВАННОЙ отписки в finally."""
     resp = web.StreamResponse(
         status=200,
         headers={
@@ -1866,8 +1860,6 @@ async def api_project_activity_stream(req: web.Request):
         },
     )
     await resp.prepare(req)
-
-    q = _bus_subscribe(session_key)
     try:
         while True:
             try:
@@ -1884,47 +1876,26 @@ async def api_project_activity_stream(req: web.Request):
             except Exception:
                 break
     finally:
-        # ГАРАНТИРОВАННАЯ отписка — иначе утечка очередей
-        _bus_unsubscribe(session_key, q)
-
+        unsubscribe(q)
     return resp
 
 
-# ─────────────────────────── GLOBAL activity-stream SSE ───────────────────────────
-#
-# GET /api/activity-stream  — единый поток ВСЕХ событий шины (для unread-индикаторов в сайдбаре).
-# Каждое событие приходит с инжектированным session_key, фронт мапит его на проект.
+async def api_project_activity_stream(req: web.Request) -> web.StreamResponse:
+    """GET /api/projects/{id}/activity-stream — поток событий шины для конкретного проекта."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = project["tg_thread"]
+    q = _bus_subscribe(session_key)
+    return await _sse_stream(req, q, lambda q: _bus_unsubscribe(session_key, q))
 
-async def api_activity_stream_all(req: web.Request):
-    resp = web.StreamResponse(
-        status=200,
-        headers={
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
-    await resp.prepare(req)
 
+async def api_activity_stream_all(req: web.Request) -> web.StreamResponse:
+    """GET /api/activity-stream — единый поток ВСЕХ событий шины (unread-индикаторы в сайдбаре)."""
     q = _bus_subscribe_global()
-    try:
-        while True:
-            try:
-                event = await asyncio.wait_for(q.get(), timeout=25.0)
-                payload = json.dumps(event, ensure_ascii=False)
-                await resp.write(f"data: {payload}\n\n".encode())
-            except asyncio.TimeoutError:
-                await resp.write(b": ping\n\n")
-            except (ConnectionResetError, ConnectionAbortedError):
-                break
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                break
-    finally:
-        _bus_unsubscribe_global(q)
-
-    return resp
+    return await _sse_stream(req, q, _bus_unsubscribe_global)
 
 
 # ─────────────────────────── свободные чаты (без привязки к проекту) ───────────────────────────
@@ -2375,6 +2346,44 @@ def _is_secret_name(name: str) -> bool:
     return False
 
 
+def _read_file_content(target: Path, root: Path, rel: str) -> web.Response:
+    """Общий хелпер для чтения файла: size/binary/text проверки + ответ JSON.
+    root используется для нормализации rel_norm в ответе.
+    Не проверяет секретность и traversal — это обязанность вызывающего."""
+    if not target.exists() or not target.is_file():
+        return web.json_response({"error": "not a file"}, status=404)
+
+    try:
+        size = target.stat().st_size
+    except Exception:
+        return web.json_response({"error": "stat failed"}, status=500)
+
+    _MAX_FILE_SIZE = 1 * 1024 * 1024  # 1 МБ
+    if size > _MAX_FILE_SIZE:
+        return web.json_response({"error": "файл слишком большой", "size": size})
+
+    try:
+        with open(target, "rb") as f:
+            head = f.read(8192)
+        if b"\x00" in head:
+            return web.json_response({"error": "бинарный файл", "size": size})
+    except Exception:
+        return web.json_response({"error": "read failed"}, status=500)
+
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return web.json_response({"error": f"read error: {e}"}, status=500)
+
+    lang = target.suffix.lstrip(".") if target.suffix else ""
+    try:
+        rel_norm = str(target.relative_to(root))
+    except ValueError:
+        rel_norm = rel
+
+    return web.json_response({"path": rel_norm, "content": content, "lang": lang, "size": size})
+
+
 def _resolve_safe(cwd: str, rel: str):
     """Возвращает (resolved_path, cwd_resolved) или поднимает ValueError при traversal."""
     cwd_resolved = Path(cwd).resolve()
@@ -2451,7 +2460,7 @@ async def api_project_files(req: web.Request):
     return web.json_response({"path": rel_norm, "entries": entries})
 
 
-async def api_project_file(req: web.Request):
+async def api_project_file(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/file?path=<rel> — содержимое файла."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -2468,7 +2477,7 @@ async def api_project_file(req: web.Request):
     except ValueError:
         return web.json_response({"error": "invalid path"}, status=400)
 
-    # Проверяем имя на секреты
+    # Проверяем имя на секреты (сохранён anти-traversal _resolve_safe)
     if _is_secret_name(target.name):
         return web.json_response({"error": "access denied"}, status=403)
 
@@ -2480,44 +2489,7 @@ async def api_project_file(req: web.Request):
     except ValueError:
         return web.json_response({"error": "invalid path"}, status=400)
 
-    if not target.exists() or not target.is_file():
-        return web.json_response({"error": "not a file"}, status=404)
-
-    # Размер
-    try:
-        size = target.stat().st_size
-    except Exception:
-        return web.json_response({"error": "stat failed"}, status=500)
-
-    MAX_SIZE = 1 * 1024 * 1024  # 1 МБ
-    if size > MAX_SIZE:
-        return web.json_response({"error": "файл слишком большой", "size": size})
-
-    # Бинарный файл: проверяем первые 8 КБ на нулевые байты
-    try:
-        with open(target, "rb") as f:
-            head = f.read(8192)
-        if b"\x00" in head:
-            return web.json_response({"error": "бинарный файл", "size": size})
-    except Exception:
-        return web.json_response({"error": "read failed"}, status=500)
-
-    # Читаем текст
-    try:
-        content = target.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return web.json_response({"error": f"read error: {e}"}, status=500)
-
-    # Расширение без точки
-    lang = target.suffix.lstrip(".") if target.suffix else ""
-
-    # rel для ответа (относительно cwd)
-    try:
-        rel_norm = str(target.relative_to(cwd_resolved))
-    except ValueError:
-        rel_norm = rel
-
-    return web.json_response({"path": rel_norm, "content": content, "lang": lang, "size": size})
+    return _read_file_content(target, cwd_resolved, rel)
 
 
 # ── Глобальный файловый браузер (от $HOME) ────────────────────────────────────
@@ -2580,7 +2552,7 @@ async def api_global_files(req: web.Request):
     return web.json_response({"path": rel_norm, "entries": entries})
 
 
-async def api_global_file(req: web.Request):
+async def api_global_file(req: web.Request) -> web.Response:
     """GET /api/global/file?path=<rel> — содержимое файла от $HOME."""
     home = Path.home()
     rel = req.rel_url.query.get("path", "")
@@ -2592,41 +2564,11 @@ async def api_global_file(req: web.Request):
     except ValueError:
         return web.json_response({"error": "invalid path"}, status=400)
 
+    # Секреты проверяем ДО чтения (сохранён anти-traversal _resolve_global_safe)
     if _is_secret_name(target.name):
         return web.json_response({"error": "access denied"}, status=403)
 
-    if not target.exists() or not target.is_file():
-        return web.json_response({"error": "not a file"}, status=404)
-
-    try:
-        size = target.stat().st_size
-    except Exception:
-        return web.json_response({"error": "stat failed"}, status=500)
-
-    MAX_SIZE = 1 * 1024 * 1024
-    if size > MAX_SIZE:
-        return web.json_response({"error": "файл слишком большой", "size": size})
-
-    try:
-        with open(target, "rb") as f:
-            head = f.read(8192)
-        if b"\x00" in head:
-            return web.json_response({"error": "бинарный файл", "size": size})
-    except Exception:
-        return web.json_response({"error": "read failed"}, status=500)
-
-    try:
-        content = target.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return web.json_response({"error": f"read error: {e}"}, status=500)
-
-    lang = target.suffix.lstrip(".") if target.suffix else ""
-    try:
-        rel_norm = str(target.relative_to(home))
-    except ValueError:
-        rel_norm = rel
-
-    return web.json_response({"path": rel_norm, "content": content, "lang": lang, "size": size})
+    return _read_file_content(target, home, rel)
 
 
 async def api_global_file_write(req: web.Request):
