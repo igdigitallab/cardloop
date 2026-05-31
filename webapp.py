@@ -700,9 +700,19 @@ _CARD_RE = re.compile(r"^\s*[-*]\s*\[(.)\]\s*(.*)$")
 # Строки вида "- текст" без checkbox — агент часто пишет именно так.
 # Внутри секции-колонки распознаём как Backlog-карточку (статус по умолчанию).
 _PLAIN_CARD_RE = re.compile(r"^\s*[-*]\s+(?!\[)(.+)$")
-_MARKER_RE = re.compile(r"\s*<!--\s*ops:([0-9a-fA-F]+)\s*-->\s*$")
+_MARKER_RE = re.compile(r"\s*<!--\s*ops:([\w-]+)\s*-->")
 # Description строки: '  > текст' (2 пробела + '>') идущие сразу после карточки
 _DESC_LINE_RE = re.compile(r"^  > (.*)$")
+
+
+def _extract_id_and_text(rest: str) -> tuple[str, str]:
+    """Извлечь ID и очистить текст от ВСЕХ маркеров ops. Первый маркер = canonical ID."""
+    matches = list(_MARKER_RE.finditer(rest))
+    if not matches:
+        return _new_card_id(), rest.strip()
+    cid = matches[0].group(1)
+    clean = _MARKER_RE.sub("", rest).strip()
+    return cid, clean
 
 
 def _tasks_path(cwd: str) -> Path:
@@ -774,11 +784,7 @@ def _parse_tasks(text: str):
         m = _CARD_RE.match(line)
         if m and cur is not None:
             rest = m.group(2)
-            mk = _MARKER_RE.search(rest)
-            if mk:
-                cid, cardtext = mk.group(1), rest[: mk.start()].rstrip()
-            else:
-                cid, cardtext = _new_card_id(), rest.rstrip()
+            cid, cardtext = _extract_id_and_text(rest)
             if cardtext:
                 card: dict = {"id": cid, "text": cardtext}
                 cols[cur].append(card)
@@ -788,11 +794,7 @@ def _parse_tasks(text: str):
             pm = _PLAIN_CARD_RE.match(line)
             if pm:
                 rest = pm.group(1)
-                mk = _MARKER_RE.search(rest)
-                if mk:
-                    cid, cardtext = mk.group(1), rest[: mk.start()].rstrip()
-                else:
-                    cid, cardtext = _new_card_id(), rest.rstrip()
+                cid, cardtext = _extract_id_and_text(rest)
                 if cardtext:
                     # Plain-карточки всегда в текущую колонку (агент сам выбрал секцию)
                     card = {"id": cid, "text": cardtext}
