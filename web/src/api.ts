@@ -27,6 +27,11 @@ export const api = {
   projects: () =>
     apiFetch<{ projects: import('./types').Project[] }>('/api/projects'),
 
+  newProject: () =>
+    apiFetch<{ ok: boolean; id: string; name: string; session_key: string; cwd: string }>(
+      '/api/projects/new', { method: 'POST' }
+    ),
+
   claudeMd: (id: string) =>
     apiFetch<import('./types').ClaudeMd>(`/api/projects/${id}/claude-md`),
 

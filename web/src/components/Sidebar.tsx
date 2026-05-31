@@ -13,6 +13,8 @@ interface Props {
   collapsed: boolean
   onToggleCollapse: () => void
   onReorder: (ids: string[]) => void
+  onNewProject: () => void
+  newProjectBusy: boolean
 }
 
 function unreadFor(p: Project, map: Record<string, number>): number {
@@ -23,6 +25,7 @@ function unreadFor(p: Project, map: Record<string, number>): number {
 export function Sidebar({
   projects, selectedId, onSelect, onLogout, onDeleteFree, loading,
   unreadBySession, collapsed, onToggleCollapse, onReorder,
+  onNewProject, newProjectBusy,
 }: Props) {
   const [search, setSearch] = useState('')
   const [dragId, setDragId] = useState<string | null>(null)
@@ -39,6 +42,14 @@ export function Sidebar({
           title="Развернуть сайдбар"
         >
           ☰
+        </button>
+        <button
+          className="new-project-btn-collapsed"
+          onClick={onNewProject}
+          disabled={newProjectBusy}
+          title="Новый проект"
+        >
+          {newProjectBusy ? '…' : '+'}
         </button>
         <div className="projects-list-collapsed">
           {projects.map(p => {
@@ -121,6 +132,15 @@ export function Sidebar({
           onChange={e => setSearch(e.target.value)}
         />
       </div>
+
+      <button
+        className="new-project-btn"
+        onClick={onNewProject}
+        disabled={newProjectBusy}
+        title="Создать новый проект — агент сам расспросит и оформит"
+      >
+        {newProjectBusy ? '⏳ создаю…' : '＋ Новый проект'}
+      </button>
 
       <div className="projects-list">
         {loading ? (

@@ -325,6 +325,50 @@ body {
   color: var(--text3);
 }
 
+.new-project-btn {
+  margin: 10px 12px 6px;
+  padding: 8px 12px;
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px dashed var(--border2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  text-align: center;
+}
+.new-project-btn:hover:not(:disabled) {
+  background: var(--bg4);
+  border-color: var(--accent);
+  color: var(--accent-h);
+}
+.new-project-btn:disabled { opacity: 0.55; cursor: wait; }
+
+.new-project-btn-collapsed {
+  width: 36px;
+  height: 36px;
+  margin: 4px auto 6px;
+  background: var(--bg3);
+  color: var(--text2);
+  border: 1px dashed var(--border2);
+  border-radius: 8px;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.new-project-btn-collapsed:hover:not(:disabled) {
+  background: var(--bg4);
+  border-color: var(--accent);
+  color: var(--accent-h);
+}
+.new-project-btn-collapsed:disabled { opacity: 0.55; cursor: wait; }
+
 .projects-list {
   flex: 1;
   overflow-y: auto;

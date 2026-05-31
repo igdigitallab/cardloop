@@ -362,6 +362,24 @@ export default function App() {
     document.addEventListener('mouseup', onUp)
   }, [])
 
+  // Создать новый проект (untitled-<ts>) и сразу открыть его + запустится онбординг-карточка
+  const [newProjectBusy, setNewProjectBusy] = useState(false)
+  const handleNewProject = useCallback(async () => {
+    if (newProjectBusy) return
+    setNewProjectBusy(true)
+    try {
+      const res = await api.newProject()
+      await loadProjects()
+      setOpenIds(prev => prev.includes(res.id) ? prev : [...prev, res.id])
+      setActiveId(res.id)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      alert(`Не удалось создать проект: ${msg}`)
+    } finally {
+      setNewProjectBusy(false)
+    }
+  }, [loadProjects, newProjectBusy])
+
   // Создать новый свободный чат (cwd=$HOME) и сразу открыть его как вкладку
   const handleNewFree = useCallback(async () => {
     try {
@@ -477,6 +495,8 @@ export default function App() {
         collapsed={sidebarCollapsed}
         onToggleCollapse={toggleSidebar}
         onReorder={handleSidebarReorder}
+        onNewProject={handleNewProject}
+        newProjectBusy={newProjectBusy}
       />
 
       <div className="main-area">

@@ -700,7 +700,18 @@ _CARD_RE = re.compile(r"^\s*[-*]\s*\[(.)\]\s*(.*)$")
 # Строки вида "- текст" без checkbox — агент часто пишет именно так.
 # Внутри секции-колонки распознаём как Backlog-карточку (статус по умолчанию).
 _PLAIN_CARD_RE = re.compile(r"^\s*[-*]\s+(?!\[)(.+)$")
-_MARKER_RE = re.compile(r"\s*<!--\s*ops:([0-9a-fA-F]+)\s*-->\s*$")
+# Один маркер: <!--ops:ID--> — ID может быть любым словом (включая нехексовые алиасы).
+_MARKER_RE = re.compile(r"\s*<!--\s*ops:([\w-]+)\s*-->")
+
+
+def _extract_id_and_text(rest: str) -> tuple[str, str]:
+    """Извлечь ID и очистить текст от ВСЕХ маркеров ops. Первый маркер = canonical ID."""
+    matches = list(_MARKER_RE.finditer(rest))
+    if not matches:
+        return _new_card_id(), rest.strip()
+    cid = matches[0].group(1)
+    clean = _MARKER_RE.sub("", rest).strip()
+    return cid, clean
 
 
 def _tasks_path(cwd: str) -> Path:
@@ -756,24 +767,14 @@ def _parse_tasks(text: str):
             continue
         m = _CARD_RE.match(line)
         if m and cur is not None:
-            rest = m.group(2)
-            mk = _MARKER_RE.search(rest)
-            if mk:
-                cid, cardtext = mk.group(1), rest[: mk.start()].rstrip()
-            else:
-                cid, cardtext = _new_card_id(), rest.rstrip()
+            cid, cardtext = _extract_id_and_text(m.group(2))
             if cardtext:
                 cols[cur].append({"id": cid, "text": cardtext})
         elif cur is not None:
             # Нет checkbox-совпадения — пробуем plain '- текст' (агентский стиль)
             pm = _PLAIN_CARD_RE.match(line)
             if pm:
-                rest = pm.group(1)
-                mk = _MARKER_RE.search(rest)
-                if mk:
-                    cid, cardtext = mk.group(1), rest[: mk.start()].rstrip()
-                else:
-                    cid, cardtext = _new_card_id(), rest.rstrip()
+                cid, cardtext = _extract_id_and_text(pm.group(1))
                 if cardtext:
                     # Plain-карточки всегда в текущую колонку (агент сам выбрал секцию)
                     cols[cur].append({"id": cid, "text": cardtext})
@@ -1041,6 +1042,98 @@ async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_ke
         })
         # замок снимается ГАРАНТИРОВАННО, даже если запись сайдкара/перенос упали
         ctx["running"].pop(session_key, None)
+
+
+_NEW_PROJECT_PROMPT = """🚀 Это новый проект, инициализируется с нуля. Cwd — текущая папка.
+
+Сейчас ничего не делай — СПРОСИ Игоря текстом одним сообщением (в конце ответа):
+
+1. Что за проект, цель?
+2. Есть ли уже наработки/код/файлы где-то ещё? (другие папки $HOME, чаты, архивы — точные пути если знает)
+3. Какие первые 3-5 задач?
+4. Как лучше назвать проект (короткий слаг)?
+
+Дальше — по моим ответам:
+- Если указал существующие папки → просканируй (ls/Read), краткая сводка.
+- Когда определимся с именем — попроси меня переименовать папку untitled-… вручную (сам не сможешь — kокпит держит её как cwd) ИЛИ просто работай в текущей.
+- Затем создай: CLAUDE.md (описание + правила канбана Backlog/In Progress/Review/Failed + как формулировать задачи), TASKS.md (реальные карточки в Backlog), README.md, .gitignore (типовой по стэку), `git init` без коммита.
+
+Веди диалог по шагам, не вали скриптом. Не задавай 10 вопросов разом — 3-5 точечных за раз."""
+
+
+def _init_card_text() -> str:
+    return "🚀 Инициализировать проект (онбординг: расспрос → CLAUDE.md, TASKS.md, README, .gitignore)"
+
+
+async def api_new_project(req: web.Request):
+    """POST /api/projects/new — создать пустой проект, прописать в topics.json,
+    спавнить онбординг-карточку, вернуть {id, name, session_key}."""
+    ctx = req.app["ctx"]
+    ts = int(time.time())
+    projects_root = Path.home() / "projects"
+    projects_root.mkdir(parents=True, exist_ok=True)
+    cwd = projects_root / f"untitled-{ts}"
+    if cwd.exists():
+        return web.json_response({"error": "коллизия имени, повтори"}, status=409)
+    cwd.mkdir()
+
+    # Стаб-файлы — агент перепишет их в ходе онбординга
+    (cwd / "CLAUDE.md").write_text(
+        "# Новый проект — инициализируется\n\n"
+        "_Заглушка. Идёт онбординг-сессия в карточке «🚀 Инициализировать проект»._\n"
+        "_После онбординга агент перепишет этот файл осмысленным содержанием._\n",
+        encoding="utf-8",
+    )
+    (cwd / ".gitignore").write_text(
+        "# дефолтный .gitignore — агент уточнит по стэку\n"
+        "venv/\n.venv/\n__pycache__/\n*.pyc\nnode_modules/\ndist/\n.env\n.env.*\n!.env.example\n",
+        encoding="utf-8",
+    )
+
+    # TASKS.md с одной карточкой сразу в In Progress
+    card_id = _new_card_id()
+    name = f"Без названия {time.strftime('%H:%M')}"
+    cols = {k: [] for k, _, _ in BOARD_COLUMNS}
+    cols["in_progress"].append({"id": card_id, "text": _init_card_text()})
+    _save_board(str(cwd), name, f"# Tasks — {name}", cols)
+
+    # Запись в topics.json — session_key синтезируем из GROUP_CHAT_ID (TG-операции тихо
+    # упадут при недоступном thread — wrapped в try/except в _run_card; web всё видит через ctx).
+    group_chat_id = ctx.get("GROUP_CHAT_ID", 0)
+    session_key = f"{group_chat_id}:{ts}"
+    if session_key in ctx["topics"]:
+        return web.json_response({"error": "коллизия session_key, повтори"}, status=409)
+    ctx["topics"][session_key] = {
+        "project": name,
+        "cwd": str(cwd),
+        "model": ctx.get("DEFAULT_MODEL", "sonnet"),
+    }
+    ctx["save_topics"]()
+
+    # Резервируем замок СИНХРОННО до первого await (против гонки повторного клика)
+    if ctx["running"].get(session_key) is not None:
+        return web.json_response({"error": "session_key уже занят"}, status=409)
+    ctx["running"][session_key] = True
+
+    # Собираем project-dict как его видит F1-инфраструктура и спавним онбординг
+    project = {
+        "id": cwd.name,
+        "name": name,
+        "cwd": str(cwd),
+        "model": ctx.get("DEFAULT_MODEL", "sonnet"),
+        "tg_thread": session_key,
+        "is_free": False,
+    }
+    card = {"id": card_id, "text": _NEW_PROJECT_PROMPT}
+    asyncio.create_task(_run_card(ctx, req.app, project, card, session_key))
+
+    return web.json_response({
+        "ok": True,
+        "id": project["id"],
+        "name": name,
+        "session_key": session_key,
+        "cwd": str(cwd),
+    })
 
 
 async def api_move_task(req: web.Request):
@@ -2641,6 +2734,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/logout", api_logout)
         app.router.add_get("/api/me", api_me)
         app.router.add_get("/api/projects", api_projects)
+        # «+ Новый проект» — создаёт untitled-<ts>/, добавляет в topics.json, спавнит онбординг
+        app.router.add_post("/api/projects/new", api_new_project)
         app.router.add_get("/api/projects/{id}/claude-md", api_project_claude_md)
         app.router.add_post("/api/projects/{id}/claude-md", api_project_claude_md_write)
         app.router.add_get("/api/projects/{id}/readme", api_project_readme)

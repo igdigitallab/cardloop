@@ -1141,6 +1141,8 @@ async def _on_start(app):
         "run_engine": run_engine, "MODELS": MODELS,
         # F1: ссылка на PTB-приложение для пинга в TG
         "ptb_app": app,
+        # «+ Новый проект» — нужен для синтеза session_key "<chat>:<thread>" в topics.json
+        "GROUP_CHAT_ID": GROUP_CHAT_ID,
     })
 
 

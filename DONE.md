@@ -2,6 +2,11 @@
 
 Архив завершённых карточек (append-only). **Сессии его НЕ читают** — гигиена контекста.
 
+## 2026-05-30 (Послесессионная уборка)
+- [x] LogsTab: Readme/Specs убраны, Активность переименована в Логи; тянет log_cmd из topics.json; empty state + кнопка «добавить задачу в бэклог» <!--ops:701bd1-->
+- [x] Board wipe protection: _PLAIN_CARD_RE + _count_potential_cards safety guard + asyncio.Lock per-cwd; восстановлены 39 задач networking-os <!--ops:d00913-->
+- [x] Идея «Новый проект» — захвачена и переработана в карточку newproj (backlog) <!--ops:8d08bb-->
+
 ## 2026-05-30 (Split-view)
 - [x] split-view: кнопка ⊞ Split в free-чате открывает второй чат рядом; перетаскиваемый разделитель; ширина в localStorage; ✕ Закрыть на правой панели; splitPairs персистируются между сессиями <!--ops:faea4a-->
 
