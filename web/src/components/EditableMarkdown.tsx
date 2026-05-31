@@ -59,8 +59,8 @@ export function EditableMarkdown({ projectId, load, save, spinnerLabel, emptyLab
       const d = await save(projectId, draft)
       setData(d)
       setEditing(false)
-    } catch (e: any) {
-      setError(String(e?.message || e))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setSaving(false)
     }

@@ -153,12 +153,13 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       const b = await p
       setBoard(b)
       schedulePoll(b)
-    } catch (e: any) {
+    } catch (e) {
       // F1: 409 = проект занят
-      if (e.status === 409) {
+      const status = (e as { status?: number })?.status
+      if (status === 409) {
         setError('⏳ Проект занят (TG или другая карточка) — попробуй позже')
       } else {
-        setError(String(e.message || e))
+        setError(e instanceof Error ? e.message : String(e))
       }
     } finally {
       setBusy(false)
@@ -220,8 +221,8 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         const found = col.cards.find(c => c.id === card.id)
         if (found) { setDescModal({ card: found }); break }
       }
-    } catch (e: any) {
-      setError(String(e.message || e))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }
@@ -245,8 +246,8 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     try {
       const r = await api.cardRun(projectId, cardId)
       setRunResult(r)
-    } catch (e: any) {
-      setRunResult({ content: `⚠ Ошибка загрузки: ${e.message || e}`, exists: false })
+    } catch (e) {
+      setRunResult({ content: `⚠ Ошибка загрузки: ${e instanceof Error ? e.message : String(e)}`, exists: false })
     } finally {
       setRunResultLoading(false)
     }
