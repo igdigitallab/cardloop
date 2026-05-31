@@ -65,7 +65,7 @@ os.environ.pop("ANTHROPIC_API_KEY", None)
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID", "0"))
 ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip()}
-DEFAULT_CWD = os.environ.get("DEFAULT_CWD", "/home/igor")
+DEFAULT_CWD = os.environ.get("DEFAULT_CWD", str(Path.home()))
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "opus")
 
 # Glasses HTTP transport (claude-glasses plugin on Even G2)
@@ -110,39 +110,45 @@ GLASSES_NUDGE = (
 TOPICS_F = DATA / "topics.json"      # СЛОЙ 1: привязка thread -> проект (вечная)
 SESSIONS_F = DATA / "sessions.json"  # СЛОЙ 2: thread -> session_id (чистит /reset)
 
-# реестр проектов: алиас(норм.) -> cwd. Покрывает имена топиков и basename папок.
-_REG_RAW = {
-    "rightforms": "/home/igor/rightforms-app",
-    "rightformsapp": "/home/igor/rightforms-app",
-    "networkingos": "/home/igor/networking-os",
-    "mailservice": "/home/igor/mail-service",
-    "linevpnbot": "/home/igor/line_vpn_bot",
-    "khronika": "/home/igor/khronika-portal",
-    "khronikaportal": "/home/igor/khronika-portal",
-    "linevpnportal": "/home/igor/linevpn-portal",
-    "eveng2": "/home/igor/even-g2",
-    "igdigitallab": "/home/igor/ig-digital-lab",
-    "contenteditor": "/home/igor/content-editor",
-    "teleprompter": "/home/igor/teleprompter",
-    "proxmonbot": "/home/igor/proxmon-bot",
-    "smsgate": "/home/igor/sms-gate",
-    "claudeops": "/home/igor/claude-ops-bot",
-    "claudeopsbot": "/home/igor/claude-ops-bot",
-    "homeassistant": "/home/igor/home-assistant",
-    "hass": "/home/igor/home-assistant",
-    "ha": "/home/igor/home-assistant",
-    "sandbox": "/home/igor/sandbox",
-    "general": DEFAULT_CWD,
-}
-
-
 def _norm(s: str) -> str:
     return "".join(c for c in s.lower() if c.isalnum())
 
 
+def _home_sub(*parts: str) -> str:
+    """Возвращает строковый путь относительно $HOME (динамически, без хардкода /home/igor)."""
+    return str(Path.home().joinpath(*parts))
+
+
+# реестр проектов: алиас(норм.) -> cwd. Покрывает имена топиков и basename папок.
+# Пути строятся через Path.home() — без хардкода /home/igor.
+_REG_RAW = {
+    "rightforms": _home_sub("rightforms-app"),
+    "rightformsapp": _home_sub("rightforms-app"),
+    "networkingos": _home_sub("networking-os"),
+    "mailservice": _home_sub("mail-service"),
+    "linevpnbot": _home_sub("line_vpn_bot"),
+    "khronika": _home_sub("khronika-portal"),
+    "khronikaportal": _home_sub("khronika-portal"),
+    "linevpnportal": _home_sub("linevpn-portal"),
+    "eveng2": _home_sub("even-g2"),
+    "igdigitallab": _home_sub("ig-digital-lab"),
+    "contenteditor": _home_sub("content-editor"),
+    "teleprompter": _home_sub("teleprompter"),
+    "proxmonbot": _home_sub("proxmon-bot"),
+    "smsgate": _home_sub("sms-gate"),
+    "claudeops": _home_sub("claude-ops-bot"),
+    "claudeopsbot": _home_sub("claude-ops-bot"),
+    "homeassistant": _home_sub("home-assistant"),
+    "hass": _home_sub("home-assistant"),
+    "ha": _home_sub("home-assistant"),
+    "sandbox": _home_sub("sandbox"),
+    "general": DEFAULT_CWD,
+}
+
+
 def build_registry() -> dict:
     reg = dict(_REG_RAW)
-    base = Path("/home/igor")
+    base = Path.home()  # динамически, без хардкода /home/igor
     for d in sorted(base.iterdir()):
         if d.is_dir() and ((d / ".git").exists() or (d / "CLAUDE.md").exists()):
             reg.setdefault(_norm(d.name), str(d))
@@ -1059,7 +1065,7 @@ async def _on_start(app):
         "resolve_project": resolve_project, "REGISTRY": REGISTRY,
         "run_for_glasses": run_for_glasses, "save_sessions": save_sessions, "save_topics": save_topics,
         "DATA": DATA, "DEFAULT_CWD": DEFAULT_CWD, "DEFAULT_MODEL": DEFAULT_MODEL,
-        "VAULT_PROJECTS": Path("/home/igor/vault/01-Projects"), "HERE": HERE,
+        "VAULT_PROJECTS": Path.home() / "vault" / "01-Projects", "HERE": HERE,
         # F1: движок и модели для авто-запуска карточек канбана
         "run_engine": run_engine, "MODELS": MODELS,
         # F1: ссылка на PTB-приложение для пинга в TG

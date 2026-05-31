@@ -415,7 +415,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
         out.append({
             "id": fid,
             "name": b.get("label", fid),
-            "cwd": b.get("cwd", "/home/igor"),
+            "cwd": b.get("cwd", str(Path.home())),
             "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
             "tg_thread": fid,  # session_key для free = его id (строка с префиксом free-)
             "is_free": True,
@@ -1906,7 +1906,7 @@ async def api_activity_stream_all(req: web.Request) -> web.StreamResponse:
 
 import uuid as _uuid
 
-_FREE_DEFAULT_CWD = "/home/igor"
+_FREE_DEFAULT_CWD = str(Path.home())
 
 
 async def api_free_create(req: web.Request):
@@ -3528,7 +3528,7 @@ _UPGRADE_PROMPT_TPL = """🔧 Подтянуть проект «{name}» до с
 
 ВАЖНО: НЕ переписывай существующее содержимое CLAUDE.md/TASKS.md/README.md/.gitignore — только ДОПОЛНЯЙ недостающее. Если файла нет — создай из шаблона.
 
-Эталоны лежат в `/home/igor/claude-ops-bot/templates/`:
+Эталоны лежат в `{tpl_dir}`:
 - `CLAUDE.md.tpl` — образец структуры, **обязательно** содержит секцию «Правила работы в кокпите» — её скопируй в CLAUDE.md проекта (если ещё нет), переменные `{{{{name}}}}` замени на актуальное имя.
 - `TASKS.md.tpl` — преамбула формата карточек. Если в текущем TASKS.md нет преамбулы с фразой «Формат карточки» — добавь её ПЕРЕД первой `##` колонкой.
 - `README.md.tpl` — если README отсутствует, создай минимальный.
@@ -3536,7 +3536,7 @@ _UPGRADE_PROMPT_TPL = """🔧 Подтянуть проект «{name}» до с
 
 Шаги:
 1. Прочитай `CLAUDE.md`, `TASKS.md`, `README.md`, `.gitignore` (если есть) в текущем cwd.
-2. Прочитай шаблоны в `/home/igor/claude-ops-bot/templates/*.tpl`.
+2. Прочитай шаблоны в `{tpl_dir}/*.tpl`.
 3. Для каждого недостающего блока — добавь его, сохранив весь существующий контент.
 4. НЕ ТРОГАЙ карточки в TASKS.md — только преамбулу выше первой `##`.
 5. В конце — короткое резюме в чате: «Добавил/обновил: A, B, C; не трогал: X, Y».
@@ -3560,7 +3560,9 @@ async def api_project_upgrade(req: web.Request):
         return web.json_response({"error": "проект занят"}, status=409)
 
     card = {"id": _new_card_id(), "text": f"🔧 Подтянуть «{name}» до стандарта"}
-    prompt = _UPGRADE_PROMPT_TPL.format(name=name)
+    here: Path = ctx.get("HERE") or Path(__file__).resolve().parent
+    tpl_dir = str(here / "templates")
+    prompt = _UPGRADE_PROMPT_TPL.format(name=name, tpl_dir=tpl_dir)
 
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
