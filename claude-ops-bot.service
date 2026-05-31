@@ -10,6 +10,7 @@ Group=igor
 WorkingDirectory=/home/igor/claude-ops-bot
 Environment=HOME=/home/igor
 Environment=PATH=/home/igor/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/igor/claude-ops-bot/.env
 # ANTHROPIC_API_KEY НЕ задаём — работаем на OAuth подписки (~/.claude/.credentials.json)
 ExecStart=/home/igor/claude-ops-bot/venv/bin/python -u /home/igor/claude-ops-bot/bot.py
 Restart=on-failure
