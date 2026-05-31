@@ -701,6 +701,8 @@ _CARD_RE = re.compile(r"^\s*[-*]\s*\[(.)\]\s*(.*)$")
 # Внутри секции-колонки распознаём как Backlog-карточку (статус по умолчанию).
 _PLAIN_CARD_RE = re.compile(r"^\s*[-*]\s+(?!\[)(.+)$")
 _MARKER_RE = re.compile(r"\s*<!--\s*ops:([0-9a-fA-F]+)\s*-->\s*$")
+# Description строки: '  > текст' (2 пробела + '>') идущие сразу после карточки
+_DESC_LINE_RE = re.compile(r"^  > (.*)$")
 
 
 def _tasks_path(cwd: str) -> Path:
@@ -739,21 +741,36 @@ def _parse_tasks(text: str):
     """(preamble, cols) — preamble = всё до первого распознанного '## <Колонка>'.
     Карточки с checkbox '- [ ] text' — парсятся в соответствующую колонку.
     Карточки без checkbox '- text' — парсятся как Backlog (агент иногда пишет так).
+    Description строки '  > текст' сразу после карточки — собираются в card['description'].
     Строки, не являющиеся карточками, внутри секций отбрасываются при перезаписи."""
     cols = {key: [] for key, _, _ in BOARD_COLUMNS}
     preamble_lines: list[str] = []
     cur = None
     seen_header = False
+    last_card: dict | None = None  # последняя добавленная карточка — приёмник description
     for line in text.splitlines():
         h = line.strip()
         if h.startswith("##"):
             name = h.lstrip("#").strip().lower()
             cur = _LABEL_TO_COL.get(name)  # None для незнакомых секций
+            last_card = None  # новая секция сбрасывает receiver
             if cur is not None:
                 seen_header = True
             elif not seen_header:
                 preamble_lines.append(line)
             continue
+        # Description строка — '  > текст', сразу после карточки
+        if cur is not None and last_card is not None:
+            dm = _DESC_LINE_RE.match(line)
+            if dm:
+                desc_line = dm.group(1)
+                if last_card.get("description") is None:
+                    last_card["description"] = desc_line
+                else:
+                    last_card["description"] += "\n" + desc_line
+                continue
+            # Иная строка — конец description блока
+            last_card = None
         m = _CARD_RE.match(line)
         if m and cur is not None:
             rest = m.group(2)
@@ -763,7 +780,9 @@ def _parse_tasks(text: str):
             else:
                 cid, cardtext = _new_card_id(), rest.rstrip()
             if cardtext:
-                cols[cur].append({"id": cid, "text": cardtext})
+                card: dict = {"id": cid, "text": cardtext}
+                cols[cur].append(card)
+                last_card = card
         elif cur is not None:
             # Нет checkbox-совпадения — пробуем plain '- текст' (агентский стиль)
             pm = _PLAIN_CARD_RE.match(line)
@@ -776,7 +795,9 @@ def _parse_tasks(text: str):
                     cid, cardtext = _new_card_id(), rest.rstrip()
                 if cardtext:
                     # Plain-карточки всегда в текущую колонку (агент сам выбрал секцию)
-                    cols[cur].append({"id": cid, "text": cardtext})
+                    card = {"id": cid, "text": cardtext}
+                    cols[cur].append(card)
+                    last_card = card
         elif not seen_header:
             preamble_lines.append(line)
     return "\n".join(preamble_lines).rstrip(), cols
@@ -790,6 +811,10 @@ def _serialize_tasks(preamble: str, cols: dict, project_name: str) -> str:
         out.append(f"## {label}")
         for card in cols[key]:
             out.append(f"- [{status}] {card['text']} <!--ops:{card['id']}-->")
+            desc = card.get("description")
+            if desc:
+                for desc_line in desc.splitlines():
+                    out.append(f"  > {desc_line}")
         out.append("")
     return "\n".join(out).rstrip() + "\n"
 
@@ -865,12 +890,18 @@ async def api_create_task(req: web.Request):
     if not text:
         return web.json_response({"error": "empty text"}, status=400)
     column = body.get("column", "backlog")
+    description = body.get("description") or None
+    if description is not None:
+        description = str(description).strip() or None
     cwd, name = project["cwd"], project["name"]
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
         if column not in cols:
             column = "backlog"
-        cols[column].insert(0, {"id": _new_card_id(), "text": text})
+        new_card: dict = {"id": _new_card_id(), "text": text}
+        if description:
+            new_card["description"] = description
+        cols[column].insert(0, new_card)
         _save_board(cwd, name, preamble, cols)
     return web.json_response(_board_payload(cwd))
 
@@ -912,6 +943,10 @@ async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_ke
     name = project["name"]
     model = project.get("model", ctx.get("DEFAULT_MODEL", "sonnet"))
     prompt = card["text"]
+    # Если есть description — добавляем его к промпту для агента
+    card_desc = card.get("description")
+    if card_desc:
+        prompt = f"{prompt}\n\n{card_desc}"
     card_id = card["id"]
     DATA: Path = ctx["DATA"]
 
@@ -1149,6 +1184,11 @@ async def api_update_task(req: web.Request):
     text = (body.get("text") or "").strip()
     if not text:
         return web.json_response({"error": "empty text"}, status=400)
+    # description: если передан ключ — обновляем (None = удалить, строка = установить)
+    update_description = "description" in body
+    description = body.get("description")
+    if description is not None:
+        description = str(description).strip() or None
     cwd, name = project["cwd"], project["name"]
     card_id = req.match_info["card"]
     async with _get_board_lock(cwd):
@@ -1158,6 +1198,11 @@ async def api_update_task(req: web.Request):
             for card in col_cards:
                 if card["id"] == card_id:
                     card["text"] = text
+                    if update_description:
+                        if description:
+                            card["description"] = description
+                        else:
+                            card.pop("description", None)
                     found = True
                     break
             if found:

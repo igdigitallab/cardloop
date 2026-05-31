@@ -39,6 +39,7 @@ export interface SpecContent {
 export interface TaskCard {
   id: string
   text: string
+  description?: string | null
 }
 
 export interface BoardColumn {

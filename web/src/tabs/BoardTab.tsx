@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
-import { Board, BoardColumn, RunResult } from '../types'
+import { Board, BoardColumn, RunResult, TaskCard } from '../types'
 import { Spinner } from '../components/Spinner'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 
@@ -43,6 +43,10 @@ export function BoardTab({ projectId }: Props) {
   const [archive, setArchive] = useState<string | null>(null)
   // Инлайн-редактирование карточки: двойной клик → textarea
   const [editingCard, setEditingCard] = useState<{ id: string; text: string } | null>(null)
+
+  // Description модалка: просмотр + редактирование описания карточки
+  const [descModal, setDescModal] = useState<{ card: TaskCard } | null>(null)
+  const [editingDesc, setEditingDesc] = useState<string | null>(null)  // null = read mode, string = edit mode
 
   // Drag-and-drop
   const [dragCardId, setDragCardId] = useState<string | null>(null)
@@ -154,10 +158,21 @@ export function BoardTab({ projectId }: Props) {
   }
 
   function addCard() {
-    const t = newText.trim()
-    if (!t) return
+    const raw = newText.trim()
+    if (!raw) return
     setNewText('')
-    run(api.createTask(projectId, t, 'backlog'))
+    // Авто-сплит: первая строка / первые 120 символов = title, остальное = description
+    let title = raw
+    let description: string | null = null
+    const nlIdx = raw.indexOf('\n')
+    if (nlIdx !== -1) {
+      title = raw.slice(0, nlIdx).trim()
+      description = raw.slice(nlIdx + 1).trim() || null
+    } else if (raw.length > 120) {
+      title = raw.slice(0, 120).trimEnd()
+      description = raw.slice(120).trim() || null
+    }
+    run(api.createTask(projectId, title, 'backlog', description))
   }
 
   function move(card: string, to: string) { run(api.moveTask(projectId, card, to)) }
@@ -170,6 +185,38 @@ export function BoardTab({ projectId }: Props) {
     const trimmed = text.trim()
     if (!trimmed) return
     run(api.updateTask(projectId, id, trimmed))
+  }
+
+  function openDescModal(card: TaskCard) {
+    setDescModal({ card })
+    setEditingDesc(null)
+  }
+
+  function closeDescModal() {
+    setDescModal(null)
+    setEditingDesc(null)
+  }
+
+  async function saveDescEdit() {
+    if (!descModal || editingDesc === null) return
+    const { card } = descModal
+    const newDesc = editingDesc.trim() || null
+    setEditingDesc(null)
+    setBusy(true); setError('')
+    try {
+      const fresh = await api.updateTask(projectId, card.id, card.text, newDesc)
+      setBoard(fresh)
+      schedulePoll(fresh)
+      // синхронизируем модалку с обновлёнными данными
+      for (const col of fresh.columns) {
+        const found = col.cards.find(c => c.id === card.id)
+        if (found) { setDescModal({ card: found }); break }
+      }
+    } catch (e: any) {
+      setError(String(e.message || e))
+    } finally {
+      setBusy(false)
+    }
   }
 
   function toggleArchive() {
@@ -317,7 +364,14 @@ export function BoardTab({ projectId }: Props) {
                         title={isInProgress ? '' : 'Двойной клик — редактировать'}
                       >
                         {isInProgress && <span className="card-running-icon" title="Выполняется агентом">⚙ </span>}
-                        {card.text}
+                        <span className="board-card-title">{card.text}</span>
+                        {card.description && (
+                          <button
+                            className="board-card-desc-btn"
+                            title="Показать описание"
+                            onClick={e => { e.stopPropagation(); openDescModal(card) }}
+                          >📝</button>
+                        )}
                       </div>
                     )}
                     <div className="board-card-actions">
@@ -381,6 +435,61 @@ export function BoardTab({ projectId }: Props) {
               {!runResultLoading && runResult?.exists && (
                 <div className="markdown-wrap">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{runResult.content}</ReactMarkdown>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Description модалка */}
+      {descModal && (
+        <div className="run-modal-overlay" onClick={closeDescModal}>
+          <div className="run-modal" onClick={e => e.stopPropagation()}>
+            <div className="run-modal-head">
+              <span style={{ fontWeight: 600, maxWidth: '80%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {descModal.card.text}
+              </span>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {editingDesc === null ? (
+                  <button
+                    className="run-modal-close"
+                    title="Редактировать описание"
+                    style={{ fontSize: 14 }}
+                    onClick={() => setEditingDesc(descModal.card.description ?? '')}
+                  >✎</button>
+                ) : (
+                  <button
+                    className="btn-primary"
+                    style={{ padding: '2px 10px', fontSize: 13 }}
+                    disabled={busy}
+                    onClick={saveDescEdit}
+                  >Сохранить</button>
+                )}
+                <button className="run-modal-close" onClick={closeDescModal}>✕</button>
+              </div>
+            </div>
+            <div className="run-modal-body">
+              {editingDesc !== null ? (
+                <textarea
+                  className="board-desc-edit-input"
+                  value={editingDesc}
+                  autoFocus
+                  rows={8}
+                  onChange={e => setEditingDesc(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Escape') setEditingDesc(null)
+                  }}
+                  placeholder="Описание задачи (markdown)…"
+                  style={{ width: '100%', resize: 'vertical', fontFamily: 'monospace', fontSize: 13 }}
+                />
+              ) : descModal.card.description ? (
+                <div className="markdown-wrap">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{descModal.card.description}</ReactMarkdown>
+                </div>
+              ) : (
+                <div style={{ color: 'var(--text-dim, #888)', fontStyle: 'italic' }}>
+                  Описание не задано. Нажмите ✎ чтобы добавить.
                 </div>
               )}
             </div>
