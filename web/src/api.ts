@@ -140,6 +140,10 @@ export const api = {
       method: 'POST',
     }),
 
+  // Проверить есть ли активный прогон (для восстановления UI после refresh)
+  projectRunning: (id: string) =>
+    apiFetch<{ running: boolean }>(`/api/projects/${id}/running`),
+
   // Feature A: session context (read/edited/commands)
   sessionContext: (id: string, sessionId?: string) =>
     apiFetch<import('./types').SessionContext>(
@@ -223,6 +227,13 @@ export const api = {
 
   deletePrompt: (id: string) =>
     apiFetch<{ ok: boolean }>(`/api/prompts/${id}`, { method: 'DELETE' }),
+
+  updatePrompt: (id: string, body: { title?: string; text?: string; category?: string }) =>
+    apiFetch<{ prompt: import('./types').Prompt }>(`/api/prompts/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
 
   // Git: commit (если dirty) + push одной кнопкой
   gitSync: (id: string, message?: string) =>

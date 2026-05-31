@@ -617,9 +617,23 @@ export function ChatTab({ project, onProjectsReload }: Props) {
     busActiveRef.current = false
     setContextTokens(null)
     setAttachments([])
-    api.sessionHistory(projectId)
-      .then(res => { if (!cancelled) { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens || null) } })
-      .catch(() => { if (!cancelled) setMessages([]) })
+
+    // Параллельно: история сессии + проверка активного прогона
+    // Если агент работал до рефреша — восстанавливаем busActiveRef и run-статус,
+    // чтобы последующие SSE-события text/tool не фильтровались
+    Promise.all([
+      api.sessionHistory(projectId),
+      api.projectRunning(projectId).catch(() => ({ running: false })),
+    ]).then(([histRes, runRes]) => {
+      if (cancelled) return
+      setMessages(histToMessages(histRes.messages))
+      setContextTokens(histRes.context_tokens || null)
+      if (runRes.running) {
+        busActiveRef.current = true
+        setRun({ startedAt: Date.now(), lastEventAt: Date.now(), currentTool: null, source: 'card' })
+      }
+    }).catch(() => { if (!cancelled) setMessages([]) })
+
     return () => { cancelled = true }
   }, [projectId])
 

@@ -2231,15 +2231,19 @@ body {
 .prompt-card-title { font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 2px; }
 .prompt-card-preview { font-size: 11px; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.prompt-delete-btn {
+.prompt-edit-btn, .prompt-delete-btn {
   flex: 0 0 auto; background: none; border: none;
-  color: var(--text3); font-size: 10px; cursor: pointer;
+  color: var(--text3); font-size: 11px; cursor: pointer;
   padding: 2px 5px; border-radius: 3px; opacity: 0;
   transition: opacity var(--transition), color var(--transition), background var(--transition);
   margin-top: 1px;
 }
+.prompt-card:hover .prompt-edit-btn,
 .prompt-card:hover .prompt-delete-btn { opacity: 1; }
+.prompt-card.editing .prompt-edit-btn { opacity: 1; color: var(--accent); }
+.prompt-edit-btn:hover { color: var(--accent-h); background: var(--bg3); }
 .prompt-delete-btn:hover { color: var(--red); background: var(--bg3); }
+.prompt-form-label { font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: .04em; }
 
 .prompt-add-btn {
   flex-shrink: 0;

@@ -292,6 +292,23 @@ async def api_prompt_delete(req: web.Request):
     _save_prompts(ctx, prompts)
     return web.json_response({"ok": True})
 
+async def api_prompt_update(req: web.Request):
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    data = await req.json()
+    prompts = _load_prompts(ctx)
+    for p in prompts:
+        if p.get("id") == pid:
+            if "title" in data: p["title"] = (data["title"] or "").strip()
+            if "text" in data: p["text"] = (data["text"] or "").strip()
+            if "category" in data:
+                cat = (data.get("category") or "").strip() or None
+                if cat: p["category"] = cat
+                else: p.pop("category", None)
+            _save_prompts(ctx, prompts)
+            return web.json_response({"prompt": p})
+    return web.json_response({"error": "not found"}, status=404)
+
 
 def _load_free_chats(ctx: dict) -> dict:
     """{free_id → {label, cwd, model, created_at}}. Файл может отсутствовать — вернёт {}."""
@@ -2321,6 +2338,16 @@ async def api_project_chat_stop(req: web.Request):
     return web.json_response({"ok": True, "stopped": False})
 
 
+async def api_project_running(req: web.Request):
+    """GET /api/projects/{id}/running — есть ли активный прогон агента в этом проекте."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = project["tg_thread"]
+    return web.json_response({"running": ctx["running"].get(session_key) is not None})
+
+
 # ─────────────────────────── Контекст сессии (session-context) ─────────────
 
 _CTX_TOOL_READ  = {"Read", "Glob", "Grep"}
@@ -2533,6 +2560,7 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
         # C1-stop: прерывание текущего прогона агента
         app.router.add_post("/api/projects/{id}/chat/stop", api_project_chat_stop)
+        app.router.add_get("/api/projects/{id}/running", api_project_running)
         # Activity-stream: живой поток событий шины (карточки, внешние прогоны)
         app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)
         # Глобальный поток всех событий (для unread-индикаторов в сайдбаре)
@@ -2550,6 +2578,7 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/prompts", api_prompts_list)
         app.router.add_post("/api/prompts", api_prompt_create)
         app.router.add_delete("/api/prompts/{id}", api_prompt_delete)
+        app.router.add_route("PATCH", "/api/prompts/{id}", api_prompt_update)
         # Свободные чаты (без привязки к проекту, cwd=$HOME)
         app.router.add_post("/api/free", api_free_create)
         app.router.add_post("/api/free/{id}/rename", api_free_rename)

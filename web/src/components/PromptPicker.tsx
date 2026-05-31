@@ -16,7 +16,6 @@ function groupPrompts(prompts: Prompt[]): [string, Prompt[]][] {
     if (!map.has(key)) map.set(key, [])
     map.get(key)!.push(p)
   }
-  // Без категории — в конец
   const result: [string, Prompt[]][] = []
   for (const [k, v] of map) {
     if (k !== NO_CATEGORY) result.push([k, v])
@@ -29,11 +28,15 @@ export function PromptPicker({ onSelect, onClose }: Props) {
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [loading, setLoading] = useState(true)
   const [openCategory, setOpenCategory] = useState<string | null>(null)
-  const [adding, setAdding] = useState(false)
-  const [newTitle, setNewTitle] = useState('')
-  const [newText, setNewText] = useState('')
-  const [newCategory, setNewCategory] = useState('')
+
+  // add / edit form
+  const [formMode, setFormMode] = useState<'idle' | 'add' | 'edit'>('idle')
+  const [editId, setEditId] = useState<string | null>(null)
+  const [formTitle, setFormTitle] = useState('')
+  const [formText, setFormText] = useState('')
+  const [formCategory, setFormCategory] = useState('')
   const [saving, setSaving] = useState(false)
+
   const ref = useRef<HTMLDivElement>(null)
   const titleRef = useRef<HTMLInputElement>(null)
 
@@ -42,7 +45,6 @@ export function PromptPicker({ onSelect, onClose }: Props) {
     api.prompts()
       .then(r => {
         setPrompts(r.prompts)
-        // Открываем первую группу по умолчанию
         const groups = groupPrompts(r.prompts)
         if (groups.length > 0) setOpenCategory(prev => prev ?? groups[0][0])
       })
@@ -53,8 +55,8 @@ export function PromptPicker({ onSelect, onClose }: Props) {
   useEffect(() => { load() }, [load])
 
   useEffect(() => {
-    if (adding) setTimeout(() => titleRef.current?.focus(), 0)
-  }, [adding])
+    if (formMode !== 'idle') setTimeout(() => titleRef.current?.focus(), 0)
+  }, [formMode])
 
   useEffect(() => {
     function handler(e: MouseEvent) {
@@ -64,33 +66,65 @@ export function PromptPicker({ onSelect, onClose }: Props) {
     return () => document.removeEventListener('mousedown', handler)
   }, [onClose])
 
+  function openAdd() {
+    setFormMode('add')
+    setEditId(null)
+    setFormTitle(''); setFormText(''); setFormCategory('')
+  }
+
+  function openEdit(p: Prompt, e: React.MouseEvent) {
+    e.stopPropagation()
+    setFormMode('edit')
+    setEditId(p.id)
+    setFormTitle(p.title)
+    setFormText(p.text)
+    setFormCategory(p.category || '')
+  }
+
+  function closeForm() {
+    setFormMode('idle')
+    setEditId(null)
+    setFormTitle(''); setFormText(''); setFormCategory('')
+  }
+
   async function handleDelete(id: string, e: React.MouseEvent) {
     e.stopPropagation()
     try {
       await api.deletePrompt(id)
       setPrompts(prev => prev.filter(p => p.id !== id))
+      if (editId === id) closeForm()
     } catch {}
   }
 
   async function handleSave() {
-    if (!newTitle.trim() || !newText.trim()) return
+    if (!formTitle.trim() || !formText.trim()) return
     setSaving(true)
     try {
-      const res = await api.createPrompt({
-        title: newTitle.trim(),
-        text: newText.trim(),
-        category: newCategory.trim() || undefined,
-      })
-      setPrompts(prev => [...prev, res.prompt])
-      const cat = res.prompt.category || NO_CATEGORY
-      setOpenCategory(cat)
-      setNewTitle(''); setNewText(''); setNewCategory(''); setAdding(false)
+      if (formMode === 'add') {
+        const res = await api.createPrompt({
+          title: formTitle.trim(),
+          text: formText.trim(),
+          category: formCategory.trim() || undefined,
+        })
+        setPrompts(prev => [...prev, res.prompt])
+        setOpenCategory(res.prompt.category || NO_CATEGORY)
+      } else if (formMode === 'edit' && editId) {
+        const res = await api.updatePrompt(editId, {
+          title: formTitle.trim(),
+          text: formText.trim(),
+          category: formCategory.trim() || '',
+        })
+        setPrompts(prev => prev.map(p => p.id === editId ? res.prompt : p))
+        setOpenCategory(res.prompt.category || NO_CATEGORY)
+      }
+      closeForm()
     } catch {}
     finally { setSaving(false) }
   }
 
   function handleKeyDownForm(e: React.KeyboardEvent) {
-    if (e.key === 'Escape') { setAdding(false); setNewTitle(''); setNewText(''); setNewCategory('') }
+    if (e.key === 'Escape') closeForm()
+    if (e.key === 's' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); handleSave() }
   }
 
   const groups = groupPrompts(prompts)
@@ -105,7 +139,7 @@ export function PromptPicker({ onSelect, onClose }: Props) {
 
       <div className="prompt-picker-list">
         {loading && <div className="prompt-picker-empty">Загрузка…</div>}
-        {!loading && prompts.length === 0 && !adding && (
+        {!loading && prompts.length === 0 && formMode === 'idle' && (
           <div className="prompt-picker-empty">Нет шаблонов. Добавьте первый!</div>
         )}
         {!loading && groups.map(([cat, items]) => (
@@ -123,9 +157,9 @@ export function PromptPicker({ onSelect, onClose }: Props) {
                 {items.map(p => (
                   <div
                     key={p.id}
-                    className="prompt-card"
-                    onClick={() => onSelect(p.text)}
-                    title={p.text}
+                    className={`prompt-card${editId === p.id ? ' editing' : ''}`}
+                    onClick={() => formMode === 'idle' && onSelect(p.text)}
+                    title={formMode === 'idle' ? p.text : undefined}
                   >
                     <div className="prompt-card-inner">
                       <div className="prompt-card-title">{p.title}</div>
@@ -134,9 +168,14 @@ export function PromptPicker({ onSelect, onClose }: Props) {
                       </div>
                     </div>
                     <button
+                      className="prompt-edit-btn"
+                      onClick={e => openEdit(p, e)}
+                      title="Редактировать"
+                    >✎</button>
+                    <button
                       className="prompt-delete-btn"
                       onClick={e => handleDelete(p.id, e)}
-                      title="Удалить шаблон"
+                      title="Удалить"
                     >✕</button>
                   </div>
                 ))}
@@ -146,21 +185,22 @@ export function PromptPicker({ onSelect, onClose }: Props) {
         ))}
       </div>
 
-      {adding ? (
+      {formMode !== 'idle' ? (
         <div className="prompt-add-form" onKeyDown={handleKeyDownForm}>
+          <div className="prompt-form-label">{formMode === 'add' ? 'Новый шаблон' : 'Редактировать'}</div>
           <input
             ref={titleRef}
             className="prompt-add-title"
             placeholder="Название шаблона"
-            value={newTitle}
-            onChange={e => setNewTitle(e.target.value)}
+            value={formTitle}
+            onChange={e => setFormTitle(e.target.value)}
           />
           <input
             className="prompt-add-title"
             placeholder="Категория (необязательно)"
             list="prompt-categories"
-            value={newCategory}
-            onChange={e => setNewCategory(e.target.value)}
+            value={formCategory}
+            onChange={e => setFormCategory(e.target.value)}
           />
           <datalist id="prompt-categories">
             {existingCategories.map(c => <option key={c} value={c} />)}
@@ -168,24 +208,21 @@ export function PromptPicker({ onSelect, onClose }: Props) {
           <textarea
             className="prompt-add-text"
             placeholder={"Текст промта…\nИспользуй [ПЕРЕМЕННАЯ] для мест заполнения"}
-            value={newText}
-            onChange={e => setNewText(e.target.value)}
+            value={formText}
+            onChange={e => setFormText(e.target.value)}
             rows={5}
           />
           <div className="prompt-add-actions">
             <button
               className="btn-primary"
               onClick={handleSave}
-              disabled={saving || !newTitle.trim() || !newText.trim()}
-            >Сохранить</button>
-            <button
-              className="btn-secondary"
-              onClick={() => { setAdding(false); setNewTitle(''); setNewText(''); setNewCategory('') }}
-            >Отмена</button>
+              disabled={saving || !formTitle.trim() || !formText.trim()}
+            >{saving ? '…' : 'Сохранить'}</button>
+            <button className="btn-secondary" onClick={closeForm} disabled={saving}>Отмена</button>
           </div>
         </div>
       ) : (
-        <button className="prompt-add-btn" onClick={() => setAdding(true)}>
+        <button className="prompt-add-btn" onClick={openAdd}>
           ＋ Новый шаблон
         </button>
       )}

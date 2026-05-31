@@ -110,6 +110,8 @@ export default function App() {
   // Текущий активный проект — для SSE-обработчика, без перепересоздания подписки на каждом select
   const activeIdRef = useRef<string | null>(null)
   const projectsRef = useRef<Project[]>([])
+  // После первой успешной загрузки не показываем "Загрузка..." при фоновых poll'ах
+  const projectsLoadedRef = useRef(false)
 
   const checkAuth = useCallback(async () => {
     try {
@@ -122,10 +124,17 @@ export default function App() {
   }, [])
 
   const loadProjects = useCallback(async () => {
-    setProjectsLoading(true)
+    // Loading-флаг только при первой загрузке — иначе сайдбар мигает "Загрузка..."
+    // при каждом фоновом poll'е (каждые 15с, на focus, на run_end)
+    if (!projectsLoadedRef.current) setProjectsLoading(true)
     try {
       const res = await api.projects()
-      setProjects(res.projects)
+      // Стабильное сравнение: не обновляем стейт если данные не изменились
+      // (предотвращает каскад эффектов openIds/sidebarOrder/activeId)
+      setProjects(prev =>
+        JSON.stringify(prev) === JSON.stringify(res.projects) ? prev : res.projects
+      )
+      projectsLoadedRef.current = true
     } catch {
       setProjects([])
     } finally {
