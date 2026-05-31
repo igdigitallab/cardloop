@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Project, TabId } from '../types'
+import { Project, ProjectStructureHealth, TabId } from '../types'
 import { api } from '../api'
 import { ProjectActivityProvider } from '../hooks/useProjectActivity'
 import { OverviewTab } from '../tabs/OverviewTab'
@@ -55,18 +55,69 @@ function readLSBool(key: string, fallback: boolean): boolean {
   }
 }
 
+const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$/
+
 interface Props {
   project: Project
   onProjectsReload: () => void
+  onRenameSuccess?: (oldId: string, newId: string) => void
   onSplitCreate?: () => void   // показать кнопку ⊞ (только для левого free-чата)
   onSplitClose?: () => void    // показать кнопку ✕ Закрыть (только для правого)
 }
 
 type GitSyncState = 'idle' | 'busy' | 'ok' | 'err'
 
-export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitClose }: Props) {
+export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
   const git = project.health.git
+
+  // ── Rename state ──────────────────────────────────────────────────────────
+  const [renaming, setRenaming] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
+  const [renameError, setRenameError] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
+  function startRename() {
+    setRenameValue(project.id)
+    setRenameError('')
+    setRenaming(true)
+  }
+
+  function cancelRename() {
+    setRenaming(false)
+    setRenameError('')
+  }
+
+  async function commitRename() {
+    const slug = renameValue.trim()
+    if (!SLUG_RE.test(slug)) {
+      setRenameError('Только строчные a-z, 0-9, дефис; 2-42 символа; не начинать/заканчивать на дефис')
+      return
+    }
+    if (slug === project.id) { cancelRename(); return }
+    try {
+      const res = await api.renameProject(project.id, slug)
+      setRenaming(false)
+      setRenameError('')
+      onProjectsReload()
+      onRenameSuccess?.(project.id, res.new_id)
+    } catch (e: unknown) {
+      const status = (e as { status?: number }).status
+      if (status === 409) {
+        setRenameError('Проект занят — останови агента')
+      } else {
+        setRenameError(e instanceof Error ? e.message : String(e))
+      }
+    }
+  }
+
+  // ── Structure health badge ────────────────────────────────────────────────
+  const [structHealth, setStructHealth] = useState<ProjectStructureHealth | null>(null)
+  useEffect(() => {
+    api.projectHealth(project.id)
+      .then(h => setStructHealth(h))
+      .catch(() => { /* endpoint may not exist yet */ })
+  }, [project.id])
 
   // ── Git sync (commit + push одной кнопкой) ────────────────────────────────
   const [syncState, setSyncState] = useState<GitSyncState>('idle')
@@ -226,13 +277,53 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
             <div className="project-header-icon">
               {project.name.charAt(0).toUpperCase()}
             </div>
-            <div>
-              <div className="project-title">{project.name}</div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              {renaming ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <input
+                      ref={renameInputRef}
+                      autoFocus
+                      className="rename-input"
+                      value={renameValue}
+                      onChange={e => { setRenameValue(e.target.value); setRenameError('') }}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') { e.preventDefault(); commitRename() }
+                        if (e.key === 'Escape') cancelRename()
+                      }}
+                      placeholder="new-slug"
+                      style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.4px', flex: 1, minWidth: 0 }}
+                    />
+                    <button className="rename-confirm-btn" onClick={commitRename} title="Применить">✓</button>
+                    <button className="rename-cancel-btn" onClick={cancelRename} title="Отмена">✕</button>
+                  </div>
+                  {renameError && <div style={{ fontSize: 11, color: 'var(--red)' }}>{renameError}</div>}
+                </div>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <div className="project-title">{project.name}</div>
+                  <button
+                    className="rename-edit-btn"
+                    onClick={startRename}
+                    title="Переименовать проект"
+                  >✏️</button>
+                </div>
+              )}
               <div className="project-meta-row">
                 <span className="meta-chip">
                   <code>{project.cwd}</code>
                 </span>
                 <span className="meta-chip">{project.model}</span>
+                {structHealth && (
+                  <button
+                    className={`health-badge health-badge-${structHealth.color}`}
+                    onClick={() => setActiveTab('overview')}
+                    title={structHealth.items.find(i => !i.ok)?.label ?? 'Все проверки пройдены'}
+                  >
+                    <span className={`git-sync-dot ${structHealth.color === 'red' ? 'yellow' : structHealth.color}`} />
+                    health {structHealth.score}/{structHealth.total}
+                  </button>
+                )}
                 {git && (
                   <span className="git-status">
                     <span className={`git-sync-dot ${gitDotClass}`} title={gitDotTitle} />

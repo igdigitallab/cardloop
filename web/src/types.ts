@@ -8,6 +8,13 @@ export interface ProjectHealth {
   git: GitHealth | null
 }
 
+export interface ProjectStructureHealth {
+  items: { key: string; label: string; ok: boolean; hint: string | null }[]
+  score: number
+  total: number
+  color: 'green' | 'yellow' | 'red'
+}
+
 export interface Project {
   id: string
   name: string

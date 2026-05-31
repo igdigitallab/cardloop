@@ -243,6 +243,19 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // Project structure health check
+  projectHealth: (id: string) =>
+    apiFetch<import('./types').ProjectStructureHealth>(`/api/projects/${id}/health`),
+
+  renameProject: (id: string, slug: string) =>
+    apiFetch<{ ok: boolean; new_id: string; new_cwd: string; new_name?: string }>(
+      `/api/projects/${id}/rename`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slug }) }
+    ),
+
+  auditProject: (id: string) =>
+    apiFetch<{ ok: boolean; card_id: string }>(`/api/projects/${id}/audit`, { method: 'POST' }),
+
   // Git: commit (если dirty) + push одной кнопкой
   gitSync: (id: string, message?: string) =>
     apiFetch<{ ok: boolean; committed: boolean; pushed: boolean; message: string | null; log: string }>(

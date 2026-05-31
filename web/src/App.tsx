@@ -394,6 +394,21 @@ export default function App() {
     }
   }, [loadProjects])
 
+  // Переименование проекта (slug) — обновляет активный проект + открытые вкладки
+  const handleRenameSuccess = useCallback((oldId: string, newId: string) => {
+    loadProjects()
+    setOpenIds(prev => prev.map(id => id === oldId ? newId : id))
+    setActiveId(prev => prev === oldId ? newId : prev)
+    setSidebarOrder(prev => prev.map(id => id === oldId ? newId : id))
+    setSplitPairs(prev => {
+      const next: Record<string, string> = {}
+      for (const [k, v] of Object.entries(prev)) {
+        next[k === oldId ? newId : k] = v === oldId ? newId : v
+      }
+      return next
+    })
+  }, [loadProjects])
+
   // Переименование вкладки — поддерживается только для free-чатов
   const handleRenameTab = useCallback(async (id: string, label: string) => {
     const proj = projectsRef.current.find(p => p.id === id)
@@ -543,6 +558,7 @@ export default function App() {
                 <ProjectView
                   project={p}
                   onProjectsReload={loadProjects}
+                  onRenameSuccess={handleRenameSuccess}
                   onSplitCreate={p.is_free && !splitId ? () => handleSplitCreate(p.id) : undefined}
                 />
               </div>

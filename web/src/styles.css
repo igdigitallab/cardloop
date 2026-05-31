@@ -2739,6 +2739,72 @@ body {
   margin: 0;
 }
 
+/* ── Welcome banner (onboarding) ────────────────────────────── */
+.welcome-banner {
+  border-left: 3px solid var(--accent);
+  background: var(--bg2);
+  padding: 16px;
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+}
+
+/* ── Rename controls ─────────────────────────────────────────── */
+.rename-edit-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  opacity: 0.5;
+  line-height: 1;
+  transition: opacity var(--transition);
+}
+.rename-edit-btn:hover { opacity: 1; }
+
+.rename-input {
+  background: var(--bg3);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-family: var(--sans);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+
+.rename-confirm-btn, .rename-cancel-btn {
+  background: none;
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition), color var(--transition);
+  flex-shrink: 0;
+}
+.rename-confirm-btn:hover { background: var(--green); color: #fff; border-color: var(--green); }
+.rename-cancel-btn:hover  { background: var(--bg4);  color: var(--red); border-color: var(--red); }
+
+/* ── Health badge (project header meta row) ──────────────────── */
+.health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--border2);
+  background: var(--bg3);
+  color: var(--text2);
+  transition: background var(--transition), color var(--transition);
+}
+.health-badge:hover { background: var(--bg4); color: var(--text); }
+.health-badge.health-badge-green  { color: var(--green);  border-color: rgba(52,199,123,0.35); }
+.health-badge.health-badge-yellow { color: var(--yellow); border-color: rgba(245,166,35,0.35); }
+.health-badge.health-badge-red    { color: var(--yellow); border-color: rgba(245,166,35,0.35); }
+
 /* ── Logs tab ────────────────────────────────────────────────── */
 .logs-container {
   display: flex;

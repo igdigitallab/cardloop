@@ -1,9 +1,37 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Project, TestResult } from '../types'
 import { api } from '../api'
+import { ProjectStructureCard } from '../components/ProjectStructureCard'
 
 interface Props {
   project: Project
+}
+
+const ONBOARDING_MARKERS = ['Заполнить во время онбординга', 'инициализируется']
+
+function WelcomeBanner({ projectId }: { projectId: string }) {
+  const [show, setShow] = useState(false)
+
+  useEffect(() => {
+    api.claudeMd(projectId)
+      .then(d => {
+        if (!d.content) return
+        const matched = ONBOARDING_MARKERS.some(m => d.content.includes(m))
+        setShow(matched)
+      })
+      .catch(() => { /* ignore */ })
+  }, [projectId])
+
+  if (!show) return null
+
+  return (
+    <div className="welcome-banner">
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>Идёт инициализация</div>
+      <div style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.5 }}>
+        Claude задаёт вопросы в чате справа → ответь, чтобы оформить проект.
+      </div>
+    </div>
+  )
 }
 
 function TestRunner({ projectId }: { projectId: string }) {
@@ -15,8 +43,8 @@ function TestRunner({ projectId }: { projectId: string }) {
     setRunning(true); setErr(''); setRes(null)
     try {
       setRes(await api.runTests(projectId))
-    } catch (e: any) {
-      setErr(String(e?.message || e))
+    } catch (e: unknown) {
+      setErr(String(e instanceof Error ? e.message : e))
     } finally {
       setRunning(false)
     }
@@ -53,6 +81,8 @@ export function OverviewTab({ project }: Props) {
 
   return (
     <div>
+      <WelcomeBanner projectId={project.id} />
+
       <div className="overview-grid">
         <div className="info-card">
           <div className="info-card-label">Рабочая директория</div>
@@ -111,6 +141,8 @@ export function OverviewTab({ project }: Props) {
           Git недоступен для этого проекта
         </div>
       )}
+
+      <ProjectStructureCard projectId={project.id} />
 
       <TestRunner projectId={project.id} />
     </div>
