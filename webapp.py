@@ -807,6 +807,15 @@ def _new_card_id() -> str:
     return secrets.token_hex(3)
 
 
+_CARD_ID_RE = re.compile(r"^[a-f0-9-]{4,20}$")
+
+
+def _valid_card_id(card_id: str) -> bool:
+    """True если card_id соответствует ожидаемому формату (hex+dash, 4-20 символов)."""
+    return bool(_CARD_ID_RE.fullmatch(card_id))
+
+
+
 def _count_potential_cards(raw: str) -> int:
     """Сколько строк в raw МОГУТ быть карточками (любого формата).
     Используется как guard: если после parse+serialize карточек стало меньше —
@@ -1558,6 +1567,8 @@ async def api_move_task(req: web.Request):
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     card_id = req.match_info["card"]
+    if not _valid_card_id(card_id):
+        return web.json_response({"error": "bad card id"}, status=400)
     try:
         body = await req.json()
     except Exception:
@@ -1637,10 +1648,13 @@ async def api_delete_task(req: web.Request):
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
+    card_id = req.match_info["card"]
+    if not _valid_card_id(card_id):
+        return web.json_response({"error": "bad card id"}, status=400)
     cwd, name = project["cwd"], project["name"]
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
-        if _pop_card(cols, req.match_info["card"]) is None:
+        if _pop_card(cols, card_id) is None:
             return web.json_response({"error": "card not found"}, status=404)
         _save_board(cwd, name, preamble, cols)
     return web.json_response(_board_payload(cwd))
@@ -1651,6 +1665,9 @@ async def api_update_task(req: web.Request):
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
+    card_id = req.match_info["card"]
+    if not _valid_card_id(card_id):
+        return web.json_response({"error": "bad card id"}, status=400)
     try:
         body = await req.json()
     except Exception:
@@ -1664,7 +1681,6 @@ async def api_update_task(req: web.Request):
     if description is not None:
         description = str(description).strip() or None
     cwd, name = project["cwd"], project["name"]
-    card_id = req.match_info["card"]
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
         found = False
@@ -2515,6 +2531,8 @@ async def api_card_run(req: web.Request):
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     card_id = req.match_info["card"]
+    if not _valid_card_id(card_id):
+        return web.json_response({"error": "bad card id"}, status=400)
     DATA: Path = ctx["DATA"]
     sidecar = DATA / "runs" / f"{card_id}.md"
     if sidecar.exists():
