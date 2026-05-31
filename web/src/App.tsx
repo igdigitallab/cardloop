@@ -7,6 +7,7 @@ import { ProjectView } from './components/ProjectView'
 import { ProjectTabBar } from './components/ProjectTabBar'
 import { Spinner } from './components/Spinner'
 import { GlobalFilesTab } from './tabs/GlobalFilesTab'
+import { useToast, ToastContainer } from './components/Toast'
 
 const GLOBAL_FILES_ID = '__global__'
 
@@ -92,6 +93,7 @@ function readSplitWidth(): number {
 }
 
 export default function App() {
+  const { toasts, showToast, dismiss } = useToast()
   const [authState, setAuthState] = useState<AuthState>('loading')
   const [projects, setProjects] = useState<Project[]>([])
   const [projectsLoading, setProjectsLoading] = useState(false)
@@ -333,7 +335,7 @@ export default function App() {
       // партнёр НЕ добавляется в openIds — управляется через splitPairs
       setSplitPairs(prev => ({ ...prev, [leftId]: res.id }))
     } catch (e) {
-      alert(`Не удалось открыть split: ${e instanceof Error ? e.message : String(e)}`)
+      showToast(`Не удалось открыть split: ${e instanceof Error ? e.message : String(e)}`)
     }
   }, [loadProjects])
 
@@ -374,7 +376,7 @@ export default function App() {
       setActiveId(res.id)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      alert(`Не удалось создать проект: ${msg}`)
+      showToast(`Не удалось создать проект: ${msg}`)
     } finally {
       setNewProjectBusy(false)
     }
@@ -390,7 +392,7 @@ export default function App() {
       setActiveId(res.id)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      alert(`Не удалось создать свободный чат: ${msg}`)
+      showToast(`Не удалось создать свободный чат: ${msg}`)
     }
   }, [loadProjects])
 
@@ -418,7 +420,7 @@ export default function App() {
       loadProjects()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      alert(`Не удалось переименовать: ${msg}`)
+      showToast(`Не удалось переименовать: ${msg}`)
     }
   }, [loadProjects])
 
@@ -429,11 +431,11 @@ export default function App() {
     } catch (e: unknown) {
       const status = (e as { status?: number }).status
       if (status === 409) {
-        alert('Свободный чат сейчас занят — сначала останови агента')
+        showToast('Свободный чат сейчас занят — сначала останови агента')
         return
       }
       const msg = e instanceof Error ? e.message : String(e)
-      alert(`Не удалось удалить: ${msg}`)
+      showToast(`Не удалось удалить: ${msg}`)
       return
     }
     // Локально закрываем вкладку (та же логика, что handleTabClose)
@@ -499,6 +501,7 @@ export default function App() {
 
   return (
     <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
+      <ToastContainer toasts={toasts} onDismiss={dismiss} />
       <Sidebar
         projects={sortedProjects.filter(p => !p.is_free)}
         selectedId={activeId}

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Project } from '../types'
 import { HealthDot } from './HealthDot'
+import { ConfirmModal } from './ConfirmModal'
 
 interface Props {
   projects: Project[]
@@ -30,6 +31,8 @@ export function Sidebar({
   const [search, setSearch] = useState('')
   const [dragId, setDragId] = useState<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
+  // Confirm delete free chat
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null)
 
   const filtered = projects.filter(p => p.name.toLowerCase().includes(search.toLowerCase()))
 
@@ -200,9 +203,7 @@ export function Sidebar({
                     className="free-delete-btn"
                     onClick={e => {
                       e.stopPropagation()
-                      if (confirm(`Удалить свободный чат «${p.name}» (история стирается)?`)) {
-                        onDeleteFree(p.id)
-                      }
+                      setConfirmDelete({ id: p.id, name: p.name })
                     }}
                     title="Удалить свободный чат"
                   >✕</button>
@@ -224,6 +225,17 @@ export function Sidebar({
           Выйти
         </button>
       </div>
+
+      {confirmDelete && (
+        <ConfirmModal
+          title="Удалить чат"
+          message={`Удалить свободный чат «${confirmDelete.name}»? История стирается.`}
+          confirmLabel="Удалить"
+          danger
+          onConfirm={() => { onDeleteFree(confirmDelete.id); setConfirmDelete(null) }}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
     </div>
   )
 }

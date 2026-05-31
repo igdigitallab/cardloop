@@ -16,6 +16,7 @@ import {
 } from '../types'
 import { useProjectActivity } from '../hooks/useProjectActivity'
 import { useClickOutside } from '../hooks/useClickOutside'
+import { Modal, ModalHead } from '../components/Modal'
 
 interface Props {
   project: Project
@@ -326,6 +327,8 @@ function SessionSelector({ projectId, onSessionChange, onInsertResetPrompt }: Se
   // Confirm-модалка перед /reset (ops:a01372) — даёт юзеру шанс отправить промт-завершение
   const [confirmReset, setConfirmReset] = useState(false)
   const [resetPromptText, setResetPromptText] = useState(DEFAULT_RESET_PROMPT)
+  // Rename modal (replaces window.prompt)
+  const [renameModal, setRenameModal] = useState<{ session: SessionInfo; value: string } | null>(null)
 
   const loadSessions = useCallback(async () => {
     try {
@@ -373,15 +376,21 @@ function SessionSelector({ projectId, onSessionChange, onInsertResetPrompt }: Se
     }
   }
 
-  async function renameSession(s: SessionInfo) {
-    const next = window.prompt('Имя сессии (пусто — убрать лейбл):', s.label || '')
-    if (next === null) return  // отмена
+  function renameSession(s: SessionInfo) {
+    setRenameModal({ session: s, value: s.label || '' })
+    setOpen(false)
+  }
+
+  async function commitRename() {
+    if (!renameModal) return
+    const { session, value } = renameModal
+    setRenameModal(null)
     try {
-      await api.setSessionLabel(projectId, s.session_id, next.trim())
+      await api.setSessionLabel(projectId, session.session_id, value.trim())
       await loadSessions()
       onSessionChange()  // лейбл активной мог измениться → обновить заголовок
-    } catch (err: any) {
-      setError(err?.message || 'ошибка переименования')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'ошибка переименования')
     }
   }
 
@@ -450,6 +459,30 @@ function SessionSelector({ projectId, onSessionChange, onInsertResetPrompt }: Se
             <div className="session-dropdown-empty">нет сохранённых сессий</div>
           )}
         </div>
+      )}
+
+      {renameModal && (
+        <Modal onClose={() => setRenameModal(null)}>
+          <ModalHead title="Переименовать сессию" onClose={() => setRenameModal(null)} />
+          <div className="run-modal-body">
+            <input
+              className="rename-input"
+              style={{ width: '100%', marginBottom: 12 }}
+              autoFocus
+              placeholder="Имя сессии (пусто — убрать лейбл)"
+              value={renameModal.value}
+              onChange={e => setRenameModal(m => m ? { ...m, value: e.target.value } : m)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') commitRename()
+                if (e.key === 'Escape') setRenameModal(null)
+              }}
+            />
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button className="btn-secondary" onClick={() => setRenameModal(null)}>Отмена</button>
+              <button className="btn-primary" onClick={commitRename}>Сохранить</button>
+            </div>
+          </div>
+        </Modal>
       )}
 
       {confirmReset && (
