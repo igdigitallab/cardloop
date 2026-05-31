@@ -1116,7 +1116,13 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           } else {
             label = run.source === 'card' ? 'карточка работает' : 'агент думает'
           }
-          const canStop = run.source === 'chat'
+          // Кнопка «Стоп» показывается всегда когда run !== null:
+          // backend `api.stopChat` → client.interrupt() прерывает ЛЮБОЙ source (chat/card/tg).
+          // abortRef?.abort() безопасен даже если ref пуст (не-chat run) — fetch только для chat.
+          // Раньше гейтилось `source === 'chat'` — кнопка пропадала после переключения вкладок,
+          // потому что восстановление через api.projectRunning ставит source='card' (неизвестно
+          // было ли это chat или card; ср. ops:13c785).
+          const canStop = true
           return (
             <div className={`chat-status-bar ${lvl}`}>
               <span className="chat-status-icon">{icon}</span>
