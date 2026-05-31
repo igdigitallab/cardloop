@@ -8,12 +8,12 @@ import { ProjectTabBar } from './components/ProjectTabBar'
 import { Spinner } from './components/Spinner'
 import { GlobalFilesTab } from './tabs/GlobalFilesTab'
 import { useToast, ToastContainer } from './components/Toast'
+import { useUnreadTracker } from './hooks/useUnreadTracker'
 
 const GLOBAL_FILES_ID = '__global__'
 
 type AuthState = 'loading' | 'unauthed' | 'authed'
 
-const LS_UNREAD = 'cops.unreadBySession'
 const LS_SIDEBAR_COLLAPSED = 'cops.sidebarCollapsed'
 const LS_OPEN = 'cops.openProjects'
 const LS_ACTIVE = 'cops.activeProject'
@@ -30,25 +30,6 @@ function readSidebarOrder(): string[] {
   } catch { return [] }
 }
 
-function readUnread(): Record<string, number> {
-  try {
-    const raw = localStorage.getItem(LS_UNREAD)
-    if (!raw) return {}
-    const obj = JSON.parse(raw)
-    if (!obj || typeof obj !== 'object') return {}
-    const out: Record<string, number> = {}
-    for (const [k, v] of Object.entries(obj)) {
-      if (typeof v === 'number' && v > 0) out[k] = v
-    }
-    return out
-  } catch {
-    return {}
-  }
-}
-
-function writeUnread(map: Record<string, number>) {
-  try { localStorage.setItem(LS_UNREAD, JSON.stringify(map)) } catch {}
-}
 
 function readBool(key: string, fallback: boolean): boolean {
   try {
@@ -100,7 +81,7 @@ export default function App() {
   const [openIds, setOpenIds] = useState<string[]>(() => readStringList(LS_OPEN))
   const [activeId, setActiveId] = useState<string | null>(() => readString(LS_ACTIVE))
   const [sidebarOrder, setSidebarOrder] = useState<string[]>(() => readSidebarOrder())
-  const [unreadBySession, setUnreadBySession] = useState<Record<string, number>>(() => readUnread())
+  const { unreadBySession, incrementUnread, clearUnreadForSession, resetUnread } = useUnreadTracker()
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => readBool(LS_SIDEBAR_COLLAPSED, false))
   // Split-view: leftId → rightId (только для free-чатов)
   const [splitPairs, setSplitPairs] = useState<Record<string, string>>(() => readSplitPairs())
@@ -230,11 +211,7 @@ export default function App() {
       if (payload.kind !== 'text' && payload.kind !== 'tool') return
       const proj = projectsRef.current.find(p => p.tg_thread != null && String(p.tg_thread) === sk)
       if (proj && proj.id === activeIdRef.current) return
-      setUnreadBySession(prev => {
-        const next = { ...prev, [sk]: (prev[sk] || 0) + 1 }
-        writeUnread(next)
-        return next
-      })
+      incrementUnread(sk)
     }
     es.onerror = () => { /* EventSource сам переподключится */ }
     return () => { es.close() }
@@ -265,14 +242,8 @@ export default function App() {
     const proj = projectsRef.current.find(p => p.id === id)
     const sk = proj?.tg_thread != null ? String(proj.tg_thread) : null
     if (!sk) return
-    setUnreadBySession(prev => {
-      if (!prev[sk]) return prev
-      const next = { ...prev }
-      delete next[sk]
-      writeUnread(next)
-      return next
-    })
-  }, [])
+    clearUnreadForSession(sk)
+  }, [clearUnreadForSession])
 
   // Открыть проект (клик в сайдбаре) — добавить в openIds (если нет) + активировать
   const handleSelect = useCallback((id: string) => {
@@ -467,8 +438,7 @@ export default function App() {
     setProjects([])
     setOpenIds([])
     setActiveId(null)
-    setUnreadBySession({})
-    writeUnread({})
+    resetUnread()
     setAuthState('unauthed')
   }
 
