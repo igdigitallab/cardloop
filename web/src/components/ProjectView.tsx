@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Project, ProjectStructureHealth, TabId } from '../types'
 import { api } from '../api'
 import { ProjectActivityProvider } from '../hooks/useProjectActivity'
+import { ErrorBoundary } from '../components/ErrorBoundary'
 import { OverviewTab } from '../tabs/OverviewTab'
 import { ClaudeMdTab } from '../tabs/ClaudeMdTab'
 import { LogsTab } from '../tabs/LogsTab'
@@ -263,7 +264,9 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
               )}
             </div>
           )}
-          <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
+          <ErrorBoundary label="Чат">
+            <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
+          </ErrorBoundary>
         </div>
       </ProjectActivityProvider>
     )
@@ -383,12 +386,12 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
         </div>
 
         <div className="tab-content">
-          {activeTab === 'overview'  && <OverviewTab project={project} />}
-          {activeTab === 'claude-md' && <ClaudeMdTab projectId={project.id} />}
-          {activeTab === 'logs'      && <LogsTab projectId={project.id} projectName={project.name} />}
-          {activeTab === 'board'     && <BoardTab projectId={project.id} />}
-          {activeTab === 'files'     && <FilesTab projectId={project.id} />}
-          {activeTab === 'memory'    && <MemoryTab projectId={project.id} />}
+          {activeTab === 'overview'  && <ErrorBoundary label="Обзор"><OverviewTab project={project} /></ErrorBoundary>}
+          {activeTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'logs'      && <ErrorBoundary label="Логи"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
+          {activeTab === 'board'     && <ErrorBoundary label="Доска"><BoardTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'files'     && <ErrorBoundary label="Файлы"><FilesTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'memory'    && <ErrorBoundary label="Память"><MemoryTab projectId={project.id} /></ErrorBoundary>}
         </div>
       </div>
 
@@ -416,7 +419,9 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
             </button>
           )}
         </div>
-        <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
+        <ErrorBoundary label="Чат">
+          <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
+        </ErrorBoundary>
       </div>
 
       {/* COLLAPSED STUB — narrow vertical button when chat is collapsed */}
