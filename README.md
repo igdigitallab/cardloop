@@ -1,31 +1,20 @@
 # Claude-Ops
 
-**Claude Code без терминала.** Один движок (Claude Agent SDK), три входа: Telegram, браузерный кокпит, канбан-карточки. Full-auto: написал задачу → Claude сам диагностирует, правит код, деплоит, отчитывается. Проект живёт на docker-core (VM 100), systemd-сервис.
+**Полноценная IDE-среда для управления проектами через Claude Agent SDK** — без терминала, с любого устройства. Один движок, три канала ввода: браузерный кокпит, Telegram, канбан-карточки. Full-auto: сформулировал задачу → агент сам диагностирует, правит код, деплоит, отчитывается.
 
 ```
- Telegram  ──┐
- Браузер   ──┼──→  run_engine()  ──→  Claude Agent SDK  ──→  файлы/git/deploy
+ Кокпит    ──┐
+ Telegram  ──┼──→  run_engine()  ──→  Claude Agent SDK  ──→  файлы / git / deploy
  Карточка  ──┘     (async generator)     (подписка)           (full-auto)
 ```
 
 ---
 
-## Что работает сегодня
+## Кокпит (claude-ops.coscore.us)
 
-### Telegram-бот (@ziraclaudebot)
-- **Forum-топики = проекты.** Каждый топик привязан к папке (`cwd`), агент работает в ней.
-- Команды: `/reset` `/resume` `/model` `/project` `/newtopic` `/diff` `/cost` `/usage` `/stop` `/whoami`
-- Приём файлов (документы + фото до 20MB) — агент видит и обрабатывает.
-- Watchdog: зависшая задача авто-прерывается (5 мин тишины или 30 мин общих).
-- Audit-лог: `data/audit/audit-YYYY-MM.log` — след каждой задачи на full-auto.
-- Надёжная отправка: ретрай транзиентных сбоёв TG, ответ до удаления статуса.
-- `md_to_html` рендер: заголовки, списки, код-блоки (длинный код сворачивается).
-- `tg-reply <путь>` — агент шлёт файл/скриншот обратно в топик.
+Браузерная среда разработки — SPA на React + Vite, бэкенд aiohttp.
 
-### Браузерный кокпит (claude-ops.coscore.us)
-- **Парольная фраза**, cookie-сессия, SPA на React+Vite.
-- **Сайдбар** с проектами: DnD-сортировка, collapse в иконки, unread-бейджи.
-- **Вкладки-проекты** сверху (как браузер): переключение без потери состояния.
+**Сайдбар:** проекты с DnD-сортировкой, collapse, unread-бейджи. **Вкладки-проекты** сверху (как браузер) — переключение без потери состояния.
 
 **Табы по проекту (левая панель ~55%):**
 
@@ -33,74 +22,77 @@
 |---|---|
 | **Обзор** | Git-статус, health-карточка (6 пунктов), кнопка «↑ Sync» (commit+push), запуск тестов |
 | **CLAUDE.md** | Просмотр + inline-редактирование (двойной клик) |
-| **Логи** | `log_cmd` из topics.json (journalctl/docker logs/etc.) |
+| **Логи** | Настраиваемая команда логов (`log_cmd` в topics.json) |
 | **Доска** | Канбан из `TASKS.md` — Backlog / In Progress / Review / Failed |
-| **Файлы** | Read-only дерево проекта + просмотр (MD рендер, код моно) |
-| **Память** | Memory-файлы агента (`~/.claude/projects/<cwd>/memory/`) |
+| **Файлы** | Дерево проекта + просмотр (MD рендер, код моно) |
+| **Память** | Memory-файлы агента |
 
-**Чат (правая панель ~45%, всегда видна):**
-- SSE-стрим из `run_engine`, markdown-рендер, CLI-рендер инструментов (Bash/Edit/Read).
-- **Сессия общая с Telegram** — начал в TG, продолжил в браузере (и наоборот).
-- Модель: sonnet / opus / haiku, переключается на лету.
-- Статистика: `N сообщ · ~K токенов`, предупреждение при >100K.
-- Pulse-индикатор: тикающий таймер + конкретика последнего инструмента.
-- Очередь: Enter во время задачи → в очередь, автоотправка после.
-- История из SDK-транскрипта, выбор/сброс сессий.
-- Ресайз/сворачивание (drag, localStorage).
-- Библиотека промтов (📋): категории, CRUD, переменные `[ПОДСТАВЬ]`.
-- Кнопка «Стоп» → `client.interrupt()` (реально прерывает).
+**Чат (правая панель ~45%, постоянная):**
+- SSE-стрим, CLI-рендер инструментов (Bash/Edit/Read/Write с diff).
+- **Сессия сквозная** — начал в Telegram, продолжил в браузере (и наоборот).
+- Модель (sonnet/opus/haiku) переключается на лету.
+- Очередь сообщений, pulse-индикатор, статистика токенов.
+- Библиотека промтов с категориями и переменными.
+- Кнопка «Стоп» реально прерывает агента (`client.interrupt`).
+- Выбор и управление сессиями.
 
-**Канбан-доска (TASKS.md → кокпит):**
-- Секции `## Backlog / In Progress / Review / Failed` = колонки.
-- Перенос: кнопки ←→, DnD между колонками, ✓ в Done, ✕ удалить.
-- **Авто-запуск (F1):** перенос в In Progress → `run_engine` в проекте → результат + git-diff → Review/Failed → пинг в TG.
-- Inline-редактирование карточек (двойной клик).
-- Защита от стирания: `_PLAIN_CARD_RE` + safety guard + asyncio.Lock.
+**Канбан-доска:**
+- `TASKS.md` в репо = источник истины. Секции = колонки, строки = карточки.
+- Перенос кнопками, DnD, inline-редактирование.
+- **Авто-запуск:** перенос карточки в In Progress → движок выполняет задачу → результат + git-diff → Review / Failed → уведомление в Telegram.
+- Защита от потери данных (три слоя).
 
-**Ещё:**
-- **Свободные чаты** (кнопка «+»): без проекта, `cwd=$HOME`, именуемые.
-- **Split-view**: два чата рядом.
-- **Глобальный файл-браузер** (📁): дерево от `$HOME`, inline-редактирование.
-- **Вложения**: 📎 / drag-drop / Ctrl+V → `data/inbox/`.
-- **Usage badge**: лимиты подписки (5ч + неделя), авто-обновление.
-- **+ Новый проект**: шаблоны → папка → онбординг-карточка (агент спрашивает о проекте).
-- **Аудит проекта** (🩺): агент проверяет по `audit-prompt.md`, создаёт карточки.
-- **Подтянуть до стандарта** (🔧): дополняет CLAUDE.md/TASKS.md/README по шаблонам.
-- **Health-check**: 6 пунктов структуры (green/yellow/red).
-- **Rename проекта**: kebab-case, `shutil.move` + topics.json.
+**Дополнительно:**
+- Свободные чаты (без привязки к проекту), Split-view.
+- Глобальный файл-браузер (`$HOME`) с inline-редактированием.
+- Вложения: 📎, drag-drop, Ctrl+V.
+- Usage badge: лимиты подписки (5ч + неделя).
+- Создание проекта (шаблоны + онбординг-агент), аудит, upgrade, health-check, rename.
 
-### Движок (run_engine)
-- Async-генератор событий `{tool|text|result|rate_limit|error}`.
-- Транспорт-независимый: TG, браузер-чат, карточка — потребители.
-- Общий `running`-замок per-проект (гонка по cwd закрыта).
-- Сессии общие между каналами (`session_key = tg_thread`).
+---
+
+## Telegram-канал
+
+Forum-группа «Development», @ziraclaudebot. **Каждый топик = проект** (привязка `thread_id → cwd`).
+
+- Написал задачу → агент работает в папке проекта.
+- Переслал алерт / скрин → агент диагностирует и чинит.
+- Файлы (до 20MB): документы и фото обрабатываются агентом.
+- Команды: `/reset` `/resume` `/model` `/project` `/newtopic` `/diff` `/cost` `/usage` `/stop` `/whoami`
+
+---
+
+## Движок
+
+`run_engine()` — async-генератор событий `{tool|text|result|rate_limit|error}`.
+
+- **Транспорт-независимый:** кокпит, Telegram, карточка — потребители одного потока.
+- **Общий замок** per-проект (гонка по cwd закрыта).
+- **Сквозные сессии** между каналами.
+- **Watchdog:** 5 мин тишины или 30 мин общих → авто-прерывание.
+- **Audit-лог:** каждая задача, каждая команда — `data/audit/`.
 
 ---
 
 ## Архитектура
 
-**Один systemd-процесс**, внутри:
-- **PTB** (python-telegram-bot) — long-polling TG
-- **aiohttp** — кокпит (webapp.py) + (опц.) HTTP для очков G2
+Один systemd-процесс: PTB (Telegram long-polling) + aiohttp (кокпит).
 
 ```
 claude-ops-bot.service
-  └─ bot.py (1174 строк)          — TG-хендлеры, движок run_engine, реестр проектов
-      ├─ webapp.py (3707 строк)    — aiohttp-кокпит, все API-эндпоинты, шина событий
-      │   └─ web/dist/             — React+Vite SPA (билд)
-      ├─ data/topics.json          — привязка топик→проект (вечная)
-      ├─ data/sessions.json        — session_id (чистит /reset)
-      ├─ data/prompts.json         — библиотека промтов
-      ├─ data/audit/               — audit-лог full-auto
-      ├─ data/runs/                — результаты авто-запуска карточек
-      └─ data/inbox/               — загруженные файлы
+  └─ bot.py             — Telegram-хендлеры, движок run_engine, реестр проектов
+      ├─ webapp.py       — aiohttp-кокпит, API, шина событий
+      │   └─ web/dist/   — React+Vite SPA
+      ├─ data/
+      │   ├─ topics.json     — привязка канал→проект (вечная)
+      │   ├─ sessions.json   — session_id (чистит /reset)
+      │   ├─ prompts.json    — библиотека промтов
+      │   ├─ audit/          — audit-лог
+      │   ├─ runs/           — результаты авто-запуска карточек
+      │   └─ inbox/          — загруженные файлы
+      ├─ templates/          — шаблоны новых проектов + reference
+      └─ tests/              — pytest (62 passed)
 ```
-
-**Фронтенд** (`web/src/`): 26 компонентов — App, Sidebar, ProjectView, ChatTab, BoardTab, FilesTab, LogsTab, OverviewTab, MemoryTab, ClaudeMdTab, GlobalFilesTab, PromptPicker, UsageBadge и др.
-
-**Шаблоны** (`templates/`): стартеры для новых проектов + reference-копии из vault.
-
-**Тесты** (`tests/`): pytest, 62 passed. Покрыто: парсер доски, path-traversal, slug-валидация, health, auth.
 
 ---
 
@@ -108,12 +100,12 @@ claude-ops-bot.service
 
 | Канал | Адрес |
 |---|---|
-| **Браузер** | `https://claude-ops.coscore.us` (proxmox-tunnel) или `192.168.0.114:8787` (LAN) |
-| **Telegram** | Forum-группа «Development», бот @ziraclaudebot |
+| **Кокпит** | `https://claude-ops.coscore.us` (Cloudflare Tunnel) / `192.168.0.114:8787` (LAN) |
+| **Telegram** | Forum-группа «Development», @ziraclaudebot |
 
-- **Auth TG:** `ALLOWED_USERS={282311426}` (только Игорь).
-- **Auth Web:** `WEB_PASSWORD` в `.env` (пароль в Credentials.md, не здесь).
-- **Auth SDK:** подписка (`~/.claude/.credentials.json`), НЕ `ANTHROPIC_API_KEY`.
+- **Auth кокпит:** `WEB_PASSWORD` в `.env` (пароль в Credentials.md).
+- **Auth Telegram:** `ALLOWED_USERS` (whitelist по user ID).
+- **Auth SDK:** подписка (`~/.claude/.credentials.json`), **НЕ `ANTHROPIC_API_KEY`**.
 
 ---
 
@@ -123,25 +115,16 @@ claude-ops-bot.service
 # Логи
 sudo journalctl -u claude-ops-bot -f
 
-# Рестарт (после правки bot.py / webapp.py)
-bash /home/igor/claude-ops-bot/restart-self.sh   # если из бота
-sudo systemctl restart claude-ops-bot             # если из терминала
+# Рестарт
+bash /home/igor/claude-ops-bot/restart-self.sh   # из агента (безопасный)
+sudo systemctl restart claude-ops-bot             # из терминала
 
-# Фронт (после правки web/)
+# Фронтенд
 cd /home/igor/claude-ops-bot/web && npm run build
 
 # Тесты
 cd /home/igor/claude-ops-bot && venv/bin/python -m pytest -q
 ```
-
----
-
-## Состояние (два слоя)
-
-- **Слой 1** — `data/topics.json`: привязка `"chat:thread" → {project, cwd, model}`. Вечная.
-- **Слой 2** — `data/sessions.json`: `"chat:thread" → session_id`. Чистит `/reset`.
-
-Переключение проекта → Слой 1. Сброс контекста → Слой 2. Топик помнит проект после `/reset`.
 
 ---
 
@@ -151,15 +134,14 @@ cd /home/igor/claude-ops-bot && venv/bin/python -m pytest -q
 |---|---|
 | `CLAUDE.md` | **Истина по эксплуатации:** gotchas, операции, состояние фич |
 | `TASKS.md` | Живая доска (канбан) — бэклог и текущие задачи |
-| `DONE.md` | Архив завершённого (72+ карточки). **Сессии НЕ читают.** |
-| `specs/roadmap.md` | Последовательность: милстоуны M1–M5, зависимости треков |
-| `specs/spec.md` | Spec v1 (TG-бот) |
-| `specs/spec-002-*.md` | Spec v2 (Control Center) |
-| `specs/spec-003-*.md` | Копилка автономии (30 блоков, сырая) |
-| `specs/vision-strategy.md` | Стратегия/монетизация — **заморожено до M3** |
+| `DONE.md` | Архив завершённого (72+ карточки). Сессии НЕ читают. |
+| `specs/roadmap.md` | Милстоуны M1–M5, зависимости треков |
+| `specs/spec-002-*.md` | Спецификация кокпита |
+| `specs/spec-003-*.md` | Спецификация автономного контура |
+| `specs/vision-strategy.md` | Стратегия — **заморожено до M3** |
 
 ---
 
 ## Технологии
 
-Python 3.11 · python-telegram-bot (PTB) · aiohttp · Claude Agent SDK (подписка) · React 18 + Vite + TypeScript · systemd · Cloudflare Tunnel
+Python 3.11 · aiohttp · python-telegram-bot · Claude Agent SDK · React 18 · Vite · TypeScript · systemd · Cloudflare Tunnel · pytest

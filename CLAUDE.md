@@ -1,11 +1,11 @@
-# CLAUDE.md — Claude-Ops-Bot
+# CLAUDE.md — Claude-Ops
 
-«Claude Code через Telegram». Бот @ziraclaudebot на docker-core запускает Claude Agent SDK по сообщениям из forum-группы «Development». Каждый топик = проект. Spec: `~/vault/01-Projects/Claude-Ops-Bot/specs/spec.md`.
+IDE-среда для управления проектами через Claude Agent SDK. Три канала: кокпит (`claude-ops.coscore.us`), Telegram (@ziraclaudebot), канбан-автозапуск. Один движок `run_engine()`, full-auto. Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 
 > ⚠️ **HTTP-транспорт для очков G2 — заглушен 2026-05-28.** Код функций (`run_for_glasses`, эндпоинты `/projects`/`/run`/`/reset`, CORS middleware) **в `bot.py` оставлен**, но отключён через пустой `GLASSES_TOKEN` в `.env` (`#disabled-2026-05-28# GLASSES_TOKEN=...`). HTTP-сервер сам не поднимается. Чтобы включить обратно: раскомментить токен в `.env` + восстановить CF tunnel ingress на pve + CNAME в Cloudflare → рестарт бота. Контекст почему свернули — `~/vault/01-Projects/even-g2/specs/claude-glasses.md`.
 
 ## Что где
-- `bot.py` — весь бот (один файл, минимальная структура). **Движок = `run_engine()`** (async-генератор событий `{tool|text|result|rate_limit|error}`, транспорт-независимый, F0 done 2026-05-29). Транспорты-потребители: `run_agent` (TG-адаптер: статус-сообщение/watchdog/audit/финал) и `run_for_glasses` (HUD-адаптер, ≤300 chars). `running[k]=True` резервируется СИНХРОННо в адаптере до первого await; `run_engine` заменяет на реальный client. Новые триггеры (web-чат C1, авто-запуск карточки F1) подключаются как потребители `run_engine`, НЕ дублируют SDK-цикл.
+- `bot.py` — TG-канал + движок. **`run_engine()`** (async-генератор событий `{tool|text|result|rate_limit|error}`, транспорт-независимый, F0 done 2026-05-29). Транспорты-потребители: `run_agent` (TG-адаптер: статус-сообщение/watchdog/audit/финал) и `run_for_glasses` (HUD-адаптер, ≤300 chars). `running[k]=True` резервируется СИНХРОННо в адаптере до первого await; `run_engine` заменяет на реальный client. Новые триггеры (web-чат C1, авто-запуск карточки F1) подключаются как потребители `run_engine`, НЕ дублируют SDK-цикл.
 - `.env` — секреты (BOT_TOKEN, GROUP_CHAT_ID, ALLOWED_USERS). НЕ в git.
 - `data/topics.json` — **СЛОЙ 1**: привязка `"chat:thread" → {project,cwd,model}`. Вечная, `/reset` не трогает.
 - `data/sessions.json` — **СЛОЙ 2**: `"chat:thread" → session_id`. Чистит только `/reset`.
