@@ -91,3 +91,29 @@
 ⚠️ **Гонка по cwd**: TG и очки могут одновременно запустить Claude в одном `cwd` (ключи разные → `running` lock не сработает). Пока не критично, при возникновении проблем — добавить cwd-lock.
 
 Запуск aiohttp подвешен через `post_init(start_glasses_http)` в `main()`. Если `GLASSES_TOKEN` пуст — HTTP отключён.
+
+## Шаблоны проектов (с 2026-05-31)
+
+Два уровня шаблонов в корне проекта:
+
+**`templates/*.tpl`** — стартеры для НОВЫХ проектов (кнопка «+ Новый проект»):
+- `CLAUDE.md.tpl` · `TASKS.md.tpl` · `README.md.tpl` · `.gitignore.tpl`
+- Переменные `{{name}}` / `{{date}}` / `{{slug}}` → `_render_template` в webapp.py
+- **`CLAUDE.md.tpl` содержит обязательный раздел «Правила работы в кокпите»** (формат карточек, сессии, файлы) — он копируется во все новые проекты, чтобы агенты знали формат и не теряли задачи. Раздел НЕ удалять при правке проекта.
+
+**`templates/reference/`** — синхронизированные копии из `~/vault/03-Resources/_templates/`:
+- `project-baseline.md` — стандарт прод-проекта (тесты, .env.example, healthz, alerting, …)
+- `audit-prompt.md` — чек-лист для кнопки «🩺 Аудит проекта» (читается из файла, не хардкод)
+- `triage-prompt.md` · `refactor-prompt.md` · `spec.md` · `project.md`
+- ⚠️ Это **копии**: при правке шаблона в vault → ре-копировать сюда (drift сам не вылечится). Зачем дубль — проект должен быть self-contained.
+
+## Новые endpoints (с 2026-05-31)
+- `POST /api/projects/new` — `~/projects/untitled-<ts>/` со стартовыми шаблонами + спавн онбординг-карточки в In Progress.
+- `POST /api/projects/{id}/rename {slug}` — kebab-case (`^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$`), `shutil.move` + апдейт topics.json. 409 если занят/папка существует.
+- `GET /api/projects/{id}/health` — синхронная проверка структуры (6 пунктов: CLAUDE.md / правила кокпита / TASKS.md преамбула / README / .gitignore .env / .git), цвет green/yellow/red. Используется блоком «Структура проекта» в Overview-табе.
+- `POST /api/projects/{id}/audit` — карточка «🩺 Аудит» в In Progress, агент идёт по `templates/reference/audit-prompt.md` и создаёт карточки на каждую проблему.
+- `POST /api/projects/{id}/upgrade` — карточка «🔧 Подтянуть до стандарта»: ДОПОЛНЯЕТ существующие CLAUDE.md/TASKS.md/README/.gitignore по шаблонам, ничего не перезаписывая.
+
+## Тесты (с 2026-05-31)
+- Каркас pytest в `tests/`, цель `make test`. Запуск: `venv/bin/python -m pytest -q`.
+- Покрыто: парсер/сериализатор доски (критика — регрессия = потеря задач в проде, см. gotcha 2026-05-30), path-traversal в `_resolve_safe`/`_resolve_global_safe`, slug-валидация ренейма, health-чек, smoke по auth/login. 62 passed.

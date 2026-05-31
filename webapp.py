@@ -2711,23 +2711,19 @@ _NEW_PROJECT_PROMPT = """\
 Не вали скриптом, веди диалог по шагам. 3-5 точечных вопросов за раз, потом жди ответа.\
 """
 
-_AUDIT_PROMPT_TPL = """\
-🩺 Аудит проекта {name}.
-
-Пройдись по чек-листу, для каждой проблемы создай НОВУЮ карточку в Backlog файла TASKS.md (помни формат: `- [ ] текст` внутри `## Backlog`, маркер ops:ID добавится автоматически).
-
-Чек-лист:
-1. CLAUDE.md существует? Содержит секцию «Правила работы в кокпите»?
-2. TASKS.md — преамбула объясняет формат? Все карточки в правильном формате (`- [ ]` внутри `##` секций)? Нет нумерованных списков / таблиц внутри секций?
-3. README.md — заполнен (не «инициализируется»)?
-4. .gitignore — есть `.env` и каталоги для секретов?
-5. Секреты — `grep -r -i "TOKEN=\\|SECRET=\\|PASSWORD=" --include="*.py" --include="*.ts" --include="*.json" --exclude-dir=node_modules --exclude-dir=venv` — нет ли захардкоженных?
-6. Тесты — есть ли `tests/` или `test_*.py`? Если проект прод — обязательны (baseline).
-7. Git — есть `.git`? Есть удалённый remote? Нет ли больших uncommitted изменений?
-8. CLAUDE.md ≤ 120 строк? Если больше — флаг «сжать».
-
-В конце — короткое резюме в чате: «N проблем найдено, M карточек создано в Backlog».\
-"""
+def _build_audit_prompt(ctx: dict, project_name: str) -> str:
+    """Audit-промт: преамбула + baseline-чек-лист из templates/reference/audit-prompt.md.
+    Сам baseline лежит файлом — Игорь правит его без правки кода."""
+    here: Path = ctx["HERE"]
+    base = (here / "templates" / "reference" / "audit-prompt.md").read_text(encoding="utf-8")
+    return (
+        f"🩺 Аудит проекта **{project_name}**.\n\n"
+        f"Пройдись по этому чек-листу (baseline ниже). Для КАЖДОЙ найденной проблемы создай "
+        f"новую карточку в `## Backlog` файла `TASKS.md` (формат: `- [ ] текст` строго внутри секции; "
+        f"маркер `ops:ID` добавится автоматически — не вписывай руками).\n\n"
+        f"В конце — короткое резюме в чате: «N проблем найдено, M карточек создано».\n\n"
+        f"---\n\n{base}"
+    )
 
 
 def _render_template(template_name: str, vars: dict, here: Path) -> str:
@@ -2994,7 +2990,7 @@ async def api_project_audit(req: web.Request):
 
     # Создаём карточку аудита в In Progress
     audit_card = {"id": _new_card_id(), "text": f"🩺 Аудит проекта «{name}»"}
-    audit_prompt = _AUDIT_PROMPT_TPL.format(name=name)
+    audit_prompt = _build_audit_prompt(ctx, name)
 
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)

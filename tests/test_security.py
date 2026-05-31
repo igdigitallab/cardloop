@@ -38,11 +38,13 @@ def test_resolve_safe_deep_traversal_rejected(tmp_path: Path):
         _resolve_safe(str(tmp_path), "../../etc/shadow")
 
 
-def test_resolve_safe_absolute_outside_rejected(tmp_path: Path):
-    """'/etc/passwd' — ведущий '/' убирается через lstrip, но путь /etc/passwd
-    уйдёт за пределы tmp_path — ValueError."""
-    with pytest.raises(ValueError, match="path traversal"):
-        _resolve_safe(str(tmp_path), "/etc/passwd")
+def test_resolve_safe_absolute_normalized_into_cwd(tmp_path: Path):
+    """'/etc/passwd' — lstrip('/') превращает в 'etc/passwd', который ВНУТРИ cwd.
+    Это безопасно: реальный файл не существует → дальше будет 404, не leak."""
+    result, cwd_resolved = _resolve_safe(str(tmp_path), "/etc/passwd")
+    # target должен быть строго внутри cwd, не наружу
+    assert str(result).startswith(str(cwd_resolved))
+    assert result == (tmp_path / "etc" / "passwd").resolve()
 
 
 def test_resolve_safe_absolute_inside_ok(tmp_path: Path):
@@ -89,10 +91,11 @@ def test_resolve_global_safe_deep_escape_rejected(tmp_path: Path):
         _resolve_global_safe(tmp_path, "../../root/.ssh/id_rsa")
 
 
-def test_resolve_global_safe_absolute_path_stripped(tmp_path: Path):
-    """'/etc/passwd' (ведущий слеш убирается через lstrip): за пределами home → ValueError."""
-    with pytest.raises(ValueError, match="path traversal"):
-        _resolve_global_safe(tmp_path, "/etc/passwd")
+def test_resolve_global_safe_absolute_normalized_into_home(tmp_path: Path):
+    """'/etc/passwd' — lstrip превращает в 'etc/passwd' внутри home. Безопасно: не существует → 404."""
+    result = _resolve_global_safe(tmp_path, "/etc/passwd")
+    assert str(result).startswith(str(tmp_path.resolve()))
+    assert result == (tmp_path / "etc" / "passwd").resolve()
 
 
 def test_resolve_global_safe_home_itself(tmp_path: Path):
