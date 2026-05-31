@@ -200,6 +200,16 @@ export const api = {
       `/api/global/file?path=${encodeURIComponent(path)}`
     ),
 
+  globalFileWrite: (path: string, content: string) =>
+    apiFetch<{ ok: boolean; path: string }>(
+      `/api/global/file?path=${encodeURIComponent(path)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      }
+    ),
+
   // Шаблоны промтов
   prompts: () =>
     apiFetch<{ prompts: import('./types').Prompt[] }>('/api/prompts'),

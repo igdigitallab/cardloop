@@ -88,6 +88,11 @@ export function GlobalFilesTab() {
   const [fileContent, setFileContent] = useState<FileContent | null>(null)
   const [fileLoading, setFileLoading] = useState(false)
   const nodesRef = useRef<TreeNode[] | null>(null)
+  // Inline editing
+  const [editing, setEditing] = useState(false)
+  const [editContent, setEditContent] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
 
   useEffect(() => {
     setRootLoading(true)
@@ -151,6 +156,8 @@ export function GlobalFilesTab() {
 
   function handleFileClick(node: TreeNode) {
     if (selectedPath === node.path) return
+    setEditing(false)
+    setSaveError('')
     setSelectedPath(node.path)
     setFileContent(null)
     setFileLoading(true)
@@ -162,6 +169,33 @@ export function GlobalFilesTab() {
       setFileContent({ path: node.path, content: '', lang: '', size: 0, error: String(e.message || e) })
       setFileLoading(false)
     })
+  }
+
+  function handleStartEdit() {
+    if (!fileContent || fileContent.error) return
+    setEditContent(fileContent.content)
+    setSaveError('')
+    setEditing(true)
+  }
+
+  function handleCancelEdit() {
+    setEditing(false)
+    setSaveError('')
+  }
+
+  async function handleSave() {
+    if (!selectedPath || !fileContent) return
+    setSaving(true)
+    setSaveError('')
+    try {
+      await api.globalFileWrite(selectedPath, editContent)
+      setFileContent({ ...fileContent, content: editContent })
+      setEditing(false)
+    } catch (e: any) {
+      setSaveError(e?.message || 'Ошибка сохранения')
+    } finally {
+      setSaving(false)
+    }
   }
 
   if (rootLoading) return <Spinner label="Загрузка файлов сервера..." />
@@ -200,10 +234,38 @@ export function GlobalFilesTab() {
               {fileContent.size > 0 && (
                 <span className="files-viewer-size">{formatSize(fileContent.size)}</span>
               )}
+              {!fileContent.error && !editing && (
+                <button className="file-edit-btn" onClick={handleStartEdit} title="Редактировать (или двойной клик на тексте)">✎ Изменить</button>
+              )}
+              {editing && (
+                <div className="file-edit-actions">
+                  {saveError && <span className="file-edit-err">⚠ {saveError}</span>}
+                  <button className="btn-primary file-save-btn" onClick={handleSave} disabled={saving}>
+                    {saving ? '…' : 'Сохранить'}
+                  </button>
+                  <button className="btn-secondary" onClick={handleCancelEdit} disabled={saving}>Отмена</button>
+                </div>
+              )}
             </div>
-            <div className="files-viewer-body">
+            <div
+              className={`files-viewer-body${editing ? ' files-viewer-editing' : ''}`}
+              onDoubleClick={!editing && !fileContent.error ? handleStartEdit : undefined}
+              title={!editing && !fileContent.error ? 'Двойной клик для редактирования' : undefined}
+            >
               {fileContent.error ? (
                 <div className="error-state">⚠ {fileContent.error}</div>
+              ) : editing ? (
+                <textarea
+                  className="file-edit-textarea"
+                  value={editContent}
+                  onChange={e => setEditContent(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Escape') handleCancelEdit()
+                    if (e.key === 's' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); handleSave() }
+                  }}
+                  autoFocus
+                  spellCheck={false}
+                />
               ) : fileContent.lang === 'md' ? (
                 <div className="markdown-wrap">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{fileContent.content}</ReactMarkdown>

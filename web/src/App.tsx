@@ -103,8 +103,10 @@ export default function App() {
   // Split-view: leftId → rightId (только для free-чатов)
   const [splitPairs, setSplitPairs] = useState<Record<string, string>>(() => readSplitPairs())
   const [splitWidth, setSplitWidth] = useState<number>(() => readSplitWidth())
-  // Глобальный файловый браузер
-  const [globalFilesOpen, setGlobalFilesOpen] = useState(false)
+  // Глобальный файловый браузер (персистируется в localStorage)
+  const [globalFilesOpen, setGlobalFilesOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem('cops.globalFilesOpen') === 'true' } catch { return false }
+  })
   // Текущий активный проект — для SSE-обработчика, без перепересоздания подписки на каждом select
   const activeIdRef = useRef<string | null>(null)
   const projectsRef = useRef<Project[]>([])
@@ -164,6 +166,9 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem(LS_SIDEBAR_ORDER, JSON.stringify(sidebarOrder)) } catch {}
   }, [sidebarOrder])
+  useEffect(() => {
+    try { localStorage.setItem('cops.globalFilesOpen', String(globalFilesOpen)) } catch {}
+  }, [globalFilesOpen])
 
   // Чистим openIds / splitPairs / sidebarOrder от мёртвых проектов после загрузки списка
   useEffect(() => {
@@ -173,7 +178,7 @@ export default function App() {
       const next = prev.filter(id => valid.has(id))
       return next.length === prev.length ? prev : next
     })
-    setActiveId(prev => (prev && valid.has(prev)) ? prev : null)
+    setActiveId(prev => prev === GLOBAL_FILES_ID || (prev && valid.has(prev)) ? prev : null)
     setSplitPairs(prev => {
       const next: Record<string, string> = {}
       let changed = false
@@ -267,6 +272,11 @@ export default function App() {
 
   // Drag-and-drop порядок сайдбара. ВАЖНО: hook — выше любых ранних return
   // (return <LoginScreen> и т.п.), иначе нарушаются Rules of Hooks → чёрный экран.
+  // Если после refresh activeId === GLOBAL_FILES_ID но флаг сброшен — восстанавливаем
+  useEffect(() => {
+    if (activeId === GLOBAL_FILES_ID) setGlobalFilesOpen(true)
+  }, [activeId])
+
   const handleOpenGlobalFiles = useCallback(() => {
     setGlobalFilesOpen(true)
     setActiveId(GLOBAL_FILES_ID)
@@ -475,45 +485,56 @@ export default function App() {
           onCloseGlobalFiles={handleCloseGlobalFiles}
         />
 
-        {activeId === GLOBAL_FILES_ID ? (
-          <div className="main-content" style={{ padding: 0, overflow: 'hidden' }}>
+        {/* Глобальный файловый браузер — всегда примонтирован (display:none когда неактивен),
+            иначе сбрасывается состояние дерева при переключении вкладок */}
+        {globalFilesOpen && (
+          <div
+            className="main-content"
+            style={{
+              display: activeId === GLOBAL_FILES_ID ? 'flex' : 'none',
+              padding: 0, overflow: 'hidden',
+            }}
+          >
             <GlobalFilesTab />
           </div>
-        ) : hasOpen ? (
-          // Рендерим ВСЕ открытые ProjectView, скрываем неактивные через display:none —
-          // это сохраняет состояние чата/SSE при переключении между вкладками.
-          openProjects.map(p => {
-            const splitId = splitPairs[p.id]
-            const splitProject = splitId ? projects.find(x => x.id === splitId) : undefined
-            return (
-              <div
-                key={p.id}
-                className={`project-tab-slot${splitProject ? ' has-split' : ''}`}
-                style={{ display: p.id === activeId ? 'flex' : 'none' }}
-              >
-                <div className={splitProject ? 'split-pane' : 'split-pane-full'} style={splitProject ? { flex: `0 0 ${splitWidth}%`, maxWidth: `${splitWidth}%` } : {}}>
-                  <ProjectView
-                    project={p}
-                    onProjectsReload={loadProjects}
-                    onSplitCreate={p.is_free && !splitId ? () => handleSplitCreate(p.id) : undefined}
-                  />
-                </div>
-                {splitProject && (
-                  <>
-                    <div className="free-split-divider" onMouseDown={onSplitDividerMouseDown} />
-                    <div className="split-pane" style={{ flex: 1 }}>
-                      <ProjectView
-                        project={splitProject}
-                        onProjectsReload={loadProjects}
-                        onSplitClose={() => handleSplitClose(p.id)}
-                      />
-                    </div>
-                  </>
-                )}
+        )}
+
+        {/* Все открытые ProjectView — всегда примонтированы, скрываем неактивные */}
+        {openProjects.map(p => {
+          const splitId = splitPairs[p.id]
+          const splitProject = splitId ? projects.find(x => x.id === splitId) : undefined
+          const isActive = p.id === activeId && activeId !== GLOBAL_FILES_ID
+          return (
+            <div
+              key={p.id}
+              className={`project-tab-slot${splitProject ? ' has-split' : ''}`}
+              style={{ display: isActive ? 'flex' : 'none' }}
+            >
+              <div className={splitProject ? 'split-pane' : 'split-pane-full'} style={splitProject ? { flex: `0 0 ${splitWidth}%`, maxWidth: `${splitWidth}%` } : {}}>
+                <ProjectView
+                  project={p}
+                  onProjectsReload={loadProjects}
+                  onSplitCreate={p.is_free && !splitId ? () => handleSplitCreate(p.id) : undefined}
+                />
               </div>
-            )
-          })
-        ) : (
+              {splitProject && (
+                <>
+                  <div className="free-split-divider" onMouseDown={onSplitDividerMouseDown} />
+                  <div className="split-pane" style={{ flex: 1 }}>
+                    <ProjectView
+                      project={splitProject}
+                      onProjectsReload={loadProjects}
+                      onSplitClose={() => handleSplitClose(p.id)}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          )
+        })}
+
+        {/* Welcome — только когда нет открытых проектов и не в глобальном браузере */}
+        {!hasOpen && activeId !== GLOBAL_FILES_ID && (
           <div className="main-content">
             <div className="welcome">
               <div className="welcome-icon">⚡</div>

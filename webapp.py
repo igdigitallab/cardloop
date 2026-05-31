@@ -1841,6 +1841,28 @@ async def api_global_file(req: web.Request):
     return web.json_response({"path": rel_norm, "content": content, "lang": lang, "size": size})
 
 
+async def api_global_file_write(req: web.Request):
+    """POST /api/global/file?path=<rel> — записать содержимое файла."""
+    home = Path.home()
+    rel = req.rel_url.query.get("path", "")
+    if not rel:
+        return web.json_response({"error": "path required"}, status=400)
+    try:
+        target = _resolve_global_safe(home, rel)
+    except ValueError:
+        return web.json_response({"error": "invalid path"}, status=400)
+    if _is_secret_name(target.name):
+        return web.json_response({"error": "access denied"}, status=403)
+    if not target.exists() or not target.is_file():
+        return web.json_response({"error": "not a file"}, status=404)
+    data = await req.json()
+    content = data.get("content", "")
+    try:
+        target.write_text(content, encoding="utf-8")
+    except Exception as e:
+        return web.json_response({"error": f"write error: {e}"}, status=500)
+    return web.json_response({"ok": True, "path": rel})
+
 
 async def api_card_run(req: web.Request):
     """GET /api/projects/{id}/tasks/{card}/run — сайдкар из DATA/runs/<card>.md (404-safe)."""
@@ -2536,6 +2558,7 @@ async def start(ptb_app, ctx: dict) -> None:
         # Глобальный файловый браузер (от $HOME, без привязки к проекту)
         app.router.add_get("/api/global/files", api_global_files)
         app.router.add_get("/api/global/file", api_global_file)
+        app.router.add_post("/api/global/file", api_global_file_write)
         # Контекст сессии (read: Фича A)
         app.router.add_get("/api/projects/{id}/session-context", api_project_session_context)
         # Память проекта (read: Фича B)

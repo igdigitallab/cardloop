@@ -568,6 +568,33 @@ body {
 /* Метка корня в файловом браузере */
 .files-root-hint { color: var(--text3); font-size: 11px; font-family: var(--mono); margin-left: 4px; }
 
+/* Inline file editor */
+.file-edit-btn {
+  margin-left: auto; flex-shrink: 0;
+  background: none; border: 1px solid var(--border2); border-radius: var(--radius-sm);
+  color: var(--text3); cursor: pointer; font-size: 12px; padding: 2px 10px;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+}
+.file-edit-btn:hover { color: var(--text); border-color: var(--accent); background: var(--bg3); }
+.file-edit-actions {
+  margin-left: auto; display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+}
+.file-save-btn { font-size: 12px; padding: 3px 12px; }
+.file-edit-err { font-size: 11px; color: var(--red); }
+.files-viewer-body { cursor: default; }
+.files-viewer-body:not(.files-viewer-editing) { cursor: text; }
+.files-viewer-editing {
+  padding: 0 !important; overflow: hidden !important;
+  display: flex; flex-direction: column;
+}
+.file-edit-textarea {
+  flex: 1; min-height: 0;
+  background: var(--bg); color: var(--text);
+  border: none; outline: none; resize: none;
+  font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  padding: 16px; box-sizing: border-box;
+}
+
 /* Usage Badge — в правом углу полосы вкладок */
 .usage-badge-wrap {
   position: relative;
