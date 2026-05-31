@@ -28,7 +28,8 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 from aiohttp import web
-import webapp  # браузерный кокпит (webapp.py) — поднимается в post_init рядом с ботом, состояние через ctx
+import webapp          # браузерный кокпит (webapp.py) — поднимается в post_init рядом с ботом, состояние через ctx
+import glasses_transport  # HTTP-транспорт для очков G2 (заглушен, включается через GLASSES_TOKEN)
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
@@ -667,6 +668,11 @@ async def run_agent(context, update, prompt: str):
 # Запросы голосовые: STT уже сделан на стороне очков через deepseek-bridge /stt,
 # сюда приходит уже текст.
 # Переиспользует run_engine (единый движок), адаптируя формат ответа под HUD (≤300 символов).
+#
+# ⚠️ Вынесено в glasses_transport.py (ops:s03dead-be 2026-05-31).
+# run_for_glasses живёт здесь — тесно связана с module-level состоянием (running/sessions/costs).
+# HTTP-роуты/CORS/старт — в glasses_transport.start(ctx).
+
 async def run_for_glasses(project_name: str, prompt: str) -> dict:
     r = resolve_project(project_name)
     if not r:
@@ -711,100 +717,17 @@ async def run_for_glasses(project_name: str, prompt: str) -> dict:
     return {"reply": reply, "session_id": sid, "project": display, "cwd": cwd}
 
 
-def _check_glasses_auth(req: web.Request) -> bool:
-    if not GLASSES_TOKEN:
-        return False  # без токена — наружу не пускаем
-    return req.headers.get("Authorization", "") == f"Bearer {GLASSES_TOKEN}"
-
-
-async def http_health(_req):
-    return web.json_response({"ok": True, "service": "claude-ops-bot"})
-
-
-async def http_projects(req):
-    if not _check_glasses_auth(req):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    # Источник — topics.json (явно курированный Игорем список), дедуп по cwd.
-    seen, out = set(), []
-    for b in topics.values():
-        if b["cwd"] in seen:
-            continue
-        seen.add(b["cwd"])
-        out.append({"project": b["project"], "cwd": b["cwd"]})
-    out.sort(key=lambda x: x["project"].lower())
-    return web.json_response({"projects": out})
-
-
-async def http_run(req):
-    if not _check_glasses_auth(req):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    try:
-        body = await req.json()
-        project = (body.get("project") or "").strip()
-        prompt = (body.get("prompt") or "").strip()
-        if not project or not prompt:
-            raise ValueError("project и prompt обязательны")
-    except Exception as e:
-        return web.json_response({"error": f"bad request: {e}"}, status=400)
-    try:
-        result = await run_for_glasses(project, prompt)
-        return web.json_response(result)
-    except ValueError as e:
-        return web.json_response({"error": str(e)}, status=404)
-    except RuntimeError as e:
-        return web.json_response({"error": str(e)}, status=409)
-    except Exception as e:
-        traceback.print_exc()
-        return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
-
-
-async def http_reset(req):
-    if not _check_glasses_auth(req):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    try:
-        body = await req.json()
-        project = (body.get("project") or "").strip()
-    except Exception as e:
-        return web.json_response({"error": f"bad request: {e}"}, status=400)
-    r = resolve_project(project)
-    if not r:
-        return web.json_response({"error": f"unknown project: {project}"}, status=404)
-    key = f"glasses:{r[0]}"
-    sessions.pop(key, None)
-    save_sessions()
-    return web.json_response({"ok": True, "project": r[0]})
-
-
-@web.middleware
-async def cors_middleware(request: web.Request, handler):
-    """CORS для очков: WebView плагина (origin file://localhost) делает preflight на cross-origin
-    fetch к нашему API. Без этого WebKit роняет request с 'Load failed'."""
-    if request.method == "OPTIONS":
-        return web.Response(status=204, headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Authorization, Content-Type",
-            "Access-Control-Max-Age": "86400",
-        })
-    resp = await handler(request)
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
-
-
 async def start_glasses_http(_app):
-    if not GLASSES_TOKEN:
-        print("[glasses-http] GLASSES_TOKEN не задан — HTTP-сервер для очков ВЫКЛЮЧЕН")
-        return
-    http_app = web.Application(middlewares=[cors_middleware], client_max_size=10 * 1024 * 1024)
-    http_app.router.add_get("/healthz", http_health)
-    http_app.router.add_get("/projects", http_projects)
-    http_app.router.add_post("/run", http_run)
-    http_app.router.add_post("/reset", http_reset)
-    runner = web.AppRunner(http_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", GLASSES_PORT)
-    await site.start()
-    print(f"[glasses-http] слушаю 0.0.0.0:{GLASSES_PORT}")
+    """Запуск HTTP-транспорта очков G2. Делегирует в glasses_transport.start(ctx)."""
+    await glasses_transport.start({
+        "GLASSES_TOKEN": GLASSES_TOKEN,
+        "GLASSES_PORT": GLASSES_PORT,
+        "topics": topics,
+        "sessions": sessions,
+        "save_sessions": save_sessions,
+        "resolve_project": resolve_project,
+        "run_for_glasses": run_for_glasses,
+    })
 
 
 # ─────────────────────────── handlers ───────────────────────────
