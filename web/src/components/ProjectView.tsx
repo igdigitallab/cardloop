@@ -389,7 +389,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
           {activeTab === 'overview'  && <ErrorBoundary label="Обзор"><OverviewTab project={project} /></ErrorBoundary>}
           {activeTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'logs'      && <ErrorBoundary label="Логи"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
-          {activeTab === 'board'     && <ErrorBoundary label="Доска"><BoardTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'board'     && <ErrorBoundary label="Доска"><BoardTab projectId={project.id} isActive={isActive} /></ErrorBoundary>}
           {activeTab === 'files'     && <ErrorBoundary label="Файлы"><FilesTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'memory'    && <ErrorBoundary label="Память"><MemoryTab projectId={project.id} /></ErrorBoundary>}
         </div>

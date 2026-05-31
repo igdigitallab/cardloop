@@ -114,9 +114,25 @@ export default function App() {
       const res = await api.projects()
       // Стабильное сравнение: не обновляем стейт если данные не изменились
       // (предотвращает каскад эффектов openIds/sidebarOrder/activeId)
-      setProjects(prev =>
-        JSON.stringify(prev) === JSON.stringify(res.projects) ? prev : res.projects
-      )
+      setProjects(prev => {
+        // Stable comparison: avoid cascading effects when data hasn't changed.
+        // Compare by id+model+health fields that drive sidebar/header rendering.
+        const same =
+          prev.length === res.projects.length &&
+          prev.every((p, i) => {
+            const n = res.projects[i]
+            return (
+              p.id === n.id &&
+              p.name === n.name &&
+              p.model === n.model &&
+              p.incidents === n.incidents &&
+              p.health.git?.branch === n.health.git?.branch &&
+              p.health.git?.dirty === n.health.git?.dirty &&
+              p.health.git?.unpushed === n.health.git?.unpushed
+            )
+          })
+        return same ? prev : res.projects
+      })
       projectsLoadedRef.current = true
     } catch {
       setProjects([])

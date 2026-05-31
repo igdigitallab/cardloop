@@ -9,6 +9,8 @@ import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 
 interface Props {
   projectId: string
+  /** When false (project tab hidden via display:none), suspend polling to avoid wasted fetches. */
+  isActive?: boolean
 }
 
 const ORDER = ['backlog', 'in_progress', 'review', 'failed']
@@ -34,7 +36,7 @@ function writeVisibleCols(s: Set<string>) {
   try { localStorage.setItem(LS_BOARD_COLS, JSON.stringify([...s])) } catch {}
 }
 
-export function BoardTab({ projectId }: Props) {
+export function BoardTab({ projectId, isActive = true }: Props) {
   const [board, setBoard] = useState<Board | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -86,13 +88,18 @@ export function BoardTab({ projectId }: Props) {
     return (col?.cards.length ?? 0) > 0
   }
 
-  // Polling: 3с пока есть in_progress, 10с в покое; не тикает когда вкладка скрыта
+  // Keep isActive in a ref so the polling closure always sees the current value
+  const isActiveRef = useRef(isActive)
+  isActiveRef.current = isActive
+
+  // Polling: 3с пока есть in_progress, 10с в покое; не тикает когда вкладка скрыта или ProjectView неактивен
   function schedulePoll(b: Board | null) {
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
     const delay = hasInProgress(b) ? POLL_FAST_MS : POLL_SLOW_MS
     pollTimerRef.current = setTimeout(async () => {
-      if (document.visibilityState !== 'visible') {
-        schedulePoll(b)  // ждём до следующего тика; обновим при visibility change
+      // Skip poll if project tab is hidden (display:none) or browser tab invisible
+      if (!isActiveRef.current || document.visibilityState !== 'visible') {
+        schedulePoll(b)  // ждём до следующего тика
         return
       }
       try {
