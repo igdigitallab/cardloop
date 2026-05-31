@@ -370,10 +370,12 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
             </div>
           </div>
 
-          <nav className="tabs">
+          <nav className="tabs" role="tablist" aria-label="Разделы проекта">
             {TABS.map(tab => (
               <button
                 key={tab.id}
+                role="tab"
+                aria-selected={activeTab === tab.id}
                 className={`tab-btn ${activeTab === tab.id ? 'active' : ''}`}
                 disabled={tab.disabled}
                 onClick={() => !tab.disabled && setActiveTab(tab.id)}
@@ -414,6 +416,8 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
               className="chat-collapse-btn"
               onClick={toggleCollapse}
               title={collapsed ? 'Развернуть чат' : 'Свернуть чат'}
+              aria-label={collapsed ? 'Развернуть чат' : 'Свернуть чат'}
+              aria-expanded={!collapsed}
             >
               {collapsed ? '⟨' : '⟩'}
             </button>

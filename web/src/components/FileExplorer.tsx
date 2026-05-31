@@ -69,17 +69,27 @@ function TreeView({ nodes, selectedPath, onFileClick, onDirToggle }: TreeProps) 
             className={`file-tree-row ${selectedPath === node.path ? 'active' : ''}`}
             style={{ paddingLeft: `${8 + node.depth * 14}px` }}
             title={node.path}
+            role={node.type === 'dir' ? 'button' : 'option'}
+            aria-expanded={node.type === 'dir' ? node.open : undefined}
+            aria-selected={selectedPath === node.path}
+            tabIndex={0}
             onClick={() => node.type === 'dir' ? onDirToggle(node) : onFileClick(node)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                node.type === 'dir' ? onDirToggle(node) : onFileClick(node)
+              }
+            }}
           >
             {node.type === 'dir' ? (
               <>
-                <span className="file-tree-caret">{node.open ? '▾' : '▸'}</span>
-                <span className="file-tree-icon">📁</span>
+                <span className="file-tree-caret" aria-hidden="true">{node.open ? '▾' : '▸'}</span>
+                <span className="file-tree-icon" aria-hidden="true">📁</span>
               </>
             ) : (
               <>
-                <span className="file-tree-caret" />
-                <span className="file-tree-icon">📄</span>
+                <span className="file-tree-caret" aria-hidden="true" />
+                <span className="file-tree-icon" aria-hidden="true">📄</span>
               </>
             )}
             <span className="file-tree-name">{node.name}</span>

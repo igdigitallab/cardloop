@@ -391,13 +391,14 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                       </div>
                     )}
                     <div className="board-card-actions">
-                      <button title="← влево" disabled={busy || idx === 0}
+                      <button title="← влево" aria-label="Переместить влево" disabled={busy || idx === 0}
                         onClick={() => move(card.id, ORDER[idx - 1])}>←</button>
-                      <button title="вправо →" disabled={busy || idx === ORDER.length - 1}
+                      <button title="вправо →" aria-label="Переместить вправо" disabled={busy || idx === ORDER.length - 1}
                         onClick={() => move(card.id, ORDER[idx + 1])}>→</button>
                       {isIncident && col.key !== 'in_progress' && (
                         <button
                           title="🤖 Передать агенту (в In Progress → авто-запуск)"
+                          aria-label="Передать агенту"
                           className="act-handoff"
                           disabled={busy}
                           onClick={() => move(card.id, 'in_progress')}
@@ -406,14 +407,15 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                       {canShowResult && (
                         <button
                           title="Результат выполнения"
+                          aria-label="Показать результат"
                           className="act-result"
                           disabled={busy}
                           onClick={() => showResult(card.id)}
                         >📄</button>
                       )}
-                      <button title="✓ в Done (архив)" className="act-done" disabled={busy}
+                      <button title="✓ в Done (архив)" aria-label="Архивировать карточку" className="act-done" disabled={busy}
                         onClick={() => move(card.id, 'done')}>✓</button>
-                      <button title="удалить" className="act-del" disabled={busy}
+                      <button title="удалить" aria-label="Удалить карточку" className="act-del" disabled={busy}
                         onClick={() => del(card.id)}>✕</button>
                     </div>
                   </div>
