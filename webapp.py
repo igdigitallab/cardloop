@@ -2680,6 +2680,340 @@ async def api_project_memory(req: web.Request):
     return web.json_response({"files": files, "exists": True})
 
 
+# ─────────────────────────── новый проект: шаблоны + инициализация ───────────────────────────
+
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$")
+
+_NEW_PROJECT_PROMPT = """\
+🚀 Новый проект инициализируется. Папка: {cwd}.
+
+В корне уже лежат стартовые шаблоны: CLAUDE.md, TASKS.md, README.md, .gitignore. Это каркас — нужно его адаптировать.
+
+ШАГ 1 — расспроси меня (одним сообщением, текстом, в конце ответа):
+- Что за проект, цель (1-2 фразы)?
+- Стек/язык/инфра?
+- Есть ли уже наработки/файлы/код где-то ещё? Точные пути если знаешь.
+- Какие первые 3-5 задач?
+
+ШАГ 2 (после моих ответов):
+- Если указал существующие папки → просканируй их (Read нескольких файлов), краткая сводка.
+- Перепиши секции «Что это» / «Стек» / «Команды» в CLAUDE.md под мои ответы. Раздел «Правила работы в кокпите» — НЕ ТРОГАЙ, он общий для всех проектов.
+- Замени стартовые карточки в TASKS.md → ## Backlog (положи мои реальные 3-5 задач, удали стартовые «Заполнить …» если уже сделал).
+- Заполни README.md.
+- При необходимости создай `specs/`, `tests/`, и т.д. — по обстановке.
+
+ШАГ 3 — имя проекта:
+- Предложи мне короткий kebab-case slug (например `my-cool-bot`). Спроси «переименовать сейчас?»
+- Если ОК — попроси меня нажать кнопку ✏️ в шапке проекта (она вызовет API rename — папка переедет, topics.json обновится без рестарта).
+
+ШАГ 4 — git init (без коммита/пуша, без моего явного ОК).
+
+Не вали скриптом, веди диалог по шагам. 3-5 точечных вопросов за раз, потом жди ответа.\
+"""
+
+_AUDIT_PROMPT_TPL = """\
+🩺 Аудит проекта {name}.
+
+Пройдись по чек-листу, для каждой проблемы создай НОВУЮ карточку в Backlog файла TASKS.md (помни формат: `- [ ] текст` внутри `## Backlog`, маркер ops:ID добавится автоматически).
+
+Чек-лист:
+1. CLAUDE.md существует? Содержит секцию «Правила работы в кокпите»?
+2. TASKS.md — преамбула объясняет формат? Все карточки в правильном формате (`- [ ]` внутри `##` секций)? Нет нумерованных списков / таблиц внутри секций?
+3. README.md — заполнен (не «инициализируется»)?
+4. .gitignore — есть `.env` и каталоги для секретов?
+5. Секреты — `grep -r -i "TOKEN=\\|SECRET=\\|PASSWORD=" --include="*.py" --include="*.ts" --include="*.json" --exclude-dir=node_modules --exclude-dir=venv` — нет ли захардкоженных?
+6. Тесты — есть ли `tests/` или `test_*.py`? Если проект прод — обязательны (baseline).
+7. Git — есть `.git`? Есть удалённый remote? Нет ли больших uncommitted изменений?
+8. CLAUDE.md ≤ 120 строк? Если больше — флаг «сжать».
+
+В конце — короткое резюме в чате: «N проблем найдено, M карточек создано в Backlog».\
+"""
+
+
+def _render_template(template_name: str, vars: dict, here: Path) -> str:
+    """Читает templates/<template_name>, заменяет {{var}} → значение из vars."""
+    tpl_path = here / "templates" / template_name
+    try:
+        text = tpl_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"шаблон не найден: {tpl_path}")
+    for key, val in vars.items():
+        text = text.replace("{{" + key + "}}", str(val))
+    return text
+
+
+async def api_new_project(req: web.Request):
+    """POST /api/projects/new — создаёт новую папку проекта со стартовыми шаблонами и
+    запускает инициализацию через run_engine (как F1-карточка)."""
+    ctx = req.app["ctx"]
+    run_engine = ctx.get("run_engine")
+
+    # Парсим тело (name опционален)
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    name = (body.get("name") or "").strip() or None
+
+    # Создаём папку ~/projects/untitled-<ts>/
+    projects_dir = Path.home() / "projects"
+    projects_dir.mkdir(exist_ok=True)
+    ts = int(time.time())
+    slug = f"untitled-{ts}"
+    cwd = projects_dir / slug
+    try:
+        cwd.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        return web.json_response({"error": f"папка уже существует: {cwd}"}, status=409)
+
+    display_name = name or slug
+    here: Path = ctx["HERE"]
+    tpl_vars = {
+        "name": display_name,
+        "date": time.strftime("%Y-%m-%d"),
+        "slug": slug,
+    }
+
+    # Пишем шаблоны
+    try:
+        (cwd / "CLAUDE.md").write_text(_render_template("CLAUDE.md.tpl", tpl_vars, here), encoding="utf-8")
+        (cwd / "README.md").write_text(_render_template("README.md.tpl", tpl_vars, here), encoding="utf-8")
+        (cwd / ".gitignore").write_text(_render_template(".gitignore.tpl", tpl_vars, here), encoding="utf-8")
+
+        # TASKS.md: рендерим шаблон, затем парсим и добавляем стартовую карточку в In Progress
+        tasks_raw = _render_template("TASKS.md.tpl", tpl_vars, here)
+        preamble, cols = _parse_tasks(tasks_raw)
+        init_card = {"id": _new_card_id(), "text": "🚀 Инициализировать проект"}
+        cols["in_progress"].append(init_card)
+        (cwd / "TASKS.md").write_text(_serialize_tasks(preamble, cols, display_name), encoding="utf-8")
+    except Exception as e:
+        # Откат: удаляем папку если не смогли записать файлы
+        import shutil
+        shutil.rmtree(str(cwd), ignore_errors=True)
+        return web.json_response({"error": f"ошибка записи шаблонов: {e}"}, status=500)
+
+    # Регистрируем в topics.json — session_key из GROUP_CHAT_ID (как неизвестный топик 0)
+    group_chat_id = ctx.get("GROUP_CHAT_ID") or 0
+    session_key = f"{group_chat_id}:{ts}"
+    ctx["topics"][session_key] = {
+        "project": display_name,
+        "cwd": str(cwd),
+        "model": ctx.get("DEFAULT_MODEL", "sonnet"),
+    }
+    save_topics = ctx.get("save_topics")
+    if callable(save_topics):
+        save_topics()
+
+    pid = _project_id(str(cwd))
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        # Формируем минимальный объект на случай если dupe по cwd вытеснил нашу запись
+        project = {
+            "id": pid,
+            "name": display_name,
+            "cwd": str(cwd),
+            "model": ctx.get("DEFAULT_MODEL", "sonnet"),
+            "tg_thread": session_key,
+            "is_free": False,
+        }
+
+    # Если run_engine недоступен — возвращаем без запуска (деградация)
+    if run_engine is None:
+        return web.json_response({"id": pid, "cwd": str(cwd), "name": display_name, "started": False})
+
+    # Проверяем замок (теоретически free slot — только что создали)
+    if ctx["running"].get(session_key) is not None:
+        return web.json_response({"id": pid, "cwd": str(cwd), "name": display_name, "started": False})
+
+    # Резервируем слот СИНХРОННО (защита от гонки — та же что в api_move_task)
+    ctx["running"][session_key] = True
+
+    # Подменяем текст карточки на онбординг-промпт ДО запуска задачи
+    # (run_engine получает card["text"] как prompt)
+    init_card["text"] = _NEW_PROJECT_PROMPT.format(cwd=str(cwd))
+    asyncio.create_task(
+        _run_card(ctx, req.app, project, init_card, session_key)
+    )
+
+    return web.json_response({
+        "id": pid,
+        "cwd": str(cwd),
+        "name": display_name,
+        "session_key": session_key,
+        "started": True,
+    })
+
+
+async def api_project_rename(req: web.Request):
+    """POST /api/projects/{id}/rename  {slug: str}
+    Переименовывает папку проекта и обновляет все записи topics.json с тем же cwd."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+
+    slug = (body.get("slug") or "").strip()
+    if not slug:
+        return web.json_response({"error": "slug is required"}, status=400)
+    if not _SLUG_RE.match(slug):
+        return web.json_response(
+            {"error": "slug must match ^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$ (kebab-case)"},
+            status=400,
+        )
+
+    session_key = project["tg_thread"]
+    if ctx["running"].get(session_key) is not None:
+        return web.json_response({"error": "проект занят, нельзя переименовать"}, status=409)
+
+    old_cwd = Path(project["cwd"])
+    new_cwd = old_cwd.parent / slug
+
+    if new_cwd.exists():
+        return web.json_response({"error": f"папка уже занята: {new_cwd}"}, status=409)
+
+    try:
+        import shutil as _shutil
+        _shutil.move(str(old_cwd), str(new_cwd))
+    except Exception as e:
+        return web.json_response({"error": f"ошибка переименования: {e}"}, status=500)
+
+    # Обновляем все записи topics с тем же старым cwd
+    old_cwd_str = str(old_cwd)
+    for b in ctx["topics"].values():
+        if b.get("cwd") == old_cwd_str:
+            b["cwd"] = str(new_cwd)
+            b["project"] = slug
+
+    save_topics = ctx.get("save_topics")
+    if callable(save_topics):
+        save_topics()
+
+    return web.json_response({
+        "ok": True,
+        "new_id": new_cwd.name,
+        "new_cwd": str(new_cwd),
+        "new_name": slug,
+    })
+
+
+async def api_project_health(req: web.Request):
+    """GET /api/projects/{id}/health — быстрая проверка структуры проекта без агента."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    cwd = Path(project["cwd"])
+
+    def _check(key: str, label: str, condition: bool, hint: str | None) -> dict:
+        return {"key": key, "label": label, "ok": condition, "hint": hint if not condition else None}
+
+    items: list[dict] = []
+
+    # 1. CLAUDE.md существует
+    claude_md = cwd / "CLAUDE.md"
+    has_claude_md = claude_md.is_file()
+    items.append(_check("claude_md", "CLAUDE.md", has_claude_md, "Создай CLAUDE.md с описанием проекта"))
+
+    # 2. CLAUDE.md содержит раздел «Правила работы в кокпите»
+    cockpit_rules = False
+    if has_claude_md:
+        try:
+            cockpit_rules = "Правила работы в кокпите" in claude_md.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    items.append(_check(
+        "claude_md_cockpit_rules", "Раздел «Правила кокпита»",
+        cockpit_rules, "Запусти аудит или ✏️ обнови вручную",
+    ))
+
+    # 3. TASKS.md существует с преамбулой
+    tasks_md = cwd / "TASKS.md"
+    has_tasks = False
+    if tasks_md.is_file():
+        try:
+            tasks_content = tasks_md.read_text(encoding="utf-8", errors="replace")
+            # Достаточно наличия любого ops-маркера ИЛИ формата `- [ ] текст <!--ops:`
+            has_tasks = "<!--ops:" in tasks_content or "Формат карточки" in tasks_content
+        except Exception:
+            pass
+    items.append(_check("tasks_md", "TASKS.md с преамбулой", has_tasks, "Создай TASKS.md с форматом колонок"))
+
+    # 4. README.md существует (любой регистр)
+    has_readme = any((cwd / name).is_file() for name in _README_CANDIDATES)
+    items.append(_check("readme", "README.md", has_readme, "Запусти аудит"))
+
+    # 5. .gitignore существует и содержит .env
+    gitignore = cwd / ".gitignore"
+    has_gitignore_env = False
+    if gitignore.is_file():
+        try:
+            has_gitignore_env = ".env" in gitignore.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    items.append(_check("gitignore", ".gitignore с .env", has_gitignore_env, "Добавь .env в .gitignore"))
+
+    # 6. git init (папка .git существует)
+    has_git = (cwd / ".git").exists()
+    items.append(_check("git_init", "git init", has_git, "Запусти git init в папке проекта"))
+
+    score = sum(1 for item in items if item["ok"])
+    total = len(items)
+    if score == total:
+        color = "green"
+    elif score >= total / 2:
+        color = "yellow"
+    else:
+        color = "red"
+
+    return web.json_response({"items": items, "score": score, "total": total, "color": color})
+
+
+async def api_project_audit(req: web.Request):
+    """POST /api/projects/{id}/audit — создаёт карточку аудита и запускает её через run_engine."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    run_engine = ctx.get("run_engine")
+    session_key = project["tg_thread"]
+    cwd = project["cwd"]
+    name = project["name"]
+
+    if ctx["running"].get(session_key) is not None:
+        return web.json_response({"error": "проект занят"}, status=409)
+
+    # Создаём карточку аудита в In Progress
+    audit_card = {"id": _new_card_id(), "text": f"🩺 Аудит проекта «{name}»"}
+    audit_prompt = _AUDIT_PROMPT_TPL.format(name=name)
+
+    async with _get_board_lock(cwd):
+        _, preamble, cols = _load_board(cwd)
+        cols["in_progress"].append(audit_card)
+        _save_board(cwd, name, preamble, cols)
+
+    if run_engine is None:
+        return web.json_response({"ok": True, "card_id": audit_card["id"], "started": False})
+
+    # Резервируем слот СИНХРОННО
+    ctx["running"][session_key] = True
+
+    # Подменяем текст карточки на полный промпт перед запуском
+    audit_card["text"] = audit_prompt
+    asyncio.create_task(_run_card(ctx, req.app, project, audit_card, session_key))
+
+    return web.json_response({"ok": True, "card_id": audit_card["id"], "started": True})
+
+
 # ─────────────────────────── статика (SPA) ───────────────────────────
 
 PLACEHOLDER_HTML = (
@@ -2796,6 +3130,14 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/session-context", api_project_session_context)
         # Память проекта (read: Фича B)
         app.router.add_get("/api/projects/{id}/memory", api_project_memory)
+        # Новый проект: создание из шаблонов + инициализация
+        app.router.add_post("/api/projects/new", api_new_project)
+        # Переименование папки проекта (kebab-case slug)
+        app.router.add_post("/api/projects/{id}/rename", api_project_rename)
+        # Быстрая проверка структуры проекта без агента
+        app.router.add_get("/api/projects/{id}/health", api_project_health)
+        # Аудит проекта: создаёт карточку + запускает run_engine
+        app.router.add_post("/api/projects/{id}/audit", api_project_audit)
 
         # Статика — всё остальное (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
