@@ -1548,81 +1548,6 @@ _NEW_PROJECT_PROMPT = """🚀 Это новый проект, инициализ
 Веди диалог по шагам, не вали скриптом. Не задавай 10 вопросов разом — 3-5 точечных за раз."""
 
 
-def _init_card_text() -> str:
-    return "🚀 Инициализировать проект (онбординг: расспрос → CLAUDE.md, TASKS.md, README, .gitignore)"
-
-
-async def api_new_project(req: web.Request):
-    """POST /api/projects/new — создать пустой проект, прописать в topics.json,
-    спавнить онбординг-карточку, вернуть {id, name, session_key}."""
-    ctx = req.app["ctx"]
-    ts = int(time.time())
-    projects_root = Path.home() / "projects"
-    projects_root.mkdir(parents=True, exist_ok=True)
-    cwd = projects_root / f"untitled-{ts}"
-    if cwd.exists():
-        return web.json_response({"error": "коллизия имени, повтори"}, status=409)
-    cwd.mkdir()
-
-    # Стаб-файлы — агент перепишет их в ходе онбординга
-    (cwd / "CLAUDE.md").write_text(
-        "# Новый проект — инициализируется\n\n"
-        "_Заглушка. Идёт онбординг-сессия в карточке «🚀 Инициализировать проект»._\n"
-        "_После онбординга агент перепишет этот файл осмысленным содержанием._\n",
-        encoding="utf-8",
-    )
-    (cwd / ".gitignore").write_text(
-        "# дефолтный .gitignore — агент уточнит по стэку\n"
-        "venv/\n.venv/\n__pycache__/\n*.pyc\nnode_modules/\ndist/\n.env\n.env.*\n!.env.example\n",
-        encoding="utf-8",
-    )
-
-    # TASKS.md с одной карточкой сразу в In Progress
-    card_id = _new_card_id()
-    name = f"Без названия {time.strftime('%H:%M')}"
-    cols = {k: [] for k, _, _ in BOARD_COLUMNS}
-    cols["in_progress"].append({"id": card_id, "text": _init_card_text()})
-    _save_board(str(cwd), name, f"# Tasks — {name}", cols)
-
-    # Запись в topics.json — session_key синтезируем из GROUP_CHAT_ID (TG-операции тихо
-    # упадут при недоступном thread — wrapped в try/except в _run_card; web всё видит через ctx).
-    group_chat_id = ctx.get("GROUP_CHAT_ID", 0)
-    session_key = f"{group_chat_id}:{ts}"
-    if session_key in ctx["topics"]:
-        return web.json_response({"error": "коллизия session_key, повтори"}, status=409)
-    ctx["topics"][session_key] = {
-        "project": name,
-        "cwd": str(cwd),
-        "model": ctx.get("DEFAULT_MODEL", "sonnet"),
-    }
-    ctx["save_topics"]()
-
-    # Резервируем замок СИНХРОННО до первого await (против гонки повторного клика)
-    if ctx["running"].get(session_key) is not None:
-        return web.json_response({"error": "session_key уже занят"}, status=409)
-    ctx["running"][session_key] = True
-
-    # Собираем project-dict как его видит F1-инфраструктура и спавним онбординг
-    project = {
-        "id": cwd.name,
-        "name": name,
-        "cwd": str(cwd),
-        "model": ctx.get("DEFAULT_MODEL", "sonnet"),
-        "tg_thread": session_key,
-        "is_free": False,
-    }
-    card = {"id": card_id, "text": _NEW_PROJECT_PROMPT}
-    asyncio.create_task(_run_card(ctx, req.app, project, card, session_key))
-
-    return web.json_response({
-        "ok": True,
-        "id": project["id"],
-        "name": name,
-        "session_key": session_key,
-        "cwd": str(cwd),
-    })
-
-
 async def api_move_task(req: web.Request):
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -3680,8 +3605,6 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/session-context", api_project_session_context)
         # Память проекта (read: Фича B)
         app.router.add_get("/api/projects/{id}/memory", api_project_memory)
-        # Новый проект: создание из шаблонов + инициализация
-        app.router.add_post("/api/projects/new", api_new_project)
         # Переименование папки проекта (kebab-case slug)
         app.router.add_post("/api/projects/{id}/rename", api_project_rename)
         # Быстрая проверка структуры проекта без агента
