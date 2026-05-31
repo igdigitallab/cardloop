@@ -24,11 +24,17 @@ import aiohttp
 from aiohttp import web
 
 
+# ─────────────────────────── именованные константы ───────────────────────────
+
+_BUS_QUEUE_SIZE = 100   # maxsize per-session очереди шины; переполнена → drop (не блокирует)
+_BUS_GLOBAL_SIZE = 200  # maxsize глобальной очереди шины (все сессии)
+
+
 # ─────────────────────────── activity bus ───────────────────────────
 #
 # Лёгкая in-process шина событий: dict[session_key -> set[asyncio.Queue]].
 # Всё в одном event loop → обычные set/dict, без asyncio.Lock.
-# Очередь maxsize=100: переполнена → drop (put_nowait в try/except), продюсер не блокируется.
+# Очередь maxsize=_BUS_QUEUE_SIZE: переполнена → drop (put_nowait в try/except), продюсер не блокируется.
 
 _bus: dict[str, set[asyncio.Queue]] = {}
 # Глобальные подписчики — получают ВСЕ события всех сессий, с инжектированным session_key.
@@ -38,7 +44,7 @@ _bus_global: set[asyncio.Queue] = set()
 
 def _bus_subscribe(session_key: str) -> "asyncio.Queue[dict]":
     """Создаёт очередь и регистрирует подписчика на session_key."""
-    q: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
+    q: asyncio.Queue[dict] = asyncio.Queue(maxsize=_BUS_QUEUE_SIZE)
     _bus.setdefault(session_key, set()).add(q)
     return q
 
@@ -54,7 +60,7 @@ def _bus_unsubscribe(session_key: str, q: "asyncio.Queue[dict]") -> None:
 
 def _bus_subscribe_global() -> "asyncio.Queue[dict]":
     """Подписка на ВСЕ события всех сессий (события приходят с полем session_key)."""
-    q: asyncio.Queue[dict] = asyncio.Queue(maxsize=200)
+    q: asyncio.Queue[dict] = asyncio.Queue(maxsize=_BUS_GLOBAL_SIZE)
     _bus_global.add(q)
     return q
 

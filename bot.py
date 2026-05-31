@@ -77,6 +77,10 @@ GLASSES_MODEL = os.environ.get("GLASSES_MODEL", "sonnet")  # короткие о
 
 MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku"}  # CLI резолвит алиасы в latest
 
+# ─────────────────────────── именованные константы ───────────────────────────
+TG_CHUNK = 4000          # макс. размер одного TG-сообщения (символы)
+GLASSES_REPLY_MAX = 300  # макс. ответ для G2 HUD (один экран ≈ 400, но оставляем место на статус-строки)
+
 # Operating-brief: инжектится в КАЖДУЮ сессию (все топики), поверх главного и проектного CLAUDE.md.
 # ⚠️ nudge — ТОЛЬКО то, что реально отличает Telegram от терминала. Всё про «как работать»
 # (scan, хирургичность, права, необратимое) живёт в CLAUDE.md (project + ~/CLAUDE.md) — агент
@@ -238,7 +242,7 @@ async def _tg_call(factory, tries=6):
 
 async def send(context, chat, thread, text, **kw):
     # Чанкуем по строкам (не вслепую по байтам) — чтобы не резать HTML-теги/entity на границе.
-    for chunk in _smart_chunks(text, 4000):
+    for chunk in _smart_chunks(text, TG_CHUNK):
         try:
             await _tg_call(lambda c=chunk: context.bot.send_message(
                 chat, c, message_thread_id=thread or None, **kw))
@@ -328,7 +332,7 @@ async def report_error(context, chat, thread, where: str, exc: BaseException):
     try:
         plain = f"💥 Краш\nГде: {where}\nЧто: {type(exc).__name__}: {exc}\n\n{block}"
         await _tg_call(lambda: context.bot.send_message(
-            chat, plain[:4000], message_thread_id=thread or None))
+            chat, plain[:TG_CHUNK], message_thread_id=thread or None))
     except Exception as send_exc:
         print(f"[report_error] не смог отправить отчёт в TG ({type(send_exc).__name__}): {exc!r}")
 
@@ -717,9 +721,9 @@ async def run_for_glasses(project_name: str, prompt: str) -> dict:
     finally:
         running.pop(key, None)
     reply = "\n".join(answer_parts).strip() or "(агент завершил без текста)"
-    # G2 HUD: жёстко режем до 300 символов (один экран ≈ 400, но оставляем место на статус-строки)
-    if len(reply) > 300:
-        reply = reply[:297] + "..."
+    # G2 HUD: жёстко режем до GLASSES_REPLY_MAX символов
+    if len(reply) > GLASSES_REPLY_MAX:
+        reply = reply[:GLASSES_REPLY_MAX - 3] + "..."
     return {"reply": reply, "session_id": sid, "project": display, "cwd": cwd}
 
 
