@@ -524,6 +524,7 @@ export default function App() {
                   project={p}
                   onProjectsReload={loadProjects}
                   onSplitCreate={p.is_free && !splitId ? () => handleSplitCreate(p.id) : undefined}
+                  isActive={isActive}
                 />
               </div>
               {splitProject && (
@@ -534,6 +535,7 @@ export default function App() {
                       project={splitProject}
                       onProjectsReload={loadProjects}
                       onSplitClose={() => handleSplitClose(p.id)}
+                      isActive={isActive}
                     />
                   </div>
                 </>
