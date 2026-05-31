@@ -330,11 +330,11 @@ def _load_prompts(ctx: dict) -> list:
 def _save_prompts(ctx: dict, prompts: list):
     _prompts_path(ctx).write_text(json.dumps(prompts, ensure_ascii=False, indent=2))
 
-async def api_prompts_list(req: web.Request):
+async def api_prompts_list(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     return web.json_response({"prompts": _load_prompts(ctx)})
 
-async def api_prompt_create(req: web.Request):
+async def api_prompt_create(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     data = await req.json()
     title = (data.get("title") or "").strip()
@@ -348,14 +348,14 @@ async def api_prompt_create(req: web.Request):
     _save_prompts(ctx, prompts)
     return web.json_response({"prompt": prompt})
 
-async def api_prompt_delete(req: web.Request):
+async def api_prompt_delete(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     prompts = [p for p in _load_prompts(ctx) if p.get("id") != pid]
     _save_prompts(ctx, prompts)
     return web.json_response({"ok": True})
 
-async def api_prompt_update(req: web.Request):
+async def api_prompt_update(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     data = await req.json()
@@ -466,11 +466,11 @@ def _find_vault_specs_dir(ctx: dict, project_name: str, cwd: str) -> Path | None
 
 # ─────────────────────────── API handlers ───────────────────────────
 
-async def api_health(req: web.Request):
+async def api_health(req: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-async def api_login(req: web.Request):
+async def api_login(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     # Rate-limit по IP (пеерд чтением тела)
     ip = req.remote or "unknown"
@@ -499,17 +499,17 @@ async def api_login(req: web.Request):
     return resp
 
 
-async def api_logout(req: web.Request):
+async def api_logout(req: web.Request) -> web.Response:
     resp = web.json_response({"ok": True})
     resp.del_cookie("cops_auth", path="/")
     return resp
 
 
-async def api_me(req: web.Request):
+async def api_me(req: web.Request) -> web.Response:
     return web.json_response({"authed": True})
 
 
-async def api_projects(req: web.Request):
+async def api_projects(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     projects = _collect_projects(ctx)
 
@@ -538,7 +538,7 @@ async def api_projects(req: web.Request):
     return web.json_response({"projects": list(enriched)})
 
 
-async def api_project_claude_md(req: web.Request):
+async def api_project_claude_md(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -558,7 +558,7 @@ async def api_project_claude_md(req: web.Request):
     return web.json_response({"path": str(path), "content": content, "exists": exists})
 
 
-async def api_project_readme(req: web.Request):
+async def api_project_readme(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -606,12 +606,12 @@ async def _write_doc(req: web.Request, resolve_path):
     return web.json_response({"path": str(path), "content": content, "exists": True})
 
 
-async def api_project_claude_md_write(req: web.Request):
+async def api_project_claude_md_write(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/claude-md — перезаписать CLAUDE.md."""
     return await _write_doc(req, lambda cwd: cwd / "CLAUDE.md")
 
 
-async def api_project_readme_write(req: web.Request):
+async def api_project_readme_write(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/readme — перезаписать существующий README (или создать README.md)."""
     def _pick(cwd: Path) -> Path:
         for name in _README_CANDIDATES:
@@ -637,7 +637,7 @@ def _spec_dirs(ctx: dict, project: dict) -> list[tuple[Path, str]]:
     return dirs
 
 
-async def api_project_specs(req: web.Request):
+async def api_project_specs(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -658,7 +658,7 @@ async def api_project_specs(req: web.Request):
     return web.json_response({"specs": specs})
 
 
-async def api_project_spec_content(req: web.Request):
+async def api_project_spec_content(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     spec_name = req.match_info["name"]
@@ -686,7 +686,7 @@ async def api_project_spec_content(req: web.Request):
     return web.json_response({"error": "not found"}, status=404)
 
 
-async def api_project_logs(req: web.Request):
+async def api_project_logs(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/logs — runtime logs via log_cmd from topics.json."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -775,7 +775,7 @@ def _scan_skills_dir(skills_dir: Path) -> list[dict]:
     return out
 
 
-async def api_project_skills(req: web.Request):
+async def api_project_skills(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/skills → {global: [...], project: [...]}.
     Парсит SKILL.md из ~/.claude/skills/ (global) и <cwd>/.claude/skills/ (project)."""
     ctx = req.app["ctx"]
@@ -789,7 +789,7 @@ async def api_project_skills(req: web.Request):
     return web.json_response({"global": global_skills, "project": project_skills})
 
 
-async def api_project_activity(req: web.Request):
+async def api_project_activity(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -1306,7 +1306,7 @@ async def _scan_and_ingest(project: dict, ctx: dict | None = None) -> dict:
     return {"ok": True, "scanned": len(errors), "added": added, "updated": updated}
 
 
-async def api_project_scan_errors(req: web.Request):
+async def api_project_scan_errors(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/scan-errors — ручной запуск сканера для одного проекта."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -1320,7 +1320,7 @@ async def api_project_scan_errors(req: web.Request):
     return web.json_response(res)
 
 
-async def api_project_incidents(req: web.Request):
+async def api_project_incidents(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/incidents — счётчик активных инцидентов (для бейджа в сайдбаре).
     Активные = err-карточки в Failed/Review/InProgress (не в Done)."""
     ctx = req.app["ctx"]
@@ -1377,7 +1377,7 @@ def _board_payload(cwd: str) -> dict:
     return {"columns": columns, "done_count": done_count, "exists": tp.exists()}
 
 
-async def api_project_tasks(req: web.Request):
+async def api_project_tasks(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -1413,7 +1413,7 @@ async def api_project_tasks(req: web.Request):
     return web.json_response(_board_payload(cwd))
 
 
-async def api_create_task(req: web.Request):
+async def api_create_task(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -1695,7 +1695,7 @@ _NEW_PROJECT_PROMPT = """🚀 Это новый проект, инициализ
 Веди диалог по шагам, не вали скриптом. Не задавай 10 вопросов разом — 3-5 точечных за раз."""
 
 
-async def api_move_task(req: web.Request):
+async def api_move_task(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -1777,7 +1777,7 @@ async def api_move_task(req: web.Request):
     return web.json_response(_board_payload(cwd))
 
 
-async def api_delete_task(req: web.Request):
+async def api_delete_task(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -1794,7 +1794,7 @@ async def api_delete_task(req: web.Request):
     return web.json_response(_board_payload(cwd))
 
 
-async def api_update_task(req: web.Request):
+async def api_update_task(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -1837,7 +1837,7 @@ async def api_update_task(req: web.Request):
     return web.json_response(_board_payload(cwd))
 
 
-async def api_tasks_done(req: web.Request):
+async def api_tasks_done(req: web.Request) -> web.Response:
     """Содержимое архива DONE.md — грузится только по запросу (сессии его не читают)."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -1915,7 +1915,7 @@ import uuid as _uuid
 _FREE_DEFAULT_CWD = str(Path.home())
 
 
-async def api_free_create(req: web.Request):
+async def api_free_create(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     try:
         body = await req.json()
@@ -1943,7 +1943,7 @@ async def api_free_create(req: web.Request):
     return web.json_response({"id": fid, **free[fid]})
 
 
-async def api_free_rename(req: web.Request):
+async def api_free_rename(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     fid = req.match_info["id"]
     free = _load_free_chats(ctx)
@@ -1972,7 +1972,7 @@ async def api_free_rename(req: web.Request):
     return web.json_response({"ok": True, "id": fid, "label": label})
 
 
-async def api_free_delete(req: web.Request):
+async def api_free_delete(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     fid = req.match_info["id"]
     free = _load_free_chats(ctx)
@@ -2054,7 +2054,7 @@ async def _fetch_oauth_usage():
         return None
 
 
-async def api_usage(req: web.Request):
+async def api_usage(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     now = time.time()
     async with _usage_lock:
@@ -2093,7 +2093,7 @@ async def api_usage(req: web.Request):
 _ALLOWED_MODELS: set[str] = {"opus", "sonnet", "haiku"}
 
 
-async def api_project_set_model(req: web.Request):
+async def api_project_set_model(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -2141,7 +2141,7 @@ async def api_project_set_model(req: web.Request):
 # Дефолтное сообщение: "wip: YYYY-MM-DD HH:MM" (если поле message пустое).
 # Возвращает {ok, committed, pushed, log}; на ошибке status 500 + {error, log}.
 
-async def api_project_upload(req: web.Request):
+async def api_project_upload(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/upload — multipart файл → data/inbox/ → {path, name, size}."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -2187,7 +2187,7 @@ async def api_project_upload(req: web.Request):
     return web.json_response({"path": str(dest), "name": filename, "size": size})
 
 
-async def api_project_git_sync(req: web.Request):
+async def api_project_git_sync(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -2291,7 +2291,7 @@ def _detect_test_cmd(cwd: str):
     return None
 
 
-async def api_project_test(req: web.Request):
+async def api_project_test(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -2401,7 +2401,7 @@ def _resolve_safe(cwd: str, rel: str):
     return target, cwd_resolved
 
 
-async def api_project_files(req: web.Request):
+async def api_project_files(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/files?path=<rel> — листинг директории."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -2516,7 +2516,7 @@ def _resolve_global_safe(home: Path, rel: str):
     return target
 
 
-async def api_global_files(req: web.Request):
+async def api_global_files(req: web.Request) -> web.Response:
     """GET /api/global/files?path=<rel> — листинг от $HOME."""
     home = Path.home()
     rel = req.rel_url.query.get("path", "")
@@ -2577,7 +2577,7 @@ async def api_global_file(req: web.Request) -> web.Response:
     return _read_file_content(target, home, rel)
 
 
-async def api_global_file_write(req: web.Request):
+async def api_global_file_write(req: web.Request) -> web.Response:
     """POST /api/global/file?path=<rel> — записать содержимое файла."""
     home = Path.home()
     rel = req.rel_url.query.get("path", "")
@@ -2600,7 +2600,7 @@ async def api_global_file_write(req: web.Request):
     return web.json_response({"ok": True, "path": rel})
 
 
-async def api_card_run(req: web.Request):
+async def api_card_run(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/tasks/{card}/run — сайдкар из DATA/runs/<card>.md (404-safe)."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -2664,7 +2664,7 @@ def _session_preview(jsonl_path: Path) -> str:
     return "(без названия)"
 
 
-async def api_project_sessions(req: web.Request):
+async def api_project_sessions(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/sessions — список сессий SDK для проекта."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -2709,7 +2709,7 @@ async def api_project_sessions(req: web.Request):
     return web.json_response({"sessions": sessions})
 
 
-async def api_project_session_label(req: web.Request):
+async def api_project_session_label(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/sessions/{sid}/label  {label}
     Ручной лейбл ЛЮБОЙ сессии (наш слой поверх SDK). Пустой label → снять лейбл.
     Хранилище глобальное по session_id (data/session_labels.json), id проекта — только маршрут."""
@@ -2736,7 +2736,7 @@ async def api_project_session_label(req: web.Request):
     return web.json_response({"ok": True, "session_id": sid, "label": label or None})
 
 
-async def api_project_set_session(req: web.Request):
+async def api_project_set_session(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/session — переключить или сбросить сессию."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -2858,7 +2858,7 @@ def _session_context_tokens(jsonl_path: Path) -> int:
     return last
 
 
-async def api_project_session_history(req: web.Request):
+async def api_project_session_history(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/session-history?session_id=<опц.> — лента активной (или указанной) сессии."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -2898,7 +2898,7 @@ async def api_project_session_history(req: web.Request):
 # Disconnect-устойчивость: если клиент закрыл вкладку (ConnectionResetError при write),
 # генератор run_engine продолжает работу до конца, session_id сохраняется, замок снимается.
 
-async def api_project_chat(req: web.Request):
+async def api_project_chat(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
 
@@ -3029,7 +3029,7 @@ async def api_project_chat(req: web.Request):
 
 # ─────────────────────────── Стоп-эндпоинт (chat/stop) ───────────────────────
 
-async def api_project_chat_stop(req: web.Request):
+async def api_project_chat_stop(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/chat/stop — прерывает текущий прогон агента.
     Кладёт вызов client.interrupt() на реальный SDK-клиент из ctx["running"].
     Возвращает {ok, stopped}; stopped=false если нечего прерывать."""
@@ -3052,7 +3052,7 @@ async def api_project_chat_stop(req: web.Request):
     return web.json_response({"ok": True, "stopped": False})
 
 
-async def api_project_running(req: web.Request):
+async def api_project_running(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/running — есть ли активный прогон агента в этом проекте."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -3131,7 +3131,7 @@ def _session_context(jsonl_path: Path) -> dict:
     return {"read": read, "edited": edited, "commands": commands}
 
 
-async def api_project_session_context(req: web.Request):
+async def api_project_session_context(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/session-context?session_id=<опц.>
     Возвращает {read, edited, commands, session_id} для активной (или указанной) сессии."""
     ctx = req.app["ctx"]
@@ -3162,7 +3162,7 @@ async def api_project_session_context(req: web.Request):
 _MEMORY_MAX_SIZE = 256 * 1024  # 256 КБ
 
 
-async def api_project_memory(req: web.Request):
+async def api_project_memory(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/memory
     Возвращает {files:[{name, content}], exists} из ~/.claude/projects/<cwd>/memory/*.md.
     MEMORY.md — первым в списке (индекс)."""
@@ -3258,7 +3258,7 @@ def _render_template(template_name: str, vars: dict, here: Path) -> str:
     return text
 
 
-async def api_new_project(req: web.Request):
+async def api_new_project(req: web.Request) -> web.Response:
     """POST /api/projects/new — создаёт новую папку проекта со стартовыми шаблонами и
     запускает инициализацию через run_engine (как F1-карточка)."""
     ctx = req.app["ctx"]
@@ -3360,7 +3360,7 @@ async def api_new_project(req: web.Request):
     })
 
 
-async def api_project_rename(req: web.Request):
+async def api_project_rename(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/rename  {slug: str}
     Переименовывает папку проекта и обновляет все записи topics.json с тем же cwd."""
     ctx = req.app["ctx"]
@@ -3418,7 +3418,7 @@ async def api_project_rename(req: web.Request):
     })
 
 
-async def api_project_health(req: web.Request):
+async def api_project_health(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/health — быстрая проверка структуры проекта без агента."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -3492,7 +3492,7 @@ async def api_project_health(req: web.Request):
     return web.json_response({"items": items, "score": score, "total": total, "color": color})
 
 
-async def api_project_audit(req: web.Request):
+async def api_project_audit(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/audit — создаёт карточку аудита и запускает её через run_engine."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -3549,7 +3549,7 @@ _UPGRADE_PROMPT_TPL = """🔧 Подтянуть проект «{name}» до с
 """
 
 
-async def api_project_upgrade(req: web.Request):
+async def api_project_upgrade(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/upgrade — карточка «🔧 Подтянуть до стандарта»: дополняет CLAUDE.md/TASKS.md/README/.gitignore по шаблонам, существующее не переписывает."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]

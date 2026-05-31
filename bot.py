@@ -14,6 +14,7 @@ import subprocess
 import time
 import traceback
 from pathlib import Path
+from typing import AsyncGenerator
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -415,7 +416,7 @@ def audit(project: str, kind: str, text: str):
 #   run_engine заменяет его реальным ClaudeSDKClient сразу после создания.
 #   Снятие running.pop(k) — ответственность адаптера (в finally).
 
-async def run_engine(
+async def run_engine(  # type: ignore[return]
     project_name: str,
     cwd: str,
     prompt: str,
@@ -424,7 +425,7 @@ async def run_engine(
     system_prompt: dict = None,
     env: dict = None,
     resume_session_id: str = None,
-):
+) -> "AsyncGenerator[dict, None]":
     """Async-генератор событий SDK. Единственный источник истины для выполнения промпта.
 
     Аргументы:
