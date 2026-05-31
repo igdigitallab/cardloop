@@ -3014,6 +3014,58 @@ async def api_project_audit(req: web.Request):
     return web.json_response({"ok": True, "card_id": audit_card["id"], "started": True})
 
 
+_UPGRADE_PROMPT_TPL = """🔧 Подтянуть проект «{name}» до стандарта кокпита.
+
+ВАЖНО: НЕ переписывай существующее содержимое CLAUDE.md/TASKS.md/README.md/.gitignore — только ДОПОЛНЯЙ недостающее. Если файла нет — создай из шаблона.
+
+Эталоны лежат в `/home/igor/claude-ops-bot/templates/`:
+- `CLAUDE.md.tpl` — образец структуры, **обязательно** содержит секцию «Правила работы в кокпите» — её скопируй в CLAUDE.md проекта (если ещё нет), переменные `{{{{name}}}}` замени на актуальное имя.
+- `TASKS.md.tpl` — преамбула формата карточек. Если в текущем TASKS.md нет преамбулы с фразой «Формат карточки» — добавь её ПЕРЕД первой `##` колонкой.
+- `README.md.tpl` — если README отсутствует, создай минимальный.
+- `.gitignore.tpl` — если в текущем нет `.env` — добавь раздел Secrets.
+
+Шаги:
+1. Прочитай `CLAUDE.md`, `TASKS.md`, `README.md`, `.gitignore` (если есть) в текущем cwd.
+2. Прочитай шаблоны в `/home/igor/claude-ops-bot/templates/*.tpl`.
+3. Для каждого недостающего блока — добавь его, сохранив весь существующий контент.
+4. НЕ ТРОГАЙ карточки в TASKS.md — только преамбулу выше первой `##`.
+5. В конце — короткое резюме в чате: «Добавил/обновил: A, B, C; не трогал: X, Y».
+"""
+
+
+async def api_project_upgrade(req: web.Request):
+    """POST /api/projects/{id}/upgrade — карточка «🔧 Подтянуть до стандарта»: дополняет CLAUDE.md/TASKS.md/README/.gitignore по шаблонам, существующее не переписывает."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    run_engine = ctx.get("run_engine")
+    session_key = project["tg_thread"]
+    cwd = project["cwd"]
+    name = project["name"]
+
+    if ctx["running"].get(session_key) is not None:
+        return web.json_response({"error": "проект занят"}, status=409)
+
+    card = {"id": _new_card_id(), "text": f"🔧 Подтянуть «{name}» до стандарта"}
+    prompt = _UPGRADE_PROMPT_TPL.format(name=name)
+
+    async with _get_board_lock(cwd):
+        _, preamble, cols = _load_board(cwd)
+        cols["in_progress"].append(card)
+        _save_board(cwd, name, preamble, cols)
+
+    if run_engine is None:
+        return web.json_response({"ok": True, "card_id": card["id"], "started": False})
+
+    ctx["running"][session_key] = True
+    card["text"] = prompt
+    asyncio.create_task(_run_card(ctx, req.app, project, card, session_key))
+    return web.json_response({"ok": True, "card_id": card["id"], "started": True})
+
+
 # ─────────────────────────── статика (SPA) ───────────────────────────
 
 PLACEHOLDER_HTML = (
@@ -3138,6 +3190,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/health", api_project_health)
         # Аудит проекта: создаёт карточку + запускает run_engine
         app.router.add_post("/api/projects/{id}/audit", api_project_audit)
+        # «🔧 Подтянуть до стандарта» — дополняет существующие файлы шаблонами без перезаписи
+        app.router.add_post("/api/projects/{id}/upgrade", api_project_upgrade)
 
         # Статика — всё остальное (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)

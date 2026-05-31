@@ -256,6 +256,9 @@ export const api = {
   auditProject: (id: string) =>
     apiFetch<{ ok: boolean; card_id: string }>(`/api/projects/${id}/audit`, { method: 'POST' }),
 
+  upgradeProject: (id: string) =>
+    apiFetch<{ ok: boolean; card_id: string }>(`/api/projects/${id}/upgrade`, { method: 'POST' }),
+
   // Git: commit (если dirty) + push одной кнопкой
   gitSync: (id: string, message?: string) =>
     apiFetch<{ ok: boolean; committed: boolean; pushed: boolean; message: string | null; log: string }>(

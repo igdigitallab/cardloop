@@ -27,3 +27,4 @@ web/dist/
 # --- os ---
 .DS_Store
 Thumbs.db
+.claude/

@@ -54,8 +54,24 @@ export function ProjectStructureCard({ projectId }: Props) {
     }
   }
 
-  function handleFix() {
-    alert('скоро')
+  const [upgradeBusy, setUpgradeBusy] = useState(false)
+  async function handleFix() {
+    if (upgradeBusy) return
+    setUpgradeBusy(true)
+    setAuditMsg('')
+    try {
+      await api.upgradeProject(projectId)
+      setAuditMsg('Карточка апгрейда создана')
+    } catch (e: unknown) {
+      const status = (e as { status?: number }).status
+      if (status === 409) {
+        setAuditMsg('Проект занят — попробуй позже')
+      } else {
+        setAuditMsg('Ошибка: ' + (e instanceof Error ? e.message : String(e)))
+      }
+    } finally {
+      setUpgradeBusy(false)
+    }
   }
 
   if (loading) return null
@@ -113,9 +129,10 @@ export function ProjectStructureCard({ projectId }: Props) {
             className="git-sync-btn"
             style={{ fontSize: 12, padding: '5px 12px', color: 'var(--text2)' }}
             onClick={handleFix}
-            title="Автоматически подтянуть проект до стандарта"
+            disabled={upgradeBusy}
+            title="Дополнить CLAUDE.md/TASKS.md/README/.gitignore по шаблону, не переписывая существующее"
           >
-            🔧 Подтянуть до стандарта
+            {upgradeBusy ? '⏳…' : '🔧 Подтянуть до стандарта'}
           </button>
         )}
         {auditMsg && (
