@@ -1,6 +1,8 @@
+> README = что это и как запустить. Карта кода → ARCHITECTURE.md. Правила работы и gotchas → CLAUDE.md. API → docs/API.md. Вклад и настройка → CONTRIBUTING.md.
+
 # Claude-Ops
 
-**Полноценная IDE-среда для управления проектами через Claude Agent SDK** — без терминала, с любого устройства. Один движок, три канала ввода: браузерный кокпит, Telegram, канбан-карточки. Full-auto: сформулировал задачу → агент сам диагностирует, правит код, деплоит, отчитывается.
+**IDE-среда для управления проектами через Claude Agent SDK** — без терминала, с любого устройства. Один движок, три канала ввода: браузерный кокпит, Telegram, канбан-карточки. Full-auto: сформулировал задачу → агент диагностирует, правит код, деплоит, отчитывается.
 
 ```
  Кокпит    ──┐
@@ -10,11 +12,13 @@
 
 ---
 
-## Кокпит (claude-ops.coscore.us)
+## Три канала
 
-Браузерная среда разработки — SPA на React + Vite, бэкенд aiohttp.
+### Кокпит (claude-ops.coscore.us)
 
-**Сайдбар:** проекты с DnD-сортировкой, collapse, unread-бейджи. **Вкладки-проекты** сверху (как браузер) — переключение без потери состояния.
+Браузерная IDE — SPA на React + Vite, бэкенд aiohttp.
+
+**Сайдбар:** проекты с DnD-сортировкой, collapse, unread-бейджи. **Вкладки-проекты** сверху — переключение без потери состояния.
 
 **Табы по проекту (левая панель ~55%):**
 
@@ -43,15 +47,13 @@
 - Защита от потери данных (три слоя).
 
 **Дополнительно:**
-- Свободные чаты (без привязки к проекту), Split-view.
+- Свободные чаты (без привязки к проекту).
 - Глобальный файл-браузер (`$HOME`) с inline-редактированием.
 - Вложения: 📎, drag-drop, Ctrl+V.
 - Usage badge: лимиты подписки (5ч + неделя).
 - Создание проекта (шаблоны + онбординг-агент), аудит, upgrade, health-check, rename.
 
----
-
-## Telegram-канал
+### Telegram-канал
 
 Forum-группа «Development», @ziraclaudebot. **Каждый топик = проект** (привязка `thread_id → cwd`).
 
@@ -60,39 +62,9 @@ Forum-группа «Development», @ziraclaudebot. **Каждый топик = 
 - Файлы (до 20MB): документы и фото обрабатываются агентом.
 - Команды: `/reset` `/resume` `/model` `/project` `/newtopic` `/diff` `/cost` `/usage` `/stop` `/whoami`
 
----
+### Канбан-автозапуск
 
-## Движок
-
-`run_engine()` — async-генератор событий `{tool|text|result|rate_limit|error}`.
-
-- **Транспорт-независимый:** кокпит, Telegram, карточка — потребители одного потока.
-- **Общий замок** per-проект (гонка по cwd закрыта).
-- **Сквозные сессии** между каналами.
-- **Watchdog:** 5 мин тишины или 30 мин общих → авто-прерывание.
-- **Audit-лог:** каждая задача, каждая команда — `data/audit/`.
-
----
-
-## Архитектура
-
-Один systemd-процесс: PTB (Telegram long-polling) + aiohttp (кокпит).
-
-```
-claude-ops-bot.service
-  └─ bot.py             — Telegram-хендлеры, движок run_engine, реестр проектов
-      ├─ webapp.py       — aiohttp-кокпит, API, шина событий
-      │   └─ web/dist/   — React+Vite SPA
-      ├─ data/
-      │   ├─ topics.json     — привязка канал→проект (вечная)
-      │   ├─ sessions.json   — session_id (чистит /reset)
-      │   ├─ prompts.json    — библиотека промтов
-      │   ├─ audit/          — audit-лог
-      │   ├─ runs/           — результаты авто-запуска карточек
-      │   └─ inbox/          — загруженные файлы
-      ├─ templates/          — шаблоны новых проектов + reference
-      └─ tests/              — pytest (62 passed)
-```
+Перенос карточки в In Progress → `_run_card` в webapp.py запускает `run_engine` → результат в `data/runs/<card>.md` → карточка переходит в Review/Failed → пинг в TG-топик.
 
 ---
 
@@ -102,9 +74,32 @@ claude-ops-bot.service
 
 Движок читает `~/.claude/.credentials.json` (claudeAiOauth, выдаётся при входе через `claude login`).
 
-**Не задавай `ANTHROPIC_API_KEY`** ни в `.env`, ни в окружении — `bot.py` явно удаляет эту переменную при старте. Если переменная будет присутствовать в окружении (например, через systemd `Environment=`), SDK переключится на API pay-per-token биллинг вместо подписки.
+**Не задавай `ANTHROPIC_API_KEY`** ни в `.env`, ни в окружении — `bot.py` явно удаляет эту переменную при старте. Если она будет присутствовать, SDK переключится на API pay-per-token биллинг вместо подписки.
 
 **Доступ строго по `ALLOWED_USERS`** — только перечисленные Telegram user ID могут взаимодействовать с ботом и кокпитом.
+
+---
+
+## Быстрый старт
+
+```bash
+# 1. Clone
+git clone https://github.com/Zira777ru/claude-ops-bot.git && cd claude-ops-bot
+
+# 2. Python
+python3 -m venv venv && venv/bin/pip install -r requirements-dev.txt
+
+# 3. Config
+cp .env.example .env   # Edit: BOT_TOKEN, GROUP_CHAT_ID, ALLOWED_USERS, WEB_PASSWORD, WEB_COOKIE_SALT
+
+# 4. Frontend
+cd web && npm install && npm run build && cd ..
+
+# 5. Run
+venv/bin/python bot.py  # Cockpit → http://localhost:8787
+```
+
+Детали (тесты, lint, deploy) → [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
@@ -115,7 +110,7 @@ claude-ops-bot.service
 | **Кокпит** | `https://claude-ops.coscore.us` (Cloudflare Tunnel) / `192.168.0.114:8787` (LAN) |
 | **Telegram** | Forum-группа «Development», @ziraclaudebot |
 
-- **Auth кокпит:** `WEB_PASSWORD` в `.env` (пароль в Credentials.md).
+- **Auth кокпит:** `WEB_PASSWORD` в `.env`.
 - **Auth Telegram:** `ALLOWED_USERS` (whitelist по user ID).
 - **Auth SDK:** подписка (`~/.claude/.credentials.json`), **НЕ `ANTHROPIC_API_KEY`**.
 
@@ -127,11 +122,13 @@ claude-ops-bot.service
 # Логи
 sudo journalctl -u claude-ops-bot -f
 
-# Рестарт
-bash /home/igor/claude-ops-bot/restart-self.sh   # из агента (безопасный)
-sudo systemctl restart claude-ops-bot             # из терминала
+# Рестарт из агента (ЕДИНСТВЕННЫЙ безопасный способ)
+bash /home/igor/claude-ops-bot/restart-self.sh
 
-# Фронтенд
+# Рестарт из терминала
+sudo systemctl restart claude-ops-bot
+
+# Фронтенд (после правки web/)
 cd /home/igor/claude-ops-bot/web && npm run build
 
 # Тесты
@@ -144,13 +141,12 @@ cd /home/igor/claude-ops-bot && venv/bin/python -m pytest -q
 
 | Файл | Назначение |
 |---|---|
-| `CLAUDE.md` | **Истина по эксплуатации:** gotchas, операции, состояние фич |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Карта кода: где что искать, схема потока |
+| [CLAUDE.md](CLAUDE.md) | Правила работы и gotchas для агентов |
+| [docs/API.md](docs/API.md) | HTTP API reference (56 роутов) |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Вклад: setup, тесты, lint, commit-стиль |
 | `TASKS.md` | Живая доска (канбан) — бэклог и текущие задачи |
-| `DONE.md` | Архив завершённого (72+ карточки). Сессии НЕ читают. |
-| `specs/roadmap.md` | Милстоуны M1–M5, зависимости треков |
-| `specs/spec-002-*.md` | Спецификация кокпита |
-| `specs/spec-003-*.md` | Спецификация автономного контура |
-| `specs/vision-strategy.md` | Стратегия — **заморожено до M3** |
+| `DONE.md` | Архив завершённого. Сессии НЕ читают. |
 
 ---
 
