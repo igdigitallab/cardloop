@@ -18,6 +18,7 @@ import time
 import traceback as _tb
 from datetime import datetime
 from pathlib import Path
+from typing import AsyncGenerator, TypedDict
 
 import aiohttp
 from aiohttp import web
@@ -1465,8 +1466,125 @@ async def _git_diff_card(cwd: str) -> tuple[str, str]:
     return diff_full, diff_stat
 
 
-async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_key: str) -> None:
-    """Фоновая задача F1: выполняет карточку через run_engine, пишет сайдкар, переносит карточку."""
+# ─────────────────────────── AppCtx TypedDict ───────────────────────────
+# Аннотация полей ctx, используемых в _run_card и хелперах.
+# Рантайм — тот же dict, TypedDict только для проверки типов (mypy/pyright).
+
+class AppCtx(TypedDict, total=False):
+    topics: dict
+    sessions: dict
+    running: dict
+    costs: dict
+    rate_limits: dict
+    DATA: Path
+    HERE: Path
+    DEFAULT_MODEL: str
+    DEFAULT_CWD: str
+    VAULT_PROJECTS: Path
+    password: str
+    _auth_token: str
+    port: int
+    GROUP_CHAT_ID: int
+    save_sessions: object   # callable
+    save_topics: object     # callable
+    resolve_project: object  # callable
+    run_engine: object      # async generator factory
+    run_for_glasses: object  # callable
+    ptb_app: object
+    MODELS: dict
+    REGISTRY: dict
+
+
+# ─────────────────────────── _run_card helpers ───────────────────────────
+
+def _write_sidecar(
+    data_dir: Path,
+    card_id: str,
+    name: str,
+    prompt: str,
+    answer_text: str,
+    ok: bool,
+    exc_info: str | None,
+    diff_stat: str,
+    diff_full: str,
+) -> None:
+    """Записывает сайдкар результата карточки в DATA/runs/<card_id>.md."""
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    outcome = "ok" if ok else "fail"
+    try:
+        runs_dir = data_dir / "runs"
+        runs_dir.mkdir(exist_ok=True)
+        sidecar_lines = [
+            f"# Результат карточки {card_id}",
+            "",
+            f"**Проект:** {name}",
+            f"**Время:** {ts}",
+            f"**Исход:** {outcome}",
+            "",
+            "## Задача",
+            "",
+            prompt,
+            "",
+            "## Ответ агента",
+            "",
+            answer_text,
+        ]
+        if exc_info:
+            sidecar_lines += ["", "## Ошибка", "", f"```\n{exc_info}\n```"]
+        if diff_stat:
+            sidecar_lines += ["", "## Git diff --stat", "", f"```\n{diff_stat}\n```"]
+        if diff_full:
+            sidecar_lines += ["", "## Git diff (полный)", "", f"```diff\n{diff_full}\n```"]
+        (runs_dir / f"{card_id}.md").write_text("\n".join(sidecar_lines), encoding="utf-8")
+    except Exception as e:
+        print(f"[_run_card] ошибка записи сайдкара {card_id}: {e}")
+
+
+async def _move_card_after_run(
+    ctx: AppCtx,
+    cwd: str,
+    name: str,
+    card: dict,
+    card_id: str,
+    ok: bool,
+) -> None:
+    """Переносит карточку в Review (ok) или Failed (err) под board-lock."""
+    try:
+        target_col = "review" if ok else "failed"
+        async with _get_board_lock(cwd):
+            _, preamble, cols = _load_board(cwd)
+            moved = _pop_card(cols, card_id)
+            if moved is None:
+                moved = card
+            cols[target_col].append(moved)
+            _save_board(cwd, name, preamble, cols)
+    except Exception as e:
+        print(f"[_run_card] ошибка переноса карточки {card_id}: {e}")
+
+
+async def _notify_tg(ctx: AppCtx, session_key: str, prompt: str, ok: bool) -> None:
+    """Отправляет пинг в TG-топик о завершении карточки. Некритичен — ошибки логируются."""
+    try:
+        ptb = ctx.get("ptb_app")
+        if ptb is None:
+            return
+        parts = session_key.split(":", 1)
+        chat_id = int(parts[0])
+        thread_id = int(parts[1]) if len(parts) > 1 and parts[1] not in ("0", "") else None
+        icon = "✅" if ok else "❌"
+        short_text = (prompt[:60] + "…") if len(prompt) > 60 else prompt
+        target_label = "Review" if ok else "Failed"
+        await ptb.bot.send_message(
+            chat_id,
+            f"{icon} Карточка «{short_text}» → {target_label}",
+            message_thread_id=thread_id,
+        )
+    except Exception as e:
+        print(f"[_run_card] TG-пинг не удался: {e}")
+
+
+async def _run_card(ctx: AppCtx, webapp_app, project: dict, card: dict, session_key: str) -> None:
+    """Фоновая задача F1: оркестратор — выполняет карточку через run_engine, пишет сайдкар, переносит карточку."""
     run_engine = ctx.get("run_engine")
     cwd = project["cwd"]
     name = project["name"]
@@ -1533,68 +1651,15 @@ async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_ke
         # git diff после выполнения
         diff_full, diff_stat = await _git_diff_card(cwd)
 
-        # сайдкар DATA/runs/<card_id>.md (защищён — его падение НЕ должно держать замок)
-        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        # сайдкар DATA/runs/<card_id>.md
         answer_text = "\n".join(answer_parts).strip() or "(агент завершил без текстового ответа)"
-        outcome = "ok" if ok else "fail"
-        try:
-            runs_dir = DATA / "runs"
-            runs_dir.mkdir(exist_ok=True)
-            sidecar_lines = [
-                f"# Результат карточки {card_id}",
-                "",
-                f"**Проект:** {name}",
-                f"**Время:** {ts}",
-                f"**Исход:** {outcome}",
-                "",
-                "## Задача",
-                "",
-                prompt,
-                "",
-                "## Ответ агента",
-                "",
-                answer_text,
-            ]
-            if exc_info:
-                sidecar_lines += ["", "## Ошибка", "", f"```\n{exc_info}\n```"]
-            if diff_stat:
-                sidecar_lines += ["", "## Git diff --stat", "", f"```\n{diff_stat}\n```"]
-            if diff_full:
-                sidecar_lines += ["", "## Git diff (полный)", "", f"```diff\n{diff_full}\n```"]
-            (runs_dir / f"{card_id}.md").write_text("\n".join(sidecar_lines), encoding="utf-8")
-        except Exception as e:
-            print(f"[_run_card] ошибка записи сайдкара {card_id}: {e}")
+        _write_sidecar(DATA, card_id, name, prompt, answer_text, ok, exc_info, diff_stat, diff_full)
 
         # перенос карточки (перезагружаем доску — могла измениться пока агент работал)
-        try:
-            target_col = "review" if ok else "failed"
-            async with _get_board_lock(cwd):
-                _, preamble, cols = _load_board(cwd)
-                moved = _pop_card(cols, card_id)
-                if moved is None:
-                    moved = card
-                cols[target_col].append(moved)
-                _save_board(cwd, name, preamble, cols)
-        except Exception as e:
-            print(f"[_run_card] ошибка переноса карточки {card_id}: {e}")
+        await _move_card_after_run(ctx, cwd, name, card, card_id, ok)
 
-        # TG-пинг (некритичен — оборачиваем в try/except)
-        try:
-            ptb = ctx.get("ptb_app")
-            if ptb is not None:
-                parts = session_key.split(":", 1)
-                chat_id = int(parts[0])
-                thread_id = int(parts[1]) if len(parts) > 1 and parts[1] not in ("0", "") else None
-                icon = "✅" if ok else "❌"
-                short_text = (prompt[:60] + "…") if len(prompt) > 60 else prompt
-                target_label = "Review" if ok else "Failed"
-                await ptb.bot.send_message(
-                    chat_id,
-                    f"{icon} Карточка «{short_text}» → {target_label}",
-                    message_thread_id=thread_id,
-                )
-        except Exception as e:
-            print(f"[_run_card] TG-пинг не удался: {e}")
+        # TG-пинг (некритичен)
+        await _notify_tg(ctx, session_key, prompt, ok)
 
     finally:
         # Публикуем завершение прогона в шину (ПЕРЕД снятием замка)
