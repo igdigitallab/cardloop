@@ -69,3 +69,37 @@
 - [x] кокпит: запуск тестов проекта (автодетект pytest/npm/make, POST /test, вывод в Обзоре) <!--ops:f30032--> — 2026-05-30, детект+роутинг+not-detected проверены; реальный прогон суиты — на usere
 - [x] ⭐ F: «+ Новый проект» — кнопка в сайдбаре без форм/вопросов. Создаёт проект «Без названия» (cwd=$HOME/projects/untitled-<ts>, запись в topics.json). Авто-создаёт TASKS.md с одной карточкой «🚀 Инициализировать проект» и сразу запускает её (In Progress). Промт карточки — интерактивная сессия-онбординг: агент СНАЧАЛА спрашивает о проекте (что за проект, есть ли уже наработки в других папках/чатах, цели), сканирует упомянутые папки, потом вместе с пользователем создаёт: CLAUDE.md (описание + правила канбана + как формулировать задачи), TASKS.md с реальными задачами, specs/, .gitignore, README. Свободные чаты для инициации не нужны — этот флоу их заменяет. · 2026-05-31
 - [x] А ещё у меня такая идея. Когда создаёшь новую сессию в проекте, чтобы задался вопрос, допустим, такой отправить Промт, завершающий сессию? И да или нет, то есть такое, вот знаешь сообщение, модульное кно какое-нибудь, и там будет Промт, завершись ещё сохрани все там, допустим. Отметь выполненные задачи в этой сессии. Ну что-нибудь такое, вот у меня, кстати, есть такой примерно Промт. И жмут, да или нет, то есть. Просто иногда бывает, что там забываю сессии закрыть правильно, и некоторые задачи не получаются, не отмечены выполненными, которые были сделаны за период сессии. Или же там, допустим, лишние файлы лишнее что-нибудь такое созданное? Короче, надо каждую сессию правильно закрывать и прежде чем получается создать новую сессию, может быть, задавать вопрос, то есть отправить такой Промт или нет? · 2026-05-31
+
+## 2026-05-31 — Рефакторинг-проход (25 карточек, 5 Sonnet-агентов)
+### Security
+- Удалён дубликат api_new_project + двойной роут /api/projects/new (ops:c01dead)
+- Command injection в log_cmd/test_cmd: create_subprocess_shell → exec+shlex.split (ops:c02sec1)
+- Path traversal: валидация card_id (regex) во всех task-эндпоинтах (ops:c03sec2)
+- Auth: sha256 → scrypt + secure/httponly cookie + rate-limit 5/5min → 429 (ops:m06auth)
+### Backend refactor
+- glasses HTTP-транспорт вынесен в glasses_transport.py (run_for_glasses остался в bot.py) (ops:s03dead-be)
+- _run_card разбит на _write_sidecar/_move_card_after_run/_notify_tg + AppCtx TypedDict (ops:m01arch)
+- Дедуп: общий _sse_stream + _read_file_content (ops:m05dedup)
+- Убраны хардкоды /home/igor → Path.home() (ops:c04hard)
+- Магические числа → именованные константы (ops:s01magic)
+- Type hints: -> web.Response, run_engine -> AsyncGenerator (ops:s02types)
+### Frontend refactor
+- Общие примитивы: useAsyncLoad/useClickOutside/Modal/lib/storage (ops:s04hooks)
+- ErrorBoundary вокруг ProjectView и всех табов (ops:c06errb)
+- FileExplorer: дедуп FilesTab+GlobalFilesTab (300→20 LOC каждый) (ops:m04files)
+- alert/confirm/prompt → Toast/ConfirmModal/inline-модалки (ops:m07modal)
+- ChatTab 1242→330: ToolBlock/SessionSelector/SessionContextPanel + useChatStream (ops:m02chat)
+- App.tsx: useTabManager/useSplitView/useUnreadTracker (частично внедрены) (ops:m03app)
+- Perf: убран JSON.stringify-сравнение, isActive-guard на polling (ops:m10perf)
+- ARIA: role/aria-label/aria-selected + keyboard-навигация (ops:m08aria)
+- Удалены мёртвые табы SpecsTab/ReadmeTab/ActivityTab (ops:s03dead-fe)
+- VITE_BACKEND_URL env + light-тема (ops:s06vite)
+- catch(e:any)→catch(e)+instanceof; ChatSSEEvent (ops:s02types-fe)
+- styles.css 3084 стр → 10 partials в styles/ (ops:m09css)
+- i18n/ru.ts (~110 ключей) + ESLint/Prettier (ops:m11i18n)
+### OSS docs + тесты
+- LICENSE MIT (ops:c05lic)
+- .env.example sanitize + web/.env.example + CONTRIBUTING.md + README auth-warning (ops:s05oss)
+- docs/API.md — 56 роутов (ops:m12apidoc)
+- +93 теста (API доски/чат/rename/ingest/конкурентность/security): 207→300 passed (ops:m13tests)
+- ARCHITECTURE.md — карта кода для будущих сессий
