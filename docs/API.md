@@ -1,0 +1,169 @@
+# Claude-Ops HTTP API Reference
+
+Backend: `aiohttp`, port `WEB_PORT` (default `8787`).
+
+**Auth:** All `/api/*` endpoints require a valid `cops_auth` cookie (scrypt-derived from `WEB_PASSWORD`)
+except `/api/health` and `/api/login` which are public.
+Cookie is obtained via `POST /api/login` and cleared via `POST /api/logout`.
+
+---
+
+## Auth / Session
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/health` | Health check — always returns `{"ok":true}` | No |
+| `POST` | `/api/login` | Authenticate with `{"password":"..."}`, sets `cops_auth` cookie | No |
+| `POST` | `/api/logout` | Clear `cops_auth` cookie | Yes |
+| `GET` | `/api/me` | Current auth status | Yes |
+
+---
+
+## Проекты (Projects)
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects` | List all projects (from `data/topics.json`, deduped by cwd) | Yes |
+| `POST` | `/api/projects/new` | Create new project: makes `~/projects/untitled-<ts>/`, adds to `topics.json`, spawns onboarding card in In Progress | Yes |
+| `GET` | `/api/projects/{id}/claude-md` | Read project `CLAUDE.md` | Yes |
+| `POST` | `/api/projects/{id}/claude-md` | Write project `CLAUDE.md` | Yes |
+| `GET` | `/api/projects/{id}/readme` | Read project `README.md` | Yes |
+| `POST` | `/api/projects/{id}/readme` | Write project `README.md` | Yes |
+| `GET` | `/api/projects/{id}/specs` | List spec files in project | Yes |
+| `GET` | `/api/projects/{id}/specs/{name}` | Read a specific spec file by name | Yes |
+| `GET` | `/api/projects/{id}/logs` | Run `log_cmd` from `topics.json` (timeout 8s, last 300 lines) — `{lines, configured, cmd}` | Yes |
+| `GET` | `/api/projects/{id}/activity` | Recent activity log for the project | Yes |
+| `GET` | `/api/projects/{id}/running` | Whether the agent is currently running for this project | Yes |
+| `POST` | `/api/projects/{id}/model` | Set active model for next request — `{"model":"sonnet\|opus\|haiku"}` | Yes |
+| `POST` | `/api/projects/{id}/git/sync` | Commit dirty files + push (one-button sync) | Yes |
+| `POST` | `/api/projects/{id}/test` | Run tests (auto-detects pytest / npm test / make test) | Yes |
+| `POST` | `/api/projects/{id}/upload` | Upload file attachment (multipart, max 20MB) to `data/inbox/` | Yes |
+| `GET` | `/api/projects/{id}/skills` | List available agent skills (global `~/.claude/skills/` + project `.claude/skills/`) | Yes |
+| `POST` | `/api/projects/{id}/scan-errors` | Trigger error scanner: creates Failed cards for new incidents | Yes |
+| `GET` | `/api/projects/{id}/incidents` | Count active error/incident cards in the project | Yes |
+| `POST` | `/api/projects/{id}/rename` | Rename project folder: `{"slug":"new-name"}` (kebab-case, `^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$`); 409 if busy or folder exists | Yes |
+| `GET` | `/api/projects/{id}/health` | Structural health check (6 points: CLAUDE.md, cockpit rules, TASKS.md preamble, README, .gitignore/.env, .git) — `{color:"green\|yellow\|red", checks:[...]}` | Yes |
+| `POST` | `/api/projects/{id}/audit` | Spawn audit card in In Progress; agent walks `templates/reference/audit-prompt.md` and creates issue cards | Yes |
+| `POST` | `/api/projects/{id}/upgrade` | Spawn upgrade card: supplements existing CLAUDE.md / TASKS.md / README / .gitignore from templates without overwriting | Yes |
+
+---
+
+## Доска / Tasks (Kanban)
+
+Source of truth: `TASKS.md` in the project root. Sections `## Backlog / In Progress / Review / Failed` are columns; cards are markdown list items `- [x] text <!--ops:ID-->`.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects/{id}/tasks` | Parse `TASKS.md` → return all cards grouped by column | Yes |
+| `POST` | `/api/projects/{id}/tasks` | Create new card in Backlog — `{"text":"..."}` | Yes |
+| `GET` | `/api/projects/{id}/tasks/done` | Read archived cards from `DONE.md` | Yes |
+| `POST` | `/api/projects/{id}/tasks/{card}/move` | Move card to another column — `{"to":"Backlog\|In Progress\|Review\|Failed\|done"}`. Moving to **In Progress** auto-starts `run_engine`; moving to `done` archives to `DONE.md` | Yes |
+| `PATCH` | `/api/projects/{id}/tasks/{card}` | Edit card text in-place — `{"text":"..."}` | Yes |
+| `DELETE` | `/api/projects/{id}/tasks/{card}` | Delete card from `TASKS.md` | Yes |
+| `GET` | `/api/projects/{id}/tasks/{card}/run` | Get sidecar result of a card auto-run from `data/runs/<card>.md` | Yes |
+
+---
+
+## Чат / SSE (Chat & Streaming)
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `POST` | `/api/projects/{id}/chat` | Start agent task — returns `text/event-stream` SSE stream of `{type:"tool\|text\|result\|error", ...}`. Shared session + lock with Telegram and board auto-runs. 409 if project is busy | Yes |
+| `POST` | `/api/projects/{id}/chat/stop` | Interrupt the current agent run (`client.interrupt()`). Note: server-side generator runs to completion; only client fetch is disconnected | Yes |
+| `GET` | `/api/projects/{id}/activity-stream` | SSE stream of board bus events for this project (`run_start / tool / text / run_end`), heartbeat 25s | Yes |
+| `GET` | `/api/activity-stream` | SSE stream of ALL projects' bus events (for unread indicators in sidebar) | Yes |
+
+---
+
+## Файлы проекта (Project Files)
+
+Read-only file explorer within project `cwd`. `.env*` files (except `.env.example`) and internal dirs (`.git`, `venv`, `node_modules`, `dist`, `__pycache__`) are blocked. Anti-traversal enforced.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects/{id}/files` | Directory listing — `?path=<rel>` relative to project cwd | Yes |
+| `GET` | `/api/projects/{id}/file` | File contents — `?path=<rel>`, max 1MB; binary files rejected | Yes |
+
+---
+
+## Глобальные файлы (Global File Browser)
+
+File browser rooted at `$HOME`. Same security rules as project files. Supports inline editing.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/global/files` | Directory listing — `?path=<abs or rel to $HOME>` | Yes |
+| `GET` | `/api/global/file` | Read file contents | Yes |
+| `POST` | `/api/global/file` | Write file contents — `?path=<path>`, body = raw text | Yes |
+
+---
+
+## Промты (Prompt Library)
+
+Global prompt templates stored in `data/prompts.json` (not in git). Supports categories and `[VARIABLE]` placeholders.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/prompts` | List all prompts `[{id, title, category, text}, ...]` | Yes |
+| `POST` | `/api/prompts` | Create prompt — `{"title":"...", "category":"...", "text":"..."}` | Yes |
+| `PATCH` | `/api/prompts/{id}` | Update prompt fields | Yes |
+| `DELETE` | `/api/prompts/{id}` | Delete prompt | Yes |
+
+---
+
+## Сессии (Sessions)
+
+Claude SDK sessions (`~/.claude/projects/<cwd-encoded>/*.jsonl`). Session is shared across Telegram, cockpit, and board auto-runs.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects/{id}/sessions` | List SDK sessions for project — `[{id, preview, ts}, ...]` | Yes |
+| `POST` | `/api/projects/{id}/sessions/{sid}/label` | Set human-readable label on a session | Yes |
+| `POST` | `/api/projects/{id}/session` | Switch active session — `{"action":"new\|resume", "session_id":"..."}`. 409 if project is busy | Yes |
+| `GET` | `/api/projects/{id}/session-history` | Full conversation history of the active session (from SDK `.jsonl` transcript) | Yes |
+| `GET` | `/api/projects/{id}/session-context` | Current session context summary (Фича A — context read) | Yes |
+
+---
+
+## Память (Memory)
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects/{id}/memory` | Read agent memory files for the project (from `~/.claude/projects/<cwd>/memory/`) | Yes |
+
+---
+
+## Usage
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/usage` | Subscription usage — 5h and 7-day limits with utilisation 0–1 and `resets_at`. Source: `GET https://api.anthropic.com/api/oauth/usage` (cached 60s). Falls back to passive `RateLimitEvent` snapshot if oauth endpoint fails | Yes |
+
+---
+
+## Свободные чаты (Free Chats)
+
+Free-form chats not tied to a project (`cwd=$HOME`). Shown in tab bar, hidden from sidebar.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `POST` | `/api/free` | Create a new free chat — returns `{id, ...}` | Yes |
+| `POST` | `/api/free/{id}/rename` | Rename free chat — `{"name":"..."}` | Yes |
+| `DELETE` | `/api/free/{id}` | Delete free chat | Yes |
+
+---
+
+## SPA Fallback
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `*` | `/{path:.*}` | Serve `web/dist/index.html` for all non-API routes (React SPA) | No |
+
+---
+
+## Summary
+
+Total registered routes: **56** API routes + 1 SPA catch-all (57 total).
+
+Public (no cookie): `GET /api/health`, `POST /api/login`.
+All other `/api/*` routes require a valid `cops_auth` session cookie.
