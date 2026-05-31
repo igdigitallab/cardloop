@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import time
 import traceback as _tb
 from datetime import datetime
@@ -628,8 +629,9 @@ async def api_project_logs(req: web.Request):
         return web.json_response({"lines": [], "configured": False, "cmd": None})
 
     try:
-        proc = await asyncio.create_subprocess_shell(
-            log_cmd,
+        # UI-controlled cmd from topics.json → exec (not shell) to prevent injection
+        proc = await asyncio.create_subprocess_exec(
+            *shlex.split(log_cmd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -1066,10 +1068,11 @@ def _incident_title(err: dict) -> str:
 
 
 async def _run_log_cmd(log_cmd: str, timeout: float = 10.0) -> str:
-    """Запускает log_cmd, возвращает stdout (+ stderr)."""
+    """Запускает log_cmd, возвращает stdout (+ stderr).
+    UI-controlled cmd from topics.json → exec (not shell) to prevent injection."""
     try:
-        proc = await asyncio.create_subprocess_shell(
-            log_cmd,
+        proc = await asyncio.create_subprocess_exec(
+            *shlex.split(log_cmd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -1085,10 +1088,11 @@ async def _run_log_cmd(log_cmd: str, timeout: float = 10.0) -> str:
 
 
 async def _run_test_cmd(test_cmd: str, cwd: str, timeout: float = 120.0) -> str:
-    """Запускает test_cmd в cwd проекта."""
+    """Запускает test_cmd в cwd проекта.
+    UI-controlled cmd from topics.json → exec (not shell) to prevent injection."""
     try:
-        proc = await asyncio.create_subprocess_shell(
-            test_cmd,
+        proc = await asyncio.create_subprocess_exec(
+            *shlex.split(test_cmd),
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
