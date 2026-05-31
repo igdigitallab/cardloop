@@ -687,7 +687,19 @@ BOARD_COLUMNS = [
 ]
 _LABEL_TO_COL = {lbl.lower(): key for key, lbl, _ in BOARD_COLUMNS}
 
+# Один lock на cwd — сериализует все cockpit-записи доски (GET canonicalize + mutations).
+# Агент пишет файл напрямую и не участвует в lock, поэтому lock защищает только кокпит↔кокпит гонку.
+_board_locks: dict[str, asyncio.Lock] = {}
+
+def _get_board_lock(cwd: str) -> asyncio.Lock:
+    if cwd not in _board_locks:
+        _board_locks[cwd] = asyncio.Lock()
+    return _board_locks[cwd]
+
 _CARD_RE = re.compile(r"^\s*[-*]\s*\[(.)\]\s*(.*)$")
+# Строки вида "- текст" без checkbox — агент часто пишет именно так.
+# Внутри секции-колонки распознаём как Backlog-карточку (статус по умолчанию).
+_PLAIN_CARD_RE = re.compile(r"^\s*[-*]\s+(?!\[)(.+)$")
 _MARKER_RE = re.compile(r"\s*<!--\s*ops:([0-9a-fA-F]+)\s*-->\s*$")
 
 
@@ -703,9 +715,31 @@ def _new_card_id() -> str:
     return secrets.token_hex(3)
 
 
+def _count_potential_cards(raw: str) -> int:
+    """Сколько строк в raw МОГУТ быть карточками (любого формата).
+    Используется как guard: если после parse+serialize карточек стало меньше —
+    значит парсер не распознал какой-то формат и перезапись уничтожит данные.
+    Считаем строки вида '- ...' или '* ...' ВНУТРИ секции ## (не преамбула)."""
+    count = 0
+    in_section = False
+    for line in raw.splitlines():
+        h = line.strip()
+        if h.startswith("##"):
+            in_section = True
+            continue
+        if not in_section:
+            continue
+        s = h
+        if s.startswith(("- ", "* ")) and len(s) > 2:
+            count += 1
+    return count
+
+
 def _parse_tasks(text: str):
     """(preamble, cols) — preamble = всё до первого распознанного '## <Колонка>'.
-    Строки-некарточки внутри секций отбрасываются при перезаписи (файл наш, канонизируем)."""
+    Карточки с checkbox '- [ ] text' — парсятся в соответствующую колонку.
+    Карточки без checkbox '- text' — парсятся как Backlog (агент иногда пишет так).
+    Строки, не являющиеся карточками, внутри секций отбрасываются при перезаписи."""
     cols = {key: [] for key, _, _ in BOARD_COLUMNS}
     preamble_lines: list[str] = []
     cur = None
@@ -730,6 +764,19 @@ def _parse_tasks(text: str):
                 cid, cardtext = _new_card_id(), rest.rstrip()
             if cardtext:
                 cols[cur].append({"id": cid, "text": cardtext})
+        elif cur is not None:
+            # Нет checkbox-совпадения — пробуем plain '- текст' (агентский стиль)
+            pm = _PLAIN_CARD_RE.match(line)
+            if pm:
+                rest = pm.group(1)
+                mk = _MARKER_RE.search(rest)
+                if mk:
+                    cid, cardtext = mk.group(1), rest[: mk.start()].rstrip()
+                else:
+                    cid, cardtext = _new_card_id(), rest.rstrip()
+                if cardtext:
+                    # Plain-карточки всегда в текущую колонку (агент сам выбрал секцию)
+                    cols[cur].append({"id": cid, "text": cardtext})
         elif not seen_header:
             preamble_lines.append(line)
     return "\n".join(preamble_lines).rstrip(), cols
@@ -775,18 +822,33 @@ async def api_project_tasks(req: web.Request):
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     cwd, name = project["cwd"], project["name"]
-    # Нормализация: добавляем ops-маркеры к строкам без них.
-    # Оптимистичная защита от гонки: перечитываем файл перед записью —
-    # если он изменился (агент писал параллельно), пропускаем цикл и ждём следующего.
     tp = _tasks_path(cwd)
-    raw, preamble, cols = _load_board(cwd)
-    if tp.exists():
-        canon = _serialize_tasks(preamble, cols, name)
-        if canon != raw:
-            current = tp.read_text(encoding="utf-8") if tp.exists() else ""
-            if current == raw:  # файл не изменился снаружи — безопасно писать
-                tp.write_text(canon, encoding="utf-8")
-            # иначе: внешняя правка, пропускаем; следующий poll подхватит новый контент
+    # Под локом: добавляем ops-маркеры к карточкам без них (только если файл изменился).
+    # Lock сериализует cockpit-операции; агент пишет напрямую — при конфликте пропускаем запись.
+    async with _get_board_lock(cwd):
+        raw, preamble, cols = _load_board(cwd)
+        if tp.exists():
+            canon = _serialize_tasks(preamble, cols, name)
+            if canon != raw:
+                # Перечитываем: если агент успел записать между _load_board и здесь — пропускаем.
+                try:
+                    current = tp.read_text(encoding="utf-8")
+                except OSError:
+                    current = ""
+                if current == raw:
+                    # Guard: не пишем если после парсинга карточек стало меньше.
+                    # Это значит агент написал что-то что парсер не распознал —
+                    # перезапись уничтожит данные. Лучше потерять маркер, чем карточку.
+                    raw_card_count = _count_potential_cards(raw)
+                    parsed_card_count = sum(len(v) for v in cols.values())
+                    if parsed_card_count < raw_card_count:
+                        print(
+                            f"[api_project_tasks] WARNING: пропускаем запись {tp} — "
+                            f"парсер нашёл {parsed_card_count} карточек из {raw_card_count} "
+                            f"потенциальных (агент записал нераспознанный формат?)"
+                        )
+                    else:
+                        tp.write_text(canon, encoding="utf-8")
     return web.json_response(_board_payload(cwd))
 
 
@@ -804,11 +866,12 @@ async def api_create_task(req: web.Request):
         return web.json_response({"error": "empty text"}, status=400)
     column = body.get("column", "backlog")
     cwd, name = project["cwd"], project["name"]
-    _, preamble, cols = _load_board(cwd)
-    if column not in cols:
-        column = "backlog"
-    cols[column].insert(0, {"id": _new_card_id(), "text": text})
-    _save_board(cwd, name, preamble, cols)
+    async with _get_board_lock(cwd):
+        _, preamble, cols = _load_board(cwd)
+        if column not in cols:
+            column = "backlog"
+        cols[column].insert(0, {"id": _new_card_id(), "text": text})
+        _save_board(cwd, name, preamble, cols)
     return web.json_response(_board_payload(cwd))
 
 
@@ -940,13 +1003,14 @@ async def _run_card(ctx: dict, webapp_app, project: dict, card: dict, session_ke
 
         # перенос карточки (перезагружаем доску — могла измениться пока агент работал)
         try:
-            _, preamble, cols = _load_board(cwd)
-            moved = _pop_card(cols, card_id)
-            if moved is None:
-                moved = card  # карточки уже нет в in_progress, но добавим в целевую колонку
             target_col = "review" if ok else "failed"
-            cols[target_col].append(moved)
-            _save_board(cwd, name, preamble, cols)
+            async with _get_board_lock(cwd):
+                _, preamble, cols = _load_board(cwd)
+                moved = _pop_card(cols, card_id)
+                if moved is None:
+                    moved = card
+                cols[target_col].append(moved)
+                _save_board(cwd, name, preamble, cols)
         except Exception as e:
             print(f"[_run_card] ошибка переноса карточки {card_id}: {e}")
 
@@ -1000,12 +1064,13 @@ async def api_move_task(req: web.Request):
         # Деградация: если движок недоступен (старый запуск) — работаем как обычный перенос
         if run_engine is None:
             print("[api_move_task] run_engine не в ctx — деградируем к ручному переносу")
-            _, preamble, cols = _load_board(cwd)
-            card = _pop_card(cols, card_id)
-            if card is None:
-                return web.json_response({"error": "card not found"}, status=404)
-            cols["in_progress"].append(card)
-            _save_board(cwd, name, preamble, cols)
+            async with _get_board_lock(cwd):
+                _, preamble, cols = _load_board(cwd)
+                card = _pop_card(cols, card_id)
+                if card is None:
+                    return web.json_response({"error": "card not found"}, status=404)
+                cols["in_progress"].append(card)
+                _save_board(cwd, name, preamble, cols)
             return web.json_response(_board_payload(cwd))
 
         # Проверка замка — занят ли проект (TG или другая карточка)
@@ -1018,15 +1083,14 @@ async def api_move_task(req: web.Request):
         # Резервируем слот СИНХРОННО до первого await (против гонки)
         ctx["running"][session_key] = True
 
-        _, preamble, cols = _load_board(cwd)
-        card = _pop_card(cols, card_id)
-        if card is None:
-            # карточка не найдена — снимаем резерв и возвращаем 404
-            ctx["running"].pop(session_key, None)
-            return web.json_response({"error": "card not found"}, status=404)
-
-        cols["in_progress"].append(card)
-        _save_board(cwd, name, preamble, cols)
+        async with _get_board_lock(cwd):
+            _, preamble, cols = _load_board(cwd)
+            card = _pop_card(cols, card_id)
+            if card is None:
+                ctx["running"].pop(session_key, None)
+                return web.json_response({"error": "card not found"}, status=404)
+            cols["in_progress"].append(card)
+            _save_board(cwd, name, preamble, cols)
 
         # Запускаем фоновую задачу (не ждём завершения)
         asyncio.create_task(_run_card(ctx, req.app, project, card, session_key))
@@ -1034,28 +1098,28 @@ async def api_move_task(req: web.Request):
         return web.json_response(_board_payload(cwd))
 
     # ── Обычный перенос (backlog / review / failed / done) ──
-    _, preamble, cols = _load_board(cwd)
-    card = _pop_card(cols, card_id)
-    if card is None:
-        return web.json_response({"error": "card not found"}, status=404)
+    async with _get_board_lock(cwd):
+        _, preamble, cols = _load_board(cwd)
+        card = _pop_card(cols, card_id)
+        if card is None:
+            return web.json_response({"error": "card not found"}, status=404)
 
-    if to == "done":
-        dp = _done_path(cwd)
-        header = dp.read_text(encoding="utf-8") if dp.exists() else f"# Done — {name}\n"
-        if not header.strip():
-            header = f"# Done — {name}\n"
-        stamp = time.strftime("%Y-%m-%d")
-        new = header.rstrip() + f"\n- [x] {card['text']} · {stamp}\n"
-        dp.write_text(new, encoding="utf-8")
-        _save_board(cwd, name, preamble, cols)
-    elif to in cols:
-        cols[to].append(card)
-        _save_board(cwd, name, preamble, cols)
-    else:
-        # неизвестная колонка — вернуть карточку на место (в backlog) и 400
-        cols["backlog"].append(card)
-        _save_board(cwd, name, preamble, cols)
-        return web.json_response({"error": "unknown column"}, status=400)
+        if to == "done":
+            dp = _done_path(cwd)
+            header = dp.read_text(encoding="utf-8") if dp.exists() else f"# Done — {name}\n"
+            if not header.strip():
+                header = f"# Done — {name}\n"
+            stamp = time.strftime("%Y-%m-%d")
+            new = header.rstrip() + f"\n- [x] {card['text']} · {stamp}\n"
+            dp.write_text(new, encoding="utf-8")
+            _save_board(cwd, name, preamble, cols)
+        elif to in cols:
+            cols[to].append(card)
+            _save_board(cwd, name, preamble, cols)
+        else:
+            cols["backlog"].append(card)
+            _save_board(cwd, name, preamble, cols)
+            return web.json_response({"error": "unknown column"}, status=400)
     return web.json_response(_board_payload(cwd))
 
 
@@ -1065,10 +1129,11 @@ async def api_delete_task(req: web.Request):
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     cwd, name = project["cwd"], project["name"]
-    _, preamble, cols = _load_board(cwd)
-    if _pop_card(cols, req.match_info["card"]) is None:
-        return web.json_response({"error": "card not found"}, status=404)
-    _save_board(cwd, name, preamble, cols)
+    async with _get_board_lock(cwd):
+        _, preamble, cols = _load_board(cwd)
+        if _pop_card(cols, req.match_info["card"]) is None:
+            return web.json_response({"error": "card not found"}, status=404)
+        _save_board(cwd, name, preamble, cols)
     return web.json_response(_board_payload(cwd))
 
 
@@ -1085,20 +1150,21 @@ async def api_update_task(req: web.Request):
     if not text:
         return web.json_response({"error": "empty text"}, status=400)
     cwd, name = project["cwd"], project["name"]
-    _, preamble, cols = _load_board(cwd)
     card_id = req.match_info["card"]
-    found = False
-    for col_cards in cols.values():
-        for card in col_cards:
-            if card["id"] == card_id:
-                card["text"] = text
-                found = True
+    async with _get_board_lock(cwd):
+        _, preamble, cols = _load_board(cwd)
+        found = False
+        for col_cards in cols.values():
+            for card in col_cards:
+                if card["id"] == card_id:
+                    card["text"] = text
+                    found = True
+                    break
+            if found:
                 break
-        if found:
-            break
-    if not found:
-        return web.json_response({"error": "card not found"}, status=404)
-    _save_board(cwd, name, preamble, cols)
+        if not found:
+            return web.json_response({"error": "card not found"}, status=404)
+        _save_board(cwd, name, preamble, cols)
     return web.json_response(_board_payload(cwd))
 
 
