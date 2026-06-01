@@ -71,9 +71,25 @@ export interface Board {
   exists: boolean
 }
 
+// ─── C2-gate: worktree run meta ───────────────────────────────────────────
+
+export interface RunMeta {
+  card_id: string
+  ts: string
+  outcome: string
+  mode: 'worktree' | 'legacy'
+  branch: string | null
+  base_branch: string | null
+  wt_path: string | null
+  has_changes: boolean
+  applied: boolean
+  discarded: boolean
+}
+
 export interface RunResult {
   content: string
   exists: boolean
+  meta?: RunMeta | null
 }
 
 export interface TestResult {

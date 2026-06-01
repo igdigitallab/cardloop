@@ -60,6 +60,14 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   const [runResultLoading, setRunResultLoading] = useState(false)
   const [showRunModal, setShowRunModal] = useState(false)
 
+  // C2-gate: apply/discard
+  const [gateError, setGateError] = useState('')
+  const [gateBusy, setGateBusy] = useState(false)
+  // Confirmation modal for discard (irreversible)
+  const [confirmDiscard, setConfirmDiscard] = useState<{ cardId: string } | null>(null)
+  // Toast for gate messages
+  const [gateToast, setGateToast] = useState<string>('')
+
   // Видимые колонки (persist в localStorage). Дефолт — только Backlog.
   const [visibleCols, setVisibleCols] = useState<Set<string>>(() => readVisibleCols())
 
@@ -244,13 +252,60 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     setRunResultLoading(true)
     setShowRunModal(true)
     setRunResult(null)
+    setGateError('')
     try {
       const r = await api.cardRun(projectId, cardId)
       setRunResult(r)
+      // мета хранится в runResult.meta — кнопки гейта читают оттуда
     } catch (e) {
       setRunResult({ content: `⚠ Ошибка загрузки: ${e instanceof Error ? e.message : String(e)}`, exists: false })
     } finally {
       setRunResultLoading(false)
+    }
+  }
+
+  // C2-gate: показать toast и скрыть через 4 секунды
+  function showToast(msg: string) {
+    setGateToast(msg)
+    setTimeout(() => setGateToast(''), 4000)
+  }
+
+  // C2-gate: применить изменения (merge)
+  async function applyCard(cardId: string) {
+    setGateBusy(true)
+    setGateError('')
+    try {
+      await api.applyCard(projectId, cardId)
+      setShowRunModal(false)
+      showToast('✓ Изменения применены')
+      await refreshNow()
+    } catch (e) {
+      const status = (e as { status?: number })?.status
+      const msg = e instanceof Error ? e.message : String(e)
+      if (status === 409) {
+        setGateError('Конфликт merge: ' + msg)
+      } else {
+        setGateError(msg)
+      }
+    } finally {
+      setGateBusy(false)
+    }
+  }
+
+  // C2-gate: отменить изменения (discard)
+  async function discardCard(cardId: string) {
+    setConfirmDiscard(null)
+    setGateBusy(true)
+    setGateError('')
+    try {
+      await api.discardCard(projectId, cardId)
+      setShowRunModal(false)
+      showToast('Изменения карточки отменены')
+      await refreshNow()
+    } catch (e) {
+      setGateError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setGateBusy(false)
     }
   }
 
@@ -448,8 +503,8 @@ export function BoardTab({ projectId, isActive = true }: Props) {
 
       {/* F1: модалка результата карточки */}
       {showRunModal && (
-        <Modal onClose={() => setShowRunModal(false)}>
-          <ModalHead title="Результат выполнения" onClose={() => setShowRunModal(false)} />
+        <Modal onClose={() => { setShowRunModal(false); setGateError('') }}>
+          <ModalHead title="Результат выполнения" onClose={() => { setShowRunModal(false); setGateError('') }} />
           <div className="run-modal-body">
             {runResultLoading && <Spinner label="Загрузка..." />}
             {!runResultLoading && runResult && !runResult.exists && (
@@ -462,8 +517,80 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{runResult.content}</ReactMarkdown>
               </div>
             )}
+            {/* C2-gate: кнопки / баннер по мета */}
+            {!runResultLoading && runResult && (() => {
+              const meta = runResult.meta
+              if (!meta) return null
+              if (meta.applied) {
+                return <div className="gate-banner gate-banner-applied">Применено ✓</div>
+              }
+              if (meta.discarded) {
+                return <div className="gate-banner gate-banner-discarded">Отменено ✗</div>
+              }
+              if (meta.mode === 'worktree' && meta.has_changes) {
+                return (
+                  <div className="gate-actions">
+                    {gateError && <div className="error-state gate-error">{gateError}</div>}
+                    <button
+                      className="btn-primary gate-apply"
+                      aria-label="Применить изменения в основную ветку"
+                      disabled={gateBusy}
+                      onClick={() => {
+                        const cardId = meta.card_id
+                        applyCard(cardId)
+                      }}
+                    >✓ Применить</button>
+                    <button
+                      className="btn-danger gate-discard"
+                      aria-label="Отменить изменения карточки (необратимо)"
+                      disabled={gateBusy}
+                      onClick={() => setConfirmDiscard({ cardId: meta.card_id })}
+                    >✗ Отмена</button>
+                  </div>
+                )
+              }
+              if (meta.mode === 'worktree' && !meta.has_changes) {
+                return <div className="gate-banner">Нет изменений — агент не изменил файлов</div>
+              }
+              // legacy
+              return <div className="gate-banner">Изменения применены прямо в рабочем дереве (без гейта)</div>
+            })()}
           </div>
         </Modal>
+      )}
+
+      {/* C2-gate: подтверждение discard */}
+      {confirmDiscard && (
+        <Modal onClose={() => setConfirmDiscard(null)}>
+          <ModalHead title="Отменить изменения?" onClose={() => setConfirmDiscard(null)} />
+          <div className="run-modal-body" role="dialog" aria-modal="true">
+            <p>Отменить изменения карточки? Ветка будет удалена. Это действие необратимо.</p>
+            <div className="gate-actions">
+              <button
+                className="btn-danger"
+                aria-label="Подтвердить отмену"
+                disabled={gateBusy}
+                onClick={() => discardCard(confirmDiscard.cardId)}
+              >Да, удалить</button>
+              <button
+                className="btn-secondary"
+                onClick={() => setConfirmDiscard(null)}
+              >Отмена</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* C2-gate: Toast */}
+      {gateToast && (
+        <div className="gate-toast" role="status" aria-live="polite">
+          {gateToast}
+          <button
+            className="gate-toast-close"
+            aria-label="Закрыть уведомление"
+            onClick={() => setGateToast('')}
+          >✕</button>
+        </div>
       )}
 
       {/* Description модалка */}

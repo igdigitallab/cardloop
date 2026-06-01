@@ -99,6 +99,18 @@ export const api = {
   cardRun: (id: string, card: string) =>
     apiFetch<import('./types').RunResult>(`/api/projects/${id}/tasks/${card}/run`),
 
+  applyCard: (id: string, card: string) =>
+    apiFetch<{ ok: boolean; applied: boolean; card_id: string }>(
+      `/api/projects/${id}/tasks/${card}/apply`,
+      { method: 'POST' }
+    ),
+
+  discardCard: (id: string, card: string) =>
+    apiFetch<{ ok: boolean; discarded: boolean; card_id: string }>(
+      `/api/projects/${id}/tasks/${card}/discard`,
+      { method: 'POST' }
+    ),
+
   files: (id: string, path: string) =>
     apiFetch<import('./types').FileListing>(
       `/api/projects/${id}/files?path=${encodeURIComponent(path)}`

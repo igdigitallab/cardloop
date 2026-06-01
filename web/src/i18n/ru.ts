@@ -120,6 +120,18 @@ export const ru = {
   'board.save_description': 'Сохранить',
   'board.description_placeholder': 'Описание задачи (markdown)…',
 
+  // ── C2-gate ──────────────────────────────────────────────────
+  'board.gate_apply': '✓ Применить',
+  'board.gate_apply_aria': 'Применить изменения в основную ветку',
+  'board.gate_discard': '✗ Отмена',
+  'board.gate_discard_aria': 'Отменить изменения карточки (необратимо)',
+  'board.gate_confirm_discard': 'Отменить изменения карточки? Ветка будет удалена.',
+  'board.gate_legacy_banner': 'Изменения применены прямо в рабочем дереве (без гейта)',
+  'board.gate_no_changes_banner': 'Агент не внёс изменений',
+  'board.gate_conflict': 'Конфликт merge: ',
+  'board.gate_applied_banner': 'Применено ✓',
+  'board.gate_discarded_banner': 'Отменено ✗',
+
   // ── Chat tab ─────────────────────────────────────────────────
   'chat.empty_hint': 'Начни чат с агентом по проекту.',
   'chat.empty_session_hint': 'Сессия общая с Telegram-топиком.',
