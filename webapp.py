@@ -2711,6 +2711,154 @@ async def api_project_test(req: web.Request) -> web.Response:
     })
 
 
+# ─────────────────────────── quality gate ───────────────────────────────────
+#
+# _run_quality_gate(wt_path, env) — прогоняет тесты В worktree-карточки.
+# Переиспользует _detect_test_cmd. Таймаут 300с. Вердикт: safe/risky/unknown.
+
+_GATE_MAX_OUTPUT = 20_000  # символов
+
+
+async def _run_quality_gate(wt_path: str, env: "dict | None" = None) -> dict:
+    """Прогоняет тесты в worktree-карточки. Возвращает:
+    {verdict:"safe|risky|unknown", tests:{detected, ok, cmd, exit_code, output, timed_out}}.
+    Вердикт: тесты прошли→safe, упали/таймаут→risky, не найдены→unknown.
+    """
+    detected = _detect_test_cmd(wt_path)
+    if detected is None:
+        return {
+            "verdict": "unknown",
+            "tests": {
+                "detected": False,
+                "ok": False,
+                "cmd": None,
+                "exit_code": None,
+                "output": "Тест-команда не обнаружена (нет pytest-конфига/tests/, npm test, make test).",
+                "timed_out": False,
+            },
+            "lint": None,
+        }
+
+    cmd, human = detected
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=wt_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=run_env,
+        )
+    except Exception as e:
+        return {
+            "verdict": "risky",
+            "tests": {
+                "detected": True,
+                "ok": False,
+                "cmd": human,
+                "exit_code": -1,
+                "output": f"Не удалось запустить тесты: {e}",
+                "timed_out": False,
+            },
+            "lint": None,
+        }
+
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+        rc = proc.returncode or 0
+        timed_out = False
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        out, rc, timed_out = b"", -1, True
+
+    text = out.decode(errors="replace")
+    if len(text) > _GATE_MAX_OUTPUT:
+        text = "…(начало обрезано)\n" + text[-_GATE_MAX_OUTPUT:]
+    if timed_out:
+        text = (text + "\n⏱ прервано по таймауту 300с").strip()
+
+    ok = (rc == 0 and not timed_out)
+    verdict = "safe" if ok else "risky"
+
+    return {
+        "verdict": verdict,
+        "tests": {
+            "detected": True,
+            "ok": ok,
+            "cmd": human,
+            "exit_code": rc,
+            "output": text,
+            "timed_out": timed_out,
+        },
+        "lint": None,  # линт — out of scope (spec-009, п.2 дизайн-решений)
+    }
+
+
+async def api_card_check(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/tasks/{card}/check — прогнать quality gate в worktree карточки.
+    Возвращает вердикт safe/risky/unknown. Записывает gate:{verdict,ts} в meta-сайдкар.
+    Legacy или нет worktree → {verdict:"unknown", reason:"legacy"}.
+    """
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    card_id = req.match_info["card"]
+    if not _valid_card_id(card_id):
+        return web.json_response({"error": "bad card id"}, status=400)
+
+    DATA: Path = ctx["DATA"]
+    meta = _read_run_meta(DATA, card_id)
+
+    # Legacy или нет worktree-мета → unknown без прогона
+    if not meta or meta.get("mode") != "worktree" or not meta.get("wt_path"):
+        return web.json_response({
+            "verdict": "unknown",
+            "reason": "legacy",
+            "tests": None,
+            "lint": None,
+        })
+
+    wt_path = meta["wt_path"]
+    if not Path(wt_path).exists():
+        return web.json_response({"error": "worktree не найден на диске"}, status=404)
+
+    # Подмешать секреты проекта (тесты могут требовать ключи)
+    cwd = project["cwd"]
+    project_secrets = _secrets_read(cwd)
+
+    result = await _run_quality_gate(wt_path, env=project_secrets or None)
+
+    # Записать результат гейта в meta-сайдкар
+    gate_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    meta["gate"] = {"verdict": result["verdict"], "ts": gate_ts}
+    _write_run_meta(DATA, card_id, meta)
+
+    # Публикуем событие в Timeline (наблюдаемость)
+    # session_key для события: берём из topics по cwd проекта (совпадает с apply/discard)
+    try:
+        topics: dict = ctx.get("topics", {})
+        session_key: str = next(
+            (k for k, v in topics.items() if isinstance(v, dict) and v.get("cwd") == cwd),
+            f"0:{project['id']}",
+        )
+        _bus_publish(session_key, {
+            "kind": "gate",
+            "verdict": result["verdict"],
+            "run_id": card_id,
+        })
+    except Exception:
+        pass  # bus-событие не должно ломать ответ
+
+    return web.json_response(result)
+
+
 # ─────────────────────────── файловый проводник ───────────────────────────
 
 # Директории и имена файлов, скрытые из листинга
@@ -4636,9 +4784,10 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_route("PATCH", "/api/projects/{id}/tasks/{card}", api_update_task)
         # F1: сайдкар результата карточки
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
-        # C2-gate: применить / отменить worktree-карточку
+        # C2-gate: применить / отменить worktree-карточку; quality gate (check)
         app.router.add_post("/api/projects/{id}/tasks/{card}/apply", api_card_apply)
         app.router.add_post("/api/projects/{id}/tasks/{card}/discard", api_card_discard)
+        app.router.add_post("/api/projects/{id}/tasks/{card}/check", api_card_check)
         # C1: SSE-чат по проекту
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
         # C1-stop: прерывание текущего прогона агента
