@@ -185,6 +185,8 @@ TG-сообщение / карточка→In Progress / веб-чат
   → session_id сохранён, running снят в finally
   → (карточка) → Review/Failed + пинг TG
   → (C2-gate) пользователь в Review видит diff + кнопки:
+      🧪 Проверить → POST /check → _run_quality_gate(wt_path) → вердикт safe/risky/unknown
+                     (тесты гоняются В worktree; apply НЕ блокируется — пользователь решает)
       ✓ Применить → git merge --no-ff card-<id> → Done (worktree удалён)
       ✗ Отмена    → worktree+ветка удалены → Backlog
       Конфликт    → 409, merge --abort, worktree жив, карточка остаётся в Review
@@ -192,4 +194,4 @@ TG-сообщение / карточка→In Progress / веб-чат
 
 ### C2-gate: файлы
 - `data/runs/<card_id>.md` — человекочитаемый сайдкар (ответ агента, diff)
-- `data/runs/<card_id>.json` — машиночитаемые мета (mode, branch, wt_path, has_changes, applied, discarded)
+- `data/runs/<card_id>.json` — машиночитаемые мета (mode, branch, wt_path, has_changes, applied, discarded, gate:{verdict,ts})

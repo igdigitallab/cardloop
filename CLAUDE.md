@@ -80,6 +80,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - **discard**: worktree+ветка удалены, карточка Backlog.
 - **Orphan worktrees** после краша: остаются на диске `.worktrees/`. Уборка — в Backlog (не в этой итерации).
 - **НИКОГДА** не делать `git branch -D` на ветках кроме `card-*` (pattern валидирован `_valid_card_id`).
+- **Quality gate (Spec 009):** `POST .../check` → `_run_quality_gate(wt_path)` гоняет тесты В worktree (не в основном дереве). Вердикт `safe/risky/unknown` сохраняется в `meta.gate`. Apply **НЕ блокируется** — пользователь решает сам. Гейт НЕ встроен в apply — только через явный вызов «🧪 Проверить». Линт — out of scope (итерация 1).
 
 ### Память проекта (Spec 006)
 - **Память в репо, НЕ в `~/.claude`.** Новое место: `<cwd>/.claude-ops/memory/` — коммитится в git. Старое (`~/.claude/projects/<cwd>/memory/`) — fallback при чтении GET (read-only совместимость). Не путать.

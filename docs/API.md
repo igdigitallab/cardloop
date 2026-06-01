@@ -65,6 +65,7 @@ Source of truth: `TASKS.md` in the project root. Sections `## Backlog / In Progr
 | `GET` | `/api/projects/{id}/tasks/{card}/run` | Get sidecar result of a card auto-run from `data/runs/<card>.md`. Also returns `meta` field (mode, has_changes, applied, discarded) from JSON sidecar | Yes |
 | `POST` | `/api/projects/{id}/tasks/{card}/apply` | **C2-gate**: merge worktree branch `card-<id>` into base branch via `git merge --no-ff`. Moves card Review→Done. 400 if legacy/no meta; 409 if merge conflict (abort is automatic, worktree stays). Requires worktree mode | Yes |
 | `POST` | `/api/projects/{id}/tasks/{card}/discard` | **C2-gate**: discard worktree changes — removes worktree + branch `card-<id>`. Moves card Review→Backlog. 400 if legacy/no meta | Yes |
+| `POST` | `/api/projects/{id}/tasks/{card}/check` | **Spec 009 quality gate**: run tests in worktree (`_detect_test_cmd` auto-detect) and return verdict. Response: `{verdict:"safe\|risky\|unknown", tests:{detected,ok,cmd,exit_code,output,timed_out}, lint:null}`. Legacy/no-worktree → `{verdict:"unknown",reason:"legacy"}`. Result saved to `meta.gate={verdict,ts}`. 400 if bad card_id; 404 if project or worktree not found. Timeout: 300s. Secrets injected from `.claude-ops/secrets/secrets.env`. Does NOT block apply — user decides | Yes |
 
 ---
 
