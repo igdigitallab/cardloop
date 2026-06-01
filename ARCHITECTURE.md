@@ -154,12 +154,13 @@ web/src/
 
 ---
 
-## Тесты: `tests/` (20 файлов, 453 passed / 6 skipped)
+## Тесты: `tests/` (21 файл, 496 passed / 6 skipped)
 
 `venv/bin/python -m pytest -q` (или `make test`). Фикстуры — `conftest.py` (aiohttp client, tmp-cwd, mock ctx, `_auth_token`).
 - **Критичное:** `test_board_parser` (регрессия = потеря задач в проде), `test_security` + `test_security_regressions` (path-traversal, card_id, rate-limit), `test_board_api`, `test_run_card`, `test_chat_sse`, `test_project_rename`, `test_ingest_errors`.
 - **Новое (Spec 007):** `test_secrets` — 47 тестов: путь, round-trip, chmod 600, gitignore, валидация ключей, лимиты, изоляция cwd, audit non-leak, API GET/POST/DELETE с критичным тестом на не-утечку значений.
 - **Новое (Spec 008):** `test_timeline` — 32 теста: slug стабильность, path резолв, append+ts+truncate+env-exclusion, ротация 5MB, bus_publish интеграция, read graceful (битые строки), backup .jsonl.1, API GET/limit/before/env-not-in-response.
+- **Новое (Spec 010):** `test_self_healing` — 28 тестов: `_self_heal_enabled` (флаг/env/default False); heal_attempted мета; OFF default = критичный регрессия-страж; heal_attempted ДО прогона; safe→Review, risky→Failed; heal_attempted не перезапускается; не-git→пропуск; занятый→пропуск; лимит конкурентности; Timeline self_heal; API-тумблер (auth/enable/disable/404).
 
 ---
 
@@ -169,6 +170,45 @@ web/src/
 - `.env` (секреты, не в git) · `.env.example` + `web/.env.example` (плейсхолдеры).
 - `claude-ops-bot.service` (systemd) · **`restart-self.sh`** (ЕДИНСТВЕННЫЙ способ рестарта из агента — detached через systemd-run; подробности в CLAUDE.md).
 - `TASKS.md` (доска, читают сессии) · `DONE.md` (архив, сессии НЕ читают) · `docs/API.md` · `CONTRIBUTING.md` · `LICENSE` (MIT).
+
+---
+
+## Петля самолечения (Spec 010)
+
+Соединяет уже готовые кирпичи в автономный цикл. **Агент готовит — человек применяет.**
+
+```
+сканер ловит падение → создаёт err-карточку (уже работало)
+  → [НОВОЕ] _self_heal_enabled(project)? → да
+  → asyncio.create_task(_self_heal_card(ctx, project, card))
+      1. heal_attempted=true в description ДО запуска (предотв. зацикливание)
+      2. Формируем heal_prompt из title + excerpt инцидента
+      3. _card_run_mode → worktree? → нет → skip (предохранитель №5)
+      4. _card_worktree_setup → .worktrees/card-<id>
+      5. ctx["running"][session_key] = True (блокируем TG от параллельного запуска)
+      6. Перемещаем карточку в In Progress
+      7. _run_card(..., worktree, wt_info) → агент чинит, авто-коммит
+         → _run_card снимает running в finally, переносит в Review/Failed
+      8. _run_quality_gate(wt_path) → verdict safe/risky/unknown
+      9. safe → остаётся в Review + heal_badge ✓; risky → Failed + heal_badge ✗
+     10. Timeline kind:"self_heal" phase:start/fixed/gate_ok/gate_fail
+     11. TG-пинг Игорю (результат)
+```
+
+**Предохранители (никогда не нарушать):**
+1. `_self_heal_enabled` = False по умолчанию — только `self_heal: true` в topics или `SELF_HEAL_ENABLED=1`
+2. `api_card_apply` НИКОГДА не вызывается из самолечения — только до Review
+3. `heal_attempted=true` пишется ДО запуска агента — краш не зациклит
+4. `_self_heal_active_count <= _SELF_HEAL_MAX_CONCURRENT (2)` — глобальный счётчик
+5. `_card_run_mode == "worktree"` обязателен — не-git/dirty пропускается
+6. Timeline `kind:"self_heal"` + TG-пинг — полная наблюдаемость
+
+**Ключевые функции (webapp.py):**
+- `_self_heal_enabled(project)` — читает флаг; по умолчанию False
+- `_send_tg_ping(ctx, project, msg)` — TG-уведомление Игорю
+- `_self_heal_card(ctx, project, incident_card)` — асинхронная петля починки
+- `_error_scanner_loop` — интеграция: после scan_and_ingest → create_task если включено
+- `api_project_self_heal_toggle` — POST `/api/projects/{id}/self-heal {enabled}`
 
 ---
 

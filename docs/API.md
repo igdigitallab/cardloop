@@ -43,6 +43,7 @@ Cookie is obtained via `POST /api/login` and cleared via `POST /api/logout`.
 | `GET` | `/api/projects/{id}/skills` | List available agent skills (global `~/.claude/skills/` + project `.claude/skills/`) | Yes |
 | `POST` | `/api/projects/{id}/scan-errors` | Trigger error scanner: creates Failed cards for new incidents | Yes |
 | `GET` | `/api/projects/{id}/incidents` | Count active error/incident cards in the project | Yes |
+| `POST` | `/api/projects/{id}/self-heal` | Toggle self-healing for a project — `{"enabled": bool}`. Writes `self_heal` to all `topics.json` entries for this cwd. Returns `{ok, self_heal, topics_updated}`. **OFF by default — never auto-applies.** | Yes |
 | `POST` | `/api/projects/{id}/rename` | Rename project folder: `{"slug":"new-name"}` (kebab-case, `^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$`); 409 if busy or folder exists | Yes |
 | `GET` | `/api/projects/{id}/health` | Structural health check (6 points: CLAUDE.md, cockpit rules, TASKS.md preamble, README, .gitignore/.env, .git) — `{color:"green\|yellow\|red", checks:[...]}` | Yes |
 | `POST` | `/api/projects/{id}/audit` | Spawn audit card in In Progress; agent walks `templates/reference/audit-prompt.md` and creates issue cards | Yes |

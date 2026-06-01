@@ -72,6 +72,15 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - **Анти-traversal.** `_resolve_safe` / `_resolve_global_safe` — resolve+startswith trailing-slash. `.env*` 403 (кроме `.env.example`). `.git/venv/node_modules/dist/__pycache__` скрыты+403.
 - **card_id валидируется** `_valid_card_id`/`_CARD_ID_RE` (не допускать path-injection через card_id).
 
+### Самолечение (Spec 010)
+- **OFF по умолчанию — незыблемо.** `_self_heal_enabled(project)` = False если нет `self_heal: true` в topics.json ИЛИ env `SELF_HEAL_ENABLED=1`. Ни один проект не включён автоматически.
+- **НИКОГДА не auto-apply.** Чинильщик доходит только до Review. `api_card_apply` НЕ вызывается из самолечения. Merge в основное дерево — всегда руками Игоря.
+- **Лимит 1 попытка/инцидент.** `heal_attempted=true` пишется в description инцидента ДО запуска агента. Повторная попытка на том же инциденте не будет запущена (предотв. зацикливание при краше).
+- **Лимит конкурентности.** `_self_heal_active_count <= _SELF_HEAL_MAX_CONCURRENT (2)`. При занятом running lock — пропуск.
+- **Только git+clean.** `_card_run_mode == "worktree"` обязателен. Не-git и dirty-дерево → пропускаем.
+- **Полная наблюдаемость.** Timeline `kind:"self_heal"` + TG-пинг Игорю на каждую попытку.
+- **heal_badge в description карточки:** `heal_badge=🔧 авто-починка · гейт ✓/✗` — читается UI для CSS-бейджа.
+
 ### C2-gate: worktree-режим карточек
 - **Детектор режима**: git-репо + чистое дерево → `worktree`; иначе → `legacy` (прогон прямо в cwd).
 - **Worktree жизненный цикл**: setup в `.worktrees/card-<id>` → прогон агента в ветке `card-<id>` → авто-коммит → сайдкар `.json` с `mode/has_changes/applied/discarded`.

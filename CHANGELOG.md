@@ -5,8 +5,25 @@
 
 > Дисциплина: при появлении новой функции — добавить строку сюда + отметить карточку в TASKS.md → DONE.md. Тег ставится на стабильную точку (`git tag vX.Y.Z`).
 
-## [Unreleased]
-_(текущая работа)_
+## [Unreleased → v0.8.0]
+Шаг 5 roadmap: Самолечение (Spec 010). Агент-чинильщик в worktree + гейт + одобрение.
+
+### Добавлено
+- **Самолечение** (Spec 010): `_self_heal_enabled(project)` — флаг per-project (`self_heal`) или env `SELF_HEAL_ENABLED`. **OFF по умолчанию — НИКОГДА не включён ни для одного проекта.**
+- **`_self_heal_card(ctx, project, incident_card)`** — петля починки: пометить `heal_attempted=true` ДО запуска (предохранитель зацикливания), сформировать промпт чинильщику, запустить через существующий C2-путь (`_card_worktree_setup` + `_run_card`), прогнать `_run_quality_gate`, перенести в Review (safe) или Failed (risky), пинг Игорю в TG.
+- **Интеграция в `_error_scanner_loop`**: после `_scan_and_ingest` при `self_heal=True` и новых инцидентах → `asyncio.create_task(_self_heal_card(...))`. Лимиты: счётчик активных починок ≤2, running lock, heal_attempted.
+- **Timeline `kind:"self_heal"`**: фазы `start / fixed / gate_ok / gate_fail / gate_unknown / skipped` публикуются в шину.
+- **`POST /api/projects/{id}/self-heal {enabled}`** — тумблер включения per-project. Auth. Не включает ни одного проекта по умолчанию.
+- **UI: тумблер «🔧 Самолечение»** в OverviewTab + подпись «Ничего не применяется без тебя». CSS-бейдж `🔧 авто-починка · гейт ✓/✗` на карточках BoardTab.
+- **28 новых тестов** (`tests/test_self_healing.py`): `_self_heal_enabled` (флаг/env/default); `heal_attempted` мета; OFF default = критичный регрессия-страж; heal_attempted ставится ДО прогона; safe→Review, risky→Failed; heal_attempted инцидент не перезапускается; не-git→пропуск; занятый→пропуск; лимит конкурентности; Timeline получает self_heal; API-тумблер (auth, enable, disable, 404). **496 passed** (было 468).
+
+### Предохранители (незыблемо)
+1. OFF по умолчанию — `self_heal` в topics или `SELF_HEAL_ENABLED` env
+2. НИКОГДА не auto-apply — агент доходит только до Review; merge руками
+3. Лимит 1 попытка/инцидент — `heal_attempted=true` ДО запуска
+4. Лимит конкурентности — max 2 авто-починки одновременно
+5. Только git+clean — не-git/dirty пропускаются
+6. Всё видно — Timeline kind:"self_heal" + TG-пинг
 
 ## [v0.7.0] — 2026-05-31
 Шаг 4 roadmap: авто-гейт качества (Spec 009). C2-«Применить» теперь не вслепую: можно прогнать тесты в worktree карточки и получить вердикт перед merge.
