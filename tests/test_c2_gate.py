@@ -19,6 +19,8 @@ from webapp import (
     _card_run_mode,
     _card_worktree_setup,
     _commit_in_worktree,
+    _diff_from_worktree,
+    _run_card,
     _write_run_meta,
     _read_run_meta,
     _write_sidecar,
@@ -594,6 +596,190 @@ async def test_apply_no_meta_returns_400(tmp_path):
 
     resp = await api_card_apply(req)
     assert resp.status == 400
+
+
+# ─────────────────────────── _diff_from_worktree ───────────────────────────
+
+async def test_diff_from_worktree_with_changes(tmp_git):
+    """worktree с коммитом → diff_full содержит изменение, diff_stat непустой."""
+    info = await _card_worktree_setup(str(tmp_git), "dddddd")
+    assert info is not None
+    wt_path = info["wt_path"]
+    base_branch = info["base_branch"]
+
+    # Пишем файл в worktree и коммитим
+    (Path(wt_path) / "agent_output.py").write_text("result = 42\n")
+    committed = await _commit_in_worktree(wt_path, "dddddd", "Add agent output")
+    assert committed is True
+
+    diff_full, diff_stat = await _diff_from_worktree(wt_path, base_branch)
+
+    assert "agent_output.py" in diff_full, "diff_full должен содержать имя изменённого файла"
+    assert diff_stat != "", "diff_stat не должен быть пустым при наличии изменений"
+
+
+async def test_diff_from_worktree_no_changes(tmp_git):
+    """worktree без изменений → diff пустой."""
+    info = await _card_worktree_setup(str(tmp_git), "eeeeee")
+    assert info is not None
+    wt_path = info["wt_path"]
+    base_branch = info["base_branch"]
+
+    # Нет коммита — worktree идентичен base
+    diff_full, diff_stat = await _diff_from_worktree(wt_path, base_branch)
+
+    assert diff_full == "", "diff_full должен быть пустым без изменений"
+    assert diff_stat == "", "diff_stat должен быть пустым без изменений"
+
+
+async def test_diff_from_worktree_invalid_path():
+    """Невалидный путь → возвращает ('', '') без исключения."""
+    diff_full, diff_stat = await _diff_from_worktree("/nonexistent/path/xyz", "main")
+    assert diff_full == "", "diff_full должен быть '' при невалидном пути"
+    assert diff_stat == "", "diff_stat должен быть '' при невалидном пути"
+
+
+# ─────────────────────────── e2e _run_card (worktree + legacy) ───────────────────────────
+
+def _make_fake_card(card_id: str, text: str = "Test task") -> dict:
+    return {"id": card_id, "text": text}
+
+
+def _make_ctx_for_run_card(data_dir: Path, cwd: str, run_engine_factory) -> dict:
+    """ctx достаточный для _run_card: include run_engine, save_sessions, sessions."""
+    pid = Path(cwd.rstrip("/")).name
+    return {
+        "topics": {
+            f"0:{pid}": {"cwd": cwd, "project": pid, "name": pid, "tg_thread": f"0:{pid}"},
+        },
+        "sessions": {},
+        "running": {},
+        "DATA": data_dir,
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "save_topics": lambda: None,
+        "run_engine": run_engine_factory,
+        "ptb_app": None,
+    }
+
+
+async def test_run_card_worktree_isolation(tmp_git, tmp_path):
+    """Интеграционный тест: агент пишет в worktree, НЕ в рабочее дерево проекта."""
+    card_id = "ffffff"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    cwd = str(tmp_git)
+
+    # Создаём TASKS.md с карточкой в In Progress (откуда агент её берёт)
+    _make_board(tmp_git, card_id, "review")
+
+    # Подготавливаем worktree
+    wt_info = await _card_worktree_setup(cwd, card_id)
+    assert wt_info is not None, "worktree setup должен успешно создать worktree"
+    wt_path = wt_info["wt_path"]
+
+    # Мок run_engine: пишет файл в cwd, который ему передан, и завершается
+    async def fake_run_engine(**kwargs):
+        engine_cwd = kwargs.get("cwd", "")
+        # Пишем файл в то cwd, которое передал _run_card — это должен быть wt_path
+        (Path(engine_cwd) / "agent_created.py").write_text("x = 1\n")
+        yield {"type": "text", "text": "Done"}
+        yield {"type": "result", "session_id": "fake-sid-001"}
+
+    project = {"name": "testrepo", "cwd": cwd, "model": "sonnet"}
+    session_key = f"0:{Path(cwd).name}"
+
+    ctx = _make_ctx_for_run_card(data_dir, cwd, fake_run_engine)
+    ctx["running"][session_key] = True  # имитируем резерв замка
+
+    await _run_card(ctx, None, project, _make_fake_card(card_id), session_key,
+                    run_mode="worktree", wt_info=wt_info)
+
+    # ИНВАРИАНТ 1: файл создан в worktree, НЕ в project cwd
+    assert (Path(wt_path) / "agent_created.py").exists(), \
+        "Файл агента должен быть в worktree"
+    assert not (tmp_git / "agent_created.py").exists(), \
+        "Файл агента НЕ должен быть в рабочем дереве проекта"
+
+    # ИНВАРИАНТ 2: TRACKED-файлы в рабочем дереве проекта НЕ изменены
+    # (untracked-файлы вроде TASKS.md или .worktrees/ — допустимы)
+    diff_tracked = subprocess.run(
+        ["git", "diff", "HEAD"], cwd=cwd, capture_output=True, text=True
+    )
+    assert diff_tracked.stdout.strip() == "", \
+        f"Tracked-файлы рабочего дерева должны быть чистыми: {diff_tracked.stdout.strip()!r}"
+    # И файл агента НЕ виден как untracked в tracked-дереве
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True
+    )
+    # agent_created.py не должен быть в статусе tracked-дерева
+    assert "agent_created.py" not in status.stdout, \
+        f"agent_created.py не должен быть в статусе рабочего дерева: {status.stdout!r}"
+
+    # ИНВАРИАНТ 3: карточка ушла в Review, JSON-мета записана
+    meta = _read_run_meta(data_dir, card_id)
+    assert meta is not None, "JSON-мета должна быть записана"
+    assert meta["mode"] == "worktree", f"mode должен быть 'worktree', получили {meta['mode']!r}"
+    assert meta["has_changes"] is True, "has_changes должен быть True (агент создал файл)"
+
+    # ИНВАРИАНТ 4: worktree НЕ удалён, ветка существует
+    assert Path(wt_path).exists(), "Worktree НЕ должен быть удалён после прогона"
+    branches = subprocess.run(
+        ["git", "branch"], cwd=cwd, capture_output=True, text=True
+    ).stdout
+    assert f"card-{card_id}" in branches, f"Ветка card-{card_id} должна существовать"
+
+    # ИНВАРИАНТ 5: замок снят
+    assert session_key not in ctx["running"], "running[session_key] должен быть снят в finally"
+
+    # ИНВАРИАНТ 6: карточка в Review (переехала из backlog)
+    _, _, cols = _load_board(cwd)
+    assert any(c["id"] == card_id for c in cols["review"]), \
+        "Карточка должна быть в Review после успешного прогона"
+
+
+async def test_run_card_legacy_mode(tmp_no_git, tmp_path):
+    """Legacy-режим: файл создан в project cwd, мета mode=legacy."""
+    card_id = "bbbbbb"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    cwd = str(tmp_no_git)
+
+    # Создаём TASKS.md с карточкой
+    _make_board(tmp_no_git, card_id, "review")
+
+    async def fake_run_engine_legacy(**kwargs):
+        engine_cwd = kwargs.get("cwd", "")
+        (Path(engine_cwd) / "legacy_output.txt").write_text("legacy result\n")
+        yield {"type": "text", "text": "Legacy done"}
+        yield {"type": "result", "session_id": "fake-sid-002"}
+
+    project = {"name": "norepo", "cwd": cwd, "model": "sonnet"}
+    session_key = f"0:{Path(cwd).name}"
+
+    ctx = _make_ctx_for_run_card(data_dir, cwd, fake_run_engine_legacy)
+    ctx["running"][session_key] = True
+
+    # В legacy-режиме wt_info=None
+    await _run_card(ctx, None, project, _make_fake_card(card_id), session_key,
+                    run_mode="legacy", wt_info=None)
+
+    # Файл создан в project cwd
+    assert (tmp_no_git / "legacy_output.txt").exists(), \
+        "Файл агента должен быть в project cwd в legacy-режиме"
+
+    # Мета записана с mode=legacy
+    meta = _read_run_meta(data_dir, card_id)
+    assert meta is not None, "JSON-мета должна быть записана"
+    assert meta["mode"] == "legacy", f"mode должен быть 'legacy', получили {meta['mode']!r}"
+
+    # Замок снят
+    assert session_key not in ctx["running"], "running[session_key] должен быть снят в finally"
+
+    # Карточка в Review
+    _, _, cols = _load_board(cwd)
+    assert any(c["id"] == card_id for c in cols["review"]), \
+        "Карточка должна быть в Review после успешного прогона (legacy)"
 
 
 # ─────────────────────────── утилита для тестов ───────────────────────────
