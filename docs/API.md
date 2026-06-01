@@ -143,6 +143,20 @@ File names: `^[a-z0-9][a-z0-9-]{0,60}\.md$` or `MEMORY.md`. Max size per file: 2
 
 ---
 
+## Секреты проекта (Project Secrets — Spec 007)
+
+Project-scoped secrets stored in `<cwd>/.claude-ops/secrets/secrets.env` (chmod 600, gitignored).
+**Security**: values are NEVER returned by the API — only key names. Values are injected into the agent process env at runtime.
+Key format: `^[A-Z_][A-Z0-9_]*$`. Max value size: 8 KB. Max keys: 100.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects/{id}/secrets` | List secret key **names** (not values!). Returns `{keys:["KEY1","KEY2",...], exists:bool}`. | Yes |
+| `POST` | `/api/projects/{id}/secrets/{key}` | Set a secret — body `{"value":"..."}`. Validates key format, checks limits. Returns updated key list (no values). 400 bad key or limits exceeded; 404 project not found. | Yes |
+| `DELETE` | `/api/projects/{id}/secrets/{key}` | Delete a secret key. Returns updated key list. 404 if key/project not found; 400 invalid key. | Yes |
+
+---
+
 ## Usage
 
 | Method | Path | Description | Auth |
@@ -173,7 +187,7 @@ Free-form chats not tied to a project (`cwd=$HOME`). Shown in tab bar, hidden fr
 
 ## Summary
 
-Total registered routes: **56** API routes + 1 SPA catch-all (57 total).
+Total registered routes: **59** API routes + 1 SPA catch-all (60 total).
 
 Public (no cookie): `GET /api/health`, `POST /api/login`.
 All other `/api/*` routes require a valid `cops_auth` session cookie.

@@ -87,6 +87,13 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - **MEMORY.md = авто-индекс.** Перестраивается при каждом write/delete. НЕ редактировать руками — перезапишется. Записи в slug-файлах с frontmatter (type/created).
 - **Slug валидация:** `^[a-z0-9][a-z0-9-]{0,60}\.md$` + `MEMORY.md`. Uppercase / traversal (`../`) → 400.
 
+### Секреты проекта (Spec 007)
+- **Значения не отдаём через API.** GET `/secrets` возвращает только имена ключей (`keys:[...]`). Никакого `values`, `data`, `secrets_map` — только имена. Тест `test_api_secrets_get_returns_only_names` фиксирует это как регрессию.
+- **Секреты не в audit/git.** `audit()` принимает только (project, kind, text) — env туда никогда не передаётся. `secrets.env` gitignored автоматически при первой записи.
+- **Ключи строго `^[A-Z_][A-Z0-9_]*$`.** lowercase, дефис, пробел, traversal `..` → 400. Это env-injection защита.
+- **Изоляция по cwd жёсткая.** `_secrets_read(cwd)` читает только `.claude-ops/secrets/secrets.env` внутри cwd этого проекта — никакой утечки между проектами.
+- **TabId актуальные:** `overview | claude-md | logs | board | files | memory | secrets` (добавлен `secrets`).
+
 ### Прочее
 - **Проценты лимитов ≠ из SDK.** Пассивный `RateLimitEvent` SDK даёт только `status`+`resets_at`, `utilization=None`. Источник % — oauth-эндпоинт `GET https://api.anthropic.com/api/oauth/usage` (header `anthropic-beta: oauth-2025-04-20`). `webapp.py:api_usage` тянет его (кэш 60с). TG-команда `/usage` пока на пассивном.
 - **LogsTab: `log_cmd` в topics.json.** Таб «Логи» запускает `log_cmd` через subprocess (timeout 8с, берёт последние 300 строк). Если не задан — empty state. Задать: в `data/topics.json` для проекта добавить `"log_cmd": "journalctl -u my-service -n 300 --no-pager"`.
