@@ -30,6 +30,8 @@ export interface Project {
   /** Сконфигурированы ли источники для сканера ошибок. */
   log_cmd?: string | null
   test_cmd?: string | null
+  /** Самолечение (Spec 010): агент авто-чинит новые инциденты в worktree. OFF по умолчанию. */
+  self_heal?: boolean
 }
 
 export interface ClaudeMd {

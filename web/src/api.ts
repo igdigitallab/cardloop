@@ -344,4 +344,15 @@ export const api = {
         body: JSON.stringify(message ? { message } : {}),
       }
     ),
+
+  // Spec 010: самолечение — включить/выключить per-project
+  toggleSelfHeal: (id: string, enabled: boolean) =>
+    apiFetch<{ ok: boolean; self_heal: boolean; topics_updated: number }>(
+      `/api/projects/${id}/self-heal`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      }
+    ),
 }

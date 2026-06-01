@@ -4,6 +4,53 @@ import { api } from '../api'
 import { ProjectStructureCard } from '../components/ProjectStructureCard'
 import { t } from '../i18n'
 
+// ─── Spec 010: Self-Heal Toggle ─────────────────────────────────────────────
+
+function SelfHealToggle({ project, onToggled }: { project: Project; onToggled?: (enabled: boolean) => void }) {
+  const [enabled, setEnabled] = useState<boolean>(!!project.self_heal)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+
+  // Sync if project prop changes (e.g. parent refreshes)
+  useEffect(() => { setEnabled(!!project.self_heal) }, [project.self_heal])
+
+  async function toggle() {
+    const next = !enabled
+    setSaving(true); setErr('')
+    try {
+      await api.toggleSelfHeal(project.id, next)
+      setEnabled(next)
+      onToggled?.(next)
+    } catch (e: unknown) {
+      setErr(String(e instanceof Error ? e.message : e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="git-card test-card">
+      <div className="test-card-header">
+        <span className="git-card-header" style={{ margin: 0 }}>{t['overview.self_heal_label']}</span>
+        <button
+          className={`doc-btn ${enabled ? 'primary' : ''}`}
+          onClick={toggle}
+          disabled={saving || !!project.is_free}
+          aria-pressed={enabled}
+          aria-label={t['overview.self_heal_label']}
+          title={enabled ? t['overview.self_heal_on'] : t['overview.self_heal_off']}
+        >
+          {saving ? t['overview.self_heal_saving'] : (enabled ? t['overview.self_heal_on'] : t['overview.self_heal_off'])}
+        </button>
+      </div>
+      <div className="test-status dim" style={{ fontSize: 12, marginTop: 4 }}>
+        {t['overview.self_heal_hint']}
+      </div>
+      {err && <div className="error-state" style={{ marginTop: 4 }}>⚠ {err}</div>}
+    </div>
+  )
+}
+
 interface Props {
   project: Project
 }
@@ -209,6 +256,9 @@ export function OverviewTab({ project }: Props) {
       <ProjectStructureCard projectId={project.id} />
 
       <IncidentScanner project={project} />
+
+      {/* Spec 010: тумблер самолечения — только для обычных (не free) проектов */}
+      {!project.is_free && <SelfHealToggle project={project} />}
 
       <TestRunner projectId={project.id} />
     </div>

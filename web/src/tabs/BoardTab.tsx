@@ -8,6 +8,13 @@ import { Modal, ModalHead } from '../components/Modal'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 import { t } from '../i18n'
 
+/** Возвращает бейдж авто-починки из description карточки, или null если не авто-чинилась. */
+function getSelfHealBadge(card: TaskCard): string | null {
+  const desc = card.description || ''
+  const m = desc.match(/heal_badge=(.+)/)
+  return m ? m[1].trim() : null
+}
+
 interface Props {
   projectId: string
   /** When false (project tab hidden via display:none), suspend polling to avoid wasted fetches. */
@@ -423,6 +430,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
 
                 {col.cards.map(card => {
                   const isIncident = isIncidentCard(card)
+                  const selfHealBadge = getSelfHealBadge(card)
                   return (
                   <div
                     className={[
@@ -430,6 +438,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                       isInProgress ? 'board-card-running' : '',
                       dragCardId === card.id ? 'board-card-dragging' : '',
                       isIncident ? 'board-card-incident' : '',
+                      selfHealBadge ? 'board-card-self-heal' : '',
                     ].filter(Boolean).join(' ')}
                     key={card.id}
                     draggable={!isInProgress}
@@ -462,6 +471,13 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                         {isIncident && <span className="card-incident-icon" title="Инцидент (источник: log/test)">⚠ </span>}
                         {isInProgress && <span className="card-running-icon" title="Выполняется агентом">⚙ </span>}
                         <span className="board-card-title">{card.text}</span>
+                        {selfHealBadge && (
+                          <span
+                            className={`card-self-heal-badge ${selfHealBadge.includes('✓') ? 'badge-ok' : 'badge-fail'}`}
+                            aria-label={t['board.self_heal_badge_aria']}
+                            title={selfHealBadge}
+                          >{selfHealBadge}</span>
+                        )}
                         {card.description && (
                           <button
                             className="board-card-desc-btn"

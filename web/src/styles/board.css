@@ -87,6 +87,30 @@
   background: linear-gradient(90deg, rgba(220,38,38,0.06), var(--bg3) 30%);
 }
 .card-incident-icon { color: var(--red, #dc2626); font-weight: 700; }
+
+/* Spec 010: Self-heal badge */
+.board-card-self-heal {
+  border-top: 2px solid var(--accent, #7c3aed);
+}
+.card-self-heal-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.card-self-heal-badge.badge-ok {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--green, #10b981);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.card-self-heal-badge.badge-fail {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--red, #dc2626);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+}
 .act-handoff {
   background: var(--accent) !important;
   color: #fff !important;

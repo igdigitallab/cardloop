@@ -95,6 +95,12 @@ export const ru = {
 
   // ── Overview tab ─────────────────────────────────────────────
   'overview.initializing': 'Идёт инициализация',
+  'overview.self_heal_label': '🔧 Самолечение',
+  'overview.self_heal_on': 'Включено',
+  'overview.self_heal_off': 'Выключено',
+  'overview.self_heal_hint': 'Агент сам чинит новые ошибки в worktree и готовит фикс на твоё одобрение. Ничего не применяется без тебя.',
+  'overview.self_heal_saving': 'Сохраняю…',
+  'overview.self_heal_error': 'Ошибка сохранения',
   'overview.scan_hint_with_source': 'Прогнать log_cmd + test_cmd, новые ошибки → карточки в Failed',
   'overview.scan_hint_no_source': 'Сначала задай log_cmd или test_cmd в topics.json',
   'overview.scan': '▶ Сканировать',
@@ -111,6 +117,9 @@ export const ru = {
 
   // ── Board tab ────────────────────────────────────────────────
   'board.loading': 'Загрузка доски...',
+  'board.self_heal_badge_ok': '🔧 авто-починка · гейт ✓',
+  'board.self_heal_badge_fail': '🔧 авто-починка · гейт ✗',
+  'board.self_heal_badge_aria': 'Карточка авто-починки (самолечение)',
   'board.columns_label': 'колонки:',
   'board.agent_running': 'Агент работает, авто-обновление...',
   'board.new_task_placeholder': 'Новая задача… (Enter — добавить)',
