@@ -4226,15 +4226,29 @@ def _valid_memory_name(name: str) -> bool:
 
 def _memory_read_all(cwd: str) -> tuple[list[dict], bool]:
     """Читает все *.md из нового места (.claude-ops/memory/).
-    Fallback: если нового нет но старое (sdk) есть — читает старое.
-    Возвращает (files, from_legacy).
-    files = [{name, content}], MEMORY.md первым."""
+    Если нового нет, а старое (sdk) есть — АВТО-МИГРАЦИЯ в новое место
+    (копируем файлы), затем читаем новое. Так удаление/запись (работающие
+    только с новым местом) перестают давать 404 на legacy-памяти.
+    Возвращает (files, from_legacy). files = [{name, content}], MEMORY.md первым."""
     new_dir = _project_memory_dir(cwd)
     if new_dir.is_dir():
         return _read_memory_dir(new_dir), False
-    # Fallback: старое место ~/.claude/projects/<cwd>/memory/
+    # Авто-миграция старого места ~/.claude/projects/<cwd>/memory/ → .claude-ops/memory/
     old_dir = _sdk_sessions_dir(cwd) / "memory"
     if old_dir.is_dir():
+        migrated = False
+        try:
+            new_dir.mkdir(parents=True, exist_ok=True)
+            for f in old_dir.glob("*.md"):
+                dest = new_dir / f.name
+                if not dest.exists():
+                    dest.write_text(f.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+            migrated = True
+        except Exception as e:
+            print(f"[memory] авто-миграция legacy→new не удалась для {cwd}: {e}")
+        if migrated and new_dir.is_dir():
+            return _read_memory_dir(new_dir), False
+        # миграция не удалась — читаем старое как было (legacy)
         return _read_memory_dir(old_dir), True
     return [], False
 

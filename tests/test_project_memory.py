@@ -211,16 +211,26 @@ def test_memory_write_size_limit(tmp_path):
 
 # ─────────────────────────── unit: обратная совместимость ─────────────────────
 
-def test_memory_read_all_fallback_to_old(tmp_path):
-    """_memory_read_all читает старое место если нового нет."""
+def test_memory_read_all_migrates_legacy(tmp_path):
+    """_memory_read_all АВТО-МИГРИРУЕТ старое место в новое если нового нет.
+    После миграции legacy=False и файлы физически в .claude-ops/memory/
+    (иначе удаление/запись давали бы 404 на legacy-памяти — это был баг)."""
     cwd = str(tmp_path)
     old_dir = _sdk_sessions_dir(cwd) / "memory"
     old_dir.mkdir(parents=True)
     (old_dir / "old-note.md").write_text("Old content")
-    files, legacy = _memory_read_all(cwd)
-    assert legacy is True
-    names = [f["name"] for f in files]
-    assert "old-note.md" in names
+    try:
+        files, legacy = _memory_read_all(cwd)
+        assert legacy is False  # мигрировано в новое место
+        names = [f["name"] for f in files]
+        assert "old-note.md" in names
+        # файл реально в новом месте → удаление теперь найдёт его
+        assert (_project_memory_dir(cwd) / "old-note.md").exists()
+        assert _memory_delete(cwd, "old-note.md") is True
+    finally:
+        # уборка legacy в реальном ~/.claude (tmp_path резолвится в HOME)
+        import shutil
+        shutil.rmtree(old_dir.parent, ignore_errors=True)
 
 
 def test_memory_read_all_new_takes_priority(tmp_path):
