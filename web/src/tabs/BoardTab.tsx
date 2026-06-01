@@ -6,6 +6,7 @@ import { Board, BoardColumn, RunResult, TaskCard, isIncidentCard } from '../type
 import { Spinner } from '../components/Spinner'
 import { Modal, ModalHead } from '../components/Modal'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
+import { t } from '../i18n'
 
 interface Props {
   projectId: string
@@ -522,10 +523,10 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               const meta = runResult.meta
               if (!meta) return null
               if (meta.applied) {
-                return <div className="gate-banner gate-banner-applied">Применено ✓</div>
+                return <div className="gate-banner gate-banner-applied">{t['board.gate_applied_banner']}</div>
               }
               if (meta.discarded) {
-                return <div className="gate-banner gate-banner-discarded">Отменено ✗</div>
+                return <div className="gate-banner gate-banner-discarded">{t['board.gate_discarded_banner']}</div>
               }
               if (meta.mode === 'worktree' && meta.has_changes) {
                 return (
@@ -533,27 +534,27 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                     {gateError && <div className="error-state gate-error">{gateError}</div>}
                     <button
                       className="btn-primary gate-apply"
-                      aria-label="Применить изменения в основную ветку"
+                      aria-label={t['board.gate_apply_aria']}
                       disabled={gateBusy}
                       onClick={() => {
                         const cardId = meta.card_id
                         applyCard(cardId)
                       }}
-                    >✓ Применить</button>
+                    >{t['board.gate_apply']}</button>
                     <button
                       className="btn-danger gate-discard"
-                      aria-label="Отменить изменения карточки (необратимо)"
+                      aria-label={t['board.gate_discard_aria']}
                       disabled={gateBusy}
                       onClick={() => setConfirmDiscard({ cardId: meta.card_id })}
-                    >✗ Отмена</button>
+                    >{t['board.gate_discard']}</button>
                   </div>
                 )
               }
               if (meta.mode === 'worktree' && !meta.has_changes) {
-                return <div className="gate-banner">Нет изменений — агент не изменил файлов</div>
+                return <div className="gate-banner">{t['board.gate_no_changes_banner']}</div>
               }
               // legacy
-              return <div className="gate-banner">Изменения применены прямо в рабочем дереве (без гейта)</div>
+              return <div className="gate-banner">{t['board.gate_legacy_banner']}</div>
             })()}
           </div>
         </Modal>
@@ -562,20 +563,20 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       {/* C2-gate: подтверждение discard */}
       {confirmDiscard && (
         <Modal onClose={() => setConfirmDiscard(null)}>
-          <ModalHead title="Отменить изменения?" onClose={() => setConfirmDiscard(null)} />
+          <ModalHead title={t['board.gate_confirm_title']} onClose={() => setConfirmDiscard(null)} />
           <div className="run-modal-body" role="dialog" aria-modal="true">
-            <p>Отменить изменения карточки? Ветка будет удалена. Это действие необратимо.</p>
+            <p>{t['board.gate_confirm_body']}</p>
             <div className="gate-actions">
               <button
                 className="btn-danger"
-                aria-label="Подтвердить отмену"
+                aria-label={t['board.gate_confirm_aria']}
                 disabled={gateBusy}
                 onClick={() => discardCard(confirmDiscard.cardId)}
-              >Да, удалить</button>
+              >{t['board.gate_confirm_yes']}</button>
               <button
                 className="btn-secondary"
                 onClick={() => setConfirmDiscard(null)}
-              >Отмена</button>
+              >{t['common.cancel']}</button>
             </div>
           </div>
         </Modal>
