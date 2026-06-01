@@ -493,6 +493,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "log_cmd": b.get("log_cmd"),
             "test_cmd": b.get("test_cmd"),
             "notify_on_error": bool(b.get("notify_on_error", False)),
+            "self_heal": bool(b.get("self_heal", False)),
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -1182,7 +1183,8 @@ def _parse_pytest_failures(pytest_output: str) -> list[dict]:
 
 
 # Маркер ID для err-карточек: 'err-<hash6>'. Описание — k=v строки.
-_ERR_DESC_RE = re.compile(r"^(source|seen|first|last|excerpt)=(.*)$")
+# heal_attempted — флаг предохранитель: инцидент уже пробовали починить (не повторять).
+_ERR_DESC_RE = re.compile(r"^(source|seen|first|last|excerpt|heal_attempted)=(.*)$")
 
 
 def _parse_incident_desc(desc: str | None) -> dict:
@@ -1200,11 +1202,14 @@ def _parse_incident_desc(desc: str | None) -> dict:
 def _format_incident_desc(meta: dict) -> str:
     """Сериализует metadata err-карточки в description-строки.
     Excerpt идёт ПОСЛЕДНИМ — может быть многострочным, но для нас это одна логическая
-    запись (хранится как одна строка с \\n заменёнными на ' / ' для компактности)."""
+    запись (хранится как одна строка с \\n заменёнными на ' / ' для компактности).
+    heal_attempted — предохранитель от повторного запуска починки."""
     lines: list[str] = []
     for key in ("source", "seen", "first", "last"):
         if key in meta:
             lines.append(f"{key}={meta[key]}")
+    if meta.get("heal_attempted"):
+        lines.append("heal_attempted=true")
     excerpt = meta.get("excerpt", "")
     if excerpt:
         # Многострочный excerpt сворачиваем в одну строку для description
@@ -1423,12 +1428,307 @@ async def api_project_incidents(req: web.Request) -> web.Response:
     return web.json_response({"count": total, "by_column": by_col})
 
 
+async def api_project_self_heal_toggle(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/self-heal {enabled: bool} — включить/выключить самолечение.
+
+    Сохраняет флаг self_heal в topics.json для ВСЕХ записей с тем же cwd.
+    Auth: требует сессионный cookie (стандартный middleware).
+    ПРЕДОХРАНИТЕЛЬ: не включает ни для одного проекта по умолчанию — только по явному запросу.
+    """
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    if project.get("is_free"):
+        return web.json_response({"error": "самолечение недоступно для свободных чатов"}, status=400)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    enabled = bool(body.get("enabled", False))
+
+    cwd = project["cwd"]
+    changed = 0
+    for b in ctx["topics"].values():
+        if b.get("cwd") == cwd:
+            b["self_heal"] = enabled
+            changed += 1
+
+    if changed:
+        save_topics = ctx.get("save_topics")
+        if callable(save_topics):
+            save_topics()
+
+    return web.json_response({"ok": True, "self_heal": enabled, "topics_updated": changed})
+
+
 # Фоновая задача: сканер всех проектов каждые SCAN_INTERVAL_SEC секунд.
 _SCAN_INTERVAL_SEC = int(os.environ.get("ERROR_SCAN_INTERVAL", "300"))  # 5 мин
 
+# ─────────────────────────── Самолечение (Spec 010) ───────────────────────────
+#
+# ПРЕДОХРАНИТЕЛИ (незыблемо):
+# 1. OFF по умолчанию — флаг self_heal в topics.json или SELF_HEAL_ENABLED env.
+# 2. НИКОГДА не auto-apply — агент доходит только до Review; Merge — руками Игоря.
+# 3. Лимит 1 попытка/инцидент — heal_attempted=true пишется ДО запуска.
+# 4. Лимит конкурентности — макс 2 авто-починки одновременно.
+# 5. Только git+clean worktree — не-git/dirty проекты пропускаются.
+# 6. Всё видно — Timeline kind:"self_heal" + TG-пинг Игорю.
+
+_SELF_HEAL_MAX_CONCURRENT = int(os.environ.get("SELF_HEAL_MAX_CONCURRENT", "2"))
+_self_heal_active_count = 0   # глобальный счётчик активных починок
+
+
+def _self_heal_enabled(project: dict) -> bool:
+    """Флаг самолечения: per-project self_heal ИЛИ глобальный env SELF_HEAL_ENABLED.
+    По умолчанию ВСЕГДА False — предохранитель №1."""
+    if project.get("self_heal"):
+        return True
+    return os.environ.get("SELF_HEAL_ENABLED", "").lower() in ("1", "true", "yes")
+
+
+async def _send_tg_ping(ctx: dict, project: dict, msg: str) -> None:
+    """Отправляет HTML-сообщение Игорю в TG-топик проекта. Некритичен."""
+    try:
+        ptb_app = ctx.get("ptb_app")
+        tg_thread_str = project.get("tg_thread", "")
+        if ptb_app and tg_thread_str and ":" in str(tg_thread_str):
+            chat_s, thread_s = str(tg_thread_str).split(":", 1)
+            chat_id = int(chat_s)
+            thread_id = int(thread_s) if thread_s.isdigit() else None
+            await ptb_app.bot.send_message(
+                chat_id, msg, message_thread_id=thread_id, parse_mode="HTML",
+            )
+    except Exception as e:
+        print(f"[self_heal] TG-пинг не удался: {e}")
+
+
+async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None:
+    """Петля починки одного инцидента. Запускается как asyncio.create_task.
+
+    ПРЕДОХРАНИТЕЛИ:
+    - heal_attempted ставится ДО запуска (предотв. зацикливание при краше).
+    - Агент доходит ТОЛЬКО до Review. НИКОГДА не auto-apply.
+    - Счётчик активных починок управляется снаружи (в scanner loop).
+    """
+    global _self_heal_active_count
+    cwd = project["cwd"]
+    name = project["name"]
+    session_key = project["tg_thread"]
+    card_id = incident_card["id"]
+    card_text = incident_card["text"]
+    card_desc = incident_card.get("description", "")
+
+    # ПРЕДОХРАНИТЕЛЬ №3: пометить heal_attempted ДО запуска (атомарно под board-lock)
+    lock = _get_board_lock(cwd)
+    try:
+        async with lock:
+            _, preamble, cols = _load_board(cwd)
+            # Ищем карточку в любой колонке
+            found_card: dict | None = None
+            for col_cards in cols.values():
+                for c in col_cards:
+                    if c["id"] == card_id:
+                        found_card = c
+                        break
+                if found_card:
+                    break
+            if found_card is None:
+                # Карточка исчезла (удалена пользователем?) — пропускаем
+                _self_heal_active_count = max(0, _self_heal_active_count - 1)
+                return
+            meta = _parse_incident_desc(found_card.get("description"))
+            meta["heal_attempted"] = "true"
+            found_card["description"] = _format_incident_desc(meta)
+            _save_board(cwd, name, preamble, cols)
+    except Exception as e:
+        print(f"[self_heal] ошибка при пометке heal_attempted для {card_id}: {e}")
+        _self_heal_active_count = max(0, _self_heal_active_count - 1)
+        return
+
+    # Timeline: старт
+    _bus_publish(session_key, {
+        "kind": "self_heal",
+        "phase": "start",
+        "card_id": card_id,
+        "project": name,
+    })
+
+    # TG-пинг: начинаем починку
+    await _send_tg_ping(
+        ctx, project,
+        f"🔧 <b>Самолечение</b>: начинаю починку инцидента <code>{card_id}</code> "
+        f"в <b>{name}</b>.\n<i>{card_text[:120]}</i>",
+    )
+
+    # Формируем промпт чинильщику
+    excerpt_part = ""
+    if card_desc:
+        meta = _parse_incident_desc(card_desc)
+        exc = meta.get("excerpt", "")
+        if exc:
+            excerpt_part = f"\n\nТрейс/детали:\n{exc[:1000]}"
+    heal_prompt = (
+        f"На проекте инцидент: {card_text}.{excerpt_part}\n\n"
+        f"Найди причину и почини. Не трогай несвязанный код. "
+        f"После правки тесты должны проходить."
+    )
+
+    # Создаём виртуальную карточку для _run_card
+    heal_card: dict = {
+        "id": card_id,
+        "text": heal_prompt,
+        "description": None,
+    }
+
+    # ПРЕДОХРАНИТЕЛЬ №5: проверяем git+clean (worktree-режим)
+    run_mode = await _card_run_mode(cwd)
+    if run_mode != "worktree":
+        print(f"[self_heal] {name}/{card_id}: не-git или dirty — пропускаем")
+        _bus_publish(session_key, {
+            "kind": "self_heal", "phase": "skipped",
+            "reason": "not_git_or_dirty", "card_id": card_id, "project": name,
+        })
+        _self_heal_active_count = max(0, _self_heal_active_count - 1)
+        return
+
+    # Настраиваем worktree (C2-изоляция)
+    wt_info = await _card_worktree_setup(cwd, card_id)
+    if wt_info is None:
+        print(f"[self_heal] {name}/{card_id}: worktree setup failed — пропускаем")
+        _self_heal_active_count = max(0, _self_heal_active_count - 1)
+        return
+
+    # Захватываем running-слот СИНХРОННО (до первого await внутри _run_card)
+    # Это имитирует что C2 занят — предотвращает двойные прогоны из TG
+    if ctx["running"].get(session_key) is not None:
+        print(f"[self_heal] {name}/{card_id}: проект занят — пропускаем")
+        _bus_publish(session_key, {
+            "kind": "self_heal", "phase": "skipped",
+            "reason": "project_busy", "card_id": card_id, "project": name,
+        })
+        _self_heal_active_count = max(0, _self_heal_active_count - 1)
+        return
+    ctx["running"][session_key] = True
+
+    # Перемещаем инцидент в in_progress под board-lock (как обычный C2-запуск)
+    try:
+        async with lock:
+            _, preamble, cols = _load_board(cwd)
+            moved = _pop_card(cols, card_id)
+            if moved is None:
+                moved = heal_card
+            cols["in_progress"].append(moved)
+            _save_board(cwd, name, preamble, cols)
+    except Exception as e:
+        print(f"[self_heal] ошибка при перемещении в in_progress: {e}")
+        ctx["running"].pop(session_key, None)
+        _self_heal_active_count = max(0, _self_heal_active_count - 1)
+        return
+
+    # Запускаем агента через существующий _run_card (ПЕРЕИСПОЛЬЗУЕМ, не дублируем SDK-цикл)
+    # _run_card снимет running-слот в finally, перенесёт карточку в Review/Failed
+    webapp_app_stub = None  # webapp_app используется только для ctx (не нужен здесь)
+    try:
+        await _run_card(
+            ctx, webapp_app_stub, project, heal_card, session_key,
+            run_mode="worktree", wt_info=wt_info,
+        )
+    except Exception as e:
+        print(f"[self_heal] _run_card упал: {e}")
+        # running-слот уже снят в _run_card.finally
+        _self_heal_active_count = max(0, _self_heal_active_count - 1)
+        return
+
+    # Timeline: агент завершил прогон
+    _bus_publish(session_key, {
+        "kind": "self_heal",
+        "phase": "fixed",
+        "card_id": card_id,
+        "project": name,
+    })
+
+    # Прогоняем quality gate в worktree
+    wt_path = wt_info["wt_path"]
+    project_secrets = _secrets_read(cwd)
+    gate = await _run_quality_gate(wt_path, env=project_secrets)
+    verdict = gate.get("verdict", "unknown")
+
+    # Записываем вердикт в meta-сайдкар
+    DATA: Path = ctx["DATA"]
+    try:
+        run_meta = _read_run_meta(DATA, card_id) or {}
+        run_meta["gate"] = {"verdict": verdict, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        _write_run_meta(DATA, card_id, run_meta)
+    except Exception as e:
+        print(f"[self_heal] ошибка записи gate в meta: {e}")
+
+    # Обновляем описание карточки с пометкой авто-починки
+    heal_badge = "🔧 авто-починка · гейт ✓" if verdict == "safe" else "🔧 авто-починка · гейт ✗"
+    try:
+        async with lock:
+            _, preamble, cols = _load_board(cwd)
+            # Карточка уже в review или failed (после _run_card)
+            for col_cards in cols.values():
+                for c in col_cards:
+                    if c["id"] == card_id:
+                        existing_meta = _parse_incident_desc(c.get("description"))
+                        existing_meta["heal_attempted"] = "true"
+                        base_desc = _format_incident_desc(existing_meta)
+                        c["description"] = base_desc + f"\nheal_badge={heal_badge}"
+                        break
+            _save_board(cwd, name, preamble, cols)
+    except Exception as e:
+        print(f"[self_heal] ошибка при обновлении пометки на карточке: {e}")
+
+    # Если risky — переносим в Failed
+    if verdict == "risky":
+        try:
+            async with lock:
+                _, preamble, cols = _load_board(cwd)
+                card_obj = _pop_card(cols, card_id)
+                if card_obj is not None:
+                    cols["failed"].append(card_obj)
+                    _save_board(cwd, name, preamble, cols)
+        except Exception as e:
+            print(f"[self_heal] ошибка при перемещении risky в failed: {e}")
+
+    # Timeline: gate результат
+    gate_phase = "gate_ok" if verdict == "safe" else ("gate_fail" if verdict == "risky" else "gate_unknown")
+    _bus_publish(session_key, {
+        "kind": "self_heal",
+        "phase": gate_phase,
+        "verdict": verdict,
+        "card_id": card_id,
+        "project": name,
+    })
+
+    # TG-пинг: результат
+    if verdict == "safe":
+        tg_msg = (
+            f"✅ <b>Самолечение</b>: фикс готов для <b>{name}</b> · <code>{card_id}</code>.\n"
+            f"Карточка в Review. Тесты прошли. Проверь и нажми «Применить»."
+        )
+    elif verdict == "risky":
+        tg_msg = (
+            f"⚠️ <b>Самолечение</b>: попытка починки <b>{name}</b> · <code>{card_id}</code> "
+            f"не прошла гейт.\nКарточка в Failed. Посмотри diff вручную."
+        )
+    else:
+        tg_msg = (
+            f"🔧 <b>Самолечение</b>: прогон завершён для <b>{name}</b> · <code>{card_id}</code>.\n"
+            f"Гейт: нет тестов (unknown). Карточка в Review. Проверь diff."
+        )
+    await _send_tg_ping(ctx, project, tg_msg)
+
+    _self_heal_active_count = max(0, _self_heal_active_count - 1)
+    print(f"[self_heal] {name}/{card_id}: done, gate={verdict}")
+
 
 async def _error_scanner_loop(ctx: dict):
-    """Фоновая задача: периодически сканирует все проекты с log_cmd/test_cmd."""
+    """Фоновая задача: периодически сканирует все проекты с log_cmd/test_cmd.
+    При включённом самолечении: новые инциденты → asyncio.create_task(_self_heal_card)."""
+    global _self_heal_active_count
     # Первый прогон через 30с после старта (дать боту устаканиться)
     await asyncio.sleep(30)
     while True:
@@ -1443,6 +1743,40 @@ async def _error_scanner_loop(ctx: dict):
                 if res.get("added") or res.get("updated"):
                     print(f"[scanner] {proj['name']}: +{res['added']} new, "
                           f"~{res['updated']} updated (из {res['scanned']} событий)")
+
+                # ── ШАГ 3: Самолечение — если включено и есть новые инциденты ──
+                # ПРЕДОХРАНИТЕЛЬ №1: только если self_heal явно включён
+                if not _self_heal_enabled(proj):
+                    continue
+                if not res.get("added", 0):
+                    continue
+                # ПРЕДОХРАНИТЕЛЬ №4: лимит конкурентности
+                if _self_heal_active_count >= _SELF_HEAL_MAX_CONCURRENT:
+                    print(f"[self_heal] лимит конкурентности ({_SELF_HEAL_MAX_CONCURRENT}) достигнут, пропускаем {proj['name']}")
+                    continue
+                # ПРЕДОХРАНИТЕЛЬ №2: running lock — не запускать если проект занят
+                session_key = proj["tg_thread"]
+                if ctx["running"].get(session_key) is not None:
+                    print(f"[self_heal] проект {proj['name']} занят, пропускаем")
+                    continue
+
+                # Находим новые инциденты (в Failed, heal_attempted не стоит)
+                try:
+                    _, _, cols = _load_board(proj["cwd"])
+                except Exception:
+                    continue
+                for card in cols.get("failed", []):
+                    if not _is_incident_card(card):
+                        continue
+                    meta = _parse_incident_desc(card.get("description"))
+                    if meta.get("heal_attempted") == "true":
+                        continue  # ПРЕДОХРАНИТЕЛЬ №3: уже пытались
+                    if _self_heal_active_count >= _SELF_HEAL_MAX_CONCURRENT:
+                        break  # перепроверяем лимит для каждой карточки
+                    _self_heal_active_count += 1
+                    asyncio.create_task(_self_heal_card(ctx, proj, card))
+                    print(f"[self_heal] запущена починка {proj['name']}/{card['id']}")
+
         except Exception as e:
             print(f"[scanner] loop error: {e}")
         await asyncio.sleep(_SCAN_INTERVAL_SEC)
@@ -4798,6 +5132,8 @@ async def start(ptb_app, ctx: dict) -> None:
         # Сканер инцидентов: ручной запуск + счётчик активных err-карточек
         app.router.add_post("/api/projects/{id}/scan-errors", api_project_scan_errors)
         app.router.add_get("/api/projects/{id}/incidents", api_project_incidents)
+        # Самолечение (Spec 010): тумблер включения per-project
+        app.router.add_post("/api/projects/{id}/self-heal", api_project_self_heal_toggle)
         # Activity-stream: живой поток событий шины (карточки, внешние прогоны)
         app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)
         # Timeline: история событий проекта (JSONL-лог шины) + пагинация
