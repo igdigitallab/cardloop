@@ -86,6 +86,88 @@ def _bus_publish(session_key: str, event: dict) -> None:
                 q.put_nowait(enriched)
             except asyncio.QueueFull:
                 pass
+    # Timeline persistence — единая точка записи для всех событий шины
+    _timeline_append(session_key, event)
+
+
+# ─────────────────────────── timeline persistence ─────────────────────────────
+#
+# Каждое событие шины персистируется в JSONL: DATA/timeline/<slug>.jsonl.
+# Slug = cwd.replace('/', '-'), как в _sdk_sessions_dir.
+# Ротация: файл >5MB → переименовать в .jsonl.1 (одна копия; перезатирает старую .1).
+# Запись глотает ошибки — не ломает прогон.
+# Инициализация: start() вызывает _timeline_init(ctx) — передаёт DATA и topics-dict.
+
+_TIMELINE_DATA_DIR: "Path | None" = None   # DATA/timeline/ — задаётся в start()
+_TIMELINE_TOPICS: "dict | None" = None     # ссылка на ctx["topics"] — для session_key→cwd
+_TIMELINE_MAX_SIZE = 5 * 1024 * 1024       # 5 MB — ротация
+_TIMELINE_TEXT_LIMIT = 2000                # симв — обрезка text-поля
+
+
+def _timeline_init(ctx: dict) -> None:
+    """Вызывается из start() — сохраняет ссылки для _timeline_append."""
+    global _TIMELINE_DATA_DIR, _TIMELINE_TOPICS
+    _TIMELINE_DATA_DIR = ctx["DATA"] / "timeline"
+    _TIMELINE_TOPICS = ctx["topics"]
+    try:
+        _TIMELINE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _timeline_slug_from_cwd(cwd: str) -> str:
+    """Стабильный slug из cwd (идентично _sdk_sessions_dir): '/' → '-'."""
+    return cwd.replace("/", "-")
+
+
+def _timeline_path(session_key: str) -> "Path | None":
+    """Возвращает Path к .jsonl-файлу для session_key, или None если DATA не инициализирован.
+    Резолвит session_key → cwd через _TIMELINE_TOPICS; если не найден — пишет в _unknown.jsonl."""
+    if _TIMELINE_DATA_DIR is None:
+        return None
+    cwd: str | None = None
+    if _TIMELINE_TOPICS:
+        topic_data = _TIMELINE_TOPICS.get(session_key)
+        if topic_data:
+            cwd = topic_data.get("cwd")
+    if cwd:
+        slug = _timeline_slug_from_cwd(cwd)
+    else:
+        # session_key может быть free-chat id или неизвестным топиком — кодируем безопасно
+        safe = session_key.replace("/", "-").replace(":", "-")
+        slug = safe if safe else "_unknown"
+    return _TIMELINE_DATA_DIR / f"{slug}.jsonl"
+
+
+def _timeline_append(session_key: str, event: dict) -> None:
+    """Добавляет событие в JSONL-лог. Ошибки глотает (не ломает прогон).
+    Никогда не логирует поля env — их в событиях нет, защита на случай будущих изменений."""
+    try:
+        path = _timeline_path(session_key)
+        if path is None:
+            return
+        # Собираем запись: добавляем ts, обрезаем text, исключаем env
+        record: dict = {"ts": time.time(), "session_key": session_key}
+        for k, v in event.items():
+            if k == "env":
+                continue  # env — секреты, никогда в timeline
+            if k == "text" and isinstance(v, str) and len(v) > _TIMELINE_TEXT_LIMIT:
+                record[k] = v[:_TIMELINE_TEXT_LIMIT] + "…"
+            else:
+                record[k] = v
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        # Ротация: если файл уже существует и > 5MB — переименовать в .1
+        try:
+            if path.exists() and path.stat().st_size > _TIMELINE_MAX_SIZE:
+                backup = path.with_suffix(".jsonl.1")
+                path.rename(backup)
+        except Exception:
+            pass
+        # Append
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass  # никогда не ломаем прогон
 
 
 # ─────────────────────────── tool formatter ───────────────────────────
@@ -2114,6 +2196,88 @@ async def api_activity_stream_all(req: web.Request) -> web.StreamResponse:
     """GET /api/activity-stream — единый поток ВСЕХ событий шины (unread-индикаторы в сайдбаре)."""
     q = _bus_subscribe_global()
     return await _sse_stream(req, q, _bus_unsubscribe_global)
+
+
+# ─────────────────────────── timeline read endpoint ───────────────────────────
+#
+# GET /api/projects/{id}/timeline?limit=N&before=<ts>
+# Читает DATA/timeline/<slug>.jsonl (+ .jsonl.1 если нужна история).
+# Отдаёт массив событий в хронологическом порядке (новые внизу).
+# Пагинация: before=<ts> — только события со ts < before.
+# Битые строки JSONL → skip (graceful).
+
+_TIMELINE_DEFAULT_LIMIT = 200
+_TIMELINE_MAX_LIMIT = 500
+
+
+def _timeline_read_events(session_key: str, limit: int, before: float | None) -> list[dict]:
+    """Читает события из JSONL (текущий файл + .1 для старой истории).
+    Возвращает список событий в хронологическом порядке, ≤ limit штук,
+    при before — только со ts < before."""
+    path = _timeline_path(session_key)
+    if path is None or not isinstance(path, Path):
+        return []
+
+    # Собираем строки из обоих файлов: сначала .1 (старые), потом текущий
+    files: list[Path] = []
+    backup = path.with_suffix(".jsonl.1")
+    if backup.exists():
+        files.append(backup)
+    if path.exists():
+        files.append(path)
+
+    events: list[dict] = []
+    for fpath in files:
+        try:
+            with open(fpath, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue  # graceful: битая строка → skip
+                    if not isinstance(obj, dict):
+                        continue
+                    ts = obj.get("ts")
+                    if before is not None and isinstance(ts, (int, float)) and ts >= before:
+                        continue
+                    events.append(obj)
+        except Exception:
+            continue
+
+    # Сортируем хронологически по ts (новые внизу)
+    events.sort(key=lambda e: e.get("ts", 0))
+    # Берём последние limit
+    return events[-limit:]
+
+
+async def api_project_timeline(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/timeline?limit=N&before=<ts> — история событий проекта."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    try:
+        limit = int(req.rel_url.query.get("limit", _TIMELINE_DEFAULT_LIMIT))
+        limit = max(1, min(limit, _TIMELINE_MAX_LIMIT))
+    except (ValueError, TypeError):
+        limit = _TIMELINE_DEFAULT_LIMIT
+
+    before: float | None = None
+    before_str = req.rel_url.query.get("before")
+    if before_str:
+        try:
+            before = float(before_str)
+        except (ValueError, TypeError):
+            pass
+
+    session_key = project["tg_thread"]
+    events = _timeline_read_events(str(session_key), limit, before)
+    return web.json_response({"events": events})
 
 
 # ─────────────────────────── свободные чаты (без привязки к проекту) ───────────────────────────
@@ -4436,6 +4600,9 @@ async def start(ptb_app, ctx: dict) -> None:
         # Деривируем токен один раз при старте (scrypt медленный — не на каждый запрос)
         ctx["_auth_token"] = _derive_token(ctx["password"])
 
+        # Timeline: инициализируем персистентность шины (DATA/timeline/)
+        _timeline_init(ctx)
+
         app = web.Application(middlewares=[auth_middleware], client_max_size=20 * 1024 * 1024)
         app["ctx"] = ctx
 
@@ -4484,6 +4651,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/incidents", api_project_incidents)
         # Activity-stream: живой поток событий шины (карточки, внешние прогоны)
         app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)
+        # Timeline: история событий проекта (JSONL-лог шины) + пагинация
+        app.router.add_get("/api/projects/{id}/timeline", api_project_timeline)
         # Глобальный поток всех событий (для unread-индикаторов в сайдбаре)
         app.router.add_get("/api/activity-stream", api_activity_stream_all)
         # Git sync — commit (если dirty) + push одной кнопкой
