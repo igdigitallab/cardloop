@@ -99,6 +99,13 @@ export const api = {
   cardRun: (id: string, card: string) =>
     apiFetch<import('./types').RunResult>(`/api/projects/${id}/tasks/${card}/run`),
 
+  // Spec 009: quality gate — прогнать тесты в worktree карточки и получить вердикт
+  checkCard: (id: string, card: string) =>
+    apiFetch<import('./types').GateResult>(
+      `/api/projects/${id}/tasks/${card}/check`,
+      { method: 'POST' }
+    ),
+
   applyCard: (id: string, card: string) =>
     apiFetch<{ ok: boolean; applied: boolean; card_id: string }>(
       `/api/projects/${id}/tasks/${card}/apply`,

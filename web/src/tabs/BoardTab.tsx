@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
-import { Board, BoardColumn, RunResult, TaskCard, isIncidentCard } from '../types'
+import { Board, BoardColumn, GateResult, RunResult, TaskCard, isIncidentCard } from '../types'
 import { Spinner } from '../components/Spinner'
 import { Modal, ModalHead } from '../components/Modal'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
@@ -68,6 +68,11 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   const [confirmDiscard, setConfirmDiscard] = useState<{ cardId: string } | null>(null)
   // Toast for gate messages
   const [gateToast, setGateToast] = useState<string>('')
+
+  // Spec 009: quality gate — результат проверки тестов перед применением
+  const [gateResult, setGateResult] = useState<GateResult | null>(null)
+  const [gateChecking, setGateChecking] = useState(false)
+  const [gateOutputOpen, setGateOutputOpen] = useState(false)
 
   // Видимые колонки (persist в localStorage). Дефолт — только Backlog.
   const [visibleCols, setVisibleCols] = useState<Set<string>>(() => readVisibleCols())
@@ -254,6 +259,8 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     setShowRunModal(true)
     setRunResult(null)
     setGateError('')
+    setGateResult(null)
+    setGateOutputOpen(false)
     try {
       const r = await api.cardRun(projectId, cardId)
       setRunResult(r)
@@ -307,6 +314,22 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       setGateError(e instanceof Error ? e.message : String(e))
     } finally {
       setGateBusy(false)
+    }
+  }
+
+  // Spec 009: quality gate — прогнать тесты в worktree карточки
+  async function checkCard(cardId: string) {
+    setGateChecking(true)
+    setGateResult(null)
+    setGateOutputOpen(false)
+    setGateError('')
+    try {
+      const r = await api.checkCard(projectId, cardId)
+      setGateResult(r)
+    } catch (e) {
+      setGateError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setGateChecking(false)
     }
   }
 
@@ -504,8 +527,8 @@ export function BoardTab({ projectId, isActive = true }: Props) {
 
       {/* F1: модалка результата карточки */}
       {showRunModal && (
-        <Modal onClose={() => { setShowRunModal(false); setGateError('') }}>
-          <ModalHead title="Результат выполнения" onClose={() => { setShowRunModal(false); setGateError('') }} />
+        <Modal onClose={() => { setShowRunModal(false); setGateError(''); setGateResult(null); setGateOutputOpen(false) }}>
+          <ModalHead title="Результат выполнения" onClose={() => { setShowRunModal(false); setGateError(''); setGateResult(null); setGateOutputOpen(false) }} />
           <div className="run-modal-body">
             {runResultLoading && <Spinner label="Загрузка..." />}
             {!runResultLoading && runResult && !runResult.exists && (
@@ -529,13 +552,57 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                 return <div className="gate-banner gate-banner-discarded">{t['board.gate_discarded_banner']}</div>
               }
               if (meta.mode === 'worktree' && meta.has_changes) {
+                const applyClass = gateResult?.verdict === 'safe'
+                  ? 'btn-primary gate-apply gate-apply-safe'
+                  : gateResult?.verdict === 'risky'
+                    ? 'btn-primary gate-apply gate-apply-risky'
+                    : 'btn-primary gate-apply'
                 return (
                   <div className="gate-actions">
                     {gateError && <div className="error-state gate-error">{gateError}</div>}
+
+                    {/* Spec 009: quality gate — кнопка «Проверить» + вердикт */}
+                    <div className="gate-check-row">
+                      <button
+                        className="btn-secondary gate-check"
+                        aria-label={t['board.gate_check_aria']}
+                        disabled={gateChecking || gateBusy}
+                        onClick={() => checkCard(meta.card_id)}
+                      >
+                        {gateChecking ? t['board.gate_checking'] : t['board.gate_check']}
+                      </button>
+                      {gateResult && (
+                        <span
+                          className={`gate-verdict gate-verdict-${gateResult.verdict}`}
+                          aria-live="polite"
+                        >
+                          {gateResult.verdict === 'safe' && t['board.gate_verdict_safe']}
+                          {gateResult.verdict === 'risky' && t['board.gate_verdict_risky']}
+                          {gateResult.verdict === 'unknown' && (
+                            gateResult.reason === 'legacy'
+                              ? t['board.gate_verdict_unknown_reason']
+                              : t['board.gate_verdict_unknown']
+                          )}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Сворачиваемый вывод тестов (если risky) */}
+                    {gateResult?.tests?.detected && gateResult.tests.output && (
+                      <details
+                        className="gate-output-details"
+                        open={gateOutputOpen}
+                        onToggle={e => setGateOutputOpen((e.target as HTMLDetailsElement).open)}
+                      >
+                        <summary className="gate-output-summary">{t['board.gate_output_toggle']}</summary>
+                        <pre className="gate-output-pre">{gateResult.tests.output}</pre>
+                      </details>
+                    )}
+
                     <button
-                      className="btn-primary gate-apply"
+                      className={applyClass}
                       aria-label={t['board.gate_apply_aria']}
-                      disabled={gateBusy}
+                      disabled={gateBusy || gateChecking}
                       onClick={() => {
                         const cardId = meta.card_id
                         applyCard(cardId)
@@ -544,7 +611,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                     <button
                       className="btn-danger gate-discard"
                       aria-label={t['board.gate_discard_aria']}
-                      disabled={gateBusy}
+                      disabled={gateBusy || gateChecking}
                       onClick={() => setConfirmDiscard({ cardId: meta.card_id })}
                     >{t['board.gate_discard']}</button>
                   </div>

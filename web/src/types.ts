@@ -71,6 +71,25 @@ export interface Board {
   exists: boolean
 }
 
+// ─── Spec 009: quality gate result ───────────────────────────────────────────
+
+export interface GateTestResult {
+  detected: boolean
+  ok: boolean
+  cmd: string | null
+  exit_code: number | null
+  output: string
+  timed_out: boolean
+}
+
+export interface GateResult {
+  verdict: 'safe' | 'risky' | 'unknown'
+  /** Reason for unknown verdict when no worktree (e.g. "legacy") */
+  reason?: string
+  tests: GateTestResult | null
+  lint: null
+}
+
 // ─── C2-gate: worktree run meta ───────────────────────────────────────────
 
 export interface RunMeta {

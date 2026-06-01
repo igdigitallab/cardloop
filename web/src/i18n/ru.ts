@@ -136,6 +136,15 @@ export const ru = {
   'board.description_placeholder': 'Описание задачи (markdown)…',
 
   // ── C2-gate ──────────────────────────────────────────────────
+  // Spec 009: quality gate
+  'board.gate_check': '🧪 Проверить',
+  'board.gate_check_aria': 'Прогнать тесты перед применением',
+  'board.gate_checking': 'Проверяю...',
+  'board.gate_verdict_safe': '🟢 Безопасно — тесты прошли',
+  'board.gate_verdict_risky': '🔴 Рискованно — тесты упали',
+  'board.gate_verdict_unknown': '⚪ Тестов нет',
+  'board.gate_verdict_unknown_reason': '⚪ Тестов нет (legacy-режим)',
+  'board.gate_output_toggle': 'Вывод тестов',
   'board.gate_apply': '✓ Применить',
   'board.gate_apply_aria': 'Применить изменения в основную ветку',
   'board.gate_discard': '✗ Отмена',
