@@ -1789,6 +1789,8 @@ async def _run_card(
             })
 
             resume_sid = ctx["sessions"].get(session_key)
+            # Секреты проекта — только из cwd основного проекта (не worktree), изоляция по cwd
+            project_secrets = _secrets_read(cwd)
             async for event in run_engine(
                 project_name=name,
                 cwd=effective_cwd,
@@ -1796,6 +1798,7 @@ async def _run_card(
                 session_key=session_key,
                 model=model,
                 resume_session_id=resume_sid,
+                env=project_secrets,
             ):
                 etype = event["type"]
                 if etype == "text":
@@ -3373,6 +3376,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
 
     try:
         resume_sid = ctx["sessions"].get(session_key)
+        # Секреты проекта подмешиваются в env агента (значения — только в процессе, не в API)
+        project_secrets = _secrets_read(cwd)
         async for event in run_engine(
             project_name=name,
             cwd=cwd,
@@ -3380,6 +3385,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             session_key=session_key,
             model=model,
             resume_session_id=resume_sid,
+            env=project_secrets,
         ):
             etype = event.get("type")
             if etype == "text":
@@ -3800,6 +3806,207 @@ async def api_project_memory_delete(req: web.Request) -> web.Response:
     files, _ = _memory_read_all(project["cwd"])
     exists = bool(files)
     return web.json_response({"files": files, "exists": exists})
+
+
+# ─────────────────────────── Секреты проекта (secrets) ──────────────────────────────────────
+#
+# Хранилище: <cwd>/.claude-ops/secrets/secrets.env (chmod 600, не в git)
+# Формат:    KEY=VALUE построчно, # — комментарии, пустые строки — игнор
+# Безопасность:
+#   - Имена ключей: ^[A-Z_][A-Z0-9_]*$ (env-совместимые, anti-injection)
+#   - Значения НИКОГДА не возвращаются через API — только список имён
+#   - .claude-ops/secrets/ добавляется в .gitignore при первой записи
+#   - chmod 600 на secrets.env при каждой записи
+#   - Изоляция по cwd: секреты одного проекта не видны другому
+
+_SECRETS_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_SECRETS_MAX_VALUE_SIZE = 8 * 1024   # 8 КБ на значение
+_SECRETS_MAX_KEYS = 100              # максимум ключей в одном проекте
+
+
+def _project_secrets_path(cwd: str) -> Path:
+    """Путь к файлу секретов: <cwd>/.claude-ops/secrets/secrets.env."""
+    return Path(cwd) / ".claude-ops" / "secrets" / "secrets.env"
+
+
+def _secrets_read(cwd: str) -> dict:
+    """Читает KEY=VALUE из secrets.env. Нет файла → {}.
+    Комментарии (#) и пустые строки игнорируются."""
+    path = _project_secrets_path(cwd)
+    result: dict[str, str] = {}
+    if not path.exists():
+        return result
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, _, v = line.partition("=")
+                k = k.strip()
+                if _SECRETS_KEY_RE.match(k):
+                    result[k] = v
+    except Exception:
+        pass
+    return result
+
+
+def _secrets_ensure_gitignore(cwd: str) -> None:
+    """Гарантирует что .claude-ops/secrets/ есть в .gitignore проекта.
+    Дописывает строку если нет."""
+    gitignore = Path(cwd) / ".gitignore"
+    line = ".claude-ops/secrets/"
+    try:
+        if gitignore.exists():
+            content = gitignore.read_text(encoding="utf-8")
+            if line in content:
+                return
+            # Дописываем в конец
+            if not content.endswith("\n"):
+                content += "\n"
+            content += f"{line}\n"
+        else:
+            content = f"{line}\n"
+        gitignore.write_text(content, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _secrets_write(cwd: str, data: dict) -> None:
+    """Атомарно записывает secrets.env (tmp+replace), chmod 600, mkdir.
+    Гарантирует .claude-ops/secrets/ в .gitignore."""
+    path = _project_secrets_path(cwd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines = ["# Секреты проекта — НЕ коммитить, не передавать третьим лицам\n"]
+    for k, v in sorted(data.items()):
+        lines.append(f"{k}={v}\n")
+
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text("".join(lines), encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+
+    # chmod 600 на итоговый файл (на случай если replace не сохранил права на некоторых ФС)
+    try:
+        path.chmod(0o600)
+    except Exception:
+        pass
+
+    _secrets_ensure_gitignore(cwd)
+
+
+def _secrets_set(cwd: str, key: str, value: str) -> None:
+    """Устанавливает (добавляет/обновляет) одну пару KEY=VALUE."""
+    if not _SECRETS_KEY_RE.match(key):
+        raise ValueError(f"invalid key name: {key!r}")
+    if len(value.encode("utf-8")) > _SECRETS_MAX_VALUE_SIZE:
+        raise ValueError("value too large (max 8KB)")
+    data = _secrets_read(cwd)
+    if key not in data and len(data) >= _SECRETS_MAX_KEYS:
+        raise ValueError(f"too many keys (max {_SECRETS_MAX_KEYS})")
+    data[key] = value
+    _secrets_write(cwd, data)
+
+
+def _secrets_delete(cwd: str, key: str) -> bool:
+    """Удаляет ключ. Возвращает True если удалён, False если не существовал."""
+    if not _SECRETS_KEY_RE.match(key):
+        raise ValueError(f"invalid key name: {key!r}")
+    data = _secrets_read(cwd)
+    if key not in data:
+        return False
+    del data[key]
+    _secrets_write(cwd, data)
+    return True
+
+
+# ─────────────────────────── API секретов (CRUD) ─────────────────────────────
+
+
+async def api_project_secrets(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/secrets — список ИМЁН ключей (без значений).
+    ⚠️ Значения секретов никогда не возвращаются клиенту."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    data = _secrets_read(project["cwd"])
+    return web.json_response({"keys": sorted(data.keys()), "exists": bool(data)})
+
+
+async def api_project_secrets_set(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/secrets/{key} — задать секрет.
+    Body: {value: str}. Возвращает обновлённый список имён (без значений)."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    key = req.match_info["key"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    # Anti-traversal: имя ключа не должно содержать path-компонент
+    if "/" in key or "\\" in key or ".." in key:
+        return web.json_response({"error": "invalid key name"}, status=400)
+    if not _SECRETS_KEY_RE.match(key):
+        return web.json_response({"error": "invalid key name (must match ^[A-Z_][A-Z0-9_]*$)"}, status=400)
+
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request body"}, status=400)
+
+    value = body.get("value", "")
+    if not isinstance(value, str):
+        return web.json_response({"error": "value must be string"}, status=400)
+
+    try:
+        _secrets_set(project["cwd"], key, value)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except Exception as e:
+        return web.json_response({"error": f"write failed: {e}"}, status=500)
+
+    data = _secrets_read(project["cwd"])
+    return web.json_response({"keys": sorted(data.keys()), "exists": bool(data)})
+
+
+async def api_project_secrets_delete(req: web.Request) -> web.Response:
+    """DELETE /api/projects/{id}/secrets/{key} — удалить секрет."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    key = req.match_info["key"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    # Anti-traversal
+    if "/" in key or "\\" in key or ".." in key:
+        return web.json_response({"error": "invalid key name"}, status=400)
+    if not _SECRETS_KEY_RE.match(key):
+        return web.json_response({"error": "invalid key name"}, status=400)
+
+    try:
+        deleted = _secrets_delete(project["cwd"], key)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except Exception as e:
+        return web.json_response({"error": f"delete failed: {e}"}, status=500)
+
+    if not deleted:
+        return web.json_response({"error": "key not found"}, status=404)
+
+    data = _secrets_read(project["cwd"])
+    return web.json_response({"keys": sorted(data.keys()), "exists": bool(data)})
 
 
 # ─────────────────────────── новый проект: шаблоны + инициализация ───────────────────────────
@@ -4315,6 +4522,10 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/memory", api_project_memory)
         app.router.add_post("/api/projects/{id}/memory/{name}", api_project_memory_write)
         app.router.add_delete("/api/projects/{id}/memory/{name}", api_project_memory_delete)
+        # Секреты проекта (Spec 007): только имена в API, значения — только агенту через env
+        app.router.add_get("/api/projects/{id}/secrets", api_project_secrets)
+        app.router.add_post("/api/projects/{id}/secrets/{key}", api_project_secrets_set)
+        app.router.add_delete("/api/projects/{id}/secrets/{key}", api_project_secrets_delete)
         # Переименование папки проекта (kebab-case slug)
         app.router.add_post("/api/projects/{id}/rename", api_project_rename)
         # Быстрая проверка структуры проекта без агента

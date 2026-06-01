@@ -557,6 +557,9 @@ async def run_agent(context, update, prompt: str):
     engine_exc = None
     webapp._bus_publish(k, {"kind": "run_start", "source": "tg", "prompt": prompt, "run_id": None})
     try:
+        # Секреты проекта (Spec 007) дополняют env; TG_CHAT_ID/TG_THREAD_ID имеют приоритет
+        project_secrets = webapp._secrets_read(cwd)
+        agent_env = {**project_secrets, "TG_CHAT_ID": str(chat), "TG_THREAD_ID": str(thread or 0)}
         async for event in run_engine(
             project_name=b["project"],
             cwd=cwd,
@@ -564,7 +567,7 @@ async def run_agent(context, update, prompt: str):
             session_key=k,
             model=model,
             system_prompt={"type": "preset", "preset": "claude_code", "append": TELEGRAM_NUDGE},
-            env={"TG_CHAT_ID": str(chat), "TG_THREAD_ID": str(thread or 0)},
+            env=agent_env,
             resume_session_id=sessions.get(k),
         ):
             last_event[0] = time.time()   # любое событие SDK = «живо» для watchdog
