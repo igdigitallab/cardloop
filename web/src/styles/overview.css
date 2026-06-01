@@ -327,6 +327,33 @@
   border-radius: 3px;
 }
 
+/* ── Memory CRUD: action buttons in sidebar ────────────────────── */
+.memory-item-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.spec-item:hover .memory-item-actions { display: flex; }
+.spec-item.active .memory-item-actions { display: flex; }
+
+.memory-action-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text3);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1;
+  transition: background var(--transition), color var(--transition);
+}
+.memory-action-btn:hover { background: var(--bg4); color: var(--text2); }
+.memory-action-btn--danger:hover { background: rgba(220,50,50,0.15); color: #e55; }
+
+/* Memory edit modal — wider than default */
+.memory-edit-modal { min-width: min(600px, 90vw); }
+
 /* ── #4 Запуск тестов ───────────────────────────────────────────── */
 .test-card { margin-top: 16px; }
 .test-card-header {

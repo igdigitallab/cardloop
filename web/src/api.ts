@@ -191,6 +191,18 @@ export const api = {
   memory: (id: string) =>
     apiFetch<import('./types').ProjectMemory>(`/api/projects/${id}/memory`),
 
+  saveMemory: (id: string, name: string, content: string) =>
+    apiFetch<import('./types').ProjectMemory>(`/api/projects/${id}/memory/${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    }),
+
+  deleteMemory: (id: string, name: string) =>
+    apiFetch<import('./types').ProjectMemory>(`/api/projects/${id}/memory/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
+
   // Свободные чаты (без привязки к проекту)
   freeCreate: (body?: { cwd?: string; model?: string; label?: string }) =>
     apiFetch<{ id: string; label: string; cwd: string; model: string; created_at: number }>(
