@@ -81,6 +81,12 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - **Orphan worktrees** после краша: остаются на диске `.worktrees/`. Уборка — в Backlog (не в этой итерации).
 - **НИКОГДА** не делать `git branch -D` на ветках кроме `card-*` (pattern валидирован `_valid_card_id`).
 
+### Память проекта (Spec 006)
+- **Память в репо, НЕ в `~/.claude`.** Новое место: `<cwd>/.claude-ops/memory/` — коммитится в git. Старое (`~/.claude/projects/<cwd>/memory/`) — fallback при чтении GET (read-only совместимость). Не путать.
+- **Агент пишет через Write.** Специальных API для агента не нужно — он пишет `.claude-ops/memory/<slug>.md` обычным Write. TELEGRAM_NUDGE напоминает об этом одной строкой.
+- **MEMORY.md = авто-индекс.** Перестраивается при каждом write/delete. НЕ редактировать руками — перезапишется. Записи в slug-файлах с frontmatter (type/created).
+- **Slug валидация:** `^[a-z0-9][a-z0-9-]{0,60}\.md$` + `MEMORY.md`. Uppercase / traversal (`../`) → 400.
+
 ### Прочее
 - **Проценты лимитов ≠ из SDK.** Пассивный `RateLimitEvent` SDK даёт только `status`+`resets_at`, `utilization=None`. Источник % — oauth-эндпоинт `GET https://api.anthropic.com/api/oauth/usage` (header `anthropic-beta: oauth-2025-04-20`). `webapp.py:api_usage` тянет его (кэш 60с). TG-команда `/usage` пока на пассивном.
 - **LogsTab: `log_cmd` в topics.json.** Таб «Логи» запускает `log_cmd` через subprocess (timeout 8с, берёт последние 300 строк). Если не задан — empty state. Задать: в `data/topics.json` для проекта добавить `"log_cmd": "journalctl -u my-service -n 300 --no-pager"`.

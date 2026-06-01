@@ -131,9 +131,15 @@ Claude SDK sessions (`~/.claude/projects/<cwd-encoded>/*.jsonl`). Session is sha
 
 ## Память (Memory)
 
+Project memory lives in **`<cwd>/.claude-ops/memory/`** — committed to git, travels with the repo.
+Response format for all endpoints: `{files:[{name, content}], exists}`. `MEMORY.md` is always first (index).
+File names: `^[a-z0-9][a-z0-9-]{0,60}\.md$` or `MEMORY.md`. Max size per file: 256 KB.
+
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/api/projects/{id}/memory` | Read agent memory files for the project (from `~/.claude/projects/<cwd>/memory/`) | Yes |
+| `GET` | `/api/projects/{id}/memory` | Read all memory files. Reads `.claude-ops/memory/`; fallback to old `~/.claude/projects/<cwd>/memory/` if new path absent. Returns `{files, exists}`. | Yes |
+| `POST` | `/api/projects/{id}/memory/{name}` | Create or update a memory entry. Body: `{"content":"..."}`. Validates slug, checks size limit, atomic write, auto-reindexes `MEMORY.md`. Returns updated `{files, exists}`. Errors: 400 bad name/size, 404 project not found. | Yes |
+| `DELETE` | `/api/projects/{id}/memory/{name}` | Delete a memory entry. Auto-reindexes `MEMORY.md`. Returns updated `{files, exists}`. Cannot delete `MEMORY.md` directly (400). 404 if entry not found. | Yes |
 
 ---
 
