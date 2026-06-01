@@ -157,6 +157,18 @@ Key format: `^[A-Z_][A-Z0-9_]*$`. Max value size: 8 KB. Max keys: 100.
 
 ---
 
+## Timeline — лента событий (Spec 008)
+
+Persistent event log for a project. Every event published via `_bus_publish` is appended to `data/timeline/<slug>.jsonl`.
+Rotation: when file exceeds **5 MB** it is renamed to `.jsonl.1` (single backup, overwrites previous). Reading merges both files.
+Event schema: `{ts, session_key, kind, source?, run_id?, prompt?, text?, tool?, outcome?}`. **env field is never written.**
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects/{id}/timeline` | Chronological list of events (newest at bottom). Query params: `limit` (default 200, max 500), `before=<ts>` (Unix float, for pagination — return events with ts < before). Returns `{events:[...]}`. 404 if project not found. | Yes |
+
+---
+
 ## Usage
 
 | Method | Path | Description | Auth |
@@ -187,7 +199,7 @@ Free-form chats not tied to a project (`cwd=$HOME`). Shown in tab bar, hidden fr
 
 ## Summary
 
-Total registered routes: **59** API routes + 1 SPA catch-all (60 total).
+Total registered routes: **60** API routes + 1 SPA catch-all (61 total).
 
 Public (no cookie): `GET /api/health`, `POST /api/login`.
 All other `/api/*` routes require a valid `cops_auth` session cookie.

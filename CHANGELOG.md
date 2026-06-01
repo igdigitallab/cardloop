@@ -8,6 +8,15 @@
 ## [Unreleased]
 _(текущая работа)_
 
+## [v0.6.0] — 2026-05-31
+Шаг 3 roadmap: наблюдаемость — Timeline (Spec 008). Шина событий теперь персистируется; кокпит получает вкладку «🕒 Лента».
+
+### Добавлено
+- **Timeline persistence** (Spec 008): `_bus_publish` теперь вызывает `_timeline_append` — единая точка записи. Каждое событие пишется в `data/timeline/<slug>.jsonl` (append-only, slug = `cwd.replace('/', '-')`). Ротация: >5MB → `.jsonl.1` (одна копия). Запись глотает исключения, env-поле никогда не пишется. `_timeline_init(ctx)` вызывается из `start()`.
+- **`GET /api/projects/{id}/timeline?limit=N&before=<ts>`** — эндпоинт истории: читает JSONL (текущий + .1), парсит gracefully (битые строки → skip), возвращает массив в хронологическом порядке. Пагинация по `before=<ts>` (Unix float). Auth-protected, anti-traversal через `_find_project_by_id`.
+- **TimelineTab** (`web/src/tabs/TimelineTab.tsx`): история из `GET /timeline` + live-события через `useProjectActivity` (переиспользует существующий SSE-коннект, новый сокет не открывается). Кнопка «Загрузить ранее» с `before=<oldest_ts>`. Иконки по kind (▶/✅/❌/🔧/💬), live-badge с пульсацией на 4с, ARIA (`role=log`, `aria-live=polite`). CSS: `styles/timeline.css`.
+- **32 новых теста** (`tests/test_timeline.py`): slug стабильность, path резолв, append+ts+truncate+env-exclusion, ротация 5MB, bus_publish интеграция, graceful broken JSONL, backup read, API GET/limit/before/env-not-in-response. **453 passed** (было 421).
+
 ## [v0.5.0] — 2026-05-31
 Шаг 2 roadmap: изолированное хранилище ключей проекта (OSS-механизм; Vault Игоря не трогаем).
 
