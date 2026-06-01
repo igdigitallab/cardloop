@@ -122,7 +122,15 @@ export interface FileContent {
   error?: string
 }
 
-export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory'
+export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'secrets'
+
+// ─── Project Secrets (Spec 007) ───────────────────────────────────────────────
+
+export interface ProjectSecrets {
+  /** Names of keys stored — values are NEVER returned by the API. */
+  keys: string[]
+  exists: boolean
+}
 
 export interface ProjectLogs {
   lines: string[]

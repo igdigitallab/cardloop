@@ -300,6 +300,22 @@ export const api = {
   upgradeProject: (id: string) =>
     apiFetch<{ ok: boolean; card_id: string }>(`/api/projects/${id}/upgrade`, { method: 'POST' }),
 
+  // Spec 007: project secrets — values are NEVER returned, only key names
+  secrets: (id: string) =>
+    apiFetch<import('./types').ProjectSecrets>(`/api/projects/${id}/secrets`),
+
+  setSecret: (id: string, key: string, value: string) =>
+    apiFetch<import('./types').ProjectSecrets>(`/api/projects/${id}/secrets/${encodeURIComponent(key)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    }),
+
+  deleteSecret: (id: string, key: string) =>
+    apiFetch<import('./types').ProjectSecrets>(`/api/projects/${id}/secrets/${encodeURIComponent(key)}`, {
+      method: 'DELETE',
+    }),
+
   // Git: commit (если dirty) + push одной кнопкой
   gitSync: (id: string, message?: string) =>
     apiFetch<{ ok: boolean; committed: boolean; pushed: boolean; message: string | null; log: string }>(
