@@ -72,6 +72,15 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - **Анти-traversal.** `_resolve_safe` / `_resolve_global_safe` — resolve+startswith trailing-slash. `.env*` 403 (кроме `.env.example`). `.git/venv/node_modules/dist/__pycache__` скрыты+403.
 - **card_id валидируется** `_valid_card_id`/`_CARD_ID_RE` (не допускать path-injection через card_id).
 
+### C2-gate: worktree-режим карточек
+- **Детектор режима**: git-репо + чистое дерево → `worktree`; иначе → `legacy` (прогон прямо в cwd).
+- **Worktree жизненный цикл**: setup в `.worktrees/card-<id>` → прогон агента в ветке `card-<id>` → авто-коммит → сайдкар `.json` с `mode/has_changes/applied/discarded`.
+- **Worktree НЕ удаляется** после прогона — остаётся до apply/discard.
+- **apply**: `merge --no-ff card-<id>` в main; конфликт → 409, `merge --abort`, worktree жив. apply-success → worktree+ветка удалены, карточка Done.
+- **discard**: worktree+ветка удалены, карточка Backlog.
+- **Orphan worktrees** после краша: остаются на диске `.worktrees/`. Уборка — в Backlog (не в этой итерации).
+- **НИКОГДА** не делать `git branch -D` на ветках кроме `card-*` (pattern валидирован `_valid_card_id`).
+
 ### Прочее
 - **Проценты лимитов ≠ из SDK.** Пассивный `RateLimitEvent` SDK даёт только `status`+`resets_at`, `utilization=None`. Источник % — oauth-эндпоинт `GET https://api.anthropic.com/api/oauth/usage` (header `anthropic-beta: oauth-2025-04-20`). `webapp.py:api_usage` тянет его (кэш 60с). TG-команда `/usage` пока на пассивном.
 - **LogsTab: `log_cmd` в topics.json.** Таб «Логи» запускает `log_cmd` через subprocess (timeout 8с, берёт последние 300 строк). Если не задан — empty state. Задать: в `data/topics.json` для проекта добавить `"log_cmd": "journalctl -u my-service -n 300 --no-pager"`.

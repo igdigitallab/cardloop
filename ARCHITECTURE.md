@@ -141,8 +141,19 @@ web/src/
 ```
 TG-сообщение / карточка→In Progress / веб-чат
   → резерв running[cwd] (синхронно)
-  → run_engine() гоняет SDK, yield events
+  → (карточка C2) режим-детектор: git+clean → worktree, иначе legacy
+  → (worktree) git worktree add .worktrees/card-<id> -b card-<id>
+  → run_engine(cwd=effective_cwd) гоняет SDK, yield events
   → адаптер рендерит (TG: send+md_to_html / web: SSE / карточка: sidecar)
+  → (worktree) авто-коммит в ветке card-<id>, diff vs base_branch
   → session_id сохранён, running снят в finally
   → (карточка) → Review/Failed + пинг TG
+  → (C2-gate) пользователь в Review видит diff + кнопки:
+      ✓ Применить → git merge --no-ff card-<id> → Done (worktree удалён)
+      ✗ Отмена    → worktree+ветка удалены → Backlog
+      Конфликт    → 409, merge --abort, worktree жив, карточка остаётся в Review
 ```
+
+### C2-gate: файлы
+- `data/runs/<card_id>.md` — человекочитаемый сайдкар (ответ агента, diff)
+- `data/runs/<card_id>.json` — машиночитаемые мета (mode, branch, wt_path, has_changes, applied, discarded)

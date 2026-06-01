@@ -62,7 +62,9 @@ Source of truth: `TASKS.md` in the project root. Sections `## Backlog / In Progr
 | `POST` | `/api/projects/{id}/tasks/{card}/move` | Move card to another column — `{"to":"Backlog\|In Progress\|Review\|Failed\|done"}`. Moving to **In Progress** auto-starts `run_engine`; moving to `done` archives to `DONE.md` | Yes |
 | `PATCH` | `/api/projects/{id}/tasks/{card}` | Edit card text in-place — `{"text":"..."}` | Yes |
 | `DELETE` | `/api/projects/{id}/tasks/{card}` | Delete card from `TASKS.md` | Yes |
-| `GET` | `/api/projects/{id}/tasks/{card}/run` | Get sidecar result of a card auto-run from `data/runs/<card>.md` | Yes |
+| `GET` | `/api/projects/{id}/tasks/{card}/run` | Get sidecar result of a card auto-run from `data/runs/<card>.md`. Also returns `meta` field (mode, has_changes, applied, discarded) from JSON sidecar | Yes |
+| `POST` | `/api/projects/{id}/tasks/{card}/apply` | **C2-gate**: merge worktree branch `card-<id>` into base branch via `git merge --no-ff`. Moves card Review→Done. 400 if legacy/no meta; 409 if merge conflict (abort is automatic, worktree stays). Requires worktree mode | Yes |
+| `POST` | `/api/projects/{id}/tasks/{card}/discard` | **C2-gate**: discard worktree changes — removes worktree + branch `card-<id>`. Moves card Review→Backlog. 400 if legacy/no meta | Yes |
 
 ---
 
