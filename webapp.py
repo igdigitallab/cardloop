@@ -1472,6 +1472,137 @@ async def _git_diff_card(cwd: str) -> tuple[str, str]:
     return diff_full, diff_stat
 
 
+# ─────────────────────────── C2: worktree helpers ───────────────────────────
+
+async def _card_run_mode(cwd: str) -> str:
+    """Определяет режим прогона карточки: 'worktree' или 'legacy'.
+    worktree = git-репо И дерево чистое. Иначе — legacy (прогон в cwd)."""
+    info = await _git_info(cwd)
+    if info is None:
+        return "legacy"
+    # git status --porcelain: пустой вывод = чистое дерево
+    status = await _git_cmd(cwd, "status", "--porcelain")
+    if status is None or status.strip():
+        return "legacy"
+    return "worktree"
+
+
+async def _card_worktree_setup(cwd: str, card_id: str) -> "dict | None":
+    """Создаёт worktree <cwd>/.worktrees/card-<id> на ветке card-<id>.
+    Если уже существует — сначала чистит. Возвращает {wt_path, base_branch} или None при ошибке."""
+    try:
+        base_branch = await _git_cmd(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+        if not base_branch:
+            return None
+        wt_path = str(Path(cwd) / ".worktrees" / f"card-{card_id}")
+        # Чистим если существует (повторный прогон)
+        if Path(wt_path).exists():
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", cwd, "worktree", "remove", "--force", wt_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        # Удаляем ветку если осталась (404-safe)
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", cwd, "branch", "-D", f"card-{card_id}",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        # Создаём новый worktree
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", cwd, "worktree", "add", wt_path, "-b", f"card-{card_id}",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        if proc.returncode != 0:
+            print(f"[worktree_setup] git worktree add failed: {stderr.decode(errors='replace').strip()}")
+            return None
+        return {"wt_path": wt_path, "base_branch": base_branch}
+    except Exception as e:
+        print(f"[worktree_setup] ошибка: {e}")
+        return None
+
+
+async def _commit_in_worktree(wt_path: str, card_id: str, prompt: str) -> bool:
+    """Авто-коммит в worktree. Возвращает True если был коммит (были изменения)."""
+    try:
+        # Проверяем наличие изменений
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", wt_path, "status", "--porcelain",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        if not stdout.decode().strip():
+            return False  # нет изменений
+        # git add -A
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", wt_path, "add", "-A",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        # git commit
+        short_prompt = (prompt[:60] + "…") if len(prompt) > 60 else prompt
+        commit_msg = f"card {card_id}: {short_prompt}"
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", wt_path, "commit", "-m", commit_msg,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        return proc.returncode == 0
+    except Exception as e:
+        print(f"[commit_in_worktree] ошибка: {e}")
+        return False
+
+
+async def _diff_from_worktree(wt_path: str, base_branch: str) -> tuple[str, str]:
+    """Возвращает (diff_full, diff_stat) из worktree vs base_branch."""
+    async def _run(*args):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", wt_path, *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            return stdout.decode(errors="replace").strip() if proc.returncode == 0 else ""
+        except Exception:
+            return ""
+    diff_full, diff_stat = await asyncio.gather(
+        _run("diff", f"{base_branch}...HEAD"),
+        _run("diff", "--stat", f"{base_branch}...HEAD"),
+    )
+    return diff_full, diff_stat
+
+
+def _write_run_meta(data_dir: Path, card_id: str, meta: dict) -> None:
+    """Записывает машиночитаемый JSON-сайдкар DATA/runs/<card_id>.json с метаданными прогона."""
+    try:
+        runs_dir = data_dir / "runs"
+        runs_dir.mkdir(exist_ok=True)
+        (runs_dir / f"{card_id}.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception as e:
+        print(f"[_write_run_meta] ошибка записи {card_id}.json: {e}")
+
+
+def _read_run_meta(data_dir: Path, card_id: str) -> "dict | None":
+    """Читает JSON-метаданные прогона. None если не существует или повреждён."""
+    try:
+        p = data_dir / "runs" / f"{card_id}.json"
+        if not p.exists():
+            return None
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 # ─────────────────────────── AppCtx TypedDict ───────────────────────────
 # Аннотация полей ctx, используемых в _run_card и хелперах.
 # Рантайм — тот же dict, TypedDict только для проверки типов (mypy/pyright).
@@ -1512,8 +1643,14 @@ def _write_sidecar(
     exc_info: str | None,
     diff_stat: str,
     diff_full: str,
+    run_mode: str = "legacy",
+    wt_branch: str | None = None,
+    base_branch: str | None = None,
+    wt_path: str | None = None,
+    has_changes: bool = False,
 ) -> None:
-    """Записывает сайдкар результата карточки в DATA/runs/<card_id>.md."""
+    """Записывает сайдкар результата карточки в DATA/runs/<card_id>.md
+    и машиночитаемый JSON в DATA/runs/<card_id>.json."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
     outcome = "ok" if ok else "fail"
     try:
@@ -1525,6 +1662,7 @@ def _write_sidecar(
             f"**Проект:** {name}",
             f"**Время:** {ts}",
             f"**Исход:** {outcome}",
+            f"**Режим:** {run_mode}",
             "",
             "## Задача",
             "",
@@ -1541,6 +1679,22 @@ def _write_sidecar(
         if diff_full:
             sidecar_lines += ["", "## Git diff (полный)", "", f"```diff\n{diff_full}\n```"]
         (runs_dir / f"{card_id}.md").write_text("\n".join(sidecar_lines), encoding="utf-8")
+        # Машиночитаемый JSON-сайдкар для apply/discard/фронта
+        meta = {
+            "card_id": card_id,
+            "ts": ts,
+            "outcome": outcome,
+            "mode": run_mode,
+            "branch": wt_branch,
+            "base_branch": base_branch,
+            "wt_path": wt_path,
+            "has_changes": has_changes,
+            "applied": False,
+            "discarded": False,
+        }
+        (runs_dir / f"{card_id}.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     except Exception as e:
         print(f"[_run_card] ошибка записи сайдкара {card_id}: {e}")
 
@@ -1588,8 +1742,19 @@ async def _notify_tg(ctx: AppCtx, session_key: str, prompt: str, ok: bool) -> No
         print(f"[_run_card] TG-пинг не удался: {e}")
 
 
-async def _run_card(ctx: AppCtx, webapp_app, project: dict, card: dict, session_key: str) -> None:
-    """Фоновая задача F1: оркестратор — выполняет карточку через run_engine, пишет сайдкар, переносит карточку."""
+async def _run_card(
+    ctx: AppCtx,
+    webapp_app,
+    project: dict,
+    card: dict,
+    session_key: str,
+    run_mode: str = "legacy",
+    wt_info: "dict | None" = None,
+) -> None:
+    """Фоновая задача F1: оркестратор — выполняет карточку через run_engine, пишет сайдкар, переносит карточку.
+
+    run_mode: 'worktree' | 'legacy'. wt_info: {wt_path, base_branch} или None.
+    """
     run_engine = ctx.get("run_engine")
     cwd = project["cwd"]
     name = project["name"]
@@ -1602,9 +1767,13 @@ async def _run_card(ctx: AppCtx, webapp_app, project: dict, card: dict, session_
     card_id = card["id"]
     DATA: Path = ctx["DATA"]
 
+    # В worktree-режиме агент работает в wt_path, иначе — в cwd
+    effective_cwd = wt_info["wt_path"] if (run_mode == "worktree" and wt_info) else cwd
+
     answer_parts: list[str] = []
     exc_info: str | None = None
     ok = False
+    has_changes = False
 
     try:
         try:
@@ -1622,7 +1791,7 @@ async def _run_card(ctx: AppCtx, webapp_app, project: dict, card: dict, session_
             resume_sid = ctx["sessions"].get(session_key)
             async for event in run_engine(
                 project_name=name,
-                cwd=cwd,
+                cwd=effective_cwd,
                 prompt=prompt,
                 session_key=session_key,
                 model=model,
@@ -1653,12 +1822,44 @@ async def _run_card(ctx: AppCtx, webapp_app, project: dict, card: dict, session_
         except Exception as e:
             exc_info = f"{type(e).__name__}: {e}\n\n{_tb.format_exc()}"
 
-        # git diff после выполнения
-        diff_full, diff_stat = await _git_diff_card(cwd)
+        # Worktree: авто-коммит + diff из ветки; legacy: diff из cwd
+        if run_mode == "worktree" and wt_info:
+            wt_path = wt_info["wt_path"]
+            base_branch = wt_info["base_branch"]
+            has_changes = await _commit_in_worktree(wt_path, card_id, prompt)
+            if has_changes:
+                diff_full, diff_stat = await _diff_from_worktree(wt_path, base_branch)
+            else:
+                diff_full, diff_stat = "", ""
+            wt_branch = f"card-{card_id}"
+        else:
+            # legacy: git diff из рабочего дерева
+            diff_full, diff_stat = await _git_diff_card(cwd)
+            has_changes = bool(diff_full or diff_stat)
+            wt_path_val = None
+            base_branch = None
+            wt_branch = None
 
-        # сайдкар DATA/runs/<card_id>.md
+        # Установка значений для worktree-режима
+        if run_mode == "worktree" and wt_info:
+            wt_path_val = wt_info["wt_path"]
+            base_branch = wt_info["base_branch"]
+            wt_branch = f"card-{card_id}"
+        else:
+            wt_path_val = None
+            base_branch = None
+            wt_branch = None
+
+        # сайдкар DATA/runs/<card_id>.md + JSON meta
         answer_text = "\n".join(answer_parts).strip() or "(агент завершил без текстового ответа)"
-        _write_sidecar(DATA, card_id, name, prompt, answer_text, ok, exc_info, diff_stat, diff_full)
+        _write_sidecar(
+            DATA, card_id, name, prompt, answer_text, ok, exc_info, diff_stat, diff_full,
+            run_mode=run_mode,
+            wt_branch=wt_branch,
+            base_branch=base_branch,
+            wt_path=wt_path_val,
+            has_changes=has_changes,
+        )
 
         # перенос карточки (перезагружаем доску — могла измениться пока агент работал)
         await _move_card_after_run(ctx, cwd, name, card, card_id, ok)
@@ -1745,8 +1946,17 @@ async def api_move_task(req: web.Request) -> web.Response:
             cols["in_progress"].append(card)
             _save_board(cwd, name, preamble, cols)
 
+        # C2: определяем режим и при worktree — настраиваем worktree
+        run_mode = await _card_run_mode(cwd)
+        wt_info: dict | None = None
+        if run_mode == "worktree":
+            wt_info = await _card_worktree_setup(cwd, card_id)
+            if wt_info is None:
+                # Деградация: setup не удался
+                run_mode = "legacy"
+
         # Запускаем фоновую задачу (не ждём завершения)
-        asyncio.create_task(_run_card(ctx, req.app, project, card, session_key))
+        asyncio.create_task(_run_card(ctx, req.app, project, card, session_key, run_mode=run_mode, wt_info=wt_info))
 
         return web.json_response(_board_payload(cwd))
 
@@ -2600,7 +2810,8 @@ async def api_global_file_write(req: web.Request) -> web.Response:
 
 
 async def api_card_run(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/tasks/{card}/run — сайдкар из DATA/runs/<card>.md (404-safe)."""
+    """GET /api/projects/{id}/tasks/{card}/run — сайдкар из DATA/runs/<card>.md (404-safe).
+    Также возвращает meta (mode, has_changes, applied, discarded) из JSON-сайдкара."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -2610,10 +2821,192 @@ async def api_card_run(req: web.Request) -> web.Response:
         return web.json_response({"error": "bad card id"}, status=400)
     DATA: Path = ctx["DATA"]
     sidecar = DATA / "runs" / f"{card_id}.md"
+    meta = _read_run_meta(DATA, card_id)
     if sidecar.exists():
         content = sidecar.read_text(encoding="utf-8", errors="replace")
-        return web.json_response({"content": content, "exists": True})
-    return web.json_response({"content": "", "exists": False})
+        return web.json_response({"content": content, "exists": True, "meta": meta})
+    return web.json_response({"content": "", "exists": False, "meta": meta})
+
+
+async def api_card_apply(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/tasks/{card}/apply — применить worktree-ветку (merge --no-ff) в основное дерево."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    card_id = req.match_info["card"]
+    if not _valid_card_id(card_id):
+        return web.json_response({"error": "bad card id"}, status=400)
+
+    DATA: Path = ctx["DATA"]
+    meta = _read_run_meta(DATA, card_id)
+
+    if not meta or meta.get("mode") != "worktree" or not meta.get("wt_path") or not meta.get("branch"):
+        return web.json_response(
+            {"error": "карточка выполнена в рабочем дереве (legacy-режим) или нет мета — гейт недоступен"},
+            status=400,
+        )
+
+    if meta.get("applied"):
+        return web.json_response({"error": "карточка уже применена"}, status=400)
+    if meta.get("discarded"):
+        return web.json_response({"error": "карточка уже отменена"}, status=400)
+
+    wt_path = meta["wt_path"]
+    branch = meta["branch"]
+    base_branch = meta.get("base_branch", "main")
+    cwd = project["cwd"]
+    name = project["name"]
+
+    # Проверяем что worktree физически существует
+    if not Path(wt_path).exists():
+        return web.json_response({"error": "worktree не найден на диске — возможно удалён после рестарта"}, status=400)
+
+    try:
+        # Убедимся что HEAD на base_branch
+        current_branch = await _git_cmd(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+        if current_branch != base_branch:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", cwd, "checkout", base_branch,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            if proc.returncode != 0:
+                return web.json_response(
+                    {"error": f"не удалось переключиться на {base_branch}: {err.decode(errors='replace').strip()}"},
+                    status=500,
+                )
+
+        # Merge --no-ff
+        prompt_short = meta.get("card_id", card_id)
+        merge_msg = f"Применить карточку {card_id}"
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", cwd, "merge", "--no-ff", branch, "-m", merge_msg,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+        if proc.returncode != 0:
+            # Merge conflict — abort и вернуть 409
+            abort_proc = await asyncio.create_subprocess_exec(
+                "git", "-C", cwd, "merge", "--abort",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(abort_proc.communicate(), timeout=10.0)
+            err_detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
+            return web.json_response(
+                {"error": "merge conflict", "detail": err_detail},
+                status=409,
+            )
+
+        # Успешный merge: удалить worktree + ветку
+        rm_proc = await asyncio.create_subprocess_exec(
+            "git", "-C", cwd, "worktree", "remove", "--force", wt_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(rm_proc.communicate(), timeout=10.0)
+        br_proc = await asyncio.create_subprocess_exec(
+            "git", "-C", cwd, "branch", "-d", branch,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(br_proc.communicate(), timeout=5.0)
+
+        # Обновить JSON-мета
+        meta["applied"] = True
+        _write_run_meta(DATA, card_id, meta)
+
+        # Перенести карточку Review → Done
+        async with _get_board_lock(cwd):
+            _, preamble, cols = _load_board(cwd)
+            card = _pop_card(cols, card_id)
+            dp = _done_path(cwd)
+            header = dp.read_text(encoding="utf-8") if dp.exists() else f"# Done — {name}\n"
+            if not header.strip():
+                header = f"# Done — {name}\n"
+            stamp = time.strftime("%Y-%m-%d")
+            card_text = card["text"] if card else card_id
+            new_done = header.rstrip() + f"\n- [x] {card_text} · {stamp}\n"
+            dp.write_text(new_done, encoding="utf-8")
+            _save_board(cwd, name, preamble, cols)
+
+        return web.json_response({"ok": True, "applied": True, "card_id": card_id})
+
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "timeout при merge"}, status=500)
+    except Exception as e:
+        return web.json_response({"error": f"внутренняя ошибка: {e}"}, status=500)
+
+
+async def api_card_discard(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/tasks/{card}/discard — отменить worktree-карточку (ветка удаляется)."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    card_id = req.match_info["card"]
+    if not _valid_card_id(card_id):
+        return web.json_response({"error": "bad card id"}, status=400)
+
+    DATA: Path = ctx["DATA"]
+    meta = _read_run_meta(DATA, card_id)
+
+    if not meta or meta.get("mode") != "worktree" or not meta.get("wt_path") or not meta.get("branch"):
+        return web.json_response(
+            {"error": "карточка выполнена в рабочем дереве (legacy-режим) или нет мета — гейт недоступен"},
+            status=400,
+        )
+
+    if meta.get("applied"):
+        return web.json_response({"error": "карточка уже применена"}, status=400)
+    if meta.get("discarded"):
+        return web.json_response({"error": "карточка уже отменена"}, status=400)
+
+    wt_path = meta["wt_path"]
+    branch = meta["branch"]
+    cwd = project["cwd"]
+    name = project["name"]
+
+    try:
+        # Удалить worktree (если существует)
+        if Path(wt_path).exists():
+            rm_proc = await asyncio.create_subprocess_exec(
+                "git", "-C", cwd, "worktree", "remove", "--force", wt_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(rm_proc.communicate(), timeout=10.0)
+
+        # Удалить ветку (404-safe)
+        br_proc = await asyncio.create_subprocess_exec(
+            "git", "-C", cwd, "branch", "-D", branch,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(br_proc.communicate(), timeout=5.0)
+
+        # Обновить JSON-мета
+        meta["discarded"] = True
+        _write_run_meta(DATA, card_id, meta)
+
+        # Перенести карточку Review → Backlog
+        async with _get_board_lock(cwd):
+            _, preamble, cols = _load_board(cwd)
+            card = _pop_card(cols, card_id)
+            if card is None:
+                card = {"id": card_id, "text": card_id}
+            cols["backlog"].append(card)
+            _save_board(cwd, name, preamble, cols)
+
+        return web.json_response({"ok": True, "discarded": True, "card_id": card_id})
+
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "timeout при discard"}, status=500)
+    except Exception as e:
+        return web.json_response({"error": f"внутренняя ошибка: {e}"}, status=500)
 
 
 # ─────────────────────────── C2: сессии проекта ───────────────────────────
@@ -3659,6 +4052,9 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_route("PATCH", "/api/projects/{id}/tasks/{card}", api_update_task)
         # F1: сайдкар результата карточки
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
+        # C2-gate: применить / отменить worktree-карточку
+        app.router.add_post("/api/projects/{id}/tasks/{card}/apply", api_card_apply)
+        app.router.add_post("/api/projects/{id}/tasks/{card}/discard", api_card_discard)
         # C1: SSE-чат по проекту
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
         # C1-stop: прерывание текущего прогона агента
