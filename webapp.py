@@ -3553,30 +3553,49 @@ async def api_project_session_context(req: web.Request) -> web.Response:
 
 _MEMORY_MAX_SIZE = 256 * 1024  # 256 КБ
 
+# Валидный slug для файла памяти: строчные буквы/цифры, дефис, 2-62 символа итого.
+# MEMORY.md разрешён отдельно (индекс).
+_MEMORY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,60}\.md$")
 
-async def api_project_memory(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/memory
-    Возвращает {files:[{name, content}], exists} из ~/.claude/projects/<cwd>/memory/*.md.
-    MEMORY.md — первым в списке (индекс)."""
-    ctx = req.app["ctx"]
-    pid = req.match_info["id"]
-    project = _find_project_by_id(ctx, pid)
-    if project is None:
-        return web.json_response({"error": "project not found"}, status=404)
 
-    mem_dir = _sdk_sessions_dir(project["cwd"]) / "memory"
-    if not mem_dir.is_dir():
-        return web.json_response({"files": [], "exists": False})
+def _project_memory_dir(cwd: str) -> Path:
+    """Новое место памяти проекта: <cwd>/.claude-ops/memory/ — коммитится в репо."""
+    return Path(cwd) / ".claude-ops" / "memory"
 
+
+def _valid_memory_name(name: str) -> bool:
+    """True если name — валидный slug.md без path-компонент."""
+    if "/" in name or "\\" in name or ".." in name:
+        return False
+    if name == "MEMORY.md":
+        return True
+    return bool(_MEMORY_NAME_RE.match(name))
+
+
+def _memory_read_all(cwd: str) -> tuple[list[dict], bool]:
+    """Читает все *.md из нового места (.claude-ops/memory/).
+    Fallback: если нового нет но старое (sdk) есть — читает старое.
+    Возвращает (files, from_legacy).
+    files = [{name, content}], MEMORY.md первым."""
+    new_dir = _project_memory_dir(cwd)
+    if new_dir.is_dir():
+        return _read_memory_dir(new_dir), False
+    # Fallback: старое место ~/.claude/projects/<cwd>/memory/
+    old_dir = _sdk_sessions_dir(cwd) / "memory"
+    if old_dir.is_dir():
+        return _read_memory_dir(old_dir), True
+    return [], False
+
+
+def _read_memory_dir(mem_dir: Path) -> list[dict]:
+    """Вспомогательный: читает *.md из указанной директории памяти."""
     files: list[dict] = []
     try:
-        md_files = sorted(mem_dir.glob("*.md"), key=lambda p: p.name)
-        # MEMORY.md первым
-        md_files_sorted = sorted(
-            md_files,
+        md_files = sorted(
+            mem_dir.glob("*.md"),
             key=lambda p: (0 if p.name == "MEMORY.md" else 1, p.name),
         )
-        for f in md_files_sorted:
+        for f in md_files:
             try:
                 size = f.stat().st_size
                 if size > _MEMORY_MAX_SIZE:
@@ -3588,8 +3607,199 @@ async def api_project_memory(req: web.Request) -> web.Response:
                 pass
     except Exception:
         pass
+    return files
 
+
+def _memory_write(cwd: str, name: str, content: str) -> None:
+    """Атомарно записывает файл памяти, создаёт директорию если нет.
+    Затем перестраивает MEMORY.md-индекс."""
+    if not _valid_memory_name(name):
+        raise ValueError(f"invalid memory file name: {name!r}")
+    if len(content.encode("utf-8")) > _MEMORY_MAX_SIZE:
+        raise ValueError("content exceeds _MEMORY_MAX_SIZE")
+    mem_dir = _project_memory_dir(cwd)
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    target = mem_dir / name
+    # Атомарная запись через tmp
+    tmp = target.with_suffix(".tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(target)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+    if name != "MEMORY.md":
+        _memory_reindex(cwd)
+
+
+def _memory_delete(cwd: str, name: str) -> bool:
+    """Удаляет файл памяти. Возвращает True если удалён, False если не существовал."""
+    if not _valid_memory_name(name):
+        raise ValueError(f"invalid memory file name: {name!r}")
+    if name == "MEMORY.md":
+        raise ValueError("cannot delete MEMORY.md directly")
+    target = _project_memory_dir(cwd) / name
+    if not target.exists():
+        return False
+    target.unlink()
+    _memory_reindex(cwd)
+    return True
+
+
+def _memory_reindex(cwd: str) -> None:
+    """Перестраивает MEMORY.md как индекс всех записей в .claude-ops/memory/.
+    Формат строки: - [Заголовок](file.md) — хук (из frontmatter или первой строки)."""
+    mem_dir = _project_memory_dir(cwd)
+    if not mem_dir.is_dir():
+        return
+    entries = sorted(
+        (p for p in mem_dir.glob("*.md") if p.name != "MEMORY.md"),
+        key=lambda p: p.name,
+    )
+    lines = ["# Память проекта\n", "\n"]
+    for entry in entries:
+        try:
+            raw = entry.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            raw = ""
+        title, hook = _memory_parse_entry(entry.name, raw)
+        line = f"- [{title}]({entry.name})"
+        if hook:
+            line += f" — {hook}"
+        lines.append(line + "\n")
+    index_path = mem_dir / "MEMORY.md"
+    index_path.write_text("".join(lines), encoding="utf-8")
+
+
+def _memory_parse_entry(filename: str, content: str) -> tuple[str, str]:
+    """Извлекает (заголовок, хук) из файла записи памяти.
+    Заголовок — из frontmatter 'title' или первая строка с #/текстом.
+    Хук — первое непустое предложение тела после frontmatter."""
+    lines = content.splitlines()
+    idx = 0
+    fm: dict[str, str] = {}
+    # Парсим YAML frontmatter (--- ... ---)
+    if lines and lines[0].strip() == "---":
+        idx = 1
+        while idx < len(lines) and lines[idx].strip() != "---":
+            kv = lines[idx].split(":", 1)
+            if len(kv) == 2:
+                fm[kv[0].strip()] = kv[1].strip()
+            idx += 1
+        idx += 1  # пропустить закрывающий ---
+
+    # Заголовок: из frontmatter или из первой строки тела
+    title = fm.get("title", "")
+    if not title:
+        for line in lines[idx:]:
+            line = line.strip()
+            if line.startswith("#"):
+                title = line.lstrip("#").strip()
+                break
+            if line:
+                title = line[:60]
+                break
+    if not title:
+        title = filename[:-3]  # убрать .md
+
+    # Хук: первое непустое предложение тела
+    hook = fm.get("hook", "")
+    if not hook:
+        for line in lines[idx:]:
+            line = line.strip().lstrip("#").strip()
+            if line and not line.startswith("---"):
+                hook = line[:100]
+                break
+
+    return title, hook
+
+
+async def api_project_memory(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/memory
+    Возвращает {files:[{name, content}], exists}.
+    Новое место: <cwd>/.claude-ops/memory/. Fallback: старое ~/.claude/projects/.
+    MEMORY.md — первым в списке (индекс)."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    files, _legacy = _memory_read_all(project["cwd"])
+    if not files:
+        return web.json_response({"files": [], "exists": False})
     return web.json_response({"files": files, "exists": True})
+
+
+async def api_project_memory_write(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/memory/{name}
+    Создаёт или обновляет запись памяти. Обновляет MEMORY.md-индекс.
+    Возвращает обновлённый список {files, exists}."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    name = req.match_info["name"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    if not _valid_memory_name(name):
+        return web.json_response({"error": "invalid file name"}, status=400)
+
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+
+    content = body.get("content", "")
+    if not isinstance(content, str):
+        return web.json_response({"error": "content must be string"}, status=400)
+    if len(content.encode("utf-8")) > _MEMORY_MAX_SIZE:
+        return web.json_response({"error": "content too large"}, status=400)
+
+    try:
+        _memory_write(project["cwd"], name, content)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except Exception as e:
+        return web.json_response({"error": f"write failed: {e}"}, status=500)
+
+    files, _ = _memory_read_all(project["cwd"])
+    return web.json_response({"files": files, "exists": True})
+
+
+async def api_project_memory_delete(req: web.Request) -> web.Response:
+    """DELETE /api/projects/{id}/memory/{name}
+    Удаляет запись памяти. Обновляет MEMORY.md-индекс.
+    Возвращает обновлённый список {files, exists}."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    name = req.match_info["name"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    if not _valid_memory_name(name):
+        return web.json_response({"error": "invalid file name"}, status=400)
+
+    if name == "MEMORY.md":
+        return web.json_response({"error": "cannot delete MEMORY.md"}, status=400)
+
+    try:
+        deleted = _memory_delete(project["cwd"], name)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except Exception as e:
+        return web.json_response({"error": f"delete failed: {e}"}, status=500)
+
+    if not deleted:
+        return web.json_response({"error": "not found"}, status=404)
+
+    files, _ = _memory_read_all(project["cwd"])
+    exists = bool(files)
+    return web.json_response({"files": files, "exists": exists})
 
 
 # ─────────────────────────── новый проект: шаблоны + инициализация ───────────────────────────
@@ -4101,8 +4311,10 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/global/file", api_global_file_write)
         # Контекст сессии (read: Фича A)
         app.router.add_get("/api/projects/{id}/session-context", api_project_session_context)
-        # Память проекта (read: Фича B)
+        # Память проекта (read+write: Фича B)
         app.router.add_get("/api/projects/{id}/memory", api_project_memory)
+        app.router.add_post("/api/projects/{id}/memory/{name}", api_project_memory_write)
+        app.router.add_delete("/api/projects/{id}/memory/{name}", api_project_memory_delete)
         # Переименование папки проекта (kebab-case slug)
         app.router.add_post("/api/projects/{id}/rename", api_project_rename)
         # Быстрая проверка структуры проекта без агента

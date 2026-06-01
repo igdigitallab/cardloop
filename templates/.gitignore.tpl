@@ -24,3 +24,7 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude-Ops: память проекта (.claude-ops/memory/) коммитится — НЕ игнорировать.
+# Приватное (ключи, секреты) — только в .claude-ops/secrets/.
+.claude-ops/secrets/
