@@ -53,7 +53,22 @@ export const ru = {
   'tab.board': 'Доска',
   'tab.files': 'Файлы',
   'tab.memory': 'Память',
+  'tab.timeline': '🕒 Лента',
   'tab.sections_aria': 'Разделы проекта',
+
+  // ── Timeline tab (Spec 008) ───────────────────────────────────────
+  'timeline.loading': 'Загрузка ленты событий...',
+  'timeline.empty_title': 'Лента пуста',
+  'timeline.empty_text': 'Здесь появятся события агента — прогоны карточек, инструменты, ответы.',
+  'timeline.load_earlier': 'Загрузить ранее',
+  'timeline.load_earlier_aria': 'Загрузить более ранние события',
+  'timeline.loading_earlier': 'Загружаю…',
+  'timeline.event_run_start': 'Прогон начат',
+  'timeline.event_run_end_ok': 'Завершено успешно',
+  'timeline.event_run_end_fail': 'Завершено с ошибкой',
+  'timeline.event_text': 'Ответ агента',
+  'timeline.event_tool': 'Инструмент',
+  'timeline.live_badge': 'live',
 
   // ── Project header / rename ──────────────────────────────────
   'project.rename_title': 'Переименовать проект',

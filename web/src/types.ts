@@ -122,7 +122,25 @@ export interface FileContent {
   error?: string
 }
 
-export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'secrets'
+export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'secrets' | 'timeline'
+
+// ─── Timeline (Spec 008) ──────────────────────────────────────────────────────
+
+export interface TimelineEvent {
+  ts: number
+  session_key: string
+  kind: 'run_start' | 'tool' | 'text' | 'run_end' | string
+  source?: 'card' | 'chat' | 'tg' | string
+  run_id?: string
+  /** run_start: prompt text */
+  prompt?: string
+  /** text: accumulated text */
+  text?: string
+  /** tool: rich tool data */
+  tool?: import('./types').RichTool
+  /** run_end: outcome */
+  outcome?: 'ok' | 'fail'
+}
 
 // ─── Project Secrets (Spec 007) ───────────────────────────────────────────────
 

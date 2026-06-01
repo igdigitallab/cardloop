@@ -316,6 +316,17 @@ export const api = {
       method: 'DELETE',
     }),
 
+  // Spec 008: Timeline — история событий шины проекта (JSONL-лог)
+  timeline: (id: string, opts?: { limit?: number; before?: number }) => {
+    const params = new URLSearchParams()
+    if (opts?.limit != null) params.set('limit', String(opts.limit))
+    if (opts?.before != null) params.set('before', String(opts.before))
+    const qs = params.toString()
+    return apiFetch<{ events: import('./types').TimelineEvent[] }>(
+      `/api/projects/${id}/timeline${qs ? `?${qs}` : ''}`
+    )
+  },
+
   // Git: commit (если dirty) + push одной кнопкой
   gitSync: (id: string, message?: string) =>
     apiFetch<{ ok: boolean; committed: boolean; pushed: boolean; message: string | null; log: string }>(

@@ -11,6 +11,7 @@ import { ChatTab } from '../tabs/ChatTab'
 import { FilesTab } from '../tabs/FilesTab'
 import { MemoryTab } from '../tabs/MemoryTab'
 import { SecretsTab } from '../tabs/SecretsTab'
+import { TimelineTab } from '../tabs/TimelineTab'
 import { t } from '../i18n'
 
 interface Tab {
@@ -28,6 +29,7 @@ const TABS: Tab[] = [
   { id: 'files',     label: t['tab.files'] },
   { id: 'memory',    label: t['tab.memory'] },
   { id: 'secrets',   label: t['tab.secrets'] },
+  { id: 'timeline',  label: t['tab.timeline'] },
 ]
 
 // localStorage keys
@@ -398,6 +400,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
           {activeTab === 'files'     && <ErrorBoundary label="Файлы"><FilesTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'memory'    && <ErrorBoundary label="Память"><MemoryTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'secrets'   && <ErrorBoundary label="Ключи"><SecretsTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'timeline'  && <ErrorBoundary label="Лента"><TimelineTab projectId={project.id} /></ErrorBoundary>}
         </div>
       </div>
 
