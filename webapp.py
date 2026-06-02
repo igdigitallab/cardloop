@@ -471,9 +471,42 @@ def _save_free_chats(ctx: dict, data: dict) -> None:
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+_TOPICS_MTIME: "float | None" = None  # mtime последней подхваченной версии topics.json
+
+
+def _maybe_reload_topics(ctx: dict) -> None:
+    """Hot-reload topics.json с диска при внешней правке (без рестарта процесса).
+
+    Зачем: `topics` грузится один раз на старте бота (bot.py) и живёт как
+    in-memory dict в ctx["topics"]. Прямая Edit/Write файла (агентом из кокпита)
+    проходила мимо этого dict → правка не видна до рестарта. Диск авторитетен —
+    runtime-команды бота всегда вызывают save_topics() — поэтому чтение с диска
+    безопасно. Обновляем dict IN-PLACE (clear+update), чтобы и бот, и кокпит
+    видели один и тот же объект. mtime-гейт: парсим только при изменении файла.
+    Битый/частично записанный файл (гонка с save_topics) → JSONDecodeError →
+    тихо оставляем текущую версию, повторим на следующем запросе."""
+    global _TOPICS_MTIME
+    try:
+        path = ctx["DATA"] / "topics.json"
+        mtime = path.stat().st_mtime
+    except OSError:
+        return
+    if _TOPICS_MTIME is not None and mtime == _TOPICS_MTIME:
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if isinstance(data, dict):
+        ctx["topics"].clear()
+        ctx["topics"].update(data)
+        _TOPICS_MTIME = mtime
+
+
 def _collect_projects(ctx: dict) -> list[dict]:
     """Дедуп по cwd, собирает список проектов из ctx["topics"].
     Добавляет free-чаты как virtual projects (id=free-<uuid>, tg_thread=сам id)."""
+    _maybe_reload_topics(ctx)
     seen: set[str] = set()
     out = []
     for key, b in ctx["topics"].items():
