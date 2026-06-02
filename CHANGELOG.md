@@ -7,6 +7,9 @@
 
 ## [Unreleased]
 
+### Добавлено
+- **Настройки кокпита — таб «⚙️ Настройки» + глобальные (карточка f2ba02).** Per-project (topics.json, hot-reload): **git on/off** (флагман — выкл → карточки гоняются legacy без worktree, git-sync 409, health не требует .git, `.git` физически не трогаем; диалоги сохраняются), модель, самолечение, TG-уведомления, log_cmd, test_cmd. Глобальные (новый `data/settings.json`, mtime hot-reload, провязаны в рантайм): самолечение-master-kill, макс. параллельных починок, интервал сканера, дефолт-модель новых проектов, watchdog stall/max. API: `GET/POST /api/settings`, `GET/POST /api/projects/{id}/settings` (валидация типов/диапазонов). Хелперы `_get_global_setting`/`_git_enabled`/`_effective_default_model`. 20 тестов (`test_settings.py`).
+
 ### Исправлено
 - **Rename проекта терял всю историю диалогов и Timeline.** `api_project_rename` двигал папку (`shutil.move`) и обновлял `topics.json`, но SDK-история (`~/.claude/projects/<slug>/`) и Timeline (`data/timeline/<slug>.jsonl`) ключуются по `slug = cwd.replace('/','-')` — после смены cwd кокпит читал пустой новый slug, и «пропадали все сессии общения» (файлы при этом целы под старым slug). Добавлен `_migrate_cwd_keyed_state(old_cwd, new_cwd, ctx)`: переносит SDK-каталог сессий + Timeline (+`.jsonl.1`) на новый slug, best-effort, предупреждения в `warnings` ответа. Тесты `test_rename_migrates_sdk_sessions`, `test_rename_migrates_timeline`. Уже потерянные проекты (`family-emergency`, `autotopic-test`) восстановлены переносом осиротевших каталогов.
 

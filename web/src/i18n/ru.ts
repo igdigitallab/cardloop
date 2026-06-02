@@ -54,6 +54,7 @@ export const ru = {
   'tab.files': 'Файлы',
   'tab.memory': 'Память',
   'tab.timeline': '🕒 Лента',
+  'tab.settings': '⚙️ Настройки',
   'tab.sections_aria': 'Разделы проекта',
 
   // ── Timeline tab (Spec 008) ───────────────────────────────────────

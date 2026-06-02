@@ -537,15 +537,23 @@ async def run_agent(context, update, prompt: str):
             pass
 
     async def watchdog():
-        """Прерывает зависшую задачу: нет событий STALL_SECONDS ИЛИ превышен MAX_SECONDS."""
+        """Прерывает зависшую задачу: нет событий stall_s ИЛИ превышен max_s.
+        Пороги — из глобальных настроек кокпита (settings.json), фоллбэк на env-дефолты."""
+        stall_s, max_s = STALL_SECONDS, MAX_SECONDS
+        try:
+            import webapp as _wa
+            stall_s = int(_wa._get_global_setting("watchdog_stall_sec", STALL_SECONDS) or STALL_SECONDS)
+            max_s = int(_wa._get_global_setting("watchdog_max_sec", MAX_SECONDS) or MAX_SECONDS)
+        except Exception:
+            pass
         try:
             while True:
                 await asyncio.sleep(20)
                 now = time.time()
-                if now - last_event[0] > STALL_SECONDS:
+                if now - last_event[0] > stall_s:
                     stalled["reason"] = f"нет событий {int((now - last_event[0]) // 60)} мин"
-                elif now - t_start > MAX_SECONDS:
-                    stalled["reason"] = f"превышен лимит {MAX_SECONDS // 60} мин"
+                elif now - t_start > max_s:
+                    stalled["reason"] = f"превышен лимит {max_s // 60} мин"
                 cl = running.get(k)
                 if stalled["reason"] and hasattr(cl, "interrupt"):
                     try:

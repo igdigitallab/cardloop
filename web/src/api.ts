@@ -345,6 +345,30 @@ export const api = {
       }
     ),
 
+  // Настройки (карточка f2ba02): глобальные + per-project
+  settings: () =>
+    apiFetch<import('./types').GlobalSettings>(`/api/settings`),
+
+  saveSettings: (partial: Record<string, unknown>) =>
+    apiFetch<{ ok: boolean; stored: Record<string, unknown> }>(`/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(partial),
+    }),
+
+  projectSettings: (id: string) =>
+    apiFetch<import('./types').ProjectSettings>(`/api/projects/${id}/settings`),
+
+  saveProjectSettings: (id: string, partial: Partial<import('./types').ProjectSettings>) =>
+    apiFetch<{ ok: boolean; topics_updated: number; settings: import('./types').ProjectSettings }>(
+      `/api/projects/${id}/settings`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(partial),
+      }
+    ),
+
   // Spec 010: самолечение — включить/выключить per-project
   toggleSelfHeal: (id: string, enabled: boolean) =>
     apiFetch<{ ok: boolean; self_heal: boolean; topics_updated: number }>(

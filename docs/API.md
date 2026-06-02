@@ -171,6 +171,19 @@ Event schema: `{ts, session_key, kind, source?, run_id?, prompt?, text?, tool?, 
 
 ---
 
+## Настройки (Settings — карточка f2ba02)
+
+Глобальные — `data/settings.json` (mtime hot-reload, провязаны в рантайм: self_heal master-kill, max concurrent, scan interval, дефолт-модель, watchdog). Per-project — поля в `topics.json` (`git_enabled`, `model`, `self_heal`, `notify_on_error`, `log_cmd`, `test_cmd`). `git_enabled=false` → кокпит не использует git (карточки legacy, git-sync 409, health не требует .git).
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/settings` | Глобальные настройки: `{stored, effective, spec}`. `effective` — действующие значения (override или env-дефолт), `spec` — типы/диапазоны. | Yes |
+| `POST` | `/api/settings` | Частичный апдейт глобальных (валидируется по spec). `null`/`""` для ключа → сброс к дефолту. 400 при неизвестном ключе/типе/диапазоне. | Yes |
+| `GET` | `/api/projects/{id}/settings` | Per-project настройки: `{git_enabled, model, self_heal, notify_on_error, log_cmd, test_cmd}`. | Yes |
+| `POST` | `/api/projects/{id}/settings` | Частичный апдейт per-project (пишет в topics.json для всех записей с этим cwd). Валидация типов/модели. Возвращает `{ok, topics_updated, settings}`. 400 при неизвестном ключе/типе. | Yes |
+
+---
+
 ## Usage
 
 | Method | Path | Description | Auth |

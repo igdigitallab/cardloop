@@ -527,6 +527,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "test_cmd": b.get("test_cmd"),
             "notify_on_error": bool(b.get("notify_on_error", False)),
             "self_heal": bool(b.get("self_heal", False)),
+            "git_enabled": b.get("git_enabled", True) is not False,
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -640,6 +641,9 @@ async def api_projects(req: web.Request) -> web.Response:
         # Для свободных чатов git-проверка бессмысленна (cwd обычно $HOME, не репо проекта)
         if p.get("is_free"):
             return {**p, "health": {"git": None}, "incidents": 0}
+        # git отключён настройкой проекта — не показываем git-статус
+        if not _git_enabled(p):
+            return {**p, "health": {"git": None}, "incidents": _count_incidents(p["cwd"])}
         try:
             git = await _git_info(p["cwd"])
         except Exception:
@@ -1546,12 +1550,241 @@ _SELF_HEAL_MAX_CONCURRENT = int(os.environ.get("SELF_HEAL_MAX_CONCURRENT", "2"))
 _self_heal_active_count = 0   # глобальный счётчик активных починок
 
 
+# ─────────────────────── глобальные настройки (data/settings.json) ───────────────────────
+#
+# Глобальные knob'ы кокпита, переопределяют env-дефолты в рантайме (hot-reload по mtime).
+# Per-project настройки живут в topics.json (model/self_heal/notify_on_error/log_cmd/
+# test_cmd/git_enabled). Глобальные — отдельный файл, т.к. не привязаны к проекту.
+# Инициализация: start() вызывает _settings_init(ctx).
+
+_SETTINGS_PATH: "Path | None" = None
+_SETTINGS_CACHE: dict = {}
+_SETTINGS_MTIME: float = 0.0
+
+# Ключ → (тип, min, max) для валидации POST. None-границы = без проверки диапазона.
+_GLOBAL_SETTINGS_SPEC = {
+    "self_heal_enabled": ("bool", None, None),       # master-kill: False → самолечение выключено везде
+    "self_heal_max_concurrent": ("int", 1, 10),
+    "scan_interval_sec": ("int", 30, 3600),
+    "default_model": ("model", None, None),          # "" → дефолт ctx
+    "watchdog_stall_sec": ("int", 30, 7200),
+    "watchdog_max_sec": ("int", 60, 14400),
+}
+
+
+def _settings_init(ctx: dict) -> None:
+    """Вызывается из start() — задаёт путь к data/settings.json."""
+    global _SETTINGS_PATH
+    _SETTINGS_PATH = ctx["DATA"] / "settings.json"
+
+
+def _load_global_settings() -> dict:
+    """Читает settings.json с mtime-гейтом. Битый файл → прошлый кэш."""
+    global _SETTINGS_CACHE, _SETTINGS_MTIME
+    if _SETTINGS_PATH is None:
+        return {}
+    try:
+        mtime = _SETTINGS_PATH.stat().st_mtime
+    except FileNotFoundError:
+        _SETTINGS_CACHE = {}
+        return {}
+    except Exception:
+        return _SETTINGS_CACHE if isinstance(_SETTINGS_CACHE, dict) else {}
+    if mtime != _SETTINGS_MTIME:
+        try:
+            data = json.loads(_SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _SETTINGS_CACHE = data
+                _SETTINGS_MTIME = mtime
+        except Exception:
+            pass  # битый/частичный файл при гонке — оставляем прошлый кэш
+    return _SETTINGS_CACHE if isinstance(_SETTINGS_CACHE, dict) else {}
+
+
+def _get_global_setting(key: str, fallback=None):
+    """Эффективное значение глобальной настройки: из settings.json или fallback.
+    Хранимое None/отсутствие → fallback."""
+    val = _load_global_settings().get(key)
+    return fallback if val is None else val
+
+
+def _save_global_settings(data: dict) -> None:
+    """Атомарно пишет settings.json и форсит перечитывание кэша."""
+    global _SETTINGS_MTIME
+    if _SETTINGS_PATH is None:
+        return
+    _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _SETTINGS_PATH.with_name(_SETTINGS_PATH.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(_SETTINGS_PATH)
+    _SETTINGS_MTIME = 0.0
+
+
+def _effective_default_model(ctx: dict) -> str:
+    """Дефолт-модель для новых проектов: глобальная настройка или ctx['DEFAULT_MODEL']."""
+    return _get_global_setting("default_model", None) or ctx.get("DEFAULT_MODEL", "sonnet")
+
+
+def _git_enabled(project: dict) -> bool:
+    """git_enabled per-project (topics.json). По умолчанию True (git включён).
+    False → кокпит НЕ использует git: прогон карточек legacy, git-sync 409,
+    health не флажит отсутствие .git. Существующий .git физически не трогаем."""
+    return project.get("git_enabled", True) is not False
+
+
 def _self_heal_enabled(project: dict) -> bool:
     """Флаг самолечения: per-project self_heal ИЛИ глобальный env SELF_HEAL_ENABLED.
+    Глобальный master-kill (settings.json self_heal_enabled=False) перекрывает всё.
     По умолчанию ВСЕГДА False — предохранитель №1."""
+    if _get_global_setting("self_heal_enabled", True) is False:
+        return False  # глобальный master-kill
     if project.get("self_heal"):
         return True
     return os.environ.get("SELF_HEAL_ENABLED", "").lower() in ("1", "true", "yes")
+
+
+# ─────────────────────── API: настройки (глобальные + per-project) ───────────────────────
+
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "self_heal", "notify_on_error", "log_cmd", "test_cmd")
+
+
+def _validate_global_settings(partial: dict) -> "tuple[dict, str | None]":
+    """Валидирует частичный апдейт по _GLOBAL_SETTINGS_SPEC.
+    None/"" → сброс ключа к дефолту. Возвращает (clean, None) или ({}, ошибка)."""
+    clean: dict = {}
+    for key, val in partial.items():
+        spec = _GLOBAL_SETTINGS_SPEC.get(key)
+        if spec is None:
+            return {}, f"неизвестный ключ: {key}"
+        typ, lo, hi = spec
+        if val is None or val == "":
+            clean[key] = None
+            continue
+        if typ == "bool":
+            if not isinstance(val, bool):
+                return {}, f"{key}: ожидался bool"
+            clean[key] = val
+        elif typ == "int":
+            try:
+                iv = int(val)
+            except (TypeError, ValueError):
+                return {}, f"{key}: ожидалось целое"
+            if (lo is not None and iv < lo) or (hi is not None and iv > hi):
+                return {}, f"{key}: вне диапазона [{lo}, {hi}]"
+            clean[key] = iv
+        elif typ == "model":
+            sv = str(val).strip().lower()
+            if sv not in _ALLOWED_MODELS:
+                return {}, f"{key}: модель не из {sorted(_ALLOWED_MODELS)}"
+            clean[key] = sv
+    return clean, None
+
+
+async def api_settings_get(req: web.Request) -> web.Response:
+    """GET /api/settings — глобальные настройки: сохранённые + эффективные значения + спека."""
+    ctx = req.app["ctx"]
+    stored = dict(_load_global_settings())
+    effective = {
+        "self_heal_enabled": _get_global_setting("self_heal_enabled", True),
+        "self_heal_max_concurrent": int(_get_global_setting("self_heal_max_concurrent", _SELF_HEAL_MAX_CONCURRENT)),
+        "scan_interval_sec": int(_get_global_setting("scan_interval_sec", _SCAN_INTERVAL_SEC)),
+        "default_model": _get_global_setting("default_model", ctx.get("DEFAULT_MODEL", "sonnet")),
+        "watchdog_stall_sec": int(_get_global_setting("watchdog_stall_sec", int(os.environ.get("STALL_SECONDS", "300")))),
+        "watchdog_max_sec": int(_get_global_setting("watchdog_max_sec", int(os.environ.get("MAX_SECONDS", "1800")))),
+    }
+    spec = {k: {"type": v[0], "min": v[1], "max": v[2]} for k, v in _GLOBAL_SETTINGS_SPEC.items()}
+    return web.json_response({"stored": stored, "effective": effective, "spec": spec})
+
+
+async def api_settings_post(req: web.Request) -> web.Response:
+    """POST /api/settings — частичный апдейт глобальных настроек (валидируется)."""
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "ожидался объект"}, status=400)
+    clean, err = _validate_global_settings(body)
+    if err:
+        return web.json_response({"error": err}, status=400)
+    current = dict(_load_global_settings())
+    for k, v in clean.items():
+        if v is None:
+            current.pop(k, None)   # сброс к дефолту
+        else:
+            current[k] = v
+    _save_global_settings(current)
+    return web.json_response({"ok": True, "stored": current})
+
+
+def _project_settings_view(project: dict) -> dict:
+    return {
+        "git_enabled": _git_enabled(project),
+        "model": project.get("model"),
+        "self_heal": bool(project.get("self_heal", False)),
+        "notify_on_error": bool(project.get("notify_on_error", False)),
+        "log_cmd": project.get("log_cmd") or "",
+        "test_cmd": project.get("test_cmd") or "",
+    }
+
+
+async def api_project_settings_get(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/settings — per-project настройки."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    return web.json_response(_project_settings_view(project))
+
+
+async def api_project_settings_post(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/settings — частичный апдейт per-project настроек в topics.json.
+
+    Пишет во ВСЕ записи topics с этим cwd (как rename). git_enabled и пр. подхватываются
+    hot-reload'ом. Возвращает обновлённый срез настроек."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "ожидался объект"}, status=400)
+
+    updates: dict = {}
+    for k, v in body.items():
+        if k not in _PROJECT_SETTING_FIELDS:
+            return web.json_response({"error": f"неизвестный ключ: {k}"}, status=400)
+        if k in ("git_enabled", "self_heal", "notify_on_error"):
+            if not isinstance(v, bool):
+                return web.json_response({"error": f"{k}: ожидался bool"}, status=400)
+            updates[k] = v
+        elif k == "model":
+            sv = str(v).strip().lower()
+            if sv not in _ALLOWED_MODELS:
+                return web.json_response({"error": f"model: не из {sorted(_ALLOWED_MODELS)}"}, status=400)
+            updates[k] = sv
+        else:  # log_cmd / test_cmd — строки; пусто → сброс ключа
+            updates[k] = str(v) if v else None
+
+    cwd = project["cwd"]
+    changed = 0
+    for b in ctx["topics"].values():
+        if b.get("cwd") == cwd:
+            for k, v in updates.items():
+                if v is None:
+                    b.pop(k, None)
+                else:
+                    b[k] = v
+            changed += 1
+    save_topics = ctx.get("save_topics")
+    if callable(save_topics):
+        save_topics()
+
+    project = _find_project_by_id(ctx, req.match_info["id"]) or project
+    return web.json_response({"ok": True, "topics_updated": changed, "settings": _project_settings_view(project)})
 
 
 async def _send_tg_ping(ctx: dict, project: dict, msg: str) -> None:
@@ -1684,8 +1917,8 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
         "description": None,
     }
 
-    # ПРЕДОХРАНИТЕЛЬ №5: проверяем git+clean (worktree-режим)
-    run_mode = await _card_run_mode(cwd)
+    # ПРЕДОХРАНИТЕЛЬ №5: проверяем git+clean (worktree-режим), уважая git_enabled
+    run_mode = await _card_run_mode(cwd, git_enabled=_git_enabled(project))
     if run_mode != "worktree":
         print(f"[self_heal] {name}/{card_id}: не-git или dirty — пропускаем")
         _bus_publish(session_key, {
@@ -1857,9 +2090,10 @@ async def _error_scanner_loop(ctx: dict):
                     continue
                 if not res.get("added", 0):
                     continue
-                # ПРЕДОХРАНИТЕЛЬ №4: лимит конкурентности
-                if _self_heal_active_count >= _SELF_HEAL_MAX_CONCURRENT:
-                    print(f"[self_heal] лимит конкурентности ({_SELF_HEAL_MAX_CONCURRENT}) достигнут, пропускаем {proj['name']}")
+                # ПРЕДОХРАНИТЕЛЬ №4: лимит конкурентности (глобальная настройка)
+                _max_conc = int(_get_global_setting("self_heal_max_concurrent", _SELF_HEAL_MAX_CONCURRENT))
+                if _self_heal_active_count >= _max_conc:
+                    print(f"[self_heal] лимит конкурентности ({_max_conc}) достигнут, пропускаем {proj['name']}")
                     continue
                 # ПРЕДОХРАНИТЕЛЬ №2: running lock — не запускать если проект занят
                 session_key = proj["tg_thread"]
@@ -1878,7 +2112,7 @@ async def _error_scanner_loop(ctx: dict):
                     meta = _parse_incident_desc(card.get("description"))
                     if meta.get("heal_attempted") == "true":
                         continue  # ПРЕДОХРАНИТЕЛЬ №3: уже пытались
-                    if _self_heal_active_count >= _SELF_HEAL_MAX_CONCURRENT:
+                    if _self_heal_active_count >= _max_conc:
                         break  # перепроверяем лимит для каждой карточки
                     _self_heal_active_count += 1
                     asyncio.create_task(_self_heal_card(ctx, proj, card))
@@ -1886,7 +2120,7 @@ async def _error_scanner_loop(ctx: dict):
 
         except Exception as e:
             print(f"[scanner] loop error: {e}")
-        await asyncio.sleep(_SCAN_INTERVAL_SEC)
+        await asyncio.sleep(int(_get_global_setting("scan_interval_sec", _SCAN_INTERVAL_SEC)))
 
 
 def _board_payload(cwd: str) -> dict:
@@ -1997,9 +2231,12 @@ async def _git_diff_card(cwd: str) -> tuple[str, str]:
 
 # ─────────────────────────── C2: worktree helpers ───────────────────────────
 
-async def _card_run_mode(cwd: str) -> str:
+async def _card_run_mode(cwd: str, git_enabled: bool = True) -> str:
     """Определяет режим прогона карточки: 'worktree' или 'legacy'.
-    worktree = git-репо И дерево чистое. Иначе — legacy (прогон в cwd)."""
+    worktree = git включён И git-репо И дерево чистое. Иначе — legacy (прогон в cwd).
+    git_enabled=False (настройка проекта) → всегда legacy, git вообще не трогаем."""
+    if not git_enabled:
+        return "legacy"
     info = await _git_info(cwd)
     if info is None:
         return "legacy"
@@ -2472,8 +2709,8 @@ async def api_move_task(req: web.Request) -> web.Response:
             cols["in_progress"].append(card)
             _save_board(cwd, name, preamble, cols)
 
-        # C2: определяем режим и при worktree — настраиваем worktree
-        run_mode = await _card_run_mode(cwd)
+        # C2: определяем режим и при worktree — настраиваем worktree (уважая git_enabled)
+        run_mode = await _card_run_mode(cwd, git_enabled=_git_enabled(project))
         wt_info: dict | None = None
         if run_mode == "worktree":
             wt_info = await _card_worktree_setup(cwd, card_id)
@@ -2739,9 +2976,9 @@ async def api_free_create(req: web.Request) -> web.Response:
     except Exception:
         body = {}
     cwd = (body.get("cwd") or _FREE_DEFAULT_CWD).rstrip("/")
-    model = (body.get("model") or ctx.get("DEFAULT_MODEL", "sonnet")).strip().lower()
+    model = (body.get("model") or _effective_default_model(ctx)).strip().lower()
     if model not in _ALLOWED_MODELS:
-        model = ctx.get("DEFAULT_MODEL", "sonnet")
+        model = _effective_default_model(ctx)
 
     # Лейбл — пользовательский или авто «Свободный HH:MM»
     label = (body.get("label") or "").strip()
@@ -3009,6 +3246,8 @@ async def api_project_git_sync(req: web.Request) -> web.Response:
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
+    if not _git_enabled(project):
+        return web.json_response({"error": "git отключён для этого проекта (настройки)"}, status=409)
     cwd = project["cwd"]
 
     try:
@@ -4958,7 +5197,7 @@ async def api_new_project(req: web.Request) -> web.Response:
     ctx["topics"][session_key] = {
         "project": display_name,
         "cwd": str(cwd),
-        "model": ctx.get("DEFAULT_MODEL", "sonnet"),
+        "model": _effective_default_model(ctx),
     }
     save_topics = ctx.get("save_topics")
     if callable(save_topics):
@@ -4972,7 +5211,7 @@ async def api_new_project(req: web.Request) -> web.Response:
             "id": pid,
             "name": display_name,
             "cwd": str(cwd),
-            "model": ctx.get("DEFAULT_MODEL", "sonnet"),
+            "model": _effective_default_model(ctx),
             "tg_thread": session_key,
             "is_free": False,
         }
@@ -5130,9 +5369,12 @@ async def api_project_health(req: web.Request) -> web.Response:
             pass
     items.append(_check("gitignore", ".gitignore с .env", has_gitignore_env, "Добавь .env в .gitignore"))
 
-    # 6. git init (папка .git существует)
-    has_git = (cwd / ".git").exists()
-    items.append(_check("git_init", "git init", has_git, "Запусти git init в папке проекта"))
+    # 6. git init (папка .git существует) — если git отключён настройкой, не требуем
+    if not _git_enabled(project):
+        items.append(_check("git_init", "git (отключён в настройках)", True, None))
+    else:
+        has_git = (cwd / ".git").exists()
+        items.append(_check("git_init", "git init", has_git, "Запусти git init в папке проекта"))
 
     score = sum(1 for item in items if item["ok"])
     total = len(items)
@@ -5283,6 +5525,7 @@ async def start(ptb_app, ctx: dict) -> None:
 
         # Timeline: инициализируем персистентность шины (DATA/timeline/)
         _timeline_init(ctx)
+        _settings_init(ctx)
 
         app = web.Application(middlewares=[auth_middleware], client_max_size=20 * 1024 * 1024)
         app["ctx"] = ctx
@@ -5298,6 +5541,10 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/logout", api_logout)
         app.router.add_get("/api/me", api_me)
         app.router.add_get("/api/projects", api_projects)
+        app.router.add_get("/api/settings", api_settings_get)
+        app.router.add_post("/api/settings", api_settings_post)
+        app.router.add_get("/api/projects/{id}/settings", api_project_settings_get)
+        app.router.add_post("/api/projects/{id}/settings", api_project_settings_post)
         # «+ Новый проект» — создаёт untitled-<ts>/, добавляет в topics.json, спавнит онбординг
         app.router.add_post("/api/projects/new", api_new_project)
         app.router.add_get("/api/projects/{id}/claude-md", api_project_claude_md)

@@ -2,6 +2,10 @@
 
 Архив завершённых карточек (append-only). **Сессии его НЕ читают** — гигиена контекста.
 
+## 2026-06-02
+- [x] ⭐ Настройки проекта + глобальные настройки (UI): таб «⚙️ Настройки» <!--ops:f2ba02--> — per-project (git on/off флагман + модель/self_heal/notify/log_cmd/test_cmd, topics.json hot-reload) + глобальные (data/settings.json, провязаны в рантайм: self_heal master-kill, max_concurrent, scan_interval, дефолт-модель, watchdog stall/max). API GET/POST `/api/settings` + `/api/projects/{id}/settings` с валидацией. 20 тестов (test_settings.py).
+- [x] rename проекта сохраняет историю диалогов + Timeline (миграция SDK-каталога по slug); восстановлены family-emergency/autotopic-test; tests test_project_rename + test_forum_topic.
+
 ## 2026-05-30 (Послесессионная уборка)
 - [x] LogsTab: Readme/Specs убраны, Активность переименована в Логи; тянет log_cmd из topics.json; empty state + кнопка «добавить задачу в бэклог» <!--ops:701bd1-->
 - [x] Board wipe protection: _PLAIN_CARD_RE + _count_potential_cards safety guard + asyncio.Lock per-cwd; восстановлены 39 задач networking-os <!--ops:d00913-->

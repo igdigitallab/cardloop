@@ -145,7 +145,32 @@ export interface FileContent {
   error?: string
 }
 
-export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'secrets' | 'timeline'
+export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'secrets' | 'timeline' | 'settings'
+
+// ─── Settings (карточка f2ba02) ───────────────────────────────────────────────
+export interface ProjectSettings {
+  git_enabled: boolean
+  model: string | null
+  self_heal: boolean
+  notify_on_error: boolean
+  log_cmd: string
+  test_cmd: string
+}
+
+export interface GlobalSettingsEffective {
+  self_heal_enabled: boolean
+  self_heal_max_concurrent: number
+  scan_interval_sec: number
+  default_model: string
+  watchdog_stall_sec: number
+  watchdog_max_sec: number
+}
+
+export interface GlobalSettings {
+  stored: Record<string, unknown>
+  effective: GlobalSettingsEffective
+  spec: Record<string, { type: string; min: number | null; max: number | null }>
+}
 
 // ─── Timeline (Spec 008) ──────────────────────────────────────────────────────
 
