@@ -355,4 +355,15 @@ export const api = {
         body: JSON.stringify({ enabled }),
       }
     ),
+
+  // TG-уведомления о новых ошибках («упало») — включить/выключить per-project
+  toggleNotifyOnError: (id: string, enabled: boolean) =>
+    apiFetch<{ ok: boolean; notify_on_error: boolean; topics_updated: number }>(
+      `/api/projects/${id}/notify-on-error`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      }
+    ),
 }

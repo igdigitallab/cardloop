@@ -32,6 +32,8 @@ export interface Project {
   test_cmd?: string | null
   /** Самолечение (Spec 010): агент авто-чинит новые инциденты в worktree. OFF по умолчанию. */
   self_heal?: boolean
+  /** TG-уведомления о новых ошибках («упало»). OFF по умолчанию. */
+  notify_on_error?: boolean
 }
 
 export interface ClaudeMd {

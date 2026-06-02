@@ -306,6 +306,9 @@ async def report_error(context, chat, thread, where: str, exc: BaseException):
     head = f"💥 <b>Краш</b>\nГде: {html.escape(where)}\nЧто: <b>{type(exc).__name__}</b>: {html.escape(str(exc))}"
     block = tb[-3500:]  # хвост трейсбека — самое релевантное
     text = f"{head}\n<pre>{html.escape(block)}</pre>"
+    # Лог в stdout → journalctl → error-scanner подхватит Traceback → инцидент в Failed.
+    # Без этого крашы видны только в TG и в Failed не попадают (самолечение их не видит).
+    print(f"[crash] {where}: {type(exc).__name__}: {exc}\n{tb}", flush=True)
     try:
         await _tg_call(lambda: context.bot.send_message(
             chat, text, message_thread_id=thread or None, parse_mode=ParseMode.HTML))

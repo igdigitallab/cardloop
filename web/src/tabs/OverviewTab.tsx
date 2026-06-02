@@ -51,6 +51,51 @@ function SelfHealToggle({ project, onToggled }: { project: Project; onToggled?: 
   )
 }
 
+// ─── TG-уведомления о новых ошибках («упало») ───────────────────────────────
+
+function NotifyOnErrorToggle({ project }: { project: Project }) {
+  const [enabled, setEnabled] = useState<boolean>(!!project.notify_on_error)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+
+  useEffect(() => { setEnabled(!!project.notify_on_error) }, [project.notify_on_error])
+
+  async function toggle() {
+    const next = !enabled
+    setSaving(true); setErr('')
+    try {
+      await api.toggleNotifyOnError(project.id, next)
+      setEnabled(next)
+    } catch (e: unknown) {
+      setErr(String(e instanceof Error ? e.message : e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="git-card test-card">
+      <div className="test-card-header">
+        <span className="git-card-header" style={{ margin: 0 }}>{t['overview.notify_label']}</span>
+        <button
+          className={`doc-btn ${enabled ? 'primary' : ''}`}
+          onClick={toggle}
+          disabled={saving || !!project.is_free}
+          aria-pressed={enabled}
+          aria-label={t['overview.notify_label']}
+          title={enabled ? t['overview.notify_on'] : t['overview.notify_off']}
+        >
+          {saving ? t['overview.notify_saving'] : (enabled ? t['overview.notify_on'] : t['overview.notify_off'])}
+        </button>
+      </div>
+      <div className="test-status dim" style={{ fontSize: 12, marginTop: 4 }}>
+        {t['overview.notify_hint']}
+      </div>
+      {err && <div className="error-state" style={{ marginTop: 4 }}>⚠ {err}</div>}
+    </div>
+  )
+}
+
 interface Props {
   project: Project
 }
@@ -259,6 +304,9 @@ export function OverviewTab({ project }: Props) {
 
       {/* Spec 010: тумблер самолечения — только для обычных (не free) проектов */}
       {!project.is_free && <SelfHealToggle project={project} />}
+
+      {/* TG-уведомления об ошибках («упало») */}
+      {!project.is_free && <NotifyOnErrorToggle project={project} />}
 
       <TestRunner projectId={project.id} />
     </div>

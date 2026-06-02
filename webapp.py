@@ -1495,6 +1495,40 @@ async def api_project_self_heal_toggle(req: web.Request) -> web.Response:
     return web.json_response({"ok": True, "self_heal": enabled, "topics_updated": changed})
 
 
+async def api_project_notify_toggle(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/notify-on-error {enabled: bool} — TG-уведомления о новых ошибках.
+
+    При включении: сканер шлёт пинг в TG-топик проекта при детекте новых инцидентов
+    («упало»). Независимо от самолечения. Флаг notify_on_error в topics.json для всех
+    записей с тем же cwd. Auth: стандартный middleware.
+    """
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    if project.get("is_free"):
+        return web.json_response({"error": "уведомления недоступны для свободных чатов"}, status=400)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    enabled = bool(body.get("enabled", False))
+
+    cwd = project["cwd"]
+    changed = 0
+    for b in ctx["topics"].values():
+        if b.get("cwd") == cwd:
+            b["notify_on_error"] = enabled
+            changed += 1
+
+    if changed:
+        save_topics = ctx.get("save_topics")
+        if callable(save_topics):
+            save_topics()
+
+    return web.json_response({"ok": True, "notify_on_error": enabled, "topics_updated": changed})
+
+
 # Фоновая задача: сканер всех проектов каждые SCAN_INTERVAL_SEC секунд.
 _SCAN_INTERVAL_SEC = int(os.environ.get("ERROR_SCAN_INTERVAL", "300"))  # 5 мин
 
@@ -1534,6 +1568,42 @@ async def _send_tg_ping(ctx: dict, project: dict, msg: str) -> None:
             )
     except Exception as e:
         print(f"[self_heal] TG-пинг не удался: {e}")
+
+
+async def _sync_forum_topic_name(ctx: dict, session_key: str, name: str) -> None:
+    """editForumTopic: синкает имя TG-топика с именем проекта (после rename).
+    Некритичен. Для синтетических ключей (топик не существует) — тихо игнорим."""
+    try:
+        ptb_app = ctx.get("ptb_app")
+        if not (ptb_app and session_key and ":" in str(session_key)):
+            return
+        chat_s, thread_s = str(session_key).split(":", 1)
+        if not thread_s.isdigit() or int(thread_s) == 0:
+            return
+        await ptb_app.bot.edit_forum_topic(
+            chat_id=int(chat_s), message_thread_id=int(thread_s), name=name,
+        )
+    except Exception as e:
+        print(f"[rename] edit_forum_topic не удался (возможно синтетический ключ): {e}")
+
+
+async def _notify_new_incidents(ctx: dict, project: dict, n_added: int) -> None:
+    """TG-пинг «упало»: при детекте новых инцидентов, если включён notify_on_error.
+    Перечисляет до 3 инцидентов из Failed. Некритичен."""
+    try:
+        _, _, cols = _load_board(project["cwd"])
+    except Exception:
+        return
+    texts = [c["text"] for c in cols.get("failed", []) if _is_incident_card(c)]
+    if not texts:
+        return
+    head = "\n".join(f"• {t[:100]}" for t in texts[:3])
+    more = f"\n…и ещё {len(texts) - 3}" if len(texts) > 3 else ""
+    msg = (
+        f"❌ <b>{project['name']}</b>: {n_added} новых ошибок\n{head}{more}\n"
+        f"<i>Таб «Доска» → Failed.</i>"
+    )
+    await _send_tg_ping(ctx, project, msg)
 
 
 async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None:
@@ -1776,6 +1846,10 @@ async def _error_scanner_loop(ctx: dict):
                 if res.get("added") or res.get("updated"):
                     print(f"[scanner] {proj['name']}: +{res['added']} new, "
                           f"~{res['updated']} updated (из {res['scanned']} событий)")
+
+                # Уведомление «упало»: новые инциденты + включён notify_on_error
+                if res.get("added", 0) and proj.get("notify_on_error"):
+                    await _notify_new_incidents(ctx, proj, res.get("added", 0))
 
                 # ── ШАГ 3: Самолечение — если включено и есть новые инциденты ──
                 # ПРЕДОХРАНИТЕЛЬ №1: только если self_heal явно включён
@@ -4810,9 +4884,27 @@ async def api_new_project(req: web.Request) -> web.Response:
         shutil.rmtree(str(cwd), ignore_errors=True)
         return web.json_response({"error": f"ошибка записи шаблонов: {e}"}, status=500)
 
-    # Регистрируем в topics.json — session_key из GROUP_CHAT_ID (как неизвестный топик 0)
+    # Регистрируем в topics.json. Пытаемся создать РЕАЛЬНЫЙ forum-топик в TG —
+    # бот админ супергруппы с manage_topics, поэтому проект сразу доступен в
+    # Telegram (чат + авто-запуск карточек). Имя проекта формируется ПОЗЖЕ
+    # онбордингом, поэтому топик создаём с плейсхолдером, а при rename имя
+    # топика синкается через editForumTopic (_sync_forum_topic_name).
+    # Если создать топик не удалось (нет прав/ошибка API) — фоллбэк на
+    # синтетический ключ chat:ts (как раньше), проект всё равно создаётся.
     group_chat_id = ctx.get("GROUP_CHAT_ID") or 0
-    session_key = f"{group_chat_id}:{ts}"
+    thread_id = None
+    ptb_app = ctx.get("ptb_app")
+    if ptb_app and group_chat_id:
+        try:
+            topic = await ptb_app.bot.create_forum_topic(
+                chat_id=group_chat_id,
+                name=(display_name if name else "🆕 Новый проект"),
+            )
+            thread_id = topic.message_thread_id
+            print(f"[new_project] forum-топик создан: thread={thread_id}")
+        except Exception as e:
+            print(f"[new_project] create_forum_topic не удался ({e}) — синтетический ключ")
+    session_key = f"{group_chat_id}:{thread_id if thread_id is not None else ts}"
     ctx["topics"][session_key] = {
         "project": display_name,
         "cwd": str(cwd),
@@ -4911,6 +5003,9 @@ async def api_project_rename(req: web.Request) -> web.Response:
     save_topics = ctx.get("save_topics")
     if callable(save_topics):
         save_topics()
+
+    # Синкаем имя forum-топика в TG (если у проекта реальный топик)
+    await _sync_forum_topic_name(ctx, session_key, slug)
 
     return web.json_response({
         "ok": True,
@@ -5181,6 +5276,7 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/incidents", api_project_incidents)
         # Самолечение (Spec 010): тумблер включения per-project
         app.router.add_post("/api/projects/{id}/self-heal", api_project_self_heal_toggle)
+        app.router.add_post("/api/projects/{id}/notify-on-error", api_project_notify_toggle)
         # Activity-stream: живой поток событий шины (карточки, внешние прогоны)
         app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)
         # Timeline: история событий проекта (JSONL-лог шины) + пагинация
