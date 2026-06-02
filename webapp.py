@@ -3772,6 +3772,56 @@ def _sdk_sessions_dir(cwd: str) -> Path:
     return Path.home() / ".claude" / "projects" / cwd.replace("/", "-")
 
 
+def _migrate_cwd_keyed_state(old_cwd: str, new_cwd: str, ctx: dict) -> list[str]:
+    """Переносит cwd-привязанное состояние при переименовании проекта.
+
+    SDK-история диалогов (~/.claude/projects/<slug>/) и Timeline-лента
+    (DATA/timeline/<slug>.jsonl) ключуются по slug = cwd.replace('/','-').
+    При смене cwd их надо физически перенести — иначе кокпит читает пустой
+    новый slug, и сессии/лента «исчезают» (хотя файлы целы под старым slug).
+    Best-effort: ошибка миграции НЕ откатывает уже выполненный move папки —
+    возвращаем список предупреждений для ответа API.
+    """
+    import shutil as _shutil
+    warnings: list[str] = []
+
+    # 1. SDK-каталог истории диалогов: ~/.claude/projects/<slug>
+    try:
+        old_sdk = _sdk_sessions_dir(old_cwd)
+        new_sdk = _sdk_sessions_dir(new_cwd)
+        if old_sdk.exists() and old_sdk != new_sdk:
+            if new_sdk.exists():
+                # Каталог назначения занят — переносим файлы по одному, без клоббера
+                for f in old_sdk.iterdir():
+                    dest = new_sdk / f.name
+                    if not dest.exists():
+                        _shutil.move(str(f), str(dest))
+            else:
+                new_sdk.parent.mkdir(parents=True, exist_ok=True)
+                _shutil.move(str(old_sdk), str(new_sdk))
+    except Exception as e:  # noqa: BLE001
+        warnings.append(f"sdk-сессии: {e}")
+
+    # 2. Timeline: DATA/timeline/<slug>.jsonl (+ .jsonl.1 backup)
+    try:
+        data_dir = ctx.get("DATA")
+        if data_dir is not None:
+            tdir = Path(data_dir) / "timeline"
+            old_slug = old_cwd.replace("/", "-")
+            new_slug = new_cwd.replace("/", "-")
+            if old_slug != new_slug:
+                for suffix in (".jsonl", ".jsonl.1"):
+                    src = tdir / f"{old_slug}{suffix}"
+                    if src.exists():
+                        dst = tdir / f"{new_slug}{suffix}"
+                        if not dst.exists():
+                            _shutil.move(str(src), str(dst))
+    except Exception as e:  # noqa: BLE001
+        warnings.append(f"timeline: {e}")
+
+    return warnings
+
+
 def _session_preview(jsonl_path: Path) -> str:
     """Извлечь первое человекочитаемое сообщение из jsonl-файла сессии (~70 симв.)."""
     try:
@@ -5004,15 +5054,22 @@ async def api_project_rename(req: web.Request) -> web.Response:
     if callable(save_topics):
         save_topics()
 
+    # Переносим cwd-привязанное состояние (SDK-история диалогов + Timeline),
+    # иначе после смены cwd сессии и лента «исчезают» — файлы остаются под старым slug.
+    migrate_warnings = _migrate_cwd_keyed_state(old_cwd_str, str(new_cwd), ctx)
+
     # Синкаем имя forum-топика в TG (если у проекта реальный топик)
     await _sync_forum_topic_name(ctx, session_key, slug)
 
-    return web.json_response({
+    resp_body = {
         "ok": True,
         "new_id": new_cwd.name,
         "new_cwd": str(new_cwd),
         "new_name": slug,
-    })
+    }
+    if migrate_warnings:
+        resp_body["warnings"] = migrate_warnings
+    return web.json_response(resp_body)
 
 
 async def api_project_health(req: web.Request) -> web.Response:

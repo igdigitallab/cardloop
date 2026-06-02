@@ -6,7 +6,9 @@
 > Дисциплина: при появлении новой функции — добавить строку сюда + отметить карточку в TASKS.md → DONE.md. Тег ставится на стабильную точку (`git tag vX.Y.Z`).
 
 ## [Unreleased]
-_(текущая работа)_
+
+### Исправлено
+- **Rename проекта терял всю историю диалогов и Timeline.** `api_project_rename` двигал папку (`shutil.move`) и обновлял `topics.json`, но SDK-история (`~/.claude/projects/<slug>/`) и Timeline (`data/timeline/<slug>.jsonl`) ключуются по `slug = cwd.replace('/','-')` — после смены cwd кокпит читал пустой новый slug, и «пропадали все сессии общения» (файлы при этом целы под старым slug). Добавлен `_migrate_cwd_keyed_state(old_cwd, new_cwd, ctx)`: переносит SDK-каталог сессий + Timeline (+`.jsonl.1`) на новый slug, best-effort, предупреждения в `warnings` ответа. Тесты `test_rename_migrates_sdk_sessions`, `test_rename_migrates_timeline`. Уже потерянные проекты (`family-emergency`, `autotopic-test`) восстановлены переносом осиротевших каталогов.
 
 ## [v0.8.1] — 2026-06-01
 ### Исправлено

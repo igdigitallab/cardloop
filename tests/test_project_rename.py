@@ -186,6 +186,62 @@ async def test_rename_nonexistent_project_returns_404(aiohttp_client, rename_app
     assert resp.status == 404
 
 
+async def test_rename_migrates_sdk_sessions(aiohttp_client, rename_app, rename_ctx, project_dir, tmp_path, monkeypatch):
+    """SDK-история диалогов (~/.claude/projects/<slug>) переносится на новый slug.
+
+    Регрессия: без миграции после rename кокпит читает пустой новый slug —
+    «пропали все сессии общения».
+    """
+    sdk_root = tmp_path / "claude-projects"
+    monkeypatch.setattr(_webapp, "_sdk_sessions_dir",
+                        lambda cwd: sdk_root / cwd.replace("/", "-"))
+
+    old_sdk = _webapp._sdk_sessions_dir(str(project_dir))
+    old_sdk.mkdir(parents=True)
+    (old_sdk / "sess-1.jsonl").write_text('{"x":1}\n', encoding="utf-8")
+
+    client = await aiohttp_client(rename_app)
+    resp = await client.post(
+        "/api/projects/old-name/rename",
+        json={"slug": "moved-proj"},
+        headers=_auth_headers(rename_ctx),
+    )
+    assert resp.status == 200
+
+    new_cwd = project_dir.parent / "moved-proj"
+    new_sdk = _webapp._sdk_sessions_dir(str(new_cwd))
+    assert not old_sdk.exists(), "старый SDK-каталог должен быть перенесён"
+    assert (new_sdk / "sess-1.jsonl").is_file(), "сессия должна оказаться под новым slug"
+    assert (new_sdk / "sess-1.jsonl").read_text(encoding="utf-8") == '{"x":1}\n'
+
+
+async def test_rename_migrates_timeline(aiohttp_client, rename_app, rename_ctx, project_dir, tmp_path, monkeypatch):
+    """Timeline-лента (DATA/timeline/<slug>.jsonl + .1 backup) переносится на новый slug."""
+    # Перенаправляем SDK-каталог в tmp, чтобы не трогать реальный ~/.claude
+    monkeypatch.setattr(_webapp, "_sdk_sessions_dir",
+                        lambda cwd: tmp_path / "claude-projects" / cwd.replace("/", "-"))
+
+    tdir = rename_ctx["DATA"] / "timeline"
+    tdir.mkdir(parents=True, exist_ok=True)
+    old_slug = str(project_dir).replace("/", "-")
+    (tdir / f"{old_slug}.jsonl").write_text('{"e":1}\n', encoding="utf-8")
+    (tdir / f"{old_slug}.jsonl.1").write_text('{"e":0}\n', encoding="utf-8")
+
+    client = await aiohttp_client(rename_app)
+    resp = await client.post(
+        "/api/projects/old-name/rename",
+        json={"slug": "tl-proj"},
+        headers=_auth_headers(rename_ctx),
+    )
+    assert resp.status == 200
+
+    new_cwd = project_dir.parent / "tl-proj"
+    new_slug = str(new_cwd).replace("/", "-")
+    assert not (tdir / f"{old_slug}.jsonl").exists(), "старый timeline должен быть перенесён"
+    assert (tdir / f"{new_slug}.jsonl").read_text(encoding="utf-8") == '{"e":1}\n'
+    assert (tdir / f"{new_slug}.jsonl.1").read_text(encoding="utf-8") == '{"e":0}\n'
+
+
 async def test_rename_returns_new_id_and_cwd(aiohttp_client, rename_app, rename_ctx, project_dir):
     """Ответ содержит new_id, new_cwd, new_name."""
     client = await aiohttp_client(rename_app)
