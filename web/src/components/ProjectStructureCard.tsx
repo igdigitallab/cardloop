@@ -23,7 +23,7 @@ export function ProjectStructureCardFull({ health, refreshHealth, projectId }: F
     setAuditMsg('')
     try {
       await api.auditProject(projectId)
-      setAuditMsg('Карточка создана')
+      setAuditMsg('Аудит запущен — смотри чат, находки упадут в Backlog')
     } catch (e: unknown) {
       const status = (e as { status?: number }).status
       if (status === 409) {
@@ -42,7 +42,7 @@ export function ProjectStructureCardFull({ health, refreshHealth, projectId }: F
     setAuditMsg('')
     try {
       await api.upgradeProject(projectId)
-      setAuditMsg('Карточка апгрейда создана')
+      setAuditMsg('Апгрейд запущен — смотри чат, правки до baseline')
     } catch (e: unknown) {
       const status = (e as { status?: number }).status
       if (status === 409) {

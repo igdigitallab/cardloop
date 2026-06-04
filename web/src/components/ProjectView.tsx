@@ -3,6 +3,8 @@ import { Project, ProjectStructureHealth, TabId } from '../types'
 import { api } from '../api'
 import { ProjectActivityProvider, useOnRunEnd, useProjectActivity } from '../hooks/useProjectActivity'
 import { ErrorBoundary } from '../components/ErrorBoundary'
+import { Modal } from '../components/Modal'
+import { TestResult } from '../types'
 import { OverviewTab } from '../tabs/OverviewTab'
 import { ClaudeMdTab } from '../tabs/ClaudeMdTab'
 import { LogsTab } from '../tabs/LogsTab'
@@ -142,61 +144,47 @@ function HealthRunEndRefresher({ refresh }: { refresh: () => void }) {
   return null
 }
 
-// ── Header scan button ────────────────────────────────────────────────────────
-function HeaderScanBtn({ projectId, onDone }: { projectId: string; onDone: () => void }) {
-  const [scanning, setScanning] = useState(false)
-
-  async function scan() {
-    if (scanning) return
-    setScanning(true)
-    try {
-      await api.scanErrors(projectId)
-      onDone()
-    } catch {
-      // non-critical — show nothing, onDone not called on error
-    } finally {
-      setScanning(false)
-    }
-  }
-
-  return (
-    <button
-      className="git-sync-btn"
-      style={{ fontSize: 11, padding: '2px 8px' }}
-      onClick={scan}
-      disabled={scanning}
-      title="Ручной скан: прогнать log_cmd, новые ошибки → карточки"
-    >
-      {scanning ? '⏳ Скан…' : '🩺 Скан'}
-    </button>
-  )
-}
-
 // ── Header test runner button ─────────────────────────────────────────────────
+// Запускает test_cmd по требованию. Показывает сводку (прошли/упали + exit code);
+// клик по сводке → модалка с полным выводом (какие тесты упали). Без вывода в
+// галочку — иначе при падении не видно деталей.
 function HeaderTestRunner({ projectId }: { projectId: string }) {
   const [running, setRunning] = useState(false)
-  const [result, setResult] = useState<{ ok: boolean; label: string } | null>(null)
+  const [result, setResult] = useState<TestResult | null>(null)
+  const [showOutput, setShowOutput] = useState(false)
 
   async function run() {
-    setRunning(true); setResult(null)
+    if (running) return
+    setRunning(true); setResult(null); setShowOutput(false)
     try {
       const res = await api.runTests(projectId)
-      if (res.detected) {
-        setResult({ ok: res.ok, label: res.ok ? '✓' : '✗' })
-      } else {
-        setResult({ ok: false, label: '?' })
-      }
-    } catch {
-      setResult({ ok: false, label: '!' })
+      setResult(res)
+    } catch (e: unknown) {
+      setResult({
+        detected: false, ok: false, cmd: null, exit_code: null,
+        output: 'Запрос не удался: ' + (e instanceof Error ? e.message : String(e)),
+      })
     } finally {
       setRunning(false)
     }
-    // Clear result after 6 seconds
-    setTimeout(() => setResult(null), 6000)
+  }
+
+  // Краткая сводка результата
+  let summary: { label: string; color: string } | null = null
+  if (result) {
+    if (!result.detected) {
+      summary = { label: '? не нашёл тесты', color: 'var(--text-dim)' }
+    } else if (result.timed_out) {
+      summary = { label: '⏱ таймаут', color: 'var(--red)' }
+    } else if (result.ok) {
+      summary = { label: `✓ прошли (exit ${result.exit_code})`, color: 'var(--green)' }
+    } else {
+      summary = { label: `✗ упали (exit ${result.exit_code})`, color: 'var(--red)' }
+    }
   }
 
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
       <button
         className="git-sync-btn"
         style={{ fontSize: 11, padding: '2px 8px' }}
@@ -206,10 +194,35 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
       >
         {running ? t['header.running_tests'] : t['header.run_tests']}
       </button>
-      {result && (
-        <span style={{ fontSize: 11, color: result.ok ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
-          {result.label}
-        </span>
+      {summary && (
+        <button
+          onClick={() => setShowOutput(true)}
+          title="Показать полный вывод"
+          style={{
+            fontSize: 11, color: summary.color, fontWeight: 700, fontFamily: 'inherit',
+            background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+            textDecoration: 'underline dotted',
+          }}
+        >
+          {summary.label}
+        </button>
+      )}
+      {showOutput && result && (
+        <Modal onClose={() => setShowOutput(false)} className="test-output-modal">
+          <h3 style={{ marginTop: 0 }}>Результат тестов</h3>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
+            {result.cmd ? <code>{result.cmd}</code> : 'тесты не обнаружены'}
+            {result.exit_code != null && ` · exit ${result.exit_code}`}
+            {result.timed_out && ' · таймаут'}
+          </div>
+          <pre style={{
+            maxHeight: '60vh', overflow: 'auto', fontSize: 12, lineHeight: 1.45,
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            background: 'var(--bg-code, rgba(0,0,0,0.25))', padding: 10, borderRadius: 6,
+          }}>
+            {result.output || '(пустой вывод)'}
+          </pre>
+        </Modal>
       )}
     </span>
   )
@@ -522,9 +535,8 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                     )}
                   </span>
                 )}
-                {/* Agent running indicator + test runner + scan — inside provider */}
+                {/* Agent running indicator + test runner — inside provider */}
                 <AgentRunningChip projectId={project.id} />
-                <HeaderScanBtn projectId={project.id} onDone={refreshHealth} />
                 <HeaderTestRunner projectId={project.id} />
                 {/* Always-mounted: single run_end→refreshHealth path */}
                 <HealthRunEndRefresher refresh={refreshHealth} />
