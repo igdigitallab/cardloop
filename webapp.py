@@ -1802,12 +1802,85 @@ _SCAN_STATE_PATH: "Path | None" = None      # задаётся в _scan_state_in
 _DISMISSED_PATH: "Path | None" = None       # задаётся в _scan_state_init(ctx)
 _DISMISS_TTL = 24 * 3600                    # 24 ч — deleted/done карточка не воскресает
 
+# ─────────────────────────── Card Queue (sequential per-project) ───────────────────────────
+# data/card_queue.json: {session_key: [card_id, ...]} — FIFO очередь ожидающих карточек.
+# Одна карточка на проект за раз; остальные ждут в очереди.
+
+_QUEUE_PATH: "Path | None" = None           # задаётся в _scan_state_init(ctx)
+
+_QUEUE_DRAIN_INTERVAL_SEC = 3               # интервал backstop-дренажного цикла
+
+# In-memory canonical очередь: {session_key: [card_id, ...]}. Единственный источник
+# истины в рамках процесса. Все мутации меняют _QUEUE СИНХРОННО + сразу флашат на диск.
+# Это устраняет RMW-гонку (read-modify-write через await): _drain_queue делает несколько
+# мутаций через await, и concurrent enqueue/remove не теряются — мутация атомарна в рамках
+# одного event-loop turn (нет await между чтением и записью _QUEUE).
+_QUEUE: "dict[str, list[str]]" = {}
+
 
 def _scan_state_init(ctx: dict) -> None:
-    """Вызывается из start() — задаёт пути к файлам состояния."""
-    global _SCAN_STATE_PATH, _DISMISSED_PATH
+    """Вызывается из start() — задаёт пути к файлам состояния. Загружает очередь в _QUEUE."""
+    global _SCAN_STATE_PATH, _DISMISSED_PATH, _QUEUE_PATH
     _SCAN_STATE_PATH = ctx["DATA"] / "scan_state.json"
     _DISMISSED_PATH = ctx["DATA"] / "dismissed_incidents.json"
+    _QUEUE_PATH = ctx["DATA"] / "card_queue.json"
+    # Загружаем persisted-очередь в in-memory canonical dict (restart-resume).
+    # Чистим _QUEUE сначала — изоляция тестов и повторного init.
+    _QUEUE.clear()
+    try:
+        if _QUEUE_PATH is not None and _QUEUE_PATH.exists():
+            data = json.loads(_QUEUE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(v, list):
+                        _QUEUE[k] = [c for c in v if isinstance(c, str)]
+    except Exception:
+        pass
+
+
+def _queue_flush() -> None:
+    """Флашит in-memory _QUEUE на диск. Глотает ВСЕ исключения.
+    _QUEUE_PATH is None → только память, не падаем (тесты без init)."""
+    try:
+        if _QUEUE_PATH is None:
+            return
+        _QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _QUEUE_PATH.write_text(json.dumps(_QUEUE, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _queue_enqueue(session_key: str, card_id: str) -> bool:
+    """Добавляет card_id в хвост очереди (dedup). Возвращает True если реально добавил,
+    False если уже был (дедуп). Мутация _QUEUE синхронна → флаш."""
+    try:
+        lst = _QUEUE.setdefault(session_key, [])
+        if card_id in lst:
+            return False
+        lst.append(card_id)
+        _queue_flush()
+        return True
+    except Exception:
+        return False
+
+
+def _queue_remove(session_key: str, card_id: str) -> None:
+    """Удаляет card_id из очереди для session_key (нет — тихо). Мутация синхронна → флаш."""
+    try:
+        lst = _QUEUE.get(session_key)
+        if lst is not None and card_id in lst:
+            lst.remove(card_id)
+            _queue_flush()
+    except Exception:
+        pass
+
+
+def _queue_for(session_key: str) -> list:
+    """Возвращает список card_id в очереди для session_key (FIFO) — копия из _QUEUE."""
+    try:
+        return list(_QUEUE.get(session_key, []))
+    except Exception:
+        return []
 
 
 def _scan_state_load() -> dict:
@@ -2675,7 +2748,10 @@ async def api_project_tasks(req: web.Request) -> web.Response:
                         )
                     else:
                         tp.write_text(canon, encoding="utf-8")
-    return web.json_response(_board_payload(cwd))
+    # F: добавляем очередь карточек в ответ
+    payload = _board_payload(cwd)
+    payload["queued"] = _queue_for(project["tg_thread"])
+    return web.json_response(payload)
 
 
 async def api_create_task(req: web.Request) -> web.Response:
@@ -3148,6 +3224,118 @@ async def _run_card(
         # замок снимается ГАРАНТИРОВАННО, даже если запись сайдкара/перенос упали
         ctx["running"].pop(session_key, None)
 
+    # D: после снятия замка — дренируем очередь (следующая карточка, если есть)
+    try:
+        _aiohttp_app = ctx.get("_aiohttp_app")
+        if _aiohttp_app is not None:
+            await _drain_queue(ctx, _aiohttp_app, project)
+    except Exception as _dq_exc:
+        print(f"[_run_card] _drain_queue error: {_dq_exc}")
+
+
+# ─────────────────────────── Card Queue: _start_card_run / _drain_queue ───────────────────────────
+
+
+async def _start_card_run(ctx: AppCtx, app, project: dict, card_id: str) -> dict:
+    """Reusable, race-safe: резервирует lock СИНХРОННО, переносит карточку в in_progress,
+    запускает _run_card в фоне. Возвращает {"started": bool, ...}.
+
+    Гарантия race-safety: проверка И установка ctx["running"][session_key] происходят
+    без единого await между ними — это единственный guard против двойного старта.
+    """
+    session_key = project["tg_thread"]
+    cwd = project["cwd"]
+    name = project["name"]
+
+    # run_engine отсутствует — деградация
+    if ctx.get("run_engine") is None:
+        return {"started": False, "reason": "no_engine"}
+
+    # ── СИНХРОННАЯ проверка+резервация (НЕТ await между check и set) ──
+    if ctx["running"].get(session_key) is not None:
+        return {"started": False, "reason": "busy"}
+    ctx["running"][session_key] = True
+    # ── конец критической секции ──
+
+    # Перенос карточки под board-lock
+    card = None
+    async with _get_board_lock(cwd):
+        _, preamble, cols = _load_board(cwd)
+        card = _pop_card(cols, card_id)
+        if card is None:
+            ctx["running"].pop(session_key, None)
+            return {"started": False, "reason": "not_found"}
+        cols["in_progress"].append(card)
+        _save_board(cwd, name, preamble, cols)
+
+    # C2: режим + worktree
+    run_mode = await _card_run_mode(cwd, git_enabled=_git_enabled(project))
+    wt_info: dict | None = None
+    if run_mode == "worktree":
+        wt_info = await _card_worktree_setup(cwd, card_id)
+        if wt_info is None:
+            run_mode = "legacy"
+
+    _spawn_bg(_run_card(ctx, app, project, card, session_key, run_mode=run_mode, wt_info=wt_info))
+    return {"started": True, "card_id": card_id}
+
+
+async def _drain_queue(ctx: AppCtx, app, project: dict) -> "str | None":
+    """Пытается запустить следующую карточку из очереди.
+    Если проект занят — возвращает None. Пропускает устаревшие/отсутствующие карточки.
+    Возвращает card_id если запуск состоялся, иначе None.
+    """
+    session_key = project["tg_thread"]
+    cwd = project["cwd"]
+
+    # Быстрый non-await check: занят → ничего не делаем
+    if ctx["running"].get(session_key) is not None:
+        return None
+
+    # Runnable columns (карточка должна быть в одной из них для запуска)
+    _RUNNABLE = {"backlog", "review", "failed"}
+
+    q = _queue_for(session_key)
+    for card_id in q:
+        # Загружаем доску
+        try:
+            _, _, cols = _load_board(cwd)
+        except Exception:
+            return None
+
+        # Orphan-guard: если в in_progress кто-то висит (в т.ч. orphan после рестарта,
+        # когда running-lock потерян но карточка осталась в колонке) — не стартуем вторую.
+        if cols.get("in_progress"):
+            return None
+
+        # Проверяем, что карточка ещё существует в runnable-колонке
+        found_runnable = any(
+            c["id"] == card_id
+            for col_key, col_cards in cols.items()
+            if col_key in _RUNNABLE
+            for c in col_cards
+        )
+        if not found_runnable:
+            # Устаревшая или перемещённая запись — убираем из очереди, пробуем следующую
+            _queue_remove(session_key, card_id)
+            continue
+
+        # Пытаемся запустить
+        result = await _start_card_run(ctx, app, project, card_id)
+        if result["started"]:
+            _queue_remove(session_key, card_id)
+            return card_id
+        elif result.get("reason") == "busy":
+            # Гонка — оставляем в очереди, попробуем позже
+            return None
+        else:
+            # not_found или no_engine — убираем устаревшую и пробуем следующую
+            # (stale-первая не должна блокировать валидную)
+            _queue_remove(session_key, card_id)
+            continue
+
+    return None
+
 
 async def api_move_task(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
@@ -3181,40 +3369,27 @@ async def api_move_task(req: web.Request) -> web.Response:
                 _save_board(cwd, name, preamble, cols)
             return web.json_response(_board_payload(cwd))
 
-        # Проверка замка — занят ли проект (TG или другая карточка)
-        if ctx["running"].get(session_key) is not None:
-            return web.json_response(
-                {"error": "проект занят (TG или другая карточка)"},
-                status=409,
-            )
-
-        # Резервируем слот СИНХРОННО до первого await (против гонки)
-        ctx["running"][session_key] = True
-
-        async with _get_board_lock(cwd):
-            _, preamble, cols = _load_board(cwd)
-            card = _pop_card(cols, card_id)
-            if card is None:
-                ctx["running"].pop(session_key, None)
+        # Используем _start_card_run (race-safe: lock резервируется синхронно внутри)
+        result = await _start_card_run(ctx, req.app, project, card_id)
+        if result["started"]:
+            return web.json_response(_board_payload(cwd))
+        elif result.get("reason") == "busy":
+            # Проект занят — ставим карточку в очередь вместо 409.
+            # "enqueued":True сигнализирует постановку; board["queued"] — актуальный список
+            # очереди (не затираем его флагом).
+            _queue_enqueue(session_key, card_id)
+            board = _board_payload(cwd)
+            board["queued"] = _queue_for(session_key)
+            return web.json_response({**board, "ok": True, "enqueued": True})
+        else:
+            # not_found или no_engine
+            reason = result.get("reason", "unknown")
+            if reason == "not_found":
                 return web.json_response({"error": "card not found"}, status=404)
-            cols["in_progress"].append(card)
-            _save_board(cwd, name, preamble, cols)
-
-        # C2: определяем режим и при worktree — настраиваем worktree (уважая git_enabled)
-        run_mode = await _card_run_mode(cwd, git_enabled=_git_enabled(project))
-        wt_info: dict | None = None
-        if run_mode == "worktree":
-            wt_info = await _card_worktree_setup(cwd, card_id)
-            if wt_info is None:
-                # Деградация: setup не удался
-                run_mode = "legacy"
-
-        # Запускаем фоновую задачу (не ждём завершения)
-        _spawn_bg(_run_card(ctx, req.app, project, card, session_key, run_mode=run_mode, wt_info=wt_info))
-
-        return web.json_response(_board_payload(cwd))
+            return web.json_response({"error": reason}, status=400)
 
     # ── Обычный перенос (backlog / review / failed / done) ──
+    session_key = project["tg_thread"]
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
         card = _pop_card(cols, card_id)
@@ -3240,6 +3415,8 @@ async def api_move_task(req: web.Request) -> web.Response:
             cols["backlog"].append(card)
             _save_board(cwd, name, preamble, cols)
             return web.json_response({"error": "unknown column"}, status=400)
+    # F: карточка вручную перемещена из очереди — убираем из очереди
+    _queue_remove(session_key, card_id)
     return web.json_response(_board_payload(cwd))
 
 
@@ -3252,6 +3429,7 @@ async def api_delete_task(req: web.Request) -> web.Response:
     if not _valid_card_id(card_id):
         return web.json_response({"error": "bad card id"}, status=400)
     cwd, name = project["cwd"], project["name"]
+    session_key = project["tg_thread"]
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
         if _pop_card(cols, card_id) is None:
@@ -3260,7 +3438,92 @@ async def api_delete_task(req: web.Request) -> web.Response:
         if card_id.startswith("err-"):
             _dismissed_add(card_id[4:])
         _save_board(cwd, name, preamble, cols)
+    # F: карточка удалена — убираем из очереди
+    _queue_remove(session_key, card_id)
     return web.json_response(_board_payload(cwd))
+
+
+async def api_run_batch(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/cards/run-batch — ставит несколько карточек в очередь.
+    Тело: {"card_ids": ["id1", "id2", ...]}.
+    Ответ: {"ok": True, "queued": <N поставлено>, "started": <card_id или null>}.
+    """
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+
+    raw_ids = body.get("card_ids")
+    if not isinstance(raw_ids, list):
+        return web.json_response({"error": "card_ids must be a list"}, status=400)
+
+    session_key = project["tg_thread"]
+    cwd = project["cwd"]
+
+    # Runnable columns — карточка должна быть в одной из них
+    _RUNNABLE = {"backlog", "review", "failed"}
+
+    # Загружаем доску один раз
+    try:
+        _, _, cols = _load_board(cwd)
+    except Exception:
+        cols = {key: [] for key, _, _ in BOARD_COLUMNS}
+
+    # Собираем set всех runnable card_id
+    runnable_ids: set = set()
+    for col_key, col_cards in cols.items():
+        if col_key in _RUNNABLE:
+            for c in col_cards:
+                runnable_ids.add(c["id"])
+
+    enqueued = 0
+    for raw_id in raw_ids:
+        if not isinstance(raw_id, str):
+            continue
+        if not _valid_card_id(raw_id):
+            continue
+        if raw_id not in runnable_ids:
+            continue
+        # _queue_enqueue → True только если реально добавил (дедуп → False) — не переоцениваем
+        if _queue_enqueue(session_key, raw_id):
+            enqueued += 1
+
+    # Сразу дренируем — первая карточка стартует если проект свободен
+    _aiohttp_app = ctx.get("_aiohttp_app") or req.app
+    started_id = await _drain_queue(ctx, _aiohttp_app, project)
+
+    return web.json_response({"ok": True, "queued": enqueued, "started": started_id})
+
+
+async def _queue_drain_loop(ctx: dict) -> None:
+    """E: Backstop-цикл: каждые _QUEUE_DRAIN_INTERVAL_SEC проверяет все проекты с очередью
+    и дренирует их. Обрабатывает: рестарт (очередь пережила его), TG-пересечение
+    (TG-прогон освободил проект — drain не вызван через _run_card).
+    """
+    await asyncio.sleep(10)  # дать боту устаканиться
+    while True:
+        try:
+            _aiohttp_app = ctx.get("_aiohttp_app")
+            if _aiohttp_app is not None:
+                projects = _collect_projects(ctx)
+                for proj in projects:
+                    # per-project try/except: сбой в одном проекте не валит дренаж остальных
+                    try:
+                        if proj.get("is_free"):
+                            continue
+                        session_key = proj["tg_thread"]
+                        if not _queue_for(session_key):
+                            continue
+                        await _drain_queue(ctx, _aiohttp_app, proj)
+                    except Exception as pe:
+                        print(f"[queue_drain_loop] project {proj.get('name')} error: {pe}")
+        except Exception as e:
+            print(f"[queue_drain_loop] error: {e}")
+        await asyncio.sleep(_QUEUE_DRAIN_INTERVAL_SEC)
 
 
 async def api_update_task(req: web.Request) -> web.Response:
@@ -6130,6 +6393,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app["ptb_app"] = ptb_app
         # Также кладём в ctx для доступа из _run_card через ctx["ptb_app"]
         ctx["ptb_app"] = ptb_app
+        # Card Queue: сохраняем aiohttp-приложение в ctx для _drain_queue из _run_card и loop
+        ctx["_aiohttp_app"] = app
 
         # API-роуты
         app.router.add_get("/api/health", api_health)
@@ -6158,6 +6423,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/tasks/{card}/move", api_move_task)
         app.router.add_delete("/api/projects/{id}/tasks/{card}", api_delete_task)
         app.router.add_route("PATCH", "/api/projects/{id}/tasks/{card}", api_update_task)
+        # Card Queue: batch-запуск нескольких карточек
+        app.router.add_post("/api/projects/{id}/cards/run-batch", api_run_batch)
         # F1: сайдкар результата карточки
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
         # C2-gate: применить / отменить worktree-карточку; quality gate (check)
@@ -6245,5 +6512,8 @@ async def start(ptb_app, ctx: dict) -> None:
         # Фоновый сканер инцидентов: log_cmd → карточки в Failed
         _spawn_bg(_error_scanner_loop(ctx))
         print(f"[webapp] сканер инцидентов запущен (интервал {_SCAN_INTERVAL_SEC}с)")
+        # Card Queue: backstop-дренажный цикл (restart-resume + TG-interleave)
+        _spawn_bg(_queue_drain_loop(ctx))
+        print(f"[webapp] queue drain loop запущен (интервал {_QUEUE_DRAIN_INTERVAL_SEC}с)")
     except Exception as e:
         print(f"[webapp] ОШИБКА при запуске: {e}")

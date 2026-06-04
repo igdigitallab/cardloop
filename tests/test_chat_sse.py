@@ -258,8 +258,10 @@ async def test_chat_saves_session_id(aiohttp_client, tmp_path, project_dir):
 # ─────────────────────────── замок конкурентности ───────────────────────────
 
 
-async def test_move_to_in_progress_busy_returns_409(aiohttp_client, tmp_path, project_dir):
-    """api_move_task в in_progress при занятом проекте (run_engine есть) → 409."""
+async def test_move_to_in_progress_busy_enqueues(aiohttp_client, tmp_path, project_dir):
+    """api_move_task в in_progress при занятом проекте (run_engine есть) → 200 + enqueued=True;
+    карточка реально попадает в очередь (карточка ставится в очередь вместо 409)."""
+    import webapp as _webapp
 
     async def fake_engine(**kwargs):
         # Медленный движок — никогда не завершается в рамках теста
@@ -267,6 +269,9 @@ async def test_move_to_in_progress_busy_returns_409(aiohttp_client, tmp_path, pr
         yield {"type": "text", "text": "never"}
 
     ctx = _make_chat_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    # Инициализируем in-memory очередь + путь к файлу (изоляция теста)
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    _webapp._scan_state_init({"DATA": tmp_path / "data"})
     # Симулируем уже занятый слот
     ctx["running"]["1001:42"] = True
 
@@ -279,9 +284,12 @@ async def test_move_to_in_progress_busy_returns_409(aiohttp_client, tmp_path, pr
         json={"to": "in_progress"},
         headers=_auth_headers(ctx),
     )
-    assert resp.status == 409, f"Занятый проект должен дать 409, получили: {resp.status}"
+    assert resp.status == 200, f"Занятый проект должен дать 200+enqueued, получили: {resp.status}"
     data = await resp.json()
-    assert "занят" in data.get("error", "").lower(), f"Error должен содержать 'занят': {data}"
+    assert data.get("enqueued") is True, f"Должно быть enqueued=True: {data}"
+    # Карточка реально в очереди
+    assert "aabbcc" in _webapp._queue_for("1001:42"), \
+        f"Карточка должна быть в очереди: {_webapp._queue_for('1001:42')}"
 
 
 async def test_concurrent_chat_second_request_busy(tmp_path, project_dir):
