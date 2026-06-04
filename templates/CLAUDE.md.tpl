@@ -60,6 +60,122 @@ created: YYYY-MM-DD
 
 ---
 
+## Error Handler
+
+Каждый сервис/бот обязан писать необработанные исключения в лог — иначе кокпит не видит рантайм-ошибки.
+Кокпит-сканер грепает строку: `UNHANDLED exc_class=<Type> path=<route>` — она обязана быть в логе.
+`logging` должен достигать журнала (journald/stdout — куда смотрит `log_cmd`).
+
+### FastAPI (эталон: networking-os CRM)
+
+```python
+import logging, traceback, uuid
+from fastapi import HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+log = logging.getLogger(__name__)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    if isinstance(exc, (HTTPException, RequestValidationError)):
+        raise exc
+    request_id = str(uuid.uuid4())
+    log.error(
+        "UNHANDLED exc_class=%s path=%s request_id=%s\n%s",
+        type(exc).__name__, request.url.path, request_id,
+        traceback.format_exc(),
+    )
+    # Опционально: fire-and-forget TG-алерт с rate-limit по (path, exc_class)
+    # asyncio.create_task(alert_exception(exc, request, request_id))
+    return JSONResponse(status_code=500,
+                        content={"error": "internal", "request_id": request_id})
+```
+
+### aiohttp (middleware)
+
+```python
+import logging, traceback
+from aiohttp import web
+
+log = logging.getLogger(__name__)
+
+@web.middleware
+async def error_middleware(request: web.Request, handler):
+    try:
+        return await handler(request)
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        log.error(
+            "UNHANDLED exc_class=%s path=%s\n%s",
+            type(exc).__name__, request.path,
+            traceback.format_exc(),
+        )
+        return web.json_response({"error": "internal"}, status=500)
+
+app = web.Application(middlewares=[error_middleware])
+```
+
+### python-telegram-bot (PTB)
+
+```python
+import logging, traceback
+from telegram.ext import Application
+
+log = logging.getLogger(__name__)
+
+async def error_handler(update, context):
+    log.error(
+        "UNHANDLED exc_class=%s path=tg_update\n%s",
+        type(context.error).__name__,
+        "".join(traceback.format_exception(type(context.error),
+                                           context.error,
+                                           context.error.__traceback__)),
+    )
+
+application = Application.builder().token("...").build()
+application.add_error_handler(error_handler)
+```
+
+### CLI / скрипт
+
+```python
+import logging, sys, traceback
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s %(message)s")
+log = logging.getLogger(__name__)
+
+def main(): ...
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        log.error("UNHANDLED exc_class=%s path=__main__\n%s",
+                  sys.exc_info()[0].__name__, traceback.format_exc())
+        sys.exit(1)
+```
+
+### Библиотека / фоновая задача
+
+```python
+import logging, sys, traceback
+
+log = logging.getLogger(__name__)
+
+def do_work():
+    try:
+        ...
+    except Exception:
+        log.error("UNHANDLED exc_class=%s path=%s\n%s",
+                  sys.exc_info()[0].__name__, "do_work", traceback.format_exc())
+        raise  # re-raise после логирования
+```
+
+---
+
 ## Правила работы в кокпите (НЕ удалять — общие для всех проектов)
 
 **Доска (TASKS.md):**
@@ -84,6 +200,32 @@ created: YYYY-MM-DD
 
 **Самолечение (опция):**
 - Тумблер «🔧 Самолечение» в Overview — OFF по умолчанию. Включать осознанно.
-- При включении: новые ошибки (log_cmd / test_cmd) → агент авто-чинит в worktree → карточка в Review.
+- При включении: новые ошибки (из log_cmd) → агент авто-чинит в worktree → карточка в Review.
 - **Незыблемо:** агент НИКОГДА не применяет изменения без человека. Merge — всегда руками («✓ Применить»).
-- Требует: git-репо + clean tree + log_cmd или test_cmd в topics.json.
+- Требует: git-репо + clean tree + log_cmd в topics.json.
+
+**Возможности ClaudeOps — что подключить:**
+
+| Возможность | Что делает | Как завести |
+|---|---|---|
+| **error handler** | **ОБЯЗАТЕЛЕН для сервисов/ботов.** Пишет необработанные исключения в лог → кокпит ловит инцидент. | Добавить по типу проекта (см. `## Error Handler` выше). |
+| **log_cmd** | Кокпит читает логи проекта (вкладка «Логи», основа сканера ошибок). | В `topics.json` для проекта: `"log_cmd": "journalctl -u my-svc -n 300 --no-pager"`. |
+| **test_cmd** | Кнопка «Прогнать тесты» + quality gate при самолечении. НЕ гоняется в фоне. | В `topics.json`: `"test_cmd": "pytest -q"`. Путь относителен cwd. |
+| **самолечение (git+clean)** | При новом инциденте агент авто-чинит в worktree → карточка в Review для ревью человеком. | Тумблер в Overview. Требует git-репо + clean tree + log_cmd. |
+| **notify_on_error** | TG-пинг Игорю при новом инциденте. | Тумблер «🔔 Уведомлять» в Overview. |
+| **healthz/liveness** | Для сервисов: проект отдаёт эндпоинт `/healthz` (или `/_health`) — кокпит сможет пинговать (на будущее). | Добавить роут, отдающий 200 + `{"ok":true}`. |
+| **память** | `.claude-ops/memory/` — знания, путешествующие с репо (решения, gotchas). | Создаётся автоматически при первой записи агента. |
+| **секреты** | `.claude-ops/secrets/secrets.env` — ключи/токены в env агента. | Вкладка «🔑 Ключи» в кокпите, или `echo 'KEY=val' >> ...secrets.env`. |
+
+---
+
+## ClaudeOps conformance
+<!-- Заполняется при онбординге. Кокпит читает это в health. Формат строки: "- <возможность>: <да: где / нет>" -->
+- error handler: нет
+- log_cmd: нет
+- test_cmd: нет
+- самолечение (git+clean): нет
+- память (.claude-ops/memory): нет
+- секреты (.claude-ops/secrets): нет
+- notify_on_error: нет
+- healthz/liveness (сервисам): нет

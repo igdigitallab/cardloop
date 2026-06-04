@@ -301,7 +301,7 @@ async def error_middleware(request: web.Request, handler):
         raise
     except Exception as exc:
         request_id = _uuid.uuid4().hex[:8]
-        logging.exception("[error_middleware] unhandled %s request_id=%s", request.path, request_id)
+        logging.exception("UNHANDLED exc_class=%s path=%s request_id=%s", type(exc).__name__, request.path, request_id)
         return web.json_response(
             {"error": type(exc).__name__, "request_id": request_id},
             status=500,
@@ -1157,6 +1157,8 @@ _GENERIC_ERR_RE = re.compile(
 _PYTEST_FAILED_RE = re.compile(
     r"^FAILED\s+([\w./\-]+)::([\w\[\]\-]+)(?:\s+-\s+(.+))?$", re.MULTILINE,
 )
+# Стандартная строка необработанного исключения: "UNHANDLED exc_class=<Type> path=<route>"
+_UNHANDLED_RE = re.compile(r"\bUNHANDLED\s+exc_class=(\S+)\s+path=(\S+)", re.MULTILINE)
 # Шумовые сообщения которые часто встречаются в логах но не являются ошибками
 _LOG_NOISE_SUBSTRINGS = (
     "deprecat",         # DeprecationWarning
@@ -1185,11 +1187,13 @@ def _parse_log_errors(log_text: str, source: str = "log") -> list[dict]:
     Дедуп ВНУТРИ списка: одинаковые ошибки в одном прогоне → одна запись (seen считается выше)."""
     out: list[dict] = []
     seen_hashes: set[str] = set()
+    traceback_exc_types: set[str] = set()
 
     # Сначала Python tracebacks (более структурированные)
     for m in _PY_TRACEBACK_RE.finditer(log_text):
         trace_body = m.group(1)
         exc_type = m.group(2)
+        traceback_exc_types.add(exc_type)
         exc_msg = m.group(3).strip()
         excerpt_lines = trace_body.strip().split("\n")[-3:] + [f"{exc_type}: {exc_msg}"]
         excerpt = "\n".join(ln.strip()[:200] for ln in excerpt_lines)
@@ -1211,6 +1215,9 @@ def _parse_log_errors(log_text: str, source: str = "log") -> list[dict]:
         # Если строка содержит "Traceback" — уже учтено выше
         if "Traceback" in msg:
             continue
+        # "UNHANDLED exc_class=..." обрабатывает отдельный проход ниже — не дублируем
+        if "UNHANDLED exc_class=" in msg:
+            continue
         h = _hash6(f"{source}|{level}|{_norm_msg(msg)}")
         if h in seen_hashes:
             continue
@@ -1218,6 +1225,25 @@ def _parse_log_errors(log_text: str, source: str = "log") -> list[dict]:
         out.append({
             "source": source, "type": level, "message": msg[:300],
             "excerpt": msg[:300], "hash": h,
+        })
+
+    # UNHANDLED стандартная строка: "UNHANDLED exc_class=<Type> path=<route>"
+    for m in _UNHANDLED_RE.finditer(log_text):
+        exc_class = m.group(1)
+        path = m.group(2)
+        # Если для этого типа уже есть карточка из трейсбека (богаче) — не дублируем.
+        # UNHANDLED-проход нужен прежде всего когда полного трейсбека нет (systemd OnFailure).
+        if exc_class in traceback_exc_types:
+            continue
+        h = _hash6(f"{source}|UNHANDLED|{_norm_msg(exc_class + ' ' + path)}")
+        if h in seen_hashes:
+            continue
+        seen_hashes.add(h)
+        matched_line = m.group(0)
+        out.append({
+            "source": source, "type": exc_class,
+            "message": f"unhandled at {path}",
+            "excerpt": matched_line, "hash": h,
         })
 
     return out
@@ -1314,32 +1340,11 @@ async def _run_log_cmd(log_cmd: str, timeout: float = 10.0) -> str:
         return ""
 
 
-async def _run_test_cmd(test_cmd: str, cwd: str, timeout: float = 120.0) -> str:
-    """Запускает test_cmd в cwd проекта.
-    UI-controlled cmd from topics.json → exec (not shell) to prevent injection."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *shlex.split(test_cmd),
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return ""
-        return stdout.decode("utf-8", errors="replace")
-    except Exception:
-        return ""
-
-
 async def _scan_project_errors(project: dict) -> list[dict]:
-    """Сканирует один проект: log_cmd + test_cmd → list[errors]. БЕЗ записи на диск."""
+    """Сканирует один проект: только log_cmd → list[errors]. БЕЗ записи на диск.
+    Тесты запускаются ТОЛЬКО через кнопку «Прогнать тесты» (api_project_test), не здесь."""
     errors: list[dict] = []
     log_cmd = project.get("log_cmd")
-    test_cmd = project.get("test_cmd")
 
     if log_cmd:
         log_text = await _run_log_cmd(log_cmd)
@@ -1347,13 +1352,6 @@ async def _scan_project_errors(project: dict) -> list[dict]:
             # Берём только последние ~500 строк — старые ошибки уже учтены прошлыми сканами
             tail = "\n".join(log_text.splitlines()[-500:])
             errors.extend(_parse_log_errors(tail, source="log"))
-
-    if test_cmd:
-        test_text = await _run_test_cmd(test_cmd, project["cwd"])
-        if test_text:
-            errors.extend(_parse_pytest_failures(test_text))
-            # Generic ERROR строки из test-output тоже учитываем
-            errors.extend(_parse_log_errors(test_text, source="test"))
 
     return errors
 
@@ -1460,9 +1458,9 @@ async def api_project_scan_errors(req: web.Request) -> web.Response:
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
-    if not project.get("log_cmd") and not project.get("test_cmd"):
+    if not project.get("log_cmd"):
         return web.json_response({
-            "ok": False, "error": "ни log_cmd, ни test_cmd не настроены в topics.json",
+            "ok": False, "error": "log_cmd не настроен в topics.json",
         }, status=400)
     res = await _scan_and_ingest(project, ctx)
     return web.json_response(res)
@@ -2086,7 +2084,7 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
 
 
 async def _error_scanner_loop(ctx: dict):
-    """Фоновая задача: периодически сканирует все проекты с log_cmd/test_cmd.
+    """Фоновая задача: периодически сканирует все проекты с log_cmd.
     При включённом самолечении: новые инциденты → asyncio.create_task(_self_heal_card)."""
     global _self_heal_active_count
     # Первый прогон через 30с после старта (дать боту устаканиться)
@@ -2097,7 +2095,7 @@ async def _error_scanner_loop(ctx: dict):
             for proj in projects:
                 if proj.get("is_free"):
                     continue
-                if not (proj.get("log_cmd") or proj.get("test_cmd")):
+                if not proj.get("log_cmd"):
                     continue
                 res = await _scan_and_ingest(proj, ctx)
                 if res.get("added") or res.get("updated"):
@@ -5085,6 +5083,7 @@ _NEW_PROJECT_PROMPT = """\
 - Замени стартовые карточки в TASKS.md → ## Backlog (положи мои реальные 3-5 задач, удали стартовые «Заполнить …» если уже сделал).
 - Заполни README.md.
 - При необходимости создай `specs/`, `tests/`, и т.д. — по обстановке.
+- если веб-сервис/бот → добавь глобальный error handler (FastAPI/aiohttp middleware, PTB add_error_handler, CLI try/except в main → logger.error). Иначе кокпит не видит рантайм-ошибки. Логируй стандартной строкой `UNHANDLED exc_class=<Type> path=<route>`.
 
 ШАГ 3 — имя проекта:
 - Предложи мне короткий kebab-case slug (например `my-cool-bot`). Спроси «переименовать сейчас?»
@@ -5310,6 +5309,63 @@ async def api_project_rename(req: web.Request) -> web.Response:
     return web.json_response(resp_body)
 
 
+_DETECT_ERROR_HANDLER_SUBSTRINGS = (
+    "@app.exception_handler",
+    "add_error_handler",
+    "error_middleware",
+    "app.add_middleware",
+    "@exception_handler",
+    "setup_exception_handlers",
+    "UNHANDLED exc_class=",   # проект принял стандартную лог-строку кокпита
+)
+_DETECT_EH_CONFORMANCE_RE = re.compile(r"(?im)^\s*-?\s*error handler:\s*(.+)$")
+_DETECT_EH_EXCLUDE_DIRS = {"venv", ".venv", "node_modules", ".git", "dist", "build", "__pycache__", ".worktrees"}
+
+
+def _detect_error_handler(cwd: Path, claude_md_text: str) -> bool:
+    """Быстрый (bounded) детектор наличия глобального error handler в проекте.
+
+    (a) Self-declaration: ## ClaudeOps conformance + строка 'error handler: <не пустое/нет>'
+    (b) Code heuristic: обходим *.py (до 60 файлов / 3 MB), ищем substring-маркеры.
+    Возвращает True при первом совпадении. try/except → False при любой ошибке."""
+    try:
+        # (a) Self-declaration — ТОЛЬКО в секции ## ClaudeOps conformance
+        # (иначе строка 'error handler:' из любого другого раздела даст ложный плюс)
+        if "## ClaudeOps conformance" in claude_md_text:
+            section = claude_md_text.split("## ClaudeOps conformance", 1)[1].split("\n## ", 1)[0]
+            m = _DETECT_EH_CONFORMANCE_RE.search(section)
+            if m:
+                val = m.group(1).strip().lower()
+                if val not in {"нет", "no", "-", "—", ""}:
+                    return True
+
+        # (b) Code heuristic — bounded scan; os.walk прунит шумные директории,
+        # НЕ спускаясь в venv/node_modules (rglob их всё равно обходит).
+        files_checked = 0
+        bytes_read = 0
+        _MAX_FILES = 60
+        _MAX_BYTES = 3 * 1024 * 1024  # 3 MB
+        for root, dirs, names in os.walk(cwd):
+            dirs[:] = [d for d in dirs if d not in _DETECT_EH_EXCLUDE_DIRS]
+            for name in names:
+                if not name.endswith(".py"):
+                    continue
+                if files_checked >= _MAX_FILES or bytes_read >= _MAX_BYTES:
+                    return False
+                try:
+                    text = Path(root, name).read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                files_checked += 1
+                bytes_read += len(text)
+                for substr in _DETECT_ERROR_HANDLER_SUBSTRINGS:
+                    if substr in text:
+                        return True
+    except Exception:
+        return False
+    return False
+
+
 async def api_project_health(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/health — быстрая проверка структуры проекта без агента."""
     ctx = req.app["ctx"]
@@ -5320,8 +5376,8 @@ async def api_project_health(req: web.Request) -> web.Response:
 
     cwd = Path(project["cwd"])
 
-    def _check(key: str, label: str, condition: bool, hint: str | None) -> dict:
-        return {"key": key, "label": label, "ok": condition, "hint": hint if not condition else None}
+    def _check(key: str, label: str, condition: bool, hint: str | None, optional: bool = False) -> dict:
+        return {"key": key, "label": label, "ok": condition, "hint": hint if not condition else None, "optional": optional}
 
     items: list[dict] = []
 
@@ -5332,9 +5388,11 @@ async def api_project_health(req: web.Request) -> web.Response:
 
     # 2. CLAUDE.md содержит раздел «Правила работы в кокпите»
     cockpit_rules = False
+    claude_md_text = ""
     if has_claude_md:
         try:
-            cockpit_rules = "Правила работы в кокпите" in claude_md.read_text(encoding="utf-8", errors="replace")
+            claude_md_text = claude_md.read_text(encoding="utf-8", errors="replace")
+            cockpit_rules = "Правила работы в кокпите" in claude_md_text
         except Exception:
             pass
     items.append(_check(
@@ -5375,9 +5433,33 @@ async def api_project_health(req: web.Request) -> web.Response:
         has_git = (cwd / ".git").exists()
         items.append(_check("git_init", "git init", has_git, "Запусти git init в папке проекта"))
 
-    score = sum(1 for item in items if item["ok"])
-    total = len(items)
-    if score == total:
+    # ── Capability checks ──────────────────────────────────────────────────────
+    # cap_log_cmd: кокпит получает логи и рантайм-ошибки только если задан log_cmd
+    items.append(_check(
+        "cap_log_cmd", "log_cmd задан (логи в кокпит)",
+        bool(project.get("log_cmd")),
+        "Задай log_cmd — иначе кокпит не видит логи и рантайм-ошибки",
+    ))
+    # cap_error_handler: глобальный error handler в коде или задекларирован в CLAUDE.md
+    items.append(_check(
+        "cap_error_handler", "Глобальный error handler",
+        _detect_error_handler(cwd, claude_md_text),
+        "Сервису/боту добавь глобальный error handler (пишет ошибки в лог) "
+        "ИЛИ задекларируй в CLAUDE.md (## ClaudeOps conformance)",
+    ))
+    # cap_test_cmd: опциональный — не влияет на score
+    items.append(_check(
+        "cap_test_cmd", "test_cmd задан (опц., по кнопке)",
+        bool(project.get("test_cmd")),
+        "Опц.: задай test_cmd для кнопки «Прогнать тесты» и quality gate",
+        optional=True,
+    ))
+
+    score = sum(1 for i in items if i["ok"] and not i.get("optional"))
+    total = sum(1 for i in items if not i.get("optional"))
+    if total == 0:
+        color = "green"
+    elif score == total:
         color = "green"
     elif score >= total / 2:
         color = "yellow"
@@ -5649,7 +5731,7 @@ async def start(ptb_app, ctx: dict) -> None:
         await site.start()
         print(f"[webapp] слушаю 0.0.0.0:{port}")
 
-        # Фоновый сканер инцидентов: log_cmd/test_cmd → карточки в Failed
+        # Фоновый сканер инцидентов: log_cmd → карточки в Failed
         asyncio.create_task(_error_scanner_loop(ctx))
         print(f"[webapp] сканер инцидентов запущен (интервал {_SCAN_INTERVAL_SEC}с)")
     except Exception as e:

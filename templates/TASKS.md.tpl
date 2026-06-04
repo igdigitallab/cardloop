@@ -10,6 +10,8 @@
 - [ ] Заполнить «Что это» в CLAUDE.md (2-3 предложения)
 - [ ] Описать стек и команды в CLAUDE.md
 - [ ] Заполнить README.md (что/как/зачем)
+- [ ] Настроить log_cmd + глобальный error handler (видимость в кокпите)
+  > Задать log_cmd в topics.json (как кокпит читает логи проекта — journalctl / docker logs / tail файла). Добавить глобальный error handler по типу проекта (FastAPI / aiohttp / PTB / CLI — см. CLAUDE.md ## Error Handler): handler обязан логировать полный трейсбек и строку UNHANDLED exc_class=... path=.... Заполнить ## ClaudeOps conformance в CLAUDE.md: отметить error handler и log_cmd как «да: где» вместо «нет».
 
 ## In Progress
 
