@@ -8,14 +8,8 @@
 > 2026-05-31: рефакторинг-проход закрыт — 25 карточек (security, рефактор бэк/фронт, OSS-доки, тесты 207→300) ушли в DONE.md. Карта кода → ARCHITECTURE.md. Ниже — только фичи/roadmap.
 
 ## Backlog
-- [ ] ⭐ Рефакторинг Ф0: безопасные фиксы багов + error-middleware кокпита (spec-011)
-  > bot.py: running-утечка при сбое send_chat_action; watchdog (порог<20с не срабатывает + не репортит срабатывание); двойной running.pop; мёртвые импорты. webapp.py: снести мёртвый _NEW_PROJECT_PROMPT@2644; try/except на req.json в prompt_create/update + global_file_write; убрать дубль worktree-блока в _run_card; добавить глобальный aiohttp error-middleware (logging.exception + json 500). Khronika: вынести scripts/khronika-web-logs.sh из репо (несвязанный проект) → vault/log_cmd. Готово: pytest зелёный, краши хендлеров логируются, Khronika-специфики в репо нет.
-- [ ] ⭐ Рефакторинг Ф1: мониторинг через ошибки рантайма, авто-прогон тестов OFF (spec-011)
-  > Сканер перестаёт гонять test_cmd (только log_cmd): убрать ветку в _scan_project_errors + условия в _error_scanner_loop/api_project_scan_errors. Стандарт error handler в templates/CLAUDE.md.tpl + _NEW_PROJECT_PROMPT + стартовая карточка TASKS.md.tpl; маркер UNHANDLED в _parse_log_errors; эталон networking-os. ClaudeOps conformance: health проверяет ВОЗМОЖНОСТИ (хендлеры/log_cmd/test_cmd/самолечение/память/секреты/notify/healthz), не только файлы; контракт «что подключить» + само-декларация в CLAUDE.md.tpl; показывать только недобор. Готово: тесты не молотят фон, новый проект знает про handler, health видит возможности.
-- [ ] ⭐ Рефакторинг Ф2: UI три зоны (Шапка/Обзор/Настройки), вкладки 9→7 (spec-011)
-  > Шапка: git-чип + Sync постоянно + индикатор агента + счётчик инцидентов + кнопка «Прогнать тесты» (модель в шапку НЕ выносим). Обзор: убрать тумблеры self_heal/notify и плашку «авто-скан 5 мин» (read-only дашборд). Настройки: влить «Ключи» секцией, убрать select модели. «Лента»→«Активность». CLAUDE.md — оставить вкладкой. Модель — ТОЛЬКО в чате, реальные версии (Opus 4.8/Sonnet 4.6/Haiku 4.5 → model-id, карточка 4df23a). Дедуп projectHealth-fetch. Снос мёртвого фронта (api.readme/specs/activity, DisabledTab). Готово: ноль дублей, 7 вкладок, npm build зелёный.
-- [ ] ⭐ Рефакторинг Ф3: чистка data/runs + рефактор-долг + дыры в тестах (spec-011)
-  > Прунить orphan-сайдкары data/runs (Review-карточки не трогать). Унификация api_project_logs↔_run_log_cmd; ленивый _usage_lock; in-function импорты (shutil×3, datetime) в топ. Тесты на непокрытое: api_new_project, sessions API, free chats, health-роут, upgrade/audit, _run_log_cmd timeout, global_file POST. Готово: мусора нет, покрытие закрыто.
+- [ ] Сейчас на Доске у нас есть Бэклог и можно отправить агенту на выполнение т.е. перенести In Progress. Там кнопка стрелочк <!--ops:c35de3-->
+  > а. Но в Failed у нас отдельная кнопка значок робота. Нужно сделать единый стиль. Значок робота. А еще после того как отправляется задача в In Progress задача пишется в чат по сути агенту. Надо добавлять в промт чтобы после выполнения он переносил задачу на Review.
 - [ ] TG-канал: проверить, что контекст наполняется корректно и НЕ дублируется при каждом сообщении (была проблема в веб-версии — кэш дублировался и сбрасывался, контекст «съедался»); сравнить с веб-каналом и зафиксировать тестом <!--ops:9aa43f-->
 - [ ] TG-канал: очередь сообщений во время работы агента — если второе сообщение приходит пока агент не закончил первое, оно должно вставать в очередь и обрабатываться после (как в веб-версии), а не отбиваться «уже работаю» <!--ops:b53401-->
 - [ ] Хранение ключей: продумать и реализовать хранилище credentials — проектные ключи (API keys, tokens сервисов) + глобальные ключи; UI в кокпите; безопасное хранение; доступ агенту <!--ops:a7b2c1-->
@@ -27,7 +21,12 @@
 ## In Progress
 
 ## Review
-- [?] Глобальные скиллы: показывать в кокпите + подготовить проект к публикации на GitHub (закрывать потребности разных пользователей) <!--ops:10f166-->
 
 ## Failed
-- [!] Кнопка Стоп пропадает при переключении вкладки <!--ops:e46770-->
+- [!] [ERR] ClientConnectionResetError: unhandled at /api/projects/sandbox/activity-stream <!--ops:err-ae1d86-->
+  > source=log
+  > seen=12
+  > first=2026-06-04T08:05
+  > last=2026-06-04T09:00
+  > heal_attempted=true
+  > excerpt=UNHANDLED exc_class=ClientConnectionResetError path=/api/projects/sandbox/activity-stream
