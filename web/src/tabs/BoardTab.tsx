@@ -492,7 +492,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                         onClick={() => move(card.id, ORDER[idx - 1])}>←</button>
                       <button title="вправо →" aria-label="Переместить вправо" disabled={busy || idx === ORDER.length - 1}
                         onClick={() => move(card.id, ORDER[idx + 1])}>→</button>
-                      {isIncident && col.key !== 'in_progress' && (
+                      {col.key !== 'in_progress' && (
                         <button
                           title="🤖 Передать агенту (в In Progress → авто-запуск)"
                           aria-label="Передать агенту"
