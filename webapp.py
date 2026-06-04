@@ -577,6 +577,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "test_cmd": b.get("test_cmd"),
             "notify_on_error": bool(b.get("notify_on_error", False)),
             "self_heal": bool(b.get("self_heal", False)),
+            "heal_ignore": b.get("heal_ignore") if isinstance(b.get("heal_ignore"), list) else None,
             "git_enabled": b.get("git_enabled", True) is not False,
         })
     out.sort(key=lambda x: x["name"].lower())
@@ -1292,7 +1293,8 @@ def _parse_pytest_failures(pytest_output: str) -> list[dict]:
 
 # Маркер ID для err-карточек: 'err-<hash6>'. Описание — k=v строки.
 # heal_attempted — флаг предохранитель: инцидент уже пробовали починить (не повторять).
-_ERR_DESC_RE = re.compile(r"^(source|seen|first|last|excerpt|heal_attempted)=(.*)$")
+# heal_skip — помечает инцидент как benign/игнорируемый: heal не запускать никогда.
+_ERR_DESC_RE = re.compile(r"^(source|seen|first|last|excerpt|heal_attempted|heal_skip)=(.*)$")
 
 
 def _parse_incident_desc(desc: str | None) -> dict:
@@ -1311,13 +1313,16 @@ def _format_incident_desc(meta: dict) -> str:
     """Сериализует metadata err-карточки в description-строки.
     Excerpt идёт ПОСЛЕДНИМ — может быть многострочным, но для нас это одна логическая
     запись (хранится как одна строка с \\n заменёнными на ' / ' для компактности).
-    heal_attempted — предохранитель от повторного запуска починки."""
+    heal_attempted — предохранитель от повторного запуска починки.
+    heal_skip — помечает инцидент как benign: heal не запускается никогда."""
     lines: list[str] = []
     for key in ("source", "seen", "first", "last"):
         if key in meta:
             lines.append(f"{key}={meta[key]}")
     if meta.get("heal_attempted"):
         lines.append("heal_attempted=true")
+    if meta.get("heal_skip"):
+        lines.append(f"heal_skip={meta['heal_skip']}")
     excerpt = meta.get("excerpt", "")
     if excerpt:
         # Многострочный excerpt сворачиваем в одну строку для description
@@ -1778,6 +1783,116 @@ def _dismissed_is_active(h: str, now: float) -> bool:
 
 _SELF_HEAL_MAX_CONCURRENT = int(os.environ.get("SELF_HEAL_MAX_CONCURRENT", "2"))
 _self_heal_active_count = 0   # глобальный счётчик активных починок
+
+# ── Ф2: Safety-layer — дебаунс / benign-фильтр / рейт-лимит ──────────────────
+# Эти константы ADD новые предохранители ПОВЕРХ spec-010 gates, не заменяют их.
+
+# B. Дебаунс: heal только если seen >= N (инцидент повторился → не транзиент)
+_HEAL_MIN_SEEN = int(os.environ.get("SELF_HEAL_MIN_SEEN", "2"))
+
+# C. Benign-классы: эти исключения НИКОГДА не лечим (benign-disconnect + transient)
+_HEAL_BENIGN_DEFAULT: "tuple[str, ...]" = (
+    "ConnectionResetError",
+    "ClientConnectionResetError",
+    "ConnectionAbortedError",
+    "CancelledError",
+    "TimeoutError",
+)
+
+# D. Per-project rate-limit: не более N запусков за окно (сек)
+_HEAL_MAX_PER_WINDOW = int(os.environ.get("SELF_HEAL_MAX_PER_WINDOW", "3"))
+_HEAL_WINDOW_SEC = int(os.environ.get("SELF_HEAL_WINDOW_SEC", "3600"))
+
+# D. История heal-запусков: {session_key → [timestamp, ...]}
+_heal_history: "dict[str, list[float]]" = {}
+
+
+def _heal_rate_ok(key: str, now: float) -> bool:
+    """Возвращает True, если heal-запуск разрешён (не превышен лимит окна).
+    Побочный эффект: очищает устаревшие записи из _heal_history[key]."""
+    history = _heal_history.get(key, [])
+    # Убираем записи старше окна
+    cutoff = now - _HEAL_WINDOW_SEC
+    history = [t for t in history if t > cutoff]
+    _heal_history[key] = history
+    return len(history) < _HEAL_MAX_PER_WINDOW
+
+
+def _heal_record(key: str, now: float) -> None:
+    """Записывает timestamp heal-запуска; очищает устаревшие."""
+    history = _heal_history.get(key, [])
+    cutoff = now - _HEAL_WINDOW_SEC
+    history = [t for t in history if t > cutoff]
+    history.append(now)
+    _heal_history[key] = history
+
+
+def _heal_decision(
+    card: dict,
+    proj: dict,
+    active_count: int,
+    max_conc: int,
+    running_busy: bool,
+    rate_ok: bool,
+    now: float,
+) -> "tuple[str, str]":
+    """Чистая функция: принимает решение по одной карточке-инциденту.
+
+    Возвращает (action, reason) где action ∈ {'heal', 'skip', 'stop', 'benign'}.
+    - 'heal'   → запустить _self_heal_card; вызывающий должен вызвать _heal_record.
+    - 'skip'   → пропустить карточку, продолжить перебор.
+    - 'benign' → пометить heal_skip=benign, пропустить.
+    - 'stop'   → прервать перебор карточек (ресурсный лимит достигнут).
+
+    Порядок проверок: cheapest/safest first (spec-012 Ф2, раздел E).
+    Не изменяет внешнего состояния — только чтение."""
+    if not _is_incident_card(card):
+        return "skip", "not_incident"
+
+    meta = _parse_incident_desc(card.get("description"))
+
+    # Предохранитель №3 (spec-010): уже пытались починить
+    if meta.get("heal_attempted") == "true":
+        return "skip", "heal_attempted"
+
+    # C. benign/heal_skip: уже помечен как benign
+    if meta.get("heal_skip"):
+        return "skip", f"heal_skip:{meta['heal_skip']}"
+
+    # C. Benign-фильтр: проверяем title + excerpt на benign-классы
+    ignore_list: "tuple[str, ...]" = _HEAL_BENIGN_DEFAULT
+    extra = proj.get("heal_ignore")
+    if extra and isinstance(extra, list):
+        ignore_list = ignore_list + tuple(str(x) for x in extra)
+
+    card_text = card.get("text", "")
+    excerpt = meta.get("excerpt", "")
+    combined = (card_text + " " + excerpt).lower()   # case-insensitive: "connectionreseterror" тоже ловим
+    for substr in ignore_list:
+        if substr.lower() in combined:
+            return "benign", substr
+
+    # B. Дебаунс: seen < MIN_SEEN → слишком молодой. Битый seen → трактуем как молодой (safe).
+    try:
+        seen = int(meta.get("seen", "1"))
+    except (ValueError, TypeError):
+        seen = 1
+    if seen < _HEAL_MIN_SEEN:
+        return "skip", f"too_young:seen={seen}"
+
+    # Предохранитель №4 (spec-010): лимит конкурентности
+    if active_count >= max_conc:
+        return "stop", "concurrency_limit"
+
+    # Предохранитель №2 (spec-010): running lock
+    if running_busy:
+        return "stop", "project_busy"
+
+    # D. Рейт-лимит
+    if not rate_ok:
+        return "stop", "rate_limit"
+
+    return "heal", "ok"
 
 
 # ─────────────────────── глобальные настройки (data/settings.json) ───────────────────────
@@ -2293,7 +2408,11 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
 
 async def _error_scanner_loop(ctx: dict):
     """Фоновая задача: периодически сканирует все проекты с log_cmd.
-    При включённом самолечении: новые инциденты → asyncio.create_task(_self_heal_card)."""
+
+    Самолечение (если включено) оценивает ВСЕ незалеченные инциденты из Failed
+    на каждом скане — не только те, что добавлены в текущем скане (gate A).
+    Safety-слой Ф2 (gates B–D) применяется ПОВЕРХ предохранителей spec-010.
+    """
     global _self_heal_active_count
     # Первый прогон через 30с после старта (дать боту устаканиться)
     await asyncio.sleep(30)
@@ -2314,36 +2433,85 @@ async def _error_scanner_loop(ctx: dict):
                 if res.get("added", 0) and proj.get("notify_on_error"):
                     await _notify_new_incidents(ctx, proj, res.get("added", 0))
 
-                # ── ШАГ 3: Самолечение — если включено и есть новые инциденты ──
-                # ПРЕДОХРАНИТЕЛЬ №1: только если self_heal явно включён
+                # ── ШАГ 3: Самолечение ─────────────────────────────────────────
+                # ПРЕДОХРАНИТЕЛЬ №1 (spec-010): только если self_heal явно включён
                 if not _self_heal_enabled(proj):
                     continue
-                if not res.get("added", 0):
-                    continue
-                # ПРЕДОХРАНИТЕЛЬ №4: лимит конкурентности (глобальная настройка)
-                _max_conc = int(_get_global_setting("self_heal_max_concurrent", _SELF_HEAL_MAX_CONCURRENT))
-                if _self_heal_active_count >= _max_conc:
-                    print(f"[self_heal] лимит конкурентности ({_max_conc}) достигнут, пропускаем {proj['name']}")
-                    continue
-                # ПРЕДОХРАНИТЕЛЬ №2: running lock — не запускать если проект занят
-                session_key = proj["tg_thread"]
-                if ctx["running"].get(session_key) is not None:
-                    print(f"[self_heal] проект {proj['name']} занят, пропускаем")
-                    continue
 
-                # Находим новые инциденты (в Failed, heal_attempted не стоит)
+                # Gate A: убрана проверка res.added > 0 — оцениваем ВСЕ инциденты
+                # на каждом скане (молодые ранее были «слишком молоды», сейчас grown).
+
+                session_key = proj["tg_thread"]
+                _max_conc = int(_get_global_setting("self_heal_max_concurrent", _SELF_HEAL_MAX_CONCURRENT))
+                now = time.time()
+
+                # Загружаем доску один раз для всего перебора карточек
                 try:
                     _, _, cols = _load_board(proj["cwd"])
                 except Exception:
                     continue
+
+                rate_limit_logged = False  # не спамим Timeline per-card, только раз на проект
+
                 for card in cols.get("failed", []):
-                    if not _is_incident_card(card):
+                    running_busy = ctx["running"].get(session_key) is not None
+                    rate_ok = _heal_rate_ok(session_key, now)
+
+                    action, reason = _heal_decision(
+                        card, proj,
+                        active_count=_self_heal_active_count,
+                        max_conc=_max_conc,
+                        running_busy=running_busy,
+                        rate_ok=rate_ok,
+                        now=now,
+                    )
+
+                    if action == "skip":
+                        # Тихие пропуски (heal_attempted, not_incident) — не логируем
+                        if reason.startswith("too_young"):
+                            print(f"[self_heal] {proj['name']}/{card['id']}: дебаунс ({reason}), ждём")
                         continue
-                    meta = _parse_incident_desc(card.get("description"))
-                    if meta.get("heal_attempted") == "true":
-                        continue  # ПРЕДОХРАНИТЕЛЬ №3: уже пытались
-                    if _self_heal_active_count >= _max_conc:
-                        break  # перепроверяем лимит для каждой карточки
+
+                    if action == "benign":
+                        # C. Помечаем heal_skip=benign один раз под board-lock
+                        print(f"[self_heal] {proj['name']}/{card['id']}: benign ({reason}), пометка heal_skip")
+                        try:
+                            lock = _get_board_lock(proj["cwd"])
+                            async with lock:
+                                _, preamble2, cols2 = _load_board(proj["cwd"])
+                                for col_cards in cols2.values():
+                                    for c in col_cards:
+                                        if c["id"] == card["id"]:
+                                            m2 = _parse_incident_desc(c.get("description"))
+                                            m2["heal_skip"] = "benign"
+                                            c["description"] = _format_incident_desc(m2)
+                                            break
+                                _save_board(proj["cwd"], proj["name"], preamble2, cols2)
+                        except Exception as ex:
+                            print(f"[self_heal] ошибка при пометке heal_skip: {ex}")
+                        continue
+
+                    if action == "stop":
+                        # Ресурсный лимит — прерываем перебор карточек этого проекта
+                        if reason == "rate_limit" and not rate_limit_logged:
+                            rate_limit_logged = True
+                            print(f"[self_heal] {proj['name']}: рейт-лимит ({_HEAL_MAX_PER_WINDOW}/"
+                                  f"{_HEAL_WINDOW_SEC}s), пропускаем скан")
+                            _bus_publish(session_key, {
+                                "kind": "self_heal",
+                                "phase": "skipped",
+                                "reason": "rate_limit",
+                                "project": proj["name"],
+                            })
+                        elif reason == "concurrency_limit":
+                            print(f"[self_heal] лимит конкурентности ({_max_conc}) достигнут, "
+                                  f"пропускаем {proj['name']}")
+                        elif reason == "project_busy":
+                            print(f"[self_heal] проект {proj['name']} занят, пропускаем")
+                        break
+
+                    # action == "heal"
+                    _heal_record(session_key, now)
                     _self_heal_active_count += 1
                     _spawn_bg(_self_heal_card(ctx, proj, card))
                     print(f"[self_heal] запущена починка {proj['name']}/{card['id']}")

@@ -101,11 +101,12 @@ def _make_project(cwd: str, self_heal: bool = False) -> dict:
     }
 
 
-def _make_incident_card(card_id: str = "err-abc123", text: str = "[ERR] ValueError: bad input") -> dict:
-    """Создаёт карточку-инцидент."""
+def _make_incident_card(card_id: str = "err-abc123", text: str = "[ERR] ValueError: bad input", seen: str = "1") -> dict:
+    """Создаёт карточку-инцидент. seen управляет debounce-гейтом spec-012 Ф2
+    (seen >= _HEAL_MIN_SEEN нужен, чтобы тест проверял СВОЙ гейт, а не дебаунс)."""
     meta = {
         "source": "log",
-        "seen": "1",
+        "seen": seen,
         "first": "2026-05-31T12:00",
         "last": "2026-05-31T12:00",
         "excerpt": "ValueError: bad input\n  File app.py line 42",
@@ -279,18 +280,23 @@ class TestScannerOffByDefault:
     @pytest.mark.asyncio
     async def test_scanner_with_flag_would_trigger_heal(self, tmp_path, tmp_git):
         """
-        С флагом self_heal=True И новыми инцидентами — _self_heal_card вызывается
-        через asyncio.create_task. (Это позитивный тест флага.)
+        С флагом self_heal=True И инцидентом seen>=_HEAL_MIN_SEEN — _self_heal_card
+        вызывается через asyncio.create_task. (Это позитивный тест флага.)
 
         Тестируем напрямую логику принятия решения в scanner loop:
-        проверяем, что create_task вызывается при self_heal=True + added>0.
+        проверяем, что create_task вызывается при self_heal=True + seen>=MIN_SEEN.
+        Карточка создаётся с seen=2 (>= дефолт _HEAL_MIN_SEEN=2).
         """
         cwd = str(tmp_git)
         data_dir = tmp_path / "data"
         data_dir.mkdir()
         ctx = _make_ctx(data_dir, cwd, self_heal=True)
 
+        # seen=2 чтобы пройти дебаунс-гейт (spec-012 Ф2 gate B)
         incident = _make_incident_card()
+        meta = _parse_incident_desc(incident["description"])
+        meta["seen"] = "2"
+        incident["description"] = _format_incident_desc(meta)
         _write_incident_to_board(cwd, incident, column="failed")
 
         create_task_calls = []
@@ -484,7 +490,7 @@ class TestConcurrencyLimit:
         session_key = project["tg_thread"]
         ctx["running"][session_key] = True
 
-        incident = _make_incident_card("err-busy123")
+        incident = _make_incident_card("err-busy123", seen="2")  # seen>=MIN: тест проверяет running-lock, не debounce
         _write_incident_to_board(cwd, incident, column="failed")
 
         create_task_calls = []
@@ -535,7 +541,7 @@ class TestConcurrencyLimit:
         data_dir.mkdir()
         ctx = _make_ctx(data_dir, cwd, self_heal=True)
 
-        incident = _make_incident_card("err-limit123")
+        incident = _make_incident_card("err-limit123", seen="2")  # seen>=MIN: тест проверяет concurrency, не debounce
         _write_incident_to_board(cwd, incident, column="failed")
 
         create_task_calls = []
