@@ -45,7 +45,12 @@
 - `templates/TASKS.md.tpl` — стартовая карточка «Настроить log_cmd + глобальный error handler».
 - **Стандартная лог-строка** `UNHANDLED exc_class=<...> path=<...>` + расширить `_parse_log_errors` маркером `UNHANDLED` (ловит инцидент даже без полного трейсбека, напр. из systemd `OnFailure`).
 
-**Health 6/6 — показывать только при недоборе** (в Обзоре): 6/6 → скрыть; <6 → «доделай настройку».
+**ClaudeOps capability conformance — проект должен СООТВЕТСТВОВАТЬ возможностям кокпита (а не только иметь файлы).**
+Сейчас health (`api_project_health`, 6 пунктов) проверяет ТОЛЬКО файлы (CLAUDE.md/cockpit-rules/TASKS/README/.gitignore/git). Проект может быть «6/6», но без хендлеров и log_cmd → кокпит к нему слеп, а его агент даже не знает, что должен их завести. Расширяем в две стороны:
+- **(контракт — учим проект) `templates/CLAUDE.md.tpl`:** в «Правила работы в кокпите» добавить блок **«Возможности ClaudeOps — что подключить»**: error handler (ОБЯЗАТЕЛЕН для сервисов/ботов — пишет ошибки в лог), логи (log_cmd), тесты (test_cmd, по кнопке), самолечение (git+clean+test/gate), notify_on_error, healthz/liveness для сервисов. Чтобы агент проекта ЗНАЛ что завести. Плюс **само-декларация**: чеклист `## ClaudeOps conformance` который онбординг заполняет (handler: где/нет; log_cmd: да/нет; и т.д.).
+- **(проверка — health-апгрейд) `api_project_health`:** добавить capability-пункты сверх файловых — log_cmd задан (из topics.json, легко)? test_cmd задан (опц.)? **error handler присутствует** (эвристика: grep по проекту `@app.exception_handler` / `add_error_handler` / `error_middleware` / `logging.*error` + само-декларация в CLAUDE.md)? git для самолечения? Health становится «файлы + возможности».
+- **Показывать ТОЛЬКО недобор** (в Обзоре): всё подключено → скрыто; недобор → «доделай: нет log_cmd / нет error handler / …» с actionable-хинтами (можно → карточка в Backlog).
+- **Полный набор для conformance:** хендлеры · логи · тесты · самолечение · память · секреты · notify · (сервисам) healthz.
 
 ---
 
