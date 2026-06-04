@@ -87,6 +87,33 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   // Видимые колонки (persist в localStorage). Дефолт — только Backlog.
   const [visibleCols, setVisibleCols] = useState<Set<string>>(() => readVisibleCols())
 
+  // Мульти-выбор карточек для пакетной отправки агенту (последовательная очередь)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  function toggleSelect(cardId: string) {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(cardId)) next.delete(cardId)
+      else next.add(cardId)
+      return next
+    })
+  }
+  async function sendSelectedToAgent() {
+    const ids = [...selected]
+    if (!ids.length || busy) return
+    setBusy(true); setError('')
+    try {
+      const r = await api.runBatch(projectId, ids)
+      setSelected(new Set())
+      const fresh = await api.tasks(projectId)
+      setBoard(fresh)
+      setGateToast(`🤖 В очередь: ${r.queued}${r.started ? ` · запущена ${r.started}` : ' · ждут освобождения проекта'}`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   function toggleCol(key: string) {
     setVisibleCols(prev => {
       const next = new Set(prev)
@@ -434,6 +461,8 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                 {col.cards.map(card => {
                   const isIncident = isIncidentCard(card)
                   const selfHealBadge = getSelfHealBadge(card)
+                  const isSel = selected.has(card.id)
+                  const isQueued = board?.queued?.includes(card.id) ?? false
                   return (
                   <div
                     className={[
@@ -442,6 +471,8 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                       dragCardId === card.id ? 'board-card-dragging' : '',
                       isIncident ? 'board-card-incident' : '',
                       selfHealBadge ? 'board-card-self-heal' : '',
+                      isSel ? 'board-card-selected' : '',
+                      isQueued ? 'board-card-queued' : '',
                     ].filter(Boolean).join(' ')}
                     key={card.id}
                     draggable={!isInProgress}
@@ -452,6 +483,22 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                     }}
                     onDragEnd={() => { setDragCardId(null); setDragOverCol(null) }}
                   >
+                    {(parkIdx >= 0 || isQueued) && (
+                      <div className="board-card-selrow">
+                        {parkIdx >= 0 && (
+                          <input
+                            type="checkbox"
+                            className="board-card-check"
+                            checked={isSel}
+                            disabled={busy}
+                            title="Выбрать для пакетной отправки агенту"
+                            onClick={e => e.stopPropagation()}
+                            onChange={() => toggleSelect(card.id)}
+                          />
+                        )}
+                        {isQueued && <span className="board-card-queued-badge" title="В очереди на запуск агентом">⏳ в очереди</span>}
+                      </div>
+                    )}
                     {editingCard?.id === card.id ? (
                       <textarea
                         className="board-card-edit-input"
@@ -530,6 +577,16 @@ export function BoardTab({ projectId, isActive = true }: Props) {
           )
         })}
       </div>
+
+      {selected.size > 0 && (
+        <div className="board-batch-bar">
+          <span className="board-batch-count">Выбрано: {selected.size}</span>
+          <button className="btn-primary board-batch-send" disabled={busy} onClick={sendSelectedToAgent}>
+            🤖 Отправить агенту ({selected.size}) — очередь
+          </button>
+          <button className="board-batch-clear" disabled={busy} onClick={() => setSelected(new Set())}>Снять выбор</button>
+        </div>
+      )}
 
       <div className="board-footer">
         <button className="board-archive-toggle" onClick={toggleArchive}>

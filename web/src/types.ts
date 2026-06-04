@@ -63,6 +63,8 @@ export interface Board {
   columns: BoardColumn[]
   done_count: number
   exists: boolean
+  /** card_ids, стоящие в очереди на запуск агентом (sequential) */
+  queued?: string[]
 }
 
 // ─── Spec 009: quality gate result ───────────────────────────────────────────

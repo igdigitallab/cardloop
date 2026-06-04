@@ -80,6 +80,14 @@ export const api = {
   cardRun: (id: string, card: string) =>
     apiFetch<import('./types').RunResult>(`/api/projects/${id}/tasks/${card}/run`),
 
+  // Мульти-отправка карточек агенту → последовательная очередь (по одной)
+  runBatch: (id: string, cardIds: string[]) =>
+    apiFetch<{ ok: boolean; queued: number; started: string | null }>(`/api/projects/${id}/cards/run-batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ card_ids: cardIds }),
+    }),
+
   // Spec 009: quality gate — прогнать тесты в worktree карточки и получить вердикт
   checkCard: (id: string, card: string) =>
     apiFetch<import('./types').GateResult>(

@@ -301,3 +301,28 @@
   overflow-x: auto; max-height: 300px; overflow-y: auto;
   white-space: pre-wrap; word-break: break-word;
 }
+
+/* ─── Мульти-выбор карточек + очередь (sequential batch send) ─── */
+.board-card-selrow { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.board-card-check { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+.board-card-selected { outline: 2px solid var(--accent); outline-offset: -1px; }
+.board-card-queued-badge {
+  font-size: 10px; font-weight: 700; color: var(--accent);
+  background: rgba(120,140,255,0.12); border-radius: 4px; padding: 1px 5px;
+}
+.board-card-queued { opacity: 0.92; }
+
+.board-batch-bar {
+  position: sticky; bottom: 8px; z-index: 20;
+  display: flex; align-items: center; gap: 10px;
+  margin: 8px 4px; padding: 8px 12px;
+  background: var(--bg-elev, #1c1f26); border: 1px solid var(--accent);
+  border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+}
+.board-batch-count { font-size: 12px; color: var(--text-dim, #aaa); }
+.board-batch-send { font-size: 13px; padding: 4px 12px; }
+.board-batch-clear {
+  font-size: 12px; background: none; border: 1px solid var(--border, #444);
+  color: var(--text-dim, #aaa); border-radius: 6px; padding: 4px 10px; cursor: pointer;
+}
+.board-batch-clear:hover { color: var(--text, #ddd); border-color: var(--text-dim, #888); }
