@@ -313,6 +313,66 @@ async def test_delete_then_rescan_does_not_resurrect_e2e(tmp_path):
     assert added2 == 0, "dismissed-инцидент не должен воскреснуть (card_id[4:] == hash)"
 
 
+# ─────────────────────────────────────────────────────────────────
+# Spec-012 Ф1: in-process push своих ошибок кокпита (_report_incident)
+# ─────────────────────────────────────────────────────────────────
+
+
+async def test_report_incident_creates_card_and_dedups_with_scanner(tmp_path, monkeypatch):
+    """Ф1: _report_incident создаёт карточку мгновенно; её hash СОВПАДАЕТ с тем, что
+    даёт лог-сканер на строке `UNHANDLED exc_class=.. path=..` → дедуп (сканер не
+    задваивает, только бампит seen)."""
+    _setup_state_paths(tmp_path)
+    cwd = tmp_path / "cops"
+    cwd.mkdir()
+    _make_empty_board(cwd)
+    fake_proj = {"cwd": str(cwd), "name": "claude-ops-bot"}
+    monkeypatch.setattr(webapp, "_find_project_by_id", lambda *a, **k: fake_proj)
+    webapp._REPORT_DEBOUNCE.clear()
+
+    # In-process репорт (как из error_middleware)
+    await webapp._report_incident({}, "ValueError", "/api/x")
+    _, _, cols = _load_board(str(cwd))
+    assert len(cols["failed"]) == 1, "карточка должна быть создана мгновенно"
+    card_id = cols["failed"][0]["id"]
+
+    # Сканер парсит ТУ ЖЕ строку UNHANDLED → тот же hash → дедуп
+    scanner_errs = webapp._parse_log_errors(
+        "2026-06-04 ERROR root UNHANDLED exc_class=ValueError path=/api/x request_id=ab12",
+        source="log",
+    )
+    assert len(scanner_errs) == 1, f"ожидали 1 UNHANDLED-ошибку, получили {scanner_errs}"
+    assert f"err-{scanner_errs[0]['hash']}" == card_id, "hash должен совпасть со сканером"
+
+    added, updated = await _ingest_errors_to_board(str(cwd), "claude-ops-bot", scanner_errs)
+    assert added == 0 and updated == 1, "сканер не задваивает — только bump seen"
+
+
+async def test_report_incident_no_project_is_silent(tmp_path, monkeypatch):
+    """Если проект не резолвится — тихо, без исключения."""
+    _setup_state_paths(tmp_path)
+    monkeypatch.setattr(webapp, "_find_project_by_id", lambda *a, **k: None)
+    webapp._REPORT_DEBOUNCE.clear()
+    await webapp._report_incident({}, "ValueError", "/api/x")  # не должно бросить
+
+
+async def test_report_incident_debounce_collapses_flood(tmp_path, monkeypatch):
+    """Ф1 hardening: один и тот же инцидент чаще раза в дебаунс-окно in-process не
+    пишется → эндпоинт, падающий на каждом запросе, не устроит I/O-шторм в TASKS.md."""
+    _setup_state_paths(tmp_path)
+    cwd = tmp_path / "deb"
+    cwd.mkdir()
+    _make_empty_board(cwd)
+    monkeypatch.setattr(webapp, "_find_project_by_id", lambda *a, **k: {"cwd": str(cwd), "name": "deb"})
+    webapp._REPORT_DEBOUNCE.clear()
+
+    for _ in range(5):  # 5 быстрых репортов одной ошибки
+        await webapp._report_incident({}, "FloodError", "/api/flood")
+
+    _, _, cols = _load_board(str(cwd))
+    assert len(cols["failed"]) == 1, "дебаунс: одна карточка, не 5 записей"
+
+
 async def test_fingerprint_appended_line_yields_new_error(tmp_path):
     """Если после fingerprint появилась новая строка с ошибкой → ровно одна новая ошибка."""
     _setup_state_paths(tmp_path)

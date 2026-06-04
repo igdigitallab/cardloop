@@ -322,6 +322,12 @@ async def error_middleware(request: web.Request, handler):
     except Exception as exc:
         request_id = _uuid.uuid4().hex[:8]
         logging.exception("UNHANDLED exc_class=%s path=%s request_id=%s", type(exc).__name__, request.path, request_id)
+        # Spec-012 Ф1: своя ошибка кокпита → карточка in-process, мгновенно (без круга
+        # через лог-сканер). Fire-and-forget; дедуп по hash не даст сканеру задвоить.
+        try:
+            _spawn_bg(_report_incident(request.app["ctx"], type(exc).__name__, request.path))
+        except Exception:
+            pass
         return web.json_response(
             {"error": type(exc).__name__, "request_id": request_id},
             status=500,
@@ -1492,6 +1498,45 @@ async def _ingest_errors_to_board(cwd: str, name: str, errors: list[dict]) -> tu
         if added or updated:
             _save_board(cwd, name, preamble, cols)
         return (added, updated)
+
+
+_REPORT_DEBOUNCE: "dict[str, float]" = {}   # hash → ts последнего in-process репорта
+_REPORT_DEBOUNCE_SEC = 10.0                  # одинаковый инцидент чаще раза в N сек не пишем
+
+
+async def _report_incident(ctx: dict, exc_class: str, where: str, project_id: str = "claude-ops-bot") -> None:
+    """Spec-012 Ф1/Ф3: ПРЯМОЙ (in-process) репорт одного инцидента → карточка,
+    минуя лог-сканер и его задержку. Hash идентичен тому, что даёт `_parse_log_errors`
+    на строке `UNHANDLED exc_class=.. path=..` (source="log") → дедуп: кто первый
+    (этот путь или сканер), тот создаёт карточку; второй бампит seen. Резолвит проект
+    сам (вся работа — в фоне, чтобы не тормозить ответ). Глотает все исключения —
+    наблюдаемость не должна ронять запрос. Переиспользуется push-эндпоинтом (Ф3)."""
+    try:
+        h = _hash6(f"log|UNHANDLED|{_norm_msg(exc_class + ' ' + where)}")
+        # Дебаунс: эндпоинт, падающий на КАЖДОМ запросе, не должен устроить I/O-шторм
+        # записей в TASKS.md. Один и тот же hash пишем не чаще раза в N сек (карточка
+        # уже создана; редкие пропущенные seen++ доберёт фоновый сканер). До board-lock.
+        now = time.time()
+        last = _REPORT_DEBOUNCE.get(h)
+        if last is not None and (now - last) < _REPORT_DEBOUNCE_SEC:
+            return
+        _REPORT_DEBOUNCE[h] = now
+        if len(_REPORT_DEBOUNCE) > 256:   # не растим словарь
+            for k in [k for k, v in _REPORT_DEBOUNCE.items() if now - v > _REPORT_DEBOUNCE_SEC]:
+                _REPORT_DEBOUNCE.pop(k, None)
+        proj = _find_project_by_id(ctx, project_id)
+        if not proj:
+            return
+        err = {
+            "source": "log",
+            "type": exc_class,
+            "message": f"unhandled at {where}",
+            "excerpt": f"UNHANDLED exc_class={exc_class} path={where}",
+            "hash": h,
+        }
+        await _ingest_errors_to_board(proj["cwd"], proj["name"], [err])
+    except Exception:
+        pass
 
 
 async def _scan_and_ingest(project: dict, ctx: dict | None = None) -> dict:
