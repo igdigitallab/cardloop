@@ -10,12 +10,14 @@ import asyncio
 import glob
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
 import shlex
 import time
 import traceback as _tb
+import uuid as _uuid
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, TypedDict
@@ -291,6 +293,22 @@ def _record_attempt(ip: str, success: bool) -> None:
 
 
 @web.middleware
+async def error_middleware(request: web.Request, handler):
+    """Внешний middleware: логирует необработанные исключения и возвращает JSON 500."""
+    try:
+        return await handler(request)
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        request_id = _uuid.uuid4().hex[:8]
+        logging.exception("[error_middleware] unhandled %s request_id=%s", request.path, request_id)
+        return web.json_response(
+            {"error": type(exc).__name__, "request_id": request_id},
+            status=500,
+        )
+
+
+@web.middleware
 async def auth_middleware(request: web.Request, handler):
     """Защита /api/* — пропускает /api/health и /api/login без cookie."""
     path = request.path
@@ -418,7 +436,10 @@ async def api_prompts_list(req: web.Request) -> web.Response:
 
 async def api_prompt_create(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
-    data = await req.json()
+    try:
+        data = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
     title = (data.get("title") or "").strip()
     text  = (data.get("text")  or "").strip()
     if not title or not text:
@@ -440,7 +461,10 @@ async def api_prompt_delete(req: web.Request) -> web.Response:
 async def api_prompt_update(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
-    data = await req.json()
+    try:
+        data = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
     prompts = _load_prompts(ctx)
     for p in prompts:
         if p.get("id") == pid:
@@ -2595,20 +2619,11 @@ async def _run_card(
             else:
                 diff_full, diff_stat = "", ""
             wt_branch = f"card-{card_id}"
+            wt_path_val = wt_path
         else:
             # legacy: git diff из рабочего дерева
             diff_full, diff_stat = await _git_diff_card(cwd)
             has_changes = bool(diff_full or diff_stat)
-            wt_path_val = None
-            base_branch = None
-            wt_branch = None
-
-        # Установка значений для worktree-режима
-        if run_mode == "worktree" and wt_info:
-            wt_path_val = wt_info["wt_path"]
-            base_branch = wt_info["base_branch"]
-            wt_branch = f"card-{card_id}"
-        else:
             wt_path_val = None
             base_branch = None
             wt_branch = None
@@ -2639,23 +2654,6 @@ async def _run_card(
         })
         # замок снимается ГАРАНТИРОВАННО, даже если запись сайдкара/перенос упали
         ctx["running"].pop(session_key, None)
-
-
-_NEW_PROJECT_PROMPT = """🚀 Это новый проект, инициализируется с нуля. Cwd — текущая папка.
-
-Сейчас ничего не делай — СПРОСИ Игоря текстом одним сообщением (в конце ответа):
-
-1. Что за проект, цель?
-2. Есть ли уже наработки/код/файлы где-то ещё? (другие папки $HOME, чаты, архивы — точные пути если знает)
-3. Какие первые 3-5 задач?
-4. Как лучше назвать проект (короткий слаг)?
-
-Дальше — по моим ответам:
-- Если указал существующие папки → просканируй (ls/Read), краткая сводка.
-- Когда определимся с именем — попроси меня переименовать папку untitled-… вручную (сам не сможешь — kокпит держит её как cwd) ИЛИ просто работай в текущей.
-- Затем создай: CLAUDE.md (описание + правила канбана Backlog/In Progress/Review/Failed + как формулировать задачи), TASKS.md (реальные карточки в Backlog), README.md, .gitignore (типовой по стэку), `git init` без коммита.
-
-Веди диалог по шагам, не вали скриптом. Не задавай 10 вопросов разом — 3-5 точечных за раз."""
 
 
 async def api_move_task(req: web.Request) -> web.Response:
@@ -2963,8 +2961,6 @@ async def api_project_timeline(req: web.Request) -> web.Response:
 # Free-чат — виртуальный «проект» с cwd=$HOME, без git, без TG-привязки.
 # Каждый клик «новый свободный» создаёт отдельную вкладку со своим session_id.
 # Хранятся в data/free_chats.json: {free-<uuid>: {label, cwd, model, created_at}}.
-
-import uuid as _uuid
 
 _FREE_DEFAULT_CWD = str(Path.home())
 
@@ -3795,7 +3791,10 @@ async def api_global_file_write(req: web.Request) -> web.Response:
         return web.json_response({"error": "access denied"}, status=403)
     if not target.exists() or not target.is_file():
         return web.json_response({"error": "not a file"}, status=404)
-    data = await req.json()
+    try:
+        data = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
     content = data.get("content", "")
     try:
         target.write_text(content, encoding="utf-8")
@@ -5518,6 +5517,11 @@ async def spa_handler(req: web.Request) -> web.Response:
 
 async def start(ptb_app, ctx: dict) -> None:
     """Поднимает aiohttp-сервер кокпита в том же процессе/loop, что и бот. НЕ блокирует."""
+    # Гарантируем, что error_middleware (logging.exception) реально пишет в журнал,
+    # даже если корневой логгер ещё не настроен (иначе ERROR уходит в lastResort).
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.WARNING,
+                             format="%(asctime)s %(levelname)s %(name)s %(message)s")
     port = ctx["port"]
     try:
         # Деривируем токен один раз при старте (scrypt медленный — не на каждый запрос)
@@ -5527,7 +5531,7 @@ async def start(ptb_app, ctx: dict) -> None:
         _timeline_init(ctx)
         _settings_init(ctx)
 
-        app = web.Application(middlewares=[auth_middleware], client_max_size=20 * 1024 * 1024)
+        app = web.Application(middlewares=[error_middleware, auth_middleware], client_max_size=20 * 1024 * 1024)
         app["ctx"] = ctx
 
         # F1: сохраняем ссылку на PTB-приложение для пинга в TG из _run_card

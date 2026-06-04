@@ -24,11 +24,8 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
-    ThinkingBlock,
-    ToolResultBlock,
     ToolUseBlock,
 )
-from aiohttp import web
 import webapp          # браузерный кокпит (webapp.py) — поднимается в post_init рядом с ботом, состояние через ctx
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
@@ -548,16 +545,24 @@ async def run_agent(context, update, prompt: str):
             pass
         try:
             while True:
-                await asyncio.sleep(20)
+                await asyncio.sleep(min(stall_s, 20))
                 now = time.time()
-                if now - last_event[0] > stall_s:
-                    stalled["reason"] = f"нет событий {int((now - last_event[0]) // 60)} мин"
+                idle = now - last_event[0]
+                if idle > stall_s:
+                    if stall_s < 60:
+                        stalled["reason"] = f"нет событий {int(idle)}с"
+                    else:
+                        stalled["reason"] = f"нет событий {int(idle // 60)} мин"
                 elif now - t_start > max_s:
                     stalled["reason"] = f"превышен лимит {max_s // 60} мин"
                 cl = running.get(k)
                 if stalled["reason"] and hasattr(cl, "interrupt"):
                     try:
                         await cl.interrupt()
+                        print(f"[watchdog] прервал задачу {k}: {stalled['reason']}")
+                        await send(context, chat, thread,
+                                   md_to_html(f"⏱ Watchdog сработал: {stalled['reason']} — задача прервана."),
+                                   parse_mode=ParseMode.HTML)
                     finally:
                         return
         except asyncio.CancelledError:
@@ -639,7 +644,7 @@ async def run_agent(context, update, prompt: str):
             "outcome": "ok" if engine_exc is None else "fail",
             "run_id": None,
         })
-        running.pop(k, None)
+        # running.pop снимается в safe_run.finally (авторитетная точка)
 
     # Если движок упал — удаляем статус и пробрасываем (safe_run/report_error обработает)
     if engine_exc is not None:
@@ -712,24 +717,28 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     running[k] = True  # placeholder; run_engine заменит на реальный client
     cid, tid = update.effective_chat.id, msg.message_thread_id
-    # вложения -> скачиваем, путь отдаём агенту
-    files = []
-    if has_file:
-        try:
-            files = await fetch_files(context, msg)
-        except Exception as e:
-            await send(context, cid, tid, f"⚠️ Не смог скачать вложение ({e}). Возможно >20MB.")
-    base = text or "Посмотри прикреплённый файл и скажи/сделай по нему, что нужно."
-    if msg.forward_origin:
-        prompt = ("[Это пересланное сообщение/алерт от одного из моих сервисов. "
-                  "Диагностируй причину и почини.]\n\n" + base)
-    else:
-        prompt = base
-    if files:
-        prompt += ("\n\n[Прикреплённые файлы — абсолютные пути на сервере, прочитай их через Read:\n"
-                   + "\n".join(files) + "]")
-    await context.bot.send_chat_action(cid, ChatAction.TYPING, message_thread_id=tid or None)
-    asyncio.create_task(safe_run(context, update, prompt))
+    try:
+        # вложения -> скачиваем, путь отдаём агенту
+        files = []
+        if has_file:
+            try:
+                files = await fetch_files(context, msg)
+            except Exception as e:
+                await send(context, cid, tid, f"⚠️ Не смог скачать вложение ({e}). Возможно >20MB.")
+        base = text or "Посмотри прикреплённый файл и скажи/сделай по нему, что нужно."
+        if msg.forward_origin:
+            prompt = ("[Это пересланное сообщение/алерт от одного из моих сервисов. "
+                      "Диагностируй причину и почини.]\n\n" + base)
+        else:
+            prompt = base
+        if files:
+            prompt += ("\n\n[Прикреплённые файлы — абсолютные пути на сервере, прочитай их через Read:\n"
+                       + "\n".join(files) + "]")
+        await context.bot.send_chat_action(cid, ChatAction.TYPING, message_thread_id=tid or None)
+        asyncio.create_task(safe_run(context, update, prompt))
+    except Exception as e:
+        running.pop(k, None)
+        await send(context, cid, tid, f"⚠️ Ошибка запуска задачи: {e}")
 
 
 async def safe_run(context, update, prompt):
