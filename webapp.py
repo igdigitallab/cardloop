@@ -1365,16 +1365,61 @@ async def _run_log_cmd(log_cmd: str, timeout: float = 10.0, raise_on_timeout: bo
 
 async def _scan_project_errors(project: dict) -> list[dict]:
     """Сканирует один проект: только log_cmd → list[errors]. БЕЗ записи на диск.
-    Тесты запускаются ТОЛЬКО через кнопку «Прогнать тесты» (api_project_test), не здесь."""
+    Тесты запускаются ТОЛЬКО через кнопку «Прогнать тесты» (api_project_test), не здесь.
+
+    Spec-012 Ф0: high-water-mark fingerprint.
+    Состояние: data/scan_state.json  {cwd: {"last_line": "<sha1>", "last_scan_ts": <float>}}.
+    Логика:
+      - Нет fingerprint (первый скан): парсим только ПОСЛЕДНИЕ 50 строк и сохраняем fingerprint
+        без немедленного создания карточек по всему хвосту (избегаем flood из старых ошибок).
+      - Есть fingerprint: ищем последнее вхождение строки с sha1==fingerprint, парсим всё ПОСЛЕ.
+        Если fingerprint не найден (лог ротирован/вышел из окна): fallback = последние 500 строк
+        (дедуп downstream защищает от дублей).
+      - После парсинга: обновляем last_line = sha1(последней непустой строки), last_scan_ts = now.
+    Ключ в state: cwd (стабильный абсолютный путь проекта).
+    """
     errors: list[dict] = []
     log_cmd = project.get("log_cmd")
 
     if log_cmd:
         log_text = await _run_log_cmd(log_cmd)
         if log_text:
-            # Берём только последние ~500 строк — старые ошибки уже учтены прошлыми сканами
-            tail = "\n".join(log_text.splitlines()[-500:])
-            errors.extend(_parse_log_errors(tail, source="log"))
+            all_lines = log_text.splitlines()
+            cwd_key = project.get("cwd", "")
+            now_ts = time.time()
+            _FP_BLOCK = 6  # блок из последних N строк как «отпечаток» позиции — устойчив
+                           # к повторяющимся ОДИНОЧНЫМ строкам (heartbeat / "200 OK"), на
+                           # которых single-line fingerprint пропускал новые ошибки между
+                           # двумя одинаковыми строками. Блок ловит реальную позицию конца.
+
+            state = _scan_state_load()
+            last_block = state.get(cwd_key, {}).get("block")  # list[sha1] последних N строк прошлого скана
+            line_hashes = [hashlib.sha1(ln.encode("utf-8", "replace")).hexdigest() for ln in all_lines]
+
+            if not last_block:
+                # Первый скан (нет состояния): парсим только хвост 50 строк, чтобы не
+                # залить доску историческими ошибками. Блок-отпечаток сохраним ниже.
+                if all_lines:
+                    errors.extend(_parse_log_errors("\n".join(all_lines[-50:]), source="log"))
+            else:
+                # ПЕРВОЕ вхождение блока (forward) — всё ПОСЛЕ него считаем новым.
+                # Forward-bias безопаснее last-occurrence: при повторе блока скорее
+                # перепарсим старое (дедуп + dismissed погасят), чем пропустим новое.
+                bl = len(last_block)
+                end_idx = None
+                for end in range(bl, len(line_hashes) + 1):
+                    if line_hashes[end - bl:end] == last_block:
+                        end_idx = end
+                        break
+                # Блок не найден (ротация / снос state) → fallback 500 (дедуп/dismissed страхуют).
+                new_lines = all_lines[end_idx:] if end_idx is not None else all_lines[-500:]
+                if new_lines:
+                    errors.extend(_parse_log_errors("\n".join(new_lines), source="log"))
+
+            # ВСЕГДА сохраняем блок конца текущего вывода (даже whitespace-only — иначе
+            # застрянем в режиме «первый скан» и будем терять строки за 50-хвостом).
+            state[cwd_key] = {"block": line_hashes[-_FP_BLOCK:], "last_scan_ts": now_ts}
+            _scan_state_save(state)
 
     return errors
 
@@ -1407,6 +1452,8 @@ async def _ingest_errors_to_board(cwd: str, name: str, errors: list[dict]) -> tu
                     h = cid[4:]
                     existing[h] = (col_key, card)
 
+        now_float = time.time()
+        dismissed_snapshot = _dismissed_load()  # один раз на батч, не на каждую ошибку
         for err in errors:
             h = err["hash"]
             if h in existing:
@@ -1423,6 +1470,10 @@ async def _ingest_errors_to_board(cwd: str, name: str, errors: list[dict]) -> tu
                 card["description"] = _format_incident_desc(meta)
                 updated += 1
             else:
+                # Spec-012 Ф0 Task B: не воскрешать dismissed инциденты в TTL-окне
+                _dts = dismissed_snapshot.get(h)
+                if _dts is not None and (now_float - _dts) < _DISMISS_TTL:
+                    continue
                 # Новая карточка в Failed
                 meta = {
                     "source": err["source"],
@@ -1579,7 +1630,96 @@ async def api_project_notify_toggle(req: web.Request) -> web.Response:
 
 
 # Фоновая задача: сканер всех проектов каждые SCAN_INTERVAL_SEC секунд.
-_SCAN_INTERVAL_SEC = int(os.environ.get("ERROR_SCAN_INTERVAL", "300"))  # 5 мин
+# Spec-012 Ф0: дефолт снижен до 60с (инкрементальный парс — дёшево; env override сохранён).
+_SCAN_INTERVAL_SEC = int(os.environ.get("ERROR_SCAN_INTERVAL", "60"))  # 1 мин (was 5 мин)
+
+# ─────────────────────────── Scan state (Spec 012 Ф0) ────────────────────────
+#
+# Высокая отметка воды: per-project fingerprint последней обработанной строки лога.
+# Файл: data/scan_state.json  {<cwd>: {"last_line": "<sha1>", "last_scan_ts": <float>}}
+# Отклонённые инциденты: data/dismissed_incidents.json  {<hash6>: <dismissed_ts>}
+# Оба файла живут в data/ (gitignored). Все хелперы глотают ВСЕ исключения — ни один
+# не может сломать сканер.
+
+_SCAN_STATE_PATH: "Path | None" = None      # задаётся в _scan_state_init(ctx)
+_DISMISSED_PATH: "Path | None" = None       # задаётся в _scan_state_init(ctx)
+_DISMISS_TTL = 24 * 3600                    # 24 ч — deleted/done карточка не воскресает
+
+
+def _scan_state_init(ctx: dict) -> None:
+    """Вызывается из start() — задаёт пути к файлам состояния."""
+    global _SCAN_STATE_PATH, _DISMISSED_PATH
+    _SCAN_STATE_PATH = ctx["DATA"] / "scan_state.json"
+    _DISMISSED_PATH = ctx["DATA"] / "dismissed_incidents.json"
+
+
+def _scan_state_load() -> dict:
+    """Загружает {cwd: {last_line, last_scan_ts}}. Ошибки/отсутствие → {}."""
+    try:
+        if _SCAN_STATE_PATH is None or not _SCAN_STATE_PATH.exists():
+            return {}
+        data = json.loads(_SCAN_STATE_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _scan_state_save(state: dict) -> None:
+    """Сохраняет state на диск. Глотает ВСЕ исключения."""
+    try:
+        if _SCAN_STATE_PATH is None:
+            return
+        _SCAN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SCAN_STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _dismissed_load() -> dict:
+    """Загружает {hash6: dismissed_ts}. Ошибки/отсутствие → {}."""
+    try:
+        if _DISMISSED_PATH is None or not _DISMISSED_PATH.exists():
+            return {}
+        data = json.loads(_DISMISSED_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _dismissed_save(dismissed: dict) -> None:
+    """Сохраняет dismissed на диск. Глотает ВСЕ исключения."""
+    try:
+        if _DISMISSED_PATH is None:
+            return
+        _DISMISSED_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _DISMISSED_PATH.write_text(json.dumps(dismissed), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _dismissed_add(h: str) -> None:
+    """Записывает hash как dismissed(now). Прунит устаревшие (>TTL). Глотает ВСЕ исключения."""
+    try:
+        now = time.time()
+        dismissed = _dismissed_load()
+        dismissed[h] = now
+        # Прунинг: удаляем записи старше TTL
+        dismissed = {k: v for k, v in dismissed.items() if now - v < _DISMISS_TTL}
+        _dismissed_save(dismissed)
+    except Exception:
+        pass
+
+
+def _dismissed_is_active(h: str, now: float) -> bool:
+    """True если hash был dismissed менее _DISMISS_TTL секунд назад."""
+    try:
+        dismissed = _dismissed_load()
+        ts = dismissed.get(h)
+        if ts is None:
+            return False
+        return (now - ts) < _DISMISS_TTL
+    except Exception:
+        return False
 
 # ─────────────────────────── Самолечение (Spec 010) ───────────────────────────
 #
@@ -2750,6 +2890,9 @@ async def api_move_task(req: web.Request) -> web.Response:
             return web.json_response({"error": "card not found"}, status=404)
 
         if to == "done":
+            # Spec-012 Ф0 Task B: err-карточка перенесена в Done → записываем как dismissed
+            if card_id.startswith("err-"):
+                _dismissed_add(card_id[4:])
             dp = _done_path(cwd)
             header = dp.read_text(encoding="utf-8") if dp.exists() else f"# Done — {name}\n"
             if not header.strip():
@@ -2781,6 +2924,9 @@ async def api_delete_task(req: web.Request) -> web.Response:
         _, preamble, cols = _load_board(cwd)
         if _pop_card(cols, card_id) is None:
             return web.json_response({"error": "card not found"}, status=404)
+        # Spec-012 Ф0 Task B: err-карточка удалена → записываем как dismissed
+        if card_id.startswith("err-"):
+            _dismissed_add(card_id[4:])
         _save_board(cwd, name, preamble, cols)
     return web.json_response(_board_payload(cwd))
 
@@ -5642,6 +5788,8 @@ async def start(ptb_app, ctx: dict) -> None:
         # Timeline: инициализируем персистентность шины (DATA/timeline/)
         _timeline_init(ctx)
         _settings_init(ctx)
+        # Spec-012 Ф0: инициализируем пути к файлам scan_state + dismissed_incidents
+        _scan_state_init(ctx)
 
         app = web.Application(middlewares=[error_middleware, auth_middleware], client_max_size=20 * 1024 * 1024)
         app["ctx"] = ctx
