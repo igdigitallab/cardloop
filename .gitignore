@@ -2,6 +2,8 @@
 .env
 *.env
 !.env.example
+# self-memory бота (.claude-ops/memory) содержит BOT_TOKEN/пароль — НЕ коммитить
+.claude-ops/
 
 # --- рантайм-состояние и данные (chat IDs, сессии, логи, audit, timeline) ---
 data/

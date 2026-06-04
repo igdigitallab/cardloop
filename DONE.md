@@ -5,6 +5,9 @@
 ## 2026-06-02
 - [x] ⭐ Настройки проекта + глобальные настройки (UI): таб «⚙️ Настройки» <!--ops:f2ba02--> — per-project (git on/off флагман + модель/self_heal/notify/log_cmd/test_cmd, topics.json hot-reload) + глобальные (data/settings.json, провязаны в рантайм: self_heal master-kill, max_concurrent, scan_interval, дефолт-модель, watchdog stall/max). API GET/POST `/api/settings` + `/api/projects/{id}/settings` с валидацией. 20 тестов (test_settings.py).
 - [x] rename проекта сохраняет историю диалогов + Timeline (миграция SDK-каталога по slug); восстановлены family-emergency/autotopic-test; tests test_project_rename + test_forum_topic.
+- [x] Авто-создание forum-топика в Telegram при создании проекта <!--ops:89f1cd--> — api_new_project зовёт create_forum_topic, в topics.json реальный ключ `<chat>:<thread_id>`; покрыто test_forum_topic.py. (Опц. welcome-сообщение / closeForumTopic при удалении — не делалось, не критично.)
+- [x] «Переименовал — пропали сессии / вопрос создания нового проекта» <!--ops:ac3ff0--> — закрыто фиксом rename выше; new-project (untitled + forum-топик + онбординг) работает.
+- [x] Снят ложный [TEST]-инцидент `test_memory_read_all_new_takes_priority` (err-5e9db6) — реальный pytest зелёный (529 passed), сканер поймал транзиент во время правок дерева.
 
 ## 2026-05-30 (Послесессионная уборка)
 - [x] LogsTab: Readme/Specs убраны, Активность переименована в Логи; тянет log_cmd из topics.json; empty state + кнопка «добавить задачу в бэклог» <!--ops:701bd1-->
