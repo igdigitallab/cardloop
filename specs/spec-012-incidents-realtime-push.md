@@ -2,9 +2,17 @@
 
 **Проект:** Claude-Ops
 **Дата:** 2026-06-04
-**Статус:** [x] Черновик / [ ] Готов к работе / [ ] В работе / [ ] Готово
+**Статус:** [ ] Черновик / [ ] Готов к работе / [ ] В работе / [x] **✅ ГОТОВО** (реализовано 2026-06-04, задеплоено, pytest 688 passed)
 
 > Источник: разбор Failed-карточек 2026-06-04 (flood `ClientConnectionResetError`, призрак из устаревшего хвоста журнала) + решение Игоря по архитектуре мониторинга. Преемник spec-011 (там монитор «через ошибки из логов» сделан в наивной poll-версии). Истина по коду — `ARCHITECTURE.md` / `docs/API.md`.
+>
+> **Реализация (коммиты):**
+> - **Кнопки (предв.)** `1a8960d` — «Скан» убрана, «Тесты» дают настоящий вывод (модалка), ясные подписи Аудит/Апгрейд.
+> - **Ф0** `c02a285` — инкрементальный скан: block-fingerprint high-water-mark (устойчив к повторяющимся строкам — block, не single-line/cursor) + dismissed-incidents TTL (закрытый инцидент не воскресает) + интервал 300→60с.
+> - **Ф1** `6514dab` — свои ошибки кокпита → карточка in-process мгновенно (`_report_incident`, hash идентичен сканеру → дедуп) + дебаунс от I/O-шторма.
+> - **Ф2** `70732d0` — самолечение safety-слой: чистая `_heal_decision` (debounce по `seen>=N` + per-project rate-limit + benign-ignore-list, case-insensitive, wired per-project override). Все 6 предохранителей spec-010 сохранены. Отвязан от `res.added`.
+> - **Ф3** `4ce3c18` — опциональный `POST /incident` (double opt-in: глобальный флаг OFF-default + per-project токен; auth-exempt по строгому regex; constant-time; **U+2028/U+2029 sanitize**; per-IP + per-project rate-limit; secret non-leak) + шаблоны (опц. push-сниппет + conformance).
+> - Каждая фаза: агенты-исполнители (Sonnet) + 2 независимых ревьюера; BLOCKER'ы (repeated-line fingerprint, unicode-инжект в доску) пойманы репро и закрыты. Самолечение на claude-ops-bot выключалось на время деплоя, возвращено в конце.
 
 ## Зачем (три большие идеи)
 
