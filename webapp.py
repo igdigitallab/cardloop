@@ -257,6 +257,20 @@ COOKIE_MAX_AGE = 2592000  # 30 дней в секундах
 
 import hmac as _hmac
 
+# Spec-012 Ф3: паттерн для точного матча пути /api/projects/{id}/incident.
+# Прекомпилирован один раз — используется в auth_middleware для tight-exempt.
+# Специально НЕ endswith("/incident"): не пропустит ../incident/evil или GET.
+_INCIDENT_PATH_RE = re.compile(r"^/api/projects/[^/]+/incident$")
+
+# Rate-limit push-эндпоинта: не более _INCIDENT_PUSH_MAX вызовов за _INCIDENT_PUSH_WINDOW сек
+# с валидным токеном, per-project. Предотвращает шторм heal-запусков.
+_INCIDENT_PUSH_MAX = 30
+_INCIDENT_PUSH_WINDOW = 60  # секунды
+_INCIDENT_IP_MAX = 300      # per-IP backstop (до резолва проекта/чтения секрета — против unauth-флуда)
+_incident_ip_history: dict[str, list[float]] = {}
+# {project_id: [timestamp, ...]} — история успешных вызовов
+_incident_push_history: dict[str, list[float]] = {}
+
 # Соль для scrypt: берётся из env WEB_COOKIE_SALT или генерируется при старте.
 AUTH_SALT: bytes = os.environ.get("WEB_COOKIE_SALT", "").encode() or (
     lambda s: (print(f"[auth] сгенерирована соль WEB_COOKIE_SALT={s} — добавь в .env", flush=True), s.encode())[1]
@@ -336,10 +350,16 @@ async def error_middleware(request: web.Request, handler):
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    """Защита /api/* — пропускает /api/health и /api/login без cookie."""
+    """Защита /api/* — пропускает /api/health и /api/login без cookie.
+    Spec-012 Ф3: также пропускает POST /api/projects/{id}/incident (у него свой
+    токен-авт в теле/заголовке). Матч TIGHT через прекомпилированный _INCIDENT_PATH_RE —
+    ни эндпоинты без trailing-id, ни /incident/evil, ни GET не попадут в exempt."""
     path = request.path
     # Незащищённые эндпоинты
     if path in ("/api/health", "/api/login"):
+        return await handler(request)
+    # Spec-012 Ф3: push-инцидент — свой auth (token). Только POST, только точный путь.
+    if request.method == "POST" and _INCIDENT_PATH_RE.match(path):
         return await handler(request)
     # Только пути /api/* проверяем
     if path.startswith("/api/"):
@@ -1325,8 +1345,9 @@ def _format_incident_desc(meta: dict) -> str:
         lines.append(f"heal_skip={meta['heal_skip']}")
     excerpt = meta.get("excerpt", "")
     if excerpt:
-        # Многострочный excerpt сворачиваем в одну строку для description
-        compact = excerpt.replace("\n", " / ")[:400]
+        # Многострочный excerpt сворачиваем в одну строку. splitlines() ловит ВСЕ
+        # разделители (вкл. U+2028/U+2029/\x85) — иначе они порвали бы формат доски.
+        compact = " / ".join(excerpt.splitlines())[:400]
         lines.append(f"excerpt={compact}")
     return "\n".join(lines)
 
@@ -1521,11 +1542,14 @@ async def _report_incident(ctx: dict, exc_class: str, where: str, project_id: st
         # Дебаунс: эндпоинт, падающий на КАЖДОМ запросе, не должен устроить I/O-шторм
         # записей в TASKS.md. Один и тот же hash пишем не чаще раза в N сек (карточка
         # уже создана; редкие пропущенные seen++ доберёт фоновый сканер). До board-lock.
+        # Ключ включает project_id — иначе одинаковая ошибка в РАЗНЫХ проектах (path
+        # нормализуется в /PATH → общий hash) глушила бы друг друга кросс-проектно.
+        dkey = f"{project_id}\x00{h}"
         now = time.time()
-        last = _REPORT_DEBOUNCE.get(h)
+        last = _REPORT_DEBOUNCE.get(dkey)
         if last is not None and (now - last) < _REPORT_DEBOUNCE_SEC:
             return
-        _REPORT_DEBOUNCE[h] = now
+        _REPORT_DEBOUNCE[dkey] = now
         if len(_REPORT_DEBOUNCE) > 256:   # не растим словарь
             for k in [k for k, v in _REPORT_DEBOUNCE.items() if now - v > _REPORT_DEBOUNCE_SEC]:
                 _REPORT_DEBOUNCE.pop(k, None)
@@ -1609,6 +1633,89 @@ async def api_project_incidents(req: web.Request) -> web.Response:
             by_col[key] = n
             total += n
     return web.json_response({"count": total, "by_column": by_col})
+
+
+async def api_project_incident(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/incident — Spec-012 Ф3: опциональный push инцидента.
+
+    Auth-exempt от cookie (auth_middleware пропускает этот маршрут), но делает
+    двойной opt-in: (1) глобальный флаг incident_push_enabled=True в settings.json,
+    (2) секрет CLAUDEOPS_INCIDENT_TOKEN в .claude-ops/secrets/ проекта.
+
+    Порядок проверок (fail-safe):
+    1. Глобальный флаг OFF → 404 (не раскрываем существование эндпоинта).
+    2. Проект не найден → 404.
+    3. Токен: секрет CLAUDEOPS_INCIDENT_TOKEN не задан (per-project opt-in) → 403.
+       Токен из X-Incident-Token / тела → constant-time сравнение; мимо → 403.
+    4. JSON: bad parse → 400; exc_class пустой → 400; санитизация (strip newlines, cap).
+    5. Rate-limit per-project (30/мин) → 429.
+    6. _report_incident fire-and-forget (дедуп = тот же hash, что у log-сканера).
+    7. {"ok": True} — токен/секрет НИКОГДА не в ответе.
+    """
+    ctx = req.app["ctx"]
+    now = time.time()
+
+    # 1. Глобальный мастер-флаг (дешёвый, до любого I/O; выключено по умолчанию → 404)
+    if _get_global_setting("incident_push_enabled", False) is not True:
+        return web.json_response({"error": "not found"}, status=404)
+
+    # 1.5. Per-IP backstop — ДО резолва проекта и чтения секрета, чтобы unauth-флуд
+    # не упирался в диск (_secrets_read) на каждом запросе.
+    ip = (req.headers.get("X-Forwarded-For", "").split(",")[0].strip() or req.remote or "?")
+    ip_hist = [t for t in _incident_ip_history.get(ip, []) if now - t < _INCIDENT_PUSH_WINDOW]
+    if len(ip_hist) >= _INCIDENT_IP_MAX:
+        return web.json_response({"error": "too many requests"}, status=429)
+    ip_hist.append(now)
+    _incident_ip_history[ip] = ip_hist
+    if len(_incident_ip_history) > 4096:   # не растим словарь
+        for k in [k for k, v in list(_incident_ip_history.items()) if not v or now - v[-1] > _INCIDENT_PUSH_WINDOW]:
+            _incident_ip_history.pop(k, None)
+
+    # 2. Проект
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "not found"}, status=404)
+
+    # 3. Тело парсим ОДИН раз (битый JSON → 400, а не маскируется под 403 token-mismatch)
+    try:
+        body = await req.json()
+        if not isinstance(body, dict):
+            raise ValueError("not a dict")
+    except Exception:
+        return web.json_response({"error": "bad request: invalid JSON"}, status=400)
+
+    # 4. Токен — per-project opt-in (заголовок предпочтительно, иначе из тела)
+    expected_token = _secrets_read(project["cwd"]).get("CLAUDEOPS_INCIDENT_TOKEN") or ""
+    if not expected_token:
+        return web.json_response({"error": "forbidden"}, status=403)   # push не включён для проекта
+    body_token = body.get("token", "")
+    presented_token = req.headers.get("X-Incident-Token", "") or (body_token if isinstance(body_token, str) else "")
+    if not _hmac.compare_digest(str(presented_token), str(expected_token)):
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    # 5. Санитизация: splitlines() ловит ВСЕ разделители строк (вкл. U+2028/U+2029/\x85) —
+    # иначе токен-холдер мог бы инжектить '## Section' / '- [ ] card' в TASKS.md.
+    def _sanitize(s, maxlen: int) -> str:
+        return " ".join(str(s).splitlines()).strip()[:maxlen]
+
+    exc_class = _sanitize(body.get("exc_class", ""), 120)
+    where = _sanitize(body.get("where") or body.get("path") or "(push)", 200)
+    if not exc_class:
+        return web.json_response({"error": "bad request: exc_class required"}, status=400)
+
+    # 6. Per-project rate-limit
+    history = [t for t in _incident_push_history.get(pid, []) if now - t < _INCIDENT_PUSH_WINDOW]
+    if len(history) >= _INCIDENT_PUSH_MAX:
+        return web.json_response({"error": "too many requests"}, status=429)
+    history.append(now)
+    _incident_push_history[pid] = history
+
+    # 7. Репорт — fire-and-forget. Дедуп по hash общий с лог-сканером (one error = one card).
+    _spawn_bg(_report_incident(ctx, exc_class, where, project_id=pid))
+
+    # 8. Ответ — токен/секрет НИКОГДА не раскрывается
+    return web.json_response({"ok": True})
 
 
 async def api_project_self_heal_toggle(req: web.Request) -> web.Response:
@@ -1914,6 +2021,9 @@ _GLOBAL_SETTINGS_SPEC = {
     "default_model": ("model", None, None),          # "" → дефолт ctx
     "watchdog_stall_sec": ("int", 30, 7200),
     "watchdog_max_sec": ("int", 60, 14400),
+    # Spec-012 Ф3: глобальный мастер-флаг push-эндпоинта. OFF по умолчанию —
+    # оператор должен явно включить. Без этого флага POST /incident → 404.
+    "incident_push_enabled": ("bool", None, None),
 }
 
 
@@ -6055,6 +6165,7 @@ async def start(ptb_app, ctx: dict) -> None:
         # Сканер инцидентов: ручной запуск + счётчик активных err-карточек
         app.router.add_post("/api/projects/{id}/scan-errors", api_project_scan_errors)
         app.router.add_get("/api/projects/{id}/incidents", api_project_incidents)
+        app.router.add_post("/api/projects/{id}/incident", api_project_incident)
         # Самолечение (Spec 010): тумблер включения per-project
         app.router.add_post("/api/projects/{id}/self-heal", api_project_self_heal_toggle)
         app.router.add_post("/api/projects/{id}/notify-on-error", api_project_notify_toggle)

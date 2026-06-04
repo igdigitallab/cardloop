@@ -702,3 +702,32 @@ async def test_delete_nonexistent_card_returns_404(
     assert resp.status == 404
     # dismissed НЕ записан — карточки не было
     assert not _dismissed_is_active("ffffff", time.time())
+
+
+def test_format_incident_desc_strips_unicode_line_seps():
+    """BLOCKER-регрессия: U+2028/U+2029 в excerpt не порождают лишних строк в
+    description (иначе splitlines() на доске даёт инжект секции/карточки)."""
+    meta = {"source": "log", "seen": "1", "excerpt": "boom ## Done - [ ] evil"}
+    desc = webapp._format_incident_desc(meta)
+    assert " " not in desc and " " not in desc
+    excerpt_lines = [l for l in desc.splitlines() if l.startswith("excerpt=")]
+    assert len(excerpt_lines) == 1, f"excerpt должен быть одной строкой: {desc!r}"
+
+
+async def test_report_incident_debounce_is_per_project(tmp_path, monkeypatch):
+    """Дебаунс per-(project,hash): одинаковая ошибка в РАЗНЫХ проектах не глушит
+    друг друга (path нормализуется в /PATH → общий hash, но проекты разные)."""
+    _setup_state_paths(tmp_path)
+    cwd_a = tmp_path / "A"; cwd_a.mkdir(); _make_empty_board(cwd_a)
+    cwd_b = tmp_path / "B"; cwd_b.mkdir(); _make_empty_board(cwd_b)
+    projs = {"A": {"cwd": str(cwd_a), "name": "A"}, "B": {"cwd": str(cwd_b), "name": "B"}}
+    monkeypatch.setattr(webapp, "_find_project_by_id", lambda ctx, pid="claude-ops-bot": projs.get(pid))
+    webapp._REPORT_DEBOUNCE.clear()
+
+    await webapp._report_incident({}, "ValueError", "/x", project_id="A")
+    await webapp._report_incident({}, "ValueError", "/x", project_id="B")  # тот же hash, другой проект
+
+    _, _, cols_a = _load_board(str(cwd_a))
+    _, _, cols_b = _load_board(str(cwd_b))
+    assert len(cols_a["failed"]) == 1, "проект A получил карточку"
+    assert len(cols_b["failed"]) == 1, "проект B НЕ должен быть заглушён дебаунсом A"

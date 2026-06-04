@@ -174,6 +174,43 @@ def do_work():
         raise  # re-raise после логирования
 ```
 
+### Опционально: мгновенный push инцидента в кокпит
+
+> **Базовый мониторинг работает и БЕЗ этого (по логам).** Push нужен только если хочется
+> доставки инцидента в кокпит мгновенно, без ожидания следующего скана (≤60с).
+> Требует двойного opt-in: (1) оператор включил `incident_push_enabled` в глобальных
+> настройках кокпита, (2) секрет `CLAUDEOPS_INCIDENT_TOKEN` задан проекту в кокпите
+> И доступен в env самого сервиса.
+
+```python
+# fire-and-forget push инцидента в кокпит (Python, framework-agnostic)
+# Вставить в глобальный обработчик исключений рядом с logging.error(...)
+import asyncio, os
+import aiohttp  # или httpx, или urllib.request — swallow ALL errors
+
+_COCKPIT_URL = os.environ.get("CLAUDEOPS_URL", "")        # https://claude-ops.coscore.us
+_COCKPIT_PROJECT = os.environ.get("CLAUDEOPS_PROJECT", "") # basename cwd проекта
+_COCKPIT_TOKEN = os.environ.get("CLAUDEOPS_INCIDENT_TOKEN", "")
+
+async def _push_incident(exc_class: str, where: str, excerpt: str = "") -> None:
+    """Fire-and-forget push инцидента в кокпит. Глотает все ошибки — сеть не должна
+    ронять сервис. Дедуп по hash гарантирован кокпитом: лог-сканер не задвоит."""
+    if not (_COCKPIT_URL and _COCKPIT_PROJECT and _COCKPIT_TOKEN):
+        return
+    url = f"{_COCKPIT_URL}/api/projects/{_COCKPIT_PROJECT}/incident"
+    payload = {"exc_class": exc_class, "where": where, "excerpt": excerpt}
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(url, json=payload,
+                         headers={"X-Incident-Token": _COCKPIT_TOKEN},
+                         timeout=aiohttp.ClientTimeout(total=5))
+    except Exception:
+        pass  # push сугубо опционален; потеря уведомления некритична
+
+# В обработчике исключений (рядом с log.error("UNHANDLED ...")):
+# asyncio.create_task(_push_incident(type(exc).__name__, request.path, str(exc)[:200]))
+```
+
 ---
 
 ## Правила работы в кокпите (НЕ удалять — общие для всех проектов)
@@ -229,3 +266,4 @@ def do_work():
 - секреты (.claude-ops/secrets): нет
 - notify_on_error: нет
 - healthz/liveness (сервисам): нет
+- incident push: нет
