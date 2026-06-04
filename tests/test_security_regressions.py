@@ -32,6 +32,8 @@ from webapp import _derive_token, _valid_card_id, _login_attempts, _tasks_path
     "a-b-c-d-e-f",  # много дефисов
     "1234567890abcd", # 14 символов
     "a" * 20,        # 20 символов — максимум
+    "err-9b37ae",    # инцидент-карточка: префикс err- + hash6
+    "err-aabbcc",    # инцидент-карточка
 ])
 def test_valid_card_id_valid(card_id: str):
     """Валидные card_id должны проходить."""
@@ -51,6 +53,8 @@ def test_valid_card_id_valid(card_id: str):
     ("ABCDEF",            "заглавные буквы (вне [a-f0-9-])"),
     ("xyz123",            "буквы g-z не в hex"),
     ("abc\ndef",          "перенос строки"),
+    ("err-../x",          "err- + traversal"),
+    ("err-ABCDEF",        "err- + заглавные"),
 ])
 def test_valid_card_id_invalid(card_id: str, reason: str):
     """Невалидные card_id должны быть отклонены."""

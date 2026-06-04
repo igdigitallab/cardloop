@@ -1033,7 +1033,10 @@ def _new_card_id() -> str:
     return secrets.token_hex(3)
 
 
-_CARD_ID_RE = re.compile(r"^[a-f0-9-]{4,20}$")
+# Обычная карточка = hex(+дефис); инцидент = 'err-<hash6>'. Префикс err- разрешён явно,
+# тело остаётся [a-f0-9-] (без точек/слешей → traversal невозможен). Без err- в классе
+# был баг: err-карточки не проходили валидацию → их нельзя было закрыть/удалить из UI.
+_CARD_ID_RE = re.compile(r"^(err-)?[a-f0-9-]{4,20}$")
 
 
 def _valid_card_id(card_id: str) -> bool:
