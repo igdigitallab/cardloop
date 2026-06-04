@@ -682,7 +682,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         <Modal onClose={closeDescModal}>
           <ModalHead
             title={
-              <span style={{ fontWeight: 600, maxWidth: '80%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <span style={{ fontWeight: 600, maxWidth: '92%', whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
                 {descModal.card.text}
               </span>
             }
