@@ -22,6 +22,9 @@ interface Props {
 }
 
 const ORDER = ['backlog', 'in_progress', 'review', 'failed']
+// Стрелки ←/→ ходят по «парковочным» колонкам, ПРОПУСКАЯ in_progress: единственный
+// способ запустить агента — кнопка 🤖 (раньше → из Backlog дублировала робота).
+const PARK_ORDER = ['backlog', 'review', 'failed']
 const POLL_FAST_MS = 3000   // когда есть карточки в In Progress (агент работает)
 const POLL_SLOW_MS = 10000  // фоновый poll (правки TASKS.md от агента через чат, внешние правки)
 
@@ -377,7 +380,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         {visibleOrder.map(key => {
           const col = colByKey(key)
           if (!col) return null
-          const idx = ORDER.indexOf(key)
+          const parkIdx = PARK_ORDER.indexOf(key)   // -1 для in_progress → стрелки скрыты
           const isInProgress = key === 'in_progress'
           const canShowResult = key === 'review' || key === 'failed'
           return (
@@ -488,14 +491,18 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                       </div>
                     )}
                     <div className="board-card-actions">
-                      <button title="← влево" aria-label="Переместить влево" disabled={busy || idx === 0}
-                        onClick={() => move(card.id, ORDER[idx - 1])}>←</button>
-                      <button title="вправо →" aria-label="Переместить вправо" disabled={busy || idx === ORDER.length - 1}
-                        onClick={() => move(card.id, ORDER[idx + 1])}>→</button>
+                      {parkIdx >= 0 && (
+                        <>
+                          <button title="← переместить (без запуска)" aria-label="Переместить влево" disabled={busy || parkIdx === 0}
+                            onClick={() => move(card.id, PARK_ORDER[parkIdx - 1])}>←</button>
+                          <button title="переместить → (без запуска)" aria-label="Переместить вправо" disabled={busy || parkIdx === PARK_ORDER.length - 1}
+                            onClick={() => move(card.id, PARK_ORDER[parkIdx + 1])}>→</button>
+                        </>
+                      )}
                       {col.key !== 'in_progress' && (
                         <button
-                          title="🤖 Передать агенту (в In Progress → авто-запуск)"
-                          aria-label="Передать агенту"
+                          title="🤖 Запустить агентом (→ In Progress)"
+                          aria-label="Запустить агентом"
                           className="act-handoff"
                           disabled={busy}
                           onClick={() => move(card.id, 'in_progress')}
