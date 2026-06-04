@@ -274,6 +274,14 @@
 .git-dirty { color: var(--yellow); font-size: 11px; }
 .git-unpushed { color: var(--text2); font-size: 11px; }
 
+/* Бейдж видимости GitHub-репо: приватный / открытый */
+.git-vis {
+  font-size: 10px; font-weight: 600; border-radius: 4px;
+  padding: 1px 6px; white-space: nowrap; line-height: 1.5;
+}
+.git-vis-private { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
+.git-vis-public  { color: var(--green);  background: color-mix(in srgb, var(--green) 14%, transparent); }
+
 /* Большая яркая точка статуса git перед веткой */
 .git-sync-dot {
   width: 9px;

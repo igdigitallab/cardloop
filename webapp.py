@@ -408,7 +408,46 @@ async def _git_info(cwd: str) -> dict | None:
     except ValueError:
         unpushed = 0
 
-    return {"branch": branch, "dirty": dirty, "unpushed": unpushed}
+    return {
+        "branch": branch, "dirty": dirty, "unpushed": unpushed,
+        "visibility": _git_visibility_cached(cwd),
+    }
+
+
+# ── GitHub visibility (private/public) — кэш + фоновый gh, чтобы НЕ блокировать поллинг ──
+_GIT_VIS_CACHE: "dict[str, tuple[str | None, float]]" = {}   # cwd → (visibility, ts)
+_GIT_VIS_TTL = 3600.0   # видимость репо меняется редко → кэш на час
+
+
+async def _git_visibility_refresh(cwd: str) -> None:
+    """Узнаёт private/public через gh, кладёт в кэш. Сетевой вызов → только в фоне.
+    Глотает всё (нет remote / не на GitHub / gh не авторизован → None)."""
+    vis: "str | None" = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "repo", "view", "--json", "visibility", "-q", ".visibility",
+            cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+        if proc.returncode == 0:
+            v = out.decode(errors="replace").strip().lower()
+            if v in ("private", "public"):
+                vis = v
+    except Exception:
+        vis = None
+    _GIT_VIS_CACHE[cwd] = (vis, time.time())
+
+
+def _git_visibility_cached(cwd: str) -> "str | None":
+    """Кэш видимости; при промахе/протухании — фоновый refresh, отдаёт текущее (stale/None),
+    НЕ блокируя поллинг. Вызывается из async-контекста (нужен running loop для _spawn_bg)."""
+    entry = _GIT_VIS_CACHE.get(cwd)
+    if entry is None or (time.time() - entry[1]) > _GIT_VIS_TTL:
+        try:
+            _spawn_bg(_git_visibility_refresh(cwd))
+        except Exception:
+            pass
+    return entry[0] if entry else None
 
 
 # ─────────────────────────── project helpers ───────────────────────────

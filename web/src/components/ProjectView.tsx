@@ -509,6 +509,14 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                       <path d="M6 21V9a9 9 0 0 0 9 9"/>
                     </svg>
                     <span className="git-branch">{git.branch}</span>
+                    {git.visibility && (
+                      <span
+                        className={`git-vis git-vis-${git.visibility}`}
+                        title={git.visibility === 'private' ? 'Приватный GitHub-репозиторий' : 'Публичный (открытый) GitHub-репозиторий'}
+                      >
+                        {git.visibility === 'private' ? '🔒 приватный' : '🌐 открытый'}
+                      </span>
+                    )}
                     {git.dirty > 0 && (
                       <span className="git-dirty" title={`${git.dirty} изменённых файлов`}>
                         ~{git.dirty}

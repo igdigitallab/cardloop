@@ -2,6 +2,8 @@ export interface GitHealth {
   branch: string
   dirty: number
   unpushed: number
+  /** GitHub visibility — приватный/публичный репо (null = не на GitHub / ещё не определено) */
+  visibility?: 'private' | 'public' | null
 }
 
 export interface ProjectHealth {
