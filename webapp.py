@@ -15,10 +15,11 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import time
 import traceback as _tb
 import uuid as _uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, TypedDict
 
@@ -30,6 +31,20 @@ from aiohttp import web
 
 _BUS_QUEUE_SIZE = 100   # maxsize per-session очереди шины; переполнена → drop (не блокирует)
 _BUS_GLOBAL_SIZE = 200  # maxsize глобальной очереди шины (все сессии)
+
+# Strong references for long-lived background tasks created via asyncio.create_task.
+# Prevents GC from collecting tasks before they complete (Python docs warning).
+_BG_TASKS: set = set()
+
+
+def _spawn_bg(coro):
+    """Создаёт fire-and-forget задачу, защищённую от GC через _BG_TASKS.
+    Результат задачи не используется вызывающим кодом — только для фоновых эффектов."""
+    t = asyncio.create_task(coro)
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+    return t
+
 
 
 # ─────────────────────────── activity bus ───────────────────────────
@@ -842,26 +857,18 @@ async def api_project_logs(req: web.Request) -> web.Response:
     if not log_cmd:
         return web.json_response({"lines": [], "configured": False, "cmd": None})
 
+    # Delegates subprocess execution to _run_log_cmd (same streams: PIPE+STDOUT, no cwd).
+    # Timeout matched to original (8 s). On timeout → 504 (restores original behaviour).
+    # raise_on_timeout=True so TimeoutError propagates here (not swallowed in _run_log_cmd).
     try:
-        # UI-controlled cmd from topics.json → exec (not shell) to prevent injection
-        proc = await asyncio.create_subprocess_exec(
-            *shlex.split(log_cmd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return web.json_response({"error": "log_cmd timed out"}, status=504)
-
-        raw = stdout.decode("utf-8", errors="replace")
+        raw = await _run_log_cmd(log_cmd, timeout=8.0, raise_on_timeout=True)
         lines = raw.splitlines()
         # last 300 lines, newest first
         tail = lines[-300:] if len(lines) > 300 else lines
         tail.reverse()
         return web.json_response({"lines": tail, "configured": True, "cmd": log_cmd})
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "log_cmd timed out"}, status=504)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
@@ -1320,9 +1327,13 @@ def _incident_title(err: dict) -> str:
     return f"[{err['source'].upper()}] {msg}"
 
 
-async def _run_log_cmd(log_cmd: str, timeout: float = 10.0) -> str:
+async def _run_log_cmd(log_cmd: str, timeout: float = 10.0, raise_on_timeout: bool = False) -> str:
     """Запускает log_cmd, возвращает stdout (+ stderr).
-    UI-controlled cmd from topics.json → exec (not shell) to prevent injection."""
+    UI-controlled cmd from topics.json → exec (not shell) to prevent injection.
+    raise_on_timeout=True: при таймауте убивает процесс и re-raise asyncio.TimeoutError
+    (вместо возврата ""). Используется HTTP-маршрутом для возврата 504.
+    raise_on_timeout=False (default): проглатывает TimeoutError и возвращает "" —
+    сохраняет поведение сканера (_scan_project_errors)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *shlex.split(log_cmd),
@@ -1334,8 +1345,12 @@ async def _run_log_cmd(log_cmd: str, timeout: float = 10.0) -> str:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
+            if raise_on_timeout:
+                raise
             return ""
         return stdout.decode("utf-8", errors="replace")
+    except asyncio.TimeoutError:
+        raise
     except Exception:
         return ""
 
@@ -2137,7 +2152,7 @@ async def _error_scanner_loop(ctx: dict):
                     if _self_heal_active_count >= _max_conc:
                         break  # перепроверяем лимит для каждой карточки
                     _self_heal_active_count += 1
-                    asyncio.create_task(_self_heal_card(ctx, proj, card))
+                    _spawn_bg(_self_heal_card(ctx, proj, card))
                     print(f"[self_heal] запущена починка {proj['name']}/{card['id']}")
 
         except Exception as e:
@@ -2715,7 +2730,7 @@ async def api_move_task(req: web.Request) -> web.Response:
                 run_mode = "legacy"
 
         # Запускаем фоновую задачу (не ждём завершения)
-        asyncio.create_task(_run_card(ctx, req.app, project, card, session_key, run_mode=run_mode, wt_info=wt_info))
+        _spawn_bg(_run_card(ctx, req.app, project, card, session_key, run_mode=run_mode, wt_info=wt_info))
 
         return web.json_response(_board_payload(cwd))
 
@@ -3052,8 +3067,16 @@ async def api_free_delete(req: web.Request) -> web.Response:
 _OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CREDS_PATH = os.path.expanduser("~/.claude/.credentials.json")
 _usage_cache: dict = {"data": None, "ts": 0.0}
-_usage_lock = asyncio.Lock()
+_usage_lock: asyncio.Lock | None = None  # lazy — created inside the running event loop
 _USAGE_TTL = 60.0
+
+
+def _get_usage_lock() -> asyncio.Lock:
+    """Returns the module-level usage lock, creating it lazily inside the running loop."""
+    global _usage_lock
+    if _usage_lock is None:
+        _usage_lock = asyncio.Lock()
+    return _usage_lock
 
 
 def _read_oauth_token() -> str | None:
@@ -3105,7 +3128,7 @@ async def _fetch_oauth_usage():
 async def api_usage(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     now = time.time()
-    async with _usage_lock:
+    async with _get_usage_lock():
         cached = _usage_cache["data"]
         if cached is None or (now - _usage_cache["ts"]) > _USAGE_TTL:
             raw = await _fetch_oauth_usage()
@@ -4018,7 +4041,6 @@ def _migrate_cwd_keyed_state(old_cwd: str, new_cwd: str, ctx: dict) -> list[str]
     Best-effort: ошибка миграции НЕ откатывает уже выполненный move папки —
     возвращаем список предупреждений для ответа API.
     """
-    import shutil as _shutil
     warnings: list[str] = []
 
     # 1. SDK-каталог истории диалогов: ~/.claude/projects/<slug>
@@ -4031,10 +4053,10 @@ def _migrate_cwd_keyed_state(old_cwd: str, new_cwd: str, ctx: dict) -> list[str]
                 for f in old_sdk.iterdir():
                     dest = new_sdk / f.name
                     if not dest.exists():
-                        _shutil.move(str(f), str(dest))
+                        shutil.move(str(f), str(dest))
             else:
                 new_sdk.parent.mkdir(parents=True, exist_ok=True)
-                _shutil.move(str(old_sdk), str(new_sdk))
+                shutil.move(str(old_sdk), str(new_sdk))
     except Exception as e:  # noqa: BLE001
         warnings.append(f"sdk-сессии: {e}")
 
@@ -4051,7 +4073,7 @@ def _migrate_cwd_keyed_state(old_cwd: str, new_cwd: str, ctx: dict) -> list[str]
                     if src.exists():
                         dst = tdir / f"{new_slug}{suffix}"
                         if not dst.exists():
-                            _shutil.move(str(src), str(dst))
+                            shutil.move(str(src), str(dst))
     except Exception as e:  # noqa: BLE001
         warnings.append(f"timeline: {e}")
 
@@ -4123,8 +4145,7 @@ async def api_project_sessions(req: web.Request) -> web.Response:
                 mtime = f.stat().st_mtime
             except Exception:
                 mtime = 0
-            import datetime
-            last_used = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
+            last_used = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
             preview = _session_preview(f)
             sessions.append({
                 "session_id": sid,
@@ -5167,7 +5188,6 @@ async def api_new_project(req: web.Request) -> web.Response:
         (cwd / "TASKS.md").write_text(_serialize_tasks(preamble, cols, display_name), encoding="utf-8")
     except Exception as e:
         # Откат: удаляем папку если не смогли записать файлы
-        import shutil
         shutil.rmtree(str(cwd), ignore_errors=True)
         return web.json_response({"error": f"ошибка записи шаблонов: {e}"}, status=500)
 
@@ -5228,9 +5248,7 @@ async def api_new_project(req: web.Request) -> web.Response:
     # Подменяем текст карточки на онбординг-промпт ДО запуска задачи
     # (run_engine получает card["text"] как prompt)
     init_card["text"] = _NEW_PROJECT_PROMPT.format(cwd=str(cwd))
-    asyncio.create_task(
-        _run_card(ctx, req.app, project, init_card, session_key)
-    )
+    _spawn_bg(_run_card(ctx, req.app, project, init_card, session_key))
 
     return web.json_response({
         "id": pid,
@@ -5275,8 +5293,7 @@ async def api_project_rename(req: web.Request) -> web.Response:
         return web.json_response({"error": f"папка уже занята: {new_cwd}"}, status=409)
 
     try:
-        import shutil as _shutil
-        _shutil.move(str(old_cwd), str(new_cwd))
+        shutil.move(str(old_cwd), str(new_cwd))
     except Exception as e:
         return web.json_response({"error": f"ошибка переименования: {e}"}, status=500)
 
@@ -5502,7 +5519,7 @@ async def api_project_audit(req: web.Request) -> web.Response:
 
     # Подменяем текст карточки на полный промпт перед запуском
     audit_card["text"] = audit_prompt
-    asyncio.create_task(_run_card(ctx, req.app, project, audit_card, session_key))
+    _spawn_bg(_run_card(ctx, req.app, project, audit_card, session_key))
 
     return web.json_response({"ok": True, "card_id": audit_card["id"], "started": True})
 
@@ -5557,7 +5574,7 @@ async def api_project_upgrade(req: web.Request) -> web.Response:
 
     ctx["running"][session_key] = True
     card["text"] = prompt
-    asyncio.create_task(_run_card(ctx, req.app, project, card, session_key))
+    _spawn_bg(_run_card(ctx, req.app, project, card, session_key))
     return web.json_response({"ok": True, "card_id": card["id"], "started": True})
 
 
@@ -5732,7 +5749,7 @@ async def start(ptb_app, ctx: dict) -> None:
         print(f"[webapp] слушаю 0.0.0.0:{port}")
 
         # Фоновый сканер инцидентов: log_cmd → карточки в Failed
-        asyncio.create_task(_error_scanner_loop(ctx))
+        _spawn_bg(_error_scanner_loop(ctx))
         print(f"[webapp] сканер инцидентов запущен (интервал {_SCAN_INTERVAL_SEC}с)")
     except Exception as e:
         print(f"[webapp] ОШИБКА при запуске: {e}")
