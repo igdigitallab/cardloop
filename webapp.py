@@ -314,6 +314,11 @@ async def error_middleware(request: web.Request, handler):
         return await handler(request)
     except web.HTTPException:
         raise
+    except (ConnectionResetError, ConnectionAbortedError):
+        # Клиент закрыл соединение (типично для SSE/long-poll: закрыл вкладку, туннель оборвался).
+        # Это НЕ инцидент. Ответ уже мог начать стримиться → json_response невозможен. Пробрасываем
+        # (aiohttp сам приберёт транспорт; CancelledError — BaseException, проходит мимо и так).
+        raise
     except Exception as exc:
         request_id = _uuid.uuid4().hex[:8]
         logging.exception("UNHANDLED exc_class=%s path=%s request_id=%s", type(exc).__name__, request.path, request_id)
@@ -2856,8 +2861,13 @@ async def _sse_stream(req: web.Request, q: "asyncio.Queue[dict]", unsubscribe) -
                 payload = json.dumps(event, ensure_ascii=False)
                 await resp.write(f"data: {payload}\n\n".encode())
             except asyncio.TimeoutError:
-                # Heartbeat — держим соединение живым через туннель (Cloudflare / nginx)
-                await resp.write(b": ping\n\n")
+                # Heartbeat — держим соединение живым через туннель (Cloudflare / nginx).
+                # Клиент мог отвалиться — тогда write упадёт ConnectionResetError; это норма,
+                # а НЕ инцидент (раньше heartbeat-write был вне защиты → утекал в error_middleware).
+                try:
+                    await resp.write(b": ping\n\n")
+                except (ConnectionResetError, ConnectionAbortedError):
+                    break
             except (ConnectionResetError, ConnectionAbortedError):
                 break
             except asyncio.CancelledError:
