@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Project, ProjectStructureHealth, TabId } from '../types'
 import { api } from '../api'
-import { ProjectActivityProvider } from '../hooks/useProjectActivity'
+import { ProjectActivityProvider, useOnRunEnd, useProjectActivity } from '../hooks/useProjectActivity'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { OverviewTab } from '../tabs/OverviewTab'
 import { ClaudeMdTab } from '../tabs/ClaudeMdTab'
@@ -10,7 +10,6 @@ import { BoardTab } from '../tabs/BoardTab'
 import { ChatTab } from '../tabs/ChatTab'
 import { FilesTab } from '../tabs/FilesTab'
 import { MemoryTab } from '../tabs/MemoryTab'
-import { SecretsTab } from '../tabs/SecretsTab'
 import { TimelineTab } from '../tabs/TimelineTab'
 import { SettingsTab } from '../tabs/SettingsTab'
 import { t } from '../i18n'
@@ -21,7 +20,7 @@ interface Tab {
   disabled?: boolean
 }
 
-// Chat is no longer a tab — it lives in the permanent right panel
+// secrets tab removed (merged into Settings); 8 tabs remain
 const TABS: Tab[] = [
   { id: 'overview',  label: t['tab.overview'] },
   { id: 'claude-md', label: t['tab.claude_md'] },
@@ -29,7 +28,6 @@ const TABS: Tab[] = [
   { id: 'board',     label: t['tab.board'] },
   { id: 'files',     label: t['tab.files'] },
   { id: 'memory',    label: t['tab.memory'] },
-  { id: 'secrets',   label: t['tab.secrets'] },
   { id: 'timeline',  label: t['tab.timeline'] },
   { id: 'settings',  label: t['tab.settings'] },
 ]
@@ -77,6 +75,146 @@ interface Props {
 
 type GitSyncState = 'idle' | 'busy' | 'ok' | 'err'
 
+// ── Agent running indicator (must be inside ProjectActivityProvider) ──────────
+function AgentRunningChip({ projectId }: { projectId: string }) {
+  const [running, setRunning] = useState(false)
+
+  // Seed state from backend on mount so a mid-run page refresh shows the chip
+  useEffect(() => {
+    api.projectRunning(projectId)
+      .then(res => { if (res.running) setRunning(true) })
+      .catch(() => { /* non-critical */ })
+  }, [projectId])
+
+  useProjectActivity(evt => {
+    if (evt.kind === 'run_start') setRunning(true)
+    else if (evt.kind === 'run_end') setRunning(false)
+  })
+
+  if (!running) return null
+  return (
+    <span
+      className="agent-running-chip"
+      title={t['header.agent_running']}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        fontSize: 11,
+        color: 'var(--accent)',
+        fontWeight: 600,
+        animation: 'agent-pulse 1.4s ease-in-out infinite',
+      }}
+    >
+      {t['header.agent_running']}
+    </span>
+  )
+}
+
+// ── Incidents chip (inside provider, uses project.incidents from prop) ────────
+function IncidentsChip({ count, onNavigate }: { count: number; onNavigate: () => void }) {
+  if (count <= 0) return null
+  return (
+    <button
+      className="incidents-chip"
+      onClick={onNavigate}
+      title={`${t['header.incidents_chip']} ${count} активных инцидентов — перейти на доску`}
+      style={{
+        background: 'var(--red)',
+        color: '#fff',
+        border: 'none',
+        borderRadius: 4,
+        padding: '2px 7px',
+        fontSize: 11,
+        fontWeight: 700,
+        cursor: 'pointer',
+        lineHeight: 1.4,
+      }}
+    >
+      {t['header.incidents_chip']} {count}
+    </button>
+  )
+}
+
+// ── Always-mounted: refresh health on run_end (single subscription, no tab dependency) ──
+function HealthRunEndRefresher({ refresh }: { refresh: () => void }) {
+  useOnRunEnd(refresh)
+  return null
+}
+
+// ── Header scan button ────────────────────────────────────────────────────────
+function HeaderScanBtn({ projectId, onDone }: { projectId: string; onDone: () => void }) {
+  const [scanning, setScanning] = useState(false)
+
+  async function scan() {
+    if (scanning) return
+    setScanning(true)
+    try {
+      await api.scanErrors(projectId)
+      onDone()
+    } catch {
+      // non-critical — show nothing, onDone not called on error
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  return (
+    <button
+      className="git-sync-btn"
+      style={{ fontSize: 11, padding: '2px 8px' }}
+      onClick={scan}
+      disabled={scanning}
+      title="Ручной скан: прогнать log_cmd, новые ошибки → карточки"
+    >
+      {scanning ? '⏳ Скан…' : '🩺 Скан'}
+    </button>
+  )
+}
+
+// ── Header test runner button ─────────────────────────────────────────────────
+function HeaderTestRunner({ projectId }: { projectId: string }) {
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<{ ok: boolean; label: string } | null>(null)
+
+  async function run() {
+    setRunning(true); setResult(null)
+    try {
+      const res = await api.runTests(projectId)
+      if (res.detected) {
+        setResult({ ok: res.ok, label: res.ok ? '✓' : '✗' })
+      } else {
+        setResult({ ok: false, label: '?' })
+      }
+    } catch {
+      setResult({ ok: false, label: '!' })
+    } finally {
+      setRunning(false)
+    }
+    // Clear result after 6 seconds
+    setTimeout(() => setResult(null), 6000)
+  }
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+      <button
+        className="git-sync-btn"
+        style={{ fontSize: 11, padding: '2px 8px' }}
+        onClick={run}
+        disabled={running}
+        title={t['header.run_tests']}
+      >
+        {running ? t['header.running_tests'] : t['header.run_tests']}
+      </button>
+      {result && (
+        <span style={{ fontSize: 11, color: result.ok ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
+          {result.label}
+        </span>
+      )}
+    </span>
+  )
+}
+
 export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose, isActive }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
   const git = project.health.git
@@ -121,13 +259,18 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     }
   }
 
-  // ── Structure health badge ────────────────────────────────────────────────
+  // ── Structure health: single source of truth (no double-fetch) ────────────
   const [structHealth, setStructHealth] = useState<ProjectStructureHealth | null>(null)
-  useEffect(() => {
+
+  const refreshHealth = useCallback(() => {
     api.projectHealth(project.id)
       .then(h => setStructHealth(h))
       .catch(() => { /* endpoint may not exist yet */ })
   }, [project.id])
+
+  useEffect(() => {
+    refreshHealth()
+  }, [refreshHealth])
 
   // ── Git sync (commit + push одной кнопкой) ────────────────────────────────
   const [syncState, setSyncState] = useState<GitSyncState>('idle')
@@ -251,6 +394,9 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
       ? { flex: '0 0 0', overflow: 'hidden', minWidth: 0 }
       : { flex: `0 0 ${chatWidth}%`, maxWidth: `${chatWidth}%` }
 
+  // incidents count: project.incidents is defined in types.ts
+  const incidentsCount = project.incidents ?? 0
+
   // Свободный чат — без левой панели табов, чат на всю ширину.
   if (project.is_free) {
     return (
@@ -325,7 +471,6 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                 <span className="meta-chip">
                   <code>{project.cwd}</code>
                 </span>
-                <span className="meta-chip">{project.model}</span>
                 {structHealth && (
                   <button
                     className={`health-badge health-badge-${structHealth.color}`}
@@ -336,6 +481,11 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                     health {structHealth.score}/{structHealth.total}
                   </button>
                 )}
+                {/* Incidents chip — shown when project has active incidents */}
+                <IncidentsChip
+                  count={incidentsCount}
+                  onNavigate={() => setActiveTab('board')}
+                />
                 {git && (
                   <span className="git-status">
                     <span className={`git-sync-dot ${gitDotClass}`} title={gitDotTitle} />
@@ -356,16 +506,15 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                         ↑{git.unpushed}
                       </span>
                     )}
-                    {gitNeedsSync && (
-                      <button
-                        className={`git-sync-btn ${syncState}`}
-                        onClick={onGitSync}
-                        disabled={syncState === 'busy'}
-                        title={gitDirty ? t['git.commit_and_push'] : t['git.push']}
-                      >
-                        {syncState === 'busy' ? '…' : '↑ Sync'}
-                      </button>
-                    )}
+                    {/* Sync button shown always (not gated on gitNeedsSync) */}
+                    <button
+                      className={`git-sync-btn ${syncState}`}
+                      onClick={onGitSync}
+                      disabled={syncState === 'busy'}
+                      title={gitDirty ? t['git.commit_and_push'] : t['git.push']}
+                    >
+                      {syncState === 'busy' ? '…' : '↑ Sync'}
+                    </button>
                     {syncState !== 'idle' && syncMsg && (
                       <span className={`git-sync-msg ${syncState}`} title={syncMsg}>
                         {syncState === 'ok' ? '✓ ' : syncState === 'err' ? '✗ ' : ''}{syncMsg}
@@ -373,6 +522,12 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                     )}
                   </span>
                 )}
+                {/* Agent running indicator + test runner + scan — inside provider */}
+                <AgentRunningChip projectId={project.id} />
+                <HeaderScanBtn projectId={project.id} onDone={refreshHealth} />
+                <HeaderTestRunner projectId={project.id} />
+                {/* Always-mounted: single run_end→refreshHealth path */}
+                <HealthRunEndRefresher refresh={refreshHealth} />
               </div>
             </div>
           </div>
@@ -395,14 +550,17 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
         </div>
 
         <div className="tab-content">
-          {activeTab === 'overview'  && <ErrorBoundary label="Обзор"><OverviewTab project={project} /></ErrorBoundary>}
+          {activeTab === 'overview'  && (
+            <ErrorBoundary label="Обзор">
+              <OverviewTab project={project} health={structHealth} refreshHealth={refreshHealth} />
+            </ErrorBoundary>
+          )}
           {activeTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'logs'      && <ErrorBoundary label="Логи"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
           {activeTab === 'board'     && <ErrorBoundary label="Доска"><BoardTab projectId={project.id} isActive={isActive} /></ErrorBoundary>}
           {activeTab === 'files'     && <ErrorBoundary label="Файлы"><FilesTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'memory'    && <ErrorBoundary label="Память"><MemoryTab projectId={project.id} /></ErrorBoundary>}
-          {activeTab === 'secrets'   && <ErrorBoundary label="Ключи"><SecretsTab projectId={project.id} /></ErrorBoundary>}
-          {activeTab === 'timeline'  && <ErrorBoundary label="Лента"><TimelineTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'timeline'  && <ErrorBoundary label="Активность"><TimelineTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'settings'  && <ErrorBoundary label="Настройки"><SettingsTab projectId={project.id} /></ErrorBoundary>}
         </div>
       </div>
@@ -453,13 +611,3 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   )
 }
 
-// DisabledTab reserved for future tabs that are not yet implemented
-export function DisabledTab({ name, icon }: { name: string; icon: string }) {
-  return (
-    <div className="tab-placeholder">
-      <div className="tab-placeholder-icon">{icon}</div>
-      <h3>{name}</h3>
-      <p>{t['project.tab_disabled_hint']}</p>
-    </div>
-  )
-}

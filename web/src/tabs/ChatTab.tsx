@@ -16,6 +16,7 @@ import {
 } from '../types'
 import { useProjectActivity } from '../hooks/useProjectActivity'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
+import { MODELS } from '../lib/models'
 
 interface Props {
   project: Project
@@ -25,7 +26,6 @@ interface Props {
 }
 
 type ModelKey = 'opus' | 'sonnet' | 'haiku'
-const MODEL_OPTIONS: ModelKey[] = ['sonnet', 'opus', 'haiku']
 
 /** Грубая оценка токенов: ~4 символа на токен (общепринятый эвристик для англ/русск). */
 function estimateTokens(messages: ChatMessage[]): number {
@@ -530,12 +530,12 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           <span className="chat-model-label">🧠</span>
           <select
             className="chat-model-select"
-            value={MODEL_OPTIONS.includes(project.model as ModelKey) ? project.model : 'sonnet'}
+            value={MODELS.some(m => m.value === project.model) ? project.model : 'sonnet'}
             onChange={e => handleModelChange(e.target.value as ModelKey)}
             disabled={changingModel || streaming}
           >
-            {MODEL_OPTIONS.map(m => (
-              <option key={m} value={m}>{m}</option>
+            {MODELS.map(m => (
+              <option key={m.value} value={m.value}>{m.label}</option>
             ))}
           </select>
         </div>

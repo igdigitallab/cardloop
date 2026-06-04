@@ -53,7 +53,7 @@ export const ru = {
   'tab.board': 'Доска',
   'tab.files': 'Файлы',
   'tab.memory': 'Память',
-  'tab.timeline': '🕒 Лента',
+  'tab.timeline': '🕒 Активность',
   'tab.settings': '⚙️ Настройки',
   'tab.sections_aria': 'Разделы проекта',
 
@@ -96,30 +96,20 @@ export const ru = {
 
   // ── Overview tab ─────────────────────────────────────────────
   'overview.initializing': 'Идёт инициализация',
-  'overview.self_heal_label': '🔧 Самолечение',
-  'overview.self_heal_on': 'Включено',
-  'overview.self_heal_off': 'Выключено',
-  'overview.self_heal_hint': 'Агент сам чинит новые ошибки в worktree и готовит фикс на твоё одобрение. Ничего не применяется без тебя.',
-  'overview.self_heal_saving': 'Сохраняю…',
-  'overview.self_heal_error': 'Ошибка сохранения',
-  'overview.notify_label': '🔔 Уведомлять об ошибках',
-  'overview.notify_on': 'Включено',
-  'overview.notify_off': 'Выключено',
-  'overview.notify_hint': 'Сканер пишет тебе в TG-топик проекта, когда что-то упало (новые инциденты). Независимо от самолечения.',
-  'overview.notify_saving': 'Сохраняю…',
-  'overview.scan_hint_with_source': 'Прогнать log_cmd + test_cmd, новые ошибки → карточки в Failed',
-  'overview.scan_hint_no_source': 'Сначала задай log_cmd или test_cmd в topics.json',
-  'overview.scan': '▶ Сканировать',
-  'overview.scanning': 'Сканирую…',
-  'overview.tests': 'Тесты',
-  'overview.run_tests': '▶ Запустить',
-  'overview.running_tests': 'Запускаю…',
   'overview.cwd': 'Рабочая директория',
-  'overview.model': 'Модель',
   'overview.not_bound': 'не привязан',
   'overview.git_branch': 'Ветка',
   'overview.git_changes': 'Изменений',
   'overview.git_unpushed': 'Не отправлено',
+  'overview.tg_thread': 'Telegram тред',
+  'overview.git_state': 'Git состояние',
+  'overview.git_unavailable': 'Git недоступен для этого проекта',
+
+  // ── Header zone ──────────────────────────────────────────────
+  'header.agent_running': '● идёт агент',
+  'header.run_tests': '▶ Тесты',
+  'header.running_tests': '⏳ Тесты…',
+  'header.incidents_chip': '🚨',
 
   // ── Board tab ────────────────────────────────────────────────
   'board.loading': 'Загрузка доски...',
@@ -271,7 +261,6 @@ export const ru = {
   'memory.path_hint': '.claude-ops/memory/',
 
   // ── Secrets tab (Spec 007) ───────────────────────────────────
-  'tab.secrets': '🔑 Ключи',
   'secrets.loading': 'Загрузка ключей...',
   'secrets.empty_title': 'Нет секретов',
   'secrets.empty_text': 'Секреты хранятся в .claude-ops/secrets/secrets.env (chmod 600, не в git) и доступны агенту как переменные окружения.',

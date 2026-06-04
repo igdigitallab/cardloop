@@ -9,7 +9,7 @@ export interface ProjectHealth {
 }
 
 export interface ProjectStructureHealth {
-  items: { key: string; label: string; ok: boolean; hint: string | null }[]
+  items: { key: string; label: string; ok: boolean; hint: string | null; optional?: boolean }[]
   score: number
   total: number
   color: 'green' | 'yellow' | 'red'
@@ -40,16 +40,6 @@ export interface ClaudeMd {
   path: string
   content: string
   exists: boolean
-}
-
-export interface Spec {
-  name: string
-  path: string
-}
-
-export interface SpecContent {
-  name: string
-  content: string
 }
 
 export interface TaskCard {
@@ -145,7 +135,7 @@ export interface FileContent {
   error?: string
 }
 
-export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'secrets' | 'timeline' | 'settings'
+export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings'
 
 // ─── Settings (карточка f2ba02) ───────────────────────────────────────────────
 export interface ProjectSettings {

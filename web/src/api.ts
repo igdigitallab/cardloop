@@ -42,25 +42,6 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
-  readme: (id: string) =>
-    apiFetch<import('./types').ClaudeMd>(`/api/projects/${id}/readme`),
-
-  saveReadme: (id: string, content: string) =>
-    apiFetch<import('./types').ClaudeMd>(`/api/projects/${id}/readme`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    }),
-
-  specs: (id: string) =>
-    apiFetch<{ specs: import('./types').Spec[] }>(`/api/projects/${id}/specs`),
-
-  spec: (id: string, name: string) =>
-    apiFetch<import('./types').SpecContent>(`/api/projects/${id}/specs/${name}`),
-
-  activity: (id: string) =>
-    apiFetch<{ lines: string[] }>(`/api/projects/${id}/activity`),
-
   projectLogs: (id: string) =>
     apiFetch<import('./types').ProjectLogs>(`/api/projects/${id}/logs`),
 

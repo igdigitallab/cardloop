@@ -391,6 +391,12 @@
   margin: 0;
 }
 
+/* ── Agent running chip pulse ────────────────────────────────── */
+@keyframes agent-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .45; }
+}
+
 /* ── Welcome banner (onboarding) ────────────────────────────── */
 .welcome-banner {
   border-left: 3px solid var(--accent);

@@ -1,104 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Project, TestResult } from '../types'
+import { Project, ProjectStructureHealth } from '../types'
 import { api } from '../api'
-import { ProjectStructureCard } from '../components/ProjectStructureCard'
+import { ProjectStructureCardFull } from '../components/ProjectStructureCard'
 import { t } from '../i18n'
-
-// ─── Spec 010: Self-Heal Toggle ─────────────────────────────────────────────
-
-function SelfHealToggle({ project, onToggled }: { project: Project; onToggled?: (enabled: boolean) => void }) {
-  const [enabled, setEnabled] = useState<boolean>(!!project.self_heal)
-  const [saving, setSaving] = useState(false)
-  const [err, setErr] = useState('')
-
-  // Sync if project prop changes (e.g. parent refreshes)
-  useEffect(() => { setEnabled(!!project.self_heal) }, [project.self_heal])
-
-  async function toggle() {
-    const next = !enabled
-    setSaving(true); setErr('')
-    try {
-      await api.toggleSelfHeal(project.id, next)
-      setEnabled(next)
-      onToggled?.(next)
-    } catch (e: unknown) {
-      setErr(String(e instanceof Error ? e.message : e))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="git-card test-card">
-      <div className="test-card-header">
-        <span className="git-card-header" style={{ margin: 0 }}>{t['overview.self_heal_label']}</span>
-        <button
-          className={`doc-btn ${enabled ? 'primary' : ''}`}
-          onClick={toggle}
-          disabled={saving || !!project.is_free}
-          aria-pressed={enabled}
-          aria-label={t['overview.self_heal_label']}
-          title={enabled ? t['overview.self_heal_on'] : t['overview.self_heal_off']}
-        >
-          {saving ? t['overview.self_heal_saving'] : (enabled ? t['overview.self_heal_on'] : t['overview.self_heal_off'])}
-        </button>
-      </div>
-      <div className="test-status dim" style={{ fontSize: 12, marginTop: 4 }}>
-        {t['overview.self_heal_hint']}
-      </div>
-      {err && <div className="error-state" style={{ marginTop: 4 }}>⚠ {err}</div>}
-    </div>
-  )
-}
-
-// ─── TG-уведомления о новых ошибках («упало») ───────────────────────────────
-
-function NotifyOnErrorToggle({ project }: { project: Project }) {
-  const [enabled, setEnabled] = useState<boolean>(!!project.notify_on_error)
-  const [saving, setSaving] = useState(false)
-  const [err, setErr] = useState('')
-
-  useEffect(() => { setEnabled(!!project.notify_on_error) }, [project.notify_on_error])
-
-  async function toggle() {
-    const next = !enabled
-    setSaving(true); setErr('')
-    try {
-      await api.toggleNotifyOnError(project.id, next)
-      setEnabled(next)
-    } catch (e: unknown) {
-      setErr(String(e instanceof Error ? e.message : e))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="git-card test-card">
-      <div className="test-card-header">
-        <span className="git-card-header" style={{ margin: 0 }}>{t['overview.notify_label']}</span>
-        <button
-          className={`doc-btn ${enabled ? 'primary' : ''}`}
-          onClick={toggle}
-          disabled={saving || !!project.is_free}
-          aria-pressed={enabled}
-          aria-label={t['overview.notify_label']}
-          title={enabled ? t['overview.notify_on'] : t['overview.notify_off']}
-        >
-          {saving ? t['overview.notify_saving'] : (enabled ? t['overview.notify_on'] : t['overview.notify_off'])}
-        </button>
-      </div>
-      <div className="test-status dim" style={{ fontSize: 12, marginTop: 4 }}>
-        {t['overview.notify_hint']}
-      </div>
-      {err && <div className="error-state" style={{ marginTop: 4 }}>⚠ {err}</div>}
-    </div>
-  )
-}
-
-interface Props {
-  project: Project
-}
 
 const ONBOARDING_MARKERS = ['Заполнить во время онбординга', 'инициализируется']
 
@@ -127,112 +31,13 @@ function WelcomeBanner({ projectId }: { projectId: string }) {
   )
 }
 
-function IncidentScanner({ project }: { project: Project }) {
-  const [running, setRunning] = useState(false)
-  const [res, setRes] = useState<{ ok: boolean; scanned: number; added: number; updated: number; error?: string } | null>(null)
-  const [lastScan, setLastScan] = useState<string | null>(null)
-
-  const hasSource = !!(project.log_cmd || project.test_cmd)
-
-  async function scan() {
-    setRunning(true)
-    setRes(null)
-    try {
-      const r = await api.scanErrors(project.id)
-      setRes(r)
-      setLastScan(new Date().toLocaleTimeString('ru'))
-    } catch (e: unknown) {
-      setRes({ ok: false, scanned: 0, added: 0, updated: 0, error: String(e instanceof Error ? e.message : e) })
-    } finally {
-      setRunning(false)
-    }
-  }
-
-  return (
-    <div className="git-card test-card">
-      <div className="test-card-header">
-        <span className="git-card-header" style={{ margin: 0 }}>🩺 Сканер инцидентов</span>
-        <button
-          className="doc-btn primary"
-          onClick={scan}
-          disabled={running || !hasSource}
-          title={hasSource ? t['overview.scan_hint_with_source'] : t['overview.scan_hint_no_source']}
-        >
-          {running ? t['overview.scanning'] : t['overview.scan']}
-        </button>
-      </div>
-      {!hasSource && (
-        <div className="test-status dim">
-          Не настроены источники. Добавь <code>log_cmd</code> и/или <code>test_cmd</code> в <code>data/topics.json</code> для этого проекта.
-          <br />
-          Пример: <code>"log_cmd": "journalctl -u my-svc -n 300 --no-pager"</code>, <code>"test_cmd": "venv/bin/python -m pytest -q"</code>.
-        </div>
-      )}
-      {hasSource && !res && !running && (
-        <div className="test-status dim">
-          Источники: {project.log_cmd ? '📜 logs' : ''}{project.log_cmd && project.test_cmd ? ' + ' : ''}{project.test_cmd ? '🧪 tests' : ''}.
-          Авто-скан каждые 5 мин в фоне.
-        </div>
-      )}
-      {res && (
-        <div className={`test-status ${res.ok ? (res.added > 0 ? 'warn' : 'ok') : 'fail'}`}>
-          {res.error ? `⚠ ${res.error}` : (
-            <>
-              {res.added > 0 ? `🚨 ${res.added} новых` : '✓ новых инцидентов нет'}
-              {res.updated > 0 && ` · ↻ ${res.updated} обновлено`}
-              {res.scanned > 0 && ` · просмотрено ${res.scanned} событий`}
-              {lastScan && ` · в ${lastScan}`}
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  )
+interface Props {
+  project: Project
+  health: ProjectStructureHealth | null
+  refreshHealth: () => void
 }
 
-function TestRunner({ projectId }: { projectId: string }) {
-  const [running, setRunning] = useState(false)
-  const [res, setRes] = useState<TestResult | null>(null)
-  const [err, setErr] = useState('')
-
-  async function run() {
-    setRunning(true); setErr(''); setRes(null)
-    try {
-      setRes(await api.runTests(projectId))
-    } catch (e: unknown) {
-      setErr(String(e instanceof Error ? e.message : e))
-    } finally {
-      setRunning(false)
-    }
-  }
-
-  return (
-    <div className="git-card test-card">
-      <div className="test-card-header">
-        <span className="git-card-header" style={{ margin: 0 }}>{t['overview.tests']}</span>
-        <button className="doc-btn primary" onClick={run} disabled={running}>
-          {running ? t['overview.running_tests'] : t['overview.run_tests']}
-        </button>
-      </div>
-      {err && <div className="error-state">⚠ {err}</div>}
-      {res && !res.detected && (
-        <div className="test-status dim">{res.output}</div>
-      )}
-      {res && res.detected && (
-        <>
-          <div className={`test-status ${res.ok ? 'ok' : 'fail'}`}>
-            {res.ok ? '✓ прошли' : (res.timed_out ? '⏱ таймаут' : '✗ упали')}
-            {' · '}<span className="mono">{res.cmd}</span>
-            {res.exit_code != null && res.exit_code >= 0 ? ` · exit ${res.exit_code}` : ''}
-          </div>
-          <pre className="test-output">{res.output || '(пустой вывод)'}</pre>
-        </>
-      )}
-    </div>
-  )
-}
-
-export function OverviewTab({ project }: Props) {
+export function OverviewTab({ project, health, refreshHealth }: Props) {
   const git = project.health.git
 
   return (
@@ -246,12 +51,7 @@ export function OverviewTab({ project }: Props) {
         </div>
 
         <div className="info-card">
-          <div className="info-card-label">{t['overview.model']}</div>
-          <div className="info-card-value">{project.model}</div>
-        </div>
-
-        <div className="info-card">
-          <div className="info-card-label">Telegram тред</div>
+          <div className="info-card-label">{t['overview.tg_thread']}</div>
           <div className="info-card-value">
             {project.tg_thread !== null ? (
               <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>#{project.tg_thread}</span>
@@ -264,7 +64,7 @@ export function OverviewTab({ project }: Props) {
 
       {git ? (
         <div className="git-card">
-          <div className="git-card-header">Git состояние</div>
+          <div className="git-card-header">{t['overview.git_state']}</div>
           <div className="git-stats">
             <div className="git-stat">
               <span className="git-stat-label">{t['overview.git_branch']}</span>
@@ -294,21 +94,15 @@ export function OverviewTab({ project }: Props) {
             <line x1="12" y1="8" x2="12" y2="12"/>
             <line x1="12" y1="16" x2="12.01" y2="16"/>
           </svg>
-          Git недоступен для этого проекта
+          {t['overview.git_unavailable']}
         </div>
       )}
 
-      <ProjectStructureCard projectId={project.id} />
-
-      <IncidentScanner project={project} />
-
-      {/* Spec 010: тумблер самолечения — только для обычных (не free) проектов */}
-      {!project.is_free && <SelfHealToggle project={project} />}
-
-      {/* TG-уведомления об ошибках («упало») */}
-      {!project.is_free && <NotifyOnErrorToggle project={project} />}
-
-      <TestRunner projectId={project.id} />
+      <ProjectStructureCardFull
+        projectId={project.id}
+        health={health}
+        refreshHealth={refreshHealth}
+      />
     </div>
   )
 }

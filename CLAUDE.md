@@ -102,7 +102,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - **Секреты не в audit/git.** `audit()` принимает только (project, kind, text) — env туда никогда не передаётся. `secrets.env` gitignored автоматически при первой записи.
 - **Ключи строго `^[A-Z_][A-Z0-9_]*$`.** lowercase, дефис, пробел, traversal `..` → 400. Это env-injection защита.
 - **Изоляция по cwd жёсткая.** `_secrets_read(cwd)` читает только `.claude-ops/secrets/secrets.env` внутри cwd этого проекта — никакой утечки между проектами.
-- **TabId актуальные:** `overview | claude-md | logs | board | files | memory | secrets | timeline` (добавлен `timeline` — Spec 008).
+- **TabId актуальные:** `overview | claude-md | logs | board | files | memory | timeline | settings` (8 вкладок; `secrets` — теперь секция в «Настройках», не вкладка; «Лента»→«Активность» — Spec 011 Ф2).
 
 ### Прочее
 - **Проценты лимитов ≠ из SDK.** Пассивный `RateLimitEvent` SDK даёт только `status`+`resets_at`, `utilization=None`. Источник % — oauth-эндпоинт `GET https://api.anthropic.com/api/oauth/usage` (header `anthropic-beta: oauth-2025-04-20`). `webapp.py:api_usage` тянет его (кэш 60с). TG-команда `/usage` пока на пассивном.
@@ -111,7 +111,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
   - **id проекта в API = basename cwd, НЕ поле `project`.** `/api/projects/<id>/logs` ждёт `networking-os`, а не `Networking-OS` (`_project_id(cwd)`). Фронт шлёт basename сам; важно для ручных curl.
   - **Кнопка «настроить логи» (LogsTab.tsx) отдаёт агенту полную инструкцию.** Empty-state создаёт backlog-карточку: короткий `text` (заголовок) + детальный `description` (как выбрать log_cmd/test_cmd: systemd/docker/файл, exec-без-sudo-без-shell, обязательная проверка вывода, test_cmd относителен cwd проекта, hot-reload вместо рестарта). `_run_card` склеивает промпт = `text + "\n\n" + description`. Многострочный description round-trip'ит через TASKS.md (`  > строка` на строку; пустые строки тоже, `_DESC_LINE_RE=^  > (.*)$`). НЕ ужимать обратно в однострочник — агент тогда снова сделает криво.
 - **Timeline (Spec 008): `data/timeline/<slug>.jsonl`.** Каждое событие `_bus_publish` персистируется. Slug = `cwd.replace('/', '-')`. Ротация при >5MB → `.jsonl.1` (одна; старая `.1` перезаписывается). Запись глотает все исключения (прогон не ломается). env-поле никогда не пишется. Инициализация: `_timeline_init(ctx)` в `start()`. `_TIMELINE_DATA_DIR` / `_TIMELINE_TOPICS` — модульные переменные (None до init — корректно).
-- **TabId актуальные:** `overview | claude-md | logs | board | files | memory | secrets | timeline`.
+- **TabId актуальные:** `overview | claude-md | logs | board | files | memory | timeline | settings` (8 вкладок; `secrets` — секция в «Настройках», не вкладка — Spec 011 Ф2).
 - **Тест-харнес userbot.** Слать боту только от аккаунта Игоря (282311426). pyrogram 2.0.106 — греть `get_chat(invite_link)` перед send; в топик `reply_to_message_id=<thread_id>`. Сессия — `networking-os/secrets/tg.session`.
 
 ---

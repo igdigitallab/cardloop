@@ -1,39 +1,21 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { api } from '../api'
 import { ProjectStructureHealth } from '../types'
-import { useOnRunEnd } from '../hooks/useProjectActivity'
 
-interface Props {
+// Version with projectId for audit/upgrade actions (used in OverviewTab)
+interface FullProps {
+  health: ProjectStructureHealth | null
+  refreshHealth: () => void
   projectId: string
 }
 
-export function ProjectStructureCard({ projectId }: Props) {
-  const [health, setHealth] = useState<ProjectStructureHealth | null>(null)
-  const [loading, setLoading] = useState(true)
+export function ProjectStructureCardFull({ health, refreshHealth, projectId }: FullProps) {
   const [auditMsg, setAuditMsg] = useState<string>('')
   const [auditBusy, setAuditBusy] = useState(false)
+  const [upgradeBusy, setUpgradeBusy] = useState(false)
 
-  async function load() {
-    try {
-      const h = await api.projectHealth(projectId)
-      setHealth(h)
-    } catch {
-      // silently ignore — endpoint may not exist yet
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    setLoading(true)
-    setHealth(null)
-    setAuditMsg('')
-    load()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId])
-
-  // Refresh on run_end — agent may have fixed things
-  useOnRunEnd(load)
+  // run_end → refresh is handled by HealthRunEndRefresher in the header (always-mounted)
+  void refreshHealth  // prop kept for API compatibility
 
   async function handleAudit() {
     if (auditBusy) return
@@ -54,7 +36,6 @@ export function ProjectStructureCard({ projectId }: Props) {
     }
   }
 
-  const [upgradeBusy, setUpgradeBusy] = useState(false)
   async function handleFix() {
     if (upgradeBusy) return
     setUpgradeBusy(true)
@@ -74,10 +55,34 @@ export function ProjectStructureCard({ projectId }: Props) {
     }
   }
 
-  if (loading) return null
   if (!health) return null
 
   const dotClass = health.color === 'green' ? 'green' : health.color === 'yellow' ? 'yellow' : 'red'
+  const failingItems = health.items.filter(item => !item.optional && !item.ok)
+  const allPassed = failingItems.length === 0
+
+  if (allPassed) {
+    return (
+      <div className="git-card" style={{ marginTop: 16 }}>
+        <div className="git-card-header" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span>Структура проекта</span>
+          <span className="git-sync-dot green" />
+          <span style={{ marginLeft: 'auto', fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text2)', textTransform: 'none', letterSpacing: 0 }}>
+            ✓ всё подключено
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <button className="git-sync-btn" style={{ fontSize: 12, padding: '5px 12px' }}
+            onClick={handleAudit} disabled={auditBusy} title="Запустить аудит проекта">
+            {auditBusy ? '⏳…' : '🩺 Аудит проекта'}
+          </button>
+          {auditMsg && <span style={{ fontSize: 12, color: auditMsg.startsWith('Ошибка') ? 'var(--red)' : 'var(--green)' }}>
+            {auditMsg.startsWith('Карточка') ? '✓ ' : ''}{auditMsg}
+          </span>}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="git-card" style={{ marginTop: 16 }}>
@@ -90,22 +95,15 @@ export function ProjectStructureCard({ projectId }: Props) {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
-        {health.items.map(item => (
+        {failingItems.map(item => (
           <div key={item.key} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{
-                fontSize: 12,
-                color: item.ok ? 'var(--green)' : 'var(--yellow)',
-                flexShrink: 0,
-                fontWeight: 600,
-              }}>
-                {item.ok ? '✓' : '✗'}
-              </span>
-              <span style={{ fontSize: 13, color: item.ok ? 'var(--text)' : 'var(--text2)' }}>
-                {item.label}
+              <span style={{ fontSize: 12, color: 'var(--yellow)', flexShrink: 0, fontWeight: 600 }}>✗</span>
+              <span style={{ fontSize: 13, color: 'var(--text2)' }}>
+                доделай: {item.label}
               </span>
             </div>
-            {!item.ok && item.hint && (
+            {item.hint && (
               <div style={{ fontSize: 11, color: 'var(--text3)', paddingLeft: 18 }}>
                 {item.hint}
               </div>
@@ -115,23 +113,15 @@ export function ProjectStructureCard({ projectId }: Props) {
       </div>
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <button
-          className="git-sync-btn"
-          style={{ fontSize: 12, padding: '5px 12px' }}
-          onClick={handleAudit}
-          disabled={auditBusy}
-          title="Запустить аудит проекта"
-        >
+        <button className="git-sync-btn" style={{ fontSize: 12, padding: '5px 12px' }}
+          onClick={handleAudit} disabled={auditBusy} title="Запустить аудит проекта">
           {auditBusy ? '⏳…' : '🩺 Аудит проекта'}
         </button>
         {health.color !== 'green' && (
-          <button
-            className="git-sync-btn"
+          <button className="git-sync-btn"
             style={{ fontSize: 12, padding: '5px 12px', color: 'var(--text2)' }}
-            onClick={handleFix}
-            disabled={upgradeBusy}
-            title="Дополнить CLAUDE.md/TASKS.md/README/.gitignore по шаблону, не переписывая существующее"
-          >
+            onClick={handleFix} disabled={upgradeBusy}
+            title="Дополнить CLAUDE.md/TASKS.md/README/.gitignore по шаблону, не переписывая существующее">
             {upgradeBusy ? '⏳…' : '🔧 Подтянуть до стандарта'}
           </button>
         )}
@@ -147,3 +137,4 @@ export function ProjectStructureCard({ projectId }: Props) {
     </div>
   )
 }
+

@@ -2,10 +2,10 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { ProjectSettings, GlobalSettings, GlobalSettingsEffective } from '../types'
 import { Spinner } from '../components/Spinner'
+import { SecretsTab } from './SecretsTab'
+import { MODELS } from '../lib/models'
 
 interface Props { projectId: string }
-
-const MODELS = ['opus', 'sonnet', 'haiku']
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -96,12 +96,6 @@ export function SettingsTab({ projectId }: Props) {
                  aria-label="Git-синхронизация" />
         </Row>
 
-        <Row title="Модель" hint="Модель агента для этого проекта.">
-          <select value={proj.model || 'sonnet'} onChange={ev => setProj({ ...proj, model: ev.target.value })}>
-            {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </Row>
-
         <Row title="Самолечение"
              hint="Агент-чинильщик при падении тестов (доходит до Review, не авто-применяет). Глобальный master-выключатель ниже перекрывает.">
           <input type="checkbox" checked={proj.self_heal}
@@ -165,9 +159,10 @@ export function SettingsTab({ projectId }: Props) {
                  onChange={ev => setE({ scan_interval_sec: Number(ev.target.value) })} />
         </Row>
 
-        <Row title="Дефолт-модель новых проектов">
+        <Row title="Дефолт-модель новых проектов"
+             hint="Применяется при создании нового проекта. Существующие проекты не затрагиваются.">
           <select value={e.default_model} onChange={ev => setE({ default_model: ev.target.value })}>
-            {MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+            {MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
         </Row>
 
@@ -190,6 +185,16 @@ export function SettingsTab({ projectId }: Props) {
           {globMsg && <span style={{ fontSize: 12, color: 'var(--text2)' }}>{globMsg}</span>}
         </div>
       </section>
+
+      {/* ── Секреты проекта ── */}
+      <section>
+        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>{'\u{1F511}'} Секреты проекта</h3>
+        <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--text3)' }}>
+          Переменные окружения, доступные агенту при выполнении задач. Не коммитятся в git.
+        </p>
+        <SecretsTab projectId={projectId} />
+      </section>
+
     </div>
   )
 }
