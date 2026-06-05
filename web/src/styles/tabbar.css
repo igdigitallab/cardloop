@@ -8,6 +8,36 @@
   min-height: 36px;
 }
 
+/* ── Hamburger — hidden on desktop, shown on tablet/mobile ─── */
+.ptab-hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border);
+  color: var(--text2);
+  font-size: 18px;
+  line-height: 1;
+  /* min tap target */
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition), color var(--transition);
+}
+.ptab-hamburger:hover {
+  background: var(--bg3);
+  color: var(--text);
+}
+
+@media (max-width: 1024px) {
+  .ptab-hamburger {
+    display: flex;
+  }
+}
+
 .ptab-list {
   display: flex;
   align-items: stretch;
@@ -406,6 +436,94 @@
 }
 .rename-confirm-btn:hover { background: var(--green); color: #fff; border-color: var(--green); }
 .rename-cancel-btn:hover  { background: var(--bg4);  color: var(--red); border-color: var(--red); }
+
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE — TabBar + ProjectHeader + Tabs
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Tab list: horizontally scrollable on mobile ─────────────── */
+@media (max-width: 1024px) {
+  .ptab-list {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    /* hide scrollbar but keep functionality */
+    scrollbar-width: none;
+  }
+  .ptab-list::-webkit-scrollbar { display: none; }
+
+  /* Ensure project tabs have enough tap target height */
+  .ptab {
+    min-height: 44px;
+  }
+
+  .ptab-new {
+    min-height: 44px;
+  }
+}
+
+/* ── Project header: condense on mobile ─────────────────────── */
+@media (max-width: 640px) {
+  .project-header {
+    padding: 10px 12px 0;
+  }
+
+  .project-header-top {
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .project-header-icon {
+    width: 28px;
+    height: 28px;
+    font-size: 13px;
+  }
+
+  .project-title {
+    font-size: 15px;
+  }
+
+  .project-meta-row {
+    gap: 6px;
+  }
+
+  /* Hide the cwd chip on very small screens — too wide, just noise */
+  .meta-chip {
+    display: none;
+  }
+
+  /* Keep git status, health badge, incidents — they wrap */
+  .project-meta-row { flex-wrap: wrap; }
+
+  /* Tabs: scrollable, tighter padding */
+  .tabs {
+    padding: 0 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+
+  .tab-btn {
+    padding: 8px 9px;
+    font-size: 12px;
+    min-height: 44px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Tab content: tighter padding */
+  .tab-content {
+    padding: 12px;
+  }
+}
+
+/* ── Sync message: hide on very small to avoid overflow ─────── */
+@media (max-width: 480px) {
+  .git-sync-msg {
+    display: none;
+  }
+}
 
 /* ── Health badge (project header meta row) ──────────────────── */
 .health-badge {

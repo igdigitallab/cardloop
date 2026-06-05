@@ -71,10 +71,16 @@ export function ProjectStructureCardFull({ health, refreshHealth, projectId }: F
             ✓ all connected
           </span>
         </div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <button className="git-sync-btn" style={{ fontSize: 12, padding: '5px 12px' }}
             onClick={handleAudit} disabled={auditBusy} title="Run project audit">
             {auditBusy ? '⏳…' : '🩺 Audit project'}
+          </button>
+          <button className="git-sync-btn"
+            style={{ fontSize: 12, padding: '5px 12px', color: 'var(--text2)' }}
+            onClick={handleFix} disabled={upgradeBusy}
+            title="Fill in CLAUDE.md/TASKS.md/README/.gitignore from template without overwriting existing content">
+            {upgradeBusy ? '⏳…' : '🔧 Bring up to standard'}
           </button>
           {auditMsg && <span style={{ fontSize: 12, color: auditMsg.startsWith('Error') ? 'var(--red)' : 'var(--green)' }}>
             {auditMsg.startsWith('Card') ? '✓ ' : ''}{auditMsg}

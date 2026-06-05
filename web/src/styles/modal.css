@@ -106,3 +106,67 @@
 }
 .prompt-add-text:focus { border-color: var(--accent); }
 .prompt-add-actions { display: flex; gap: 8px; }
+
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE — Modals + Pickers → bottom-sheet on ≤640px
+   ══════════════════════════════════════════════════════════════ */
+
+@media (max-width: 640px) {
+  /* Generic run-modal → full-width bottom sheet */
+  .run-modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .run-modal {
+    width: 100%;
+    max-width: 100%;
+    max-height: 90svh;
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+
+  /* test-output modal inside board cards */
+  .test-output-modal {
+    border-radius: var(--radius) var(--radius) 0 0 !important;
+  }
+
+  /* Reset confirm modal */
+  .reset-confirm-overlay {
+    align-items: flex-end;
+  }
+
+  .reset-confirm-modal {
+    width: 100%;
+    max-width: 100%;
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+
+  /* Prompt picker → bottom sheet */
+  .prompt-picker {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: auto;
+    border-radius: var(--radius) var(--radius) 0 0;
+    max-height: 70svh;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+    z-index: 400;
+  }
+}
+
+/* ── Inputs: font ≥16px on mobile to prevent iOS auto-zoom ─── */
+@media (max-width: 640px) {
+  .prompt-add-title,
+  .prompt-add-text,
+  .reset-confirm-textarea {
+    font-size: 16px;
+  }
+
+  /* Login card: fluid on small screens */
+  .login-card {
+    width: min(340px, calc(100vw - 32px));
+  }
+}

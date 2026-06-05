@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Project } from '../types'
 import { HealthDot } from './HealthDot'
 import { ConfirmModal } from './ConfirmModal'
@@ -17,6 +17,10 @@ interface Props {
   onReorder: (ids: string[]) => void
   onNewProject: () => void
   newProjectBusy: boolean
+  /** Mobile/tablet off-canvas drawer: whether the sidebar is open */
+  drawerOpen?: boolean
+  /** Called when the drawer should close (e.g. close button inside) */
+  onCloseDrawer?: () => void
 }
 
 function unreadFor(p: Project, map: Record<string, number>): number {
@@ -27,19 +31,100 @@ function unreadFor(p: Project, map: Record<string, number>): number {
 export function Sidebar({
   projects, selectedId, onSelect, onLogout, onDeleteFree, loading,
   unreadBySession, collapsed, onToggleCollapse, onReorder,
-  onNewProject, newProjectBusy,
+  onNewProject, newProjectBusy, drawerOpen,
 }: Props) {
   const [search, setSearch] = useState('')
-  const [dragId, setDragId] = useState<string | null>(null)
-  const [dragOverId, setDragOverId] = useState<string | null>(null)
   // Confirm delete free chat
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null)
+
+  // ── Pointer-events reorder (works on mouse + touch; closes board card f78394) ──
+  // Replaces HTML5 DnD which is broken on iOS/Android.
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
+
+  // Track pointer state without causing re-renders on every move
+  const pointerState = useRef<{
+    id: string
+    startX: number
+    startY: number
+    moved: boolean
+    pointerId: number
+  } | null>(null)
+
+  function handlePointerDown(e: React.PointerEvent, id: string) {
+    // Only primary button (left click / single touch)
+    if (e.button !== 0 && e.pointerType === 'mouse') return
+    pointerState.current = {
+      id,
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
+      pointerId: e.pointerId,
+    }
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  }
+
+  function handlePointerMove(e: React.PointerEvent, id: string) {
+    const ps = pointerState.current
+    if (!ps || ps.id !== id) return
+    const dx = e.clientX - ps.startX
+    const dy = e.clientY - ps.startY
+    if (!ps.moved && Math.sqrt(dx * dx + dy * dy) > 5) {
+      ps.moved = true
+      setDragId(id)
+    }
+    if (!ps.moved) return
+
+    // Find the element under the pointer to determine drag-over target
+    const el = document.elementFromPoint(e.clientX, e.clientY)
+    const itemEl = el?.closest('[data-project-id]') as HTMLElement | null
+    const overId = itemEl?.dataset.projectId ?? null
+    if (overId && overId !== id) {
+      setDragOverId(overId)
+    } else if (!overId) {
+      setDragOverId(null)
+    }
+  }
+
+  function handlePointerUp(e: React.PointerEvent, id: string) {
+    const ps = pointerState.current
+    if (!ps || ps.id !== id) return
+    ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
+
+    if (ps.moved && dragOverId && dragOverId !== id) {
+      // Commit reorder
+      const ids = projects.map(p => p.id)
+      const fromIdx = ids.indexOf(id)
+      const toIdx = ids.indexOf(dragOverId)
+      if (fromIdx !== -1 && toIdx !== -1) {
+        const next = [...ids]
+        next.splice(fromIdx, 1)
+        next.splice(toIdx, 0, id)
+        onReorder(next)
+      }
+    } else if (!ps.moved) {
+      // No drag movement → treat as a click/select
+      onSelect(id)
+    }
+
+    pointerState.current = null
+    setDragId(null)
+    setDragOverId(null)
+  }
+
+  function handlePointerCancel(_e: React.PointerEvent, id: string) {
+    const ps = pointerState.current
+    if (!ps || ps.id !== id) return
+    pointerState.current = null
+    setDragId(null)
+    setDragOverId(null)
+  }
 
   const filtered = projects.filter(p => p.name.toLowerCase().includes(search.toLowerCase()))
 
   if (collapsed) {
     return (
-      <div className="sidebar sidebar-collapsed-mode">
+      <div className={`sidebar sidebar-collapsed-mode${drawerOpen ? ' drawer-open' : ''}`}>
         <button
           className="sidebar-toggle-btn collapsed"
           onClick={onToggleCollapse}
@@ -81,44 +166,8 @@ export function Sidebar({
     )
   }
 
-  function handleDragStart(e: React.DragEvent, id: string) {
-    setDragId(id)
-    e.dataTransfer.effectAllowed = 'move'
-  }
-
-  function handleDragOver(e: React.DragEvent, id: string) {
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'move'
-    if (id !== dragId) setDragOverId(id)
-  }
-
-  function handleDrop(e: React.DragEvent, targetId: string) {
-    e.preventDefault()
-    if (!dragId || dragId === targetId) {
-      setDragId(null)
-      setDragOverId(null)
-      return
-    }
-    const ids = projects.map(p => p.id)
-    const fromIdx = ids.indexOf(dragId)
-    const toIdx = ids.indexOf(targetId)
-    if (fromIdx !== -1 && toIdx !== -1) {
-      const next = [...ids]
-      next.splice(fromIdx, 1)
-      next.splice(toIdx, 0, dragId)
-      onReorder(next)
-    }
-    setDragId(null)
-    setDragOverId(null)
-  }
-
-  function handleDragEnd() {
-    setDragId(null)
-    setDragOverId(null)
-  }
-
   return (
-    <div className="sidebar">
+    <div className={`sidebar${drawerOpen ? ' drawer-open' : ''}`}>
       <div className="sidebar-header">
         <div className="sidebar-logo">
           <div className="sidebar-logo-icon">⚡</div>
@@ -164,12 +213,12 @@ export function Sidebar({
             return (
               <div
                 key={p.id}
-                draggable
-                onDragStart={e => handleDragStart(e, p.id)}
-                onDragOver={e => handleDragOver(e, p.id)}
-                onDragLeave={() => setDragOverId(null)}
-                onDrop={e => handleDrop(e, p.id)}
-                onDragEnd={handleDragEnd}
+                data-project-id={p.id}
+                /* Pointer events reorder — works on mouse AND touch */
+                onPointerDown={e => handlePointerDown(e, p.id)}
+                onPointerMove={e => handlePointerMove(e, p.id)}
+                onPointerUp={e => handlePointerUp(e, p.id)}
+                onPointerCancel={e => handlePointerCancel(e, p.id)}
                 className={[
                   'project-item',
                   p.is_free ? 'project-item-free' : '',
@@ -178,8 +227,8 @@ export function Sidebar({
                   isDragging ? 'sidebar-item-dragging' : '',
                   isDragOver ? 'sidebar-item-drag-over' : '',
                 ].filter(Boolean).join(' ')}
-                onClick={() => onSelect(p.id)}
                 title={p.cwd}
+                style={{ touchAction: 'none' }}
               >
                 {p.is_free
                   ? <span className="free-icon">🏠</span>
@@ -202,6 +251,7 @@ export function Sidebar({
                 {p.is_free && (
                   <button
                     className="free-delete-btn"
+                    onPointerDown={e => e.stopPropagation()}
                     onClick={e => {
                       e.stopPropagation()
                       setConfirmDelete({ id: p.id, name: p.name })

@@ -81,6 +81,7 @@
   border: 1px solid var(--border2);
   border-radius: var(--radius-sm);
   padding: 9px 10px;
+  position: relative;
 }
 .board-card-incident {
   border-left: 3px solid var(--red, #dc2626);
@@ -304,7 +305,9 @@
 
 /* ─── Мульти-выбор карточек + очередь (sequential batch send) ─── */
 .board-card-selrow { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
-.board-card-check { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+/* checkbox floats compactly in the card's top-right corner (no lone row) */
+.board-card-check { position: absolute; top: 6px; right: 6px; width: 14px; height: 14px; margin: 0; z-index: 2; cursor: pointer; accent-color: var(--accent); }
+.board-card-text { padding-right: 16px; }
 .board-card-selected { outline: 2px solid var(--accent); outline-offset: -1px; }
 .board-card-queued-badge {
   font-size: 10px; font-weight: 700; color: var(--accent);
@@ -326,3 +329,33 @@
   color: var(--text-dim, #aaa); border-radius: 6px; padding: 4px 10px; cursor: pointer;
 }
 .board-batch-clear:hover { color: var(--text, #ddd); border-color: var(--text-dim, #888); }
+
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE — Board
+   ══════════════════════════════════════════════════════════════ */
+
+@media (max-width: 640px) {
+  /* Single column on phones */
+  .board-columns {
+    grid-template-columns: 1fr;
+  }
+
+  /* Board card action buttons: larger touch targets */
+  .board-card-actions button {
+    min-height: 36px;
+    padding: 6px 10px;
+  }
+
+  /* Modal bottom-sheet on mobile */
+  .run-modal-overlay {
+    align-items: flex-end;
+  }
+
+  .run-modal {
+    width: 100%;
+    max-width: 100%;
+    border-radius: var(--radius) var(--radius) 0 0;
+    max-height: 90svh;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+}

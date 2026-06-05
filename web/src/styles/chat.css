@@ -763,3 +763,73 @@
 }
 .reset-confirm-btn-send:hover:not(:disabled) { background: var(--accent-h); border-color: var(--accent-h); }
 .reset-confirm-btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE — Chat panel
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Inputs: prevent iOS auto-zoom (font ≥16px) ─────────────── */
+@media (max-width: 640px) {
+  .chat-textarea {
+    font-size: 16px;
+  }
+
+  .session-selector-btn {
+    font-size: 14px;
+  }
+
+  .chat-model-select {
+    font-size: 16px;
+  }
+
+  /* Session dropdown: full-width on mobile */
+  .session-dropdown {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    top: auto;
+    bottom: env(safe-area-inset-bottom, 0);
+    max-width: 100%;
+    min-width: 0;
+    max-height: 50vh;
+    border-radius: var(--radius) var(--radius) 0 0;
+    z-index: 500;
+  }
+}
+
+/* ── Chat pane header: condense ─────────────────────────────── */
+@media (max-width: 768px) {
+  .project-chat-pane-header {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  .chat-session-bar {
+    padding: 4px 8px;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  /* Input area: tighter padding, allow keyboard to push it up */
+  .chat-input-area {
+    padding: 8px 10px;
+  }
+}
+
+/* ── Touch targets: all interactive buttons ≥44×44 ──────────── */
+@media (pointer: coarse) {
+  .session-selector-btn,
+  .session-reset-btn,
+  .chat-stop-btn,
+  .ctx-panel-toggle,
+  .ctx-refresh-btn {
+    min-height: 44px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .session-reset-btn {
+    width: 44px;
+    height: 44px;
+  }
+}

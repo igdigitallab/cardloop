@@ -153,3 +153,28 @@
 .doc-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .doc-btn.primary:hover:not(:disabled) { background: var(--accent-h); border-color: var(--accent-h); color: #fff; }
 .doc-btn.ghost { background: transparent; }
+
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE — Forms / Login
+   ══════════════════════════════════════════════════════════════ */
+
+@media (max-width: 640px) {
+  /* Login card: fluid width on small screens */
+  .login-card {
+    width: min(340px, calc(100vw - 32px));
+    padding: 24px 20px;
+  }
+
+  /* Inputs: font ≥16px to prevent iOS auto-zoom */
+  .form-group input {
+    font-size: 16px;
+  }
+
+  /* Toast container: full width at bottom */
+  .toast-container {
+    bottom: max(16px, env(safe-area-inset-bottom));
+    right: 12px;
+    left: 12px;
+    max-width: 100%;
+  }
+}

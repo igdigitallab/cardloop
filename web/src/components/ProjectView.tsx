@@ -331,10 +331,10 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   // Remember width before collapse so we can restore it
   const widthBeforeCollapse = useRef<number>(chatWidth)
 
-  // Detect narrow viewport — disable resize below 900px
-  const [narrow, setNarrow] = useState(() => window.innerWidth < 900)
+  // Detect narrow viewport — disable resize below 768px (matches CSS breakpoint)
+  const [narrow, setNarrow] = useState(() => window.innerWidth < 768)
   useEffect(() => {
-    function onResize() { setNarrow(window.innerWidth < 900) }
+    function onResize() { setNarrow(window.innerWidth < 768) }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])

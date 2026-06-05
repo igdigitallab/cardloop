@@ -215,30 +215,8 @@
   color: var(--text);
 }
 
-/* Responsive: stack vertically on narrow screens */
-@media (max-width: 900px) {
-  .project-split-layout {
-    flex-direction: column !important;
-  }
-
-  .project-left-pane {
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-    flex: none;
-    /* let left pane take natural height, chat gets 45vh below */
-  }
-
-  .project-chat-pane {
-    flex: none;
-    height: 45vh;
-    min-height: 280px;
-  }
-
-  .project-split-divider,
-  .chat-collapsed-stub {
-    display: none;
-  }
-}
+/* Responsive: stack vertically on narrow screens (superseded by 768px breakpoint below) */
+/* Kept for browsers that don't support dvh/svh — the 768px rule below takes precedence */
 
 /* ── Welcome ───────────────────────────────────────────────── */
 .welcome {
@@ -277,3 +255,127 @@
   flex-direction: column;
   overflow: hidden;
 }
+
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE — breakpoints: mobile ≤640px, tablet ≤1024px
+   Desktop (>1024px): existing rules above — untouched.
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Drawer backdrop (mobile/tablet) ───────────────────────── */
+.sidebar-backdrop {
+  display: none;
+}
+
+@media (max-width: 1024px) {
+  /* Sidebar becomes off-canvas drawer */
+  .sidebar,
+  .sidebar.sidebar-collapsed-mode {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100%;
+    /* Use dvh so the drawer fills above the mobile chrome */
+    height: 100dvh;
+    z-index: 300;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease, box-shadow 0.25s ease;
+    box-shadow: none;
+    /* Keep sidebar width from desktop var */
+    width: var(--sidebar-w);
+    min-width: var(--sidebar-w);
+  }
+
+  .sidebar.drawer-open,
+  .sidebar.sidebar-collapsed-mode.drawer-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 32px rgba(0, 0, 0, 0.6);
+  }
+
+  /* Main area takes full width (drawer overlays it) */
+  .main-area {
+    width: 100%;
+  }
+
+  /* Backdrop overlay */
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 299;
+    background: rgba(0, 0, 0, 0);
+    pointer-events: none;
+    transition: background 0.25s ease;
+  }
+
+  .sidebar-backdrop.visible {
+    background: rgba(0, 0, 0, 0.55);
+    pointer-events: auto;
+  }
+}
+
+/* ── Split-view: single pane on mobile ─────────────────────── */
+@media (max-width: 640px) {
+  .project-tab-slot.has-split {
+    flex-direction: column;
+  }
+
+  /* Hide the second split pane; the parent JS shows only the active one */
+  .project-tab-slot.has-split .split-pane:last-child {
+    display: none;
+  }
+
+  /* The single visible pane takes full width */
+  .project-tab-slot.has-split .split-pane:first-child,
+  .project-tab-slot.has-split .split-pane-full {
+    flex: 1 1 100%;
+    max-width: 100%;
+  }
+
+  .free-split-divider {
+    display: none;
+  }
+}
+
+/* ── Chat panel: full-width/height on tablet ────────────────── */
+@media (max-width: 768px) {
+  .project-split-layout {
+    flex-direction: column !important;
+  }
+
+  .project-left-pane {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+
+  .project-chat-pane {
+    flex: none;
+    height: 45vh;
+    min-height: 260px;
+  }
+
+  .project-split-divider,
+  .chat-collapsed-stub {
+    display: none;
+  }
+}
+
+/* ── Safe-area padding for notch devices ───────────────────── */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .chat-input-area {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+
+  .sidebar-footer {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+}
+
+/* ── Full-height shell uses dynamic viewport ────────────────── */
+@supports (height: 100dvh) {
+  html, body, #root {
+    height: 100dvh;
+  }
+}
+
+/* On older browsers without dvh, keep the existing 100% */

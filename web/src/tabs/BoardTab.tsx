@@ -483,20 +483,20 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                     }}
                     onDragEnd={() => { setDragCardId(null); setDragOverCol(null) }}
                   >
-                    {(parkIdx >= 0 || isQueued) && (
+                    {parkIdx >= 0 && (
+                      <input
+                        type="checkbox"
+                        className="board-card-check"
+                        checked={isSel}
+                        disabled={busy}
+                        title="Select for batch send to agent"
+                        onClick={e => e.stopPropagation()}
+                        onChange={() => toggleSelect(card.id)}
+                      />
+                    )}
+                    {isQueued && (
                       <div className="board-card-selrow">
-                        {parkIdx >= 0 && (
-                          <input
-                            type="checkbox"
-                            className="board-card-check"
-                            checked={isSel}
-                            disabled={busy}
-                            title="Select for batch send to agent"
-                            onClick={e => e.stopPropagation()}
-                            onChange={() => toggleSelect(card.id)}
-                          />
-                        )}
-                        {isQueued && <span className="board-card-queued-badge" title="Queued for agent run">⏳ queued</span>}
+                        <span className="board-card-queued-badge" title="Queued for agent run">⏳ queued</span>
                       </div>
                     )}
                     {editingCard?.id === card.id ? (

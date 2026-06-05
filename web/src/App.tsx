@@ -84,6 +84,8 @@ export default function App() {
   const [sidebarOrder, setSidebarOrder] = useState<string[]>(() => readSidebarOrder())
   const { unreadBySession, incrementUnread, clearUnreadForSession, resetUnread } = useUnreadTracker()
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => readBool(LS_SIDEBAR_COLLAPSED, false))
+  // Off-canvas drawer (mobile/tablet ≤1024px): not persisted, default closed
+  const [drawerOpen, setDrawerOpen] = useState(false)
   // Split-view: leftId → rightId (free chats only)
   const [splitPairs, setSplitPairs] = useState<Record<string, string>>(() => readSplitPairs())
   const [splitWidth, setSplitWidth] = useState<number>(() => readSplitWidth())
@@ -319,10 +321,12 @@ export default function App() {
   }, [clearUnreadForSession])
 
   // Open project (sidebar click) — add to openIds (if not there) + activate
+  // Also close the mobile drawer after selection
   const handleSelect = useCallback((id: string) => {
     setOpenIds(prev => prev.includes(id) ? prev : [...prev, id])
     setActiveId(id)
     clearUnread(id)
+    setDrawerOpen(false)
   }, [clearUnread])
 
   // Drag-and-drop sidebar order. IMPORTANT: hook must be above any early returns
@@ -506,6 +510,15 @@ export default function App() {
     })
   }, [])
 
+  // Close drawer when viewport is resized back to desktop (>1024px)
+  useEffect(() => {
+    function onResize() {
+      if (window.innerWidth > 1024) setDrawerOpen(false)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
   async function handleLogout() {
     try { await api.logout() } catch { /* ignore */ }
     setProjects([])
@@ -545,6 +558,12 @@ export default function App() {
   return (
     <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
+      {/* Backdrop for mobile drawer — tap to close */}
+      <div
+        className={`sidebar-backdrop${drawerOpen ? ' visible' : ''}`}
+        onClick={() => setDrawerOpen(false)}
+        aria-hidden="true"
+      />
       <Sidebar
         projects={sortedProjects.filter(p => !p.is_free)}
         selectedId={activeId}
@@ -558,6 +577,8 @@ export default function App() {
         onReorder={handleSidebarReorder}
         onNewProject={handleNewProject}
         newProjectBusy={newProjectBusy}
+        drawerOpen={drawerOpen}
+        onCloseDrawer={() => setDrawerOpen(false)}
       />
 
       <div className="main-area">
@@ -573,6 +594,7 @@ export default function App() {
           globalFilesActive={activeId === GLOBAL_FILES_ID}
           onOpenGlobalFiles={handleOpenGlobalFiles}
           onCloseGlobalFiles={handleCloseGlobalFiles}
+          onToggleDrawer={() => setDrawerOpen(prev => !prev)}
         />
 
         {/* Global file browser — always mounted (display:none when inactive),

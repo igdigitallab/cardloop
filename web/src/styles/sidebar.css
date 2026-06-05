@@ -221,10 +221,26 @@
 .project-item-free:hover .free-delete-btn { opacity: 1; }
 .free-delete-btn:hover { color: var(--red); background: var(--bg4); }
 
-/* Sidebar drag-and-drop reordering */
-.project-item { cursor: grab; }
+/* Sidebar reordering (pointer events — works on mouse AND touch) */
+.project-item { cursor: grab; touch-action: none; }
 .project-item.sidebar-item-dragging { opacity: 0.35; cursor: grabbing; }
 .project-item.sidebar-item-drag-over { border-top: 2px solid var(--accent); margin-top: -2px; }
+
+/* Touch targets ≥44px on coarse pointer (finger touch) */
+@media (pointer: coarse) {
+  .project-item {
+    min-height: 44px;
+    padding-top: 9px;
+    padding-bottom: 9px;
+  }
+}
+
+/* Search input: font ≥16px on mobile to prevent iOS auto-zoom */
+@media (max-width: 640px) {
+  .search-input {
+    font-size: 16px;
+  }
+}
 
 .project-icon-btn.free.active { border-color: var(--accent-h); }
 

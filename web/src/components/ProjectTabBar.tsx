@@ -14,6 +14,8 @@ interface Props {
   globalFilesActive: boolean
   onOpenGlobalFiles: () => void
   onCloseGlobalFiles: () => void
+  /** Toggles the mobile off-canvas sidebar drawer */
+  onToggleDrawer?: () => void
 }
 
 function TabItem({
@@ -98,9 +100,19 @@ function TabItem({
 export function ProjectTabBar({
   projects, activeId, unreadBySession, onActivate, onClose, onRename, onNewFree,
   globalFilesOpen, globalFilesActive, onOpenGlobalFiles, onCloseGlobalFiles,
+  onToggleDrawer,
 }: Props) {
   return (
     <div className="project-tabbar">
+      {/* Hamburger — only visible on tablet/mobile (hidden on desktop via CSS) */}
+      <button
+        className="ptab-hamburger"
+        onClick={onToggleDrawer}
+        title="Open sidebar"
+        aria-label="Open sidebar"
+      >
+        ☰
+      </button>
       <div className="ptab-list">
         {projects.map(p => {
           const sk = p.tg_thread != null ? String(p.tg_thread) : null
