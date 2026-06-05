@@ -379,4 +379,15 @@ export const api = {
         body: JSON.stringify({ enabled }),
       }
     ),
+
+  // Cross-device UI-раскладка (открытые вкладки/активная/сайдбар/split) — серверный источник истины
+  uiState: () =>
+    apiFetch<{ state: Record<string, unknown> }>('/api/ui-state'),
+
+  saveUiState: (state: Record<string, unknown>) =>
+    apiFetch<{ ok: boolean }>('/api/ui-state', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state }),
+    }),
 }

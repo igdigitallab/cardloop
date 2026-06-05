@@ -95,6 +95,10 @@ export default function App() {
   const projectsRef = useRef<Project[]>([])
   // После первой успешной загрузки не показываем "Загрузка..." при фоновых poll'ах
   const projectsLoadedRef = useRef(false)
+  // Cross-device UI-раскладка: источник истины — сервер (data/ui_state.json).
+  // localStorage остаётся мгновенным кэшем (без мигания), сервер досинхронит.
+  const uiHydratedRef = useRef(false)
+  const uiSaveTimer = useRef<number | null>(null)
 
   const checkAuth = useCallback(async () => {
     try {
@@ -177,6 +181,57 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('cops.globalFilesOpen', String(globalFilesOpen)) } catch {}
   }, [globalFilesOpen])
+
+  // ── Cross-device sync: гидратация раскладки с сервера (источник истины) ──────
+  // localStorage уже засеял стейт (без мигания); сервер досинхронит поверх.
+  // Применяем только присутствующие ключи — пустой серверный стейт ничего не трёт.
+  useEffect(() => {
+    if (authState !== 'authed') return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { state } = await api.uiState()
+        if (!cancelled && state && typeof state === 'object') {
+          if (Array.isArray(state.open))
+            setOpenIds((state.open as unknown[]).filter((x): x is string => typeof x === 'string'))
+          if (typeof state.active === 'string' || state.active === null)
+            setActiveId(state.active as string | null)
+          if (Array.isArray(state.sidebarOrder))
+            setSidebarOrder((state.sidebarOrder as unknown[]).filter((x): x is string => typeof x === 'string'))
+          if (state.splitPairs && typeof state.splitPairs === 'object' && !Array.isArray(state.splitPairs))
+            setSplitPairs(state.splitPairs as Record<string, string>)
+          if (typeof state.splitWidth === 'number')
+            setSplitWidth(Math.max(20, Math.min(80, state.splitWidth)))
+          if (typeof state.globalFilesOpen === 'boolean')
+            setGlobalFilesOpen(state.globalFilesOpen)
+        }
+      } catch {
+        // нет серверного состояния / офлайн — продолжаем с локальной раскладкой
+      } finally {
+        if (!cancelled) uiHydratedRef.current = true
+      }
+    })()
+    return () => { cancelled = true }
+  }, [authState])
+
+  // ── Cross-device sync: дебаунс-запись раскладки на сервер ────────────────────
+  // Только ПОСЛЕ гидратации — иначе только что открытое устройство затрёт сервер
+  // устаревшим localStorage. last-write-wins; конфликты для 1 юзера несущественны.
+  useEffect(() => {
+    if (authState !== 'authed' || !uiHydratedRef.current) return
+    if (uiSaveTimer.current) window.clearTimeout(uiSaveTimer.current)
+    uiSaveTimer.current = window.setTimeout(() => {
+      api.saveUiState({
+        open: openIds,
+        active: activeId,
+        sidebarOrder,
+        splitPairs,
+        splitWidth,
+        globalFilesOpen,
+      }).catch(() => {})
+    }, 800)
+    return () => { if (uiSaveTimer.current) window.clearTimeout(uiSaveTimer.current) }
+  }, [openIds, activeId, sidebarOrder, splitPairs, splitWidth, globalFilesOpen, authState])
 
   // Чистим openIds / splitPairs / sidebarOrder от мёртвых проектов после загрузки списка
   useEffect(() => {

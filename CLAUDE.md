@@ -26,6 +26,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - Репо: `github.com/Zira777ru/claude-ops-bot` — **PRIVATE** (инфра-контрол-плейн: внутр. IP/тоннели/OPSEC-зоны в этом файле; публиковать только после санитизации).
 - `.gitignore` исключает: `.env`, `data/` (chat IDs/сессии/audit/логи), `venv/`, `web/node_modules`, `web/dist`, `.worktrees/`.
 - ⚠️ Перед коммитом нового: проверить, что секрет/значение не попало в трекаемые файлы.
+- ⚠️ **Anti-hardcode (проект идёт в OSS).** В трекаемый код/доки — НИКАКОГО персонального/инфра-хардкода: пути → `$HOME`/относительные (не `/home/igor/…`), ID/токены/пароли → `.env` (+ плейсхолдер в `.env.example`), реестр проектов → `data/registry.json` (gitignored), имя оператора/язык → env (`OPERATOR_NAME`/`RESPONSE_LANGUAGE`). Реальное значение Игоря — только в gitignored-конфиге; в код идёт чтение из него. Новую персональную/инфра-константу не вписывать в код — параметризовать. Детали и инвентарь → `specs/spec-014-oss-hardening.md`; мультиюзер → `specs/spec-013-multi-user.md`.
 - Параллельные агенты → `git worktree add .worktrees/<name> -b <branch>`; после — `git worktree prune`.
 
 ---

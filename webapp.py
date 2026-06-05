@@ -2187,6 +2187,79 @@ def _save_global_settings(data: dict) -> None:
     _SETTINGS_MTIME = 0.0
 
 
+# ── UI-state sync (раскладка кокпита между устройствами) ─────────────────────
+# Серверный стор раскладки UI (открытые вкладки, активная, порядок сайдбара,
+# split-view) — чтобы она следовала за пользователем между устройствами, а не
+# жила только в localStorage конкретного браузера. Хранится под ключом-
+# неймспейсом; сейчас single-tenant ("default"). ЕДИНСТВЕННАЯ точка смены на
+# user_id при мульти-юзере — _ui_state_ns() (см. spec-013-multi-user).
+# Семантика: сервер = источник истины, фронт дебаунсит запись, last-write-wins
+# (для одного человека на двух устройствах конфликты несущественны).
+_UI_STATE_PATH: "Path | None" = None
+_UI_STATE_MAX_BYTES = 64 * 1024   # раскладка крошечная; защита от раздувания файла
+
+
+def _ui_state_init(ctx: dict) -> None:
+    """Вызывается из start() — задаёт путь к data/ui_state.json."""
+    global _UI_STATE_PATH
+    _UI_STATE_PATH = ctx["DATA"] / "ui_state.json"
+
+
+def _ui_state_ns(req: web.Request) -> str:
+    """Неймспейс хранения UI-раскладки. Single-tenant → "default".
+    ЕДИНСТВЕННАЯ точка смены на user_id при мульти-юзере (см. spec-013)."""
+    return "default"
+
+
+def _ui_state_load_all() -> dict:
+    """Читает весь ui_state.json ({ns: state}). Битый/отсутствует → {}."""
+    if _UI_STATE_PATH is None:
+        return {}
+    try:
+        data = json.loads(_UI_STATE_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}  # битый/частичный файл при гонке — не роняем кокпит
+
+
+def _ui_state_save_all(data: dict) -> None:
+    """Атомарно пишет ui_state.json (tmp+replace)."""
+    if _UI_STATE_PATH is None:
+        return
+    _UI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _UI_STATE_PATH.with_name(_UI_STATE_PATH.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(_UI_STATE_PATH)
+
+
+async def api_ui_state_get(req: web.Request) -> web.Response:
+    """GET /api/ui-state → {state: {...}} — раскладка кокпита для этого юзера."""
+    ns = _ui_state_ns(req)
+    state = _ui_state_load_all().get(ns)
+    return web.json_response({"state": state if isinstance(state, dict) else {}})
+
+
+async def api_ui_state_put(req: web.Request) -> web.Response:
+    """PUT /api/ui-state {state: {...}} — сохранить раскладку. Тело — непрозрачный
+    JSON-объект (фронт сам решает набор ключей); сервер только хранит per-ns."""
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    state = body.get("state")
+    if not isinstance(state, dict):
+        return web.json_response({"error": "state must be an object"}, status=400)
+    if len(json.dumps(state, ensure_ascii=False).encode("utf-8")) > _UI_STATE_MAX_BYTES:
+        return web.json_response({"error": "state too large"}, status=413)
+    ns = _ui_state_ns(req)
+    all_state = _ui_state_load_all()
+    all_state[ns] = state
+    _ui_state_save_all(all_state)
+    return web.json_response({"ok": True})
+
+
 def _effective_default_model(ctx: dict) -> str:
     """Дефолт-модель для новых проектов: глобальная настройка или ctx['DEFAULT_MODEL']."""
     return _get_global_setting("default_model", None) or ctx.get("DEFAULT_MODEL", "sonnet")
@@ -6422,6 +6495,7 @@ async def start(ptb_app, ctx: dict) -> None:
         # Timeline: инициализируем персистентность шины (DATA/timeline/)
         _timeline_init(ctx)
         _settings_init(ctx)
+        _ui_state_init(ctx)
         # Spec-012 Ф0: инициализируем пути к файлам scan_state + dismissed_incidents
         _scan_state_init(ctx)
 
@@ -6443,6 +6517,9 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects", api_projects)
         app.router.add_get("/api/settings", api_settings_get)
         app.router.add_post("/api/settings", api_settings_post)
+        # Cross-device UI-раскладка (открытые вкладки/активная/сайдбар/split)
+        app.router.add_get("/api/ui-state", api_ui_state_get)
+        app.router.add_put("/api/ui-state", api_ui_state_put)
         app.router.add_get("/api/projects/{id}/settings", api_project_settings_get)
         app.router.add_post("/api/projects/{id}/settings", api_project_settings_post)
         # «+ Новый проект» — создаёт untitled-<ts>/, добавляет в topics.json, спавнит онбординг
