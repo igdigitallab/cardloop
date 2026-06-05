@@ -79,7 +79,7 @@ def test_write_sidecar_content_fail_with_exc(tmp_path):
     content = (tmp_path / "runs" / "ddeecc.md").read_text(encoding="utf-8")
     assert "fail" in content
     assert "RuntimeError" in content
-    assert "Ошибка" in content
+    assert "Error" in content
 
 
 def test_write_sidecar_creates_runs_dir(tmp_path):

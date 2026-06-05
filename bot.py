@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Claude-Ops-Bot — «Claude Code через Telegram».
-Forum-группа Development: каждый топик привязан к проекту (thread_id -> cwd).
-Полные права (bypassPermissions), подписка Игоря (без ANTHROPIC_API_KEY),
-общий + проектный CLAUDE.md через setting_sources. Spec: ~/vault/01-Projects/Claude-Ops-Bot/.
+Claude-Ops-Bot — Claude Code over Telegram.
+Forum group: each topic is bound to a project (thread_id -> cwd).
+Full permissions (bypassPermissions), subscription auth (no ANTHROPIC_API_KEY by default),
+global + project CLAUDE.md loaded via setting_sources. Spec: ~/vault/01-Projects/Claude-Ops-Bot/.
 """
 import asyncio
 import html
@@ -26,7 +26,7 @@ from claude_agent_sdk import (
     TextBlock,
     ToolUseBlock,
 )
-import webapp          # браузерный кокпит (webapp.py) — поднимается в post_init рядом с ботом, состояние через ctx
+import webapp          # web cockpit (webapp.py) — started alongside the bot, state shared via ctx
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
@@ -80,53 +80,53 @@ ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") 
 DEFAULT_CWD = os.environ.get("DEFAULT_CWD", str(Path.home()))
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "opus")
 
-WEB_PORT = int(os.environ.get("WEB_PORT", "8787"))           # браузерный кокпит
-WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")            # парольная фраза для входа в кокпит
+WEB_PORT = int(os.environ.get("WEB_PORT", "8787"))           # web cockpit port
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")            # passphrase for cockpit login
 
-MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku"}  # CLI резолвит алиасы в latest
+MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku"}  # CLI resolves aliases to latest
 
-# Персонализация: задаётся через env; дефолты нейтральные (работают без .env у нового пользователя).
+# Personalisation: set via env; neutral defaults work without .env for new users.
 OPERATOR_NAME = os.environ.get("OPERATOR_NAME", "the operator")
-RESPONSE_LANGUAGE = os.environ.get("RESPONSE_LANGUAGE", "")   # пусто = без языковой директивы
+RESPONSE_LANGUAGE = os.environ.get("RESPONSE_LANGUAGE", "")   # empty = no language directive
 
-# ─────────────────────────── именованные константы ───────────────────────────
-TG_CHUNK = 4000          # макс. размер одного TG-сообщения (символы)
+# ─────────────────────────── named constants ───────────────────────────
+TG_CHUNK = 4000          # max size of a single TG message (characters)
 
-# Operating-brief: инжектится в КАЖДУЮ сессию (все топики), поверх главного и проектного CLAUDE.md.
-# ⚠️ nudge — ТОЛЬКО то, что реально отличает Telegram от терминала. Всё про «как работать»
-# (scan, хирургичность, права, необратимое) живёт в CLAUDE.md (project + ~/CLAUDE.md) — агент
-# грузит их через setting_sources и читает те же файлы, что и терминал. Не дублировать сюда:
-# лишний контекст каждый ход = агент тупее. Держать коротким.
-_lang_directive = f", отвечай {RESPONSE_LANGUAGE}" if RESPONSE_LANGUAGE else ""
+# Operating-brief: injected into EVERY session (all topics), on top of global and project CLAUDE.md.
+# ⚠️ nudge — ONLY what genuinely differs from a terminal. Everything about "how to work"
+# (scan, surgical edits, permissions, destructive ops) lives in CLAUDE.md (project + ~/CLAUDE.md) —
+# the agent loads them via setting_sources and reads the same files as the terminal. Do not duplicate
+# here: extra context per turn = dumber agent. Keep short.
+_lang_directive = f", answer in {RESPONSE_LANGUAGE}" if RESPONSE_LANGUAGE else ""
 TELEGRAM_NUDGE = (
-    "Канал — Telegram-бот, не интерактивный терминал. В остальном ты обычный Claude Code: "
-    "следуй CLAUDE.md проекта и ~/CLAUDE.md (уже загружены) — там все правила работы.\n"
-    f"- Интерактивных диалогов/кнопок НЕТ: нужно уточнение или выбор — спроси ТЕКСТОМ в конце ответа "
-    f"и заверши ход; {OPERATOR_NAME} ответит следующим сообщением, сессия продолжится.\n"
-    f"- Ответ — кратко{_lang_directive}, живой прозой: что сделал → что дальше. Не дублируй лог инструментов "
-    f"(он виден в статусе) и не вставляй длинные листинги кода — правки {OPERATOR_NAME} видит в файлах.\n"
-    f"- Файл/скриншот {OPERATOR_NAME} в этот топик: `tg-reply <путь> [подпись]`.\n"
-    "- Важное решение/грабли/что отвергнуто → запиши в `.claude-ops/memory/` (см. CLAUDE.md проекта)."
+    "Channel is a Telegram bot, not an interactive terminal. Otherwise you are regular Claude Code: "
+    "follow the project CLAUDE.md and ~/CLAUDE.md (already loaded) — all working rules are there.\n"
+    f"- No interactive dialogs/buttons: if you need clarification or a choice — ask as plain TEXT at "
+    f"the end of your reply and finish the turn; {OPERATOR_NAME} will reply in the next message and the session continues.\n"
+    f"- Reply concisely{_lang_directive}, in natural prose: what you did → what's next. Do not echo the tool log "
+    f"(it's visible in the status) and avoid long code listings — {OPERATOR_NAME} sees edits in files.\n"
+    f"- To send a file/screenshot to {OPERATOR_NAME} in this topic: `tg-reply <path> [caption]`.\n"
+    "- Key decisions / pitfalls / rejected approaches → write to `.claude-ops/memory/` (see project CLAUDE.md)."
 )
-# AskUserQuestion = интерактивная голосовалка (нет ответа в TG -> агент зависает/решает сам).
+# AskUserQuestion = interactive prompt (no reply in TG -> agent hangs or decides on its own).
 DISALLOWED_TOOLS = ["AskUserQuestion"]
 
-TOPICS_F = DATA / "topics.json"      # СЛОЙ 1: привязка thread -> проект (вечная)
-SESSIONS_F = DATA / "sessions.json"  # СЛОЙ 2: thread -> session_id (чистит /reset)
+TOPICS_F = DATA / "topics.json"      # LAYER 1: thread -> project binding (persistent)
+SESSIONS_F = DATA / "sessions.json"  # LAYER 2: thread -> session_id (cleared by /reset)
 
 def _norm(s: str) -> str:
     return "".join(c for c in s.lower() if c.isalnum())
 
 
 def _home_sub(*parts: str) -> str:
-    """Возвращает строковый путь относительно $HOME (динамически, без хардкода /home/igor)."""
+    """Returns a string path relative to $HOME (dynamic, no hardcoded /home/<user>)."""
     return str(Path.home().joinpath(*parts))
 
 
 def _load_registry_json() -> dict:
-    """Загружает data/registry.json (gitignored) если есть.
-    Формат: {"alias": "relative-from-HOME"} — пути относительно $HOME.
-    Возвращает {} если файл отсутствует или повреждён."""
+    """Loads data/registry.json (gitignored) if present.
+    Format: {"alias": "relative-from-HOME"} — paths relative to $HOME.
+    Returns {} if the file is missing or malformed."""
     reg_f = HERE / "data" / "registry.json"
     if not reg_f.exists():
         return {}
@@ -137,18 +137,18 @@ def _load_registry_json() -> dict:
         return {}
 
 
-# реестр проектов: алиас(норм.) -> cwd. Покрывает имена топиков и basename папок.
-# Реальные алиасы оператора хранятся в gitignored data/registry.json
-# (шаблон: registry.example.json). Авто-скан $HOME добавляет basename папок.
+# project registry: normalized_alias -> cwd. Covers topic names and folder basenames.
+# Operator's real aliases live in gitignored data/registry.json
+# (template: registry.example.json). Auto-scan of $HOME adds folder basenames.
 _REG_RAW: dict = _load_registry_json()
-# Функциональный алиас (НЕ персональный): General-топик форума → дефолтный cwd.
-# DEFAULT_CWD параметризован через env, поэтому остаётся в коде, а не в registry.json.
+# Functional alias (NOT personal): General forum topic → default cwd.
+# DEFAULT_CWD is parameterised via env, so it stays in code rather than registry.json.
 _REG_RAW.setdefault("general", DEFAULT_CWD)
 
 
 def build_registry() -> dict:
     reg = dict(_REG_RAW)
-    base = Path.home()  # динамически, без хардкода /home/igor
+    base = Path.home()  # dynamic, no hardcoded /home/<user>
     for d in sorted(base.iterdir()):
         if d.is_dir() and ((d / ".git").exists() or (d / "CLAUDE.md").exists()):
             reg.setdefault(_norm(d.name), str(d))
@@ -159,7 +159,7 @@ REGISTRY = build_registry()
 
 
 def resolve_project(name: str):
-    """name -> (display, cwd) либо None. Принимает алиас, basename или абсолютный путь."""
+    """name -> (display, cwd) or None. Accepts alias, basename, or absolute path."""
     name = name.strip()
     if name.startswith("/") and Path(name).is_dir():
         return Path(name).name, name
@@ -180,8 +180,8 @@ def _read(f, default):
 topics = _read(TOPICS_F, {})       # "chat:thread" -> {project, cwd, model}
 sessions = _read(SESSIONS_F, {})   # "chat:thread" -> session_id
 costs = {}                         # "chat:thread" -> last cost usd
-running = {}                       # "chat:thread" -> ClaudeSDKClient (для /stop)
-rate_limits = {}                   # rate_limit_type -> {status, resets_at, utilization, ts} (пассивно)
+running = {}                       # "chat:thread" -> ClaudeSDKClient (for /stop)
+rate_limits = {}                   # rate_limit_type -> {status, resets_at, utilization, ts} (passive)
 
 
 def save_topics():
@@ -199,16 +199,16 @@ def key_of(update: Update) -> str:
 
 
 def binding_for(update: Update) -> dict:
-    """Привязка топика. General/без топика -> дефолт. Авто-привязка по имени НЕ здесь
-    (она в on_topic_created). Тут только чтение + дефолт для General."""
+    """Topic binding. General / no topic -> default. Name-based auto-binding is NOT here
+    (that's in on_topic_created). Here we only read + return default for General."""
     k = key_of(update)
     if k in topics:
         return topics[k]
-    # топик без привязки -> дефолт на /home/igor, но проект помечаем как unbound
+    # topic without a binding -> fall back to DEFAULT_CWD, mark project as unbound
     thread = update.effective_message.message_thread_id
     if not thread:
         return {"project": "General", "cwd": DEFAULT_CWD, "model": DEFAULT_MODEL}
-    return None  # неизвестный топик -> попросим /project
+    return None  # unknown topic -> ask user to run /project
 
 
 # ─────────────────────────── auth ───────────────────────────
@@ -219,10 +219,10 @@ def authorized(update: Update) -> bool:
 
 # ─────────────────────────── helpers ───────────────────────────
 async def _tg_call(factory, tries=6):
-    """Один вызов TG API, переживающий ТРАНЗИЕНТНЫЕ сбои — главную причину «пропажи ответа»
-    на длинных задачах: RetryAfter (flood-control), NetworkError/Bad Gateway, TimedOut.
-    factory — функция без аргументов, отдающая СВЕЖУЮ корутину (нужно для повторов).
-    BadRequest сюда НЕ ловим — это логическая ошибка (битый HTML), её разбирает вызывающий."""
+    """Single TG API call that survives TRANSIENT failures — the main cause of "lost replies"
+    on long tasks: RetryAfter (flood-control), NetworkError/Bad Gateway, TimedOut.
+    factory — zero-argument callable returning a FRESH coroutine (needed for retries).
+    BadRequest is NOT caught here — it is a logic error (broken HTML) handled by the caller."""
     delay = 1.0
     for attempt in range(tries):
         try:
@@ -237,64 +237,64 @@ async def _tg_call(factory, tries=6):
 
 
 async def send(context, chat, thread, text, **kw):
-    # Чанкуем по строкам (не вслепую по байтам) — чтобы не резать HTML-теги/entity на границе.
+    # Chunk by lines (not blindly by bytes) to avoid splitting HTML tags/entities at chunk boundaries.
     for chunk in _smart_chunks(text, TG_CHUNK):
         try:
             await _tg_call(lambda c=chunk: context.bot.send_message(
                 chat, c, message_thread_id=thread or None, **kw))
         except BadRequest:
-            # парсер HTML/MD подавился — шлём как plain text, лишь бы дошло.
-            # ВАЖНО: chunk сюда приходит уже html-escaped (<b>... &lt;... &amp;...).
-            # Без unescape Игорь увидит сырые &lt;b&gt; — это и есть «не смог прочитать».
+            # HTML/MD parser choked — send as plain text so the message gets through.
+            # IMPORTANT: chunk arrives already html-escaped (<b>... &lt;... &amp;...).
+            # Without unescape the operator would see raw &lt;b&gt; — unreadable.
             kw2 = {k: v for k, v in kw.items() if k != "parse_mode"}
             plain = html.unescape(re.sub(r"</?(b|i|code|pre|a)[^>]*>", "", chunk))
             await _tg_call(lambda p=plain: context.bot.send_message(
                 chat, p, message_thread_id=thread or None, **kw2))
 
 
-CODE_MAX_LINES = 20      # длиннее — сворачиваем (в TG-ответе важна суть, не простыни кода)
-CODE_PREVIEW_LINES = 10  # сколько строк показать перед сворачиванием
+CODE_MAX_LINES = 20      # longer blocks are collapsed (TG reply should convey intent, not walls of code)
+CODE_PREVIEW_LINES = 10  # how many lines to show before collapsing
 
 
 def _render_code_block(body: str, lang: str = "") -> str:
-    """Блок ```...``` -> моноширинный <pre>. Длинный (> CODE_MAX_LINES) сворачивается в превью +
-    маркер: правки Игорь и так видит в файлах/diff, простыни кода в TG — шум («без лишнего кода»)."""
+    """``` block ``` -> monospace <pre>. Long blocks (> CODE_MAX_LINES) are collapsed to a preview +
+    marker: the operator can see edits in files/diff anyway; code walls in TG are noise."""
     lines = body.split("\n")
-    while lines and not lines[-1].strip():   # срезаем пустой хвост
+    while lines and not lines[-1].strip():   # strip trailing blank lines
         lines.pop()
     n = len(lines)
     if n > CODE_MAX_LINES:
         head = "\n".join(lines[:CODE_PREVIEW_LINES])
         tag = f"{lang} · " if lang else ""
-        return f"<pre>{html.escape(head)}\n…</pre><i>‹{tag}{n} строк кода свёрнуто›</i>"
+        return f"<pre>{html.escape(head)}\n…</pre><i>‹{tag}{n} lines of code collapsed›</i>"
     return f"<pre>{html.escape(chr(10).join(lines))}</pre>"
 
 
 def md_to_html(text: str) -> str:
-    """Markdown ответа модели -> безопасный HTML для Telegram (поддерживает <b><i><code><pre><a>).
-    Стратегия: код/ссылки вынимаем в плейсхолдеры ДО экранирования (чтобы не побить и посчитать
-    строки), экранируем остальное, накладываем лёгкий markdown, возвращаем плейсхолдеры обратно.
-    Всё на стороне бота — агент про формат не думает, остаётся таким же умным, как в терминале."""
+    """Model's Markdown response -> safe Telegram HTML (supports <b><i><code><pre><a>).
+    Strategy: extract code/links into placeholders BEFORE escaping (to avoid breaking them and
+    to count lines), escape the rest, apply light markdown, restore placeholders.
+    All done bot-side — the agent doesn't think about formatting and stays as smart as in a terminal."""
     stash = []
 
     def _stash(fragment: str) -> str:
         stash.append(fragment)
-        return f"\x00P{len(stash) - 1}\x00"   # \x00 не трогается html.escape и markdown-регексами
+        return f"\x00P{len(stash) - 1}\x00"   # \x00 is not touched by html.escape or markdown regexes
 
-    # 1) блоки кода ```lang\n...``` (до экранирования — нужно посчитать строки)
+    # 1) code blocks ```lang\n...``` (before escaping — need to count lines)
     text = re.sub(r"```([^\n]*)\n?(.*?)```",
                   lambda m: _stash(_render_code_block(m.group(2), (m.group(1) or "").strip())),
                   text, flags=re.DOTALL)
-    # 2) инлайн `код`
+    # 2) inline `code`
     text = re.sub(r"`([^`\n]+?)`",
                   lambda m: _stash(f"<code>{html.escape(m.group(1))}</code>"), text)
-    # 3) ссылки [текст](url)
+    # 3) links [text](url)
     text = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)",
                   lambda m: _stash(f'<a href="{html.escape(m.group(2), quote=True)}">{html.escape(m.group(1))}</a>'),
                   text)
-    # 4) экранируем остальное (сырые <title>/<div> из ответа становятся безопасными)
+    # 4) escape the rest (raw <title>/<div> from model output become safe)
     text = html.escape(text)
-    # 5) построчно: заголовки #..###### -> жирная строка; маркеры списка -*+ -> •
+    # 5) line by line: headings #..###### -> bold; list markers -*+ -> •
     out = []
     for line in text.split("\n"):
         h = re.match(r"\s*#{1,6}\s+(.*)", line)
@@ -303,24 +303,24 @@ def md_to_html(text: str) -> str:
         else:
             out.append(re.sub(r"^(\s*)[-*+]\s+", r"\1• ", line))
     text = "\n".join(out)
-    # 6) **жирный** и *курсив* (курсив — консервативно, чтобы не ловить «2 * 3» и остатки списков)
+    # 6) **bold** and *italic* (italic conservative — avoid catching "2 * 3" and list remnants)
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?<![\*\w])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\*\w])", r"<i>\1</i>", text)
-    # 7) возвращаем код/ссылки
+    # 7) restore code/links
     return re.sub(r"\x00P(\d+)\x00", lambda m: stash[int(m.group(1))], text)
 
 
 async def report_error(context, chat, thread, where: str, exc: BaseException):
-    """Шлёт краш Игорю: место + тип + трейсбек в копируемом <pre>-блоке.
-    Любые ошибки отправки глушим — если httpx-клиент PTB уже закрыт (shutdown сервиса),
-    слать всё равно некуда, и второй необработанный exception только шумит в логах."""
+    """Sends a crash report to the operator: location + type + traceback in a copyable <pre> block.
+    All send errors are suppressed — if the PTB httpx client is already closed (service shutdown)
+    there is nowhere to send anyway, and a second unhandled exception would only clutter logs."""
     chat = chat or GROUP_CHAT_ID or (next(iter(ALLOWED_USERS), None))
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    head = f"💥 <b>Краш</b>\nГде: {html.escape(where)}\nЧто: <b>{type(exc).__name__}</b>: {html.escape(str(exc))}"
-    block = tb[-3500:]  # хвост трейсбека — самое релевантное
+    head = f"💥 <b>Crash</b>\nWhere: {html.escape(where)}\nWhat: <b>{type(exc).__name__}</b>: {html.escape(str(exc))}"
+    block = tb[-3500:]  # tail of traceback — most relevant part
     text = f"{head}\n<pre>{html.escape(block)}</pre>"
-    # Лог в stdout → journalctl → error-scanner подхватит Traceback → инцидент в Failed.
-    # Без этого крашы видны только в TG и в Failed не попадают (самолечение их не видит).
+    # Log to stdout → journalctl → error-scanner picks up Traceback → incident in Failed.
+    # Without this, crashes are only visible in TG and never reach the self-heal scanner.
     print(f"[crash] {where}: {type(exc).__name__}: {exc}\n{tb}", flush=True)
     try:
         await _tg_call(lambda: context.bot.send_message(
@@ -329,11 +329,11 @@ async def report_error(context, chat, thread, where: str, exc: BaseException):
     except Exception:
         pass
     try:
-        plain = f"💥 Краш\nГде: {where}\nЧто: {type(exc).__name__}: {exc}\n\n{block}"
+        plain = f"💥 Crash\nWhere: {where}\nWhat: {type(exc).__name__}: {exc}\n\n{block}"
         await _tg_call(lambda: context.bot.send_message(
             chat, plain[:TG_CHUNK], message_thread_id=thread or None))
     except Exception as send_exc:
-        print(f"[report_error] не смог отправить отчёт в TG ({type(send_exc).__name__}): {exc!r}")
+        print(f"[report_error] failed to send crash report to TG ({type(send_exc).__name__}): {exc!r}")
 
 
 def _chunks(s, n):
@@ -343,8 +343,8 @@ def _chunks(s, n):
 
 
 def _smart_chunks(s: str, n: int):
-    """Режем по строкам (потом по пробелам), чтобы не рвать HTML-теги/entity на границе чанка.
-    Если строка сама длиннее n — fallback на грубое разбиение."""
+    """Split by lines (then by spaces) to avoid tearing HTML tags/entities at chunk boundaries.
+    If a single line is longer than n — fall back to hard splitting."""
     if not s:
         return [""]
     out, buf = [], ""
@@ -372,8 +372,8 @@ def short(cmd: str, limit=90) -> str:
 
 # ─────────────────────────── audit + watchdog ───────────────────────────
 AUDIT_DIR = DATA / "audit"
-STALL_SECONDS = int(os.environ.get("STALL_SECONDS", "300"))   # нет событий N сек -> прервать
-MAX_SECONDS = int(os.environ.get("MAX_SECONDS", "1800"))      # общий потолок задачи (30 мин)
+STALL_SECONDS = int(os.environ.get("STALL_SECONDS", "300"))   # no events for N sec -> interrupt
+MAX_SECONDS = int(os.environ.get("MAX_SECONDS", "1800"))      # overall task ceiling (30 min)
 _DESTRUCTIVE = ("git push", "push origin", "reset --hard", "rebase", "git clean", "--force",
                 "rm -rf", "rm -r ", "rm -f", "drop table", "drop database", "delete from",
                 "truncate", "coolify", "docker rm", "docker stop", "compose down",
@@ -386,7 +386,7 @@ def _is_destructive(cmd: str) -> bool:
 
 
 def audit(project: str, kind: str, text: str):
-    """Аппендит в data/audit/audit-YYYY-MM.log — постоянный след действий full-auto бота на проде."""
+    """Appends to data/audit/audit-YYYY-MM.log — permanent trail of full-auto bot actions on prod."""
     try:
         AUDIT_DIR.mkdir(exist_ok=True)
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -396,23 +396,23 @@ def audit(project: str, kind: str, text: str):
         pass
 
 
-# ─────────────────────────── ДВИЖОК (async-генератор событий) ───────────────────────────
+# ─────────────────────────── ENGINE (async event generator) ───────────────────────────
 #
-# run_engine — независимый генератор событий. Не знает про Telegram, aiohttp или любой транспорт.
-# Транспорты (TG-адаптер run_agent) потребляют его события.
+# run_engine — independent event generator. Knows nothing about Telegram, aiohttp, or any transport.
+# Transports (TG adapter run_agent) consume its events.
 #
-# Схема событий:
-#   {"type": "tool",       "name": str, "input": dict}        — инструмент запущен агентом
-#   {"type": "text",       "text": str}                        — текстовый блок ответа модели
+# Event schema:
+#   {"type": "tool",       "name": str, "input": dict}        — tool invoked by the agent
+#   {"type": "text",       "text": str}                        — text block from model response
 #   {"type": "result",     "session_id": str|None,
-#                          "cost_usd": float|None}             — финальный ResultMessage
-#   {"type": "rate_limit", "rate_limit_type": str, ...}        — RateLimitEvent (пассивное)
-#   {"type": "error",      "exc": BaseException}               — исключение из SDK
+#                          "cost_usd": float|None}             — final ResultMessage
+#   {"type": "rate_limit", "rate_limit_type": str, ...}        — RateLimitEvent (passive)
+#   {"type": "error",      "exc": BaseException}               — exception from SDK
 #
-# ВАЖНО — running[session_key]:
-#   Адаптер (on_message) ставит running[k] = True СИНХРОННО до первого await (гонка!).
-#   run_engine заменяет его реальным ClaudeSDKClient сразу после создания.
-#   Снятие running.pop(k) — ответственность адаптера (в finally).
+# IMPORTANT — running[session_key]:
+#   The adapter (on_message) sets running[k] = True SYNCHRONOUSLY before the first await (race!).
+#   run_engine replaces it with the real ClaudeSDKClient immediately after creation.
+#   Clearing running.pop(k) is the adapter's responsibility (in finally).
 
 async def run_engine(  # type: ignore[return]
     project_name: str,
@@ -424,19 +424,19 @@ async def run_engine(  # type: ignore[return]
     env: dict = None,
     resume_session_id: str = None,
 ) -> "AsyncGenerator[dict, None]":
-    """Async-генератор событий SDK. Единственный источник истины для выполнения промпта.
+    """Async SDK event generator. Single source of truth for prompt execution.
 
-    Аргументы:
-        project_name      — имя проекта (для audit-лога)
-        cwd               — рабочая директория
-        prompt            — промпт пользователя
-        session_key       — ключ в running/sessions (напр. "chat:thread")
-        model             — модель (алиас из MODELS или строка напрямую)
-        system_prompt     — dict {type,preset,append}, по умолчанию — TG-preset
-        env               — доп. env-переменные для агента (TG_CHAT_ID и т.п.)
-        resume_session_id — session_id для resume (None = новая сессия)
+    Args:
+        project_name      — project name (for audit log)
+        cwd               — working directory
+        prompt            — user prompt
+        session_key       — key in running/sessions (e.g. "chat:thread")
+        model             — model (alias from MODELS or raw string)
+        system_prompt     — dict {type,preset,append}, default is TG preset
+        env               — extra env vars for the agent (TG_CHAT_ID etc.)
+        resume_session_id — session_id to resume (None = new session)
 
-    Yields dict событий. Исключения SDK оборачиваются в {"type": "error", "exc": ...}.
+    Yields event dicts. SDK exceptions are wrapped as {"type": "error", "exc": ...}.
     """
     if system_prompt is None:
         system_prompt = {"type": "preset", "preset": "claude_code", "append": TELEGRAM_NUDGE}
@@ -456,15 +456,15 @@ async def run_engine(  # type: ignore[return]
 
     audit(project_name, "TASK", short(prompt, 300))
 
-    last_ctx_tokens = 0   # реальный размер контекста = prompt-токены последнего AssistantMessage
+    last_ctx_tokens = 0   # real context size = prompt tokens of the last AssistantMessage
     try:
         async with ClaudeSDKClient(options=opts) as client:
-            running[session_key] = client   # заменяем True-placeholder реальным клиентом (для /stop)
+            running[session_key] = client   # replace True-placeholder with the real client (for /stop)
             await client.query(prompt)
             async for msg in client.receive_response():
                 if isinstance(msg, AssistantMessage):
-                    # usage последнего ассистент-сообщения = весь промпт текущего хода:
-                    # input + cache_read + cache_creation == get_context_usage().totalTokens (проверено)
+                    # usage of the last assistant message = full prompt of the current turn:
+                    # input + cache_read + cache_creation == get_context_usage().totalTokens (verified)
                     u = getattr(msg, "usage", None) or {}
                     pt = (u.get("input_tokens", 0)
                           + u.get("cache_read_input_tokens", 0)
@@ -493,16 +493,16 @@ async def run_engine(  # type: ignore[return]
                         "context_tokens": last_ctx_tokens,
                     }
                 elif isinstance(msg, SystemMessage):
-                    pass   # системные сообщения SDK — не транслируем
+                    pass   # SDK system messages — not forwarded to transport
     except Exception as exc:
         yield {"type": "error", "exc": exc}
 
 
-# ─────────────────────────── TG-адаптер ───────────────────────────
+# ─────────────────────────── TG adapter ───────────────────────────
 #
-# run_agent — потребитель run_engine для Telegram-канала.
-# Рендерит статус-сообщение (edit), watchdog, heartbeat, audit-лог, финальный ответ.
-# Поведение 1-в-1 с оригиналом — только источник событий заменён на генератор.
+# run_agent — run_engine consumer for the Telegram channel.
+# Renders the status message (edit), watchdog, heartbeat, audit log, and final reply.
+# Behaviour is 1-to-1 with the original — only the event source is replaced by the generator.
 
 async def run_agent(context, update, prompt: str):
     chat = update.effective_chat.id
@@ -510,21 +510,21 @@ async def run_agent(context, update, prompt: str):
     k = key_of(update)
     b = topics.get(k) or binding_for(update)
     cwd, model = b["cwd"], b.get("model", DEFAULT_MODEL)
-    # слот уже зарезервирован в on_message (running[k]=True) — здесь только работаем
+    # slot already reserved in on_message (running[k]=True) — here we just do the work
 
     status = await context.bot.send_message(
-        chat, f"⚙️ <b>{b['project']}</b> · {model}\n<i>думаю…</i>",
+        chat, f"⚙️ <b>{b['project']}</b> · {model}\n<i>thinking…</i>",
         message_thread_id=thread or None, parse_mode=ParseMode.HTML,
     )
     log_lines, answer, n_edits = [], [], 0
     last_edit = 0.0
     t_start = time.time()
-    last_event = [t_start]        # обновляется на каждом событии SDK (для watchdog)
+    last_event = [t_start]        # updated on every SDK event (for watchdog)
     stalled = {"reason": None}
 
     def _elapsed():
         s = int(time.time() - t_start)
-        return f"{s // 60}м {s % 60:02d}с" if s >= 60 else f"{s}с"
+        return f"{s // 60}m {s % 60:02d}s" if s >= 60 else f"{s}s"
 
     async def push_status(force=False):
         nonlocal last_edit
@@ -532,8 +532,8 @@ async def run_agent(context, update, prompt: str):
         if not force and now - last_edit < 2.0:
             return
         last_edit = now
-        tail = "\n".join(log_lines[-8:]) or "думаю…"
-        # таймер в шапке всегда меняется → нет ошибки "message is not modified" и видно, что жив
+        tail = "\n".join(log_lines[-8:]) or "thinking…"
+        # timer in the header always changes → no "message is not modified" error and shows liveness
         body = f"⚙️ <b>{b['project']}</b> · {model} · ⏱ {_elapsed()}\n{html.escape(tail)}"
         try:
             await context.bot.edit_message_text(body, chat, status.message_id, parse_mode=ParseMode.HTML)
@@ -541,7 +541,7 @@ async def run_agent(context, update, prompt: str):
             pass
 
     async def heartbeat():
-        """Тикает статус каждые ~12с даже без новых tool-вызовов — сигнал «работаю, не завис»."""
+        """Ticks the status every ~12 s even without new tool calls — signals "alive, not hung"."""
         try:
             while True:
                 await asyncio.sleep(12)
@@ -550,8 +550,8 @@ async def run_agent(context, update, prompt: str):
             pass
 
     async def watchdog():
-        """Прерывает зависшую задачу: нет событий stall_s ИЛИ превышен max_s.
-        Пороги — из глобальных настроек кокпита (settings.json), фоллбэк на env-дефолты."""
+        """Interrupts a stalled task: no events for stall_s OR max_s exceeded.
+        Thresholds come from cockpit global settings (settings.json), falling back to env defaults."""
         stall_s, max_s = STALL_SECONDS, MAX_SECONDS
         try:
             import webapp as _wa
@@ -566,18 +566,18 @@ async def run_agent(context, update, prompt: str):
                 idle = now - last_event[0]
                 if idle > stall_s:
                     if stall_s < 60:
-                        stalled["reason"] = f"нет событий {int(idle)}с"
+                        stalled["reason"] = f"no events for {int(idle)}s"
                     else:
-                        stalled["reason"] = f"нет событий {int(idle // 60)} мин"
+                        stalled["reason"] = f"no events for {int(idle // 60)} min"
                 elif now - t_start > max_s:
-                    stalled["reason"] = f"превышен лимит {max_s // 60} мин"
+                    stalled["reason"] = f"exceeded limit of {max_s // 60} min"
                 cl = running.get(k)
                 if stalled["reason"] and hasattr(cl, "interrupt"):
                     try:
                         await cl.interrupt()
-                        print(f"[watchdog] прервал задачу {k}: {stalled['reason']}")
+                        print(f"[watchdog] interrupted task {k}: {stalled['reason']}")
                         await send(context, chat, thread,
-                                   md_to_html(f"⏱ Watchdog сработал: {stalled['reason']} — задача прервана."),
+                                   md_to_html(f"⏱ Watchdog triggered: {stalled['reason']} — task interrupted."),
                                    parse_mode=ParseMode.HTML)
                     finally:
                         return
@@ -589,7 +589,7 @@ async def run_agent(context, update, prompt: str):
     engine_exc = None
     webapp._bus_publish(k, {"kind": "run_start", "source": "tg", "prompt": prompt, "run_id": None})
     try:
-        # Секреты проекта (Spec 007) дополняют env; TG_CHAT_ID/TG_THREAD_ID имеют приоритет
+        # Project secrets (Spec 007) augment env; TG_CHAT_ID/TG_THREAD_ID take priority
         project_secrets = webapp._secrets_read(cwd)
         agent_env = {**project_secrets, "TG_CHAT_ID": str(chat), "TG_THREAD_ID": str(thread or 0)}
         async for event in run_engine(
@@ -602,7 +602,7 @@ async def run_agent(context, update, prompt: str):
             env=agent_env,
             resume_session_id=sessions.get(k),
         ):
-            last_event[0] = time.time()   # любое событие SDK = «живо» для watchdog
+            last_event[0] = time.time()   # any SDK event = "alive" for watchdog
             etype = event["type"]
 
             if etype == "text":
@@ -660,9 +660,9 @@ async def run_agent(context, update, prompt: str):
             "outcome": "ok" if engine_exc is None else "fail",
             "run_id": None,
         })
-        # running.pop снимается в safe_run.finally (авторитетная точка)
+        # running.pop is cleared in safe_run.finally (authoritative location)
 
-    # Если движок упал — удаляем статус и пробрасываем (safe_run/report_error обработает)
+    # If the engine failed — delete the status message and re-raise (safe_run/report_error handles it)
     if engine_exc is not None:
         try:
             await context.bot.delete_message(chat, status.message_id)
@@ -670,16 +670,16 @@ async def run_agent(context, update, prompt: str):
             pass
         raise engine_exc
 
-    # финал: СНАЧАЛА шлём ответ, и только ПОТОМ убираем статус-сообщение.
-    # Порядок критичен: если отправка ответа упадёт даже после ретраев — на экране
-    # останется последний прогресс (а не пустота). Удаление статуса до отправки и было
-    # причиной «пропали и ход работы, и ответ» на длинных задачах.
+    # Final: FIRST send the reply, THEN delete the status message.
+    # Order is critical: if sending the reply fails even after retries — the last progress
+    # remains on screen (not blank). Deleting status before sending was the cause of
+    # "both the progress log and the reply disappeared" on long tasks.
     footer = []
     if n_edits:
-        footer.append(f"✏️ правок файлов: {n_edits}")
+        footer.append(f"✏️ files edited: {n_edits}")
     if stalled["reason"]:
-        footer.append(f"⚠️ авто-прервано watchdog: {stalled['reason']}")
-    ans = md_to_html("\n".join(answer).strip() or "(агент завершил без текстового ответа)")
+        footer.append(f"⚠️ auto-interrupted by watchdog: {stalled['reason']}")
+    ans = md_to_html("\n".join(answer).strip() or "(agent finished with no text reply)")
     if footer:
         ans += "\n\n— — —\n" + "\n".join(footer)
     await send(context, chat, thread, ans, parse_mode=ParseMode.HTML)
@@ -693,8 +693,8 @@ async def run_agent(context, update, prompt: str):
 
 # ─────────────────────────── handlers ───────────────────────────
 async def fetch_files(context, msg) -> list:
-    """Скачивает вложения (документ/фото) в data/inbox/ и возвращает абсолютные пути.
-    Лимит Telegram getFile — 20MB. Агент потом читает их по пути через Read."""
+    """Downloads attachments (document/photo) to data/inbox/ and returns absolute paths.
+    Telegram getFile limit is 20 MB. The agent then reads them by path via Read."""
     inbox = DATA / "inbox"
     inbox.mkdir(exist_ok=True)
     paths = []
@@ -724,59 +724,59 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     k = key_of(update)
     if k not in topics and msg.message_thread_id:
         await send(context, update.effective_chat.id, msg.message_thread_id,
-                   "🔌 Топик не привязан к проекту. Привяжи: /project <имя>")
+                   "🔌 Topic is not bound to a project. Bind it: /project <name>")
         return
-    # защита от гонки: резервируем слот СИНХРОННО, до первого await
+    # race-condition guard: reserve slot SYNCHRONOUSLY before the first await
     if k in running:
         await send(context, update.effective_chat.id, msg.message_thread_id,
-                   "⏳ Уже работаю в этом топике. /stop чтобы прервать.")
+                   "⏳ Already running in this topic. Use /stop to interrupt.")
         return
-    running[k] = True  # placeholder; run_engine заменит на реальный client
+    running[k] = True  # placeholder; run_engine will replace with the real client
     cid, tid = update.effective_chat.id, msg.message_thread_id
     try:
-        # вложения -> скачиваем, путь отдаём агенту
+        # attachments -> download, pass paths to agent
         files = []
         if has_file:
             try:
                 files = await fetch_files(context, msg)
             except Exception as e:
-                await send(context, cid, tid, f"⚠️ Не смог скачать вложение ({e}). Возможно >20MB.")
-        base = text or "Посмотри прикреплённый файл и скажи/сделай по нему, что нужно."
+                await send(context, cid, tid, f"⚠️ Failed to download attachment ({e}). Possibly >20 MB.")
+        base = text or "Look at the attached file and do whatever is needed with it."
         if msg.forward_origin:
-            prompt = ("[Это пересланное сообщение/алерт от одного из моих сервисов. "
-                      "Диагностируй причину и почини.]\n\n" + base)
+            prompt = ("[This is a forwarded message / alert from one of my services. "
+                      "Diagnose the cause and fix it.]\n\n" + base)
         else:
             prompt = base
         if files:
-            prompt += ("\n\n[Прикреплённые файлы — абсолютные пути на сервере, прочитай их через Read:\n"
+            prompt += ("\n\n[Attached files — absolute paths on the server, read them via Read:\n"
                        + "\n".join(files) + "]")
         await context.bot.send_chat_action(cid, ChatAction.TYPING, message_thread_id=tid or None)
         asyncio.create_task(safe_run(context, update, prompt))
     except Exception as e:
         running.pop(k, None)
-        await send(context, cid, tid, f"⚠️ Ошибка запуска задачи: {e}")
+        await send(context, cid, tid, f"⚠️ Task launch error: {e}")
 
 
 async def safe_run(context, update, prompt):
-    """Обёртка фоновой задачи: PTB не ловит исключения из asyncio.create_task сам."""
+    """Background task wrapper: PTB does not catch exceptions from asyncio.create_task itself."""
     chat = update.effective_chat.id
     thread = update.effective_message.message_thread_id
     k = key_of(update)
     try:
         await run_agent(context, update, prompt)
     except Exception as e:
-        # SIGTERM/SIGKILL CLI при systemctl restart/stop сервиса -> SDK отдаёт exit 143/137.
-        # Это не баг бота, а штатный shutdown — не шумим «крашем» в TG.
+        # SIGTERM/SIGKILL to CLI on systemctl restart/stop -> SDK returns exit 143/137.
+        # This is a normal shutdown, not a bot bug — don't report it as a "crash" in TG.
         if "exit code 143" in str(e) or "exit code 137" in str(e):
             print(f"[safe_run] CLI killed during shutdown (exit 143/137), prompt={short(prompt, 60)}")
         else:
             await report_error(context, chat, thread, f"run_agent · {short(prompt, 60)}", e)
     finally:
-        running.pop(k, None)  # гарантированно снимаем резерв, даже если упало до try в run_agent
+        running.pop(k, None)  # always clear the reservation, even if run_agent crashed before its try
 
 
 async def on_error(update, context):
-    """Глобальный обработчик ошибок PTB (хэндлеры команд и т.п.)."""
+    """Global PTB error handler (command handlers etc.)."""
     chat = thread = None
     where = "handler"
     if isinstance(update, Update):
@@ -791,7 +791,7 @@ async def on_error(update, context):
 
 
 async def on_topic_created(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Новый топик -> авто-привязка по имени через реестр."""
+    """New topic -> auto-bind by name via registry."""
     if not authorized(update):
         return
     msg = update.effective_message
@@ -802,10 +802,10 @@ async def on_topic_created(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topics[k] = {"project": r[0], "cwd": r[1], "model": DEFAULT_MODEL}
         save_topics()
         await send(context, update.effective_chat.id, msg.message_thread_id,
-                   f"✅ Привязал топик к <b>{r[0]}</b>\n<code>{r[1]}</code>", parse_mode=ParseMode.HTML)
+                   f"✅ Bound topic to <b>{r[0]}</b>\n<code>{r[1]}</code>", parse_mode=ParseMode.HTML)
     else:
         await send(context, update.effective_chat.id, msg.message_thread_id,
-                   f"🔌 Топик «{html.escape(name)}» не сматчился с проектом. Привяжи: /project &lt;имя|путь&gt;",
+                   f"🔌 Topic «{html.escape(name)}» did not match any project. Bind manually: /project &lt;name|path&gt;",
                    parse_mode=ParseMode.HTML)
 
 
@@ -814,8 +814,8 @@ async def cmd_start(update, context):
     if not authorized(update):
         return
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-               "👋 Claude-Ops. Пиши задачу или пересылай алерт в топик проекта.\n"
-               "Команды: /whoami /reset /resume /model /project /newtopic /diff /cost /stop")
+               "👋 Claude-Ops. Send a task or forward an alert to a project topic.\n"
+               "Commands: /whoami /reset /resume /model /project /newtopic /diff /cost /stop")
 
 
 async def cmd_whoami(update, context):
@@ -825,7 +825,7 @@ async def cmd_whoami(update, context):
     b = topics.get(k) or binding_for(update)
     if not b:
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-                   "🔌 Топик не привязан. /project <имя>")
+                   "🔌 Topic not bound. /project <name>")
         return
     sid = sessions.get(k, "—")
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
@@ -842,7 +842,7 @@ async def cmd_reset(update, context):
     b = topics.get(k) or binding_for(update)
     proj = b["project"] if b else "—"
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-               f"🔄 Контекст сброшен. Проект <b>{proj}</b> сохранён.", parse_mode=ParseMode.HTML)
+               f"🔄 Context reset. Project <b>{proj}</b> preserved.", parse_mode=ParseMode.HTML)
 
 
 async def cmd_resume(update, context):
@@ -853,11 +853,11 @@ async def cmd_resume(update, context):
         sessions[k] = context.args[0]
         save_sessions()
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-                   f"⏯ Резюмлю сессию <code>{context.args[0]}</code>", parse_mode=ParseMode.HTML)
+                   f"⏯ Resuming session <code>{context.args[0]}</code>", parse_mode=ParseMode.HTML)
     else:
         sid = sessions.get(k, "—")
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-                   f"Текущая сессия топика: <code>{sid}</code>", parse_mode=ParseMode.HTML)
+                   f"Current topic session: <code>{sid}</code>", parse_mode=ParseMode.HTML)
 
 
 async def cmd_model(update, context):
@@ -867,17 +867,17 @@ async def cmd_model(update, context):
     b = topics.get(k) or binding_for(update)
     if not b:
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-                   "🔌 Сначала привяжи топик: /project <имя>")
+                   "🔌 Bind the topic first: /project <name>")
         return
     if not context.args or context.args[0] not in MODELS:
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-                   "Формат: /model opus|sonnet|haiku")
+                   "Usage: /model opus|sonnet|haiku")
         return
     b["model"] = context.args[0]
     if k in topics:
         save_topics()
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-               f"🧠 Модель топика: <b>{context.args[0]}</b> (со следующего запроса)", parse_mode=ParseMode.HTML)
+               f"🧠 Topic model: <b>{context.args[0]}</b> (takes effect from the next request)", parse_mode=ParseMode.HTML)
 
 
 async def cmd_project(update, context):
@@ -885,28 +885,28 @@ async def cmd_project(update, context):
         return
     if not context.args:
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-                   "Формат: /project <имя|путь>. Известные: " + ", ".join(sorted(set(_REG_RAW))))
+                   "Usage: /project <name|path>. Known: " + ", ".join(sorted(set(_REG_RAW))))
         return
     r = resolve_project(" ".join(context.args))
     if not r:
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-                   "❌ Не нашёл такой проект/путь.")
+                   "❌ Project/path not found.")
         return
     k = key_of(update)
     prev = topics.get(k, {})
     topics[k] = {"project": r[0], "cwd": r[1], "model": prev.get("model", DEFAULT_MODEL)}
     save_topics()
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-               f"📌 Топик привязан к <b>{r[0]}</b>\n<code>{r[1]}</code>", parse_mode=ParseMode.HTML)
+               f"📌 Topic bound to <b>{r[0]}</b>\n<code>{r[1]}</code>", parse_mode=ParseMode.HTML)
 
 
 async def cmd_newtopic(update, context):
-    """Бот сам создаёт forum-топик и привязывает к проекту."""
+    """Bot creates a forum topic and binds it to a project."""
     if not authorized(update):
         return
     if not context.args:
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-                   "Формат: /newtopic <имя проекта>")
+                   "Usage: /newtopic <project name>")
         return
     name = " ".join(context.args)
     res = await context.bot.create_forum_topic(chat_id=update.effective_chat.id, name=name)
@@ -916,11 +916,11 @@ async def cmd_newtopic(update, context):
     if r:
         topics[k] = {"project": r[0], "cwd": r[1], "model": DEFAULT_MODEL}
         save_topics()
-        note = f" → привязан к <code>{r[1]}</code>"
+        note = f" → bound to <code>{r[1]}</code>"
     else:
-        note = " (не сматчился с проектом — привяжи /project внутри топика)"
+        note = " (did not match any project — bind with /project inside the topic)"
     await context.bot.send_message(update.effective_chat.id,
-                                   f"🆕 Создал топик «{html.escape(name)}»{note}",
+                                   f"🆕 Created topic «{html.escape(name)}»{note}",
                                    message_thread_id=tid, parse_mode=ParseMode.HTML)
 
 
@@ -935,9 +935,9 @@ async def cmd_diff(update, context):
         out = subprocess.run(["git", "-C", b["cwd"], "diff", "--stat"],
                              capture_output=True, text=True, timeout=15).stdout
     except Exception as e:
-        out = f"ошибка: {e}"
+        out = f"error: {e}"
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-               f"<b>git diff --stat</b> ({b['project']})\n<pre>{html.escape(out or '(пусто)')}</pre>",
+               f"<b>git diff --stat</b> ({b['project']})\n<pre>{html.escape(out or '(empty)')}</pre>",
                parse_mode=ParseMode.HTML)
 
 
@@ -947,14 +947,14 @@ async def cmd_cost(update, context):
     k = key_of(update)
     c = costs.get(k)
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-               f"💰 Последний запрос: ${c:.4f}" if c is not None else "💰 Данных пока нет")
+               f"💰 Last request: ${c:.4f}" if c is not None else "💰 No data yet")
 
 
 _RL_LABELS = {
-    "five_hour": "5-часовая сессия",
-    "seven_day": "Недельный лимит",
-    "seven_day_opus": "Недельный · Opus",
-    "seven_day_sonnet": "Недельный · Sonnet",
+    "five_hour": "5-hour session",
+    "seven_day": "Weekly limit",
+    "seven_day_opus": "Weekly · Opus",
+    "seven_day_sonnet": "Weekly · Sonnet",
     "overage": "Overage",
 }
 _RL_ICON = {"allowed": "🟢", "allowed_warning": "🟡", "rejected": "🔴"}
@@ -965,25 +965,25 @@ def _fmt_reset(ts):
         return "—"
     delta = ts - time.time()
     if delta <= 0:
-        return "скоро"
+        return "soon"
     h, m = int(delta // 3600), int((delta % 3600) // 60)
-    return f"через {h}ч {m}м" if h else f"через {m}м"
+    return f"in {h}h {m}m" if h else f"in {m}m"
 
 
 def format_usage() -> str:
     if not rate_limits:
-        return ("📊 Данных о лимитах пока нет — придут с первым же запросом к боту "
-                "(они приезжают вместе с ответами).")
-    lines = ["📊 <b>Лимиты подписки</b> (пассивно, с последних ответов):"]
+        return ("📊 No limit data yet — it will arrive with the first request to the bot "
+                "(delivered together with responses).")
+    lines = ["📊 <b>Subscription limits</b> (passive, from recent responses):"]
     for t in ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "overage"]:
         d = rate_limits.get(t)
         if not d:
             continue
         icon = _RL_ICON.get(d["status"], "⚪")
         util = d.get("utilization")
-        pct = f" · использовано {util * 100:.0f}% (осталось {100 - util * 100:.0f}%)" if util is not None else ""
-        lines.append(f"{icon} <b>{_RL_LABELS.get(t, t)}</b>: сброс {_fmt_reset(d['resets_at'])}{pct}")
-    lines.append("\n<i>Точный % приходит только при приближении к лимиту; иначе — статус и время сброса.</i>")
+        pct = f" · used {util * 100:.0f}% ({100 - util * 100:.0f}% remaining)" if util is not None else ""
+        lines.append(f"{icon} <b>{_RL_LABELS.get(t, t)}</b>: resets {_fmt_reset(d['resets_at'])}{pct}")
+    lines.append("\n<i>Exact % only arrives when approaching the limit; otherwise just status and reset time.</i>")
     return "\n".join(lines)
 
 
@@ -1001,15 +1001,15 @@ async def cmd_stop(update, context):
     client = running.get(k)
     cid, tid = update.effective_chat.id, update.effective_message.message_thread_id
     if client is None:
-        await send(context, cid, tid, "Нечего прерывать.")
+        await send(context, cid, tid, "Nothing to interrupt.")
     elif hasattr(client, "interrupt"):
         try:
             await client.interrupt()
         except Exception:
             pass
-        await send(context, cid, tid, "🛑 Прерываю…")
+        await send(context, cid, tid, "🛑 Interrupting…")
     else:
-        await send(context, cid, tid, "⏳ Задача ещё запускается — секунду.")
+        await send(context, cid, tid, "⏳ Task is still starting up — please wait a moment.")
 
 
 # ─────────────────────────── main ───────────────────────────

@@ -11,7 +11,7 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-// Строка «лейбл + контрол» с подсказкой
+// Label + control row with a hint
 function Row({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, padding: '10px 0', borderTop: '1px solid var(--border)' }}>
@@ -48,7 +48,7 @@ export function SettingsTab({ projectId }: Props) {
     setSavingProj(true); setProjMsg('')
     try {
       const r = await api.saveProjectSettings(projectId, proj)
-      setProj(r.settings); setProjMsg('Сохранено ✓')
+      setProj(r.settings); setProjMsg('Saved ✓')
     } catch (e) { setProjMsg('⚠ ' + errMsg(e)) }
     finally { setSavingProj(false) }
   }
@@ -66,12 +66,12 @@ export function SettingsTab({ projectId }: Props) {
         watchdog_stall_sec: ef.watchdog_stall_sec,
         watchdog_max_sec: ef.watchdog_max_sec,
       })
-      setGlobMsg(`Сохранено ✓ (${Object.keys(r.stored).length} переопределений)`)
+      setGlobMsg(`Saved ✓ (${Object.keys(r.stored).length} override(s))`)
     } catch (e) { setGlobMsg('⚠ ' + errMsg(e)) }
     finally { setSavingGlob(false) }
   }
 
-  if (loading) return <Spinner label="Загрузка настроек…" />
+  if (loading) return <Spinner label="Loading settings…" />
   if (error) return <div className="error-state">⚠ {error}</div>
   if (!proj || !glob) return null
 
@@ -82,31 +82,31 @@ export function SettingsTab({ projectId }: Props) {
   return (
     <div style={{ maxWidth: 660, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 28, padding: '6px 4px 32px' }}>
 
-      {/* ── Настройки проекта ── */}
+      {/* ── Project settings ── */}
       <section>
-        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>Настройки проекта</h3>
+        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>Project settings</h3>
         <p style={{ margin: '0 0 6px', fontSize: 12, color: 'var(--text3)' }}>
-          Только для этого проекта (хранятся в topics.json, подхватываются на лету).
+          Per-project only (stored in topics.json, hot-reloaded).
         </p>
 
-        <Row title="Git-синхронизация"
-             hint="Выкл — кокпит не использует git: карточки гоняются прямо в папке (без worktree-веток), кнопка git-sync отключена, health не требует .git. Вся история диалогов сохраняется; существующий .git физически не трогаем.">
+        <Row title="Git sync"
+             hint="Off — cockpit does not use git: cards run directly in the folder (no worktree branches), git-sync button is disabled, health does not require .git. All conversation history is preserved; existing .git is not physically touched.">
           <input type="checkbox" checked={proj.git_enabled}
                  onChange={ev => setProj({ ...proj, git_enabled: ev.target.checked })}
-                 aria-label="Git-синхронизация" />
+                 aria-label="Git sync" />
         </Row>
 
-        <Row title="Самолечение"
-             hint="Агент-чинильщик при падении тестов (доходит до Review, не авто-применяет). Глобальный master-выключатель ниже перекрывает.">
+        <Row title="Self-heal"
+             hint="Auto-fix agent on test failure (goes up to Review, does not auto-apply). The global master switch below overrides this.">
           <input type="checkbox" checked={proj.self_heal}
                  onChange={ev => setProj({ ...proj, self_heal: ev.target.checked })}
-                 aria-label="Самолечение" />
+                 aria-label="Self-heal" />
         </Row>
 
-        <Row title="TG-уведомления об ошибках" hint="Пинг в Telegram при новых инцидентах в Failed.">
+        <Row title="TG error notifications" hint="Ping in Telegram on new incidents in Failed.">
           <input type="checkbox" checked={proj.notify_on_error}
                  onChange={ev => setProj({ ...proj, notify_on_error: ev.target.checked })}
-                 aria-label="TG-уведомления об ошибках" />
+                 aria-label="TG error notifications" />
         </Row>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '10px 0', borderTop: '1px solid var(--border)' }}>
@@ -127,52 +127,52 @@ export function SettingsTab({ projectId }: Props) {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
           <button className="doc-btn primary" onClick={saveProj} disabled={savingProj}>
-            {savingProj ? 'Сохранение…' : 'Сохранить'}
+            {savingProj ? 'Saving…' : 'Save'}
           </button>
           {projMsg && <span style={{ fontSize: 12, color: 'var(--text2)' }}>{projMsg}</span>}
         </div>
       </section>
 
-      {/* ── Глобальные настройки ── */}
+      {/* ── Global settings ── */}
       <section>
-        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>Глобальные настройки</h3>
+        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>Global settings</h3>
         <p style={{ margin: '0 0 6px', fontSize: 12, color: 'var(--text3)' }}>
-          На весь кокпит (data/settings.json). Переопределяют env-дефолты в рантайме.
+          Cockpit-wide (data/settings.json). Overrides env defaults at runtime.
         </p>
 
-        <Row title="Самолечение — master"
-             hint="Выкл — самолечение отключено во ВСЕХ проектах, независимо от их персональной настройки.">
+        <Row title="Self-heal — master"
+             hint="Off — self-heal is disabled in ALL projects, regardless of their individual setting.">
           <input type="checkbox" checked={e.self_heal_enabled}
                  onChange={ev => setE({ self_heal_enabled: ev.target.checked })}
-                 aria-label="Самолечение master" />
+                 aria-label="Self-heal master" />
         </Row>
 
-        <Row title="Макс. параллельных починок" hint="1–10">
+        <Row title="Max parallel fixes" hint="1–10">
           <input type="number" min={1} max={10} style={{ width: 90, padding: '4px 8px', fontSize: 13 }}
                  value={e.self_heal_max_concurrent}
                  onChange={ev => setE({ self_heal_max_concurrent: Number(ev.target.value) })} />
         </Row>
 
-        <Row title="Интервал сканера инцидентов, сек" hint="30–3600">
+        <Row title="Incident scanner interval, sec" hint="30–3600">
           <input type="number" min={30} max={3600} style={{ width: 90, padding: '4px 8px', fontSize: 13 }}
                  value={e.scan_interval_sec}
                  onChange={ev => setE({ scan_interval_sec: Number(ev.target.value) })} />
         </Row>
 
-        <Row title="Дефолт-модель новых проектов"
-             hint="Применяется при создании нового проекта. Существующие проекты не затрагиваются.">
+        <Row title="Default model for new projects"
+             hint="Applied when creating a new project. Existing projects are not affected.">
           <select value={e.default_model} onChange={ev => setE({ default_model: ev.target.value })}>
             {MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
         </Row>
 
-        <Row title="Watchdog: тишина, сек" hint="Нет событий дольше → прервать задачу. 30–7200">
+        <Row title="Watchdog: silence, sec" hint="No events longer than this → interrupt task. 30–7200">
           <input type="number" min={30} max={7200} style={{ width: 90, padding: '4px 8px', fontSize: 13 }}
                  value={e.watchdog_stall_sec}
                  onChange={ev => setE({ watchdog_stall_sec: Number(ev.target.value) })} />
         </Row>
 
-        <Row title="Watchdog: потолок задачи, сек" hint="Общий лимит на задачу. 60–14400">
+        <Row title="Watchdog: task ceiling, sec" hint="Total task time limit. 60–14400">
           <input type="number" min={60} max={14400} style={{ width: 90, padding: '4px 8px', fontSize: 13 }}
                  value={e.watchdog_max_sec}
                  onChange={ev => setE({ watchdog_max_sec: Number(ev.target.value) })} />
@@ -180,17 +180,17 @@ export function SettingsTab({ projectId }: Props) {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
           <button className="doc-btn primary" onClick={saveGlob} disabled={savingGlob}>
-            {savingGlob ? 'Сохранение…' : 'Сохранить'}
+            {savingGlob ? 'Saving…' : 'Save'}
           </button>
           {globMsg && <span style={{ fontSize: 12, color: 'var(--text2)' }}>{globMsg}</span>}
         </div>
       </section>
 
-      {/* ── Секреты проекта ── */}
+      {/* ── Project secrets ── */}
       <section>
-        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>{'\u{1F511}'} Секреты проекта</h3>
+        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>{'\u{1F511}'} Project secrets</h3>
         <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--text3)' }}>
-          Переменные окружения, доступные агенту при выполнении задач. Не коммитятся в git.
+          Environment variables available to the agent when running tasks. Not committed to git.
         </p>
         <SecretsTab projectId={projectId} />
       </section>

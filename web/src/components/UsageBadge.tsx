@@ -13,17 +13,17 @@ interface UsageData {
   now: number
 }
 
-/** Форматирует «через 2ч 15м» или «12м». */
+/** Formats "in 2h 15m" or "12m". */
 function fmtReset(resetsAt: number | null, now: number): string {
   if (!resetsAt) return '—'
   const delta = resetsAt - now
-  if (delta <= 0) return 'скоро'
+  if (delta <= 0) return 'soon'
   const h = Math.floor(delta / 3600)
   const m = Math.floor((delta % 3600) / 60)
-  return h > 0 ? `${h}ч ${m}м` : `${m}м`
+  return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
-/** Цвет по utilization: <50% зелёный, 50–80% жёлтый, ≥80% красный. */
+/** Color by utilization: <50% green, 50–80% yellow, ≥80% red. */
 function pickClass(d: RawLimit | undefined): string {
   if (!d) return 'usage-dim'
   if (d.status === 'rejected') return 'usage-red'
@@ -36,8 +36,8 @@ function pickClass(d: RawLimit | undefined): string {
 
 const USAGE_URL = 'https://claude.ai/settings/usage'
 
-/** Открыть в новой вкладке. В установленном PWA `target=_blank` навигирует внутри окна —
- *  явный window.open на жесте пользователя надёжнее выкидывает во внешний браузер. */
+/** Open in a new tab. In an installed PWA `target=_blank` navigates inside the window —
+ *  an explicit window.open on a user gesture more reliably opens an external browser. */
 function openUsage(e: React.MouseEvent) {
   e.preventDefault()
   window.open(USAGE_URL, '_blank', 'noopener,noreferrer')
@@ -79,7 +79,7 @@ export function UsageBadge() {
   const week  = data.limits.seven_day
   const now   = data.now
 
-  // Если ничего ещё не прилетало с SDK — placeholder
+  // Nothing from SDK yet — show placeholder
   if (!fiveH && !week) {
     return (
       <a
@@ -88,14 +88,14 @@ export function UsageBadge() {
         target="_blank"
         rel="noopener noreferrer"
         onClick={openUsage}
-        title="Лимиты загружаются… (клик — claude.ai/settings/usage)"
+        title="Limits loading… (click — claude.ai/settings/usage)"
       >
         ⏱ —
       </a>
     )
   }
 
-  // Основной показатель — 5-часовое окно, иначе недельное.
+  // Primary indicator — 5-hour window, otherwise weekly.
   const primary = fiveH ?? week!
   const icon = fiveH ? '⏱' : '📅'
   const pct = fmtPct(primary.utilization)
@@ -112,7 +112,7 @@ export function UsageBadge() {
         target="_blank"
         rel="noopener noreferrer"
         onClick={openUsage}
-        title="Лимиты подписки Claude Code (клик — claude.ai/settings/usage)"
+        title="Claude Code subscription limits (click — claude.ai/settings/usage)"
       >
         <span className="usage-icon">{icon}</span>
         {pct && <span>{pct}</span>}
@@ -126,17 +126,17 @@ export function UsageBadge() {
             const d = data.limits[k]
             if (!d) return null
             const label = ({
-              five_hour: '5-часовое окно',
-              seven_day: 'Неделя (всё)',
-              seven_day_opus: 'Неделя Opus',
-              seven_day_sonnet: 'Неделя Sonnet',
-              overage: 'Перерасход',
+              five_hour: '5-hour window',
+              seven_day: 'Week (all)',
+              seven_day_opus: 'Week Opus',
+              seven_day_sonnet: 'Week Sonnet',
+              overage: 'Overage',
             } as Record<string, string>)[k]
             return (
               <div key={k} className={`usage-row ${pickClass(d)}`}>
                 <span className="usage-row-label">{label}</span>
                 <span className="usage-row-pct">{fmtPct(d.utilization) || d.status}</span>
-                <span className="usage-row-reset">сброс {fmtReset(d.resets_at, now)}</span>
+                <span className="usage-row-reset">resets {fmtReset(d.resets_at, now)}</span>
               </div>
             )
           })}

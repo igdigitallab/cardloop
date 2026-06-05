@@ -29,7 +29,7 @@ export function ToolBlock({ tool }: { tool: RichTool }) {
           <div className="chat-tool-edit-line">
             <span className="chat-tool-file">{tool.file}</span>
             {count !== undefined && (
-              <span className="chat-tool-desc">{count} правок</span>
+              <span className="chat-tool-desc">{count} edit{count === 1 ? '' : 's'}</span>
             )}
             {'cell_type' in tool && tool.cell_type && (
               <span className="chat-tool-desc">cell: {tool.cell_type}</span>
@@ -38,7 +38,7 @@ export function ToolBlock({ tool }: { tool: RichTool }) {
               <button
                 className="chat-tool-expand-btn chat-tool-expand-inline"
                 onClick={() => setExpanded(e => !e)}
-              >{expanded ? '▲ скрыть' : '▼ diff'}</button>
+              >{expanded ? '▲ hide' : '▼ diff'}</button>
             )}
           </div>
           {hasOldNew && expanded && (
@@ -67,7 +67,7 @@ export function ToolBlock({ tool }: { tool: RichTool }) {
               <button
                 className="chat-tool-expand-btn chat-tool-expand-inline"
                 onClick={() => setExpanded(e => !e)}
-              >{expanded ? '▲ скрыть' : '▼ содержимое'}</button>
+              >{expanded ? '▲ hide' : '▼ contents'}</button>
             )}
           </div>
           {expanded && tool.preview && (

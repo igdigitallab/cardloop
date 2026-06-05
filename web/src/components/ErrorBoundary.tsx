@@ -31,7 +31,7 @@ export class ErrorBoundary extends Component<Props, State> {
         <div className="error-boundary-fallback">
           <div className="error-boundary-icon">⚠</div>
           <div className="error-boundary-msg">
-            Что-то сломалось{this.props.label ? ` в «${this.props.label}»` : ''}.
+            Something broke{this.props.label ? ` in "${this.props.label}"` : ''}.
           </div>
           {this.state.error && (
             <pre className="error-boundary-detail">{this.state.error.message}</pre>
@@ -40,14 +40,14 @@ export class ErrorBoundary extends Component<Props, State> {
             className="btn-primary"
             onClick={() => { this.setState({ hasError: false, error: null }) }}
           >
-            Попробовать снова
+            Try again
           </button>
           <button
             className="btn-secondary"
             onClick={() => window.location.reload()}
             style={{ marginLeft: 8 }}
           >
-            Перезагрузить
+            Reload
           </button>
         </div>
       )

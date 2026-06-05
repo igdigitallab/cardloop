@@ -41,12 +41,12 @@ function EditModal({ projectId, existingName, initialContent, onSaved, onClose }
   async function doSave() {
     setError('')
     let finalName = name.trim()
-    if (!finalName) { setError('Имя файла обязательно'); return }
+    if (!finalName) { setError('File name is required'); return }
     // Auto-append .md if needed
     if (!finalName.endsWith('.md')) finalName = finalName + '.md'
     // Basic slug validation
     if (!/^[a-z0-9][a-z0-9-]{0,60}\.md$/.test(finalName)) {
-      setError('Имя: строчные a-z, 0-9, дефис, 2–62 символа до .md')
+      setError('Name: lowercase a-z, 0-9, hyphen, 2–62 characters before .md')
       return
     }
     setSaving(true)
@@ -63,7 +63,7 @@ function EditModal({ projectId, existingName, initialContent, onSaved, onClose }
   return (
     <Modal onClose={onClose} className="memory-edit-modal">
       <ModalHead
-        title={isNew ? '+ Новая запись памяти' : `Редактировать: ${existingName}`}
+        title={isNew ? '+ New memory entry' : `Edit: ${existingName}`}
         onClose={onClose}
       />
       <div className="run-modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -113,7 +113,7 @@ function EditModal({ projectId, existingName, initialContent, onSaved, onClose }
           </button>
         </div>
         <p style={{ margin: 0, fontSize: 11, color: 'var(--text3)' }}>
-          Ctrl+Enter — сохранить · Esc — отмена
+          Ctrl+Enter — save · Esc — cancel
         </p>
       </div>
     </Modal>
@@ -222,15 +222,15 @@ export function MemoryTab({ projectId }: Props) {
           </div>
           <div className="memory-empty-title">{t['memory.empty_title']}</div>
           <p className="memory-empty-text">
-            Файлы из <code>{t['memory.path_hint']}</code> — накапливаемые знания проекта,
-            которые <strong>коммитятся в git</strong> и путешествуют с репо.
+            Files from <code>{t['memory.path_hint']}</code> — accumulated project knowledge
+            that is <strong>committed to git</strong> and travels with the repo.
           </p>
           <p className="memory-empty-text">
-            Агент пишет сюда сам (через Write), или создай запись вручную кнопкой ниже.
-            Типы: <code>decision</code> / <code>gotcha</code> / <code>rejected</code> / <code>convention</code>.
+            The agent writes here automatically (via Write), or create an entry manually with the button below.
+            Types: <code>decision</code> / <code>gotcha</code> / <code>rejected</code> / <code>convention</code>.
           </p>
           <p className="memory-empty-note">
-            💡 Индекс <code>MEMORY.md</code> обновляется автоматически при каждой записи.
+            💡 The <code>MEMORY.md</code> index is updated automatically on every write.
           </p>
           <button
             className="doc-btn primary"
@@ -315,7 +315,7 @@ export function MemoryTab({ projectId }: Props) {
         {/* Content area */}
         <div className="spec-content">
           {!selectedFile && (
-            <div className="no-content" style={{ paddingTop: 4 }}>← Выберите файл</div>
+            <div className="no-content" style={{ paddingTop: 4 }}>← Select a file</div>
           )}
           {selectedFile && (
             <div className="markdown-wrap" style={{ position: 'relative' }}>

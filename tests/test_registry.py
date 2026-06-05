@@ -218,9 +218,9 @@ class TestEnvFallbacks:
         """Если RESPONSE_LANGUAGE пуст — языковой директивы нет."""
         mod = self._get_constants(monkeypatch, {"RESPONSE_LANGUAGE": ""})
         # не должно быть директивы «отвечай ...»
-        assert "отвечай" not in mod.TELEGRAM_NUDGE
+        assert "answer in" not in mod.TELEGRAM_NUDGE
 
     def test_nudge_has_language_directive_when_set(self, monkeypatch):
         """Если RESPONSE_LANGUAGE задан — директива в nudge присутствует."""
         mod = self._get_constants(monkeypatch, {"RESPONSE_LANGUAGE": "ru"})
-        assert "отвечай ru" in mod.TELEGRAM_NUDGE
+        assert "answer in ru" in mod.TELEGRAM_NUDGE

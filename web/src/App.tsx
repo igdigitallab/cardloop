@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { api } from './api'
 import { Project } from './types'
+import { t } from './i18n'
 import { LoginScreen } from './components/LoginScreen'
 import { Sidebar } from './components/Sidebar'
 import { ProjectView } from './components/ProjectView'
@@ -83,20 +84,20 @@ export default function App() {
   const [sidebarOrder, setSidebarOrder] = useState<string[]>(() => readSidebarOrder())
   const { unreadBySession, incrementUnread, clearUnreadForSession, resetUnread } = useUnreadTracker()
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => readBool(LS_SIDEBAR_COLLAPSED, false))
-  // Split-view: leftId → rightId (только для free-чатов)
+  // Split-view: leftId → rightId (free chats only)
   const [splitPairs, setSplitPairs] = useState<Record<string, string>>(() => readSplitPairs())
   const [splitWidth, setSplitWidth] = useState<number>(() => readSplitWidth())
-  // Глобальный файловый браузер (персистируется в localStorage)
+  // Global file browser (persisted in localStorage)
   const [globalFilesOpen, setGlobalFilesOpen] = useState<boolean>(() => {
     try { return localStorage.getItem('cops.globalFilesOpen') === 'true' } catch { return false }
   })
-  // Текущий активный проект — для SSE-обработчика, без перепересоздания подписки на каждом select
+  // Current active project — for SSE handler, no re-subscription on every select
   const activeIdRef = useRef<string | null>(null)
   const projectsRef = useRef<Project[]>([])
-  // После первой успешной загрузки не показываем "Загрузка..." при фоновых poll'ах
+  // After first successful load, don't show "Loading..." on background polls
   const projectsLoadedRef = useRef(false)
-  // Cross-device UI-раскладка: источник истины — сервер (data/ui_state.json).
-  // localStorage остаётся мгновенным кэшем (без мигания), сервер досинхронит.
+  // Cross-device UI layout: server is the source of truth (data/ui_state.json).
+  // localStorage serves as an instant cache (no flash); server syncs on top.
   const uiHydratedRef = useRef(false)
   const uiSaveTimer = useRef<number | null>(null)
 
@@ -111,13 +112,13 @@ export default function App() {
   }, [])
 
   const loadProjects = useCallback(async () => {
-    // Loading-флаг только при первой загрузке — иначе сайдбар мигает "Загрузка..."
-    // при каждом фоновом poll'е (каждые 15с, на focus, на run_end)
+    // Loading flag only on first load — otherwise the sidebar flashes "Loading..."
+    // on every background poll (every 15s, on focus, on run_end)
     if (!projectsLoadedRef.current) setProjectsLoading(true)
     try {
       const res = await api.projects()
-      // Стабильное сравнение: не обновляем стейт если данные не изменились
-      // (предотвращает каскад эффектов openIds/sidebarOrder/activeId)
+      // Stable comparison: skip state update when data hasn't changed
+      // (prevents cascading effects on openIds/sidebarOrder/activeId)
       setProjects(prev => {
         // Stable comparison: avoid cascading effects when data hasn't changed.
         // Compare by id+model+health fields that drive sidebar/header rendering.
@@ -155,7 +156,7 @@ export default function App() {
     }
   }, [authState, loadProjects])
 
-  // Поддерживаем refs в актуальном состоянии (нужны SSE-обработчику без перепересоздания подписки)
+  // Keep refs up-to-date (needed by SSE handler without re-subscription)
   useEffect(() => { activeIdRef.current = activeId }, [activeId])
   useEffect(() => { projectsRef.current = projects }, [projects])
 
@@ -182,9 +183,9 @@ export default function App() {
     try { localStorage.setItem('cops.globalFilesOpen', String(globalFilesOpen)) } catch {}
   }, [globalFilesOpen])
 
-  // ── Cross-device sync: гидратация раскладки с сервера (источник истины) ──────
-  // localStorage уже засеял стейт (без мигания); сервер досинхронит поверх.
-  // Применяем только присутствующие ключи — пустой серверный стейт ничего не трёт.
+  // ── Cross-device sync: hydrate layout from server (source of truth) ─────────
+  // localStorage already seeded state (no flash); server syncs on top.
+  // Apply only present keys — an empty server state does not wipe anything.
   useEffect(() => {
     if (authState !== 'authed') return
     let cancelled = false
@@ -206,7 +207,7 @@ export default function App() {
             setGlobalFilesOpen(state.globalFilesOpen)
         }
       } catch {
-        // нет серверного состояния / офлайн — продолжаем с локальной раскладкой
+        // no server state / offline — continue with local layout
       } finally {
         if (!cancelled) uiHydratedRef.current = true
       }
@@ -214,9 +215,9 @@ export default function App() {
     return () => { cancelled = true }
   }, [authState])
 
-  // ── Cross-device sync: дебаунс-запись раскладки на сервер ────────────────────
-  // Только ПОСЛЕ гидратации — иначе только что открытое устройство затрёт сервер
-  // устаревшим localStorage. last-write-wins; конфликты для 1 юзера несущественны.
+  // ── Cross-device sync: debounced layout save to server ───────────────────────
+  // Only AFTER hydration — otherwise a freshly opened device would overwrite the server
+  // with stale localStorage. last-write-wins; conflicts are negligible for a single user.
   useEffect(() => {
     if (authState !== 'authed' || !uiHydratedRef.current) return
     if (uiSaveTimer.current) window.clearTimeout(uiSaveTimer.current)
@@ -233,7 +234,7 @@ export default function App() {
     return () => { if (uiSaveTimer.current) window.clearTimeout(uiSaveTimer.current) }
   }, [openIds, activeId, sidebarOrder, splitPairs, splitWidth, globalFilesOpen, authState])
 
-  // Чистим openIds / splitPairs / sidebarOrder от мёртвых проектов после загрузки списка
+  // Clean up openIds / splitPairs / sidebarOrder of dead projects after list load
   useEffect(() => {
     if (!projects.length) return
     const valid = new Set(projects.map(p => p.id))
@@ -260,7 +261,7 @@ export default function App() {
     })
   }, [projects])
 
-  // Глобальный SSE-стрим активности → unread-индикаторы + live-refresh git-статуса
+  // Global SSE activity stream → unread indicators + live git-status refresh
   useEffect(() => {
     if (authState !== 'authed') return
 
@@ -271,25 +272,25 @@ export default function App() {
       const sk = payload.session_key
       if (!sk) return
 
-      // run_end → агент мог что-то записать в файлы → освежаем список проектов
-      // (git.dirty/unpushed в шапке и сайдбаре станут актуальными)
+      // run_end → agent may have written files → refresh project list
+      // (git.dirty/unpushed in header and sidebar will become current)
       if (payload.kind === 'run_end') {
         loadProjects()
         return
       }
 
-      // Учитываем только значимые события для unread
+      // Only count meaningful events for unread
       if (payload.kind !== 'text' && payload.kind !== 'tool') return
       const proj = projectsRef.current.find(p => p.tg_thread != null && String(p.tg_thread) === sk)
       if (proj && proj.id === activeIdRef.current) return
       incrementUnread(sk)
     }
-    es.onerror = () => { /* EventSource сам переподключится */ }
+    es.onerror = () => { /* EventSource will reconnect automatically */ }
     return () => { es.close() }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- incrementUnread is stable (useCallback)
   }, [authState, loadProjects])
 
-  // Live-refresh git-статуса: polling каждые 15с + при возврате фокуса на окно/вкладку
+  // Live git-status refresh: poll every 15s + on window/tab focus
   useEffect(() => {
     if (authState !== 'authed') return
 
@@ -317,16 +318,16 @@ export default function App() {
     clearUnreadForSession(sk)
   }, [clearUnreadForSession])
 
-  // Открыть проект (клик в сайдбаре) — добавить в openIds (если нет) + активировать
+  // Open project (sidebar click) — add to openIds (if not there) + activate
   const handleSelect = useCallback((id: string) => {
     setOpenIds(prev => prev.includes(id) ? prev : [...prev, id])
     setActiveId(id)
     clearUnread(id)
   }, [clearUnread])
 
-  // Drag-and-drop порядок сайдбара. ВАЖНО: hook — выше любых ранних return
-  // (return <LoginScreen> и т.п.), иначе нарушаются Rules of Hooks → чёрный экран.
-  // Если после refresh activeId === GLOBAL_FILES_ID но флаг сброшен — восстанавливаем
+  // Drag-and-drop sidebar order. IMPORTANT: hook must be above any early returns
+  // (return <LoginScreen> etc.), otherwise Rules of Hooks are violated → black screen.
+  // If after refresh activeId === GLOBAL_FILES_ID but flag was cleared — restore it
   useEffect(() => {
     if (activeId === GLOBAL_FILES_ID) setGlobalFilesOpen(true)
   }, [activeId])
@@ -345,24 +346,24 @@ export default function App() {
     setSidebarOrder(ids)
   }, [])
 
-  // Активировать вкладку (клик по табу)
+  // Activate tab (tab click)
   const handleTabActivate = useCallback((id: string) => {
     setActiveId(id)
     clearUnread(id)
   }, [clearUnread])
 
-  // Закрыть вкладку — убрать из openIds; если была активной — соседняя становится активной
+  // Close tab — remove from openIds; if it was active — the adjacent one becomes active
   const handleTabClose = useCallback((id: string) => {
     setSplitPairs(prev => { const { [id]: _, ...rest } = prev; return rest })
     setOpenIds(prev => {
       const idx = prev.indexOf(id)
       if (idx === -1) return prev
       const next = prev.filter(x => x !== id)
-      // если закрыли активную — переключаем на соседнюю
+      // if the closed tab was active — switch to the adjacent one
       setActiveId(curActive => {
         if (curActive !== id) return curActive
         if (next.length === 0) return null
-        // приоритет: правый сосед, иначе левый
+        // prefer the right neighbour, otherwise the left
         const newIdx = Math.min(idx, next.length - 1)
         return next[newIdx]
       })
@@ -370,15 +371,15 @@ export default function App() {
     })
   }, [])
 
-  // Split-view: создать второй free-чат рядом с активным
+  // Split-view: create a second free chat alongside the active one
   const handleSplitCreate = useCallback(async (leftId: string) => {
     try {
       const res = await api.freeCreate()
       await loadProjects()
-      // партнёр НЕ добавляется в openIds — управляется через splitPairs
+      // split partner is NOT added to openIds — managed via splitPairs
       setSplitPairs(prev => ({ ...prev, [leftId]: res.id }))
     } catch (e) {
-      showToast(`Не удалось открыть split: ${e instanceof Error ? e.message : String(e)}`)
+      showToast(`Could not open split: ${e instanceof Error ? e.message : String(e)}`)
     }
   }, [loadProjects, showToast])
 
@@ -407,7 +408,7 @@ export default function App() {
     document.addEventListener('mouseup', onUp)
   }, [])
 
-  // Создать новый проект (untitled-<ts>) и сразу открыть его + запустится онбординг-карточка
+  // Create a new project (untitled-<ts>), open it immediately + onboarding card will start
   const [newProjectBusy, setNewProjectBusy] = useState(false)
   const handleNewProject = useCallback(async () => {
     if (newProjectBusy) return
@@ -419,27 +420,27 @@ export default function App() {
       setActiveId(res.id)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      showToast(`Не удалось создать проект: ${msg}`)
+      showToast(`Could not create project: ${msg}`)
     } finally {
       setNewProjectBusy(false)
     }
   }, [loadProjects, newProjectBusy, showToast])
 
-  // Создать новый свободный чат (cwd=$HOME) и сразу открыть его как вкладку
+  // Create a new free chat (cwd=$HOME) and immediately open it as a tab
   const handleNewFree = useCallback(async () => {
     try {
       const res = await api.freeCreate()
-      // Обновляем список проектов и сразу открываем новый чат
+      // Refresh project list and immediately open the new chat
       await loadProjects()
       setOpenIds(prev => prev.includes(res.id) ? prev : [...prev, res.id])
       setActiveId(res.id)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      showToast(`Не удалось создать свободный чат: ${msg}`)
+      showToast(`Could not create free chat: ${msg}`)
     }
   }, [loadProjects, showToast])
 
-  // Переименование проекта (slug) — обновляет активный проект + открытые вкладки
+  // Rename project (slug) — updates active project + open tabs
   const handleRenameSuccess = useCallback((oldId: string, newId: string) => {
     loadProjects()
     setOpenIds(prev => prev.map(id => id === oldId ? newId : id))
@@ -454,7 +455,7 @@ export default function App() {
     })
   }, [loadProjects])
 
-  // Переименование вкладки — поддерживается только для free-чатов
+  // Tab rename — supported for free chats only
   const handleRenameTab = useCallback(async (id: string, label: string) => {
     const proj = projectsRef.current.find(p => p.id === id)
     if (!proj?.is_free) return
@@ -463,25 +464,25 @@ export default function App() {
       loadProjects()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      showToast(`Не удалось переименовать: ${msg}`)
+      showToast(`Could not rename: ${msg}`)
     }
   }, [loadProjects, showToast])
 
-  // Удалить свободный чат — закрыть вкладку, убрать с бэка
+  // Delete free chat — close the tab and remove from backend
   const handleDeleteFree = useCallback(async (id: string) => {
     try {
       await api.freeDelete(id)
     } catch (e: unknown) {
       const status = (e as { status?: number }).status
       if (status === 409) {
-        showToast('Свободный чат сейчас занят — сначала останови агента')
+        showToast(t['app.free_chat_busy'])
         return
       }
       const msg = e instanceof Error ? e.message : String(e)
-      showToast(`Не удалось удалить: ${msg}`)
+      showToast(`Could not delete: ${msg}`)
       return
     }
-    // Локально закрываем вкладку (та же логика, что handleTabClose)
+    // Close the tab locally (same logic as handleTabClose)
     setOpenIds(prev => {
       const idx = prev.indexOf(id)
       if (idx === -1) return prev
@@ -517,7 +518,7 @@ export default function App() {
   if (authState === 'loading') {
     return (
       <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}>
-        <Spinner label="Соединение..." />
+        <Spinner label="Connecting..." />
       </div>
     )
   }
@@ -534,7 +535,7 @@ export default function App() {
     return ra - rb
   })
 
-  // Открытые проекты в порядке их открытия (как в LS — не перетасовываем при unread)
+  // Open projects in their opening order (like in LS — don't shuffle on unread)
   const openProjects = openIds
     .map(id => projects.find(p => p.id === id))
     .filter((p): p is Project => !!p)
@@ -574,8 +575,8 @@ export default function App() {
           onCloseGlobalFiles={handleCloseGlobalFiles}
         />
 
-        {/* Глобальный файловый браузер — всегда примонтирован (display:none когда неактивен),
-            иначе сбрасывается состояние дерева при переключении вкладок */}
+        {/* Global file browser — always mounted (display:none when inactive),
+            otherwise the tree state is reset when switching tabs */}
         {globalFilesOpen && (
           <div
             className="main-content"
@@ -588,7 +589,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Все открытые ProjectView — всегда примонтированы, скрываем неактивные */}
+        {/* All open ProjectViews — always mounted, inactive ones are hidden */}
         {openProjects.map(p => {
           const splitId = splitPairs[p.id]
           const splitProject = splitId ? projects.find(x => x.id === splitId) : undefined
@@ -625,13 +626,13 @@ export default function App() {
           )
         })}
 
-        {/* Welcome — только когда нет открытых проектов и не в глобальном браузере */}
+        {/* Welcome — only when no open projects and not in the global file browser */}
         {!hasOpen && activeId !== GLOBAL_FILES_ID && (
           <div className="main-content">
             <div className="welcome">
               <div className="welcome-icon">⚡</div>
               <h2>Claude-Ops</h2>
-              <p>Выберите проект в левом сайдбаре для просмотра деталей</p>
+              <p>{t['app.welcome_hint']}</p>
             </div>
           </div>
         )}

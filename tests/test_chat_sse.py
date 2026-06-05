@@ -178,7 +178,7 @@ async def test_chat_busy_project_returns_sse_error(aiohttp_client, tmp_path, pro
     assert len(error_events) > 0
     # Проверяем что текст ошибки содержит «занят»
     error_texts = [e.get("error", "") for e in error_events]
-    assert any("занят" in t for t in error_texts), f"Ошибка должна содержать 'занят': {error_texts}"
+    assert any("busy" in t for t in error_texts), f"Ошибка должна содержать 'занят': {error_texts}"
 
 
 # ─────────────────────────── chat: нормальная работа ───────────────────────────
@@ -406,4 +406,4 @@ async def test_two_simultaneous_chat_requests(aiohttp_client, tmp_path, project_
         f"Второй запрос должен получить SSE error 'занят', события: {events2}"
     )
     error_text = " ".join(e.get("error", "") for e in error_events)
-    assert "занят" in error_text, f"Ошибка должна содержать 'занят': {error_text}"
+    assert "busy" in error_text, f"Ошибка должна содержать 'занят': {error_text}"

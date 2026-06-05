@@ -11,8 +11,8 @@ export function ClaudeMdTab({ projectId }: Props) {
       projectId={projectId}
       load={api.claudeMd}
       save={api.saveClaudeMd}
-      spinnerLabel="Загрузка CLAUDE.md..."
-      emptyLabel="Нет CLAUDE.md для этого проекта"
+      spinnerLabel="Loading CLAUDE.md..."
+      emptyLabel="No CLAUDE.md for this project"
     />
   )
 }

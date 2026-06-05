@@ -172,7 +172,7 @@ async def test_rename_busy_project_returns_409(aiohttp_client, rename_app, renam
     )
     assert resp.status == 409
     data = await resp.json()
-    assert "занят" in data.get("error", "").lower()
+    assert "busy" in data.get("error", "").lower()
 
 
 async def test_rename_nonexistent_project_returns_404(aiohttp_client, rename_app, rename_ctx):

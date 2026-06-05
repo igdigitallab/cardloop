@@ -1,90 +1,90 @@
 # Changelog
 
-Все заметные изменения Claude-Ops. Формат — обратный хронологический.
-Версии — semver-подобно (0.x пока проект в активной разработке).
+All notable changes to Claude-Ops. Format — reverse chronological.
+Versions follow semver-like conventions (0.x while the project is under active development).
 
-> Дисциплина: при появлении новой функции — добавить строку сюда + отметить карточку в TASKS.md → DONE.md. Тег ставится на стабильную точку (`git tag vX.Y.Z`).
+> Discipline: when a new feature ships — add a line here + mark the card in TASKS.md → DONE.md. A tag is placed on a stable point (`git tag vX.Y.Z`).
 
 ## [Unreleased]
 
-### Добавлено
-- **Настройки кокпита — таб «⚙️ Настройки» + глобальные (карточка f2ba02).** Per-project (topics.json, hot-reload): **git on/off** (флагман — выкл → карточки гоняются legacy без worktree, git-sync 409, health не требует .git, `.git` физически не трогаем; диалоги сохраняются), модель, самолечение, TG-уведомления, log_cmd, test_cmd. Глобальные (новый `data/settings.json`, mtime hot-reload, провязаны в рантайм): самолечение-master-kill, макс. параллельных починок, интервал сканера, дефолт-модель новых проектов, watchdog stall/max. API: `GET/POST /api/settings`, `GET/POST /api/projects/{id}/settings` (валидация типов/диапазонов). Хелперы `_get_global_setting`/`_git_enabled`/`_effective_default_model`. 20 тестов (`test_settings.py`).
+### Added
+- **Cockpit settings — "⚙️ Settings" tab + global settings (card f2ba02).** Per-project (topics.json, hot-reload): **git on/off** (flagship — off → cards run in legacy mode without worktree, git-sync returns 409, health doesn't require .git, `.git` is not physically touched; sessions are preserved), model, self-healing, TG notifications, log_cmd, test_cmd. Global (new `data/settings.json`, mtime hot-reload, wired into runtime): self-healing master kill, max concurrent repairs, scanner interval, default model for new projects, watchdog stall/max. API: `GET/POST /api/settings`, `GET/POST /api/projects/{id}/settings` (type/range validation). Helpers `_get_global_setting`/`_git_enabled`/`_effective_default_model`. 20 tests (`test_settings.py`).
 
-### Исправлено
-- **Rename проекта терял всю историю диалогов и Timeline.** `api_project_rename` двигал папку (`shutil.move`) и обновлял `topics.json`, но SDK-история (`~/.claude/projects/<slug>/`) и Timeline (`data/timeline/<slug>.jsonl`) ключуются по `slug = cwd.replace('/','-')` — после смены cwd кокпит читал пустой новый slug, и «пропадали все сессии общения» (файлы при этом целы под старым slug). Добавлен `_migrate_cwd_keyed_state(old_cwd, new_cwd, ctx)`: переносит SDK-каталог сессий + Timeline (+`.jsonl.1`) на новый slug, best-effort, предупреждения в `warnings` ответа. Тесты `test_rename_migrates_sdk_sessions`, `test_rename_migrates_timeline`. Уже потерянные проекты восстановлены переносом осиротевших каталогов.
+### Fixed
+- **Project rename lost all conversation history and Timeline.** `api_project_rename` moved the folder (`shutil.move`) and updated `topics.json`, but SDK history (`~/.claude/projects/<slug>/`) and Timeline (`data/timeline/<slug>.jsonl`) are keyed by `slug = cwd.replace('/','-')` — after changing cwd the cockpit read an empty new slug, and "all sessions appeared to disappear" (files were intact under the old slug). Added `_migrate_cwd_keyed_state(old_cwd, new_cwd, ctx)`: moves the SDK sessions directory + Timeline (+`.jsonl.1`) to the new slug, best-effort, warnings in response `warnings`. Tests: `test_rename_migrates_sdk_sessions`, `test_rename_migrates_timeline`. Already-lost projects recovered by moving orphaned directories.
 
 ## [v0.8.1] — 2026-06-01
-### Исправлено
-- **Память: 404 при удалении legacy-записи** (баг v0.4.0). `_memory_read_all` читал старое место (`~/.claude/projects/<cwd>/memory/`) как fallback, но `_memory_delete`/write работали только с новым (`.claude-ops/memory/`) → удаление legacy-записи давало 404. Теперь при первом чтении legacy-память **авто-мигрируется** в новое место (для всех проектов разом), удаление/запись начинают работать. Тест `test_memory_read_all_migrates_legacy`.
+### Fixed
+- **Memory: 404 on deleting a legacy entry** (bug since v0.4.0). `_memory_read_all` read the old location (`~/.claude/projects/<cwd>/memory/`) as a fallback, but `_memory_delete`/write only operated on the new location (`.claude-ops/memory/`) → deleting a legacy entry returned 404. Now, on first read, legacy memory is **auto-migrated** to the new location (for all projects at once), and delete/write operations work correctly. Test: `test_memory_read_all_migrates_legacy`.
 
 ## [v0.8.0] — 2026-05-31
-Шаг 5 roadmap (вершина): Самолечение (Spec 010). Агент-чинильщик в worktree + гейт + одобрение. **Roadmap «полноценный сервис разработки» завершён** (5/5 шагов).
+Step 5 of the roadmap (final): Self-healing (Spec 010). Repair agent in a worktree + quality gate + human approval. **"Full development service" roadmap complete** (5/5 steps).
 
-### Добавлено
-- **Самолечение** (Spec 010): `_self_heal_enabled(project)` — флаг per-project (`self_heal`) или env `SELF_HEAL_ENABLED`. **OFF по умолчанию — НИКОГДА не включён ни для одного проекта.**
-- **`_self_heal_card(ctx, project, incident_card)`** — петля починки: пометить `heal_attempted=true` ДО запуска (предохранитель зацикливания), сформировать промпт чинильщику, запустить через существующий C2-путь (`_card_worktree_setup` + `_run_card`), прогнать `_run_quality_gate`, перенести в Review (safe) или Failed (risky), пинг Игорю в TG.
-- **Интеграция в `_error_scanner_loop`**: после `_scan_and_ingest` при `self_heal=True` и новых инцидентах → `asyncio.create_task(_self_heal_card(...))`. Лимиты: счётчик активных починок ≤2, running lock, heal_attempted.
-- **Timeline `kind:"self_heal"`**: фазы `start / fixed / gate_ok / gate_fail / gate_unknown / skipped` публикуются в шину.
-- **`POST /api/projects/{id}/self-heal {enabled}`** — тумблер включения per-project. Auth. Не включает ни одного проекта по умолчанию.
-- **UI: тумблер «🔧 Самолечение»** в OverviewTab + подпись «Ничего не применяется без тебя». CSS-бейдж `🔧 авто-починка · гейт ✓/✗` на карточках BoardTab.
-- **28 новых тестов** (`tests/test_self_healing.py`): `_self_heal_enabled` (флаг/env/default); `heal_attempted` мета; OFF default = критичный регрессия-страж; heal_attempted ставится ДО прогона; safe→Review, risky→Failed; heal_attempted инцидент не перезапускается; не-git→пропуск; занятый→пропуск; лимит конкурентности; Timeline получает self_heal; API-тумблер (auth, enable, disable, 404). **496 passed** (было 468).
+### Added
+- **Self-healing** (Spec 010): `_self_heal_enabled(project)` — per-project flag (`self_heal`) or env `SELF_HEAL_ENABLED`. **OFF by default — NEVER enabled for any project automatically.**
+- **`_self_heal_card(ctx, project, incident_card)`** — repair loop: mark `heal_attempted=true` BEFORE starting (loop prevention guard), build repair prompt, run via existing C2 path (`_card_worktree_setup` + `_run_card`), run `_run_quality_gate`, move to Review (safe) or Failed (risky), ping operator on Telegram.
+- **Integration in `_error_scanner_loop`**: after `_scan_and_ingest`, if `self_heal=True` and new incidents exist → `asyncio.create_task(_self_heal_card(...))`. Limits: active repair counter ≤2, running lock, heal_attempted.
+- **Timeline `kind:"self_heal"`**: phases `start / fixed / gate_ok / gate_fail / gate_unknown / skipped` published to the bus.
+- **`POST /api/projects/{id}/self-heal {enabled}`** — per-project toggle. Auth-protected. Does not enable any project by default.
+- **UI: "🔧 Self-heal" toggle** in OverviewTab + label "Nothing is applied without you". CSS badge `🔧 auto-repair · gate ✓/✗` on BoardTab cards.
+- **28 new tests** (`tests/test_self_healing.py`): `_self_heal_enabled` (flag/env/default); `heal_attempted` meta; OFF default = critical regression guard; heal_attempted set before run; safe→Review, risky→Failed; heal_attempted incident not re-run; non-git→skip; busy→skip; concurrency limit; Timeline receives self_heal; API toggle (auth, enable, disable, 404). **496 passed** (was 468).
 
-### Предохранители (незыблемо)
-1. OFF по умолчанию — `self_heal` в topics или `SELF_HEAL_ENABLED` env
-2. НИКОГДА не auto-apply — агент доходит только до Review; merge руками
-3. Лимит 1 попытка/инцидент — `heal_attempted=true` ДО запуска
-4. Лимит конкурентности — max 2 авто-починки одновременно
-5. Только git+clean — не-git/dirty пропускаются
-6. Всё видно — Timeline kind:"self_heal" + TG-пинг
+### Safety guards (inviolable)
+1. OFF by default — `self_heal` in topics or `SELF_HEAL_ENABLED` env
+2. NEVER auto-apply — agent only reaches Review; merge is always done by hand
+3. 1 attempt per incident — `heal_attempted=true` set BEFORE agent starts
+4. Concurrency limit — max 2 auto-repairs at once
+5. git+clean only — non-git/dirty trees are skipped
+6. Full visibility — Timeline kind:"self_heal" + TG ping
 
 ## [v0.7.0] — 2026-05-31
-Шаг 4 roadmap: авто-гейт качества (Spec 009). C2-«Применить» теперь не вслепую: можно прогнать тесты в worktree карточки и получить вердикт перед merge.
+Step 4 of the roadmap: quality gate (Spec 009). C2 "Apply" is no longer blind: you can run tests in the card's worktree and get a verdict before merging.
 
-### Добавлено
-- **Quality gate** (Spec 009): `_run_quality_gate(wt_path, env)` — прогон тестов в worktree-карточки через `_detect_test_cmd` (переиспользование). Таймаут 300с, вывод обрезается до 20k. Вердикт: `safe` (rc=0) / `risky` (rc≠0 или таймаут) / `unknown` (нет тест-конфига).
-- **`POST /api/projects/{id}/tasks/{card}/check`** — эндпоинт гейта: читает meta, прогоняет `_run_quality_gate(wt_path)` с секретами проекта, возвращает вердикт, записывает `meta.gate={verdict,ts}` в JSON-сайдкар, публикует `{kind:"gate", verdict}` в Timeline. Legacy/нет worktree → `{verdict:"unknown", reason:"legacy"}`. 400 bad card_id; 404 нет проекта или нет worktree на диске.
-- **UI: кнопка «🧪 Проверить»** в модалке результата карточки (worktree-режим, рядом с ✓Применить/✗Отмена). После check: 🟢 Безопасно / 🔴 Рискованно / ⚪ Тестов нет. При risky — сворачиваемый вывод тестов (`<details>`). Кнопка «Применить» получает визуальный акцент по вердикту (зелёная при safe, предупреждающий стиль при risky) — **но НЕ блокируется**. ARIA: `aria-live=polite` на вердикте.
-- **15 новых тестов** (`tests/test_quality_gate.py`): safe/risky/unknown; тесты гоняются в wt_path; секреты в env; вывод обрезается; API check: вердикт, legacy→unknown, bad card_id→400, нет worktree→404, нет проекта→404, meta.gate обновляется. **468 passed** (было 453).
-- **Линт:** out of scope в этой итерации (spec-009, п.2). `lint: null` в ответе. Добавить в следующей итерации при необходимости.
+### Added
+- **Quality gate** (Spec 009): `_run_quality_gate(wt_path, env)` — runs tests in the card's worktree via `_detect_test_cmd` (reuse). Timeout 300s, output truncated to 20k. Verdict: `safe` (rc=0) / `risky` (rc≠0 or timeout) / `unknown` (no test config).
+- **`POST /api/projects/{id}/tasks/{card}/check`** — gate endpoint: reads meta, runs `_run_quality_gate(wt_path)` with project secrets, returns verdict, writes `meta.gate={verdict,ts}` to JSON sidecar, publishes `{kind:"gate", verdict}` to Timeline. Legacy/no worktree → `{verdict:"unknown", reason:"legacy"}`. 400 bad card_id; 404 no project or no worktree on disk.
+- **UI: "🧪 Check" button** in the card result modal (worktree mode, next to ✓Apply/✗Discard). After check: 🟢 Safe / 🔴 Risky / ⚪ No tests. On risky — collapsible test output (`<details>`). "Apply" button gets visual emphasis by verdict (green for safe, warning style for risky) — **but is NOT blocked**. ARIA: `aria-live=polite` on verdict.
+- **15 new tests** (`tests/test_quality_gate.py`): safe/risky/unknown; tests run in wt_path; secrets in env; output truncated; API check: verdict, legacy→unknown, bad card_id→400, no worktree→404, no project→404, meta.gate updated. **468 passed** (was 453).
+- **Lint:** out of scope in this iteration (spec-009, item 2). `lint: null` in response. Add in a future iteration if needed.
 
 ## [v0.6.0] — 2026-05-31
-Шаг 3 roadmap: наблюдаемость — Timeline (Spec 008). Шина событий теперь персистируется; кокпит получает вкладку «🕒 Лента».
+Step 3 of the roadmap: observability — Timeline (Spec 008). The event bus is now persisted; the cockpit gets a "🕒 Activity" tab.
 
-### Добавлено
-- **Timeline persistence** (Spec 008): `_bus_publish` теперь вызывает `_timeline_append` — единая точка записи. Каждое событие пишется в `data/timeline/<slug>.jsonl` (append-only, slug = `cwd.replace('/', '-')`). Ротация: >5MB → `.jsonl.1` (одна копия). Запись глотает исключения, env-поле никогда не пишется. `_timeline_init(ctx)` вызывается из `start()`.
-- **`GET /api/projects/{id}/timeline?limit=N&before=<ts>`** — эндпоинт истории: читает JSONL (текущий + .1), парсит gracefully (битые строки → skip), возвращает массив в хронологическом порядке. Пагинация по `before=<ts>` (Unix float). Auth-protected, anti-traversal через `_find_project_by_id`.
-- **TimelineTab** (`web/src/tabs/TimelineTab.tsx`): история из `GET /timeline` + live-события через `useProjectActivity` (переиспользует существующий SSE-коннект, новый сокет не открывается). Кнопка «Загрузить ранее» с `before=<oldest_ts>`. Иконки по kind (▶/✅/❌/🔧/💬), live-badge с пульсацией на 4с, ARIA (`role=log`, `aria-live=polite`). CSS: `styles/timeline.css`.
-- **32 новых теста** (`tests/test_timeline.py`): slug стабильность, path резолв, append+ts+truncate+env-exclusion, ротация 5MB, bus_publish интеграция, graceful broken JSONL, backup read, API GET/limit/before/env-not-in-response. **453 passed** (было 421).
+### Added
+- **Timeline persistence** (Spec 008): `_bus_publish` now calls `_timeline_append` — single write point. Each event is written to `data/timeline/<slug>.jsonl` (append-only, slug = `cwd.replace('/', '-')`). Rotation: >5MB → `.jsonl.1` (one copy). Writes swallow exceptions, env field is never written. `_timeline_init(ctx)` called from `start()`.
+- **`GET /api/projects/{id}/timeline?limit=N&before=<ts>`** — history endpoint: reads JSONL (current + .1), parses gracefully (broken lines → skip), returns array in chronological order. Paginated by `before=<ts>` (Unix float). Auth-protected, anti-traversal via `_find_project_by_id`.
+- **TimelineTab** (`web/src/tabs/TimelineTab.tsx`): history from `GET /timeline` + live events via `useProjectActivity` (reuses existing SSE connection, no new socket opened). "Load earlier" button with `before=<oldest_ts>`. Icons by kind (▶/✅/❌/🔧/💬), live badge with 4s pulse, ARIA (`role=log`, `aria-live=polite`). CSS: `styles/timeline.css`.
+- **32 new tests** (`tests/test_timeline.py`): slug stability, path resolve, append+ts+truncate+env-exclusion, 5MB rotation, bus_publish integration, graceful broken JSONL, backup read, API GET/limit/before/env-not-in-response. **453 passed** (was 421).
 
 ## [v0.5.0] — 2026-05-31
-Шаг 2 roadmap: изолированное хранилище ключей проекта (OSS-механизм; личный vault оператора не трогаем).
+Step 2 of the roadmap: isolated project key store (OSS mechanism; operator's personal vault is untouched).
 
-### Добавлено
-- **Хранилище ключей проекта** (Spec 007): `.claude-ops/secrets/secrets.env` — `chmod 600`, gitignored автоматически при первой записи. Секреты подмешиваются в `env` агента при каждом запуске (`run_engine`, `run_agent`, `_run_card`, `api_project_chat`). Изоляция по cwd. **Значения НИКОГДА не возвращаются через API** — только список имён ключей. CRUD через кокпит: вкладка «🔑 Ключи» (SecretsTab) с добавлением (password-input), списком (маска ••••••) и удалением (ConfirmModal). 47 новых тестов (421 passed). +3 эндпоинта: `GET/POST/DELETE /api/projects/{id}/secrets/{key}`.
+### Added
+- **Project key store** (Spec 007): `.claude-ops/secrets/secrets.env` — `chmod 600`, gitignored automatically on first write. Secrets are injected into the agent's `env` on every run (`run_engine`, `run_agent`, `_run_card`, `api_project_chat`). Isolated by cwd. **Values are NEVER returned via API** — only the list of key names. CRUD via cockpit: "🔑 Secrets" tab (SecretsTab) with add (password-input), list (masked ••••••) and delete (ConfirmModal). 47 new tests (421 passed). +3 endpoints: `GET/POST/DELETE /api/projects/{id}/secrets/{key}`.
 
 ## [v0.4.0] — 2026-05-31
-Шаг 1 roadmap «полноценный сервис разработки»: накапливаемая память проекта.
+Step 1 of the roadmap "full development service": accumulated project memory.
 
-### Добавлено
-- **Память проекта** (spec-006): переехала в репо проекта (`.claude-ops/memory/` — коммитится в git, путешествует с проектом, OSS-friendly). POST/DELETE эндпоинты для CRUD из кокпита. MemoryTab стал редактируемым (создание/редактирование/удаление записей). Агент пишет память сам через обычный Write (nudge + раздел в шаблоне CLAUDE.md). `MEMORY.md` — авто-индекс. Типы записей: decision / gotcha / rejected / convention. 49 новых тестов (374 passed).
+### Added
+- **Project memory** (spec-006): moved into the project repo (`.claude-ops/memory/` — committed to git, travels with the project, OSS-friendly). POST/DELETE endpoints for CRUD from the cockpit. MemoryTab became editable (create/edit/delete entries). Agent writes memory itself via normal Write (nudge + section in CLAUDE.md template). `MEMORY.md` — auto-index. Entry types: decision / gotcha / rejected / convention. 49 new tests (374 passed).
 
 ## [v0.3.0] — 2026-05-31
-Стабильная точка после большого цикла рефакторинга, чистки и C2.
+Stable point after a major refactoring, cleanup, and C2 cycle.
 
-### Добавлено
-- **C2-gate** — гейт «Применить / Отмена» + worktree-per-task: карточка в git-проекте прогоняется в изолированном `git worktree`, в Review кнопки ✓/✗, merge --no-ff или откат. Безопасный откат = фундамент для будущей автономии.
-- `ARCHITECTURE.md` — карта кода для новых разработчиков/агентов.
-- OSS-каркас: `LICENSE` (MIT), `CONTRIBUTING.md`, `docs/API.md` (56 роутов).
-- ESLint + Prettier (`npm run lint` / `format`), i18n-словарь (`web/src/i18n/ru.ts`).
-- Тесты: 207 → 325 (доска, чат, rename, конкурентность, security, C2).
+### Added
+- **C2-gate** — "Apply / Discard" gate + worktree-per-task: a card in a git project runs in an isolated `git worktree`, in Review you get ✓/✗ buttons, merge --no-ff or rollback. Safe rollback = foundation for future autonomy.
+- `ARCHITECTURE.md` — code map for new developers/agents.
+- OSS scaffold: `LICENSE` (MIT), `CONTRIBUTING.md`, `docs/API.md` (56 routes).
+- ESLint + Prettier (`npm run lint` / `format`), i18n dictionary (`web/src/i18n/ru.ts`).
+- Tests: 207 → 325 (board, chat, rename, concurrency, security, C2).
 
-### Изменено / Очищено
-- Полностью удалён Glasses/G2-транспорт (не актуально).
-- Документация переписана в иерархию без дублей (README / ARCHITECTURE / CLAUDE.md / CONTRIBUTING).
-- CLAUDE.md очищен от ledger-истории → только forward-правила + gotchas.
-- `styles.css` (3000+ строк) разбит на 10 partials.
-- Backend: убраны хардкоды путей пользователя, command-injection в log_cmd/test_cmd, path-traversal в card_id, auth → scrypt + secure cookie + rate-limit.
-- systemd-юнит: добавлен `EnvironmentFile=` (фикс — `.env` не грузился).
+### Changed / Cleaned
+- Glasses/G2 transport removed entirely (no longer relevant).
+- Documentation rewritten into a hierarchy without duplication (README / ARCHITECTURE / CLAUDE.md / CONTRIBUTING).
+- CLAUDE.md cleared of ledger history → forward rules + gotchas only.
+- `styles.css` (3000+ lines) split into 10 partials.
+- Backend: removed user path hardcodes, command-injection in log_cmd/test_cmd, path-traversal in card_id, auth → scrypt + secure cookie + rate-limit.
+- systemd unit: added `EnvironmentFile=` (fix — `.env` was not being loaded).
 
-## [v0.2.x] — до 2026-05-31
-Кокпит (табы, чат SSE, доска-канбан с автозапуском, файлы, промты), сквозные сессии кокпит↔TG, движок `run_engine`, тесты-каркас. (История — в git log.)
+## [v0.2.x] — before 2026-05-31
+Cockpit (tabs, chat SSE, kanban board with auto-run, files, prompts), shared sessions cockpit↔TG, `run_engine` engine, test scaffold. (History — in git log.)

@@ -42,7 +42,7 @@ export function ToastContainer({ toasts, onDismiss }: { toasts: Toast[]; onDismi
           <button
             className="toast-close"
             onClick={() => onDismiss(t.id)}
-            aria-label="Закрыть уведомление"
+            aria-label="Close notification"
           >✕</button>
         </div>
       ))}

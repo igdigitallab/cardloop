@@ -19,7 +19,7 @@ export function GlobalFilesTab() {
       fetchFile={fetchFile}
       onSave={onSave}
       treeLabel={
-        <>{'📁 Файлы сервера '}<span className="files-root-hint">~/</span></>
+        <>{'📁 Server files '}<span className="files-root-hint">~/</span></>
       }
     />
   )

@@ -14,8 +14,8 @@ interface Props {
   emptyLabel: string
 }
 
-/** Просмотр markdown с inline-редактором: двойной клик → textarea → сохранение в файл.
- *  Общий движок для вкладок CLAUDE.md и README (ops:455557). */
+/** Markdown viewer with inline editor: double-click → textarea → save to file.
+ *  Shared engine for CLAUDE.md and README tabs (ops:455557). */
 export function EditableMarkdown({ projectId, load, save, spinnerLabel, emptyLabel }: Props) {
   const [data, setData] = useState<ClaudeMd | null>(null)
   const [loading, setLoading] = useState(true)
@@ -24,7 +24,7 @@ export function EditableMarkdown({ projectId, load, save, spinnerLabel, emptyLab
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
 
-  // Пока идёт правка — фоновые reload'ы (run-end/focus) НЕ затирают черновик.
+  // While editing — background reloads (run-end/focus) do NOT overwrite the draft.
   const editingRef = useRef(false)
   editingRef.current = editing
 
@@ -77,7 +77,7 @@ export function EditableMarkdown({ projectId, load, save, spinnerLabel, emptyLab
     return (
       <div className="doc-editor">
         <div className="doc-editor-bar">
-          <span className="doc-editor-hint">Ctrl+Enter — сохранить · Esc — отмена</span>
+          <span className="doc-editor-hint">Ctrl+Enter — save · Esc — cancel</span>
           <div className="doc-editor-actions">
             <button className="doc-btn ghost" onClick={cancel} disabled={saving}>{t['common.cancel']}</button>
             <button className="doc-btn primary" onClick={doSave} disabled={saving}>
@@ -113,7 +113,7 @@ export function EditableMarkdown({ projectId, load, save, spinnerLabel, emptyLab
         </svg>
         {emptyLabel}
         {data && <span style={{ color: 'var(--text3)', marginLeft: 6, fontSize: 11 }}>({data.path})</span>}
-        <button className="doc-btn primary doc-create-btn" onClick={startEdit}>✏ Создать</button>
+        <button className="doc-btn primary doc-create-btn" onClick={startEdit}>✏ Create</button>
       </div>
     )
   }

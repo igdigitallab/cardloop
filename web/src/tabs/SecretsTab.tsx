@@ -35,7 +35,7 @@ function AddModal({ projectId, onSaved, onClose }: AddModalProps) {
   async function doSave() {
     setError('')
     const k = key.trim().toUpperCase()
-    if (!k) { setError('Имя ключа обязательно'); return }
+    if (!k) { setError('Key name is required'); return }
     if (!KEY_RE.test(k)) { setError(t['secrets.key_invalid']); return }
     if (!value) { setError(t['secrets.value_empty']); return }
     setSaving(true)
@@ -101,7 +101,7 @@ function AddModal({ projectId, onSaved, onClose }: AddModalProps) {
           </button>
         </div>
         <p style={{ margin: 0, fontSize: 11, color: 'var(--text3)' }}>
-          Ctrl+Enter — сохранить · Esc — отмена
+          Ctrl+Enter — save · Esc — cancel
         </p>
       </div>
     </Modal>
@@ -206,7 +206,7 @@ export function SecretsTab({ projectId }: Props) {
                   fontSize: 13,
                 }}
                 role="listitem"
-                aria-label={`Секрет: ${k}`}
+                aria-label={`Secret: ${k}`}
               >
                 <span style={{ fontWeight: 600, color: 'var(--text1)' }}>{k}</span>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

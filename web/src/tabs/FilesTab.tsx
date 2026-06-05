@@ -22,7 +22,7 @@ export function FilesTab({ projectId }: Props) {
     <FileExplorer
       fetchDir={fetchDir}
       fetchFile={fetchFile}
-      treeLabel="Файлы проекта"
+      treeLabel="Project files"
       refreshRef={refreshRef}
     />
   )

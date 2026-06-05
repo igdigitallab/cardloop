@@ -1,238 +1,238 @@
-> ARCHITECTURE = карта кода (где что искать). Gotchas → CLAUDE.md. HTTP-контракт → docs/API.md. Запуск → CONTRIBUTING.md.
+> ARCHITECTURE = code map (where to find what). Gotchas → CLAUDE.md. HTTP contract → docs/API.md. Running → CONTRIBUTING.md.
 
 # ARCHITECTURE.md — Claude-Ops
 
-Навигатор по кодовой базе. Истина = код; этот файл — карта. Меняешь поведение → ищи здесь нужный файл и строку.
+Navigation guide for the codebase. Source of truth = the code; this file is the map. Changing behavior → find the right file and line here.
 
-> Claude-Ops — IDE-среда управления проектами через Claude Agent SDK. Три канала входа, один движок, full-auto.
-> **Один процесс** (aiohttp + python-telegram-bot): `bot.py` импортит `webapp.py` и поднимает кокпит в том же event-loop. Общий `running`-замок → нет гонки по cwd между каналами.
+> Claude-Ops — a browser IDE for managing projects via the Claude Agent SDK. Three input channels, one engine, full-auto.
+> **Single process** (aiohttp + python-telegram-bot): `bot.py` imports `webapp.py` and runs the cockpit in the same event loop. Shared `running` lock → no race condition between channels on the same cwd.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      ОДИН PYTHON-ПРОЦЕСС                        │
+│                      SINGLE PYTHON PROCESS                       │
 │                                                                  │
 │  Telegram (@YOUR_BOT) ─┐                                         │
-│  Кокпит (YOUR_DOMAIN) ─┼─► run_engine() ─► Claude SDK           │
-│  Канбан-автозапуск (карточка) ──┘    (async-генератор событий)  │
+│  Cockpit (YOUR_DOMAIN) ─┼─► run_engine() ─► Claude SDK          │
+│  Kanban auto-run (card) ──┘   (async event generator)           │
 │                                                                  │
-│  Общее состояние: running{} · sessions{} · topics{} (через ctx) │
+│  Shared state: running{} · sessions{} · topics{} (via ctx)      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Ядро: `bot.py` (~1020 строк, 45 функций)
+## Core: `bot.py` (~1020 lines, 45 functions)
 
-TG-канал + **движок** + точка старта процесса.
+TG channel + **engine** + process entry point.
 
-### Движок (транспорт-независимое сердце)
-- **`run_engine(...)` (bot.py:419)** — `async def -> AsyncGenerator[dict, None]`. Гоняет Claude Agent SDK, yield-ит события `{tool|text|result|rate_limit|error}`. **Не знает про транспорт.** Все каналы — его потребители. Меняешь логику работы агента → здесь.
-- **Потребители движка:**
-  - `run_agent(context, update, prompt)` (bot.py:509) — TG-адаптер: статус-сообщение, watchdog, audit, финальная отправка.
-  - `_run_card(...)` в **webapp.py** — автозапуск карточки.
-  - `api_project_chat` в **webapp.py** — веб-чат (SSE-потребитель).
+### Engine (transport-independent core)
+- **`run_engine(...)` (bot.py:419)** — `async def -> AsyncGenerator[dict, None]`. Drives the Claude Agent SDK, yields events `{tool|text|result|rate_limit|error}`. **Transport-agnostic.** All channels are its consumers. Change agent logic → here.
+- **Engine consumers:**
+  - `run_agent(context, update, prompt)` (bot.py:509) — TG adapter: status message, watchdog, audit, final send.
+  - `_run_card(...)` in **webapp.py** — card auto-run.
+  - `api_project_chat` in **webapp.py** — web chat (SSE consumer).
 
-### Конкурентность / состояние
-- **`running{key: bool}`** — замок per-`cwd`. Резерв СИНХРОННО в `on_message` (bot.py:766) до первого await, снятие в `safe_run` (bot.py:806) `finally`. Защита от двух параллельных процессов на одном проекте.
-- **`sessions{key: session_id}`** (СЛОЙ 2, `data/sessions.json`, `save_sessions` bot.py:196) — SDK-сессии, `/reset` чистит.
-- **`topics{key: {project,cwd,model,log_cmd,...}}`** (СЛОЙ 1, `data/topics.json`, `save_topics` bot.py:192) — привязка канал→проект, вечная.
-- `key_of(update)` (bot.py:200), `binding_for(update)` (bot.py:206) — резолв ключа `"chat:thread"`.
+### Concurrency / state
+- **`running{key: bool}`** — per-`cwd` lock. Reserved SYNCHRONOUSLY in `on_message` (bot.py:766) before the first await, released in `safe_run` (bot.py:806) `finally`. Guards against two parallel processes on the same project.
+- **`sessions{key: session_id}`** (LAYER 2, `data/sessions.json`, `save_sessions` bot.py:196) — SDK sessions, cleared by `/reset`.
+- **`topics{key: {project,cwd,model,log_cmd,...}}`** (LAYER 1, `data/topics.json`, `save_topics` bot.py:192) — channel→project mapping, permanent.
+- `key_of(update)` (bot.py:200), `binding_for(update)` (bot.py:206) — resolve key `"chat:thread"`.
 
-### Реестр проектов
-- `build_registry()` (bot.py:154), `resolve_project(name)` (bot.py:166), `_home_sub(*parts)` (bot.py:122) — пути от `Path.home()` (без хардкодов `/home/<user>`). Новый проект → алиас в `_REG_RAW` или авто-скан `~`.
+### Project registry
+- `build_registry()` (bot.py:154), `resolve_project(name)` (bot.py:166), `_home_sub(*parts)` (bot.py:122) — paths from `Path.home()` (no hardcoded `/home/<user>`). New project → alias in `_REG_RAW` or auto-scan `~`.
 
-### TG-команды (bot.py:859–1062)
-`cmd_start · cmd_whoami · cmd_reset · cmd_resume · cmd_model · cmd_project · cmd_newtopic · cmd_diff · cmd_cost · cmd_usage · cmd_stop`. Хендлеры: `on_message`, `on_topic_created` (авто-привязка проекта), `on_error`.
+### TG commands (bot.py:859–1062)
+`cmd_start · cmd_whoami · cmd_reset · cmd_resume · cmd_model · cmd_project · cmd_newtopic · cmd_diff · cmd_cost · cmd_usage · cmd_stop`. Handlers: `on_message`, `on_topic_created` (auto-bind project), `on_error`.
 
-### Рендер/утилиты
-- `md_to_html(text)` (bot.py:278) + `_render_code_block` (bot.py:264) — markdown→TG-HTML со сворачиванием кода. ВСЕ ответы через него (иначе краш HTML parse_mode).
-- `send()` (bot.py:244) + `_tg_call()` (bot.py:226) — отправка с ретраем транзиентных сбоев; `_smart_chunks` (bot.py:347) — нарезка по `TG_CHUNK=4000`.
-- `audit()` (bot.py:390) + `_is_destructive()` (bot.py:385) — audit-лог full-auto в `data/audit/`.
+### Rendering / utilities
+- `md_to_html(text)` (bot.py:278) + `_render_code_block` (bot.py:264) — markdown→TG HTML with code folding. ALL responses go through it (otherwise HTML parse_mode crashes).
+- `send()` (bot.py:244) + `_tg_call()` (bot.py:226) — send with retry on transient errors; `_smart_chunks` (bot.py:347) — split by `TG_CHUNK=4000`.
+- `audit()` (bot.py:390) + `_is_destructive()` (bot.py:385) — full-auto audit log in `data/audit/`.
 
-### Старт
-- **`_on_start(app)` (bot.py:976)** — post_init: поднимает `webapp.start(app, ctx)`. **Здесь формируется `ctx`** — словарь ссылок на общее состояние, передаётся в webapp.
-- `main()` (bot.py:996) — сборка PTB-приложения, регистрация хендлеров, `_load_env()`.
+### Startup
+- **`_on_start(app)` (bot.py:976)** — post_init: launches `webapp.start(app, ctx)`. **`ctx` is built here** — a dict of shared state references, passed into webapp.
+- `main()` (bot.py:996) — assembles the PTB application, registers handlers, calls `_load_env()`.
 
 ---
 
-## Кокпит: `webapp.py` (~3730 строк, 57 роутов)
+## Cockpit: `webapp.py` (~3730 lines, 57 routes)
 
-aiohttp-сервер. **НЕ импортит `bot.py`** (двойное состояние!) — всё получает через `ctx` (передан из `bot.py:_on_start`).
+aiohttp server. **Does NOT import `bot.py`** (would double the state!) — everything comes via `ctx` (passed from `bot.py:_on_start`).
 
-- **`AppCtx(TypedDict, total=False)` (webapp.py:1479)** — типизация `ctx`: `topics/sessions/running/resolve_project/run_engine/DATA/HERE/...`. Рантайм — обычный dict, аннотация для читаемости. **Хочешь понять что доступно из webapp — смотри AppCtx.**
-- `start(app, ctx)` — регистрация всех роутов + middleware. **Полный список роутов → `docs/API.md`.**
-- **Auth:** cookie `cops_auth`, `_derive_token` на `hashlib.scrypt` (соль `WEB_COOKIE_SALT`), `secure/httponly/samesite`, rate-limit 5 fail/5min → 429. Middleware на `/api/*` кроме `/api/health`, `/api/login`.
+- **`AppCtx(TypedDict, total=False)` (webapp.py:1479)** — types for `ctx`: `topics/sessions/running/resolve_project/run_engine/DATA/HERE/...`. At runtime it's a plain dict; the annotation exists for readability. **Want to know what's available in webapp — see AppCtx.**
+- `start(app, ctx)` — registers all routes + middleware. **Full route list → `docs/API.md`.**
+- **Auth:** cookie `cops_auth`, `_derive_token` via `hashlib.scrypt` (salt `WEB_COOKIE_SALT`), `secure/httponly/samesite`, rate-limit 5 fails/5min → 429. Middleware on `/api/*` except `/api/health`, `/api/login`.
 
-### Ключевые группы хендлеров (имена `api_*`)
-| Область | Хендлеры | Примечание |
+### Key handler groups (named `api_*`)
+| Area | Handlers | Notes |
 |---|---|---|
-| Проекты | `api_projects`, `api_new_project`, `api_rename`, `api_health`, `api_git_sync` | rename мигрирует SDK-сессии+Timeline (`_migrate_cwd_keyed_state`) |
-| Настройки (f2ba02) | `api_settings_get/post` (глобальные `data/settings.json`), `api_project_settings_get/post` (topics.json) | `_get_global_setting`/`_git_enabled`/`_effective_default_model`; git_enabled=false → run-mode legacy |
-| Доска/Tasks | `api_project_tasks`, `api_create_task`, `api_move_task`, `api_delete_task`, `api_update_task`, `api_card_run`, `api_tasks_done` | `card_id` валидируется `_valid_card_id`/`_CARD_ID_RE` |
-| Автозапуск | **`_run_card`** → `_write_sidecar` + `_move_card_after_run` + `_notify_tg` | разбит на 3 хелпера. Перенос в In Progress → run_engine |
-| Чат/SSE | `api_project_chat`, `api_chat_stop`, `_sse_stream`, `api_activity_stream` | общий `_sse_stream` |
-| Файлы | `api_project_files`, `api_project_file`, `api_global_files`, `api_global_file` | общий `_read_file_content`; анти-traversal `_resolve_safe`/`_resolve_global_safe` |
-| Промты | `api_prompts` (CRUD) | `data/prompts.json` |
-| Сессии | `api_sessions`, `api_session` (new/resume), `api_session_history`, `api_session_context` | общие с TG |
-| Usage | `api_usage` | oauth-эндпоинт, кэш 60с |
-| Память проекта | `api_project_memory` (GET), `api_project_memory_write` (POST), `api_project_memory_delete` (DELETE) | Путь: `<cwd>/.claude-ops/memory/` (новое) + fallback на `~/.claude/projects/<cwd>/memory/` (старое). Агент пишет через обычный Write. Хелперы: `_project_memory_dir`, `_memory_read_all`, `_memory_write`, `_memory_delete`, `_memory_reindex`. Имена — `_valid_memory_name` (slug-regex). |
-| **Секреты проекта** (Spec 007) | `api_project_secrets` (GET), `api_project_secrets_set` (POST), `api_project_secrets_delete` (DELETE) | Путь: `<cwd>/.claude-ops/secrets/secrets.env` (chmod 600, gitignored). **Значения НИКОГДА не возвращаются через API** — только имена ключей. Хелперы: `_project_secrets_path`, `_secrets_read`, `_secrets_write`, `_secrets_set`, `_secrets_delete`, `_secrets_ensure_gitignore`. Ключи — `_SECRETS_KEY_RE = ^[A-Z_][A-Z0-9_]*$`. Лимиты: 8KB/значение, 100 ключей. |
-| **Timeline** (Spec 008) | `api_project_timeline` (GET) | Персистентная лента событий шины. Хелперы: `_timeline_init`, `_timeline_path`, `_timeline_append`, `_timeline_slug_from_cwd`, `_timeline_read_events`. Хук в `_bus_publish` — единая точка записи. Файл: `data/timeline/<slug>.jsonl` (+ `.jsonl.1` backup). env-поле никогда не записывается. |
-| Прочее | `api_logs`, `api_claude_md`, `api_audit`, `api_upgrade`, `api_scan_errors`, `_ingest_errors_to_board` | |
-| Subprocess | `_run_log_cmd`, `_run_test_cmd`, `api_project_logs` | `create_subprocess_exec(*shlex.split())` — НЕ shell |
+| Projects | `api_projects`, `api_new_project`, `api_rename`, `api_health`, `api_git_sync` | rename migrates SDK sessions+Timeline (`_migrate_cwd_keyed_state`) |
+| Settings (f2ba02) | `api_settings_get/post` (global `data/settings.json`), `api_project_settings_get/post` (topics.json) | `_get_global_setting`/`_git_enabled`/`_effective_default_model`; git_enabled=false → run-mode legacy |
+| Board/Tasks | `api_project_tasks`, `api_create_task`, `api_move_task`, `api_delete_task`, `api_update_task`, `api_card_run`, `api_tasks_done` | `card_id` validated by `_valid_card_id`/`_CARD_ID_RE` |
+| Auto-run | **`_run_card`** → `_write_sidecar` + `_move_card_after_run` + `_notify_tg` | split into 3 helpers. Move to In Progress → run_engine |
+| Chat/SSE | `api_project_chat`, `api_chat_stop`, `_sse_stream`, `api_activity_stream` | shared `_sse_stream` |
+| Files | `api_project_files`, `api_project_file`, `api_global_files`, `api_global_file` | shared `_read_file_content`; anti-traversal `_resolve_safe`/`_resolve_global_safe` |
+| Prompts | `api_prompts` (CRUD) | `data/prompts.json` |
+| Sessions | `api_sessions`, `api_session` (new/resume), `api_session_history`, `api_session_context` | shared with TG |
+| Usage | `api_usage` | oauth endpoint, 60s cache |
+| Project memory | `api_project_memory` (GET), `api_project_memory_write` (POST), `api_project_memory_delete` (DELETE) | Path: `<cwd>/.claude-ops/memory/` (new) + fallback to `~/.claude/projects/<cwd>/memory/` (legacy). Agent writes via normal Write. Helpers: `_project_memory_dir`, `_memory_read_all`, `_memory_write`, `_memory_delete`, `_memory_reindex`. Names validated by `_valid_memory_name` (slug-regex). |
+| **Project secrets** (Spec 007) | `api_project_secrets` (GET), `api_project_secrets_set` (POST), `api_project_secrets_delete` (DELETE) | Path: `<cwd>/.claude-ops/secrets/secrets.env` (chmod 600, gitignored). **Values are NEVER returned via API** — only key names. Helpers: `_project_secrets_path`, `_secrets_read`, `_secrets_write`, `_secrets_set`, `_secrets_delete`, `_secrets_ensure_gitignore`. Keys validated by `_SECRETS_KEY_RE = ^[A-Z_][A-Z0-9_]*$`. Limits: 8KB/value, 100 keys. |
+| **Timeline** (Spec 008) | `api_project_timeline` (GET) | Persistent event bus log. Helpers: `_timeline_init`, `_timeline_path`, `_timeline_append`, `_timeline_slug_from_cwd`, `_timeline_read_events`. Hook in `_bus_publish` — single write point. File: `data/timeline/<slug>.jsonl` (+ `.jsonl.1` backup). env field is never written. |
+| Misc | `api_logs`, `api_claude_md`, `api_audit`, `api_upgrade`, `api_scan_errors`, `_ingest_errors_to_board` | |
+| Subprocess | `_run_log_cmd`, `_run_test_cmd`, `api_project_logs` | `create_subprocess_exec(*shlex.split())` — NOT shell |
 
 ---
 
-## Фронтенд: `web/src/` (React + Vite + TS, 39 файлов)
+## Frontend: `web/src/` (React + Vite + TS, 39 files)
 
 ```
 web/src/
-├── main.tsx                  точка входа
-├── App.tsx                   корень: проекты, табы, polling
-├── api.ts                    HTTP-клиент (VITE_BACKEND_URL || localhost:8787)
-├── types.ts                  типы (ChatSSEEvent и пр.)
+├── main.tsx                  entry point
+├── App.tsx                   root: projects, tabs, polling
+├── api.ts                    HTTP client (VITE_BACKEND_URL || localhost:8787)
+├── types.ts                  types (ChatSSEEvent etc.)
 ├── i18n/
-│   ├── ru.ts                 ~110 ключей UI-строк
+│   ├── ru.ts                 ~110 UI string keys
 │   └── index.ts              export const t = ru
 ├── lib/
 │   └── storage.ts            readLS/writeLS (localStorage)
 ├── hooks/
-│   ├── useChatStream.ts      ⭐ SSE-стрим чата (reader, chunk-safe парсинг)
+│   ├── useChatStream.ts      ⭐ chat SSE stream (reader, chunk-safe parsing)
 │   ├── useAsyncLoad.ts       generic loading/error/data
 │   ├── useClickOutside.ts
-│   ├── useProjectActivity.tsx  шина активности
+│   ├── useProjectActivity.tsx  activity bus
 │   └── useUnreadTracker.ts
 ├── components/
-│   ├── ProjectView.tsx       контейнер проекта (табы слева + чат справа)
+│   ├── ProjectView.tsx       project container (tabs left + chat right)
 │   ├── ProjectTabBar.tsx · Sidebar.tsx (DnD)
-│   ├── ChatTab-части:        ToolBlock · SessionSelector · SessionContextPanel
-│   ├── FileExplorer.tsx      ⭐ общий для Files/GlobalFiles
+│   ├── ChatTab parts:        ToolBlock · SessionSelector · SessionContextPanel
+│   ├── FileExplorer.tsx      ⭐ shared for Files/GlobalFiles
 │   ├── Modal.tsx · ConfirmModal.tsx · Toast.tsx
-│   ├── ErrorBoundary.tsx     ⭐ оборачивает ProjectView + каждый таб
+│   ├── ErrorBoundary.tsx     ⭐ wraps ProjectView + each tab
 │   ├── PromptPicker · SkillPicker · UsageBadge · ProjectStructureCard
 │   ├── EditableMarkdown · HealthDot · LoginScreen · Spinner
 ├── tabs/                     overview | claude-md | logs | board | files | memory | secrets | timeline
-│   ├── ChatTab.tsx           ядро + useChatStream
-│   ├── BoardTab.tsx          канбан (isActive-guard на polling)
-│   ├── FilesTab / GlobalFilesTab  (тонкие обёртки над FileExplorer)
+│   ├── ChatTab.tsx           core + useChatStream
+│   ├── BoardTab.tsx          kanban (isActive-guard on polling)
+│   ├── FilesTab / GlobalFilesTab  (thin wrappers over FileExplorer)
 │   ├── OverviewTab · LogsTab · MemoryTab · ClaudeMdTab · SecretsTab
-│   └── TimelineTab.tsx       ⭐ Spec 008: история из GET /timeline + live via useProjectActivity (SSE reuse)
-└── styles/                   ⭐ styles.css разбит на 11 partials
-    ├── base.css (vars/тема/light) · layout · sidebar · tabbar · overview
+│   └── TimelineTab.tsx       ⭐ Spec 008: history from GET /timeline + live via useProjectActivity (SSE reuse)
+└── styles/                   ⭐ styles.css split into 11 partials
+    ├── base.css (vars/theme/light) · layout · sidebar · tabbar · overview
     └── board · chat · files · modal · forms · timeline
-        (корневой styles.css = 11 @import в порядке каскада)
+        (root styles.css = 11 @import in cascade order)
 ```
 
 ---
 
-## Timeline — персистентность шины (Spec 008)
+## Timeline — event bus persistence (Spec 008)
 
-Каждое событие `_bus_publish(session_key, event)` дополнительно записывается в JSONL-лог проекта.
+Every event from `_bus_publish(session_key, event)` is additionally written to the project's JSONL log.
 
-**Архитектура:**
-- Единая точка записи — хук в `_bus_publish` вызывает `_timeline_append(session_key, event)`.
-- `_timeline_init(ctx)` — вызывается из `start()`, сохраняет `DATA/timeline/` path и ссылку на `ctx["topics"]` в модульные переменные `_TIMELINE_DATA_DIR` / `_TIMELINE_TOPICS`.
-- `_timeline_path(session_key)` — резолвит `session_key → cwd` через `_TIMELINE_TOPICS`, строит путь `DATA/timeline/<slug>.jsonl`. Если session_key не найден — `_unknown.jsonl`.
-- `_timeline_slug_from_cwd(cwd)` — `cwd.replace('/', '-')`, аналогично `_sdk_sessions_dir`.
-- `_timeline_append(session_key, event)` — добавляет `ts=time.time()`, обрезает `text` >2000 симв, исключает поле `env` (никогда), ротация >5MB → `.jsonl.1`. Глотает ВСЕ исключения.
-- `_timeline_read_events(session_key, limit, before)` — читает `.jsonl` + `.jsonl.1`, парсит gracefully (битые строки → skip), сортирует по ts, пагинирует.
+**Architecture:**
+- Single write point — hook in `_bus_publish` calls `_timeline_append(session_key, event)`.
+- `_timeline_init(ctx)` — called from `start()`, stores the `DATA/timeline/` path and a reference to `ctx["topics"]` in module-level variables `_TIMELINE_DATA_DIR` / `_TIMELINE_TOPICS`.
+- `_timeline_path(session_key)` — resolves `session_key → cwd` via `_TIMELINE_TOPICS`, builds path `DATA/timeline/<slug>.jsonl`. If session_key not found — `_unknown.jsonl`.
+- `_timeline_slug_from_cwd(cwd)` — `cwd.replace('/', '-')`, analogous to `_sdk_sessions_dir`.
+- `_timeline_append(session_key, event)` — adds `ts=time.time()`, truncates `text` >2000 chars, excludes the `env` field (always), rotates >5MB → `.jsonl.1`. Swallows ALL exceptions.
+- `_timeline_read_events(session_key, limit, before)` — reads `.jsonl` + `.jsonl.1`, parses gracefully (broken lines → skip), sorts by ts, paginates.
 
-**Безопасность:** `env`-поле исключается в `_timeline_append` — секреты проекта не попадают в лог. Проверено тестом `test_api_timeline_env_not_in_response`.
+**Security:** the `env` field is excluded in `_timeline_append` — project secrets never reach the log. Verified by test `test_api_timeline_env_not_in_response`.
 
-**Фронт:** `TimelineTab.tsx` — история via `GET /api/projects/{id}/timeline`, live через `useProjectActivity` (переиспользует существующий SSE-коннект, новый сокет НЕ открывается).
-
----
-
-## Поток env-секретов (Spec 007)
-
-Секреты проекта подмешиваются в env агента при КАЖДОМ запуске `run_engine`:
-- **TG-канал** (`bot.py:run_agent`): `{**_secrets_read(cwd), "TG_CHAT_ID":..., "TG_THREAD_ID":...}` — TG-переменные всегда перетирают секреты с теми же именами (приоритет).
-- **Кокпит чат** (`webapp.py:api_project_chat`): `env=_secrets_read(cwd)`.
-- **Карточки** (`webapp.py:_run_card`): `env=_secrets_read(cwd)` из cwd основного проекта (не worktree).
-- Агент видит секреты как `os.environ["MY_KEY"]` — стандартные переменные окружения.
-- Секреты НЕ логируются в `audit()` — тот принимает только (project, kind, text). env туда не передаётся.
-- Секреты НЕ попадают в транскрипт/сессии/сайдкары — они в env процесса, не в тексте.
+**Frontend:** `TimelineTab.tsx` — history via `GET /api/projects/{id}/timeline`, live events via `useProjectActivity` (reuses the existing SSE connection, no new socket opened).
 
 ---
 
-## Тесты: `tests/` (21 файл, 496 passed / 6 skipped)
+## Secrets flow (Spec 007)
 
-`venv/bin/python -m pytest -q` (или `make test`). Фикстуры — `conftest.py` (aiohttp client, tmp-cwd, mock ctx, `_auth_token`).
-- **Критичное:** `test_board_parser` (регрессия = потеря задач в проде), `test_security` + `test_security_regressions` (path-traversal, card_id, rate-limit), `test_board_api`, `test_run_card`, `test_chat_sse`, `test_project_rename`, `test_ingest_errors`.
-- **Новое (Spec 007):** `test_secrets` — 47 тестов: путь, round-trip, chmod 600, gitignore, валидация ключей, лимиты, изоляция cwd, audit non-leak, API GET/POST/DELETE с критичным тестом на не-утечку значений.
-- **Новое (Spec 008):** `test_timeline` — 32 теста: slug стабильность, path резолв, append+ts+truncate+env-exclusion, ротация 5MB, bus_publish интеграция, read graceful (битые строки), backup .jsonl.1, API GET/limit/before/env-not-in-response.
-- **Новое (Spec 010):** `test_self_healing` — 28 тестов: `_self_heal_enabled` (флаг/env/default False); heal_attempted мета; OFF default = критичный регрессия-страж; heal_attempted ДО прогона; safe→Review, risky→Failed; heal_attempted не перезапускается; не-git→пропуск; занятый→пропуск; лимит конкурентности; Timeline self_heal; API-тумблер (auth/enable/disable/404).
-
----
-
-## Данные и эксплуатация
-
-- `data/topics.json` (СЛОЙ 1, вечный; per-project настройки: model/self_heal/notify_on_error/log_cmd/test_cmd/git_enabled) · `data/sessions.json` (СЛОЙ 2, /reset чистит) · `data/settings.json` (глобальные настройки f2ba02, mtime hot-reload) · `data/prompts.json` · `data/runs/<card>.md` (сайдкары) · `data/audit/` · `data/inbox/` (файлы из TG) · `data/timeline/<slug>.jsonl` (Timeline Spec 008). **`data/` в .gitignore.**
-- `.env` (секреты, не в git) · `.env.example` + `web/.env.example` (плейсхолдеры).
-- `claude-ops-bot.service` (systemd) · **`restart-self.sh`** (ЕДИНСТВЕННЫЙ способ рестарта из агента — detached через systemd-run; подробности в CLAUDE.md).
-- `TASKS.md` (доска, читают сессии) · `DONE.md` (архив, сессии НЕ читают) · `docs/API.md` · `CONTRIBUTING.md` · `LICENSE` (MIT).
+Project secrets are injected into the agent's env on every `run_engine` call:
+- **TG channel** (`bot.py:run_agent`): `{**_secrets_read(cwd), "TG_CHAT_ID":..., "TG_THREAD_ID":...}` — TG variables always override secrets with the same names (take priority).
+- **Cockpit chat** (`webapp.py:api_project_chat`): `env=_secrets_read(cwd)`.
+- **Cards** (`webapp.py:_run_card`): `env=_secrets_read(cwd)` from the main project cwd (not worktree).
+- Agent sees secrets as `os.environ["MY_KEY"]` — standard environment variables.
+- Secrets are NOT logged in `audit()` — that function only accepts (project, kind, text). env is never passed there.
+- Secrets do NOT reach transcripts/sessions/sidecars — they live in the process env, not in text.
 
 ---
 
-## Петля самолечения (Spec 010)
+## Tests: `tests/` (21 files, 496 passed / 6 skipped)
 
-Соединяет уже готовые кирпичи в автономный цикл. **Агент готовит — человек применяет.**
+`venv/bin/python -m pytest -q` (or `make test`). Fixtures — `conftest.py` (aiohttp client, tmp-cwd, mock ctx, `_auth_token`).
+- **Critical:** `test_board_parser` (regression = lost tasks in production), `test_security` + `test_security_regressions` (path-traversal, card_id, rate-limit), `test_board_api`, `test_run_card`, `test_chat_sse`, `test_project_rename`, `test_ingest_errors`.
+- **New (Spec 007):** `test_secrets` — 47 tests: path, round-trip, chmod 600, gitignore, key validation, limits, cwd isolation, audit non-leak, API GET/POST/DELETE with critical value non-leak test.
+- **New (Spec 008):** `test_timeline` — 32 tests: slug stability, path resolve, append+ts+truncate+env-exclusion, 5MB rotation, bus_publish integration, graceful broken lines, backup .jsonl.1, API GET/limit/before/env-not-in-response.
+- **New (Spec 010):** `test_self_healing` — 28 tests: `_self_heal_enabled` (flag/env/default False); heal_attempted meta; OFF default = critical regression guard; heal_attempted set BEFORE run; safe→Review, risky→Failed; heal_attempted incident not restarted; non-git→skip; busy→skip; concurrency limit; Timeline self_heal; API toggle (auth/enable/disable/404).
+
+---
+
+## Data and operations
+
+- `data/topics.json` (LAYER 1, permanent; per-project settings: model/self_heal/notify_on_error/log_cmd/test_cmd/git_enabled) · `data/sessions.json` (LAYER 2, `/reset` clears) · `data/settings.json` (global settings f2ba02, mtime hot-reload) · `data/prompts.json` · `data/runs/<card>.md` (sidecars) · `data/audit/` · `data/inbox/` (files from TG) · `data/timeline/<slug>.jsonl` (Timeline Spec 008). **`data/` is in .gitignore.**
+- `.env` (secrets, not in git) · `.env.example` + `web/.env.example` (placeholders).
+- `claude-ops-bot.service` (systemd) · **`restart-self.sh`** (THE ONLY way to restart from inside the agent — detached via systemd-run; details in CLAUDE.md).
+- `TASKS.md` (board, sessions read this) · `DONE.md` (archive, sessions do NOT read this) · `docs/API.md` · `CONTRIBUTING.md` · `LICENSE` (MIT).
+
+---
+
+## Self-healing loop (Spec 010)
+
+Connects existing building blocks into an autonomous cycle. **Agent prepares — human applies.**
 
 ```
-сканер ловит падение → создаёт err-карточку (уже работало)
-  → [НОВОЕ] _self_heal_enabled(project)? → да
+scanner catches failure → creates err-card (already worked)
+  → [NEW] _self_heal_enabled(project)? → yes
   → asyncio.create_task(_self_heal_card(ctx, project, card))
-      1. heal_attempted=true в description ДО запуска (предотв. зацикливание)
-      2. Формируем heal_prompt из title + excerpt инцидента
-      3. _card_run_mode → worktree? → нет → skip (предохранитель №5)
+      1. Write heal_attempted=true to description BEFORE run (prevents loops)
+      2. Build heal_prompt from title + incident excerpt
+      3. _card_run_mode → worktree? → no → skip (safety guard #5)
       4. _card_worktree_setup → .worktrees/card-<id>
-      5. ctx["running"][session_key] = True (блокируем TG от параллельного запуска)
-      6. Перемещаем карточку в In Progress
-      7. _run_card(..., worktree, wt_info) → агент чинит, авто-коммит
-         → _run_card снимает running в finally, переносит в Review/Failed
+      5. ctx["running"][session_key] = True (blocks TG from parallel run)
+      6. Move card to In Progress
+      7. _run_card(..., worktree, wt_info) → agent fixes, auto-commit
+         → _run_card releases running in finally, moves to Review/Failed
       8. _run_quality_gate(wt_path) → verdict safe/risky/unknown
-      9. safe → остаётся в Review + heal_badge ✓; risky → Failed + heal_badge ✗
+      9. safe → stays in Review + heal_badge ✓; risky → Failed + heal_badge ✗
      10. Timeline kind:"self_heal" phase:start/fixed/gate_ok/gate_fail
-     11. TG-пинг оператору (результат)
+     11. TG ping to operator (result)
 ```
 
-**Предохранители (никогда не нарушать):**
-1. `_self_heal_enabled` = False по умолчанию — только `self_heal: true` в topics или `SELF_HEAL_ENABLED=1`
-2. `api_card_apply` НИКОГДА не вызывается из самолечения — только до Review
-3. `heal_attempted=true` пишется ДО запуска агента — краш не зациклит
-4. `_self_heal_active_count <= _SELF_HEAL_MAX_CONCURRENT (2)` — глобальный счётчик
-5. `_card_run_mode == "worktree"` обязателен — не-git/dirty пропускается
-6. Timeline `kind:"self_heal"` + TG-пинг — полная наблюдаемость
+**Safety guards (never bypass):**
+1. `_self_heal_enabled` = False by default — only `self_heal: true` in topics or `SELF_HEAL_ENABLED=1`
+2. `api_card_apply` is NEVER called from self-healing — agent only reaches Review
+3. `heal_attempted=true` written BEFORE agent starts — a crash won't loop
+4. `_self_heal_active_count <= _SELF_HEAL_MAX_CONCURRENT (2)` — global counter
+5. `_card_run_mode == "worktree"` required — non-git/dirty skipped
+6. Full observability — Timeline `kind:"self_heal"` + TG ping
 
-**Ключевые функции (webapp.py):**
-- `_self_heal_enabled(project)` — читает флаг; по умолчанию False
-- `_send_tg_ping(ctx, project, msg)` — TG-уведомление оператору
-- `_self_heal_card(ctx, project, incident_card)` — асинхронная петля починки
-- `_error_scanner_loop` — интеграция: после scan_and_ingest → create_task если включено
+**Key functions (webapp.py):**
+- `_self_heal_enabled(project)` — reads flag; False by default
+- `_send_tg_ping(ctx, project, msg)` — TG notification to operator
+- `_self_heal_card(ctx, project, incident_card)` — async repair loop
+- `_error_scanner_loop` — integration: after scan_and_ingest → create_task if enabled
 - `api_project_self_heal_toggle` — POST `/api/projects/{id}/self-heal {enabled}`
 
 ---
 
-## Поток одной задачи (end-to-end)
+## Single task flow (end-to-end)
 
 ```
-TG-сообщение / карточка→In Progress / веб-чат
-  → резерв running[cwd] (синхронно)
-  → (карточка C2) режим-детектор: git+clean → worktree, иначе legacy
+TG message / card→In Progress / web chat
+  → reserve running[cwd] (synchronously)
+  → (card C2) mode detector: git+clean → worktree, else legacy
   → (worktree) git worktree add .worktrees/card-<id> -b card-<id>
-  → run_engine(cwd=effective_cwd) гоняет SDK, yield events
-  → адаптер рендерит (TG: send+md_to_html / web: SSE / карточка: sidecar)
-  → (worktree) авто-коммит в ветке card-<id>, diff vs base_branch
-  → session_id сохранён, running снят в finally
-  → (карточка) → Review/Failed + пинг TG
-  → (C2-gate) пользователь в Review видит diff + кнопки:
-      🧪 Проверить → POST /check → _run_quality_gate(wt_path) → вердикт safe/risky/unknown
-                     (тесты гоняются В worktree; apply НЕ блокируется — пользователь решает)
-      ✓ Применить → git merge --no-ff card-<id> → Done (worktree удалён)
-      ✗ Отмена    → worktree+ветка удалены → Backlog
-      Конфликт    → 409, merge --abort, worktree жив, карточка остаётся в Review
+  → run_engine(cwd=effective_cwd) drives SDK, yields events
+  → adapter renders (TG: send+md_to_html / web: SSE / card: sidecar)
+  → (worktree) auto-commit on branch card-<id>, diff vs base_branch
+  → session_id saved, running released in finally
+  → (card) → Review/Failed + TG ping
+  → (C2-gate) user in Review sees diff + buttons:
+      🧪 Check  → POST /check → _run_quality_gate(wt_path) → verdict safe/risky/unknown
+                  (tests run IN the worktree; apply is NOT blocked — user decides)
+      ✓ Apply   → git merge --no-ff card-<id> → Done (worktree removed)
+      ✗ Discard → worktree+branch removed → Backlog
+      Conflict  → 409, merge --abort, worktree intact, card stays in Review
 ```
 
-### C2-gate: файлы
-- `data/runs/<card_id>.md` — человекочитаемый сайдкар (ответ агента, diff)
-- `data/runs/<card_id>.json` — машиночитаемые мета (mode, branch, wt_path, has_changes, applied, discarded, gate:{verdict,ts})
+### C2-gate: files
+- `data/runs/<card_id>.md` — human-readable sidecar (agent response, diff)
+- `data/runs/<card_id>.json` — machine-readable metadata (mode, branch, wt_path, has_changes, applied, discarded, gate:{verdict,ts})

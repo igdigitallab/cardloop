@@ -746,7 +746,7 @@ class TestNoAutoApply:
         # Проверяем пометку в description
         for c in cols.get("failed", []):
             if c["id"] == "err-risky123":
-                assert "гейт ✗" in (c.get("description") or ""), "risky карточка должна иметь пометку «гейт ✗»"
+                assert "gate ✗" in (c.get("description") or ""), "risky карточка должна иметь пометку «гейт ✗»"
                 break
 
 

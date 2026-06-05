@@ -138,7 +138,7 @@ def test_code_block_long_collapses():
     # Последняя строка свёрнута — должна отсутствовать
     assert f"line{CODE_MAX_LINES + 4}" not in out
     # Должен быть маркер сворачивания
-    assert "свёрнуто" in out
+    assert "collapsed" in out
 
 
 def test_code_block_escapes_html_inside():

@@ -80,7 +80,7 @@ export const api = {
   cardRun: (id: string, card: string) =>
     apiFetch<import('./types').RunResult>(`/api/projects/${id}/tasks/${card}/run`),
 
-  // Мульти-отправка карточек агенту → последовательная очередь (по одной)
+  // Batch-send cards to agent → sequential queue (one at a time)
   runBatch: (id: string, cardIds: string[]) =>
     apiFetch<{ ok: boolean; queued: number; started: string | null }>(`/api/projects/${id}/cards/run-batch`, {
       method: 'POST',
@@ -88,7 +88,7 @@ export const api = {
       body: JSON.stringify({ card_ids: cardIds }),
     }),
 
-  // Spec 009: quality gate — прогнать тесты в worktree карточки и получить вердикт
+  // Spec 009: quality gate — run tests in the card's worktree and get a verdict
   checkCard: (id: string, card: string) =>
     apiFetch<import('./types').GateResult>(
       `/api/projects/${id}/tasks/${card}/check`,
@@ -128,7 +128,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  // #2: ручной лейбл любой сессии (пустой — снять)
+  // #2: manual label for any session (empty = remove)
   setSessionLabel: (id: string, sid: string, label: string) =>
     apiFetch<{ ok: boolean; session_id: string; label: string | null }>(
       `/api/projects/${id}/sessions/${encodeURIComponent(sid)}/label`,
@@ -139,7 +139,7 @@ export const api = {
       }
     ),
 
-  // #4: запуск тестов проекта
+  // #4: run project tests
   runTests: (id: string) =>
     apiFetch<import('./types').TestResult>(`/api/projects/${id}/test`, {
       method: 'POST',
@@ -156,18 +156,18 @@ export const api = {
       method: 'POST',
     }),
 
-  // Проверить есть ли активный прогон (для восстановления UI после refresh)
+  // Check whether there is an active run (for restoring UI after refresh)
   projectRunning: (id: string) =>
     apiFetch<{ running: boolean }>(`/api/projects/${id}/running`),
 
-  // Скиллы агента (глобальные + проектные)
+  // Agent skills (global + project)
   projectSkills: (id: string) =>
     apiFetch<{
       global: { name: string; description: string }[]
       project: { name: string; description: string }[]
     }>(`/api/projects/${id}/skills`),
 
-  // Сканер инцидентов: ручной запуск + счётчик активных err-карточек на доске
+  // Incident scanner: manual trigger + count of active err-cards on the board
   scanErrors: (id: string) =>
     apiFetch<{ ok: boolean; scanned: number; added: number; updated: number; error?: string }>(
       `/api/projects/${id}/scan-errors`, { method: 'POST' }
@@ -199,7 +199,7 @@ export const api = {
       method: 'DELETE',
     }),
 
-  // Свободные чаты (без привязки к проекту)
+  // Free chats (not bound to a project)
   freeCreate: (body?: { cwd?: string; model?: string; label?: string }) =>
     apiFetch<{ id: string; label: string; cwd: string; model: string; created_at: number }>(
       '/api/free',
@@ -220,14 +220,14 @@ export const api = {
   freeDelete: (id: string) =>
     apiFetch<{ ok: boolean }>(`/api/free/${id}`, { method: 'DELETE' }),
 
-  // Лимиты подписки Claude Code (rate_limits SDK, обновляются пассивно)
+  // Claude Code subscription limits (rate_limits SDK, updated passively)
   usage: () =>
     apiFetch<{
       limits: Record<string, { status: string; resets_at: number | null; utilization: number | null; ts: number }>
       now: number
     }>('/api/usage'),
 
-  // Сменить модель проекта (опус/сонет/хайку) — применится со следующего запроса
+  // Change project model (opus/sonnet/haiku) — takes effect on the next request
   setModel: (id: string, model: 'opus' | 'sonnet' | 'haiku') =>
     apiFetch<{ ok: boolean; model: string; topics_updated: number }>(
       `/api/projects/${id}/model`,
@@ -238,7 +238,7 @@ export const api = {
       }
     ),
 
-  // Глобальный файловый браузер (от $HOME)
+  // Global file browser (from $HOME)
   globalFiles: (path: string) =>
     apiFetch<import('./types').FileListing>(
       `/api/global/files?path=${encodeURIComponent(path)}`
@@ -259,7 +259,7 @@ export const api = {
       }
     ),
 
-  // Шаблоны промтов
+  // Prompt templates
   prompts: () =>
     apiFetch<{ prompts: import('./types').Prompt[] }>('/api/prompts'),
 
@@ -312,7 +312,7 @@ export const api = {
       method: 'DELETE',
     }),
 
-  // Spec 008: Timeline — история событий шины проекта (JSONL-лог)
+  // Spec 008: Timeline — project bus event history (JSONL log)
   timeline: (id: string, opts?: { limit?: number; before?: number }) => {
     const params = new URLSearchParams()
     if (opts?.limit != null) params.set('limit', String(opts.limit))
@@ -323,7 +323,7 @@ export const api = {
     )
   },
 
-  // Git: commit (если dirty) + push одной кнопкой
+  // Git: commit (if dirty) + push in one button
   gitSync: (id: string, message?: string) =>
     apiFetch<{ ok: boolean; committed: boolean; pushed: boolean; message: string | null; log: string }>(
       `/api/projects/${id}/git/sync`,
@@ -334,7 +334,7 @@ export const api = {
       }
     ),
 
-  // Настройки (карточка f2ba02): глобальные + per-project
+  // Settings (card f2ba02): global + per-project
   settings: () =>
     apiFetch<import('./types').GlobalSettings>(`/api/settings`),
 
@@ -358,7 +358,7 @@ export const api = {
       }
     ),
 
-  // Spec 010: самолечение — включить/выключить per-project
+  // Spec 010: self-heal — enable/disable per-project
   toggleSelfHeal: (id: string, enabled: boolean) =>
     apiFetch<{ ok: boolean; self_heal: boolean; topics_updated: number }>(
       `/api/projects/${id}/self-heal`,
@@ -369,7 +369,7 @@ export const api = {
       }
     ),
 
-  // TG-уведомления о новых ошибках («упало») — включить/выключить per-project
+  // TG error notifications — enable/disable per-project
   toggleNotifyOnError: (id: string, enabled: boolean) =>
     apiFetch<{ ok: boolean; notify_on_error: boolean; topics_updated: number }>(
       `/api/projects/${id}/notify-on-error`,
@@ -380,7 +380,7 @@ export const api = {
       }
     ),
 
-  // Cross-device UI-раскладка (открытые вкладки/активная/сайдбар/split) — серверный источник истины
+  // Cross-device UI layout (open tabs/active/sidebar/split) — server source of truth
   uiState: () =>
     apiFetch<{ state: Record<string, unknown> }>('/api/ui-state'),
 

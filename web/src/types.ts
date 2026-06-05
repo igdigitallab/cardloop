@@ -2,7 +2,7 @@ export interface GitHealth {
   branch: string
   dirty: number
   unpushed: number
-  /** GitHub visibility — приватный/публичный репо (null = не на GitHub / ещё не определено) */
+  /** GitHub visibility — private/public repo (null = not on GitHub / not yet determined) */
   visibility?: 'private' | 'public' | null
 }
 
@@ -22,19 +22,19 @@ export interface Project {
   name: string
   cwd: string
   model: string
-  /** Для обычных проектов = number (chat:thread из TG). Для свободных чатов = их строковый id. */
+  /** For regular projects = number (chat:thread from TG). For free chats = their string id. */
   tg_thread: number | string | null
   health: ProjectHealth
-  /** True для свободных чатов (без TG/git, cwd=$HOME). */
+  /** True for free chats (no TG/git, cwd=$HOME). */
   is_free?: boolean
-  /** Активные инциденты (err-карточки на доске вне Done). Бейдж 🚨 в сайдбаре. */
+  /** Active incidents (err-cards on the board outside Done). 🚨 badge in the sidebar. */
   incidents?: number
-  /** Сконфигурированы ли источники для сканера ошибок. */
+  /** Whether log/test sources are configured for the error scanner. */
   log_cmd?: string | null
   test_cmd?: string | null
-  /** Самолечение (Spec 010): агент авто-чинит новые инциденты в worktree. OFF по умолчанию. */
+  /** Self-heal (Spec 010): agent auto-fixes new incidents in a worktree. OFF by default. */
   self_heal?: boolean
-  /** TG-уведомления о новых ошибках («упало»). OFF по умолчанию. */
+  /** TG error notifications. OFF by default. */
   notify_on_error?: boolean
 }
 
@@ -50,7 +50,7 @@ export interface TaskCard {
   description?: string | null
 }
 
-/** Карточка-инцидент = id начинается с 'err-'. UI подсвечивает её красной рамкой. */
+/** Incident card = id starts with 'err-'. UI highlights it with a red border. */
 export function isIncidentCard(card: TaskCard): boolean {
   return card.id.startsWith('err-')
 }
@@ -65,7 +65,7 @@ export interface Board {
   columns: BoardColumn[]
   done_count: number
   exists: boolean
-  /** card_ids, стоящие в очереди на запуск агентом (sequential) */
+  /** card_ids queued for sequential agent execution */
   queued?: string[]
 }
 
@@ -141,7 +141,7 @@ export interface FileContent {
 
 export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings'
 
-// ─── Settings (карточка f2ba02) ───────────────────────────────────────────────
+// ─── Settings (card f2ba02) ───────────────────────────────────────────────────
 export interface ProjectSettings {
   git_enabled: boolean
   model: string | null

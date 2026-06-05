@@ -54,30 +54,30 @@ export function LogsTab({ projectId, projectName }: Props) {
   async function handleAddTask() {
     setAddingTask(true)
     try {
-      const title = `Настроить источник логов для ${projectName}`
+      const title = `Configure log source for ${projectName}`
       const instruction = [
-        `Цель: настроить источник логов (и, если в проекте есть тесты, источник тестов) для проекта «${projectName}», чтобы заработал таб «Логи» в кокпите и фоновый сканер инцидентов.`,
+        `Goal: configure the log source (and, if the project has tests, the test source) for project "${projectName}" so that the Logs tab in the cockpit and the background incident scanner work.`,
         ``,
-        `Ты запущен в cwd ЭТОГО проекта (проверь: pwd). Конфиг живёт в файле data/topics.json в корне проекта claude-ops-bot — это НЕ внутри текущего проекта. Найди его через: find $HOME -maxdepth 3 -name topics.json -path "*/claude-ops-bot/*" 2>/dev/null | head -1`,
+        `You are running in the cwd of THIS project (check: pwd). The config lives in data/topics.json at the root of the claude-ops-bot project — NOT inside the current project. Find it with: find $HOME -maxdepth 3 -name topics.json -path "*/claude-ops-bot/*" 2>/dev/null | head -1`,
         ``,
-        `ШАГИ:`,
-        `1. Открой data/topics.json в корне claude-ops-bot (путь нашёл выше). Найди блок, у которого "cwd" совпадает с твоим pwd. Правки вносишь ТОЛЬКО в этот блок. Сохрани валидный JSON (не сломай остальные блоки).`,
+        `STEPS:`,
+        `1. Open data/topics.json at the claude-ops-bot root (path found above). Find the block whose "cwd" matches your pwd. Make changes ONLY in that block. Save valid JSON (don't break other blocks).`,
         ``,
-        `2. Подбери "log_cmd" по тому, как этот проект реально запущен. Команда исполняется от текущего пользователя ($(whoami)), БЕЗ sudo и без shell (exec, не bash) — поэтому НИКАКИХ пайпов, &&, >, переменных $ и кавычек-обёрток:`,
-        `   • systemd-сервис → "journalctl -u <unit> -n 300 --no-pager". Найди реальный юнит: systemctl list-units --type=service | grep -i <часть-имени>. journalctl без sudo работает если пользователь в группе adm.`,
-        `   • Docker/Coolify-контейнер → "docker logs --tail 300 <container>". Найди имя: docker ps --format '{{.Names}}' | grep -i <часть-имени>.`,
-        `   • Просто файл лога → "tail -n 300 /абсолютный/путь/к.log".`,
-        `   ВАЖНО: log_cmd исполняется БЕЗ cwd проекта → используй абсолютные пути и полные имена юнитов/контейнеров.`,
+        `2. Pick "log_cmd" based on how this project is actually running. The command is executed as the current user ($(whoami)), WITHOUT sudo and without a shell (exec, not bash) — so NO pipes, &&, >, $ variables, or wrapper quotes:`,
+        `   • systemd service → "journalctl -u <unit> -n 300 --no-pager". Find the real unit: systemctl list-units --type=service | grep -i <name-part>. journalctl works without sudo if the user is in the adm group.`,
+        `   • Docker/Coolify container → "docker logs --tail 300 <container>". Find the name: docker ps --format '{{.Names}}' | grep -i <name-part>.`,
+        `   • Just a log file → "tail -n 300 /absolute/path/to.log".`,
+        `   IMPORTANT: log_cmd runs WITHOUT the project cwd → use absolute paths and full unit/container names.`,
         ``,
-        `3. Если в проекте есть тесты — добавь "test_cmd". Он исполняется ВНУТРИ cwd проекта, поэтому пути относительные к корню проекта: напр. ".venv/bin/python -m pytest -q tests/" или "venv/bin/python -m pytest -q". Тестов нет — НЕ добавляй test_cmd.`,
+        `3. If the project has tests — add "test_cmd". It runs INSIDE the project cwd, so paths are relative to the project root: e.g. ".venv/bin/python -m pytest -q tests/" or "venv/bin/python -m pytest -q". No tests — do NOT add test_cmd.`,
         ``,
-        `4. ПРОВЕРЬ перед завершением (обязательно, иначе задача не сделана):`,
-        `   • Выполни выбранный log_cmd ТОЧНО как есть (без sudo) и убедись, что он печатает реальные свежие строки — не пусто, не «permission denied», не «unit not found»/«no such container». Пусто или ошибка → подбери другую команду и проверь снова.`,
-        `   • Если добавил test_cmd — запусти его в cwd проекта и убедись, что pytest реально стартует (а не «No such file or directory»).`,
+        `4. VERIFY before finishing (required, otherwise the task is not done):`,
+        `   • Run the chosen log_cmd EXACTLY as-is (without sudo) and confirm it prints real fresh lines — not empty, not "permission denied", not "unit not found"/"no such container". Empty or error → pick a different command and verify again.`,
+        `   • If you added test_cmd — run it in the project cwd and confirm pytest actually starts (not "No such file or directory").`,
         ``,
-        `5. Рестарт НЕ нужен: кокпит перечитывает topics.json с диска на лету (hot-reload). После сохранения таб «Логи» заработает сразу. НЕ перезапускай claude-ops-bot и не пиши «нужен рестарт».`,
+        `5. Restart is NOT needed: the cockpit re-reads topics.json from disk on the fly (hot-reload). After saving, the Logs tab will work immediately. Do NOT restart claude-ops-bot and do not write "restart needed".`,
         ``,
-        `В отчёте укажи: какой log_cmd (и test_cmd, если ставил) записал + первые 3-5 проверенных строк вывода.`,
+        `In the report state: which log_cmd (and test_cmd if set) was written + the first 3-5 verified output lines.`,
       ].join('\n')
       await api.createTask(projectId, title, 'backlog', instruction)
       setTaskAdded(true)
@@ -98,23 +98,23 @@ export function LogsTab({ projectId, projectName }: Props) {
         <div className="logs-empty-icon">📋</div>
         <h3>{t['logs.not_configured_title']}</h3>
         <p>
-          Для этого проекта не указан источник логов.<br />
-          Задайте <code>log_cmd</code> (и, если есть тесты, <code>test_cmd</code>) в <code>data/topics.json</code> — или нажмите кнопку ниже, и агент настроит сам.
+          No log source configured for this project.<br />
+          Set <code>log_cmd</code> (and, if there are tests, <code>test_cmd</code>) in <code>data/topics.json</code> — or click the button below and the agent will configure it.
         </p>
         <p className="logs-empty-example">
-          Например: <code>"log_cmd": "journalctl -u my-service -n 300 --no-pager"</code><br />
-          или: <code>"log_cmd": "docker logs --tail 300 my-container"</code><br />
-          или: <code>"log_cmd": "tail -n 300 /var/log/myapp.log"</code>
+          Example: <code>"log_cmd": "journalctl -u my-service -n 300 --no-pager"</code><br />
+          or: <code>"log_cmd": "docker logs --tail 300 my-container"</code><br />
+          or: <code>"log_cmd": "tail -n 300 /var/log/myapp.log"</code>
         </p>
         {taskAdded ? (
-          <div className="logs-task-added">✓ Задача добавлена в бэклог</div>
+          <div className="logs-task-added">✓ Task added to backlog</div>
         ) : (
           <button
             className="btn-primary logs-add-task-btn"
             onClick={handleAddTask}
             disabled={addingTask}
           >
-            {addingTask ? '…' : '+ Добавить задачу в бэклог'}
+            {addingTask ? '…' : '+ Add task to backlog'}
           </button>
         )}
       </div>
@@ -125,7 +125,7 @@ export function LogsTab({ projectId, projectName }: Props) {
     <div className="logs-container">
       <div className="logs-toolbar">
         <button className="btn-secondary logs-refresh-btn" onClick={reload} title={t['logs.refresh_title']}>{t['logs.refresh']}</button>
-        <span className="logs-count">{lines.length} строк</span>
+        <span className="logs-count">{lines.length} lines</span>
       </div>
       <div className="logs-output">
         {lines.length === 0

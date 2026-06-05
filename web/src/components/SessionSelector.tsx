@@ -11,28 +11,28 @@ import { Modal, ModalHead } from './Modal'
 interface Props {
   projectId: string
   onSessionChange: () => void
-  /** Вызывается когда юзер хочет вставить «промт-завершения» в чат-инпут. */
+  /** Called when the user wants to insert a "wrap-up prompt" into the chat input. */
   onInsertResetPrompt?: (text: string) => void
 }
 
 const DEFAULT_RESET_PROMPT =
-  "Заканчиваем сессию. Перед тем как уйти:\n" +
-  "1. Просмотри список карточек в TASKS.md, отметь выполненные (передвинь в Done через мою команду или скажи мне).\n" +
-  "2. Проверь нет ли мусорных временных файлов в cwd (untitled, scratch, .bak) — предложи удалить.\n" +
-  "3. Если есть незакоммиченные правки — короткое описание что и зачем (commit-сообщение).\n" +
-  "Не пиши код, просто проверь и доложи."
+  "Wrapping up the session. Before you go:\n" +
+  "1. Review the card list in TASKS.md, mark completed ones (move to Done via my command or tell me).\n" +
+  "2. Check for any junk temporary files in cwd (untitled, scratch, .bak) — suggest deleting them.\n" +
+  "3. If there are uncommitted changes — a short description of what and why (commit message).\n" +
+  "Don't write code, just check and report."
 
 /** Format ISO datetime as relative time */
 function relTime(iso: string): string {
   try {
     const diff = Date.now() - new Date(iso).getTime()
     const mins = Math.floor(diff / 60000)
-    if (mins < 2) return 'только что'
-    if (mins < 60) return `${mins} мин назад`
+    if (mins < 2) return 'just now'
+    if (mins < 60) return `${mins}m ago`
     const hrs = Math.floor(mins / 60)
-    if (hrs < 24) return `${hrs} ч назад`
+    if (hrs < 24) return `${hrs}h ago`
     const days = Math.floor(hrs / 24)
-    return `${days} дн назад`
+    return `${days}d ago`
   } catch {
     return ''
   }
@@ -68,7 +68,7 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
   const activeSession = sessions.find(s => s.is_active)
   const activeLabel = activeSession
     ? (activeSession.label || (activeSession.session_id.slice(0, 8) + '…'))
-    : 'новая'
+    : 'new'
 
   async function switchSession(action: 'new' | 'resume', session_id?: string) {
     setBusy(true)
@@ -85,9 +85,9 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
     } catch (err) {
       const e = err as { status?: number; message?: string }
       if (e?.status === 409) {
-        setError('проект занят')
+        setError('project is busy')
       } else {
-        setError(e?.message || 'ошибка')
+        setError(e?.message || 'error')
       }
     } finally {
       setBusy(false)
@@ -109,7 +109,7 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
       await loadSessions()
       onSessionChange()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'ошибка переименования')
+      setError(err instanceof Error ? err.message : 'rename error')
     }
   }
 
@@ -119,13 +119,13 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
         className="session-reset-btn"
         onClick={requestReset}
         disabled={busy}
-        title="Новая сессия (с подтверждением)"
+        title="New session (with confirmation)"
       >↺</button>
       <button
         className="session-selector-btn"
         onClick={() => { setOpen(o => !o); if (!open) loadSessions() }}
         disabled={busy}
-        title="Выбрать сессию"
+        title="Select session"
         aria-expanded={open}
         aria-haspopup="listbox"
       >
@@ -143,7 +143,7 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
             onClick={requestReset}
             disabled={busy}
           >
-            ➕ Новая сессия
+            ➕ New session
           </button>
           {sessions.length > 0 && <div className="session-dropdown-sep" />}
           {sessions.map(s => (
@@ -168,13 +168,13 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
                 className="session-rename-btn"
                 onClick={e => { e.stopPropagation(); setRenameModal({ session: s, value: s.label || '' }); setOpen(false) }}
                 disabled={busy}
-                title="Переименовать сессию"
-                aria-label="Переименовать сессию"
+                title="Rename session"
+                aria-label="Rename session"
               >✎</button>
             </div>
           ))}
           {sessions.length === 0 && (
-            <div className="session-dropdown-empty">нет сохранённых сессий</div>
+            <div className="session-dropdown-empty">no saved sessions</div>
           )}
         </div>
       )}
@@ -182,13 +182,13 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
       {/* Rename modal */}
       {renameModal && (
         <Modal onClose={() => setRenameModal(null)}>
-          <ModalHead title="Переименовать сессию" onClose={() => setRenameModal(null)} />
+          <ModalHead title="Rename session" onClose={() => setRenameModal(null)} />
           <div className="run-modal-body">
             <input
               className="rename-input"
               style={{ width: '100%', marginBottom: 12 }}
               autoFocus
-              placeholder="Имя сессии (пусто — убрать лейбл)"
+              placeholder="Session name (empty — remove label)"
               value={renameModal.value}
               onChange={e => setRenameModal(m => m ? { ...m, value: e.target.value } : m)}
               onKeyDown={e => {
@@ -197,8 +197,8 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
               }}
             />
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button className="btn-secondary" onClick={() => setRenameModal(null)}>Отмена</button>
-              <button className="btn-primary" onClick={commitRename}>Сохранить</button>
+              <button className="btn-secondary" onClick={() => setRenameModal(null)}>Cancel</button>
+              <button className="btn-primary" onClick={commitRename}>Save</button>
             </div>
           </div>
         </Modal>
@@ -209,12 +209,12 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
         <div className="reset-confirm-overlay" onClick={() => setConfirmReset(false)}>
           <div className="reset-confirm-modal" onClick={e => e.stopPropagation()}>
             <div className="reset-confirm-head">
-              <span>Новая сессия</span>
+              <span>New session</span>
               <button className="reset-confirm-close" onClick={() => setConfirmReset(false)}>✕</button>
             </div>
             <div className="reset-confirm-body">
               <p className="reset-confirm-hint">
-                Контекст текущей сессии сбросится. Перед закрытием можно отправить агенту промт-«завершение» (отметит сделанные карточки, проверит мусор):
+                The current session context will be reset. Before closing, you can send the agent a "wrap-up" prompt (it will mark completed cards and check for junk):
               </p>
               <textarea
                 className="reset-confirm-textarea"
@@ -227,13 +227,13 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
                   className="reset-confirm-btn-cancel"
                   onClick={() => setConfirmReset(false)}
                   disabled={busy}
-                >Отмена</button>
+                >Cancel</button>
                 <button
                   className="reset-confirm-btn-skip"
                   onClick={() => { setConfirmReset(false); switchSession('new') }}
                   disabled={busy}
-                  title="Сбросить сессию без отправки промта"
-                >Просто новая сессия</button>
+                  title="Reset session without sending a prompt"
+                >Just new session</button>
                 <button
                   className="reset-confirm-btn-send"
                   onClick={() => {
@@ -241,8 +241,8 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
                     setConfirmReset(false)
                   }}
                   disabled={busy || !onInsertResetPrompt}
-                  title="Вставить промт в чат — отправь его, потом нажми ↺ ещё раз для новой сессии"
-                >📋 Вставить в чат</button>
+                  title="Insert prompt into chat — send it, then click ↺ again for a new session"
+                >📋 Insert into chat</button>
               </div>
             </div>
           </div>

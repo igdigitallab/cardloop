@@ -69,9 +69,9 @@ interface Props {
   project: Project
   onProjectsReload: () => void
   onRenameSuccess?: (oldId: string, newId: string) => void
-  onSplitCreate?: () => void   // показать кнопку ⊞ (только для левого free-чата)
-  onSplitClose?: () => void    // показать кнопку ✕ Закрыть (только для правого)
-  /** Передаётся в ChatTab для восстановления running-state при возврате на вкладку. */
+  onSplitCreate?: () => void   // show ⊞ button (left free-chat only)
+  onSplitClose?: () => void    // show ✕ Close button (right pane only)
+  /** Passed to ChatTab for restoring running-state when switching back to the tab. */
   isActive?: boolean
 }
 
@@ -120,7 +120,7 @@ function IncidentsChip({ count, onNavigate }: { count: number; onNavigate: () =>
     <button
       className="incidents-chip"
       onClick={onNavigate}
-      title={`${t['header.incidents_chip']} ${count} активных инцидентов — перейти на доску`}
+      title={`${t['header.incidents_chip']} ${count} active incident(s) — go to board`}
       style={{
         background: 'var(--red)',
         color: '#fff',
@@ -145,9 +145,9 @@ function HealthRunEndRefresher({ refresh }: { refresh: () => void }) {
 }
 
 // ── Header test runner button ─────────────────────────────────────────────────
-// Запускает test_cmd по требованию. Показывает сводку (прошли/упали + exit code);
-// клик по сводке → модалка с полным выводом (какие тесты упали). Без вывода в
-// галочку — иначе при падении не видно деталей.
+// Runs test_cmd on demand. Shows a summary (passed/failed + exit code);
+// click on summary → modal with full output (which tests failed). No inline output
+// in the button — otherwise failure details are invisible.
 function HeaderTestRunner({ projectId }: { projectId: string }) {
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState<TestResult | null>(null)
@@ -162,24 +162,24 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
     } catch (e: unknown) {
       setResult({
         detected: false, ok: false, cmd: null, exit_code: null,
-        output: 'Запрос не удался: ' + (e instanceof Error ? e.message : String(e)),
+        output: 'Request failed: ' + (e instanceof Error ? e.message : String(e)),
       })
     } finally {
       setRunning(false)
     }
   }
 
-  // Краткая сводка результата
+  // Short summary of results
   let summary: { label: string; color: string } | null = null
   if (result) {
     if (!result.detected) {
-      summary = { label: '? не нашёл тесты', color: 'var(--text-dim)' }
+      summary = { label: '? no tests found', color: 'var(--text-dim)' }
     } else if (result.timed_out) {
-      summary = { label: '⏱ таймаут', color: 'var(--red)' }
+      summary = { label: '⏱ timeout', color: 'var(--red)' }
     } else if (result.ok) {
-      summary = { label: `✓ прошли (exit ${result.exit_code})`, color: 'var(--green)' }
+      summary = { label: `✓ passed (exit ${result.exit_code})`, color: 'var(--green)' }
     } else {
-      summary = { label: `✗ упали (exit ${result.exit_code})`, color: 'var(--red)' }
+      summary = { label: `✗ failed (exit ${result.exit_code})`, color: 'var(--red)' }
     }
   }
 
@@ -197,7 +197,7 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
       {summary && (
         <button
           onClick={() => setShowOutput(true)}
-          title="Показать полный вывод"
+          title="Show full output"
           style={{
             fontSize: 11, color: summary.color, fontWeight: 700, fontFamily: 'inherit',
             background: 'none', border: 'none', cursor: 'pointer', padding: 0,
@@ -209,18 +209,18 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
       )}
       {showOutput && result && (
         <Modal onClose={() => setShowOutput(false)} className="test-output-modal">
-          <h3 style={{ marginTop: 0 }}>Результат тестов</h3>
+          <h3 style={{ marginTop: 0 }}>Test results</h3>
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
-            {result.cmd ? <code>{result.cmd}</code> : 'тесты не обнаружены'}
+            {result.cmd ? <code>{result.cmd}</code> : 'no tests detected'}
             {result.exit_code != null && ` · exit ${result.exit_code}`}
-            {result.timed_out && ' · таймаут'}
+            {result.timed_out && ' · timeout'}
           </div>
           <pre style={{
             maxHeight: '60vh', overflow: 'auto', fontSize: 12, lineHeight: 1.45,
             whiteSpace: 'pre-wrap', wordBreak: 'break-word',
             background: 'var(--bg-code, rgba(0,0,0,0.25))', padding: 10, borderRadius: 6,
           }}>
-            {result.output || '(пустой вывод)'}
+            {result.output || '(empty output)'}
           </pre>
         </Modal>
       )}
@@ -285,19 +285,19 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     refreshHealth()
   }, [refreshHealth])
 
-  // ── Git sync (commit + push одной кнопкой) ────────────────────────────────
+  // ── Git sync (commit + push in one button) ───────────────────────────────
   const [syncState, setSyncState] = useState<GitSyncState>('idle')
   const [syncMsg, setSyncMsg] = useState<string>('')
 
   const gitDirty = (git?.dirty ?? 0) > 0
   const gitUnpushed = (git?.unpushed ?? 0) > 0
   const gitNeedsSync = gitDirty || gitUnpushed
-  // Цвет точки: серый если git недоступен, жёлтый если есть что синхронизировать, зелёный если чисто
+  // Dot color: gray if git unavailable, yellow if sync needed, green if clean
   const gitDotClass = !git ? 'gray' : gitNeedsSync ? 'yellow' : 'green'
   const gitDotTitle = !git
-    ? 'Git недоступен'
+    ? 'Git not available'
     : gitNeedsSync
-      ? `${gitDirty ? `${git!.dirty} изменено` : ''}${gitDirty && gitUnpushed ? ', ' : ''}${gitUnpushed ? `${git!.unpushed} не отправлено` : ''}`
+      ? `${gitDirty ? `${git!.dirty} changed` : ''}${gitDirty && gitUnpushed ? ', ' : ''}${gitUnpushed ? `${git!.unpushed} unpushed` : ''}`
       : t['git.sync_clean']
 
   const onGitSync = useCallback(async () => {
@@ -307,7 +307,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     try {
       const res = await api.gitSync(project.id)
       const parts: string[] = []
-      if (res.committed) parts.push(`коммит: ${res.message}`)
+      if (res.committed) parts.push(`commit: ${res.message}`)
       if (res.pushed) parts.push(t['git.sync_pushed'])
       setSyncMsg(parts.join(' · ') || t['git.sync_nothing'])
       setSyncState('ok')
@@ -410,7 +410,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   // incidents count: project.incidents is defined in types.ts
   const incidentsCount = project.incidents ?? 0
 
-  // Свободный чат — без левой панели табов, чат на всю ширину.
+  // Free chat — no left tab panel, chat at full width.
   if (project.is_free) {
     return (
       <ProjectActivityProvider projectId={project.id}>
@@ -419,18 +419,18 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
             <div className="free-chat-toolbar">
               <span className="free-chat-name">{project.name}</span>
               {onSplitCreate && (
-                <button className="split-create-btn" onClick={onSplitCreate} title="Открыть второй чат рядом">
+                <button className="split-create-btn" onClick={onSplitCreate} title={t['split.open_second_chat']}>
                   ⊞ Split
                 </button>
               )}
               {onSplitClose && (
-                <button className="split-close-btn" onClick={onSplitClose} title="Закрыть эту панель">
-                  ✕ Закрыть
+                <button className="split-close-btn" onClick={onSplitClose} title={t['split.close_panel']}>
+                  ✕ Close
                 </button>
               )}
             </div>
           )}
-          <ErrorBoundary label="Чат">
+          <ErrorBoundary label="Chat">
             <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
           </ErrorBoundary>
         </div>
@@ -512,18 +512,18 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                     {git.visibility && (
                       <span
                         className={`git-vis git-vis-${git.visibility}`}
-                        title={git.visibility === 'private' ? 'Приватный GitHub-репозиторий' : 'Публичный (открытый) GitHub-репозиторий'}
+                        title={git.visibility === 'private' ? 'Private GitHub repository' : 'Public (open) GitHub repository'}
                       >
                         {git.visibility === 'private' ? '🔒' : '🌐'}
                       </span>
                     )}
                     {git.dirty > 0 && (
-                      <span className="git-dirty" title={`${git.dirty} изменённых файлов`}>
+                      <span className="git-dirty" title={`${git.dirty} changed file(s)`}>
                         ~{git.dirty}
                       </span>
                     )}
                     {git.unpushed > 0 && (
-                      <span className="git-unpushed" title={`${git.unpushed} не отправлено`}>
+                      <span className="git-unpushed" title={`${git.unpushed} unpushed`}>
                         ↑{git.unpushed}
                       </span>
                     )}
@@ -571,17 +571,17 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
 
         <div className="tab-content">
           {activeTab === 'overview'  && (
-            <ErrorBoundary label="Обзор">
+            <ErrorBoundary label="Overview">
               <OverviewTab project={project} health={structHealth} refreshHealth={refreshHealth} />
             </ErrorBoundary>
           )}
           {activeTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
-          {activeTab === 'logs'      && <ErrorBoundary label="Логи"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
-          {activeTab === 'board'     && <ErrorBoundary label="Доска"><BoardTab projectId={project.id} isActive={isActive} /></ErrorBoundary>}
-          {activeTab === 'files'     && <ErrorBoundary label="Файлы"><FilesTab projectId={project.id} /></ErrorBoundary>}
-          {activeTab === 'memory'    && <ErrorBoundary label="Память"><MemoryTab projectId={project.id} /></ErrorBoundary>}
-          {activeTab === 'timeline'  && <ErrorBoundary label="Активность"><TimelineTab projectId={project.id} /></ErrorBoundary>}
-          {activeTab === 'settings'  && <ErrorBoundary label="Настройки"><SettingsTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'logs'      && <ErrorBoundary label="Logs"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
+          {activeTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} /></ErrorBoundary>}
+          {activeTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'memory'    && <ErrorBoundary label="Memory"><MemoryTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} /></ErrorBoundary>}
         </div>
       </div>
 
@@ -598,7 +598,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
       {/* RIGHT: permanent chat panel */}
       <div className="project-chat-pane" style={chatStyle}>
         <div className="project-chat-pane-header">
-          <span>💬 Чат по проекту</span>
+          <span>💬 Project chat</span>
           {!narrow && (
             <button
               className="chat-collapse-btn"
@@ -611,7 +611,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
             </button>
           )}
         </div>
-        <ErrorBoundary label="Чат">
+        <ErrorBoundary label="Chat">
           <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
         </ErrorBoundary>
       </div>

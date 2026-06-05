@@ -4,7 +4,7 @@ import { api } from '../api'
 import { ProjectStructureCardFull } from '../components/ProjectStructureCard'
 import { t } from '../i18n'
 
-const ONBOARDING_MARKERS = ['Заполнить во время онбординга', 'инициализируется']
+const ONBOARDING_MARKERS = ['Fill in during onboarding', 'initializing']
 
 function WelcomeBanner({ projectId }: { projectId: string }) {
   const [show, setShow] = useState(false)
@@ -25,7 +25,7 @@ function WelcomeBanner({ projectId }: { projectId: string }) {
     <div className="welcome-banner">
       <div style={{ fontWeight: 600, marginBottom: 4 }}>{t['overview.initializing']}</div>
       <div style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.5 }}>
-        Claude задаёт вопросы в чате справа → ответь, чтобы оформить проект.
+        Claude is asking questions in the chat panel → answer to set up the project.
       </div>
     </div>
   )

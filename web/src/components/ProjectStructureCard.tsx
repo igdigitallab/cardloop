@@ -23,13 +23,13 @@ export function ProjectStructureCardFull({ health, refreshHealth, projectId }: F
     setAuditMsg('')
     try {
       await api.auditProject(projectId)
-      setAuditMsg('Аудит запущен — смотри чат, находки упадут в Backlog')
+      setAuditMsg('Audit started — check chat, findings will go to Backlog')
     } catch (e: unknown) {
       const status = (e as { status?: number }).status
       if (status === 409) {
-        setAuditMsg('Проект занят — попробуй позже')
+        setAuditMsg('Project is busy — try again later')
       } else {
-        setAuditMsg('Ошибка: ' + (e instanceof Error ? e.message : String(e)))
+        setAuditMsg('Error: ' + (e instanceof Error ? e.message : String(e)))
       }
     } finally {
       setAuditBusy(false)
@@ -42,13 +42,13 @@ export function ProjectStructureCardFull({ health, refreshHealth, projectId }: F
     setAuditMsg('')
     try {
       await api.upgradeProject(projectId)
-      setAuditMsg('Апгрейд запущен — смотри чат, правки до baseline')
+      setAuditMsg('Upgrade started — check chat, changes toward baseline')
     } catch (e: unknown) {
       const status = (e as { status?: number }).status
       if (status === 409) {
-        setAuditMsg('Проект занят — попробуй позже')
+        setAuditMsg('Project is busy — try again later')
       } else {
-        setAuditMsg('Ошибка: ' + (e instanceof Error ? e.message : String(e)))
+        setAuditMsg('Error: ' + (e instanceof Error ? e.message : String(e)))
       }
     } finally {
       setUpgradeBusy(false)
@@ -65,19 +65,19 @@ export function ProjectStructureCardFull({ health, refreshHealth, projectId }: F
     return (
       <div className="git-card" style={{ marginTop: 16 }}>
         <div className="git-card-header" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span>Структура проекта</span>
+          <span>Project structure</span>
           <span className="git-sync-dot green" />
           <span style={{ marginLeft: 'auto', fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text2)', textTransform: 'none', letterSpacing: 0 }}>
-            ✓ всё подключено
+            ✓ all connected
           </span>
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
           <button className="git-sync-btn" style={{ fontSize: 12, padding: '5px 12px' }}
-            onClick={handleAudit} disabled={auditBusy} title="Запустить аудит проекта">
-            {auditBusy ? '⏳…' : '🩺 Аудит проекта'}
+            onClick={handleAudit} disabled={auditBusy} title="Run project audit">
+            {auditBusy ? '⏳…' : '🩺 Audit project'}
           </button>
-          {auditMsg && <span style={{ fontSize: 12, color: auditMsg.startsWith('Ошибка') ? 'var(--red)' : 'var(--green)' }}>
-            {auditMsg.startsWith('Карточка') ? '✓ ' : ''}{auditMsg}
+          {auditMsg && <span style={{ fontSize: 12, color: auditMsg.startsWith('Error') ? 'var(--red)' : 'var(--green)' }}>
+            {auditMsg.startsWith('Card') ? '✓ ' : ''}{auditMsg}
           </span>}
         </div>
       </div>
@@ -87,7 +87,7 @@ export function ProjectStructureCardFull({ health, refreshHealth, projectId }: F
   return (
     <div className="git-card" style={{ marginTop: 16 }}>
       <div className="git-card-header" style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-        <span>Структура проекта</span>
+        <span>Project structure</span>
         <span className={`git-sync-dot ${dotClass}`} title={`${health.score}/${health.total}`} />
         <span style={{ marginLeft: 'auto', fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text2)', textTransform: 'none', letterSpacing: 0 }}>
           {health.score}/{health.total}
@@ -100,7 +100,7 @@ export function ProjectStructureCardFull({ health, refreshHealth, projectId }: F
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: 12, color: 'var(--yellow)', flexShrink: 0, fontWeight: 600 }}>✗</span>
               <span style={{ fontSize: 13, color: 'var(--text2)' }}>
-                доделай: {item.label}
+                to do: {item.label}
               </span>
             </div>
             {item.hint && (
@@ -114,23 +114,23 @@ export function ProjectStructureCardFull({ health, refreshHealth, projectId }: F
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="git-sync-btn" style={{ fontSize: 12, padding: '5px 12px' }}
-          onClick={handleAudit} disabled={auditBusy} title="Запустить аудит проекта">
-          {auditBusy ? '⏳…' : '🩺 Аудит проекта'}
+          onClick={handleAudit} disabled={auditBusy} title="Run project audit">
+          {auditBusy ? '⏳…' : '🩺 Audit project'}
         </button>
         {health.color !== 'green' && (
           <button className="git-sync-btn"
             style={{ fontSize: 12, padding: '5px 12px', color: 'var(--text2)' }}
             onClick={handleFix} disabled={upgradeBusy}
-            title="Дополнить CLAUDE.md/TASKS.md/README/.gitignore по шаблону, не переписывая существующее">
-            {upgradeBusy ? '⏳…' : '🔧 Подтянуть до стандарта'}
+            title="Fill in CLAUDE.md/TASKS.md/README/.gitignore from template without overwriting existing content">
+            {upgradeBusy ? '⏳…' : '🔧 Bring up to standard'}
           </button>
         )}
         {auditMsg && (
           <span style={{
             fontSize: 12,
-            color: auditMsg.startsWith('Ошибка') || auditMsg.includes('занят') ? 'var(--red)' : 'var(--green)',
+            color: auditMsg.startsWith('Error') || auditMsg.includes('busy') ? 'var(--red)' : 'var(--green)',
           }}>
-            {auditMsg.startsWith('Карточка') ? '✓ ' : ''}{auditMsg}
+            {auditMsg.startsWith('Card') ? '✓ ' : ''}{auditMsg}
           </span>
         )}
       </div>

@@ -61,7 +61,7 @@ function TabItem({
       onDoubleClick={() => {
         if (project.is_free) setEditing(true)
       }}
-      title={editing ? '' : (project.is_free ? `${project.cwd} (двойной клик — переименовать)` : project.cwd)}
+      title={editing ? '' : (project.is_free ? `${project.cwd} (double-click to rename)` : project.cwd)}
     >
       {editing ? (
         <input
@@ -80,13 +80,13 @@ function TabItem({
         <span className="ptab-name">{project.name}</span>
       )}
       {!editing && unread > 0 && !isActive && (
-        <span className="ptab-unread" title={`${unread} новых`}>{unread > 99 ? '99+' : unread}</span>
+        <span className="ptab-unread" title={`${unread} new`}>{unread > 99 ? '99+' : unread}</span>
       )}
       {!editing && isActive && (
         <button
           className="ptab-close"
           onClick={(e) => { e.stopPropagation(); onClose() }}
-          title="Закрыть вкладку"
+          title="Close tab"
         >
           ✕
         </button>
@@ -117,19 +117,19 @@ export function ProjectTabBar({
             />
           )
         })}
-        {/* Специальная вкладка "Файлы сервера" */}
+        {/* Server files special tab */}
         {globalFilesOpen && (
           <div
             className={`ptab ptab-global-files ${globalFilesActive ? 'active' : ''}`}
             onClick={onOpenGlobalFiles}
-            title="Файлы сервера (~)"
+            title="Server files (~)"
           >
-            <span className="ptab-name">📁 Файлы</span>
+            <span className="ptab-name">📁 Files</span>
             {globalFilesActive && (
               <button
                 className="ptab-close"
                 onClick={e => { e.stopPropagation(); onCloseGlobalFiles() }}
-                title="Закрыть"
+                title="Close"
               >✕</button>
             )}
           </div>
@@ -137,17 +137,17 @@ export function ProjectTabBar({
         <button
           className="ptab-new"
           onClick={onNewFree}
-          title="Новый свободный чат"
+          title="New free chat"
         >
           +
         </button>
       </div>
       <div className="ptab-spacer" />
-      {/* Кнопка глобального файлового браузера */}
+      {/* Global file browser button */}
       <button
         className={`ptab-folder-btn${globalFilesActive ? ' active' : ''}`}
         onClick={onOpenGlobalFiles}
-        title="Файлы сервера (~)"
+        title="Server files (~)"
       >
         📁
       </button>

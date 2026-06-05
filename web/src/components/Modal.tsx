@@ -59,7 +59,7 @@ export function ModalHead({ title, onClose, extra }: ModalHeadProps) {
         <button
           className="run-modal-close"
           onClick={onClose}
-          aria-label="Закрыть"
+          aria-label="Close"
         >✕</button>
       </div>
     </div>

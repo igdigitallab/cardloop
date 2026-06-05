@@ -1,13 +1,13 @@
 /**
- * Один SSE-коннект на проект (provider в ProjectView), все табы подписываются через hooks.
+ * Single SSE connection per project (provider in ProjectView), all tabs subscribe via hooks.
  *
- * Зачем: каждый таб раньше открывал свой fetch+ReadableStream на /activity-stream.
- * 7 табов = 7 сокетов на каждый открытый проект. Через контекст — один на проект-вкладку.
+ * Why: each tab used to open its own fetch+ReadableStream on /activity-stream.
+ * 7 tabs = 7 sockets per open project. Via context — one per project tab.
  *
- * Использование:
- *   <ProjectActivityProvider projectId={p.id}>  ← в ProjectView
+ * Usage:
+ *   <ProjectActivityProvider projectId={p.id}>  ← in ProjectView
  *     ...
- *     useOnRunEnd(() => reload())               ← в каждом табе/секции
+ *     useOnRunEnd(() => reload())               ← in each tab/section
  */
 import {
   createContext, useContext, useEffect, useRef, useCallback, ReactNode,
@@ -17,7 +17,7 @@ import { ActivityEvent } from '../types'
 type Handler = (evt: ActivityEvent) => void
 
 interface BusValue {
-  /** Подписаться на ВСЕ события шины. Возвращает unsubscribe. */
+  /** Subscribe to ALL bus events. Returns unsubscribe. */
   subscribe: (h: Handler) => () => void
 }
 
@@ -29,7 +29,7 @@ interface ProviderProps {
 }
 
 export function ProjectActivityProvider({ projectId, children }: ProviderProps) {
-  // Множество активных подписчиков (mutable ref — без перерендера на (un)subscribe)
+  // Set of active subscribers (mutable ref — no re-render on (un)subscribe)
   const handlersRef = useRef<Set<Handler>>(new Set())
 
   const subscribe = useCallback((h: Handler) => {
@@ -37,7 +37,7 @@ export function ProjectActivityProvider({ projectId, children }: ProviderProps) 
     return () => { handlersRef.current.delete(h) }
   }, [])
 
-  // Один SSE-коннект на projectId. Переподключение при разрыве через 2с.
+  // Single SSE connection per projectId. Reconnects after 2s on disconnect.
   useEffect(() => {
     const ac = new AbortController()
     let active = true
@@ -67,9 +67,9 @@ export function ProjectActivityProvider({ projectId, children }: ProviderProps) 
               try {
                 const evt = JSON.parse(ln.slice(6)) as ActivityEvent
                 for (const h of handlersRef.current) {
-                  try { h(evt) } catch { /* подписчик не должен валить шину */ }
+                  try { h(evt) } catch { /* subscriber must not crash the bus */ }
                 }
-              } catch { /* skip битый JSON / heartbeat */ }
+              } catch { /* skip malformed JSON / heartbeat */ }
             }
           }
         } catch (err: unknown) {
@@ -90,7 +90,7 @@ export function ProjectActivityProvider({ projectId, children }: ProviderProps) 
   )
 }
 
-/** Подписаться на ВСЕ события шины. handler нестабильным быть может (внутри используем ref). */
+/** Subscribe to ALL bus events. handler may be unstable (we use a ref internally). */
 // eslint-disable-next-line react-refresh/only-export-components -- hooks + provider co-located by design
 export function useProjectActivity(handler: Handler) {
   const ctx = useContext(BusContext)
@@ -103,7 +103,7 @@ export function useProjectActivity(handler: Handler) {
   }, [ctx])
 }
 
-/** Удобный хук: вызывает callback на каждом run_end из шины. */
+/** Convenience hook: calls callback on every run_end from the bus. */
 // eslint-disable-next-line react-refresh/only-export-components -- hooks + provider co-located by design
 export function useOnRunEnd(callback: () => void) {
   useProjectActivity(evt => {
@@ -111,7 +111,7 @@ export function useOnRunEnd(callback: () => void) {
   })
 }
 
-/** Хук: refresh при возврате фокуса/видимости + опционально через polling. */
+/** Hook: refresh on focus/visibility return + optionally on a polling interval. */
 // eslint-disable-next-line react-refresh/only-export-components -- hooks + provider co-located by design
 export function useFocusRefresh(callback: () => void, pollMs?: number) {
   const cbRef = useRef(callback)

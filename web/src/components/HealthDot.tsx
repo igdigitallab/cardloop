@@ -16,10 +16,10 @@ export function HealthDot({ health }: Props) {
 }
 
 function healthTitle(health: ProjectHealth, status: string): string {
-  if (status === 'gray') return 'Git недоступен'
+  if (status === 'gray') return 'Git not available'
   const g = health.git!
-  const parts = [`ветка: ${g.branch}`]
-  if (g.dirty > 0) parts.push(`изменено: ${g.dirty}`)
-  if (g.unpushed > 0) parts.push(`не отправлено: ${g.unpushed}`)
+  const parts = [`branch: ${g.branch}`]
+  if (g.dirty > 0) parts.push(`changed: ${g.dirty}`)
+  if (g.unpushed > 0) parts.push(`unpushed: ${g.unpushed}`)
   return parts.join(' · ')
 }

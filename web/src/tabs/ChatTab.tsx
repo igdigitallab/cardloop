@@ -17,17 +17,18 @@ import {
 import { useProjectActivity } from '../hooks/useProjectActivity'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS } from '../lib/models'
+import { t } from '../i18n'
 
 interface Props {
   project: Project
   onProjectsReload: () => void
-  /** Когда вкладка проекта становится видимой (false→true) — проверяем running-статус. */
+  /** When the project tab becomes visible (false→true) — check running status. */
   isActive?: boolean
 }
 
 type ModelKey = 'opus' | 'sonnet' | 'haiku'
 
-/** Грубая оценка токенов: ~4 символа на токен (общепринятый эвристик для англ/русск). */
+/** Rough token estimate: ~4 characters per token (common heuristic for English/Russian). */
 function estimateTokens(messages: ChatMessage[]): number {
   let total = 0
   for (const m of messages) {
@@ -45,7 +46,7 @@ function formatTokens(n: number): string {
   return `${Math.round(n / 1000)}K`
 }
 
-/** Форматирует длительность: 0:05, 1:23, 12:45. */
+/** Formats duration: 0:05, 1:23, 12:45. */
 function formatDuration(sec: number): string {
   const s = Math.max(0, Math.floor(sec))
   const m = Math.floor(s / 60)
@@ -53,7 +54,7 @@ function formatDuration(sec: number): string {
   return `${m}:${r.toString().padStart(2, '0')}`
 }
 
-/** Короткая подсказка для tool — что именно сейчас крутится. */
+/** Short hint for tool — what is currently running. */
 function toolHint(tool: RichTool): string {
   if (tool.kind === 'bash') {
     const cmd = tool.cmd.trim().split('\n')[0]
@@ -84,7 +85,7 @@ interface Attachment {
   error?: string
 }
 
-// Сегментация потокового ответа: на границе text↔tool открывается НОВОЕ ассистент-сообщение.
+// Stream response segmentation: at the text↔tool boundary a NEW assistant message is opened.
 type StreamChunk =
   | { kind: 'text'; text: string }
   | { kind: 'tool'; tool: ChatToolCall }
@@ -252,7 +253,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     const now = Date.now()
 
     if (evt.kind === 'run_start') {
-      const prefix = evt.source === 'card' ? '🗂 карточка: ' : evt.source === 'tg' ? '📱 TG: ' : ''
+      const prefix = evt.source === 'card' ? '🗂 card: ' : evt.source === 'tg' ? '📱 TG: ' : ''
       const userMsg = makeUserMsg(prefix + evt.prompt)
       const assistantMsg = makeAssistantMsg()
       busActiveRef.current = true
@@ -320,11 +321,11 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const sendMessage = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim()
     const readyFiles = overrideText === undefined ? attachments.filter(a => a.path) : []
-    const effectiveText = text || (readyFiles.length > 0 ? 'Посмотри прикреплённые файлы.' : '')
+    const effectiveText = text || (readyFiles.length > 0 ? t['chat.look_at_files'] : '')
     if (!effectiveText) return
 
     if (streaming && overrideText === undefined) {
-      const filePaths = readyFiles.map(a => `прикреплён файл: ${a.path}`)
+      const filePaths = readyFiles.map(a => `attached file: ${a.path}`)
       const fullText = filePaths.length > 0 ? `${effectiveText}\n\n${filePaths.join('\n')}` : effectiveText
       queueRef.current.push(fullText)
       setQueueLen(queueRef.current.length)
@@ -333,7 +334,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       return
     }
 
-    const filePaths = readyFiles.map(a => `прикреплён файл: ${a.path}`)
+    const filePaths = readyFiles.map(a => `attached file: ${a.path}`)
     const fullPrompt = filePaths.length > 0 ? `${effectiveText}\n\n${filePaths.join('\n')}` : effectiveText
 
     if (overrideText === undefined) { setInput(''); setAttachments([]) }
@@ -480,7 +481,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       await api.setModel(projectId, m)
       onProjectsReload()
     } catch {
-      // тихо игнорим
+      // silently ignore
     } finally {
       setChangingModel(false)
     }
@@ -515,18 +516,18 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           const tokens = real ? contextTokens! : estimateTokens(messages)
           const lvl = tokens >= 200_000 ? 'high' : tokens >= 120_000 ? 'mid' : 'low'
           const lvlHint =
-            lvl === 'high' ? ' · контекст раздут — /reset' :
-            lvl === 'mid' ? ' · контекст растёт' : ''
+            lvl === 'high' ? ' · context bloated — /reset' :
+            lvl === 'mid' ? ' · context growing' : ''
           const title = real
-            ? `Реальный размер контекста сессии: ${tokens.toLocaleString('ru')} токенов (весь промпт уходит в модель каждый ход). Базовый пол ~11–14K — системный промпт Claude Code + инструменты, остаётся даже после /reset. 🟡 от 120K · 🔴 от 200K.`
-            : 'Грубая оценка (4 символа ≈ 1 токен) — точные токены появятся после первого ответа.'
+            ? `Actual session context size: ${tokens.toLocaleString('en')} tokens (full prompt is sent to the model each turn). Base floor ~11–14K — Claude Code system prompt + tools, remains even after /reset. 🟡 from 120K · 🔴 from 200K.`
+            : t['chat.token_count_rough']
           return (
             <span className={`chat-stats-inline lvl-${lvl}`} title={title}>
               💬 {messages.length} · {real ? '' : '~'}{formatTokens(tokens)}{lvlHint}
             </span>
           )
         })()}
-        <div className="chat-model-selector" title="Модель применяется со следующего запроса">
+        <div className="chat-model-selector" title={t['chat.model_hint']}>
           <span className="chat-model-label">🧠</span>
           <select
             className="chat-model-select"
@@ -548,7 +549,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
         {messages.length === 0 && (
           <div className="chat-empty">
             <div className="chat-empty-icon">💬</div>
-            <p>Начни чат с агентом по проекту.<br />Сессия общая с Telegram-топиком.</p>
+            <p>{t['chat.empty_hint']}<br />{t['chat.empty_session_hint']}</p>
           </div>
         )}
 
@@ -600,12 +601,12 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 <span className="att-name" title={a.name}>{a.name}</span>
                 {a.uploading && <span className="att-spinner">↻</span>}
                 {a.error && <span className="att-err-icon" title={a.error}>⚠</span>}
-                <button className="att-remove" onClick={() => setAttachments(prev => prev.filter(x => x.id !== a.id))} title="Убрать" aria-label="Убрать прикреплённый файл">✕</button>
+                <button className="att-remove" onClick={() => setAttachments(prev => prev.filter(x => x.id !== a.id))} title={t['chat.remove_file']} aria-label={t['chat.remove_file_aria']}>✕</button>
               </div>
             ))}
           </div>
         )}
-        {dragOver && <div className="chat-drop-hint">📎 Отпустите файлы здесь</div>}
+        {dragOver && <div className="chat-drop-hint">📎 Drop files here</div>}
         {run && (() => {
           const elapsedSec = (tick - run.startedAt) / 1000
           const silenceSec = (tick - run.lastEventAt) / 1000
@@ -619,9 +620,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             label = hint ? `${tool.name} · ${hint}` : tool.name
           } else if (silenceSec < 3 && elapsedSec > 1) {
             icon = '✍'
-            label = 'пишет ответ'
+            label = t['chat.status_writing']
           } else {
-            label = run.source === 'card' ? 'карточка работает' : 'агент думает'
+            label = run.source === 'card' ? t['chat.status_card_running'] : t['chat.status_thinking']
           }
           return (
             <div className={`chat-status-bar ${lvl}`}>
@@ -630,16 +631,16 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
               <span className="chat-status-time">· {formatDuration(elapsedSec)}</span>
               {silenceSec > 30 && (
                 <span className="chat-status-silence">
-                  ⚠ тишина {formatDuration(silenceSec)}
-                  {silenceSec > 120 && ' · возможно завис'}
+                  ⚠ silence {formatDuration(silenceSec)}
+                  {silenceSec > 120 && ' · possibly hung'}
                 </span>
               )}
               {queueLen > 0 && (
-                <span className="chat-status-queue" title={`${queueLen} сообщ. в очереди, отправятся автоматически`}>
-                  ⏭ в очереди: {queueLen}
+                <span className="chat-status-queue" title={`${queueLen} message(s) queued, will send automatically`}>
+                  ⏭ queued: {queueLen}
                 </span>
               )}
-              <button className="chat-stop-btn" onClick={stopStream} title="Прервать стрим (очередь очистится)" aria-label="Остановить агента">✕ стоп</button>
+              <button className="chat-stop-btn" onClick={stopStream} title={t['chat.stop_title']} aria-label={t['chat.stop_aria']}>{t['chat.stop_btn']}</button>
             </div>
           )
         })()}
@@ -661,8 +662,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             ref={textareaRef}
             className="chat-textarea"
             placeholder={streaming
-              ? 'Агент работает — сообщение встанет в очередь, отправится после завершения…'
-              : 'Сообщение агенту… (Enter — отправить, Shift+Enter — перенос)'}
+              ? t['chat.input_placeholder_busy']
+              : t['chat.input_placeholder']}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -674,29 +675,29 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
               <button
                 className="chat-tool-btn"
                 onClick={() => fileInputRef.current?.click()}
-                title="Прикрепить файл (или перетащи / Ctrl+V)"
-                aria-label="Прикрепить файл"
+                title={t['chat.attach_file_title']}
+                aria-label={t['chat.attach_file_aria']}
               >📎</button>
               <button
                 className={`chat-tool-btn${showPrompts ? ' active' : ''}`}
                 onClick={() => { setShowPrompts(s => !s); setShowSkills(false) }}
-                title="Шаблоны промтов"
-                aria-label="Шаблоны промтов"
+                title={t['chat.prompts_title']}
+                aria-label={t['chat.prompts_aria']}
               >📋</button>
               <button
                 className={`chat-tool-btn${showSkills ? ' active' : ''}`}
                 onClick={() => { setShowSkills(s => !s); setShowPrompts(false) }}
-                title="Скиллы агента (глобальные + проекта)"
-                aria-label="Скиллы агента"
+                title={t['chat.skills_title']}
+                aria-label={t['chat.skills_aria']}
               >🛠</button>
             </div>
             <button
               className="btn-primary chat-send-btn"
               disabled={!input.trim() && attachments.filter(a => a.path).length === 0}
               onClick={() => sendMessage()}
-              title={streaming ? 'Поставить в очередь' : 'Отправить (Enter)'}
+              title={streaming ? t['chat.queue_title'] : t['chat.send_title']}
             >
-              {streaming ? 'В очередь' : 'Отправить ↵'}
+              {streaming ? t['chat.queue'] : t['chat.send']}
             </button>
           </div>
         </div>

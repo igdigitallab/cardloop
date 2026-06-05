@@ -8,7 +8,7 @@ import { Modal, ModalHead } from '../components/Modal'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 import { t } from '../i18n'
 
-/** Возвращает бейдж авто-починки из description карточки, или null если не авто-чинилась. */
+/** Returns the self-heal badge from a card's description, or null if the card was not self-healed. */
 function getSelfHealBadge(card: TaskCard): string | null {
   const desc = card.description || ''
   const m = desc.match(/heal_badge=(.+)/)
@@ -22,14 +22,14 @@ interface Props {
 }
 
 const ORDER = ['backlog', 'in_progress', 'review', 'failed']
-// Стрелки ←/→ ходят по «парковочным» колонкам, ПРОПУСКАЯ in_progress: единственный
-// способ запустить агента — кнопка 🤖 (раньше → из Backlog дублировала робота).
+// Arrows ←/→ move through "parking" columns, SKIPPING in_progress: the only
+// way to run the agent is the 🤖 button (previously → from Backlog duplicated the robot).
 const PARK_ORDER = ['backlog', 'review', 'failed']
-const POLL_FAST_MS = 3000   // когда есть карточки в In Progress (агент работает)
-const POLL_SLOW_MS = 10000  // фоновый poll (правки TASKS.md от агента через чат, внешние правки)
+const POLL_FAST_MS = 3000   // when there are cards in In Progress (agent is running)
+const POLL_SLOW_MS = 10000  // background poll (TASKS.md edits from agent via chat, external edits)
 
 const LS_BOARD_COLS = 'cops.boardVisibleCols'
-const DEFAULT_VISIBLE: string[] = ['backlog']  // дефолт — только Backlog
+const DEFAULT_VISIBLE: string[] = ['backlog']  // default — Backlog only
 
 function readVisibleCols(): Set<string> {
   try {
@@ -55,10 +55,10 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   const [newText, setNewText] = useState('')
   const [showArchive, setShowArchive] = useState(false)
   const [archive, setArchive] = useState<string | null>(null)
-  // Инлайн-редактирование карточки: двойной клик → textarea
+  // Inline card editing: double-click → textarea
   const [editingCard, setEditingCard] = useState<{ id: string; text: string } | null>(null)
 
-  // Description модалка: просмотр + редактирование описания карточки
+  // Description modal: view + edit card description
   const [descModal, setDescModal] = useState<{ card: TaskCard } | null>(null)
   const [editingDesc, setEditingDesc] = useState<string | null>(null)  // null = read mode, string = edit mode
 
@@ -66,7 +66,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   const [dragCardId, setDragCardId] = useState<string | null>(null)
   const [dragOverCol, setDragOverCol] = useState<string | null>(null)
 
-  // F1: модалка результата карточки
+  // F1: card result modal state
   const [runResult, setRunResult] = useState<RunResult | null>(null)
   const [runResultLoading, setRunResultLoading] = useState(false)
   const [showRunModal, setShowRunModal] = useState(false)
@@ -79,15 +79,15 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   // Toast for gate messages
   const [gateToast, setGateToast] = useState<string>('')
 
-  // Spec 009: quality gate — результат проверки тестов перед применением
+  // Spec 009: quality gate — test check result before applying
   const [gateResult, setGateResult] = useState<GateResult | null>(null)
   const [gateChecking, setGateChecking] = useState(false)
   const [gateOutputOpen, setGateOutputOpen] = useState(false)
 
-  // Видимые колонки (persist в localStorage). Дефолт — только Backlog.
+  // Visible columns (persisted in localStorage). Default — Backlog only.
   const [visibleCols, setVisibleCols] = useState<Set<string>>(() => readVisibleCols())
 
-  // Мульти-выбор карточек для пакетной отправки агенту (последовательная очередь)
+  // Multi-select cards for batch sending to agent (sequential queue)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   function toggleSelect(cardId: string) {
     setSelected(prev => {
@@ -106,7 +106,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       setSelected(new Set())
       const fresh = await api.tasks(projectId)
       setBoard(fresh)
-      setGateToast(`🤖 В очередь: ${r.queued}${r.started ? ` · запущена ${r.started}` : ' · ждут освобождения проекта'}`)
+      setGateToast(`🤖 Queued: ${r.queued}${r.started ? ` · started ${r.started}` : ' · waiting for project to free up'}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -118,7 +118,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     setVisibleCols(prev => {
       const next = new Set(prev)
       if (next.has(key)) {
-        if (next.size <= 1) return prev  // нельзя скрыть последнюю
+        if (next.size <= 1) return prev  // cannot hide the last column
         next.delete(key)
       } else {
         next.add(key)
@@ -132,7 +132,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   const projectIdRef = useRef(projectId)
   projectIdRef.current = projectId
 
-  // F1: есть ли карточки в In Progress — частим polling
+  // F1: are there cards in In Progress — speed up polling
   function hasInProgress(b: Board | null): boolean {
     if (!b) return false
     const col = b.columns.find(c => c.key === 'in_progress')
@@ -143,14 +143,14 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   const isActiveRef = useRef(isActive)
   isActiveRef.current = isActive
 
-  // Polling: 3с пока есть in_progress, 10с в покое; не тикает когда вкладка скрыта или ProjectView неактивен
+  // Polling: 3s while in_progress, 10s at rest; does not tick when tab is hidden or ProjectView inactive
   function schedulePoll(b: Board | null) {
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
     const delay = hasInProgress(b) ? POLL_FAST_MS : POLL_SLOW_MS
     pollTimerRef.current = setTimeout(async () => {
       // Skip poll if project tab is hidden (display:none) or browser tab invisible
       if (!isActiveRef.current || document.visibilityState !== 'visible') {
-        schedulePoll(b)  // ждём до следующего тика
+        schedulePoll(b)  // wait for the next tick
         return
       }
       try {
@@ -163,13 +163,13 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     }, delay)
   }
 
-  // Мгновенный refresh (focus, visibility, run_end из шины)
+  // Instant refresh (focus, visibility, run_end from bus)
   async function refreshNow() {
     try {
       const fresh = await api.tasks(projectIdRef.current)
       setBoard(fresh)
       schedulePoll(fresh)
-    } catch { /* тихо игнорим — следующий poll-тик попробует */ }
+    } catch { /* silently ignore — next poll tick will retry */ }
   }
 
   useEffect(() => {
@@ -194,9 +194,9 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- schedulePoll uses refs only, stable
   }, [projectId])
 
-  // Refresh на focus/visibility (общий хук)
+  // Refresh on focus/visibility (shared hook)
   useFocusRefresh(refreshNow)
-  // Refresh на run_end из общей шины проекта — агент мог изменить TASKS.md, карточка могла уйти Review/Failed
+  // Refresh on run_end from the project bus — agent may have changed TASKS.md, card may have moved to Review/Failed
   useOnRunEnd(refreshNow)
 
   async function run(p: Promise<Board>) {
@@ -206,10 +206,10 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       setBoard(b)
       schedulePoll(b)
     } catch (e) {
-      // F1: 409 = проект занят
+      // F1: 409 = project is busy
       const status = (e as { status?: number })?.status
       if (status === 409) {
-        setError('⏳ Проект занят (TG или другая карточка) — попробуй позже')
+        setError('⏳ Project is busy (TG or another card) — try again later')
       } else {
         setError(e instanceof Error ? e.message : String(e))
       }
@@ -222,7 +222,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     const raw = newText.trim()
     if (!raw) return
     setNewText('')
-    // Авто-сплит: первая строка / первые 120 символов = title, остальное = description
+    // Auto-split: first line / first 120 chars = title, the rest = description
     let title = raw
     let description: string | null = null
     const nlIdx = raw.indexOf('\n')
@@ -268,7 +268,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       const fresh = await api.updateTask(projectId, card.id, card.text, newDesc)
       setBoard(fresh)
       schedulePoll(fresh)
-      // синхронизируем модалку с обновлёнными данными
+      // sync modal with updated data
       for (const col of fresh.columns) {
         const found = col.cards.find(c => c.id === card.id)
         if (found) { setDescModal({ card: found }); break }
@@ -285,12 +285,12 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     setShowArchive(true)
     if (archive === null) {
       api.tasksDone(projectId)
-        .then(d => setArchive(d.content || '*Архив пуст*'))
+        .then(d => setArchive(d.content || '*Archive is empty*'))
         .catch(e => setArchive(`⚠ ${e.message || e}`))
     }
   }
 
-  // F1: показать результат выполнения карточки
+  // F1: show card run result
   async function showResult(cardId: string) {
     setRunResultLoading(true)
     setShowRunModal(true)
@@ -301,34 +301,34 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     try {
       const r = await api.cardRun(projectId, cardId)
       setRunResult(r)
-      // мета хранится в runResult.meta — кнопки гейта читают оттуда
+      // meta is stored in runResult.meta — gate buttons read from there
     } catch (e) {
-      setRunResult({ content: `⚠ Ошибка загрузки: ${e instanceof Error ? e.message : String(e)}`, exists: false })
+      setRunResult({ content: `⚠ Load error: ${e instanceof Error ? e.message : String(e)}`, exists: false })
     } finally {
       setRunResultLoading(false)
     }
   }
 
-  // C2-gate: показать toast и скрыть через 4 секунды
+  // C2-gate: show toast and hide after 4 seconds
   function showToast(msg: string) {
     setGateToast(msg)
     setTimeout(() => setGateToast(''), 4000)
   }
 
-  // C2-gate: применить изменения (merge)
+  // C2-gate: apply changes (merge)
   async function applyCard(cardId: string) {
     setGateBusy(true)
     setGateError('')
     try {
       await api.applyCard(projectId, cardId)
       setShowRunModal(false)
-      showToast('✓ Изменения применены')
+      showToast(t['board.gate_applied_banner'])
       await refreshNow()
     } catch (e) {
       const status = (e as { status?: number })?.status
       const msg = e instanceof Error ? e.message : String(e)
       if (status === 409) {
-        setGateError('Конфликт merge: ' + msg)
+        setGateError(t['board.gate_conflict'] + msg)
       } else {
         setGateError(msg)
       }
@@ -337,7 +337,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     }
   }
 
-  // C2-gate: отменить изменения (discard)
+  // C2-gate: discard changes
   async function discardCard(cardId: string) {
     setConfirmDiscard(null)
     setGateBusy(true)
@@ -345,7 +345,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     try {
       await api.discardCard(projectId, cardId)
       setShowRunModal(false)
-      showToast('Изменения карточки отменены')
+      showToast(t['board.gate_discarded_banner'])
       await refreshNow()
     } catch (e) {
       setGateError(e instanceof Error ? e.message : String(e))
@@ -354,7 +354,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     }
   }
 
-  // Spec 009: quality gate — прогнать тесты в worktree карточки
+  // Spec 009: quality gate — run tests in the card's worktree
   async function checkCard(cardId: string) {
     setGateChecking(true)
     setGateResult(null)
@@ -370,7 +370,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     }
   }
 
-  if (loading) return <Spinner label="Загрузка доски..." />
+  if (loading) return <Spinner label={t['board.loading']} />
 
   const cols = board?.columns ?? []
   const colByKey = (k: string): BoardColumn | undefined => cols.find(c => c.key === k)
@@ -381,9 +381,9 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     <div className="board-wrap">
       {error && <div className="error-state" style={{ marginBottom: 10 }}>⚠ {error}</div>}
 
-      {/* Тогглы колонок — показать/скрыть. Если в скрытой колонке есть карточки, подсвечиваем счётчик. */}
+      {/* Column toggles — show/hide. If a hidden column has cards, highlight the counter. */}
       <div className="board-col-toggles">
-        <span className="board-col-toggles-label">колонки:</span>
+        <span className="board-col-toggles-label">{t['board.columns_label']}</span>
         {ORDER.map(k => {
           const col = colByKey(k)
           const label = col?.label || k
@@ -395,7 +395,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               key={k}
               className={`board-col-toggle ${isOn ? 'on' : 'off'} ${hidden ? 'has-cards' : ''}`}
               onClick={() => toggleCol(k)}
-              title={isOn ? `Скрыть «${label}»` : `Показать «${label}»`}
+              title={isOn ? `Hide "${label}"` : `Show "${label}"`}
             >
               {label}{count > 0 ? ` (${count})` : ''}
             </button>
@@ -407,7 +407,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         {visibleOrder.map(key => {
           const col = colByKey(key)
           if (!col) return null
-          const parkIdx = PARK_ORDER.indexOf(key)   // -1 для in_progress → стрелки скрыты
+          const parkIdx = PARK_ORDER.indexOf(key)   // -1 for in_progress → arrows hidden
           const isInProgress = key === 'in_progress'
           const canShowResult = key === 'review' || key === 'failed'
           return (
@@ -415,9 +415,9 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               <div className="board-col-head">
                 <span className="board-col-label">{col.label}</span>
                 <span className="board-col-count">{col.cards.length}</span>
-                {/* F1: индикатор работы агента в заголовке колонки */}
+                {/* F1: agent running indicator in column header */}
                 {isInProgress && col.cards.length > 0 && (
-                  <span className="board-col-running" title="Агент работает, авто-обновление...">⚙</span>
+                  <span className="board-col-running" title={t['board.agent_running']}>⚙</span>
                 )}
               </div>
 
@@ -445,7 +445,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                 {key === 'backlog' && (
                   <div className="board-add">
                     <textarea
-                      placeholder="Новая задача… (Enter — добавить)"
+                      placeholder={t['board.new_task_placeholder']}
                       value={newText}
                       onChange={e => setNewText(e.target.value)}
                       onKeyDown={e => {
@@ -454,7 +454,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                       rows={2}
                     />
                     <button className="btn-primary" disabled={busy || !newText.trim()}
-                      onClick={addCard}>+ Добавить</button>
+                      onClick={addCard}>+ Add</button>
                   </div>
                 )}
 
@@ -491,12 +491,12 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                             className="board-card-check"
                             checked={isSel}
                             disabled={busy}
-                            title="Выбрать для пакетной отправки агенту"
+                            title="Select for batch send to agent"
                             onClick={e => e.stopPropagation()}
                             onChange={() => toggleSelect(card.id)}
                           />
                         )}
-                        {isQueued && <span className="board-card-queued-badge" title="В очереди на запуск агентом">⏳ в очереди</span>}
+                        {isQueued && <span className="board-card-queued-badge" title="Queued for agent run">⏳ queued</span>}
                       </div>
                     )}
                     {editingCard?.id === card.id ? (
@@ -516,10 +516,10 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                       <div
                         className="board-card-text"
                         onDoubleClick={() => !isInProgress && setEditingCard({ id: card.id, text: card.text })}
-                        title={isInProgress ? '' : 'Двойной клик — редактировать'}
+                        title={isInProgress ? '' : t['board.edit_hint']}
                       >
-                        {isIncident && <span className="card-incident-icon" title="Инцидент (источник: log/test)">⚠ </span>}
-                        {isInProgress && <span className="card-running-icon" title="Выполняется агентом">⚙ </span>}
+                        {isIncident && <span className="card-incident-icon" title={t['board.incident_title']}>⚠ </span>}
+                        {isInProgress && <span className="card-running-icon" title={t['board.card_running_title']}>⚙ </span>}
                         <span className="board-card-title">{card.text}</span>
                         {selfHealBadge && (
                           <span
@@ -531,7 +531,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                         {card.description && (
                           <button
                             className="board-card-desc-btn"
-                            title="Показать описание"
+                            title={t['board.show_description']}
                             onClick={e => { e.stopPropagation(); openDescModal(card) }}
                           >📝</button>
                         )}
@@ -540,16 +540,16 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                     <div className="board-card-actions">
                       {parkIdx >= 0 && (
                         <>
-                          <button title="← переместить (без запуска)" aria-label="Переместить влево" disabled={busy || parkIdx === 0}
+                          <button title={t['board.move_left']} aria-label={t['board.move_left_aria']} disabled={busy || parkIdx === 0}
                             onClick={() => move(card.id, PARK_ORDER[parkIdx - 1])}>←</button>
-                          <button title="переместить → (без запуска)" aria-label="Переместить вправо" disabled={busy || parkIdx === PARK_ORDER.length - 1}
+                          <button title={t['board.move_right']} aria-label={t['board.move_right_aria']} disabled={busy || parkIdx === PARK_ORDER.length - 1}
                             onClick={() => move(card.id, PARK_ORDER[parkIdx + 1])}>→</button>
                         </>
                       )}
                       {col.key !== 'in_progress' && (
                         <button
-                          title="🤖 Запустить агентом (→ In Progress)"
-                          aria-label="Запустить агентом"
+                          title="🤖 Run by agent (→ In Progress)"
+                          aria-label={t['board.handoff_aria']}
                           className="act-handoff"
                           disabled={busy}
                           onClick={() => move(card.id, 'in_progress')}
@@ -557,16 +557,16 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                       )}
                       {canShowResult && (
                         <button
-                          title="Результат выполнения"
-                          aria-label="Показать результат"
+                          title={t['board.show_result']}
+                          aria-label={t['board.show_result_aria']}
                           className="act-result"
                           disabled={busy}
                           onClick={() => showResult(card.id)}
                         >📄</button>
                       )}
-                      <button title="✓ в Done (архив)" aria-label="Архивировать карточку" className="act-done" disabled={busy}
+                      <button title={t['board.archive']} aria-label={t['board.archive_aria']} className="act-done" disabled={busy}
                         onClick={() => move(card.id, 'done')}>✓</button>
-                      <button title="удалить" aria-label="Удалить карточку" className="act-del" disabled={busy}
+                      <button title={t['board.delete']} aria-label={t['board.delete_aria']} className="act-del" disabled={busy}
                         onClick={() => del(card.id)}>✕</button>
                     </div>
                   </div>
@@ -580,40 +580,40 @@ export function BoardTab({ projectId, isActive = true }: Props) {
 
       {selected.size > 0 && (
         <div className="board-batch-bar">
-          <span className="board-batch-count">Выбрано: {selected.size}</span>
+          <span className="board-batch-count">Selected: {selected.size}</span>
           <button className="btn-primary board-batch-send" disabled={busy} onClick={sendSelectedToAgent}>
-            🤖 Отправить агенту ({selected.size}) — очередь
+            🤖 Send to agent ({selected.size}) — queue
           </button>
-          <button className="board-batch-clear" disabled={busy} onClick={() => setSelected(new Set())}>Снять выбор</button>
+          <button className="board-batch-clear" disabled={busy} onClick={() => setSelected(new Set())}>Deselect all</button>
         </div>
       )}
 
       <div className="board-footer">
         <button className="board-archive-toggle" onClick={toggleArchive}>
-          {showArchive ? '▾' : '▸'} Архив (Done) · {board?.done_count ?? 0}
+          {showArchive ? '▾' : '▸'} Archive (Done) · {board?.done_count ?? 0}
         </button>
         {!board?.exists && (
-          <span className="board-hint">TASKS.md ещё нет — создастся при первой задаче</span>
+          <span className="board-hint">TASKS.md does not exist yet — will be created on the first task</span>
         )}
       </div>
 
       {showArchive && (
         <div className="board-archive">
           {archive === null
-            ? <Spinner label="Загрузка архива..." />
+            ? <Spinner label={t['board.loading_archive']} />
             : <div className="markdown-wrap"><ReactMarkdown remarkPlugins={[remarkGfm]}>{archive}</ReactMarkdown></div>}
         </div>
       )}
 
-      {/* F1: модалка результата карточки */}
+      {/* F1: card result modal */}
       {showRunModal && (
         <Modal onClose={() => { setShowRunModal(false); setGateError(''); setGateResult(null); setGateOutputOpen(false) }}>
-          <ModalHead title="Результат выполнения" onClose={() => { setShowRunModal(false); setGateError(''); setGateResult(null); setGateOutputOpen(false) }} />
+          <ModalHead title={t['board.result_modal_title']} onClose={() => { setShowRunModal(false); setGateError(''); setGateResult(null); setGateOutputOpen(false) }} />
           <div className="run-modal-body">
-            {runResultLoading && <Spinner label="Загрузка..." />}
+            {runResultLoading && <Spinner label={t['common.loading']} />}
             {!runResultLoading && runResult && !runResult.exists && (
               <div className="error-state">
-                Сайдкар не найден — карточка ещё не выполнялась или результат удалён.
+                Sidecar not found — the card has not run yet or the result was deleted.
               </div>
             )}
             {!runResultLoading && runResult?.exists && (
@@ -621,7 +621,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{runResult.content}</ReactMarkdown>
               </div>
             )}
-            {/* C2-gate: кнопки / баннер по мета */}
+            {/* C2-gate: buttons / banner based on meta */}
             {!runResultLoading && runResult && (() => {
               const meta = runResult.meta
               if (!meta) return null
@@ -641,7 +641,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                   <div className="gate-actions">
                     {gateError && <div className="error-state gate-error">{gateError}</div>}
 
-                    {/* Spec 009: quality gate — кнопка «Проверить» + вердикт */}
+                    {/* Spec 009: quality gate — "Check" button + verdict */}
                     <div className="gate-check-row">
                       <button
                         className="btn-secondary gate-check"
@@ -667,7 +667,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                       )}
                     </div>
 
-                    {/* Сворачиваемый вывод тестов (если risky) */}
+                    {/* Collapsible test output (if risky) */}
                     {gateResult?.tests?.detected && gateResult.tests.output && (
                       <details
                         className="gate-output-details"
@@ -707,7 +707,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         </Modal>
       )}
 
-      {/* C2-gate: подтверждение discard */}
+      {/* C2-gate: discard confirmation */}
       {confirmDiscard && (
         <Modal onClose={() => setConfirmDiscard(null)}>
           <ModalHead title={t['board.gate_confirm_title']} onClose={() => setConfirmDiscard(null)} />
@@ -735,13 +735,13 @@ export function BoardTab({ projectId, isActive = true }: Props) {
           {gateToast}
           <button
             className="gate-toast-close"
-            aria-label="Закрыть уведомление"
+            aria-label={t['toast.close_aria']}
             onClick={() => setGateToast('')}
           >✕</button>
         </div>
       )}
 
-      {/* Description модалка */}
+      {/* Description modal */}
       {descModal && (
         <Modal onClose={closeDescModal}>
           <ModalHead
@@ -755,7 +755,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               editingDesc === null ? (
                 <button
                   className="run-modal-close"
-                  title="Редактировать описание"
+                  title={t['board.edit_description']}
                   style={{ fontSize: 14 }}
                   onClick={() => setEditingDesc(descModal.card.description ?? '')}
                 >✎</button>
@@ -765,7 +765,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                   style={{ padding: '2px 10px', fontSize: 13 }}
                   disabled={busy}
                   onClick={saveDescEdit}
-                >Сохранить</button>
+                >{t['board.save_description']}</button>
               )
             }
           />
@@ -780,7 +780,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                 onKeyDown={e => {
                   if (e.key === 'Escape') setEditingDesc(null)
                 }}
-                placeholder="Описание задачи (markdown)…"
+                placeholder={t['board.description_placeholder']}
                 style={{ width: '100%', resize: 'vertical', fontFamily: 'monospace', fontSize: 13 }}
               />
             ) : descModal.card.description ? (
@@ -789,7 +789,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               </div>
             ) : (
               <div style={{ color: 'var(--text-dim, #888)', fontStyle: 'italic' }}>
-                Описание не задано. Нажмите ✎ чтобы добавить.
+                No description. Click ✎ to add one.
               </div>
             )}
           </div>

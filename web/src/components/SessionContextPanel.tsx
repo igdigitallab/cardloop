@@ -40,31 +40,31 @@ export function SessionContextPanel({ projectId, refreshKey }: Props) {
       <button
         className="ctx-panel-toggle"
         onClick={() => setOpen(o => !o)}
-        title={open ? 'Свернуть контекст сессии' : 'Развернуть контекст сессии'}
+        title={open ? 'Collapse session context' : 'Expand session context'}
         aria-expanded={open}
       >
         <span className="ctx-panel-icon">📎</span>
         <span className="ctx-panel-label">
-          Контекст: {totalFiles} файл{totalFiles === 1 ? '' : totalFiles >= 2 && totalFiles <= 4 ? 'а' : 'ов'}
-          {ctx.commands.length > 0 && `, ${ctx.commands.length} команд`}
+          Context: {totalFiles} file{totalFiles === 1 ? '' : 's'}
+          {ctx.commands.length > 0 && `, ${ctx.commands.length} command${ctx.commands.length === 1 ? '' : 's'}`}
         </span>
         <span className="ctx-panel-chevron">{open ? '▲' : '▼'}</span>
         <button
           className="ctx-refresh-btn"
           onClick={e => { e.stopPropagation(); load() }}
-          title="Обновить контекст"
+          title="Refresh context"
           disabled={loading}
-          aria-label="Обновить контекст сессии"
+          aria-label="Refresh session context"
         >↺</button>
       </button>
 
       {open && (
         <div className="ctx-panel-body">
-          {loading && <div className="ctx-loading">обновление…</div>}
+          {loading && <div className="ctx-loading">updating…</div>}
 
           {ctx.read.length > 0 && (
             <div className="ctx-section">
-              <div className="ctx-section-label">📖 Прочитано ({ctx.read.length})</div>
+              <div className="ctx-section-label">📖 Read ({ctx.read.length})</div>
               <div className="ctx-list">
                 {ctx.read.map((f, i) => (
                   <div key={i} className="ctx-item">{f}</div>
@@ -75,7 +75,7 @@ export function SessionContextPanel({ projectId, refreshKey }: Props) {
 
           {ctx.edited.length > 0 && (
             <div className="ctx-section">
-              <div className="ctx-section-label">✏️ Изменено ({ctx.edited.length})</div>
+              <div className="ctx-section-label">✏️ Edited ({ctx.edited.length})</div>
               <div className="ctx-list">
                 {ctx.edited.map((f, i) => (
                   <div key={i} className="ctx-item ctx-item-edited">{f}</div>
@@ -86,7 +86,7 @@ export function SessionContextPanel({ projectId, refreshKey }: Props) {
 
           {ctx.commands.length > 0 && (
             <div className="ctx-section">
-              <div className="ctx-section-label">⚙ Команды ({ctx.commands.length})</div>
+              <div className="ctx-section-label">⚙ Commands ({ctx.commands.length})</div>
               <div className="ctx-list">
                 {ctx.commands.map((c, i) => (
                   <div key={i} className="ctx-item ctx-item-cmd">{c}</div>

@@ -1,9 +1,9 @@
 /**
- * TimelineTab — хронологическая лента событий проекта (Spec 008).
+ * TimelineTab — chronological event feed for a project (Spec 008).
  *
- * История загружается через GET /api/projects/{id}/timeline.
- * Live-события получаются через существующий activity-stream SSE (useProjectActivity).
- * Пагинация: кнопка «Загрузить ранее» подгружает события before=<oldest_ts>.
+ * History is loaded via GET /api/projects/{id}/timeline.
+ * Live events are received through the existing activity-stream SSE (useProjectActivity).
+ * Pagination: "Load earlier" button fetches events before=<oldest_ts>.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
@@ -217,7 +217,7 @@ export function TimelineTab({ projectId }: Props) {
   if (error) return <div className="error-state">⚠ {error}</div>
 
   return (
-    <div className="timeline-pane" role="log" aria-label="Лента событий проекта" aria-live="polite">
+    <div className="timeline-pane" role="log" aria-label="Project event feed" aria-live="polite">
       {/* Load earlier button */}
       {hasMore && (
         <div className="timeline-load-earlier">

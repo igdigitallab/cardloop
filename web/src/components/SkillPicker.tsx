@@ -8,16 +8,16 @@ interface Skill {
 
 interface Props {
   projectId: string
-  /** Вставка текста в чат-инпут (родитель ставит курсор/фокус). */
+  /** Insert text into the chat input (parent sets cursor/focus). */
   onSelect: (text: string) => void
   onClose: () => void
 }
 
 type Section = 'project' | 'global'
 
-/** Шаблон вставки. Claude Code понимает «используй скилл <name>» как намёк агенту. */
+/** Insertion template. Claude Code understands "use skill <name>:" as a hint to the agent. */
 function insertText(name: string): string {
-  return `используй скилл ${name}: `
+  return `use skill ${name}: `
 }
 
 export function SkillPicker({ projectId, onSelect, onClose }: Props) {
@@ -32,10 +32,10 @@ export function SkillPicker({ projectId, onSelect, onClose }: Props) {
     api.projectSkills(projectId)
       .then(r => {
         setSkills(r)
-        // Открываем «Проекта» если есть что показать, иначе «Глобальные»
+        // Open 'Project' section if there is something to show, otherwise 'Global'
         setOpenSection(r.project.length > 0 ? 'project' : 'global')
       })
-      .catch(e => setError(e?.message || 'ошибка загрузки'))
+      .catch(e => setError(e?.message || 'loading error'))
       .finally(() => setLoading(false))
   }, [projectId])
 
@@ -65,8 +65,8 @@ export function SkillPicker({ projectId, onSelect, onClose }: Props) {
             {items.length === 0 && (
               <div className="prompt-picker-empty" style={{ padding: '8px 12px' }}>
                 {key === 'project'
-                  ? 'нет проектных скиллов (добавь в <cwd>/.claude/skills/<name>/SKILL.md)'
-                  : 'нет глобальных скиллов'}
+                  ? 'no project skills (add one at <cwd>/.claude/skills/<name>/SKILL.md)'
+                  : 'no global skills'}
               </div>
             )}
             {items.map(s => (
@@ -93,17 +93,17 @@ export function SkillPicker({ projectId, onSelect, onClose }: Props) {
   return (
     <div className="prompt-picker" ref={ref}>
       <div className="prompt-picker-header">
-        <span className="prompt-picker-title">🛠 Скиллы агента</span>
-        <button className="prompt-picker-close" onClick={onClose} title="Закрыть">✕</button>
+        <span className="prompt-picker-title">🛠 Agent skills</span>
+        <button className="prompt-picker-close" onClick={onClose} title="Close">✕</button>
       </div>
 
       <div className="prompt-picker-list">
-        {loading && <div className="prompt-picker-empty">Загрузка…</div>}
+        {loading && <div className="prompt-picker-empty">Loading…</div>}
         {error && <div className="prompt-picker-empty">⚠ {error}</div>}
         {!loading && !error && (
           <>
-            {renderSection('project', 'Проекта', '📁', skills.project)}
-            {renderSection('global', 'Глобальные', '🌍', skills.global)}
+            {renderSection('project', 'Project', '📁', skills.project)}
+            {renderSection('global', 'Global', '🌍', skills.global)}
           </>
         )}
       </div>

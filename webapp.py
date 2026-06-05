@@ -1,9 +1,9 @@
 """
-webapp.py — браузерный кокпит Claude-Ops-Bot.
+webapp.py — browser cockpit for Claude-Ops-Bot.
 
-Поднимается в том же процессе/loop, что и PTB-бот.
-Все объекты состояния передаются через ctx — мутации видны боту.
-НЕ импортирует bot.py напрямую (повторный импорт создаст второй экземпляр).
+Runs in the same process/loop as the PTB bot.
+All state objects are passed via ctx — mutations are visible to the bot.
+Does NOT import bot.py directly (re-import would create a second instance).
 """
 
 import asyncio
@@ -27,10 +27,10 @@ import aiohttp
 from aiohttp import web
 
 
-# ─────────────────────────── именованные константы ───────────────────────────
+# ─────────────────────────── named constants ───────────────────────────
 
-_BUS_QUEUE_SIZE = 100   # maxsize per-session очереди шины; переполнена → drop (не блокирует)
-_BUS_GLOBAL_SIZE = 200  # maxsize глобальной очереди шины (все сессии)
+_BUS_QUEUE_SIZE = 100   # maxsize per-session bus queue; full → drop (non-blocking)
+_BUS_GLOBAL_SIZE = 200  # maxsize global bus queue (all sessions)
 
 # Strong references for long-lived background tasks created via asyncio.create_task.
 # Prevents GC from collecting tasks before they complete (Python docs warning).
@@ -38,8 +38,8 @@ _BG_TASKS: set = set()
 
 
 def _spawn_bg(coro):
-    """Создаёт fire-and-forget задачу, защищённую от GC через _BG_TASKS.
-    Результат задачи не используется вызывающим кодом — только для фоновых эффектов."""
+    """Creates a fire-and-forget task, protected from GC via _BG_TASKS.
+    The task result is not used by the caller — side effects only."""
     t = asyncio.create_task(coro)
     _BG_TASKS.add(t)
     t.add_done_callback(_BG_TASKS.discard)
@@ -49,25 +49,25 @@ def _spawn_bg(coro):
 
 # ─────────────────────────── activity bus ───────────────────────────
 #
-# Лёгкая in-process шина событий: dict[session_key -> set[asyncio.Queue]].
-# Всё в одном event loop → обычные set/dict, без asyncio.Lock.
-# Очередь maxsize=_BUS_QUEUE_SIZE: переполнена → drop (put_nowait в try/except), продюсер не блокируется.
+# Lightweight in-process event bus: dict[session_key -> set[asyncio.Queue]].
+# Everything runs in one event loop → plain set/dict, no asyncio.Lock needed.
+# Queue maxsize=_BUS_QUEUE_SIZE: full → drop (put_nowait in try/except), producer is non-blocking.
 
 _bus: dict[str, set[asyncio.Queue]] = {}
-# Глобальные подписчики — получают ВСЕ события всех сессий, с инжектированным session_key.
-# Используется для общего activity-stream приложения (unread-индикаторы в сайдбаре).
+# Global subscribers — receive ALL events from all sessions, with session_key injected.
+# Used for the application-wide activity stream (unread indicators in the sidebar).
 _bus_global: set[asyncio.Queue] = set()
 
 
 def _bus_subscribe(session_key: str) -> "asyncio.Queue[dict]":
-    """Создаёт очередь и регистрирует подписчика на session_key."""
+    """Creates a queue and registers a subscriber for session_key."""
     q: asyncio.Queue[dict] = asyncio.Queue(maxsize=_BUS_QUEUE_SIZE)
     _bus.setdefault(session_key, set()).add(q)
     return q
 
 
 def _bus_unsubscribe(session_key: str, q: "asyncio.Queue[dict]") -> None:
-    """Удаляет подписчика; очищает ключ, если подписчиков не осталось."""
+    """Removes a subscriber; clears the key if no subscribers remain."""
     subscribers = _bus.get(session_key)
     if subscribers is not None:
         subscribers.discard(q)
@@ -76,7 +76,7 @@ def _bus_unsubscribe(session_key: str, q: "asyncio.Queue[dict]") -> None:
 
 
 def _bus_subscribe_global() -> "asyncio.Queue[dict]":
-    """Подписка на ВСЕ события всех сессий (события приходят с полем session_key)."""
+    """Subscribe to ALL events from all sessions (events carry a session_key field)."""
     q: asyncio.Queue[dict] = asyncio.Queue(maxsize=_BUS_GLOBAL_SIZE)
     _bus_global.add(q)
     return q
@@ -87,15 +87,15 @@ def _bus_unsubscribe_global(q: "asyncio.Queue[dict]") -> None:
 
 
 def _bus_publish(session_key: str, event: dict) -> None:
-    """Публикует событие во все очереди подписчиков. Переполнена → drop (не блокирует)."""
+    """Publishes an event to all subscriber queues. Full queue → drop (non-blocking)."""
     subscribers = _bus.get(session_key)
     if subscribers:
-        for q in list(subscribers):  # list() — снимок, т.к. _bus_unsubscribe может вызываться параллельно
+        for q in list(subscribers):  # list() — snapshot, since _bus_unsubscribe may be called concurrently
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                pass  # slow consumer — drop, не блокировать продюсера
-    # Глобальная рассылка — обогащаем событие session_key, чтобы фронт мог сматчить с проектом
+                pass  # slow consumer — drop, do not block the producer
+    # Global broadcast — enrich the event with session_key so the frontend can match it to a project
     if _bus_global:
         enriched = {**event, "session_key": session_key}
         for q in list(_bus_global):
@@ -103,26 +103,26 @@ def _bus_publish(session_key: str, event: dict) -> None:
                 q.put_nowait(enriched)
             except asyncio.QueueFull:
                 pass
-    # Timeline persistence — единая точка записи для всех событий шины
+    # Timeline persistence — single write point for all bus events
     _timeline_append(session_key, event)
 
 
 # ─────────────────────────── timeline persistence ─────────────────────────────
 #
-# Каждое событие шины персистируется в JSONL: DATA/timeline/<slug>.jsonl.
-# Slug = cwd.replace('/', '-'), как в _sdk_sessions_dir.
-# Ротация: файл >5MB → переименовать в .jsonl.1 (одна копия; перезатирает старую .1).
-# Запись глотает ошибки — не ломает прогон.
-# Инициализация: start() вызывает _timeline_init(ctx) — передаёт DATA и topics-dict.
+# Every bus event is persisted to JSONL: DATA/timeline/<slug>.jsonl.
+# Slug = cwd.replace('/', '-'), matching _sdk_sessions_dir.
+# Rotation: file >5MB → rename to .jsonl.1 (one backup copy; overwrites old .1).
+# Write errors are swallowed — never breaks a run.
+# Init: start() calls _timeline_init(ctx) — passes DATA and the topics dict.
 
-_TIMELINE_DATA_DIR: "Path | None" = None   # DATA/timeline/ — задаётся в start()
-_TIMELINE_TOPICS: "dict | None" = None     # ссылка на ctx["topics"] — для session_key→cwd
-_TIMELINE_MAX_SIZE = 5 * 1024 * 1024       # 5 MB — ротация
-_TIMELINE_TEXT_LIMIT = 2000                # симв — обрезка text-поля
+_TIMELINE_DATA_DIR: "Path | None" = None   # DATA/timeline/ — set in start()
+_TIMELINE_TOPICS: "dict | None" = None     # ref to ctx["topics"] — for session_key→cwd lookup
+_TIMELINE_MAX_SIZE = 5 * 1024 * 1024       # 5 MB — rotation threshold
+_TIMELINE_TEXT_LIMIT = 2000                # chars — text field truncation limit
 
 
 def _timeline_init(ctx: dict) -> None:
-    """Вызывается из start() — сохраняет ссылки для _timeline_append."""
+    """Called from start() — stores references for _timeline_append."""
     global _TIMELINE_DATA_DIR, _TIMELINE_TOPICS
     _TIMELINE_DATA_DIR = ctx["DATA"] / "timeline"
     _TIMELINE_TOPICS = ctx["topics"]
@@ -133,13 +133,13 @@ def _timeline_init(ctx: dict) -> None:
 
 
 def _timeline_slug_from_cwd(cwd: str) -> str:
-    """Стабильный slug из cwd (идентично _sdk_sessions_dir): '/' → '-'."""
+    """Stable slug from cwd (identical to _sdk_sessions_dir): '/' → '-'."""
     return cwd.replace("/", "-")
 
 
 def _timeline_path(session_key: str) -> "Path | None":
-    """Возвращает Path к .jsonl-файлу для session_key, или None если DATA не инициализирован.
-    Резолвит session_key → cwd через _TIMELINE_TOPICS; если не найден — пишет в _unknown.jsonl."""
+    """Returns the Path to the .jsonl file for session_key, or None if DATA is not initialised.
+    Resolves session_key → cwd via _TIMELINE_TOPICS; falls back to _unknown.jsonl if not found."""
     if _TIMELINE_DATA_DIR is None:
         return None
     cwd: str | None = None
@@ -150,30 +150,30 @@ def _timeline_path(session_key: str) -> "Path | None":
     if cwd:
         slug = _timeline_slug_from_cwd(cwd)
     else:
-        # session_key может быть free-chat id или неизвестным топиком — кодируем безопасно
+        # session_key may be a free-chat id or unknown topic — encode safely
         safe = session_key.replace("/", "-").replace(":", "-")
         slug = safe if safe else "_unknown"
     return _TIMELINE_DATA_DIR / f"{slug}.jsonl"
 
 
 def _timeline_append(session_key: str, event: dict) -> None:
-    """Добавляет событие в JSONL-лог. Ошибки глотает (не ломает прогон).
-    Никогда не логирует поля env — их в событиях нет, защита на случай будущих изменений."""
+    """Appends an event to the JSONL log. Swallows errors (never breaks a run).
+    Never logs env fields — they don't appear in events; guard against future changes."""
     try:
         path = _timeline_path(session_key)
         if path is None:
             return
-        # Собираем запись: добавляем ts, обрезаем text, исключаем env
+        # Build record: add ts, truncate text, exclude env
         record: dict = {"ts": time.time(), "session_key": session_key}
         for k, v in event.items():
             if k == "env":
-                continue  # env — секреты, никогда в timeline
+                continue  # env — secrets, never in timeline
             if k == "text" and isinstance(v, str) and len(v) > _TIMELINE_TEXT_LIMIT:
                 record[k] = v[:_TIMELINE_TEXT_LIMIT] + "…"
             else:
                 record[k] = v
         line = json.dumps(record, ensure_ascii=False) + "\n"
-        # Ротация: если файл уже существует и > 5MB — переименовать в .1
+        # Rotation: if the file already exists and is > 5MB — rename to .1
         try:
             if path.exists() and path.stat().st_size > _TIMELINE_MAX_SIZE:
                 backup = path.with_suffix(".jsonl.1")
@@ -184,14 +184,14 @@ def _timeline_append(session_key: str, event: dict) -> None:
         with open(path, "a", encoding="utf-8") as f:
             f.write(line)
     except Exception:
-        pass  # никогда не ломаем прогон
+        pass  # never break a run
 
 
 # ─────────────────────────── tool formatter ───────────────────────────
 
 def _format_tool(name: str, inp: dict) -> dict:
-    """Единый форматтер tool-события: возвращает богатую структуру по типу инструмента.
-    Используется во всех трёх точках: chat SSE, bus publish, session-history."""
+    """Unified tool-event formatter: returns a rich structure keyed by tool type.
+    Used in all three places: chat SSE, bus publish, session-history."""
     if not isinstance(inp, dict):
         inp = {}
 
@@ -237,7 +237,7 @@ def _format_tool(name: str, inp: dict) -> dict:
         return {"name": name, "kind": "search", "pattern": pattern, "path": path}
 
     else:
-        # прочее: берём первое значение как summary
+        # other: take the first value as summary
         first = next(iter(inp.values()), "") if inp else ""
         summary = str(first)
         if len(summary) > 200:
@@ -259,39 +259,39 @@ _WEB_COOKIE_SECURE: bool = os.environ.get("WEB_COOKIE_SECURE", "").lower() in ("
 
 # ─────────────────────────── auth ───────────────────────────
 #
-# Схема: cookie cops_auth = hex(scrypt(password, salt=AUTH_SALT, n=2^14, r=8, p=1)).
-# Соль — AUTH_SALT из env (первый запуск → авто-генерация и вывод в stderr).
-# Сравнение — hmac.compare_digest (constant-time).
-# Rate-limit: ≥5 неудачных попыток с одного IP за 5 мин → 429 на 5 мин.
+# Scheme: cookie cops_auth = hex(scrypt(password, salt=AUTH_SALT, n=2^14, r=8, p=1)).
+# Salt — AUTH_SALT from env (first run → auto-generated and printed to stderr).
+# Comparison — hmac.compare_digest (constant-time).
+# Rate-limit: ≥5 failed attempts from one IP in 5 min → 429 for 5 min.
 
 import hmac as _hmac
 
-# Spec-012 Ф3: паттерн для точного матча пути /api/projects/{id}/incident.
-# Прекомпилирован один раз — используется в auth_middleware для tight-exempt.
-# Специально НЕ endswith("/incident"): не пропустит ../incident/evil или GET.
+# Spec-012 Ph3: pattern for exact match of path /api/projects/{id}/incident.
+# Pre-compiled once — used in auth_middleware for tight-exempt.
+# Deliberately NOT endswith("/incident"): won't pass ../incident/evil or GET.
 _INCIDENT_PATH_RE = re.compile(r"^/api/projects/[^/]+/incident$")
 
-# Rate-limit push-эндпоинта: не более _INCIDENT_PUSH_MAX вызовов за _INCIDENT_PUSH_WINDOW сек
-# с валидным токеном, per-project. Предотвращает шторм heal-запусков.
+# Rate-limit for the push endpoint: at most _INCIDENT_PUSH_MAX calls per _INCIDENT_PUSH_WINDOW sec
+# with a valid token, per-project. Prevents a storm of heal launches.
 _INCIDENT_PUSH_MAX = 30
-_INCIDENT_PUSH_WINDOW = 60  # секунды
-_INCIDENT_IP_MAX = 300      # per-IP backstop (до резолва проекта/чтения секрета — против unauth-флуда)
+_INCIDENT_PUSH_WINDOW = 60  # seconds
+_INCIDENT_IP_MAX = 300      # per-IP backstop (before project resolution/secret read — against unauth flood)
 _incident_ip_history: dict[str, list[float]] = {}
-# {project_id: [timestamp, ...]} — история успешных вызовов
+# {project_id: [timestamp, ...]} — history of successful calls
 _incident_push_history: dict[str, list[float]] = {}
 
-# Соль для scrypt: берётся из env WEB_COOKIE_SALT или генерируется при старте.
+# scrypt salt: taken from env WEB_COOKIE_SALT or auto-generated at startup.
 AUTH_SALT: bytes = os.environ.get("WEB_COOKIE_SALT", "").encode() or (
-    lambda s: (print(f"[auth] сгенерирована соль WEB_COOKIE_SALT={s} — добавь в .env", flush=True), s.encode())[1]
+    lambda s: (print(f"[auth] generated WEB_COOKIE_SALT={s} — add to .env", flush=True), s.encode())[1]
 )(secrets.token_hex(16))
 
 
 def _derive_token(password: str) -> str:
-    """Деривация cookie-токена через scrypt (stdlib, без новых зависимостей)."""
+    """Derives the cookie token via scrypt (stdlib, no new dependencies)."""
     dk = hashlib.scrypt(
         password.encode(),
         salt=AUTH_SALT,
-        n=1 << 14,  # 16384 — баланс скорости и безопасности (< 100ms на сервере)
+        n=1 << 14,  # 16384 — balance of speed and security (< 100ms on server)
         r=8,
         p=1,
         dklen=32,
@@ -299,22 +299,22 @@ def _derive_token(password: str) -> str:
     return dk.hex()
 
 
-# Обратная совместимость для middleware (используется в тестах)
+# Backwards-compatibility alias for middleware (used in tests)
 def _make_token(password: str) -> str:
     return _derive_token(password)
 
 
 # Rate-limit: {ip: [(timestamp, ok:bool), ...]}
 _login_attempts: dict[str, list[tuple[float, bool]]] = {}
-_LOGIN_WINDOW = 300   # 5 минут
-_LOGIN_MAX_FAIL = 5   # макс неудачных попыток
+_LOGIN_WINDOW = 300   # 5 minutes
+_LOGIN_MAX_FAIL = 5   # max failed attempts
 
 
 def _check_rate_limit(ip: str) -> bool:
-    """True если IP превысил лимит неудачных попыток. Чистит старые записи."""
+    """Returns True if the IP has exceeded the failed-attempt limit. Prunes old records."""
     now = time.monotonic()
     attempts = _login_attempts.get(ip, [])
-    # Оставляем только записи в пределах окна
+    # Keep only records within the window
     attempts = [(t, ok) for t, ok in attempts if now - t < _LOGIN_WINDOW]
     _login_attempts[ip] = attempts
     fails = sum(1 for _, ok in attempts if not ok)
@@ -325,28 +325,29 @@ def _record_attempt(ip: str, success: bool) -> None:
     now = time.monotonic()
     bucket = _login_attempts.setdefault(ip, [])
     bucket.append((now, success))
-    # Не даём расти бесконечно (атака с одного IP)
+    # Cap growth (single-IP attack)
     if len(bucket) > 200:
         _login_attempts[ip] = bucket[-200:]
 
 
 @web.middleware
 async def error_middleware(request: web.Request, handler):
-    """Внешний middleware: логирует необработанные исключения и возвращает JSON 500."""
+    """Outer middleware: logs unhandled exceptions and returns JSON 500."""
     try:
         return await handler(request)
     except web.HTTPException:
         raise
     except (ConnectionResetError, ConnectionAbortedError):
-        # Клиент закрыл соединение (типично для SSE/long-poll: закрыл вкладку, туннель оборвался).
-        # Это НЕ инцидент. Ответ уже мог начать стримиться → json_response невозможен. Пробрасываем
-        # (aiohttp сам приберёт транспорт; CancelledError — BaseException, проходит мимо и так).
+        # Client closed the connection (typical for SSE/long-poll: closed tab, tunnel dropped).
+        # This is NOT an incident. The response may have already started streaming → json_response
+        # is impossible. Re-raise (aiohttp will clean up the transport; CancelledError is a
+        # BaseException and passes through on its own).
         raise
     except Exception as exc:
         request_id = _uuid.uuid4().hex[:8]
         logging.exception("UNHANDLED exc_class=%s path=%s request_id=%s", type(exc).__name__, request.path, request_id)
-        # Spec-012 Ф1: своя ошибка кокпита → карточка in-process, мгновенно (без круга
-        # через лог-сканер). Fire-and-forget; дедуп по hash не даст сканеру задвоить.
+        # Spec-012 Ph1: cockpit's own error → in-process card, immediately (no round-trip
+        # through the log scanner). Fire-and-forget; hash dedup prevents the scanner from doubling it.
         try:
             _spawn_bg(_report_incident(request.app["ctx"], type(exc).__name__, request.path))
         except Exception:
@@ -359,18 +360,18 @@ async def error_middleware(request: web.Request, handler):
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    """Защита /api/* — пропускает /api/health и /api/login без cookie.
-    Spec-012 Ф3: также пропускает POST /api/projects/{id}/incident (у него свой
-    токен-авт в теле/заголовке). Матч TIGHT через прекомпилированный _INCIDENT_PATH_RE —
-    ни эндпоинты без trailing-id, ни /incident/evil, ни GET не попадут в exempt."""
+    """Guards /api/* — passes /api/health and /api/login without a cookie.
+    Spec-012 Ph3: also passes POST /api/projects/{id}/incident (it has its own
+    token-auth in the body/header). Match is TIGHT via pre-compiled _INCIDENT_PATH_RE —
+    endpoints without trailing id, /incident/evil, or GET will not be exempt."""
     path = request.path
-    # Незащищённые эндпоинты
+    # Unprotected endpoints
     if path in ("/api/health", "/api/login"):
         return await handler(request)
-    # Spec-012 Ф3: push-инцидент — свой auth (token). Только POST, только точный путь.
+    # Spec-012 Ph3: push-incident — its own auth (token). POST only, exact path only.
     if request.method == "POST" and _INCIDENT_PATH_RE.match(path):
         return await handler(request)
-    # Только пути /api/* проверяем
+    # Only /api/* paths are checked
     if path.startswith("/api/"):
         password = request.app["ctx"]["password"]
         expected = request.app["ctx"]["_auth_token"]
@@ -383,7 +384,7 @@ async def auth_middleware(request: web.Request, handler):
 # ─────────────────────────── git helpers ───────────────────────────
 
 async def _git_cmd(cwd: str, *args, timeout: float = 3.0):
-    """Запускает git-команду в cwd, возвращает stdout или None при ошибке."""
+    """Runs a git command in cwd, returns stdout or None on error."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "git", "-C", cwd, *args,
@@ -403,7 +404,7 @@ async def _git_cmd(cwd: str, *args, timeout: float = 3.0):
 
 
 async def _git_info(cwd: str) -> dict | None:
-    """Возвращает {branch, dirty, unpushed} или None если не git-репо."""
+    """Returns {branch, dirty, unpushed} or None if not a git repo."""
     branch = await _git_cmd(cwd, "rev-parse", "--abbrev-ref", "HEAD")
     if branch is None:
         return None
@@ -423,14 +424,14 @@ async def _git_info(cwd: str) -> dict | None:
     }
 
 
-# ── GitHub visibility (private/public) — кэш + фоновый gh, чтобы НЕ блокировать поллинг ──
+# ── GitHub visibility (private/public) — cache + background gh to NOT block polling ──
 _GIT_VIS_CACHE: "dict[str, tuple[str | None, float]]" = {}   # cwd → (visibility, ts)
-_GIT_VIS_TTL = 3600.0   # видимость репо меняется редко → кэш на час
+_GIT_VIS_TTL = 3600.0   # repo visibility changes rarely → cache for one hour
 
 
 async def _git_visibility_refresh(cwd: str) -> None:
-    """Узнаёт private/public через gh, кладёт в кэш. Сетевой вызов → только в фоне.
-    Глотает всё (нет remote / не на GitHub / gh не авторизован → None)."""
+    """Fetches private/public via gh and stores in cache. Network call → background only.
+    Swallows everything (no remote / not on GitHub / gh not authorised → None)."""
     vis: "str | None" = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -448,8 +449,8 @@ async def _git_visibility_refresh(cwd: str) -> None:
 
 
 def _git_visibility_cached(cwd: str) -> "str | None":
-    """Кэш видимости; при промахе/протухании — фоновый refresh, отдаёт текущее (stale/None),
-    НЕ блокируя поллинг. Вызывается из async-контекста (нужен running loop для _spawn_bg)."""
+    """Visibility cache; on miss/expiry — background refresh, returns current value (stale/None)
+    without blocking polling. Called from an async context (needs a running loop for _spawn_bg)."""
     entry = _GIT_VIS_CACHE.get(cwd)
     if entry is None or (time.time() - entry[1]) > _GIT_VIS_TTL:
         try:
@@ -462,7 +463,7 @@ def _git_visibility_cached(cwd: str) -> "str | None":
 # ─────────────────────────── project helpers ───────────────────────────
 
 def _project_id(cwd: str) -> str:
-    """id проекта = basename cwd без хвостового /."""
+    """Project id = basename of cwd without trailing /."""
     return Path(cwd.rstrip("/")).name
 
 
@@ -471,7 +472,7 @@ def _session_labels_path(ctx: dict) -> Path:
 
 
 def _load_session_labels(ctx: dict) -> dict:
-    """{session_id → user_label}. SDK сам lable не умеет — это наш слой."""
+    """{session_id → user_label}. The SDK has no label support — this is our layer."""
     p = _session_labels_path(ctx)
     if not p.exists():
         return {}
@@ -488,8 +489,8 @@ def _save_session_labels(ctx: dict, data: dict) -> None:
 
 
 def _inherit_label_from_free_chat(ctx: dict, session_key: str, sid: str) -> None:
-    """Если session_key — это free-чат с label, и у sid ещё нет своего лейбла —
-    наследует label вкладки. Вызывается когда SDK впервые присвоил session_id."""
+    """If session_key is a free-chat with a label and sid has no label yet —
+    inherits the tab label. Called when the SDK assigns a session_id for the first time."""
     if not (session_key and session_key.startswith("free-") and sid):
         return
     free = _load_free_chats(ctx)
@@ -498,7 +499,7 @@ def _inherit_label_from_free_chat(ctx: dict, session_key: str, sid: str) -> None
         return
     labels = _load_session_labels(ctx)
     if sid in labels:
-        return  # уже подписана (ручной rename) — не трогаем
+        return  # already labelled (manual rename) — leave it alone
     labels[sid] = entry["label"]
     _save_session_labels(ctx, labels)
 
@@ -574,7 +575,7 @@ async def api_prompt_update(req: web.Request) -> web.Response:
 
 
 def _load_free_chats(ctx: dict) -> dict:
-    """{free_id → {label, cwd, model, created_at}}. Файл может отсутствовать — вернёт {}."""
+    """{free_id → {label, cwd, model, created_at}}. File may be absent — returns {}."""
     p = _free_chats_path(ctx)
     if not p.exists():
         return {}
@@ -589,20 +590,20 @@ def _save_free_chats(ctx: dict, data: dict) -> None:
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-_TOPICS_MTIME: "float | None" = None  # mtime последней подхваченной версии topics.json
+_TOPICS_MTIME: "float | None" = None  # mtime of the last loaded version of topics.json
 
 
 def _maybe_reload_topics(ctx: dict) -> None:
-    """Hot-reload topics.json с диска при внешней правке (без рестарта процесса).
+    """Hot-reload topics.json from disk when edited externally (without restarting the process).
 
-    Зачем: `topics` грузится один раз на старте бота (bot.py) и живёт как
-    in-memory dict в ctx["topics"]. Прямая Edit/Write файла (агентом из кокпита)
-    проходила мимо этого dict → правка не видна до рестарта. Диск авторитетен —
-    runtime-команды бота всегда вызывают save_topics() — поэтому чтение с диска
-    безопасно. Обновляем dict IN-PLACE (clear+update), чтобы и бот, и кокпит
-    видели один и тот же объект. mtime-гейт: парсим только при изменении файла.
-    Битый/частично записанный файл (гонка с save_topics) → JSONDecodeError →
-    тихо оставляем текущую версию, повторим на следующем запросе."""
+    Why: `topics` is loaded once at bot startup (bot.py) and lives as an
+    in-memory dict in ctx["topics"]. A direct Edit/Write by an agent from the cockpit
+    bypassed that dict → the change was invisible until restart. The disk is authoritative —
+    bot runtime commands always call save_topics() — so reading from disk is safe.
+    We update the dict IN-PLACE (clear+update) so both the bot and cockpit share
+    the same object. mtime gate: only re-parse when the file changes.
+    A corrupted/partially-written file (race with save_topics) → JSONDecodeError →
+    silently keep the current version and retry on the next request."""
     global _TOPICS_MTIME
     try:
         path = ctx["DATA"] / "topics.json"
@@ -622,8 +623,8 @@ def _maybe_reload_topics(ctx: dict) -> None:
 
 
 def _collect_projects(ctx: dict) -> list[dict]:
-    """Дедуп по cwd, собирает список проектов из ctx["topics"].
-    Добавляет free-чаты как virtual projects (id=free-<uuid>, tg_thread=сам id)."""
+    """Deduplicates by cwd, builds a project list from ctx["topics"].
+    Appends free-chats as virtual projects (id=free-<uuid>, tg_thread=its own id)."""
     _maybe_reload_topics(ctx)
     seen: set[str] = set()
     out = []
@@ -633,7 +634,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             continue
         seen.add(cwd)
         pid = _project_id(cwd)
-        # tg_thread — строковый ключ "chat:thread"
+        # tg_thread — string key "chat:thread"
         out.append({
             "id": pid,
             "name": b.get("project", pid),
@@ -650,7 +651,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
         })
     out.sort(key=lambda x: x["name"].lower())
 
-    # Free chats — отдельная секция, сортировка по времени создания
+    # Free chats — separate section, sorted by creation time
     free = _load_free_chats(ctx)
     free_items = sorted(free.items(), key=lambda kv: kv[1].get("created_at", 0))
     for fid, b in free_items:
@@ -659,14 +660,14 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "name": b.get("label", fid),
             "cwd": b.get("cwd", str(Path.home())),
             "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
-            "tg_thread": fid,  # session_key для free = его id (строка с префиксом free-)
+            "tg_thread": fid,  # session_key for free = its own id (string with free- prefix)
             "is_free": True,
         })
     return out
 
 
 def _find_project_by_id(ctx: dict, pid: str) -> dict | None:
-    """Ищет проект по id (basename cwd)."""
+    """Finds a project by id (basename of cwd)."""
     for p in _collect_projects(ctx):
         if p["id"] == pid:
             return p
@@ -674,8 +675,8 @@ def _find_project_by_id(ctx: dict, pid: str) -> dict | None:
 
 
 def _find_vault_specs_dir(ctx: dict, project_name: str, cwd: str) -> Path | None:
-    """Пробует несколько вариантов имён для папки в VAULT_PROJECTS.
-    Если VAULT_PROJECTS не задан (None) — возвращает None (фича отключена)."""
+    """Tries several name variants for a folder in VAULT_PROJECTS.
+    If VAULT_PROJECTS is not set (None) — returns None (feature disabled)."""
     vault: Optional[Path] = ctx.get("VAULT_PROJECTS")
     if not vault or not vault.is_dir():
         return None
@@ -685,7 +686,7 @@ def _find_vault_specs_dir(ctx: dict, project_name: str, cwd: str) -> Path | None
         Path(cwd).name,
         Path(cwd).name.lower(),
     ]
-    # Регистронезависимый перебор реальных папок
+    # Case-insensitive scan of existing folders
     try:
         existing = {d.name: d for d in vault.iterdir() if d.is_dir()}
     except Exception:
@@ -709,7 +710,7 @@ async def api_health(req: web.Request) -> web.Response:
 
 async def api_login(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
-    # Rate-limit по IP (пеерд чтением тела)
+    # Rate-limit by IP (before reading the body)
     ip = req.remote or "unknown"
     if _check_rate_limit(ip):
         return web.json_response({"error": "too many attempts, try later"}, status=429)
@@ -758,10 +759,10 @@ async def api_projects(req: web.Request) -> web.Response:
         return sum(1 for col_cards in cols.values() for c in col_cards if _is_incident_card(c))
 
     async def enrich(p: dict) -> dict:
-        # Для свободных чатов git-проверка бессмысленна (cwd обычно $HOME, не репо проекта)
+        # For free chats git checks are meaningless (cwd is usually $HOME, not a project repo)
         if p.get("is_free"):
             return {**p, "health": {"git": None}, "incidents": 0}
-        # git отключён настройкой проекта — не показываем git-статус
+        # git disabled by project setting — don't show git status
         if not _git_enabled(p):
             return {**p, "health": {"git": None}, "incidents": _count_incidents(p["cwd"])}
         try:
@@ -793,7 +794,7 @@ async def api_project_claude_md(req: web.Request) -> web.Response:
             content = ""
             exists = False
     except Exception as e:
-        content = f"[ошибка чтения: {e}]"
+        content = f"[read error: {e}]"
         exists = False
     return web.json_response({"path": str(path), "content": content, "exists": exists})
 
@@ -805,7 +806,7 @@ async def api_project_readme(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     cwd = Path(project["cwd"])
-    # перебор популярных вариантов имени README
+    # try common README filename variants
     candidates = ["README.md", "readme.md", "Readme.md", "README.MD",
                   "README.markdown", "README.rst", "README.txt", "README"]
     path, content, exists = cwd / "README.md", "", False
@@ -816,7 +817,7 @@ async def api_project_readme(req: web.Request) -> web.Response:
                 path, content, exists = p, p.read_text(encoding="utf-8"), True
                 break
     except Exception as e:
-        content, exists = f"[ошибка чтения: {e}]", False
+        content, exists = f"[read error: {e}]", False
     return web.json_response({"path": str(path), "content": content, "exists": exists})
 
 
@@ -825,8 +826,8 @@ _README_CANDIDATES = ["README.md", "readme.md", "Readme.md", "README.MD",
 
 
 async def _write_doc(req: web.Request, resolve_path):
-    """Общий писатель для CLAUDE.md/README: POST {content} → перезаписать файл.
-    resolve_path(cwd)→Path выбирает целевой файл (учитывает существующий вариант имени)."""
+    """Shared writer for CLAUDE.md/README: POST {content} → overwrite file.
+    resolve_path(cwd)→Path picks the target file (respects existing filename variant)."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -842,17 +843,17 @@ async def _write_doc(req: web.Request, resolve_path):
     try:
         path.write_text(content, encoding="utf-8")
     except Exception as e:
-        return web.json_response({"error": f"ошибка записи: {e}"}, status=500)
+        return web.json_response({"error": f"write error: {e}"}, status=500)
     return web.json_response({"path": str(path), "content": content, "exists": True})
 
 
 async def api_project_claude_md_write(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/claude-md — перезаписать CLAUDE.md."""
+    """POST /api/projects/{id}/claude-md — overwrite CLAUDE.md."""
     return await _write_doc(req, lambda cwd: cwd / "CLAUDE.md")
 
 
 async def api_project_readme_write(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/readme — перезаписать существующий README (или создать README.md)."""
+    """POST /api/projects/{id}/readme — overwrite existing README (or create README.md)."""
     def _pick(cwd: Path) -> Path:
         for name in _README_CANDIDATES:
             if (cwd / name).exists():
@@ -862,9 +863,9 @@ async def api_project_readme_write(req: web.Request) -> web.Response:
 
 
 def _spec_dirs(ctx: dict, project: dict) -> list[tuple[Path, str]]:
-    """Папки со спеками проекта: ЛОКАЛЬНАЯ <cwd>/specs/ (приоритет) + vault <name>/specs/.
-    Возвращает [(dir, source)] только существующих. Агент часто пишет спеки локально,
-    а человек — в vault; кокпит показывает и то, и то."""
+    """Spec folders for the project: LOCAL <cwd>/specs/ (priority) + vault <name>/specs/.
+    Returns [(dir, source)] for existing ones only. Agents often write specs locally
+    while the human writes in vault; the cockpit shows both."""
     dirs: list[tuple[Path, str]] = []
     local = Path(project["cwd"]) / "specs"
     if local.is_dir():
@@ -885,7 +886,7 @@ async def api_project_specs(req: web.Request) -> web.Response:
         return web.json_response({"error": "project not found"}, status=404)
 
     specs = []
-    seen: set[str] = set()  # дедуп по имени; локальная папка идёт первой → выигрывает
+    seen: set[str] = set()  # dedup by name; local folder comes first → wins
     for d, src in _spec_dirs(ctx, project):
         try:
             for f in sorted(d.glob("*.md")):
@@ -903,7 +904,7 @@ async def api_project_spec_content(req: web.Request) -> web.Response:
     pid = req.match_info["id"]
     spec_name = req.match_info["name"]
 
-    # Защита от path traversal: только basename, только .md
+    # Path traversal guard: basename only, .md only
     spec_name = Path(spec_name).name
     if not spec_name.endswith(".md"):
         return web.json_response({"error": "only .md files allowed"}, status=400)
@@ -912,12 +913,12 @@ async def api_project_spec_content(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    # Ищем по имени в локальной, затем в vault (та же приоритетность, что в списке)
+    # Search by name in local first, then vault (same priority as in the list)
     for d, _src in _spec_dirs(ctx, project):
         try:
             candidate = (d / spec_name).resolve()
             if not str(candidate).startswith(str(d.resolve())):
-                continue  # path traversal — пропускаем
+                continue  # path traversal — skip
             if candidate.is_file():
                 content = candidate.read_text(encoding="utf-8")
                 return web.json_response({"name": spec_name, "content": content})
@@ -957,9 +958,9 @@ async def api_project_logs(req: web.Request) -> web.Response:
 # ─────────────────────────── Skills picker ───────────────────────────
 
 def _parse_skill_frontmatter(text: str) -> dict | None:
-    """Парсит YAML-frontmatter SKILL.md → {name, description}.
-    Минимальный парсер: ищет '---\n...---', берёт строки 'key: value'.
-    Многострочные values (через '|' или '>') не поддерживаем — в SKILL.md они редки в шапке."""
+    """Parses YAML frontmatter from SKILL.md → {name, description}.
+    Minimal parser: finds '---\n...---', reads 'key: value' lines.
+    Multi-line values (via '|' or '>') are not supported — they are rare in SKILL.md headers."""
     if not text.startswith("---"):
         return None
     end = text.find("\n---", 4)
@@ -981,14 +982,14 @@ def _parse_skill_frontmatter(text: str) -> dict | None:
 
 
 def _scan_skills_dir(skills_dir: Path) -> list[dict]:
-    """Возвращает список {name, description} из <dir>/<skill>/SKILL.md (case-insensitive имя файла)."""
+    """Returns a list of {name, description} from <dir>/<skill>/SKILL.md (case-insensitive filename)."""
     out: list[dict] = []
     if not skills_dir.is_dir():
         return out
     for sub in sorted(skills_dir.iterdir()):
         if not sub.is_dir():
             continue
-        # SKILL.md или skill.md
+        # SKILL.md or skill.md
         skill_file = None
         for candidate in ("SKILL.md", "skill.md"):
             p = sub / candidate
@@ -1009,7 +1010,7 @@ def _scan_skills_dir(skills_dir: Path) -> list[dict]:
 
 async def api_project_skills(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/skills → {global: [...], project: [...]}.
-    Парсит SKILL.md из ~/.claude/skills/ (global) и <cwd>/.claude/skills/ (project)."""
+    Parses SKILL.md from ~/.claude/skills/ (global) and <cwd>/.claude/skills/ (project)."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -1035,7 +1036,7 @@ async def api_project_activity(req: web.Request) -> web.Response:
 
     try:
         if audit_dir.is_dir():
-            # Берём все audit-*.log, сортируем по имени (хронология)
+            # Take all audit-*.log files, sort by name (chronological)
             log_files = sorted(audit_dir.glob("audit-*.log"))
             for log_file in log_files:
                 try:
@@ -1047,18 +1048,18 @@ async def api_project_activity(req: web.Request) -> web.Response:
     except Exception:
         pass
 
-    # Последние 120 строк, новые сверху
+    # Last 120 lines, newest first
     tail = lines[-120:] if len(lines) > 120 else lines
     tail.reverse()
 
     return web.json_response({"lines": tail})
 
 
-# ─────────────────────────── доска задач (TASKS.md / DONE.md) ───────────────────────────
+# ─────────────────────────── task board (TASKS.md / DONE.md) ───────────────────────────
 #
-# Spec=Kanban=2 файла. TASKS.md (секции = колонки) — единственный, что читают сессии.
-# DONE.md (архив) — append-only, агент его НЕ читает (гигиена контекста).
-# Истина = markdown в репо проекта; БД для плана НЕ используется.
+# Spec=Kanban=2 files. TASKS.md (sections = columns) — the only file sessions read.
+# DONE.md (archive) — append-only, agents do NOT read it (context hygiene).
+# Source of truth = markdown in the project repo; no DB for the plan.
 
 BOARD_COLUMNS = [
     ("backlog",     "Backlog",     " "),
@@ -1068,8 +1069,9 @@ BOARD_COLUMNS = [
 ]
 _LABEL_TO_COL = {lbl.lower(): key for key, lbl, _ in BOARD_COLUMNS}
 
-# Один lock на cwd — сериализует все cockpit-записи доски (GET canonicalize + mutations).
-# Агент пишет файл напрямую и не участвует в lock, поэтому lock защищает только кокпит↔кокпит гонку.
+# One lock per cwd — serialises all cockpit writes to the board (GET canonicalise + mutations).
+# The agent writes the file directly and does not participate in the lock, so the lock only
+# protects the cockpit↔cockpit race.
 _board_locks: dict[str, asyncio.Lock] = {}
 
 def _get_board_lock(cwd: str) -> asyncio.Lock:
@@ -1078,17 +1080,17 @@ def _get_board_lock(cwd: str) -> asyncio.Lock:
     return _board_locks[cwd]
 
 _CARD_RE = re.compile(r"^\s*[-*]\s*\[(.)\]\s*(.*)$")
-# Строки вида "- текст" без checkbox — агент часто пишет именно так.
-# Внутри секции-колонки распознаём как Backlog-карточку (статус по умолчанию).
+# Lines like "- text" without a checkbox — agents often write this way.
+# Inside a column section we treat these as Backlog cards (default status).
 _PLAIN_CARD_RE = re.compile(r"^\s*[-*]\s+(?!\[)(.+)$")
-# Один маркер: <!--ops:ID--> — ID может быть любым словом (включая нехексовые алиасы).
+# Single marker: <!--ops:ID--> — ID can be any word (including non-hex aliases).
 _MARKER_RE = re.compile(r"\s*<!--\s*ops:([\w-]+)\s*-->")
-# Description строки: '  > текст' (2 пробела + '>') идущие сразу после карточки
+# Description lines: '  > text' (2 spaces + '>') immediately following a card
 _DESC_LINE_RE = re.compile(r"^  > (.*)$")
 
 
 def _extract_id_and_text(rest: str) -> tuple[str, str]:
-    """Извлечь ID и очистить текст от ВСЕХ маркеров ops. Первый маркер = canonical ID."""
+    """Extract ID and strip ALL ops markers from text. First marker = canonical ID."""
     matches = list(_MARKER_RE.finditer(rest))
     if not matches:
         return _new_card_id(), rest.strip()
@@ -1109,23 +1111,23 @@ def _new_card_id() -> str:
     return secrets.token_hex(3)
 
 
-# Обычная карточка = hex(+дефис); инцидент = 'err-<hash6>'. Префикс err- разрешён явно,
-# тело остаётся [a-f0-9-] (без точек/слешей → traversal невозможен). Без err- в классе
-# был баг: err-карточки не проходили валидацию → их нельзя было закрыть/удалить из UI.
+# Regular card = hex(+dash); incident = 'err-<hash6>'. The err- prefix is explicitly allowed;
+# the body stays [a-f0-9-] (no dots/slashes → traversal impossible). Without err- in the class
+# there was a bug: err-cards failed validation → couldn't be closed/deleted from the UI.
 _CARD_ID_RE = re.compile(r"^(err-)?[a-f0-9-]{4,20}$")
 
 
 def _valid_card_id(card_id: str) -> bool:
-    """True если card_id соответствует ожидаемому формату (hex+dash, 4-20 символов)."""
+    """True if card_id matches the expected format (hex+dash, 4-20 chars)."""
     return bool(_CARD_ID_RE.fullmatch(card_id))
 
 
 
 def _count_potential_cards(raw: str) -> int:
-    """Сколько строк в raw МОГУТ быть карточками (любого формата).
-    Используется как guard: если после parse+serialize карточек стало меньше —
-    значит парсер не распознал какой-то формат и перезапись уничтожит данные.
-    Считаем строки вида '- ...' или '* ...' ВНУТРИ секции ## (не преамбула)."""
+    """How many lines in raw COULD be cards (any format).
+    Used as a guard: if after parse+serialize the card count dropped —
+    the parser didn't recognise some format and a write would destroy data.
+    Counts lines like '- ...' or '* ...' INSIDE a ## section (not preamble)."""
     count = 0
     in_section = False
     for line in raw.splitlines():
@@ -1142,28 +1144,28 @@ def _count_potential_cards(raw: str) -> int:
 
 
 def _parse_tasks(text: str):
-    """(preamble, cols) — preamble = всё до первого распознанного '## <Колонка>'.
-    Карточки с checkbox '- [ ] text' — парсятся в соответствующую колонку.
-    Карточки без checkbox '- text' — парсятся как Backlog (агент иногда пишет так).
-    Description строки '  > текст' сразу после карточки — собираются в card['description'].
-    Строки, не являющиеся карточками, внутри секций отбрасываются при перезаписи."""
+    """(preamble, cols) — preamble = everything before the first recognised '## <Column>'.
+    Cards with checkbox '- [ ] text' — parsed into the matching column.
+    Cards without checkbox '- text' — parsed as Backlog (agents sometimes write this way).
+    Description lines '  > text' immediately after a card — collected into card['description'].
+    Non-card lines inside sections are discarded on re-serialisation."""
     cols = {key: [] for key, _, _ in BOARD_COLUMNS}
     preamble_lines: list[str] = []
     cur = None
     seen_header = False
-    last_card: dict | None = None  # последняя добавленная карточка — приёмник description
+    last_card: dict | None = None  # last added card — description receiver
     for line in text.splitlines():
         h = line.strip()
         if h.startswith("##"):
             name = h.lstrip("#").strip().lower()
-            cur = _LABEL_TO_COL.get(name)  # None для незнакомых секций
-            last_card = None  # новая секция сбрасывает receiver
+            cur = _LABEL_TO_COL.get(name)  # None for unknown sections
+            last_card = None  # new section resets receiver
             if cur is not None:
                 seen_header = True
             elif not seen_header:
                 preamble_lines.append(line)
             continue
-        # Description строка — '  > текст', сразу после карточки
+        # Description line — '  > text', immediately after a card
         if cur is not None and last_card is not None:
             dm = _DESC_LINE_RE.match(line)
             if dm:
@@ -1173,7 +1175,7 @@ def _parse_tasks(text: str):
                 else:
                     last_card["description"] += "\n" + desc_line
                 continue
-            # Иная строка — конец description блока
+            # Any other line — end of description block
             last_card = None
         m = _CARD_RE.match(line)
         if m and cur is not None:
@@ -1183,12 +1185,12 @@ def _parse_tasks(text: str):
                 cols[cur].append(card)
                 last_card = card
         elif cur is not None:
-            # Нет checkbox-совпадения — пробуем plain '- текст' (агентский стиль)
+            # No checkbox match — try plain '- text' (agent style)
             pm = _PLAIN_CARD_RE.match(line)
             if pm:
                 cid, cardtext = _extract_id_and_text(pm.group(1))
                 if cardtext:
-                    # Plain-карточки всегда в текущую колонку (агент сам выбрал секцию)
+                    # Plain cards always go to the current column (agent chose the section)
                     card = {"id": cid, "text": cardtext}
                     cols[cur].append(card)
                     last_card = card
@@ -1226,21 +1228,21 @@ def _save_board(cwd: str, name: str, preamble: str, cols: dict) -> None:
 
 # ─────────────────────────── Error scanner (incidents) ───────────────────────────
 #
-# Сканер падений (логи + тесты) → карточки в Failed-секции TASKS.md.
-# Карточка-инцидент = обычная карточка с маркером ID вида "err-<hash6>".
-# Метаданные (source, seen, first, last, excerpt) хранятся в description ('  > ' строки)
-# в виде key=value — это переживает round-trip парсера и видно агенту в plain-md.
+# Crash scanner (logs + tests) → cards in the Failed section of TASKS.md.
+# Incident card = regular card with marker ID of the form "err-<hash6>".
+# Metadata (source, seen, first, last, excerpt) stored in description ('  > ' lines)
+# as key=value — survives parser round-trip and is visible to agents in plain-md.
 #
-# Дедуп: хеш по (source_type, normalized_message, file?, line?). Если карточка с таким
-# err-<hash> уже есть в Failed/Review/InProgress — обновляем seen+last в description,
-# новую НЕ создаём (иначе один зависший воркер плодит 1000 карточек за ночь).
+# Dedup: hash by (source_type, normalised_message, file?, line?). If a card with that
+# err-<hash> already exists in Failed/Review/InProgress — update seen+last in description,
+# do NOT create a new card (otherwise one hung worker generates 1000 cards overnight).
 
-# Python traceback: "Traceback (most recent call last):" ... последняя строка с типом
+# Python traceback: "Traceback (most recent call last):" ... last line with type
 _PY_TRACEBACK_RE = re.compile(
     r"Traceback \(most recent call last\):\n((?:.+\n)+?)([A-Z][\w.]*(?:Error|Exception|Warning|Exit)):\s*(.+)",
     re.MULTILINE,
 )
-# Generic ERROR/CRITICAL: строка лога вида "... ERROR ... msg" / "... CRITICAL ... msg"
+# Generic ERROR/CRITICAL: log line like "... ERROR ... msg" / "... CRITICAL ... msg"
 _GENERIC_ERR_RE = re.compile(
     r"^.*\b(ERROR|CRITICAL|FATAL)\b[:\s]+(.+?)$", re.MULTILINE,
 )
@@ -1248,9 +1250,9 @@ _GENERIC_ERR_RE = re.compile(
 _PYTEST_FAILED_RE = re.compile(
     r"^FAILED\s+([\w./\-]+)::([\w\[\]\-]+)(?:\s+-\s+(.+))?$", re.MULTILINE,
 )
-# Стандартная строка необработанного исключения: "UNHANDLED exc_class=<Type> path=<route>"
+# Standard unhandled-exception line: "UNHANDLED exc_class=<Type> path=<route>"
 _UNHANDLED_RE = re.compile(r"\bUNHANDLED\s+exc_class=(\S+)\s+path=(\S+)", re.MULTILINE)
-# Шумовые сообщения которые часто встречаются в логах но не являются ошибками
+# Noisy messages that appear frequently in logs but are not errors
 _LOG_NOISE_SUBSTRINGS = (
     "deprecat",         # DeprecationWarning
     "GET /api/health",  # health-checks
@@ -1263,24 +1265,24 @@ def _hash6(s: str) -> str:
 
 
 def _norm_msg(msg: str) -> str:
-    """Нормализация сообщения для хеша: убираем числа, временные id, пути.
-    Цель — '<id=42>' и '<id=99>' дают один хеш, а '<KeyError>' и '<ValueError>' разные."""
+    """Normalises a message for hashing: removes numbers, temporary ids, paths.
+    Goal — '<id=42>' and '<id=99>' give the same hash, while '<KeyError>' and '<ValueError>' differ."""
     s = msg.lower()
-    s = re.sub(r"0x[0-9a-f]+", "0xN", s)            # адреса
-    s = re.sub(r"\b\d{4,}\b", "N", s)               # длинные числа (PID/timestamp)
-    s = re.sub(r"/[\w/.\-]+", "/PATH", s)           # пути
+    s = re.sub(r"0x[0-9a-f]+", "0xN", s)            # addresses
+    s = re.sub(r"\b\d{4,}\b", "N", s)               # long numbers (PID/timestamp)
+    s = re.sub(r"/[\w/.\-]+", "/PATH", s)           # paths
     s = re.sub(r"\s+", " ", s).strip()
     return s[:300]
 
 
 def _parse_log_errors(log_text: str, source: str = "log") -> list[dict]:
-    """Извлекает ошибки из лог-текста. Возвращает list[{source, type, message, excerpt, hash}].
-    Дедуп ВНУТРИ списка: одинаковые ошибки в одном прогоне → одна запись (seen считается выше)."""
+    """Extracts errors from log text. Returns list[{source, type, message, excerpt, hash}].
+    Dedup WITHIN the list: identical errors in one run → one record (seen counted above)."""
     out: list[dict] = []
     seen_hashes: set[str] = set()
     traceback_exc_types: set[str] = set()
 
-    # Сначала Python tracebacks (более структурированные)
+    # Python tracebacks first (more structured)
     for m in _PY_TRACEBACK_RE.finditer(log_text):
         trace_body = m.group(1)
         exc_type = m.group(2)
@@ -1297,16 +1299,16 @@ def _parse_log_errors(log_text: str, source: str = "log") -> list[dict]:
             "excerpt": excerpt, "hash": h,
         })
 
-    # Generic ERROR/CRITICAL — фильтруем дубли python-трейсов (они уже в out)
+    # Generic ERROR/CRITICAL — filter duplicates from python tracebacks (already in out)
     for m in _GENERIC_ERR_RE.finditer(log_text):
         level = m.group(1)
         msg = m.group(2).strip()
         if any(noise in msg.lower() for noise in _LOG_NOISE_SUBSTRINGS):
             continue
-        # Если строка содержит "Traceback" — уже учтено выше
+        # If the line contains "Traceback" — already handled above
         if "Traceback" in msg:
             continue
-        # "UNHANDLED exc_class=..." обрабатывает отдельный проход ниже — не дублируем
+        # "UNHANDLED exc_class=..." is handled in a separate pass below — don't duplicate
         if "UNHANDLED exc_class=" in msg:
             continue
         h = _hash6(f"{source}|{level}|{_norm_msg(msg)}")
@@ -1318,12 +1320,12 @@ def _parse_log_errors(log_text: str, source: str = "log") -> list[dict]:
             "excerpt": msg[:300], "hash": h,
         })
 
-    # UNHANDLED стандартная строка: "UNHANDLED exc_class=<Type> path=<route>"
+    # UNHANDLED standard line: "UNHANDLED exc_class=<Type> path=<route>"
     for m in _UNHANDLED_RE.finditer(log_text):
         exc_class = m.group(1)
         path = m.group(2)
-        # Если для этого типа уже есть карточка из трейсбека (богаче) — не дублируем.
-        # UNHANDLED-проход нужен прежде всего когда полного трейсбека нет (systemd OnFailure).
+        # If there is already a card for this type from a traceback (richer) — don't duplicate.
+        # The UNHANDLED pass is primarily needed when a full traceback is absent (systemd OnFailure).
         if exc_class in traceback_exc_types:
             continue
         h = _hash6(f"{source}|UNHANDLED|{_norm_msg(exc_class + ' ' + path)}")
@@ -1341,7 +1343,7 @@ def _parse_log_errors(log_text: str, source: str = "log") -> list[dict]:
 
 
 def _parse_pytest_failures(pytest_output: str) -> list[dict]:
-    """Извлекает FAILED-строки из pytest-output."""
+    """Extracts FAILED lines from pytest output."""
     out: list[dict] = []
     seen: set[str] = set()
     for m in _PYTEST_FAILED_RE.finditer(pytest_output):
@@ -1360,14 +1362,14 @@ def _parse_pytest_failures(pytest_output: str) -> list[dict]:
     return out
 
 
-# Маркер ID для err-карточек: 'err-<hash6>'. Описание — k=v строки.
-# heal_attempted — флаг предохранитель: инцидент уже пробовали починить (не повторять).
-# heal_skip — помечает инцидент как benign/игнорируемый: heal не запускать никогда.
+# ID marker for err-cards: 'err-<hash6>'. Description — k=v lines.
+# heal_attempted — safety flag: incident has already been attempted (don't retry).
+# heal_skip — marks incident as benign/ignored: never run heal.
 _ERR_DESC_RE = re.compile(r"^(source|seen|first|last|excerpt|heal_attempted|heal_skip)=(.*)$")
 
 
 def _parse_incident_desc(desc: str | None) -> dict:
-    """Парсит description err-карточки в dict. Неизвестные строки игнорируем."""
+    """Parses the description of an err-card into a dict. Unknown lines are ignored."""
     out: dict = {}
     if not desc:
         return out
@@ -1379,11 +1381,11 @@ def _parse_incident_desc(desc: str | None) -> dict:
 
 
 def _format_incident_desc(meta: dict) -> str:
-    """Сериализует metadata err-карточки в description-строки.
-    Excerpt идёт ПОСЛЕДНИМ — может быть многострочным, но для нас это одна логическая
-    запись (хранится как одна строка с \\n заменёнными на ' / ' для компактности).
-    heal_attempted — предохранитель от повторного запуска починки.
-    heal_skip — помечает инцидент как benign: heal не запускается никогда."""
+    """Serialises err-card metadata to description lines.
+    Excerpt goes LAST — may be multi-line, but we treat it as one logical record
+    (stored as one line with \\n replaced by ' / ' for compactness).
+    heal_attempted — guard against re-running a fix.
+    heal_skip — marks an incident as benign: heal never runs."""
     lines: list[str] = []
     for key in ("source", "seen", "first", "last"):
         if key in meta:
@@ -1394,20 +1396,20 @@ def _format_incident_desc(meta: dict) -> str:
         lines.append(f"heal_skip={meta['heal_skip']}")
     excerpt = meta.get("excerpt", "")
     if excerpt:
-        # Многострочный excerpt сворачиваем в одну строку. splitlines() ловит ВСЕ
-        # разделители (вкл. U+2028/U+2029/\x85) — иначе они порвали бы формат доски.
+        # Collapse multi-line excerpt to one line. splitlines() catches ALL
+        # line separators (incl. U+2028/U+2029/\x85) — otherwise they would break the board format.
         compact = " / ".join(excerpt.splitlines())[:400]
         lines.append(f"excerpt={compact}")
     return "\n".join(lines)
 
 
 def _is_incident_card(card: dict) -> bool:
-    """Карточка-инцидент = id начинается с 'err-'."""
+    """An incident card has an id starting with 'err-'."""
     return card.get("id", "").startswith("err-")
 
 
 def _incident_title(err: dict) -> str:
-    """Короткий заголовок карточки: '[ERR] AttributeError: msg' / '[TEST] test_name — reason'."""
+    """Short card title: '[ERR] AttributeError: msg' / '[TEST] test_name — reason'."""
     msg = err["message"][:80]
     if err["source"] == "test":
         return f"[TEST] {msg}"
@@ -1417,12 +1419,12 @@ def _incident_title(err: dict) -> str:
 
 
 async def _run_log_cmd(log_cmd: str, timeout: float = 10.0, raise_on_timeout: bool = False) -> str:
-    """Запускает log_cmd, возвращает stdout (+ stderr).
+    """Runs log_cmd and returns stdout (+ stderr).
     UI-controlled cmd from topics.json → exec (not shell) to prevent injection.
-    raise_on_timeout=True: при таймауте убивает процесс и re-raise asyncio.TimeoutError
-    (вместо возврата ""). Используется HTTP-маршрутом для возврата 504.
-    raise_on_timeout=False (default): проглатывает TimeoutError и возвращает "" —
-    сохраняет поведение сканера (_scan_project_errors)."""
+    raise_on_timeout=True: on timeout kills the process and re-raises asyncio.TimeoutError
+    (instead of returning ""). Used by the HTTP route to return 504.
+    raise_on_timeout=False (default): swallows TimeoutError and returns "" —
+    preserves the scanner's behaviour (_scan_project_errors)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *shlex.split(log_cmd),
@@ -1445,19 +1447,19 @@ async def _run_log_cmd(log_cmd: str, timeout: float = 10.0, raise_on_timeout: bo
 
 
 async def _scan_project_errors(project: dict) -> list[dict]:
-    """Сканирует один проект: только log_cmd → list[errors]. БЕЗ записи на диск.
-    Тесты запускаются ТОЛЬКО через кнопку «Прогнать тесты» (api_project_test), не здесь.
+    """Scans one project: log_cmd only → list[errors]. Does NOT write to disk.
+    Tests are run ONLY via the 'Run tests' button (api_project_test), not here.
 
-    Spec-012 Ф0: high-water-mark fingerprint.
-    Состояние: data/scan_state.json  {cwd: {"last_line": "<sha1>", "last_scan_ts": <float>}}.
-    Логика:
-      - Нет fingerprint (первый скан): парсим только ПОСЛЕДНИЕ 50 строк и сохраняем fingerprint
-        без немедленного создания карточек по всему хвосту (избегаем flood из старых ошибок).
-      - Есть fingerprint: ищем последнее вхождение строки с sha1==fingerprint, парсим всё ПОСЛЕ.
-        Если fingerprint не найден (лог ротирован/вышел из окна): fallback = последние 500 строк
-        (дедуп downstream защищает от дублей).
-      - После парсинга: обновляем last_line = sha1(последней непустой строки), last_scan_ts = now.
-    Ключ в state: cwd (стабильный абсолютный путь проекта).
+    Spec-012 Ph0: high-water-mark fingerprint.
+    State: data/scan_state.json  {cwd: {"last_line": "<sha1>", "last_scan_ts": <float>}}.
+    Logic:
+      - No fingerprint (first scan): parse only the LAST 50 lines and save fingerprint
+        without immediately creating cards for the whole tail (avoids flood from old errors).
+      - Fingerprint exists: find the last occurrence of the line with sha1==fingerprint, parse everything AFTER.
+        If fingerprint not found (log rotated/moved out of window): fallback = last 500 lines
+        (downstream dedup protects against duplicates).
+      - After parsing: update last_line = sha1(last non-empty line), last_scan_ts = now.
+    Key in state: cwd (stable absolute project path).
     """
     errors: list[dict] = []
     log_cmd = project.get("log_cmd")
@@ -1468,37 +1470,37 @@ async def _scan_project_errors(project: dict) -> list[dict]:
             all_lines = log_text.splitlines()
             cwd_key = project.get("cwd", "")
             now_ts = time.time()
-            _FP_BLOCK = 6  # блок из последних N строк как «отпечаток» позиции — устойчив
-                           # к повторяющимся ОДИНОЧНЫМ строкам (heartbeat / "200 OK"), на
-                           # которых single-line fingerprint пропускал новые ошибки между
-                           # двумя одинаковыми строками. Блок ловит реальную позицию конца.
+            _FP_BLOCK = 6  # block of last N lines as a position "fingerprint" — resilient
+                           # to repeated SINGLE lines (heartbeat / "200 OK"), where
+                           # single-line fingerprint missed new errors between two identical lines.
+                           # Block captures the real end position.
 
             state = _scan_state_load()
-            last_block = state.get(cwd_key, {}).get("block")  # list[sha1] последних N строк прошлого скана
+            last_block = state.get(cwd_key, {}).get("block")  # list[sha1] of last N lines from previous scan
             line_hashes = [hashlib.sha1(ln.encode("utf-8", "replace")).hexdigest() for ln in all_lines]
 
             if not last_block:
-                # Первый скан (нет состояния): парсим только хвост 50 строк, чтобы не
-                # залить доску историческими ошибками. Блок-отпечаток сохраним ниже.
+                # First scan (no state): parse only the last 50 lines to avoid flooding
+                # the board with historical errors. Block fingerprint saved below.
                 if all_lines:
                     errors.extend(_parse_log_errors("\n".join(all_lines[-50:]), source="log"))
             else:
-                # ПЕРВОЕ вхождение блока (forward) — всё ПОСЛЕ него считаем новым.
-                # Forward-bias безопаснее last-occurrence: при повторе блока скорее
-                # перепарсим старое (дедуп + dismissed погасят), чем пропустим новое.
+                # FIRST occurrence of the block (forward) — everything AFTER is considered new.
+                # Forward-bias is safer than last-occurrence: on block repeat we rather
+                # re-parse old lines (dedup + dismissed will suppress) than miss new ones.
                 bl = len(last_block)
                 end_idx = None
                 for end in range(bl, len(line_hashes) + 1):
                     if line_hashes[end - bl:end] == last_block:
                         end_idx = end
                         break
-                # Блок не найден (ротация / снос state) → fallback 500 (дедуп/dismissed страхуют).
+                # Block not found (rotation / state wiped) → fallback 500 (dedup/dismissed cover us).
                 new_lines = all_lines[end_idx:] if end_idx is not None else all_lines[-500:]
                 if new_lines:
                     errors.extend(_parse_log_errors("\n".join(new_lines), source="log"))
 
-            # ВСЕГДА сохраняем блок конца текущего вывода (даже whitespace-only — иначе
-            # застрянем в режиме «первый скан» и будем терять строки за 50-хвостом).
+            # ALWAYS save the block for the end of current output (even whitespace-only — otherwise
+            # we'd stay in "first scan" mode and miss lines beyond the 50-line tail).
             state[cwd_key] = {"block": line_hashes[-_FP_BLOCK:], "last_scan_ts": now_ts}
             _scan_state_save(state)
 
@@ -1506,25 +1508,25 @@ async def _scan_project_errors(project: dict) -> list[dict]:
 
 
 async def _ingest_errors_to_board(cwd: str, name: str, errors: list[dict]) -> tuple[int, int]:
-    """Записывает/обновляет err-карточки в TASKS.md. Возвращает (added, updated).
-    Под board-lock. Дедуп: карточка err-<hash> уже есть → обновляем seen/last в description."""
+    """Writes/updates err-cards in TASKS.md. Returns (added, updated).
+    Under board-lock. Dedup: card err-<hash> already exists → update seen/last in description."""
     if not errors:
         return (0, 0)
 
     lock = _get_board_lock(cwd)
     async with lock:
         raw, preamble, cols = _load_board(cwd)
-        # Guard: если файл нет/не парсится — лучше не трогать
+        # Guard: if file is missing/unparseable — better not to touch it
         potential = _count_potential_cards(raw)
         parsed_count = sum(len(v) for v in cols.values())
         if raw.strip() and parsed_count < potential:
-            return (0, 0)  # подозрительный файл — не пишем
+            return (0, 0)  # suspicious file — don't write
 
         now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M")
         added = 0
         updated = 0
 
-        # Индекс существующих err-карточек: hash → (column, card)
+        # Index of existing err-cards: hash → (column, card)
         existing: dict[str, tuple[str, dict]] = {}
         for col_key, col_cards in cols.items():
             for card in col_cards:
@@ -1534,11 +1536,11 @@ async def _ingest_errors_to_board(cwd: str, name: str, errors: list[dict]) -> tu
                     existing[h] = (col_key, card)
 
         now_float = time.time()
-        dismissed_snapshot = _dismissed_load()  # один раз на батч, не на каждую ошибку
+        dismissed_snapshot = _dismissed_load()  # once per batch, not per error
         for err in errors:
             h = err["hash"]
             if h in existing:
-                # Update seen+last, не двигаем колонку (юзер мог уже перенести)
+                # Update seen+last, don't move the column (user may have already moved it)
                 col_key, card = existing[h]
                 meta = _parse_incident_desc(card.get("description"))
                 try:
@@ -1547,15 +1549,15 @@ async def _ingest_errors_to_board(cwd: str, name: str, errors: list[dict]) -> tu
                     seen_n = 2
                 meta["seen"] = str(seen_n)
                 meta["last"] = now_iso
-                # first / source / excerpt — оставляем из первой встречи
+                # first / source / excerpt — keep from first occurrence
                 card["description"] = _format_incident_desc(meta)
                 updated += 1
             else:
-                # Spec-012 Ф0 Task B: не воскрешать dismissed инциденты в TTL-окне
+                # Spec-012 Ph0 Task B: don't resurrect dismissed incidents within TTL window
                 _dts = dismissed_snapshot.get(h)
                 if _dts is not None and (now_float - _dts) < _DISMISS_TTL:
                     continue
-                # Новая карточка в Failed
+                # New card in Failed
                 meta = {
                     "source": err["source"],
                     "seen": "1",
@@ -1575,31 +1577,32 @@ async def _ingest_errors_to_board(cwd: str, name: str, errors: list[dict]) -> tu
         return (added, updated)
 
 
-_REPORT_DEBOUNCE: "dict[str, float]" = {}   # hash → ts последнего in-process репорта
-_REPORT_DEBOUNCE_SEC = 10.0                  # одинаковый инцидент чаще раза в N сек не пишем
+_REPORT_DEBOUNCE: "dict[str, float]" = {}   # hash → ts of last in-process report
+_REPORT_DEBOUNCE_SEC = 10.0                  # same incident written at most once per N sec
 
 
 async def _report_incident(ctx: dict, exc_class: str, where: str, project_id: str = "claude-ops-bot") -> None:
-    """Spec-012 Ф1/Ф3: ПРЯМОЙ (in-process) репорт одного инцидента → карточка,
-    минуя лог-сканер и его задержку. Hash идентичен тому, что даёт `_parse_log_errors`
-    на строке `UNHANDLED exc_class=.. path=..` (source="log") → дедуп: кто первый
-    (этот путь или сканер), тот создаёт карточку; второй бампит seen. Резолвит проект
-    сам (вся работа — в фоне, чтобы не тормозить ответ). Глотает все исключения —
-    наблюдаемость не должна ронять запрос. Переиспользуется push-эндпоинтом (Ф3)."""
+    """Spec-012 Ph1/Ph3: DIRECT (in-process) report of one incident → card,
+    bypassing the log scanner and its delay. Hash is identical to what `_parse_log_errors`
+    produces for the line `UNHANDLED exc_class=.. path=..` (source="log") → dedup: whoever
+    is first (this path or the scanner) creates the card; the second bumps seen. Resolves
+    the project itself (all work in background so it doesn't slow the response).
+    Swallows all exceptions — observability must not drop a request.
+    Reused by the push endpoint (Ph3)."""
     try:
         h = _hash6(f"log|UNHANDLED|{_norm_msg(exc_class + ' ' + where)}")
-        # Дебаунс: эндпоинт, падающий на КАЖДОМ запросе, не должен устроить I/O-шторм
-        # записей в TASKS.md. Один и тот же hash пишем не чаще раза в N сек (карточка
-        # уже создана; редкие пропущенные seen++ доберёт фоновый сканер). До board-lock.
-        # Ключ включает project_id — иначе одинаковая ошибка в РАЗНЫХ проектах (path
-        # нормализуется в /PATH → общий hash) глушила бы друг друга кросс-проектно.
+        # Debounce: an endpoint failing on EVERY request must not trigger an I/O storm
+        # of writes to TASKS.md. Same hash written at most once per N sec (card already
+        # created; rare skipped seen++ will be caught by the background scanner). Before board-lock.
+        # Key includes project_id — otherwise the same error in DIFFERENT projects (path
+        # normalised to /PATH → shared hash) would suppress each other cross-project.
         dkey = f"{project_id}\x00{h}"
         now = time.time()
         last = _REPORT_DEBOUNCE.get(dkey)
         if last is not None and (now - last) < _REPORT_DEBOUNCE_SEC:
             return
         _REPORT_DEBOUNCE[dkey] = now
-        if len(_REPORT_DEBOUNCE) > 256:   # не растим словарь
+        if len(_REPORT_DEBOUNCE) > 256:   # cap dict growth
             for k in [k for k, v in _REPORT_DEBOUNCE.items() if now - v > _REPORT_DEBOUNCE_SEC]:
                 _REPORT_DEBOUNCE.pop(k, None)
         proj = _find_project_by_id(ctx, project_id)
@@ -1618,8 +1621,8 @@ async def _report_incident(ctx: dict, exc_class: str, where: str, project_id: st
 
 
 async def _scan_and_ingest(project: dict, ctx: dict | None = None) -> dict:
-    """Полный цикл: сканируем проект, заливаем в доску, опц. TG-нотификация.
-    Возвращает {ok, added, updated, scanned}."""
+    """Full cycle: scan project, ingest to board, optional TG notification.
+    Returns {ok, added, updated, scanned}."""
     try:
         errors = await _scan_project_errors(project)
     except Exception as e:
@@ -1630,7 +1633,7 @@ async def _scan_and_ingest(project: dict, ctx: dict | None = None) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e), "scanned": len(errors), "added": 0, "updated": 0}
 
-    # TG-нотификация про НОВЫЕ инциденты (не дедуп-updates)
+    # TG notification for NEW incidents (not dedup-updates)
     if added > 0 and ctx and project.get("notify_on_error"):
         try:
             ptb_app = ctx.get("ptb_app")
@@ -1639,7 +1642,7 @@ async def _scan_and_ingest(project: dict, ctx: dict | None = None) -> dict:
                 chat_s, thread_s = tg_thread_str.split(":", 1)
                 chat_id = int(chat_s)
                 thread_id = int(thread_s) if thread_s.isdigit() else None
-                msg = f"🚨 <b>{added}</b> новых инцидентов в <b>{project['name']}</b> — см. доску."
+                msg = f"🚨 <b>{added}</b> new incidents in <b>{project['name']}</b> — check the board."
                 await ptb_app.bot.send_message(
                     chat_id, msg, message_thread_id=thread_id, parse_mode="HTML",
                 )
@@ -1650,22 +1653,22 @@ async def _scan_and_ingest(project: dict, ctx: dict | None = None) -> dict:
 
 
 async def api_project_scan_errors(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/scan-errors — ручной запуск сканера для одного проекта."""
+    """POST /api/projects/{id}/scan-errors — manual scanner run for one project."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     if not project.get("log_cmd"):
         return web.json_response({
-            "ok": False, "error": "log_cmd не настроен в topics.json",
+            "ok": False, "error": "log_cmd not configured in topics.json",
         }, status=400)
     res = await _scan_and_ingest(project, ctx)
     return web.json_response(res)
 
 
 async def api_project_incidents(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/incidents — счётчик активных инцидентов (для бейджа в сайдбаре).
-    Активные = err-карточки в Failed/Review/InProgress (не в Done)."""
+    """GET /api/projects/{id}/incidents — count of active incidents (for sidebar badge).
+    Active = err-cards in Failed/Review/InProgress (not in Done)."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -1685,48 +1688,48 @@ async def api_project_incidents(req: web.Request) -> web.Response:
 
 
 async def api_project_incident(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/incident — Spec-012 Ф3: опциональный push инцидента.
+    """POST /api/projects/{id}/incident — Spec-012 Ph3: optional incident push.
 
-    Auth-exempt от cookie (auth_middleware пропускает этот маршрут), но делает
-    двойной opt-in: (1) глобальный флаг incident_push_enabled=True в settings.json,
-    (2) секрет CLAUDEOPS_INCIDENT_TOKEN в .claude-ops/secrets/ проекта.
+    Cookie-auth exempt (auth_middleware skips this route), but requires double opt-in:
+    (1) global flag incident_push_enabled=True in settings.json,
+    (2) secret CLAUDEOPS_INCIDENT_TOKEN in .claude-ops/secrets/ of the project.
 
-    Порядок проверок (fail-safe):
-    1. Глобальный флаг OFF → 404 (не раскрываем существование эндпоинта).
-    2. Проект не найден → 404.
-    3. Токен: секрет CLAUDEOPS_INCIDENT_TOKEN не задан (per-project opt-in) → 403.
-       Токен из X-Incident-Token / тела → constant-time сравнение; мимо → 403.
-    4. JSON: bad parse → 400; exc_class пустой → 400; санитизация (strip newlines, cap).
-    5. Rate-limit per-project (30/мин) → 429.
-    6. _report_incident fire-and-forget (дедуп = тот же hash, что у log-сканера).
-    7. {"ok": True} — токен/секрет НИКОГДА не в ответе.
+    Check order (fail-safe):
+    1. Global flag OFF → 404 (don't reveal that the endpoint exists).
+    2. Project not found → 404.
+    3. Token: secret CLAUDEOPS_INCIDENT_TOKEN not set (per-project opt-in) → 403.
+       Token from X-Incident-Token / body → constant-time compare; mismatch → 403.
+    4. JSON: bad parse → 400; exc_class empty → 400; sanitize (strip newlines, cap).
+    5. Rate-limit per-project (30/min) → 429.
+    6. _report_incident fire-and-forget (dedup = same hash as log-scanner).
+    7. {"ok": True} — token/secret NEVER in response.
     """
     ctx = req.app["ctx"]
     now = time.time()
 
-    # 1. Глобальный мастер-флаг (дешёвый, до любого I/O; выключено по умолчанию → 404)
+    # 1. Global master flag (cheap, before any I/O; off by default → 404)
     if _get_global_setting("incident_push_enabled", False) is not True:
         return web.json_response({"error": "not found"}, status=404)
 
-    # 1.5. Per-IP backstop — ДО резолва проекта и чтения секрета, чтобы unauth-флуд
-    # не упирался в диск (_secrets_read) на каждом запросе.
+    # 1.5. Per-IP backstop — BEFORE project resolution and secret read, so unauth flood
+    # doesn't hit disk (_secrets_read) on every request.
     ip = (req.headers.get("X-Forwarded-For", "").split(",")[0].strip() or req.remote or "?")
     ip_hist = [t for t in _incident_ip_history.get(ip, []) if now - t < _INCIDENT_PUSH_WINDOW]
     if len(ip_hist) >= _INCIDENT_IP_MAX:
         return web.json_response({"error": "too many requests"}, status=429)
     ip_hist.append(now)
     _incident_ip_history[ip] = ip_hist
-    if len(_incident_ip_history) > 4096:   # не растим словарь
+    if len(_incident_ip_history) > 4096:   # cap dict growth
         for k in [k for k, v in list(_incident_ip_history.items()) if not v or now - v[-1] > _INCIDENT_PUSH_WINDOW]:
             _incident_ip_history.pop(k, None)
 
-    # 2. Проект
+    # 2. Project
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
     if project is None:
         return web.json_response({"error": "not found"}, status=404)
 
-    # 3. Тело парсим ОДИН раз (битый JSON → 400, а не маскируется под 403 token-mismatch)
+    # 3. Parse body ONCE (bad JSON → 400, not masked as 403 token-mismatch)
     try:
         body = await req.json()
         if not isinstance(body, dict):
@@ -1734,17 +1737,17 @@ async def api_project_incident(req: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "bad request: invalid JSON"}, status=400)
 
-    # 4. Токен — per-project opt-in (заголовок предпочтительно, иначе из тела)
+    # 4. Token — per-project opt-in (header preferred, otherwise from body)
     expected_token = _secrets_read(project["cwd"]).get("CLAUDEOPS_INCIDENT_TOKEN") or ""
     if not expected_token:
-        return web.json_response({"error": "forbidden"}, status=403)   # push не включён для проекта
+        return web.json_response({"error": "forbidden"}, status=403)   # push not enabled for this project
     body_token = body.get("token", "")
     presented_token = req.headers.get("X-Incident-Token", "") or (body_token if isinstance(body_token, str) else "")
     if not _hmac.compare_digest(str(presented_token), str(expected_token)):
         return web.json_response({"error": "forbidden"}, status=403)
 
-    # 5. Санитизация: splitlines() ловит ВСЕ разделители строк (вкл. U+2028/U+2029/\x85) —
-    # иначе токен-холдер мог бы инжектить '## Section' / '- [ ] card' в TASKS.md.
+    # 5. Sanitize: splitlines() catches ALL line separators (incl. U+2028/U+2029/\x85) —
+    # otherwise a token-holder could inject '## Section' / '- [ ] card' into TASKS.md.
     def _sanitize(s, maxlen: int) -> str:
         return " ".join(str(s).splitlines()).strip()[:maxlen]
 
@@ -1760,26 +1763,26 @@ async def api_project_incident(req: web.Request) -> web.Response:
     history.append(now)
     _incident_push_history[pid] = history
 
-    # 7. Репорт — fire-and-forget. Дедуп по hash общий с лог-сканером (one error = one card).
+    # 7. Report — fire-and-forget. Dedup by hash shared with log-scanner (one error = one card).
     _spawn_bg(_report_incident(ctx, exc_class, where, project_id=pid))
 
-    # 8. Ответ — токен/секрет НИКОГДА не раскрывается
+    # 8. Response — token/secret NEVER revealed
     return web.json_response({"ok": True})
 
 
 async def api_project_self_heal_toggle(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/self-heal {enabled: bool} — включить/выключить самолечение.
+    """POST /api/projects/{id}/self-heal {enabled: bool} — enable/disable self-healing.
 
-    Сохраняет флаг self_heal в topics.json для ВСЕХ записей с тем же cwd.
-    Auth: требует сессионный cookie (стандартный middleware).
-    ПРЕДОХРАНИТЕЛЬ: не включает ни для одного проекта по умолчанию — только по явному запросу.
+    Saves the self_heal flag in topics.json for ALL entries with the same cwd.
+    Auth: requires session cookie (standard middleware).
+    SAFETY: not enabled for any project by default — only on explicit request.
     """
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     if project.get("is_free"):
-        return web.json_response({"error": "самолечение недоступно для свободных чатов"}, status=400)
+        return web.json_response({"error": "self-healing is not available for free chats"}, status=400)
     try:
         body = await req.json()
     except Exception:
@@ -1802,18 +1805,18 @@ async def api_project_self_heal_toggle(req: web.Request) -> web.Response:
 
 
 async def api_project_notify_toggle(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/notify-on-error {enabled: bool} — TG-уведомления о новых ошибках.
+    """POST /api/projects/{id}/notify-on-error {enabled: bool} — TG notifications on new errors.
 
-    При включении: сканер шлёт пинг в TG-топик проекта при детекте новых инцидентов
-    («упало»). Независимо от самолечения. Флаг notify_on_error в topics.json для всех
-    записей с тем же cwd. Auth: стандартный middleware.
+    When enabled: scanner sends a ping to the project's TG topic when new incidents are detected
+    ("crashed"). Independent of self-healing. Flag notify_on_error in topics.json for all
+    entries with the same cwd. Auth: standard middleware.
     """
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     if project.get("is_free"):
-        return web.json_response({"error": "уведомления недоступны для свободных чатов"}, status=400)
+        return web.json_response({"error": "notifications are not available for free chats"}, status=400)
     try:
         body = await req.json()
     except Exception:
@@ -1835,46 +1838,46 @@ async def api_project_notify_toggle(req: web.Request) -> web.Response:
     return web.json_response({"ok": True, "notify_on_error": enabled, "topics_updated": changed})
 
 
-# Фоновая задача: сканер всех проектов каждые SCAN_INTERVAL_SEC секунд.
-# Spec-012 Ф0: дефолт снижен до 60с (инкрементальный парс — дёшево; env override сохранён).
-_SCAN_INTERVAL_SEC = int(os.environ.get("ERROR_SCAN_INTERVAL", "60"))  # 1 мин (was 5 мин)
+# Background task: scans all projects every SCAN_INTERVAL_SEC seconds.
+# Spec-012 Ph0: default lowered to 60s (incremental parse — cheap; env override preserved).
+_SCAN_INTERVAL_SEC = int(os.environ.get("ERROR_SCAN_INTERVAL", "60"))  # 1 min (was 5 min)
 
-# ─────────────────────────── Scan state (Spec 012 Ф0) ────────────────────────
+# ─────────────────────────── Scan state (Spec 012 Ph0) ────────────────────────
 #
-# Высокая отметка воды: per-project fingerprint последней обработанной строки лога.
-# Файл: data/scan_state.json  {<cwd>: {"last_line": "<sha1>", "last_scan_ts": <float>}}
-# Отклонённые инциденты: data/dismissed_incidents.json  {<hash6>: <dismissed_ts>}
-# Оба файла живут в data/ (gitignored). Все хелперы глотают ВСЕ исключения — ни один
-# не может сломать сканер.
+# High-water mark: per-project fingerprint of the last processed log line.
+# File: data/scan_state.json  {<cwd>: {"last_line": "<sha1>", "last_scan_ts": <float>}}
+# Dismissed incidents: data/dismissed_incidents.json  {<hash6>: <dismissed_ts>}
+# Both files live in data/ (gitignored). All helpers swallow ALL exceptions — none
+# can break the scanner.
 
-_SCAN_STATE_PATH: "Path | None" = None      # задаётся в _scan_state_init(ctx)
-_DISMISSED_PATH: "Path | None" = None       # задаётся в _scan_state_init(ctx)
-_DISMISS_TTL = 24 * 3600                    # 24 ч — deleted/done карточка не воскресает
+_SCAN_STATE_PATH: "Path | None" = None      # set in _scan_state_init(ctx)
+_DISMISSED_PATH: "Path | None" = None       # set in _scan_state_init(ctx)
+_DISMISS_TTL = 24 * 3600                    # 24 h — deleted/done card is not resurrected
 
 # ─────────────────────────── Card Queue (sequential per-project) ───────────────────────────
-# data/card_queue.json: {session_key: [card_id, ...]} — FIFO очередь ожидающих карточек.
-# Одна карточка на проект за раз; остальные ждут в очереди.
+# data/card_queue.json: {session_key: [card_id, ...]} — FIFO queue of pending cards.
+# One card per project at a time; others wait in the queue.
 
-_QUEUE_PATH: "Path | None" = None           # задаётся в _scan_state_init(ctx)
+_QUEUE_PATH: "Path | None" = None           # set in _scan_state_init(ctx)
 
-_QUEUE_DRAIN_INTERVAL_SEC = 3               # интервал backstop-дренажного цикла
+_QUEUE_DRAIN_INTERVAL_SEC = 3               # backstop drain cycle interval
 
-# In-memory canonical очередь: {session_key: [card_id, ...]}. Единственный источник
-# истины в рамках процесса. Все мутации меняют _QUEUE СИНХРОННО + сразу флашат на диск.
-# Это устраняет RMW-гонку (read-modify-write через await): _drain_queue делает несколько
-# мутаций через await, и concurrent enqueue/remove не теряются — мутация атомарна в рамках
-# одного event-loop turn (нет await между чтением и записью _QUEUE).
+# In-memory canonical queue: {session_key: [card_id, ...]}. Single source of truth
+# within the process. All mutations change _QUEUE SYNCHRONOUSLY and immediately flush to disk.
+# This eliminates the RMW race (read-modify-write via await): _drain_queue makes several
+# mutations via await, and concurrent enqueue/remove are not lost — mutation is atomic within
+# one event-loop turn (no await between reading and writing _QUEUE).
 _QUEUE: "dict[str, list[str]]" = {}
 
 
 def _scan_state_init(ctx: dict) -> None:
-    """Вызывается из start() — задаёт пути к файлам состояния. Загружает очередь в _QUEUE."""
+    """Called from start() — sets paths to state files. Loads persisted queue into _QUEUE."""
     global _SCAN_STATE_PATH, _DISMISSED_PATH, _QUEUE_PATH
     _SCAN_STATE_PATH = ctx["DATA"] / "scan_state.json"
     _DISMISSED_PATH = ctx["DATA"] / "dismissed_incidents.json"
     _QUEUE_PATH = ctx["DATA"] / "card_queue.json"
-    # Загружаем persisted-очередь в in-memory canonical dict (restart-resume).
-    # Чистим _QUEUE сначала — изоляция тестов и повторного init.
+    # Load persisted queue into in-memory canonical dict (restart-resume).
+    # Clear _QUEUE first — test isolation and re-init safety.
     _QUEUE.clear()
     try:
         if _QUEUE_PATH is not None and _QUEUE_PATH.exists():
@@ -1888,8 +1891,8 @@ def _scan_state_init(ctx: dict) -> None:
 
 
 def _queue_flush() -> None:
-    """Флашит in-memory _QUEUE на диск. Глотает ВСЕ исключения.
-    _QUEUE_PATH is None → только память, не падаем (тесты без init)."""
+    """Flushes in-memory _QUEUE to disk. Swallows ALL exceptions.
+    _QUEUE_PATH is None → memory only, no crash (tests without init)."""
     try:
         if _QUEUE_PATH is None:
             return
@@ -1900,8 +1903,8 @@ def _queue_flush() -> None:
 
 
 def _queue_enqueue(session_key: str, card_id: str) -> bool:
-    """Добавляет card_id в хвост очереди (dedup). Возвращает True если реально добавил,
-    False если уже был (дедуп). Мутация _QUEUE синхронна → флаш."""
+    """Appends card_id to the tail of the queue (dedup). Returns True if actually added,
+    False if already present (dedup). _QUEUE mutation is synchronous → flush."""
     try:
         lst = _QUEUE.setdefault(session_key, [])
         if card_id in lst:
@@ -1914,7 +1917,7 @@ def _queue_enqueue(session_key: str, card_id: str) -> bool:
 
 
 def _queue_remove(session_key: str, card_id: str) -> None:
-    """Удаляет card_id из очереди для session_key (нет — тихо). Мутация синхронна → флаш."""
+    """Removes card_id from the queue for session_key (absent — silent). Mutation is synchronous → flush."""
     try:
         lst = _QUEUE.get(session_key)
         if lst is not None and card_id in lst:
@@ -1925,7 +1928,7 @@ def _queue_remove(session_key: str, card_id: str) -> None:
 
 
 def _queue_for(session_key: str) -> list:
-    """Возвращает список card_id в очереди для session_key (FIFO) — копия из _QUEUE."""
+    """Returns the list of card_ids in the queue for session_key (FIFO) — a copy from _QUEUE."""
     try:
         return list(_QUEUE.get(session_key, []))
     except Exception:
@@ -1933,7 +1936,7 @@ def _queue_for(session_key: str) -> list:
 
 
 def _scan_state_load() -> dict:
-    """Загружает {cwd: {last_line, last_scan_ts}}. Ошибки/отсутствие → {}."""
+    """Loads {cwd: {last_line, last_scan_ts}}. Errors/absent → {}."""
     try:
         if _SCAN_STATE_PATH is None or not _SCAN_STATE_PATH.exists():
             return {}
@@ -1944,7 +1947,7 @@ def _scan_state_load() -> dict:
 
 
 def _scan_state_save(state: dict) -> None:
-    """Сохраняет state на диск. Глотает ВСЕ исключения."""
+    """Saves state to disk. Swallows ALL exceptions."""
     try:
         if _SCAN_STATE_PATH is None:
             return
@@ -1955,7 +1958,7 @@ def _scan_state_save(state: dict) -> None:
 
 
 def _dismissed_load() -> dict:
-    """Загружает {hash6: dismissed_ts}. Ошибки/отсутствие → {}."""
+    """Loads {hash6: dismissed_ts}. Errors/absent → {}."""
     try:
         if _DISMISSED_PATH is None or not _DISMISSED_PATH.exists():
             return {}
@@ -1966,7 +1969,7 @@ def _dismissed_load() -> dict:
 
 
 def _dismissed_save(dismissed: dict) -> None:
-    """Сохраняет dismissed на диск. Глотает ВСЕ исключения."""
+    """Saves dismissed to disk. Swallows ALL exceptions."""
     try:
         if _DISMISSED_PATH is None:
             return
@@ -1977,12 +1980,12 @@ def _dismissed_save(dismissed: dict) -> None:
 
 
 def _dismissed_add(h: str) -> None:
-    """Записывает hash как dismissed(now). Прунит устаревшие (>TTL). Глотает ВСЕ исключения."""
+    """Records hash as dismissed(now). Prunes expired entries (>TTL). Swallows ALL exceptions."""
     try:
         now = time.time()
         dismissed = _dismissed_load()
         dismissed[h] = now
-        # Прунинг: удаляем записи старше TTL
+        # Pruning: remove entries older than TTL
         dismissed = {k: v for k, v in dismissed.items() if now - v < _DISMISS_TTL}
         _dismissed_save(dismissed)
     except Exception:
@@ -1990,7 +1993,7 @@ def _dismissed_add(h: str) -> None:
 
 
 def _dismissed_is_active(h: str, now: float) -> bool:
-    """True если hash был dismissed менее _DISMISS_TTL секунд назад."""
+    """True if hash was dismissed less than _DISMISS_TTL seconds ago."""
     try:
         dismissed = _dismissed_load()
         ts = dismissed.get(h)
@@ -2000,26 +2003,26 @@ def _dismissed_is_active(h: str, now: float) -> bool:
     except Exception:
         return False
 
-# ─────────────────────────── Самолечение (Spec 010) ───────────────────────────
+# ─────────────────────────── Self-healing (Spec 010) ───────────────────────────
 #
-# ПРЕДОХРАНИТЕЛИ (незыблемо):
-# 1. OFF по умолчанию — флаг self_heal в topics.json или SELF_HEAL_ENABLED env.
-# 2. НИКОГДА не auto-apply — агент доходит только до Review; Merge — руками Игоря.
-# 3. Лимит 1 попытка/инцидент — heal_attempted=true пишется ДО запуска.
-# 4. Лимит конкурентности — макс 2 авто-починки одновременно.
-# 5. Только git+clean worktree — не-git/dirty проекты пропускаются.
-# 6. Всё видно — Timeline kind:"self_heal" + TG-пинг Игорю.
+# SAFETY GUARDS (non-negotiable):
+# 1. OFF by default — self_heal flag in topics.json or SELF_HEAL_ENABLED env.
+# 2. NEVER auto-apply — agent goes only to Review; Merge is always manual.
+# 3. Limit 1 attempt/incident — heal_attempted=true written BEFORE launch.
+# 4. Concurrency limit — max 2 auto-fixes at once.
+# 5. git+clean worktree only — non-git/dirty projects are skipped.
+# 6. Full visibility — Timeline kind:"self_heal" + TG ping to operator.
 
 _SELF_HEAL_MAX_CONCURRENT = int(os.environ.get("SELF_HEAL_MAX_CONCURRENT", "2"))
-_self_heal_active_count = 0   # глобальный счётчик активных починок
+_self_heal_active_count = 0   # global counter of active fixes
 
-# ── Ф2: Safety-layer — дебаунс / benign-фильтр / рейт-лимит ──────────────────
-# Эти константы ADD новые предохранители ПОВЕРХ spec-010 gates, не заменяют их.
+# ── Ph2: Safety-layer — debounce / benign-filter / rate-limit ──────────────────
+# These constants ADD new guards ON TOP OF spec-010 gates; they don't replace them.
 
-# B. Дебаунс: heal только если seen >= N (инцидент повторился → не транзиент)
+# B. Debounce: heal only if seen >= N (incident repeated → not transient)
 _HEAL_MIN_SEEN = int(os.environ.get("SELF_HEAL_MIN_SEEN", "2"))
 
-# C. Benign-классы: эти исключения НИКОГДА не лечим (benign-disconnect + transient)
+# C. Benign classes: these exceptions are NEVER healed (benign-disconnect + transient)
 _HEAL_BENIGN_DEFAULT: "tuple[str, ...]" = (
     "ConnectionResetError",
     "ClientConnectionResetError",
@@ -2028,19 +2031,19 @@ _HEAL_BENIGN_DEFAULT: "tuple[str, ...]" = (
     "TimeoutError",
 )
 
-# D. Per-project rate-limit: не более N запусков за окно (сек)
+# D. Per-project rate-limit: at most N launches per window (sec)
 _HEAL_MAX_PER_WINDOW = int(os.environ.get("SELF_HEAL_MAX_PER_WINDOW", "3"))
 _HEAL_WINDOW_SEC = int(os.environ.get("SELF_HEAL_WINDOW_SEC", "3600"))
 
-# D. История heal-запусков: {session_key → [timestamp, ...]}
+# D. Heal-launch history: {session_key → [timestamp, ...]}
 _heal_history: "dict[str, list[float]]" = {}
 
 
 def _heal_rate_ok(key: str, now: float) -> bool:
-    """Возвращает True, если heal-запуск разрешён (не превышен лимит окна).
-    Побочный эффект: очищает устаревшие записи из _heal_history[key]."""
+    """Returns True if a heal launch is allowed (window limit not exceeded).
+    Side effect: prunes expired entries from _heal_history[key]."""
     history = _heal_history.get(key, [])
-    # Убираем записи старше окна
+    # Remove entries older than the window
     cutoff = now - _HEAL_WINDOW_SEC
     history = [t for t in history if t > cutoff]
     _heal_history[key] = history
@@ -2048,7 +2051,7 @@ def _heal_rate_ok(key: str, now: float) -> bool:
 
 
 def _heal_record(key: str, now: float) -> None:
-    """Записывает timestamp heal-запуска; очищает устаревшие."""
+    """Records a heal-launch timestamp; prunes expired entries."""
     history = _heal_history.get(key, [])
     cutoff = now - _HEAL_WINDOW_SEC
     history = [t for t in history if t > cutoff]
@@ -2065,30 +2068,30 @@ def _heal_decision(
     rate_ok: bool,
     now: float,
 ) -> "tuple[str, str]":
-    """Чистая функция: принимает решение по одной карточке-инциденту.
+    """Pure function: makes a decision on one incident card.
 
-    Возвращает (action, reason) где action ∈ {'heal', 'skip', 'stop', 'benign'}.
-    - 'heal'   → запустить _self_heal_card; вызывающий должен вызвать _heal_record.
-    - 'skip'   → пропустить карточку, продолжить перебор.
-    - 'benign' → пометить heal_skip=benign, пропустить.
-    - 'stop'   → прервать перебор карточек (ресурсный лимит достигнут).
+    Returns (action, reason) where action ∈ {'heal', 'skip', 'stop', 'benign'}.
+    - 'heal'   → launch _self_heal_card; caller must call _heal_record.
+    - 'skip'   → skip the card, continue iterating.
+    - 'benign' → mark heal_skip=benign, skip.
+    - 'stop'   → stop iterating cards (resource limit reached).
 
-    Порядок проверок: cheapest/safest first (spec-012 Ф2, раздел E).
-    Не изменяет внешнего состояния — только чтение."""
+    Check order: cheapest/safest first (spec-012 Ph2, section E).
+    Does not mutate external state — read-only."""
     if not _is_incident_card(card):
         return "skip", "not_incident"
 
     meta = _parse_incident_desc(card.get("description"))
 
-    # Предохранитель №3 (spec-010): уже пытались починить
+    # Safety guard #3 (spec-010): already attempted a fix
     if meta.get("heal_attempted") == "true":
         return "skip", "heal_attempted"
 
-    # C. benign/heal_skip: уже помечен как benign
+    # C. benign/heal_skip: already marked as benign
     if meta.get("heal_skip"):
         return "skip", f"heal_skip:{meta['heal_skip']}"
 
-    # C. Benign-фильтр: проверяем title + excerpt на benign-классы
+    # C. Benign filter: check title + excerpt against benign classes
     ignore_list: "tuple[str, ...]" = _HEAL_BENIGN_DEFAULT
     extra = proj.get("heal_ignore")
     if extra and isinstance(extra, list):
@@ -2096,12 +2099,12 @@ def _heal_decision(
 
     card_text = card.get("text", "")
     excerpt = meta.get("excerpt", "")
-    combined = (card_text + " " + excerpt).lower()   # case-insensitive: "connectionreseterror" тоже ловим
+    combined = (card_text + " " + excerpt).lower()   # case-insensitive: catches "connectionreseterror" too
     for substr in ignore_list:
         if substr.lower() in combined:
             return "benign", substr
 
-    # B. Дебаунс: seen < MIN_SEEN → слишком молодой. Битый seen → трактуем как молодой (safe).
+    # B. Debounce: seen < MIN_SEEN → too young. Corrupted seen → treat as young (safe).
     try:
         seen = int(meta.get("seen", "1"))
     except (ValueError, TypeError):
@@ -2109,54 +2112,54 @@ def _heal_decision(
     if seen < _HEAL_MIN_SEEN:
         return "skip", f"too_young:seen={seen}"
 
-    # Предохранитель №4 (spec-010): лимит конкурентности
+    # Safety guard #4 (spec-010): concurrency limit
     if active_count >= max_conc:
         return "stop", "concurrency_limit"
 
-    # Предохранитель №2 (spec-010): running lock
+    # Safety guard #2 (spec-010): running lock
     if running_busy:
         return "stop", "project_busy"
 
-    # D. Рейт-лимит
+    # D. Rate-limit
     if not rate_ok:
         return "stop", "rate_limit"
 
     return "heal", "ok"
 
 
-# ─────────────────────── глобальные настройки (data/settings.json) ───────────────────────
+# ─────────────────────── global settings (data/settings.json) ───────────────────────
 #
-# Глобальные knob'ы кокпита, переопределяют env-дефолты в рантайме (hot-reload по mtime).
-# Per-project настройки живут в topics.json (model/self_heal/notify_on_error/log_cmd/
-# test_cmd/git_enabled). Глобальные — отдельный файл, т.к. не привязаны к проекту.
-# Инициализация: start() вызывает _settings_init(ctx).
+# Global cockpit knobs, override env defaults at runtime (hot-reload by mtime).
+# Per-project settings live in topics.json (model/self_heal/notify_on_error/log_cmd/
+# test_cmd/git_enabled). Globals are in a separate file as they are not project-bound.
+# Init: start() calls _settings_init(ctx).
 
 _SETTINGS_PATH: "Path | None" = None
 _SETTINGS_CACHE: dict = {}
 _SETTINGS_MTIME: float = 0.0
 
-# Ключ → (тип, min, max) для валидации POST. None-границы = без проверки диапазона.
+# Key → (type, min, max) for POST validation. None bounds = no range check.
 _GLOBAL_SETTINGS_SPEC = {
-    "self_heal_enabled": ("bool", None, None),       # master-kill: False → самолечение выключено везде
+    "self_heal_enabled": ("bool", None, None),       # master-kill: False → self-healing disabled everywhere
     "self_heal_max_concurrent": ("int", 1, 10),
     "scan_interval_sec": ("int", 30, 3600),
-    "default_model": ("model", None, None),          # "" → дефолт ctx
+    "default_model": ("model", None, None),          # "" → ctx default
     "watchdog_stall_sec": ("int", 30, 7200),
     "watchdog_max_sec": ("int", 60, 14400),
-    # Spec-012 Ф3: глобальный мастер-флаг push-эндпоинта. OFF по умолчанию —
-    # оператор должен явно включить. Без этого флага POST /incident → 404.
+    # Spec-012 Ph3: global master flag for push endpoint. OFF by default —
+    # operator must explicitly enable. Without this flag POST /incident → 404.
     "incident_push_enabled": ("bool", None, None),
 }
 
 
 def _settings_init(ctx: dict) -> None:
-    """Вызывается из start() — задаёт путь к data/settings.json."""
+    """Called from start() — sets path to data/settings.json."""
     global _SETTINGS_PATH
     _SETTINGS_PATH = ctx["DATA"] / "settings.json"
 
 
 def _load_global_settings() -> dict:
-    """Читает settings.json с mtime-гейтом. Битый файл → прошлый кэш."""
+    """Reads settings.json with mtime gate. Corrupted file → previous cache."""
     global _SETTINGS_CACHE, _SETTINGS_MTIME
     if _SETTINGS_PATH is None:
         return {}
@@ -2174,19 +2177,19 @@ def _load_global_settings() -> dict:
                 _SETTINGS_CACHE = data
                 _SETTINGS_MTIME = mtime
         except Exception:
-            pass  # битый/частичный файл при гонке — оставляем прошлый кэш
+            pass  # corrupted/partial file during race — keep previous cache
     return _SETTINGS_CACHE if isinstance(_SETTINGS_CACHE, dict) else {}
 
 
 def _get_global_setting(key: str, fallback=None):
-    """Эффективное значение глобальной настройки: из settings.json или fallback.
-    Хранимое None/отсутствие → fallback."""
+    """Effective value of a global setting: from settings.json or fallback.
+    Stored None/absent → fallback."""
     val = _load_global_settings().get(key)
     return fallback if val is None else val
 
 
 def _save_global_settings(data: dict) -> None:
-    """Атомарно пишет settings.json и форсит перечитывание кэша."""
+    """Atomically writes settings.json and forces cache re-read."""
     global _SETTINGS_MTIME
     if _SETTINGS_PATH is None:
         return
@@ -2197,32 +2200,32 @@ def _save_global_settings(data: dict) -> None:
     _SETTINGS_MTIME = 0.0
 
 
-# ── UI-state sync (раскладка кокпита между устройствами) ─────────────────────
-# Серверный стор раскладки UI (открытые вкладки, активная, порядок сайдбара,
-# split-view) — чтобы она следовала за пользователем между устройствами, а не
-# жила только в localStorage конкретного браузера. Хранится под ключом-
-# неймспейсом; сейчас single-tenant ("default"). ЕДИНСТВЕННАЯ точка смены на
-# user_id при мульти-юзере — _ui_state_ns() (см. spec-013-multi-user).
-# Семантика: сервер = источник истины, фронт дебаунсит запись, last-write-wins
-# (для одного человека на двух устройствах конфликты несущественны).
+# ── UI-state sync (cockpit layout across devices) ─────────────────────────────
+# Server-side store for the UI layout (open tabs, active tab, sidebar order,
+# split-view) — so it follows the user across devices instead of living only
+# in the local browser's localStorage. Stored under a namespace key;
+# currently single-tenant ("default"). The ONLY place to swap to user_id
+# for multi-user is _ui_state_ns() (see spec-013-multi-user).
+# Semantics: server = source of truth, frontend debounces writes, last-write-wins
+# (for one person on two devices conflicts are insignificant).
 _UI_STATE_PATH: "Path | None" = None
-_UI_STATE_MAX_BYTES = 64 * 1024   # раскладка крошечная; защита от раздувания файла
+_UI_STATE_MAX_BYTES = 64 * 1024   # layout is tiny; protects against file bloat
 
 
 def _ui_state_init(ctx: dict) -> None:
-    """Вызывается из start() — задаёт путь к data/ui_state.json."""
+    """Called from start() — sets path to data/ui_state.json."""
     global _UI_STATE_PATH
     _UI_STATE_PATH = ctx["DATA"] / "ui_state.json"
 
 
 def _ui_state_ns(req: web.Request) -> str:
-    """Неймспейс хранения UI-раскладки. Single-tenant → "default".
-    ЕДИНСТВЕННАЯ точка смены на user_id при мульти-юзере (см. spec-013)."""
+    """Namespace for UI layout storage. Single-tenant → "default".
+    The ONLY place to change to user_id for multi-user (see spec-013)."""
     return "default"
 
 
 def _ui_state_load_all() -> dict:
-    """Читает весь ui_state.json ({ns: state}). Битый/отсутствует → {}."""
+    """Reads the entire ui_state.json ({ns: state}). Corrupted/absent → {}."""
     if _UI_STATE_PATH is None:
         return {}
     try:
@@ -2231,11 +2234,11 @@ def _ui_state_load_all() -> dict:
     except FileNotFoundError:
         return {}
     except Exception:
-        return {}  # битый/частичный файл при гонке — не роняем кокпит
+        return {}  # corrupted/partial file during race — don't crash the cockpit
 
 
 def _ui_state_save_all(data: dict) -> None:
-    """Атомарно пишет ui_state.json (tmp+replace)."""
+    """Atomically writes ui_state.json (tmp+replace)."""
     if _UI_STATE_PATH is None:
         return
     _UI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2245,15 +2248,15 @@ def _ui_state_save_all(data: dict) -> None:
 
 
 async def api_ui_state_get(req: web.Request) -> web.Response:
-    """GET /api/ui-state → {state: {...}} — раскладка кокпита для этого юзера."""
+    """GET /api/ui-state → {state: {...}} — cockpit layout for this user."""
     ns = _ui_state_ns(req)
     state = _ui_state_load_all().get(ns)
     return web.json_response({"state": state if isinstance(state, dict) else {}})
 
 
 async def api_ui_state_put(req: web.Request) -> web.Response:
-    """PUT /api/ui-state {state: {...}} — сохранить раскладку. Тело — непрозрачный
-    JSON-объект (фронт сам решает набор ключей); сервер только хранит per-ns."""
+    """PUT /api/ui-state {state: {...}} — save layout. Body is an opaque
+    JSON object (frontend decides the keys); server stores per namespace."""
     try:
         body = await req.json()
     except Exception:
@@ -2271,67 +2274,67 @@ async def api_ui_state_put(req: web.Request) -> web.Response:
 
 
 def _effective_default_model(ctx: dict) -> str:
-    """Дефолт-модель для новых проектов: глобальная настройка или ctx['DEFAULT_MODEL']."""
+    """Default model for new projects: global setting or ctx['DEFAULT_MODEL']."""
     return _get_global_setting("default_model", None) or ctx.get("DEFAULT_MODEL", "sonnet")
 
 
 def _git_enabled(project: dict) -> bool:
-    """git_enabled per-project (topics.json). По умолчанию True (git включён).
-    False → кокпит НЕ использует git: прогон карточек legacy, git-sync 409,
-    health не флажит отсутствие .git. Существующий .git физически не трогаем."""
+    """git_enabled per-project (topics.json). Default True (git enabled).
+    False → cockpit does NOT use git: card runs are legacy, git-sync returns 409,
+    health check does not flag missing .git. Existing .git is not physically touched."""
     return project.get("git_enabled", True) is not False
 
 
 def _self_heal_enabled(project: dict) -> bool:
-    """Флаг самолечения: per-project self_heal ИЛИ глобальный env SELF_HEAL_ENABLED.
-    Глобальный master-kill (settings.json self_heal_enabled=False) перекрывает всё.
-    По умолчанию ВСЕГДА False — предохранитель №1."""
+    """Self-heal flag: per-project self_heal OR global env SELF_HEAL_ENABLED.
+    Global master-kill (settings.json self_heal_enabled=False) overrides everything.
+    Default is ALWAYS False — safety guard #1."""
     if _get_global_setting("self_heal_enabled", True) is False:
-        return False  # глобальный master-kill
+        return False  # global master-kill
     if project.get("self_heal"):
         return True
     return os.environ.get("SELF_HEAL_ENABLED", "").lower() in ("1", "true", "yes")
 
 
-# ─────────────────────── API: настройки (глобальные + per-project) ───────────────────────
+# ─────────────────────── API: settings (global + per-project) ───────────────────────
 
 _PROJECT_SETTING_FIELDS = ("git_enabled", "model", "self_heal", "notify_on_error", "log_cmd", "test_cmd")
 
 
 def _validate_global_settings(partial: dict) -> "tuple[dict, str | None]":
-    """Валидирует частичный апдейт по _GLOBAL_SETTINGS_SPEC.
-    None/"" → сброс ключа к дефолту. Возвращает (clean, None) или ({}, ошибка)."""
+    """Validates a partial update against _GLOBAL_SETTINGS_SPEC.
+    None/"" → reset key to default. Returns (clean, None) or ({}, error)."""
     clean: dict = {}
     for key, val in partial.items():
         spec = _GLOBAL_SETTINGS_SPEC.get(key)
         if spec is None:
-            return {}, f"неизвестный ключ: {key}"
+            return {}, f"unknown key: {key}"
         typ, lo, hi = spec
         if val is None or val == "":
             clean[key] = None
             continue
         if typ == "bool":
             if not isinstance(val, bool):
-                return {}, f"{key}: ожидался bool"
+                return {}, f"{key}: expected bool"
             clean[key] = val
         elif typ == "int":
             try:
                 iv = int(val)
             except (TypeError, ValueError):
-                return {}, f"{key}: ожидалось целое"
+                return {}, f"{key}: expected integer"
             if (lo is not None and iv < lo) or (hi is not None and iv > hi):
-                return {}, f"{key}: вне диапазона [{lo}, {hi}]"
+                return {}, f"{key}: out of range [{lo}, {hi}]"
             clean[key] = iv
         elif typ == "model":
             sv = str(val).strip().lower()
             if sv not in _ALLOWED_MODELS:
-                return {}, f"{key}: модель не из {sorted(_ALLOWED_MODELS)}"
+                return {}, f"{key}: model not in {sorted(_ALLOWED_MODELS)}"
             clean[key] = sv
     return clean, None
 
 
 async def api_settings_get(req: web.Request) -> web.Response:
-    """GET /api/settings — глобальные настройки: сохранённые + эффективные значения + спека."""
+    """GET /api/settings — global settings: stored + effective values + spec."""
     ctx = req.app["ctx"]
     stored = dict(_load_global_settings())
     effective = {
@@ -2347,20 +2350,20 @@ async def api_settings_get(req: web.Request) -> web.Response:
 
 
 async def api_settings_post(req: web.Request) -> web.Response:
-    """POST /api/settings — частичный апдейт глобальных настроек (валидируется)."""
+    """POST /api/settings — partial update of global settings (validated)."""
     try:
         body = await req.json()
     except Exception:
         return web.json_response({"error": "bad request"}, status=400)
     if not isinstance(body, dict):
-        return web.json_response({"error": "ожидался объект"}, status=400)
+        return web.json_response({"error": "expected object"}, status=400)
     clean, err = _validate_global_settings(body)
     if err:
         return web.json_response({"error": err}, status=400)
     current = dict(_load_global_settings())
     for k, v in clean.items():
         if v is None:
-            current.pop(k, None)   # сброс к дефолту
+            current.pop(k, None)   # reset to default
         else:
             current[k] = v
     _save_global_settings(current)
@@ -2379,7 +2382,7 @@ def _project_settings_view(project: dict) -> dict:
 
 
 async def api_project_settings_get(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/settings — per-project настройки."""
+    """GET /api/projects/{id}/settings — per-project settings."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -2388,10 +2391,10 @@ async def api_project_settings_get(req: web.Request) -> web.Response:
 
 
 async def api_project_settings_post(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/settings — частичный апдейт per-project настроек в topics.json.
+    """POST /api/projects/{id}/settings — partial update of per-project settings in topics.json.
 
-    Пишет во ВСЕ записи topics с этим cwd (как rename). git_enabled и пр. подхватываются
-    hot-reload'ом. Возвращает обновлённый срез настроек."""
+    Writes to ALL topics entries with this cwd (like rename). git_enabled and others are
+    picked up by hot-reload. Returns the updated settings slice."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -2401,22 +2404,22 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "bad request"}, status=400)
     if not isinstance(body, dict):
-        return web.json_response({"error": "ожидался объект"}, status=400)
+        return web.json_response({"error": "expected object"}, status=400)
 
     updates: dict = {}
     for k, v in body.items():
         if k not in _PROJECT_SETTING_FIELDS:
-            return web.json_response({"error": f"неизвестный ключ: {k}"}, status=400)
+            return web.json_response({"error": f"unknown key: {k}"}, status=400)
         if k in ("git_enabled", "self_heal", "notify_on_error"):
             if not isinstance(v, bool):
-                return web.json_response({"error": f"{k}: ожидался bool"}, status=400)
+                return web.json_response({"error": f"{k}: expected bool"}, status=400)
             updates[k] = v
         elif k == "model":
             sv = str(v).strip().lower()
             if sv not in _ALLOWED_MODELS:
-                return web.json_response({"error": f"model: не из {sorted(_ALLOWED_MODELS)}"}, status=400)
+                return web.json_response({"error": f"model: not in {sorted(_ALLOWED_MODELS)}"}, status=400)
             updates[k] = sv
-        else:  # log_cmd / test_cmd — строки; пусто → сброс ключа
+        else:  # log_cmd / test_cmd — strings; empty → reset key
             updates[k] = str(v) if v else None
 
     cwd = project["cwd"]
@@ -2438,7 +2441,7 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
 
 
 async def _send_tg_ping(ctx: dict, project: dict, msg: str) -> None:
-    """Отправляет HTML-сообщение Игорю в TG-топик проекта. Некритичен."""
+    """Sends an HTML message to the project's TG topic. Non-critical."""
     try:
         ptb_app = ctx.get("ptb_app")
         tg_thread_str = project.get("tg_thread", "")
@@ -2450,12 +2453,12 @@ async def _send_tg_ping(ctx: dict, project: dict, msg: str) -> None:
                 chat_id, msg, message_thread_id=thread_id, parse_mode="HTML",
             )
     except Exception as e:
-        print(f"[self_heal] TG-пинг не удался: {e}")
+        print(f"[self_heal] TG ping failed: {e}")
 
 
 async def _sync_forum_topic_name(ctx: dict, session_key: str, name: str) -> None:
-    """editForumTopic: синкает имя TG-топика с именем проекта (после rename).
-    Некритичен. Для синтетических ключей (топик не существует) — тихо игнорим."""
+    """editForumTopic: syncs the TG topic name with the project name (after rename).
+    Non-critical. For synthetic keys (topic doesn't exist) — silently ignored."""
     try:
         ptb_app = ctx.get("ptb_app")
         if not (ptb_app and session_key and ":" in str(session_key)):
@@ -2467,12 +2470,12 @@ async def _sync_forum_topic_name(ctx: dict, session_key: str, name: str) -> None
             chat_id=int(chat_s), message_thread_id=int(thread_s), name=name,
         )
     except Exception as e:
-        print(f"[rename] edit_forum_topic не удался (возможно синтетический ключ): {e}")
+        print(f"[rename] edit_forum_topic failed (possibly synthetic key): {e}")
 
 
 async def _notify_new_incidents(ctx: dict, project: dict, n_added: int) -> None:
-    """TG-пинг «упало»: при детекте новых инцидентов, если включён notify_on_error.
-    Перечисляет до 3 инцидентов из Failed. Некритичен."""
+    """TG ping "crashed": on new incident detection, if notify_on_error is enabled.
+    Lists up to 3 incidents from Failed. Non-critical."""
     try:
         _, _, cols = _load_board(project["cwd"])
     except Exception:
@@ -2481,21 +2484,21 @@ async def _notify_new_incidents(ctx: dict, project: dict, n_added: int) -> None:
     if not texts:
         return
     head = "\n".join(f"• {t[:100]}" for t in texts[:3])
-    more = f"\n…и ещё {len(texts) - 3}" if len(texts) > 3 else ""
+    more = f"\n…and {len(texts) - 3} more" if len(texts) > 3 else ""
     msg = (
-        f"❌ <b>{project['name']}</b>: {n_added} новых ошибок\n{head}{more}\n"
-        f"<i>Таб «Доска» → Failed.</i>"
+        f"❌ <b>{project['name']}</b>: {n_added} new errors\n{head}{more}\n"
+        f"<i>Board tab → Failed.</i>"
     )
     await _send_tg_ping(ctx, project, msg)
 
 
 async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None:
-    """Петля починки одного инцидента. Запускается как asyncio.create_task.
+    """Fix loop for one incident. Launched as asyncio.create_task.
 
-    ПРЕДОХРАНИТЕЛИ:
-    - heal_attempted ставится ДО запуска (предотв. зацикливание при краше).
-    - Агент доходит ТОЛЬКО до Review. НИКОГДА не auto-apply.
-    - Счётчик активных починок управляется снаружи (в scanner loop).
+    SAFETY GUARDS:
+    - heal_attempted is set BEFORE launch (prevents looping on crash).
+    - Agent goes ONLY to Review. NEVER auto-apply.
+    - Active fix counter is managed externally (in scanner loop).
     """
     global _self_heal_active_count
     cwd = project["cwd"]
@@ -2505,12 +2508,12 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
     card_text = incident_card["text"]
     card_desc = incident_card.get("description", "")
 
-    # ПРЕДОХРАНИТЕЛЬ №3: пометить heal_attempted ДО запуска (атомарно под board-lock)
+    # SAFETY GUARD #3: mark heal_attempted BEFORE launch (atomically under board-lock)
     lock = _get_board_lock(cwd)
     try:
         async with lock:
             _, preamble, cols = _load_board(cwd)
-            # Ищем карточку в любой колонке
+            # Search for the card in any column
             found_card: dict | None = None
             for col_cards in cols.values():
                 for c in col_cards:
@@ -2520,7 +2523,7 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
                 if found_card:
                     break
             if found_card is None:
-                # Карточка исчезла (удалена пользователем?) — пропускаем
+                # Card disappeared (deleted by user?) — skip
                 _self_heal_active_count = max(0, _self_heal_active_count - 1)
                 return
             meta = _parse_incident_desc(found_card.get("description"))
@@ -2528,11 +2531,11 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
             found_card["description"] = _format_incident_desc(meta)
             _save_board(cwd, name, preamble, cols)
     except Exception as e:
-        print(f"[self_heal] ошибка при пометке heal_attempted для {card_id}: {e}")
+        print(f"[self_heal] error marking heal_attempted for {card_id}: {e}")
         _self_heal_active_count = max(0, _self_heal_active_count - 1)
         return
 
-    # Timeline: старт
+    # Timeline: start
     _bus_publish(session_key, {
         "kind": "self_heal",
         "phase": "start",
@@ -2540,37 +2543,37 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
         "project": name,
     })
 
-    # TG-пинг: начинаем починку
+    # TG ping: starting the fix
     await _send_tg_ping(
         ctx, project,
-        f"🔧 <b>Самолечение</b>: начинаю починку инцидента <code>{card_id}</code> "
-        f"в <b>{name}</b>.\n<i>{card_text[:120]}</i>",
+        f"🔧 <b>Self-healing</b>: starting fix for incident <code>{card_id}</code> "
+        f"in <b>{name}</b>.\n<i>{card_text[:120]}</i>",
     )
 
-    # Формируем промпт чинильщику
+    # Build prompt for the fixer agent
     excerpt_part = ""
     if card_desc:
         meta = _parse_incident_desc(card_desc)
         exc = meta.get("excerpt", "")
         if exc:
-            excerpt_part = f"\n\nТрейс/детали:\n{exc[:1000]}"
+            excerpt_part = f"\n\nTrace/details:\n{exc[:1000]}"
     heal_prompt = (
-        f"На проекте инцидент: {card_text}.{excerpt_part}\n\n"
-        f"Найди причину и почини. Не трогай несвязанный код. "
-        f"После правки тесты должны проходить."
+        f"The project has an incident: {card_text}.{excerpt_part}\n\n"
+        f"Find the root cause and fix it. Do not touch unrelated code. "
+        f"After the fix all tests must pass."
     )
 
-    # Создаём виртуальную карточку для _run_card
+    # Create a virtual card for _run_card
     heal_card: dict = {
         "id": card_id,
         "text": heal_prompt,
         "description": None,
     }
 
-    # ПРЕДОХРАНИТЕЛЬ №5: проверяем git+clean (worktree-режим), уважая git_enabled
+    # SAFETY GUARD #5: check git+clean (worktree mode), respecting git_enabled
     run_mode = await _card_run_mode(cwd, git_enabled=_git_enabled(project))
     if run_mode != "worktree":
-        print(f"[self_heal] {name}/{card_id}: не-git или dirty — пропускаем")
+        print(f"[self_heal] {name}/{card_id}: not-git or dirty — skipping")
         _bus_publish(session_key, {
             "kind": "self_heal", "phase": "skipped",
             "reason": "not_git_or_dirty", "card_id": card_id, "project": name,
@@ -2578,17 +2581,17 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
         _self_heal_active_count = max(0, _self_heal_active_count - 1)
         return
 
-    # Настраиваем worktree (C2-изоляция)
+    # Set up worktree (C2-isolation)
     wt_info = await _card_worktree_setup(cwd, card_id)
     if wt_info is None:
-        print(f"[self_heal] {name}/{card_id}: worktree setup failed — пропускаем")
+        print(f"[self_heal] {name}/{card_id}: worktree setup failed — skipping")
         _self_heal_active_count = max(0, _self_heal_active_count - 1)
         return
 
-    # Захватываем running-слот СИНХРОННО (до первого await внутри _run_card)
-    # Это имитирует что C2 занят — предотвращает двойные прогоны из TG
+    # Acquire running slot SYNCHRONOUSLY (before the first await inside _run_card)
+    # Signals that C2 is busy — prevents double runs from TG
     if ctx["running"].get(session_key) is not None:
-        print(f"[self_heal] {name}/{card_id}: проект занят — пропускаем")
+        print(f"[self_heal] {name}/{card_id}: project busy — skipping")
         _bus_publish(session_key, {
             "kind": "self_heal", "phase": "skipped",
             "reason": "project_busy", "card_id": card_id, "project": name,
@@ -2597,7 +2600,7 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
         return
     ctx["running"][session_key] = True
 
-    # Перемещаем инцидент в in_progress под board-lock (как обычный C2-запуск)
+    # Move incident to in_progress under board-lock (like a normal C2 launch)
     try:
         async with lock:
             _, preamble, cols = _load_board(cwd)
@@ -2607,26 +2610,26 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
             cols["in_progress"].append(moved)
             _save_board(cwd, name, preamble, cols)
     except Exception as e:
-        print(f"[self_heal] ошибка при перемещении в in_progress: {e}")
+        print(f"[self_heal] error moving to in_progress: {e}")
         ctx["running"].pop(session_key, None)
         _self_heal_active_count = max(0, _self_heal_active_count - 1)
         return
 
-    # Запускаем агента через существующий _run_card (ПЕРЕИСПОЛЬЗУЕМ, не дублируем SDK-цикл)
-    # _run_card снимет running-слот в finally, перенесёт карточку в Review/Failed
-    webapp_app_stub = None  # webapp_app используется только для ctx (не нужен здесь)
+    # Launch the agent via the existing _run_card (REUSE, do not duplicate the SDK cycle)
+    # _run_card releases the running slot in finally, moves the card to Review/Failed
+    webapp_app_stub = None  # webapp_app is only used for ctx (not needed here)
     try:
         await _run_card(
             ctx, webapp_app_stub, project, heal_card, session_key,
             run_mode="worktree", wt_info=wt_info,
         )
     except Exception as e:
-        print(f"[self_heal] _run_card упал: {e}")
-        # running-слот уже снят в _run_card.finally
+        print(f"[self_heal] _run_card raised: {e}")
+        # running slot already released in _run_card.finally
         _self_heal_active_count = max(0, _self_heal_active_count - 1)
         return
 
-    # Timeline: агент завершил прогон
+    # Timeline: agent finished run
     _bus_publish(session_key, {
         "kind": "self_heal",
         "phase": "fixed",
@@ -2634,27 +2637,27 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
         "project": name,
     })
 
-    # Прогоняем quality gate в worktree
+    # Run quality gate in worktree
     wt_path = wt_info["wt_path"]
     project_secrets = _secrets_read(cwd)
     gate = await _run_quality_gate(wt_path, env=project_secrets)
     verdict = gate.get("verdict", "unknown")
 
-    # Записываем вердикт в meta-сайдкар
+    # Write verdict to meta sidecar
     DATA: Path = ctx["DATA"]
     try:
         run_meta = _read_run_meta(DATA, card_id) or {}
         run_meta["gate"] = {"verdict": verdict, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
         _write_run_meta(DATA, card_id, run_meta)
     except Exception as e:
-        print(f"[self_heal] ошибка записи gate в meta: {e}")
+        print(f"[self_heal] error writing gate to meta: {e}")
 
-    # Обновляем описание карточки с пометкой авто-починки
-    heal_badge = "🔧 авто-починка · гейт ✓" if verdict == "safe" else "🔧 авто-починка · гейт ✗"
+    # Update card description with auto-fix badge
+    heal_badge = "🔧 auto-fix · gate ✓" if verdict == "safe" else "🔧 auto-fix · gate ✗"
     try:
         async with lock:
             _, preamble, cols = _load_board(cwd)
-            # Карточка уже в review или failed (после _run_card)
+            # Card is already in review or failed (after _run_card)
             for col_cards in cols.values():
                 for c in col_cards:
                     if c["id"] == card_id:
@@ -2665,9 +2668,9 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
                         break
             _save_board(cwd, name, preamble, cols)
     except Exception as e:
-        print(f"[self_heal] ошибка при обновлении пометки на карточке: {e}")
+        print(f"[self_heal] error updating badge on card: {e}")
 
-    # Если risky — переносим в Failed
+    # If risky — move to Failed
     if verdict == "risky":
         try:
             async with lock:
@@ -2677,9 +2680,9 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
                     cols["failed"].append(card_obj)
                     _save_board(cwd, name, preamble, cols)
         except Exception as e:
-            print(f"[self_heal] ошибка при перемещении risky в failed: {e}")
+            print(f"[self_heal] error moving risky to failed: {e}")
 
-    # Timeline: gate результат
+    # Timeline: gate result
     gate_phase = "gate_ok" if verdict == "safe" else ("gate_fail" if verdict == "risky" else "gate_unknown")
     _bus_publish(session_key, {
         "kind": "self_heal",
@@ -2689,21 +2692,21 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
         "project": name,
     })
 
-    # TG-пинг: результат
+    # TG ping: result
     if verdict == "safe":
         tg_msg = (
-            f"✅ <b>Самолечение</b>: фикс готов для <b>{name}</b> · <code>{card_id}</code>.\n"
-            f"Карточка в Review. Тесты прошли. Проверь и нажми «Применить»."
+            f"✅ <b>Self-healing</b>: fix ready for <b>{name}</b> · <code>{card_id}</code>.\n"
+            f"Card is in Review. Tests passed. Review and click 'Apply'."
         )
     elif verdict == "risky":
         tg_msg = (
-            f"⚠️ <b>Самолечение</b>: попытка починки <b>{name}</b> · <code>{card_id}</code> "
-            f"не прошла гейт.\nКарточка в Failed. Посмотри diff вручную."
+            f"⚠️ <b>Self-healing</b>: fix attempt for <b>{name}</b> · <code>{card_id}</code> "
+            f"did not pass the gate.\nCard is in Failed. Review the diff manually."
         )
     else:
         tg_msg = (
-            f"🔧 <b>Самолечение</b>: прогон завершён для <b>{name}</b> · <code>{card_id}</code>.\n"
-            f"Гейт: нет тестов (unknown). Карточка в Review. Проверь diff."
+            f"🔧 <b>Self-healing</b>: run completed for <b>{name}</b> · <code>{card_id}</code>.\n"
+            f"Gate: no tests (unknown). Card is in Review. Review the diff."
         )
     await _send_tg_ping(ctx, project, tg_msg)
 
@@ -2712,14 +2715,14 @@ async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None
 
 
 async def _error_scanner_loop(ctx: dict):
-    """Фоновая задача: периодически сканирует все проекты с log_cmd.
+    """Background task: periodically scans all projects with log_cmd.
 
-    Самолечение (если включено) оценивает ВСЕ незалеченные инциденты из Failed
-    на каждом скане — не только те, что добавлены в текущем скане (gate A).
-    Safety-слой Ф2 (gates B–D) применяется ПОВЕРХ предохранителей spec-010.
+    Self-healing (if enabled) evaluates ALL unhealed incidents from Failed
+    on every scan — not just those added in the current scan (gate A).
+    Safety-layer Ph2 (gates B–D) applied ON TOP OF spec-010 guards.
     """
     global _self_heal_active_count
-    # Первый прогон через 30с после старта (дать боту устаканиться)
+    # First run 30s after startup (give the bot time to settle)
     await asyncio.sleep(30)
     while True:
         try:
@@ -2732,31 +2735,31 @@ async def _error_scanner_loop(ctx: dict):
                 res = await _scan_and_ingest(proj, ctx)
                 if res.get("added") or res.get("updated"):
                     print(f"[scanner] {proj['name']}: +{res['added']} new, "
-                          f"~{res['updated']} updated (из {res['scanned']} событий)")
+                          f"~{res['updated']} updated (from {res['scanned']} events)")
 
-                # Уведомление «упало»: новые инциденты + включён notify_on_error
+                # "Crashed" notification: new incidents + notify_on_error enabled
                 if res.get("added", 0) and proj.get("notify_on_error"):
                     await _notify_new_incidents(ctx, proj, res.get("added", 0))
 
-                # ── ШАГ 3: Самолечение ─────────────────────────────────────────
-                # ПРЕДОХРАНИТЕЛЬ №1 (spec-010): только если self_heal явно включён
+                # ── STEP 3: Self-healing ──────────────────────────────────────
+                # SAFETY GUARD #1 (spec-010): only if self_heal is explicitly enabled
                 if not _self_heal_enabled(proj):
                     continue
 
-                # Gate A: убрана проверка res.added > 0 — оцениваем ВСЕ инциденты
-                # на каждом скане (молодые ранее были «слишком молоды», сейчас grown).
+                # Gate A: removed res.added > 0 check — evaluate ALL incidents
+                # on every scan (young ones were "too young" before, now grown).
 
                 session_key = proj["tg_thread"]
                 _max_conc = int(_get_global_setting("self_heal_max_concurrent", _SELF_HEAL_MAX_CONCURRENT))
                 now = time.time()
 
-                # Загружаем доску один раз для всего перебора карточек
+                # Load board once for the entire card iteration
                 try:
                     _, _, cols = _load_board(proj["cwd"])
                 except Exception:
                     continue
 
-                rate_limit_logged = False  # не спамим Timeline per-card, только раз на проект
+                rate_limit_logged = False  # don't spam Timeline per-card, only once per project
 
                 for card in cols.get("failed", []):
                     running_busy = ctx["running"].get(session_key) is not None
@@ -2772,14 +2775,14 @@ async def _error_scanner_loop(ctx: dict):
                     )
 
                     if action == "skip":
-                        # Тихие пропуски (heal_attempted, not_incident) — не логируем
+                        # Silent skips (heal_attempted, not_incident) — don't log
                         if reason.startswith("too_young"):
-                            print(f"[self_heal] {proj['name']}/{card['id']}: дебаунс ({reason}), ждём")
+                            print(f"[self_heal] {proj['name']}/{card['id']}: debounce ({reason}), waiting")
                         continue
 
                     if action == "benign":
-                        # C. Помечаем heal_skip=benign один раз под board-lock
-                        print(f"[self_heal] {proj['name']}/{card['id']}: benign ({reason}), пометка heal_skip")
+                        # C. Mark heal_skip=benign once under board-lock
+                        print(f"[self_heal] {proj['name']}/{card['id']}: benign ({reason}), marking heal_skip")
                         try:
                             lock = _get_board_lock(proj["cwd"])
                             async with lock:
@@ -2793,15 +2796,15 @@ async def _error_scanner_loop(ctx: dict):
                                             break
                                 _save_board(proj["cwd"], proj["name"], preamble2, cols2)
                         except Exception as ex:
-                            print(f"[self_heal] ошибка при пометке heal_skip: {ex}")
+                            print(f"[self_heal] error marking heal_skip: {ex}")
                         continue
 
                     if action == "stop":
-                        # Ресурсный лимит — прерываем перебор карточек этого проекта
+                        # Resource limit — stop iterating cards for this project
                         if reason == "rate_limit" and not rate_limit_logged:
                             rate_limit_logged = True
-                            print(f"[self_heal] {proj['name']}: рейт-лимит ({_HEAL_MAX_PER_WINDOW}/"
-                                  f"{_HEAL_WINDOW_SEC}s), пропускаем скан")
+                            print(f"[self_heal] {proj['name']}: rate-limit ({_HEAL_MAX_PER_WINDOW}/"
+                                  f"{_HEAL_WINDOW_SEC}s), skipping scan")
                             _bus_publish(session_key, {
                                 "kind": "self_heal",
                                 "phase": "skipped",
@@ -2809,17 +2812,17 @@ async def _error_scanner_loop(ctx: dict):
                                 "project": proj["name"],
                             })
                         elif reason == "concurrency_limit":
-                            print(f"[self_heal] лимит конкурентности ({_max_conc}) достигнут, "
-                                  f"пропускаем {proj['name']}")
+                            print(f"[self_heal] concurrency limit ({_max_conc}) reached, "
+                                  f"skipping {proj['name']}")
                         elif reason == "project_busy":
-                            print(f"[self_heal] проект {proj['name']} занят, пропускаем")
+                            print(f"[self_heal] project {proj['name']} busy, skipping")
                         break
 
                     # action == "heal"
                     _heal_record(session_key, now)
                     _self_heal_active_count += 1
                     _spawn_bg(_self_heal_card(ctx, proj, card))
-                    print(f"[self_heal] запущена починка {proj['name']}/{card['id']}")
+                    print(f"[self_heal] launched fix for {proj['name']}/{card['id']}")
 
         except Exception as e:
             print(f"[scanner] loop error: {e}")
@@ -2844,33 +2847,33 @@ async def api_project_tasks(req: web.Request) -> web.Response:
         return web.json_response({"error": "project not found"}, status=404)
     cwd, name = project["cwd"], project["name"]
     tp = _tasks_path(cwd)
-    # Под локом: добавляем ops-маркеры к карточкам без них (только если файл изменился).
-    # Lock сериализует cockpit-операции; агент пишет напрямую — при конфликте пропускаем запись.
+    # Under lock: add ops-markers to cards that lack them (only if file changed).
+    # Lock serialises cockpit operations; agent writes directly — on conflict skip the write.
     async with _get_board_lock(cwd):
         raw, preamble, cols = _load_board(cwd)
         if tp.exists():
             canon = _serialize_tasks(preamble, cols, name)
             if canon != raw:
-                # Перечитываем: если агент успел записать между _load_board и здесь — пропускаем.
+                # Re-read: if agent wrote between _load_board and here — skip.
                 try:
                     current = tp.read_text(encoding="utf-8")
                 except OSError:
                     current = ""
                 if current == raw:
-                    # Guard: не пишем если после парсинга карточек стало меньше.
-                    # Это значит агент написал что-то что парсер не распознал —
-                    # перезапись уничтожит данные. Лучше потерять маркер, чем карточку.
+                    # Guard: don't write if parsed card count dropped.
+                    # That means the agent wrote something the parser didn't recognise —
+                    # overwriting would destroy data. Better to lose a marker than a card.
                     raw_card_count = _count_potential_cards(raw)
                     parsed_card_count = sum(len(v) for v in cols.values())
                     if parsed_card_count < raw_card_count:
                         print(
-                            f"[api_project_tasks] WARNING: пропускаем запись {tp} — "
-                            f"парсер нашёл {parsed_card_count} карточек из {raw_card_count} "
-                            f"потенциальных (агент записал нераспознанный формат?)"
+                            f"[api_project_tasks] WARNING: skipping write to {tp} — "
+                            f"parser found {parsed_card_count} cards out of {raw_card_count} "
+                            f"potential (agent wrote unrecognised format?)"
                         )
                     else:
                         tp.write_text(canon, encoding="utf-8")
-    # F: добавляем очередь карточек в ответ
+    # F: add card queue to response
     payload = _board_payload(cwd)
     payload["queued"] = _queue_for(project["tg_thread"])
     return web.json_response(payload)
@@ -2913,10 +2916,10 @@ def _pop_card(cols: dict, card_id: str):
     return None
 
 
-# ─────────────────────────── F1: авто-запуск карточки ───────────────────────────
+# ─────────────────────────── F1: card auto-run ───────────────────────────
 
 async def _git_diff_card(cwd: str) -> tuple[str, str]:
-    """Возвращает (diff_full, diff_stat) через asyncio subprocess. Пустые строки при ошибке."""
+    """Returns (diff_full, diff_stat) via asyncio subprocess. Empty strings on error."""
     async def _run(*args):
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -2938,15 +2941,15 @@ async def _git_diff_card(cwd: str) -> tuple[str, str]:
 # ─────────────────────────── C2: worktree helpers ───────────────────────────
 
 async def _card_run_mode(cwd: str, git_enabled: bool = True) -> str:
-    """Определяет режим прогона карточки: 'worktree' или 'legacy'.
-    worktree = git включён И git-репо И дерево чистое. Иначе — legacy (прогон в cwd).
-    git_enabled=False (настройка проекта) → всегда legacy, git вообще не трогаем."""
+    """Determines card run mode: 'worktree' or 'legacy'.
+    worktree = git enabled AND git repo AND clean working tree. Otherwise — legacy (run in cwd).
+    git_enabled=False (project setting) → always legacy, git not touched at all."""
     if not git_enabled:
         return "legacy"
     info = await _git_info(cwd)
     if info is None:
         return "legacy"
-    # git status --porcelain: пустой вывод = чистое дерево
+    # git status --porcelain: empty output = clean working tree
     status = await _git_cmd(cwd, "status", "--porcelain")
     if status is None or status.strip():
         return "legacy"
@@ -2954,14 +2957,14 @@ async def _card_run_mode(cwd: str, git_enabled: bool = True) -> str:
 
 
 async def _card_worktree_setup(cwd: str, card_id: str) -> "dict | None":
-    """Создаёт worktree <cwd>/.worktrees/card-<id> на ветке card-<id>.
-    Если уже существует — сначала чистит. Возвращает {wt_path, base_branch} или None при ошибке."""
+    """Creates worktree <cwd>/.worktrees/card-<id> on branch card-<id>.
+    If it already exists — cleans it first. Returns {wt_path, base_branch} or None on error."""
     try:
         base_branch = await _git_cmd(cwd, "rev-parse", "--abbrev-ref", "HEAD")
         if not base_branch:
             return None
         wt_path = str(Path(cwd) / ".worktrees" / f"card-{card_id}")
-        # Чистим если существует (повторный прогон)
+        # Clean up if it already exists (re-run)
         if Path(wt_path).exists():
             proc = await asyncio.create_subprocess_exec(
                 "git", "-C", cwd, "worktree", "remove", "--force", wt_path,
@@ -2969,14 +2972,14 @@ async def _card_worktree_setup(cwd: str, card_id: str) -> "dict | None":
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(proc.communicate(), timeout=10.0)
-        # Удаляем ветку если осталась (404-safe)
+        # Delete branch if it still exists (404-safe)
         proc = await asyncio.create_subprocess_exec(
             "git", "-C", cwd, "branch", "-D", f"card-{card_id}",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
         await asyncio.wait_for(proc.communicate(), timeout=5.0)
-        # Создаём новый worktree
+        # Create new worktree
         proc = await asyncio.create_subprocess_exec(
             "git", "-C", cwd, "worktree", "add", wt_path, "-b", f"card-{card_id}",
             stdout=asyncio.subprocess.DEVNULL,
@@ -2988,14 +2991,14 @@ async def _card_worktree_setup(cwd: str, card_id: str) -> "dict | None":
             return None
         return {"wt_path": wt_path, "base_branch": base_branch}
     except Exception as e:
-        print(f"[worktree_setup] ошибка: {e}")
+        print(f"[worktree_setup] error: {e}")
         return None
 
 
 async def _commit_in_worktree(wt_path: str, card_id: str, prompt: str) -> bool:
-    """Авто-коммит в worktree. Возвращает True если был коммит (были изменения)."""
+    """Auto-commit in worktree. Returns True if a commit was made (there were changes)."""
     try:
-        # Проверяем наличие изменений
+        # Check for changes
         proc = await asyncio.create_subprocess_exec(
             "git", "-C", wt_path, "status", "--porcelain",
             stdout=asyncio.subprocess.PIPE,
@@ -3003,7 +3006,7 @@ async def _commit_in_worktree(wt_path: str, card_id: str, prompt: str) -> bool:
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
         if not stdout.decode().strip():
-            return False  # нет изменений
+            return False  # no changes
         # git add -A
         proc = await asyncio.create_subprocess_exec(
             "git", "-C", wt_path, "add", "-A",
@@ -3022,12 +3025,12 @@ async def _commit_in_worktree(wt_path: str, card_id: str, prompt: str) -> bool:
         await asyncio.wait_for(proc.communicate(), timeout=15.0)
         return proc.returncode == 0
     except Exception as e:
-        print(f"[commit_in_worktree] ошибка: {e}")
+        print(f"[commit_in_worktree] error: {e}")
         return False
 
 
 async def _diff_from_worktree(wt_path: str, base_branch: str) -> tuple[str, str]:
-    """Возвращает (diff_full, diff_stat) из worktree vs base_branch."""
+    """Returns (diff_full, diff_stat) from worktree vs base_branch."""
     async def _run(*args):
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -3047,7 +3050,7 @@ async def _diff_from_worktree(wt_path: str, base_branch: str) -> tuple[str, str]
 
 
 def _write_run_meta(data_dir: Path, card_id: str, meta: dict) -> None:
-    """Записывает машиночитаемый JSON-сайдкар DATA/runs/<card_id>.json с метаданными прогона."""
+    """Writes machine-readable JSON sidecar DATA/runs/<card_id>.json with run metadata."""
     try:
         runs_dir = data_dir / "runs"
         runs_dir.mkdir(exist_ok=True)
@@ -3055,11 +3058,11 @@ def _write_run_meta(data_dir: Path, card_id: str, meta: dict) -> None:
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except Exception as e:
-        print(f"[_write_run_meta] ошибка записи {card_id}.json: {e}")
+        print(f"[_write_run_meta] error writing {card_id}.json: {e}")
 
 
 def _read_run_meta(data_dir: Path, card_id: str) -> "dict | None":
-    """Читает JSON-метаданные прогона. None если не существует или повреждён."""
+    """Reads run JSON metadata. None if not found or corrupted."""
     try:
         p = data_dir / "runs" / f"{card_id}.json"
         if not p.exists():
@@ -3070,8 +3073,8 @@ def _read_run_meta(data_dir: Path, card_id: str) -> "dict | None":
 
 
 # ─────────────────────────── AppCtx TypedDict ───────────────────────────
-# Аннотация полей ctx, используемых в _run_card и хелперах.
-# Рантайм — тот же dict, TypedDict только для проверки типов (mypy/pyright).
+# Annotation of ctx fields used in _run_card and helpers.
+# Runtime is the same dict; TypedDict is for type checking only (mypy/pyright).
 
 class AppCtx(TypedDict, total=False):
     topics: dict
@@ -3115,37 +3118,37 @@ def _write_sidecar(
     wt_path: str | None = None,
     has_changes: bool = False,
 ) -> None:
-    """Записывает сайдкар результата карточки в DATA/runs/<card_id>.md
-    и машиночитаемый JSON в DATA/runs/<card_id>.json."""
+    """Writes the card result sidecar to DATA/runs/<card_id>.md
+    and machine-readable JSON to DATA/runs/<card_id>.json."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
     outcome = "ok" if ok else "fail"
     try:
         runs_dir = data_dir / "runs"
         runs_dir.mkdir(exist_ok=True)
         sidecar_lines = [
-            f"# Результат карточки {card_id}",
+            f"# Card result {card_id}",
             "",
-            f"**Проект:** {name}",
-            f"**Время:** {ts}",
-            f"**Исход:** {outcome}",
-            f"**Режим:** {run_mode}",
+            f"**Project:** {name}",
+            f"**Time:** {ts}",
+            f"**Outcome:** {outcome}",
+            f"**Mode:** {run_mode}",
             "",
-            "## Задача",
+            "## Task",
             "",
             prompt,
             "",
-            "## Ответ агента",
+            "## Agent response",
             "",
             answer_text,
         ]
         if exc_info:
-            sidecar_lines += ["", "## Ошибка", "", f"```\n{exc_info}\n```"]
+            sidecar_lines += ["", "## Error", "", f"```\n{exc_info}\n```"]
         if diff_stat:
             sidecar_lines += ["", "## Git diff --stat", "", f"```\n{diff_stat}\n```"]
         if diff_full:
-            sidecar_lines += ["", "## Git diff (полный)", "", f"```diff\n{diff_full}\n```"]
+            sidecar_lines += ["", "## Git diff (full)", "", f"```diff\n{diff_full}\n```"]
         (runs_dir / f"{card_id}.md").write_text("\n".join(sidecar_lines), encoding="utf-8")
-        # Машиночитаемый JSON-сайдкар для apply/discard/фронта
+        # Machine-readable JSON sidecar for apply/discard/frontend
         meta = {
             "card_id": card_id,
             "ts": ts,
@@ -3162,7 +3165,7 @@ def _write_sidecar(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except Exception as e:
-        print(f"[_run_card] ошибка записи сайдкара {card_id}: {e}")
+        print(f"[_run_card] error writing sidecar {card_id}: {e}")
 
 
 async def _move_card_after_run(
@@ -3173,7 +3176,7 @@ async def _move_card_after_run(
     card_id: str,
     ok: bool,
 ) -> None:
-    """Переносит карточку в Review (ok) или Failed (err) под board-lock."""
+    """Moves the card to Review (ok) or Failed (err) under board-lock."""
     try:
         target_col = "review" if ok else "failed"
         async with _get_board_lock(cwd):
@@ -3184,11 +3187,11 @@ async def _move_card_after_run(
             cols[target_col].append(moved)
             _save_board(cwd, name, preamble, cols)
     except Exception as e:
-        print(f"[_run_card] ошибка переноса карточки {card_id}: {e}")
+        print(f"[_run_card] error moving card {card_id}: {e}")
 
 
 async def _notify_tg(ctx: AppCtx, session_key: str, prompt: str, ok: bool) -> None:
-    """Отправляет пинг в TG-топик о завершении карточки. Некритичен — ошибки логируются."""
+    """Sends a ping to the TG topic about card completion. Non-critical — errors are logged."""
     try:
         ptb = ctx.get("ptb_app")
         if ptb is None:
@@ -3201,11 +3204,11 @@ async def _notify_tg(ctx: AppCtx, session_key: str, prompt: str, ok: bool) -> No
         target_label = "Review" if ok else "Failed"
         await ptb.bot.send_message(
             chat_id,
-            f"{icon} Карточка «{short_text}» → {target_label}",
+            f"{icon} Card '{short_text}' → {target_label}",
             message_thread_id=thread_id,
         )
     except Exception as e:
-        print(f"[_run_card] TG-пинг не удался: {e}")
+        print(f"[_run_card] TG ping failed: {e}")
 
 
 async def _run_card(
@@ -3217,32 +3220,32 @@ async def _run_card(
     run_mode: str = "legacy",
     wt_info: "dict | None" = None,
 ) -> None:
-    """Фоновая задача F1: оркестратор — выполняет карточку через run_engine, пишет сайдкар, переносит карточку.
+    """Background task F1: orchestrator — runs a card via run_engine, writes sidecar, moves the card.
 
-    run_mode: 'worktree' | 'legacy'. wt_info: {wt_path, base_branch} или None.
+    run_mode: 'worktree' | 'legacy'. wt_info: {wt_path, base_branch} or None.
     """
     run_engine = ctx.get("run_engine")
     cwd = project["cwd"]
     name = project["name"]
     model = project.get("model", ctx.get("DEFAULT_MODEL", "sonnet"))
     prompt = card["text"]
-    # Если есть description — добавляем его к промпту для агента
+    # If description is present — append it to the agent prompt
     card_desc = card.get("description")
     if card_desc:
         prompt = f"{prompt}\n\n{card_desc}"
     card_id = card["id"]
-    # Карточка доски: кокпит САМ перенесёт её в Review при успехе (_move_card_after_run).
-    # Агенту сообщаем lifecycle, чтобы он завершил чисто и дал резюме человеку на ревью.
-    # Доску (TASKS.md) агент вручную НЕ правит — иначе ломается канонизация/ops-маркеры.
+    # Board card: the cockpit ITSELF moves it to Review on success (_move_card_after_run).
+    # We tell the agent about the lifecycle so it finishes cleanly and gives a summary for review.
+    # The agent must NOT edit TASKS.md manually — that would break canonicalisation/ops-markers.
     prompt = (
-        f"{prompt}\n\n[Это карточка доски «{card_id}» проекта «{name}». Выполни задачу. "
-        f"Когда закончишь — карточка автоматически уйдёт в Review человеку на проверку: "
-        f"заверши работу и закончи КРАТКИМ резюме сделанного (оно попадёт в Review). "
-        f"TASKS.md вручную не правь — перенос делает кокпит.]"
+        f"{prompt}\n\n[This is board card '{card_id}' in project '{name}'. Complete the task. "
+        f"When done — the card will automatically move to Review for human inspection: "
+        f"finish the work and end with a BRIEF summary of what was done (it will appear in Review). "
+        f"Do NOT edit TASKS.md manually — the cockpit handles the move.]"
     )
     DATA: Path = ctx["DATA"]
 
-    # В worktree-режиме агент работает в wt_path, иначе — в cwd
+    # In worktree mode the agent works in wt_path, otherwise in cwd
     effective_cwd = wt_info["wt_path"] if (run_mode == "worktree" and wt_info) else cwd
 
     answer_parts: list[str] = []
@@ -3253,9 +3256,9 @@ async def _run_card(
     try:
         try:
             if run_engine is None:
-                raise RuntimeError("run_engine недоступен в ctx (старый запуск без F1)")
+                raise RuntimeError("run_engine not available in ctx (old launch without F1)")
 
-            # Публикуем старт прогона в шину (подписчики activity-stream увидят вживую)
+            # Publish run start to the bus (activity-stream subscribers will see it live)
             _bus_publish(session_key, {
                 "kind": "run_start",
                 "source": "card",
@@ -3264,7 +3267,7 @@ async def _run_card(
             })
 
             resume_sid = ctx["sessions"].get(session_key)
-            # Секреты проекта — только из cwd основного проекта (не worktree), изоляция по cwd
+            # Project secrets — only from cwd of the main project (not worktree), isolated by cwd
             project_secrets = _secrets_read(cwd)
             async for event in run_engine(
                 project_name=name,
@@ -3300,7 +3303,7 @@ async def _run_card(
         except Exception as e:
             exc_info = f"{type(e).__name__}: {e}\n\n{_tb.format_exc()}"
 
-        # Worktree: авто-коммит + diff из ветки; legacy: diff из cwd
+        # Worktree: auto-commit + diff from branch; legacy: diff from cwd
         if run_mode == "worktree" and wt_info:
             wt_path = wt_info["wt_path"]
             base_branch = wt_info["base_branch"]
@@ -3312,15 +3315,15 @@ async def _run_card(
             wt_branch = f"card-{card_id}"
             wt_path_val = wt_path
         else:
-            # legacy: git diff из рабочего дерева
+            # legacy: git diff from working tree
             diff_full, diff_stat = await _git_diff_card(cwd)
             has_changes = bool(diff_full or diff_stat)
             wt_path_val = None
             base_branch = None
             wt_branch = None
 
-        # сайдкар DATA/runs/<card_id>.md + JSON meta
-        answer_text = "\n".join(answer_parts).strip() or "(агент завершил без текстового ответа)"
+        # sidecar DATA/runs/<card_id>.md + JSON meta
+        answer_text = "\n".join(answer_parts).strip() or "(agent finished without a text response)"
         _write_sidecar(
             DATA, card_id, name, prompt, answer_text, ok, exc_info, diff_stat, diff_full,
             run_mode=run_mode,
@@ -3330,23 +3333,23 @@ async def _run_card(
             has_changes=has_changes,
         )
 
-        # перенос карточки (перезагружаем доску — могла измениться пока агент работал)
+        # move card (reload board — may have changed while agent was running)
         await _move_card_after_run(ctx, cwd, name, card, card_id, ok)
 
-        # TG-пинг (некритичен)
+        # TG ping (non-critical)
         await _notify_tg(ctx, session_key, prompt, ok)
 
     finally:
-        # Публикуем завершение прогона в шину (ПЕРЕД снятием замка)
+        # Publish run completion to bus (BEFORE releasing the lock)
         _bus_publish(session_key, {
             "kind": "run_end",
             "outcome": "ok" if ok else "fail",
             "run_id": card_id,
         })
-        # замок снимается ГАРАНТИРОВАННО, даже если запись сайдкара/перенос упали
+        # lock is released UNCONDITIONALLY, even if sidecar write/move failed
         ctx["running"].pop(session_key, None)
 
-    # D: после снятия замка — дренируем очередь (следующая карточка, если есть)
+    # D: after releasing the lock — drain the queue (next card, if any)
     try:
         _aiohttp_app = ctx.get("_aiohttp_app")
         if _aiohttp_app is not None:
@@ -3359,27 +3362,27 @@ async def _run_card(
 
 
 async def _start_card_run(ctx: AppCtx, app, project: dict, card_id: str) -> dict:
-    """Reusable, race-safe: резервирует lock СИНХРОННО, переносит карточку в in_progress,
-    запускает _run_card в фоне. Возвращает {"started": bool, ...}.
+    """Reusable, race-safe: reserves lock SYNCHRONOUSLY, moves card to in_progress,
+    launches _run_card in background. Returns {"started": bool, ...}.
 
-    Гарантия race-safety: проверка И установка ctx["running"][session_key] происходят
-    без единого await между ними — это единственный guard против двойного старта.
+    Race-safety guarantee: check AND set of ctx["running"][session_key] happen
+    without a single await between them — this is the only guard against double-start.
     """
     session_key = project["tg_thread"]
     cwd = project["cwd"]
     name = project["name"]
 
-    # run_engine отсутствует — деградация
+    # run_engine absent — degraded mode
     if ctx.get("run_engine") is None:
         return {"started": False, "reason": "no_engine"}
 
-    # ── СИНХРОННАЯ проверка+резервация (НЕТ await между check и set) ──
+    # ── SYNCHRONOUS check+reserve (NO await between check and set) ──
     if ctx["running"].get(session_key) is not None:
         return {"started": False, "reason": "busy"}
     ctx["running"][session_key] = True
-    # ── конец критической секции ──
+    # ── end of critical section ──
 
-    # Перенос карточки под board-lock
+    # Move card under board-lock
     card = None
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
@@ -3390,7 +3393,7 @@ async def _start_card_run(ctx: AppCtx, app, project: dict, card_id: str) -> dict
         cols["in_progress"].append(card)
         _save_board(cwd, name, preamble, cols)
 
-    # C2: режим + worktree
+    # C2: mode + worktree
     run_mode = await _card_run_mode(cwd, git_enabled=_git_enabled(project))
     wt_info: dict | None = None
     if run_mode == "worktree":
@@ -3403,34 +3406,34 @@ async def _start_card_run(ctx: AppCtx, app, project: dict, card_id: str) -> dict
 
 
 async def _drain_queue(ctx: AppCtx, app, project: dict) -> "str | None":
-    """Пытается запустить следующую карточку из очереди.
-    Если проект занят — возвращает None. Пропускает устаревшие/отсутствующие карточки.
-    Возвращает card_id если запуск состоялся, иначе None.
+    """Tries to launch the next card from the queue.
+    If project is busy — returns None. Skips stale/missing cards.
+    Returns card_id if a run was started, otherwise None.
     """
     session_key = project["tg_thread"]
     cwd = project["cwd"]
 
-    # Быстрый non-await check: занят → ничего не делаем
+    # Fast non-await check: busy → do nothing
     if ctx["running"].get(session_key) is not None:
         return None
 
-    # Runnable columns (карточка должна быть в одной из них для запуска)
+    # Runnable columns (card must be in one of these to be launched)
     _RUNNABLE = {"backlog", "review", "failed"}
 
     q = _queue_for(session_key)
     for card_id in q:
-        # Загружаем доску
+        # Load board
         try:
             _, _, cols = _load_board(cwd)
         except Exception:
             return None
 
-        # Orphan-guard: если в in_progress кто-то висит (в т.ч. orphan после рестарта,
-        # когда running-lock потерян но карточка осталась в колонке) — не стартуем вторую.
+        # Orphan-guard: if someone is hanging in in_progress (incl. orphan after restart
+        # when running-lock was lost but card stayed in the column) — don't start a second.
         if cols.get("in_progress"):
             return None
 
-        # Проверяем, что карточка ещё существует в runnable-колонке
+        # Check that the card still exists in a runnable column
         found_runnable = any(
             c["id"] == card_id
             for col_key, col_cards in cols.items()
@@ -3438,21 +3441,21 @@ async def _drain_queue(ctx: AppCtx, app, project: dict) -> "str | None":
             for c in col_cards
         )
         if not found_runnable:
-            # Устаревшая или перемещённая запись — убираем из очереди, пробуем следующую
+            # Stale or moved entry — remove from queue, try next
             _queue_remove(session_key, card_id)
             continue
 
-        # Пытаемся запустить
+        # Try to launch
         result = await _start_card_run(ctx, app, project, card_id)
         if result["started"]:
             _queue_remove(session_key, card_id)
             return card_id
         elif result.get("reason") == "busy":
-            # Гонка — оставляем в очереди, попробуем позже
+            # Race — leave in queue, try later
             return None
         else:
-            # not_found или no_engine — убираем устаревшую и пробуем следующую
-            # (stale-первая не должна блокировать валидную)
+            # not_found or no_engine — remove stale and try next
+            # (stale first entry must not block a valid one)
             _queue_remove(session_key, card_id)
             continue
 
@@ -3474,14 +3477,14 @@ async def api_move_task(req: web.Request) -> web.Response:
     to = body.get("to", "")
     cwd, name = project["cwd"], project["name"]
 
-    # ── F1: авто-запуск при переносе в in_progress ──
+    # ── F1: auto-launch on move to in_progress ──
     if to == "in_progress":
         session_key = project["tg_thread"]
         run_engine = ctx.get("run_engine")
 
-        # Деградация: если движок недоступен (старый запуск) — работаем как обычный перенос
+        # Degraded mode: if engine is unavailable (old launch) — behave as plain move
         if run_engine is None:
-            print("[api_move_task] run_engine не в ctx — деградируем к ручному переносу")
+            print("[api_move_task] run_engine not in ctx — degrading to manual move")
             async with _get_board_lock(cwd):
                 _, preamble, cols = _load_board(cwd)
                 card = _pop_card(cols, card_id)
@@ -3491,26 +3494,26 @@ async def api_move_task(req: web.Request) -> web.Response:
                 _save_board(cwd, name, preamble, cols)
             return web.json_response(_board_payload(cwd))
 
-        # Используем _start_card_run (race-safe: lock резервируется синхронно внутри)
+        # Use _start_card_run (race-safe: lock reserved synchronously inside)
         result = await _start_card_run(ctx, req.app, project, card_id)
         if result["started"]:
             return web.json_response(_board_payload(cwd))
         elif result.get("reason") == "busy":
-            # Проект занят — ставим карточку в очередь вместо 409.
-            # "enqueued":True сигнализирует постановку; board["queued"] — актуальный список
-            # очереди (не затираем его флагом).
+            # Project busy — queue the card instead of 409.
+            # "enqueued":True signals queuing; board["queued"] is the current queue list
+            # (don't overwrite it with the flag).
             _queue_enqueue(session_key, card_id)
             board = _board_payload(cwd)
             board["queued"] = _queue_for(session_key)
             return web.json_response({**board, "ok": True, "enqueued": True})
         else:
-            # not_found или no_engine
+            # not_found or no_engine
             reason = result.get("reason", "unknown")
             if reason == "not_found":
                 return web.json_response({"error": "card not found"}, status=404)
             return web.json_response({"error": reason}, status=400)
 
-    # ── Обычный перенос (backlog / review / failed / done) ──
+    # ── Regular move (backlog / review / failed / done) ──
     session_key = project["tg_thread"]
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
@@ -3519,7 +3522,7 @@ async def api_move_task(req: web.Request) -> web.Response:
             return web.json_response({"error": "card not found"}, status=404)
 
         if to == "done":
-            # Spec-012 Ф0 Task B: err-карточка перенесена в Done → записываем как dismissed
+            # Spec-012 Ph0 Task B: err-card moved to Done → record as dismissed
             if card_id.startswith("err-"):
                 _dismissed_add(card_id[4:])
             dp = _done_path(cwd)
@@ -3537,7 +3540,7 @@ async def api_move_task(req: web.Request) -> web.Response:
             cols["backlog"].append(card)
             _save_board(cwd, name, preamble, cols)
             return web.json_response({"error": "unknown column"}, status=400)
-    # F: карточка вручную перемещена из очереди — убираем из очереди
+    # F: card manually moved out of queue — remove from queue
     _queue_remove(session_key, card_id)
     return web.json_response(_board_payload(cwd))
 
@@ -3556,19 +3559,19 @@ async def api_delete_task(req: web.Request) -> web.Response:
         _, preamble, cols = _load_board(cwd)
         if _pop_card(cols, card_id) is None:
             return web.json_response({"error": "card not found"}, status=404)
-        # Spec-012 Ф0 Task B: err-карточка удалена → записываем как dismissed
+        # Spec-012 Ph0 Task B: err-card deleted → record as dismissed
         if card_id.startswith("err-"):
             _dismissed_add(card_id[4:])
         _save_board(cwd, name, preamble, cols)
-    # F: карточка удалена — убираем из очереди
+    # F: card deleted — remove from queue
     _queue_remove(session_key, card_id)
     return web.json_response(_board_payload(cwd))
 
 
 async def api_run_batch(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/cards/run-batch — ставит несколько карточек в очередь.
-    Тело: {"card_ids": ["id1", "id2", ...]}.
-    Ответ: {"ok": True, "queued": <N поставлено>, "started": <card_id или null>}.
+    """POST /api/projects/{id}/cards/run-batch — queues multiple cards.
+    Body: {"card_ids": ["id1", "id2", ...]}.
+    Response: {"ok": True, "queued": <N queued>, "started": <card_id or null>}.
     """
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -3586,16 +3589,16 @@ async def api_run_batch(req: web.Request) -> web.Response:
     session_key = project["tg_thread"]
     cwd = project["cwd"]
 
-    # Runnable columns — карточка должна быть в одной из них
+    # Runnable columns — card must be in one of these
     _RUNNABLE = {"backlog", "review", "failed"}
 
-    # Загружаем доску один раз
+    # Load board once
     try:
         _, _, cols = _load_board(cwd)
     except Exception:
         cols = {key: [] for key, _, _ in BOARD_COLUMNS}
 
-    # Собираем set всех runnable card_id
+    # Build set of all runnable card_ids
     runnable_ids: set = set()
     for col_key, col_cards in cols.items():
         if col_key in _RUNNABLE:
@@ -3610,11 +3613,11 @@ async def api_run_batch(req: web.Request) -> web.Response:
             continue
         if raw_id not in runnable_ids:
             continue
-        # _queue_enqueue → True только если реально добавил (дедуп → False) — не переоцениваем
+        # _queue_enqueue → True only if actually added (dedup → False) — don't overcounting
         if _queue_enqueue(session_key, raw_id):
             enqueued += 1
 
-    # Сразу дренируем — первая карточка стартует если проект свободен
+    # Drain immediately — first card starts if project is free
     _aiohttp_app = ctx.get("_aiohttp_app") or req.app
     started_id = await _drain_queue(ctx, _aiohttp_app, project)
 
@@ -3622,18 +3625,18 @@ async def api_run_batch(req: web.Request) -> web.Response:
 
 
 async def _queue_drain_loop(ctx: dict) -> None:
-    """E: Backstop-цикл: каждые _QUEUE_DRAIN_INTERVAL_SEC проверяет все проекты с очередью
-    и дренирует их. Обрабатывает: рестарт (очередь пережила его), TG-пересечение
-    (TG-прогон освободил проект — drain не вызван через _run_card).
+    """E: Backstop loop: every _QUEUE_DRAIN_INTERVAL_SEC checks all projects with a queue
+    and drains them. Handles: restart (queue survived it), TG interleave
+    (TG run freed the project — drain not triggered via _run_card).
     """
-    await asyncio.sleep(10)  # дать боту устаканиться
+    await asyncio.sleep(10)  # give the bot time to settle
     while True:
         try:
             _aiohttp_app = ctx.get("_aiohttp_app")
             if _aiohttp_app is not None:
                 projects = _collect_projects(ctx)
                 for proj in projects:
-                    # per-project try/except: сбой в одном проекте не валит дренаж остальных
+                    # per-project try/except: failure in one project doesn't take down the rest
                     try:
                         if proj.get("is_free"):
                             continue
@@ -3663,7 +3666,7 @@ async def api_update_task(req: web.Request) -> web.Response:
     text = (body.get("text") or "").strip()
     if not text:
         return web.json_response({"error": "empty text"}, status=400)
-    # description: если передан ключ — обновляем (None = удалить, строка = установить)
+    # description: if the key is present — update it (None = delete, string = set)
     update_description = "description" in body
     description = body.get("description")
     if description is not None:
@@ -3692,7 +3695,7 @@ async def api_update_task(req: web.Request) -> web.Response:
 
 
 async def api_tasks_done(req: web.Request) -> web.Response:
-    """Содержимое архива DONE.md — грузится только по запросу (сессии его не читают)."""
+    """Contents of the DONE.md archive — loaded on demand (sessions don't read it)."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -3704,13 +3707,13 @@ async def api_tasks_done(req: web.Request) -> web.Response:
 
 # ─────────────────────────── activity-stream SSE ───────────────────────────
 #
-# GET /api/projects/{id}/activity-stream  — поток событий проекта (session-specific)
-# GET /api/activity-stream                — глобальный поток всех сессий
-# Клиент держит соединение; при разрыве finally гарантирует отписку.
+# GET /api/projects/{id}/activity-stream  — project event stream (session-specific)
+# GET /api/activity-stream                — global stream of all sessions
+# Client holds the connection; finally guarantees unsubscription on disconnect.
 
 async def _sse_stream(req: web.Request, q: "asyncio.Queue[dict]", unsubscribe) -> web.StreamResponse:
-    """Общий SSE-цикл: читает из очереди q, пишет в StreamResponse.
-    unsubscribe — callable(q) для ГАРАНТИРОВАННОЙ отписки в finally."""
+    """Shared SSE loop: reads from queue q, writes to StreamResponse.
+    unsubscribe — callable(q) for GUARANTEED unsubscription in finally."""
     resp = web.StreamResponse(
         status=200,
         headers={
@@ -3727,9 +3730,9 @@ async def _sse_stream(req: web.Request, q: "asyncio.Queue[dict]", unsubscribe) -
                 payload = json.dumps(event, ensure_ascii=False)
                 await resp.write(f"data: {payload}\n\n".encode())
             except asyncio.TimeoutError:
-                # Heartbeat — держим соединение живым через туннель (Cloudflare / nginx).
-                # Клиент мог отвалиться — тогда write упадёт ConnectionResetError; это норма,
-                # а НЕ инцидент (раньше heartbeat-write был вне защиты → утекал в error_middleware).
+                # Heartbeat — keep the connection alive through a tunnel (Cloudflare / nginx).
+                # Client may have dropped — write would then raise ConnectionResetError; this is normal,
+                # NOT an incident (heartbeat-write was unguarded before → leaked into error_middleware).
                 try:
                     await resp.write(b": ping\n\n")
                 except (ConnectionResetError, ConnectionAbortedError):
@@ -3746,7 +3749,7 @@ async def _sse_stream(req: web.Request, q: "asyncio.Queue[dict]", unsubscribe) -
 
 
 async def api_project_activity_stream(req: web.Request) -> web.StreamResponse:
-    """GET /api/projects/{id}/activity-stream — поток событий шины для конкретного проекта."""
+    """GET /api/projects/{id}/activity-stream — bus event stream for a specific project."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -3758,7 +3761,7 @@ async def api_project_activity_stream(req: web.Request) -> web.StreamResponse:
 
 
 async def api_activity_stream_all(req: web.Request) -> web.StreamResponse:
-    """GET /api/activity-stream — единый поток ВСЕХ событий шины (unread-индикаторы в сайдбаре)."""
+    """GET /api/activity-stream — unified stream of ALL bus events (unread indicators in sidebar)."""
     q = _bus_subscribe_global()
     return await _sse_stream(req, q, _bus_unsubscribe_global)
 
@@ -3766,24 +3769,24 @@ async def api_activity_stream_all(req: web.Request) -> web.StreamResponse:
 # ─────────────────────────── timeline read endpoint ───────────────────────────
 #
 # GET /api/projects/{id}/timeline?limit=N&before=<ts>
-# Читает DATA/timeline/<slug>.jsonl (+ .jsonl.1 если нужна история).
-# Отдаёт массив событий в хронологическом порядке (новые внизу).
-# Пагинация: before=<ts> — только события со ts < before.
-# Битые строки JSONL → skip (graceful).
+# Reads DATA/timeline/<slug>.jsonl (+ .jsonl.1 for older history).
+# Returns array of events in chronological order (newest at the bottom).
+# Pagination: before=<ts> — events with ts < before only.
+# Corrupted JSONL lines → skip (graceful).
 
 _TIMELINE_DEFAULT_LIMIT = 200
 _TIMELINE_MAX_LIMIT = 500
 
 
 def _timeline_read_events(session_key: str, limit: int, before: float | None) -> list[dict]:
-    """Читает события из JSONL (текущий файл + .1 для старой истории).
-    Возвращает список событий в хронологическом порядке, ≤ limit штук,
-    при before — только со ts < before."""
+    """Reads events from JSONL (current file + .1 for older history).
+    Returns list of events in chronological order, ≤ limit items,
+    with before — only events with ts < before."""
     path = _timeline_path(session_key)
     if path is None or not isinstance(path, Path):
         return []
 
-    # Собираем строки из обоих файлов: сначала .1 (старые), потом текущий
+    # Gather lines from both files: .1 (older) first, then current
     files: list[Path] = []
     backup = path.with_suffix(".jsonl.1")
     if backup.exists():
@@ -3802,7 +3805,7 @@ def _timeline_read_events(session_key: str, limit: int, before: float | None) ->
                     try:
                         obj = json.loads(line)
                     except Exception:
-                        continue  # graceful: битая строка → skip
+                        continue  # graceful: corrupted line → skip
                     if not isinstance(obj, dict):
                         continue
                     ts = obj.get("ts")
@@ -3812,14 +3815,14 @@ def _timeline_read_events(session_key: str, limit: int, before: float | None) ->
         except Exception:
             continue
 
-    # Сортируем хронологически по ts (новые внизу)
+    # Sort chronologically by ts (newest at the bottom)
     events.sort(key=lambda e: e.get("ts", 0))
-    # Берём последние limit
+    # Take the last `limit`
     return events[-limit:]
 
 
 async def api_project_timeline(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/timeline?limit=N&before=<ts> — история событий проекта."""
+    """GET /api/projects/{id}/timeline?limit=N&before=<ts> — project event history."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -3845,11 +3848,11 @@ async def api_project_timeline(req: web.Request) -> web.Response:
     return web.json_response({"events": events})
 
 
-# ─────────────────────────── свободные чаты (без привязки к проекту) ───────────────────────────
+# ─────────────────────────── free chats (not bound to a project) ───────────────────────────
 #
-# Free-чат — виртуальный «проект» с cwd=$HOME, без git, без TG-привязки.
-# Каждый клик «новый свободный» создаёт отдельную вкладку со своим session_id.
-# Хранятся в data/free_chats.json: {free-<uuid>: {label, cwd, model, created_at}}.
+# Free chat — virtual "project" with cwd=$HOME, no git, no TG binding.
+# Each click on "new free" creates a separate tab with its own session_id.
+# Stored in data/free_chats.json: {free-<uuid>: {label, cwd, model, created_at}}.
 
 _FREE_DEFAULT_CWD = str(Path.home())
 
@@ -3865,10 +3868,10 @@ async def api_free_create(req: web.Request) -> web.Response:
     if model not in _ALLOWED_MODELS:
         model = _effective_default_model(ctx)
 
-    # Лейбл — пользовательский или авто «Свободный HH:MM»
+    # Label — user-supplied or auto "Free HH:MM"
     label = (body.get("label") or "").strip()
     if not label:
-        label = f"Свободный {time.strftime('%H:%M')}"
+        label = f"Free {time.strftime('%H:%M')}"
 
     fid = f"free-{_uuid.uuid4().hex[:8]}"
     free = _load_free_chats(ctx)
@@ -3900,8 +3903,8 @@ async def api_free_rename(req: web.Request) -> web.Response:
     free[fid]["label"] = label
     _save_free_chats(ctx, free)
 
-    # Если у вкладки уже есть активная Claude-сессия — прокидываем тот же label на неё,
-    # чтобы переименование вкладки автоматически переименовало и сессию в SessionSelector.
+    # If the tab already has an active Claude session — propagate the same label to it,
+    # so renaming the tab automatically renames the session in SessionSelector as well.
     active_sid = ctx["sessions"].get(fid)
     if active_sid:
         labels = _load_session_labels(ctx)
@@ -3918,13 +3921,13 @@ async def api_free_delete(req: web.Request) -> web.Response:
     if fid not in free:
         return web.json_response({"error": "free chat not found"}, status=404)
 
-    # Нельзя удалить если в нём идёт работа — клиент должен сначала остановить
+    # Cannot delete if a run is in progress — client must stop it first
     if ctx["running"].get(fid) is not None:
         return web.json_response({"error": "chat is busy, stop it first"}, status=409)
 
     free.pop(fid)
     _save_free_chats(ctx, free)
-    # Подчищаем session_id если был
+    # Clean up session_id if one existed
     if ctx["sessions"].pop(fid, None) is not None:
         save = ctx.get("save_sessions")
         if callable(save):
@@ -3932,13 +3935,13 @@ async def api_free_delete(req: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-# ─────────────────────────── лимиты подписки Claude Code ───────────────────────────
+# ─────────────────────────── Claude Code subscription limits ───────────────────────────
 #
-# GET /api/usage  → текущий снимок лимитов подписки (5ч окно, недельные, opus/sonnet, overage).
-# Источник истины для ПРОЦЕНТОВ — официальный oauth-эндпоинт https://api.anthropic.com/api/oauth/usage
-# (тот же, что бьёт `/usage` в самом Claude Code). Пассивный RateLimitEvent SDK даёт только
-# status+resets_at, БЕЗ utilization на этой подписке (проверено 2026-05-30) — потому % раньше не было.
-# Токен берём из ~/.claude/.credentials.json (SDK его сам рефрешит). Кэш 60с — фронт поллит каждые 30с.
+# GET /api/usage  → current snapshot of subscription limits (5h window, weekly, opus/sonnet, overage).
+# Source of truth for PERCENTAGES — the official oauth endpoint https://api.anthropic.com/api/oauth/usage
+# (the same one hit by `/usage` in Claude Code itself). Passive RateLimitEvent from SDK gives only
+# status+resets_at, WITHOUT utilization for this subscription (verified 2026-05-30) — that's why % was missing.
+# Token taken from ~/.claude/.credentials.json (SDK refreshes it automatically). Cache 60s — frontend polls every 30s.
 
 _OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # CLAUDE_CREDENTIALS_PATH: path to Claude OAuth credentials file.
@@ -3978,7 +3981,7 @@ def _iso_to_unix(s):
 
 
 def _norm_window(d):
-    """oauth-окно {utilization:0-100, resets_at:ISO} → формат фронта {utilization:0-1, resets_at:unix}."""
+    """OAuth window {utilization:0-100, resets_at:ISO} → frontend format {utilization:0-1, resets_at:unix}."""
     if not isinstance(d, dict):
         return None
     util = d.get("utilization")
@@ -4030,17 +4033,17 @@ async def api_usage(req: web.Request) -> web.Response:
                 _usage_cache["data"] = limits
                 _usage_cache["ts"] = now
                 cached = limits
-        # oauth недоступен (нет токена / 401 / сеть) → фоллбэк на пассивный снимок SDK
+        # oauth unavailable (no token / 401 / network) → fallback to passive SDK snapshot
         if not cached:
             cached = ctx.get("rate_limits") or {}
     return web.json_response({"limits": cached, "now": time.time()})
 
 
-# ─────────────────────────── смена модели проекта ───────────────────────────
+# ─────────────────────────── project model change ───────────────────────────
 #
 # POST /api/projects/{id}/model  {model: "opus"|"sonnet"|"haiku"}
-# Обновляет model во ВСЕХ topics с тем же cwd (один проект может иметь несколько TG-топиков),
-# persist через save_topics() из ctx. Применится со следующего запроса (текущая сессия не трогается).
+# Updates model in ALL topics with the same cwd (one project may have multiple TG topics),
+# persists via save_topics() from ctx. Takes effect on the next request (current session is not touched).
 
 _ALLOWED_MODELS: set[str] = {"opus", "sonnet", "haiku"}
 
@@ -4062,7 +4065,7 @@ async def api_project_set_model(req: web.Request) -> web.Response:
             status=400,
         )
 
-    # Free-чат: модель хранится в free_chats.json по его id
+    # Free chat: model is stored in free_chats.json by its id
     if project.get("is_free"):
         free = _load_free_chats(ctx)
         if project["id"] in free:
@@ -4070,7 +4073,7 @@ async def api_project_set_model(req: web.Request) -> web.Response:
             _save_free_chats(ctx, free)
         return web.json_response({"ok": True, "model": model, "topics_updated": 1})
 
-    # Обычный проект — обновляем все topics с тем же cwd
+    # Regular project — update all topics with the same cwd
     cwd = project["cwd"]
     changed = 0
     for b in ctx["topics"].values():
@@ -4089,12 +4092,12 @@ async def api_project_set_model(req: web.Request) -> web.Response:
 # ─────────────────────────── git sync (commit + push) ───────────────────────────
 #
 # POST /api/projects/{id}/git/sync  {message?: str}
-# Если есть локальные правки → git add -A + git commit -m <msg>. Затем git push.
-# Дефолтное сообщение: "wip: YYYY-MM-DD HH:MM" (если поле message пустое).
-# Возвращает {ok, committed, pushed, log}; на ошибке status 500 + {error, log}.
+# If there are local changes → git add -A + git commit -m <msg>. Then git push.
+# Default message: "wip: YYYY-MM-DD HH:MM" (if message field is empty).
+# Returns {ok, committed, pushed, log}; on error status 500 + {error, log}.
 
 async def api_project_upload(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/upload — multipart файл → data/inbox/ → {path, name, size}."""
+    """POST /api/projects/{id}/upload — multipart file → data/inbox/ → {path, name, size}."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -4107,11 +4110,11 @@ async def api_project_upload(req: web.Request) -> web.Response:
     try:
         reader = await req.multipart()
     except Exception:
-        return web.json_response({"error": "ожидается multipart/form-data"}, status=400)
+        return web.json_response({"error": "expected multipart/form-data"}, status=400)
 
     field = await reader.next()
     if field is None:
-        return web.json_response({"error": "нет поля file"}, status=400)
+        return web.json_response({"error": "no file field"}, status=400)
 
     filename = field.filename or "upload"
     safe_name = re.sub(r'[^\w.\-]', '_', filename)
@@ -4130,7 +4133,7 @@ async def api_project_upload(req: web.Request) -> web.Response:
                 if size > MAX_UPLOAD:
                     fh.close()
                     dest.unlink(missing_ok=True)
-                    return web.json_response({"error": "файл слишком большой (макс 20 МБ)"}, status=413)
+                    return web.json_response({"error": "file too large (max 20 MB)"}, status=413)
                 fh.write(chunk)
     except Exception as e:
         dest.unlink(missing_ok=True)
@@ -4145,7 +4148,7 @@ async def api_project_git_sync(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     if not _git_enabled(project):
-        return web.json_response({"error": "git отключён для этого проекта (настройки)"}, status=409)
+        return web.json_response({"error": "git disabled for this project (settings)"}, status=409)
     cwd = project["cwd"]
 
     try:
@@ -4167,12 +4170,12 @@ async def api_project_git_sync(req: web.Request) -> web.Response:
     committed = False
     pushed = False
 
-    # 1. Проверяем статус
+    # 1. Check status
     rc, status = await _git("status", "--porcelain")
     if rc != 0:
         return web.json_response({"error": "git status failed", "log": status}, status=500)
 
-    # 2. Если есть dirty — стейджим и коммитим
+    # 2. If dirty — stage and commit
     if status.strip():
         rc, out = await _git("add", "-A")
         log_parts.append(f"$ git add -A\n{out}".rstrip())
@@ -4185,7 +4188,7 @@ async def api_project_git_sync(req: web.Request) -> web.Response:
             return web.json_response({"error": "git commit failed", "log": "\n\n".join(log_parts)}, status=500)
         committed = True
 
-    # 3. Push (даже если коммита не было — могли быть локальные коммиты не отправлены)
+    # 3. Push (even if no commit — there may be local commits not yet pushed)
     rc, out = await _git("push")
     log_parts.append(f"$ git push\n{out}".rstrip())
     if rc != 0:
@@ -4201,13 +4204,13 @@ async def api_project_git_sync(req: web.Request) -> web.Response:
     })
 
 
-# ─────────────────────────── запуск тестов проекта ───────────────────────────
+# ─────────────────────────── project test runner ───────────────────────────
 #
-# POST /api/projects/{id}/test → автодетект тест-команды, прогон, вывод в кокпит.
-# Детект по убыванию специфичности: pytest-конфиг/tests/ → npm test → make test.
+# POST /api/projects/{id}/test → auto-detect test command, run, output to cockpit.
+# Detection in decreasing specificity: pytest-cfg/tests/ → npm test → make test.
 
 def _detect_test_cmd(cwd: str):
-    """Возвращает (cmd:list[str], human:str) или None если не нашли как тестировать."""
+    """Returns (cmd:list[str], human:str) or None if no test method found."""
     p = Path(cwd)
     # Python / pytest
     has_pytest_cfg = any((p / n).exists() for n in
@@ -4255,8 +4258,8 @@ async def api_project_test(req: web.Request) -> web.Response:
     if detected is None:
         return web.json_response({
             "detected": False, "ok": False, "cmd": None, "exit_code": None,
-            "output": "Не нашёл как запускать тесты: нет pytest-конфига/tests/, "
-                      "скрипта test в package.json или цели test в Makefile.",
+            "output": "Could not find how to run tests: no pytest config/tests/ dir, "
+                      "test script in package.json, or test target in Makefile.",
         })
     cmd, human = detected
     try:
@@ -4267,7 +4270,7 @@ async def api_project_test(req: web.Request) -> web.Response:
             env=os.environ.copy(),
         )
     except Exception as e:
-        return web.json_response({"error": f"запуск не удался: {e}", "cmd": human}, status=500)
+        return web.json_response({"error": f"launch failed: {e}", "cmd": human}, status=500)
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
         rc = proc.returncode or 0
@@ -4280,9 +4283,9 @@ async def api_project_test(req: web.Request) -> web.Response:
         out, rc, timed_out = b"", -1, True
     text = out.decode(errors="replace")
     if len(text) > 20000:
-        text = "…(начало обрезано)\n" + text[-20000:]
+        text = "…(beginning truncated)\n" + text[-20000:]
     if timed_out:
-        text = (text + "\n⏱ прервано по таймауту 300с").strip()
+        text = (text + "\n⏱ interrupted by 300s timeout").strip()
     return web.json_response({
         "detected": True, "ok": (rc == 0 and not timed_out),
         "cmd": human, "exit_code": rc, "timed_out": timed_out, "output": text,
@@ -4291,16 +4294,16 @@ async def api_project_test(req: web.Request) -> web.Response:
 
 # ─────────────────────────── quality gate ───────────────────────────────────
 #
-# _run_quality_gate(wt_path, env) — прогоняет тесты В worktree-карточки.
-# Переиспользует _detect_test_cmd. Таймаут 300с. Вердикт: safe/risky/unknown.
+# _run_quality_gate(wt_path, env) — runs tests IN the card worktree.
+# Reuses _detect_test_cmd. Timeout 300s. Verdict: safe/risky/unknown.
 
-_GATE_MAX_OUTPUT = 20_000  # символов
+_GATE_MAX_OUTPUT = 20_000  # chars
 
 
 async def _run_quality_gate(wt_path: str, env: "dict | None" = None) -> dict:
-    """Прогоняет тесты в worktree-карточки. Возвращает:
+    """Runs tests in the card worktree. Returns:
     {verdict:"safe|risky|unknown", tests:{detected, ok, cmd, exit_code, output, timed_out}}.
-    Вердикт: тесты прошли→safe, упали/таймаут→risky, не найдены→unknown.
+    Verdict: tests passed→safe, failed/timeout→risky, not found→unknown.
     """
     detected = _detect_test_cmd(wt_path)
     if detected is None:
@@ -4311,7 +4314,7 @@ async def _run_quality_gate(wt_path: str, env: "dict | None" = None) -> dict:
                 "ok": False,
                 "cmd": None,
                 "exit_code": None,
-                "output": "Тест-команда не обнаружена (нет pytest-конфига/tests/, npm test, make test).",
+                "output": "Test command not found (no pytest config/tests/ dir, npm test, or make test).",
                 "timed_out": False,
             },
             "lint": None,
@@ -4337,7 +4340,7 @@ async def _run_quality_gate(wt_path: str, env: "dict | None" = None) -> dict:
                 "ok": False,
                 "cmd": human,
                 "exit_code": -1,
-                "output": f"Не удалось запустить тесты: {e}",
+                "output": f"Failed to launch tests: {e}",
                 "timed_out": False,
             },
             "lint": None,
@@ -4356,9 +4359,9 @@ async def _run_quality_gate(wt_path: str, env: "dict | None" = None) -> dict:
 
     text = out.decode(errors="replace")
     if len(text) > _GATE_MAX_OUTPUT:
-        text = "…(начало обрезано)\n" + text[-_GATE_MAX_OUTPUT:]
+        text = "…(beginning truncated)\n" + text[-_GATE_MAX_OUTPUT:]
     if timed_out:
-        text = (text + "\n⏱ прервано по таймауту 300с").strip()
+        text = (text + "\n⏱ interrupted by 300s timeout").strip()
 
     ok = (rc == 0 and not timed_out)
     verdict = "safe" if ok else "risky"
@@ -4373,14 +4376,14 @@ async def _run_quality_gate(wt_path: str, env: "dict | None" = None) -> dict:
             "output": text,
             "timed_out": timed_out,
         },
-        "lint": None,  # линт — out of scope (spec-009, п.2 дизайн-решений)
+        "lint": None,  # lint — out of scope (spec-009, design decision 2)
     }
 
 
 async def api_card_check(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/tasks/{card}/check — прогнать quality gate в worktree карточки.
-    Возвращает вердикт safe/risky/unknown. Записывает gate:{verdict,ts} в meta-сайдкар.
-    Legacy или нет worktree → {verdict:"unknown", reason:"legacy"}.
+    """POST /api/projects/{id}/tasks/{card}/check — run quality gate in card worktree.
+    Returns verdict safe/risky/unknown. Writes gate:{verdict,ts} to meta sidecar.
+    Legacy or no worktree → {verdict:"unknown", reason:"legacy"}.
     """
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -4394,7 +4397,7 @@ async def api_card_check(req: web.Request) -> web.Response:
     DATA: Path = ctx["DATA"]
     meta = _read_run_meta(DATA, card_id)
 
-    # Legacy или нет worktree-мета → unknown без прогона
+    # Legacy or no worktree meta → unknown without running
     if not meta or meta.get("mode") != "worktree" or not meta.get("wt_path"):
         return web.json_response({
             "verdict": "unknown",
@@ -4405,21 +4408,21 @@ async def api_card_check(req: web.Request) -> web.Response:
 
     wt_path = meta["wt_path"]
     if not Path(wt_path).exists():
-        return web.json_response({"error": "worktree не найден на диске"}, status=404)
+        return web.json_response({"error": "worktree not found on disk"}, status=404)
 
-    # Подмешать секреты проекта (тесты могут требовать ключи)
+    # Inject project secrets (tests may need keys)
     cwd = project["cwd"]
     project_secrets = _secrets_read(cwd)
 
     result = await _run_quality_gate(wt_path, env=project_secrets or None)
 
-    # Записать результат гейта в meta-сайдкар
+    # Write gate result to meta sidecar
     gate_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     meta["gate"] = {"verdict": result["verdict"], "ts": gate_ts}
     _write_run_meta(DATA, card_id, meta)
 
-    # Публикуем событие в Timeline (наблюдаемость)
-    # session_key для события: берём из topics по cwd проекта (совпадает с apply/discard)
+    # Publish event to Timeline (observability)
+    # session_key for the event: taken from topics by project cwd (same as apply/discard)
     try:
         topics: dict = ctx.get("topics", {})
         session_key: str = next(
@@ -4432,32 +4435,32 @@ async def api_card_check(req: web.Request) -> web.Response:
             "run_id": card_id,
         })
     except Exception:
-        pass  # bus-событие не должно ломать ответ
+        pass  # bus event must not break the response
 
     return web.json_response(result)
 
 
-# ─────────────────────────── файловый проводник ───────────────────────────
+# ─────────────────────────── file browser ───────────────────────────
 
-# Директории и имена файлов, скрытые из листинга
+# Directories and filenames hidden from listing
 _FS_EXCLUDE_DIRS: set[str] = {
     ".git", "node_modules", "venv", ".venv", "__pycache__",
     "dist", ".worktrees", ".mypy_cache", ".pytest_cache",
 }
 
-# Файлы/паттерны, скрытые из листинга и чтения.
-# Правило: имя начинается с ".env" — НО ".env.example" разрешён.
+# Files/patterns hidden from listing and reading.
+# Rule: name starts with ".env" — BUT ".env.example" is allowed.
 def _is_secret_name(name: str) -> bool:
-    """True если имя файла считается секретным (не должно отображаться/читаться)."""
+    """True if the filename is considered secret (must not be shown/read)."""
     if name.startswith(".env") and name != ".env.example":
         return True
     return False
 
 
 def _read_file_content(target: Path, root: Path, rel: str) -> web.Response:
-    """Общий хелпер для чтения файла: size/binary/text проверки + ответ JSON.
-    root используется для нормализации rel_norm в ответе.
-    Не проверяет секретность и traversal — это обязанность вызывающего."""
+    """Shared helper for reading a file: size/binary/text checks + JSON response.
+    root is used to normalise rel_norm in the response.
+    Does not check secrecy and traversal — that is the caller's responsibility."""
     if not target.exists() or not target.is_file():
         return web.json_response({"error": "not a file"}, status=404)
 
@@ -4466,15 +4469,15 @@ def _read_file_content(target: Path, root: Path, rel: str) -> web.Response:
     except Exception:
         return web.json_response({"error": "stat failed"}, status=500)
 
-    _MAX_FILE_SIZE = 1 * 1024 * 1024  # 1 МБ
+    _MAX_FILE_SIZE = 1 * 1024 * 1024  # 1 MB
     if size > _MAX_FILE_SIZE:
-        return web.json_response({"error": "файл слишком большой", "size": size})
+        return web.json_response({"error": "file too large", "size": size})
 
     try:
         with open(target, "rb") as f:
             head = f.read(8192)
         if b"\x00" in head:
-            return web.json_response({"error": "бинарный файл", "size": size})
+            return web.json_response({"error": "binary file", "size": size})
     except Exception:
         return web.json_response({"error": "read failed"}, status=500)
 
@@ -4493,9 +4496,9 @@ def _read_file_content(target: Path, root: Path, rel: str) -> web.Response:
 
 
 def _resolve_safe(cwd: str, rel: str):
-    """Возвращает (resolved_path, cwd_resolved) или поднимает ValueError при traversal."""
+    """Returns (resolved_path, cwd_resolved) or raises ValueError on traversal."""
     cwd_resolved = Path(cwd).resolve()
-    # Убираем ведущий / если есть — rel должен быть относительным
+    # Strip leading / if present — rel should be relative
     rel_clean = rel.lstrip("/")
     target = (cwd_resolved / rel_clean).resolve()
     if not str(target).startswith(str(cwd_resolved) + "/") and target != cwd_resolved:
@@ -4504,7 +4507,7 @@ def _resolve_safe(cwd: str, rel: str):
 
 
 async def api_project_files(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/files?path=<rel> — листинг директории."""
+    """GET /api/projects/{id}/files?path=<rel> — directory listing."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -4521,7 +4524,7 @@ async def api_project_files(req: web.Request) -> web.Response:
     if not target.exists() or not target.is_dir():
         return web.json_response({"error": "not a directory"}, status=404)
 
-    # Нормализуем rel для ответа (относительно cwd)
+    # Normalise rel for response (relative to cwd)
     try:
         rel_norm = str(target.relative_to(cwd_resolved))
         if rel_norm == ".":
@@ -4529,7 +4532,7 @@ async def api_project_files(req: web.Request) -> web.Response:
     except ValueError:
         return web.json_response({"error": "invalid path"}, status=400)
 
-    # Не пускаем навигацию ВНУТРЬ исключённых директорий (.git/venv/node_modules…) напрямую
+    # Block navigation INTO excluded directories (.git/venv/node_modules…) directly
     if any(part in _FS_EXCLUDE_DIRS for part in target.relative_to(cwd_resolved).parts):
         return web.json_response({"error": "directory hidden"}, status=404)
 
@@ -4538,20 +4541,20 @@ async def api_project_files(req: web.Request) -> web.Response:
         items = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
         for item in items:
             name = item.name
-            # Исключаем скрытые директории и секреты
+            # Exclude hidden directories and secrets
             if item.is_dir() and name in _FS_EXCLUDE_DIRS:
                 continue
             if item.is_file() and _is_secret_name(name):
                 continue
-            # Также скрываем секреты в папках
+            # Also hide secrets in folders
             if item.is_dir() and _is_secret_name(name):
                 continue
             if item.is_symlink():
-                # Разрешаем симлинк и проверяем, не выходит ли он за пределы cwd
+                # Resolve symlink and check it doesn't leave cwd
                 try:
                     linked = item.resolve()
                     if not str(linked).startswith(str(cwd_resolved)):
-                        continue  # симлинк наружу — скрываем
+                        continue  # symlink points outside — hide
                 except Exception:
                     continue
             entry_type = "dir" if item.is_dir() else "file"
@@ -4569,7 +4572,7 @@ async def api_project_files(req: web.Request) -> web.Response:
 
 
 async def api_project_file(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/file?path=<rel> — содержимое файла."""
+    """GET /api/projects/{id}/file?path=<rel> — file contents."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -4585,11 +4588,11 @@ async def api_project_file(req: web.Request) -> web.Response:
     except ValueError:
         return web.json_response({"error": "invalid path"}, status=400)
 
-    # Проверяем имя на секреты (сохранён anти-traversal _resolve_safe)
+    # Check name for secrets (anti-traversal kept via _resolve_safe)
     if _is_secret_name(target.name):
         return web.json_response({"error": "access denied"}, status=403)
 
-    # Запрещаем читать внутри исключённых директорий (.git/venv/node_modules…)
+    # Deny reading inside excluded directories (.git/venv/node_modules…)
     try:
         rel_parts = target.relative_to(cwd_resolved).parts
         if any(part in _FS_EXCLUDE_DIRS for part in rel_parts):
@@ -4600,8 +4603,8 @@ async def api_project_file(req: web.Request) -> web.Response:
     return _read_file_content(target, cwd_resolved, rel)
 
 
-# ── Глобальный файловый браузер (от $HOME) ────────────────────────────────────
-# Не привязан к проекту — листинг/чтение от /home/igor/ с теми же правилами безопасности.
+# ── Global file browser (from $HOME) ─────────────────────────────────────────
+# Not bound to a project — listing/reading from $HOME with the same security rules.
 
 _GLOBAL_FS_EXCLUDE: set[str] = {
     "node_modules", "venv", ".venv", "__pycache__",
@@ -4610,7 +4613,7 @@ _GLOBAL_FS_EXCLUDE: set[str] = {
 
 
 def _resolve_global_safe(home: Path, rel: str):
-    """Как _resolve_safe, но root = $HOME. Поднимает ValueError при traversal."""
+    """Like _resolve_safe, but root = $HOME. Raises ValueError on traversal."""
     rel_clean = rel.lstrip("/")
     target = (home / rel_clean).resolve()
     if not str(target).startswith(str(home) + "/") and target != home:
@@ -4619,7 +4622,7 @@ def _resolve_global_safe(home: Path, rel: str):
 
 
 async def api_global_files(req: web.Request) -> web.Response:
-    """GET /api/global/files?path=<rel> — листинг от $HOME."""
+    """GET /api/global/files?path=<rel> — directory listing from $HOME."""
     home = Path.home()
     rel = req.rel_url.query.get("path", "")
     try:
@@ -4661,7 +4664,7 @@ async def api_global_files(req: web.Request) -> web.Response:
 
 
 async def api_global_file(req: web.Request) -> web.Response:
-    """GET /api/global/file?path=<rel> — содержимое файла от $HOME."""
+    """GET /api/global/file?path=<rel> — file contents from $HOME."""
     home = Path.home()
     rel = req.rel_url.query.get("path", "")
     if not rel:
@@ -4672,7 +4675,7 @@ async def api_global_file(req: web.Request) -> web.Response:
     except ValueError:
         return web.json_response({"error": "invalid path"}, status=400)
 
-    # Секреты проверяем ДО чтения (сохранён anти-traversal _resolve_global_safe)
+    # Check secrets BEFORE reading (anti-traversal kept via _resolve_global_safe)
     if _is_secret_name(target.name):
         return web.json_response({"error": "access denied"}, status=403)
 
@@ -4680,7 +4683,7 @@ async def api_global_file(req: web.Request) -> web.Response:
 
 
 async def api_global_file_write(req: web.Request) -> web.Response:
-    """POST /api/global/file?path=<rel> — записать содержимое файла."""
+    """POST /api/global/file?path=<rel> — write file contents."""
     home = Path.home()
     rel = req.rel_url.query.get("path", "")
     if not rel:
@@ -4706,8 +4709,8 @@ async def api_global_file_write(req: web.Request) -> web.Response:
 
 
 async def api_card_run(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/tasks/{card}/run — сайдкар из DATA/runs/<card>.md (404-safe).
-    Также возвращает meta (mode, has_changes, applied, discarded) из JSON-сайдкара."""
+    """GET /api/projects/{id}/tasks/{card}/run — sidecar from DATA/runs/<card>.md (404-safe).
+    Also returns meta (mode, has_changes, applied, discarded) from JSON sidecar."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -4725,7 +4728,7 @@ async def api_card_run(req: web.Request) -> web.Response:
 
 
 async def api_card_apply(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/tasks/{card}/apply — применить worktree-ветку (merge --no-ff) в основное дерево."""
+    """POST /api/projects/{id}/tasks/{card}/apply — apply worktree branch (merge --no-ff) into the main tree."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -4739,14 +4742,14 @@ async def api_card_apply(req: web.Request) -> web.Response:
 
     if not meta or meta.get("mode") != "worktree" or not meta.get("wt_path") or not meta.get("branch"):
         return web.json_response(
-            {"error": "карточка выполнена в рабочем дереве (legacy-режим) или нет мета — гейт недоступен"},
+            {"error": "card was run in working tree (legacy mode) or no meta — gate unavailable"},
             status=400,
         )
 
     if meta.get("applied"):
-        return web.json_response({"error": "карточка уже применена"}, status=400)
+        return web.json_response({"error": "card already applied"}, status=400)
     if meta.get("discarded"):
-        return web.json_response({"error": "карточка уже отменена"}, status=400)
+        return web.json_response({"error": "card already discarded"}, status=400)
 
     wt_path = meta["wt_path"]
     branch = meta["branch"]
@@ -4754,12 +4757,12 @@ async def api_card_apply(req: web.Request) -> web.Response:
     cwd = project["cwd"]
     name = project["name"]
 
-    # Проверяем что worktree физически существует
+    # Check that worktree physically exists
     if not Path(wt_path).exists():
-        return web.json_response({"error": "worktree не найден на диске — возможно удалён после рестарта"}, status=400)
+        return web.json_response({"error": "worktree not found on disk — possibly deleted after restart"}, status=400)
 
     try:
-        # Убедимся что HEAD на base_branch
+        # Ensure HEAD is on base_branch
         current_branch = await _git_cmd(cwd, "rev-parse", "--abbrev-ref", "HEAD")
         if current_branch != base_branch:
             proc = await asyncio.create_subprocess_exec(
@@ -4770,13 +4773,13 @@ async def api_card_apply(req: web.Request) -> web.Response:
             _, err = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             if proc.returncode != 0:
                 return web.json_response(
-                    {"error": f"не удалось переключиться на {base_branch}: {err.decode(errors='replace').strip()}"},
+                    {"error": f"could not switch to {base_branch}: {err.decode(errors='replace').strip()}"},
                     status=500,
                 )
 
         # Merge --no-ff
         prompt_short = meta.get("card_id", card_id)
-        merge_msg = f"Применить карточку {card_id}"
+        merge_msg = f"Apply card {card_id}"
         proc = await asyncio.create_subprocess_exec(
             "git", "-C", cwd, "merge", "--no-ff", branch, "-m", merge_msg,
             stdout=asyncio.subprocess.PIPE,
@@ -4784,7 +4787,7 @@ async def api_card_apply(req: web.Request) -> web.Response:
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
         if proc.returncode != 0:
-            # Merge conflict — abort и вернуть 409
+            # Merge conflict — abort and return 409
             abort_proc = await asyncio.create_subprocess_exec(
                 "git", "-C", cwd, "merge", "--abort",
                 stdout=asyncio.subprocess.DEVNULL,
@@ -4797,7 +4800,7 @@ async def api_card_apply(req: web.Request) -> web.Response:
                 status=409,
             )
 
-        # Успешный merge: удалить worktree + ветку
+        # Successful merge: delete worktree + branch
         rm_proc = await asyncio.create_subprocess_exec(
             "git", "-C", cwd, "worktree", "remove", "--force", wt_path,
             stdout=asyncio.subprocess.DEVNULL,
@@ -4811,11 +4814,11 @@ async def api_card_apply(req: web.Request) -> web.Response:
         )
         await asyncio.wait_for(br_proc.communicate(), timeout=5.0)
 
-        # Обновить JSON-мета
+        # Update JSON meta
         meta["applied"] = True
         _write_run_meta(DATA, card_id, meta)
 
-        # Перенести карточку Review → Done
+        # Move card Review → Done
         async with _get_board_lock(cwd):
             _, preamble, cols = _load_board(cwd)
             card = _pop_card(cols, card_id)
@@ -4832,13 +4835,13 @@ async def api_card_apply(req: web.Request) -> web.Response:
         return web.json_response({"ok": True, "applied": True, "card_id": card_id})
 
     except asyncio.TimeoutError:
-        return web.json_response({"error": "timeout при merge"}, status=500)
+        return web.json_response({"error": "timeout during merge"}, status=500)
     except Exception as e:
-        return web.json_response({"error": f"внутренняя ошибка: {e}"}, status=500)
+        return web.json_response({"error": f"internal error: {e}"}, status=500)
 
 
 async def api_card_discard(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/tasks/{card}/discard — отменить worktree-карточку (ветка удаляется)."""
+    """POST /api/projects/{id}/tasks/{card}/discard — discard worktree card (branch deleted)."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -4852,14 +4855,14 @@ async def api_card_discard(req: web.Request) -> web.Response:
 
     if not meta or meta.get("mode") != "worktree" or not meta.get("wt_path") or not meta.get("branch"):
         return web.json_response(
-            {"error": "карточка выполнена в рабочем дереве (legacy-режим) или нет мета — гейт недоступен"},
+            {"error": "card was run in working tree (legacy mode) or no meta — gate unavailable"},
             status=400,
         )
 
     if meta.get("applied"):
-        return web.json_response({"error": "карточка уже применена"}, status=400)
+        return web.json_response({"error": "card already applied"}, status=400)
     if meta.get("discarded"):
-        return web.json_response({"error": "карточка уже отменена"}, status=400)
+        return web.json_response({"error": "card already discarded"}, status=400)
 
     wt_path = meta["wt_path"]
     branch = meta["branch"]
@@ -4867,7 +4870,7 @@ async def api_card_discard(req: web.Request) -> web.Response:
     name = project["name"]
 
     try:
-        # Удалить worktree (если существует)
+        # Delete worktree (if it exists)
         if Path(wt_path).exists():
             rm_proc = await asyncio.create_subprocess_exec(
                 "git", "-C", cwd, "worktree", "remove", "--force", wt_path,
@@ -4876,7 +4879,7 @@ async def api_card_discard(req: web.Request) -> web.Response:
             )
             await asyncio.wait_for(rm_proc.communicate(), timeout=10.0)
 
-        # Удалить ветку (404-safe)
+        # Delete branch (404-safe)
         br_proc = await asyncio.create_subprocess_exec(
             "git", "-C", cwd, "branch", "-D", branch,
             stdout=asyncio.subprocess.DEVNULL,
@@ -4884,11 +4887,11 @@ async def api_card_discard(req: web.Request) -> web.Response:
         )
         await asyncio.wait_for(br_proc.communicate(), timeout=5.0)
 
-        # Обновить JSON-мета
+        # Update JSON meta
         meta["discarded"] = True
         _write_run_meta(DATA, card_id, meta)
 
-        # Перенести карточку Review → Backlog
+        # Move card Review → Backlog
         async with _get_board_lock(cwd):
             _, preamble, cols = _load_board(cwd)
             card = _pop_card(cols, card_id)
@@ -4900,37 +4903,37 @@ async def api_card_discard(req: web.Request) -> web.Response:
         return web.json_response({"ok": True, "discarded": True, "card_id": card_id})
 
     except asyncio.TimeoutError:
-        return web.json_response({"error": "timeout при discard"}, status=500)
+        return web.json_response({"error": "timeout during discard"}, status=500)
     except Exception as e:
-        return web.json_response({"error": f"внутренняя ошибка: {e}"}, status=500)
+        return web.json_response({"error": f"internal error: {e}"}, status=500)
 
 
-# ─────────────────────────── C2: сессии проекта ───────────────────────────
+# ─────────────────────────── C2: project sessions ───────────────────────────
 
 def _sdk_sessions_dir(cwd: str) -> Path:
-    """Папка SDK с .jsonl-сессиями для данного cwd."""
+    """SDK folder with .jsonl sessions for the given cwd."""
     return Path.home() / ".claude" / "projects" / cwd.replace("/", "-")
 
 
 def _migrate_cwd_keyed_state(old_cwd: str, new_cwd: str, ctx: dict) -> list[str]:
-    """Переносит cwd-привязанное состояние при переименовании проекта.
+    """Migrates cwd-keyed state when a project is renamed.
 
-    SDK-история диалогов (~/.claude/projects/<slug>/) и Timeline-лента
-    (DATA/timeline/<slug>.jsonl) ключуются по slug = cwd.replace('/','-').
-    При смене cwd их надо физически перенести — иначе кокпит читает пустой
-    новый slug, и сессии/лента «исчезают» (хотя файлы целы под старым slug).
-    Best-effort: ошибка миграции НЕ откатывает уже выполненный move папки —
-    возвращаем список предупреждений для ответа API.
+    SDK conversation history (~/.claude/projects/<slug>/) and the Timeline feed
+    (DATA/timeline/<slug>.jsonl) are keyed by slug = cwd.replace('/','-').
+    When cwd changes they must be physically moved — otherwise the cockpit reads an empty
+    new slug, and sessions/feed "disappear" (files are intact under the old slug).
+    Best-effort: migration errors do NOT roll back an already-completed folder move —
+    we return a list of warnings for the API response.
     """
     warnings: list[str] = []
 
-    # 1. SDK-каталог истории диалогов: ~/.claude/projects/<slug>
+    # 1. SDK conversation history dir: ~/.claude/projects/<slug>
     try:
         old_sdk = _sdk_sessions_dir(old_cwd)
         new_sdk = _sdk_sessions_dir(new_cwd)
         if old_sdk.exists() and old_sdk != new_sdk:
             if new_sdk.exists():
-                # Каталог назначения занят — переносим файлы по одному, без клоббера
+                # Destination occupied — move files one by one, no clobber
                 for f in old_sdk.iterdir():
                     dest = new_sdk / f.name
                     if not dest.exists():
@@ -4939,7 +4942,7 @@ def _migrate_cwd_keyed_state(old_cwd: str, new_cwd: str, ctx: dict) -> list[str]
                 new_sdk.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(old_sdk), str(new_sdk))
     except Exception as e:  # noqa: BLE001
-        warnings.append(f"sdk-сессии: {e}")
+        warnings.append(f"sdk-sessions: {e}")
 
     # 2. Timeline: DATA/timeline/<slug>.jsonl (+ .jsonl.1 backup)
     try:
@@ -4962,7 +4965,7 @@ def _migrate_cwd_keyed_state(old_cwd: str, new_cwd: str, ctx: dict) -> list[str]
 
 
 def _session_preview(jsonl_path: Path) -> str:
-    """Извлечь первое человекочитаемое сообщение из jsonl-файла сессии (~70 симв.)."""
+    """Extract the first human-readable message from a session jsonl file (~70 chars)."""
     try:
         lines_read = 0
         with open(jsonl_path, encoding="utf-8", errors="replace") as f:
@@ -4977,13 +4980,13 @@ def _session_preview(jsonl_path: Path) -> str:
                     obj = json.loads(line)
                 except Exception:
                     continue
-                # Вариант 1: операция enqueue с content-строкой
+                # Option 1: enqueue operation with a content string
                 if obj.get("operation") == "enqueue":
                     content = obj.get("content")
                     if isinstance(content, str) and content.strip():
                         text = content.strip()
                         return (text[:70] + "…") if len(text) > 70 else text
-                # Вариант 2: message с role=user
+                # Option 2: message with role=user
                 msg = obj.get("message", {})
                 if isinstance(msg, dict) and msg.get("role") == "user":
                     content = msg.get("content", "")
@@ -4998,11 +5001,11 @@ def _session_preview(jsonl_path: Path) -> str:
                                     return (text[:70] + "…") if len(text) > 70 else text
     except Exception:
         pass
-    return "(без названия)"
+    return "(untitled)"
 
 
 async def api_project_sessions(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/sessions — список сессий SDK для проекта."""
+    """GET /api/projects/{id}/sessions — list of SDK sessions for the project."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -5047,13 +5050,13 @@ async def api_project_sessions(req: web.Request) -> web.Response:
 
 async def api_project_session_label(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/sessions/{sid}/label  {label}
-    Ручной лейбл ЛЮБОЙ сессии (наш слой поверх SDK). Пустой label → снять лейбл.
-    Хранилище глобальное по session_id (data/session_labels.json), id проекта — только маршрут."""
+    Manual label for ANY session (our layer on top of SDK). Empty label → remove label.
+    Storage is global by session_id (data/session_labels.json), project id is route-only."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
-    sid = os.path.basename(req.match_info["sid"])  # анти-traversal: только basename
+    sid = os.path.basename(req.match_info["sid"])  # anti-traversal: basename only
     if not sid:
         return web.json_response({"error": "bad session id"}, status=400)
     try:
@@ -5073,7 +5076,7 @@ async def api_project_session_label(req: web.Request) -> web.Response:
 
 
 async def api_project_set_session(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/session — переключить или сбросить сессию."""
+    """POST /api/projects/{id}/session — switch or reset session."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -5082,10 +5085,10 @@ async def api_project_set_session(req: web.Request) -> web.Response:
 
     tg_thread = project["tg_thread"]
 
-    # Замок: нельзя менять сессию пока проект занят
+    # Lock: cannot change session while project is busy
     if ctx["running"].get(tg_thread) is not None:
         return web.json_response(
-            {"error": "проект занят, смена сессии недоступна"},
+            {"error": "project busy, session change unavailable"},
             status=409,
         )
 
@@ -5105,10 +5108,10 @@ async def api_project_set_session(req: web.Request) -> web.Response:
         session_id = body.get("session_id", "")
         if not session_id:
             return web.json_response({"error": "session_id required"}, status=400)
-        # Санитизация: только basename (без / и ..) — против выхода на чужой .jsonl
+        # Sanitise: basename only (no / or ..) — against escaping to another .jsonl
         if session_id != Path(session_id).name or session_id in ("", ".", ".."):
             return web.json_response({"error": "invalid session_id"}, status=400)
-        # Валидируем — файл должен существовать
+        # Validate — file must exist
         sdk_dir = _sdk_sessions_dir(project["cwd"])
         candidate = sdk_dir / f"{session_id}.jsonl"
         if not candidate.is_file():
@@ -5122,9 +5125,9 @@ async def api_project_set_session(req: web.Request) -> web.Response:
 
 
 def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
-    """Парсит SDK-транскрипт сессии → лента [{role, text, tools}].
-    user(str)=реплика человека; user(list)=tool_result, пропуск.
-    assistant(list)=блоки text/tool_use. Прочие type — мусор."""
+    """Parses an SDK session transcript → feed [{role, text, tools}].
+    user(str)=human reply; user(list)=tool_result, skip.
+    assistant(list)=text/tool_use blocks. Other types — noise."""
     msgs: list[dict] = []
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as f:
@@ -5144,7 +5147,7 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
                     c = m.get("content")
                     if isinstance(c, str) and c.strip():
                         msgs.append({"role": "user", "text": c.strip(), "tools": []})
-                    # content-list у user = tool_result → пропускаем (не реплика человека)
+                    # content-list on user = tool_result → skip (not a human reply)
                 elif t == "assistant":
                     c = m.get("content")
                     if not isinstance(c, list):
@@ -5167,9 +5170,9 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
 
 
 def _session_context_tokens(jsonl_path: Path) -> int:
-    """Реальный размер контекста сессии = prompt-токены последнего assistant-хода
-    (input + cache_read + cache_creation). Совпадает с get_context_usage().totalTokens.
-    0 если транскрипта/usage нет."""
+    """Actual session context size = prompt tokens of the last assistant turn
+    (input + cache_read + cache_creation). Matches get_context_usage().totalTokens.
+    0 if no transcript/usage."""
     last = 0
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as f:
@@ -5195,7 +5198,7 @@ def _session_context_tokens(jsonl_path: Path) -> int:
 
 
 async def api_project_session_history(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/session-history?session_id=<опц.> — лента активной (или указанной) сессии."""
+    """GET /api/projects/{id}/session-history?session_id=<opt.> — feed for active (or specified) session."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -5205,7 +5208,7 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     sid = req.rel_url.query.get("session_id", "") or ctx["sessions"].get(project["tg_thread"])
     if not sid:
         return web.json_response({"messages": [], "session_id": None})
-    # Санитизация (basename-only)
+    # Sanitise (basename-only)
     if sid != Path(sid).name or sid in (".", ".."):
         return web.json_response({"error": "invalid session_id"}, status=400)
 
@@ -5220,25 +5223,25 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     })
 
 
-# ─────────────────────────── C1: SSE-чат ───────────────────────────
+# ─────────────────────────── C1: SSE chat ───────────────────────────
 #
 # POST /api/projects/{id}/chat  body: {"prompt": str}
-# Ответ: text/event-stream с событиями:
+# Response: text/event-stream with events:
 #   data: {"type":"text","text":"..."}
 #   data: {"type":"tool","name":"...","input":"..."}
 #   data: {"type":"result"}
 #   data: {"type":"error","error":"..."}
 #   data: {"type":"done"}
 #
-# Замок ОБЩИЙ с TG и F1-карточками (session_key = project["tg_thread"]).
-# Disconnect-устойчивость: если клиент закрыл вкладку (ConnectionResetError при write),
-# генератор run_engine продолжает работу до конца, session_id сохраняется, замок снимается.
+# Lock SHARED with TG and F1 cards (session_key = project["tg_thread"]).
+# Disconnect-resilient: if client closed the tab (ConnectionResetError on write),
+# the run_engine generator continues to completion, session_id is saved, lock is released.
 
 async def api_project_chat(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
 
-    # Проверяем run_engine заранее (деградация: старый запуск без F1/C1)
+    # Check run_engine upfront (degraded: old launch without F1/C1)
     run_engine = ctx.get("run_engine")
     if run_engine is None:
         resp = web.StreamResponse(
@@ -5248,11 +5251,11 @@ async def api_project_chat(req: web.Request) -> web.Response:
                      "X-Accel-Buffering": "no"},
         )
         await resp.prepare(req)
-        payload = json.dumps({"type": "error", "error": "run_engine недоступен"}, ensure_ascii=False)
+        payload = json.dumps({"type": "error", "error": "run_engine unavailable"}, ensure_ascii=False)
         await resp.write(f"data: {payload}\n\n".encode())
         return resp
 
-    # Парсим тело запроса
+    # Parse request body
     try:
         body = await req.json()
     except Exception:
@@ -5261,7 +5264,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     if not prompt:
         return web.json_response({"error": "empty prompt"}, status=400)
 
-    # Резолвим проект
+    # Resolve project
     project = _find_project_by_id(ctx, pid)
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
@@ -5269,9 +5272,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
     cwd = project["cwd"]
     name = project["name"]
     model = project.get("model", ctx.get("DEFAULT_MODEL", "sonnet"))
-    session_key = project["tg_thread"]  # ОБЩИЙ ключ с TG и F1
+    session_key = project["tg_thread"]  # SHARED key with TG and F1
 
-    # Проверка замка (СИНХРОННО — до первого await, против гонки)
+    # Lock check (SYNCHRONOUSLY — before first await, against race)
     if ctx["running"].get(session_key) is not None:
         resp = web.StreamResponse(
             status=200,
@@ -5281,13 +5284,13 @@ async def api_project_chat(req: web.Request) -> web.Response:
         )
         await resp.prepare(req)
         payload = json.dumps(
-            {"type": "error", "error": "проект занят (TG/карточка/чат)"},
+            {"type": "error", "error": "project busy (TG/card/chat)"},
             ensure_ascii=False,
         )
         await resp.write(f"data: {payload}\n\n".encode())
         return resp
 
-    # Резервируем слот СИНХРОННО до первого await
+    # Reserve slot SYNCHRONOUSLY before first await
     ctx["running"][session_key] = True
 
     resp = web.StreamResponse(
@@ -5310,14 +5313,14 @@ async def api_project_chat(req: web.Request) -> web.Response:
             line = f"data: {json.dumps(payload_dict, ensure_ascii=False)}\n\n"
             await resp.write(line.encode())
         except (ConnectionResetError, ConnectionAbortedError, Exception) as exc:
-            # Клиент закрыл вкладку — помечаем, но НЕ прерываем генератор
-            # (задача доигрывает в фоне, session_id сохранится)
+            # Client closed the tab — mark it, but do NOT interrupt the generator
+            # (task continues in background, session_id will be saved)
             client_gone = True
-            print(f"[api_project_chat] клиент отключился ({type(exc).__name__}), задача продолжается в фоне")
+            print(f"[api_project_chat] client disconnected ({type(exc).__name__}), task continues in background")
 
     try:
         resume_sid = ctx["sessions"].get(session_key)
-        # Секреты проекта подмешиваются в env агента (значения — только в процессе, не в API)
+        # Project secrets are injected into the agent's env (values only in-process, not in the API)
         project_secrets = _secrets_read(cwd)
         async for event in run_engine(
             project_name=name,
@@ -5355,23 +5358,23 @@ async def api_project_chat(req: web.Request) -> web.Response:
                         "ts": time.time(),
                     }
                 await _send({"type": "rate_limit", "status": event.get("status", "")})
-            # прочие типы — игнорируем
+            # other types — ignore
 
         await _send({"type": "done"})
 
     finally:
-        # Замок снимается ГАРАНТИРОВАННО (даже если генератор бросил исключение)
+        # Lock released UNCONDITIONALLY (even if the generator threw an exception)
         ctx["running"].pop(session_key, None)
 
     return resp
 
 
-# ─────────────────────────── Стоп-эндпоинт (chat/stop) ───────────────────────
+# ─────────────────────────── Stop endpoint (chat/stop) ───────────────────────
 
 async def api_project_chat_stop(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/chat/stop — прерывает текущий прогон агента.
-    Кладёт вызов client.interrupt() на реальный SDK-клиент из ctx["running"].
-    Возвращает {ok, stopped}; stopped=false если нечего прерывать."""
+    """POST /api/projects/{id}/chat/stop — interrupts the current agent run.
+    Calls client.interrupt() on the real SDK client from ctx["running"].
+    Returns {ok, stopped}; stopped=false if nothing to interrupt."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -5392,7 +5395,7 @@ async def api_project_chat_stop(req: web.Request) -> web.Response:
 
 
 async def api_project_running(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/running — есть ли активный прогон агента в этом проекте."""
+    """GET /api/projects/{id}/running — whether an agent run is active for this project."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -5401,7 +5404,7 @@ async def api_project_running(req: web.Request) -> web.Response:
     return web.json_response({"running": ctx["running"].get(session_key) is not None})
 
 
-# ─────────────────────────── Контекст сессии (session-context) ─────────────
+# ─────────────────────────── Session context (session-context) ─────────────
 
 _CTX_TOOL_READ  = {"Read", "Glob", "Grep"}
 _CTX_TOOL_EDIT  = {"Edit", "Write", "NotebookEdit"}
@@ -5410,8 +5413,8 @@ _CTX_LIST_LIMIT = 200
 
 
 def _session_context(jsonl_path: Path) -> dict:
-    """Парсит SDK-транскрипт: извлекает read/edited/commands из tool_use блоков ассистента.
-    Дедуп по значению, первое вхождение wins. Лимит ~200 на категорию."""
+    """Parses an SDK transcript: extracts read/edited/commands from assistant tool_use blocks.
+    Dedup by value, first occurrence wins. Limit ~200 per category."""
     read: list[str]     = []
     edited: list[str]   = []
     commands: list[str] = []
@@ -5471,8 +5474,8 @@ def _session_context(jsonl_path: Path) -> dict:
 
 
 async def api_project_session_context(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/session-context?session_id=<опц.>
-    Возвращает {read, edited, commands, session_id} для активной (или указанной) сессии."""
+    """GET /api/projects/{id}/session-context?session_id=<opt.>
+    Returns {read, edited, commands, session_id} for the active (or specified) session."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -5483,7 +5486,7 @@ async def api_project_session_context(req: web.Request) -> web.Response:
     if not sid:
         return web.json_response({"read": [], "edited": [], "commands": [], "session_id": None})
 
-    # Санитизация basename-only (как в session-history)
+    # Sanitise basename-only (same as session-history)
     if sid != Path(sid).name or sid in (".", ".."):
         return web.json_response({"error": "invalid session_id"}, status=400)
 
@@ -5496,22 +5499,22 @@ async def api_project_session_context(req: web.Request) -> web.Response:
     return web.json_response(data)
 
 
-# ─────────────────────────── Память проекта (memory) ─────────────────────────
+# ─────────────────────────── Project memory (memory) ─────────────────────────
 
-_MEMORY_MAX_SIZE = 256 * 1024  # 256 КБ
+_MEMORY_MAX_SIZE = 256 * 1024  # 256 KB
 
-# Валидный slug для файла памяти: строчные буквы/цифры, дефис, 2-62 символа итого.
-# MEMORY.md разрешён отдельно (индекс).
+# Valid slug for a memory file: lowercase letters/digits, dash, 2-62 chars total.
+# MEMORY.md is allowed separately (index).
 _MEMORY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,60}\.md$")
 
 
 def _project_memory_dir(cwd: str) -> Path:
-    """Новое место памяти проекта: <cwd>/.claude-ops/memory/ — коммитится в репо."""
+    """New project memory location: <cwd>/.claude-ops/memory/ — committed to repo."""
     return Path(cwd) / ".claude-ops" / "memory"
 
 
 def _valid_memory_name(name: str) -> bool:
-    """True если name — валидный slug.md без path-компонент."""
+    """True if name is a valid slug.md without path components."""
     if "/" in name or "\\" in name or ".." in name:
         return False
     if name == "MEMORY.md":
@@ -5520,15 +5523,15 @@ def _valid_memory_name(name: str) -> bool:
 
 
 def _memory_read_all(cwd: str) -> tuple[list[dict], bool]:
-    """Читает все *.md из нового места (.claude-ops/memory/).
-    Если нового нет, а старое (sdk) есть — АВТО-МИГРАЦИЯ в новое место
-    (копируем файлы), затем читаем новое. Так удаление/запись (работающие
-    только с новым местом) перестают давать 404 на legacy-памяти.
-    Возвращает (files, from_legacy). files = [{name, content}], MEMORY.md первым."""
+    """Reads all *.md from the new location (.claude-ops/memory/).
+    If the new location doesn't exist but the old (sdk) one does — AUTO-MIGRATE
+    (copy files) then read the new location. This way delete/write operations
+    (which work only with the new location) stop returning 404 for legacy memory.
+    Returns (files, from_legacy). files = [{name, content}], MEMORY.md first."""
     new_dir = _project_memory_dir(cwd)
     if new_dir.is_dir():
         return _read_memory_dir(new_dir), False
-    # Авто-миграция старого места ~/.claude/projects/<cwd>/memory/ → .claude-ops/memory/
+    # Auto-migrate old location ~/.claude/projects/<cwd>/memory/ → .claude-ops/memory/
     old_dir = _sdk_sessions_dir(cwd) / "memory"
     if old_dir.is_dir():
         migrated = False
@@ -5540,16 +5543,16 @@ def _memory_read_all(cwd: str) -> tuple[list[dict], bool]:
                     dest.write_text(f.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
             migrated = True
         except Exception as e:
-            print(f"[memory] авто-миграция legacy→new не удалась для {cwd}: {e}")
+            print(f"[memory] auto-migration legacy→new failed for {cwd}: {e}")
         if migrated and new_dir.is_dir():
             return _read_memory_dir(new_dir), False
-        # миграция не удалась — читаем старое как было (legacy)
+        # migration failed — read the old location as-is (legacy)
         return _read_memory_dir(old_dir), True
     return [], False
 
 
 def _read_memory_dir(mem_dir: Path) -> list[dict]:
-    """Вспомогательный: читает *.md из указанной директории памяти."""
+    """Helper: reads *.md from the specified memory directory."""
     files: list[dict] = []
     try:
         md_files = sorted(
@@ -5560,7 +5563,7 @@ def _read_memory_dir(mem_dir: Path) -> list[dict]:
             try:
                 size = f.stat().st_size
                 if size > _MEMORY_MAX_SIZE:
-                    content = f"[файл слишком большой: {size} байт]"
+                    content = f"[file too large: {size} bytes]"
                 else:
                     content = f.read_text(encoding="utf-8", errors="replace")
                 files.append({"name": f.name, "content": content})
@@ -5572,8 +5575,8 @@ def _read_memory_dir(mem_dir: Path) -> list[dict]:
 
 
 def _memory_write(cwd: str, name: str, content: str) -> None:
-    """Атомарно записывает файл памяти, создаёт директорию если нет.
-    Затем перестраивает MEMORY.md-индекс."""
+    """Atomically writes a memory file, creating the directory if absent.
+    Then rebuilds the MEMORY.md index."""
     if not _valid_memory_name(name):
         raise ValueError(f"invalid memory file name: {name!r}")
     if len(content.encode("utf-8")) > _MEMORY_MAX_SIZE:
@@ -5581,7 +5584,7 @@ def _memory_write(cwd: str, name: str, content: str) -> None:
     mem_dir = _project_memory_dir(cwd)
     mem_dir.mkdir(parents=True, exist_ok=True)
     target = mem_dir / name
-    # Атомарная запись через tmp
+    # Atomic write via tmp
     tmp = target.with_suffix(".tmp")
     try:
         tmp.write_text(content, encoding="utf-8")
@@ -5597,7 +5600,7 @@ def _memory_write(cwd: str, name: str, content: str) -> None:
 
 
 def _memory_delete(cwd: str, name: str) -> bool:
-    """Удаляет файл памяти. Возвращает True если удалён, False если не существовал."""
+    """Deletes a memory file. Returns True if deleted, False if not found."""
     if not _valid_memory_name(name):
         raise ValueError(f"invalid memory file name: {name!r}")
     if name == "MEMORY.md":
@@ -5611,8 +5614,8 @@ def _memory_delete(cwd: str, name: str) -> bool:
 
 
 def _memory_reindex(cwd: str) -> None:
-    """Перестраивает MEMORY.md как индекс всех записей в .claude-ops/memory/.
-    Формат строки: - [Заголовок](file.md) — хук (из frontmatter или первой строки)."""
+    """Rebuilds MEMORY.md as an index of all entries in .claude-ops/memory/.
+    Line format: - [Title](file.md) — hook (from frontmatter or first line)."""
     mem_dir = _project_memory_dir(cwd)
     if not mem_dir.is_dir():
         return
@@ -5620,7 +5623,7 @@ def _memory_reindex(cwd: str) -> None:
         (p for p in mem_dir.glob("*.md") if p.name != "MEMORY.md"),
         key=lambda p: p.name,
     )
-    lines = ["# Память проекта\n", "\n"]
+    lines = ["# Project memory\n", "\n"]
     for entry in entries:
         try:
             raw = entry.read_text(encoding="utf-8", errors="replace")
@@ -5636,13 +5639,13 @@ def _memory_reindex(cwd: str) -> None:
 
 
 def _memory_parse_entry(filename: str, content: str) -> tuple[str, str]:
-    """Извлекает (заголовок, хук) из файла записи памяти.
-    Заголовок — из frontmatter 'title' или первая строка с #/текстом.
-    Хук — первое непустое предложение тела после frontmatter."""
+    """Extracts (title, hook) from a memory entry file.
+    Title — from frontmatter 'title' or the first line with #/text.
+    Hook — first non-empty sentence of the body after frontmatter."""
     lines = content.splitlines()
     idx = 0
     fm: dict[str, str] = {}
-    # Парсим YAML frontmatter (--- ... ---)
+    # Parse YAML frontmatter (--- ... ---)
     if lines and lines[0].strip() == "---":
         idx = 1
         while idx < len(lines) and lines[idx].strip() != "---":
@@ -5650,9 +5653,9 @@ def _memory_parse_entry(filename: str, content: str) -> tuple[str, str]:
             if len(kv) == 2:
                 fm[kv[0].strip()] = kv[1].strip()
             idx += 1
-        idx += 1  # пропустить закрывающий ---
+        idx += 1  # skip closing ---
 
-    # Заголовок: из frontmatter или из первой строки тела
+    # Title: from frontmatter or from first body line
     title = fm.get("title", "")
     if not title:
         for line in lines[idx:]:
@@ -5664,9 +5667,9 @@ def _memory_parse_entry(filename: str, content: str) -> tuple[str, str]:
                 title = line[:60]
                 break
     if not title:
-        title = filename[:-3]  # убрать .md
+        title = filename[:-3]  # strip .md
 
-    # Хук: первое непустое предложение тела
+    # Hook: first non-empty sentence of the body
     hook = fm.get("hook", "")
     if not hook:
         for line in lines[idx:]:
@@ -5680,9 +5683,9 @@ def _memory_parse_entry(filename: str, content: str) -> tuple[str, str]:
 
 async def api_project_memory(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/memory
-    Возвращает {files:[{name, content}], exists}.
-    Новое место: <cwd>/.claude-ops/memory/. Fallback: старое ~/.claude/projects/.
-    MEMORY.md — первым в списке (индекс)."""
+    Returns {files:[{name, content}], exists}.
+    New location: <cwd>/.claude-ops/memory/. Fallback: old ~/.claude/projects/.
+    MEMORY.md — first in the list (index)."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -5697,8 +5700,8 @@ async def api_project_memory(req: web.Request) -> web.Response:
 
 async def api_project_memory_write(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/memory/{name}
-    Создаёт или обновляет запись памяти. Обновляет MEMORY.md-индекс.
-    Возвращает обновлённый список {files, exists}."""
+    Creates or updates a memory entry. Updates the MEMORY.md index.
+    Returns the updated {files, exists} list."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     name = req.match_info["name"]
@@ -5733,8 +5736,8 @@ async def api_project_memory_write(req: web.Request) -> web.Response:
 
 async def api_project_memory_delete(req: web.Request) -> web.Response:
     """DELETE /api/projects/{id}/memory/{name}
-    Удаляет запись памяти. Обновляет MEMORY.md-индекс.
-    Возвращает обновлённый список {files, exists}."""
+    Deletes a memory entry. Updates the MEMORY.md index.
+    Returns the updated {files, exists} list."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     name = req.match_info["name"]
@@ -5763,30 +5766,30 @@ async def api_project_memory_delete(req: web.Request) -> web.Response:
     return web.json_response({"files": files, "exists": exists})
 
 
-# ─────────────────────────── Секреты проекта (secrets) ──────────────────────────────────────
+# ─────────────────────────── Project secrets (secrets) ──────────────────────────────────────
 #
-# Хранилище: <cwd>/.claude-ops/secrets/secrets.env (chmod 600, не в git)
-# Формат:    KEY=VALUE построчно, # — комментарии, пустые строки — игнор
-# Безопасность:
-#   - Имена ключей: ^[A-Z_][A-Z0-9_]*$ (env-совместимые, anti-injection)
-#   - Значения НИКОГДА не возвращаются через API — только список имён
-#   - .claude-ops/secrets/ добавляется в .gitignore при первой записи
-#   - chmod 600 на secrets.env при каждой записи
-#   - Изоляция по cwd: секреты одного проекта не видны другому
+# Storage: <cwd>/.claude-ops/secrets/secrets.env (chmod 600, not in git)
+# Format:  KEY=VALUE per line, # — comments, empty lines — ignored
+# Security:
+#   - Key names: ^[A-Z_][A-Z0-9_]*$ (env-compatible, anti-injection)
+#   - Values are NEVER returned via API — only the list of names
+#   - .claude-ops/secrets/ added to .gitignore on first write
+#   - chmod 600 on secrets.env on every write
+#   - Isolated by cwd: secrets of one project are not visible to another
 
 _SECRETS_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
-_SECRETS_MAX_VALUE_SIZE = 8 * 1024   # 8 КБ на значение
-_SECRETS_MAX_KEYS = 100              # максимум ключей в одном проекте
+_SECRETS_MAX_VALUE_SIZE = 8 * 1024   # 8 KB per value
+_SECRETS_MAX_KEYS = 100              # max keys per project
 
 
 def _project_secrets_path(cwd: str) -> Path:
-    """Путь к файлу секретов: <cwd>/.claude-ops/secrets/secrets.env."""
+    """Path to secrets file: <cwd>/.claude-ops/secrets/secrets.env."""
     return Path(cwd) / ".claude-ops" / "secrets" / "secrets.env"
 
 
 def _secrets_read(cwd: str) -> dict:
-    """Читает KEY=VALUE из secrets.env. Нет файла → {}.
-    Комментарии (#) и пустые строки игнорируются."""
+    """Reads KEY=VALUE from secrets.env. No file → {}.
+    Comments (#) and empty lines are ignored."""
     path = _project_secrets_path(cwd)
     result: dict[str, str] = {}
     if not path.exists():
@@ -5807,8 +5810,8 @@ def _secrets_read(cwd: str) -> dict:
 
 
 def _secrets_ensure_gitignore(cwd: str) -> None:
-    """Гарантирует что .claude-ops/secrets/ есть в .gitignore проекта.
-    Дописывает строку если нет."""
+    """Ensures .claude-ops/secrets/ is in the project .gitignore.
+    Appends the line if absent."""
     gitignore = Path(cwd) / ".gitignore"
     line = ".claude-ops/secrets/"
     try:
@@ -5816,7 +5819,7 @@ def _secrets_ensure_gitignore(cwd: str) -> None:
             content = gitignore.read_text(encoding="utf-8")
             if line in content:
                 return
-            # Дописываем в конец
+            # Append to end
             if not content.endswith("\n"):
                 content += "\n"
             content += f"{line}\n"
@@ -5828,12 +5831,12 @@ def _secrets_ensure_gitignore(cwd: str) -> None:
 
 
 def _secrets_write(cwd: str, data: dict) -> None:
-    """Атомарно записывает secrets.env (tmp+replace), chmod 600, mkdir.
-    Гарантирует .claude-ops/secrets/ в .gitignore."""
+    """Atomically writes secrets.env (tmp+replace), chmod 600, mkdir.
+    Ensures .claude-ops/secrets/ is in .gitignore."""
     path = _project_secrets_path(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    lines = ["# Секреты проекта — НЕ коммитить, не передавать третьим лицам\n"]
+    lines = ["# Project secrets — DO NOT commit or share with third parties\n"]
     for k, v in sorted(data.items()):
         lines.append(f"{k}={v}\n")
 
@@ -5849,7 +5852,7 @@ def _secrets_write(cwd: str, data: dict) -> None:
             except Exception:
                 pass
 
-    # chmod 600 на итоговый файл (на случай если replace не сохранил права на некоторых ФС)
+    # chmod 600 on final file (in case replace didn't preserve permissions on some FS)
     try:
         path.chmod(0o600)
     except Exception:
@@ -5859,7 +5862,7 @@ def _secrets_write(cwd: str, data: dict) -> None:
 
 
 def _secrets_set(cwd: str, key: str, value: str) -> None:
-    """Устанавливает (добавляет/обновляет) одну пару KEY=VALUE."""
+    """Sets (adds/updates) one KEY=VALUE pair."""
     if not _SECRETS_KEY_RE.match(key):
         raise ValueError(f"invalid key name: {key!r}")
     if len(value.encode("utf-8")) > _SECRETS_MAX_VALUE_SIZE:
@@ -5872,7 +5875,7 @@ def _secrets_set(cwd: str, key: str, value: str) -> None:
 
 
 def _secrets_delete(cwd: str, key: str) -> bool:
-    """Удаляет ключ. Возвращает True если удалён, False если не существовал."""
+    """Deletes a key. Returns True if deleted, False if it didn't exist."""
     if not _SECRETS_KEY_RE.match(key):
         raise ValueError(f"invalid key name: {key!r}")
     data = _secrets_read(cwd)
@@ -5883,12 +5886,12 @@ def _secrets_delete(cwd: str, key: str) -> bool:
     return True
 
 
-# ─────────────────────────── API секретов (CRUD) ─────────────────────────────
+# ─────────────────────────── Secrets API (CRUD) ─────────────────────────────
 
 
 async def api_project_secrets(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/secrets — список ИМЁН ключей (без значений).
-    ⚠️ Значения секретов никогда не возвращаются клиенту."""
+    """GET /api/projects/{id}/secrets — list of key NAMES (no values).
+    ⚠️ Secret values are never returned to the client."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -5900,8 +5903,8 @@ async def api_project_secrets(req: web.Request) -> web.Response:
 
 
 async def api_project_secrets_set(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/secrets/{key} — задать секрет.
-    Body: {value: str}. Возвращает обновлённый список имён (без значений)."""
+    """POST /api/projects/{id}/secrets/{key} — set a secret.
+    Body: {value: str}. Returns updated list of names (no values)."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     key = req.match_info["key"]
@@ -5909,7 +5912,7 @@ async def api_project_secrets_set(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    # Anti-traversal: имя ключа не должно содержать path-компонент
+    # Anti-traversal: key name must not contain path components
     if "/" in key or "\\" in key or ".." in key:
         return web.json_response({"error": "invalid key name"}, status=400)
     if not _SECRETS_KEY_RE.match(key):
@@ -5936,7 +5939,7 @@ async def api_project_secrets_set(req: web.Request) -> web.Response:
 
 
 async def api_project_secrets_delete(req: web.Request) -> web.Response:
-    """DELETE /api/projects/{id}/secrets/{key} — удалить секрет."""
+    """DELETE /api/projects/{id}/secrets/{key} — delete a secret."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     key = req.match_info["key"]
@@ -5964,79 +5967,79 @@ async def api_project_secrets_delete(req: web.Request) -> web.Response:
     return web.json_response({"keys": sorted(data.keys()), "exists": bool(data)})
 
 
-# ─────────────────────────── новый проект: шаблоны + инициализация ───────────────────────────
+# ─────────────────────────── new project: templates + initialisation ───────────────────────────
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$")
 
 _NEW_PROJECT_PROMPT = """\
-🚀 Новый проект инициализируется. Папка: {cwd}.
+🚀 New project initialising. Folder: {cwd}.
 
-В корне уже лежат стартовые шаблоны: CLAUDE.md, TASKS.md, README.md, .gitignore. Это каркас — нужно его адаптировать.
+Starter templates are already in the root: CLAUDE.md, TASKS.md, README.md, .gitignore. This is a scaffold — it needs to be adapted.
 
-ШАГ 1 — расспроси меня (одним сообщением, текстом, в конце ответа):
-- Что за проект, цель (1-2 фразы)?
-- Стек/язык/инфра?
-- Есть ли уже наработки/файлы/код где-то ещё? Точные пути если знаешь.
-- Какие первые 3-5 задач?
+STEP 1 — ask me (in one message, as plain text, at the end of your reply):
+- What is the project and its goal (1-2 sentences)?
+- Stack/language/infrastructure?
+- Are there existing drafts/files/code somewhere else? Exact paths if you know them.
+- What are the first 3-5 tasks?
 
-ШАГ 2 (после моих ответов):
-- Если указал существующие папки → просканируй их (Read нескольких файлов), краткая сводка.
-- Перепиши секции «Что это» / «Стек» / «Команды» в CLAUDE.md под мои ответы. Раздел «Правила работы в кокпите» — НЕ ТРОГАЙ, он общий для всех проектов.
-- Замени стартовые карточки в TASKS.md → ## Backlog (положи мои реальные 3-5 задач, удали стартовые «Заполнить …» если уже сделал).
-- Заполни README.md.
-- При необходимости создай `specs/`, `tests/`, и т.д. — по обстановке.
-- если веб-сервис/бот → добавь глобальный error handler (FastAPI/aiohttp middleware, PTB add_error_handler, CLI try/except в main → logger.error). Иначе кокпит не видит рантайм-ошибки. Логируй стандартной строкой `UNHANDLED exc_class=<Type> path=<route>`.
+STEP 2 (after my answers):
+- If I mentioned existing folders → scan them (Read several files), brief summary.
+- Rewrite the "What this is" / "Stack" / "Commands" sections in CLAUDE.md to match my answers. The "Cockpit rules" section — DO NOT TOUCH, it is shared across all projects.
+- Replace starter cards in TASKS.md → ## Backlog (put my real 3-5 tasks, remove the placeholder "Fill in …" cards if done).
+- Fill in README.md.
+- If needed, create `specs/`, `tests/`, etc. — as appropriate.
+- If it's a web service/bot → add a global error handler (FastAPI/aiohttp middleware, PTB add_error_handler, CLI try/except in main → logger.error). Otherwise the cockpit won't see runtime errors. Log with the standard line `UNHANDLED exc_class=<Type> path=<route>`.
 
-ШАГ 3 — имя проекта:
-- Предложи мне короткий kebab-case slug (например `my-cool-bot`). Спроси «переименовать сейчас?»
-- Если ОК — попроси меня нажать кнопку ✏️ в шапке проекта (она вызовет API rename — папка переедет, topics.json обновится без рестарта).
+STEP 3 — project name:
+- Suggest a short kebab-case slug (e.g. `my-cool-bot`). Ask "rename now?"
+- If OK — ask me to click the ✏️ button in the project header (it calls the rename API — folder will be moved, topics.json updated without restart).
 
-ШАГ 4 — git init (без коммита/пуша, без моего явного ОК).
+STEP 4 — git init (no commit/push, no explicit approval needed from me).
 
-Не вали скриптом, веди диалог по шагам. 3-5 точечных вопросов за раз, потом жди ответа.\
+Don't dump a script, lead a dialogue step by step. 3-5 focused questions at a time, then wait for my answer.\
 """
 
 def _build_audit_prompt(ctx: dict, project_name: str) -> str:
-    """Audit-промт: преамбула + baseline-чек-лист из templates/reference/audit-prompt.md.
-    Сам baseline лежит файлом — Игорь правит его без правки кода."""
+    """Audit prompt: preamble + baseline checklist from templates/reference/audit-prompt.md.
+    The baseline lives in a file — edit it there without touching the code."""
     here: Path = ctx["HERE"]
     base = (here / "templates" / "reference" / "audit-prompt.md").read_text(encoding="utf-8")
     return (
-        f"🩺 Аудит проекта **{project_name}**.\n\n"
-        f"Пройдись по этому чек-листу (baseline ниже). Для КАЖДОЙ найденной проблемы создай "
-        f"новую карточку в `## Backlog` файла `TASKS.md` (формат: `- [ ] текст` строго внутри секции; "
-        f"маркер `ops:ID` добавится автоматически — не вписывай руками).\n\n"
-        f"В конце — короткое резюме в чате: «N проблем найдено, M карточек создано».\n\n"
+        f"🩺 Audit of project **{project_name}**.\n\n"
+        f"Go through this checklist (baseline below). For EACH problem found, create "
+        f"a new card in `## Backlog` of `TASKS.md` (format: `- [ ] text` strictly inside the section; "
+        f"the `ops:ID` marker will be added automatically — don't add it manually).\n\n"
+        f"At the end — a short summary in chat: 'N problems found, M cards created'.\n\n"
         f"---\n\n{base}"
     )
 
 
 def _render_template(template_name: str, vars: dict, here: Path) -> str:
-    """Читает templates/<template_name>, заменяет {{var}} → значение из vars."""
+    """Reads templates/<template_name>, replaces {{var}} → value from vars."""
     tpl_path = here / "templates" / template_name
     try:
         text = tpl_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        raise FileNotFoundError(f"шаблон не найден: {tpl_path}")
+        raise FileNotFoundError(f"template not found: {tpl_path}")
     for key, val in vars.items():
         text = text.replace("{{" + key + "}}", str(val))
     return text
 
 
 async def api_new_project(req: web.Request) -> web.Response:
-    """POST /api/projects/new — создаёт новую папку проекта со стартовыми шаблонами и
-    запускает инициализацию через run_engine (как F1-карточка)."""
+    """POST /api/projects/new — creates a new project folder with starter templates and
+    launches initialisation via run_engine (like an F1 card)."""
     ctx = req.app["ctx"]
     run_engine = ctx.get("run_engine")
 
-    # Парсим тело (name опционален)
+    # Parse body (name is optional)
     try:
         body = await req.json()
     except Exception:
         body = {}
     name = (body.get("name") or "").strip() or None
 
-    # Создаём папку ~/projects/untitled-<ts>/
+    # Create folder ~/projects/untitled-<ts>/
     projects_dir = Path.home() / "projects"
     projects_dir.mkdir(exist_ok=True)
     ts = int(time.time())
@@ -6045,7 +6048,7 @@ async def api_new_project(req: web.Request) -> web.Response:
     try:
         cwd.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
-        return web.json_response({"error": f"папка уже существует: {cwd}"}, status=409)
+        return web.json_response({"error": f"folder already exists: {cwd}"}, status=409)
 
     display_name = name or slug
     here: Path = ctx["HERE"]
@@ -6055,30 +6058,30 @@ async def api_new_project(req: web.Request) -> web.Response:
         "slug": slug,
     }
 
-    # Пишем шаблоны
+    # Write templates
     try:
         (cwd / "CLAUDE.md").write_text(_render_template("CLAUDE.md.tpl", tpl_vars, here), encoding="utf-8")
         (cwd / "README.md").write_text(_render_template("README.md.tpl", tpl_vars, here), encoding="utf-8")
         (cwd / ".gitignore").write_text(_render_template(".gitignore.tpl", tpl_vars, here), encoding="utf-8")
 
-        # TASKS.md: рендерим шаблон, затем парсим и добавляем стартовую карточку в In Progress
+        # TASKS.md: render template, then parse and add starter card to In Progress
         tasks_raw = _render_template("TASKS.md.tpl", tpl_vars, here)
         preamble, cols = _parse_tasks(tasks_raw)
-        init_card = {"id": _new_card_id(), "text": "🚀 Инициализировать проект"}
+        init_card = {"id": _new_card_id(), "text": "🚀 Initialise project"}
         cols["in_progress"].append(init_card)
         (cwd / "TASKS.md").write_text(_serialize_tasks(preamble, cols, display_name), encoding="utf-8")
     except Exception as e:
-        # Откат: удаляем папку если не смогли записать файлы
+        # Rollback: delete folder if template writes failed
         shutil.rmtree(str(cwd), ignore_errors=True)
-        return web.json_response({"error": f"ошибка записи шаблонов: {e}"}, status=500)
+        return web.json_response({"error": f"error writing templates: {e}"}, status=500)
 
-    # Регистрируем в topics.json. Пытаемся создать РЕАЛЬНЫЙ forum-топик в TG —
-    # бот админ супергруппы с manage_topics, поэтому проект сразу доступен в
-    # Telegram (чат + авто-запуск карточек). Имя проекта формируется ПОЗЖЕ
-    # онбордингом, поэтому топик создаём с плейсхолдером, а при rename имя
-    # топика синкается через editForumTopic (_sync_forum_topic_name).
-    # Если создать топик не удалось (нет прав/ошибка API) — фоллбэк на
-    # синтетический ключ chat:ts (как раньше), проект всё равно создаётся.
+    # Register in topics.json. Try to create a REAL forum topic in TG —
+    # the bot is an admin of the supergroup with manage_topics, so the project is immediately
+    # available in Telegram (chat + card auto-run). The project name is set LATER
+    # by onboarding, so we create the topic with a placeholder; on rename the topic
+    # name is synced via editForumTopic (_sync_forum_topic_name).
+    # If creating the topic fails (no rights/API error) — fall back to
+    # a synthetic key chat:ts (as before), project is still created.
     group_chat_id = ctx.get("GROUP_CHAT_ID") or 0
     thread_id = None
     ptb_app = ctx.get("ptb_app")
@@ -6086,12 +6089,12 @@ async def api_new_project(req: web.Request) -> web.Response:
         try:
             topic = await ptb_app.bot.create_forum_topic(
                 chat_id=group_chat_id,
-                name=(display_name if name else "🆕 Новый проект"),
+                name=(display_name if name else "🆕 New project"),
             )
             thread_id = topic.message_thread_id
-            print(f"[new_project] forum-топик создан: thread={thread_id}")
+            print(f"[new_project] forum topic created: thread={thread_id}")
         except Exception as e:
-            print(f"[new_project] create_forum_topic не удался ({e}) — синтетический ключ")
+            print(f"[new_project] create_forum_topic failed ({e}) — synthetic key")
     session_key = f"{group_chat_id}:{thread_id if thread_id is not None else ts}"
     ctx["topics"][session_key] = {
         "project": display_name,
@@ -6105,7 +6108,7 @@ async def api_new_project(req: web.Request) -> web.Response:
     pid = _project_id(str(cwd))
     project = _find_project_by_id(ctx, pid)
     if project is None:
-        # Формируем минимальный объект на случай если dupe по cwd вытеснил нашу запись
+        # Build a minimal object in case a cwd duplicate displaced our entry
         project = {
             "id": pid,
             "name": display_name,
@@ -6115,19 +6118,19 @@ async def api_new_project(req: web.Request) -> web.Response:
             "is_free": False,
         }
 
-    # Если run_engine недоступен — возвращаем без запуска (деградация)
+    # If run_engine is unavailable — return without launching (degraded mode)
     if run_engine is None:
         return web.json_response({"id": pid, "cwd": str(cwd), "name": display_name, "started": False})
 
-    # Проверяем замок (теоретически free slot — только что создали)
+    # Check lock (theoretically free slot — just created)
     if ctx["running"].get(session_key) is not None:
         return web.json_response({"id": pid, "cwd": str(cwd), "name": display_name, "started": False})
 
-    # Резервируем слот СИНХРОННО (защита от гонки — та же что в api_move_task)
+    # Reserve slot SYNCHRONOUSLY (race guard — same as in api_move_task)
     ctx["running"][session_key] = True
 
-    # Подменяем текст карточки на онбординг-промпт ДО запуска задачи
-    # (run_engine получает card["text"] как prompt)
+    # Replace card text with onboarding prompt BEFORE launching the task
+    # (run_engine receives card["text"] as prompt)
     init_card["text"] = _NEW_PROJECT_PROMPT.format(cwd=str(cwd))
     _spawn_bg(_run_card(ctx, req.app, project, init_card, session_key))
 
@@ -6142,7 +6145,7 @@ async def api_new_project(req: web.Request) -> web.Response:
 
 async def api_project_rename(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/rename  {slug: str}
-    Переименовывает папку проекта и обновляет все записи topics.json с тем же cwd."""
+    Renames the project folder and updates all topics.json entries with the same cwd."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -6165,20 +6168,20 @@ async def api_project_rename(req: web.Request) -> web.Response:
 
     session_key = project["tg_thread"]
     if ctx["running"].get(session_key) is not None:
-        return web.json_response({"error": "проект занят, нельзя переименовать"}, status=409)
+        return web.json_response({"error": "project busy, cannot rename"}, status=409)
 
     old_cwd = Path(project["cwd"])
     new_cwd = old_cwd.parent / slug
 
     if new_cwd.exists():
-        return web.json_response({"error": f"папка уже занята: {new_cwd}"}, status=409)
+        return web.json_response({"error": f"folder already taken: {new_cwd}"}, status=409)
 
     try:
         shutil.move(str(old_cwd), str(new_cwd))
     except Exception as e:
-        return web.json_response({"error": f"ошибка переименования: {e}"}, status=500)
+        return web.json_response({"error": f"rename error: {e}"}, status=500)
 
-    # Обновляем все записи topics с тем же старым cwd
+    # Update all topics entries with the same old cwd
     old_cwd_str = str(old_cwd)
     for b in ctx["topics"].values():
         if b.get("cwd") == old_cwd_str:
@@ -6189,11 +6192,11 @@ async def api_project_rename(req: web.Request) -> web.Response:
     if callable(save_topics):
         save_topics()
 
-    # Переносим cwd-привязанное состояние (SDK-история диалогов + Timeline),
-    # иначе после смены cwd сессии и лента «исчезают» — файлы остаются под старым slug.
+    # Migrate cwd-keyed state (SDK conversation history + Timeline),
+    # otherwise after cwd changes sessions and feed "disappear" — files stay under the old slug.
     migrate_warnings = _migrate_cwd_keyed_state(old_cwd_str, str(new_cwd), ctx)
 
-    # Синкаем имя forum-топика в TG (если у проекта реальный топик)
+    # Sync TG forum topic name (if the project has a real topic)
     await _sync_forum_topic_name(ctx, session_key, slug)
 
     resp_body = {
@@ -6214,21 +6217,21 @@ _DETECT_ERROR_HANDLER_SUBSTRINGS = (
     "app.add_middleware",
     "@exception_handler",
     "setup_exception_handlers",
-    "UNHANDLED exc_class=",   # проект принял стандартную лог-строку кокпита
+    "UNHANDLED exc_class=",   # project uses the cockpit's standard log line
 )
 _DETECT_EH_CONFORMANCE_RE = re.compile(r"(?im)^\s*-?\s*error handler:\s*(.+)$")
 _DETECT_EH_EXCLUDE_DIRS = {"venv", ".venv", "node_modules", ".git", "dist", "build", "__pycache__", ".worktrees"}
 
 
 def _detect_error_handler(cwd: Path, claude_md_text: str) -> bool:
-    """Быстрый (bounded) детектор наличия глобального error handler в проекте.
+    """Fast (bounded) detector for the presence of a global error handler in the project.
 
-    (a) Self-declaration: ## ClaudeOps conformance + строка 'error handler: <не пустое/нет>'
-    (b) Code heuristic: обходим *.py (до 60 файлов / 3 MB), ищем substring-маркеры.
-    Возвращает True при первом совпадении. try/except → False при любой ошибке."""
+    (a) Self-declaration: ## ClaudeOps conformance + line 'error handler: <non-empty/no>'
+    (b) Code heuristic: walk *.py (up to 60 files / 3 MB), look for substring markers.
+    Returns True on first match. try/except → False on any error."""
     try:
-        # (a) Self-declaration — ТОЛЬКО в секции ## ClaudeOps conformance
-        # (иначе строка 'error handler:' из любого другого раздела даст ложный плюс)
+        # (a) Self-declaration — ONLY in section ## ClaudeOps conformance
+        # (otherwise 'error handler:' from any other section would give a false positive)
         if "## ClaudeOps conformance" in claude_md_text:
             section = claude_md_text.split("## ClaudeOps conformance", 1)[1].split("\n## ", 1)[0]
             m = _DETECT_EH_CONFORMANCE_RE.search(section)
@@ -6237,8 +6240,8 @@ def _detect_error_handler(cwd: Path, claude_md_text: str) -> bool:
                 if val not in {"нет", "no", "-", "—", ""}:
                     return True
 
-        # (b) Code heuristic — bounded scan; os.walk прунит шумные директории,
-        # НЕ спускаясь в venv/node_modules (rglob их всё равно обходит).
+        # (b) Code heuristic — bounded scan; os.walk prunes noisy directories,
+        # not descending into venv/node_modules (rglob would anyway).
         files_checked = 0
         bytes_read = 0
         _MAX_FILES = 60
@@ -6265,7 +6268,7 @@ def _detect_error_handler(cwd: Path, claude_md_text: str) -> bool:
 
 
 async def api_project_health(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/health — быстрая проверка структуры проекта без агента."""
+    """GET /api/projects/{id}/health — quick project structure check without an agent."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -6279,12 +6282,12 @@ async def api_project_health(req: web.Request) -> web.Response:
 
     items: list[dict] = []
 
-    # 1. CLAUDE.md существует
+    # 1. CLAUDE.md exists
     claude_md = cwd / "CLAUDE.md"
     has_claude_md = claude_md.is_file()
-    items.append(_check("claude_md", "CLAUDE.md", has_claude_md, "Создай CLAUDE.md с описанием проекта"))
+    items.append(_check("claude_md", "CLAUDE.md", has_claude_md, "Create CLAUDE.md with a project description"))
 
-    # 2. CLAUDE.md содержит раздел «Правила работы в кокпите»
+    # 2. CLAUDE.md contains the "Cockpit rules" section
     cockpit_rules = False
     claude_md_text = ""
     if has_claude_md:
@@ -6294,27 +6297,27 @@ async def api_project_health(req: web.Request) -> web.Response:
         except Exception:
             pass
     items.append(_check(
-        "claude_md_cockpit_rules", "Раздел «Правила кокпита»",
-        cockpit_rules, "Запусти аудит или ✏️ обнови вручную",
+        "claude_md_cockpit_rules", "Cockpit rules section",
+        cockpit_rules, "Run audit or ✏️ update manually",
     ))
 
-    # 3. TASKS.md существует с преамбулой
+    # 3. TASKS.md exists with preamble
     tasks_md = cwd / "TASKS.md"
     has_tasks = False
     if tasks_md.is_file():
         try:
             tasks_content = tasks_md.read_text(encoding="utf-8", errors="replace")
-            # Достаточно наличия любого ops-маркера ИЛИ формата `- [ ] текст <!--ops:`
+            # Presence of any ops-marker OR the "Формат карточки" preamble marker is enough
             has_tasks = "<!--ops:" in tasks_content or "Формат карточки" in tasks_content
         except Exception:
             pass
-    items.append(_check("tasks_md", "TASKS.md с преамбулой", has_tasks, "Создай TASKS.md с форматом колонок"))
+    items.append(_check("tasks_md", "TASKS.md with preamble", has_tasks, "Create TASKS.md with column format"))
 
-    # 4. README.md существует (любой регистр)
+    # 4. README.md exists (any case)
     has_readme = any((cwd / name).is_file() for name in _README_CANDIDATES)
-    items.append(_check("readme", "README.md", has_readme, "Запусти аудит"))
+    items.append(_check("readme", "README.md", has_readme, "Run audit"))
 
-    # 5. .gitignore существует и содержит .env
+    # 5. .gitignore exists and contains .env
     gitignore = cwd / ".gitignore"
     has_gitignore_env = False
     if gitignore.is_file():
@@ -6322,34 +6325,34 @@ async def api_project_health(req: web.Request) -> web.Response:
             has_gitignore_env = ".env" in gitignore.read_text(encoding="utf-8", errors="replace")
         except Exception:
             pass
-    items.append(_check("gitignore", ".gitignore с .env", has_gitignore_env, "Добавь .env в .gitignore"))
+    items.append(_check("gitignore", ".gitignore with .env", has_gitignore_env, "Add .env to .gitignore"))
 
-    # 6. git init (папка .git существует) — если git отключён настройкой, не требуем
+    # 6. git init (.git folder exists) — if git is disabled by setting, don't require it
     if not _git_enabled(project):
-        items.append(_check("git_init", "git (отключён в настройках)", True, None))
+        items.append(_check("git_init", "git (disabled in settings)", True, None))
     else:
         has_git = (cwd / ".git").exists()
-        items.append(_check("git_init", "git init", has_git, "Запусти git init в папке проекта"))
+        items.append(_check("git_init", "git init", has_git, "Run git init in the project folder"))
 
     # ── Capability checks ──────────────────────────────────────────────────────
-    # cap_log_cmd: кокпит получает логи и рантайм-ошибки только если задан log_cmd
+    # cap_log_cmd: cockpit receives logs and runtime errors only if log_cmd is set
     items.append(_check(
-        "cap_log_cmd", "log_cmd задан (логи в кокпит)",
+        "cap_log_cmd", "log_cmd set (logs to cockpit)",
         bool(project.get("log_cmd")),
-        "Задай log_cmd — иначе кокпит не видит логи и рантайм-ошибки",
+        "Set log_cmd — otherwise the cockpit won't see logs and runtime errors",
     ))
-    # cap_error_handler: глобальный error handler в коде или задекларирован в CLAUDE.md
+    # cap_error_handler: global error handler in code or declared in CLAUDE.md
     items.append(_check(
-        "cap_error_handler", "Глобальный error handler",
+        "cap_error_handler", "Global error handler",
         _detect_error_handler(cwd, claude_md_text),
-        "Сервису/боту добавь глобальный error handler (пишет ошибки в лог) "
-        "ИЛИ задекларируй в CLAUDE.md (## ClaudeOps conformance)",
+        "Add a global error handler to the service/bot (writes errors to log) "
+        "OR declare it in CLAUDE.md (## ClaudeOps conformance)",
     ))
-    # cap_test_cmd: опциональный — не влияет на score
+    # cap_test_cmd: optional — does not affect score
     items.append(_check(
-        "cap_test_cmd", "test_cmd задан (опц., по кнопке)",
+        "cap_test_cmd", "test_cmd set (opt., via button)",
         bool(project.get("test_cmd")),
-        "Опц.: задай test_cmd для кнопки «Прогнать тесты» и quality gate",
+        "Opt.: set test_cmd for the 'Run tests' button and quality gate",
         optional=True,
     ))
 
@@ -6368,7 +6371,7 @@ async def api_project_health(req: web.Request) -> web.Response:
 
 
 async def api_project_audit(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/audit — создаёт карточку аудита и запускает её через run_engine."""
+    """POST /api/projects/{id}/audit — creates an audit card and launches it via run_engine."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -6381,10 +6384,10 @@ async def api_project_audit(req: web.Request) -> web.Response:
     name = project["name"]
 
     if ctx["running"].get(session_key) is not None:
-        return web.json_response({"error": "проект занят"}, status=409)
+        return web.json_response({"error": "project busy"}, status=409)
 
-    # Создаём карточку аудита в In Progress
-    audit_card = {"id": _new_card_id(), "text": f"🩺 Аудит проекта «{name}»"}
+    # Create audit card in In Progress
+    audit_card = {"id": _new_card_id(), "text": f"🩺 Audit project '{name}'"}
     audit_prompt = _build_audit_prompt(ctx, name)
 
     async with _get_board_lock(cwd):
@@ -6395,37 +6398,37 @@ async def api_project_audit(req: web.Request) -> web.Response:
     if run_engine is None:
         return web.json_response({"ok": True, "card_id": audit_card["id"], "started": False})
 
-    # Резервируем слот СИНХРОННО
+    # Reserve slot SYNCHRONOUSLY
     ctx["running"][session_key] = True
 
-    # Подменяем текст карточки на полный промпт перед запуском
+    # Replace card text with full prompt before launching
     audit_card["text"] = audit_prompt
     _spawn_bg(_run_card(ctx, req.app, project, audit_card, session_key))
 
     return web.json_response({"ok": True, "card_id": audit_card["id"], "started": True})
 
 
-_UPGRADE_PROMPT_TPL = """🔧 Подтянуть проект «{name}» до стандарта кокпита.
+_UPGRADE_PROMPT_TPL = """🔧 Bring project '{name}' up to cockpit standard.
 
-ВАЖНО: НЕ переписывай существующее содержимое CLAUDE.md/TASKS.md/README.md/.gitignore — только ДОПОЛНЯЙ недостающее. Если файла нет — создай из шаблона.
+IMPORTANT: Do NOT rewrite existing content of CLAUDE.md/TASKS.md/README.md/.gitignore — only ADD what is missing. If a file doesn't exist — create it from the template.
 
-Эталоны лежат в `{tpl_dir}`:
-- `CLAUDE.md.tpl` — образец структуры, **обязательно** содержит секцию «Правила работы в кокпите» — её скопируй в CLAUDE.md проекта (если ещё нет), переменные `{{{{name}}}}` замени на актуальное имя.
-- `TASKS.md.tpl` — преамбула формата карточек. Если в текущем TASKS.md нет преамбулы с фразой «Формат карточки» — добавь её ПЕРЕД первой `##` колонкой.
-- `README.md.tpl` — если README отсутствует, создай минимальный.
-- `.gitignore.tpl` — если в текущем нет `.env` — добавь раздел Secrets.
+Reference templates are in `{tpl_dir}`:
+- `CLAUDE.md.tpl` — structural example; **must** contain a "Cockpit rules" section — copy it into the project CLAUDE.md (if not already there), replace `{{{{name}}}}` variables with the actual name.
+- `TASKS.md.tpl` — card format preamble. If the current TASKS.md lacks a preamble with the phrase «Формат карточки» — add it BEFORE the first `##` column.
+- `README.md.tpl` — if README is absent, create a minimal one.
+- `.gitignore.tpl` — if the current file lacks `.env` — add a Secrets section.
 
-Шаги:
-1. Прочитай `CLAUDE.md`, `TASKS.md`, `README.md`, `.gitignore` (если есть) в текущем cwd.
-2. Прочитай шаблоны в `{tpl_dir}/*.tpl`.
-3. Для каждого недостающего блока — добавь его, сохранив весь существующий контент.
-4. НЕ ТРОГАЙ карточки в TASKS.md — только преамбулу выше первой `##`.
-5. В конце — короткое резюме в чате: «Добавил/обновил: A, B, C; не трогал: X, Y».
+Steps:
+1. Read `CLAUDE.md`, `TASKS.md`, `README.md`, `.gitignore` (if present) in the current cwd.
+2. Read the templates in `{tpl_dir}/*.tpl`.
+3. For each missing block — add it, preserving all existing content.
+4. DO NOT TOUCH cards in TASKS.md — only the preamble above the first `##`.
+5. At the end — a short summary in chat: 'Added/updated: A, B, C; left untouched: X, Y'.
 """
 
 
 async def api_project_upgrade(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/upgrade — карточка «🔧 Подтянуть до стандарта»: дополняет CLAUDE.md/TASKS.md/README/.gitignore по шаблонам, существующее не переписывает."""
+    """POST /api/projects/{id}/upgrade — '🔧 Bring up to standard' card: supplements CLAUDE.md/TASKS.md/README/.gitignore from templates without overwriting existing content."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -6438,9 +6441,9 @@ async def api_project_upgrade(req: web.Request) -> web.Response:
     name = project["name"]
 
     if ctx["running"].get(session_key) is not None:
-        return web.json_response({"error": "проект занят"}, status=409)
+        return web.json_response({"error": "project busy"}, status=409)
 
-    card = {"id": _new_card_id(), "text": f"🔧 Подтянуть «{name}» до стандарта"}
+    card = {"id": _new_card_id(), "text": f"🔧 Bring '{name}' up to standard"}
     here: Path = ctx.get("HERE") or Path(__file__).resolve().parent
     tpl_dir = str(here / "templates")
     prompt = _UPGRADE_PROMPT_TPL.format(name=name, tpl_dir=tpl_dir)
@@ -6459,31 +6462,31 @@ async def api_project_upgrade(req: web.Request) -> web.Response:
     return web.json_response({"ok": True, "card_id": card["id"], "started": True})
 
 
-# ─────────────────────────── статика (SPA) ───────────────────────────
+# ─────────────────────────── static files (SPA) ───────────────────────────
 
 PLACEHOLDER_HTML = (
-    "Фронтенд ещё не собран: cd web && npm install && npm run build"
+    "Frontend not built yet: cd web && npm install && npm run build"
 )
 
 
 async def spa_handler(req: web.Request) -> web.Response:
-    """Отдаёт статику из web/dist. SPA-роутинг — fallback на index.html."""
+    """Serves static files from web/dist. SPA routing — fallback to index.html."""
     dist: Path = req.app["ctx"]["HERE"] / "web" / "dist"
     index = dist / "index.html"
 
-    # Если dist вообще нет — заглушка
+    # If dist doesn't exist at all — show placeholder
     if not dist.exists() or not index.exists():
         return web.Response(text=PLACEHOLDER_HTML, content_type="text/plain")
 
-    # Нормализуем путь
+    # Normalise path
     rel = req.path.lstrip("/") or "index.html"
     target = (dist / rel).resolve()
 
-    # Защита от выхода за пределы dist
+    # Guard against escaping dist
     try:
         target.relative_to(dist.resolve())
     except ValueError:
-        # path traversal → отдаём index (безопасно)
+        # path traversal → serve index (safe)
         return web.FileResponse(index)
 
     if target.is_file():
@@ -6493,38 +6496,38 @@ async def spa_handler(req: web.Request) -> web.Response:
     return web.FileResponse(index)
 
 
-# ─────────────────────────── точка входа ───────────────────────────
+# ─────────────────────────── entry point ───────────────────────────
 
 async def start(ptb_app, ctx: dict) -> None:
-    """Поднимает aiohttp-сервер кокпита в том же процессе/loop, что и бот. НЕ блокирует."""
-    # Гарантируем, что error_middleware (logging.exception) реально пишет в журнал,
-    # даже если корневой логгер ещё не настроен (иначе ERROR уходит в lastResort).
+    """Starts the aiohttp cockpit server in the same process/loop as the bot. Non-blocking."""
+    # Ensure error_middleware (logging.exception) actually writes to the log,
+    # even if the root logger hasn't been configured yet (otherwise ERROR goes to lastResort).
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.WARNING,
                              format="%(asctime)s %(levelname)s %(name)s %(message)s")
     port = ctx["port"]
     try:
-        # Деривируем токен один раз при старте (scrypt медленный — не на каждый запрос)
+        # Derive token once at startup (scrypt is slow — not per-request)
         ctx["_auth_token"] = _derive_token(ctx["password"])
 
-        # Timeline: инициализируем персистентность шины (DATA/timeline/)
+        # Timeline: initialise bus persistence (DATA/timeline/)
         _timeline_init(ctx)
         _settings_init(ctx)
         _ui_state_init(ctx)
-        # Spec-012 Ф0: инициализируем пути к файлам scan_state + dismissed_incidents
+        # Spec-012 Ph0: initialise paths to scan_state + dismissed_incidents files
         _scan_state_init(ctx)
 
         app = web.Application(middlewares=[error_middleware, auth_middleware], client_max_size=20 * 1024 * 1024)
         app["ctx"] = ctx
 
-        # F1: сохраняем ссылку на PTB-приложение для пинга в TG из _run_card
+        # F1: save reference to PTB app for TG pings from _run_card
         app["ptb_app"] = ptb_app
-        # Также кладём в ctx для доступа из _run_card через ctx["ptb_app"]
+        # Also put in ctx for access from _run_card via ctx["ptb_app"]
         ctx["ptb_app"] = ptb_app
-        # Card Queue: сохраняем aiohttp-приложение в ctx для _drain_queue из _run_card и loop
+        # Card Queue: save aiohttp app in ctx for _drain_queue from _run_card and loop
         ctx["_aiohttp_app"] = app
 
-        # API-роуты
+        # API routes
         app.router.add_get("/api/health", api_health)
         app.router.add_post("/api/login", api_login)
         app.router.add_post("/api/logout", api_logout)
@@ -6532,12 +6535,12 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects", api_projects)
         app.router.add_get("/api/settings", api_settings_get)
         app.router.add_post("/api/settings", api_settings_post)
-        # Cross-device UI-раскладка (открытые вкладки/активная/сайдбар/split)
+        # Cross-device UI layout (open tabs/active/sidebar/split)
         app.router.add_get("/api/ui-state", api_ui_state_get)
         app.router.add_put("/api/ui-state", api_ui_state_put)
         app.router.add_get("/api/projects/{id}/settings", api_project_settings_get)
         app.router.add_post("/api/projects/{id}/settings", api_project_settings_post)
-        # «+ Новый проект» — создаёт untitled-<ts>/, добавляет в topics.json, спавнит онбординг
+        # "+ New project" — creates untitled-<ts>/, adds to topics.json, spawns onboarding
         app.router.add_post("/api/projects/new", api_new_project)
         app.router.add_get("/api/projects/{id}/claude-md", api_project_claude_md)
         app.router.add_post("/api/projects/{id}/claude-md", api_project_claude_md_write)
@@ -6547,91 +6550,91 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/specs/{name}", api_project_spec_content)
         app.router.add_get("/api/projects/{id}/logs", api_project_logs)
         app.router.add_get("/api/projects/{id}/activity", api_project_activity)
-        # Доска задач (TASKS.md / DONE.md)
+        # Task board (TASKS.md / DONE.md)
         app.router.add_get("/api/projects/{id}/tasks", api_project_tasks)
         app.router.add_post("/api/projects/{id}/tasks", api_create_task)
         app.router.add_get("/api/projects/{id}/tasks/done", api_tasks_done)
         app.router.add_post("/api/projects/{id}/tasks/{card}/move", api_move_task)
         app.router.add_delete("/api/projects/{id}/tasks/{card}", api_delete_task)
         app.router.add_route("PATCH", "/api/projects/{id}/tasks/{card}", api_update_task)
-        # Card Queue: batch-запуск нескольких карточек
+        # Card Queue: batch-launch multiple cards
         app.router.add_post("/api/projects/{id}/cards/run-batch", api_run_batch)
-        # F1: сайдкар результата карточки
+        # F1: card result sidecar
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
-        # C2-gate: применить / отменить worktree-карточку; quality gate (check)
+        # C2-gate: apply / discard worktree card; quality gate (check)
         app.router.add_post("/api/projects/{id}/tasks/{card}/apply", api_card_apply)
         app.router.add_post("/api/projects/{id}/tasks/{card}/discard", api_card_discard)
         app.router.add_post("/api/projects/{id}/tasks/{card}/check", api_card_check)
-        # C1: SSE-чат по проекту
+        # C1: SSE chat for project
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
-        # C1-stop: прерывание текущего прогона агента
+        # C1-stop: interrupt current agent run
         app.router.add_post("/api/projects/{id}/chat/stop", api_project_chat_stop)
         app.router.add_get("/api/projects/{id}/running", api_project_running)
-        # Скиллы агента: глобальные (~/.claude/skills/) + проектные (<cwd>/.claude/skills/)
+        # Agent skills: global (~/.claude/skills/) + project (<cwd>/.claude/skills/)
         app.router.add_get("/api/projects/{id}/skills", api_project_skills)
-        # Сканер инцидентов: ручной запуск + счётчик активных err-карточек
+        # Incident scanner: manual run + active err-card count
         app.router.add_post("/api/projects/{id}/scan-errors", api_project_scan_errors)
         app.router.add_get("/api/projects/{id}/incidents", api_project_incidents)
         app.router.add_post("/api/projects/{id}/incident", api_project_incident)
-        # Самолечение (Spec 010): тумблер включения per-project
+        # Self-healing (Spec 010): per-project toggle
         app.router.add_post("/api/projects/{id}/self-heal", api_project_self_heal_toggle)
         app.router.add_post("/api/projects/{id}/notify-on-error", api_project_notify_toggle)
-        # Activity-stream: живой поток событий шины (карточки, внешние прогоны)
+        # Activity-stream: live bus event stream (cards, external runs)
         app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)
-        # Timeline: история событий проекта (JSONL-лог шины) + пагинация
+        # Timeline: project event history (JSONL bus log) + pagination
         app.router.add_get("/api/projects/{id}/timeline", api_project_timeline)
-        # Глобальный поток всех событий (для unread-индикаторов в сайдбаре)
+        # Global stream of all events (for unread indicators in sidebar)
         app.router.add_get("/api/activity-stream", api_activity_stream_all)
-        # Git sync — commit (если dirty) + push одной кнопкой
+        # Git sync — commit (if dirty) + push in one click
         app.router.add_post("/api/projects/{id}/git/sync", api_project_git_sync)
-        # Запуск тестов проекта (автодетект pytest/npm/make)
+        # Project test runner (auto-detect pytest/npm/make)
         app.router.add_post("/api/projects/{id}/test", api_project_test)
         app.router.add_post("/api/projects/{id}/upload", api_project_upload)
-        # Смена модели проекта (применяется со следующего запроса)
+        # Project model change (takes effect on next request)
         app.router.add_post("/api/projects/{id}/model", api_project_set_model)
-        # Лимиты подписки (5ч + недельные) — для значка в полосе вкладок
+        # Subscription limits (5h + weekly) — for badge in tab bar
         app.router.add_get("/api/usage", api_usage)
-        # Шаблоны промтов (глобальные, data/prompts.json)
+        # Prompt templates (global, data/prompts.json)
         app.router.add_get("/api/prompts", api_prompts_list)
         app.router.add_post("/api/prompts", api_prompt_create)
         app.router.add_delete("/api/prompts/{id}", api_prompt_delete)
         app.router.add_route("PATCH", "/api/prompts/{id}", api_prompt_update)
-        # Свободные чаты (без привязки к проекту, cwd=$HOME)
+        # Free chats (not bound to a project, cwd=$HOME)
         app.router.add_post("/api/free", api_free_create)
         app.router.add_post("/api/free/{id}/rename", api_free_rename)
         app.router.add_delete("/api/free/{id}", api_free_delete)
-        # C2: управление сессиями проекта
+        # C2: project session management
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
         app.router.add_post("/api/projects/{id}/sessions/{sid}/label", api_project_session_label)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)
         app.router.add_get("/api/projects/{id}/session-history", api_project_session_history)
-        # Файловый проводник (read-only)
+        # File browser (read-only)
         app.router.add_get("/api/projects/{id}/files", api_project_files)
         app.router.add_get("/api/projects/{id}/file", api_project_file)
-        # Глобальный файловый браузер (от $HOME, без привязки к проекту)
+        # Global file browser (from $HOME, not bound to a project)
         app.router.add_get("/api/global/files", api_global_files)
         app.router.add_get("/api/global/file", api_global_file)
         app.router.add_post("/api/global/file", api_global_file_write)
-        # Контекст сессии (read: Фича A)
+        # Session context (read: Feature A)
         app.router.add_get("/api/projects/{id}/session-context", api_project_session_context)
-        # Память проекта (read+write: Фича B)
+        # Project memory (read+write: Feature B)
         app.router.add_get("/api/projects/{id}/memory", api_project_memory)
         app.router.add_post("/api/projects/{id}/memory/{name}", api_project_memory_write)
         app.router.add_delete("/api/projects/{id}/memory/{name}", api_project_memory_delete)
-        # Секреты проекта (Spec 007): только имена в API, значения — только агенту через env
+        # Project secrets (Spec 007): names only in API, values — agent via env only
         app.router.add_get("/api/projects/{id}/secrets", api_project_secrets)
         app.router.add_post("/api/projects/{id}/secrets/{key}", api_project_secrets_set)
         app.router.add_delete("/api/projects/{id}/secrets/{key}", api_project_secrets_delete)
-        # Переименование папки проекта (kebab-case slug)
+        # Project folder rename (kebab-case slug)
         app.router.add_post("/api/projects/{id}/rename", api_project_rename)
-        # Быстрая проверка структуры проекта без агента
+        # Quick project structure check without an agent
         app.router.add_get("/api/projects/{id}/health", api_project_health)
-        # Аудит проекта: создаёт карточку + запускает run_engine
+        # Project audit: creates card + launches run_engine
         app.router.add_post("/api/projects/{id}/audit", api_project_audit)
-        # «🔧 Подтянуть до стандарта» — дополняет существующие файлы шаблонами без перезаписи
+        # '🔧 Bring up to standard' — supplements existing files with templates without overwriting
         app.router.add_post("/api/projects/{id}/upgrade", api_project_upgrade)
 
-        # Статика — всё остальное (SPA)
+        # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
 
         # WEB_HOST: interface to bind on.
@@ -6646,11 +6649,11 @@ async def start(ptb_app, ctx: dict) -> None:
         await site.start()
         print(f"[webapp] listening on {web_host}:{port}")
 
-        # Фоновый сканер инцидентов: log_cmd → карточки в Failed
+        # Background incident scanner: log_cmd → cards in Failed
         _spawn_bg(_error_scanner_loop(ctx))
-        print(f"[webapp] сканер инцидентов запущен (интервал {_SCAN_INTERVAL_SEC}с)")
-        # Card Queue: backstop-дренажный цикл (restart-resume + TG-interleave)
+        print(f"[webapp] incident scanner started (interval {_SCAN_INTERVAL_SEC}s)")
+        # Card Queue: backstop drain loop (restart-resume + TG-interleave)
         _spawn_bg(_queue_drain_loop(ctx))
-        print(f"[webapp] queue drain loop запущен (интервал {_QUEUE_DRAIN_INTERVAL_SEC}с)")
+        print(f"[webapp] queue drain loop started (interval {_QUEUE_DRAIN_INTERVAL_SEC}s)")
     except Exception as e:
-        print(f"[webapp] ОШИБКА при запуске: {e}")
+        print(f"[webapp] ERROR during startup: {e}")

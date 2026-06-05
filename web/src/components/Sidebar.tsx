@@ -64,14 +64,14 @@ export function Sidebar({
                 key={p.id}
                 className={`project-icon-btn ${isActive ? 'active' : ''} ${p.is_free ? 'free' : ''}`}
                 onClick={() => onSelect(p.id)}
-                title={`${p.name}${unread ? ` (${unread} нов.)` : ''}`}
+                title={`${p.name}${unread ? ` (${unread} new)` : ''}`}
               >
                 <span className="project-icon-letter">
                   {p.is_free ? '🏠' : p.name.charAt(0).toUpperCase()}
                 </span>
                 {unread > 0 && <span className="unread-dot-collapsed" />}
                 {(p.incidents ?? 0) > 0 && (
-                  <span className="incidents-dot-collapsed" title={`${p.incidents} инцидентов`}>🚨</span>
+                  <span className="incidents-dot-collapsed" title={`${p.incidents} incident(s)`}>🚨</span>
                 )}
               </button>
             )
@@ -146,7 +146,7 @@ export function Sidebar({
         disabled={newProjectBusy}
         title={t['sidebar.new_project_hint']}
       >
-        {newProjectBusy ? '⏳ создаю…' : `＋ ${t['sidebar.new_project']}`}
+        {newProjectBusy ? '⏳ creating…' : `＋ ${t['sidebar.new_project']}`}
       </button>
 
       <div className="projects-list">
@@ -189,13 +189,13 @@ export function Sidebar({
                 {(p.incidents ?? 0) > 0 && (
                   <span
                     className="incidents-badge"
-                    title={`${p.incidents} активных инцидентов на доске`}
+                    title={`${p.incidents} active incident(s) on the board`}
                   >
                     🚨 {p.incidents}
                   </span>
                 )}
                 {unread > 0 && (
-                  <span className="unread-badge" title={`${unread} новых событий`}>
+                  <span className="unread-badge" title={`${unread} new event(s)`}>
                     {unread > 99 ? '99+' : unread}
                   </span>
                 )}
@@ -223,14 +223,14 @@ export function Sidebar({
             <polyline points="16 17 21 12 16 7"/>
             <line x1="21" y1="12" x2="9" y2="12"/>
           </svg>
-          Выйти
+          Sign out
         </button>
       </div>
 
       {confirmDelete && (
         <ConfirmModal
           title={t['sidebar.delete_chat']}
-          message={`Удалить свободный чат «${confirmDelete.name}»? История стирается.`}
+          message={`Delete free chat "${confirmDelete.name}"? History will be erased.`}
           confirmLabel={t['common.delete']}
           danger
           onConfirm={() => { onDeleteFree(confirmDelete.id); setConfirmDelete(null) }}

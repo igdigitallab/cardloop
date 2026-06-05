@@ -134,7 +134,7 @@ export function PromptPicker({ onSelect, onClose }: Props) {
   return (
     <div className="prompt-picker" ref={ref}>
       <div className="prompt-picker-header">
-        <span className="prompt-picker-title">📋 Шаблоны</span>
+        <span className="prompt-picker-title">📋 Templates</span>
         <button className="prompt-picker-close" onClick={onClose} title={t['prompts.close']}>✕</button>
       </div>
 

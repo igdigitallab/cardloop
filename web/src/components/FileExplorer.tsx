@@ -134,7 +134,7 @@ export function FileExplorer({
   fetchDir,
   fetchFile,
   onSave,
-  treeLabel = 'Файлы',
+  treeLabel = 'Files',
   refreshRef,
 }: FileExplorerProps) {
   const [rootNodes, setRootNodes] = useState<TreeNode[] | null>(null)
@@ -250,7 +250,7 @@ export function FileExplorer({
       await merge(newRoot)
       nodesRef.current = newRoot
       setRootNodes([...newRoot])
-    } catch { /* тихо игнорим */ }
+    } catch { /* silently ignore */ }
 
     if (selectedPath) {
       try {
@@ -309,7 +309,7 @@ export function FileExplorer({
       setFileContent({ ...fileContent, content: editContent })
       setEditing(false)
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : 'Ошибка сохранения')
+      setSaveError(e instanceof Error ? e.message : 'Save error')
     } finally {
       setSaving(false)
     }
@@ -317,7 +317,7 @@ export function FileExplorer({
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
-  if (rootLoading) return <Spinner label="Загрузка файлов..." />
+  if (rootLoading) return <Spinner label="Loading files..." />
   if (rootError) return <div className="error-state">⚠ {rootError}</div>
   if (!rootNodes) return null
 
@@ -328,7 +328,7 @@ export function FileExplorer({
         <div className="files-tree-label">{treeLabel}</div>
         <div className="files-tree-scroll">
           {rootNodes.length === 0 ? (
-            <div className="no-content">Директория пуста</div>
+            <div className="no-content">Directory is empty</div>
           ) : (
             <TreeView
               nodes={rootNodes}
@@ -343,10 +343,10 @@ export function FileExplorer({
       {/* Right: file viewer / editor */}
       <div className="files-viewer-pane">
         {!selectedPath && (
-          <div className="no-content files-viewer-hint">← Выберите файл</div>
+          <div className="no-content files-viewer-hint">← Select a file</div>
         )}
 
-        {selectedPath && fileLoading && <Spinner label="Загрузка..." />}
+        {selectedPath && fileLoading && <Spinner label="Loading..." />}
 
         {selectedPath && !fileLoading && fileContent && (
           <>
@@ -356,24 +356,24 @@ export function FileExplorer({
                 <span className="files-viewer-size">{formatSize(fileContent.size)}</span>
               )}
               {onSave && !fileContent.error && !editing && (
-                <button className="file-edit-btn" onClick={handleStartEdit} title="Редактировать (или двойной клик на тексте)">
-                  ✎ Изменить
+                <button className="file-edit-btn" onClick={handleStartEdit} title="Edit (or double-click on text)">
+                  ✎ Edit
                 </button>
               )}
               {editing && (
                 <div className="file-edit-actions">
                   {saveError && <span className="file-edit-err">⚠ {saveError}</span>}
                   <button className="btn-primary file-save-btn" onClick={handleSave} disabled={saving}>
-                    {saving ? '…' : 'Сохранить'}
+                    {saving ? '…' : 'Save'}
                   </button>
-                  <button className="btn-secondary" onClick={handleCancelEdit} disabled={saving}>Отмена</button>
+                  <button className="btn-secondary" onClick={handleCancelEdit} disabled={saving}>Cancel</button>
                 </div>
               )}
             </div>
             <div
               className={`files-viewer-body${editing ? ' files-viewer-editing' : ''}`}
               onDoubleClick={onSave && !editing && !fileContent.error ? handleStartEdit : undefined}
-              title={onSave && !editing && !fileContent.error ? 'Двойной клик для редактирования' : undefined}
+              title={onSave && !editing && !fileContent.error ? 'Double-click to edit' : undefined}
             >
               {fileContent.error ? (
                 <div className="error-state">⚠ {fileContent.error}</div>
