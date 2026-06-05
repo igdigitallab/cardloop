@@ -514,7 +514,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                         className={`git-vis git-vis-${git.visibility}`}
                         title={git.visibility === 'private' ? 'Приватный GitHub-репозиторий' : 'Публичный (открытый) GitHub-репозиторий'}
                       >
-                        {git.visibility === 'private' ? '🔒 приватный' : '🌐 открытый'}
+                        {git.visibility === 'private' ? '🔒' : '🌐'}
                       </span>
                     )}
                     {git.dirty > 0 && (
