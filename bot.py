@@ -46,6 +46,10 @@ DATA.mkdir(exist_ok=True)
 
 
 def _load_env():
+    # Opt-out: set COPS_NO_DOTENV=1 to skip auto-loading .env (tests, or deployments
+    # that inject env directly via systemd/Docker). Keeps default behavior unchanged.
+    if os.environ.get("COPS_NO_DOTENV"):
+        return
     f = HERE / ".env"
     if f.exists():
         for line in f.read_text().splitlines():
@@ -56,10 +60,21 @@ def _load_env():
 
 
 _load_env()
-# NB: ANTHROPIC_API_KEY намеренно НЕ задаётся — SDK работает на OAuth подписки (~/.claude).
-os.environ.pop("ANTHROPIC_API_KEY", None)
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+# ── Auth mode: "subscription" (default) or "api_key" ──────────────────────────
+# subscription: SDK uses OAuth credentials from ~/.claude/.credentials.json.
+#   ANTHROPIC_API_KEY is forcibly removed to prevent accidental API billing.
+# api_key: ANTHROPIC_API_KEY is passed through; the SDK uses it and BILLS the
+#   Anthropic API. Use only as a conscious opt-in — never the default.
+CLAUDE_AUTH_MODE = os.environ.get("CLAUDE_AUTH_MODE", "subscription")
+if CLAUDE_AUTH_MODE == "subscription":
+    # Remove any API key from the environment so the SDK cannot accidentally
+    # fall back to API billing.  This is the money-safety guard.
+    os.environ.pop("ANTHROPIC_API_KEY", None)
+# api_key mode: do nothing — ANTHROPIC_API_KEY stays in os.environ and the
+# SDK will pick it up automatically.
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")  # optional — web-only mode if empty
 GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID", "0"))
 ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip()}
 DEFAULT_CWD = os.environ.get("DEFAULT_CWD", str(Path.home()))
@@ -998,48 +1013,109 @@ async def cmd_stop(update, context):
 
 
 # ─────────────────────────── main ───────────────────────────
-async def _on_start(app):
-    """post_init: поднимаем внутрипроцессные HTTP-каналы рядом с ботом.
-    Каждый обёрнут в собственный try/except — падение веба НЕ роняет Telegram."""
-    await webapp.start(app, {              # браузерный кокпит
-        "port": WEB_PORT, "password": WEB_PASSWORD,
-        "topics": topics, "sessions": sessions, "running": running,
-        "costs": costs, "rate_limits": rate_limits,
-        "resolve_project": resolve_project, "REGISTRY": REGISTRY,
-        "save_sessions": save_sessions, "save_topics": save_topics,
-        "DATA": DATA, "DEFAULT_CWD": DEFAULT_CWD, "DEFAULT_MODEL": DEFAULT_MODEL,
-        "VAULT_PROJECTS": Path(os.environ["VAULT_PROJECTS"]) if os.environ.get("VAULT_PROJECTS") else None, "HERE": HERE,
-        # F1: движок и модели для авто-запуска карточек канбана
-        "run_engine": run_engine, "MODELS": MODELS,
-        # F1: ссылка на PTB-приложение для пинга в TG
-        "ptb_app": app,
-        # «+ Новый проект» — нужен для синтеза session_key "<chat>:<thread>" в topics.json
+
+def _build_ctx(ptb_app) -> dict:
+    """Build the shared context dict passed to webapp.start().
+
+    ptb_app is the PTB Application instance in TG mode, or None in web-only mode.
+    All other values come from module-level state so both modes share the same
+    topics/sessions/running/etc. dicts.
+    """
+    return {
+        "port": WEB_PORT,
+        "password": WEB_PASSWORD,
+        "topics": topics,
+        "sessions": sessions,
+        "running": running,
+        "costs": costs,
+        "rate_limits": rate_limits,
+        "resolve_project": resolve_project,
+        "REGISTRY": REGISTRY,
+        "save_sessions": save_sessions,
+        "save_topics": save_topics,
+        "DATA": DATA,
+        "DEFAULT_CWD": DEFAULT_CWD,
+        "DEFAULT_MODEL": DEFAULT_MODEL,
+        "VAULT_PROJECTS": Path(os.environ["VAULT_PROJECTS"]) if os.environ.get("VAULT_PROJECTS") else None,
+        "HERE": HERE,
+        # Engine + models for kanban auto-run
+        "run_engine": run_engine,
+        "MODELS": MODELS,
+        # PTB app reference for TG pings from _run_card / self-heal / notify_on_error.
+        # None in web-only mode — all callers guard on ptb_app is None → no-op.
+        "ptb_app": ptb_app,
+        # Needed to synthesise session_key "<chat>:<thread>" when creating new projects
         "GROUP_CHAT_ID": GROUP_CHAT_ID,
-    })
+    }
+
+
+async def _amain() -> None:
+    """Async entry point.
+
+    Always starts the web cockpit + engine on the current asyncio loop.
+    PTB (Telegram polling) starts only when BOT_TOKEN is set.  In web-only
+    mode ptb_app=None is passed to webapp so all TG side-effects are skipped.
+
+    Loop ownership: a single asyncio loop drives both aiohttp and PTB.
+    PTB is started via the manual lifecycle (initialize/start/start_polling)
+    rather than run_polling() so it does NOT take over the loop.
+    """
+    if BOT_TOKEN:
+        # ── Telegram mode ──────────────────────────────────────────────────
+        ptb_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
+        ptb_app.add_handler(CommandHandler("start", cmd_start))
+        ptb_app.add_handler(CommandHandler("help", cmd_start))
+        ptb_app.add_handler(CommandHandler("whoami", cmd_whoami))
+        ptb_app.add_handler(CommandHandler("reset", cmd_reset))
+        ptb_app.add_handler(CommandHandler("clear", cmd_reset))
+        ptb_app.add_handler(CommandHandler("resume", cmd_resume))
+        ptb_app.add_handler(CommandHandler("model", cmd_model))
+        ptb_app.add_handler(CommandHandler("project", cmd_project))
+        ptb_app.add_handler(CommandHandler("newtopic", cmd_newtopic))
+        ptb_app.add_handler(CommandHandler("diff", cmd_diff))
+        ptb_app.add_handler(CommandHandler("cost", cmd_cost))
+        ptb_app.add_handler(CommandHandler("usage", cmd_usage))
+        ptb_app.add_handler(CommandHandler("stop", cmd_stop))
+        ptb_app.add_handler(MessageHandler(filters.StatusUpdate.FORUM_TOPIC_CREATED, on_topic_created))
+        ptb_app.add_handler(MessageHandler(
+            (filters.TEXT | filters.CAPTION | filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND,
+            on_message))
+        ptb_app.add_error_handler(on_error)
+
+        ctx = _build_ctx(ptb_app)
+
+        # Start web cockpit first (aiohttp, non-blocking)
+        await webapp.start(ptb_app, ctx)
+
+        # Start PTB on the same loop via manual lifecycle
+        await ptb_app.initialize()
+        await ptb_app.start()
+        await ptb_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+
+        print("Claude-Ops-Bot started (Telegram + web cockpit).")
+
+        # Idle until shutdown signal
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await ptb_app.updater.stop()
+            await ptb_app.stop()
+            await ptb_app.shutdown()
+    else:
+        # ── Web-only mode ─────────────────────────────────────────────────
+        # No BOT_TOKEN set.  The web cockpit and engine run standalone.
+        # Telegram-specific features (forum-topic auto-bind, TG pings) are
+        # simply absent; all ptb_app guards in webapp produce no-ops.
+        ctx = _build_ctx(None)
+        await webapp.start(None, ctx)
+        print("Claude-Ops-Bot started (web-only mode, no Telegram).")
+
+        # Idle until shutdown signal
+        await asyncio.Event().wait()
 
 
 def main():
-    app: Application = ApplicationBuilder().token(BOT_TOKEN).post_init(_on_start).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_start))
-    app.add_handler(CommandHandler("whoami", cmd_whoami))
-    app.add_handler(CommandHandler("reset", cmd_reset))
-    app.add_handler(CommandHandler("clear", cmd_reset))  # алиас под привычку из CLI
-    app.add_handler(CommandHandler("resume", cmd_resume))
-    app.add_handler(CommandHandler("model", cmd_model))
-    app.add_handler(CommandHandler("project", cmd_project))
-    app.add_handler(CommandHandler("newtopic", cmd_newtopic))
-    app.add_handler(CommandHandler("diff", cmd_diff))
-    app.add_handler(CommandHandler("cost", cmd_cost))
-    app.add_handler(CommandHandler("usage", cmd_usage))
-    app.add_handler(CommandHandler("stop", cmd_stop))
-    app.add_handler(MessageHandler(filters.StatusUpdate.FORUM_TOPIC_CREATED, on_topic_created))
-    app.add_handler(MessageHandler(
-        (filters.TEXT | filters.CAPTION | filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND,
-        on_message))
-    app.add_error_handler(on_error)
-    print("Claude-Ops-Bot запущен.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    asyncio.run(_amain())
 
 
 if __name__ == "__main__":

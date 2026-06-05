@@ -245,7 +245,16 @@ def _format_tool(name: str, inp: dict) -> dict:
         return {"name": name, "kind": "other", "summary": summary}
 
 
-COOKIE_MAX_AGE = 2592000  # 30 дней в секундах
+COOKIE_MAX_AGE = 2592000  # 30 days in seconds
+
+# WEB_COOKIE_SECURE: controls the Secure flag on the auth cookie.
+# When True the browser only sends the cookie over HTTPS, which is correct
+# behind an HTTPS reverse proxy or Cloudflare Tunnel.
+# When False (default) the cookie is also sent over plain http — necessary
+# for local or LAN access without TLS (http://192.168.x.x:8787 etc.).
+# ⚠️  Do NOT set to true unless you are accessing the cockpit over HTTPS;
+# otherwise the browser silently drops the cookie and login appears broken.
+_WEB_COOKIE_SECURE: bool = os.environ.get("WEB_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
 
 
 # ─────────────────────────── auth ───────────────────────────
@@ -719,7 +728,7 @@ async def api_login(req: web.Request) -> web.Response:
     resp.set_cookie(
         "cops_auth", token,
         httponly=True,
-        secure=True,
+        secure=_WEB_COOKIE_SECURE,
         path="/",
         max_age=COOKIE_MAX_AGE,
         samesite="Lax",
@@ -3932,7 +3941,12 @@ async def api_free_delete(req: web.Request) -> web.Response:
 # Токен берём из ~/.claude/.credentials.json (SDK его сам рефрешит). Кэш 60с — фронт поллит каждые 30с.
 
 _OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-_CREDS_PATH = os.path.expanduser("~/.claude/.credentials.json")
+# CLAUDE_CREDENTIALS_PATH: path to Claude OAuth credentials file.
+# Defaults to ~/.claude/.credentials.json (the standard Claude CLI location).
+# Override only when running multiple Claude accounts or in non-standard setups.
+_CREDS_PATH = os.path.expanduser(
+    os.environ.get("CLAUDE_CREDENTIALS_PATH", "") or "~/.claude/.credentials.json"
+)
 _usage_cache: dict = {"data": None, "ts": 0.0}
 _usage_lock: asyncio.Lock | None = None  # lazy — created inside the running event loop
 _USAGE_TTL = 60.0
@@ -6620,11 +6634,17 @@ async def start(ptb_app, ctx: dict) -> None:
         # Статика — всё остальное (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
 
+        # WEB_HOST: interface to bind on.
+        # Default 127.0.0.1 is safe (local only).  Set to 0.0.0.0 to expose
+        # to LAN / a reverse proxy.  Never expose to the internet without
+        # an HTTPS reverse proxy and WEB_COOKIE_SECURE=true.
+        web_host = os.environ.get("WEB_HOST", "127.0.0.1")
+
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", port)
+        site = web.TCPSite(runner, web_host, port)
         await site.start()
-        print(f"[webapp] слушаю 0.0.0.0:{port}")
+        print(f"[webapp] listening on {web_host}:{port}")
 
         # Фоновый сканер инцидентов: log_cmd → карточки в Failed
         _spawn_bg(_error_scanner_loop(ctx))

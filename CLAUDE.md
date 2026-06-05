@@ -27,6 +27,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - `.gitignore` исключает: `.env`, `data/` (chat IDs/сессии/audit/логи), `venv/`, `web/node_modules`, `web/dist`, `.worktrees/`.
 - ⚠️ Перед коммитом нового: проверить, что секрет/значение не попало в трекаемые файлы.
 - ⚠️ **Anti-hardcode (проект идёт в OSS).** В трекаемый код/доки — НИКАКОГО персонального/инфра-хардкода: пути → `$HOME`/относительные (не `/home/<user>/…`), ID/токены/пароли → `.env` (+ плейсхолдер в `.env.example`), реестр проектов → `data/registry.json` (gitignored), имя оператора/язык → env (`OPERATOR_NAME`/`RESPONSE_LANGUAGE`). Реальное значение оператора — только в gitignored-конфиге; в код идёт чтение из него. Новую персональную/инфра-константу не вписывать в код — параметризовать. Детали и инвентарь → `specs/spec-014-oss-hardening.md`; мультиюзер → `specs/spec-013-multi-user.md`.
+- ⚠️ **English-only (the project ships in English).** All NEW code, comments, docstrings, log/print output, user-facing strings, UI, and docs MUST be in English. Do not add Russian text to the codebase. The agent's **reply** language is controlled separately by env `RESPONSE_LANGUAGE` (not hardcoded) — Igor's instance keeps it `по-русски`, so the agent still answers in Russian while the code/UI stay English. Plan & progress → `specs/spec-015-oss-runtime.md`.
 - Параллельные агенты → `git worktree add .worktrees/<name> -b <branch>`; после — `git worktree prune`.
 
 ---

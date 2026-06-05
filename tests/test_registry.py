@@ -163,6 +163,10 @@ class TestEnvFallbacks:
         monkeypatch.setenv("BOT_TOKEN", "fake:token")
         monkeypatch.setenv("ALLOWED_USERS", "999")
         monkeypatch.setenv("GROUP_CHAT_ID", "0")
+        # Don't auto-load the repo .env — otherwise OPERATOR_NAME/RESPONSE_LANGUAGE
+        # from a populated .env resurrect via setdefault and the default-case
+        # assertions become env-dependent (flaky across checkouts/CI).
+        monkeypatch.setenv("COPS_NO_DOTENV", "1")
         import importlib
         spec = importlib.util.spec_from_file_location("bot_test_env", ROOT / "bot.py")
         mod = importlib.util.module_from_spec(spec)
