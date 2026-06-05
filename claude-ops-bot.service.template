@@ -1,0 +1,32 @@
+# Шаблон systemd-юнита для claude-ops-bot.
+#
+# УСТАНОВКА:
+#   1. Подставь имя пользователя: sed 's/__USER__/YOUR_USERNAME/g' claude-ops-bot.service.template > /tmp/claude-ops-bot.service
+#   2. sudo cp /tmp/claude-ops-bot.service /etc/systemd/system/claude-ops-bot.service
+#   3. sudo systemctl daemon-reload && sudo systemctl enable --now claude-ops-bot
+#
+# Либо через экземплярный юнит (systemd @-синтаксис):
+#   sudo cp claude-ops-bot.service.template /etc/systemd/system/claude-ops-bot@.service
+#   sudo systemctl enable --now claude-ops-bot@YOUR_USERNAME
+#   (тогда %i = имя пользователя, %h = home dir)
+
+[Unit]
+Description=Claude-Ops-Bot (Claude Code via Telegram, forum-topics per project)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=%h/claude-ops-bot
+Environment=HOME=%h
+Environment=PATH=%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/claude-ops-bot/.env
+# ANTHROPIC_API_KEY НЕ задаём — работаем на OAuth подписки (~/.claude/.credentials.json)
+ExecStart=%h/claude-ops-bot/venv/bin/python -u %h/claude-ops-bot/bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

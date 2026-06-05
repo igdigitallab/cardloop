@@ -58,5 +58,5 @@
 ---
 
 ## Ссылки
-- Vault credentials: `~/vault/_system/Credentials.md`
+- Credentials: `$VAULT/_system/Credentials.md` (или ваш менеджер паролей)
 - ...

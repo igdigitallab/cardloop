@@ -15,18 +15,18 @@
 ```
 # Refactor задача: <PROJECT>
 
-Проект: /home/igor/<PROJECT>/
+Проект: $HOME/<PROJECT>/
 Прочитай:
 1. CLAUDE.md проекта
-2. ~/vault/01-Projects/<PROJECT>/README.md
-3. ~/vault/01-Projects/<PROJECT>/audit-*.md — последний audit-отчёт (если несколько — самый свежий)
-4. ~/vault/03-Resources/_templates/project-baseline.md
-5. Раздел "Tech gotchas" в /home/igor/CLAUDE.md
+2. $VAULT/01-Projects/<PROJECT>/README.md
+3. $VAULT/01-Projects/<PROJECT>/audit-*.md — последний audit-отчёт (если несколько — самый свежий)
+4. $VAULT/03-Resources/_templates/project-baseline.md
+5. Раздел "Tech gotchas" в $HOME/CLAUDE.md
 
 Используй skill `legacy-modernizer` принципы (если установлен) — strangler fig, characterization tests, incremental migration.
 
 ## Режим: PLAN ONLY на первом проходе
-НЕ менять код. Создать план рефакторинга → spec в `vault/01-Projects/<PROJECT>/specs/`. Дальше — Игорь читает, апрувит, начинаем по фазам.
+НЕ менять код. Создать план рефакторинга → spec в `$VAULT/01-Projects/<PROJECT>/specs/`. Дальше — оператор читает, апрувит, начинаем по фазам.
 
 ---
 
@@ -52,7 +52,7 @@
 - **P1 findings которые упираются в архитектуру** → главные кандидаты на рефакторинг
 - **P2 findings которые накопились** → второстепенные
 - **Homegrown solutions где есть готовое** (например, `requests`+`BeautifulSoup` → Firecrawl)
-- **Зоны где Игорь часто фиксит баги** (смотри `git log --since="3 months ago" --oneline | grep -iE "fix|bug"`)
+- **Зоны где часто фиксят баги** (смотри `git log --since="3 months ago" --oneline | grep -iE "fix|bug"`)
 
 Не делай "рефакторинг всего проекта" — это big bang anti-pattern. Делай **зональный**: одна подсистема за раз.
 
@@ -105,7 +105,7 @@ def do_x(args):
 Для каждой фазы:
 - **Rollback trigger** (что заставит откатиться): новые ошибки в логах, latency growth, юзер-жалобы
 - **Validation** (что проверяем перед следующей фазой): error rate < baseline, ключевые метрики стабильны
-- **Owner** — кто следит (Игорь и/или мониторинг)
+- **Owner** — кто следит (оператор и/или мониторинг)
 
 Если зона маленькая (S) и риск low — Strangler можно упростить до "новая ветка → тесты зелёные → merge → деплой → 24ч мониторинг → cleanup".
 
@@ -124,7 +124,7 @@ def do_x(args):
 
 ## Этап 5: Spec файл
 
-Создай `~/vault/01-Projects/<PROJECT>/specs/<NNNN>-refactor-<YYYY-MM-DD>.md`:
+Создай `$VAULT/01-Projects/<PROJECT>/specs/<NNNN>-refactor-<YYYY-MM-DD>.md`:
 
 \```markdown
 # Refactor Plan — <PROJECT> — <YYYY-MM-DD>
@@ -189,7 +189,7 @@ def do_x(args):
 
 ## После плана
 
-Игорь читает spec, при апруве — отдельная сессия на каждую фазу:
+Оператор читает spec, при апруве — отдельная сессия на каждую фазу:
 - "Сделай Phase 1 из spec <NNNN>" — Claude пишет characterization tests
 - "Сделай Phase 2 zone 1" — Claude строит parallel implementation
 - и т.д.

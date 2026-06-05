@@ -14,7 +14,7 @@
 
 ## Три канала
 
-### Кокпит (claude-ops.coscore.us)
+### Кокпит (YOUR_DOMAIN)
 
 Браузерная IDE — SPA на React + Vite, бэкенд aiohttp.
 
@@ -55,7 +55,7 @@
 
 ### Telegram-канал
 
-Forum-группа «Development», @ziraclaudebot. **Каждый топик = проект** (привязка `thread_id → cwd`).
+Forum-группа «Development», @YOUR_BOT. **Каждый топик = проект** (привязка `thread_id → cwd`).
 
 - Написал задачу → агент работает в папке проекта.
 - Переслал алерт / скрин → агент диагностирует и чинит.
@@ -84,7 +84,7 @@ Forum-группа «Development», @ziraclaudebot. **Каждый топик = 
 
 ```bash
 # 1. Clone
-git clone https://github.com/Zira777ru/claude-ops-bot.git && cd claude-ops-bot
+git clone https://github.com/YOUR_GITHUB/claude-ops-bot.git && cd claude-ops-bot
 
 # 2. Python
 python3 -m venv venv && venv/bin/pip install -r requirements-dev.txt
@@ -107,8 +107,8 @@ venv/bin/python bot.py  # Cockpit → http://localhost:8787
 
 | Канал | Адрес |
 |---|---|
-| **Кокпит** | `https://claude-ops.coscore.us` (Cloudflare Tunnel) / `192.168.0.114:8787` (LAN) |
-| **Telegram** | Forum-группа «Development», @ziraclaudebot |
+| **Кокпит** | `https://YOUR_DOMAIN` (Cloudflare Tunnel / reverse proxy) / `localhost:8787` (LAN) |
+| **Telegram** | Forum-группа «Development», @YOUR_BOT |
 
 - **Auth кокпит:** `WEB_PASSWORD` в `.env`.
 - **Auth Telegram:** `ALLOWED_USERS` (whitelist по user ID).
@@ -123,16 +123,16 @@ venv/bin/python bot.py  # Cockpit → http://localhost:8787
 sudo journalctl -u claude-ops-bot -f
 
 # Рестарт из агента (ЕДИНСТВЕННЫЙ безопасный способ)
-bash /home/igor/claude-ops-bot/restart-self.sh
+bash $HOME/claude-ops-bot/restart-self.sh
 
 # Рестарт из терминала
 sudo systemctl restart claude-ops-bot
 
 # Фронтенд (после правки web/)
-cd /home/igor/claude-ops-bot/web && npm run build
+cd $HOME/claude-ops-bot/web && npm run build
 
 # Тесты
-cd /home/igor/claude-ops-bot && venv/bin/python -m pytest -q
+cd $HOME/claude-ops-bot && venv/bin/python -m pytest -q
 ```
 
 ---

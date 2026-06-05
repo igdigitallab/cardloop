@@ -13,12 +13,12 @@
 ```
 # Audit задача: <PROJECT>
 
-Проект: /home/igor/<PROJECT>/
+Проект: $HOME/<PROJECT>/
 Прочитай:
 1. CLAUDE.md проекта (если есть)
-2. ~/vault/01-Projects/<PROJECT>/README.md (если есть)
-3. ~/vault/03-Resources/_templates/project-baseline.md — стандарт baseline
-4. Раздел "Tech gotchas" в /home/igor/CLAUDE.md — реальные грабли Игоря, используй как чеклист
+2. $VAULT/01-Projects/<PROJECT>/README.md (если есть)
+3. $VAULT/03-Resources/_templates/project-baseline.md — стандарт baseline
+4. Раздел "Tech gotchas" в $HOME/CLAUDE.md — операционные грабли, используй как чеклист
 
 ## Режим: AUDIT ONLY
 НЕ менять код. НЕ фиксить. НЕ рефакторить. Только findings → отчёт.
@@ -30,7 +30,7 @@
 Выполни в самом начале, до чтения кода:
 
 ```bash
-PROJ=/home/igor/<PROJECT>
+PROJ=$HOME/<PROJECT>
 cd "$PROJ"
 
 # Зависимости с CVE
@@ -46,7 +46,7 @@ grep -E "^\.env$" .gitignore 2>/dev/null || echo "WARN: .env not in .gitignore"
 git ls-files | grep -E "^\.env$" && echo "CRITICAL: .env committed!" || echo "ok"
 
 # Прод-логи за неделю — реальные ошибки, не гипотетические
-APP_UUID=$(grep -E "<PROJECT>.*\`[a-z0-9]{20,}\`" /home/igor/CLAUDE.md | grep -oE "\`[a-z0-9]{20,}\`" | tr -d '`' | head -1)
+APP_UUID=$(grep -E "<PROJECT>.*\`[a-z0-9]{20,}\`" $HOME/CLAUDE.md | grep -oE "\`[a-z0-9]{20,}\`" | tr -d '`' | head -1)
 if [ -n "$APP_UUID" ]; then
   CONTAINER=$(docker ps --format "{{.Names}}" | grep "$APP_UUID" | head -1)
   [ -n "$CONTAINER" ] && docker logs --since 168h "$CONTAINER" 2>&1 | grep -iE "error|exception|traceback|critical" | tail -100
@@ -79,7 +79,7 @@ grep -rE "requests\.(get|post)|BeautifulSoup|httpx\.|aiohttp\.ClientSession" --i
 - [ ] **Real API/DB в unit-тестах** — unit-тесты бьют реально в Telegram/Hiddify/external API (это для integration-тестов)
 - [ ] **Production data в тестах** — реальные user_id, токены, имена вместо fixtures
 
-**ВАЖНО для Игоря (см. [[feedback_no_mocks_db]] в memory):** integration-тесты ДОЛЖНЫ бить в реальную БД, не мокать её. Это **не** анти-паттерн, это сознательное решение. Различай unit vs integration.
+**ВАЖНО (если применимо к проекту):** integration-тесты ДОЛЖНЫ бить в реальную БД, не мокать её. Это **не** анти-паттерн, это сознательное решение. Различай unit vs integration.
 
 Если найдено 3+ анти-паттернов в выборке → P1 finding "Test quality: rewrite needed".
 
@@ -94,14 +94,14 @@ grep -rE "requests\.(get|post)|BeautifulSoup|httpx\.|aiohttp\.ClientSession" --i
 
 ## Этап 2: Tech-gotchas чеклист
 
-Перед чтением кода — открой раздел "Tech gotchas" в `/home/igor/CLAUDE.md`. Пройдись по проекту с каждым gotcha как чеклистом:
+Перед чтением кода — открой раздел "Tech gotchas" в `$HOME/CLAUDE.md`. Пройдись по проекту с каждым gotcha как чеклистом:
 
 - Telegram-bot? → HTML escape user input (parse_mode=HTML ломается на `<`), python-telegram-bot job_queue, не APScheduler
 - asyncio + subprocess? → `limit=10*1024*1024` в `create_subprocess_exec`
 - VPN/auth flow? → guards перед `_issue_subscription`, атомарный block (Hiddify lesson)
 - Coolify env spec-symbols? → `is_literal=true`
 - `host.docker.internal`? → нужен `extra_hosts: ["host.docker.internal:host-gateway"]` или container name в общей сети
-- Web scraping? → `firecrawl.coscore.us` доступен, не делай homegrown
+- Web scraping? → `YOUR_FIRECRAWL_URL` доступен, не делай homegrown
 
 Для каждого подходящего gotcha — проверь применение. Не подошёл — пропусти.
 
@@ -167,7 +167,7 @@ grep -rE "requests\.(get|post)|BeautifulSoup|httpx\.|aiohttp\.ClientSession" --i
 - Дублирование которое реально мешает
 - Слишком длинные функции (>100 строк) с явными швами
 - Magic numbers без объяснения
-- **Homegrown web scraper** — если используется `requests`/`BeautifulSoup` для скрейпинга → предложить миграцию на Firecrawl (`https://firecrawl.coscore.us/v1/scrape`). Игорь хостит свой инстанс, рейт-лимитов нет.
+- **Homegrown web scraper** — если используется `requests`/`BeautifulSoup` для скрейпинга → предложить миграцию на Firecrawl (`https://YOUR_FIRECRAWL_URL/v1/scrape`). Вы хостите свой инстанс, рейт-лимитов нет.
 
 ### P3 — стилистика
 **ПРОПУСКАТЬ.** Не упоминать.
@@ -192,7 +192,7 @@ grep -rE "requests\.(get|post)|BeautifulSoup|httpx\.|aiohttp\.ClientSession" --i
 
 ## Формат отчёта
 
-Создай `~/vault/01-Projects/<PROJECT>/audit-<YYYY-MM-DD>.md` со структурой:
+Создай `$VAULT/01-Projects/<PROJECT>/audit-<YYYY-MM-DD>.md` со структурой:
 
 \```markdown
 # Audit <PROJECT> — <YYYY-MM-DD>
@@ -256,7 +256,7 @@ grep -rE "requests\.(get|post)|BeautifulSoup|httpx\.|aiohttp\.ClientSession" --i
 \```
 
 После создания отчёта — кратко доложи:
-"Audit готов: vault/01-Projects/<PROJECT>/audit-<date>.md. N findings (P0: X, P1: Y). Baseline: <статус>. Прод-логи: <топ ошибка>. Топ-риск: <одна фраза>. Тестов нужно написать: N."
+"Audit готов: $VAULT/01-Projects/<PROJECT>/audit-<date>.md. N findings (P0: X, P1: Y). Baseline: <статус>. Прод-логи: <топ ошибка>. Топ-риск: <одна фраза>. Тестов нужно написать: N."
 
 ---
 
@@ -273,9 +273,9 @@ grep -rE "requests\.(get|post)|BeautifulSoup|httpx\.|aiohttp\.ClientSession" --i
 
 ## После аудита
 
-Игорь решает по каждому P0/P1 что делать:
+Оператор решает по каждому P0/P1 что делать:
 - P0 → отдельная сессия с фиксом
-- P1 → spec в `~/vault/01-Projects/<PROJECT>/specs/`
+- P1 → spec в `$VAULT/01-Projects/<PROJECT>/specs/`
 - P2 → backlog проекта
 - TEST-* → отдельная сессия "напиши тесты по audit-<date>.md", приоритезированно по critical paths
 ```

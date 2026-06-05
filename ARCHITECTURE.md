@@ -11,8 +11,8 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                      ОДИН PYTHON-ПРОЦЕСС                        │
 │                                                                  │
-│  Telegram (@ziraclaudebot) ─┐                                    │
-│  Кокпит (claude-ops.coscore.us) ─┼─► run_engine() ─► Claude SDK │
+│  Telegram (@YOUR_BOT) ─┐                                         │
+│  Кокпит (YOUR_DOMAIN) ─┼─► run_engine() ─► Claude SDK           │
 │  Канбан-автозапуск (карточка) ──┘    (async-генератор событий)  │
 │                                                                  │
 │  Общее состояние: running{} · sessions{} · topics{} (через ctx) │
@@ -39,7 +39,7 @@ TG-канал + **движок** + точка старта процесса.
 - `key_of(update)` (bot.py:200), `binding_for(update)` (bot.py:206) — резолв ключа `"chat:thread"`.
 
 ### Реестр проектов
-- `build_registry()` (bot.py:154), `resolve_project(name)` (bot.py:166), `_home_sub(*parts)` (bot.py:122) — пути от `Path.home()` (без хардкодов `/home/igor`). Новый проект → алиас в `_REG_RAW` или авто-скан `~`.
+- `build_registry()` (bot.py:154), `resolve_project(name)` (bot.py:166), `_home_sub(*parts)` (bot.py:122) — пути от `Path.home()` (без хардкодов `/home/<user>`). Новый проект → алиас в `_REG_RAW` или авто-скан `~`.
 
 ### TG-команды (bot.py:859–1062)
 `cmd_start · cmd_whoami · cmd_reset · cmd_resume · cmd_model · cmd_project · cmd_newtopic · cmd_diff · cmd_cost · cmd_usage · cmd_stop`. Хендлеры: `on_message`, `on_topic_created` (авто-привязка проекта), `on_error`.
@@ -193,7 +193,7 @@ web/src/
       8. _run_quality_gate(wt_path) → verdict safe/risky/unknown
       9. safe → остаётся в Review + heal_badge ✓; risky → Failed + heal_badge ✗
      10. Timeline kind:"self_heal" phase:start/fixed/gate_ok/gate_fail
-     11. TG-пинг Игорю (результат)
+     11. TG-пинг оператору (результат)
 ```
 
 **Предохранители (никогда не нарушать):**
@@ -206,7 +206,7 @@ web/src/
 
 **Ключевые функции (webapp.py):**
 - `_self_heal_enabled(project)` — читает флаг; по умолчанию False
-- `_send_tg_ping(ctx, project, msg)` — TG-уведомление Игорю
+- `_send_tg_ping(ctx, project, msg)` — TG-уведомление оператору
 - `_self_heal_card(ctx, project, incident_card)` — асинхронная петля починки
 - `_error_scanner_loop` — интеграция: после scan_and_ingest → create_task если включено
 - `api_project_self_heal_toggle` — POST `/api/projects/{id}/self-heal {enabled}`

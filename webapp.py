@@ -21,7 +21,7 @@ import traceback as _tb
 import uuid as _uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator, TypedDict
+from typing import AsyncGenerator, Optional, TypedDict
 
 import aiohttp
 from aiohttp import web
@@ -665,9 +665,10 @@ def _find_project_by_id(ctx: dict, pid: str) -> dict | None:
 
 
 def _find_vault_specs_dir(ctx: dict, project_name: str, cwd: str) -> Path | None:
-    """Пробует несколько вариантов имён для папки в VAULT_PROJECTS."""
-    vault: Path = ctx["VAULT_PROJECTS"]
-    if not vault.is_dir():
+    """Пробует несколько вариантов имён для папки в VAULT_PROJECTS.
+    Если VAULT_PROJECTS не задан (None) — возвращает None (фича отключена)."""
+    vault: Optional[Path] = ctx.get("VAULT_PROJECTS")
+    if not vault or not vault.is_dir():
         return None
     candidates = [
         project_name,
@@ -3073,7 +3074,7 @@ class AppCtx(TypedDict, total=False):
     HERE: Path
     DEFAULT_MODEL: str
     DEFAULT_CWD: str
-    VAULT_PROJECTS: Path
+    VAULT_PROJECTS: Optional[Path]
     password: str
     _auth_token: str
     port: int

@@ -60,7 +60,7 @@
 - `.env` НЕ закоммичен (`git ls-files | grep '^\.env$'` → пусто)
 - Git history без секретов: `git log -p --all | grep -iE '(TOKEN|SECRET|PASSWORD|API_KEY)\s*='`. Если найдено — rotate секреты и BFG/git-filter-repo для чистки.
 
-**Зачем:** при пересоздании Coolify app не вспоминать переменные. И не светить секреты в публичных репах (`Zira777ru/*` некоторые публичные).
+**Зачем:** при пересоздании Coolify app не вспоминать переменные. И не светить секреты в публичных репах.
 
 ---
 
@@ -132,12 +132,12 @@ pip install safety && safety check -r requirements.txt
 
 **НЕ писать homegrown** `requests` + `BeautifulSoup` парсер. Использовать self-hosted Firecrawl:
 ```
-POST https://firecrawl.coscore.us/v1/scrape
+POST https://YOUR_FIRECRAWL_URL/v1/scrape
 Body: {"url": "...", "formats": ["markdown", "html"]}
 ```
 
 **Зачем:**
-- Игорь хостит свой инстанс — нет рейт-лимитов, не платит
+- Вы хостите свой инстанс — нет рейт-лимитов, не платите
 - Возвращает чистый markdown, JS-rendered контент
 - Авто-обработка cookie consent, антибот-защит
 
@@ -148,7 +148,7 @@ Body: {"url": "...", "formats": ["markdown", "html"]}
 ## Проверка baseline'а проекта
 
 ```bash
-PROJ=/home/igor/<project>
+PROJ=$HOME/<project>
 cd "$PROJ"
 echo "=== Baseline check: $PROJ ==="
 

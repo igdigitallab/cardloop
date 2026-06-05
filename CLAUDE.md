@@ -2,7 +2,7 @@
 
 # CLAUDE.md — Claude-Ops
 
-IDE-среда для управления проектами через Claude Agent SDK. Три канала: кокпит (`claude-ops.coscore.us`), Telegram (@ziraclaudebot), канбан-автозапуск. Один движок `run_engine()`, full-auto.
+IDE-среда для управления проектами через Claude Agent SDK. Три канала: кокпит (`YOUR_DOMAIN`), Telegram (@YOUR_BOT), канбан-автозапуск. Один движок `run_engine()`, full-auto.
 
 Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 
@@ -23,10 +23,10 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 
 ## Git
 
-- Репо: `github.com/Zira777ru/claude-ops-bot` — **PRIVATE** (инфра-контрол-плейн: внутр. IP/тоннели/OPSEC-зоны в этом файле; публиковать только после санитизации).
+- Репо: `github.com/YOUR_GITHUB/claude-ops-bot` — **PRIVATE** (инфра-контрол-плейн: внутр. IP/тоннели/OPSEC-зоны в этом файле; публиковать только после санитизации).
 - `.gitignore` исключает: `.env`, `data/` (chat IDs/сессии/audit/логи), `venv/`, `web/node_modules`, `web/dist`, `.worktrees/`.
 - ⚠️ Перед коммитом нового: проверить, что секрет/значение не попало в трекаемые файлы.
-- ⚠️ **Anti-hardcode (проект идёт в OSS).** В трекаемый код/доки — НИКАКОГО персонального/инфра-хардкода: пути → `$HOME`/относительные (не `/home/igor/…`), ID/токены/пароли → `.env` (+ плейсхолдер в `.env.example`), реестр проектов → `data/registry.json` (gitignored), имя оператора/язык → env (`OPERATOR_NAME`/`RESPONSE_LANGUAGE`). Реальное значение Игоря — только в gitignored-конфиге; в код идёт чтение из него. Новую персональную/инфра-константу не вписывать в код — параметризовать. Детали и инвентарь → `specs/spec-014-oss-hardening.md`; мультиюзер → `specs/spec-013-multi-user.md`.
+- ⚠️ **Anti-hardcode (проект идёт в OSS).** В трекаемый код/доки — НИКАКОГО персонального/инфра-хардкода: пути → `$HOME`/относительные (не `/home/<user>/…`), ID/токены/пароли → `.env` (+ плейсхолдер в `.env.example`), реестр проектов → `data/registry.json` (gitignored), имя оператора/язык → env (`OPERATOR_NAME`/`RESPONSE_LANGUAGE`). Реальное значение оператора — только в gitignored-конфиге; в код идёт чтение из него. Новую персональную/инфра-константу не вписывать в код — параметризовать. Детали и инвентарь → `specs/spec-014-oss-hardening.md`; мультиюзер → `specs/spec-013-multi-user.md`.
 - Параллельные агенты → `git worktree add .worktrees/<name> -b <branch>`; после — `git worktree prune`.
 
 ---
@@ -34,7 +34,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 ## Операции
 
 - Логи: `sudo journalctl -u claude-ops-bot -f`
-- Рестарт из агента: `bash /home/igor/claude-ops-bot/restart-self.sh` (ЕДИНСТВЕННЫЙ безопасный способ).
+- Рестарт из агента: `bash $HOME/claude-ops-bot/restart-self.sh` (ЕДИНСТВЕННЫЙ безопасный способ).
 - Рестарт из терминала: `sudo systemctl restart claude-ops-bot`.
 - После правки `bot.py`/`webapp.py` — обязательно рестарт сервиса.
 - После правки `web/` — пересобрать: `cd web && npm run build`.
@@ -45,12 +45,12 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 
 ### Auth и окружение
 - **Auth = подписка, НЕ API.** SDK читает `~/.claude/.credentials.json` (claudeAiOauth). `ANTHROPIC_API_KEY` НЕ задавать нигде — `bot.py` его явно `pop`-ает, в unit его нет. Иначе уйдёт на API-биллинг.
-- **systemd PATH.** Юнит задаёт `PATH=/home/igor/.npm-global/bin:...` — иначе SDK не найдёт native-бинарь `claude`. И `HOME=/home/igor` для доступа к credentials.
-- **bypassPermissions + full-auto.** Бот сам пушит/деплоит/удаляет. Необратимое репортит постфактум (footer ⚠️). Доступ строго `ALLOWED_USERS={282311426}`.
+- **systemd PATH.** Юнит задаёт `PATH=$HOME/.npm-global/bin:...` — иначе SDK не найдёт native-бинарь `claude`. И `HOME=/home/<user>` для доступа к credentials.
+- **bypassPermissions + full-auto.** Бот сам пушит/деплоит/удаляет. Необратимое репортит постфактум (footer ⚠️). Доступ строго `ALLOWED_USERS={<YOUR_TELEGRAM_ID>}`.
 
 ### Рестарт и cgroup
 - **САМО-рестарт = суицид.** Бот живёт в cgroup своего systemd-сервиса. Любой `systemctl stop/restart/kill` ИЛИ `kill/pkill` своего процесса из его же шелла сносит cgroup ПОСРЕДИ команды → `stop && start` не доживает до `start`. **Защита:** PreToolUse-хук `~/.claude/hooks/guard-self-lifecycle.sh` блокирует такие Bash-команды. **Для правок — только `bash restart-self.sh`** (detached через `systemd-run` вне cgroup).
-- **Рестарт ОБРЫВАЕТ текущий ход + все sub-agents.** Даже корректный `bash restart-self.sh` убивает Python-процесс агента. Правила: (1) Перед `restart-self.sh` — отправь Игорю полный итог, заверши ход. (2) Если есть `in_progress` sub-agents — жди их завершения. (3) После `restart-self.sh` — никаких Bash-команд в этом ходу. (4) Smoke / `curl /api/health` — в следующем сообщении.
+- **Рестарт ОБРЫВАЕТ текущий ход + все sub-agents.** Даже корректный `bash restart-self.sh` убивает Python-процесс агента. Правила: (1) Перед `restart-self.sh` — отправь оператору полный итог, заверши ход. (2) Если есть `in_progress` sub-agents — жди их завершения. (3) После `restart-self.sh` — никаких Bash-команд в этом ходу. (4) Smoke / `curl /api/health` — в следующем сообщении.
 - **pkill footgun.** НЕ делать `pkill -f "bot.py"` — паттерн совпадает с командной строкой самой команды и убивает шелл (exit 144). Глушить через systemd или по PID.
 - **Один getUpdates.** Не запускать второй инстанс (nohup + systemd одновременно) — конфликт long-polling.
 
@@ -79,7 +79,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - **Лимит 1 попытка/инцидент.** `heal_attempted=true` пишется в description инцидента ДО запуска агента. Повторная попытка на том же инциденте не будет запущена (предотв. зацикливание при краше).
 - **Лимит конкурентности.** `_self_heal_active_count <= _SELF_HEAL_MAX_CONCURRENT (2)`. При занятом running lock — пропуск.
 - **Только git+clean.** `_card_run_mode == "worktree"` обязателен. Не-git и dirty-дерево → пропускаем.
-- **Полная наблюдаемость.** Timeline `kind:"self_heal"` + TG-пинг Игорю на каждую попытку.
+- **Полная наблюдаемость.** Timeline `kind:"self_heal"` + TG-пинг оператору на каждую попытку.
 - **heal_badge в description карточки:** `heal_badge=🔧 авто-починка · гейт ✓/✗` — читается UI для CSS-бейджа.
 
 ### C2-gate: worktree-режим карточек
@@ -115,7 +115,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
   - **Кнопка «настроить логи» (LogsTab.tsx) отдаёт агенту полную инструкцию.** Empty-state создаёт backlog-карточку: короткий `text` (заголовок) + детальный `description` (как выбрать log_cmd/test_cmd: systemd/docker/файл, exec-без-sudo-без-shell, обязательная проверка вывода, test_cmd относителен cwd проекта, hot-reload вместо рестарта). `_run_card` склеивает промпт = `text + "\n\n" + description`. Многострочный description round-trip'ит через TASKS.md (`  > строка` на строку; пустые строки тоже, `_DESC_LINE_RE=^  > (.*)$`). НЕ ужимать обратно в однострочник — агент тогда снова сделает криво.
 - **Timeline (Spec 008): `data/timeline/<slug>.jsonl`.** Каждое событие `_bus_publish` персистируется. Slug = `cwd.replace('/', '-')`. Ротация при >5MB → `.jsonl.1` (одна; старая `.1` перезаписывается). Запись глотает все исключения (прогон не ломается). env-поле никогда не пишется. Инициализация: `_timeline_init(ctx)` в `start()`. `_TIMELINE_DATA_DIR` / `_TIMELINE_TOPICS` — модульные переменные (None до init — корректно).
 - **TabId актуальные:** `overview | claude-md | logs | board | files | memory | timeline | settings` (8 вкладок; `secrets` — секция в «Настройках», не вкладка — Spec 011 Ф2).
-- **Тест-харнес userbot.** Слать боту только от аккаунта Игоря (282311426). pyrogram 2.0.106 — греть `get_chat(invite_link)` перед send; в топик `reply_to_message_id=<thread_id>`. Сессия — `networking-os/secrets/tg.session`.
+- **Тест-харнес userbot.** Слать боту только от аккаунта оператора (`<YOUR_TELEGRAM_ID>`). pyrogram 2.0.106 — греть `get_chat(invite_link)` перед send; в топик `reply_to_message_id=<thread_id>`. Сессия — `<userbot_project>/secrets/tg.session`.
 
 ---
 

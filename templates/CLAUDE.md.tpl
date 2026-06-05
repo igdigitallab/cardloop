@@ -52,7 +52,7 @@ created: YYYY-MM-DD
 **Когда писать:**
 - `decision` — архитектурное или технологическое решение + почему так, а не иначе.
 - `gotcha` — грабли, на которые наступили, чтобы не наступить снова.
-- `rejected` — что Игорь или проект отвергли + почему (не предлагать снова).
+- `rejected` — что оператор или проект отвергли + почему (не предлагать снова).
 - `convention` — договорённость о стиле, именовании, подходе.
 
 Агент пишет сюда через обычный Write (путь относительный: `.claude-ops/memory/<slug>.md`).
@@ -66,7 +66,7 @@ created: YYYY-MM-DD
 Кокпит-сканер грепает строку: `UNHANDLED exc_class=<Type> path=<route>` — она обязана быть в логе.
 `logging` должен достигать журнала (journald/stdout — куда смотрит `log_cmd`).
 
-### FastAPI (эталон: networking-os CRM)
+### FastAPI
 
 ```python
 import logging, traceback, uuid
@@ -188,7 +188,7 @@ def do_work():
 import asyncio, os
 import aiohttp  # или httpx, или urllib.request — swallow ALL errors
 
-_COCKPIT_URL = os.environ.get("CLAUDEOPS_URL", "")        # https://claude-ops.coscore.us
+_COCKPIT_URL = os.environ.get("CLAUDEOPS_URL", "")        # https://YOUR_DOMAIN
 _COCKPIT_PROJECT = os.environ.get("CLAUDEOPS_PROJECT", "") # basename cwd проекта
 _COCKPIT_TOKEN = os.environ.get("CLAUDEOPS_INCIDENT_TOKEN", "")
 
@@ -249,7 +249,7 @@ async def _push_incident(exc_class: str, where: str, excerpt: str = "") -> None:
 | **log_cmd** | Кокпит читает логи проекта (вкладка «Логи», основа сканера ошибок). | В `topics.json` для проекта: `"log_cmd": "journalctl -u my-svc -n 300 --no-pager"`. |
 | **test_cmd** | Кнопка «Прогнать тесты» + quality gate при самолечении. НЕ гоняется в фоне. | В `topics.json`: `"test_cmd": "pytest -q"`. Путь относителен cwd. |
 | **самолечение (git+clean)** | При новом инциденте агент авто-чинит в worktree → карточка в Review для ревью человеком. | Тумблер в Overview. Требует git-репо + clean tree + log_cmd. |
-| **notify_on_error** | TG-пинг Игорю при новом инциденте. | Тумблер «🔔 Уведомлять» в Overview. |
+| **notify_on_error** | TG-пинг оператору при новом инциденте. | Тумблер «🔔 Уведомлять» в Overview. |
 | **healthz/liveness** | Для сервисов: проект отдаёт эндпоинт `/healthz` (или `/_health`) — кокпит сможет пинговать (на будущее). | Добавить роут, отдающий 200 + `{"ok":true}`. |
 | **память** | `.claude-ops/memory/` — знания, путешествующие с репо (решения, gotchas). | Создаётся автоматически при первой записи агента. |
 | **секреты** | `.claude-ops/secrets/secrets.env` — ключи/токены в env агента. | Вкладка «🔑 Ключи» в кокпите, или `echo 'KEY=val' >> ...secrets.env`. |

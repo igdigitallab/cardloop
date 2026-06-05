@@ -238,15 +238,21 @@ def test_memory_read_all_new_takes_priority(tmp_path):
     cwd = str(tmp_path)
     # Старое место
     old_dir = _sdk_sessions_dir(cwd) / "memory"
-    old_dir.mkdir(parents=True)
+    old_dir.mkdir(parents=True, exist_ok=True)
     (old_dir / "old-note.md").write_text("Old")
-    # Новое место
-    _memory_write(cwd, "new-note.md", "New")
-    files, legacy = _memory_read_all(cwd)
-    assert legacy is False
-    names = [f["name"] for f in files]
-    assert "new-note.md" in names
-    assert "old-note.md" not in names
+    try:
+        # Новое место
+        _memory_write(cwd, "new-note.md", "New")
+        files, legacy = _memory_read_all(cwd)
+        assert legacy is False
+        names = [f["name"] for f in files]
+        assert "new-note.md" in names
+        assert "old-note.md" not in names
+    finally:
+        # уборка legacy в реальном ~/.claude (tmp_path резолвится в HOME) — иначе
+        # mkdir без exist_ok падает на следующем прогоне с тем же pytest-tmp слагом
+        import shutil
+        shutil.rmtree(old_dir.parent, ignore_errors=True)
 
 
 # ─────────────────────────── API tests (aiohttp) ──────────────────────────────

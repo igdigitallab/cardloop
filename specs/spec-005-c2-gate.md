@@ -84,5 +84,5 @@
 
 ## Out of scope (этой итерации)
 - Уборка orphan-worktrees после краша (→ Backlog).
-- Авто-git-init для не-git проектов (Игорь отклонил).
-- Squash-режим (Игорь выбрал merge --no-ff).
+- Авто-git-init для не-git проектов (отклонено оператором).
+- Squash-режим (принято: merge --no-ff).

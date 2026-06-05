@@ -6,7 +6,7 @@
 
 ```bash
 # 1. Clone
-git clone https://github.com/Zira777ru/claude-ops-bot.git
+git clone https://github.com/YOUR_GITHUB/claude-ops-bot.git
 cd claude-ops-bot
 
 # 2. Python environment

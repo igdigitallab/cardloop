@@ -11,7 +11,7 @@
 - **Настройки кокпита — таб «⚙️ Настройки» + глобальные (карточка f2ba02).** Per-project (topics.json, hot-reload): **git on/off** (флагман — выкл → карточки гоняются legacy без worktree, git-sync 409, health не требует .git, `.git` физически не трогаем; диалоги сохраняются), модель, самолечение, TG-уведомления, log_cmd, test_cmd. Глобальные (новый `data/settings.json`, mtime hot-reload, провязаны в рантайм): самолечение-master-kill, макс. параллельных починок, интервал сканера, дефолт-модель новых проектов, watchdog stall/max. API: `GET/POST /api/settings`, `GET/POST /api/projects/{id}/settings` (валидация типов/диапазонов). Хелперы `_get_global_setting`/`_git_enabled`/`_effective_default_model`. 20 тестов (`test_settings.py`).
 
 ### Исправлено
-- **Rename проекта терял всю историю диалогов и Timeline.** `api_project_rename` двигал папку (`shutil.move`) и обновлял `topics.json`, но SDK-история (`~/.claude/projects/<slug>/`) и Timeline (`data/timeline/<slug>.jsonl`) ключуются по `slug = cwd.replace('/','-')` — после смены cwd кокпит читал пустой новый slug, и «пропадали все сессии общения» (файлы при этом целы под старым slug). Добавлен `_migrate_cwd_keyed_state(old_cwd, new_cwd, ctx)`: переносит SDK-каталог сессий + Timeline (+`.jsonl.1`) на новый slug, best-effort, предупреждения в `warnings` ответа. Тесты `test_rename_migrates_sdk_sessions`, `test_rename_migrates_timeline`. Уже потерянные проекты (`family-emergency`, `autotopic-test`) восстановлены переносом осиротевших каталогов.
+- **Rename проекта терял всю историю диалогов и Timeline.** `api_project_rename` двигал папку (`shutil.move`) и обновлял `topics.json`, но SDK-история (`~/.claude/projects/<slug>/`) и Timeline (`data/timeline/<slug>.jsonl`) ключуются по `slug = cwd.replace('/','-')` — после смены cwd кокпит читал пустой новый slug, и «пропадали все сессии общения» (файлы при этом целы под старым slug). Добавлен `_migrate_cwd_keyed_state(old_cwd, new_cwd, ctx)`: переносит SDK-каталог сессий + Timeline (+`.jsonl.1`) на новый slug, best-effort, предупреждения в `warnings` ответа. Тесты `test_rename_migrates_sdk_sessions`, `test_rename_migrates_timeline`. Уже потерянные проекты восстановлены переносом осиротевших каталогов.
 
 ## [v0.8.1] — 2026-06-01
 ### Исправлено
@@ -57,7 +57,7 @@
 - **32 новых теста** (`tests/test_timeline.py`): slug стабильность, path резолв, append+ts+truncate+env-exclusion, ротация 5MB, bus_publish интеграция, graceful broken JSONL, backup read, API GET/limit/before/env-not-in-response. **453 passed** (было 421).
 
 ## [v0.5.0] — 2026-05-31
-Шаг 2 roadmap: изолированное хранилище ключей проекта (OSS-механизм; Vault Игоря не трогаем).
+Шаг 2 roadmap: изолированное хранилище ключей проекта (OSS-механизм; личный vault оператора не трогаем).
 
 ### Добавлено
 - **Хранилище ключей проекта** (Spec 007): `.claude-ops/secrets/secrets.env` — `chmod 600`, gitignored автоматически при первой записи. Секреты подмешиваются в `env` агента при каждом запуске (`run_engine`, `run_agent`, `_run_card`, `api_project_chat`). Изоляция по cwd. **Значения НИКОГДА не возвращаются через API** — только список имён ключей. CRUD через кокпит: вкладка «🔑 Ключи» (SecretsTab) с добавлением (password-input), списком (маска ••••••) и удалением (ConfirmModal). 47 новых тестов (421 passed). +3 эндпоинта: `GET/POST/DELETE /api/projects/{id}/secrets/{key}`.
@@ -83,7 +83,7 @@
 - Документация переписана в иерархию без дублей (README / ARCHITECTURE / CLAUDE.md / CONTRIBUTING).
 - CLAUDE.md очищен от ledger-истории → только forward-правила + gotchas.
 - `styles.css` (3000+ строк) разбит на 10 partials.
-- Backend: убраны хардкоды `/home/igor`, command-injection в log_cmd/test_cmd, path-traversal в card_id, auth → scrypt + secure cookie + rate-limit.
+- Backend: убраны хардкоды путей пользователя, command-injection в log_cmd/test_cmd, path-traversal в card_id, auth → scrypt + secure cookie + rate-limit.
 - systemd-юнит: добавлен `EnvironmentFile=` (фикс — `.env` не грузился).
 
 ## [v0.2.x] — до 2026-05-31
