@@ -2278,7 +2278,7 @@ async def _send_tg_ping(ctx: dict, project: dict, msg: str) -> None:
                 chat_id, msg, message_thread_id=thread_id, parse_mode="HTML",
             )
     except Exception as e:
-        print(f"[self_heal] TG ping failed: {e}")
+        print(f"[tg_ping] TG ping failed: {e}")
 
 
 async def _sync_forum_topic_name(ctx: dict, session_key: str, name: str) -> None:
