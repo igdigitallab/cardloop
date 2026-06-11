@@ -1,5 +1,7 @@
 # Spec 010 — Самолечение (триггер ошибки → агент-чинильщик → гейт → одобрение)
 
+> **STATUS: REMOVED in v0.9** — auto-run caused cross-session interference: a heal session launched while another terminal/TG/glasses session was actively working in the same project, corrupting uncommitted changes.
+
 > Статус: APPROVED Игорем (шаг 5 roadmap). Ветка `feature-self-healing`.
 > ⭐ Вершина roadmap. Рамка: ИНСТРУМЕНТ Игоря + OSS. БЕЗ привязки к Coolify/Vault.
 > Строится НА проверенном фундаменте: сканер инцидентов + C2-worktree + гейт качества + Timeline.

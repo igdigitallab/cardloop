@@ -59,8 +59,6 @@ export function SettingsTab({ projectId }: Props) {
     const ef = glob.effective
     try {
       const r = await api.saveSettings({
-        self_heal_enabled: ef.self_heal_enabled,
-        self_heal_max_concurrent: ef.self_heal_max_concurrent,
         scan_interval_sec: ef.scan_interval_sec,
         default_model: ef.default_model || '',
         watchdog_stall_sec: ef.watchdog_stall_sec,
@@ -94,13 +92,6 @@ export function SettingsTab({ projectId }: Props) {
           <input type="checkbox" checked={proj.git_enabled}
                  onChange={ev => setProj({ ...proj, git_enabled: ev.target.checked })}
                  aria-label="Git sync" />
-        </Row>
-
-        <Row title="Self-heal"
-             hint="Auto-fix agent on test failure (goes up to Review, does not auto-apply). The global master switch below overrides this.">
-          <input type="checkbox" checked={proj.self_heal}
-                 onChange={ev => setProj({ ...proj, self_heal: ev.target.checked })}
-                 aria-label="Self-heal" />
         </Row>
 
         <Row title="TG error notifications" hint="Ping in Telegram on new incidents in Failed.">
@@ -139,19 +130,6 @@ export function SettingsTab({ projectId }: Props) {
         <p style={{ margin: '0 0 6px', fontSize: 12, color: 'var(--text3)' }}>
           Cockpit-wide (data/settings.json). Overrides env defaults at runtime.
         </p>
-
-        <Row title="Self-heal — master"
-             hint="Off — self-heal is disabled in ALL projects, regardless of their individual setting.">
-          <input type="checkbox" checked={e.self_heal_enabled}
-                 onChange={ev => setE({ self_heal_enabled: ev.target.checked })}
-                 aria-label="Self-heal master" />
-        </Row>
-
-        <Row title="Max parallel fixes" hint="1–10">
-          <input type="number" min={1} max={10} style={{ width: 90, padding: '4px 8px', fontSize: 13 }}
-                 value={e.self_heal_max_concurrent}
-                 onChange={ev => setE({ self_heal_max_concurrent: Number(ev.target.value) })} />
-        </Row>
 
         <Row title="Incident scanner interval, sec" hint="30–3600">
           <input type="number" min={30} max={3600} style={{ width: 90, padding: '4px 8px', fontSize: 13 }}

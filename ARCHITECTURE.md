@@ -161,55 +161,14 @@ Project secrets are injected into the agent's env on every `run_engine` call:
 - **Critical:** `test_board_parser` (regression = lost tasks in production), `test_security` + `test_security_regressions` (path-traversal, card_id, rate-limit), `test_board_api`, `test_run_card`, `test_chat_sse`, `test_project_rename`, `test_ingest_errors`.
 - **New (Spec 007):** `test_secrets` — 47 tests: path, round-trip, chmod 600, gitignore, key validation, limits, cwd isolation, audit non-leak, API GET/POST/DELETE with critical value non-leak test.
 - **New (Spec 008):** `test_timeline` — 32 tests: slug stability, path resolve, append+ts+truncate+env-exclusion, 5MB rotation, bus_publish integration, graceful broken lines, backup .jsonl.1, API GET/limit/before/env-not-in-response.
-- **New (Spec 010):** `test_self_healing` — 28 tests: `_self_heal_enabled` (flag/env/default False); heal_attempted meta; OFF default = critical regression guard; heal_attempted set BEFORE run; safe→Review, risky→Failed; heal_attempted incident not restarted; non-git→skip; busy→skip; concurrency limit; Timeline self_heal; API toggle (auth/enable/disable/404).
-
 ---
 
 ## Data and operations
 
-- `data/topics.json` (LAYER 1, permanent; per-project settings: model/self_heal/notify_on_error/log_cmd/test_cmd/git_enabled) · `data/sessions.json` (LAYER 2, `/reset` clears) · `data/settings.json` (global settings f2ba02, mtime hot-reload) · `data/prompts.json` · `data/runs/<card>.md` (sidecars) · `data/audit/` · `data/inbox/` (files from TG) · `data/timeline/<slug>.jsonl` (Timeline Spec 008). **`data/` is in .gitignore.**
+- `data/topics.json` (LAYER 1, permanent; per-project settings: model/notify_on_error/log_cmd/test_cmd/git_enabled) · `data/sessions.json` (LAYER 2, `/reset` clears) · `data/settings.json` (global settings f2ba02, mtime hot-reload) · `data/prompts.json` · `data/runs/<card>.md` (sidecars) · `data/audit/` · `data/inbox/` (files from TG) · `data/timeline/<slug>.jsonl` (Timeline Spec 008). **`data/` is in .gitignore.**
 - `.env` (secrets, not in git) · `.env.example` + `web/.env.example` (placeholders).
 - `claude-ops-bot.service` (systemd) · **`restart-self.sh`** (THE ONLY way to restart from inside the agent — detached via systemd-run; details in CLAUDE.md).
 - `TASKS.md` (board, sessions read this) · `DONE.md` (archive, sessions do NOT read this) · `docs/API.md` · `CONTRIBUTING.md` · `LICENSE` (MIT).
-
----
-
-## Self-healing loop (Spec 010)
-
-Connects existing building blocks into an autonomous cycle. **Agent prepares — human applies.**
-
-```
-scanner catches failure → creates err-card (already worked)
-  → [NEW] _self_heal_enabled(project)? → yes
-  → asyncio.create_task(_self_heal_card(ctx, project, card))
-      1. Write heal_attempted=true to description BEFORE run (prevents loops)
-      2. Build heal_prompt from title + incident excerpt
-      3. _card_run_mode → worktree? → no → skip (safety guard #5)
-      4. _card_worktree_setup → .worktrees/card-<id>
-      5. ctx["running"][session_key] = True (blocks TG from parallel run)
-      6. Move card to In Progress
-      7. _run_card(..., worktree, wt_info) → agent fixes, auto-commit
-         → _run_card releases running in finally, moves to Review/Failed
-      8. _run_quality_gate(wt_path) → verdict safe/risky/unknown
-      9. safe → stays in Review + heal_badge ✓; risky → Failed + heal_badge ✗
-     10. Timeline kind:"self_heal" phase:start/fixed/gate_ok/gate_fail
-     11. TG ping to operator (result)
-```
-
-**Safety guards (never bypass):**
-1. `_self_heal_enabled` = False by default — only `self_heal: true` in topics or `SELF_HEAL_ENABLED=1`
-2. `api_card_apply` is NEVER called from self-healing — agent only reaches Review
-3. `heal_attempted=true` written BEFORE agent starts — a crash won't loop
-4. `_self_heal_active_count <= _SELF_HEAL_MAX_CONCURRENT (2)` — global counter
-5. `_card_run_mode == "worktree"` required — non-git/dirty skipped
-6. Full observability — Timeline `kind:"self_heal"` + TG ping
-
-**Key functions (webapp.py):**
-- `_self_heal_enabled(project)` — reads flag; False by default
-- `_send_tg_ping(ctx, project, msg)` — TG notification to operator
-- `_self_heal_card(ctx, project, incident_card)` — async repair loop
-- `_error_scanner_loop` — integration: after scan_and_ingest → create_task if enabled
-- `api_project_self_heal_toggle` — POST `/api/projects/{id}/self-heal {enabled}`
 
 ---
 

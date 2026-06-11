@@ -112,9 +112,6 @@ export const en = {
 
   // ── Board tab ────────────────────────────────────────────────
   'board.loading': 'Loading board...',
-  'board.self_heal_badge_ok': '🔧 auto-fix · gate ✓',
-  'board.self_heal_badge_fail': '🔧 auto-fix · gate ✗',
-  'board.self_heal_badge_aria': 'Auto-fix card (self-heal)',
   'board.columns_label': 'columns:',
   'board.agent_running': 'Agent is running, auto-updating...',
   'board.new_task_placeholder': 'New task… (Enter to add)',

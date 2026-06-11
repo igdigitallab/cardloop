@@ -43,13 +43,11 @@ def settings_tmp(tmp_path):
 
 def test_get_global_setting_fallback_when_empty(settings_tmp):
     assert _webapp._get_global_setting("scan_interval_sec", 300) == 300
-    assert _webapp._get_global_setting("self_heal_enabled", True) is True
 
 
 def test_save_and_get_global_setting(settings_tmp):
-    _webapp._save_global_settings({"scan_interval_sec": 120, "self_heal_enabled": False})
+    _webapp._save_global_settings({"scan_interval_sec": 120})
     assert _webapp._get_global_setting("scan_interval_sec", 300) == 120
-    assert _webapp._get_global_setting("self_heal_enabled", True) is False
 
 
 def test_global_settings_hot_reload(settings_tmp):
@@ -78,11 +76,10 @@ def test_validate_unknown_key():
 
 def test_validate_out_of_range():
     assert _webapp._validate_global_settings({"scan_interval_sec": 5})[1]
-    assert _webapp._validate_global_settings({"self_heal_max_concurrent": 999})[1]
 
 
 def test_validate_bad_type():
-    assert _webapp._validate_global_settings({"self_heal_enabled": "yes"})[1]
+    assert _webapp._validate_global_settings({"watchdog_stall_sec": "yes"})[1]
 
 
 def test_validate_model_normalizes_and_rejects():
@@ -97,13 +94,6 @@ def test_validate_empty_resets_to_none():
 
 
 # ─────────────── провязка в рантайм ───────────────
-
-
-def test_self_heal_master_kill(settings_tmp):
-    proj = {"self_heal": True}
-    assert _webapp._self_heal_enabled(proj) is True
-    _webapp._save_global_settings({"self_heal_enabled": False})
-    assert _webapp._self_heal_enabled(proj) is False  # master-kill перекрывает per-project
 
 
 def test_effective_default_model(settings_tmp):
@@ -178,7 +168,7 @@ async def test_api_settings_get(aiohttp_client, app, app_ctx):
     assert r.status == 200
     d = await r.json()
     assert {"stored", "effective", "spec"} <= set(d)
-    assert d["effective"]["self_heal_enabled"] is True
+    assert "scan_interval_sec" in d["effective"]
 
 
 async def test_api_settings_post_valid_persists(aiohttp_client, app, app_ctx):

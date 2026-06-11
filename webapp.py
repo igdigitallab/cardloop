@@ -645,8 +645,6 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "log_cmd": b.get("log_cmd"),
             "test_cmd": b.get("test_cmd"),
             "notify_on_error": bool(b.get("notify_on_error", False)),
-            "self_heal": bool(b.get("self_heal", False)),
-            "heal_ignore": b.get("heal_ignore") if isinstance(b.get("heal_ignore"), list) else None,
             "git_enabled": b.get("git_enabled", True) is not False,
         })
     out.sort(key=lambda x: x["name"].lower())
@@ -1252,11 +1250,15 @@ _PYTEST_FAILED_RE = re.compile(
 )
 # Standard unhandled-exception line: "UNHANDLED exc_class=<Type> path=<route>"
 _UNHANDLED_RE = re.compile(r"\bUNHANDLED\s+exc_class=(\S+)\s+path=(\S+)", re.MULTILINE)
-# Noisy messages that appear frequently in logs but are not errors
+# Noisy messages that appear frequently in logs but are not errors.
+# Checked case-insensitively against both ERROR-line msg AND traceback (exc_type + exc_msg).
 _LOG_NOISE_SUBSTRINGS = (
-    "deprecat",         # DeprecationWarning
-    "GET /api/health",  # health-checks
+    "deprecat",                     # DeprecationWarning
+    "GET /api/health",              # health-checks
     "200 OK",
+    "telegram.ext.updater",         # PTB polling — transient, auto-retried by network_retry_loop
+    "telegram.error.networkerror",  # TG API 5xx (Bad Gateway etc.) — auto-retried
+    "telegram.error.timedout",      # TG API timeouts — auto-retried
 )
 
 
@@ -1286,8 +1288,13 @@ def _parse_log_errors(log_text: str, source: str = "log") -> list[dict]:
     for m in _PY_TRACEBACK_RE.finditer(log_text):
         trace_body = m.group(1)
         exc_type = m.group(2)
-        traceback_exc_types.add(exc_type)
         exc_msg = m.group(3).strip()
+        # Noise filter: benign transient exceptions (e.g. telegram.error.NetworkError on polling) —
+        # checked on (exc_type + exc_msg) so that fully-qualified type names match _LOG_NOISE_SUBSTRINGS.
+        combined = f"{exc_type} {exc_msg}".lower()
+        if any(noise in combined for noise in _LOG_NOISE_SUBSTRINGS):
+            continue
+        traceback_exc_types.add(exc_type)
         excerpt_lines = trace_body.strip().split("\n")[-3:] + [f"{exc_type}: {exc_msg}"]
         excerpt = "\n".join(ln.strip()[:200] for ln in excerpt_lines)
         h = _hash6(f"{source}|{exc_type}|{_norm_msg(exc_msg)}")
@@ -1363,9 +1370,7 @@ def _parse_pytest_failures(pytest_output: str) -> list[dict]:
 
 
 # ID marker for err-cards: 'err-<hash6>'. Description — k=v lines.
-# heal_attempted — safety flag: incident has already been attempted (don't retry).
-# heal_skip — marks incident as benign/ignored: never run heal.
-_ERR_DESC_RE = re.compile(r"^(source|seen|first|last|excerpt|heal_attempted|heal_skip)=(.*)$")
+_ERR_DESC_RE = re.compile(r"^(source|seen|first|last|excerpt)=(.*)$")
 
 
 def _parse_incident_desc(desc: str | None) -> dict:
@@ -1383,17 +1388,11 @@ def _parse_incident_desc(desc: str | None) -> dict:
 def _format_incident_desc(meta: dict) -> str:
     """Serialises err-card metadata to description lines.
     Excerpt goes LAST — may be multi-line, but we treat it as one logical record
-    (stored as one line with \\n replaced by ' / ' for compactness).
-    heal_attempted — guard against re-running a fix.
-    heal_skip — marks an incident as benign: heal never runs."""
+    (stored as one line with \\n replaced by ' / ' for compactness)."""
     lines: list[str] = []
     for key in ("source", "seen", "first", "last"):
         if key in meta:
             lines.append(f"{key}={meta[key]}")
-    if meta.get("heal_attempted"):
-        lines.append("heal_attempted=true")
-    if meta.get("heal_skip"):
-        lines.append(f"heal_skip={meta['heal_skip']}")
     excerpt = meta.get("excerpt", "")
     if excerpt:
         # Collapse multi-line excerpt to one line. splitlines() catches ALL
@@ -1770,40 +1769,6 @@ async def api_project_incident(req: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-async def api_project_self_heal_toggle(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/self-heal {enabled: bool} — enable/disable self-healing.
-
-    Saves the self_heal flag in topics.json for ALL entries with the same cwd.
-    Auth: requires session cookie (standard middleware).
-    SAFETY: not enabled for any project by default — only on explicit request.
-    """
-    ctx = req.app["ctx"]
-    project = _find_project_by_id(ctx, req.match_info["id"])
-    if project is None:
-        return web.json_response({"error": "project not found"}, status=404)
-    if project.get("is_free"):
-        return web.json_response({"error": "self-healing is not available for free chats"}, status=400)
-    try:
-        body = await req.json()
-    except Exception:
-        return web.json_response({"error": "bad request"}, status=400)
-    enabled = bool(body.get("enabled", False))
-
-    cwd = project["cwd"]
-    changed = 0
-    for b in ctx["topics"].values():
-        if b.get("cwd") == cwd:
-            b["self_heal"] = enabled
-            changed += 1
-
-    if changed:
-        save_topics = ctx.get("save_topics")
-        if callable(save_topics):
-            save_topics()
-
-    return web.json_response({"ok": True, "self_heal": enabled, "topics_updated": changed})
-
-
 async def api_project_notify_toggle(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/notify-on-error {enabled: bool} — TG notifications on new errors.
 
@@ -2003,130 +1968,6 @@ def _dismissed_is_active(h: str, now: float) -> bool:
     except Exception:
         return False
 
-# ─────────────────────────── Self-healing (Spec 010) ───────────────────────────
-#
-# SAFETY GUARDS (non-negotiable):
-# 1. OFF by default — self_heal flag in topics.json or SELF_HEAL_ENABLED env.
-# 2. NEVER auto-apply — agent goes only to Review; Merge is always manual.
-# 3. Limit 1 attempt/incident — heal_attempted=true written BEFORE launch.
-# 4. Concurrency limit — max 2 auto-fixes at once.
-# 5. git+clean worktree only — non-git/dirty projects are skipped.
-# 6. Full visibility — Timeline kind:"self_heal" + TG ping to operator.
-
-_SELF_HEAL_MAX_CONCURRENT = int(os.environ.get("SELF_HEAL_MAX_CONCURRENT", "2"))
-_self_heal_active_count = 0   # global counter of active fixes
-
-# ── Ph2: Safety-layer — debounce / benign-filter / rate-limit ──────────────────
-# These constants ADD new guards ON TOP OF spec-010 gates; they don't replace them.
-
-# B. Debounce: heal only if seen >= N (incident repeated → not transient)
-_HEAL_MIN_SEEN = int(os.environ.get("SELF_HEAL_MIN_SEEN", "2"))
-
-# C. Benign classes: these exceptions are NEVER healed (benign-disconnect + transient)
-_HEAL_BENIGN_DEFAULT: "tuple[str, ...]" = (
-    "ConnectionResetError",
-    "ClientConnectionResetError",
-    "ConnectionAbortedError",
-    "CancelledError",
-    "TimeoutError",
-)
-
-# D. Per-project rate-limit: at most N launches per window (sec)
-_HEAL_MAX_PER_WINDOW = int(os.environ.get("SELF_HEAL_MAX_PER_WINDOW", "3"))
-_HEAL_WINDOW_SEC = int(os.environ.get("SELF_HEAL_WINDOW_SEC", "3600"))
-
-# D. Heal-launch history: {session_key → [timestamp, ...]}
-_heal_history: "dict[str, list[float]]" = {}
-
-
-def _heal_rate_ok(key: str, now: float) -> bool:
-    """Returns True if a heal launch is allowed (window limit not exceeded).
-    Side effect: prunes expired entries from _heal_history[key]."""
-    history = _heal_history.get(key, [])
-    # Remove entries older than the window
-    cutoff = now - _HEAL_WINDOW_SEC
-    history = [t for t in history if t > cutoff]
-    _heal_history[key] = history
-    return len(history) < _HEAL_MAX_PER_WINDOW
-
-
-def _heal_record(key: str, now: float) -> None:
-    """Records a heal-launch timestamp; prunes expired entries."""
-    history = _heal_history.get(key, [])
-    cutoff = now - _HEAL_WINDOW_SEC
-    history = [t for t in history if t > cutoff]
-    history.append(now)
-    _heal_history[key] = history
-
-
-def _heal_decision(
-    card: dict,
-    proj: dict,
-    active_count: int,
-    max_conc: int,
-    running_busy: bool,
-    rate_ok: bool,
-    now: float,
-) -> "tuple[str, str]":
-    """Pure function: makes a decision on one incident card.
-
-    Returns (action, reason) where action ∈ {'heal', 'skip', 'stop', 'benign'}.
-    - 'heal'   → launch _self_heal_card; caller must call _heal_record.
-    - 'skip'   → skip the card, continue iterating.
-    - 'benign' → mark heal_skip=benign, skip.
-    - 'stop'   → stop iterating cards (resource limit reached).
-
-    Check order: cheapest/safest first (spec-012 Ph2, section E).
-    Does not mutate external state — read-only."""
-    if not _is_incident_card(card):
-        return "skip", "not_incident"
-
-    meta = _parse_incident_desc(card.get("description"))
-
-    # Safety guard #3 (spec-010): already attempted a fix
-    if meta.get("heal_attempted") == "true":
-        return "skip", "heal_attempted"
-
-    # C. benign/heal_skip: already marked as benign
-    if meta.get("heal_skip"):
-        return "skip", f"heal_skip:{meta['heal_skip']}"
-
-    # C. Benign filter: check title + excerpt against benign classes
-    ignore_list: "tuple[str, ...]" = _HEAL_BENIGN_DEFAULT
-    extra = proj.get("heal_ignore")
-    if extra and isinstance(extra, list):
-        ignore_list = ignore_list + tuple(str(x) for x in extra)
-
-    card_text = card.get("text", "")
-    excerpt = meta.get("excerpt", "")
-    combined = (card_text + " " + excerpt).lower()   # case-insensitive: catches "connectionreseterror" too
-    for substr in ignore_list:
-        if substr.lower() in combined:
-            return "benign", substr
-
-    # B. Debounce: seen < MIN_SEEN → too young. Corrupted seen → treat as young (safe).
-    try:
-        seen = int(meta.get("seen", "1"))
-    except (ValueError, TypeError):
-        seen = 1
-    if seen < _HEAL_MIN_SEEN:
-        return "skip", f"too_young:seen={seen}"
-
-    # Safety guard #4 (spec-010): concurrency limit
-    if active_count >= max_conc:
-        return "stop", "concurrency_limit"
-
-    # Safety guard #2 (spec-010): running lock
-    if running_busy:
-        return "stop", "project_busy"
-
-    # D. Rate-limit
-    if not rate_ok:
-        return "stop", "rate_limit"
-
-    return "heal", "ok"
-
-
 # ─────────────────────── global settings (data/settings.json) ───────────────────────
 #
 # Global cockpit knobs, override env defaults at runtime (hot-reload by mtime).
@@ -2140,8 +1981,6 @@ _SETTINGS_MTIME: float = 0.0
 
 # Key → (type, min, max) for POST validation. None bounds = no range check.
 _GLOBAL_SETTINGS_SPEC = {
-    "self_heal_enabled": ("bool", None, None),       # master-kill: False → self-healing disabled everywhere
-    "self_heal_max_concurrent": ("int", 1, 10),
     "scan_interval_sec": ("int", 30, 3600),
     "default_model": ("model", None, None),          # "" → ctx default
     "watchdog_stall_sec": ("int", 30, 7200),
@@ -2285,20 +2124,9 @@ def _git_enabled(project: dict) -> bool:
     return project.get("git_enabled", True) is not False
 
 
-def _self_heal_enabled(project: dict) -> bool:
-    """Self-heal flag: per-project self_heal OR global env SELF_HEAL_ENABLED.
-    Global master-kill (settings.json self_heal_enabled=False) overrides everything.
-    Default is ALWAYS False — safety guard #1."""
-    if _get_global_setting("self_heal_enabled", True) is False:
-        return False  # global master-kill
-    if project.get("self_heal"):
-        return True
-    return os.environ.get("SELF_HEAL_ENABLED", "").lower() in ("1", "true", "yes")
-
-
 # ─────────────────────── API: settings (global + per-project) ───────────────────────
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "self_heal", "notify_on_error", "log_cmd", "test_cmd")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd")
 
 
 def _validate_global_settings(partial: dict) -> "tuple[dict, str | None]":
@@ -2338,8 +2166,6 @@ async def api_settings_get(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     stored = dict(_load_global_settings())
     effective = {
-        "self_heal_enabled": _get_global_setting("self_heal_enabled", True),
-        "self_heal_max_concurrent": int(_get_global_setting("self_heal_max_concurrent", _SELF_HEAL_MAX_CONCURRENT)),
         "scan_interval_sec": int(_get_global_setting("scan_interval_sec", _SCAN_INTERVAL_SEC)),
         "default_model": _get_global_setting("default_model", ctx.get("DEFAULT_MODEL", "sonnet")),
         "watchdog_stall_sec": int(_get_global_setting("watchdog_stall_sec", int(os.environ.get("STALL_SECONDS", "300")))),
@@ -2374,7 +2200,6 @@ def _project_settings_view(project: dict) -> dict:
     return {
         "git_enabled": _git_enabled(project),
         "model": project.get("model"),
-        "self_heal": bool(project.get("self_heal", False)),
         "notify_on_error": bool(project.get("notify_on_error", False)),
         "log_cmd": project.get("log_cmd") or "",
         "test_cmd": project.get("test_cmd") or "",
@@ -2410,7 +2235,7 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
     for k, v in body.items():
         if k not in _PROJECT_SETTING_FIELDS:
             return web.json_response({"error": f"unknown key: {k}"}, status=400)
-        if k in ("git_enabled", "self_heal", "notify_on_error"):
+        if k in ("git_enabled", "notify_on_error"):
             if not isinstance(v, bool):
                 return web.json_response({"error": f"{k}: expected bool"}, status=400)
             updates[k] = v
@@ -2492,236 +2317,8 @@ async def _notify_new_incidents(ctx: dict, project: dict, n_added: int) -> None:
     await _send_tg_ping(ctx, project, msg)
 
 
-async def _self_heal_card(ctx: dict, project: dict, incident_card: dict) -> None:
-    """Fix loop for one incident. Launched as asyncio.create_task.
-
-    SAFETY GUARDS:
-    - heal_attempted is set BEFORE launch (prevents looping on crash).
-    - Agent goes ONLY to Review. NEVER auto-apply.
-    - Active fix counter is managed externally (in scanner loop).
-    """
-    global _self_heal_active_count
-    cwd = project["cwd"]
-    name = project["name"]
-    session_key = project["tg_thread"]
-    card_id = incident_card["id"]
-    card_text = incident_card["text"]
-    card_desc = incident_card.get("description", "")
-
-    # SAFETY GUARD #3: mark heal_attempted BEFORE launch (atomically under board-lock)
-    lock = _get_board_lock(cwd)
-    try:
-        async with lock:
-            _, preamble, cols = _load_board(cwd)
-            # Search for the card in any column
-            found_card: dict | None = None
-            for col_cards in cols.values():
-                for c in col_cards:
-                    if c["id"] == card_id:
-                        found_card = c
-                        break
-                if found_card:
-                    break
-            if found_card is None:
-                # Card disappeared (deleted by user?) — skip
-                _self_heal_active_count = max(0, _self_heal_active_count - 1)
-                return
-            meta = _parse_incident_desc(found_card.get("description"))
-            meta["heal_attempted"] = "true"
-            found_card["description"] = _format_incident_desc(meta)
-            _save_board(cwd, name, preamble, cols)
-    except Exception as e:
-        print(f"[self_heal] error marking heal_attempted for {card_id}: {e}")
-        _self_heal_active_count = max(0, _self_heal_active_count - 1)
-        return
-
-    # Timeline: start
-    _bus_publish(session_key, {
-        "kind": "self_heal",
-        "phase": "start",
-        "card_id": card_id,
-        "project": name,
-    })
-
-    # TG ping: starting the fix
-    await _send_tg_ping(
-        ctx, project,
-        f"🔧 <b>Self-healing</b>: starting fix for incident <code>{card_id}</code> "
-        f"in <b>{name}</b>.\n<i>{card_text[:120]}</i>",
-    )
-
-    # Build prompt for the fixer agent
-    excerpt_part = ""
-    if card_desc:
-        meta = _parse_incident_desc(card_desc)
-        exc = meta.get("excerpt", "")
-        if exc:
-            excerpt_part = f"\n\nTrace/details:\n{exc[:1000]}"
-    heal_prompt = (
-        f"The project has an incident: {card_text}.{excerpt_part}\n\n"
-        f"Find the root cause and fix it. Do not touch unrelated code. "
-        f"After the fix all tests must pass."
-    )
-
-    # Create a virtual card for _run_card
-    heal_card: dict = {
-        "id": card_id,
-        "text": heal_prompt,
-        "description": None,
-    }
-
-    # SAFETY GUARD #5: check git+clean (worktree mode), respecting git_enabled
-    run_mode = await _card_run_mode(cwd, git_enabled=_git_enabled(project))
-    if run_mode != "worktree":
-        print(f"[self_heal] {name}/{card_id}: not-git or dirty — skipping")
-        _bus_publish(session_key, {
-            "kind": "self_heal", "phase": "skipped",
-            "reason": "not_git_or_dirty", "card_id": card_id, "project": name,
-        })
-        _self_heal_active_count = max(0, _self_heal_active_count - 1)
-        return
-
-    # Set up worktree (C2-isolation)
-    wt_info = await _card_worktree_setup(cwd, card_id)
-    if wt_info is None:
-        print(f"[self_heal] {name}/{card_id}: worktree setup failed — skipping")
-        _self_heal_active_count = max(0, _self_heal_active_count - 1)
-        return
-
-    # Acquire running slot SYNCHRONOUSLY (before the first await inside _run_card)
-    # Signals that C2 is busy — prevents double runs from TG
-    if ctx["running"].get(session_key) is not None:
-        print(f"[self_heal] {name}/{card_id}: project busy — skipping")
-        _bus_publish(session_key, {
-            "kind": "self_heal", "phase": "skipped",
-            "reason": "project_busy", "card_id": card_id, "project": name,
-        })
-        _self_heal_active_count = max(0, _self_heal_active_count - 1)
-        return
-    ctx["running"][session_key] = True
-
-    # Move incident to in_progress under board-lock (like a normal C2 launch)
-    try:
-        async with lock:
-            _, preamble, cols = _load_board(cwd)
-            moved = _pop_card(cols, card_id)
-            if moved is None:
-                moved = heal_card
-            cols["in_progress"].append(moved)
-            _save_board(cwd, name, preamble, cols)
-    except Exception as e:
-        print(f"[self_heal] error moving to in_progress: {e}")
-        ctx["running"].pop(session_key, None)
-        _self_heal_active_count = max(0, _self_heal_active_count - 1)
-        return
-
-    # Launch the agent via the existing _run_card (REUSE, do not duplicate the SDK cycle)
-    # _run_card releases the running slot in finally, moves the card to Review/Failed
-    webapp_app_stub = None  # webapp_app is only used for ctx (not needed here)
-    try:
-        await _run_card(
-            ctx, webapp_app_stub, project, heal_card, session_key,
-            run_mode="worktree", wt_info=wt_info,
-        )
-    except Exception as e:
-        print(f"[self_heal] _run_card raised: {e}")
-        # running slot already released in _run_card.finally
-        _self_heal_active_count = max(0, _self_heal_active_count - 1)
-        return
-
-    # Timeline: agent finished run
-    _bus_publish(session_key, {
-        "kind": "self_heal",
-        "phase": "fixed",
-        "card_id": card_id,
-        "project": name,
-    })
-
-    # Run quality gate in worktree
-    wt_path = wt_info["wt_path"]
-    project_secrets = _secrets_read(cwd)
-    gate = await _run_quality_gate(wt_path, env=project_secrets)
-    verdict = gate.get("verdict", "unknown")
-
-    # Write verdict to meta sidecar
-    DATA: Path = ctx["DATA"]
-    try:
-        run_meta = _read_run_meta(DATA, card_id) or {}
-        run_meta["gate"] = {"verdict": verdict, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
-        _write_run_meta(DATA, card_id, run_meta)
-    except Exception as e:
-        print(f"[self_heal] error writing gate to meta: {e}")
-
-    # Update card description with auto-fix badge
-    heal_badge = "🔧 auto-fix · gate ✓" if verdict == "safe" else "🔧 auto-fix · gate ✗"
-    try:
-        async with lock:
-            _, preamble, cols = _load_board(cwd)
-            # Card is already in review or failed (after _run_card)
-            for col_cards in cols.values():
-                for c in col_cards:
-                    if c["id"] == card_id:
-                        existing_meta = _parse_incident_desc(c.get("description"))
-                        existing_meta["heal_attempted"] = "true"
-                        base_desc = _format_incident_desc(existing_meta)
-                        c["description"] = base_desc + f"\nheal_badge={heal_badge}"
-                        break
-            _save_board(cwd, name, preamble, cols)
-    except Exception as e:
-        print(f"[self_heal] error updating badge on card: {e}")
-
-    # If risky — move to Failed
-    if verdict == "risky":
-        try:
-            async with lock:
-                _, preamble, cols = _load_board(cwd)
-                card_obj = _pop_card(cols, card_id)
-                if card_obj is not None:
-                    cols["failed"].append(card_obj)
-                    _save_board(cwd, name, preamble, cols)
-        except Exception as e:
-            print(f"[self_heal] error moving risky to failed: {e}")
-
-    # Timeline: gate result
-    gate_phase = "gate_ok" if verdict == "safe" else ("gate_fail" if verdict == "risky" else "gate_unknown")
-    _bus_publish(session_key, {
-        "kind": "self_heal",
-        "phase": gate_phase,
-        "verdict": verdict,
-        "card_id": card_id,
-        "project": name,
-    })
-
-    # TG ping: result
-    if verdict == "safe":
-        tg_msg = (
-            f"✅ <b>Self-healing</b>: fix ready for <b>{name}</b> · <code>{card_id}</code>.\n"
-            f"Card is in Review. Tests passed. Review and click 'Apply'."
-        )
-    elif verdict == "risky":
-        tg_msg = (
-            f"⚠️ <b>Self-healing</b>: fix attempt for <b>{name}</b> · <code>{card_id}</code> "
-            f"did not pass the gate.\nCard is in Failed. Review the diff manually."
-        )
-    else:
-        tg_msg = (
-            f"🔧 <b>Self-healing</b>: run completed for <b>{name}</b> · <code>{card_id}</code>.\n"
-            f"Gate: no tests (unknown). Card is in Review. Review the diff."
-        )
-    await _send_tg_ping(ctx, project, tg_msg)
-
-    _self_heal_active_count = max(0, _self_heal_active_count - 1)
-    print(f"[self_heal] {name}/{card_id}: done, gate={verdict}")
-
-
 async def _error_scanner_loop(ctx: dict):
-    """Background task: periodically scans all projects with log_cmd.
-
-    Self-healing (if enabled) evaluates ALL unhealed incidents from Failed
-    on every scan — not just those added in the current scan (gate A).
-    Safety-layer Ph2 (gates B–D) applied ON TOP OF spec-010 guards.
-    """
-    global _self_heal_active_count
+    """Background task: periodically scans all projects with log_cmd."""
     # First run 30s after startup (give the bot time to settle)
     await asyncio.sleep(30)
     while True:
@@ -2740,89 +2337,6 @@ async def _error_scanner_loop(ctx: dict):
                 # "Crashed" notification: new incidents + notify_on_error enabled
                 if res.get("added", 0) and proj.get("notify_on_error"):
                     await _notify_new_incidents(ctx, proj, res.get("added", 0))
-
-                # ── STEP 3: Self-healing ──────────────────────────────────────
-                # SAFETY GUARD #1 (spec-010): only if self_heal is explicitly enabled
-                if not _self_heal_enabled(proj):
-                    continue
-
-                # Gate A: removed res.added > 0 check — evaluate ALL incidents
-                # on every scan (young ones were "too young" before, now grown).
-
-                session_key = proj["tg_thread"]
-                _max_conc = int(_get_global_setting("self_heal_max_concurrent", _SELF_HEAL_MAX_CONCURRENT))
-                now = time.time()
-
-                # Load board once for the entire card iteration
-                try:
-                    _, _, cols = _load_board(proj["cwd"])
-                except Exception:
-                    continue
-
-                rate_limit_logged = False  # don't spam Timeline per-card, only once per project
-
-                for card in cols.get("failed", []):
-                    running_busy = ctx["running"].get(session_key) is not None
-                    rate_ok = _heal_rate_ok(session_key, now)
-
-                    action, reason = _heal_decision(
-                        card, proj,
-                        active_count=_self_heal_active_count,
-                        max_conc=_max_conc,
-                        running_busy=running_busy,
-                        rate_ok=rate_ok,
-                        now=now,
-                    )
-
-                    if action == "skip":
-                        # Silent skips (heal_attempted, not_incident) — don't log
-                        if reason.startswith("too_young"):
-                            print(f"[self_heal] {proj['name']}/{card['id']}: debounce ({reason}), waiting")
-                        continue
-
-                    if action == "benign":
-                        # C. Mark heal_skip=benign once under board-lock
-                        print(f"[self_heal] {proj['name']}/{card['id']}: benign ({reason}), marking heal_skip")
-                        try:
-                            lock = _get_board_lock(proj["cwd"])
-                            async with lock:
-                                _, preamble2, cols2 = _load_board(proj["cwd"])
-                                for col_cards in cols2.values():
-                                    for c in col_cards:
-                                        if c["id"] == card["id"]:
-                                            m2 = _parse_incident_desc(c.get("description"))
-                                            m2["heal_skip"] = "benign"
-                                            c["description"] = _format_incident_desc(m2)
-                                            break
-                                _save_board(proj["cwd"], proj["name"], preamble2, cols2)
-                        except Exception as ex:
-                            print(f"[self_heal] error marking heal_skip: {ex}")
-                        continue
-
-                    if action == "stop":
-                        # Resource limit — stop iterating cards for this project
-                        if reason == "rate_limit" and not rate_limit_logged:
-                            rate_limit_logged = True
-                            print(f"[self_heal] {proj['name']}: rate-limit ({_HEAL_MAX_PER_WINDOW}/"
-                                  f"{_HEAL_WINDOW_SEC}s), skipping scan")
-                            _bus_publish(session_key, {
-                                "kind": "self_heal",
-                                "phase": "skipped",
-                                "reason": "rate_limit",
-                                "project": proj["name"],
-                            })
-                        elif reason == "concurrency_limit":
-                            print(f"[self_heal] concurrency limit ({_max_conc}) reached, "
-                                  f"skipping {proj['name']}")
-                        elif reason == "project_busy":
-                            print(f"[self_heal] project {proj['name']} busy, skipping")
-                        break
-
-                    # action == "heal"
-                    _heal_record(session_key, now)
-                    _self_heal_active_count += 1
-                    _spawn_bg(_self_heal_card(ctx, proj, card))
-                    print(f"[self_heal] launched fix for {proj['name']}/{card['id']}")
 
         except Exception as e:
             print(f"[scanner] loop error: {e}")
@@ -6576,8 +6090,6 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/scan-errors", api_project_scan_errors)
         app.router.add_get("/api/projects/{id}/incidents", api_project_incidents)
         app.router.add_post("/api/projects/{id}/incident", api_project_incident)
-        # Self-healing (Spec 010): per-project toggle
-        app.router.add_post("/api/projects/{id}/self-heal", api_project_self_heal_toggle)
         app.router.add_post("/api/projects/{id}/notify-on-error", api_project_notify_toggle)
         # Activity-stream: live bus event stream (cards, external runs)
         app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)

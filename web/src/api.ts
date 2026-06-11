@@ -358,17 +358,6 @@ export const api = {
       }
     ),
 
-  // Spec 010: self-heal — enable/disable per-project
-  toggleSelfHeal: (id: string, enabled: boolean) =>
-    apiFetch<{ ok: boolean; self_heal: boolean; topics_updated: number }>(
-      `/api/projects/${id}/self-heal`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled }),
-      }
-    ),
-
   // TG error notifications — enable/disable per-project
   toggleNotifyOnError: (id: string, enabled: boolean) =>
     apiFetch<{ ok: boolean; notify_on_error: boolean; topics_updated: number }>(

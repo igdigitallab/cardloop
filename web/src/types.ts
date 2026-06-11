@@ -32,8 +32,6 @@ export interface Project {
   /** Whether log/test sources are configured for the error scanner. */
   log_cmd?: string | null
   test_cmd?: string | null
-  /** Self-heal (Spec 010): agent auto-fixes new incidents in a worktree. OFF by default. */
-  self_heal?: boolean
   /** TG error notifications. OFF by default. */
   notify_on_error?: boolean
 }
@@ -145,15 +143,12 @@ export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'mem
 export interface ProjectSettings {
   git_enabled: boolean
   model: string | null
-  self_heal: boolean
   notify_on_error: boolean
   log_cmd: string
   test_cmd: string
 }
 
 export interface GlobalSettingsEffective {
-  self_heal_enabled: boolean
-  self_heal_max_concurrent: number
   scan_interval_sec: number
   default_model: string
   watchdog_stall_sec: number

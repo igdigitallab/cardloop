@@ -113,9 +113,6 @@ export const ru = {
 
   // ── Board tab ────────────────────────────────────────────────
   'board.loading': 'Загрузка доски...',
-  'board.self_heal_badge_ok': '🔧 авто-починка · гейт ✓',
-  'board.self_heal_badge_fail': '🔧 авто-починка · гейт ✗',
-  'board.self_heal_badge_aria': 'Карточка авто-починки (самолечение)',
   'board.columns_label': 'колонки:',
   'board.agent_running': 'Агент работает, авто-обновление...',
   'board.new_task_placeholder': 'Новая задача… (Enter — добавить)',
