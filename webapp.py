@@ -519,20 +519,172 @@ def _free_chats_path(ctx: dict) -> Path:
 
 # ── Prompt templates ──────────────────────────────────────────────────────────
 
+# Adapted from addyosmani/agent-skills (MIT)
+# https://github.com/addyosmani/agent-skills/blob/main/LICENSE
+#
+# These are the built-in default prompt templates shipped with every ClaudeOps
+# instance. They are seeded into data/prompts.json on first startup (or when a
+# template with the matching slug_id is absent). Operators can delete or edit any
+# template; deleted defaults are recorded in the file and never re-inserted.
+#
+# Merge rules (enforced by _seed_default_prompts):
+#   1. Load current prompts.json (may be empty / missing).
+#   2. Collect slugs of every entry whose "slug_id" field matches a default slug.
+#   3. Collect slugs listed in the top-level "__deleted_defaults" array (operator-
+#      removed; persisted so restarts never resurface them).
+#   4. Insert only defaults whose slug_id is absent from both sets.
+#   5. Save atomically; never modify or remove existing operator entries.
+DEFAULT_PROMPT_TEMPLATES: list[dict] = [
+    {
+        "slug_id": "spec-writer",
+        "id": "default-spec-writer",
+        "title": "Spec writer",
+        "category": "Define",
+        "text": (
+            "You are a spec-writer. Before drafting anything, surface your assumptions explicitly:\n\n"
+            "ASSUMPTIONS I'M MAKING:\n"
+            "1. [tech stack / environment]\n"
+            "2. [auth model / data layer]\n"
+            "3. [scope boundary]\n"
+            "→ Correct me now or I'll proceed with these.\n\n"
+            "Then write a spec covering: Objective (who/why/success), Commands (exact CLI flags),\n"
+            "Architecture (component boundaries), Data model (key entities), API surface (endpoints/\n"
+            "contracts), Task breakdown (ordered, verifiable). Each section max 10 lines unless depth\n"
+            "is required. Output to specs/spec-NNN-<name>.md."
+        ),
+    },
+    {
+        "slug_id": "debug-triage",
+        "id": "default-debug-triage",
+        "title": "Debug triage",
+        "category": "Verify",
+        "text": (
+            "Something broke. Stop-the-Line protocol:\n"
+            "1. STOP adding features or making other changes.\n"
+            "2. PRESERVE evidence: paste exact error, last working commit, env.\n"
+            "3. REPRODUCE: make the failure happen reliably. If not reproducible → document and monitor.\n"
+            "4. ISOLATE: binary-search the change set. Smallest reproducer.\n"
+            "5. ROOT CAUSE: don't fix symptoms. Find why, not what.\n"
+            "6. FIX: targeted, minimal change. Add a regression test.\n"
+            "7. VERIFY: run tests. Confirm fix in the same environment the bug appeared.\n"
+            "8. RESUME only after step 7 passes."
+        ),
+    },
+    {
+        "slug_id": "pre-deploy-gate",
+        "id": "default-pre-deploy-gate",
+        "title": "Pre-deploy gate",
+        "category": "Ship",
+        "text": (
+            "Pre-deploy gate — confirm each before deploying:\n"
+            "CODE:     [ ] tests pass  [ ] build clean  [ ] lint/types pass  [ ] no debug console.log\n"
+            "SECURITY: [ ] no secrets in code/git  [ ] npm audit no criticals  [ ] input validation\n"
+            "INFRA:    [ ] env vars set  [ ] migration ran  [ ] rollback plan exists\n"
+            "MONITOR:  [ ] error rate baseline noted  [ ] rollback trigger defined (error % or latency)\n\n"
+            "If any box is unchecked → stop and report. Do not deploy."
+        ),
+    },
+]
+
+_DEFAULT_SLUGS: set[str] = {t["slug_id"] for t in DEFAULT_PROMPT_TEMPLATES}
+
+
+def _seed_default_prompts(ctx: dict) -> None:
+    """Insert missing default prompt templates into prompts.json.
+
+    Safe to call on every startup:
+    - Existing operator entries (any id / slug_id) are never modified.
+    - Defaults that the operator deleted are listed in __deleted_defaults and
+      never re-inserted.
+    - Defaults already present (matched by slug_id) are skipped.
+    - No duplicate slug_ids are ever created.
+    """
+    p = _prompts_path(ctx)
+    try:
+        raw: dict | list = json.loads(p.read_text()) if p.exists() else []
+    except Exception:
+        raw = []
+
+    # Support both old (plain list) and new (dict with __deleted_defaults) formats
+    if isinstance(raw, dict):
+        prompts: list = raw.get("prompts", [])
+        deleted_defaults: list = raw.get("__deleted_defaults", [])
+    else:
+        prompts = raw
+        deleted_defaults = []
+
+    existing_slugs: set[str] = {e.get("slug_id", "") for e in prompts}
+    skip_slugs: set[str] = existing_slugs | set(deleted_defaults)
+
+    to_add = [t for t in DEFAULT_PROMPT_TEMPLATES if t["slug_id"] not in skip_slugs]
+    if not to_add:
+        return
+
+    prompts = to_add + prompts  # defaults first for discoverability
+
+    payload: dict | list
+    if deleted_defaults:
+        payload = {"__deleted_defaults": deleted_defaults, "prompts": prompts}
+    else:
+        payload = prompts
+
+    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def _prompts_path(ctx: dict) -> Path:
     return ctx["DATA"] / "prompts.json"
 
 def _load_prompts(ctx: dict) -> list:
+    """Return the prompts list from prompts.json.
+
+    The file may be a plain JSON array (legacy) or a dict with keys
+    ``prompts`` and ``__deleted_defaults`` (current format written by
+    _seed_default_prompts / _save_prompts when deleted_defaults exist).
+    Always returns a plain list so callers are unaffected.
+    """
     p = _prompts_path(ctx)
     if not p.exists():
         return []
     try:
-        return json.loads(p.read_text())
+        raw = json.loads(p.read_text())
+        if isinstance(raw, dict):
+            return raw.get("prompts", [])
+        return raw
     except Exception:
         return []
 
-def _save_prompts(ctx: dict, prompts: list):
-    _prompts_path(ctx).write_text(json.dumps(prompts, ensure_ascii=False, indent=2))
+
+def _load_prompts_raw(ctx: dict) -> tuple[list, list]:
+    """Return (prompts_list, deleted_defaults_list) from prompts.json.
+
+    Internal helper for operations that must preserve __deleted_defaults.
+    """
+    p = _prompts_path(ctx)
+    if not p.exists():
+        return [], []
+    try:
+        raw = json.loads(p.read_text())
+        if isinstance(raw, dict):
+            return raw.get("prompts", []), raw.get("__deleted_defaults", [])
+        return raw, []
+    except Exception:
+        return [], []
+
+
+def _save_prompts(ctx: dict, prompts: list, deleted_defaults: list | None = None) -> None:
+    """Persist prompts to prompts.json.
+
+    If deleted_defaults is provided (even an empty list) the file is written in
+    dict format so the __deleted_defaults list survives round-trips. Otherwise
+    uses the legacy plain-list format for backward compatibility with instances
+    that have never had a default deleted.
+    """
+    if deleted_defaults is not None:
+        payload: dict | list = {"__deleted_defaults": deleted_defaults, "prompts": prompts}
+    else:
+        payload = prompts
+    _prompts_path(ctx).write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
 
 async def api_prompts_list(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
@@ -550,16 +702,24 @@ async def api_prompt_create(req: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="title and text required")
     category = (data.get("category") or "").strip() or None
     prompt = {"id": str(_uuid.uuid4())[:8], "title": title, "text": text, **({"category": category} if category else {})}
-    prompts = _load_prompts(ctx)
+    prompts, deleted_defaults = _load_prompts_raw(ctx)
     prompts.append(prompt)
-    _save_prompts(ctx, prompts)
+    _save_prompts(ctx, prompts, deleted_defaults if deleted_defaults else None)
     return web.json_response({"prompt": prompt})
 
 async def api_prompt_delete(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
-    prompts = [p for p in _load_prompts(ctx) if p.get("id") != pid]
-    _save_prompts(ctx, prompts)
+    prompts, deleted_defaults = _load_prompts_raw(ctx)
+    # If the deleted entry is a default, record its slug_id so it is not re-seeded.
+    for entry in prompts:
+        if entry.get("id") == pid:
+            slug = entry.get("slug_id", "")
+            if slug in _DEFAULT_SLUGS and slug not in deleted_defaults:
+                deleted_defaults.append(slug)
+            break
+    prompts = [p for p in prompts if p.get("id") != pid]
+    _save_prompts(ctx, prompts, deleted_defaults if deleted_defaults else None)
     return web.json_response({"ok": True})
 
 async def api_prompt_update(req: web.Request) -> web.Response:
@@ -569,7 +729,7 @@ async def api_prompt_update(req: web.Request) -> web.Response:
         data = await req.json()
     except Exception:
         return web.json_response({"error": "bad request"}, status=400)
-    prompts = _load_prompts(ctx)
+    prompts, deleted_defaults = _load_prompts_raw(ctx)
     for p in prompts:
         if p.get("id") == pid:
             if "title" in data: p["title"] = (data["title"] or "").strip()
@@ -578,7 +738,7 @@ async def api_prompt_update(req: web.Request) -> web.Response:
                 cat = (data.get("category") or "").strip() or None
                 if cat: p["category"] = cat
                 else: p.pop("category", None)
-            _save_prompts(ctx, prompts)
+            _save_prompts(ctx, prompts, deleted_defaults if deleted_defaults else None)
             return web.json_response({"prompt": p})
     return web.json_response({"error": "not found"}, status=404)
 
@@ -6506,6 +6666,8 @@ async def start(ptb_app, ctx: dict) -> None:
         _schedules._schedules_init(ctx)
         # Spec-020: Deferred Runs — initialise file path
         _deferred_init(ctx)
+        # Seed built-in default prompt templates (merge, never overwrite operator entries)
+        _seed_default_prompts(ctx)
 
         app = web.Application(middlewares=[error_middleware, auth_middleware], client_max_size=20 * 1024 * 1024)
         app["ctx"] = ctx

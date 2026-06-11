@@ -164,3 +164,12 @@ cd $HOME/claude-ops-bot && venv/bin/python -m pytest -q
 ## Tech stack
 
 Python 3.11 · aiohttp · python-telegram-bot · Claude Agent SDK · React 18 · Vite · TypeScript · systemd · Cloudflare Tunnel · pytest
+
+---
+
+## Credits
+
+The built-in default prompt templates (`spec-writer`, `debug-triage`, `pre-deploy-gate`) and the
+executor sub-agent addendums (planning mode, source-driven development, doubt-check) are adapted
+from [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills), published under the
+[MIT License](https://github.com/addyosmani/agent-skills/blob/main/LICENSE) by Addy Osmani et al.

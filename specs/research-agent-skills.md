@@ -299,10 +299,18 @@ Install as `~/.claude/commands/idea-refine.md`. Trigger: "help me refine this id
 Per the task card: these playbooks plug into the sub-agent Settings UI (spec-017 Phase C).
 Suggested sequencing:
 
-1. Add `spec-writer`, `debug-triage`, `pre-deploy-gate` to `data/prompts.json` as
-   default templates (immediately useful for any OSS user).
-2. Add executor system-prompt addendums (planning mode, source-driven, doubt-check) to
-   the default `AgentDefinition.prompt` for the `executor` role in the spec-017 roster.
+1. ~~Add `spec-writer`, `debug-triage`, `pre-deploy-gate` to `data/prompts.json` as
+   default templates (immediately useful for any OSS user).~~ **DONE 2026-06-11.**
+   Implemented as `DEFAULT_PROMPT_TEMPLATES` constant + `_seed_default_prompts()` in
+   `webapp.py`. Seed merges on every startup: inserts absent defaults, skips existing ones,
+   never re-inserts operator-deleted entries (tracked via `__deleted_defaults` in the file).
+   Attribution comment and README Credits section added. 22 tests green.
+
+2. ~~Add executor system-prompt addendums (planning mode, source-driven, doubt-check) to
+   the default `AgentDefinition.prompt` for the `executor` role in the spec-017 roster.~~ **DONE 2026-06-11.**
+   Three addendums (PLANNING MODE, SOURCE-DRIVEN, DOUBT CHECK) added to `DEFAULT_AGENTS["executor"].prompt`
+   in `bot.py`. researcher/quick prompts unchanged. Covered by tests.
+
 3. Ship `interview-me` and `idea-refine` as personal operator installs (not in OSS
    default — they require a live interactive user).
 4. Add `adr-writer` and `observability` templates in a follow-up pass.
