@@ -1,6 +1,7 @@
 ---
 created: 2026-06-10
-status: draft
+status: in-progress
+phase_a_completed: 2026-06-11
 ---
 
 # Spec 019 — Schedules Registry: unified view of all scheduled jobs
@@ -17,21 +18,30 @@ Detect jobs that should have run but did not. Close the backlog card
 
 ### The real bug this spec was born from
 
-On 2026-06-10 an audit revealed that `~/logs/` did not exist on the server. Five cron
-jobs had been silently swallowing their entire output for an unknown period:
-- Two backup scripts (`backup-volumes.sh` and a second backup)
+On 2026-06-10 an audit revealed that `~/logs/` did not exist on the server. Four cron
+jobs had been silently producing no output for the period 2026-05-12 to 2026-06-11
+(confirmed: no artifacts in `~/backups` for that window):
+- `backup-hiddify.sh`
+- `backup-bot-db.sh`
+- `rsync` → NAS
 - `g2-community-watch`
 - `meta-analyst`
-- `rsync` → NAS
 
-All five redirect stdout/stderr to a path under `~/logs/`. Because the directory was
-missing, every invocation exited with a redirect error after doing nothing — yet cron
-recorded exit 0 for the redirect itself. No alert was raised; no backup was verifiably
-happening.
+Note: `backup-volumes.sh` is a root cron job and was NOT affected (it runs under root,
+not the user, and does not redirect to `~/logs/`).
 
-The fix (creating the directory) is trivial. **Catching this class of bug is the primary
-acceptance criterion for this spec.** A cron entry whose redirect target does not exist
-must appear as `status: broken` in the registry.
+All five user cron jobs redirect stdout/stderr to a path under `~/logs/`. Because the
+directory was missing, every invocation exited immediately with a shell redirect error
+after doing nothing — the actual command never ran. The redirect failure causes the
+entire command string to not execute; cron recorded the shell exit, not the command.
+No alert was raised; backups were not happening.
+
+The fix (`mkdir ~/logs`) was applied 2026-06-11; subsequent runs of both backup scripts
+completed successfully (artifacts confirmed in `~/backups`).
+
+**Catching this class of bug is the primary acceptance criterion for this spec.** A cron
+entry whose redirect target's parent directory does not exist must appear as
+`status: broken` in the registry.
 
 ### Current state (2026-06-10 inventory)
 
@@ -278,8 +288,8 @@ Acceptance (Phase A):
 - `POST /api/schedules/scan` → 200 `{"queued":true}` → after scan `GET /api/schedules`
   returns updated data.
 - No write to any file outside `data/schedules_cache.json` during a scan.
-- `pytest -q` — all existing tests green (748 baseline); new collector unit tests added
-  (see Test plan).
+- `pytest -q` — all existing tests green (690 passed, 6 skipped baseline); new collector
+  unit tests added (see Test plan).
 
 ### Phase B — Purpose annotations + Investigate action (M: ~3–5 h)
 
@@ -341,7 +351,7 @@ Acceptance (Phase C):
 
 ## Test plan
 
-All phases gate on `pytest -q` green (748 baseline).
+All phases gate on `pytest -q` green (690 passed, 6 skipped baseline as of Phase A implementation).
 
 ### Phase A tests
 - `test_collector_parses_crontab_lines` — feed a mock crontab string; assert N records
