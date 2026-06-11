@@ -195,6 +195,17 @@
   text-align: center;
 }
 
+/* Reply-ready dot: agent finished a run while this tab was not active */
+.ptab-reply-ready {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 5px rgba(52, 199, 123, 0.7);
+  flex-shrink: 0;
+}
+
 .ptab-close {
   background: transparent;
   border: none;

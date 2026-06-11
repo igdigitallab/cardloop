@@ -85,6 +85,8 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(() => readString(LS_ACTIVE))
   const [sidebarOrder, setSidebarOrder] = useState<string[]>(() => readSidebarOrder())
   const { unreadBySession, incrementUnread, clearUnreadForSession, resetUnread } = useUnreadTracker()
+  // Reply-ready: project IDs where the agent finished a run while the tab was not active
+  const [replyReadyIds, setReplyReadyIds] = useState<Set<string>>(() => new Set())
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => readBool(LS_SIDEBAR_COLLAPSED, false))
   // Off-canvas drawer (mobile/tablet ≤1024px): not persisted, default closed
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -282,6 +284,17 @@ export default function App() {
       // (git.dirty/unpushed in header and sidebar will become current)
       if (payload.kind === 'run_end') {
         loadProjects()
+        // Mark project as reply-ready when its tab is not currently active
+        const proj = sk
+          ? projectsRef.current.find(p => p.tg_thread != null && String(p.tg_thread) === sk)
+          : null
+        if (proj && proj.id !== activeIdRef.current) {
+          setReplyReadyIds(prev => {
+            const next = new Set(prev)
+            next.add(proj.id)
+            return next
+          })
+        }
         return
       }
 
@@ -320,8 +333,14 @@ export default function App() {
   const clearUnread = useCallback((id: string) => {
     const proj = projectsRef.current.find(p => p.id === id)
     const sk = proj?.tg_thread != null ? String(proj.tg_thread) : null
-    if (!sk) return
-    clearUnreadForSession(sk)
+    if (sk) clearUnreadForSession(sk)
+    // Also clear reply-ready indicator when the user switches to this tab
+    setReplyReadyIds(prev => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
   }, [clearUnreadForSession])
 
   // Open project (sidebar click) — add to openIds (if not there) + activate
@@ -586,6 +605,7 @@ export default function App() {
         onDeleteFree={handleDeleteFree}
         loading={projectsLoading}
         unreadBySession={unreadBySession}
+        replyReadyIds={replyReadyIds}
         collapsed={sidebarCollapsed}
         onToggleCollapse={toggleSidebar}
         onReorder={handleSidebarReorder}
@@ -600,6 +620,7 @@ export default function App() {
           projects={openProjects}
           activeId={activeId}
           unreadBySession={unreadBySession}
+          replyReadyIds={replyReadyIds}
           onActivate={handleTabActivate}
           onClose={handleTabClose}
           onRename={handleRenameTab}

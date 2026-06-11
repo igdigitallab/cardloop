@@ -272,7 +272,16 @@
   color: var(--text2);
 }
 
-/* реплика пользователя — тонкий префикс › в акценте, без плашки */
+/* operator message — full-width highlight row + left accent stripe */
+.chat-msg-user {
+  background: rgba(107, 104, 245, 0.07);
+  border-left: 2px solid var(--accent);
+  margin-left: -12px;
+  margin-right: -12px;
+  padding: 4px 12px 4px 10px;
+  border-radius: 0;
+}
+
 .chat-msg-user .chat-msg-body {
   color: var(--text);
   position: relative;

@@ -6,6 +6,8 @@ interface Props {
   projects: Project[]
   activeId: string | null
   unreadBySession: Record<string, number>
+  /** Project IDs where the agent finished a run while the tab was not active */
+  replyReadyIds?: Set<string>
   onActivate: (id: string) => void
   onClose: (id: string) => void
   onRename: (id: string, label: string) => void
@@ -23,11 +25,13 @@ interface Props {
 }
 
 function TabItem({
-  project, isActive, unread, onActivate, onClose, onRename, activeRef,
+  project, isActive, unread, replyReady, onActivate, onClose, onRename, activeRef,
 }: {
   project: Project
   isActive: boolean
   unread: number
+  /** True when the agent finished a reply while this tab was not active */
+  replyReady?: boolean
   onActivate: () => void
   onClose: () => void
   onRename: (label: string) => void
@@ -90,6 +94,9 @@ function TabItem({
       {!editing && unread > 0 && !isActive && (
         <span className="ptab-unread" title={`${unread} new`}>{unread > 99 ? '99+' : unread}</span>
       )}
+      {!editing && replyReady && !isActive && (
+        <span className="ptab-reply-ready" title="Agent reply is ready" />
+      )}
       {!editing && isActive && (
         <button
           className="ptab-close"
@@ -104,7 +111,7 @@ function TabItem({
 }
 
 export function ProjectTabBar({
-  projects, activeId, unreadBySession, onActivate, onClose, onRename, onNewFree,
+  projects, activeId, unreadBySession, replyReadyIds, onActivate, onClose, onRename, onNewFree,
   globalFilesOpen, globalFilesActive, onOpenGlobalFiles, onCloseGlobalFiles,
   schedulesOpen, schedulesActive, onOpenSchedules, onCloseSchedules,
   onToggleDrawer,
@@ -138,6 +145,7 @@ export function ProjectTabBar({
               project={p}
               isActive={isActive}
               unread={unread}
+              replyReady={replyReadyIds?.has(p.id)}
               onActivate={() => onActivate(p.id)}
               onClose={() => onClose(p.id)}
               onRename={(label) => onRename(p.id, label)}

@@ -12,6 +12,8 @@ interface Props {
   onDeleteFree: (id: string) => void
   loading: boolean
   unreadBySession: Record<string, number>
+  /** Project IDs where the agent finished a reply while the tab was not active */
+  replyReadyIds?: Set<string>
   collapsed: boolean
   onToggleCollapse: () => void
   onReorder: (ids: string[]) => void
@@ -30,7 +32,7 @@ function unreadFor(p: Project, map: Record<string, number>): number {
 
 export function Sidebar({
   projects, selectedId, onSelect, onLogout, onDeleteFree, loading,
-  unreadBySession, collapsed, onToggleCollapse, onReorder,
+  unreadBySession, replyReadyIds, collapsed, onToggleCollapse, onReorder,
   onNewProject, newProjectBusy, drawerOpen,
 }: Props) {
   const [search, setSearch] = useState('')
@@ -155,6 +157,9 @@ export function Sidebar({
                   {p.is_free ? '🏠' : p.name.charAt(0).toUpperCase()}
                 </span>
                 {unread > 0 && <span className="unread-dot-collapsed" />}
+                {replyReadyIds?.has(p.id) && selectedId !== p.id && (
+                  <span className="reply-ready-dot-collapsed" title="Agent reply is ready" />
+                )}
                 {(p.incidents ?? 0) > 0 && (
                   <span className="incidents-dot-collapsed" title={`${p.incidents} incident(s)`}>🚨</span>
                 )}
@@ -247,6 +252,9 @@ export function Sidebar({
                   <span className="unread-badge" title={`${unread} new event(s)`}>
                     {unread > 99 ? '99+' : unread}
                   </span>
+                )}
+                {replyReadyIds?.has(p.id) && selectedId !== p.id && (
+                  <span className="reply-ready-badge" title="Agent reply is ready" />
                 )}
                 {p.is_free && (
                   <button
