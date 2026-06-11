@@ -227,8 +227,8 @@ export const api = {
       now: number
     }>('/api/usage'),
 
-  // Change project model (opus/sonnet/haiku) — takes effect on the next request
-  setModel: (id: string, model: 'opus' | 'sonnet' | 'haiku') =>
+  // Change project model (fable/opus/sonnet/haiku) — takes effect on the next request
+  setModel: (id: string, model: 'fable' | 'opus' | 'sonnet' | 'haiku') =>
     apiFetch<{ ok: boolean; model: string; topics_updated: number }>(
       `/api/projects/${id}/model`,
       {

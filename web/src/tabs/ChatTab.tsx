@@ -16,7 +16,7 @@ import {
 } from '../types'
 import { useProjectActivity } from '../hooks/useProjectActivity'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
-import { MODELS } from '../lib/models'
+import { MODELS, modelLabel } from '../lib/models'
 import { t } from '../i18n'
 
 interface Props {
@@ -26,7 +26,7 @@ interface Props {
   isActive?: boolean
 }
 
-type ModelKey = 'opus' | 'sonnet' | 'haiku'
+type ModelKey = 'fable' | 'opus' | 'sonnet' | 'haiku'
 
 /** Rough token estimate: ~4 characters per token (common heuristic for English/Russian). */
 function estimateTokens(messages: ChatMessage[]): number {
@@ -536,10 +536,15 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           <span className="chat-model-label">🧠</span>
           <select
             className="chat-model-select"
-            value={MODELS.some(m => m.value === project.model) ? project.model : 'sonnet'}
+            value={project.model}
             onChange={e => handleModelChange(e.target.value as ModelKey)}
             disabled={changingModel || streaming}
           >
+            {/* Unknown stored alias: show it as-is instead of silently displaying
+                (and on next change POST-ing) a different model. */}
+            {!MODELS.some(m => m.value === project.model) && (
+              <option value={project.model}>{modelLabel(project.model)}</option>
+            )}
             {MODELS.map(m => (
               <option key={m.value} value={m.value}>{m.label}</option>
             ))}
