@@ -54,6 +54,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - **Рестарт ОБРЫВАЕТ текущий ход + все sub-agents.** Даже корректный `bash restart-self.sh` убивает Python-процесс агента. Правила: (1) Перед `restart-self.sh` — отправь оператору полный итог, заверши ход. (2) Если есть `in_progress` sub-agents — жди их завершения. (3) После `restart-self.sh` — никаких Bash-команд в этом ходу. (4) Smoke / `curl /api/health` — в следующем сообщении.
 - **pkill footgun.** НЕ делать `pkill -f "bot.py"` — паттерн совпадает с командной строкой самой команды и убивает шелл (exit 144). Глушить через systemd или по PID.
 - **Один getUpdates.** Не запускать второй инстанс (nohup + systemd одновременно) — конфликт long-polling.
+- **`claude-agent-sdk` >= 0.2.96 обязателен для fable (spec-017).** Старый SDK (<=0.2.87) НЕ знает модель `fable`/`claude-fable-5` и МОЛЧА подменяет её на opus (без ошибки, `is_error=False`) — дирижёр тихо деградирует. CLI при этом алиас знает — обманчиво. После пересоздания venv: `pip install -U "claude-agent-sdk>=0.2.96"`. Симптом: сессия отвечает «issue with the selected model» или представляется Opus.
 
 ### Telegram и рендер
 - **HTML parse_mode + сырой ответ модели = краш.** Ответ модели часто содержит `<title>`/`<div>` и пр. → Telegram `BadRequest: unsupported start tag`. Ответ ВСЕГДА гнать через `md_to_html()`, `send()` имеет fallback на plain при BadRequest.
