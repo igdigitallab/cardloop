@@ -635,6 +635,155 @@ async def test_deferred_loop_fails_after_max_attempts(fake_ctx):
     assert "busy" in records[0]["error"]
 
 
+# ─────────────────────────── _deferred_loop fire_on_reset ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_deferred_loop_fire_on_reset_free_window(fake_ctx):
+    """fire_on_reset fires immediately when utilization < DEFERRED_FREE_THRESHOLD (mock 0.05)."""
+    fake_ctx["topics"]["100:10"] = _make_topic("myproject")
+
+    _webapp._save_deferred([{
+        "id": "def-for-free",
+        "project": "myproject",
+        "session_key": "100:10",
+        "prompt": "fire on free window",
+        "fire_at": None,
+        "fire_on_reset": True,
+        "status": "pending",
+        "fired_at": None,
+        "error": None,
+        "attempts": 0,
+    }])
+
+    free_usage = {"five_hour": {"utilization": 0.05, "resets_at": time.time() + 18000, "status": "allowed"}}
+
+    spawned: list = []
+
+    def mock_spawn_bg(coro):
+        """Capture spawned coroutines without actually running them."""
+        spawned.append(coro)
+        # Close the coroutine to avoid ResourceWarning
+        try:
+            coro.close()
+        except Exception:
+            pass
+
+    with patch.object(_webapp, "_get_cached_usage_data", new_callable=AsyncMock, return_value=free_usage), \
+         patch.object(_webapp, "_spawn_bg", side_effect=mock_spawn_bg), \
+         patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            call_count = 0
+            async def controlled_sleep(n):
+                nonlocal call_count
+                call_count += 1
+                if call_count >= 2:
+                    raise asyncio.CancelledError()
+            mock_sleep.side_effect = controlled_sleep
+            try:
+                await _webapp._deferred_loop(fake_ctx)
+            except asyncio.CancelledError:
+                pass
+
+    # Should have fired immediately (utilization 0.05 < DEFERRED_FREE_THRESHOLD 0.10)
+    # The loop marks the record as "fired" and calls _spawn_bg(_execute_deferred(...))
+    records = _webapp._load_deferred()
+    fired = next(r for r in records if r["id"] == "def-for-free")
+    assert fired["status"] == "fired", f"Expected 'fired' but got '{fired['status']}'"
+    assert len(spawned) == 1, f"Expected _spawn_bg called once, got {len(spawned)}"
+
+
+@pytest.mark.asyncio
+async def test_deferred_loop_fire_on_reset_waits_for_resets_at(fake_ctx):
+    """fire_on_reset does NOT fire when utilization=0.90; fires when time >= resets_at + jitter."""
+    fake_ctx["topics"]["100:10"] = _make_topic("myproject")
+
+    _webapp._save_deferred([{
+        "id": "def-for-wait",
+        "project": "myproject",
+        "session_key": "100:10",
+        "prompt": "wait for reset",
+        "fire_at": None,
+        "fire_on_reset": True,
+        "status": "pending",
+        "fired_at": None,
+        "error": None,
+        "attempts": 0,
+    }])
+
+    # High utilization, resets_at = now + 120s → should NOT fire yet
+    now = time.time()
+    high_usage = {"five_hour": {"utilization": 0.90, "resets_at": now + 120, "status": "allowed"}}
+
+    spawned1: list = []
+
+    def mock_spawn_bg1(coro):
+        spawned1.append(coro)
+        try:
+            coro.close()
+        except Exception:
+            pass
+
+    with patch.object(_webapp, "_get_cached_usage_data", new_callable=AsyncMock, return_value=high_usage), \
+         patch.object(_webapp, "_spawn_bg", side_effect=mock_spawn_bg1), \
+         patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            call_count = 0
+            async def controlled_sleep(n):
+                nonlocal call_count
+                call_count += 1
+                if call_count >= 2:
+                    raise asyncio.CancelledError()
+            mock_sleep.side_effect = controlled_sleep
+            try:
+                await _webapp._deferred_loop(fake_ctx)
+            except asyncio.CancelledError:
+                pass
+
+    # Should NOT have fired yet (resets_at is 120s in the future)
+    assert len(spawned1) == 0, "Expected no _spawn_bg call (run not yet due)"
+    records = _webapp._load_deferred()
+    pending = next(r for r in records if r["id"] == "def-for-wait")
+    assert pending["status"] == "pending"
+
+    # Now simulate time past resets_at + jitter:
+    # Assign stable jitter to the record (simulate what loop already persisted)
+    past_usage = {"five_hour": {"utilization": 0.90, "resets_at": now - 100, "status": "allowed"}}
+    pending["_jitter"] = 30  # fire_now = now >= (now-100) + 30 = True
+    _webapp._save_deferred(records)
+
+    spawned2: list = []
+
+    def mock_spawn_bg2(coro):
+        spawned2.append(coro)
+        try:
+            coro.close()
+        except Exception:
+            pass
+
+    with patch.object(_webapp, "_get_cached_usage_data", new_callable=AsyncMock, return_value=past_usage), \
+         patch.object(_webapp, "_spawn_bg", side_effect=mock_spawn_bg2), \
+         patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep2:
+            call_count2 = 0
+            async def controlled_sleep2(n):
+                nonlocal call_count2
+                call_count2 += 1
+                if call_count2 >= 2:
+                    raise asyncio.CancelledError()
+            mock_sleep2.side_effect = controlled_sleep2
+            try:
+                await _webapp._deferred_loop(fake_ctx)
+            except asyncio.CancelledError:
+                pass
+
+    # Now it should have fired (resets_at + jitter is in the past)
+    assert len(spawned2) == 1, f"Expected _spawn_bg called once after reset, got {len(spawned2)}"
+    records = _webapp._load_deferred()
+    fired = next(r for r in records if r["id"] == "def-for-wait")
+    assert fired["status"] == "fired"
+
+
 # ─────────────────────────── _deferred_init ───────────────────────────────────
 
 def test_deferred_init_sets_file_path(tmp_path):
