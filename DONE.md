@@ -127,3 +127,4 @@
 - [x] Кнопочка выделения в бклок очень стрёмно стоит. Нужно немножко сокращать пространство.. · 2026-06-05
 - [x] [ERR] ERROR: telegram.ext.Updater Exception happened while polling for updates. <!--ops:err-b73031-->
   > Closed: self-healing removed (spec-010 dropped in v0.9)
+- [x] Единый Schedules: cron + systemd timers + /schedule + celery + n8n · 2026-06-10
