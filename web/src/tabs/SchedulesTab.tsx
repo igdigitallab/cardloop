@@ -74,6 +74,7 @@ export function SchedulesTab() {
   const [scanning, setScanning] = useState(false)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [investigatingId, setInvestigatingId] = useState<string | null>(null)
+  const [cancellingId, setCancellingId] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
 
   // Filters
@@ -128,6 +129,21 @@ export function SchedulesTab() {
       showToast(e instanceof Error ? e.message : String(e))
     } finally {
       setInvestigatingId(null)
+    }
+  }
+
+  const handleCancel = async (record: ScheduleRecord) => {
+    const deferredId = record.annotations?.deferred_id as string | undefined
+    if (!deferredId) return
+    setCancellingId(record.id)
+    try {
+      await api.deferredDelete(deferredId)
+      showToast(t['schedules.deferred_cancelled'])
+      load()
+    } catch (e: unknown) {
+      showToast(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCancellingId(null)
     }
   }
 
@@ -288,7 +304,19 @@ export function SchedulesTab() {
                       }
                     </td>
                     <td style={tdStyle} onClick={e => e.stopPropagation()}>
-                      {!record.purpose && (
+                      {record.source === 'deferred' && record.annotations?.deferred_id ? (
+                        <button
+                          className="btn btn-secondary btn-xs"
+                          disabled={cancellingId === record.id}
+                          onClick={() => handleCancel(record)}
+                          title={t['schedules.deferred_cancel_title']}
+                          style={{ color: '#ef4444', borderColor: '#ef444433' }}
+                        >
+                          {cancellingId === record.id
+                            ? t['schedules.deferred_cancelling']
+                            : t['schedules.deferred_cancel']}
+                        </button>
+                      ) : !record.purpose && (
                         <button
                           className="btn btn-secondary btn-xs"
                           disabled={investigatingId === record.id}

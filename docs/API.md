@@ -236,6 +236,55 @@ Scan interval: env `SCHEDULES_SCAN_INTERVAL` (default 300s).
 
 ---
 
+---
+
+## Deferred Runs (Spec 020)
+
+Queue a prompt to execute at a specific time or after the 5-hour rate-limit window resets.
+Records are persisted in `data/deferred.json` (survives restarts).
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `POST` | `/api/deferred` | Create a deferred run. Body: `{project, prompt, fire_at?, fire_on_reset?}`. Exactly one of `fire_at` (ISO-8601 UTC string) or `fire_on_reset: true` required. Returns `{id, status}` with HTTP 201. | Yes |
+| `GET` | `/api/deferred` | List all deferred records. Query params: `?status=pending` (filter by status), `?project=<name>` (filter by project). | Yes |
+| `DELETE` | `/api/deferred/{id}` | Cancel a pending deferred run. Returns `{cancelled: true}` (200) or 404 (not found) or 409 (already fired/failed). | Yes |
+
+### Deferred record schema
+
+```json
+{
+  "id": "def-a3f7c2b1",
+  "project": "networking-os",
+  "session_key": "chat:thread",
+  "prompt": "Run a full audit…",
+  "fire_at": "2026-06-12T09:00:00Z",
+  "fire_on_reset": false,
+  "created": "2026-06-11T14:00:00Z",
+  "status": "pending|fired|cancelled|failed",
+  "fired_at": null,
+  "error": null,
+  "attempts": 0
+}
+```
+
+**Status lifecycle:** `pending` → `fired` (started) or `cancelled` (via DELETE) or `failed` (project busy after max attempts or execution error).
+
+**fire_on_reset behaviour:** At poll time the `five_hour` limit is checked via the OAuth usage cache.
+- If `utilization < DEFERRED_FREE_THRESHOLD` (default 0.10): fires immediately.
+- Otherwise: fires when `time.time() >= resets_at + jitter` (jitter 30–90 s, stable per record).
+
+**Busy re-queue:** If the project slot is busy at fire time, `fire_at` is pushed forward 5 minutes and `attempts` is incremented. After `DEFERRED_MAX_ATTEMPTS` (default 5) the record is marked `failed` and the operator is notified via Telegram.
+
+**Env vars:** `DEFERRED_POLL_SEC` (default 30), `DEFERRED_MAX_ATTEMPTS` (default 5), `DEFERRED_FREE_THRESHOLD` (default 0.10).
+
+**Schedules integration:** Pending deferred records appear in `GET /api/schedules` with `source: "deferred"`.
+Cancel via `DELETE /api/deferred/{id}`.
+
+**Telegram:** `/later <time_spec> <prompt>` — queues a deferred run from the bound project topic.
+`time_spec`: `reset` | `Nh` | `Nm` | `HH:MM` (LA tz) | ISO-8601.
+
+---
+
 ## SPA Fallback
 
 | Method | Path | Description | Auth |
@@ -246,7 +295,7 @@ Scan interval: env `SCHEDULES_SCAN_INTERVAL` (default 300s).
 
 ## Summary
 
-Total registered routes: **63** API routes + 1 SPA catch-all (64 total).
+Total registered routes: **66** API routes + 1 SPA catch-all (67 total).
 
 Public (no cookie): `GET /api/health`, `POST /api/login`.
 All other `/api/*` routes require a valid `cops_auth` session cookie.

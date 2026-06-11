@@ -170,6 +170,11 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showPrompts, setShowPrompts] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
+  const [showDefer, setShowDefer] = useState(false)
+  const [deferMode, setDeferMode] = useState<'time' | 'reset'>('time')
+  const [deferDatetime, setDeferDatetime] = useState('')
+  const [deferSubmitting, setDeferSubmitting] = useState(false)
+  const [deferToast, setDeferToast] = useState<string | null>(null)
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
 
@@ -700,6 +705,24 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 title={t['chat.skills_title']}
                 aria-label={t['chat.skills_aria']}
               >🛠</button>
+              <button
+                className={`chat-tool-btn${showDefer ? ' active' : ''}`}
+                onClick={() => {
+                  setShowDefer(s => !s)
+                  setShowPrompts(false)
+                  setShowSkills(false)
+                  // Default datetime = now + 30 min
+                  if (!deferDatetime) {
+                    const d = new Date(Date.now() + 30 * 60 * 1000)
+                    const pad = (n: number) => String(n).padStart(2, '0')
+                    setDeferDatetime(
+                      `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+                    )
+                  }
+                }}
+                title={t['chat.defer_title']}
+                aria-label={t['chat.defer_aria']}
+              >⏱</button>
             </div>
             <button
               className="btn-primary chat-send-btn"
@@ -712,6 +735,104 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           </div>
         </div>
       </div>
+
+      {/* Deferred Run Modal */}
+      {showDefer && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        }}
+          onClick={() => setShowDefer(false)}
+        >
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: 10, padding: 24, minWidth: 340, maxWidth: 480,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.25)',
+          }}
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 style={{ margin: '0 0 16px', fontSize: 16 }}>{t['chat.defer_modal_title']}</h3>
+            {/* Mode tabs */}
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              <button
+                className={`btn btn-sm ${deferMode === 'time' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setDeferMode('time')}
+              >{t['chat.defer_mode_time']}</button>
+              <button
+                className={`btn btn-sm ${deferMode === 'reset' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setDeferMode('reset')}
+              >{t['chat.defer_mode_reset']}</button>
+            </div>
+            {deferMode === 'time' && (
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 13, display: 'block', marginBottom: 4 }}>{t['chat.defer_fire_at']}</label>
+                <input
+                  type="datetime-local"
+                  value={deferDatetime}
+                  onChange={e => setDeferDatetime(e.target.value)}
+                  style={{ width: '100%', fontSize: 14, padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', boxSizing: 'border-box' }}
+                />
+              </div>
+            )}
+            {deferMode === 'reset' && (
+              <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
+                {t['chat.defer_reset_hint']}
+              </p>
+            )}
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
+              {t['chat.defer_prompt_preview']}: <em>{input.slice(0, 80) || '(empty)'}</em>
+            </p>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button className="btn btn-secondary btn-sm" onClick={() => setShowDefer(false)}>
+                {t['common.cancel']}
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                disabled={deferSubmitting || !input.trim() || (deferMode === 'time' && !deferDatetime)}
+                onClick={async () => {
+                  setDeferSubmitting(true)
+                  try {
+                    const body: Record<string, unknown> = {
+                      project: project.id,
+                      prompt: input,
+                    }
+                    if (deferMode === 'reset') {
+                      body.fire_on_reset = true
+                    } else {
+                      // Convert local datetime-local to ISO-8601 UTC
+                      body.fire_at = new Date(deferDatetime).toISOString()
+                    }
+                    await api.deferredCreate(body)
+                    setShowDefer(false)
+                    setInput('')
+                    setDeferToast(t['chat.defer_queued'])
+                    setTimeout(() => setDeferToast(null), 4000)
+                  } catch (e: unknown) {
+                    setDeferToast(e instanceof Error ? e.message : String(e))
+                    setTimeout(() => setDeferToast(null), 4000)
+                  } finally {
+                    setDeferSubmitting(false)
+                  }
+                }}
+              >
+                {deferSubmitting ? t['chat.defer_submitting'] : t['chat.defer_queue']}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Defer toast */}
+      {deferToast && (
+        <div style={{
+          position: 'fixed', bottom: 24, right: 24,
+          padding: '10px 18px', background: 'var(--bg-card)',
+          border: '1px solid var(--border)', borderRadius: 8,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.15)', fontSize: 13, zIndex: 9999,
+        }}>
+          {deferToast}
+        </div>
+      )}
     </div>
   )
 }

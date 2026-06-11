@@ -1190,6 +1190,95 @@ async def cmd_stop(update, context):
         await send(context, cid, tid, "⏳ Task is still starting up — please wait a moment.")
 
 
+# ─────────────────────────── /later — deferred runs (Spec 020) ───────────────────────────
+
+def _parse_time_spec(spec: str) -> tuple:
+    """Parse time spec: 'reset', 'Nh', 'Nm', 'HH:MM', or ISO-8601 UTC.
+    Returns (fire_at: str|None, fire_on_reset: bool)."""
+    import re as _re
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    spec = spec.strip()
+    if spec.lower() == "reset":
+        return (None, True)
+    # Nh / Nm
+    m = _re.match(r'^(\d+)([hm])$', spec.lower())
+    if m:
+        n = int(m.group(1))
+        delta = n * 3600 if m.group(2) == 'h' else n * 60
+        fire_ts = time.time() + delta
+        return (webapp._unix_to_iso(fire_ts), False)
+    # HH:MM
+    m = _re.match(r'^(\d{1,2}):(\d{2})$', spec)
+    if m:
+        from zoneinfo import ZoneInfo
+        tz_name = os.environ.get("OPERATOR_TZ", "America/Los_Angeles")
+        local_tz = ZoneInfo(tz_name)
+        now_local = _dt.now(local_tz)
+        target = now_local.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+        if target <= now_local:
+            target += _td(days=1)
+        return (webapp._unix_to_iso(target.timestamp()), False)
+    # ISO-8601
+    try:
+        dt = _dt.fromisoformat(spec.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_tz.utc)
+        return (webapp._unix_to_iso(dt.timestamp()), False)
+    except Exception:
+        pass
+    raise ValueError(f"Unrecognised time spec: {spec!r}")
+
+
+async def cmd_later(update, context):
+    """Handle /later <time_spec> <prompt> — queue a deferred run."""
+    if not authorized(update):
+        return
+    cid = update.effective_chat.id
+    tid = update.effective_message.message_thread_id
+    args_text = (update.effective_message.text or "").split(None, 2)
+    # args_text[0] = "/later", [1] = time_spec, [2] = prompt
+    if len(args_text) < 3:
+        await send(context, cid, tid,
+                   "Usage: /later <time_spec> <prompt>\n\ntime_spec: reset | 2h | 30m | HH:MM | ISO-8601")
+        return
+    time_spec = args_text[1]
+    prompt_text = args_text[2].strip()
+    if not prompt_text:
+        await send(context, cid, tid, "Usage: /later <time_spec> <prompt>")
+        return
+    k = key_of(update)
+    binding = topics.get(k)
+    if binding is None:
+        await send(context, cid, tid,
+                   "This topic is not bound to a project. Use /project <name> first.")
+        return
+    project = binding.get("project", "")
+    try:
+        fire_at, fire_on_reset = _parse_time_spec(time_spec)
+    except ValueError as e:
+        await send(context, cid, tid, f"Invalid time spec: {e}")
+        return
+    record = {
+        "id": webapp._new_deferred_id(),
+        "project": project,
+        "session_key": k,
+        "prompt": prompt_text[:4096],
+        "fire_at": fire_at,
+        "fire_on_reset": fire_on_reset,
+        "created": webapp._utcnow_iso(),
+        "status": "pending",
+        "fired_at": None,
+        "error": None,
+        "attempts": 0,
+    }
+    records = webapp._load_deferred()
+    records.append(record)
+    webapp._save_deferred(records)
+    trigger_str = "after rate-limit reset" if fire_on_reset else f"at {fire_at}"
+    await send(context, cid, tid,
+               f"[QUEUED] Deferred run queued [{project}] {trigger_str}\nPrompt: {prompt_text[:80]}...")
+
+
 # ─────────────────────────── main ───────────────────────────
 
 def _build_ctx(ptb_app) -> dict:
@@ -1257,6 +1346,7 @@ async def _amain() -> None:
         ptb_app.add_handler(CommandHandler("cost", cmd_cost))
         ptb_app.add_handler(CommandHandler("usage", cmd_usage))
         ptb_app.add_handler(CommandHandler("stop", cmd_stop))
+        ptb_app.add_handler(CommandHandler("later", cmd_later))
         ptb_app.add_handler(MessageHandler(filters.StatusUpdate.FORUM_TOPIC_CREATED, on_topic_created))
         ptb_app.add_handler(MessageHandler(
             (filters.TEXT | filters.CAPTION | filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND,

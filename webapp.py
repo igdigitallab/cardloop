@@ -35,6 +35,12 @@ import schedules as _schedules
 _BUS_QUEUE_SIZE = 100   # maxsize per-session bus queue; full → drop (non-blocking)
 _BUS_GLOBAL_SIZE = 200  # maxsize global bus queue (all sessions)
 
+# ─────────────────────────── Deferred Runs (Spec 020) ───────────────────────────
+_DEFERRED_POLL_SEC = int(os.environ.get("DEFERRED_POLL_SEC", "30"))
+_DEFERRED_MAX_ATTEMPTS = int(os.environ.get("DEFERRED_MAX_ATTEMPTS", "5"))
+_DEFERRED_FREE_THRESHOLD = float(os.environ.get("DEFERRED_FREE_THRESHOLD", "0.10"))
+_DEFERRED_FILE: "Path | None" = None  # set in _deferred_init(ctx)
+
 # Strong references for long-lived background tasks created via asyncio.create_task.
 # Prevents GC from collecting tasks before they complete (Python docs warning).
 _BG_TASKS: set = set()
@@ -3600,6 +3606,336 @@ async def api_usage(req: web.Request) -> web.Response:
     return web.json_response({"limits": cached, "now": time.time()})
 
 
+# ─────────────────────────── Deferred Runs (Spec 020) ────────────────────────────
+
+def _deferred_init(ctx: dict) -> None:
+    global _DEFERRED_FILE
+    _DEFERRED_FILE = ctx["DATA"] / "deferred.json"
+
+
+def _load_deferred() -> list:
+    if _DEFERRED_FILE is None or not _DEFERRED_FILE.exists():
+        return []
+    try:
+        return json.loads(_DEFERRED_FILE.read_text())
+    except Exception:
+        return []
+
+
+def _save_deferred(records: list) -> None:
+    if _DEFERRED_FILE is None:
+        return
+    tmp = Path(str(_DEFERRED_FILE) + ".tmp")
+    tmp.write_text(json.dumps(records, indent=2))
+    os.replace(str(tmp), str(_DEFERRED_FILE))
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _unix_to_iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _new_deferred_id() -> str:
+    return "def-" + secrets.token_hex(4)
+
+
+async def _get_cached_usage_data(ctx: dict) -> dict:
+    """Returns cached usage limits dict. Uses the existing _usage_cache; refreshes if stale."""
+    now = time.time()
+    async with _get_usage_lock():
+        cached = _usage_cache["data"]
+        if cached is None or (now - _usage_cache["ts"]) > _USAGE_TTL:
+            raw = await _fetch_oauth_usage()
+            if raw is not None:
+                limits: dict = {}
+                for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+                    nv = _norm_window(raw.get(k))
+                    if nv:
+                        limits[k] = nv
+                _usage_cache["data"] = limits
+                _usage_cache["ts"] = now
+                cached = limits
+        if not cached:
+            cached = ctx.get("rate_limits") or {}
+    return cached or {}
+
+
+async def _notify_operator(ctx: dict, text: str) -> None:
+    """Sends a TG message to the first allowed user. Non-critical — errors are logged."""
+    ptb_app = ctx.get("ptb_app")
+    if ptb_app is None:
+        return
+    allowed = os.environ.get("ALLOWED_USERS", "")
+    if not allowed:
+        return
+    for uid_str in allowed.split(","):
+        uid_str = uid_str.strip()
+        if uid_str.isdigit():
+            try:
+                await ptb_app.bot.send_message(chat_id=int(uid_str), text=text[:4096])
+            except Exception as e:
+                print(f"[deferred] notify_operator error: {e}")
+            break
+
+
+async def _execute_deferred(ctx: dict, record: dict) -> None:
+    """Execute a single deferred run. Mirrors _run_card logic for run_engine invocation."""
+    records = _load_deferred()
+    rec = next((r for r in records if r["id"] == record["id"]), None)
+    session_key = record["session_key"]
+    try:
+        topics = ctx["topics"]
+        topic = topics.get(session_key)
+        if topic is None:
+            raise ValueError(f"session_key {session_key!r} not found in topics")
+        cwd = topic.get("cwd") or ctx.get("DEFAULT_CWD") or str(Path.home())
+        project_name = topic.get("project", "unknown")
+        prompt = record["prompt"]
+        model = topic.get("model") or ctx.get("DEFAULT_MODEL", "sonnet")
+        run_engine = ctx.get("run_engine")
+        if run_engine is None:
+            raise RuntimeError("run_engine not available in ctx")
+
+        project_secrets = _secrets_read(cwd)
+        agents_config = topic.get("agents_config") or {}
+        agents_kwargs = _build_agents_kwargs(ctx, agents_config)
+
+        _bus_publish(session_key, {
+            "kind": "run_start",
+            "source": "deferred",
+            "prompt": prompt,
+            "run_id": record["id"],
+        })
+
+        answer_parts: list = []
+        async for event in run_engine(
+            project_name=project_name,
+            cwd=cwd,
+            prompt=prompt,
+            session_key=session_key,
+            model=model,
+            resume_session_id=ctx["sessions"].get(session_key),
+            env=project_secrets,
+            **agents_kwargs,
+        ):
+            etype = event["type"]
+            if etype == "text":
+                answer_parts.append(event["text"])
+                _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": record["id"]})
+            elif etype == "result":
+                if event.get("session_id"):
+                    ctx["sessions"][session_key] = event["session_id"]
+                    ctx["save_sessions"]()
+            elif etype == "error":
+                raise event["exc"]
+
+        _bus_publish(session_key, {"kind": "run_end", "outcome": "ok", "run_id": record["id"]})
+
+        result_text = "\n".join(answer_parts).strip()
+        if rec:
+            rec["status"] = "fired"
+            rec["error"] = None
+            _save_deferred(records)
+        notify_text = (
+            f"[OK] Deferred run complete [{record['project']}]: {result_text[:200]}"
+            if result_text else
+            f"[OK] Deferred run complete [{record['project']}]: {record['prompt'][:80]}..."
+        )
+        await _notify_operator(ctx, notify_text)
+
+    except Exception as e:
+        _bus_publish(session_key, {"kind": "run_end", "outcome": "fail", "run_id": record["id"]})
+        if rec:
+            rec["status"] = "failed"
+            rec["error"] = str(e)[:200]
+            _save_deferred(records)
+        await _notify_operator(ctx, f"[ERROR] Deferred run failed [{record.get('project', '?')}]: {e}")
+    finally:
+        ctx["running"].pop(session_key, None)
+
+
+async def _deferred_loop(ctx: dict) -> None:
+    """Deferred runs polling loop (Spec 020). Poll interval: DEFERRED_POLL_SEC. Startup delay: 15s."""
+    import random as _random
+    await asyncio.sleep(15)
+    while True:
+        try:
+            records = _load_deferred()
+            changed = False
+            for record in records:
+                if record.get("status") != "pending":
+                    continue
+                fire_on_reset = record.get("fire_on_reset", False)
+                fire_at = record.get("fire_at")
+                fire_now = False
+
+                if fire_on_reset:
+                    try:
+                        usage = await _get_cached_usage_data(ctx)
+                        limit = usage.get("five_hour")
+                        if limit is None:
+                            continue
+                        util = limit.get("utilization")
+                        if util is not None and util < _DEFERRED_FREE_THRESHOLD:
+                            fire_now = True
+                        else:
+                            resets_at = limit.get("resets_at")
+                            if resets_at is None:
+                                continue
+                            jitter = record.get("_jitter")
+                            if jitter is None:
+                                jitter = _random.randint(30, 90)
+                                record["_jitter"] = jitter
+                                changed = True
+                            fire_now = (time.time() >= resets_at + jitter)
+                    except Exception as e:
+                        print(f"[deferred_loop] usage fetch error: {e}")
+                        continue
+                elif fire_at:
+                    try:
+                        ts = _iso_to_unix(fire_at)
+                        fire_now = ts is not None and (time.time() >= ts)
+                    except Exception:
+                        continue
+                else:
+                    continue
+
+                if not fire_now:
+                    continue
+
+                # Check if session is busy
+                k = record["session_key"]
+                if ctx["running"].get(k):
+                    record["attempts"] = record.get("attempts", 0) + 1
+                    changed = True
+                    if record["attempts"] >= _DEFERRED_MAX_ATTEMPTS:
+                        record["status"] = "failed"
+                        record["error"] = "project busy after max attempts"
+                        _save_deferred(records)
+                        changed = False
+                        await _notify_operator(
+                            ctx,
+                            f"[ERROR] Deferred run {record['id']} failed: project busy after {_DEFERRED_MAX_ATTEMPTS} attempts"
+                        )
+                    else:
+                        record["fire_at"] = _unix_to_iso(time.time() + 300)
+                        record["fire_on_reset"] = False
+                        record.pop("_jitter", None)
+                        _save_deferred(records)
+                        changed = False
+                    continue
+
+                # Fire: mark synchronously before any await
+                record["status"] = "fired"
+                record["fired_at"] = _utcnow_iso()
+                _save_deferred(records)
+                changed = False
+                await _notify_operator(
+                    ctx,
+                    f"[START] Starting deferred run [{record['project']}]: {record['prompt'][:80]}..."
+                )
+                # Reserve running lock synchronously before creating task
+                ctx["running"][k] = True
+                _spawn_bg(_execute_deferred(ctx, record))
+
+            if changed:
+                _save_deferred(records)
+        except Exception as e:
+            print(f"[deferred_loop] error: {e}")
+
+        await asyncio.sleep(_DEFERRED_POLL_SEC)
+
+
+async def api_deferred_create(req: web.Request) -> web.Response:
+    """POST /api/deferred — queue a deferred run."""
+    ctx = req.app["ctx"]
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+
+    project = (body.get("project") or "").strip()
+    prompt = (body.get("prompt") or "").strip()
+    fire_at = body.get("fire_at")
+    fire_on_reset = body.get("fire_on_reset", False)
+
+    if not project:
+        return web.json_response({"error": "project required"}, status=400)
+    if not prompt:
+        return web.json_response({"error": "prompt required"}, status=400)
+    if fire_at and fire_on_reset:
+        return web.json_response({"error": "provide exactly one of fire_at or fire_on_reset"}, status=400)
+    if not fire_at and not fire_on_reset:
+        return web.json_response({"error": "provide exactly one of fire_at or fire_on_reset"}, status=400)
+
+    # Validate project exists in topics
+    topics = ctx["topics"]
+    session_key = None
+    for k, v in topics.items():
+        if v.get("project") == project:
+            session_key = k
+            break
+    if session_key is None:
+        return web.json_response({"error": f"unknown project: {project}"}, status=400)
+
+    if fire_at:
+        if _iso_to_unix(fire_at) is None:
+            return web.json_response({"error": "invalid fire_at format (ISO-8601 UTC)"}, status=400)
+
+    record = {
+        "id": _new_deferred_id(),
+        "project": project,
+        "session_key": session_key,
+        "prompt": prompt[:4096],
+        "fire_at": fire_at if fire_at else None,
+        "fire_on_reset": bool(fire_on_reset),
+        "created": _utcnow_iso(),
+        "status": "pending",
+        "fired_at": None,
+        "error": None,
+        "attempts": 0,
+    }
+
+    records = _load_deferred()
+    records.append(record)
+    _save_deferred(records)
+
+    trigger_str = "after rate-limit reset" if fire_on_reset else f"at {fire_at}"
+    await _notify_operator(ctx, f"[QUEUED] Deferred run queued [{project}] {trigger_str}: {prompt[:80]}...")
+
+    return web.json_response({"id": record["id"], "status": "pending"}, status=201)
+
+
+async def api_deferred_list(req: web.Request) -> web.Response:
+    """GET /api/deferred — list deferred runs with optional filters."""
+    records = _load_deferred()
+    status_filter = req.rel_url.query.get("status")
+    project_filter = req.rel_url.query.get("project")
+    if status_filter:
+        records = [r for r in records if r.get("status") == status_filter]
+    if project_filter:
+        records = [r for r in records if r.get("project") == project_filter]
+    return web.json_response(records)
+
+
+async def api_deferred_delete(req: web.Request) -> web.Response:
+    """DELETE /api/deferred/{id} — cancel a pending deferred run."""
+    deferred_id = req.match_info["id"]
+    records = _load_deferred()
+    rec = next((r for r in records if r["id"] == deferred_id), None)
+    if rec is None:
+        return web.json_response({"error": "not found"}, status=404)
+    status = rec.get("status")
+    if status in ("fired", "failed"):
+        return web.json_response({"error": f"already {status}"}, status=409)
+    rec["status"] = "cancelled"
+    _save_deferred(records)
+    return web.json_response({"cancelled": True})
+
+
 # ─────────────────────────── project model change ───────────────────────────
 #
 # POST /api/projects/{id}/model  {model: "opus"|"sonnet"|"haiku"}
@@ -6102,6 +6438,24 @@ async def api_schedules_get(req: web.Request) -> web.Response:
 
     records = sorted(records, key=sort_key)
 
+    # Spec 020: merge deferred pending records
+    deferred = _load_deferred()
+    for dr in deferred:
+        if dr.get("status") == "pending":
+            trigger = "after rate-limit reset" if dr.get("fire_on_reset") else (dr.get("fire_at") or "?")
+            records.append({
+                "id": dr["id"],
+                "source": "deferred",
+                "schedule": trigger,
+                "command": dr.get("prompt", "")[:80],
+                "project": dr.get("project"),
+                "last_run": None,
+                "next_run": dr.get("fire_at"),
+                "status": "ok",
+                "purpose": f"Deferred: {dr.get('prompt', '')[:60]}",
+                "annotations": {"fire_on_reset": dr.get("fire_on_reset", False), "deferred_id": dr["id"]},
+            })
+
     return web.json_response({
         "scanned_at": cache.get("scanned_at"),
         "source_statuses": cache.get("source_statuses", []),
@@ -6150,6 +6504,8 @@ async def start(ptb_app, ctx: dict) -> None:
         _scan_state_init(ctx)
         # Spec-019: Schedules registry — initialise file paths
         _schedules._schedules_init(ctx)
+        # Spec-020: Deferred Runs — initialise file path
+        _deferred_init(ctx)
 
         app = web.Application(middlewares=[error_middleware, auth_middleware], client_max_size=20 * 1024 * 1024)
         app["ctx"] = ctx
@@ -6271,6 +6627,11 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/schedules/scan", api_schedules_scan)
         app.router.add_post("/api/schedules/{id}/investigate", api_schedules_investigate)
 
+        # Spec-020: Deferred Runs
+        app.router.add_post("/api/deferred", api_deferred_create)
+        app.router.add_get("/api/deferred", api_deferred_list)
+        app.router.add_delete("/api/deferred/{id}", api_deferred_delete)
+
         # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
 
@@ -6295,5 +6656,8 @@ async def start(ptb_app, ctx: dict) -> None:
         _spawn_bg(_schedules._schedules_scan_loop(ctx))
         print(f"[webapp] schedules scanner started (interval {_schedules._SCAN_INTERVAL_SEC}s)")
         print(f"[webapp] queue drain loop started (interval {_QUEUE_DRAIN_INTERVAL_SEC}s)")
+        # Spec-020: Deferred Runs — polling loop
+        _spawn_bg(_deferred_loop(ctx))
+        print(f"[webapp] deferred runs loop started (interval {_DEFERRED_POLL_SEC}s)")
     except Exception as e:
         print(f"[webapp] ERROR during startup: {e}")

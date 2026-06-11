@@ -389,4 +389,18 @@ export const api = {
 
   schedulesInvestigate: (id: string) =>
     apiFetch<{ card_id: string }>(`/api/schedules/${encodeURIComponent(id)}/investigate`, { method: 'POST' }),
+
+  // Spec-020: Deferred Runs
+  deferredCreate: (body: Record<string, unknown>) =>
+    apiFetch<{ id: string; status: string }>('/api/deferred', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  deferredList: (qs = '') =>
+    apiFetch<unknown[]>(`/api/deferred${qs}`),
+
+  deferredDelete: (id: string) =>
+    apiFetch<{ cancelled: boolean }>(`/api/deferred/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
