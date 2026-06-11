@@ -71,6 +71,10 @@ interface Props {
   onSplitClose?: () => void    // show ✕ Close button (right pane only)
   /** Passed to ChatTab for restoring running-state when switching back to the tab. */
   isActive?: boolean
+  /** H3: All open project IDs in tab order (for swipe navigation) */
+  openProjectIds?: string[]
+  /** H3: Called when swipe switches to a different project */
+  onSwipeToProject?: (id: string) => void
 }
 
 type GitSyncState = 'idle' | 'busy' | 'ok' | 'err'
@@ -226,7 +230,7 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
   )
 }
 
-export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose, isActive }: Props) {
+export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
   // Mobile inner tab: null = show chat (default), TabId = show that inner tab
   const [mobileInnerTab, setMobileInnerTab] = useState<TabId | null>(null)
@@ -410,6 +414,75 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   // incidents count: project.incidents is defined in types.ts
   const incidentsCount = project.incidents ?? 0
 
+  // ── H3: Swipe gesture to switch between open project chats ──────────────────
+  // Hooks MUST be declared before any early return (Rules of Hooks).
+  // SWIPE DIRECTION MAPPING (flip the +1/-1 to reverse):
+  // Swipe RIGHT (finger moves right) → NEXT project tab (index + 1)
+  // Swipe LEFT  (finger moves left)  → PREVIOUS project tab (index - 1)
+  const SWIPE_H_THRESHOLD = 60   // minimum horizontal distance to trigger switch
+  const SWIPE_V_MAX       = 30   // maximum vertical drift (to not conflict with scroll)
+
+  const swipeStart = useRef<{ x: number; y: number; onScrollable: boolean } | null>(null)
+  const [swipeAnim, setSwipeAnim] = useState<'left' | 'right' | null>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+
+  function isOnHScrollable(el: EventTarget | null): boolean {
+    let node = el as HTMLElement | null
+    while (node && node !== contentRef.current) {
+      if (node.scrollWidth > node.clientWidth) return true
+      node = node.parentElement
+    }
+    return false
+  }
+
+  function handleTouchStart(e: React.TouchEvent) {
+    if (mobileInnerTab !== null) return  // only on Chat tab
+    const touch = e.touches[0]
+    swipeStart.current = {
+      x: touch.clientX,
+      y: touch.clientY,
+      onScrollable: isOnHScrollable(e.target),
+    }
+  }
+
+  function handleTouchMove(e: React.TouchEvent) {
+    if (!swipeStart.current || swipeStart.current.onScrollable) return
+    if (mobileInnerTab !== null) return
+    const touch = e.touches[0]
+    const dy = Math.abs(touch.clientY - swipeStart.current.y)
+    // Prevent scroll conflict: if vertical drift exceeds max, cancel swipe detection
+    if (dy > SWIPE_V_MAX) {
+      swipeStart.current = null
+    }
+  }
+
+  function handleTouchEnd(e: React.TouchEvent) {
+    if (!swipeStart.current || swipeStart.current.onScrollable) return
+    if (mobileInnerTab !== null) return
+    const touch = e.changedTouches[0]
+    const dx = touch.clientX - swipeStart.current.x
+    const dy = Math.abs(touch.clientY - swipeStart.current.y)
+    swipeStart.current = null
+
+    if (Math.abs(dx) < SWIPE_H_THRESHOLD || dy > SWIPE_V_MAX) return
+    if (!openProjectIds || !onSwipeToProject) return
+
+    const currentIdx = openProjectIds.indexOf(project.id)
+    if (currentIdx === -1) return
+
+    // Swipe RIGHT → next (index + 1); Swipe LEFT → previous (index - 1)
+    const delta = dx > 0 ? +1 : -1  // swipe right=+1, left=-1
+    const nextIdx = currentIdx + delta
+    if (nextIdx < 0 || nextIdx >= openProjectIds.length) return  // edge: no wrap
+
+    const dir = dx > 0 ? 'right' : 'left'
+    setSwipeAnim(dir)
+    setTimeout(() => {
+      setSwipeAnim(null)
+      onSwipeToProject(openProjectIds[nextIdx])
+    }, 180)  // matches CSS transition duration
+  }
+
   // Free chat — no left tab panel, chat at full width.
   if (project.is_free) {
     return (
@@ -461,8 +534,14 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
               </button>
             ))}
           </nav>
-          {/* Content area: chat or inner tab */}
-          <div className="mobile-project-content">
+          {/* Content area: chat or inner tab — swipe handler on Chat tab only */}
+          <div
+            className={`mobile-project-content${swipeAnim ? ` swipe-anim-${swipeAnim}` : ''}`}
+            ref={contentRef}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+          >
             {mobileInnerTab === null ? (
               <ErrorBoundary label="Chat">
                 <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />

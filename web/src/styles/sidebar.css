@@ -396,3 +396,30 @@
     padding-bottom: 11px;
   }
 }
+
+/* H1: Back-to-project button — mobile only, visible when a project is active */
+.sidebar-back-btn {
+  display: none;
+}
+@media (max-width: 768px) {
+  .sidebar-back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 44px;
+    background: var(--bg3);
+    border: none;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    gap: 6px;
+    transition: background var(--transition), color var(--transition);
+  }
+  .sidebar-back-btn:hover {
+    background: var(--bg4);
+    color: var(--text);
+  }
+}

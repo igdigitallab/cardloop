@@ -496,3 +496,18 @@
 }
 
 /* On older browsers without dvh, keep the existing 100% */
+
+/* H3: Swipe animation when switching between open project chats */
+@media (max-width: 768px) {
+  .mobile-project-content {
+    transition: transform 0.18s ease, opacity 0.18s ease;
+  }
+  .mobile-project-content.swipe-anim-right {
+    transform: translateX(30px);
+    opacity: 0;
+  }
+  .mobile-project-content.swipe-anim-left {
+    transform: translateX(-30px);
+    opacity: 0;
+  }
+}

@@ -624,6 +624,8 @@ export default function App() {
         newProjectBusy={newProjectBusy}
         drawerOpen={drawerOpen}
         onCloseDrawer={() => setDrawerOpen(false)}
+        activeProjectId={activeId}
+        onGoBack={() => setMobileScreen('project')}
       />
 
       <div className="main-area">
@@ -696,6 +698,8 @@ export default function App() {
                   onRenameSuccess={handleRenameSuccess}
                   onSplitCreate={p.is_free && !splitId ? () => handleSplitCreate(p.id) : undefined}
                   isActive={isActive}
+                  openProjectIds={openIds}
+                  onSwipeToProject={(id) => { handleTabActivate(id) }}
                 />
               </div>
               {splitProject && (

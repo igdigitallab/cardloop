@@ -39,6 +39,7 @@ export const ru = {
   'sidebar.no_results': 'Ничего не найдено',
   'sidebar.delete_free_chat': 'Удалить свободный чат',
   'sidebar.delete_chat': 'Удалить чат',
+  'sidebar.back_to_project': 'Вернуться к проекту',
 
   // ── Project Tab Bar ──────────────────────────────────────────
   'tabbar.new_free_chat': 'Новый свободный чат',
@@ -47,6 +48,8 @@ export const ru = {
   'tabbar.close': 'Закрыть',
   'tabbar.back_to_list': 'Назад к списку проектов',
   'tabbar.open_sidebar': 'Открыть сайдбар',
+  'tabbar.open_tabs_menu': 'Переключить между открытыми проектами',
+  'tabbar.open_tabs_count': 'Открытые вкладки',
 
   // ── Mobile navigation ────────────────────────────────────────
   'mobile.chat_tab': '💬 Chat',

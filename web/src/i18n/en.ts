@@ -38,6 +38,7 @@ export const en = {
   'sidebar.no_results': 'Nothing found',
   'sidebar.delete_free_chat': 'Delete free chat',
   'sidebar.delete_chat': 'Delete chat',
+  'sidebar.back_to_project': 'Back to project',
 
   // ── Project Tab Bar ──────────────────────────────────────────
   'tabbar.new_free_chat': 'New free chat',
@@ -46,6 +47,8 @@ export const en = {
   'tabbar.close': 'Close',
   'tabbar.back_to_list': 'Back to project list',
   'tabbar.open_sidebar': 'Open sidebar',
+  'tabbar.open_tabs_menu': 'Switch between open projects',
+  'tabbar.open_tabs_count': 'Open tabs',
 
   // ── Mobile navigation ────────────────────────────────────────
   'mobile.chat_tab': '💬 Chat',

@@ -23,6 +23,10 @@ interface Props {
   drawerOpen?: boolean
   /** Called when the drawer should close (e.g. close button inside) */
   onCloseDrawer?: () => void
+  /** H1: The current active project ID (for mobile back button) */
+  activeProjectId?: string | null
+  /** H1: Called when operator taps back — navigate back to the project screen */
+  onGoBack?: () => void
 }
 
 function unreadFor(p: Project, map: Record<string, number>): number {
@@ -33,7 +37,7 @@ function unreadFor(p: Project, map: Record<string, number>): number {
 export function Sidebar({
   projects, selectedId, onSelect, onLogout, onDeleteFree, loading,
   unreadBySession, replyReadyIds, collapsed, onToggleCollapse, onReorder,
-  onNewProject, newProjectBusy, drawerOpen,
+  onNewProject, newProjectBusy, drawerOpen, activeProjectId, onGoBack,
 }: Props) {
   const [search, setSearch] = useState('')
   // Confirm delete free chat
@@ -162,6 +166,17 @@ export function Sidebar({
             ⟨
           </button>
         </div>
+        {/* H1: Back-to-project button — visible ONLY on mobile when a project is active */}
+        {onGoBack && activeProjectId && activeProjectId !== '__global__' && activeProjectId !== '__schedules__' && (
+          <button
+            className="sidebar-back-btn"
+            onClick={onGoBack}
+            title={t['sidebar.back_to_project']}
+            aria-label={t['sidebar.back_to_project']}
+          >
+            ✕ {t['sidebar.back_to_project']}
+          </button>
+        )}
         <input
           className="search-input"
           type="text"

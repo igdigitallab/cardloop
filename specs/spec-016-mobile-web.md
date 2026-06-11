@@ -353,3 +353,48 @@ Connection budget after fix: 2 (global + active project) instead of N+1.
 ### Director directives applied
 - **Directive 1**: mobile-project-header removed; ProjectTabBar + mobile-inner-tabs = 2-row chrome (~88px)
 - **Directive 2**: mobile toggle hidden; desktop collapsed = narrow rail (expand + new, no icon list)
+
+---
+
+## Phase H — Operator follow-ups after Phase G acceptance (2026-06-11)
+
+Three mobile-only improvements requested by the operator. All changes gated behind
+`@media (max-width: 768px)` (CSS) / `narrow` guard (JS); desktop >768 untouched.
+
+**H1 — Back button on the project-list screen.**
+Opening the full-screen project list from a project left no way back (the `‹` chevron
+lives in ProjectTabBar, hidden on `mobile-on-list`). Fix: `.sidebar-back-btn` row at the
+top of the sidebar — rendered ONLY when an active project exists (`activeProjectId` not
+null / `__global__` / `__schedules__`), hidden at >768px via CSS. Tap →
+`setMobileScreen('project')` (reuses the existing reverse slide). On first launch (no
+active project) the button is absent. Props: `Sidebar.activeProjectId` + `Sidebar.onGoBack`
+(wired in App.tsx).
+
+**H2 — Open-tabs dropdown menu in ProjectTabBar.**
+The mobile tab strip fits ~1 tab. Added a compact `▾ N` button (≥44px tap target) inside
+`.ptab-list` (before the `+` button) showing the count of open projects. Tap → dropdown
+listbox of all open tabs: name + green reply-ready dot + red 🚨 incidents badge + unread
+counter. Items are ≥44px tall. Tap an item → `onActivate(id)` + menu closes. Horizontal
+scroll of the strip is preserved; the menu is `display:none` on desktop. Click-outside
+closes (document mousedown listener while open).
+
+**H3 — Swipe to switch between open project chats.**
+Gesture is active only at ≤768px AND only when the inner Chat tab is shown
+(`mobileInnerTab === null`) — Board/Files/etc. keep their own scrolls untouched.
+Recognition on `.mobile-project-content` (touchstart/move/end): horizontal delta >60px,
+vertical drift <30px (cancels mid-gesture if exceeded — feed scroll wins), and the gesture
+is ignored when it starts inside a horizontally scrollable element (`scrollWidth >
+clientWidth` checked up the parent chain — pre/code blocks).
+
+**Swipe direction mapping** (single constant block in ProjectView.tsx, flip `+1/-1` to reverse):
+- Swipe RIGHT (finger moves right) → NEXT open tab (index + 1 = the project to the RIGHT in tab order)
+- Swipe LEFT (finger moves left) → PREVIOUS open tab (index - 1 = to the LEFT)
+
+At list edges: no wrap-around, gesture is a no-op. Feedback: 180ms translateX+opacity CSS
+transition (`swipe-anim-left/right`) on the content area, then `onSwipeToProject(id)` →
+`handleTabActivate`. Props: `ProjectView.openProjectIds` + `ProjectView.onSwipeToProject`
+(wired in App.tsx).
+
+Acceptance (Playwright 390×844): list back button appears from project & returns; ▾ menu
+lists 3+ open projects & switches; synthetic touch swipe switches to the adjacent tab;
+vertical feed scroll unaffected; desktop 1440×900 regression — sidebar/split/tabs unchanged.

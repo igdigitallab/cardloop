@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { Project } from '../types'
 import { UsageBadge } from './UsageBadge'
+import { t } from '../i18n'
 
 interface Props {
   projects: Project[]
@@ -122,6 +123,22 @@ export function ProjectTabBar({
 }: Props) {
   const activeTabRef = useRef<HTMLDivElement>(null)
 
+  // H2: Open-tabs dropdown state + click-outside handling
+  const [tabMenuOpen, setTabMenuOpen] = useState(false)
+  const tabMenuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (tabMenuRef.current && !tabMenuRef.current.contains(e.target as Node)) {
+        setTabMenuOpen(false)
+      }
+    }
+    if (tabMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [tabMenuOpen])
+
   // D5: auto-scroll active tab into view when activeId changes
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ behavior: 'smooth', inline: 'nearest' })
@@ -139,6 +156,52 @@ export function ProjectTabBar({
       >
         {mobileScreen === 'project' ? '‹' : '☰'}
       </button>
+      {/* H2: Open-tabs dropdown menu — mobile only. Lives OUTSIDE .ptab-list:
+          the list has overflow-x:auto which would clip the absolute dropdown. */}
+      {projects.length > 0 && (
+        <div className="ptab-menu-wrap" ref={tabMenuRef}>
+            <button
+              className="ptab-menu-btn"
+              onClick={() => setTabMenuOpen(s => !s)}
+              title={t['tabbar.open_tabs_menu']}
+              aria-label={t['tabbar.open_tabs_count']}
+            >
+              ▾ {projects.length}
+            </button>
+            {tabMenuOpen && (
+              <div className="ptab-menu-dropdown" role="listbox">
+                {projects.map(p => {
+                  const sk = p.tg_thread != null ? String(p.tg_thread) : null
+                  const unread = sk ? (unreadBySession[sk] || 0) : 0
+                  const isActive = p.id === activeId
+                  const hasIncidents = (p.incidents ?? 0) > 0
+                  return (
+                    <button
+                      key={p.id}
+                      className={`ptab-menu-item${isActive ? ' active' : ''}`}
+                      role="option"
+                      aria-selected={isActive}
+                      onClick={() => { onActivate(p.id); setTabMenuOpen(false) }}
+                    >
+                      <span className="ptab-menu-name">{p.name}</span>
+                      {replyReadyIds?.has(p.id) && !isActive && (
+                        <span className="ptab-menu-dot ptab-menu-dot-green" title="Agent reply ready" />
+                      )}
+                      {hasIncidents && (
+                        <span className="ptab-menu-badge" title={`${p.incidents} incident(s)`}>
+                          🚨 {p.incidents}
+                        </span>
+                      )}
+                      {unread > 0 && !isActive && (
+                        <span className="ptab-unread">{unread > 99 ? '99+' : unread}</span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+        </div>
+      )}
       <div className="ptab-list">
         {projects.map(p => {
           const sk = p.tg_thread != null ? String(p.tg_thread) : null
