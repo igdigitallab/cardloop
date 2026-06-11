@@ -273,6 +273,42 @@ Acceptance for Phase E:
 | C | Touch targets ≥44px, 16px inputs, modal bottom-sheets, dvh + safe-area | **DONE** |
 | D | Chat flex height fix, board horizontal scroll, Shift+Enter hint, Split button hide | ~2-3h |
 | E | PWA manifest + icons + meta tags | ~1h |
+| F | App-like navigation stack (rev3, see below) | **DONE** |
+
+---
+
+## Phase F — App-like navigation stack (revision-3, SHIPPED 2026-06-11)
+
+Operator verdict on phases A–C: a shrunk desktop "looks awful" on a phone. Rev3 replaces
+the responsive-squeeze approach with a proper mobile nav stack at ≤768px (desktop >768 untouched):
+
+- **Screen 1 — project list**: sidebar content covers the full screen (`.app-layout.mobile-on-list`).
+  Selecting a project slides to Screen 2.
+- **Screen 2 — project**: chat fills the whole screen (primary tool). `ProjectTabBar` (project
+  tabs + green reply-ready badges) stays on top; the hamburger becomes a `‹` back-to-list button.
+  Below it: compact horizontally scrollable inner tab strip (`.mobile-inner-tabs`) —
+  Chat | CLAUDE.md | Logs | Board | Files | Memory | Activity | Settings.
+- Inner tabs open full-screen replacing chat; tapping Chat returns.
+- State: `mobileScreen: 'list' | 'project'` in App.tsx; `mobileInnerTab: TabId | null` in ProjectView.
+
+### Defect found in review + root cause (fixed)
+
+**Symptom:** Board (and any data tab) stuck on "Loading…" forever on mobile over plain HTTP.
+
+**Root cause — NOT a mobile-layout bug per se:** every open project tab keeps its ProjectView
+mounted (`display:none` slot), and each mounted ProjectView held an open per-project SSE
+fetch-stream (`/api/projects/<id>/activity-stream`). UI state hydrates the operator's open-tab
+list (8 tabs) from the server, so 8 SSE streams + 1 global EventSource exceeded the browser's
+~6-connections-per-origin HTTP/1.1 limit → every subsequent `fetch()` queued indefinitely.
+HTTP/2 (prod via Cloudflare) multiplexes and hides the bug; plain HTTP (localhost) deadlocks.
+
+**Fix:** `ProjectActivityProvider` got an `active` prop — the SSE stream is held only for the
+*active* project tab (`active={isActive}` in ProjectView). On reactivation the provider
+reconnects and emits one synthetic `run_end` ("sse-catch-up") so `useOnRunEnd` subscribers
+re-fetch whatever they missed while hidden. ChatTab is immune to the synthetic event
+(busActiveRef gate) and self-heals via its 5s `/running` poll. Reply-ready badges are
+unaffected — they ride the single global `/api/activity-stream` EventSource in App.tsx.
+Connection budget after fix: 2 (global + active project) instead of N+1.
 
 ---
 

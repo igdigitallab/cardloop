@@ -413,7 +413,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   // Free chat — no left tab panel, chat at full width.
   if (project.is_free) {
     return (
-      <ProjectActivityProvider projectId={project.id}>
+      <ProjectActivityProvider projectId={project.id} active={isActive}>
         <div className="main-content project-free-layout">
           {(onSplitCreate || onSplitClose) && (
             <div className="free-chat-toolbar">
@@ -441,7 +441,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   // ── Mobile narrow branch (≤768px, non-free projects only) ──────────────────
   if (narrow && !project.is_free) {
     return (
-      <ProjectActivityProvider projectId={project.id}>
+      <ProjectActivityProvider projectId={project.id} active={isActive}>
         <div className="main-content mobile-project-layout">
           {/* Compact project header row */}
           <div className="mobile-project-header">
@@ -492,7 +492,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   }
 
   return (
-    <ProjectActivityProvider projectId={project.id}>
+    <ProjectActivityProvider projectId={project.id} active={isActive}>
     <div className="main-content project-split-layout" ref={containerRef}>
       {/* LEFT: header + tabs + content */}
       <div className="project-left-pane" style={leftStyle}>
