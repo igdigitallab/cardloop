@@ -1,12 +1,12 @@
 """
-Тесты системы настроек кокпита (карточка f2ba02).
+Tests for cockpit settings system (card f2ba02).
 
-Покрывают:
-- глобальный стор data/settings.json: load/save/get + hot-reload по mtime;
-- валидацию глобальных настроек (тип/диапазон/модель/сброс);
-- провязку в рантайм: self_heal master-kill, дефолт-модель;
+Covers:
+- global store data/settings.json: load/save/get + hot-reload by mtime;
+- validation of global settings (type/range/model/reset);
+- runtime wiring: default model;
 - per-project git_enabled: helper + _card_run_mode → legacy + git-sync 409;
-- API GET/POST глобальных и per-project настроек.
+- API GET/POST global and per-project settings.
 """
 import sys
 import json

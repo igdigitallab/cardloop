@@ -1773,7 +1773,7 @@ async def api_project_notify_toggle(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/notify-on-error {enabled: bool} — TG notifications on new errors.
 
     When enabled: scanner sends a ping to the project's TG topic when new incidents are detected
-    ("crashed"). Independent of self-healing. Flag notify_on_error in topics.json for all
+    ("crashed"). Flag notify_on_error in topics.json for all
     entries with the same cwd. Auth: standard middleware.
     """
     ctx = req.app["ctx"]
@@ -1971,7 +1971,7 @@ def _dismissed_is_active(h: str, now: float) -> bool:
 # ─────────────────────── global settings (data/settings.json) ───────────────────────
 #
 # Global cockpit knobs, override env defaults at runtime (hot-reload by mtime).
-# Per-project settings live in topics.json (model/self_heal/notify_on_error/log_cmd/
+# Per-project settings live in topics.json (model/notify_on_error/log_cmd/
 # test_cmd/git_enabled). Globals are in a separate file as they are not project-bound.
 # Init: start() calls _settings_init(ctx).
 
@@ -3559,7 +3559,7 @@ async def api_usage(req: web.Request) -> web.Response:
 # Updates model in ALL topics with the same cwd (one project may have multiple TG topics),
 # persists via save_topics() from ctx. Takes effect on the next request (current session is not touched).
 
-_ALLOWED_MODELS: set[str] = {"opus", "sonnet", "haiku"}
+_ALLOWED_MODELS: set[str] = {"opus", "sonnet", "haiku", "fable"}
 
 
 async def api_project_set_model(req: web.Request) -> web.Response:
@@ -4872,6 +4872,17 @@ async def api_project_chat(req: web.Request) -> web.Response:
                         "ts": time.time(),
                     }
                 await _send({"type": "rate_limit", "status": event.get("status", "")})
+            elif etype == "subagent":
+                # Forward sub-agent lifecycle events as-is; cockpit UI display: Phase C.
+                await _send({
+                    "type": "subagent",
+                    "subtype": event.get("subtype"),
+                    "task_id": event.get("task_id"),
+                    "description": event.get("description"),
+                    "status": event.get("status"),
+                    "summary": event.get("summary"),
+                    "last_tool_name": event.get("last_tool_name"),
+                })
             # other types — ignore
 
         await _send({"type": "done"})

@@ -17,12 +17,16 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from claude_agent_sdk import (
+    AgentDefinition,
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     RateLimitEvent,
     ResultMessage,
     SystemMessage,
+    TaskNotificationMessage,
+    TaskProgressMessage,
+    TaskStartedMessage,
     TextBlock,
     ToolUseBlock,
 )
@@ -78,12 +82,62 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")  # optional — web-only mode if emp
 GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID", "0"))
 ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip()}
 DEFAULT_CWD = os.environ.get("DEFAULT_CWD", str(Path.home()))
-DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "opus")
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "fable")
 
 WEB_PORT = int(os.environ.get("WEB_PORT", "8787"))           # web cockpit port
 WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")            # passphrase for cockpit login
 
-MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku"}  # CLI resolves aliases to latest
+MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku", "fable": "fable"}  # CLI resolves aliases to latest
+
+# ─────────────────────────── sub-agent roster ───────────────────────────
+# Default agents available to conductor sessions via the SDK Task tool.
+# Models are configurable via env; Phase C will add per-project overrides.
+_EXECUTOR_MODEL = os.environ.get("EXECUTOR_MODEL", "sonnet")
+_RESEARCHER_MODEL = os.environ.get("RESEARCHER_MODEL", "sonnet")
+_QUICK_MODEL = os.environ.get("QUICK_MODEL", "haiku")
+
+DEFAULT_AGENTS: dict = {
+    "executor": AgentDefinition(
+        description="General code and infra execution agent. Writes files, runs bash commands.",
+        prompt=(
+            "You are an executor sub-agent. Carry out the task brief you receive completely "
+            "and autonomously. Write files, run bash commands, and fix errors as needed. "
+            "Report results concisely."
+        ),
+        model=_EXECUTOR_MODEL,
+        permissionMode="bypassPermissions",
+    ),
+    "researcher": AgentDefinition(
+        description="Read-only research agent. Web lookups, file reads, grep. No writes.",
+        prompt=(
+            "You are a researcher sub-agent. Gather information requested in the task brief. "
+            "Use web search, file reads, and grep. Do NOT write or edit files."
+        ),
+        model=_RESEARCHER_MODEL,
+        permissionMode="bypassPermissions",
+        disallowedTools=["Write", "Edit", "NotebookEdit"],
+    ),
+    "quick": AgentDefinition(
+        description="Fast lookup and simple transform agent. Cheap, low-latency questions.",
+        prompt=(
+            "You are a quick-response sub-agent. Answer the task brief concisely and directly."
+        ),
+        model=_QUICK_MODEL,
+        permissionMode="bypassPermissions",
+    ),
+}
+
+# Conductor directive appended to system_prompt when model is fable.
+# Kept as a module constant so it can be asserted in tests without instantiating run_engine.
+CONDUCTOR_PROMPT = (
+    "You are an orchestrator. Delegate substantial execution to sub-agents via the Task tool — "
+    "pass them a self-contained brief (no chat history; just what they need). Reserve your own "
+    "turns for planning, decision-making, and synthesising results. Do not run long code "
+    "sequences or file-editing loops yourself."
+)
+
+# Maximum TaskProgressMessage events forwarded to SSE per task (prevents flood on long runs).
+MAX_SUBAGENT_PROGRESS = int(os.environ.get("MAX_SUBAGENT_PROGRESS", "10"))
 
 # Personalisation: set via env; neutral defaults work without .env for new users.
 OPERATOR_NAME = os.environ.get("OPERATOR_NAME", "the operator")
@@ -320,7 +374,6 @@ async def report_error(context, chat, thread, where: str, exc: BaseException):
     block = tb[-3500:]  # tail of traceback — most relevant part
     text = f"{head}\n<pre>{html.escape(block)}</pre>"
     # Log to stdout → journalctl → error-scanner picks up Traceback → incident in Failed.
-    # Without this, crashes are only visible in TG and never reach the self-heal scanner.
     print(f"[crash] {where}: {type(exc).__name__}: {exc}\n{tb}", flush=True)
     try:
         await _tg_call(lambda: context.bot.send_message(
@@ -423,6 +476,7 @@ async def run_engine(  # type: ignore[return]
     system_prompt: dict = None,
     env: dict = None,
     resume_session_id: str = None,
+    agents: "dict | None" = None,
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
@@ -435,6 +489,7 @@ async def run_engine(  # type: ignore[return]
         system_prompt     — dict {type,preset,append}, default is TG preset
         env               — extra env vars for the agent (TG_CHAT_ID etc.)
         resume_session_id — session_id to resume (None = new session)
+        agents            — sub-agent roster; defaults to DEFAULT_AGENTS when None
 
     Yields event dicts. SDK exceptions are wrapped as {"type": "error", "exc": ...}.
     """
@@ -443,8 +498,22 @@ async def run_engine(  # type: ignore[return]
 
     resolved_model = MODELS.get(model, model) if model else MODELS.get(DEFAULT_MODEL, DEFAULT_MODEL)
 
+    # Conductor directive: inject when using fable as orchestrator model.
+    if resolved_model and resolved_model.startswith("fable"):
+        existing_append = system_prompt.get("append") or ""
+        sep = "\n" if existing_append else ""
+        system_prompt = dict(system_prompt)
+        system_prompt["append"] = existing_append + sep + CONDUCTOR_PROMPT
+
+    # Sub-agent roster: use provided agents or fall back to the default roster.
+    effective_agents = agents if agents is not None else DEFAULT_AGENTS
+
+    # Fallback model: if fable is unavailable at runtime, degrade to opus silently.
+    fallback = "opus" if resolved_model and resolved_model.startswith("fable") else None
+
     opts = ClaudeAgentOptions(
         model=resolved_model,
+        fallback_model=fallback,
         permission_mode="bypassPermissions",
         cwd=cwd,
         setting_sources=["user", "project"],
@@ -452,6 +521,7 @@ async def run_engine(  # type: ignore[return]
         disallowed_tools=DISALLOWED_TOOLS,
         system_prompt=system_prompt,
         env=env or {},
+        agents=effective_agents,
     )
 
     audit(project_name, "TASK", short(prompt, 300))
@@ -493,7 +563,37 @@ async def run_engine(  # type: ignore[return]
                         "context_tokens": last_ctx_tokens,
                     }
                 elif isinstance(msg, SystemMessage):
-                    pass   # SDK system messages — not forwarded to transport
+                    if isinstance(msg, TaskStartedMessage):
+                        yield {
+                            "type": "subagent",
+                            "subtype": "started",
+                            "task_id": msg.task_id,
+                            "description": msg.description,
+                            "status": None,
+                            "summary": None,
+                            "last_tool_name": None,
+                        }
+                    elif isinstance(msg, TaskProgressMessage):
+                        yield {
+                            "type": "subagent",
+                            "subtype": "progress",
+                            "task_id": msg.task_id,
+                            "description": msg.description,
+                            "status": None,
+                            "summary": None,
+                            "last_tool_name": getattr(msg, "last_tool_name", None),
+                        }
+                    elif isinstance(msg, TaskNotificationMessage):
+                        yield {
+                            "type": "subagent",
+                            "subtype": "notification",
+                            "task_id": msg.task_id,
+                            "description": msg.summary,   # notification has no description field
+                            "status": msg.status,
+                            "summary": msg.summary,
+                            "last_tool_name": None,
+                        }
+                    # Other SystemMessage subtypes remain silent
     except Exception as exc:
         yield {"type": "error", "exc": exc}
 
@@ -587,6 +687,7 @@ async def run_agent(context, update, prompt: str):
     hb = asyncio.create_task(heartbeat())
     wd = asyncio.create_task(watchdog())
     engine_exc = None
+    subagent_progress_counts: dict = {}   # task_id -> count of progress events seen
     webapp._bus_publish(k, {"kind": "run_start", "source": "tg", "prompt": prompt, "run_id": None})
     try:
         # Project secrets (Spec 007) augment env; TG_CHAT_ID/TG_THREAD_ID take priority
@@ -646,6 +747,32 @@ async def run_agent(context, update, prompt: str):
                         "utilization": event.get("utilization"),
                         "ts": time.time(),
                     }
+
+            elif etype == "subagent":
+                subtype = event.get("subtype")
+                task_id = event.get("task_id", "")
+                description = event.get("description", "")
+                if subtype == "started":
+                    log_lines.append(f"⚙ sub-agent started: {short(description, 60)}")
+                    await push_status()
+                elif subtype == "progress":
+                    # Rate-limit: forward to SSE but skip excessive TG status updates.
+                    count = subagent_progress_counts.get(task_id, 0) + 1
+                    subagent_progress_counts[task_id] = count
+                    if count <= MAX_SUBAGENT_PROGRESS:
+                        tool = event.get("last_tool_name") or ""
+                        detail = f" [{tool}]" if tool else ""
+                        log_lines.append(f"  ↳ {short(description, 50)}{detail}")
+                        await push_status()
+                elif subtype == "notification":
+                    status = event.get("status") or ""
+                    summary = event.get("summary") or ""
+                    icon = "✓" if status == "completed" else "✗"
+                    line = f"{icon} sub-agent {status}: {short(summary or description, 80)}"
+                    log_lines.append(line)
+                    answer.append(f"\n_{line}_")   # append terminal result to final reply
+                    await push_status()
+                webapp._bus_publish(k, {"kind": "subagent", "run_id": None, **event})
 
             elif etype == "error":
                 engine_exc = event["exc"]
@@ -1041,7 +1168,8 @@ def _build_ctx(ptb_app) -> dict:
         # Engine + models for kanban auto-run
         "run_engine": run_engine,
         "MODELS": MODELS,
-        # PTB app reference for TG pings from _run_card / self-heal / notify_on_error.
+        "DEFAULT_AGENTS": DEFAULT_AGENTS,
+        # PTB app reference for TG pings from _run_card and notify_on_error.
         # None in web-only mode — all callers guard on ptb_app is None → no-op.
         "ptb_app": ptb_app,
         # Needed to synthesise session_key "<chat>:<thread>" when creating new projects
