@@ -823,3 +823,146 @@ def test_schedules_init_sets_paths(tmp_path):
     assert _sched._ANNOTATIONS_PATH == data / "schedules_annotations.json"
     assert _sched._STATIC_PATH == data / "schedules.json"
     assert _sched._BOOTSTRAPPED is False
+
+
+# ─────────────────────────── Task 1: systemd project resolution ───────────────
+
+def test_resolve_project_unit_name_prefix_matches(tmp_path):
+    """Unit name prefix heuristic: networking-crm-sync.timer → networking-os."""
+    project_dir = tmp_path / "networking-os"
+    project_dir.mkdir()
+    fake_ctx = {
+        "topics": {
+            "1:1": {"project": "Networking-OS", "cwd": str(project_dir), "model": "fable"},
+        },
+        "sessions": {},
+        "running": {},
+        "DATA": tmp_path,
+        "HERE": ROOT,
+        "VAULT_PROJECTS": None,
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "save_topics": lambda: None,
+        "run_engine": None,
+        "ptb_app": None,
+    }
+    # Command is just /usr/bin/curl (no path match), but unit_name prefix matches
+    result = _sched._resolve_project(fake_ctx, "/usr/bin/curl", unit_name="networking-crm-sync.timer")
+    assert result == "networking-os", f"Expected networking-os, got {result!r}"
+
+
+def test_resolve_project_exec_start_path_match(tmp_path):
+    """ExecStart argv with project venv path resolves correctly."""
+    project_dir = tmp_path / "networking-os"
+    project_dir.mkdir()
+    venv_python = str(project_dir / ".venv" / "bin" / "python")
+    fake_ctx = {
+        "topics": {
+            "1:1": {"project": "Networking-OS", "cwd": str(project_dir), "model": "fable"},
+        },
+        "sessions": {},
+        "running": {},
+        "DATA": tmp_path,
+        "HERE": ROOT,
+        "VAULT_PROJECTS": None,
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "save_topics": lambda: None,
+        "run_engine": None,
+        "ptb_app": None,
+    }
+    # Simulate full ExecStart passed as command (argv includes project path)
+    exec_start = f"{{ path=/home/igor/networking-os/.venv/bin/python ; argv[]={venv_python} -m networking.crm ; }}"
+    result = _sched._resolve_project(fake_ctx, exec_start, unit_name="networking-crm-alert.timer")
+    assert result == "networking-os", f"Expected networking-os via path match, got {result!r}"
+
+
+def test_resolve_project_unit_name_no_match_for_system_units(tmp_path):
+    """System units like apt-daily.timer do not match project networking-os."""
+    project_dir = tmp_path / "networking-os"
+    project_dir.mkdir()
+    fake_ctx = {
+        "topics": {
+            "1:1": {"project": "Networking-OS", "cwd": str(project_dir), "model": "fable"},
+        },
+        "sessions": {},
+        "running": {},
+        "DATA": tmp_path,
+        "HERE": ROOT,
+        "VAULT_PROJECTS": None,
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "save_topics": lambda: None,
+        "run_engine": None,
+        "ptb_app": None,
+    }
+    # 'apt' token does not match 'networking' token
+    result = _sched._resolve_project(fake_ctx, "/usr/lib/apt/apt.systemd.daily", unit_name="apt-daily.timer")
+    assert result is None, f"System unit should not match any project, got {result!r}"
+
+
+def test_resolve_project_unit_name_strips_timer_suffix(tmp_path):
+    """Unit name with .timer suffix is stripped before token comparison."""
+    project_dir = tmp_path / "proxmon-bot"
+    project_dir.mkdir()
+    fake_ctx = {
+        "topics": {
+            "1:2": {"project": "proxmon-bot", "cwd": str(project_dir), "model": "fable"},
+        },
+        "sessions": {},
+        "running": {},
+        "DATA": tmp_path,
+        "HERE": ROOT,
+        "VAULT_PROJECTS": None,
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "save_topics": lambda: None,
+        "run_engine": None,
+        "ptb_app": None,
+    }
+    # proxmon-health.timer → tokens [proxmon, health]; project proxmon-bot → tokens [proxmon, bot]
+    # share 1 token 'proxmon' → matches proxmon-bot
+    result = _sched._resolve_project(fake_ctx, "/usr/bin/true", unit_name="proxmon-health.timer")
+    assert result == "proxmon-bot", f"Expected proxmon-bot, got {result!r}"
+
+
+# ─────────────────────────── Task 2: in-process static registry ──────────────
+
+def test_collect_in_process_returns_all_entries(tmp_path):
+    """Static registry with 11 in-process entries reads all of them."""
+    static_path = tmp_path / "schedules.json"
+    entries = [
+        {"id": f"ip-test-{i:03d}", "source": "in_process", "schedule": "every 5m",
+         "command": f"job_{i}", "project": "pyrogram_bot",
+         "status": "unknown", "purpose": f"Test job {i}", "last_run": None, "next_run": None,
+         "annotations": {}}
+        for i in range(11)
+    ]
+    static_path.write_text(json.dumps(entries))
+    _sched._STATIC_PATH = static_path
+    records = _sched._collect_in_process()
+    assert len(records) == 11
+    assert all(r["source"] == "in_process" for r in records)
+    assert all(r["status"] == "unknown" for r in records)
+    assert all(r["last_run"] is None for r in records)
+
+
+def test_collect_in_process_preserves_project_field(tmp_path):
+    """Each in-process entry keeps its declared project field."""
+    static_path = tmp_path / "schedules.json"
+    entries = [
+        {"id": "ip-pyro-1", "source": "in_process", "schedule": "every 4h",
+         "command": "finance_job", "project": "pyrogram_bot",
+         "status": "unknown", "purpose": "Finance categorization", "last_run": None, "next_run": None,
+         "annotations": {}},
+        {"id": "ip-proxmon-1", "source": "in_process", "schedule": "every 60s",
+         "command": "health_job", "project": "proxmon-bot",
+         "status": "unknown", "purpose": "Health check", "last_run": None, "next_run": None,
+         "annotations": {}},
+    ]
+    static_path.write_text(json.dumps(entries))
+    _sched._STATIC_PATH = static_path
+    records = _sched._collect_in_process()
+    projects = {r["project"] for r in records}
+    assert "pyrogram_bot" in projects
+    assert "proxmon-bot" in projects

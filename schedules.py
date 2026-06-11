@@ -59,33 +59,78 @@ def _record_id(source: str, schedule: str, command: str) -> str:
 
 # ── Project resolver ─────────────────────────────────────────────────────────
 
-def _resolve_project(ctx: dict, command: str, cwd: str | None = None) -> str | None:
+def _resolve_project(
+    ctx: dict,
+    command: str,
+    cwd: str | None = None,
+    unit_name: str | None = None,
+) -> str | None:
     """
-    Resolve a project id from the command string or working directory.
-    Matches against project cwd basenames + topics.json.
-    Returns basename of matching cwd, or None.
+    Resolve a project id from command string, working directory, or systemd unit name.
+
+    Matching order (first match wins):
+    1. Project cwd path appears in the command string.  For systemd units the
+       caller should pass the full ExecStart string (including argv[]) so that
+       units whose argv references a project venv or script resolve correctly.
+    2. cwd kwarg matches a project's cwd exactly.
+    3. unit_name prefix heuristic: the unit name (without .timer/.service suffix)
+       is split on '-'; the project whose id shares the longest dash-token prefix
+       with the unit name is returned (minimum 1 matching token).
+       Tie-break: longest shared prefix wins; on equal length, alphabetical by id.
+       General-purpose system units (apt-*, e2scrub-*, etc.) produce no match here
+       because their first token is unlikely to match any registered project id token.
+
+    Returns project id (basename of cwd) or None.
     """
     # Import lazily to avoid circular dependency
     try:
         import webapp as _wa
         projects = _wa._collect_projects(ctx)
         home = str(Path.home())
+
+        # Passes 1 & 2: command/cwd path matching (original logic)
         for p in projects:
             pcwd = p.get("cwd", "")
             if not pcwd:
                 continue
-            # Normalise paths: expand ~ and $HOME
             norm_cwd = pcwd.replace("$HOME", home).replace("~", home)
             norm_cwd_path = str(Path(norm_cwd).resolve())
-            # Check if command mentions the project path or cwd
             cmd_norm = command.replace("$HOME", home).replace("~", home)
             if norm_cwd_path in cmd_norm:
                 return p["id"]
-            # cwd match for systemd/in-process
             if cwd:
                 cwd_norm = cwd.replace("$HOME", home).replace("~", home)
                 if norm_cwd_path == str(Path(cwd_norm).resolve()):
                     return p["id"]
+
+        # Pass 3: unit name dash-token prefix heuristic
+        if unit_name:
+            svc = unit_name
+            for sfx in (".timer", ".service"):
+                if svc.endswith(sfx):
+                    svc = svc[: -len(sfx)]
+                    break
+            unit_tokens = svc.split("-")
+            best_match: str | None = None
+            best_score: int = 0
+            for p in projects:
+                pid = p["id"]  # e.g. "networking-os"
+                proj_tokens = pid.split("-")
+                # Count shared prefix tokens
+                shared = 0
+                for ut, pt in zip(unit_tokens, proj_tokens):
+                    if ut == pt:
+                        shared += 1
+                    else:
+                        break
+                if shared > best_score:
+                    best_score = shared
+                    best_match = pid
+                elif shared == best_score and shared > 0 and pid < (best_match or ""):
+                    best_match = pid  # alphabetical tiebreak
+            if best_score >= 1 and best_match is not None:
+                return best_match
+
         return None
     except Exception:
         return None
@@ -566,16 +611,26 @@ async def _collect_systemd(ctx: dict) -> list[dict]:
     # For each timer, get details
     for entry in timer_list:
         unit = entry["unit"]
-        details = await _get_systemd_unit_details(unit)
-        active_state = details.get("ActiveState", "unknown")
-        description = details.get("Description", "")
-        exec_start = details.get("ExecStart", "")
-        # Extract actual command from ExecStart (format: "{ path=... ; argv[]=... ; }")
+        # Get ActiveState from the timer unit itself
+        timer_details = await _get_systemd_unit_details(unit)
+        active_state = timer_details.get("ActiveState", "unknown")
+        # Get ExecStart and Description from the corresponding .service unit
+        svc_unit = unit[:-6] + ".service" if unit.endswith(".timer") else unit
+        svc_details = await _get_systemd_unit_details(svc_unit)
+        description = svc_details.get("Description", "") or timer_details.get("Description", "")
+        exec_start = svc_details.get("ExecStart", "")
+
+        # Extract display command from ExecStart path field; fall back to description/unit
         command = description or unit
         if exec_start:
             m = re.search(r"path=([^;]+)", exec_start)
             if m:
                 command = m.group(1).strip()
+
+        # For project resolution: use the full ExecStart string (includes argv[] with full paths)
+        # so that units whose argv references a project venv or script resolve correctly.
+        # Pass unit_name for heuristic prefix-based fallback (e.g. networking-crm-* → networking-os).
+        resolve_hint = exec_start if exec_start else command
 
         last_run = entry.get("last_iso")
         next_run = entry.get("next_iso")
@@ -588,7 +643,7 @@ async def _collect_systemd(ctx: dict) -> list[dict]:
             "source": "systemd",
             "schedule": schedule,
             "command": command,
-            "project": _resolve_project(ctx, command),
+            "project": _resolve_project(ctx, resolve_hint, unit_name=unit),
             "last_run": last_run,
             "next_run": next_run,
             "status": status,
