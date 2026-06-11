@@ -34,6 +34,8 @@ from webapp import _derive_token, _valid_card_id, _login_attempts, _tasks_path
     "a" * 20,        # 20 символов — максимум
     "err-9b37ae",    # инцидент-карточка: префикс err- + hash6
     "err-aabbcc",    # инцидент-карточка
+    "jan-9e2d",      # user-defined slug (non-hex lowercase — now allowed)
+    "xyz-1234",      # non-hex lowercase letters are valid
 ])
 def test_valid_card_id_valid(card_id: str):
     """Валидные card_id должны проходить."""
@@ -50,8 +52,7 @@ def test_valid_card_id_valid(card_id: str):
     ("abc def",           "пробел"),
     ("abc/def",           "слеш"),
     ("abc\\def",          "обратный слеш"),
-    ("ABCDEF",            "заглавные буквы (вне [a-f0-9-])"),
-    ("xyz123",            "буквы g-z не в hex"),
+    ("ABCDEF",            "заглавные буквы (вне [a-z0-9-])"),
     ("abc\ndef",          "перенос строки"),
     ("err-../x",          "err- + traversal"),
     ("err-ABCDEF",        "err- + заглавные"),
