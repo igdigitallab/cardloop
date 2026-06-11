@@ -541,3 +541,227 @@ async def test_chat_sse_forwards_subagent_events(aiohttp_client, tmp_path):
     assert subagent_events[1]["subtype"] == "notification"
     assert subagent_events[1]["status"] == "completed"
     assert subagent_events[1]["summary"] == "Lint clean"
+
+
+# ═══════════════════════════════════════════════════════════════
+# Phase C — Per-project agents_config
+# ═══════════════════════════════════════════════════════════════
+
+
+def _make_ctx_with_project(tmp_path, project_key="100:1", agents_config=None):
+    """Helper: minimal ctx dict for settings tests."""
+    from webapp import _derive_token
+    pdir = tmp_path / "proj"
+    pdir.mkdir(exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    entry = {"project": "proj", "cwd": str(pdir), "model": "sonnet"}
+    if agents_config is not None:
+        entry["agents_config"] = agents_config
+    ctx = {
+        "topics": {project_key: entry},
+        "sessions": {},
+        "running": {},
+        "password": "pw",
+        "DATA": data_dir,
+        "HERE": ROOT,
+        "VAULT_PROJECTS": None,
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "save_topics": lambda: None,
+        "run_engine": None,
+        "ptb_app": None,
+        "rate_limits": {},
+        "MODELS": bot.MODELS,
+        "_build_agents_kwargs": bot._build_agents_kwargs,
+    }
+    ctx["_auth_token"] = _derive_token("pw")
+    return ctx
+
+
+def _make_settings_app(ctx):
+    from aiohttp import web
+    app = web.Application(middlewares=[_webapp.auth_middleware])
+    app["ctx"] = ctx
+    app.router.add_get("/api/projects/{id}/settings", _webapp.api_project_settings_get)
+    app.router.add_post("/api/projects/{id}/settings", _webapp.api_project_settings_post)
+    return app
+
+
+def test_agents_config_partial_update(tmp_path):
+    """POST settings with agents_config partial update → 200, persisted in topics."""
+    import asyncio
+    ctx = _make_ctx_with_project(tmp_path)
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+        app = _make_settings_app(ctx)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/projects/proj/settings",
+                json={"agents_config": {"executor_model": "haiku"}},
+                headers={"Cookie": f"cops_auth={ctx['_auth_token']}"},
+            )
+            assert resp.status == 200, f"Expected 200, got {resp.status}: {await resp.text()}"
+            data = await resp.json()
+            assert data["ok"] is True
+            assert data["settings"]["agents_config"]["executor_model"] == "haiku"
+            # persisted in topics
+            entry = ctx["topics"]["100:1"]
+            assert entry.get("agents_config", {}).get("executor_model") == "haiku"
+
+    asyncio.run(run())
+
+
+def test_agents_config_invalid_model_rejected(tmp_path):
+    """POST settings with unknown model in agents_config → 400."""
+    import asyncio
+    ctx = _make_ctx_with_project(tmp_path)
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+        app = _make_settings_app(ctx)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/projects/proj/settings",
+                json={"agents_config": {"executor_model": "gpt-4"}},
+                headers={"Cookie": f"cops_auth={ctx['_auth_token']}"},
+            )
+            assert resp.status == 400, f"Expected 400 for invalid model, got {resp.status}"
+            data = await resp.json()
+            assert "error" in data
+
+    asyncio.run(run())
+
+
+def test_agents_config_unknown_key_rejected(tmp_path):
+    """POST settings with unknown key in agents_config → 400."""
+    import asyncio
+    ctx = _make_ctx_with_project(tmp_path)
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+        app = _make_settings_app(ctx)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/projects/proj/settings",
+                json={"agents_config": {"bogus_key": "haiku"}},
+                headers={"Cookie": f"cops_auth={ctx['_auth_token']}"},
+            )
+            assert resp.status == 400, f"Expected 400 for unknown key, got {resp.status}"
+
+    asyncio.run(run())
+
+
+def test_agents_config_conductor_prompt_toggle(tmp_path):
+    """conductor_prompt: false stored and honoured in run_engine (skip_conductor_prompt=True)."""
+    import asyncio
+
+    # Test storage
+    ctx = _make_ctx_with_project(tmp_path)
+
+    async def run_store():
+        from aiohttp.test_utils import TestClient, TestServer
+        app = _make_settings_app(ctx)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/projects/proj/settings",
+                json={"agents_config": {"conductor_prompt": False}},
+                headers={"Cookie": f"cops_auth={ctx['_auth_token']}"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["settings"]["agents_config"]["conductor_prompt"] is False
+            assert ctx["topics"]["100:1"]["agents_config"]["conductor_prompt"] is False
+
+    asyncio.run(run_store())
+
+    # Test that _build_agents_kwargs translates conductor_prompt=False to skip_conductor_prompt=True
+    kwargs = bot._build_agents_kwargs({"conductor_prompt": False})
+    assert kwargs.get("skip_conductor_prompt") is True, f"Expected skip_conductor_prompt=True, got {kwargs}"
+
+    kwargs_on = bot._build_agents_kwargs({"conductor_prompt": True})
+    assert kwargs_on.get("skip_conductor_prompt") is False or "skip_conductor_prompt" not in kwargs_on
+
+
+@pytest.mark.asyncio
+async def test_conductor_prompt_skipped_when_toggle_off(tmp_path):
+    """run_engine with skip_conductor_prompt=True must NOT inject conductor directive even for fable."""
+    captured_opts = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured_opts["opts"] = options
+
+        async def query(self, prompt):
+            pass
+
+        async def receive_response(self):
+            return
+            yield
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    with patch.object(bot, "ClaudeSDKClient", FakeClient), \
+         patch.object(bot, "running", {}), \
+         patch.object(bot, "audit", lambda *a: None):
+        async for _ in bot.run_engine(
+            project_name="test",
+            cwd=str(tmp_path),
+            prompt="hi",
+            session_key="c:t",
+            model="fable",
+            skip_conductor_prompt=True,
+        ):
+            pass
+
+    opts = captured_opts.get("opts")
+    assert opts is not None
+    sp = opts.system_prompt
+    append_text = sp.get("append", "") if isinstance(sp, dict) else str(sp)
+    assert bot.CONDUCTOR_PROMPT not in append_text, (
+        f"CONDUCTOR_PROMPT must NOT be injected when skip_conductor_prompt=True: {append_text!r}"
+    )
+
+
+def test_build_agents_kwargs_model_override(tmp_path):
+    """_build_agents_kwargs with executor_model='haiku' must return agents dict with overridden executor."""
+    kwargs = bot._build_agents_kwargs({"executor_model": "haiku"})
+    assert "agents" in kwargs
+    agents = kwargs["agents"]
+    assert "executor" in agents
+    assert agents["executor"].model == "haiku"
+    # researcher and quick should keep defaults
+    assert agents.get("researcher") is not None
+    assert agents.get("quick") is not None
+
+
+def test_build_agents_kwargs_empty(tmp_path):
+    """_build_agents_kwargs with empty config returns empty dict (use defaults)."""
+    kwargs = bot._build_agents_kwargs({})
+    assert kwargs == {}
+
+
+def test_project_settings_view_includes_agents_config(tmp_path):
+    """_project_settings_view must include agents_config key."""
+    project = {
+        "project": "proj",
+        "cwd": str(tmp_path),
+        "model": "fable",
+        "agents_config": {"executor_model": "haiku", "conductor_prompt": True},
+    }
+    view = _webapp._project_settings_view(project)
+    assert "agents_config" in view
+    assert view["agents_config"]["executor_model"] == "haiku"
+    assert view["agents_config"]["conductor_prompt"] is True
+
+
+def test_project_settings_view_agents_config_absent():
+    """_project_settings_view returns empty dict for agents_config when not set."""
+    project = {"project": "proj", "cwd": "/tmp/x", "model": "sonnet"}
+    view = _webapp._project_settings_view(project)
+    assert view["agents_config"] == {}

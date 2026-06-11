@@ -649,6 +649,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "test_cmd": b.get("test_cmd"),
             "notify_on_error": bool(b.get("notify_on_error", False)),
             "git_enabled": b.get("git_enabled", True) is not False,
+            "agents_config": b.get("agents_config") or {},
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -2129,7 +2130,7 @@ def _git_enabled(project: dict) -> bool:
 
 # ─────────────────────── API: settings (global + per-project) ───────────────────────
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config")
 
 
 def _validate_global_settings(partial: dict) -> "tuple[dict, str | None]":
@@ -2206,6 +2207,7 @@ def _project_settings_view(project: dict) -> dict:
         "notify_on_error": bool(project.get("notify_on_error", False)),
         "log_cmd": project.get("log_cmd") or "",
         "test_cmd": project.get("test_cmd") or "",
+        "agents_config": project.get("agents_config") or {},
     }
 
 
@@ -2247,6 +2249,32 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
             if sv not in _ALLOWED_MODELS:
                 return web.json_response({"error": f"model: not in {sorted(_ALLOWED_MODELS)}"}, status=400)
             updates[k] = sv
+        elif k == "agents_config":
+            if not isinstance(v, dict):
+                return web.json_response({"error": "agents_config: expected object"}, status=400)
+            clean_cfg: dict = {}
+            for cfg_key, cfg_val in v.items():
+                if cfg_key in ("executor_model", "researcher_model", "quick_model"):
+                    sv2 = str(cfg_val).strip().lower()
+                    if sv2 not in _ALLOWED_MODELS:
+                        return web.json_response(
+                            {"error": f"agents_config.{cfg_key}: model not in {sorted(_ALLOWED_MODELS)}"},
+                            status=400,
+                        )
+                    clean_cfg[cfg_key] = sv2
+                elif cfg_key == "conductor_prompt":
+                    if not isinstance(cfg_val, bool):
+                        return web.json_response(
+                            {"error": "agents_config.conductor_prompt: expected bool"},
+                            status=400,
+                        )
+                    clean_cfg[cfg_key] = cfg_val
+                else:
+                    return web.json_response(
+                        {"error": f"agents_config: unknown key {cfg_key!r}"},
+                        status=400,
+                    )
+            updates[k] = clean_cfg if clean_cfg else None
         else:  # log_cmd / test_cmd — strings; empty → reset key
             updates[k] = str(v) if v else None
 
@@ -2619,6 +2647,19 @@ class AppCtx(TypedDict, total=False):
 
 # ─────────────────────────── _run_card helpers ───────────────────────────
 
+
+def _build_agents_kwargs(ctx: dict, agents_config: dict) -> dict:
+    """Build run_engine keyword args from a project's agents_config dict.
+
+    Delegates to bot._build_agents_kwargs (exposed via ctx) to avoid importing bot directly.
+    Returns {} when agents_config is empty or the helper is unavailable (uses run_engine defaults).
+    """
+    fn = ctx.get("_build_agents_kwargs")
+    if fn is None or not agents_config:
+        return {}
+    return fn(agents_config)
+
+
 def _write_sidecar(
     data_dir: Path,
     card_id: str,
@@ -2786,6 +2827,8 @@ async def _run_card(
             resume_sid = ctx["sessions"].get(session_key)
             # Project secrets — only from cwd of the main project (not worktree), isolated by cwd
             project_secrets = _secrets_read(cwd)
+            agents_config = project.get("agents_config") or {}
+            agents_kwargs = _build_agents_kwargs(ctx, agents_config)
             async for event in run_engine(
                 project_name=name,
                 cwd=effective_cwd,
@@ -2794,6 +2837,7 @@ async def _run_card(
                 model=model,
                 resume_session_id=resume_sid,
                 env=project_secrets,
+                **agents_kwargs,
             ):
                 etype = event["type"]
                 if etype == "text":
@@ -4839,6 +4883,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
         resume_sid = ctx["sessions"].get(session_key)
         # Project secrets are injected into the agent's env (values only in-process, not in the API)
         project_secrets = _secrets_read(cwd)
+        agents_config = project.get("agents_config") or {}
+        agents_kwargs = _build_agents_kwargs(ctx, agents_config)
         async for event in run_engine(
             project_name=name,
             cwd=cwd,
@@ -4847,6 +4893,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             model=model,
             resume_session_id=resume_sid,
             env=project_secrets,
+            **agents_kwargs,
         ):
             etype = event.get("type")
             if etype == "text":

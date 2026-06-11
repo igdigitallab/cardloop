@@ -355,6 +355,17 @@ export const en = {
   'schedules.investigate_title': 'Create an investigation task on the board',
   'schedules.investigate_created': 'Investigation card created',
   'tabbar.schedules': 'Schedules',
+  'settings.subagents_title': 'Sub-agents',
+  'settings.subagents_hint': 'Per-project model overrides for executor / researcher / quick agents. Empty = global default.',
+  'settings.executor_model': 'Executor model',
+  'settings.executor_model_hint': 'Agent for code and infra runs (default: sonnet).',
+  'settings.researcher_model': 'Researcher model',
+  'settings.researcher_model_hint': 'Read-only research agent (default: sonnet).',
+  'settings.quick_model': 'Quick model',
+  'settings.quick_model_hint': 'Fast lookup agent (default: haiku).',
+  'settings.conductor_prompt': 'Conductor prompt',
+  'settings.conductor_prompt_hint': 'When off, fable sessions do not receive the orchestrator directive.',
+  'settings.global_default': '— global default —',
 } as const
 
 export type TKey = keyof typeof en

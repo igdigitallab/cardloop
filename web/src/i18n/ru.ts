@@ -356,6 +356,17 @@ export const ru = {
   'schedules.investigate_title': 'Создать задачу на исследование на доске',
   'schedules.investigate_created': 'Карточка исследования создана',
   'tabbar.schedules': 'Расписания',
+  'settings.subagents_title': 'Субагенты',
+  'settings.subagents_hint': 'Переопределение модели для executor / researcher / quick агентов. Пусто = глобальный дефолт.',
+  'settings.executor_model': 'Модель executor',
+  'settings.executor_model_hint': 'Агент для кода и инфры (по умолчанию: sonnet).',
+  'settings.researcher_model': 'Модель researcher',
+  'settings.researcher_model_hint': 'Агент только для чтения / ресёрча (по умолчанию: sonnet).',
+  'settings.quick_model': 'Модель quick',
+  'settings.quick_model_hint': 'Быстрый агент для коротких запросов (по умолчанию: haiku).',
+  'settings.conductor_prompt': 'Conductor prompt',
+  'settings.conductor_prompt_hint': 'Когда выключено — fable-сессии не получают директиву дирижёра.',
+  'settings.global_default': '— глобальный дефолт —',
 } as const
 
 export type TKey = keyof typeof ru

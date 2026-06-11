@@ -127,6 +127,52 @@ DEFAULT_AGENTS: dict = {
     ),
 }
 
+
+def _build_agents_kwargs(agents_config: dict) -> dict:
+    """Build keyword args for run_engine from a project's agents_config dict.
+
+    Returns a dict that can be unpacked into run_engine(**kwargs).
+    Empty / absent agents_config → {} (use defaults).
+
+    Keys recognised in agents_config:
+        executor_model   — model alias for the executor agent
+        researcher_model — model alias for the researcher agent
+        quick_model      — model alias for the quick agent
+        conductor_prompt — bool; False → pass skip_conductor_prompt=True to run_engine
+    """
+    if not agents_config:
+        return {}
+
+    kwargs: dict = {}
+
+    model_overrides = {
+        "executor":   agents_config.get("executor_model"),
+        "researcher": agents_config.get("researcher_model"),
+        "quick":      agents_config.get("quick_model"),
+    }
+    has_model_override = any(v for v in model_overrides.values())
+    if has_model_override:
+        overridden: dict = {}
+        for agent_name, agent_def in DEFAULT_AGENTS.items():
+            override_model = model_overrides.get(agent_name)
+            if override_model:
+                overridden[agent_name] = AgentDefinition(
+                    description=agent_def.description,
+                    prompt=agent_def.prompt,
+                    model=override_model,
+                    permissionMode=agent_def.permissionMode,
+                    disallowedTools=agent_def.disallowedTools,
+                )
+            else:
+                overridden[agent_name] = agent_def
+        kwargs["agents"] = overridden
+
+    if "conductor_prompt" in agents_config:
+        kwargs["skip_conductor_prompt"] = not agents_config["conductor_prompt"]
+
+    return kwargs
+
+
 # Conductor directive appended to system_prompt when model is fable.
 # Kept as a module constant so it can be asserted in tests without instantiating run_engine.
 CONDUCTOR_PROMPT = (
@@ -477,19 +523,21 @@ async def run_engine(  # type: ignore[return]
     env: dict = None,
     resume_session_id: str = None,
     agents: "dict | None" = None,
+    skip_conductor_prompt: bool = False,
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
     Args:
-        project_name      — project name (for audit log)
-        cwd               — working directory
-        prompt            — user prompt
-        session_key       — key in running/sessions (e.g. "chat:thread")
-        model             — model (alias from MODELS or raw string)
-        system_prompt     — dict {type,preset,append}, default is TG preset
-        env               — extra env vars for the agent (TG_CHAT_ID etc.)
-        resume_session_id — session_id to resume (None = new session)
-        agents            — sub-agent roster; defaults to DEFAULT_AGENTS when None
+        project_name          — project name (for audit log)
+        cwd                   — working directory
+        prompt                — user prompt
+        session_key           — key in running/sessions (e.g. "chat:thread")
+        model                 — model (alias from MODELS or raw string)
+        system_prompt         — dict {type,preset,append}, default is TG preset
+        env                   — extra env vars for the agent (TG_CHAT_ID etc.)
+        resume_session_id     — session_id to resume (None = new session)
+        agents                — sub-agent roster; defaults to DEFAULT_AGENTS when None
+        skip_conductor_prompt — if True, suppress conductor directive even for fable model
 
     Yields event dicts. SDK exceptions are wrapped as {"type": "error", "exc": ...}.
     """
@@ -498,8 +546,8 @@ async def run_engine(  # type: ignore[return]
 
     resolved_model = MODELS.get(model, model) if model else MODELS.get(DEFAULT_MODEL, DEFAULT_MODEL)
 
-    # Conductor directive: inject when using fable as orchestrator model.
-    if resolved_model and resolved_model.startswith("fable"):
+    # Conductor directive: inject when using fable as orchestrator model (unless disabled per-project).
+    if not skip_conductor_prompt and resolved_model and resolved_model.startswith("fable"):
         existing_append = system_prompt.get("append") or ""
         sep = "\n" if existing_append else ""
         system_prompt = dict(system_prompt)
@@ -693,6 +741,8 @@ async def run_agent(context, update, prompt: str):
         # Project secrets (Spec 007) augment env; TG_CHAT_ID/TG_THREAD_ID take priority
         project_secrets = webapp._secrets_read(cwd)
         agent_env = {**project_secrets, "TG_CHAT_ID": str(chat), "TG_THREAD_ID": str(thread or 0)}
+        agents_config = b.get("agents_config") or {}
+        agent_kwargs = _build_agents_kwargs(agents_config)
         async for event in run_engine(
             project_name=b["project"],
             cwd=cwd,
@@ -702,6 +752,7 @@ async def run_agent(context, update, prompt: str):
             system_prompt={"type": "preset", "preset": "claude_code", "append": TELEGRAM_NUDGE},
             env=agent_env,
             resume_session_id=sessions.get(k),
+            **agent_kwargs,
         ):
             last_event[0] = time.time()   # any SDK event = "alive" for watchdog
             etype = event["type"]
@@ -1169,6 +1220,8 @@ def _build_ctx(ptb_app) -> dict:
         "run_engine": run_engine,
         "MODELS": MODELS,
         "DEFAULT_AGENTS": DEFAULT_AGENTS,
+        # Per-project agents_config helper (Spec 017 Phase C)
+        "_build_agents_kwargs": _build_agents_kwargs,
         # PTB app reference for TG pings from _run_card and notify_on_error.
         # None in web-only mode — all callers guard on ptb_app is None → no-op.
         "ptb_app": ptb_app,

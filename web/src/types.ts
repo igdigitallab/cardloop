@@ -140,12 +140,22 @@ export interface FileContent {
 export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings'
 
 // ─── Settings (card f2ba02) ───────────────────────────────────────────────────
+
+// ─── Spec 017 Phase C: per-project sub-agent config ──────────────────────────
+export interface AgentsConfig {
+  executor_model?: string
+  researcher_model?: string
+  quick_model?: string
+  conductor_prompt?: boolean
+}
+
 export interface ProjectSettings {
   git_enabled: boolean
   model: string | null
   notify_on_error: boolean
   log_cmd: string
   test_cmd: string
+  agents_config: AgentsConfig
 }
 
 export interface GlobalSettingsEffective {

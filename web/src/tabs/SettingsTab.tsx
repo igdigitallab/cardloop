@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { api } from '../api'
-import { ProjectSettings, GlobalSettings, GlobalSettingsEffective } from '../types'
+import { ProjectSettings, GlobalSettings, GlobalSettingsEffective, AgentsConfig } from '../types'
 import { Spinner } from '../components/Spinner'
 import { SecretsTab } from './SecretsTab'
 import { MODELS } from '../lib/models'
@@ -47,7 +47,14 @@ export function SettingsTab({ projectId }: Props) {
     if (!proj) return
     setSavingProj(true); setProjMsg('')
     try {
-      const r = await api.saveProjectSettings(projectId, proj)
+      // Clean agents_config: strip keys with empty/undefined model values before sending
+      const rawCfg = proj.agents_config ?? {}
+      const cleanCfg: AgentsConfig = {}
+      if (rawCfg.executor_model)   cleanCfg.executor_model   = rawCfg.executor_model
+      if (rawCfg.researcher_model) cleanCfg.researcher_model = rawCfg.researcher_model
+      if (rawCfg.quick_model)      cleanCfg.quick_model      = rawCfg.quick_model
+      if (rawCfg.conductor_prompt !== undefined) cleanCfg.conductor_prompt = rawCfg.conductor_prompt
+      const r = await api.saveProjectSettings(projectId, { ...proj, agents_config: cleanCfg })
       setProj(r.settings); setProjMsg('Saved ✓')
     } catch (e) { setProjMsg('⚠ ' + errMsg(e)) }
     finally { setSavingProj(false) }
@@ -115,6 +122,50 @@ export function SettingsTab({ projectId }: Props) {
                  placeholder="venv/bin/python -m pytest -q"
                  value={proj.test_cmd} onChange={ev => setProj({ ...proj, test_cmd: ev.target.value })} />
         </div>
+
+        <h4 style={{ margin: '14px 0 4px', fontSize: 13, fontWeight: 600, color: 'var(--text2)' }}>Sub-agents</h4>
+        <p style={{ margin: '0 0 6px', fontSize: 11, color: 'var(--text3)' }}>
+          Per-project model overrides for executor / researcher / quick agents. Empty = global default.
+        </p>
+
+        <Row title="Executor model" hint="Agent for code and infra runs (default: sonnet).">
+          <select
+            value={proj.agents_config?.executor_model ?? ''}
+            onChange={ev => setProj({ ...proj, agents_config: { ...proj.agents_config, executor_model: ev.target.value || undefined } })}
+          >
+            <option value="">— global default —</option>
+            {MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+          </select>
+        </Row>
+
+        <Row title="Researcher model" hint="Read-only research agent (default: sonnet).">
+          <select
+            value={proj.agents_config?.researcher_model ?? ''}
+            onChange={ev => setProj({ ...proj, agents_config: { ...proj.agents_config, researcher_model: ev.target.value || undefined } })}
+          >
+            <option value="">— global default —</option>
+            {MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+          </select>
+        </Row>
+
+        <Row title="Quick model" hint="Fast lookup agent (default: haiku).">
+          <select
+            value={proj.agents_config?.quick_model ?? ''}
+            onChange={ev => setProj({ ...proj, agents_config: { ...proj.agents_config, quick_model: ev.target.value || undefined } })}
+          >
+            <option value="">— global default —</option>
+            {MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+          </select>
+        </Row>
+
+        <Row title="Conductor prompt" hint="When off, fable sessions do not receive the orchestrator directive.">
+          <input
+            type="checkbox"
+            checked={proj.agents_config?.conductor_prompt ?? true}
+            onChange={ev => setProj({ ...proj, agents_config: { ...proj.agents_config, conductor_prompt: ev.target.checked } })}
+            aria-label="Conductor prompt"
+          />
+        </Row>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
           <button className="doc-btn primary" onClick={saveProj} disabled={savingProj}>
