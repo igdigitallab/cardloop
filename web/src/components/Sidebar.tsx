@@ -124,6 +124,8 @@ export function Sidebar({
 
   const filtered = projects.filter(p => p.name.toLowerCase().includes(search.toLowerCase()))
 
+  // CR-01 / Directive 2: Collapsed sidebar — narrow rail with only expand + new project buttons.
+  // No icon list. Mobile hides the toggle entirely via CSS (sidebar-toggle-btn display:none at ≤768px).
   if (collapsed) {
     return (
       <div className={`sidebar sidebar-collapsed-mode${drawerOpen ? ' drawer-open' : ''}`}>
@@ -142,31 +144,6 @@ export function Sidebar({
         >
           {newProjectBusy ? '…' : '+'}
         </button>
-        <div className="projects-list-collapsed">
-          {projects.map(p => {
-            const unread = unreadFor(p, unreadBySession)
-            const isActive = selectedId === p.id
-            return (
-              <button
-                key={p.id}
-                className={`project-icon-btn ${isActive ? 'active' : ''} ${p.is_free ? 'free' : ''}`}
-                onClick={() => onSelect(p.id)}
-                title={`${p.name}${unread ? ` (${unread} new)` : ''}`}
-              >
-                <span className="project-icon-letter">
-                  {p.is_free ? '🏠' : p.name.charAt(0).toUpperCase()}
-                </span>
-                {unread > 0 && <span className="unread-dot-collapsed" />}
-                {replyReadyIds?.has(p.id) && selectedId !== p.id && (
-                  <span className="reply-ready-dot-collapsed" title="Agent reply is ready" />
-                )}
-                {(p.incidents ?? 0) > 0 && (
-                  <span className="incidents-dot-collapsed" title={`${p.incidents} incident(s)`}>🚨</span>
-                )}
-              </button>
-            )
-          })}
-        </div>
       </div>
     )
   }

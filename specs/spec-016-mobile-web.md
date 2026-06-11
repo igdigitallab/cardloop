@@ -324,3 +324,32 @@ Connection budget after fix: 2 (global + active project) instead of N+1.
 - Board card **f78394** (tablet drag) — closed by Phase C (Pointer Events).
 - [[spec-015-oss-runtime]] — English-only applies to every new string here.
 - [[spec-009-quality-gate]] — Phase D board fix does not affect worktree/gate flow.
+
+---
+
+## Phase G — QA pass (2026-06-11, 17 defects)
+
+### Fixed
+| ID | Description | Resolution |
+|----|-------------|------------|
+| D-01 | Breakpoint mismatch JS `< 768` | Changed to `<= 768` in ProjectView.tsx |
+| D-02 | Same root cause as D-01 | Fixed with D-01 |
+| D-03 | ptab-close hover-only on touch | `@media (hover: none)` always-visible on active tab |
+| D-04 | Excessive chrome 130px | Removed mobile-project-header; 2-row chrome ≈ 88px |
+| D-05 | No keyboard layout adjust | visualViewport resize handler in ChatTab.tsx |
+| D-06 | Hamburger hidden on mobile list | Resolved by Directive 2 (toggle hidden on mobile) |
+| D-07 | Tab strip no scroll indicator | mask-image fade gradient on mobile-inner-tabs |
+| D-08 | Inner tab buttons 40px < 44px | min-height: 44px on .mobile-inner-tab-btn |
+| D-09 | Collapse toggle 22×22px | Hidden on mobile; coarse pointer upsizes on desktop |
+| D-10 | New project btn 36px | min-height: 44px at ≤768px |
+| D-11 | Logout btn 31px | min-height: 44px at ≤768px |
+| D-12 | ptab-folder-btn 36px | min-height: 44px at ≤768px |
+| D-13 | Desktop collapsed icon btn height | Icon strip removed (CR-01 Directive 2) |
+| D-14 | Sidebar toggle small | Same as D-09 |
+| D-15 | Logout small | Same as D-11 |
+| D-16 | New project btn small | Same as D-10 |
+| CR-01 | Collapsed icon strip | Removed icon list; rail shows only expand + new btn |
+
+### Director directives applied
+- **Directive 1**: mobile-project-header removed; ProjectTabBar + mobile-inner-tabs = 2-row chrome (~88px)
+- **Directive 2**: mobile toggle hidden; desktop collapsed = narrow rail (expand + new, no icon list)

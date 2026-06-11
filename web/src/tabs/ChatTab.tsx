@@ -182,6 +182,23 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
   }, [messages])
 
+  // D-05: Adjust layout when virtual keyboard appears on mobile
+  useEffect(() => {
+    if (!isTouchDevice) return
+    const vv = window.visualViewport
+    if (!vv) return
+    function onViewportResize() {
+      const chatWrap = textareaRef.current?.closest('.chat-wrap') as HTMLElement | null
+      if (!chatWrap) return
+      const keyboardHeight = window.innerHeight - vv!.height
+      chatWrap.style.height = keyboardHeight > 50
+        ? `${vv!.height}px`
+        : ''
+    }
+    vv.addEventListener('resize', onViewportResize)
+    return () => vv.removeEventListener('resize', onViewportResize)
+  }, [])
+
   // Tick every second while there is an active run — localised to status bar only.
   useEffect(() => {
     if (!run) return

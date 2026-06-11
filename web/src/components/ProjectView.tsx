@@ -331,10 +331,10 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   // Remember width before collapse so we can restore it
   const widthBeforeCollapse = useRef<number>(chatWidth)
 
-  // Detect narrow viewport — disable resize below 768px (matches CSS breakpoint)
-  const [narrow, setNarrow] = useState(() => window.innerWidth < 768)
+  // Detect narrow viewport — disable resize at/below 768px (matches CSS breakpoint)
+  const [narrow, setNarrow] = useState(() => window.innerWidth <= 768)
   useEffect(() => {
-    function onResize() { setNarrow(window.innerWidth < 768) }
+    function onResize() { setNarrow(window.innerWidth <= 768) }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
@@ -443,13 +443,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     return (
       <ProjectActivityProvider projectId={project.id} active={isActive}>
         <div className="main-content mobile-project-layout">
-          {/* Compact project header row */}
-          <div className="mobile-project-header">
-            <span className="mobile-project-title">{project.name}</span>
-            {git && <span className={`git-sync-dot ${gitDotClass}`} title={gitDotTitle} />}
-            <AgentRunningChip projectId={project.id} />
-          </div>
-          {/* Inner tab strip (secondary row) */}
+          {/* Inner tab strip — Row 2 (Row 1 = ProjectTabBar with back btn + usage badge) */}
           <nav className="mobile-inner-tabs" aria-label={t['tab.sections_aria']}>
             <button
               className={`mobile-inner-tab-btn ${mobileInnerTab === null ? 'active' : ''}`}

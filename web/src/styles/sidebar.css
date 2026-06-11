@@ -356,3 +356,43 @@
 }
 
 .logout-btn:hover { background: var(--bg3); color: var(--red); }
+
+/* D-03: Touch — always show free-delete-btn (no hover on touch) */
+@media (hover: none) {
+  .project-item-free .free-delete-btn {
+    opacity: 1;
+  }
+}
+
+/* Directive 2: Hide sidebar toggle on mobile — mobile uses its own nav stack */
+@media (max-width: 768px) {
+  .sidebar-toggle-btn {
+    display: none;
+  }
+}
+
+/* D-09: Upsize collapse toggle on coarse pointer (touch) devices */
+@media (pointer: coarse) {
+  .sidebar-toggle-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* D-10: New project button tap target ≥44px on mobile */
+@media (max-width: 768px) {
+  .new-project-btn {
+    min-height: 44px;
+    padding-top: 11px;
+    padding-bottom: 11px;
+  }
+}
+
+/* D-11: Logout button tap target ≥44px on mobile */
+@media (max-width: 768px) {
+  .logout-btn {
+    min-height: 44px;
+    padding-top: 11px;
+    padding-bottom: 11px;
+  }
+}

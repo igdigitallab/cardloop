@@ -426,13 +426,16 @@
     flex-shrink: 0;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
+    /* D-07: Fade right edge to indicate horizontal scrollability */
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
+    mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
   }
   .mobile-inner-tabs::-webkit-scrollbar { display: none; }
 
   .mobile-inner-tab-btn {
     flex-shrink: 0;
     padding: 0 12px;
-    min-height: 40px;
+    min-height: 44px;
     font-size: 12px;
     font-weight: 500;
     background: transparent;

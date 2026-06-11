@@ -75,6 +75,14 @@
 .prompt-card.editing .prompt-edit-btn { opacity: 1; color: var(--accent); }
 .prompt-edit-btn:hover { color: var(--accent-h); background: var(--bg3); }
 .prompt-delete-btn:hover { color: var(--red); background: var(--bg3); }
+
+/* D-03: Touch — always show prompt action buttons (no hover on touch) */
+@media (hover: none) {
+  .prompt-card .prompt-delete-btn,
+  .prompt-card .prompt-edit-btn {
+    opacity: 1;
+  }
+}
 .prompt-form-label { font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: .04em; }
 
 .prompt-add-btn {

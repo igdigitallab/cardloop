@@ -545,6 +545,28 @@
   }
 }
 
+/* D-03: Touch — always show close button on active tab (no hover on touch) */
+@media (hover: none) {
+  .ptab.active .ptab-close {
+    opacity: 1;
+  }
+}
+
+/* D-03: Touch — always show rename edit button (no hover on touch) */
+@media (hover: none) {
+  .rename-edit-btn {
+    opacity: 1;
+  }
+}
+
+/* D-12: Folder button tap target ≥44px on mobile */
+@media (max-width: 768px) {
+  .ptab-folder-btn {
+    min-height: 44px;
+    padding: 0 14px;
+  }
+}
+
 /* ── Health badge (project header meta row) ──────────────────── */
 .health-badge {
   display: inline-flex;

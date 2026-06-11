@@ -261,6 +261,13 @@
 .doc-view:hover .doc-edit-fab { opacity: 0.8; }
 .doc-edit-fab:hover { opacity: 1; color: var(--text); background: var(--bg3); }
 
+/* D-03: Touch — always show doc edit button (no hover on touch) */
+@media (hover: none) {
+  .doc-view .doc-edit-fab {
+    opacity: 0.8;
+  }
+}
+
 .doc-editor {
   display: flex;
   flex-direction: column;
