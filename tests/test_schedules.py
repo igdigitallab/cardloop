@@ -146,6 +146,60 @@ def test_collector_skips_redirect_check_if_mkdir_in_command():
     assert status == "unknown"
 
 
+# ── Cron last_run heuristic (redirect-target mtime) ─────────────────────────
+
+def test_cron_interval_minutes():
+    """Rough interval estimation from common cron shapes."""
+    assert _sched._cron_interval_minutes("*/10 * * * *") == 10
+    assert _sched._cron_interval_minutes("*/5 * * * *") == 5
+    assert _sched._cron_interval_minutes("30 * * * *") == 60
+    assert _sched._cron_interval_minutes("0 4 * * *") == 24 * 60
+    assert _sched._cron_interval_minutes("0 4 * * 0") == 7 * 24 * 60
+    assert _sched._cron_interval_minutes("@reboot") is None
+    assert _sched._cron_interval_minutes("0 9 */3 * *") is None  # complex → no guess
+
+
+def test_cron_fresh_redirect_mtime_promotes_to_ok(tmp_path):
+    """Redirect target with fresh mtime + known interval → status ok, last_run set."""
+    log = tmp_path / "fresh.log"
+    log.write_text("output\n")  # mtime = now
+    command = f"/usr/bin/true >> {log} 2>&1"
+    rec = _sched._cron_record("*/10 * * * *", command, {"topics": {}})
+    assert rec["status"] == "ok", rec
+    assert rec["last_run"] is not None
+
+
+def test_cron_old_redirect_mtime_stays_unknown_not_stale(tmp_path):
+    """CORE SEMANTICS: an old mtime must NOT demote to stale — `>>` with empty
+    output does not update mtime, so an old mtime is not proof the job stopped."""
+    import os
+    log = tmp_path / "old.log"
+    log.write_text("old output\n")
+    two_hours_ago = time.time() - 2 * 3600
+    os.utime(log, (two_hours_ago, two_hours_ago))
+    command = f"/usr/bin/true >> {log} 2>&1"
+    rec = _sched._cron_record("*/10 * * * *", command, {"topics": {}})
+    assert rec["status"] == "unknown", f"old mtime must stay unknown, got {rec['status']}"
+    assert rec["last_run"] is not None  # mtime still recorded as best-effort last_run
+
+
+def test_cron_dev_null_redirect_stays_unknown():
+    """Redirect to /dev/null carries no run evidence → unknown, no last_run."""
+    command = "/usr/bin/true >/dev/null 2>&1"
+    rec = _sched._cron_record("*/10 * * * *", command, {"topics": {}})
+    assert rec["status"] == "unknown"
+    assert rec["last_run"] is None
+
+
+def test_cron_missing_redirect_file_stays_unknown(tmp_path):
+    """Redirect target absent but parent exists → unknown (no false broken/stale)."""
+    log = tmp_path / "never-written.log"  # parent exists, file doesn't
+    command = f"/usr/bin/true >> {log} 2>&1"
+    rec = _sched._cron_record("*/10 * * * *", command, {"topics": {}})
+    assert rec["status"] == "unknown"
+    assert rec["last_run"] is None
+
+
 def test_record_id_is_stable():
     """Same source+schedule+command on two calls → same id."""
     id1 = _sched._record_id("cron", "*/5 * * * *", "bash /scripts/check.sh")
@@ -164,7 +218,7 @@ def test_record_id_differs_for_different_commands():
 # ─────────────────────────── Phase A: systemd parsing ─────────────────────────
 
 def test_collector_parses_systemd_timers():
-    """Mock systemd list-timers tabular output; assert records."""
+    """Tabular fallback parser: unit names + ISO timestamps from header positions."""
     tabular = """NEXT                        LEFT          LAST                        PASSED       UNIT                           ACTIVATES
 Wed 2026-06-11 04:00:00 UTC 3h 59min left Tue 2026-06-10 04:00:01 UTC 20h ago      networking-crm-sync.timer      networking-crm-sync.service
 n/a                         n/a           Tue 2026-06-10 03:00:00 UTC 21h ago      networking-crm-health.timer    networking-crm-health.service
@@ -173,36 +227,112 @@ n/a                         n/a           Tue 2026-06-10 03:00:00 UTC 21h ago   
 """
     results = _sched._parse_systemd_timers_text(tabular)
     assert len(results) >= 1
-    units = [r["unit"] for r in results]
-    assert "networking-crm-sync.timer" in units
+    by_unit = {r["unit"]: r for r in results}
+    assert "networking-crm-sync.timer" in by_unit
+    sync = by_unit["networking-crm-sync.timer"]
+    assert sync["next_iso"] is not None and "2026-06-11" in sync["next_iso"]
+    assert sync["last_iso"] is not None and "2026-06-10" in sync["last_iso"]
 
 
 def test_collector_systemd_failed_state_is_broken():
     """Timer with ActiveState=failed → status broken."""
-    details = {"ActiveState": "failed", "Description": "Test Timer", "ExecStart": ""}
-    # Simulate what _collect_systemd does with a failed timer
-    active_state = details.get("ActiveState", "unknown")
-    if active_state == "failed":
-        status = "broken"
-    elif active_state == "active":
-        status = "ok"
-    else:
-        status = "unknown"
-    assert status == "broken"
+    assert _sched._systemd_status("failed", None, None) == "broken"
 
 
-def test_collector_parses_systemd_json_format():
-    """Parse JSON output of systemctl list-timers."""
-    data = [
-        {"unit": "networking-crm-sync.timer", "next": "Wed 2026-06-11 04:00:00 UTC",
-         "last": "Tue 2026-06-10 04:00:01 UTC", "activates": "networking-crm-sync.service"},
-        {"unit": "networking-crm-health.timer", "next": "n/a", "last": "n/a",
-         "activates": "networking-crm-health.service"},
-        {"unit": "not-a-timer.service", "next": "", "last": "", "activates": ""},
-    ]
-    results = _sched._parse_systemd_timers_json(data)
-    assert len(results) == 2  # .service excluded
-    assert all(r["unit"].endswith(".timer") for r in results)
+# REAL fixture captured from this host (systemd 255, 2026-06-10):
+# `systemctl list-timers --all --output=json` emits next/last as INTEGER
+# microsecond unix timestamps — NOT strings. The original parser expected
+# strings, got None timestamps, and the old status logic turned None into
+# "stale" → 21 false ScheduleMissed incidents. These tests pin both fixes.
+_REAL_LIST_TIMERS_JSON = [
+    {"next": 1781150581843041, "left": 1781150581843041, "last": 1781150281833140,
+     "passed": 2651253926487, "unit": "networking-crm-calls.timer",
+     "activates": "networking-crm-calls.service"},
+    {"next": 1781150700000000, "left": 1781150700000000, "last": 1781150401228954,
+     "passed": 2651373322302, "unit": "networking-crm-ticktick-backfill.timer",
+     "activates": "networking-crm-ticktick-backfill.service"},
+    {"next": 1781150820000000, "left": 1781150820000000, "last": 1781149921855165,
+     "passed": 2650893948512, "unit": "networking-crm-gcal-push.timer",
+     "activates": "networking-crm-gcal-push.service"},
+]
+
+
+def test_systemd_json_real_fixture_microsecond_timestamps():
+    """Regression: real list-timers JSON (int microseconds) parses into ISO timestamps."""
+    results = _sched._parse_systemd_timers_json(_REAL_LIST_TIMERS_JSON)
+    assert len(results) == 3
+    for r in results:
+        assert r["next_iso"] is not None, f"next_iso None for {r['unit']} — usec parse broken"
+        assert r["last_iso"] is not None, f"last_iso None for {r['unit']} — usec parse broken"
+        assert r["next_iso"].startswith("2026-06-1"), r["next_iso"]
+        assert r["last_iso"].startswith("2026-06-1"), r["last_iso"]
+
+
+def test_systemd_real_fixture_active_timer_is_ok():
+    """Regression: a healthy timer from the real fixture must derive status=ok
+    (when 'now' is within its schedule window), not stale."""
+    from datetime import datetime, timezone
+    results = _sched._parse_systemd_timers_json(_REAL_LIST_TIMERS_JSON)
+    r = results[0]  # networking-crm-calls.timer
+    # 'now' = the moment of its last trigger → next elapse is in the future
+    now = datetime.fromtimestamp(1781150281833140 / 1e6, tz=timezone.utc)
+    status = _sched._systemd_status("active", r["last_iso"], r["next_iso"], now=now)
+    assert status == "ok"
+
+
+def test_usec_to_iso_valid():
+    """Int microseconds → ISO UTC string."""
+    iso = _sched._usec_to_iso(1781150581843041)
+    assert iso is not None and iso.startswith("2026-06-1")
+
+
+def test_usec_to_iso_invalid():
+    """0 / None / garbage → None (never a fake timestamp)."""
+    assert _sched._usec_to_iso(0) is None
+    assert _sched._usec_to_iso(None) is None
+    assert _sched._usec_to_iso("not-a-number") is None
+    assert _sched._usec_to_iso(-5) is None
+
+
+# ── CORE SEMANTICS regression: unknown ≠ stale ────────────────────────────────
+
+def test_systemd_status_unknown_next_is_unknown_not_stale():
+    """THE regression test: active timer with unparseable/missing next_run
+    must be 'unknown', NEVER 'stale'. The original bug flooded the board with
+    21 false ScheduleMissed incidents for perfectly healthy timers."""
+    assert _sched._systemd_status("active", None, None) == "unknown"
+    assert _sched._systemd_status("active", "2026-06-10T04:00:00+00:00", None) == "unknown"
+
+
+def test_systemd_status_future_next_is_ok():
+    """Active timer with next elapse in the future → ok."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 6, 11, 4, 0, 0, tzinfo=timezone.utc)
+    future = (now + timedelta(minutes=5)).isoformat()
+    assert _sched._systemd_status("active", None, future, now=now) == "ok"
+
+
+def test_systemd_status_past_next_beyond_grace_is_stale():
+    """Active timer whose next elapse is in the past beyond grace → stale
+    (positive evidence: it should have fired and didn't)."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 6, 11, 4, 0, 0, tzinfo=timezone.utc)
+    past = (now - timedelta(hours=2)).isoformat()
+    assert _sched._systemd_status("active", None, past, now=now) == "stale"
+
+
+def test_systemd_status_past_next_within_grace_is_ok():
+    """Next elapse slightly in the past (within grace) → ok, not stale."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 6, 11, 4, 0, 0, tzinfo=timezone.utc)
+    just_past = (now - timedelta(seconds=30)).isoformat()
+    assert _sched._systemd_status("active", None, just_past, now=now) == "ok"
+
+
+def test_systemd_status_inactive_is_unknown():
+    """Inactive/other states → unknown."""
+    assert _sched._systemd_status("inactive", None, "2026-06-11T04:00:00+00:00") == "unknown"
+    assert _sched._systemd_status("unknown", None, None) == "unknown"
 
 
 def test_iso_from_systemd_ts_valid():

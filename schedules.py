@@ -152,6 +152,85 @@ _CRON_VAR_RE = re.compile(r"^\s*[A-Z_]+=")
 _CRON_SPECIAL_RE = re.compile(r"^\s*@")
 
 
+def _cron_interval_minutes(schedule: str) -> int | None:
+    """Rough interval estimate (minutes) from a cron expression.
+    Only common shapes are recognised; anything else → None (no freshness check)."""
+    fields = schedule.split()
+    if len(fields) != 5:
+        return None
+    minute, hour, dom, month, dow = fields
+    m = re.fullmatch(r"\*/(\d+)", minute)
+    if m and hour == "*":
+        return int(m.group(1))                      # */N * * * *  → every N min
+    if minute.isdigit() or "," in minute:
+        if hour == "*":
+            return 60                               # M * * * *    → hourly
+        if dom == "*" and month == "*" and dow == "*":
+            return 24 * 60                          # M H * * *    → daily
+        if dow != "*" and dom == "*":
+            return 7 * 24 * 60                      # M H * * D    → weekly
+    m = re.fullmatch(r"\*/(\d+)", hour)
+    if m and (minute.isdigit() or minute == "0"):
+        return int(m.group(1)) * 60                 # M */N * * *  → every N hours
+    return None
+
+
+def _cron_last_run_from_redirect(command: str) -> str | None:
+    """Heuristic last_run for a cron entry: mtime of the first redirect target
+    that is a regular existing file (not /dev/null, not an fd duplication).
+    Returns ISO timestamp or None."""
+    for m in _REDIRECT_RE.finditer(command):
+        raw = m.group(1).strip()
+        if raw.startswith("&") or raw == "/dev/null":
+            continue
+        expanded = _expand_home(raw)
+        try:
+            p = Path(expanded)
+            if p.is_file():
+                mtime = p.stat().st_mtime
+                return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+        except OSError:
+            continue
+    return None
+
+
+def _cron_record(schedule: str, command: str, ctx: dict, id_source: str = "cron") -> dict:
+    """Build one normalised cron record (shared by user/root/cron.d parsers).
+
+    last_run heuristic: redirect-target mtime. IMPORTANT asymmetry — a fresh mtime
+    PROMOTES status to "ok" (positive evidence of a recent run), but an old mtime
+    NEVER demotes to "stale": `>>` with empty output does not touch mtime, so an
+    old mtime is not proof the job stopped running. Absence of evidence stays
+    "unknown" and never alerts.
+    """
+    status = _check_cron_command_status(command)
+    last_run = None
+    if status != "broken":
+        last_run = _cron_last_run_from_redirect(command)
+        if last_run and status == "unknown":
+            interval = _cron_interval_minutes(schedule)
+            if interval:
+                try:
+                    last_dt = datetime.fromisoformat(last_run)
+                    age_sec = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                    if age_sec <= 2 * interval * 60:
+                        status = "ok"
+                except (ValueError, TypeError):
+                    pass
+    return {
+        "id": _record_id(id_source, schedule, command),
+        "source": "cron",
+        "schedule": schedule,
+        "command": command,
+        "project": _resolve_project(ctx, command),
+        "last_run": last_run,
+        "next_run": None,
+        "status": status,
+        "purpose": None,
+        "annotations": {},
+    }
+
+
 def _parse_crontab_text(text: str, ctx: dict) -> list[dict]:
     """Parse crontab text into normalised schedule records."""
     records: list[dict] = []
@@ -178,20 +257,7 @@ def _parse_crontab_text(text: str, ctx: dict) -> list[dict]:
             schedule = " ".join(parts[:5])
             command = parts[5]
 
-        status = _check_cron_command_status(command)
-        rec_id = _record_id("cron", schedule, command)
-        records.append({
-            "id": rec_id,
-            "source": "cron",
-            "schedule": schedule,
-            "command": command,
-            "project": _resolve_project(ctx, command),
-            "last_run": None,
-            "next_run": None,
-            "status": status,
-            "purpose": None,
-            "annotations": {},
-        })
+        records.append(_cron_record(schedule, command, ctx))
     return records
 
 
@@ -240,20 +306,7 @@ async def _collect_cron(ctx: dict) -> list[dict]:
     except Exception as e:
         log.debug("[schedules] root crontab unavailable: %s", e)
 
-    # /etc/cron.d/*
-    try:
-        proc = await asyncio.wait_for(
-            asyncio.create_subprocess_exec(
-                "sudo", "-n", "cat",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            ),
-            timeout=5.0,
-        )
-        # Actually just read the files directly — may work without sudo
-    except Exception:
-        pass
-
+    # /etc/cron.d/* — world-readable on most systems; read directly, no sudo
     crond = Path("/etc/cron.d")
     if crond.is_dir():
         try:
@@ -289,20 +342,7 @@ def _parse_crontab_d_text(text: str, ctx: dict, source_file: str) -> list[dict]:
         schedule = " ".join(parts[:5])
         # parts[5] = user, parts[6] = command
         command = parts[6]
-        status = _check_cron_command_status(command)
-        rec_id = _record_id(f"cron-d:{source_file}", schedule, command)
-        records.append({
-            "id": rec_id,
-            "source": "cron",
-            "schedule": schedule,
-            "command": command,
-            "project": _resolve_project(ctx, command),
-            "last_run": None,
-            "next_run": None,
-            "status": status,
-            "purpose": None,
-            "annotations": {},
-        })
+        records.append(_cron_record(schedule, command, ctx, id_source=f"cron-d:{source_file}"))
     return records
 
 
@@ -310,10 +350,12 @@ def _parse_crontab_d_text(text: str, ctx: dict, source_file: str) -> list[dict]:
 
 def _parse_systemd_timers_text(text: str) -> list[dict]:
     """
-    Parse tabular output of `systemctl list-timers --all`.
-    Columns: NEXT  LEFT  LAST  PASSED  UNIT  ACTIVATES
-    The columns are fixed-width in the tabular output; header detection is used.
-    Returns a list of {unit, next_raw, last_raw} dicts.
+    Fallback parser for tabular `systemctl list-timers --all` output
+    (used only when --output=json is unsupported).
+    Columns: NEXT  LEFT  LAST  PASSED  UNIT  ACTIVATES.
+    Column boundaries come from header keyword positions (NEXT..LEFT = next,
+    LAST..PASSED = last). Timestamps that fail to parse → None (never guessed).
+    Returns [{unit, next_iso, last_iso}] — same contract as the JSON parser.
     """
     results: list[dict] = []
     lines = text.splitlines()
@@ -330,34 +372,58 @@ def _parse_systemd_timers_text(text: str) -> list[dict]:
         return results
 
     header = lines[header_idx]
-    # Column positions by header keyword
-    unit_pos = header.find("UNIT")
     next_pos = header.find("NEXT")
+    left_pos = header.find("LEFT")
     last_pos = header.find("LAST")
+    passed_pos = header.find("PASSED")
+    unit_pos = header.find("UNIT")
 
     for line in lines[header_idx + 1:]:
-        if not line.strip() or line.strip().startswith("timers") or "listed" in line.lower():
+        if not line.strip() or "listed" in line.lower():
             break
         unit = ""
         next_raw = ""
         last_raw = ""
-        if unit_pos >= 0 and unit_pos < len(line):
+        if 0 <= unit_pos < len(line):
             unit_part = line[unit_pos:].split()
             unit = unit_part[0] if unit_part else ""
-        if next_pos >= 0 and next_pos < len(line):
-            next_raw = line[next_pos:unit_pos].strip() if unit_pos > next_pos else line[next_pos:].split("  ")[0].strip()
-        if last_pos >= 0 and last_pos < len(line):
-            last_end = next_pos if next_pos > last_pos else len(line)
-            last_raw = line[last_pos:last_end].strip()
+        if 0 <= next_pos < len(line) and left_pos > next_pos:
+            next_raw = line[next_pos:left_pos].strip()
+        if 0 <= last_pos < len(line) and passed_pos > last_pos:
+            last_raw = line[last_pos:passed_pos].strip()
         if unit and unit.endswith(".timer"):
-            results.append({"unit": unit, "next_raw": next_raw, "last_raw": last_raw})
+            results.append({
+                "unit": unit,
+                "next_iso": _iso_from_systemd_ts(next_raw),
+                "last_iso": _iso_from_systemd_ts(last_raw),
+            })
     return results
+
+
+def _usec_to_iso(usec) -> str | None:
+    """Convert a systemd microsecond unix timestamp to ISO 8601 UTC, or None.
+
+    Real format on this host (systemd 255): `systemctl list-timers --output=json`
+    emits `next`/`last` as INTEGER microseconds since epoch
+    (e.g. 1781147700000000), NOT strings. 0 / None / non-numeric → None.
+    """
+    try:
+        usec = int(usec)
+    except (TypeError, ValueError):
+        return None
+    if usec <= 0:
+        return None
+    try:
+        dt = datetime.fromtimestamp(usec / 1_000_000, tz=timezone.utc)
+        return dt.isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _parse_systemd_timers_json(data: list[dict]) -> list[dict]:
     """
     Parse JSON output of `systemctl list-timers --all --output=json`.
-    Fields: unit, next, last, activates, ...
+    Returns [{unit, next_iso, last_iso}] with timestamps already converted to ISO.
     """
     results: list[dict] = []
     for entry in data:
@@ -366,8 +432,8 @@ def _parse_systemd_timers_json(data: list[dict]) -> list[dict]:
             continue
         results.append({
             "unit": unit,
-            "next_raw": str(entry.get("next", "") or ""),
-            "last_raw": str(entry.get("last", "") or ""),
+            "next_iso": _usec_to_iso(entry.get("next")),
+            "last_iso": _usec_to_iso(entry.get("last")),
         })
     return results
 
@@ -411,6 +477,43 @@ async def _get_systemd_unit_details(unit: str) -> dict:
         return result
     except Exception:
         return {}
+
+
+# Grace period: a timer whose next elapse is slightly in the past is usually
+# just about to fire (or the scan raced the clock) — not a stale signal.
+_SYSTEMD_STALE_GRACE_SEC = 600
+
+
+def _systemd_status(
+    active_state: str,
+    last_run_iso: str | None,
+    next_run_iso: str | None,
+    now: "datetime | None" = None,
+) -> str:
+    """Derive a timer status. CORE SEMANTICS (regression-critical):
+
+    Unknown timestamps NEVER produce "stale" — a parse failure or missing data
+    must degrade to "unknown" (no incident), never to a false alert.
+    "stale" requires POSITIVE evidence: a real next_run timestamp that is
+    in the past beyond the grace period (the timer should have fired but didn't).
+    """
+    if active_state == "failed":
+        return "broken"
+    if active_state != "active":
+        return "unknown"
+    if next_run_iso is None:
+        # No reliable next-elapse data → unknown, NOT stale.
+        return "unknown"
+    try:
+        next_dt = datetime.fromisoformat(next_run_iso)
+        now_dt = now or datetime.now(timezone.utc)
+        if next_dt.tzinfo is None:
+            next_dt = next_dt.replace(tzinfo=timezone.utc)
+        if (now_dt - next_dt).total_seconds() > _SYSTEMD_STALE_GRACE_SEC:
+            return "stale"
+        return "ok"
+    except (ValueError, TypeError):
+        return "unknown"
 
 
 async def _collect_systemd(ctx: dict) -> list[dict]:
@@ -470,19 +573,9 @@ async def _collect_systemd(ctx: dict) -> list[dict]:
             if m:
                 command = m.group(1).strip()
 
-        last_run = _iso_from_systemd_ts(entry.get("last_raw", ""))
-        next_run = _iso_from_systemd_ts(entry.get("next_raw", ""))
-
-        # Status derivation
-        if active_state == "failed":
-            status = "broken"
-        elif active_state == "active":
-            if next_run is None and last_run is None:
-                status = "stale"
-            else:
-                status = "ok"
-        else:
-            status = "unknown"
+        last_run = entry.get("last_iso")
+        next_run = entry.get("next_iso")
+        status = _systemd_status(active_state, last_run, next_run)
 
         schedule = unit  # systemd timers don't expose cron string easily
         rec_id = _record_id("systemd", unit, command)
