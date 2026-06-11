@@ -10,7 +10,6 @@
 ## Backlog
 - [ ] Решить вопрос с удалением проекта. В том числе и, допустим, надо при удалении решать полностью удалять проекты, все смен <!--ops:207822-->
   > ные файлы с ним. Вижу, просто удаляем проект из. Claude ops. Нужен твой совет.
-- [ ] TG-канал: проверить, что контекст наполняется корректно и НЕ дублируется при каждом сообщении (была проблема в веб-версии — кэш дублировался и сбрасывался, контекст «съедался»); сравнить с веб-каналом и зафиксировать тестом <!--ops:9aa43f-->
 - [ ] TG-канал: очередь TG-сообщений (bot.py on_message — второе сообщение в очередь, не «уже работаю») <!--ops:b53401-->
   > Карточная очередь (busy→enqueue на доске) — СДЕЛАНО (c54a66f). Остаётся ОТДЕЛЬНЫЙ путь: bot.py on_message всё ещё отбивает второе TG-сообщение «уже работаю». Нужна очередь промптов в TG-канале (главный канал — аккуратно + userbot-тест).
 - [ ] Глобальные ключи + общий UI хранилища credentials <!--ops:a7b2c1-->
@@ -23,6 +22,8 @@
 ## In Progress
 
 ## Review
+- [?] TG-канал: проверить, что контекст наполняется корректно и НЕ дублируется при каждом сообщении (была проблема в веб-версии — кэш дублировался и сбрасывался, контекст «съедался»); сравнить с веб-каналом и зафиксировать тестом <!--ops:9aa43f-->
+  > VERDICT: NO BUG. (a) resume_session_id: saved in sessions.json after each turn, passed correctly on turn N+1, NOT cleared on error event — only /reset clears it (bot.py:786-788). (b) system_prompt: fresh dict literal each call in run_engine (line 544) and run_agent (line 752) — cannot accumulate; TELEGRAM_NUDGE is an immutable string. TG and web paths produce identical system_prompt. (c) context_tokens: live check on autotopic-test shows 1.01x growth per turn (36497→36689 tokens), not 2x. Session resume confirmed: turn 2 correctly recalled turn 1 content from resuming the same session. Web bug was a FRONTEND busActiveRef reset (ChatTab unmount vs display:none) — unrelated to backend session plumbing. 9 unit tests added in tests/test_tg_session_resume.py covering all three hypotheses.
 - [ ] Вкладку обзор удалить вообще. Всю информацию вынести в настройки. Настройки проекта. Ну и во-первых, путь. И все остальное уже есть у нас. И посмотри, вот там есть кнопки аудит проекта и подогнать под проект. Почему так? Не на всех проектах отображаются одинаковые эти кнопки. Это сделано у нас по шаблону и во всех проектах должно быть одинаково. <!--ops:d124ae-->
 - [ ] Сделать в чате выделение моих сообщений. Прям всю полосу Headlight какой нибудь. <!--ops:c14fec-->
 - [ ] Добавить уведомления - что ответ от AI готов во вкладки наверху. <!--ops:09d84b-->
