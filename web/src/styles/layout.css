@@ -342,20 +342,31 @@
     flex-direction: column !important;
   }
 
+  /* D1: left pane capped at 55vh so the chat pane can flex to fill the rest */
   .project-left-pane {
     border-right: none;
     border-bottom: 1px solid var(--border);
-    flex: none;
+    flex: 0 0 auto;
+    max-height: 55vh;
+    overflow-y: auto;
   }
 
+  /* D1: chat pane takes all remaining vertical space (was: fixed 45vh) */
   .project-chat-pane {
-    flex: none;
-    height: 45vh;
-    min-height: 260px;
+    flex: 1 1 auto;
+    min-height: 200px;
+    /* remove fixed height: 45vh */
   }
 
   .project-split-divider,
   .chat-collapsed-stub {
+    display: none;
+  }
+}
+
+/* D4: hide Split button on mobile — split view requires two panes */
+@media (max-width: 640px) {
+  .split-create-btn {
     display: none;
   }
 }

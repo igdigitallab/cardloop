@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import { Project } from '../types'
 import { UsageBadge } from './UsageBadge'
 
@@ -23,7 +23,7 @@ interface Props {
 }
 
 function TabItem({
-  project, isActive, unread, onActivate, onClose, onRename,
+  project, isActive, unread, onActivate, onClose, onRename, activeRef,
 }: {
   project: Project
   isActive: boolean
@@ -31,6 +31,7 @@ function TabItem({
   onActivate: () => void
   onClose: () => void
   onRename: (label: string) => void
+  activeRef?: React.RefObject<HTMLDivElement>
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(project.name)
@@ -62,6 +63,7 @@ function TabItem({
 
   return (
     <div
+      ref={activeRef}
       className={`ptab ${isActive ? 'active' : ''} ${project.is_free ? 'ptab-free' : ''}`}
       onClick={() => !editing && onActivate()}
       onDoubleClick={() => {
@@ -107,6 +109,13 @@ export function ProjectTabBar({
   schedulesOpen, schedulesActive, onOpenSchedules, onCloseSchedules,
   onToggleDrawer,
 }: Props) {
+  const activeTabRef = useRef<HTMLDivElement>(null)
+
+  // D5: auto-scroll active tab into view when activeId changes
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ behavior: 'smooth', inline: 'nearest' })
+  }, [activeId])
+
   return (
     <div className="project-tabbar">
       {/* Hamburger — only visible on tablet/mobile (hidden on desktop via CSS) */}
@@ -122,15 +131,17 @@ export function ProjectTabBar({
         {projects.map(p => {
           const sk = p.tg_thread != null ? String(p.tg_thread) : null
           const unread = sk ? (unreadBySession[sk] || 0) : 0
+          const isActive = p.id === activeId
           return (
             <TabItem
               key={p.id}
               project={p}
-              isActive={p.id === activeId}
+              isActive={isActive}
               unread={unread}
               onActivate={() => onActivate(p.id)}
               onClose={() => onClose(p.id)}
               onRename={(label) => onRename(p.id, label)}
+              activeRef={isActive ? activeTabRef : undefined}
             />
           )
         })}

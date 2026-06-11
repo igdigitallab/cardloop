@@ -186,6 +186,7 @@ export const en = {
   'chat.stop_aria': 'Stop agent',
   'chat.input_placeholder_busy': 'Agent is running — message will be queued and sent after completion…',
   'chat.input_placeholder': 'Message to agent… (Enter to send, Shift+Enter for newline)',
+  'chat.input_placeholder_touch': 'Message to agent…',
   'chat.look_at_files': 'Look at the attached files.',
 
   // ── Session selector ─────────────────────────────────────────

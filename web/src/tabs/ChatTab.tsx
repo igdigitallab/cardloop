@@ -137,6 +137,11 @@ function makeAssistantMsg(): ChatMessage {
 
 // ─── ChatTab ──────────────────────────────────────────────────────────────
 
+/** True on touch devices — `pointer: coarse` or `ontouchstart` present. */
+const isTouchDevice: boolean =
+  typeof window !== 'undefined' &&
+  (window.matchMedia?.('(pointer: coarse)').matches || 'ontouchstart' in window)
+
 export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const projectId = project.id
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -663,7 +668,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             className="chat-textarea"
             placeholder={streaming
               ? t['chat.input_placeholder_busy']
-              : t['chat.input_placeholder']}
+              : isTouchDevice ? t['chat.input_placeholder_touch'] : t['chat.input_placeholder']}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}

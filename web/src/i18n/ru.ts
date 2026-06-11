@@ -187,6 +187,7 @@ export const ru = {
   'chat.stop_aria': 'Остановить агента',
   'chat.input_placeholder_busy': 'Агент работает — сообщение встанет в очередь, отправится после завершения…',
   'chat.input_placeholder': 'Сообщение агенту… (Enter — отправить, Shift+Enter — перенос)',
+  'chat.input_placeholder_touch': 'Сообщение агенту…',
   'chat.look_at_files': 'Посмотри прикреплённые файлы.',
 
   // ── Session selector ─────────────────────────────────────────

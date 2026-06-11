@@ -311,11 +311,35 @@
    RESPONSIVE — Board
    ══════════════════════════════════════════════════════════════ */
 
-@media (max-width: 640px) {
-  /* Single column on phones */
-  .board-columns {
-    grid-template-columns: 1fr;
+/* D2: Board on tablet/mobile — horizontal scroll with fixed-width columns */
+@media (max-width: 768px) {
+  /* Allow tab-content to scroll so the board has enough room */
+  .tab-content {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
+
+  /* Kanban: horizontal scroll with fixed-width columns */
+  .board-columns {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: 10px;
+    padding-bottom: 8px;
+    /* reset grid from desktop */
+    grid-template-columns: unset;
+  }
+
+  .board-col {
+    min-width: 240px;
+    flex-shrink: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  /* Note: .board-columns is flex with horizontal scroll from the 768px rule above.
+     On 390px phones, 240px column width shows ~1.6 columns — scroll to see more. */
 
   /* Board card action buttons: larger touch targets */
   .board-card-actions button {
