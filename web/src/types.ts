@@ -137,7 +137,7 @@ export interface FileContent {
   error?: string
 }
 
-export type TabId = 'overview' | 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings'
+export type TabId = 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings'
 
 // ─── Settings (card f2ba02) ───────────────────────────────────────────────────
 

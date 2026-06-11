@@ -46,7 +46,6 @@ export const en = {
   'tabbar.close': 'Close',
 
   // ── Project tabs labels ──────────────────────────────────────
-  'tab.overview': 'Overview',
   'tab.claude_md': 'CLAUDE.md',
   'tab.logs': 'Logs',
   'tab.board': 'Board',

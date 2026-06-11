@@ -1,11 +1,45 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { api } from '../api'
-import { ProjectSettings, GlobalSettings, GlobalSettingsEffective, AgentsConfig } from '../types'
+import { Project, ProjectSettings, GlobalSettings, GlobalSettingsEffective, AgentsConfig, ProjectStructureHealth } from '../types'
 import { Spinner } from '../components/Spinner'
 import { SecretsTab } from './SecretsTab'
 import { MODELS } from '../lib/models'
+import { ProjectStructureCardFull } from '../components/ProjectStructureCard'
+import { t } from '../i18n'
 
-interface Props { projectId: string }
+const ONBOARDING_MARKERS = ['Fill in during onboarding', 'initializing']
+
+function WelcomeBanner({ projectId }: { projectId: string }) {
+  const [show, setShow] = useState(false)
+
+  useEffect(() => {
+    api.claudeMd(projectId)
+      .then(d => {
+        if (!d.content) return
+        const matched = ONBOARDING_MARKERS.some(m => d.content.includes(m))
+        setShow(matched)
+      })
+      .catch(() => { /* ignore */ })
+  }, [projectId])
+
+  if (!show) return null
+
+  return (
+    <div className="welcome-banner">
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>{t['overview.initializing']}</div>
+      <div style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.5 }}>
+        Claude is asking questions in the chat panel → answer to set up the project.
+      </div>
+    </div>
+  )
+}
+
+interface Props {
+  projectId: string
+  project: Project
+  health: ProjectStructureHealth | null
+  refreshHealth: () => void
+}
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -24,7 +58,7 @@ function Row({ title, hint, children }: { title: string; hint?: string; children
   )
 }
 
-export function SettingsTab({ projectId }: Props) {
+export function SettingsTab({ projectId, project, health, refreshHealth }: Props) {
   const [proj, setProj] = useState<ProjectSettings | null>(null)
   const [glob, setGlob] = useState<GlobalSettings | null>(null)
   const [loading, setLoading] = useState(true)
@@ -84,8 +118,76 @@ export function SettingsTab({ projectId }: Props) {
   const setE = (patch: Partial<GlobalSettingsEffective>) =>
     setGlob({ ...glob, effective: { ...e, ...patch } })
 
+  const git = project.health.git
+
   return (
     <div style={{ maxWidth: 660, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 28, padding: '6px 4px 32px' }}>
+
+      {/* ── Project info ── */}
+      <section>
+        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>Project info</h3>
+        <WelcomeBanner projectId={projectId} />
+
+        <div className="overview-grid" style={{ marginTop: 8 }}>
+          <div className="info-card">
+            <div className="info-card-label">{t['overview.cwd']}</div>
+            <div className="info-card-value mono">{project.cwd}</div>
+          </div>
+
+          <div className="info-card">
+            <div className="info-card-label">{t['overview.tg_thread']}</div>
+            <div className="info-card-value">
+              {project.tg_thread !== null ? (
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>#{project.tg_thread}</span>
+              ) : (
+                <span style={{ color: 'var(--text3)' }}>{t['overview.not_bound']}</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {git ? (
+          <div className="git-card" style={{ marginTop: 8 }}>
+            <div className="git-card-header">{t['overview.git_state']}</div>
+            <div className="git-stats">
+              <div className="git-stat">
+                <span className="git-stat-label">{t['overview.git_branch']}</span>
+                <span className="git-stat-value" style={{ fontSize: 14, fontWeight: 500, color: 'var(--accent-h)' }}>
+                  {git.branch}
+                </span>
+              </div>
+              <div className="git-stat">
+                <span className="git-stat-label">{t['overview.git_changes']}</span>
+                <span className={`git-stat-value ${git.dirty > 0 ? 'warn' : 'ok'}`}>
+                  {git.dirty}
+                </span>
+              </div>
+              <div className="git-stat">
+                <span className="git-stat-label">{t['overview.git_unpushed']}</span>
+                <span className={`git-stat-value ${git.unpushed > 0 ? 'warn' : 'ok'}`}>
+                  {git.unpushed}
+                </span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="no-content" style={{ marginTop: 8 }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            {t['overview.git_unavailable']}
+          </div>
+        )}
+
+        <ProjectStructureCardFull
+          projectId={projectId}
+          health={health}
+          refreshHealth={refreshHealth}
+        />
+      </section>
 
       {/* ── Project settings ── */}
       <section>

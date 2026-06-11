@@ -5,7 +5,6 @@ import { ProjectActivityProvider, useOnRunEnd, useProjectActivity } from '../hoo
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { Modal } from '../components/Modal'
 import { TestResult } from '../types'
-import { OverviewTab } from '../tabs/OverviewTab'
 import { ClaudeMdTab } from '../tabs/ClaudeMdTab'
 import { LogsTab } from '../tabs/LogsTab'
 import { BoardTab } from '../tabs/BoardTab'
@@ -22,9 +21,8 @@ interface Tab {
   disabled?: boolean
 }
 
-// secrets tab removed (merged into Settings); 8 tabs remain
+// secrets tab removed (merged into Settings); overview tab removed (merged into Settings); 7 tabs remain
 const TABS: Tab[] = [
-  { id: 'overview',  label: t['tab.overview'] },
   { id: 'claude-md', label: t['tab.claude_md'] },
   { id: 'logs',      label: t['tab.logs'] },
   { id: 'board',     label: t['tab.board'] },
@@ -487,7 +485,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                 {structHealth && (
                   <button
                     className={`health-badge health-badge-${structHealth.color}`}
-                    onClick={() => setActiveTab('overview')}
+                    onClick={() => setActiveTab('settings')}
                     title={structHealth.items.find(i => !i.ok)?.label ?? t['project.health_all_ok']}
                   >
                     <span className={`git-sync-dot ${structHealth.color === 'red' ? 'yellow' : structHealth.color}`} />
@@ -570,18 +568,13 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
         </div>
 
         <div className="tab-content">
-          {activeTab === 'overview'  && (
-            <ErrorBoundary label="Overview">
-              <OverviewTab project={project} health={structHealth} refreshHealth={refreshHealth} />
-            </ErrorBoundary>
-          )}
           {activeTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'logs'      && <ErrorBoundary label="Logs"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
           {activeTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} /></ErrorBoundary>}
           {activeTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'memory'    && <ErrorBoundary label="Memory"><MemoryTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
-          {activeTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} /></ErrorBoundary>}
         </div>
       </div>
 

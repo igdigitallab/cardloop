@@ -47,7 +47,6 @@ export const ru = {
   'tabbar.close': 'Закрыть',
 
   // ── Project tabs labels ──────────────────────────────────────
-  'tab.overview': 'Обзор',
   'tab.claude_md': 'CLAUDE.md',
   'tab.logs': 'Логи',
   'tab.board': 'Доска',
