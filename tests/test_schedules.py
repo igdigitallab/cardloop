@@ -110,6 +110,23 @@ CRON_TZ=America/Los_Angeles
     assert any("/router-monitor.sh" in c for c in commands)
     assert all(r["source"] == "cron" for r in records)
 
+    # Regression: command must be the FULL remainder including the redirect tail.
+    # The original parser used split(None, 6) and kept only the first token
+    # ("/home/igor/scripts/router-monitor.sh" without ">> ... 2>&1"), which made
+    # broken-redirect detection and the mtime last_run heuristic blind.
+    monitor_cmd = next(c for c in commands if "/router-monitor.sh" in c)
+    assert ">> /home/igor/logs/monitor.log 2>&1" in monitor_cmd, monitor_cmd
+
+
+def test_collector_cron_d_full_command_with_redirect():
+    """cron.d format: command remainder after the user field is kept whole."""
+    text = "30 4 * * * root /usr/local/bin/backup-volumes.sh >> /var/log/backup.log 2>&1\n"
+    with patch.object(_sched, "_resolve_project", return_value=None):
+        records = _sched._parse_crontab_d_text(text, {"topics": {}}, "/etc/cron.d/backup")
+    assert len(records) == 1
+    assert records[0]["command"] == "/usr/local/bin/backup-volumes.sh >> /var/log/backup.log 2>&1"
+    assert "root" not in records[0]["command"].split(">>")[0].split("/")[0]
+
 
 def test_collector_detects_broken_redirect_to_missing_dir(tmp_path):
     """Cron entry with >> /nonexistent/path/file.log → status broken."""

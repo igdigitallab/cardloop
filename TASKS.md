@@ -22,7 +22,7 @@
   > Версии моделей (Opus 4.8/Sonnet 4.6/Haiku 4.5) + убран дубль селектора — СДЕЛАНО в spec-011 Ф2. Осталось: режимы мышления.
 - [ ] multi-chat: несколько чатов на один проект, каждый со своим session_id; полоса вкладок чатов <!--ops:3a00f3-->
 - [ ] Карточки: своя свежая сессия на карточку + cwd-замок (развести с общей сессией чата перед автономией) <!--ops:2a0a1a-->
-- [x] Единый Schedules: cron + systemd timers + /schedule + celery + n8n <!--ops:cb8518-->
+- [ ] Единый Schedules: cron + systemd timers + /schedule + celery + n8n <!--ops:cb8518-->
 
 ## In Progress
 

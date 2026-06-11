@@ -251,7 +251,10 @@ def _parse_crontab_text(text: str, ctx: dict) -> list[dict]:
             schedule = parts[0].strip()
             command = parts[1].strip()
         else:
-            parts = line.split(None, 6)
+            # split(None, 5): parts[0..4] = schedule fields, parts[5] = FULL command
+            # remainder (a higher maxsplit would cut the command at its first token,
+            # hiding redirects from the broken/last_run detection).
+            parts = line.split(None, 5)
             if len(parts) < 6:
                 continue
             schedule = " ".join(parts[:5])
@@ -336,11 +339,12 @@ def _parse_crontab_d_text(text: str, ctx: dict, source_file: str) -> list[dict]:
             continue
         if _CRON_VAR_RE.match(line):
             continue
-        parts = line.split(None, 7)
+        # split(None, 6): parts[0..4] = schedule, parts[5] = user,
+        # parts[6] = FULL command remainder (see _parse_crontab_text note).
+        parts = line.split(None, 6)
         if len(parts) < 7:
             continue
         schedule = " ".join(parts[:5])
-        # parts[5] = user, parts[6] = command
         command = parts[6]
         records.append(_cron_record(schedule, command, ctx, id_source=f"cron-d:{source_file}"))
     return records
