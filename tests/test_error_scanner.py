@@ -96,6 +96,21 @@ def test_skip_health_check_noise():
     assert len(errors) == 0
 
 
+def test_skip_telegram_polling_transient():
+    """Транзиентные ошибки TG polling (PTB сам ретраит) не должны попадать в Failed.
+    Регрессия: одно Bad Gateway от Telegram API заваливало доску карточкой err-*."""
+    log = """2026-06-05 18:11:08,149 ERROR telegram.ext.Updater Exception happened while polling for updates.
+Traceback (most recent call last):
+  File "/venv/telegram/ext/_utils/networkloop.py", line 161, in network_retry_loop
+    await do_action()
+  File "/venv/telegram/_bot.py", line 4865, in get_updates
+    await self._post(
+telegram.error.NetworkError: Bad Gateway
+"""
+    errors = _parse_log_errors(log)
+    assert errors == [], f"TG polling transient должен быть отфильтрован, got: {errors}"
+
+
 def test_traceback_not_double_counted_with_generic():
     """Если ERROR-строка содержит Traceback, она не должна дублироваться (traceback парсится отдельно)."""
     log = """

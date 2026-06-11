@@ -128,3 +128,5 @@
 - [x] [ERR] ERROR: telegram.ext.Updater Exception happened while polling for updates. <!--ops:err-b73031-->
   > Closed: self-healing removed (spec-010 dropped in v0.9)
 - [x] Единый Schedules: cron + systemd timers + /schedule + celery + n8n · 2026-06-10
+- [x] [feature] Deferred prompt runs — schedule agent start at a set time or after rate-limit window reset · 2026-06-11
+- [x] [research] addyosmani/agent-skills as source of default executor playbooks for ClaudeOps · 2026-06-11
