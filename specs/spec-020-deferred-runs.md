@@ -1,7 +1,8 @@
 ---
 created: 2026-06-11
 updated: 2026-06-11
-status: draft
+status: in-progress
+phases_shipped: A, B, C, D
 card: ops:98748d
 ---
 
@@ -522,6 +523,127 @@ same as Telegram message limit) is required.
 - **Auto-retry on model error.** If `_execute_deferred` encounters an SDK error
   (not a busy slot), the run is marked `failed`. Retry logic for transient model errors
   is handled by the existing `run_engine` retry behaviour, not by the deferred layer.
+
+---
+
+### Phase D — Auto-resume on rate-limit (S: ~2–3 h)
+
+**Scope:** When a run is killed mid-flight by a 5-hour rate-limit (SDK yields `rate_limit`
+status `"rejected"` and `ResultMessage.api_error_status = 429`), automatically create a
+`fire_on_reset` deferred record so the work resumes once the window reopens — without
+operator action.
+
+#### Detection
+
+`run_engine` (bot.py) now captures `ResultMessage.api_error_status` in the `result` event:
+```python
+{"type": "result", ..., "api_error_status": 429}  # 429 = rate-limited
+```
+`api_error_status` is `None` on success. Available since SDK v2.1.110.
+
+#### Single interception point: `_maybe_auto_resume`
+
+A single async helper in `webapp.py` is called after every run completes:
+
+```python
+async def _maybe_auto_resume(
+    ctx, session_key, original_prompt, last_result_event,
+    resume_session_id=None, parent_auto_resume_count=0,
+)
+```
+
+Called from:
+- `run_agent` (bot.py) — after TG reply is sent
+- `api_project_chat` (webapp.py) — after `_send({"type": "done"})`
+- `_run_card` (webapp.py) — after TG ping
+- `_execute_deferred` (webapp.py) — after deferred run completes
+
+One implementation, four call sites. No duplication.
+
+#### Auto-deferred record schema (Phase D additions)
+
+```json
+{
+  "id": "def-a3f7c2b1",
+  "project": "networking-os",
+  "session_key": "chat:thread",
+  "prompt": "Continue the interrupted task exactly where you stopped. Original request: <first 200 chars>",
+  "fire_at": null,
+  "fire_on_reset": true,
+  "auto_resume": true,
+  "auto_resume_count": 1,
+  "resume_session_id": "<session_id of interrupted run>",
+  "original_prompt_preview": "<first 200 chars of original prompt>"
+}
+```
+
+`resume_session_id` is passed to `run_engine(resume_session_id=...)` so the agent
+resumes in the exact conversation context of the interrupted run.
+
+#### Loop guard
+
+`auto_resume_count` tracks how many consecutive auto-resumes have fired in one chain.
+When `parent_auto_resume_count >= AUTO_RESUME_MAX` (default 3), `_maybe_auto_resume`
+sends a TG warning instead of creating another record:
+```
+[WARN] Auto-resume limit reached (3) for [project]. Manual restart required.
+```
+
+#### Toggle
+
+`AUTO_RESUME_ON_RATE_LIMIT=0` disables Phase D entirely. Default is `1` (enabled).
+
+#### New env vars
+
+| Var | Default | Description |
+|---|---|---|
+| `AUTO_RESUME_ON_RATE_LIMIT` | `1` | Enable/disable auto-resume on rate-limit |
+| `AUTO_RESUME_MAX` | `3` | Max consecutive auto-resume records per chain |
+
+#### TG notification (on auto-resume creation)
+
+```
+⏸ <project>: rate-limited, auto-resume queued (resets ~HH:MM) [def-a3f7c2b1]
+```
+
+`resets_at` is read from `ctx["rate_limits"]` (populated by the most recent
+`RateLimitEvent` in the just-completed run). Timezone: `OPERATOR_TZ` env
+(default `America/Los_Angeles`). If unavailable, the timestamp is omitted.
+
+#### Deliverables
+
+- `run_engine` (bot.py): `result` event includes `api_error_status` field
+- `_maybe_auto_resume` helper (webapp.py) — single shared implementation
+- `_get_resets_at_display` helper (webapp.py) — formats reset time in operator timezone
+- Hooks in `run_agent`, `api_project_chat`, `_run_card`, `_execute_deferred`
+- `_execute_deferred`: uses `record["resume_session_id"]` when present (over sessions dict)
+- `AUTO_RESUME_ON_RATE_LIMIT`, `AUTO_RESUME_MAX` env-configurable constants
+
+#### Acceptance (Phase D)
+
+- Run killed with `api_error_status=429` → `fire_on_reset` deferred record created with
+  `auto_resume=true`, `resume_session_id` set, prompt is continuation text.
+- Successful run (`api_error_status=None`) → no auto-resume record created.
+- `AUTO_RESUME_ON_RATE_LIMIT=0` → no record, no TG notification.
+- `auto_resume_count >= AUTO_RESUME_MAX` → TG warning, no new record (loop guard).
+- Counter increments correctly in chain: parent=2 → child has `auto_resume_count=3`.
+- TG notification contains project name and "rate-limited" or ⏸.
+- `result` event with `None` last_result_event → no-op.
+- Unknown `session_key` (not in topics) → no-op.
+- `resume_session_id` in deferred record is passed to `run_engine` (context preserved).
+
+#### Tests (Phase D) — `tests/test_deferred.py`
+
+- `test_auto_resume_creates_deferred_on_429`
+- `test_auto_resume_no_record_on_success`
+- `test_auto_resume_no_record_on_non_429`
+- `test_auto_resume_toggle_off_no_record`
+- `test_auto_resume_loop_guard_notifies_not_creates`
+- `test_auto_resume_counter_increments`
+- `test_auto_resume_notification_sent`
+- `test_auto_resume_none_result_event_noop`
+- `test_auto_resume_unknown_session_key_noop`
+- `test_execute_deferred_uses_resume_session_id`
 
 ---
 

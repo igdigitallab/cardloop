@@ -9,6 +9,7 @@ Covers:
 - api_deferred_delete (DELETE /api/deferred/{id}) — cancel
 - api_schedules_get merges deferred pending records (Spec 020 integration)
 - _deferred_loop: fires at correct time, respects busy session, max attempts
+- Phase D: auto-resume on rate-limit detection + loop guard + toggle
 """
 import asyncio
 import json
@@ -855,3 +856,269 @@ async def test_create_deferred_truncates_long_prompt(aiohttp_client, deferred_ap
     assert resp.status == 201
     records = _webapp._load_deferred()
     assert len(records[0]["prompt"]) == 4096
+
+
+# ─────────────────────────── Phase D: auto-resume on rate-limit ───────────────────────────
+
+
+def _make_fake_ctx_with_topic(tmp_path, project="myproject", session_key="100:10"):
+    """Minimal ctx for _maybe_auto_resume tests."""
+    data = tmp_path / "data"
+    data.mkdir(exist_ok=True)
+    _webapp._DEFERRED_FILE = data / "deferred.json"
+    return {
+        "topics": {session_key: {"project": project, "cwd": str(tmp_path), "model": "sonnet"}},
+        "sessions": {session_key: "sess-abc123"},
+        "running": {},
+        "rate_limits": {},
+        "ptb_app": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_creates_deferred_on_429(tmp_path):
+    """_maybe_auto_resume creates a fire_on_reset deferred record when api_error_status==429."""
+    ctx = _make_fake_ctx_with_topic(tmp_path)
+    result_event = {"type": "result", "session_id": "sess-abc123", "api_error_status": 429}
+
+    with patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+        await _webapp._maybe_auto_resume(
+            ctx=ctx,
+            session_key="100:10",
+            original_prompt="Run a big task",
+            last_result_event=result_event,
+            resume_session_id="sess-abc123",
+        )
+
+    records = _webapp._load_deferred()
+    assert len(records) == 1
+    r = records[0]
+    assert r["status"] == "pending"
+    assert r["fire_on_reset"] is True
+    assert r["auto_resume"] is True
+    assert r["auto_resume_count"] == 1
+    assert r["resume_session_id"] == "sess-abc123"
+    assert "Continue the interrupted task" in r["prompt"]
+    assert "Run a big task" in r["prompt"]
+    assert r["id"].startswith("def-")
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_no_record_on_success(tmp_path):
+    """_maybe_auto_resume does NOT create a record when api_error_status is None (success)."""
+    ctx = _make_fake_ctx_with_topic(tmp_path)
+    result_event = {"type": "result", "session_id": "sess-abc123", "api_error_status": None}
+
+    with patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+        await _webapp._maybe_auto_resume(
+            ctx=ctx,
+            session_key="100:10",
+            original_prompt="Run a task",
+            last_result_event=result_event,
+            resume_session_id="sess-abc123",
+        )
+
+    records = _webapp._load_deferred()
+    assert records == []
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_no_record_on_non_429(tmp_path):
+    """_maybe_auto_resume does NOT create a record for non-rate-limit errors (e.g. 500)."""
+    ctx = _make_fake_ctx_with_topic(tmp_path)
+    result_event = {"type": "result", "session_id": "sess-abc123", "api_error_status": 500}
+
+    with patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+        await _webapp._maybe_auto_resume(
+            ctx=ctx,
+            session_key="100:10",
+            original_prompt="Run a task",
+            last_result_event=result_event,
+            resume_session_id="sess-abc123",
+        )
+
+    records = _webapp._load_deferred()
+    assert records == []
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_toggle_off_no_record(tmp_path):
+    """When AUTO_RESUME_ON_RATE_LIMIT=0, _maybe_auto_resume creates no record."""
+    ctx = _make_fake_ctx_with_topic(tmp_path)
+    result_event = {"type": "result", "api_error_status": 429}
+
+    with patch.object(_webapp, "_AUTO_RESUME_ON_RATE_LIMIT", 0), \
+         patch.object(_webapp, "_notify_operator", new_callable=AsyncMock) as mock_notify:
+        await _webapp._maybe_auto_resume(
+            ctx=ctx,
+            session_key="100:10",
+            original_prompt="Run a task",
+            last_result_event=result_event,
+        )
+
+    records = _webapp._load_deferred()
+    assert records == []
+    mock_notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_loop_guard_notifies_not_creates(tmp_path):
+    """When auto_resume_count >= AUTO_RESUME_MAX, sends TG warning instead of creating record."""
+    ctx = _make_fake_ctx_with_topic(tmp_path)
+    result_event = {"type": "result", "api_error_status": 429}
+
+    notify_calls = []
+    async def capture_notify(ctx, text):
+        notify_calls.append(text)
+
+    max_val = _webapp._AUTO_RESUME_MAX  # default 3
+
+    with patch.object(_webapp, "_notify_operator", side_effect=capture_notify):
+        await _webapp._maybe_auto_resume(
+            ctx=ctx,
+            session_key="100:10",
+            original_prompt="Run a task",
+            last_result_event=result_event,
+            parent_auto_resume_count=max_val,  # at or above limit
+        )
+
+    records = _webapp._load_deferred()
+    assert records == []  # no new deferred record
+    assert len(notify_calls) == 1
+    assert "Manual restart required" in notify_calls[0] or "limit" in notify_calls[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_counter_increments(tmp_path):
+    """auto_resume_count is incremented correctly in the created record."""
+    ctx = _make_fake_ctx_with_topic(tmp_path)
+    result_event = {"type": "result", "api_error_status": 429}
+
+    with patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+        # Simulate 2nd in chain (parent_count=2; max default=3 so still allowed)
+        await _webapp._maybe_auto_resume(
+            ctx=ctx,
+            session_key="100:10",
+            original_prompt="Original task text",
+            last_result_event=result_event,
+            parent_auto_resume_count=2,
+        )
+
+    records = _webapp._load_deferred()
+    assert len(records) == 1
+    assert records[0]["auto_resume_count"] == 3  # parent 2 + 1
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_notification_sent(tmp_path):
+    """_maybe_auto_resume sends a TG notification on successful auto-resume creation."""
+    ctx = _make_fake_ctx_with_topic(tmp_path)
+    result_event = {"type": "result", "api_error_status": 429}
+
+    notify_calls = []
+    async def capture_notify(ctx, text):
+        notify_calls.append(text)
+
+    with patch.object(_webapp, "_notify_operator", side_effect=capture_notify):
+        await _webapp._maybe_auto_resume(
+            ctx=ctx,
+            session_key="100:10",
+            original_prompt="Deploy to production",
+            last_result_event=result_event,
+        )
+
+    assert len(notify_calls) == 1
+    msg = notify_calls[0]
+    assert "myproject" in msg
+    assert "rate-limited" in msg or "⏸" in msg
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_none_result_event_noop(tmp_path):
+    """_maybe_auto_resume is a no-op when last_result_event is None."""
+    ctx = _make_fake_ctx_with_topic(tmp_path)
+
+    with patch.object(_webapp, "_notify_operator", new_callable=AsyncMock) as mock_notify:
+        await _webapp._maybe_auto_resume(
+            ctx=ctx,
+            session_key="100:10",
+            original_prompt="Some task",
+            last_result_event=None,
+        )
+
+    records = _webapp._load_deferred()
+    assert records == []
+    mock_notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_unknown_session_key_noop(tmp_path):
+    """_maybe_auto_resume is a no-op when session_key not in topics."""
+    ctx = _make_fake_ctx_with_topic(tmp_path)
+    result_event = {"type": "result", "api_error_status": 429}
+
+    with patch.object(_webapp, "_notify_operator", new_callable=AsyncMock) as mock_notify:
+        await _webapp._maybe_auto_resume(
+            ctx=ctx,
+            session_key="999:999",  # not in topics
+            original_prompt="Some task",
+            last_result_event=result_event,
+        )
+
+    records = _webapp._load_deferred()
+    assert records == []
+    mock_notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execute_deferred_uses_resume_session_id(tmp_path):
+    """_execute_deferred passes record['resume_session_id'] to run_engine when present."""
+    data = tmp_path / "data"
+    data.mkdir(exist_ok=True)
+    _webapp._DEFERRED_FILE = data / "deferred.json"
+
+    session_key = "100:10"
+    record = {
+        "id": "def-testresume",
+        "project": "myproject",
+        "session_key": session_key,
+        "prompt": "Continue the interrupted task",
+        "fire_at": None,
+        "fire_on_reset": True,
+        "created": _webapp._utcnow_iso(),
+        "status": "fired",
+        "fired_at": _webapp._utcnow_iso(),
+        "error": None,
+        "attempts": 0,
+        "auto_resume": True,
+        "auto_resume_count": 1,
+        "resume_session_id": "interrupted-session-xyz",
+        "original_prompt_preview": "Build the thing",
+    }
+    _webapp._save_deferred([record])
+
+    run_engine_calls = []
+
+    async def mock_run_engine(**kwargs):
+        run_engine_calls.append(kwargs)
+        # Yield a successful result with no rate-limit
+        yield {"type": "result", "session_id": "new-session-456", "api_error_status": None}
+
+    ctx = {
+        "topics": {session_key: {"project": "myproject", "cwd": str(tmp_path), "model": "sonnet"}},
+        "sessions": {},
+        "running": {session_key: True},
+        "rate_limits": {},
+        "ptb_app": None,
+        "run_engine": mock_run_engine,
+        "save_sessions": lambda: None,
+    }
+
+    with patch.object(_webapp, "_notify_operator", new_callable=AsyncMock), \
+         patch.object(_webapp, "_maybe_auto_resume", new_callable=AsyncMock), \
+         patch.object(_webapp, "_secrets_read", return_value={}), \
+         patch.object(_webapp, "_build_agents_kwargs", return_value={}):
+        await _webapp._execute_deferred(ctx, record)
+
+    assert len(run_engine_calls) == 1
+    assert run_engine_calls[0]["resume_session_id"] == "interrupted-session-xyz"

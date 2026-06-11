@@ -41,6 +41,14 @@ _DEFERRED_MAX_ATTEMPTS = int(os.environ.get("DEFERRED_MAX_ATTEMPTS", "5"))
 _DEFERRED_FREE_THRESHOLD = float(os.environ.get("DEFERRED_FREE_THRESHOLD", "0.10"))
 _DEFERRED_FILE: "Path | None" = None  # set in _deferred_init(ctx)
 
+# Phase D: auto-resume on rate-limit
+# AUTO_RESUME_ON_RATE_LIMIT=1 (default) — create a fire_on_reset deferred record whenever a run
+# terminates with api_error_status=429 (rate-limited mid-flight). Set to 0 to disable.
+_AUTO_RESUME_ON_RATE_LIMIT = int(os.environ.get("AUTO_RESUME_ON_RATE_LIMIT", "1"))
+# Maximum consecutive auto-resume records allowed in one chain (loop guard).
+# Counted via auto_resume_count on the deferred record.
+_AUTO_RESUME_MAX = int(os.environ.get("AUTO_RESUME_MAX", "3"))
+
 # Strong references for long-lived background tasks created via asyncio.create_task.
 # Prevents GC from collecting tasks before they complete (Python docs warning).
 _BG_TASKS: set = set()
@@ -2976,6 +2984,7 @@ async def _run_card(
     exc_info: str | None = None
     ok = False
     has_changes = False
+    _card_last_result_event: "dict | None" = None  # Phase D: track for auto-resume
 
     try:
         try:
@@ -3018,6 +3027,7 @@ async def _run_card(
                         "tool": tool_data,
                     })
                 elif etype == "result":
+                    _card_last_result_event = event  # Phase D: capture for auto-resume
                     if event.get("session_id"):
                         ctx["sessions"][session_key] = event["session_id"]
                         ctx["save_sessions"]()
@@ -3065,6 +3075,16 @@ async def _run_card(
 
         # TG ping (non-critical)
         await _notify_tg(ctx, session_key, prompt, ok)
+
+        # Phase D: auto-resume if run was killed by rate-limit
+        _resume_sid = ctx["sessions"].get(session_key)
+        await _maybe_auto_resume(
+            ctx=ctx,
+            session_key=session_key,
+            original_prompt=card.get("text", prompt),
+            last_result_event=_card_last_result_event,
+            resume_session_id=_resume_sid,
+        )
 
     finally:
         # Publish run completion to bus (BEFORE releasing the lock)
@@ -3768,6 +3788,115 @@ async def api_usage(req: web.Request) -> web.Response:
 
 # ─────────────────────────── Deferred Runs (Spec 020) ────────────────────────────
 
+async def _maybe_auto_resume(
+    ctx: dict,
+    session_key: str,
+    original_prompt: str,
+    last_result_event: "dict | None",
+    resume_session_id: "str | None" = None,
+    parent_auto_resume_count: int = 0,
+) -> None:
+    """Phase D: auto-resume after rate-limit.
+
+    Called after any run completes (run_agent, api_project_chat, _run_card,
+    _execute_deferred). If the run ended with api_error_status=429 and
+    AUTO_RESUME_ON_RATE_LIMIT is enabled, creates a fire_on_reset deferred record
+    that will re-run the task once the 5-hour window resets.
+
+    Chain guard: if parent_auto_resume_count >= AUTO_RESUME_MAX, sends a TG
+    notification instead of creating another auto-resume record.
+
+    Does nothing (silently) when:
+    - AUTO_RESUME_ON_RATE_LIMIT is 0
+    - last_result_event is None or api_error_status != 429
+    - session_key not found in topics
+    - _DEFERRED_FILE is not initialised (deferred system not started)
+    """
+    if not _AUTO_RESUME_ON_RATE_LIMIT:
+        return
+    if last_result_event is None:
+        return
+    if last_result_event.get("api_error_status") != 429:
+        return
+    if _DEFERRED_FILE is None:
+        return
+
+    topics = ctx.get("topics") or {}
+    topic = topics.get(session_key)
+    if topic is None:
+        return
+
+    project_name = topic.get("project", "unknown")
+
+    # Loop guard
+    if parent_auto_resume_count >= _AUTO_RESUME_MAX:
+        await _notify_operator(
+            ctx,
+            f"[WARN] Auto-resume limit reached ({_AUTO_RESUME_MAX}) for [{project_name}]. "
+            f"Manual restart required."
+        )
+        return
+
+    # Build continuation prompt (resume_session_id preserves context in the SDK)
+    short_original = original_prompt[:200]
+    continuation_prompt = (
+        f"Continue the interrupted task exactly where you stopped. "
+        f"Original request: {short_original}"
+    )
+
+    resets_at_str = _get_resets_at_display(ctx)
+
+    record = {
+        "id": _new_deferred_id(),
+        "project": project_name,
+        "session_key": session_key,
+        "prompt": continuation_prompt,
+        "fire_at": None,
+        "fire_on_reset": True,
+        "created": _utcnow_iso(),
+        "status": "pending",
+        "fired_at": None,
+        "error": None,
+        "attempts": 0,
+        # Phase D fields
+        "auto_resume": True,
+        "auto_resume_count": parent_auto_resume_count + 1,
+        "resume_session_id": resume_session_id,
+        "original_prompt_preview": short_original,
+    }
+    records = _load_deferred()
+    records.append(record)
+    _save_deferred(records)
+
+    await _notify_operator(
+        ctx,
+        f"⏸ {project_name}: rate-limited, auto-resume queued"
+        + (f" (resets ~{resets_at_str})" if resets_at_str else "")
+        + f" [{record['id']}]"
+    )
+
+
+def _get_resets_at_display(ctx: dict) -> str:
+    """Returns a human-readable LA time string for the next rate-limit reset, or ''."""
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(os.environ.get("OPERATOR_TZ", "America/Los_Angeles"))
+        # First try the passive rate_limits dict (populated by any recent run_engine call)
+        rate_limits = ctx.get("rate_limits") or {}
+        resets_at = None
+        for _rl_type in ("five_hour", "seven_day"):
+            entry = rate_limits.get(_rl_type)
+            if entry and entry.get("resets_at"):
+                resets_at = entry["resets_at"]
+                break
+        if resets_at is None:
+            return ""
+        dt = datetime.fromtimestamp(float(resets_at), tz=tz)
+        return dt.strftime("%H:%M")
+    except Exception:
+        return ""
+
+
 def _deferred_init(ctx: dict) -> None:
     global _DEFERRED_FILE
     _DEFERRED_FILE = ctx["DATA"] / "deferred.json"
@@ -3846,6 +3975,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
     records = _load_deferred()
     rec = next((r for r in records if r["id"] == record["id"]), None)
     session_key = record["session_key"]
+    _deferred_last_result_event: "dict | None" = None  # Phase D: track for auto-resume
     try:
         topics = ctx["topics"]
         topic = topics.get(session_key)
@@ -3870,6 +4000,9 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
             "run_id": record["id"],
         })
 
+        # Phase D: use record's resume_session_id if present (preserves interrupted context)
+        resume_sid = record.get("resume_session_id") or ctx["sessions"].get(session_key)
+
         answer_parts: list = []
         async for event in run_engine(
             project_name=project_name,
@@ -3877,7 +4010,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
             prompt=prompt,
             session_key=session_key,
             model=model,
-            resume_session_id=ctx["sessions"].get(session_key),
+            resume_session_id=resume_sid,
             env=project_secrets,
             **agents_kwargs,
         ):
@@ -3886,6 +4019,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
                 answer_parts.append(event["text"])
                 _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": record["id"]})
             elif etype == "result":
+                _deferred_last_result_event = event  # Phase D: capture for auto-resume
                 if event.get("session_id"):
                     ctx["sessions"][session_key] = event["session_id"]
                     ctx["save_sessions"]()
@@ -3905,6 +4039,18 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
             f"[OK] Deferred run complete [{record['project']}]: {record['prompt'][:80]}..."
         )
         await _notify_operator(ctx, notify_text)
+
+        # Phase D: auto-resume if this deferred run was also killed by rate-limit
+        _resume_sid_def = ctx["sessions"].get(session_key)
+        parent_count = record.get("auto_resume_count", 0)
+        await _maybe_auto_resume(
+            ctx=ctx,
+            session_key=session_key,
+            original_prompt=record.get("original_prompt_preview", prompt),
+            last_result_event=_deferred_last_result_event,
+            resume_session_id=_resume_sid_def,
+            parent_auto_resume_count=parent_count,
+        )
 
     except Exception as e:
         _bus_publish(session_key, {"kind": "run_end", "outcome": "fail", "run_id": record["id"]})
@@ -5375,6 +5521,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
             client_gone = True
             print(f"[api_project_chat] client disconnected ({type(exc).__name__}), task continues in background")
 
+    _chat_last_result_event: "dict | None" = None  # Phase D: track for auto-resume
+
     try:
         resume_sid = ctx["sessions"].get(session_key)
         # Project secrets are injected into the agent's env (values only in-process, not in the API)
@@ -5399,6 +5547,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 tool_data = _format_tool(event["name"], inp if isinstance(inp, dict) else {})
                 await _send({"type": "tool", **tool_data})
             elif etype == "result":
+                _chat_last_result_event = event  # Phase D: capture for auto-resume
                 sid = event.get("session_id")
                 if sid:
                     ctx["sessions"][session_key] = sid
@@ -5432,6 +5581,16 @@ async def api_project_chat(req: web.Request) -> web.Response:
             # other types — ignore
 
         await _send({"type": "done"})
+
+        # Phase D: auto-resume if killed by rate-limit (before lock release so session_key is valid)
+        _resume_sid_chat = ctx["sessions"].get(session_key)
+        await _maybe_auto_resume(
+            ctx=ctx,
+            session_key=session_key,
+            original_prompt=prompt,
+            last_result_event=_chat_last_result_event,
+            resume_session_id=_resume_sid_chat,
+        )
 
     finally:
         # Lock released UNCONDITIONALLY (even if the generator threw an exception)

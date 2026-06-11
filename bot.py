@@ -685,6 +685,9 @@ async def run_engine(  # type: ignore[return]
                         "session_id": getattr(msg, "session_id", None),
                         "cost_usd": getattr(msg, "total_cost_usd", None),
                         "context_tokens": last_ctx_tokens,
+                        # api_error_status: HTTP status when run failed (e.g. 429 = rate-limited).
+                        # None on success. Available since SDK v2.1.110.
+                        "api_error_status": getattr(msg, "api_error_status", None),
                     }
                 elif isinstance(msg, SystemMessage):
                     if isinstance(msg, TaskStartedMessage):
@@ -812,6 +815,7 @@ async def run_agent(context, update, prompt: str):
     wd = asyncio.create_task(watchdog())
     engine_exc = None
     subagent_progress_counts: dict = {}   # task_id -> count of progress events seen
+    _tg_last_result_event: dict | None = None  # Phase D: track for auto-resume
     webapp._bus_publish(k, {"kind": "run_start", "source": "tg", "prompt": prompt, "run_id": None})
     try:
         # Project secrets (Spec 007) augment env; TG_CHAT_ID/TG_THREAD_ID take priority
@@ -859,6 +863,7 @@ async def run_agent(context, update, prompt: str):
                 await push_status()
 
             elif etype == "result":
+                _tg_last_result_event = event  # Phase D: capture for auto-resume
                 if event.get("session_id"):
                     sessions[k] = event["session_id"]
                     save_sessions()
@@ -942,6 +947,23 @@ async def run_agent(context, update, prompt: str):
     except Exception:
         pass
     audit(b["project"], "DONE", f"edits={n_edits}" + (f" STALLED:{stalled['reason']}" if stalled["reason"] else ""))
+
+    # Phase D: auto-resume if TG run was killed by rate-limit
+    _tg_ctx = {
+        "topics": topics,
+        "sessions": sessions,
+        "running": running,
+        "rate_limits": rate_limits,
+        "ptb_app": context.application if hasattr(context, "application") else None,
+    }
+    _resume_sid_tg = sessions.get(k)
+    await webapp._maybe_auto_resume(
+        ctx=_tg_ctx,
+        session_key=k,
+        original_prompt=prompt,
+        last_result_event=_tg_last_result_event,
+        resume_session_id=_resume_sid_tg,
+    )
 
 
 
