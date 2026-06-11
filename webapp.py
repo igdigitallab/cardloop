@@ -1112,10 +1112,10 @@ def _new_card_id() -> str:
     return secrets.token_hex(3)
 
 
-# Regular card = hex(+dash); incident = 'err-<hash6>'. The err- prefix is explicitly allowed;
-# the body stays [a-f0-9-] (no dots/slashes → traversal impossible). Without err- in the class
-# there was a bug: err-cards failed validation → couldn't be closed/deleted from the UI.
-_CARD_ID_RE = re.compile(r"^(err-)?[a-f0-9-]{4,20}$")
+# Regular card = hex(+dash) OR alphanumeric slug like jan-9e2d; incident = 'err-<hash6>'.
+# The err- prefix is explicitly allowed. No dots/slashes → traversal impossible.
+# Extended to [a-z0-9-] so user-defined IDs like "jan-9e2d" pass validation.
+_CARD_ID_RE = re.compile(r"^(err-)?[a-z0-9-]{4,20}$")
 
 
 def _valid_card_id(card_id: str) -> bool:
