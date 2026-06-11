@@ -379,4 +379,14 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state }),
     }),
+
+  // Spec-019: Schedules registry
+  schedules: (qs = '') =>
+    apiFetch<import('./tabs/SchedulesTab').SchedulesResponse>(`/api/schedules${qs}`),
+
+  schedulesScan: () =>
+    apiFetch<{ queued: boolean }>('/api/schedules/scan', { method: 'POST' }),
+
+  schedulesInvestigate: (id: string) =>
+    apiFetch<{ card_id: string }>(`/api/schedules/${encodeURIComponent(id)}/investigate`, { method: 'POST' }),
 }

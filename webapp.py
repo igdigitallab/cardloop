@@ -26,6 +26,9 @@ from typing import AsyncGenerator, Optional, TypedDict
 import aiohttp
 from aiohttp import web
 
+# Spec-019: Schedules registry module
+import schedules as _schedules
+
 
 # ─────────────────────────── named constants ───────────────────────────
 
@@ -6021,6 +6024,63 @@ async def spa_handler(req: web.Request) -> web.Response:
     return web.FileResponse(index)
 
 
+# ─────────────────────────── Spec-019: Schedules API ───────────────────────
+
+async def api_schedules_get(req: web.Request) -> web.Response:
+    """GET /api/schedules — returns normalised schedule registry.
+    Query params: ?project=id, ?status=broken,stale, ?source=cron,systemd"""
+    cache = _schedules._read_cache()
+    records: list[dict] = cache.get("records", [])
+
+    # Apply filters
+    project_filter = req.rel_url.query.get("project", "").strip()
+    status_filter = req.rel_url.query.get("status", "").strip()
+    source_filter = req.rel_url.query.get("source", "").strip()
+
+    if project_filter:
+        records = [r for r in records if r.get("project") == project_filter]
+    if status_filter:
+        allowed = {s.strip() for s in status_filter.split(",") if s.strip()}
+        records = [r for r in records if r.get("status") in allowed]
+    if source_filter:
+        allowed_src = {s.strip() for s in source_filter.split(",") if s.strip()}
+        records = [r for r in records if r.get("source") in allowed_src]
+
+    # Sort: next_run ascending (nulls last)
+    def sort_key(r):
+        nr = r.get("next_run")
+        if nr is None:
+            return (1, "")
+        return (0, str(nr))
+
+    records = sorted(records, key=sort_key)
+
+    return web.json_response({
+        "scanned_at": cache.get("scanned_at"),
+        "source_statuses": cache.get("source_statuses", []),
+        "records": records,
+    })
+
+
+async def api_schedules_scan(req: web.Request) -> web.Response:
+    """POST /api/schedules/scan — triggers immediate background re-scan."""
+    ctx = req.app["ctx"]
+    _spawn_bg(_schedules.run_scan(ctx))
+    return web.json_response({"queued": True})
+
+
+async def api_schedules_investigate(req: web.Request) -> web.Response:
+    """POST /api/schedules/{id}/investigate — create Backlog card for investigation."""
+    ctx = req.app["ctx"]
+    record_id = req.match_info.get("id", "").strip()
+    if not record_id:
+        return web.json_response({"error": "missing id"}, status=400)
+    result = await _schedules.investigate_schedule(ctx, record_id)
+    if result is None:
+        return web.json_response({"error": "schedule entry not found"}, status=404)
+    return web.json_response(result)
+
+
 # ─────────────────────────── entry point ───────────────────────────
 
 async def start(ptb_app, ctx: dict) -> None:
@@ -6041,6 +6101,8 @@ async def start(ptb_app, ctx: dict) -> None:
         _ui_state_init(ctx)
         # Spec-012 Ph0: initialise paths to scan_state + dismissed_incidents files
         _scan_state_init(ctx)
+        # Spec-019: Schedules registry — initialise file paths
+        _schedules._schedules_init(ctx)
 
         app = web.Application(middlewares=[error_middleware, auth_middleware], client_max_size=20 * 1024 * 1024)
         app["ctx"] = ctx
@@ -6157,6 +6219,11 @@ async def start(ptb_app, ctx: dict) -> None:
         # '🔧 Bring up to standard' — supplements existing files with templates without overwriting
         app.router.add_post("/api/projects/{id}/upgrade", api_project_upgrade)
 
+        # Spec-019: Schedules registry
+        app.router.add_get("/api/schedules", api_schedules_get)
+        app.router.add_post("/api/schedules/scan", api_schedules_scan)
+        app.router.add_post("/api/schedules/{id}/investigate", api_schedules_investigate)
+
         # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
 
@@ -6177,6 +6244,9 @@ async def start(ptb_app, ctx: dict) -> None:
         print(f"[webapp] incident scanner started (interval {_SCAN_INTERVAL_SEC}s)")
         # Card Queue: backstop drain loop (restart-resume + TG-interleave)
         _spawn_bg(_queue_drain_loop(ctx))
+        # Spec-019: Schedules registry — background scan loop
+        _spawn_bg(_schedules._schedules_scan_loop(ctx))
+        print(f"[webapp] schedules scanner started (interval {_schedules._SCAN_INTERVAL_SEC}s)")
         print(f"[webapp] queue drain loop started (interval {_QUEUE_DRAIN_INTERVAL_SEC}s)")
     except Exception as e:
         print(f"[webapp] ERROR during startup: {e}")

@@ -14,6 +14,10 @@ interface Props {
   globalFilesActive: boolean
   onOpenGlobalFiles: () => void
   onCloseGlobalFiles: () => void
+  schedulesOpen: boolean
+  schedulesActive: boolean
+  onOpenSchedules: () => void
+  onCloseSchedules: () => void
   /** Toggles the mobile off-canvas sidebar drawer */
   onToggleDrawer?: () => void
 }
@@ -100,6 +104,7 @@ function TabItem({
 export function ProjectTabBar({
   projects, activeId, unreadBySession, onActivate, onClose, onRename, onNewFree,
   globalFilesOpen, globalFilesActive, onOpenGlobalFiles, onCloseGlobalFiles,
+  schedulesOpen, schedulesActive, onOpenSchedules, onCloseSchedules,
   onToggleDrawer,
 }: Props) {
   return (
@@ -146,6 +151,23 @@ export function ProjectTabBar({
             )}
           </div>
         )}
+        {/* Schedules special tab */}
+        {schedulesOpen && (
+          <div
+            className={`ptab ptab-global-files ${schedulesActive ? 'active' : ''}`}
+            onClick={onOpenSchedules}
+            title="Schedules"
+          >
+            <span className="ptab-name">🗓 Schedules</span>
+            {schedulesActive && (
+              <button
+                className="ptab-close"
+                onClick={e => { e.stopPropagation(); onCloseSchedules() }}
+                title="Close"
+              >✕</button>
+            )}
+          </div>
+        )}
         <button
           className="ptab-new"
           onClick={onNewFree}
@@ -155,6 +177,14 @@ export function ProjectTabBar({
         </button>
       </div>
       <div className="ptab-spacer" />
+      {/* Schedules button */}
+      <button
+        className={`ptab-folder-btn${schedulesActive ? ' active' : ''}`}
+        onClick={onOpenSchedules}
+        title="Schedules"
+      >
+        🗓
+      </button>
       {/* Global file browser button */}
       <button
         className={`ptab-folder-btn${globalFilesActive ? ' active' : ''}`}

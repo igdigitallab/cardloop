@@ -203,6 +203,39 @@ Free-form chats not tied to a project (`cwd=$HOME`). Shown in tab bar, hidden fr
 
 ---
 
+## Schedules Registry (Spec 019)
+
+Global view of all scheduled tasks on the server (cron, systemd timers, Claude jobs,
+Coolify, n8n, in-process).  The registry is **read-only** from the API layer.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/schedules` | Returns full normalised schedule registry. Query params: `?project=<id>` (filter by project), `?status=broken,stale` (comma-separated), `?source=cron,systemd` (comma-separated). Response: `{scanned_at, source_statuses, records[]}` | Yes |
+| `POST` | `/api/schedules/scan` | Trigger immediate background re-scan. Response: `{queued: true}` | Yes |
+| `POST` | `/api/schedules/{id}/investigate` | Create a Backlog investigation card for the schedule entry. Response: `{card_id: "..."}` | Yes |
+
+### Record schema
+
+```json
+{
+  "id": "<stable 12-char hex>",
+  "source": "cron|systemd|claude_jobs|coolify|n8n|in_process",
+  "schedule": "0 4 * * *",
+  "command": "bash ~/scripts/backup.sh >> ~/logs/backup.log 2>&1",
+  "project": "networking-os",
+  "last_run": "2026-06-10T04:00:01+00:00",
+  "next_run": "2026-06-11T04:00:00+00:00",
+  "status": "ok|stale|broken|unknown",
+  "purpose": "Daily backup of Docker volumes to NAS",
+  "annotations": {}
+}
+```
+
+Cache file: `data/schedules_cache.json` (gitignored). Annotations overlay: `data/schedules_annotations.json`.
+Scan interval: env `SCHEDULES_SCAN_INTERVAL` (default 300s).
+
+---
+
 ## SPA Fallback
 
 | Method | Path | Description | Auth |
@@ -213,7 +246,7 @@ Free-form chats not tied to a project (`cwd=$HOME`). Shown in tab bar, hidden fr
 
 ## Summary
 
-Total registered routes: **60** API routes + 1 SPA catch-all (61 total).
+Total registered routes: **63** API routes + 1 SPA catch-all (64 total).
 
 Public (no cookie): `GET /api/health`, `POST /api/login`.
 All other `/api/*` routes require a valid `cops_auth` session cookie.

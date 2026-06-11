@@ -329,6 +329,32 @@ export const ru = {
   'modal.close_aria': 'Закрыть',
   'toast.close_aria': 'Закрыть уведомление',
   'spinner.default': 'Загрузка...',
+
+  // ── Schedules tab (Spec 019) ──────────────────────────────────
+  'schedules.title': 'Расписания',
+  'schedules.loading': 'Загрузка расписаний...',
+  'schedules.empty': 'Задачи по расписанию не найдены',
+  'schedules.scan_now': 'Сканировать',
+  'schedules.scanning': 'Сканирую...',
+  'schedules.last_scan': 'Последнее сканирование',
+  'schedules.entries': 'записей',
+  'schedules.filter_all_sources': 'Все источники',
+  'schedules.filter_all_statuses': 'Все статусы',
+  'schedules.filter_all_projects': 'Все проекты',
+  'schedules.col_schedule': 'Расписание',
+  'schedules.col_command': 'Команда',
+  'schedules.col_source': 'Источник',
+  'schedules.col_project': 'Проект',
+  'schedules.col_last_run': 'Последний запуск',
+  'schedules.col_next_run': 'Следующий запуск',
+  'schedules.col_status': 'Статус',
+  'schedules.col_purpose': 'Назначение',
+  'schedules.col_actions': 'Действия',
+  'schedules.investigate': 'Исследовать',
+  'schedules.investigating': 'Создаю...',
+  'schedules.investigate_title': 'Создать задачу на исследование на доске',
+  'schedules.investigate_created': 'Карточка исследования создана',
+  'tabbar.schedules': 'Расписания',
 } as const
 
 export type TKey = keyof typeof ru

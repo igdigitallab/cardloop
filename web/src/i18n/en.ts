@@ -328,6 +328,32 @@ export const en = {
   'modal.close_aria': 'Close',
   'toast.close_aria': 'Close notification',
   'spinner.default': 'Loading...',
+
+  // ── Schedules tab (Spec 019) ──────────────────────────────────
+  'schedules.title': 'Schedules',
+  'schedules.loading': 'Loading schedules...',
+  'schedules.empty': 'No scheduled tasks found',
+  'schedules.scan_now': 'Scan now',
+  'schedules.scanning': 'Scanning...',
+  'schedules.last_scan': 'Last scan',
+  'schedules.entries': 'entries',
+  'schedules.filter_all_sources': 'All sources',
+  'schedules.filter_all_statuses': 'All statuses',
+  'schedules.filter_all_projects': 'All projects',
+  'schedules.col_schedule': 'Schedule',
+  'schedules.col_command': 'Command',
+  'schedules.col_source': 'Source',
+  'schedules.col_project': 'Project',
+  'schedules.col_last_run': 'Last run',
+  'schedules.col_next_run': 'Next run',
+  'schedules.col_status': 'Status',
+  'schedules.col_purpose': 'Purpose',
+  'schedules.col_actions': 'Actions',
+  'schedules.investigate': 'Investigate',
+  'schedules.investigating': 'Creating...',
+  'schedules.investigate_title': 'Create an investigation task on the board',
+  'schedules.investigate_created': 'Investigation card created',
+  'tabbar.schedules': 'Schedules',
 } as const
 
 export type TKey = keyof typeof en

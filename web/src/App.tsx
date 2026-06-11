@@ -8,10 +8,12 @@ import { ProjectView } from './components/ProjectView'
 import { ProjectTabBar } from './components/ProjectTabBar'
 import { Spinner } from './components/Spinner'
 import { GlobalFilesTab } from './tabs/GlobalFilesTab'
+import { SchedulesTab } from './tabs/SchedulesTab'
 import { useToast, ToastContainer } from './components/Toast'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
 
 const GLOBAL_FILES_ID = '__global__'
+const SCHEDULES_ID = '__schedules__'
 
 type AuthState = 'loading' | 'unauthed' | 'authed'
 
@@ -93,6 +95,8 @@ export default function App() {
   const [globalFilesOpen, setGlobalFilesOpen] = useState<boolean>(() => {
     try { return localStorage.getItem('cops.globalFilesOpen') === 'true' } catch { return false }
   })
+  // Schedules tab (global)
+  const [schedulesOpen, setSchedulesOpen] = useState<boolean>(false)
   // Current active project — for SSE handler, no re-subscription on every select
   const activeIdRef = useRef<string | null>(null)
   const projectsRef = useRef<Project[]>([])
@@ -244,7 +248,7 @@ export default function App() {
       const next = prev.filter(id => valid.has(id))
       return next.length === prev.length ? prev : next
     })
-    setActiveId(prev => prev === GLOBAL_FILES_ID || (prev && valid.has(prev)) ? prev : null)
+    setActiveId(prev => prev === GLOBAL_FILES_ID || prev === SCHEDULES_ID || (prev && valid.has(prev)) ? prev : null)
     setSplitPairs(prev => {
       const next: Record<string, string> = {}
       let changed = false
@@ -344,6 +348,16 @@ export default function App() {
   const handleCloseGlobalFiles = useCallback(() => {
     setGlobalFilesOpen(false)
     setActiveId(prev => prev === GLOBAL_FILES_ID ? (openIds[0] || null) : prev)
+  }, [openIds])
+
+  const handleOpenSchedules = useCallback(() => {
+    setSchedulesOpen(true)
+    setActiveId(SCHEDULES_ID)
+  }, [])
+
+  const handleCloseSchedules = useCallback(() => {
+    setSchedulesOpen(false)
+    setActiveId(prev => prev === SCHEDULES_ID ? (openIds[0] || null) : prev)
   }, [openIds])
 
   const handleSidebarReorder = useCallback((ids: string[]) => {
@@ -594,6 +608,10 @@ export default function App() {
           globalFilesActive={activeId === GLOBAL_FILES_ID}
           onOpenGlobalFiles={handleOpenGlobalFiles}
           onCloseGlobalFiles={handleCloseGlobalFiles}
+          schedulesOpen={schedulesOpen}
+          schedulesActive={activeId === SCHEDULES_ID}
+          onOpenSchedules={handleOpenSchedules}
+          onCloseSchedules={handleCloseSchedules}
           onToggleDrawer={() => setDrawerOpen(prev => !prev)}
         />
 
@@ -608,6 +626,21 @@ export default function App() {
             }}
           >
             <GlobalFilesTab />
+          </div>
+        )}
+
+        {/* Schedules tab — global, always mounted when open */}
+        {schedulesOpen && (
+          <div
+            className="main-content"
+            style={{
+              display: activeId === SCHEDULES_ID ? 'flex' : 'none',
+              flexDirection: 'column',
+              padding: 0,
+              overflow: 'hidden',
+            }}
+          >
+            <SchedulesTab />
           </div>
         )}
 
@@ -648,8 +681,8 @@ export default function App() {
           )
         })}
 
-        {/* Welcome — only when no open projects and not in the global file browser */}
-        {!hasOpen && activeId !== GLOBAL_FILES_ID && (
+        {/* Welcome — only when no open projects and not in the global file browser or schedules */}
+        {!hasOpen && activeId !== GLOBAL_FILES_ID && activeId !== SCHEDULES_ID && (
           <div className="main-content">
             <div className="welcome">
               <div className="welcome-icon">⚡</div>
