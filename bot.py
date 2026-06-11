@@ -213,6 +213,9 @@ DISALLOWED_TOOLS = ["AskUserQuestion"]
 
 TOPICS_F = DATA / "topics.json"      # LAYER 1: thread -> project binding (persistent)
 SESSIONS_F = DATA / "sessions.json"  # LAYER 2: thread -> session_id (cleared by /reset)
+TG_QUEUE_F = DATA / "tg_queue.json"  # LAYER 3: per-topic message queue (persists across restarts)
+
+TG_QUEUE_MAX = int(os.environ.get("TG_QUEUE_MAX", "5"))  # max messages queued per topic
 
 def _norm(s: str) -> str:
     return "".join(c for c in s.lower() if c.isalnum())
@@ -282,6 +285,65 @@ sessions = _read(SESSIONS_F, {})   # "chat:thread" -> session_id
 costs = {}                         # "chat:thread" -> last cost usd
 running = {}                       # "chat:thread" -> ClaudeSDKClient (for /stop)
 rate_limits = {}                   # rate_limit_type -> {status, resets_at, utilization, ts} (passive)
+
+# ─────────────────────────── TG message queue ───────────────────────────
+# Per-topic FIFO queue of pending user messages received while a run is in progress.
+# Survives restarts via TG_QUEUE_F (data/tg_queue.json — gitignored inside data/).
+# In-memory canonical dict: {session_key: [{"prompt": str, "msg_id": int}, ...]}
+# All mutations are synchronous (no await between read and write) — race-safe.
+_TG_QUEUE: "dict[str, list[dict]]" = _read(TG_QUEUE_F, {})
+
+
+def _tg_queue_flush() -> None:
+    """Atomically flushes _TG_QUEUE to disk. Swallows all exceptions."""
+    try:
+        tmp = TG_QUEUE_F.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_TG_QUEUE, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(TG_QUEUE_F)
+    except Exception:
+        pass
+
+
+def _tg_queue_enqueue(session_key: str, prompt: str, msg_id: int) -> "int | None":
+    """Appends a message to the queue for session_key.
+
+    Returns 1-indexed queue position if added, or None if the queue is full (TG_QUEUE_MAX).
+    Mutation is synchronous → flush immediately.
+    """
+    lst = _TG_QUEUE.setdefault(session_key, [])
+    if len(lst) >= TG_QUEUE_MAX:
+        return None
+    lst.append({"prompt": prompt, "msg_id": msg_id})
+    _tg_queue_flush()
+    return len(lst)  # 1-indexed position after append
+
+
+def _tg_queue_pop(session_key: str) -> "dict | None":
+    """Pops and returns the first (oldest) message from the queue, or None if empty.
+
+    Mutation is synchronous → flush immediately.
+    """
+    lst = _TG_QUEUE.get(session_key)
+    if not lst:
+        return None
+    item = lst.pop(0)
+    if not lst:
+        _TG_QUEUE.pop(session_key, None)
+    _tg_queue_flush()
+    return item
+
+
+def _tg_queue_clear(session_key: str) -> int:
+    """Removes all queued messages for session_key. Returns the count removed."""
+    lst = _TG_QUEUE.pop(session_key, [])
+    if lst:
+        _tg_queue_flush()
+    return len(lst)
+
+
+def _tg_queue_len(session_key: str) -> int:
+    """Returns number of messages currently queued for session_key."""
+    return len(_TG_QUEUE.get(session_key, []))
 
 
 def save_topics():
@@ -906,8 +968,26 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     # race-condition guard: reserve slot SYNCHRONOUSLY before the first await
     if k in running:
-        await send(context, update.effective_chat.id, msg.message_thread_id,
-                   "⏳ Already running in this topic. Use /stop to interrupt.")
+        # Engine is busy — enqueue the message instead of rejecting it.
+        # Build the full prompt first (attachments are not downloaded here — queue plain text only).
+        base_text = (msg.text or msg.caption or "").strip()
+        if base_text or not (msg.document or msg.photo):
+            q_prompt = base_text or "(no text)"
+            if msg.forward_origin:
+                q_prompt = ("[This is a forwarded message / alert from one of my services. "
+                            "Diagnose the cause and fix it.]\n\n" + q_prompt)
+            pos = _tg_queue_enqueue(k, q_prompt, msg.message_id)
+            if pos is None:
+                await send(context, update.effective_chat.id, msg.message_thread_id,
+                           f"⚠️ Queue is full ({TG_QUEUE_MAX} messages). Use /stop or wait.")
+            else:
+                await send(context, update.effective_chat.id, msg.message_thread_id,
+                           f"⏳ Queued #{pos} — will run after the current turn finishes.")
+        else:
+            # File-only message while busy: skip silently with notice
+            await send(context, update.effective_chat.id, msg.message_thread_id,
+                       "⚠️ File attachments cannot be queued while a run is in progress. "
+                       "Please resend after the current turn finishes.")
         return
     running[k] = True  # placeholder; run_engine will replace with the real client
     cid, tid = update.effective_chat.id, msg.message_thread_id
@@ -935,6 +1015,58 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send(context, cid, tid, f"⚠️ Task launch error: {e}")
 
 
+async def _drain_tg_queue(context, update) -> None:
+    """After a turn finishes, pop and run the next queued message for this topic (if any).
+
+    Called from safe_run.finally — AFTER running.pop(k) so the slot is free.
+    Sends a status notice before starting the queued run so the operator sees it was dequeued.
+    If the queue is empty, returns immediately (no-op).
+    """
+    k = key_of(update)
+    item = _tg_queue_pop(k)
+    if item is None:
+        return
+    remaining = _tg_queue_len(k)
+    chat = update.effective_chat.id
+    thread = update.effective_message.message_thread_id
+    try:
+        notice = (f"▶️ Running queued message"
+                  + (f" ({remaining} more in queue)" if remaining else "")
+                  + ".")
+        await send(context, chat, thread, notice)
+    except Exception:
+        pass
+    # Reserve the slot synchronously before the first await (same race guard as on_message).
+    if k in running:
+        # Another message snuck in between pop and now — put the item back at the front.
+        _TG_QUEUE.setdefault(k, []).insert(0, item)
+        _tg_queue_flush()
+        return
+    running[k] = True
+    try:
+        await context.bot.send_chat_action(chat, ChatAction.TYPING, message_thread_id=thread or None)
+    except Exception:
+        pass
+    asyncio.create_task(_safe_run_queued(context, update, item["prompt"]))
+
+
+async def _safe_run_queued(context, update, prompt: str) -> None:
+    """Runs a dequeued prompt through run_agent, then drains again (chain drain)."""
+    chat = update.effective_chat.id
+    thread = update.effective_message.message_thread_id
+    k = key_of(update)
+    try:
+        await run_agent(context, update, prompt)
+    except Exception as e:
+        if "exit code 143" in str(e) or "exit code 137" in str(e):
+            print(f"[safe_run_queued] CLI killed during shutdown, prompt={short(prompt, 60)}")
+        else:
+            await report_error(context, chat, thread, f"run_agent(queued) · {short(prompt, 60)}", e)
+    finally:
+        running.pop(k, None)
+        await _drain_tg_queue(context, update)
+
+
 async def safe_run(context, update, prompt):
     """Background task wrapper: PTB does not catch exceptions from asyncio.create_task itself."""
     chat = update.effective_chat.id
@@ -951,6 +1083,8 @@ async def safe_run(context, update, prompt):
             await report_error(context, chat, thread, f"run_agent · {short(prompt, 60)}", e)
     finally:
         running.pop(k, None)  # always clear the reservation, even if run_agent crashed before its try
+        # Drain the queue: if messages were enqueued while this run was active, start the next one.
+        await _drain_tg_queue(context, update)
 
 
 async def on_error(update, context):
@@ -1017,10 +1151,12 @@ async def cmd_reset(update, context):
     k = key_of(update)
     sessions.pop(k, None)
     save_sessions()
+    cleared = _tg_queue_clear(k)
     b = topics.get(k) or binding_for(update)
     proj = b["project"] if b else "—"
+    queue_note = f" Queue cleared ({cleared} message(s))." if cleared else ""
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-               f"🔄 Context reset. Project <b>{proj}</b> preserved.", parse_mode=ParseMode.HTML)
+               f"🔄 Context reset. Project <b>{proj}</b> preserved.{queue_note}", parse_mode=ParseMode.HTML)
 
 
 async def cmd_resume(update, context):
