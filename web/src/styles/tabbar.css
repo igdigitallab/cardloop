@@ -38,6 +38,15 @@
   }
 }
 
+/* On mobile project screen the hamburger shows a back chevron */
+@media (max-width: 768px) {
+  .ptab-hamburger.ptab-hamburger-back {
+    font-size: 22px;
+    font-weight: 300;
+    letter-spacing: -1px;
+  }
+}
+
 .ptab-list {
   display: flex;
   align-items: stretch;

@@ -228,6 +228,8 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
 
 export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose, isActive }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
+  // Mobile inner tab: null = show chat (default), TabId = show that inner tab
+  const [mobileInnerTab, setMobileInnerTab] = useState<TabId | null>(null)
   const git = project.health.git
 
   // ── Rename state ──────────────────────────────────────────────────────────
@@ -431,6 +433,59 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
           <ErrorBoundary label="Chat">
             <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
           </ErrorBoundary>
+        </div>
+      </ProjectActivityProvider>
+    )
+  }
+
+  // ── Mobile narrow branch (≤768px, non-free projects only) ──────────────────
+  if (narrow && !project.is_free) {
+    return (
+      <ProjectActivityProvider projectId={project.id}>
+        <div className="main-content mobile-project-layout">
+          {/* Compact project header row */}
+          <div className="mobile-project-header">
+            <span className="mobile-project-title">{project.name}</span>
+            {git && <span className={`git-sync-dot ${gitDotClass}`} title={gitDotTitle} />}
+            <AgentRunningChip projectId={project.id} />
+          </div>
+          {/* Inner tab strip (secondary row) */}
+          <nav className="mobile-inner-tabs" aria-label={t['tab.sections_aria']}>
+            <button
+              className={`mobile-inner-tab-btn ${mobileInnerTab === null ? 'active' : ''}`}
+              onClick={() => setMobileInnerTab(null)}
+            >
+              💬 Chat
+            </button>
+            {TABS.map(tab => (
+              <button
+                key={tab.id}
+                className={`mobile-inner-tab-btn ${mobileInnerTab === tab.id ? 'active' : ''}`}
+                onClick={() => setMobileInnerTab(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+          {/* Content area: chat or inner tab */}
+          <div className="mobile-project-content">
+            {mobileInnerTab === null ? (
+              <ErrorBoundary label="Chat">
+                <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
+              </ErrorBoundary>
+            ) : (
+              <>
+                {mobileInnerTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
+                {mobileInnerTab === 'logs'      && <ErrorBoundary label="Logs"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
+                {mobileInnerTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} /></ErrorBoundary>}
+                {mobileInnerTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} /></ErrorBoundary>}
+                {mobileInnerTab === 'memory'    && <ErrorBoundary label="Memory"><MemoryTab projectId={project.id} /></ErrorBoundary>}
+                {mobileInnerTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
+                {mobileInnerTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} /></ErrorBoundary>}
+              </>
+            )}
+          </div>
+          <HealthRunEndRefresher refresh={refreshHealth} />
         </div>
       </ProjectActivityProvider>
     )

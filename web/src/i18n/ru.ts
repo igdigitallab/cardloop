@@ -45,6 +45,11 @@ export const ru = {
   'tabbar.server_files': 'Файлы сервера (~)',
   'tabbar.close_tab': 'Закрыть вкладку',
   'tabbar.close': 'Закрыть',
+  'tabbar.back_to_list': 'Назад к списку проектов',
+  'tabbar.open_sidebar': 'Открыть сайдбар',
+
+  // ── Mobile navigation ────────────────────────────────────────
+  'mobile.chat_tab': '💬 Chat',
 
   // ── Project tabs labels ──────────────────────────────────────
   'tab.claude_md': 'CLAUDE.md',

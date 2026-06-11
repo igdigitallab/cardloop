@@ -44,6 +44,11 @@ export const en = {
   'tabbar.server_files': 'Server files (~)',
   'tabbar.close_tab': 'Close tab',
   'tabbar.close': 'Close',
+  'tabbar.back_to_list': 'Back to project list',
+  'tabbar.open_sidebar': 'Open sidebar',
+
+  // ── Mobile navigation ────────────────────────────────────────
+  'mobile.chat_tab': '💬 Chat',
 
   // ── Project tabs labels ──────────────────────────────────────
   'tab.claude_md': 'CLAUDE.md',

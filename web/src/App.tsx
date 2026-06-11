@@ -20,6 +20,7 @@ type AuthState = 'loading' | 'unauthed' | 'authed'
 const LS_SIDEBAR_COLLAPSED = 'cops.sidebarCollapsed'
 const LS_OPEN = 'cops.openProjects'
 const LS_ACTIVE = 'cops.activeProject'
+type MobileScreen = 'list' | 'project'
 const LS_SPLIT_PAIRS = 'cops.splitPairs'
 const LS_SPLIT_WIDTH = 'cops.splitWidth'
 const LS_SIDEBAR_ORDER = 'cops.sidebarOrder'
@@ -79,6 +80,11 @@ function readSplitWidth(): number {
 export default function App() {
   const { toasts, showToast, dismiss } = useToast()
   const [authState, setAuthState] = useState<AuthState>('loading')
+  // Mobile navigation: 'list' = project list screen, 'project' = project detail screen
+  const [mobileScreen, setMobileScreen] = useState<MobileScreen>(() => {
+    const active = readString(LS_ACTIVE)
+    return active ? 'project' : 'list'
+  })
   const [projects, setProjects] = useState<Project[]>([])
   const [projectsLoading, setProjectsLoading] = useState(false)
   const [openIds, setOpenIds] = useState<string[]>(() => readStringList(LS_OPEN))
@@ -344,12 +350,13 @@ export default function App() {
   }, [clearUnreadForSession])
 
   // Open project (sidebar click) — add to openIds (if not there) + activate
-  // Also close the mobile drawer after selection
+  // Also close the mobile drawer after selection + navigate to project screen on mobile
   const handleSelect = useCallback((id: string) => {
     setOpenIds(prev => prev.includes(id) ? prev : [...prev, id])
     setActiveId(id)
     clearUnread(id)
     setDrawerOpen(false)
+    setMobileScreen('project')
   }, [clearUnread])
 
   // Drag-and-drop sidebar order. IMPORTANT: hook must be above any early returns
@@ -387,6 +394,7 @@ export default function App() {
   const handleTabActivate = useCallback((id: string) => {
     setActiveId(id)
     clearUnread(id)
+    setMobileScreen('project')
   }, [clearUnread])
 
   // Close tab — remove from openIds; if it was active — the adjacent one becomes active
@@ -399,7 +407,10 @@ export default function App() {
       // if the closed tab was active — switch to the adjacent one
       setActiveId(curActive => {
         if (curActive !== id) return curActive
-        if (next.length === 0) return null
+        if (next.length === 0) {
+          setMobileScreen('list')
+          return null
+        }
         // prefer the right neighbour, otherwise the left
         const newIdx = Math.min(idx, next.length - 1)
         return next[newIdx]
@@ -589,7 +600,7 @@ export default function App() {
   const hasOpen = openProjects.length > 0
 
   return (
-    <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
+    <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''} mobile-on-${mobileScreen}`}>
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
       {/* Backdrop for mobile drawer — tap to close */}
       <div
@@ -634,6 +645,8 @@ export default function App() {
           onOpenSchedules={handleOpenSchedules}
           onCloseSchedules={handleCloseSchedules}
           onToggleDrawer={() => setDrawerOpen(prev => !prev)}
+          mobileScreen={mobileScreen}
+          onGoToProjectList={() => setMobileScreen('list')}
         />
 
         {/* Global file browser — always mounted (display:none when inactive),

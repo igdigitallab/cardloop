@@ -362,6 +362,109 @@
   .chat-collapsed-stub {
     display: none;
   }
+
+  /* ── Phase E: Mobile navigation stack ──────────────────────── */
+
+  /* mobile-on-list: sidebar fills screen, main-area hidden */
+  .app-layout.mobile-on-list .sidebar,
+  .app-layout.mobile-on-list .sidebar.sidebar-collapsed-mode {
+    transform: translateX(0) !important;
+    position: fixed;
+    inset: 0;
+    width: 100vw !important;
+    min-width: 100vw !important;
+    z-index: 300;
+  }
+  .app-layout.mobile-on-list .main-area {
+    display: none;
+  }
+  .app-layout.mobile-on-list .sidebar-backdrop {
+    display: none !important;
+  }
+
+  /* mobile-on-project: sidebar hidden, main-area full screen */
+  .app-layout.mobile-on-project .sidebar {
+    display: none;
+  }
+  .app-layout.mobile-on-project .main-area {
+    width: 100%;
+  }
+
+  /* ── Mobile project layout (narrow branch in ProjectView) ───── */
+  .mobile-project-layout {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
+  .mobile-project-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    min-height: 44px;
+  }
+
+  .mobile-project-title {
+    font-size: 14px;
+    font-weight: 600;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-inner-tabs {
+    display: flex;
+    align-items: stretch;
+    overflow-x: auto;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .mobile-inner-tabs::-webkit-scrollbar { display: none; }
+
+  .mobile-inner-tab-btn {
+    flex-shrink: 0;
+    padding: 0 12px;
+    min-height: 40px;
+    font-size: 12px;
+    font-weight: 500;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text2);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color var(--transition);
+    display: flex;
+    align-items: center;
+  }
+  .mobile-inner-tab-btn.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+  }
+  .mobile-inner-tab-btn:hover { color: var(--text); }
+
+  .mobile-project-content {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Inner tab content gets its own scroll */
+  .mobile-project-content .tab-content {
+    padding: 12px;
+    overflow-y: auto;
+    flex: 1;
+  }
 }
 
 /* D4: hide Split button on mobile — split view requires two panes */

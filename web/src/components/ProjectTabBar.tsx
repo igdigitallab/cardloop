@@ -22,6 +22,10 @@ interface Props {
   onCloseSchedules: () => void
   /** Toggles the mobile off-canvas sidebar drawer */
   onToggleDrawer?: () => void
+  /** Current mobile navigation screen ('list' | 'project') */
+  mobileScreen?: 'list' | 'project'
+  /** Navigate back to the project list screen on mobile */
+  onGoToProjectList?: () => void
 }
 
 function TabItem({
@@ -114,7 +118,7 @@ export function ProjectTabBar({
   projects, activeId, unreadBySession, replyReadyIds, onActivate, onClose, onRename, onNewFree,
   globalFilesOpen, globalFilesActive, onOpenGlobalFiles, onCloseGlobalFiles,
   schedulesOpen, schedulesActive, onOpenSchedules, onCloseSchedules,
-  onToggleDrawer,
+  onToggleDrawer, mobileScreen, onGoToProjectList,
 }: Props) {
   const activeTabRef = useRef<HTMLDivElement>(null)
 
@@ -126,13 +130,14 @@ export function ProjectTabBar({
   return (
     <div className="project-tabbar">
       {/* Hamburger — only visible on tablet/mobile (hidden on desktop via CSS) */}
+      {/* On mobile project screen: acts as back-to-list. On desktop or list: opens drawer. */}
       <button
-        className="ptab-hamburger"
-        onClick={onToggleDrawer}
-        title="Open sidebar"
-        aria-label="Open sidebar"
+        className={`ptab-hamburger${mobileScreen === 'project' ? ' ptab-hamburger-back' : ''}`}
+        onClick={mobileScreen === 'project' && onGoToProjectList ? onGoToProjectList : onToggleDrawer}
+        title={mobileScreen === 'project' ? 'Back to project list' : 'Open sidebar'}
+        aria-label={mobileScreen === 'project' ? 'Back to project list' : 'Open sidebar'}
       >
-        ☰
+        {mobileScreen === 'project' ? '‹' : '☰'}
       </button>
       <div className="ptab-list">
         {projects.map(p => {
