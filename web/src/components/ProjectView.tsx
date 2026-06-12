@@ -75,6 +75,9 @@ interface Props {
   openProjectIds?: string[]
   /** H3: Called when swipe switches to a different project */
   onSwipeToProject?: (id: string) => void
+  /** Sidebar "⚙ Settings" request: when {id} matches this project, switch to the Settings tab.
+   *  nonce changes on every request so repeats re-fire even for the already-open project. */
+  settingsRequest?: { id: string; nonce: number } | null
 }
 
 type GitSyncState = 'idle' | 'busy' | 'ok' | 'err'
@@ -230,11 +233,21 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
   )
 }
 
-export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject }: Props) {
+export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject, settingsRequest }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
   // Mobile inner tab: null = show chat (default), TabId = show that inner tab
   const [mobileInnerTab, setMobileInnerTab] = useState<TabId | null>(null)
   const git = project.health.git
+
+  // Sidebar "⚙ Settings" request → switch to the Settings tab when it targets this project.
+  // Keyed on nonce so a repeat request for the already-open project re-fires.
+  useEffect(() => {
+    if (settingsRequest && settingsRequest.id === project.id) {
+      setActiveTab('settings')
+      setMobileInnerTab('settings')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsRequest?.nonce])
 
   // ── Rename state ──────────────────────────────────────────────────────────
   const [renaming, setRenaming] = useState(false)

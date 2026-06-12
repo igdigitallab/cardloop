@@ -462,6 +462,34 @@ export const api = {
       body: JSON.stringify({ groups }),
     }),
 
+  createGroup: (name: string) =>
+    apiFetch<{ groups: string[]; assignments: Record<string, string> }>('/api/project-groups/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }),
+
+  renameGroup: (from: string, to: string) =>
+    apiFetch<{ groups: string[]; assignments: Record<string, string> }>('/api/project-groups/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to }),
+    }),
+
+  deleteGroup: (name: string) =>
+    apiFetch<{ groups: string[]; assignments: Record<string, string> }>('/api/project-groups/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }),
+
+  reorderGroups: (order: string[]) =>
+    apiFetch<{ groups: string[]; assignments: Record<string, string> }>('/api/project-groups/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order }),
+    }),
+
   // Spec-026 Phase 2: TOTP 2FA
   totpStatus: () =>
     apiFetch<{ enabled: boolean }>('/api/auth/totp/status'),

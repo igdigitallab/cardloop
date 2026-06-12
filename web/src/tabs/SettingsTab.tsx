@@ -67,6 +67,9 @@ export function SettingsTab({ projectId, project, health, refreshHealth }: Props
   const [globMsg, setGlobMsg] = useState('')
   const [savingProj, setSavingProj] = useState(false)
   const [savingGlob, setSavingGlob] = useState(false)
+  const [archiving, setArchiving] = useState(false)
+  const [archiveMsg, setArchiveMsg] = useState('')
+  const [confirmArchiveLocal, setConfirmArchiveLocal] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -324,6 +327,49 @@ export function SettingsTab({ projectId, project, health, refreshHealth }: Props
           Environment variables available to the agent when running tasks. Not committed to git.
         </p>
         <SecretsTab projectId={projectId} />
+      </section>
+
+      {/* ── Danger zone ── */}
+      <section>
+        <h3 style={{ margin: '0 0 4px', fontSize: 15, color: 'var(--red)' }}>Danger zone</h3>
+        <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--text3)' }}>
+          Destructive actions. Archive moves the project out of the active list; it can be restored from the sidebar.
+        </p>
+        {archiveMsg && (
+          <p style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--text2)' }}>{archiveMsg}</p>
+        )}
+        {confirmArchiveLocal ? (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span style={{ fontSize: 13, color: 'var(--text2)' }}>Archive "{project.name}"?</span>
+            <button
+              className="btn-danger"
+              onClick={async () => {
+                setArchiving(true)
+                setArchiveMsg('')
+                try {
+                  await api.archiveProject(projectId)
+                  setArchiveMsg('Project archived. You can restore it from the sidebar.')
+                } catch (e) { setArchiveMsg('⚠ ' + errMsg(e)) }
+                setArchiving(false)
+                setConfirmArchiveLocal(false)
+              }}
+              disabled={archiving}
+            >
+              {archiving ? 'Archiving…' : 'Confirm archive'}
+            </button>
+            <button className="btn-secondary" onClick={() => setConfirmArchiveLocal(false)} disabled={archiving}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            className="btn-danger"
+            style={{ fontSize: 13 }}
+            onClick={() => setConfirmArchiveLocal(true)}
+          >
+            🗄 Archive project
+          </button>
+        )}
       </section>
 
     </div>

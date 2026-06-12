@@ -1,7 +1,9 @@
 """
-Tests for Spec-024: Project Groups.
+Tests for Spec-024 + Spec-030 Phase 1: Project Groups.
 
-Tests the helper functions and business logic directly (no HTTP client needed).
+Unit tests — helper functions and business logic directly (no HTTP client needed).
+HTTP tests — Spec-030 Phase 1 atomic endpoints via aiohttp_client.
+
 Covers:
 - _load_groups / _save_groups round-trip
 - assign project to group (auto-creates if new)
@@ -12,20 +14,28 @@ Covers:
 - reorder persists
 - filesystem invariant: group ops ONLY modify data/project_groups.json, nothing under project cwd
 - label validation (empty, control chars)
+- POST /api/project-groups/create  (new, idempotent)
+- POST /api/project-groups/rename  (remaps assignments, rejects missing/collision)
+- POST /api/project-groups/delete  (unassigns projects, idempotent)
+- POST /api/project-groups/reorder (permutation accepted; non-permutation rejected)
 """
 import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
+import webapp as _webapp
 from webapp import (
     _collect_projects,
     _load_groups,
     _save_groups,
     _groups_path,
     _project_id,
+    _derive_token,
 )
 
 
@@ -328,3 +338,257 @@ def test_groups_structure_has_required_keys(tmp_path):
     assert "assignments" in result
     assert isinstance(result["groups"], list)
     assert isinstance(result["assignments"], dict)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Spec-030 Phase 1: HTTP tests for atomic group management endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────── fixtures ────────────────────────────────────────
+
+PASSWORD = "test-password-030"
+
+
+@pytest.fixture
+def groups_ctx(tmp_path):
+    """Minimal ctx for Spec-030 HTTP tests."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    ctx = {
+        "topics": {},
+        "sessions": {},
+        "running": {},
+        "password": PASSWORD,
+        "DATA": data_dir,
+        "HERE": ROOT,
+        "VAULT_PROJECTS": tmp_path / "vault" / "01-Projects",
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "save_topics": lambda: None,
+        "run_engine": None,
+        "ptb_app": None,
+        "rate_limits": {},
+    }
+    ctx["_auth_token"] = _derive_token(PASSWORD)
+    return ctx
+
+
+@pytest.fixture
+def groups_app(groups_ctx):
+    """aiohttp app wired with Spec-030 group management routes."""
+    from aiohttp import web
+
+    app = web.Application(middlewares=[_webapp.auth_middleware])
+    app["ctx"] = groups_ctx
+
+    app.router.add_get("/api/health", _webapp.api_health)
+    app.router.add_post("/api/login", _webapp.api_login)
+    # Spec-024 routes (kept for compatibility check)
+    app.router.add_get("/api/project-groups", _webapp.api_project_groups_get)
+    app.router.add_post("/api/project-groups", _webapp.api_project_groups_manage)
+    # Spec-030 Phase 1 routes
+    app.router.add_post("/api/project-groups/create", _webapp.api_project_groups_create)
+    app.router.add_post("/api/project-groups/rename", _webapp.api_project_groups_rename)
+    app.router.add_post("/api/project-groups/delete", _webapp.api_project_groups_delete)
+    app.router.add_post("/api/project-groups/reorder", _webapp.api_project_groups_reorder)
+
+    return app
+
+
+def _auth(ctx):
+    return {"Cookie": f"cops_auth={ctx['_auth_token']}"}
+
+
+# ─────────────────────────── /create ─────────────────────────────────────────
+
+async def test_create_group_new(aiohttp_client, groups_app, groups_ctx):
+    """POST /create with a new name appends it to groups and returns full state."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    resp = await client.post("/api/project-groups/create", json={"name": "Work"}, headers=h)
+    assert resp.status == 200
+    data = await resp.json()
+    assert "groups" in data and "assignments" in data
+    assert "Work" in data["groups"]
+
+
+async def test_create_group_idempotent(aiohttp_client, groups_app, groups_ctx):
+    """POST /create with an existing name returns 200 with current state (no duplicate)."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    # Create once
+    await client.post("/api/project-groups/create", json={"name": "Work"}, headers=h)
+    # Create again
+    resp = await client.post("/api/project-groups/create", json={"name": "Work"}, headers=h)
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["groups"].count("Work") == 1
+
+
+async def test_create_group_empty_name_rejected(aiohttp_client, groups_app, groups_ctx):
+    """POST /create with empty name → 400."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    resp = await client.post("/api/project-groups/create", json={"name": "  "}, headers=h)
+    assert resp.status == 400
+
+
+async def test_create_group_bad_json(aiohttp_client, groups_app, groups_ctx):
+    """POST /create with non-JSON body → 400."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    resp = await client.post(
+        "/api/project-groups/create",
+        data="not-json",
+        headers={**h, "Content-Type": "application/json"},
+    )
+    assert resp.status == 400
+
+
+# ─────────────────────────── /rename ─────────────────────────────────────────
+
+async def test_rename_group_remaps_assignments(aiohttp_client, groups_app, groups_ctx):
+    """POST /rename renames the group AND remaps every assignment pointing to it."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+
+    # Seed state: group "Work", project "proj-a" assigned to it
+    _save_groups(groups_ctx, {
+        "groups": ["Work", "Personal"],
+        "assignments": {"proj-a": "Work", "proj-b": "Personal"},
+    })
+
+    resp = await client.post(
+        "/api/project-groups/rename", json={"from": "Work", "to": "Office"}, headers=h
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    # Groups list updated
+    assert "Office" in data["groups"]
+    assert "Work" not in data["groups"]
+    assert "Personal" in data["groups"]
+    # Assignment for proj-a remapped
+    assert data["assignments"]["proj-a"] == "Office"
+    # Unrelated assignment untouched
+    assert data["assignments"]["proj-b"] == "Personal"
+
+
+async def test_rename_group_rejects_missing_from(aiohttp_client, groups_app, groups_ctx):
+    """POST /rename with unknown 'from' → 400."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    _save_groups(groups_ctx, {"groups": ["Work"], "assignments": {}})
+    resp = await client.post(
+        "/api/project-groups/rename", json={"from": "NoSuchGroup", "to": "Other"}, headers=h
+    )
+    assert resp.status == 400
+
+
+async def test_rename_group_rejects_collision(aiohttp_client, groups_app, groups_ctx):
+    """POST /rename where 'to' already exists (and != 'from') → 400."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    _save_groups(groups_ctx, {"groups": ["Work", "Personal"], "assignments": {}})
+    resp = await client.post(
+        "/api/project-groups/rename", json={"from": "Work", "to": "Personal"}, headers=h
+    )
+    assert resp.status == 400
+
+
+async def test_rename_group_empty_to_rejected(aiohttp_client, groups_app, groups_ctx):
+    """POST /rename with empty 'to' → 400."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    _save_groups(groups_ctx, {"groups": ["Work"], "assignments": {}})
+    resp = await client.post(
+        "/api/project-groups/rename", json={"from": "Work", "to": ""}, headers=h
+    )
+    assert resp.status == 400
+
+
+# ─────────────────────────── /delete ─────────────────────────────────────────
+
+async def test_delete_group_unassigns_projects(aiohttp_client, groups_app, groups_ctx):
+    """POST /delete removes group and unassigns all projects pointing to it."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    _save_groups(groups_ctx, {
+        "groups": ["Work", "Personal"],
+        "assignments": {"proj-a": "Work", "proj-b": "Work", "proj-c": "Personal"},
+    })
+    resp = await client.post("/api/project-groups/delete", json={"name": "Work"}, headers=h)
+    assert resp.status == 200
+    data = await resp.json()
+    assert "Work" not in data["groups"]
+    assert "Personal" in data["groups"]
+    # proj-a and proj-b are now ungrouped
+    assert "proj-a" not in data["assignments"]
+    assert "proj-b" not in data["assignments"]
+    # proj-c assignment to Personal survives
+    assert data["assignments"]["proj-c"] == "Personal"
+
+
+async def test_delete_group_idempotent_absent(aiohttp_client, groups_app, groups_ctx):
+    """POST /delete for a group that doesn't exist → 200 with unchanged state."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    _save_groups(groups_ctx, {"groups": ["Work"], "assignments": {"proj-a": "Work"}})
+    resp = await client.post(
+        "/api/project-groups/delete", json={"name": "DoesNotExist"}, headers=h
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert "Work" in data["groups"]
+    assert data["assignments"]["proj-a"] == "Work"
+
+
+# ─────────────────────────── /reorder ────────────────────────────────────────
+
+async def test_reorder_accepts_permutation(aiohttp_client, groups_app, groups_ctx):
+    """POST /reorder with a valid permutation → 200, groups list updated in new order."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    _save_groups(groups_ctx, {
+        "groups": ["A", "B", "C"],
+        "assignments": {"proj-x": "B"},
+    })
+    resp = await client.post(
+        "/api/project-groups/reorder", json={"order": ["C", "A", "B"]}, headers=h
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["groups"] == ["C", "A", "B"]
+    # Assignments untouched
+    assert data["assignments"]["proj-x"] == "B"
+
+
+async def test_reorder_rejects_non_permutation_extra_name(aiohttp_client, groups_app, groups_ctx):
+    """POST /reorder with an unknown name → 400."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    _save_groups(groups_ctx, {"groups": ["A", "B"], "assignments": {}})
+    resp = await client.post(
+        "/api/project-groups/reorder", json={"order": ["A", "B", "X"]}, headers=h
+    )
+    assert resp.status == 400
+
+
+async def test_reorder_rejects_non_permutation_missing_name(aiohttp_client, groups_app, groups_ctx):
+    """POST /reorder missing an existing name → 400."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    _save_groups(groups_ctx, {"groups": ["A", "B", "C"], "assignments": {}})
+    resp = await client.post(
+        "/api/project-groups/reorder", json={"order": ["A", "B"]}, headers=h
+    )
+    assert resp.status == 400
+
+
+async def test_reorder_rejects_non_list(aiohttp_client, groups_app, groups_ctx):
+    """POST /reorder with non-list order → 400."""
+    client = await aiohttp_client(groups_app)
+    h = _auth(groups_ctx)
+    resp = await client.post(
+        "/api/project-groups/reorder", json={"order": "not-a-list"}, headers=h
+    )
+    assert resp.status == 400

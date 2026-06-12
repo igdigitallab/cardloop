@@ -96,6 +96,9 @@ export default function App() {
   // Reply-ready: project IDs where the agent finished a run while the tab was not active
   const [replyReadyIds, setReplyReadyIds] = useState<Set<string>>(() => new Set())
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => readBool(LS_SIDEBAR_COLLAPSED, false))
+  // Request to open a project's Settings tab (from sidebar context menu). nonce bumps so
+  // repeat requests for an already-open project still fire the effect in ProjectView.
+  const [settingsRequest, setSettingsRequest] = useState<{ id: string; nonce: number } | null>(null)
   // Off-canvas drawer (mobile/tablet ≤1024px): not persisted, default closed
   const [drawerOpen, setDrawerOpen] = useState(false)
   // Split-view: leftId → rightId (free chats only)
@@ -362,6 +365,13 @@ export default function App() {
     setDrawerOpen(false)
     setMobileScreen('project')
   }, [clearUnread])
+
+  // Sidebar context-menu "⚙ Settings": select the project + ask its ProjectView to
+  // switch to the Settings tab. ProjectView watches settingsRequest.nonce.
+  const handleOpenProjectSettings = useCallback((id: string) => {
+    handleSelect(id)
+    setSettingsRequest({ id, nonce: Date.now() })
+  }, [handleSelect])
 
   // Drag-and-drop sidebar order. IMPORTANT: hook must be above any early returns
   // (return <LoginScreen> etc.), otherwise Rules of Hooks are violated → black screen.
@@ -641,6 +651,7 @@ export default function App() {
         activeProjectId={activeId}
         onGoBack={() => setMobileScreen('project')}
         onProjectsReload={loadProjects}
+        onOpenProjectSettings={handleOpenProjectSettings}
       />
 
       <div className="main-area">
@@ -734,6 +745,7 @@ export default function App() {
                   isActive={isActive}
                   openProjectIds={openIds}
                   onSwipeToProject={(id) => { handleTabActivate(id) }}
+                  settingsRequest={settingsRequest}
                 />
               </div>
               {splitProject && (

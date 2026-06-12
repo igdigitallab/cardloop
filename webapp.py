@@ -1706,6 +1706,111 @@ async def api_project_groups_manage(req: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+# ── Spec-030 Phase 1: atomic project-group management endpoints ───────────────
+
+async def api_project_groups_create(req: web.Request) -> web.Response:
+    """POST /api/project-groups/create  body: {name}
+    Append a new empty group.  Idempotent: already-exists → 200 with current state."""
+    ctx = req.app["ctx"]
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return web.json_response({"error": "name must be a non-empty string"}, status=400)
+    name = name.strip()
+    groups_data = _load_groups(ctx)
+    if name not in groups_data["groups"]:
+        groups_data["groups"].append(name)
+        _save_groups(ctx, groups_data)
+    return web.json_response(groups_data)
+
+
+async def api_project_groups_rename(req: web.Request) -> web.Response:
+    """POST /api/project-groups/rename  body: {from, to}
+    Rename a group in the groups list AND remap all matching assignments."""
+    ctx = req.app["ctx"]
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    from_name = body.get("from")
+    to_name = body.get("to")
+    if not isinstance(from_name, str) or not from_name.strip():
+        return web.json_response({"error": "from must be a non-empty string"}, status=400)
+    if not isinstance(to_name, str) or not to_name.strip():
+        return web.json_response({"error": "to must be a non-empty string"}, status=400)
+    from_name = from_name.strip()
+    to_name = to_name.strip()
+    groups_data = _load_groups(ctx)
+    if from_name not in groups_data["groups"]:
+        return web.json_response({"error": f"group '{from_name}' not found"}, status=400)
+    # Collision: target already exists and is different from the source
+    if to_name != from_name and to_name in groups_data["groups"]:
+        return web.json_response({"error": f"group '{to_name}' already exists"}, status=400)
+    # Rename in groups list (preserve order)
+    groups_data["groups"] = [
+        to_name if g == from_name else g for g in groups_data["groups"]
+    ]
+    # Remap every assignment whose value matches from_name
+    groups_data["assignments"] = {
+        pid: (to_name if label == from_name else label)
+        for pid, label in groups_data["assignments"].items()
+    }
+    _save_groups(ctx, groups_data)
+    return web.json_response(groups_data)
+
+
+async def api_project_groups_delete(req: web.Request) -> web.Response:
+    """POST /api/project-groups/delete  body: {name}
+    Remove a group and unassign all projects pointing to it.  Idempotent if absent."""
+    ctx = req.app["ctx"]
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return web.json_response({"error": "name must be a non-empty string"}, status=400)
+    name = name.strip()
+    groups_data = _load_groups(ctx)
+    if name in groups_data["groups"]:
+        groups_data["groups"] = [g for g in groups_data["groups"] if g != name]
+        groups_data["assignments"] = {
+            pid: label for pid, label in groups_data["assignments"].items()
+            if label != name
+        }
+        _save_groups(ctx, groups_data)
+    return web.json_response(groups_data)
+
+
+async def api_project_groups_reorder(req: web.Request) -> web.Response:
+    """POST /api/project-groups/reorder  body: {order: [...]}
+    Set the groups list to `order`.  Must be an exact permutation (same set)."""
+    ctx = req.app["ctx"]
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    order = body.get("order")
+    if not isinstance(order, list):
+        return web.json_response({"error": "order must be a list"}, status=400)
+    for item in order:
+        if not isinstance(item, str) or not item.strip():
+            return web.json_response({"error": "order items must be non-empty strings"}, status=400)
+    order = [item.strip() for item in order]
+    groups_data = _load_groups(ctx)
+    if set(order) != set(groups_data["groups"]) or len(order) != len(groups_data["groups"]):
+        return web.json_response(
+            {"error": "order must be a permutation of the current groups (no additions or removals)"},
+            status=400,
+        )
+    groups_data["groups"] = order
+    _save_groups(ctx, groups_data)
+    return web.json_response(groups_data)
+
+
 async def api_project_claude_md(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -8323,6 +8428,11 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/group", api_project_group_set)
         app.router.add_get("/api/project-groups", api_project_groups_get)
         app.router.add_post("/api/project-groups", api_project_groups_manage)
+        # Spec-030 Phase 1: atomic group management
+        app.router.add_post("/api/project-groups/create", api_project_groups_create)
+        app.router.add_post("/api/project-groups/rename", api_project_groups_rename)
+        app.router.add_post("/api/project-groups/delete", api_project_groups_delete)
+        app.router.add_post("/api/project-groups/reorder", api_project_groups_reorder)
         app.router.add_get("/api/projects/{id}/claude-md", api_project_claude_md)
         app.router.add_post("/api/projects/{id}/claude-md", api_project_claude_md_write)
         app.router.add_get("/api/projects/{id}/readme", api_project_readme)
