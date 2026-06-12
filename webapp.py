@@ -3776,6 +3776,8 @@ async def _do_session_rotation(ctx: dict, session_key: str, project: dict, cwd: 
 
         # Collect haiku summary — fresh session (resume_session_id=None) to avoid re-paying
         # the full ~175K context.  Falls back to ROTATION_SUMMARY_PROMPT if tail unavailable.
+        # ephemeral=True: rotation runs must NEVER reuse a live persistent client — they use a
+        # synthetic session key and must be fully isolated from the main chat session.
         summary_parts: list[str] = []
         async for event in run_engine(
             project_name=name,
@@ -3784,6 +3786,8 @@ async def _do_session_rotation(ctx: dict, session_key: str, project: dict, cwd: 
             session_key=rotate_session_key,
             model="haiku",
             resume_session_id=None,
+            ctx=ctx,
+            ephemeral=True,
         ):
             if event.get("type") == "text":
                 summary_parts.append(event["text"])
@@ -3938,6 +3942,8 @@ async def _run_card(
             project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
             agents_config = project.get("agents_config") or {}
             agents_kwargs = _build_agents_kwargs(ctx, agents_config)
+            # ephemeral=True: cards are always isolated — they MUST NOT reuse a live client
+            # from the shared chat session (different cwd, synthetic session key).
             async for event in run_engine(
                 project_name=name,
                 cwd=effective_cwd,
@@ -3947,6 +3953,8 @@ async def _run_card(
                 resume_session_id=resume_sid,
                 env=project_secrets,
                 **agents_kwargs,
+                ctx=ctx,
+                ephemeral=True,
             ):
                 etype = event["type"]
                 if etype == "text":
@@ -4939,6 +4947,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
         resume_sid = record.get("resume_session_id") or ctx["sessions"].get(session_key)
 
         answer_parts: list = []
+        # ephemeral=False: deferred runs share the project's session (same as the chat path).
         async for event in run_engine(
             project_name=project_name,
             cwd=cwd,
@@ -4948,6 +4957,8 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
             resume_session_id=resume_sid,
             env=project_secrets,
             **agents_kwargs,
+            ctx=ctx,
+            ephemeral=False,
         ):
             etype = event["type"]
             if etype == "text":
@@ -6495,6 +6506,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
         except Exception as _inj_exc:
             print(f"[rotation] handoff injection failed (continuing without it): {_inj_exc}")
             effective_prompt = prompt
+        # ephemeral=False: chat sessions share state with the project (resumable, context-tracked).
         async for event in run_engine(
             project_name=name,
             cwd=cwd,
@@ -6504,6 +6516,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
             resume_session_id=resume_sid,
             env=project_secrets,
             **agents_kwargs,
+            ctx=ctx,
+            ephemeral=False,
         ):
             etype = event.get("type")
             if etype == "text":

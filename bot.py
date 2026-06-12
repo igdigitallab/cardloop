@@ -6,6 +6,8 @@ Full permissions (bypassPermissions), subscription auth (no ANTHROPIC_API_KEY by
 global + project CLAUDE.md loaded via setting_sources. Spec: ~/vault/01-Projects/Claude-Ops-Bot/.
 """
 import asyncio
+import dataclasses
+import hashlib
 import html
 import json
 import os
@@ -321,6 +323,21 @@ sessions = _read(SESSIONS_F, {})   # "chat:thread" -> session_id
 costs = {}                         # "chat:thread" -> last cost usd
 running = {}                       # "chat:thread" -> ClaudeSDKClient (for /stop)
 rate_limits = {}                   # rate_limit_type -> {status, resets_at, utilization, ts} (passive)
+
+# ── Spec-028 Phase 2: live-client registry ────────────────────────────────────────────────────
+# Only populated when PERSISTENT_CLIENT=1; empty (and dormant) otherwise.
+
+@dataclasses.dataclass
+class _LiveEntry:
+    """Holds a connected ClaudeSDKClient that survives across turns."""
+    client: object              # ClaudeSDKClient
+    fingerprint: str            # hash of immutable opts fields; mismatch → evict+recreate
+    last_used: float            # time.monotonic() timestamp of the last turn start
+    idle_task: object           # asyncio.Task for TTL-based eviction; None until scheduled
+    session_key: str            # key in running / _live_clients
+
+
+_live_clients: "dict[str, _LiveEntry]" = {}  # session_key -> _LiveEntry
 # Spec-021 Phase 4: one-shot handoff summaries pending injection into the next turn after rotation.
 # {session_key: summary_text}. Cleared immediately after injection so it fires exactly once.
 # NOTE: In-memory only — lost on service restart between rotation and next turn; that is acceptable.
@@ -578,6 +595,16 @@ def short(cmd: str, limit=90) -> str:
 AUDIT_DIR = DATA / "audit"
 STALL_SECONDS = int(os.environ.get("STALL_SECONDS", "300"))   # no events for N sec -> interrupt
 MAX_SECONDS = int(os.environ.get("MAX_SECONDS", "1800"))      # overall task ceiling (30 min)
+
+# ── Spec-028: persistent (long-lived) client feature flag ─────────────────────────────────────
+# PERSISTENT_CLIENT=0 (default OFF) → behaviour is byte-identical to pre-028; all existing tests pass.
+# PERSISTENT_CLIENT=1 → run_engine reuses the same ClaudeSDKClient across turns for non-ephemeral
+# sessions (chat / deferred), skipping per-turn connect/disconnect overhead.
+PERSISTENT_CLIENT: bool = os.environ.get("PERSISTENT_CLIENT", "0") == "1"
+# Max idle seconds before an unused live client is evicted (disconnected) automatically.
+LIVE_CLIENT_TTL_SEC: int = int(os.environ.get("LIVE_CLIENT_TTL_SEC", "600"))
+# Max number of concurrent live clients held in the registry; LRU eviction beyond this.
+LIVE_CLIENT_MAX: int = int(os.environ.get("LIVE_CLIENT_MAX", "10"))
 _DESTRUCTIVE = ("git push", "push origin", "reset --hard", "rebase", "git clean", "--force",
                 "rm -rf", "rm -r ", "rm -f", "drop table", "drop database", "delete from",
                 "truncate", "coolify", "docker rm", "docker stop", "compose down",
@@ -598,6 +625,135 @@ def audit(project: str, kind: str, text: str):
             f.write(f"{ts} [{project}] {kind}: {text}\n")
     except Exception:
         pass
+
+
+# ─────────────────────────── Spec-028: live-client helpers ─────────────────────────────────────
+#
+# These helpers are only active when PERSISTENT_CLIENT=1.
+# With the flag OFF they are never called and the behaviour is byte-identical to pre-028.
+
+def _compute_fingerprint(opts: "ClaudeAgentOptions") -> str:
+    """Hash the subset of opts fields that are immutable once a ClaudeSDKClient is connected.
+
+    A fingerprint mismatch (e.g. /model switch, different system_prompt preset) means we must
+    evict the live entry and reconnect rather than reusing the old subprocess.
+
+    Fields deliberately excluded: resume (session_id), env (per-turn TG_CHAT_ID etc.),
+    agents roster (can't change the subprocess mid-session anyway), effort.
+    """
+    parts = [
+        str(getattr(opts, "cwd", "")),
+        str(getattr(opts, "model", "")),
+        str(getattr(opts, "permission_mode", "")),
+        str(sorted(getattr(opts, "setting_sources", []) or [])),
+        str(sorted(getattr(opts, "disallowed_tools", []) or [])),
+        # Capture the stable identity of the system_prompt (preset type/name) without the
+        # per-turn append text — we don't want every TG nudge update to force a reconnect.
+        str((getattr(opts, "system_prompt", None) or {}).get("type", "")),
+        str((getattr(opts, "system_prompt", None) or {}).get("preset", "")),
+    ]
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
+async def _evict_live_client(session_key: str, ctx: "dict | None") -> None:
+    """Disconnect and remove a live client entry. Safe to call even if the key is absent.
+
+    Cancels the idle timer, disconnects the subprocess (with a 10 s timeout guard), and
+    removes the entry from _live_clients (and from ctx["live_clients"] if ctx is provided).
+    """
+    registry: "dict[str, _LiveEntry]" = (ctx or {}).get("live_clients", _live_clients)
+    entry = registry.pop(session_key, None)
+    if entry is None:
+        return
+    # Cancel the pending idle-eviction task.  We do NOT await it — the task is fire-and-forget
+    # and its CancelledError is handled internally.  Awaiting a shielded cancelled task raises
+    # CancelledError in the caller, which is never what we want here.
+    if entry.idle_task is not None and not entry.idle_task.done():
+        entry.idle_task.cancel()
+    # Disconnect the subprocess.
+    try:
+        await asyncio.wait_for(entry.client.disconnect(), timeout=10)
+    except Exception as exc:
+        print(f"[live-client] evict {session_key}: disconnect failed ({exc!r}), force-dropping")
+
+
+async def _get_or_create_live_client(
+    ctx: "dict | None",
+    session_key: str,
+    opts: "ClaudeAgentOptions",
+    *,
+    ephemeral: bool,
+) -> "object | None":
+    """Return a reusable connected ClaudeSDKClient for session_key, or None.
+
+    Returns None whenever the persistent-client path should NOT be taken:
+    - Feature flag is OFF (PERSISTENT_CLIENT=False)
+    - The call site explicitly requests ephemeral isolation (_run_card, _do_session_rotation)
+    - ctx is None (ctx-less test/legacy callers; they use the standard `async with` path)
+
+    On flag-ON + non-ephemeral:
+    - Existing matching entry → cancel idle timer, bump last_used, return client.
+    - Fingerprint mismatch (model switch etc.) → evict old, create new.
+    - No entry → create, connect, register, start idle timer.
+    - Enforces LIVE_CLIENT_MAX via LRU eviction.
+    """
+    if not PERSISTENT_CLIENT or ephemeral or ctx is None:
+        return None
+
+    registry: "dict[str, _LiveEntry]" = ctx.get("live_clients", _live_clients)
+    fingerprint = _compute_fingerprint(opts)
+
+    existing = registry.get(session_key)
+    if existing is not None:
+        if existing.fingerprint != fingerprint:
+            print(f"[live-client] fingerprint changed for {session_key} — evicting and reconnecting")
+            await _evict_live_client(session_key, ctx)
+            # Fall through to create a new entry.
+        else:
+            # Reuse: cancel the pending idle countdown and refresh the timestamp.
+            if existing.idle_task is not None and not existing.idle_task.done():
+                existing.idle_task.cancel()
+            existing.last_used = time.monotonic()
+            existing.idle_task = _schedule_idle_eviction(session_key, ctx)
+            return existing.client
+
+    # ── Enforce LIVE_CLIENT_MAX via LRU ──────────────────────────────────────────────────────────
+    while len(registry) >= LIVE_CLIENT_MAX:
+        oldest_key = min(registry, key=lambda k: registry[k].last_used)
+        print(f"[live-client] LRU evict {oldest_key} (registry full at {LIVE_CLIENT_MAX})")
+        await _evict_live_client(oldest_key, ctx)
+
+    # ── Create and connect ────────────────────────────────────────────────────────────────────────
+    client = ClaudeSDKClient(options=opts)
+    await client.connect()
+    entry = _LiveEntry(
+        client=client,
+        fingerprint=fingerprint,
+        last_used=time.monotonic(),
+        idle_task=None,
+        session_key=session_key,
+    )
+    registry[session_key] = entry
+    entry.idle_task = _schedule_idle_eviction(session_key, ctx)
+    print(f"[live-client] created entry for {session_key} (total: {len(registry)})")
+    return client
+
+
+def _schedule_idle_eviction(session_key: str, ctx: "dict | None") -> "asyncio.Task":
+    """Create (and return) an asyncio Task that evicts session_key after LIVE_CLIENT_TTL_SEC idle.
+
+    The task is a module-level detached task — NOT tied to any turn coroutine — so it
+    survives after the turn generator is exhausted.
+    """
+    async def _idle_waiter():
+        try:
+            await asyncio.sleep(LIVE_CLIENT_TTL_SEC)
+            print(f"[live-client] idle TTL expired for {session_key} — evicting")
+            await _evict_live_client(session_key, ctx)
+        except asyncio.CancelledError:
+            pass  # Normal: cancelled when the entry is reused or manually evicted.
+
+    return asyncio.ensure_future(_idle_waiter())
 
 
 # ─────────────────────────── ENGINE (async event generator) ───────────────────────────
@@ -629,6 +785,9 @@ async def run_engine(  # type: ignore[return]
     resume_session_id: str = None,
     agents: "dict | None" = None,
     skip_conductor_prompt: bool = False,
+    *,
+    ctx: "dict | None" = None,
+    ephemeral: bool = False,
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
@@ -643,6 +802,12 @@ async def run_engine(  # type: ignore[return]
         resume_session_id     — session_id to resume (None = new session)
         agents                — sub-agent roster; defaults to DEFAULT_AGENTS when None
         skip_conductor_prompt — if True, suppress conductor directive even for fable model
+        ctx                   — shared context dict (Spec-028 Phase 1): used for running[]
+                                 lookup and live-client registry when PERSISTENT_CLIENT=1.
+                                 None → falls back to module-level globals (pre-028 behaviour).
+        ephemeral             — if True, always use a fresh ClaudeSDKClient (no live-client
+                                 reuse). Set by _run_card and _do_session_rotation which must
+                                 be fully isolated from shared sessions.
 
     Yields event dicts. SDK exceptions are wrapped as {"type": "error", "exc": ...}.
     """
@@ -685,103 +850,152 @@ async def run_engine(  # type: ignore[return]
 
     audit(project_name, "TASK", short(prompt, 300))
 
+    # Spec-028 Phase 1: resolve which running-dict to use.
+    # ctx is provided by call sites that have a context dict (run_agent, api_project_chat,
+    # _execute_deferred).  Legacy / ctx-less callers (tests, _maybe_rotate_tg slim ctx) fall
+    # back to the module-global `running` dict — behaviour is identical to pre-028.
+    _running: dict = ctx["running"] if ctx is not None and "running" in ctx else running
+
     last_ctx_tokens = 0   # real context size = prompt tokens of the last AssistantMessage
     # Spec-022: track per-turn usage for cost visibility
     last_usage: dict = {}
     _turn_start_ms: float = 0.0  # wall-clock fallback when SDK duration_ms is absent
+
+    # Shared inner generator: processes SDK messages and yields engine events.
+    # Extracted so both the live-client branch and the `async with` branch share
+    # identical event-processing logic with no duplication.
+    async def _process_messages(client):
+        """Read messages from `client` and yield engine events."""
+        nonlocal last_ctx_tokens, last_usage, _turn_start_ms
+        _turn_start_ms = __import__("time").monotonic() * 1000
+        await client.query(prompt)
+        async for msg in client.receive_response():
+            if isinstance(msg, AssistantMessage):
+                # usage of the last assistant message = full prompt of the current turn:
+                # input + cache_read + cache_creation == get_context_usage().totalTokens (verified)
+                u = getattr(msg, "usage", None) or {}
+                pt = (u.get("input_tokens", 0)
+                      + u.get("cache_read_input_tokens", 0)
+                      + u.get("cache_creation_input_tokens", 0))
+                if pt:
+                    last_ctx_tokens = pt
+                last_usage = u  # capture for the result event
+                for blk in msg.content:
+                    if isinstance(blk, TextBlock) and blk.text.strip():
+                        yield {"type": "text", "text": blk.text}
+                    elif isinstance(blk, ToolUseBlock):
+                        yield {"type": "tool", "name": blk.name, "input": blk.input or {}}
+            elif isinstance(msg, RateLimitEvent):
+                i = msg.rate_limit_info
+                yield {
+                    "type": "rate_limit",
+                    "rate_limit_type": i.rate_limit_type,
+                    "status": i.status,
+                    "resets_at": i.resets_at,
+                    "utilization": i.utilization,
+                }
+            elif isinstance(msg, ResultMessage):
+                # Spec-022: per-turn cost visibility fields
+                _u = last_usage
+                _cache_read = _u.get("cache_read_input_tokens", 0) or 0
+                _fresh = (_u.get("input_tokens", 0) or 0) + (_u.get("cache_creation_input_tokens", 0) or 0)
+                _pt = _cache_read + _fresh  # == last_ctx_tokens when >0
+                _cache_hit_pct = round((_cache_read / _pt) * 100) if _pt > 0 else 0
+                # Duration: prefer SDK attribute, fall back to wall-clock measurement.
+                # SDK may expose duration_ms or duration_api_ms on ResultMessage.
+                _dur = getattr(msg, "duration_ms", None)
+                if _dur is None:
+                    _dur = getattr(msg, "duration_api_ms", None)
+                if _dur is None and _turn_start_ms > 0:
+                    _dur = round(__import__("time").monotonic() * 1000 - _turn_start_ms)
+                yield {
+                    "type": "result",
+                    "session_id": getattr(msg, "session_id", None),
+                    "cost_usd": getattr(msg, "total_cost_usd", None),
+                    "context_tokens": last_ctx_tokens,
+                    # api_error_status: HTTP status when run failed (e.g. 429 = rate-limited).
+                    # None on success. Available since SDK v2.1.110.
+                    "api_error_status": getattr(msg, "api_error_status", None),
+                    # Spec-022: per-turn cache/token metrics (facts from SDK usage)
+                    "cache_read_tokens": _cache_read,
+                    "fresh_tokens": _fresh,
+                    "prompt_tokens": _pt if _pt > 0 else last_ctx_tokens,
+                    "cache_hit_pct": _cache_hit_pct,
+                    "duration_ms": _dur,
+                }
+            elif isinstance(msg, SystemMessage):
+                if isinstance(msg, TaskStartedMessage):
+                    yield {
+                        "type": "subagent",
+                        "subtype": "started",
+                        "task_id": msg.task_id,
+                        "description": msg.description,
+                        "status": None,
+                        "summary": None,
+                        "last_tool_name": None,
+                    }
+                elif isinstance(msg, TaskProgressMessage):
+                    yield {
+                        "type": "subagent",
+                        "subtype": "progress",
+                        "task_id": msg.task_id,
+                        "description": msg.description,
+                        "status": None,
+                        "summary": None,
+                        "last_tool_name": getattr(msg, "last_tool_name", None),
+                    }
+                elif isinstance(msg, TaskNotificationMessage):
+                    yield {
+                        "type": "subagent",
+                        "subtype": "notification",
+                        "task_id": msg.task_id,
+                        "description": msg.summary,   # notification has no description field
+                        "status": msg.status,
+                        "summary": msg.summary,
+                        "last_tool_name": None,
+                    }
+                # Other SystemMessage subtypes remain silent
+
+    # ── Spec-028 Phase 2: live-client branch (flag-gated, ephemeral=False only) ──────────────────
+    # When PERSISTENT_CLIENT=0 (default) _get_or_create_live_client returns None immediately and
+    # we fall through to the pre-028 `async with` path — byte-identical behaviour.
     try:
-        async with ClaudeSDKClient(options=opts) as client:
-            running[session_key] = client   # replace True-placeholder with the real client (for /stop)
-            _turn_start_ms = __import__("time").monotonic() * 1000
-            await client.query(prompt)
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    # usage of the last assistant message = full prompt of the current turn:
-                    # input + cache_read + cache_creation == get_context_usage().totalTokens (verified)
-                    u = getattr(msg, "usage", None) or {}
-                    pt = (u.get("input_tokens", 0)
-                          + u.get("cache_read_input_tokens", 0)
-                          + u.get("cache_creation_input_tokens", 0))
-                    if pt:
-                        last_ctx_tokens = pt
-                    last_usage = u  # capture for the result event
-                    for blk in msg.content:
-                        if isinstance(blk, TextBlock) and blk.text.strip():
-                            yield {"type": "text", "text": blk.text}
-                        elif isinstance(blk, ToolUseBlock):
-                            yield {"type": "tool", "name": blk.name, "input": blk.input or {}}
-                elif isinstance(msg, RateLimitEvent):
-                    i = msg.rate_limit_info
-                    yield {
-                        "type": "rate_limit",
-                        "rate_limit_type": i.rate_limit_type,
-                        "status": i.status,
-                        "resets_at": i.resets_at,
-                        "utilization": i.utilization,
-                    }
-                elif isinstance(msg, ResultMessage):
-                    # Spec-022: per-turn cost visibility fields
-                    _u = last_usage
-                    _cache_read = _u.get("cache_read_input_tokens", 0) or 0
-                    _fresh = (_u.get("input_tokens", 0) or 0) + (_u.get("cache_creation_input_tokens", 0) or 0)
-                    _pt = _cache_read + _fresh  # == last_ctx_tokens when >0
-                    _cache_hit_pct = round((_cache_read / _pt) * 100) if _pt > 0 else 0
-                    # Duration: prefer SDK attribute, fall back to wall-clock measurement.
-                    # SDK may expose duration_ms or duration_api_ms on ResultMessage.
-                    _dur = getattr(msg, "duration_ms", None)
-                    if _dur is None:
-                        _dur = getattr(msg, "duration_api_ms", None)
-                    if _dur is None and _turn_start_ms > 0:
-                        _dur = round(__import__("time").monotonic() * 1000 - _turn_start_ms)
-                    yield {
-                        "type": "result",
-                        "session_id": getattr(msg, "session_id", None),
-                        "cost_usd": getattr(msg, "total_cost_usd", None),
-                        "context_tokens": last_ctx_tokens,
-                        # api_error_status: HTTP status when run failed (e.g. 429 = rate-limited).
-                        # None on success. Available since SDK v2.1.110.
-                        "api_error_status": getattr(msg, "api_error_status", None),
-                        # Spec-022: per-turn cache/token metrics (facts from SDK usage)
-                        "cache_read_tokens": _cache_read,
-                        "fresh_tokens": _fresh,
-                        "prompt_tokens": _pt if _pt > 0 else last_ctx_tokens,
-                        "cache_hit_pct": _cache_hit_pct,
-                        "duration_ms": _dur,
-                    }
-                elif isinstance(msg, SystemMessage):
-                    if isinstance(msg, TaskStartedMessage):
-                        yield {
-                            "type": "subagent",
-                            "subtype": "started",
-                            "task_id": msg.task_id,
-                            "description": msg.description,
-                            "status": None,
-                            "summary": None,
-                            "last_tool_name": None,
-                        }
-                    elif isinstance(msg, TaskProgressMessage):
-                        yield {
-                            "type": "subagent",
-                            "subtype": "progress",
-                            "task_id": msg.task_id,
-                            "description": msg.description,
-                            "status": None,
-                            "summary": None,
-                            "last_tool_name": getattr(msg, "last_tool_name", None),
-                        }
-                    elif isinstance(msg, TaskNotificationMessage):
-                        yield {
-                            "type": "subagent",
-                            "subtype": "notification",
-                            "task_id": msg.task_id,
-                            "description": msg.summary,   # notification has no description field
-                            "status": msg.status,
-                            "summary": msg.summary,
-                            "last_tool_name": None,
-                        }
-                    # Other SystemMessage subtypes remain silent
-    except Exception as exc:
-        yield {"type": "error", "exc": exc}
+        live = await _get_or_create_live_client(ctx, session_key, opts, ephemeral=ephemeral)
+    except Exception as _lc_exc:
+        # Live-client setup failure must never silently swallow the turn — degrade gracefully.
+        print(f"[live-client] setup failed for {session_key} ({_lc_exc!r}), falling back to fresh client")
+        live = None
+
+    if live is not None:
+        # ── Persistent-client path ────────────────────────────────────────────────────────────────
+        # The client is already connected; we skip __aenter__ / __aexit__.
+        # running[session_key] is set here (replacing the True placeholder) so the watchdog and
+        # /stop command can interrupt mid-turn.  We MUST pop it in finally (the adapter's finally
+        # also pops it, making this double-safe).
+        # We do NOT call client.disconnect() — the live-client registry owns the lifecycle.
+        _running[session_key] = live
+        try:
+            async for event in _process_messages(live):
+                yield event
+        except Exception as exc:
+            # Subprocess state is unknown after an error — evict so the next turn reconnects fresh.
+            print(f"[live-client] error during turn for {session_key} ({exc!r}) — evicting")
+            await _evict_live_client(session_key, ctx)
+            yield {"type": "error", "exc": exc}
+        finally:
+            # DO NOT disconnect — the live client must survive for the next turn.
+            # The adapter (safe_run / api_project_chat finally) clears running[k] separately;
+            # we do it here too as a safety net for ctx-isolated callers.
+            _running.pop(session_key, None)
+    else:
+        # ── Standard fresh-client path (pre-028 behaviour, unchanged) ────────────────────────────
+        try:
+            async with ClaudeSDKClient(options=opts) as client:
+                _running[session_key] = client  # replace True-placeholder (for /stop)
+                async for event in _process_messages(client):
+                    yield event
+        except Exception as exc:
+            yield {"type": "error", "exc": exc}
 
 
 # ─────────────────────────── TG adapter ───────────────────────────
@@ -878,6 +1092,13 @@ async def run_agent(context, update, prompt: str):
     b = topics.get(k) or binding_for(update)
     cwd, model = b["cwd"], b.get("model", DEFAULT_MODEL)
     # slot already reserved in on_message (running[k]=True) — here we just do the work
+
+    # Spec-028 Phase 1: build a ctx dict so run_engine uses the shared running dict and,
+    # when PERSISTENT_CLIENT=1, the live-client registry.
+    _engine_ctx = {
+        "running": running,
+        "live_clients": _live_clients,
+    }
 
     status = await context.bot.send_message(
         chat, f"⚙️ <b>{b['project']}</b> · {model}\n<i>thinking…</i>",
@@ -999,6 +1220,8 @@ async def run_agent(context, update, prompt: str):
             env=agent_env,
             resume_session_id=resume_sid,
             **agent_kwargs,
+            ctx=_engine_ctx,
+            ephemeral=False,
         ):
             last_event[0] = time.time()   # any SDK event = "alive" for watchdog
             etype = event["type"]
@@ -1667,6 +1890,10 @@ def _build_ctx(ptb_app) -> dict:
         # Context early-warn: tracks session keys that have already fired the CONTEXT_WARN_AT alert.
         # Shared by reference — webapp.py reads/writes it via ctx["context_warned"].
         "context_warned": context_warned,
+        # Spec-028: persistent-client feature flag + registry (exported so webapp can read without
+        # importing bot.py; webapp passes ctx to run_engine which reads these fields).
+        "PERSISTENT_CLIENT": PERSISTENT_CLIENT,
+        "live_clients": _live_clients,
     }
 
 
