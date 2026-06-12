@@ -3010,6 +3010,16 @@ async def _do_session_rotation(ctx: dict, session_key: str, project: dict, cwd: 
         except Exception as ss_e:
             print(f"[rotation] save_sessions failed: {ss_e}")
 
+        # Spec-021 Phase 4: mark pending handoff so the next chat turn gets the summary injected.
+        # ctx["pending_handoff"] is the shared dict from bot.py (wired via _build_ctx).
+        # Callers that use a slim rot_ctx (TG path) may not include it — that path marks it directly.
+        try:
+            ph = ctx.get("pending_handoff")
+            if ph is not None:
+                ph[session_key] = summary
+        except Exception as _ph_exc:
+            print(f"[rotation] failed to store pending_handoff: {_ph_exc}")
+
         print(f"[rotation] session rotated for {session_key} — handoff saved")
         return summary
 
@@ -5643,10 +5653,31 @@ async def api_project_chat(req: web.Request) -> web.Response:
         project_secrets = _secrets_read(cwd)
         agents_config = project.get("agents_config") or {}
         agents_kwargs = _build_agents_kwargs(ctx, agents_config)
+        # Spec-021 Phase 4: inject handoff summary into the first turn of a fresh session.
+        # Only fires when there is no existing session (post-rotation) and a pending handoff exists.
+        effective_prompt = prompt
+        try:
+            if resume_sid is None:
+                ph = ctx.get("pending_handoff") or {}
+                pending_summary = ph.pop(session_key, None)
+                if pending_summary is not None:
+                    effective_prompt = (
+                        "<prior-session-summary>\n"
+                        "The previous session was rotated to stay lean. Summary of where we left off below.\n"
+                        "Continue this work if the new message relates to it; ignore this block if starting "
+                        "something unrelated.\n\n"
+                        f"{pending_summary}\n"
+                        "</prior-session-summary>\n\n"
+                        f"{prompt}"
+                    )
+                    print(f"[rotation] injected handoff into first post-rotation turn for {session_key}")
+        except Exception as _inj_exc:
+            print(f"[rotation] handoff injection failed (continuing without it): {_inj_exc}")
+            effective_prompt = prompt
         async for event in run_engine(
             project_name=name,
             cwd=cwd,
-            prompt=prompt,
+            prompt=effective_prompt,
             session_key=session_key,
             model=model,
             resume_session_id=resume_sid,

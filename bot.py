@@ -299,6 +299,10 @@ sessions = _read(SESSIONS_F, {})   # "chat:thread" -> session_id
 costs = {}                         # "chat:thread" -> last cost usd
 running = {}                       # "chat:thread" -> ClaudeSDKClient (for /stop)
 rate_limits = {}                   # rate_limit_type -> {status, resets_at, utilization, ts} (passive)
+# Spec-021 Phase 4: one-shot handoff summaries pending injection into the next turn after rotation.
+# {session_key: summary_text}. Cleared immediately after injection so it fires exactly once.
+# NOTE: In-memory only — lost on service restart between rotation and next turn; that is acceptable.
+pending_handoff: "dict[str, str]" = {}
 
 # ─────────────────────────── TG message queue ───────────────────────────
 # Per-topic FIFO queue of pending user messages received while a run is in progress.
@@ -787,6 +791,11 @@ async def _maybe_rotate_tg(context, chat, thread, k: str, b: dict, last_result_e
         rot_project = {"name": b["project"], "model": b.get("model", DEFAULT_MODEL)}
         summary = await webapp._do_session_rotation(rot_ctx, k, rot_project, b["cwd"])
         if summary is not None:
+            # Spec-021 Phase 4: mark pending handoff so next turn gets the summary injected.
+            try:
+                pending_handoff[k] = summary
+            except Exception as _ph_exc:
+                print(f"[rotation] failed to store pending_handoff: {_ph_exc}")
             await send(
                 context, chat, thread,
                 md_to_html(f"♻️ Session rotated at {ctx_tokens // 1000}K tokens — handoff saved"),
@@ -888,15 +897,35 @@ async def run_agent(context, update, prompt: str):
         agent_env = {**project_secrets, "TG_CHAT_ID": str(chat), "TG_THREAD_ID": str(thread or 0)}
         agents_config = b.get("agents_config") or {}
         agent_kwargs = _build_agents_kwargs(agents_config)
+        # Spec-021 Phase 4: inject handoff summary into the first turn of a fresh session.
+        # Only fires when there is no existing session (post-rotation) and a pending handoff exists.
+        resume_sid = sessions.get(k)
+        effective_prompt = prompt
+        try:
+            if resume_sid is None and k in pending_handoff:
+                summary = pending_handoff.pop(k)
+                effective_prompt = (
+                    "<prior-session-summary>\n"
+                    "The previous session was rotated to stay lean. Summary of where we left off below.\n"
+                    "Continue this work if the new message relates to it; ignore this block if starting "
+                    "something unrelated.\n\n"
+                    f"{summary}\n"
+                    "</prior-session-summary>\n\n"
+                    f"{prompt}"
+                )
+                print(f"[rotation] injected handoff into first post-rotation turn for {k}")
+        except Exception as _inj_exc:
+            print(f"[rotation] handoff injection failed (continuing without it): {_inj_exc}")
+            effective_prompt = prompt
         async for event in run_engine(
             project_name=b["project"],
             cwd=cwd,
-            prompt=prompt,
+            prompt=effective_prompt,
             session_key=k,
             model=model,
             system_prompt={"type": "preset", "preset": "claude_code", "append": TELEGRAM_NUDGE},
             env=agent_env,
-            resume_session_id=sessions.get(k),
+            resume_session_id=resume_sid,
             **agent_kwargs,
         ):
             last_event[0] = time.time()   # any SDK event = "alive" for watchdog
@@ -1556,6 +1585,8 @@ def _build_ctx(ptb_app) -> dict:
         "ptb_app": ptb_app,
         # Needed to synthesise session_key "<chat>:<thread>" when creating new projects
         "GROUP_CHAT_ID": GROUP_CHAT_ID,
+        # Spec-021 Phase 4: pending handoff summaries awaiting injection (shared with webapp via ctx)
+        "pending_handoff": pending_handoff,
     }
 
 

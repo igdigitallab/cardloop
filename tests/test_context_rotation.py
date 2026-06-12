@@ -46,6 +46,8 @@ def _make_ctx(tmp_path, project_dir, run_engine=None):
         "run_engine": run_engine,
         "ptb_app": None,
         "rate_limits": {},
+        # Spec-021 Phase 4: pending handoff summaries
+        "pending_handoff": {},
     }
     ctx["_auth_token"] = _derive_token(password)
     (tmp_path / "data").mkdir(exist_ok=True)
@@ -515,3 +517,189 @@ async def test_tg_rotation_skipped_below_threshold(tmp_path, project_dir):
 
     rotation_stub.assert_not_awaited()
     send_stub.assert_not_awaited()
+
+
+# ─────────────────────────── Part 3: Handoff auto-injection (Spec-021 Phase 4) ─
+
+SESSION_KEY = "1001:42"
+
+
+async def test_pending_handoff_set_after_rotation(tmp_path, project_dir):
+    """_do_session_rotation stores summary in ctx['pending_handoff'][session_key]."""
+    summary_text = "We were building feature X. Next step: add tests."
+
+    async def haiku_engine(**kwargs):
+        yield {"type": "text", "text": summary_text}
+        yield {"type": "result", "session_id": "haiku-sess", "context_tokens": 500}
+
+    project = {"name": "myproject", "cwd": str(project_dir)}
+    ctx = _make_ctx(tmp_path, project_dir)
+    ctx["sessions"][SESSION_KEY] = "old-session-id"
+    ctx["run_engine"] = haiku_engine
+
+    with patch.object(_webapp, "CONTEXT_ROTATION", True):
+        result = await _webapp._do_session_rotation(ctx, SESSION_KEY, project, str(project_dir))
+
+    assert result == summary_text
+    assert ctx["pending_handoff"].get(SESSION_KEY) == summary_text, (
+        f"pending_handoff must be set after rotation, got: {ctx['pending_handoff']}"
+    )
+
+
+async def test_handoff_injected_into_next_chat_turn(aiohttp_client, tmp_path, project_dir):
+    """A pending handoff is prepended to the prompt on the next fresh-session chat turn."""
+    captured_prompts = []
+
+    async def fake_engine(**kwargs):
+        captured_prompts.append(kwargs.get("prompt", ""))
+        yield {"type": "text", "text": "response"}
+        yield {"type": "result", "session_id": "new-sess", "context_tokens": 100}
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    # Simulate: rotation happened, pending handoff is waiting
+    ctx["pending_handoff"][SESSION_KEY] = "Previous work: feature X was 80% done."
+    # No active session — fresh turn (resume_session_id will be None)
+    assert SESSION_KEY not in ctx["sessions"]
+
+    with patch.object(_webapp, "CONTEXT_ROTATION", True):
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "Continue the work"},
+            headers=_auth_headers(ctx),
+        )
+        assert resp.status == 200
+        await _read_sse(resp)
+
+    assert len(captured_prompts) == 1
+    injected = captured_prompts[0]
+    assert "<prior-session-summary>" in injected, (
+        f"Handoff preamble must be injected. Got prompt: {injected[:200]!r}"
+    )
+    assert "Previous work: feature X was 80% done." in injected
+    assert "Continue the work" in injected
+
+
+async def test_handoff_cleared_after_injection(aiohttp_client, tmp_path, project_dir):
+    """After injection, pending_handoff entry is removed so it fires exactly once."""
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "ok"}
+        yield {"type": "result", "session_id": "sess-1", "context_tokens": 100}
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    ctx["pending_handoff"][SESSION_KEY] = "Some summary."
+
+    with patch.object(_webapp, "CONTEXT_ROTATION", True):
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "Hello"},
+            headers=_auth_headers(ctx),
+        )
+
+    assert SESSION_KEY not in ctx["pending_handoff"], (
+        "pending_handoff must be cleared after injection so it only fires once"
+    )
+
+
+async def test_handoff_not_injected_when_session_exists(aiohttp_client, tmp_path, project_dir):
+    """If an active session already exists (not a fresh start), handoff is NOT injected."""
+    captured_prompts = []
+
+    async def fake_engine(**kwargs):
+        captured_prompts.append(kwargs.get("prompt", ""))
+        yield {"type": "text", "text": "ok"}
+        yield {"type": "result", "session_id": "existing-sess", "context_tokens": 100}
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    # An active session exists (not post-rotation)
+    ctx["sessions"][SESSION_KEY] = "ongoing-session-id"
+    ctx["pending_handoff"][SESSION_KEY] = "Should not be injected."
+
+    with patch.object(_webapp, "CONTEXT_ROTATION", True):
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "Next step"},
+            headers=_auth_headers(ctx),
+        )
+        assert resp.status == 200
+        await _read_sse(resp)
+
+    assert len(captured_prompts) == 1
+    assert "<prior-session-summary>" not in captured_prompts[0], (
+        "Handoff must NOT be injected when an active session exists"
+    )
+    # pending_handoff should still be there (not consumed)
+    assert ctx["pending_handoff"].get(SESSION_KEY) == "Should not be injected."
+
+
+async def test_card_run_not_affected_by_handoff(tmp_path, project_dir):
+    """_run_card runs are unaffected by pending_handoff — cards are always fresh, no preamble."""
+    captured_prompts = []
+
+    async def fake_engine(**kwargs):
+        captured_prompts.append(kwargs.get("prompt", ""))
+        yield {"type": "text", "text": "done"}
+        yield {"type": "result", "session_id": "card-sess", "context_tokens": 100}
+
+    session_key = SESSION_KEY
+    project = {
+        "name": "myproject",
+        "cwd": str(project_dir),
+        "tg_thread": session_key,
+        "model": "sonnet",
+    }
+    card = {"id": "aabbcc", "text": "Build widget", "description": None}
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    ctx["cwd_locks"] = {}
+    ctx["running"][session_key] = True
+    # Simulate a pending handoff for this session
+    ctx["pending_handoff"][session_key] = "Previous work summary."
+
+    await _webapp._run_card(ctx, None, project, card, session_key, run_mode="legacy")
+
+    assert len(captured_prompts) == 1
+    assert "<prior-session-summary>" not in captured_prompts[0], (
+        "Card runs must NOT receive the handoff preamble"
+    )
+    # pending_handoff should remain untouched by the card run
+    assert ctx["pending_handoff"].get(session_key) == "Previous work summary.", (
+        "Card run must not consume the pending_handoff"
+    )
+
+
+async def test_handoff_injection_failure_does_not_break_turn(aiohttp_client, tmp_path, project_dir):
+    """If handoff injection throws an exception, the turn continues normally."""
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "response"}
+        yield {"type": "result", "session_id": "sess-ok", "context_tokens": 100}
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    # Install a broken pending_handoff that raises on pop
+    broken_dict = {}
+
+    class _BrokenDict(dict):
+        def pop(self, key, default=None):
+            raise RuntimeError("simulated injection error")
+
+    ctx["pending_handoff"] = _BrokenDict({"1001:42": "summary"})
+
+    with patch.object(_webapp, "CONTEXT_ROTATION", True):
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "Do work"},
+            headers=_auth_headers(ctx),
+        )
+        assert resp.status == 200
+        events = await _read_sse(resp)
+
+    result_events = [e for e in events if e.get("type") == "result"]
+    assert len(result_events) > 0, (
+        f"Turn must complete normally even if handoff injection fails, got: {events}"
+    )

@@ -2,7 +2,7 @@
 created: 2026-06-11
 updated: 2026-06-11
 status: in-progress
-phases_shipped: 1, 2, 3
+phases_shipped: 1, 2, 3, 4
 card: ops:spec021
 ---
 
@@ -71,6 +71,26 @@ once at the end of `run_agent` (after the final reply and the auto-resume check)
 - A `ctx["cwd_locks"]` dict prevents two simultaneous runs (different session_keys)
   targeting the same working directory. The lock is set/released in `_run_card`'s try/finally.
 
+### Part 4 — Handoff auto-injection (Phase 4)
+
+After rotation, the handoff summary is injected into the **first turn of the new session** so
+the model has continuity — making rotation behave like `/compact`, not `/clear`.
+
+- **Pending state:** `ctx["pending_handoff"]` (shared dict, wired via `_build_ctx`). Set by
+  `_do_session_rotation` when `ctx["pending_handoff"]` is present (web path). The TG path
+  (`_maybe_rotate_tg`) uses a slim `rot_ctx` without `pending_handoff`, so it sets it
+  directly on the module-level `pending_handoff` dict after the call returns.
+- **Injection:** at prompt-construction time in `api_project_chat` (web) and `run_agent` (TG).
+  Fires only when `resume_session_id is None` (fresh session) and a pending entry exists.
+  The entry is `.pop()`-ed immediately — injected exactly once.
+- **Preamble format:** wraps the summary in `<prior-session-summary>...</prior-session-summary>`
+  with an instruction to ignore it if unrelated to the current message.
+- **Card runs:** `_run_card` does not touch `pending_handoff` — cards receive no preamble.
+- **Restart gap:** `pending_handoff` is in-memory only. A service restart between rotation and
+  the next turn loses the pending injection — acceptable, the handoff file remains on disk.
+- **Failure isolation:** both the injection block and the marking block are wrapped in
+  `try/except` — a failure never breaks the turn.
+
 ### Part 3 — Context counter in UI
 
 - ChatTab shows `{N}K` context indicator next to the model selector.
@@ -88,6 +108,7 @@ once at the end of `run_agent` (after the final reply and the auto-resume check)
 | 1 | Auto session rotation backend (`_do_session_rotation`, `api_project_rotate`) | shipped |
 | 2 | Fresh card sessions + cwd-lock in `_run_card` | shipped |
 | 3 | UI context indicator + rotate button in ChatTab | shipped |
+| 4 | Handoff auto-injection into first post-rotation turn (web + TG) | shipped |
 
 ---
 
@@ -106,12 +127,18 @@ once at the end of `run_agent` (after the final reply and the auto-resume check)
 - [ ] After `_run_card` finishes, cwd-lock for that path is released.
 - [ ] ChatTab shows yellow badge at 40K tokens, red at 60K.
 - [ ] "♻ Wrap & reset" button visible at 60K+ tokens.
+- [ ] After rotation, `ctx["pending_handoff"][session_key]` is set to the summary text.
+- [ ] On the next fresh-session chat turn (web), the handoff is prepended to the prompt as `<prior-session-summary>`.
+- [ ] The pending handoff is cleared after injection (fires exactly once).
+- [ ] Handoff is NOT injected when an active session already exists (non-fresh turn).
+- [ ] `_run_card` runs are unaffected by pending_handoff — no preamble injected.
+- [ ] Handoff injection failure does not break the turn (try/except guard).
 
 ---
 
 ## Tests
 
-`tests/test_context_rotation.py` — 16 tests covering:
+`tests/test_context_rotation.py` — 22 tests covering:
 - Rotation triggered/not-triggered by threshold
 - TG-path hook (`_maybe_rotate_tg`): triggered above threshold, skipped below,
   skipped while `_TG_QUEUE` non-empty
@@ -124,6 +151,12 @@ once at the end of `run_agent` (after the final reply and the auto-resume check)
 - Card does not write session back
 - cwd-lock blocks concurrent card
 - cwd-lock released after finish
+- Phase 4 — pending_handoff set after rotation
+- Phase 4 — handoff injected into next chat turn (fresh session)
+- Phase 4 — handoff cleared after injection (fires once)
+- Phase 4 — handoff NOT injected when session already active
+- Phase 4 — card runs unaffected (no preamble injected)
+- Phase 4 — injection failure does not break the turn
 
 ---
 
