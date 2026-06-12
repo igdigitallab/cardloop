@@ -17,10 +17,15 @@ export const en = {
   // ── Login ────────────────────────────────────────────────────
   'login.title': 'Sign in',
   'login.subtitle': 'Project Management Cockpit',
+  'login.subtitle_2fa': 'Two-factor authentication',
   'login.password_label': 'Passphrase',
+  'login.totp_label': 'Authenticator code',
+  'login.totp_recovery_hint': 'or enter a recovery code',
   'login.submit_loading': 'Checking...',
   'login.submit': 'Sign in',
   'login.error_wrong_password': 'Wrong passphrase',
+  'login.error_totp_invalid': 'Invalid code — try again',
+  'login.back_to_password': '← Back',
 
   // ── App / Welcome ────────────────────────────────────────────
   'app.connecting': 'Connecting...',
@@ -447,6 +452,30 @@ export const en = {
   'vault.loading': 'Loading vault...',
   'vault.error': 'Failed to load vault',
   'tabbar.vault': '🔐 Vault',
+
+  // ── 2FA panel (Spec 026 Phase 2) ─────────────────────────────
+  'totp.section_title': '🔐 Two-factor (2FA)',
+  'totp.status_on': 'Two-factor: ON',
+  'totp.status_off': 'Two-factor: OFF',
+  'totp.enable_btn': 'Enable 2FA',
+  'totp.disable_btn': 'Disable 2FA',
+  'totp.disable_confirm_title': 'Disable two-factor?',
+  'totp.disable_confirm_msg': "Disable two-factor? You'll log in with the password only.",
+  'totp.disable_confirm_btn': 'Disable',
+  'totp.scan_qr': 'Scan this QR code with your authenticator app',
+  'totp.manual_secret': 'Or enter this key manually:',
+  'totp.recovery_title': 'Recovery codes',
+  'totp.recovery_warning': 'Save these now — shown once. Each code can be used once.',
+  'totp.recovery_copy': 'Copy all',
+  'totp.recovery_copied': 'Copied!',
+  'totp.activate_label': 'Enter the 6-digit code from your app to confirm',
+  'totp.activate_placeholder': '000000',
+  'totp.activate_btn': 'Activate 2FA',
+  'totp.activating': 'Activating…',
+  'totp.error_invalid': 'Invalid code — check your app and try again',
+  'totp.enabled_toast': '2FA enabled',
+  'totp.disabled_toast': '2FA disabled',
+  'totp.loading': 'Loading 2FA status…',
 } as const
 
 export type TKey = keyof typeof en

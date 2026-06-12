@@ -18,10 +18,15 @@ export const ru = {
   // ── Login ────────────────────────────────────────────────────
   'login.title': 'Вход',
   'login.subtitle': 'Панель управления проектами',
+  'login.subtitle_2fa': 'Двухфакторная аутентификация',
   'login.password_label': 'Парольная фраза',
+  'login.totp_label': 'Код из приложения',
+  'login.totp_recovery_hint': 'или введи код восстановления',
   'login.submit_loading': 'Проверяю...',
   'login.submit': 'Войти',
   'login.error_wrong_password': 'Неверная парольная фраза',
+  'login.error_totp_invalid': 'Неверный код — попробуй ещё раз',
+  'login.back_to_password': '← Назад',
 
   // ── App / Welcome ────────────────────────────────────────────
   'app.connecting': 'Соединение...',
@@ -448,6 +453,30 @@ export const ru = {
   'vault.loading': 'Загрузка хранилища...',
   'vault.error': 'Ошибка загрузки хранилища',
   'tabbar.vault': '🔐 Хранилище',
+
+  // ── 2FA panel (Spec 026 Phase 2) ─────────────────────────────
+  'totp.section_title': '🔐 Двухфакторная аутентификация (2FA)',
+  'totp.status_on': 'Двухфакторная: ВКЛ',
+  'totp.status_off': 'Двухфакторная: ВЫКЛ',
+  'totp.enable_btn': 'Включить 2FA',
+  'totp.disable_btn': 'Отключить 2FA',
+  'totp.disable_confirm_title': 'Отключить двухфакторку?',
+  'totp.disable_confirm_msg': 'Отключить двухфакторную аутентификацию? Вход будет только по паролю.',
+  'totp.disable_confirm_btn': 'Отключить',
+  'totp.scan_qr': 'Отсканируй QR-код в приложении-аутентификаторе',
+  'totp.manual_secret': 'Или введи ключ вручную:',
+  'totp.recovery_title': 'Коды восстановления',
+  'totp.recovery_warning': 'Сохрани сейчас — показываются один раз. Каждый код одноразовый.',
+  'totp.recovery_copy': 'Копировать всё',
+  'totp.recovery_copied': 'Скопировано!',
+  'totp.activate_label': 'Введи 6-значный код из приложения для подтверждения',
+  'totp.activate_placeholder': '000000',
+  'totp.activate_btn': 'Активировать 2FA',
+  'totp.activating': 'Активирую…',
+  'totp.error_invalid': 'Неверный код — проверь приложение и попробуй снова',
+  'totp.enabled_toast': '2FA включена',
+  'totp.disabled_toast': '2FA отключена',
+  'totp.loading': 'Загрузка статуса 2FA…',
 } as const
 
 export type TKey = keyof typeof ru

@@ -4,7 +4,10 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { ...OPTS, ...init })
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText)
-    throw Object.assign(new Error(text), { status: res.status })
+    // Attach parsed JSON body (if any) so callers can inspect error codes
+    let body: Record<string, unknown> | null = null
+    try { body = JSON.parse(text) } catch { /* ignore */ }
+    throw Object.assign(new Error(text), { status: res.status, body })
   }
   return res.json() as Promise<T>
 }
@@ -14,11 +17,11 @@ export const api = {
 
   me: () => apiFetch<{ authed: boolean }>('/api/me'),
 
-  login: (password: string) =>
+  login: (password: string, totp?: string) =>
     apiFetch<{ ok: boolean }>('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify(totp ? { password, totp } : { password }),
     }),
 
   logout: () =>
@@ -458,6 +461,25 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groups }),
     }),
+
+  // Spec-026 Phase 2: TOTP 2FA
+  totpStatus: () =>
+    apiFetch<{ enabled: boolean }>('/api/auth/totp/status'),
+
+  totpEnroll: () =>
+    apiFetch<{ secret: string; otpauth_uri: string; recovery_codes: string[] }>('/api/auth/totp/enroll', {
+      method: 'POST',
+    }),
+
+  totpActivate: (code: string) =>
+    apiFetch<{ enabled: boolean }>('/api/auth/totp/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    }),
+
+  totpDisable: () =>
+    apiFetch<{ enabled: boolean }>('/api/auth/totp', { method: 'DELETE' }),
 
   // Spec-026 Phase 3: Global encrypted secret vault (names+categories only — no values)
   secretsList: () =>

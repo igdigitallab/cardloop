@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { QRCodeSVG } from 'qrcode.react'
 import { api } from '../api'
 import { t } from '../i18n'
 import { Modal, ModalHead } from '../components/Modal'
@@ -48,6 +49,221 @@ function groupByCategory(secrets: SecretMeta[]): Map<string, SecretMeta[]> {
   })
   for (const k of keys) sorted.set(k, map.get(k)!)
   return sorted
+}
+
+// ── TOTP Enrollment Panel ──────────────────────────────────────
+
+interface EnrollState {
+  secret: string
+  otpauth_uri: string
+  recovery_codes: string[]
+}
+
+function TotpPanel({ onToast }: { onToast: (msg: string) => void }) {
+  const [loading, setLoading] = useState(true)
+  const [enabled, setEnabled] = useState(false)
+
+  // Enrollment in-progress state
+  const [enroll, setEnroll] = useState<EnrollState | null>(null)
+  const [enrolling, setEnrolling] = useState(false)
+
+  // Activation code input
+  const [activateCode, setActivateCode] = useState('')
+  const [activating, setActivating] = useState(false)
+  const [activateError, setActivateError] = useState<string | null>(null)
+
+  // Recovery codes copy feedback
+  const [codesCopied, setCodesCopied] = useState(false)
+
+  // Disable confirm modal
+  const [showDisableConfirm, setShowDisableConfirm] = useState(false)
+
+  const codeInputRef = useRef<HTMLInputElement>(null)
+
+  // Load status on mount
+  useEffect(() => {
+    api.totpStatus()
+      .then(res => setEnabled(res.enabled))
+      .catch(() => {/* silently ignore — section will stay loading */})
+      .finally(() => setLoading(false))
+  }, [])
+
+  const handleEnroll = useCallback(async () => {
+    setEnrolling(true)
+    try {
+      const res = await api.totpEnroll()
+      setEnroll({ secret: res.secret, otpauth_uri: res.otpauth_uri, recovery_codes: res.recovery_codes })
+      setActivateCode('')
+      setActivateError(null)
+      setTimeout(() => codeInputRef.current?.focus(), 50)
+    } catch (e: unknown) {
+      onToast(e instanceof Error ? e.message : String(e))
+    } finally {
+      setEnrolling(false)
+    }
+  }, [onToast])
+
+  const handleActivate = useCallback(async () => {
+    if (!activateCode.trim()) return
+    setActivating(true)
+    setActivateError(null)
+    try {
+      await api.totpActivate(activateCode.trim())
+      setEnabled(true)
+      setEnroll(null)
+      setActivateCode('')
+      onToast(t['totp.enabled_toast'])
+    } catch (e: unknown) {
+      const apiErr = e as { status?: number; body?: { error?: string } }
+      if (apiErr.status === 400 && apiErr.body?.error === 'totp_invalid') {
+        setActivateError(t['totp.error_invalid'])
+        setActivateCode('')
+      } else {
+        setActivateError(e instanceof Error ? e.message : String(e))
+      }
+    } finally {
+      setActivating(false)
+    }
+  }, [activateCode, onToast])
+
+  const handleDisable = useCallback(async () => {
+    setShowDisableConfirm(false)
+    try {
+      await api.totpDisable()
+      setEnabled(false)
+      onToast(t['totp.disabled_toast'])
+    } catch (e: unknown) {
+      onToast(e instanceof Error ? e.message : String(e))
+    }
+  }, [onToast])
+
+  const handleCopyRecovery = useCallback(async () => {
+    if (!enroll) return
+    try {
+      await navigator.clipboard.writeText(enroll.recovery_codes.join('\n'))
+      setCodesCopied(true)
+      setTimeout(() => setCodesCopied(false), 2000)
+    } catch {
+      onToast('Copy failed')
+    }
+  }, [enroll, onToast])
+
+  if (loading) {
+    return (
+      <div className="totp-panel totp-panel--loading">
+        <span className="totp-status-label">{t['totp.loading']}</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="totp-panel">
+      <div className="totp-panel-header">
+        <span className="totp-section-title">{t['totp.section_title']}</span>
+        <span className={`totp-status-badge ${enabled ? 'totp-status-badge--on' : 'totp-status-badge--off'}`}>
+          {enabled ? t['totp.status_on'] : t['totp.status_off']}
+        </span>
+      </div>
+
+      {!enabled && !enroll && (
+        <div className="totp-panel-body">
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={handleEnroll}
+            disabled={enrolling}
+          >
+            {enrolling ? '…' : t['totp.enable_btn']}
+          </button>
+        </div>
+      )}
+
+      {!enabled && enroll && (
+        <div className="totp-enroll-body">
+          {/* QR Code */}
+          <p className="totp-hint">{t['totp.scan_qr']}</p>
+          <div className="totp-qr-wrap">
+            <QRCodeSVG value={enroll.otpauth_uri} size={160} />
+          </div>
+
+          {/* Manual secret */}
+          <p className="totp-hint">{t['totp.manual_secret']}</p>
+          <code className="totp-secret-code">{enroll.secret}</code>
+
+          {/* Recovery codes */}
+          <div className="totp-recovery-block">
+            <div className="totp-recovery-header">
+              <span className="totp-recovery-title">{t['totp.recovery_title']}</span>
+              <button
+                className={`vault-btn${codesCopied ? ' vault-btn-copied' : ''}`}
+                onClick={handleCopyRecovery}
+              >
+                {codesCopied ? t['totp.recovery_copied'] : t['totp.recovery_copy']}
+              </button>
+            </div>
+            <p className="totp-recovery-warning">{t['totp.recovery_warning']}</p>
+            <div className="totp-recovery-codes">
+              {enroll.recovery_codes.map(code => (
+                <span key={code} className="totp-recovery-code">{code}</span>
+              ))}
+            </div>
+          </div>
+
+          {/* Activation */}
+          <div className="totp-activate-row">
+            <label className="vault-form-label">{t['totp.activate_label']}</label>
+            <div className="totp-activate-input-row">
+              <input
+                ref={codeInputRef}
+                className="vault-form-input totp-code-input"
+                type="text"
+                inputMode="numeric"
+                value={activateCode}
+                onChange={e => setActivateCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder={t['totp.activate_placeholder']}
+                maxLength={6}
+                autoComplete="one-time-code"
+                disabled={activating}
+                onKeyDown={e => { if (e.key === 'Enter') handleActivate() }}
+              />
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={handleActivate}
+                disabled={activating || activateCode.length < 6}
+              >
+                {activating ? t['totp.activating'] : t['totp.activate_btn']}
+              </button>
+            </div>
+            {activateError && (
+              <div className="totp-error">{activateError}</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {enabled && (
+        <div className="totp-panel-body">
+          <button
+            className="btn btn-sm"
+            style={{ color: 'var(--red, #ef4444)', borderColor: 'var(--red, #ef4444)' }}
+            onClick={() => setShowDisableConfirm(true)}
+          >
+            {t['totp.disable_btn']}
+          </button>
+        </div>
+      )}
+
+      {showDisableConfirm && (
+        <ConfirmModal
+          title={t['totp.disable_confirm_title']}
+          message={t['totp.disable_confirm_msg']}
+          confirmLabel={t['totp.disable_confirm_btn']}
+          danger
+          onConfirm={handleDisable}
+          onCancel={() => setShowDisableConfirm(false)}
+        />
+      )}
+    </div>
+  )
 }
 
 // ── Component ──────────────────────────────────────────────────
@@ -230,6 +446,9 @@ export function VaultTab() {
   // ── Render ────────────────────────────────────────────────────
   return (
     <div className="vault-container">
+      {/* 2FA panel — always at the top */}
+      <TotpPanel onToast={showToast} />
+
       {/* Header */}
       <div className="vault-header">
         <h2>{t['vault.title']}</h2>

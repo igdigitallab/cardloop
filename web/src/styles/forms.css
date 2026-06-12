@@ -52,6 +52,12 @@
   margin-bottom: 24px;
 }
 
+.login-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text3);
+}
+
 .form-group {
   margin-bottom: 16px;
 }
