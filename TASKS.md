@@ -8,6 +8,7 @@
 > 2026-05-31: рефакторинг-проход закрыт — 25 карточек (security, рефактор бэк/фронт, OSS-доки, тесты 207→300) ушли в DONE.md. Карта кода → ARCHITECTURE.md. Ниже — только фичи/roadmap.
 
 ## Backlog
+- [ ] Token economy: model routing per work type — board cards default to sonnet (cheap execution), chat stays on project model, per-card model field + global default in settings. Biggest untouched cost lever (idea 2026-06-11, conductor session)
 - [ ] Решить вопрос с удалением проекта. В том числе и, допустим, надо при удалении решать полностью удалять проекты, все смен <!--ops:207822-->
   > ные файлы с ним. Вижу, просто удаляем проект из. Claude ops. Нужен твой совет.
 - [ ] Глобальные ключи + общий UI хранилища credentials <!--ops:a7b2c1-->
