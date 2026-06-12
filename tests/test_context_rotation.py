@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 import bot as _bot
 import webapp as _webapp
-from webapp import _derive_token, CONTEXT_ROTATE_AT, CONTEXT_ROTATION
+from webapp import _derive_token, CONTEXT_ROTATE_AT, CONTEXT_ROTATION, CONTEXT_WARN_AT
 
 
 # ─────────────────────────── helpers ────────────────────────────────────────
@@ -48,6 +48,8 @@ def _make_ctx(tmp_path, project_dir, run_engine=None):
         "rate_limits": {},
         # Spec-021 Phase 4: pending handoff summaries
         "pending_handoff": {},
+        # Context early-warn tracking set (shared by reference like pending_handoff)
+        "context_warned": set(),
     }
     ctx["_auth_token"] = _derive_token(password)
     (tmp_path / "data").mkdir(exist_ok=True)
@@ -246,6 +248,31 @@ async def test_rotation_handoff_file_written(tmp_path, project_dir):
     content = handoff_path.read_text(encoding="utf-8")
     assert "type: handoff" in content
     assert summary_text in content
+
+
+async def test_rotation_summary_uses_no_full_transcript_resume(tmp_path, project_dir):
+    """Task 2: _do_session_rotation calls run_engine with resume_session_id=None (fresh haiku session).
+    No full-transcript resume — the 175K context is NOT re-paid for the summary call."""
+    captured = {}
+
+    async def haiku_engine(**kwargs):
+        captured["resume"] = kwargs.get("resume_session_id")
+        yield {"type": "text", "text": "Summary: feature X in progress."}
+        yield {"type": "result", "session_id": "haiku-fresh", "context_tokens": 500}
+
+    session_key = "1001:42"
+    project = {"name": "myproject", "cwd": str(project_dir)}
+    ctx = _make_ctx(tmp_path, project_dir)
+    ctx["sessions"][session_key] = "fat-session-id"
+    ctx["run_engine"] = haiku_engine
+
+    with patch.object(_webapp, "CONTEXT_ROTATION", True):
+        await _webapp._do_session_rotation(ctx, session_key, project, str(project_dir))
+
+    assert captured.get("resume") is None, (
+        f"Task 2: rotation summary must use resume_session_id=None (fresh session), "
+        f"got: {captured.get('resume')!r}"
+    )
 
 
 async def test_rotation_failure_does_not_break_main_run(aiohttp_client, tmp_path, project_dir):
@@ -722,4 +749,204 @@ async def test_handoff_injection_failure_does_not_break_turn(aiohttp_client, tmp
     result_events = [e for e in events if e.get("type") == "result"]
     assert len(result_events) > 0, (
         f"Turn must complete normally even if handoff injection fails, got: {events}"
+    )
+
+
+# ─────────────────────────── Part 4: Context early warning (CONTEXT_WARN_AT) ─
+
+async def test_context_warn_fires_on_crossing(aiohttp_client, tmp_path, project_dir):
+    """context_tokens at CONTEXT_WARN_AT → context_warn=True on result, session key tracked."""
+    warn_at = 150000
+    rotate_at = 175000
+
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "hello"}
+        yield {"type": "result", "session_id": "sess-w", "context_tokens": warn_at}
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
+         patch.object(_webapp, "CONTEXT_WARN_AT", warn_at), \
+         patch.object(_webapp, "_QUEUE", {}), \
+         patch.object(_webapp, "_notify_tg_context_warn", AsyncMock()):
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "Work"},
+            headers=_auth_headers(ctx),
+        )
+        assert resp.status == 200
+        events = await _read_sse(resp)
+
+    result_events = [e for e in events if e.get("type") == "result"]
+    assert len(result_events) == 1
+    assert result_events[0].get("context_warn") is True, (
+        f"Expected context_warn=True on first crossing, got: {result_events[0]}"
+    )
+    # The session key must be tracked to prevent re-firing.
+    assert SESSION_KEY in ctx["context_warned"], (
+        "session_key must be added to context_warned after the first crossing"
+    )
+
+
+async def test_context_warn_does_not_refire(aiohttp_client, tmp_path, project_dir):
+    """Second turn still above CONTEXT_WARN_AT → context_warn NOT present (anti-spam)."""
+    warn_at = 150000
+    rotate_at = 175000
+
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "hello"}
+        yield {"type": "result", "session_id": "sess-w2", "context_tokens": warn_at + 1000}
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    # Pre-mark as already warned — simulates a session that already crossed the threshold.
+    ctx["context_warned"].add(SESSION_KEY)
+
+    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
+         patch.object(_webapp, "CONTEXT_WARN_AT", warn_at), \
+         patch.object(_webapp, "_QUEUE", {}), \
+         patch.object(_webapp, "_notify_tg_context_warn", AsyncMock()):
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "More work"},
+            headers=_auth_headers(ctx),
+        )
+        assert resp.status == 200
+        events = await _read_sse(resp)
+
+    result_events = [e for e in events if e.get("type") == "result"]
+    assert len(result_events) == 1
+    assert "context_warn" not in result_events[0], (
+        f"context_warn must be absent on a second above-threshold turn, got: {result_events[0]}"
+    )
+
+
+async def test_context_warn_absent_below_threshold(aiohttp_client, tmp_path, project_dir):
+    """context_tokens well below CONTEXT_WARN_AT → context_warn absent from result."""
+    warn_at = 150000
+    rotate_at = 175000
+
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "hi"}
+        yield {"type": "result", "session_id": "sess-low2", "context_tokens": 50000}
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
+         patch.object(_webapp, "CONTEXT_WARN_AT", warn_at), \
+         patch.object(_webapp, "_QUEUE", {}):
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "Test"},
+            headers=_auth_headers(ctx),
+        )
+        assert resp.status == 200
+        events = await _read_sse(resp)
+
+    result_events = [e for e in events if e.get("type") == "result"]
+    assert len(result_events) == 1
+    assert "context_warn" not in result_events[0], (
+        f"context_warn must be absent below threshold, got: {result_events[0]}"
+    )
+    assert SESSION_KEY not in ctx["context_warned"], (
+        "context_warned must not be set when below threshold"
+    )
+
+
+async def test_context_warn_absent_at_or_above_rotate_at(aiohttp_client, tmp_path, project_dir):
+    """context_tokens at/above CONTEXT_ROTATE_AT → rotation fires, warn must NOT also fire."""
+    warn_at = 150000
+    rotate_at = 175000
+
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "hello"}
+        yield {"type": "result", "session_id": "sess-over", "context_tokens": rotate_at + 1}
+
+    async def fake_rotation_engine(**kwargs):
+        yield {"type": "text", "text": "Summary."}
+        yield {"type": "result", "session_id": "rot-sess", "context_tokens": 500}
+
+    async def dispatch(**kwargs):
+        if kwargs.get("model") == "haiku":
+            async for e in fake_rotation_engine(**kwargs):
+                yield e
+        else:
+            async for e in fake_engine(**kwargs):
+                yield e
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=dispatch)
+    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
+         patch.object(_webapp, "CONTEXT_WARN_AT", warn_at), \
+         patch.object(_webapp, "_QUEUE", {}), \
+         patch.object(_webapp, "_notify_tg_context_warn", AsyncMock()) as mock_warn_notify:
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "Do something"},
+            headers=_auth_headers(ctx),
+        )
+        assert resp.status == 200
+        events = await _read_sse(resp)
+        # Warn TG notify must NOT fire when tokens are at/above the rotation backstop.
+        mock_warn_notify.assert_not_awaited()
+
+    result_events = [e for e in events if e.get("type") == "result"]
+    assert len(result_events) == 1
+    assert "context_warn" not in result_events[0], (
+        f"context_warn must be absent when rotation fires (tokens >= CONTEXT_ROTATE_AT), got: {result_events[0]}"
+    )
+
+
+async def test_context_warn_cleared_after_rotation(tmp_path, project_dir):
+    """After _do_session_rotation, context_warned entry for session_key is removed."""
+    summary_text = "Task: X. Status: done."
+
+    async def haiku_engine(**kwargs):
+        yield {"type": "text", "text": summary_text}
+        yield {"type": "result", "session_id": "haiku-r", "context_tokens": 400}
+
+    ctx = _make_ctx(tmp_path, project_dir)
+    ctx["sessions"][SESSION_KEY] = "old-sess"
+    ctx["run_engine"] = haiku_engine
+    # Simulate that the warn already fired before rotation.
+    ctx["context_warned"].add(SESSION_KEY)
+
+    with patch.object(_webapp, "CONTEXT_ROTATION", True):
+        await _webapp._do_session_rotation(ctx, SESSION_KEY, project={"name": "myproject", "cwd": str(project_dir)}, cwd=str(project_dir))
+
+    assert SESSION_KEY not in ctx["context_warned"], (
+        "context_warned must be cleared after rotation so a fresh session can warn again"
+    )
+
+
+async def test_context_warn_cleared_after_web_reset(aiohttp_client, tmp_path, project_dir):
+    """POST /session action=new clears context_warned so the fresh session can warn again."""
+    ctx = _make_ctx(tmp_path, project_dir)
+    # Simulate that the warn already fired.
+    ctx["context_warned"].add(SESSION_KEY)
+    # No active session / not busy.
+    assert SESSION_KEY not in ctx["sessions"]
+    assert ctx["running"].get(SESSION_KEY) is None
+
+    from aiohttp import web
+    app = web.Application(middlewares=[_webapp.auth_middleware])
+    app["ctx"] = ctx
+    app.router.add_post("/api/projects/{id}/session", _webapp.api_project_set_session)
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/api/projects/myproject/session",
+        json={"action": "new"},
+        headers=_auth_headers(ctx),
+    )
+    assert resp.status == 200
+    assert SESSION_KEY not in ctx["context_warned"], (
+        "context_warned must be cleared after a web /session new reset"
     )

@@ -61,6 +61,10 @@ _AUTO_RESUME_MAX = int(os.environ.get("AUTO_RESUME_MAX", "3"))
 # CONTEXT_ROTATION=1 enables auto-rotation; set to 0 to disable globally.
 CONTEXT_ROTATE_AT = int(os.environ.get("CONTEXT_ROTATE_AT", "175000"))
 CONTEXT_ROTATION = os.environ.get("CONTEXT_ROTATION", "1") == "1"
+# CONTEXT_WARN_AT: token count that triggers a one-time early warning (default 150 000).
+# Fires on the first turn that crosses this threshold (upward only), before the hard backstop.
+# Suppressed once rotation fires (i.e. no warn if already at/above CONTEXT_ROTATE_AT).
+CONTEXT_WARN_AT = int(os.environ.get("CONTEXT_WARN_AT", "150000"))
 
 # Prompt sent to haiku to produce a handoff summary of the current session.
 ROTATION_SUMMARY_PROMPT = (
@@ -3652,8 +3656,94 @@ async def _notify_tg_rotation(ctx: dict, session_key: str, tokens: int) -> None:
         print(f"[rotation] TG notify failed: {e}")
 
 
+async def _notify_tg_context_warn(ctx: dict, session_key: str, tokens: int) -> None:
+    """Sends a one-time TG warning when context crosses CONTEXT_WARN_AT. Non-critical.
+    Called only on the upward crossing (anti-spam); caller owns the once-per-session guard."""
+    try:
+        ptb = ctx.get("ptb_app")
+        if ptb is None:
+            return
+        parts = session_key.split(":", 1)
+        chat_id = int(parts[0])
+        thread_id = int(parts[1]) if len(parts) > 1 and parts[1] not in ("0", "") else None
+        k = round(tokens / 1000)
+        backstop_k = round(CONTEXT_ROTATE_AT / 1000)
+        await ptb.bot.send_message(
+            chat_id,
+            f"⚠️ Context ~{k}K (backstop {backstop_k}K). Consider /rotate or compress the next prompt.",
+            message_thread_id=thread_id,
+        )
+    except Exception as e:
+        print(f"[context-warn] TG notify failed: {e}")
+
+
+_ROTATION_TAIL_EVENTS = 15   # max events to read from the tail of the jsonl transcript
+_ROTATION_TAIL_MAX_CHARS = 8000  # hard cap on tail text size sent to haiku
+
+
+def _build_rotation_tail_prompt(jsonl_path: Path, tail_events: int = _ROTATION_TAIL_EVENTS, max_chars: int = _ROTATION_TAIL_MAX_CHARS) -> str:
+    """Read the last N events from a session jsonl transcript and build a cheap summary prompt.
+
+    Only extracts human turns (string content) and assistant text blocks — skips tool calls,
+    attachments, and queue-operation events to keep the tail concise.
+
+    Returns a prompt string with the tail inlined, or ROTATION_SUMMARY_PROMPT (bare, no tail)
+    if the file is unreadable or produces no usable content.
+    """
+    try:
+        lines: list[str] = []
+        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if raw:
+                    lines.append(raw)
+
+        tail_lines = lines[-tail_events:] if len(lines) > tail_events else lines
+        parts: list[str] = []
+        for raw in tail_lines:
+            try:
+                ev = json.loads(raw)
+            except Exception:
+                continue
+            etype = ev.get("type")
+            msg = ev.get("message") or {}
+            content = msg.get("content")
+            if etype == "user" and isinstance(content, str) and content.strip():
+                parts.append(f"[user] {content.strip()}")
+            elif etype == "assistant" and isinstance(content, list):
+                text_blocks = [
+                    b.get("text", "")
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+                ]
+                if text_blocks:
+                    parts.append(f"[assistant] {' '.join(text_blocks).strip()}")
+
+        if not parts:
+            return ROTATION_SUMMARY_PROMPT
+
+        tail_text = "\n".join(parts)
+        # Truncate from the front if over the char limit (keep the most recent content).
+        if len(tail_text) > max_chars:
+            tail_text = "…" + tail_text[-max_chars:]
+
+        return (
+            "Below are the last few turns of a session that is about to be rotated.\n"
+            "Summarize for handoff: active tasks + their state, key decisions, "
+            "important file paths, unresolved questions. Be dense, ≤500 words, English.\n\n"
+            f"<session-tail>\n{tail_text}\n</session-tail>"
+        )
+    except Exception as e:
+        print(f"[rotation] tail-prompt build failed ({e}) — falling back to bare prompt")
+        return ROTATION_SUMMARY_PROMPT
+
+
 async def _do_session_rotation(ctx: dict, session_key: str, project: dict, cwd: str) -> "str | None":
     """Summarise current session via haiku, save handoff, clear session.
+
+    Uses a fresh haiku session with only the transcript tail inlined (Task 2 optimisation).
+    This avoids re-paying the full ~175K context when asking for the handoff summary.
+    Falls back to the bare prompt if the jsonl is unreadable.
 
     Returns summary text on success, None on failure or if rotation is disabled.
     Entire function is wrapped in try/except — rotation failure never breaks a run.
@@ -3670,15 +3760,30 @@ async def _do_session_rotation(ctx: dict, session_key: str, project: dict, cwd: 
         rotate_session_key = session_key + ":rotate-summary"
         resume_sid = ctx["sessions"].get(session_key)
 
-        # Collect haiku summary — uses a separate session_key to avoid touching the main lock
+        # Task 2: build a tail-only prompt so haiku starts fresh (no full 175K re-pay).
+        # Derive the jsonl path deterministically from cwd + session_id.
+        summary_prompt = ROTATION_SUMMARY_PROMPT
+        if resume_sid:
+            try:
+                jsonl_path = _sdk_sessions_dir(cwd) / f"{resume_sid}.jsonl"
+                if jsonl_path.is_file():
+                    summary_prompt = _build_rotation_tail_prompt(jsonl_path)
+                    print(f"[rotation] using tail prompt from {jsonl_path.name} ({len(summary_prompt)} chars)")
+                else:
+                    print(f"[rotation] jsonl not found at {jsonl_path} — using bare prompt")
+            except Exception as _tp_exc:
+                print(f"[rotation] tail-prompt lookup failed ({_tp_exc}) — using bare prompt")
+
+        # Collect haiku summary — fresh session (resume_session_id=None) to avoid re-paying
+        # the full ~175K context.  Falls back to ROTATION_SUMMARY_PROMPT if tail unavailable.
         summary_parts: list[str] = []
         async for event in run_engine(
             project_name=name,
             cwd=cwd,
-            prompt=ROTATION_SUMMARY_PROMPT,
+            prompt=summary_prompt,
             session_key=rotate_session_key,
             model="haiku",
-            resume_session_id=resume_sid,
+            resume_session_id=None,
         ):
             if event.get("type") == "text":
                 summary_parts.append(event["text"])
@@ -3718,6 +3823,14 @@ async def _do_session_rotation(ctx: dict, session_key: str, project: dict, cwd: 
                 ph[session_key] = summary
         except Exception as _ph_exc:
             print(f"[rotation] failed to store pending_handoff: {_ph_exc}")
+
+        # Clear context-warn state so a fresh session can warn again.
+        try:
+            cw = ctx.get("context_warned")
+            if cw is not None:
+                cw.discard(session_key)
+        except Exception as _cw_exc:
+            print(f"[rotation] failed to clear context_warned: {_cw_exc}")
 
         print(f"[rotation] session rotated for {session_key} — handoff saved")
         return summary
@@ -6127,6 +6240,13 @@ async def api_project_set_session(req: web.Request) -> web.Response:
     if action == "new":
         ctx["sessions"].pop(tg_thread, None)
         ctx["save_sessions"]()
+        # Clear context-warn state so a fresh session can warn again.
+        try:
+            _cw = ctx.get("context_warned")
+            if _cw is not None:
+                _cw.discard(tg_thread)
+        except Exception:
+            pass
         return web.json_response({"active": None})
 
     elif action == "resume":
@@ -6408,6 +6528,20 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     # pick five_hour window utilization as the primary signal
                     _w = (_cached.get("five_hour") or {})
                     _utilization = _w.get("utilization") if isinstance(_w, dict) else None
+                # Context early-warning: upward crossing of CONTEXT_WARN_AT (once per session).
+                # Only fires in the warn zone (>= CONTEXT_WARN_AT but < CONTEXT_ROTATE_AT).
+                _ctx_warn = False
+                try:
+                    _ctx_warned: "set | None" = ctx.get("context_warned")
+                    if (
+                        _ctx_warned is not None
+                        and CONTEXT_WARN_AT <= ctx_tokens < CONTEXT_ROTATE_AT
+                        and session_key not in _ctx_warned
+                    ):
+                        _ctx_warn = True
+                        _ctx_warned.add(session_key)
+                except Exception as _cw_exc:
+                    print(f"[context-warn] state check failed: {_cw_exc}")
                 await _send({
                     "type": "result",
                     "context_tokens": ctx_tokens,
@@ -6417,7 +6551,14 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     "cache_hit_pct": event.get("cache_hit_pct"),
                     "duration_ms": event.get("duration_ms"),
                     "utilization": _utilization,
+                    **({"context_warn": True} if _ctx_warn else {}),
                 })
+                # Context warn: send one-time TG notification on the upward crossing.
+                if _ctx_warn:
+                    try:
+                        await _notify_tg_context_warn(ctx, session_key, ctx_tokens)
+                    except Exception as _cw_notify_exc:
+                        print(f"[context-warn] notification failed: {_cw_notify_exc}")
                 # Spec-021: auto session rotation when context exceeds threshold
                 if (
                     CONTEXT_ROTATION

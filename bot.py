@@ -325,6 +325,9 @@ rate_limits = {}                   # rate_limit_type -> {status, resets_at, util
 # {session_key: summary_text}. Cleared immediately after injection so it fires exactly once.
 # NOTE: In-memory only — lost on service restart between rotation and next turn; that is acceptable.
 pending_handoff: "dict[str, str]" = {}
+# Context early-warn: tracks session keys that have already received the CONTEXT_WARN_AT alert.
+# Cleared on rotation (_do_session_rotation) and on /reset so a fresh session can warn again.
+context_warned: "set[str]" = set()
 
 # ─────────────────────────── TG message queue ───────────────────────────
 # Per-topic FIFO queue of pending user messages received while a run is in progress.
@@ -833,6 +836,41 @@ async def _maybe_rotate_tg(context, chat, thread, k: str, b: dict, last_result_e
         print(f"[rotation] TG-path rotation failed (continuing with old session): {rot_exc}")
 
 
+async def _maybe_warn_tg(context, chat, thread, k: str, last_result_event: "dict | None"):
+    """Spec-021: one-time early context warning for the TG channel.
+
+    Fires when context crosses webapp.CONTEXT_WARN_AT (upward only) and has not yet
+    reached the hard backstop webapp.CONTEXT_ROTATE_AT.  Tracks the crossing in the
+    module-level context_warned set so the warning is sent at most once per session.
+    Cleared by cmd_reset (/reset) and by _do_session_rotation so a fresh session can warn again.
+
+    Mirrors the anti-spam and try/except guard pattern of _maybe_rotate_tg.
+    """
+    try:
+        ctx_tokens = (last_result_event or {}).get("context_tokens", 0) or 0
+        warn_at = webapp.CONTEXT_WARN_AT
+        rotate_at = webapp.CONTEXT_ROTATE_AT
+        # Only fire in the warn zone (at/above warn threshold but below the rotation backstop).
+        if not (warn_at <= ctx_tokens < rotate_at):
+            return
+        # Anti-spam: only on the upward crossing (first turn in the warn zone).
+        if k in context_warned:
+            return
+        context_warned.add(k)
+        k_display = round(ctx_tokens / 1000)
+        backstop_k = round(rotate_at / 1000)
+        await send(
+            context, chat, thread,
+            md_to_html(
+                f"⚠️ Контекст ~{k_display}K (бэкстоп {backstop_k}K). "
+                f"Стоит /rotate или сжать следующий запрос, пока не влетел в жирный ход."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as warn_exc:
+        print(f"[context-warn] TG-path warn failed: {warn_exc}")
+
+
 async def run_agent(context, update, prompt: str):
     chat = update.effective_chat.id
     thread = update.effective_message.message_thread_id or 0
@@ -1096,6 +1134,9 @@ async def run_agent(context, update, prompt: str):
     # Spec-021: auto session rotation for the TG channel (after auto-resume check).
     await _maybe_rotate_tg(context, chat, thread, k, b, _tg_last_result_event)
 
+    # Context early-warning: one-time TG alert when approaching the rotation backstop.
+    # Fires only in the warn zone (>= CONTEXT_WARN_AT, < CONTEXT_ROTATE_AT); muted after rotation.
+    await _maybe_warn_tg(context, chat, thread, k, _tg_last_result_event)
 
 
 # ─────────────────────────── handlers ───────────────────────────
@@ -1319,6 +1360,8 @@ async def cmd_reset(update, context):
     sessions.pop(k, None)
     save_sessions()
     cleared = _tg_queue_clear(k)
+    # Clear context-warn state so a fresh session can warn again.
+    context_warned.discard(k)
     b = topics.get(k) or binding_for(update)
     proj = b["project"] if b else "—"
     queue_note = f" Queue cleared ({cleared} message(s))." if cleared else ""
@@ -1621,6 +1664,9 @@ def _build_ctx(ptb_app) -> dict:
         "GROUP_CHAT_ID": GROUP_CHAT_ID,
         # Spec-021 Phase 4: pending handoff summaries awaiting injection (shared with webapp via ctx)
         "pending_handoff": pending_handoff,
+        # Context early-warn: tracks session keys that have already fired the CONTEXT_WARN_AT alert.
+        # Shared by reference — webapp.py reads/writes it via ctx["context_warned"].
+        "context_warned": context_warned,
     }
 
 

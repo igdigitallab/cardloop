@@ -247,6 +247,12 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   // Spec-021: context rotation UI state
   const [rotateToast, setRotateToast] = useState<string | null>(null)
   const [rotating, setRotating] = useState(false)
+  // Context early-warning banner state.
+  // contextWarnFromBackend: set true when the backend sends context_warn=true on a result event.
+  // warnDismissedAtTokens: the token count when the user dismissed the banner (null = not dismissed).
+  //   The banner re-appears if tokens climb into the escalation zone (≥175K) even after a dismiss.
+  const [contextWarnFromBackend, setContextWarnFromBackend] = useState(false)
+  const [warnDismissedAtTokens, setWarnDismissedAtTokens] = useState<number | null>(null)
   // Context-token value at the END of the previous completed turn — source for the growth delta.
   // null until a second turn arrives (no delta shown on the first turn).
   const [prevContextTokens, setPrevContextTokens] = useState<number | null>(null)
@@ -325,6 +331,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setContextTokens(null)
     setPrevContextTokens(null)
     setAttachments([])
+    setContextWarnFromBackend(false)
+    setWarnDismissedAtTokens(null)
 
     Promise.all([
       api.sessionHistory(projectId),
@@ -419,6 +427,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setContextTokens(null)
     setPrevContextTokens(null)
     setAttachments([])
+    setContextWarnFromBackend(false)
+    setWarnDismissedAtTokens(null)
     setCtxRefreshKey(k => k + 1)
     api.sessionHistory(projectId)
       .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens || null) })
@@ -512,6 +522,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             if (typeof evtAny.context_tokens === 'number' && (evtAny.context_tokens as number) > 0) {
               // Snapshot the prior value before overwriting — feeds the growth delta badge.
               setContextTokens(prev => { setPrevContextTokens(prev); return evtAny.context_tokens as number })
+            }
+            // Thread context_warn from backend: if true, mark the banner as active and clear any
+            // previous dismiss (a fresh backend signal means the operator should see it again).
+            if ((evtAny as Record<string, unknown>).context_warn === true) {
+              setContextWarnFromBackend(true)
+              setWarnDismissedAtTokens(null)
+            } else {
+              setContextWarnFromBackend(false)
             }
             // Spec-022: reset cache freshness countdown on every completed turn
             setLastTurnEndMs(now)
@@ -640,6 +658,33 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setStreaming(false)
     queueRef.current = []
     setQueueLen(0)
+  }
+
+  // Shared rotate handler — called from both the health-row button and the context warning banner.
+  async function handleRotate() {
+    setRotating(true)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/rotate`, {
+        method: 'POST', credentials: 'include',
+      })
+      const data = await res.json() as Record<string, unknown>
+      if (!res.ok) {
+        setRotateToast(`Rotate failed: ${data.error ?? res.statusText}`)
+      } else if (data.rotated) {
+        setContextTokens(0)
+        setPrevContextTokens(null)
+        setContextWarnFromBackend(false)
+        setWarnDismissedAtTokens(null)
+        setRotateToast('Session rotated — handoff saved, fresh start')
+      } else {
+        setRotateToast(`Not rotated: ${data.reason ?? 'unknown reason'}`)
+      }
+    } catch (e: unknown) {
+      setRotateToast(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRotating(false)
+      setTimeout(() => setRotateToast(null), 5000)
+    }
   }
 
   return (
@@ -780,29 +825,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 style={wrapBtnStyle}
                 disabled={rotating || streaming}
                 title="Wrap & reset (summarize + fresh session)"
-                onClick={async () => {
-                  setRotating(true)
-                  try {
-                    const res = await fetch(`/api/projects/${projectId}/rotate`, {
-                      method: 'POST', credentials: 'include',
-                    })
-                    const data = await res.json() as Record<string, unknown>
-                    if (!res.ok) {
-                      setRotateToast(`Rotate failed: ${data.error ?? res.statusText}`)
-                    } else if (data.rotated) {
-                      setContextTokens(0)
-                      setPrevContextTokens(null)
-                      setRotateToast('Session rotated — handoff saved, fresh start')
-                    } else {
-                      setRotateToast(`Not rotated: ${data.reason ?? 'unknown reason'}`)
-                    }
-                  } catch (e: unknown) {
-                    setRotateToast(e instanceof Error ? e.message : String(e))
-                  } finally {
-                    setRotating(false)
-                    setTimeout(() => setRotateToast(null), 5000)
-                  }
-                }}
+                onClick={handleRotate}
               >
                 {rotating ? '…' : '♻ Wrap & reset'}
               </button>
@@ -1015,6 +1038,71 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             onClose={() => setShowSkills(false)}
           />
         )}
+        {/* Context early-warning banner — shown above the composer when context approaches limits */}
+        {(() => {
+          const warnTokens = contextTokens != null && contextTokens > 0
+            ? contextTokens
+            : estimateTokens(messages)
+          const WARN_THRESHOLD = 150_000
+          const ESCALATE_THRESHOLD = 175_000
+          const isEscalated = warnTokens >= ESCALATE_THRESHOLD
+          const isInWarnZone = warnTokens >= WARN_THRESHOLD && !isEscalated
+          // Trigger: backend flag OR token-count fallback
+          const shouldWarn = contextWarnFromBackend || isInWarnZone || isEscalated
+          if (!shouldWarn) return null
+          // Dismiss gate: once dismissed, suppress unless we've escalated into the ≥175K zone
+          if (warnDismissedAtTokens !== null && !isEscalated) return null
+          const nK = Math.round(warnTokens / 1000)
+          const bannerColor = isEscalated
+            ? 'var(--color-red, #ef4444)'
+            : 'var(--color-yellow, #eab308)'
+          const bannerBg = isEscalated
+            ? 'rgba(239,68,68,0.08)'
+            : 'rgba(234,179,8,0.08)'
+          const bannerText = isEscalated
+            ? `⚠️ Context ${nK}K — auto-rotate backstop at 175K. Wrap now to avoid losing the session.`
+            : `⚠️ Context ~${nK}K — consider wrapping the session before a large turn (auto-rotate backstop at 175K).`
+          return (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '6px 10px',
+              background: bannerBg,
+              border: `1px solid ${bannerColor}`,
+              borderRadius: 6,
+              fontSize: 12,
+              color: bannerColor,
+              margin: '4px 0',
+              flexShrink: 0,
+            }}>
+              <span style={{ flex: 1, lineHeight: 1.4 }}>{bannerText}</span>
+              <button
+                style={{
+                  fontSize: 11, padding: '2px 7px', cursor: rotating ? 'wait' : 'pointer',
+                  background: 'transparent', border: `1px solid ${bannerColor}`,
+                  borderRadius: 4, color: bannerColor, fontWeight: 600, whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                }}
+                disabled={rotating || streaming}
+                title="Wrap & reset (summarize + fresh session)"
+                onClick={handleRotate}
+              >
+                {rotating ? '…' : '♻ Wrap & reset'}
+              </button>
+              <button
+                style={{
+                  fontSize: 13, padding: '0 4px', cursor: 'pointer',
+                  background: 'transparent', border: 'none',
+                  color: bannerColor, lineHeight: 1, flexShrink: 0,
+                }}
+                title="Dismiss warning"
+                aria-label="Dismiss context warning"
+                onClick={() => setWarnDismissedAtTokens(warnTokens)}
+              >
+                ✕
+              </button>
+            </div>
+          )
+        })()}
         <div className="chat-composer">
           <textarea
             ref={textareaRef}

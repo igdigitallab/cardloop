@@ -272,6 +272,8 @@ export interface ChatEventResult {
   cache_hit_pct?: number | null
   duration_ms?: number | null
   utilization?: number | null
+  /** Early-warning flag: backend sets true when context is in the ≈150K–175K zone. */
+  context_warn?: boolean
 }
 
 export interface ChatEventError {
