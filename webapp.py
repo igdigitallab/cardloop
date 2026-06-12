@@ -813,8 +813,13 @@ def _maybe_reload_topics(ctx: dict) -> None:
 
 def _collect_projects(ctx: dict) -> list[dict]:
     """Deduplicates by cwd, builds a project list from ctx["topics"].
-    Appends free-chats as virtual projects (id=free-<uuid>, tg_thread=its own id)."""
+    Appends free-chats as virtual projects (id=free-<uuid>, tg_thread=its own id).
+    Archived project ids are excluded from the result."""
     _maybe_reload_topics(ctx)
+    archived = _load_archived(ctx)
+    groups_data = _load_groups(ctx)
+    assignments = groups_data["assignments"]
+    valid_groups = set(groups_data["groups"])
     seen: set[str] = set()
     out = []
     for key, b in ctx["topics"].items():
@@ -823,6 +828,9 @@ def _collect_projects(ctx: dict) -> list[dict]:
             continue
         seen.add(cwd)
         pid = _project_id(cwd)
+        if pid in archived:
+            continue
+        raw_group = assignments.get(pid)
         # tg_thread — string key "chat:thread"
         out.append({
             "id": pid,
@@ -836,6 +844,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "notify_on_error": bool(b.get("notify_on_error", False)),
             "git_enabled": b.get("git_enabled", True) is not False,
             "agents_config": b.get("agents_config") or {},
+            "group": raw_group if raw_group in valid_groups else None,
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -850,6 +859,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
             "tg_thread": fid,  # session_key for free = its own id (string with free- prefix)
             "is_free": True,
+            "group": None,
         })
     return out
 
@@ -859,6 +869,87 @@ def _find_project_by_id(ctx: dict, pid: str) -> dict | None:
     for p in _collect_projects(ctx):
         if p["id"] == pid:
             return p
+    return None
+
+
+# ─────────────────────────── archive store ───────────────────────────────────
+
+def _archived_path(ctx: dict) -> Path:
+    return ctx["DATA"] / "archived.json"
+
+def _load_archived(ctx: dict) -> set:
+    """Returns a set of archived project ids."""
+    p = _archived_path(ctx)
+    if not p.exists():
+        return set()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return set(data) if isinstance(data, list) else set()
+    except Exception:
+        return set()
+
+def _save_archived(ctx: dict, archived: set) -> None:
+    _archived_path(ctx).write_text(
+        json.dumps(sorted(archived), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+# ─────────────────────────── groups store ────────────────────────────────────
+
+def _groups_path(ctx: dict) -> Path:
+    return ctx["DATA"] / "project_groups.json"
+
+def _load_groups(ctx: dict) -> dict:
+    """Returns {groups:[...], assignments:{...}}."""
+    p = _groups_path(ctx)
+    if not p.exists():
+        return {"groups": [], "assignments": {}}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"groups": [], "assignments": {}}
+        return {
+            "groups": data.get("groups", []) if isinstance(data.get("groups"), list) else [],
+            "assignments": data.get("assignments", {}) if isinstance(data.get("assignments"), dict) else {},
+        }
+    except Exception:
+        return {"groups": [], "assignments": {}}
+
+def _save_groups(ctx: dict, data: dict) -> None:
+    _groups_path(ctx).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+def _find_project_by_id_any(ctx: dict, pid: str) -> dict | None:
+    """Finds a project by id WITHOUT filtering archived ones.
+    Searches topics and free_chats directly."""
+    _maybe_reload_topics(ctx)
+    seen: set[str] = set()
+    for key, b in ctx["topics"].items():
+        cwd = b.get("cwd", "")
+        if not cwd or cwd in seen:
+            continue
+        seen.add(cwd)
+        if _project_id(cwd) == pid:
+            return {
+                "id": pid,
+                "name": b.get("project", pid),
+                "cwd": cwd,
+                "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
+                "tg_thread": key,
+                "is_free": False,
+            }
+    # Also check free chats
+    free = _load_free_chats(ctx)
+    if pid in free:
+        b = free[pid]
+        return {
+            "id": pid,
+            "name": b.get("label", pid),
+            "cwd": b.get("cwd", str(Path.home())),
+            "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
+            "tg_thread": pid,
+            "is_free": True,
+        }
     return None
 
 
@@ -965,6 +1056,114 @@ async def api_projects(req: web.Request) -> web.Response:
         enriched = [{**p, "health": {"git": None}} for p in projects]
 
     return web.json_response({"projects": list(enriched)})
+
+
+async def api_project_archive(req: web.Request) -> web.Response:
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id_any(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    if project.get("is_free"):
+        return web.json_response({"error": "free chats cannot be archived"}, status=400)
+    session_key = project["tg_thread"]
+    if ctx["running"].get(session_key) is not None:
+        return web.json_response({"error": "project busy"}, status=409)
+    archived = _load_archived(ctx)
+    archived.add(pid)
+    _save_archived(ctx, archived)
+    return web.json_response({"archived": True})
+
+
+async def api_project_unarchive(req: web.Request) -> web.Response:
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id_any(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    archived = _load_archived(ctx)
+    if pid not in archived:
+        return web.json_response({"error": "project not archived"}, status=400)
+    archived.discard(pid)
+    _save_archived(ctx, archived)
+    return web.json_response({"archived": False})
+
+
+async def api_projects_archived(req: web.Request) -> web.Response:
+    ctx = req.app["ctx"]
+    archived_ids = _load_archived(ctx)
+    _maybe_reload_topics(ctx)
+    result = []
+    seen: set[str] = set()
+    for key, b in ctx["topics"].items():
+        cwd = b.get("cwd", "")
+        if not cwd or cwd in seen:
+            continue
+        seen.add(cwd)
+        pid = _project_id(cwd)
+        if pid in archived_ids:
+            result.append({"id": pid, "name": b.get("project", pid), "cwd": cwd})
+    result.sort(key=lambda x: x["name"].lower())
+    return web.json_response({"projects": result})
+
+
+async def api_project_group_set(req: web.Request) -> web.Response:
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    group = body.get("group")
+    if group is not None and not isinstance(group, str):
+        return web.json_response({"error": "group must be a string or null"}, status=400)
+    if group is not None and not group.strip():
+        return web.json_response({"error": "group label cannot be empty"}, status=400)
+    groups_data = _load_groups(ctx)
+    if group is not None:
+        group = group.strip()
+        # Auto-add group if it doesn't exist
+        if group not in groups_data["groups"]:
+            groups_data["groups"].append(group)
+        groups_data["assignments"][pid] = group
+    else:
+        groups_data["assignments"].pop(pid, None)
+    _save_groups(ctx, groups_data)
+    return web.json_response({"ok": True})
+
+
+async def api_project_groups_get(req: web.Request) -> web.Response:
+    ctx = req.app["ctx"]
+    return web.json_response(_load_groups(ctx))
+
+
+async def api_project_groups_manage(req: web.Request) -> web.Response:
+    ctx = req.app["ctx"]
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    new_groups = body.get("groups")
+    if not isinstance(new_groups, list):
+        return web.json_response({"error": "groups must be a list"}, status=400)
+    # Validate: all items must be non-empty strings
+    for g in new_groups:
+        if not isinstance(g, str) or not g.strip():
+            return web.json_response({"error": "group labels must be non-empty strings"}, status=400)
+    new_groups = [g.strip() for g in new_groups]
+    groups_data = _load_groups(ctx)
+    # Remove assignments for deleted groups
+    new_set = set(new_groups)
+    groups_data["assignments"] = {
+        pid: label for pid, label in groups_data["assignments"].items()
+        if label in new_set
+    }
+    groups_data["groups"] = new_groups
+    _save_groups(ctx, groups_data)
+    return web.json_response({"ok": True})
 
 
 async def api_project_claude_md(req: web.Request) -> web.Response:
@@ -7081,6 +7280,14 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/settings", api_project_settings_post)
         # "+ New project" — creates untitled-<ts>/, adds to topics.json, spawns onboarding
         app.router.add_post("/api/projects/new", api_new_project)
+        # Spec-023: Project Archive — static route MUST be before {id} routes
+        app.router.add_get("/api/projects/archived", api_projects_archived)
+        app.router.add_post("/api/projects/{id}/archive", api_project_archive)
+        app.router.add_post("/api/projects/{id}/unarchive", api_project_unarchive)
+        # Spec-024: Project Groups
+        app.router.add_post("/api/projects/{id}/group", api_project_group_set)
+        app.router.add_get("/api/project-groups", api_project_groups_get)
+        app.router.add_post("/api/project-groups", api_project_groups_manage)
         app.router.add_get("/api/projects/{id}/claude-md", api_project_claude_md)
         app.router.add_post("/api/projects/{id}/claude-md", api_project_claude_md_write)
         app.router.add_get("/api/projects/{id}/readme", api_project_readme)

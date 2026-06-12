@@ -34,6 +34,17 @@ export interface Project {
   test_cmd?: string | null
   /** TG error notifications. OFF by default. */
   notify_on_error?: boolean
+  /** Spec-024: virtual group label assigned to this project (null = ungrouped). */
+  group?: string | null
+}
+
+// ─── Spec-024: Project Groups ────────────────────────────────────────────────
+
+export interface ProjectGroups {
+  /** Ordered list of group labels. */
+  groups: string[]
+  /** Map of project_id → group label. */
+  assignments: Record<string, string>
 }
 
 export interface ClaudeMd {

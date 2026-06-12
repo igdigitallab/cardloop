@@ -609,7 +609,7 @@ export default function App() {
         aria-hidden="true"
       />
       <Sidebar
-        projects={sortedProjects.filter(p => !p.is_free)}
+        projects={sortedProjects}
         selectedId={activeId}
         onSelect={handleSelect}
         onLogout={handleLogout}
@@ -626,6 +626,7 @@ export default function App() {
         onCloseDrawer={() => setDrawerOpen(false)}
         activeProjectId={activeId}
         onGoBack={() => setMobileScreen('project')}
+        onProjectsReload={loadProjects}
       />
 
       <div className="main-area">

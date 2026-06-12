@@ -403,4 +403,32 @@ export const api = {
 
   deferredDelete: (id: string) =>
     apiFetch<{ cancelled: boolean }>(`/api/deferred/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // Spec-023: Project Archive
+  archiveProject: (id: string) =>
+    apiFetch<{ archived: boolean }>(`/api/projects/${id}/archive`, { method: 'POST' }),
+
+  unarchiveProject: (id: string) =>
+    apiFetch<{ archived: boolean }>(`/api/projects/${id}/unarchive`, { method: 'POST' }),
+
+  archivedProjects: () =>
+    apiFetch<{ projects: { id: string; name: string; cwd: string }[] }>('/api/projects/archived'),
+
+  // Spec-024: Project Groups
+  projectGroups: () =>
+    apiFetch<import('./types').ProjectGroups>('/api/project-groups'),
+
+  setProjectGroup: (id: string, group: string | null) =>
+    apiFetch<{ ok: boolean }>(`/api/projects/${id}/group`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group }),
+    }),
+
+  manageGroups: (groups: string[]) =>
+    apiFetch<{ ok: boolean }>('/api/project-groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groups }),
+    }),
 }
