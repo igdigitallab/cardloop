@@ -892,8 +892,9 @@ async def run_agent(context, update, prompt: str):
     _tg_last_result_event: dict | None = None  # Phase D: track for auto-resume
     webapp._bus_publish(k, {"kind": "run_start", "source": "tg", "prompt": prompt, "run_id": None})
     try:
-        # Project secrets (Spec 007) augment env; TG_CHAT_ID/TG_THREAD_ID take priority
-        project_secrets = webapp._secrets_read(cwd)
+        # Project secrets (Spec 007) augment env; TG_CHAT_ID/TG_THREAD_ID take priority.
+        # vault: references are resolved here; TG vars are merged after so they always win.
+        project_secrets = await webapp._resolve_secret_refs(webapp._secrets_read(cwd))
         agent_env = {**project_secrets, "TG_CHAT_ID": str(chat), "TG_THREAD_ID": str(thread or 0)}
         agents_config = b.get("agents_config") or {}
         agent_kwargs = _build_agents_kwargs(agents_config)

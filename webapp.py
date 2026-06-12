@@ -3769,8 +3769,9 @@ async def _run_card(
             # Spec-021 Part 2: cards always start fresh — never resume the shared chat session.
             # This isolates card context from chat history (and from other cards).
             resume_sid = None
-            # Project secrets — only from cwd of the main project (not worktree), isolated by cwd
-            project_secrets = _secrets_read(cwd)
+            # Project secrets — only from cwd of the main project (not worktree), isolated by cwd.
+            # vault: references are resolved before injecting into the agent env.
+            project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
             agents_config = project.get("agents_config") or {}
             agents_kwargs = _build_agents_kwargs(ctx, agents_config)
             async for event in run_engine(
@@ -6298,7 +6299,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
     try:
         resume_sid = ctx["sessions"].get(session_key)
         # Project secrets are injected into the agent's env (values only in-process, not in the API)
-        project_secrets = _secrets_read(cwd)
+        # vault: references are resolved here; TG vars are merged after (they win).
+        project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
         agents_config = project.get("agents_config") or {}
         agents_kwargs = _build_agents_kwargs(ctx, agents_config)
         # Spec-021 Phase 4: inject handoff summary into the first turn of a fresh session.
@@ -6910,6 +6912,114 @@ def _secrets_read(cwd: str) -> dict:
                     result[k] = v
     except Exception:
         pass
+    return result
+
+
+# ─────────────────────────── Vault reference resolver (Spec 026 Phase 3a) ──────
+# A secret VALUE of the form  vault:<exact item name>  is resolved at runtime
+# via the `vw` CLI (VaultWarden client).  Plain values pass through UNCHANGED —
+# the feature is inert until someone opts in by using the vault: prefix.
+#
+# Contract:
+#   - Reference format:  vault:<exact item name>   (case-sensitive, no leading space)
+#   - `vw pass <name>` returns lines of  "Name: password"  (substring search).
+#   - We select only lines where the part before the first ": " matches exactly.
+#   - Exactly one match → use that password.
+#   - Zero or more-than-one exact match → RuntimeError (fail loud).
+#   - vw non-zero exit / timeout → RuntimeError naming the key.
+#   - Resolved values are cached in-memory for _VAULT_CACHE_TTL seconds, keyed
+#     by the exact item name.  Cache is NEVER written to disk.
+#   - Resolved values are NEVER logged or printed.
+
+_VW_PATH = os.path.expanduser("~/.local/bin/vw")
+_VAULT_CACHE_TTL = 300  # seconds
+# {item_name: (resolved_password, expires_at_monotonic)}
+_vault_cache: dict[str, tuple[str, float]] = {}
+
+
+async def _resolve_one_vault_ref(item_name: str) -> str:
+    """Resolve a single vault item name to its password via `vw pass`.
+
+    Uses an in-memory TTL cache so repeated calls within _VAULT_CACHE_TTL seconds
+    do not spawn a new subprocess.  Raises RuntimeError on any failure.
+    """
+    now = time.monotonic()
+    cached = _vault_cache.get(item_name)
+    if cached is not None:
+        value, expires = cached
+        if now < expires:
+            return value
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _VW_PATH, "pass", item_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            f"vault: timed out resolving secret key '{item_name}' "
+            f"(vw did not respond within 10 s)"
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"vault: vw binary not found at '{_VW_PATH}'; "
+            f"cannot resolve secret key '{item_name}'"
+        )
+
+    if proc.returncode != 0:
+        err_snippet = (stderr_bytes or b"").decode(errors="replace")[:200]
+        raise RuntimeError(
+            f"vault: vw exited with code {proc.returncode} "
+            f"while resolving secret key '{item_name}': {err_snippet}"
+        )
+
+    stdout = stdout_bytes.decode(errors="replace")
+    # vw pass output: one line per match, format  "Name: password"
+    # We need EXACT name match (case-sensitive) to avoid substring collisions.
+    exact_matches: list[str] = []
+    for line in stdout.splitlines():
+        if ": " not in line:
+            continue
+        line_name, _, line_pw = line.partition(": ")
+        if line_name == item_name:
+            exact_matches.append(line_pw)
+
+    if len(exact_matches) == 0:
+        raise RuntimeError(
+            f"vault: no item with exact name '{item_name}' found "
+            f"while resolving secret key — check the item name (case-sensitive, exact match required)"
+        )
+    if len(exact_matches) > 1:
+        raise RuntimeError(
+            f"vault: {len(exact_matches)} items with exact name '{item_name}' found in vault "
+            f"while resolving secret key — item names must be unique"
+        )
+
+    password = exact_matches[0]
+    _vault_cache[item_name] = (password, now + _VAULT_CACHE_TTL)
+    return password
+
+
+async def _resolve_secret_refs(secrets: dict) -> dict:
+    """Resolve any vault: references in secrets dict.
+
+    For each (key, value): if value is a str starting with 'vault:', the
+    remainder is treated as an exact vault item name and resolved via vw.
+    All other values pass through unchanged.
+
+    Returns a new dict with the same keys; raises RuntimeError on any
+    resolution failure (the caller's run must not proceed with a missing secret).
+    """
+    result: dict = {}
+    for k, v in secrets.items():
+        if isinstance(v, str) and v.startswith("vault:"):
+            item_name = v[len("vault:"):]
+            resolved = await _resolve_one_vault_ref(item_name)
+            result[k] = resolved
+        else:
+            result[k] = v
     return result
 
 
