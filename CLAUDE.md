@@ -39,6 +39,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - Рестарт из терминала: `sudo systemctl restart claude-ops-bot`.
 - После правки `bot.py`/`webapp.py` — обязательно рестарт сервиса.
 - После правки `web/` — пересобрать: `cd web && npm run build`.
+- **Тесты: `venv/bin/python -m pytest tests/`** (≈950, должно быть green). ⚠️ ТОЛЬКО через venv — в нём `pytest-aiohttp` (requirements-dev.txt); системный `python` его НЕ имеет → ~237 endpoint-тестов падают в ложный `error`. Такому прогону не верить и тесты под него НЕ переписывать.
 
 ---
 
