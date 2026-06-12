@@ -337,23 +337,56 @@ def _make_token(password: str) -> str:
 _login_attempts: dict[str, list[tuple[float, bool]]] = {}
 _LOGIN_WINDOW = 300   # 5 minutes
 _LOGIN_MAX_FAIL = 5   # max failed attempts
+_RETRY_AFTER_BASE = 30   # seconds for first throttle response
+_RETRY_AFTER_CAP = 900   # maximum back-off cap (15 min)
 
 
-def _check_rate_limit(ip: str) -> bool:
-    """Returns True if the IP has exceeded the failed-attempt limit. Prunes old records."""
+def _client_ip(req) -> str:
+    """Extract the real client IP from a request, respecting reverse-proxy headers.
+
+    Priority: CF-Connecting-IP (set by Cloudflare) → first X-Forwarded-For entry
+    (set by Traefik / other proxies) → req.remote (socket peer) → "unknown".
+    """
+    cf_ip = req.headers.get("CF-Connecting-IP", "").strip()
+    if cf_ip:
+        return cf_ip
+    xff = req.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if xff:
+        return xff
+    return req.remote or "unknown"
+
+
+def _check_rate_limit(ip: str) -> tuple[bool, int]:
+    """Check whether this IP has exceeded the failed-attempt threshold.
+
+    Returns (blocked, retry_after_seconds).  retry_after grows with consecutive
+    failures so a sustained flood backs off, but different IPs are independent.
+    Successful logins are NOT counted toward the failure budget.
+    """
     now = time.monotonic()
     attempts = _login_attempts.get(ip, [])
-    # Keep only records within the window
+    # Keep only records within the window; ignore successes for the failure count
     attempts = [(t, ok) for t, ok in attempts if now - t < _LOGIN_WINDOW]
     _login_attempts[ip] = attempts
     fails = sum(1 for _, ok in attempts if not ok)
-    return fails >= _LOGIN_MAX_FAIL
+    if fails < _LOGIN_MAX_FAIL:
+        return False, 0
+    # Compute a growing delay: base * 2^(excess-1), capped
+    excess = fails - _LOGIN_MAX_FAIL  # 0 on first threshold hit, grows with more fails
+    delay = min(_RETRY_AFTER_BASE * (2 ** excess), _RETRY_AFTER_CAP)
+    return True, int(delay)
 
 
 def _record_attempt(ip: str, success: bool) -> None:
+    """Record a login attempt.  Successes reset the failure window for this IP."""
     now = time.monotonic()
+    if success:
+        # A successful login clears prior failures so the operator is never locked out
+        # by their own previous mistakes once they authenticate correctly.
+        _login_attempts[ip] = [(now, True)]
+        return
     bucket = _login_attempts.setdefault(ip, [])
-    bucket.append((now, success))
+    bucket.append((now, False))
     # Cap growth (single-IP attack)
     if len(bucket) > 200:
         _login_attempts[ip] = bucket[-200:]
@@ -1087,10 +1120,13 @@ async def api_health(req: web.Request) -> web.Response:
 
 async def api_login(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
-    # Rate-limit by IP (before reading the body)
-    ip = req.remote or "unknown"
-    if _check_rate_limit(ip):
-        return web.json_response({"error": "too many attempts, try later"}, status=429)
+    # Rate-limit by real client IP (respects CF-Connecting-IP / X-Forwarded-For)
+    ip = _client_ip(req)
+    blocked, retry_after = _check_rate_limit(ip)
+    if blocked:
+        resp = web.json_response({"error": "too many attempts, try later"}, status=429)
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
     try:
         body = await req.json()
         password = body.get("password", "")
@@ -2514,7 +2550,7 @@ async def api_project_incident(req: web.Request) -> web.Response:
 
     # 1.5. Per-IP backstop — BEFORE project resolution and secret read, so unauth flood
     # doesn't hit disk (_secrets_read) on every request.
-    ip = (req.headers.get("X-Forwarded-For", "").split(",")[0].strip() or req.remote or "?")
+    ip = _client_ip(req) or "?"
     ip_hist = [t for t in _incident_ip_history.get(ip, []) if now - t < _INCIDENT_PUSH_WINDOW]
     if len(ip_hist) >= _INCIDENT_IP_MAX:
         return web.json_response({"error": "too many requests"}, status=429)

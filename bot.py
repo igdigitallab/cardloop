@@ -1656,7 +1656,19 @@ async def _amain() -> None:
         await asyncio.Event().wait()
 
 
+def _check_web_password(password: str) -> None:
+    """Raise RuntimeError if the web password is empty or unset.
+
+    Factored out of main() so tests can call it directly without triggering sys.exit.
+    """
+    if not password:
+        raise RuntimeError(
+            "FATAL: WEB_PASSWORD must be set (refusing to start with blank password)"
+        )
+
+
 def main():
+    _check_web_password(WEB_PASSWORD)
     asyncio.run(_amain())
 
 
