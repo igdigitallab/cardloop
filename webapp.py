@@ -5668,7 +5668,24 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     ctx["save_sessions"]()
                     _inherit_label_from_free_chat(ctx, session_key, sid)
                 ctx_tokens = event.get("context_tokens", 0)
-                await _send({"type": "result", "context_tokens": ctx_tokens})
+                # Spec-022: pass through per-turn cost visibility fields
+                # utilization: best-effort from 60s-cached oauth data — never make a fresh call here
+                _utilization: float | None = None
+                _cached = _usage_cache.get("data")
+                if _cached and (time.time() - _usage_cache.get("ts", 0)) <= _USAGE_TTL:
+                    # pick five_hour window utilization as the primary signal
+                    _w = (_cached.get("five_hour") or {})
+                    _utilization = _w.get("utilization") if isinstance(_w, dict) else None
+                await _send({
+                    "type": "result",
+                    "context_tokens": ctx_tokens,
+                    "cache_read_tokens": event.get("cache_read_tokens"),
+                    "fresh_tokens": event.get("fresh_tokens"),
+                    "prompt_tokens": event.get("prompt_tokens"),
+                    "cache_hit_pct": event.get("cache_hit_pct"),
+                    "duration_ms": event.get("duration_ms"),
+                    "utilization": _utilization,
+                })
                 # Spec-021: auto session rotation when context exceeds threshold
                 if (
                     CONTEXT_ROTATION

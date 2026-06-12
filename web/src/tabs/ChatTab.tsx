@@ -9,10 +9,12 @@ import { SessionSelector } from '../components/SessionSelector'
 import { SessionContextPanel } from '../components/SessionContextPanel'
 import {
   ChatMessage,
+  ChatEventResult,
   ChatToolCall,
   HistoryMessage,
   Project,
   RichTool,
+  TurnMetrics,
 } from '../types'
 import { useProjectActivity } from '../hooks/useProjectActivity'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
@@ -52,6 +54,48 @@ function formatDuration(sec: number): string {
   const m = Math.floor(s / 60)
   const r = s % 60
   return `${m}:${r.toString().padStart(2, '0')}`
+}
+
+// ─── Spec-022: Cost visibility constants ──────────────────────────────────────
+// Cache TTL in minutes. Basis: Claude Code writes hour-TTL cache — observed
+// ephemeral_1h_input_tokens in usage. This is an ESTIMATE; isolated in one constant.
+const CACHE_TTL_MIN = 60
+const CACHE_WARM_PCT = 70   // ≥70% cache-hit → warm (♨️)
+const CACHE_COLD_PCT = 30   // <30% cache-hit → cold (🧊)
+
+/** Format HH:MM from a Date or ms timestamp. */
+function fmtHHMM(ts: number): string {
+  const d = new Date(ts)
+  const h = d.getHours().toString().padStart(2, '0')
+  const m = d.getMinutes().toString().padStart(2, '0')
+  return `${h}:${m}`
+}
+
+/** Format a turn duration from milliseconds. E.g. "38s", "2m 41s". Returns null when ms is null. */
+function fmtTurnDuration(ms: number | null | undefined): string | null {
+  if (ms == null) return null
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return r > 0 ? `${m}m ${r}s` : `${m}m`
+}
+
+/** Format MM:SS countdown from total seconds remaining. */
+function fmtCountdown(totalSec: number): string {
+  const s = Math.max(0, Math.floor(totalSec))
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m.toString().padStart(2, '0')}:${r.toString().padStart(2, '0')}`
+}
+
+/** Format a gap (ms) as human-readable: "2m", "1h 5m", "3h". */
+function fmtGap(ms: number): string {
+  const totalMin = Math.round(ms / 60000)
+  if (totalMin < 60) return `${totalMin}m`
+  const h = Math.floor(totalMin / 60)
+  const m = totalMin % 60
+  return m > 0 ? `${h}h ${m}m` : `${h}h`
 }
 
 /** Short hint for tool — what is currently running. */
@@ -124,11 +168,35 @@ function finalizeStreaming(messages: ChatMessage[], err?: string): ChatMessage[]
   return messages
 }
 
+/** Finalize streaming and attach per-turn metrics from the result event. */
+function finalizeStreamingWithMetrics(
+  messages: ChatMessage[],
+  resultEvt: ChatEventResult,
+  nowMs: number,
+): ChatMessage[] {
+  const last = messages[messages.length - 1]
+  if (last && last.role === 'assistant' && last.streaming) {
+    const metrics: TurnMetrics | undefined =
+      resultEvt.cache_hit_pct != null && resultEvt.prompt_tokens != null
+        ? {
+            cache_hit_pct: resultEvt.cache_hit_pct ?? 0,
+            prompt_tokens: resultEvt.prompt_tokens ?? 0,
+            cache_read_tokens: resultEvt.cache_read_tokens ?? 0,
+            fresh_tokens: resultEvt.fresh_tokens ?? 0,
+            duration_ms: resultEvt.duration_ms ?? null,
+          }
+        : undefined
+    const updated: ChatMessage = { ...last, streaming: false, ts: nowMs, metrics }
+    return [...messages.slice(0, -1), updated]
+  }
+  return messages
+}
+
 let _msgCounter = 0
 function nextId() { return `msg-${++_msgCounter}` }
 
 function makeUserMsg(text: string): ChatMessage {
-  return { id: nextId(), role: 'user', text, tools: [], streaming: false }
+  return { id: nextId(), role: 'user', text, tools: [], streaming: false, ts: Date.now() }
 }
 
 function makeAssistantMsg(): ChatMessage {
@@ -178,6 +246,10 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   // Spec-021: context rotation UI state
   const [rotateToast, setRotateToast] = useState<string | null>(null)
   const [rotating, setRotating] = useState(false)
+  // Spec-022: cache freshness countdown — unix ms when the last turn completed (null = never)
+  const [lastTurnEndMs, setLastTurnEndMs] = useState<number | null>(null)
+  // Ticking second for the cache freshness countdown (independent of run ticker)
+  const [cacheTick, setCacheTick] = useState<number>(Date.now())
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
 
@@ -217,6 +289,13 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     const id = setInterval(() => setTick(Date.now()), 1000)
     return () => clearInterval(id)
   }, [run])
+
+  // Spec-022: tick every second for the cache freshness countdown.
+  // Runs always (while mounted) but only ticks the cacheTick state — cheap re-render.
+  useEffect(() => {
+    const id = setInterval(() => setCacheTick(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
 
   function histToMessages(items: HistoryMessage[]): ChatMessage[] {
     return items.map((m, i) => ({
@@ -423,6 +502,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             if (typeof evtAny.context_tokens === 'number' && (evtAny.context_tokens as number) > 0) {
               setContextTokens(evtAny.context_tokens as number)
             }
+            // Spec-022: reset cache freshness countdown on every completed turn
+            setLastTurnEndMs(now)
           }
           // Spec-021: rotation event — session was cleared, reset context counter
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -443,6 +524,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 return appendChunk(prev, { kind: 'tool', tool: toolFields as unknown as ChatToolCall })
               }
               case 'result':
+                // Spec-022: finalize with metrics from result event
+                return finalizeStreamingWithMetrics(prev, evt as unknown as ChatEventResult, now)
               case 'done':
                 return finalizeStreaming(prev)
               case 'error':
@@ -648,6 +731,30 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             </span>
           )
         })()}
+
+        {/* Spec-022: cache freshness countdown */}
+        {(() => {
+          // cacheTick drives re-renders every second
+          void cacheTick
+          const ttlMs = CACHE_TTL_MIN * 60 * 1000
+          if (lastTurnEndMs === null) return null
+          const elapsedMs = Date.now() - lastTurnEndMs
+          const remainingSec = Math.max(0, (ttlMs - elapsedMs) / 1000)
+          const isWarm = remainingSec > 0
+          return (
+            <span
+              title="Estimate — cache state isn't exposed by the API. Warm ≈ next turn cheap; cold ≈ next turn re-reads the full prompt at full price."
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                fontSize: 12, marginLeft: 6, whiteSpace: 'nowrap',
+                color: isWarm ? 'var(--color-green, #22c55e)' : 'var(--color-muted, #9ca3af)',
+                cursor: 'default',
+              }}
+            >
+              {isWarm ? `♨️ cache ${fmtCountdown(remainingSec)}` : '⚪ cache cold'}
+            </span>
+          )
+        })()}
       </div>
 
       {/* Session context panel */}
@@ -661,26 +768,89 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           </div>
         )}
 
-        {messages.map(msg => {
+        {messages.map((msg, idx) => {
           const isEmpty = !msg.text && msg.tools.length === 0 && !msg.error
           if (isEmpty && msg.role === 'assistant') return null
+
+          // Spec-022: cold-start divider — gap between prev assistant turn end and this user msg
+          const prevMsg = idx > 0 ? messages[idx - 1] : null
+          const showColdDivider = (
+            msg.role === 'user' &&
+            msg.ts != null &&
+            prevMsg?.ts != null &&
+            (msg.ts - prevMsg.ts) > CACHE_TTL_MIN * 60 * 1000
+          )
+
           return (
-            <div key={msg.id} className={`chat-msg chat-msg-${msg.role}`}>
-              {msg.tools.length > 0 && (
-                <div className="chat-tools">
-                  {msg.tools.map((t, i) => (
-                    <ToolBlock key={i} tool={t} />
-                  ))}
+            <div key={msg.id}>
+              {showColdDivider && msg.ts != null && prevMsg!.ts != null && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', margin: '8px 0', gap: 8,
+                  color: 'var(--color-muted, #9ca3af)', fontSize: 11,
+                }}>
+                  <div style={{ flex: 1, height: 1, background: 'var(--border, #374151)' }} />
+                  <span>⚪ paused {fmtGap(msg.ts - prevMsg!.ts)} · cache cold</span>
+                  <div style={{ flex: 1, height: 1, background: 'var(--border, #374151)' }} />
                 </div>
               )}
-              {msg.text && (
-                <div className="chat-msg-body markdown-wrap">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
-                </div>
-              )}
-              {msg.error && (
-                <div className="chat-msg-error">⚠ {msg.error}</div>
-              )}
+              <div className={`chat-msg chat-msg-${msg.role}`}>
+                {/* Spec-022: timestamp on messages that have one (live-session only) */}
+                {msg.ts != null && (
+                  <div style={{
+                    textAlign: 'right', fontSize: 10,
+                    color: 'var(--color-muted, #9ca3af)',
+                    marginBottom: 2, userSelect: 'none',
+                  }}>
+                    {fmtHHMM(msg.ts)}
+                  </div>
+                )}
+                {msg.tools.length > 0 && (
+                  <div className="chat-tools">
+                    {msg.tools.map((t, i) => (
+                      <ToolBlock key={i} tool={t} />
+                    ))}
+                  </div>
+                )}
+                {msg.text && (
+                  <div className="chat-msg-body markdown-wrap">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+                  </div>
+                )}
+                {msg.error && (
+                  <div className="chat-msg-error">⚠ {msg.error}</div>
+                )}
+                {/* Spec-022: per-turn metric footer on assistant messages */}
+                {msg.role === 'assistant' && msg.metrics && !msg.streaming && (() => {
+                  const m = msg.metrics
+                  const cacheEmoji = m.cache_hit_pct >= CACHE_WARM_PCT
+                    ? '♨️'
+                    : m.cache_hit_pct < CACHE_COLD_PCT
+                    ? '🧊'
+                    : ''
+                  const durStr = fmtTurnDuration(m.duration_ms)
+                  const ptK = m.prompt_tokens >= 1000
+                    ? `${Math.round(m.prompt_tokens / 1000)}K`
+                    : `${m.prompt_tokens}`
+                  const parts: string[] = []
+                  if (msg.ts) parts.push(fmtHHMM(msg.ts))
+                  if (durStr) parts.push(`⏱ ${durStr}`)
+                  parts.push(`${cacheEmoji ? cacheEmoji + ' ' : ''}cache ${m.cache_hit_pct}%`)
+                  parts.push(`${ptK}`)
+                  return (
+                    <div
+                      title="Facts from this turn's usage — cache-read is billed ~10%, fresh tokens at full price."
+                      style={{
+                        fontSize: 10, marginTop: 4,
+                        color: 'var(--color-muted, #9ca3af)',
+                        userSelect: 'none', whiteSpace: 'nowrap', overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      }}
+                    >
+                      {parts.join(' · ')}
+                    </div>
+                  )
+                })()}
+              </div>
             </div>
           )
         })}

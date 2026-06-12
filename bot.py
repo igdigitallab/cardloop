@@ -651,9 +651,13 @@ async def run_engine(  # type: ignore[return]
     audit(project_name, "TASK", short(prompt, 300))
 
     last_ctx_tokens = 0   # real context size = prompt tokens of the last AssistantMessage
+    # Spec-022: track per-turn usage for cost visibility
+    last_usage: dict = {}
+    _turn_start_ms: float = 0.0  # wall-clock fallback when SDK duration_ms is absent
     try:
         async with ClaudeSDKClient(options=opts) as client:
             running[session_key] = client   # replace True-placeholder with the real client (for /stop)
+            _turn_start_ms = __import__("time").monotonic() * 1000
             await client.query(prompt)
             async for msg in client.receive_response():
                 if isinstance(msg, AssistantMessage):
@@ -665,6 +669,7 @@ async def run_engine(  # type: ignore[return]
                           + u.get("cache_creation_input_tokens", 0))
                     if pt:
                         last_ctx_tokens = pt
+                    last_usage = u  # capture for the result event
                     for blk in msg.content:
                         if isinstance(blk, TextBlock) and blk.text.strip():
                             yield {"type": "text", "text": blk.text}
@@ -680,6 +685,19 @@ async def run_engine(  # type: ignore[return]
                         "utilization": i.utilization,
                     }
                 elif isinstance(msg, ResultMessage):
+                    # Spec-022: per-turn cost visibility fields
+                    _u = last_usage
+                    _cache_read = _u.get("cache_read_input_tokens", 0) or 0
+                    _fresh = (_u.get("input_tokens", 0) or 0) + (_u.get("cache_creation_input_tokens", 0) or 0)
+                    _pt = _cache_read + _fresh  # == last_ctx_tokens when >0
+                    _cache_hit_pct = round((_cache_read / _pt) * 100) if _pt > 0 else 0
+                    # Duration: prefer SDK attribute, fall back to wall-clock measurement.
+                    # SDK may expose duration_ms or duration_api_ms on ResultMessage.
+                    _dur = getattr(msg, "duration_ms", None)
+                    if _dur is None:
+                        _dur = getattr(msg, "duration_api_ms", None)
+                    if _dur is None and _turn_start_ms > 0:
+                        _dur = round(__import__("time").monotonic() * 1000 - _turn_start_ms)
                     yield {
                         "type": "result",
                         "session_id": getattr(msg, "session_id", None),
@@ -688,6 +706,12 @@ async def run_engine(  # type: ignore[return]
                         # api_error_status: HTTP status when run failed (e.g. 429 = rate-limited).
                         # None on success. Available since SDK v2.1.110.
                         "api_error_status": getattr(msg, "api_error_status", None),
+                        # Spec-022: per-turn cache/token metrics (facts from SDK usage)
+                        "cache_read_tokens": _cache_read,
+                        "fresh_tokens": _fresh,
+                        "prompt_tokens": _pt if _pt > 0 else last_ctx_tokens,
+                        "cache_hit_pct": _cache_hit_pct,
+                        "duration_ms": _dur,
                     }
                 elif isinstance(msg, SystemMessage):
                     if isinstance(msg, TaskStartedMessage):

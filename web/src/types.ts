@@ -254,6 +254,13 @@ export type ChatEventTool = RichTool & { type: 'tool' }
 
 export interface ChatEventResult {
   type: 'result'
+  context_tokens?: number
+  cache_read_tokens?: number | null
+  fresh_tokens?: number | null
+  prompt_tokens?: number | null
+  cache_hit_pct?: number | null
+  duration_ms?: number | null
+  utilization?: number | null
 }
 
 export interface ChatEventError {
@@ -288,6 +295,15 @@ export interface HistoryMessage {
   tools: RichTool[]
 }
 
+/** Per-turn cost metrics stamped onto assistant messages when result event arrives. */
+export interface TurnMetrics {
+  cache_hit_pct: number
+  prompt_tokens: number
+  cache_read_tokens: number
+  fresh_tokens: number
+  duration_ms: number | null
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
@@ -299,6 +315,10 @@ export interface ChatMessage {
   streaming: boolean
   /** Error message if the turn ended with an error */
   error?: string
+  /** Unix timestamp (ms) when the message was created / result arrived */
+  ts?: number
+  /** Cost visibility metrics — stamped when result event arrives (assistant only) */
+  metrics?: TurnMetrics
 }
 
 // ─── Prompt templates ─────────────────────────────────────────────────────
