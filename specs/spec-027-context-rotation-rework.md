@@ -219,20 +219,35 @@ a DISALLOWED_TOOLS spike (add ~5 never-used tools, measure if `cache_creation` d
 the `everything-evenhub` plugin for ops-bot (`.claude/settings.json`). Smaller than the diet; do
 only if the spike shows schema exclusion is real.
 
+**RESOLVED 2026-06-12 — SKIP (premise doesn't hold):**
+- **Plugins are not a baseline cost here.** `everything-evenhub` + `marketing-skills` are enabled
+  GLOBALLY in `~/.claude/settings.json` (`enabledPlugins`). The SDK's `ClaudeAgentOptions.plugins`
+  field only *loads* local plugins — there is no per-session way to *disable* a user-enabled plugin.
+  Disabling globally would break Even G2; the `user` setting source can't be dropped (it carries the
+  `guard-self-lifecycle.sh` safety hook). And plugin skills/commands are **lazy (~0 prefix tokens** —
+  same as the 44 marketing-skills), so they don't ride the cached baseline anyway → nothing to save.
+- **DISALLOWED_TOOLS doesn't shrink the prefix.** Tool schemas are ~85% compiled into the CLI binary;
+  `disallowed_tools` blocks *usage*, not the schema in the system prompt. So the spike's expected
+  `cache_creation` drop wouldn't materialize.
+- Net: not worth the rate-limit of a live spike for ~0 gain. The cockpit now surfaces per-turn
+  `fresh_tokens`/`cache_hit_pct`, so if anyone wants to empirically retest, the measurement is one
+  before/after cold turn away — but the structural reasoning says don't bother. **Part 8 closed.**
+
 ---
 
 ## Phases
 
 | Phase | Part | Description | Status |
 |-------|------|-------------|--------|
-| 1 | 1 | Remove 60K auto-trigger (web+TG); set high backstop (~175K) per decision | planned |
-| 2 | 2 | Cheap summary (no full-transcript resume) + evaluate `fork_session` | planned |
-| 3 | 3 | `exclude_dynamic_sections=True` + corrected verification | planned |
-| 4 | 4 | CLAUDE.md diet — **template first**, then `~/CLAUDE.md`, then project, then others | planned |
-| 5 | 5 | Cockpit UI: remove duplicate, one session-health row + quick wins | planned |
-| 6 | 6 | Thinking/effort: routine `medium` for opus, `thinking=disabled` for haiku subagents | planned |
-| 7 | 7 | Lean subagents: minimal `tools` per role + fan-out cap in CONDUCTOR_PROMPT | planned |
-| 8 | 8 | (optional) DISALLOWED_TOOLS spike + disable evenhub plugin for ops-bot | optional |
+| 1 | 1 | Remove 60K auto-trigger (web+TG); high backstop 175K | **shipped 2026-06-12** |
+| 1b | — | Early-warn at 150K (SSE `context_warn` + TG push, crossing-only) + cockpit banner | **shipped 2026-06-12** |
+| 2 | 2 | Cheap rotation summary — fresh haiku + jsonl tail (no full resume) | **shipped 2026-06-12** |
+| 3 | 3 | `exclude_dynamic_sections=True` on both presets | **shipped 2026-06-12** |
+| 4 | 4 | CLAUDE.md diet — template + project (GOTCHAS.md + reference/) | **shipped 2026-06-12** (`~/CLAUDE.md` pending, conductor's own doc) |
+| 5 | 5 | Cockpit UI: one session-health row + growth delta + quick wins | **shipped 2026-06-12** |
+| 6 | 6 | `effort` via `DEFAULT_EFFORT` env (default medium) + `effort=low` quick subagent | **shipped 2026-06-12** |
+| 7 | 7 | Lean subagents: minimal `tools` + `maxTurns` + fan-out cap in CONDUCTOR_PROMPT | **shipped 2026-06-12** |
+| 8 | 8 | (optional) tool-overhead trim | **closed — skip** (premise doesn't hold, see Part 8) |
 
 Phases are independent; ship in any order. **Felt-window priority:** Part 6 (thinking) and
 Part 7 (lean subagents) are the top levers the operator will actually notice; Part 1 (no 60K
