@@ -23,6 +23,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     RateLimitEvent,
     ResultMessage,
     SystemMessage,
@@ -32,6 +33,7 @@ from claude_agent_sdk import (
     TextBlock,
     ToolUseBlock,
 )
+from claude_agent_sdk.types import HookContext, PostToolUseHookInput
 import webapp          # web cockpit (webapp.py) — started alongside the bot, state shared via ctx
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
@@ -627,6 +629,108 @@ def audit(project: str, kind: str, text: str):
         pass
 
 
+# ─────────────────────────── Spec-029 §2: PostToolUse hook ────────────────────────────────────
+#
+# Enriches the audit log and timeline with actual tool OUTPUT.
+# Previously only the tool invocation (command / file path) was recorded; now the result
+# (stdout, edit outcome, etc.) is also captured — greatly reducing "what actually ran?" debugging.
+#
+# Safety guarantees (hot-path):
+#   1. Entire body wrapped in try/except — a hook crash NEVER breaks a turn.
+#   2. Output is truncated to _HOOK_OUTPUT_TRUNCATE chars — protects against huge Bash stdout.
+#   3. env / secret values are never passed; the hook receives tool_response only.
+#   4. Returns {} (empty SyncHookJSONOutput) — no side-effects on the model's view of the output.
+
+_HOOK_OUTPUT_TRUNCATE = 500  # chars — keep audit lines readable, cap hot-path I/O
+
+
+def _tool_response_to_str(tool_response: object) -> str:
+    """Convert a raw tool_response to a single-line string, truncated to _HOOK_OUTPUT_TRUNCATE.
+
+    tool_response may be:
+      - dict  (e.g. {"stdout": "...", "stderr": "...", "interrupted": False} for Bash)
+      - str   (plain text for Read, Edit, etc.)
+      - other (fallback repr)
+    Never raises.
+    """
+    try:
+        if isinstance(tool_response, dict):
+            # Prefer stdout; include stderr only when stdout is empty.
+            stdout = str(tool_response.get("stdout", "") or "")
+            stderr = str(tool_response.get("stderr", "") or "")
+            interrupted = tool_response.get("interrupted", False)
+            parts = []
+            if stdout:
+                parts.append(stdout)
+            if stderr:
+                parts.append(f"[stderr] {stderr}")
+            if interrupted:
+                parts.append("[interrupted]")
+            raw = " ".join(parts) if parts else repr(tool_response)
+        else:
+            raw = str(tool_response)
+    except Exception:
+        return "<unparseable>"
+
+    # Collapse newlines to spaces for single-line audit entries.
+    single = raw.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    if len(single) > _HOOK_OUTPUT_TRUNCATE:
+        return single[:_HOOK_OUTPUT_TRUNCATE] + "…"
+    return single
+
+
+def _make_post_tool_use_hook(project_name: str, session_key: str):
+    """Return an async HookCallback that records tool output in the audit log and timeline.
+
+    Closes over `project_name` and `session_key` so the hook can route audit lines to the
+    correct project without receiving env or secrets.  `webapp` is imported at module level
+    so timeline publishing works when webapp is initialised (production) and is silently
+    skipped when it is not (tests that don't set up _TIMELINE_DATA_DIR).
+    """
+    async def _post_tool_use_hook(
+        hook_input: "PostToolUseHookInput",
+        tool_use_id: "str | None",
+        context: "HookContext",
+    ) -> dict:
+        """Record tool output to audit log and timeline. Never raises."""
+        try:
+            tool_name = hook_input.get("tool_name", "?") if isinstance(hook_input, dict) else getattr(hook_input, "tool_name", "?")
+            tool_response = hook_input.get("tool_response") if isinstance(hook_input, dict) else getattr(hook_input, "tool_response", None)
+
+            output_str = _tool_response_to_str(tool_response)
+
+            # Determine ok/err: dict with "error" key, or exception-like object.
+            is_err = False
+            try:
+                if isinstance(tool_response, dict):
+                    is_err = bool(tool_response.get("error") or tool_response.get("is_error"))
+                elif hasattr(tool_response, "is_error"):
+                    is_err = bool(tool_response.is_error)
+            except Exception:
+                pass
+
+            status = "err" if is_err else "ok"
+            audit_text = f"{tool_name} {status} {output_str}"
+            audit(project_name, "RESULT", audit_text)
+
+            # Also publish to timeline via the webapp bus (only available post-init).
+            try:
+                webapp._timeline_append(session_key, {
+                    "kind": "tool_result",
+                    "tool": tool_name,
+                    "status": status,
+                    "output": output_str,
+                })
+            except Exception:
+                pass  # webapp not initialised or timeline write error — never break a turn
+        except Exception:
+            pass  # entire hook body is guarded — never propagate to the SDK
+
+        return {}  # empty SyncHookJSONOutput — no model-visible side-effects
+
+    return _post_tool_use_hook
+
+
 # ─────────────────────────── Spec-028: live-client helpers ─────────────────────────────────────
 #
 # These helpers are only active when PERSISTENT_CLIENT=1.
@@ -834,6 +938,9 @@ async def run_engine(  # type: ignore[return]
     # Fallback model: if fable is unavailable at runtime, degrade to opus silently.
     fallback = "opus" if resolved_model and resolved_model.startswith("fable") else None
 
+    # Spec-029 §2: PostToolUse hook — records tool output to audit log + timeline.
+    _post_tool_hook = _make_post_tool_use_hook(project_name, session_key)
+
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,
@@ -846,6 +953,9 @@ async def run_engine(  # type: ignore[return]
         env=env or {},
         agents=effective_agents,
         effort=_DEFAULT_EFFORT,  # type: ignore[arg-type]
+        hooks={"PostToolUse": [HookMatcher(hooks=[_post_tool_hook])]},
+        # include_hook_events=False (default) — HookEventMessage lifecycle noise adds no extra
+        # data beyond what the hook callback already captures, and would flood _process_messages.
     )
 
     audit(project_name, "TASK", short(prompt, 300))
