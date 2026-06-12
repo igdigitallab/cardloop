@@ -44,6 +44,25 @@ When a `result` event carries `context_tokens > CONTEXT_ROTATE_AT`:
 
 Toggle: `CONTEXT_ROTATION=1` (default on) env var. Threshold: `CONTEXT_ROTATE_AT=60000` tokens.
 
+### Part 1b — TG-channel hook
+
+The same rotation applies to the Telegram path: `bot.py` `_maybe_rotate_tg(...)`, called
+once at the end of `run_agent` (after the final reply and the auto-resume check), using
+`context_tokens` from the captured final result event.
+
+- **Wiring choice:** a direct `webapp._do_session_rotation(...)` call from bot.py —
+  consistent with the existing `webapp._maybe_auto_resume` precedent. The CLAUDE.md
+  constraint only forbids the reverse direction (webapp.py must not import bot.py);
+  bot.py already imports webapp. No ctx indirection or shared module needed.
+- **Guards:** same global toggle + threshold as the web path, plus a TG-queue-drain
+  guard — rotation is skipped while `_TG_QUEUE[k]` has pending queued messages and
+  triggers after the last drained turn instead. The hook runs exactly once per turn,
+  so no once-per-turn flag is needed.
+- **Notification:** sent via bot.py `send()` directly into the bound chat/thread
+  (`_do_session_rotation`'s ctx gets no `ptb_app`, and `_notify_tg_rotation` is not
+  called — exactly one notification).
+- Whole hook is try/except-guarded — rotation failure never breaks the TG turn.
+
 ### Part 2 — Fresh session per card + cwd-lock
 
 - `_run_card` always starts with `resume_sid = None` — each card is a standalone run.
@@ -92,8 +111,10 @@ Toggle: `CONTEXT_ROTATION=1` (default on) env var. Threshold: `CONTEXT_ROTATE_AT
 
 ## Tests
 
-`tests/test_context_rotation.py` — 13 tests covering:
+`tests/test_context_rotation.py` — 16 tests covering:
 - Rotation triggered/not-triggered by threshold
+- TG-path hook (`_maybe_rotate_tg`): triggered above threshold, skipped below,
+  skipped while `_TG_QUEUE` non-empty
 - Toggle off
 - Session cleared after rotation
 - Handoff file written
@@ -119,7 +140,6 @@ Toggle: `CONTEXT_ROTATION=1` (default on) env var. Threshold: `CONTEXT_ROTATE_AT
 
 ## Non-goals
 
-- Automatic rotation in TG channel (bot.py) — out of scope for this iteration.
 - Per-card memory accumulation (each card is fully fresh, no handoff carried to next card).
 - UI to browse rotation history.
 

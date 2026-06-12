@@ -15,6 +15,7 @@ import pytest
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
+import bot as _bot
 import webapp as _webapp
 from webapp import _derive_token, CONTEXT_ROTATE_AT, CONTEXT_ROTATION
 
@@ -447,3 +448,70 @@ async def test_cwd_lock_released_on_finish(tmp_path, project_dir):
     assert not ctx["cwd_locks"].get(cwd_key), (
         f"cwd-lock must be released after _run_card finishes, got: {ctx['cwd_locks']}"
     )
+
+
+# ─────────────────────────── TG-path hook (_maybe_rotate_tg in bot.py) ──────
+
+_TG_KEY = "1001:42"
+
+
+def _tg_binding(project_dir) -> dict:
+    return {"project": "myproject", "cwd": str(project_dir), "model": "sonnet"}
+
+
+async def _call_tg_hook(project_dir, context_tokens, tg_queue, rotation_stub, send_stub):
+    """Invoke bot._maybe_rotate_tg with mocked rotation/send and a controlled queue."""
+    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", 60000), \
+         patch.object(_webapp, "_do_session_rotation", rotation_stub), \
+         patch.object(_bot, "_TG_QUEUE", tg_queue), \
+         patch.object(_bot, "send", send_stub):
+        await _bot._maybe_rotate_tg(
+            None, 1001, 42, _TG_KEY,
+            _tg_binding(project_dir),
+            {"context_tokens": context_tokens},
+        )
+
+
+async def test_tg_rotation_triggered_above_threshold(tmp_path, project_dir):
+    """TG hook: 70K tokens, empty queue → _do_session_rotation called + TG notification sent."""
+    calls = []
+
+    async def rotation_stub(ctx, session_key, project, cwd):
+        calls.append({"ctx": ctx, "session_key": session_key, "project": project, "cwd": cwd})
+        return "summary text"
+
+    send_stub = AsyncMock()
+    await _call_tg_hook(project_dir, 70000, {}, rotation_stub, send_stub)
+
+    assert len(calls) == 1, f"Rotation must be called once, got {len(calls)}"
+    assert calls[0]["session_key"] == _TG_KEY
+    assert calls[0]["cwd"] == str(project_dir)
+    assert calls[0]["project"]["name"] == "myproject"
+    # ctx must carry exactly what _do_session_rotation reads — incl. run_engine
+    assert calls[0]["ctx"]["run_engine"] is _bot.run_engine
+    assert "ptb_app" not in calls[0]["ctx"], "No ptb_app — TG notify goes via send(), not _notify_tg_rotation"
+    send_stub.assert_awaited_once()
+
+
+async def test_tg_rotation_skipped_when_queue_nonempty(tmp_path, project_dir):
+    """TG hook: 70K tokens but _TG_QUEUE[k] has a pending message → rotation NOT called."""
+    rotation_stub = AsyncMock(return_value="summary")
+    send_stub = AsyncMock()
+    queue = {_TG_KEY: [{"prompt": "queued message", "message_id": 7}]}
+
+    await _call_tg_hook(project_dir, 70000, queue, rotation_stub, send_stub)
+
+    rotation_stub.assert_not_awaited()
+    send_stub.assert_not_awaited()
+
+
+async def test_tg_rotation_skipped_below_threshold(tmp_path, project_dir):
+    """TG hook: 30K tokens < threshold → rotation NOT called."""
+    rotation_stub = AsyncMock(return_value="summary")
+    send_stub = AsyncMock()
+
+    await _call_tg_hook(project_dir, 30000, {}, rotation_stub, send_stub)
+
+    rotation_stub.assert_not_awaited()
+    send_stub.assert_not_awaited()

@@ -731,6 +731,47 @@ async def run_engine(  # type: ignore[return]
 # Renders the status message (edit), watchdog, heartbeat, audit log, and final reply.
 # Behaviour is 1-to-1 with the original — only the event source is replaced by the generator.
 
+async def _maybe_rotate_tg(context, chat, thread, k: str, b: dict, last_result_event: "dict | None"):
+    """Spec-021: auto session rotation for the TG channel.
+
+    Mirrors the web-path guards: global toggle (CONTEXT_ROTATION), token threshold
+    (CONTEXT_ROTATE_AT), and a TG-queue-drain guard — rotation is skipped while
+    _TG_QUEUE[k] has pending messages and fires after the last drained turn instead.
+    Called exactly once at the end of run_agent, so no once-per-turn flag is needed
+    (unlike the web path, which checks inside the event loop).
+
+    Wiring: direct call into webapp._do_session_rotation — same direction as the
+    existing webapp._maybe_auto_resume call (only webapp->bot imports are forbidden).
+    Rotation failure must never break the TG turn — the whole body is guarded.
+    """
+    try:
+        ctx_tokens = (last_result_event or {}).get("context_tokens", 0) or 0
+        if not webapp.CONTEXT_ROTATION or ctx_tokens <= webapp.CONTEXT_ROTATE_AT:
+            return
+        if _TG_QUEUE.get(k):
+            print(f"[rotation] skipping — TG queue not empty for {k}")
+            return
+        # _do_session_rotation only reads run_engine/sessions/save_sessions from ctx.
+        # ptb_app is intentionally omitted: the TG notification is sent below via
+        # send() (already in the right chat/thread, with retry) instead of
+        # webapp._notify_tg_rotation — exactly one notification, never both.
+        rot_ctx = {
+            "sessions": sessions,
+            "save_sessions": save_sessions,
+            "run_engine": run_engine,
+        }
+        rot_project = {"name": b["project"], "model": b.get("model", DEFAULT_MODEL)}
+        summary = await webapp._do_session_rotation(rot_ctx, k, rot_project, b["cwd"])
+        if summary is not None:
+            await send(
+                context, chat, thread,
+                md_to_html(f"♻️ Session rotated at {ctx_tokens // 1000}K tokens — handoff saved"),
+                parse_mode=ParseMode.HTML,
+            )
+    except Exception as rot_exc:
+        print(f"[rotation] TG-path rotation failed (continuing with old session): {rot_exc}")
+
+
 async def run_agent(context, update, prompt: str):
     chat = update.effective_chat.id
     thread = update.effective_message.message_thread_id or 0
@@ -964,6 +1005,9 @@ async def run_agent(context, update, prompt: str):
         last_result_event=_tg_last_result_event,
         resume_session_id=_resume_sid_tg,
     )
+
+    # Spec-021: auto session rotation for the TG channel (after auto-resume check).
+    await _maybe_rotate_tg(context, chat, thread, k, b, _tg_last_result_event)
 
 
 
