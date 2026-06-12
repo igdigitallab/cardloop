@@ -9,11 +9,13 @@ import { ProjectTabBar } from './components/ProjectTabBar'
 import { Spinner } from './components/Spinner'
 import { GlobalFilesTab } from './tabs/GlobalFilesTab'
 import { SchedulesTab } from './tabs/SchedulesTab'
+import { VaultTab } from './tabs/VaultTab'
 import { useToast, ToastContainer } from './components/Toast'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
 
 const GLOBAL_FILES_ID = '__global__'
 const SCHEDULES_ID = '__schedules__'
+const VAULT_ID = '__vault__'
 
 type AuthState = 'loading' | 'unauthed' | 'authed'
 
@@ -105,6 +107,8 @@ export default function App() {
   })
   // Schedules tab (global)
   const [schedulesOpen, setSchedulesOpen] = useState<boolean>(false)
+  // Vault tab (global)
+  const [vaultOpen, setVaultOpen] = useState<boolean>(false)
   // Current active project — for SSE handler, no re-subscription on every select
   const activeIdRef = useRef<string | null>(null)
   const projectsRef = useRef<Project[]>([])
@@ -256,7 +260,7 @@ export default function App() {
       const next = prev.filter(id => valid.has(id))
       return next.length === prev.length ? prev : next
     })
-    setActiveId(prev => prev === GLOBAL_FILES_ID || prev === SCHEDULES_ID || (prev && valid.has(prev)) ? prev : null)
+    setActiveId(prev => prev === GLOBAL_FILES_ID || prev === SCHEDULES_ID || prev === VAULT_ID || (prev && valid.has(prev)) ? prev : null)
     setSplitPairs(prev => {
       const next: Record<string, string> = {}
       let changed = false
@@ -384,6 +388,16 @@ export default function App() {
   const handleCloseSchedules = useCallback(() => {
     setSchedulesOpen(false)
     setActiveId(prev => prev === SCHEDULES_ID ? (openIds[0] || null) : prev)
+  }, [openIds])
+
+  const handleOpenVault = useCallback(() => {
+    setVaultOpen(true)
+    setActiveId(VAULT_ID)
+  }, [])
+
+  const handleCloseVault = useCallback(() => {
+    setVaultOpen(false)
+    setActiveId(prev => prev === VAULT_ID ? (openIds[0] || null) : prev)
   }, [openIds])
 
   const handleSidebarReorder = useCallback((ids: string[]) => {
@@ -647,6 +661,10 @@ export default function App() {
           schedulesActive={activeId === SCHEDULES_ID}
           onOpenSchedules={handleOpenSchedules}
           onCloseSchedules={handleCloseSchedules}
+          vaultOpen={vaultOpen}
+          vaultActive={activeId === VAULT_ID}
+          onOpenVault={handleOpenVault}
+          onCloseVault={handleCloseVault}
           onToggleDrawer={() => setDrawerOpen(prev => !prev)}
           mobileScreen={mobileScreen}
           onGoToProjectList={() => setMobileScreen('list')}
@@ -678,6 +696,21 @@ export default function App() {
             }}
           >
             <SchedulesTab />
+          </div>
+        )}
+
+        {/* Vault tab — global, always mounted when open */}
+        {vaultOpen && (
+          <div
+            className="main-content"
+            style={{
+              display: activeId === VAULT_ID ? 'flex' : 'none',
+              flexDirection: 'column',
+              padding: 0,
+              overflow: 'hidden',
+            }}
+          >
+            <VaultTab />
           </div>
         )}
 
@@ -720,8 +753,8 @@ export default function App() {
           )
         })}
 
-        {/* Welcome — only when no open projects and not in the global file browser or schedules */}
-        {!hasOpen && activeId !== GLOBAL_FILES_ID && activeId !== SCHEDULES_ID && (
+        {/* Welcome — only when no open projects and not in the global file browser, schedules, or vault */}
+        {!hasOpen && activeId !== GLOBAL_FILES_ID && activeId !== SCHEDULES_ID && activeId !== VAULT_ID && (
           <div className="main-content">
             <div className="welcome">
               <div className="welcome-icon">⚡</div>

@@ -21,6 +21,10 @@ interface Props {
   schedulesActive: boolean
   onOpenSchedules: () => void
   onCloseSchedules: () => void
+  vaultOpen: boolean
+  vaultActive: boolean
+  onOpenVault: () => void
+  onCloseVault: () => void
   /** Toggles the mobile off-canvas sidebar drawer */
   onToggleDrawer?: () => void
   /** Current mobile navigation screen ('list' | 'project') */
@@ -119,6 +123,7 @@ export function ProjectTabBar({
   projects, activeId, unreadBySession, replyReadyIds, onActivate, onClose, onRename, onNewFree,
   globalFilesOpen, globalFilesActive, onOpenGlobalFiles, onCloseGlobalFiles,
   schedulesOpen, schedulesActive, onOpenSchedules, onCloseSchedules,
+  vaultOpen, vaultActive, onOpenVault, onCloseVault,
   onToggleDrawer, mobileScreen, onGoToProjectList,
 }: Props) {
   const activeTabRef = useRef<HTMLDivElement>(null)
@@ -255,6 +260,23 @@ export function ProjectTabBar({
             )}
           </div>
         )}
+        {/* Vault special tab */}
+        {vaultOpen && (
+          <div
+            className={`ptab ptab-global-files ${vaultActive ? 'active' : ''}`}
+            onClick={onOpenVault}
+            title="Vault"
+          >
+            <span className="ptab-name">🔐 Vault</span>
+            {vaultActive && (
+              <button
+                className="ptab-close"
+                onClick={e => { e.stopPropagation(); onCloseVault() }}
+                title="Close"
+              >✕</button>
+            )}
+          </div>
+        )}
         <button
           className="ptab-new"
           onClick={onNewFree}
@@ -264,6 +286,14 @@ export function ProjectTabBar({
         </button>
       </div>
       <div className="ptab-spacer" />
+      {/* Vault button */}
+      <button
+        className={`ptab-folder-btn${vaultActive ? ' active' : ''}`}
+        onClick={onOpenVault}
+        title="Vault"
+      >
+        🔐
+      </button>
       {/* Schedules button */}
       <button
         className={`ptab-folder-btn${schedulesActive ? ' active' : ''}`}

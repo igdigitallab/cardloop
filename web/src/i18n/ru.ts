@@ -426,6 +426,28 @@ export const ru = {
   'settings.conductor_prompt': 'Conductor prompt',
   'settings.conductor_prompt_hint': 'Когда выключено — fable-сессии не получают директиву дирижёра.',
   'settings.global_default': '— глобальный дефолт —',
+
+  // ── Vault tab (Spec 026) ─────────────────────────────────────
+  'vault.title': '🔐 Хранилище',
+  'vault.addSecret': '+ Добавить секрет',
+  'vault.searchPlaceholder': 'Поиск секретов...',
+  'vault.name': 'Имя',
+  'vault.value': 'Значение',
+  'vault.category': 'Категория',
+  'vault.notes': 'Заметки',
+  'vault.reveal': 'Показать',
+  'vault.hide': 'Скрыть',
+  'vault.copy': 'Копировать',
+  'vault.copied': 'Скопировано!',
+  'vault.edit': 'Изменить',
+  'vault.delete': 'Удалить',
+  'vault.deleteConfirm': 'Удалить секрет "{name}"? Это действие необратимо.',
+  'vault.uncategorized': 'Без категории',
+  'vault.noSecrets': 'Хранилище пусто',
+  'vault.saveSecret': 'Сохранить',
+  'vault.loading': 'Загрузка хранилища...',
+  'vault.error': 'Ошибка загрузки хранилища',
+  'tabbar.vault': '🔐 Хранилище',
 } as const
 
 export type TKey = keyof typeof ru

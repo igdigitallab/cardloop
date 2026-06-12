@@ -471,7 +471,7 @@ export function Sidebar({
           <span className="sidebar-logo-text">Claude-Ops</span>
           <button className="sidebar-toggle-btn" onClick={onToggleCollapse} title={t['sidebar.collapse']}>⟨</button>
         </div>
-        {onGoBack && activeProjectId && activeProjectId !== '__global__' && activeProjectId !== '__schedules__' && (
+        {onGoBack && activeProjectId && activeProjectId !== '__global__' && activeProjectId !== '__schedules__' && activeProjectId !== '__vault__' && (
           <button className="sidebar-back-btn" onClick={onGoBack} title={t['sidebar.back_to_project']} aria-label={t['sidebar.back_to_project']}>
             ✕ {t['sidebar.back_to_project']}
           </button>

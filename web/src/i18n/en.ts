@@ -425,6 +425,28 @@ export const en = {
   'settings.conductor_prompt': 'Conductor prompt',
   'settings.conductor_prompt_hint': 'When off, fable sessions do not receive the orchestrator directive.',
   'settings.global_default': '— global default —',
+
+  // ── Vault tab (Spec 026) ─────────────────────────────────────
+  'vault.title': '🔐 Vault',
+  'vault.addSecret': '+ Add secret',
+  'vault.searchPlaceholder': 'Search secrets...',
+  'vault.name': 'Name',
+  'vault.value': 'Value',
+  'vault.category': 'Category',
+  'vault.notes': 'Notes',
+  'vault.reveal': 'Reveal',
+  'vault.hide': 'Hide',
+  'vault.copy': 'Copy',
+  'vault.copied': 'Copied!',
+  'vault.edit': 'Edit',
+  'vault.delete': 'Delete',
+  'vault.deleteConfirm': 'Delete secret "{name}"? This action is irreversible.',
+  'vault.uncategorized': 'Uncategorized',
+  'vault.noSecrets': 'No secrets in the vault',
+  'vault.saveSecret': 'Save',
+  'vault.loading': 'Loading vault...',
+  'vault.error': 'Failed to load vault',
+  'tabbar.vault': '🔐 Vault',
 } as const
 
 export type TKey = keyof typeof en

@@ -458,4 +458,26 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groups }),
     }),
+
+  // Spec-026 Phase 3: Global encrypted secret vault (names+categories only — no values)
+  secretsList: () =>
+    apiFetch<{ secrets: Array<{ name: string; category: string }> }>('/api/secrets'),
+
+  secretReveal: (name: string) =>
+    apiFetch<{ name: string; value: string; category: string; notes: string; updated_at: string }>(
+      `/api/secrets/${encodeURIComponent(name)}`
+    ),
+
+  secretSet: (body: { name: string; value: string; category?: string; notes?: string }) =>
+    apiFetch<{ name: string; category: string; ok: true }>('/api/secrets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  secretDelete: (name: string) =>
+    apiFetch<{ name: string; deleted: true }>(
+      `/api/secrets/${encodeURIComponent(name)}`,
+      { method: 'DELETE' }
+    ),
 }
