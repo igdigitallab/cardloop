@@ -893,7 +893,7 @@ async def run_agent(context, update, prompt: str):
     webapp._bus_publish(k, {"kind": "run_start", "source": "tg", "prompt": prompt, "run_id": None})
     try:
         # Project secrets (Spec 007) augment env; TG_CHAT_ID/TG_THREAD_ID take priority.
-        # vault: references are resolved here; TG vars are merged after so they always win.
+        # secret: references are resolved against the built-in store; TG vars are merged after so they always win.
         project_secrets = await webapp._resolve_secret_refs(webapp._secrets_read(cwd))
         agent_env = {**project_secrets, "TG_CHAT_ID": str(chat), "TG_THREAD_ID": str(thread or 0)}
         agents_config = b.get("agents_config") or {}

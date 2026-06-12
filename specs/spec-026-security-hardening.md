@@ -37,10 +37,16 @@ A full security audit (`~/vault/01-Projects/Claude-Ops-Bot/security-audit-2026-0
 - [ ] A documented **break-glass** path exists (disable TOTP from the host shell) so the operator can never be permanently locked out.
 - [ ] TOTP secret and recovery codes are stored encrypted at rest (see Phase 3 backend), never in plaintext config.
 
-### Phase 3 — Secret vault backend (GATED at the destructive step)
-- [ ] ClaudeOps can resolve a secret from an **encrypted vault backend** (Bitwarden/VaultWarden CLI) by reference instead of reading a plaintext value. A reference like `vault:<item>` resolves at runtime, is cached briefly in memory only, and is never written to disk in plaintext.
-- [ ] Both per-project secrets and shared/global credentials can be expressed as vault references; the agent and projects see them as normal environment variables at run time, exactly as today.
-- [ ] Operational migration: the operator's plaintext master-credentials file is migrated into the vault, every entry verified retrievable, and only **then** the plaintext file is removed (destructive — explicit gate).
+### Phase 3 — Built-in encrypted secret store + Vault UI (revised 2026-06-11; replaces the VaultWarden direction)
+**Decision:** NO external secret service. VaultWarden is the owner's PERSONAL password manager, not an infra dependency, and OSS users must never be forced to stand one up. Secrets live in a built-in encrypted-at-rest store with a thin CLI, usable identically from the terminal (Claude CLI) and the cockpit. Locked choices: master key = keyfile (0600); UI reveal = plain 👁 for now (tighten after Phase 2); migrate ALL ~50 genuine secrets; UI = a global "🔐 Vault" button.
+
+- [ ] **Engine:** a single encrypted store file (gitignored), encrypted with `cryptography` Fernet (already a dependency — no new external dep, no service). Record shape: `name → {value, category, notes, updated_at}`. One shared module used by BOTH the CLI and the cockpit (the `_secrets_read` pattern).
+- [ ] **Master key:** resolved from env `CLAUDE_OPS_SECRET_KEY` if set, else a keyfile (default `~/.config/claude-ops/secret.key`, chmod 600), path env-overridable. `secret init` generates the key (0600) if absent. The key is NEVER written into the encrypted file or any tracked file.
+- [ ] **CLI `secret`:** `get NAME` / `set NAME [value]` / `list` / `rm NAME` / `init` / `import <file>`. Native read AND write for Claude via Bash; works in any terminal/project (on PATH via a console entry or documented symlink).
+- [ ] **Cockpit API:** `GET /api/secrets` returns names + categories ONLY (never values); `GET /api/secrets/{name}` returns the decrypted value ON DEMAND (audited); `POST`/`PUT`/`DELETE` add/edit/remove. All under the auth middleware.
+- [ ] **Cockpit UI:** a GLOBAL "🔐 Vault" view (peer to global Files / Schedules 🗓), reached from the global nav. Names grouped by category, values masked; per-row reveal (👁, on-demand single-secret decrypt — never bulk-dump to the page), copy, edit, delete; add-secret; search/filter.
+- [ ] **Resolver:** repoint the Phase-3a resolver from `vault:`/`vw` to `secret:<name>` reading the built-in store. The `vw` dependency is dropped from this path. Plain (non-`secret:`) values still pass through unchanged; missing/failed lookups still fail loud.
+- [ ] **Migration (GATED destructive):** `secret import` ingests the ~50 genuine secrets from the owner's plaintext credentials file (config/UUIDs/IPs/URLs are NOT secrets — they stay in docs); each verified retrievable via `secret get`; THEN, on explicit go, the plaintext secrets AND the VaultWarden master-password reference are removed from that file.
 
 ---
 
@@ -82,5 +88,6 @@ A full security audit (`~/vault/01-Projects/Claude-Ops-Bot/security-audit-2026-0
 
 ---
 
-## Open decision (for the owner)
-**Optional, narrow HTTP-browser hardening that does NOT reduce the agent's capability:** the cockpit's HTTP file browser (`/api/global/file`, `/api/projects/.../file`) can currently *serve* `.ssh` keys and `.claude/.credentials.json` as downloads to any authenticated session. The *agent itself* reads those through its own runtime, not this HTTP API — so blocklisting them in the HTTP browser would harden the "stolen session downloads portable keys" path **without** taking anything away from Claude or the projects. Recommended as a cheap extra layer; left as the owner's call since it slightly reduces manual convenience in the UI.
+## Deferred / later
+- **Narrow HTTP-browser hardening (optional):** the cockpit's HTTP file browser can *serve* `.ssh` keys and `.claude/.credentials.json` to any authenticated session. The agent reads those via its own runtime, not this HTTP API, so blocklisting them in the HTTP browser would harden the "stolen session downloads portable keys" path without reducing Claude's capability. Cheap extra layer; deferred.
+- **Per-project secrets adopting the same encryption:** today `.claude-ops/secrets/secrets.env` is plaintext 0600. It can later reference the global store (`secret:<name>`) or adopt the same Fernet engine. Out of scope for this pass.

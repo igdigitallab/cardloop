@@ -29,6 +29,9 @@ from aiohttp import web
 # Spec-019: Schedules registry module
 import schedules as _schedules
 
+# Spec-026 Phase 3: built-in encrypted secret store
+import secretstore as _secretstore
+
 
 # ─────────────────────────── named constants ───────────────────────────
 
@@ -3770,7 +3773,7 @@ async def _run_card(
             # This isolates card context from chat history (and from other cards).
             resume_sid = None
             # Project secrets — only from cwd of the main project (not worktree), isolated by cwd.
-            # vault: references are resolved before injecting into the agent env.
+            # secret: references are resolved against the built-in store before injecting into the agent env.
             project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
             agents_config = project.get("agents_config") or {}
             agents_kwargs = _build_agents_kwargs(ctx, agents_config)
@@ -6298,8 +6301,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
 
     try:
         resume_sid = ctx["sessions"].get(session_key)
-        # Project secrets are injected into the agent's env (values only in-process, not in the API)
-        # vault: references are resolved here; TG vars are merged after (they win).
+        # Project secrets are injected into the agent's env (values only in-process, not in the API).
+        # secret: references are resolved against the built-in store; TG vars are merged after (they win).
         project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
         agents_config = project.get("agents_config") or {}
         agents_kwargs = _build_agents_kwargs(ctx, agents_config)
@@ -6915,112 +6918,155 @@ def _secrets_read(cwd: str) -> dict:
     return result
 
 
-# ─────────────────────────── Vault reference resolver (Spec 026 Phase 3a) ──────
-# A secret VALUE of the form  vault:<exact item name>  is resolved at runtime
-# via the `vw` CLI (VaultWarden client).  Plain values pass through UNCHANGED —
-# the feature is inert until someone opts in by using the vault: prefix.
+# ─────────────────────────── Secret reference resolver (Spec 026 Phase 3) ──────
+# A secret VALUE of the form  secret:<name>  is resolved at runtime via the
+# built-in encrypted store (secretstore.py).  Plain values pass through UNCHANGED
+# — the feature is inert until someone opts in by using the secret: prefix.
 #
 # Contract:
-#   - Reference format:  vault:<exact item name>   (case-sensitive, no leading space)
-#   - `vw pass <name>` returns lines of  "Name: password"  (substring search).
-#   - We select only lines where the part before the first ": " matches exactly.
-#   - Exactly one match → use that password.
-#   - Zero or more-than-one exact match → RuntimeError (fail loud).
-#   - vw non-zero exit / timeout → RuntimeError naming the key.
-#   - Resolved values are cached in-memory for _VAULT_CACHE_TTL seconds, keyed
-#     by the exact item name.  Cache is NEVER written to disk.
+#   - Reference format:  secret:<name>   (case-sensitive, no leading space)
+#   - Resolved via secretstore.get(name); None → RuntimeError (fail loud).
 #   - Resolved values are NEVER logged or printed.
-
-_VW_PATH = os.path.expanduser("~/.local/bin/vw")
-_VAULT_CACHE_TTL = 300  # seconds
-# {item_name: (resolved_password, expires_at_monotonic)}
-_vault_cache: dict[str, tuple[str, float]] = {}
-
-
-async def _resolve_one_vault_ref(item_name: str) -> str:
-    """Resolve a single vault item name to its password via `vw pass`.
-
-    Uses an in-memory TTL cache so repeated calls within _VAULT_CACHE_TTL seconds
-    do not spawn a new subprocess.  Raises RuntimeError on any failure.
-    """
-    now = time.monotonic()
-    cached = _vault_cache.get(item_name)
-    if cached is not None:
-        value, expires = cached
-        if now < expires:
-            return value
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            _VW_PATH, "pass", item_name,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=10)
-    except asyncio.TimeoutError:
-        raise RuntimeError(
-            f"vault: timed out resolving secret key '{item_name}' "
-            f"(vw did not respond within 10 s)"
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"vault: vw binary not found at '{_VW_PATH}'; "
-            f"cannot resolve secret key '{item_name}'"
-        )
-
-    if proc.returncode != 0:
-        err_snippet = (stderr_bytes or b"").decode(errors="replace")[:200]
-        raise RuntimeError(
-            f"vault: vw exited with code {proc.returncode} "
-            f"while resolving secret key '{item_name}': {err_snippet}"
-        )
-
-    stdout = stdout_bytes.decode(errors="replace")
-    # vw pass output: one line per match, format  "Name: password"
-    # We need EXACT name match (case-sensitive) to avoid substring collisions.
-    exact_matches: list[str] = []
-    for line in stdout.splitlines():
-        if ": " not in line:
-            continue
-        line_name, _, line_pw = line.partition(": ")
-        if line_name == item_name:
-            exact_matches.append(line_pw)
-
-    if len(exact_matches) == 0:
-        raise RuntimeError(
-            f"vault: no item with exact name '{item_name}' found "
-            f"while resolving secret key — check the item name (case-sensitive, exact match required)"
-        )
-    if len(exact_matches) > 1:
-        raise RuntimeError(
-            f"vault: {len(exact_matches)} items with exact name '{item_name}' found in vault "
-            f"while resolving secret key — item names must be unique"
-        )
-
-    password = exact_matches[0]
-    _vault_cache[item_name] = (password, now + _VAULT_CACHE_TTL)
-    return password
-
+#   - No in-memory cache: the store is a local encrypted file; reads are cheap.
+#     (The previous vw-based resolver had a 300-second TTL cache; that is dropped
+#     here because local file I/O does not need it.  If profiling ever shows it is
+#     a bottleneck, add caching inside secretstore.py.)
 
 async def _resolve_secret_refs(secrets: dict) -> dict:
-    """Resolve any vault: references in secrets dict.
+    """Resolve any secret: references in a project secrets dict.
 
-    For each (key, value): if value is a str starting with 'vault:', the
-    remainder is treated as an exact vault item name and resolved via vw.
-    All other values pass through unchanged.
+    For each (key, value): if value is a str starting with 'secret:', the
+    remainder is treated as a secret name in the built-in encrypted store and
+    resolved via secretstore.get().  All other values pass through unchanged.
 
-    Returns a new dict with the same keys; raises RuntimeError on any
-    resolution failure (the caller's run must not proceed with a missing secret).
+    Returns a new dict with the same keys.  Raises RuntimeError on any
+    resolution failure — the caller's agent run must not proceed with a missing
+    secret (fail loud, never inject empty).
     """
     result: dict = {}
     for k, v in secrets.items():
-        if isinstance(v, str) and v.startswith("vault:"):
-            item_name = v[len("vault:"):]
-            resolved = await _resolve_one_vault_ref(item_name)
+        if isinstance(v, str) and v.startswith("secret:"):
+            # Resolve via built-in store (secretstore.py)
+            secret_name = v[len("secret:"):]
+            resolved = _secretstore.get(secret_name)
+            if resolved is None:
+                raise RuntimeError(
+                    f"secret: name '{secret_name}' (env key '{k}') not found in the "
+                    f"built-in secret store — add it with  `secret set {secret_name} <value>`"
+                )
             result[k] = resolved
         else:
             result[k] = v
     return result
+
+
+# ─────────────────────────── Global Vault API (Spec 026 Phase 3) ──────────────
+# Name validation for the global vault — same character set as secretstore.py.
+_VAULT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+_log = logging.getLogger(__name__)
+
+
+async def api_vault_list(req: web.Request) -> web.Response:
+    """GET /api/secrets — list names and categories (NEVER values).
+
+    Response: {"secrets": [{"name": ..., "category": ...}, ...]}
+    Requires valid auth cookie (covered by auth_middleware).
+    """
+    try:
+        metas = _secretstore.list_meta()
+    except RuntimeError as exc:
+        return web.json_response({"error": str(exc)}, status=503)
+
+    # Strip notes and values — only name + category for the list view
+    return web.json_response({
+        "secrets": [{"name": m["name"], "category": m["category"]} for m in metas]
+    })
+
+
+async def api_vault_get(req: web.Request) -> web.Response:
+    """GET /api/secrets/{name} — reveal a single secret (value + metadata).
+
+    The decrypted value is returned on-demand.  Every call is audit-logged
+    (name only, never the value).
+    Requires valid auth cookie.
+    """
+    name = req.match_info["name"]
+    if not _VAULT_NAME_RE.match(name):
+        return web.json_response({"error": "invalid secret name"}, status=400)
+
+    try:
+        entry = _secretstore.get_full(name)
+    except (RuntimeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=503)
+
+    if entry is None:
+        return web.json_response({"error": "secret not found"}, status=404)
+
+    # Audit: log the reveal (name only — never log the value)
+    _log.info("vault reveal: name=%r (value not logged)", name)
+
+    return web.json_response({
+        "name": entry["name"],
+        "value": entry["value"],
+        "category": entry.get("category", ""),
+        "notes": entry.get("notes", ""),
+        "updated_at": entry.get("updated_at", ""),
+    })
+
+
+async def api_vault_set(req: web.Request) -> web.Response:
+    """POST /api/secrets — create or update a secret.
+
+    Body: {"name": str, "value": str, "category": str (opt), "notes": str (opt)}
+    Requires valid auth cookie.
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+
+    name = body.get("name", "")
+    value = body.get("value", "")
+    category = body.get("category", "")
+    notes = body.get("notes", "")
+
+    if not isinstance(name, str) or not _VAULT_NAME_RE.match(name):
+        return web.json_response({"error": "invalid secret name"}, status=400)
+    if not isinstance(value, str):
+        return web.json_response({"error": "value must be a string"}, status=400)
+
+    try:
+        _secretstore.set(name, value, category=category, notes=notes)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except RuntimeError as exc:
+        return web.json_response({"error": str(exc)}, status=503)
+
+    return web.json_response({"name": name, "category": category, "ok": True})
+
+
+async def api_vault_delete(req: web.Request) -> web.Response:
+    """DELETE /api/secrets/{name} — remove a secret.
+
+    Requires valid auth cookie.
+    """
+    name = req.match_info["name"]
+    if not _VAULT_NAME_RE.match(name):
+        return web.json_response({"error": "invalid secret name"}, status=400)
+
+    try:
+        removed = _secretstore.delete(name)
+    except (ValueError, RuntimeError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    if not removed:
+        return web.json_response({"error": "secret not found"}, status=404)
+
+    return web.json_response({"name": name, "deleted": True})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _secrets_ensure_gitignore(cwd: str) -> None:
@@ -7953,6 +7999,12 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/deferred", api_deferred_create)
         app.router.add_get("/api/deferred", api_deferred_list)
         app.router.add_delete("/api/deferred/{id}", api_deferred_delete)
+
+        # Spec-026 Phase 3: Global Vault (built-in encrypted secret store)
+        app.router.add_get("/api/secrets", api_vault_list)
+        app.router.add_get("/api/secrets/{name}", api_vault_get)
+        app.router.add_post("/api/secrets", api_vault_set)
+        app.router.add_delete("/api/secrets/{name}", api_vault_delete)
 
         # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
