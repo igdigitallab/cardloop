@@ -32,6 +32,9 @@ import schedules as _schedules
 # Spec-026 Phase 3: built-in encrypted secret store
 import secretstore as _secretstore
 
+# Spec-026 Phase 2: TOTP second factor
+import totp as _totp
+
 
 # ─────────────────────────── named constants ───────────────────────────
 
@@ -1139,6 +1142,50 @@ async def api_login(req: web.Request) -> web.Response:
     if not _hmac.compare_digest(password, ctx["password"]):
         _record_attempt(ip, False)
         return web.json_response({"error": "bad password"}, status=401)
+
+    # Spec-026 Phase 2: TOTP second factor.
+    # SAFETY: only required when an ACTIVE secret is already enrolled.
+    # Until the operator enrolls and activates 2FA this block is a no-op —
+    # deploying this code cannot lock anyone out.
+    try:
+        active_secret = _secretstore.get("__totp_secret__")
+    except Exception:
+        active_secret = None
+
+    if active_secret:
+        # 2FA is active — require a TOTP code (or a recovery code)
+        totp_code = str(body.get("totp", "")).strip()
+        if not totp_code:
+            # Wrong TOTP counts as a failed attempt (keeps rate-limiter honoured)
+            _record_attempt(ip, False)
+            return web.json_response({"error": "totp_required"}, status=401)
+
+        # Try TOTP first
+        if _totp.verify(active_secret, totp_code):
+            pass  # valid — fall through to issue cookie
+        else:
+            # Try recovery code
+            try:
+                hashes_json = _secretstore.get("__totp_recovery__")
+                hashes = json.loads(hashes_json) if hashes_json else []
+            except Exception:
+                hashes = []
+
+            ok, remaining = _totp.verify_and_consume(totp_code, hashes)
+            if ok:
+                # Consumed one recovery hash — persist the updated list
+                try:
+                    _secretstore.set(
+                        "__totp_recovery__",
+                        json.dumps(remaining),
+                        category="totp",
+                    )
+                except Exception:
+                    pass  # persist best-effort; still grant login
+            else:
+                _record_attempt(ip, False)
+                return web.json_response({"error": "totp_invalid"}, status=401)
+
     _record_attempt(ip, True)
     token = ctx["_auth_token"]
     resp = web.json_response({"ok": True})
@@ -7066,6 +7113,152 @@ async def api_vault_delete(req: web.Request) -> web.Response:
     return web.json_response({"name": name, "deleted": True})
 
 
+# ─────────────────────────── TOTP enrollment API (Spec 026, Phase 2) ──────────
+#
+# All four endpoints require an authenticated cookie (covered by auth_middleware).
+# The TOTP secret is stored encrypted in the built-in vault under reserved names:
+#   __totp_secret__   — the ACTIVE base32 TOTP secret
+#   __totp_pending__  — staged secret during enrollment (not yet active)
+#   __totp_recovery__ — JSON array of sha256 hashes of one-time recovery codes
+#
+# Break-glass (host shell): `secret rm __totp_secret__`
+# This removes the active secret and falls back to password-only login instantly.
+
+
+async def api_totp_status(req: web.Request) -> web.Response:
+    """GET /api/auth/totp/status — report whether TOTP is currently active.
+
+    Response: {"enabled": bool}
+    Requires valid auth cookie.
+    """
+    try:
+        active = _secretstore.get("__totp_secret__")
+    except Exception:
+        active = None
+    return web.json_response({"enabled": bool(active)})
+
+
+async def api_totp_enroll(req: web.Request) -> web.Response:
+    """POST /api/auth/totp/enroll — begin TOTP enrollment.
+
+    Generates a fresh TOTP secret and 10 recovery codes.  Stores the secret
+    as __totp_pending__ (NOT active yet — operator must call /activate to
+    confirm they can produce a valid code).
+
+    Response (one-time — codes are not stored plaintext after this):
+        {
+            "secret": "<base32>",
+            "otpauth_uri": "otpauth://totp/...",
+            "recovery_codes": ["xxxx-xxxx", ...]
+        }
+
+    The recovery_codes list is shown ONCE here; after /activate only the
+    SHA-256 hashes are retained in __totp_recovery__.
+    Requires valid auth cookie.
+    """
+    secret = _totp.random_base32(32)
+    codes = _totp.gen_recovery_codes(10)
+
+    # Retrieve issuer / account from env / ctx for the provisioning URI
+    ctx = req.app["ctx"]
+    issuer = os.environ.get("TOTP_ISSUER", "ClaudeOps")
+    account = os.environ.get("OPERATOR_NAME", "operator")
+
+    uri = _totp.provisioning_uri(secret, account=account, issuer=issuer)
+
+    # Persist the pending secret (overwrites any previous pending enrollment)
+    try:
+        _secretstore.set("__totp_pending__", secret, category="totp",
+                         notes="pending TOTP enrollment — not yet active")
+    except Exception as exc:
+        return web.json_response({"error": f"store error: {exc}"}, status=503)
+
+    return web.json_response({
+        "secret": secret,
+        "otpauth_uri": uri,
+        "recovery_codes": codes,
+    })
+
+
+async def api_totp_activate(req: web.Request) -> web.Response:
+    """POST /api/auth/totp/activate — confirm enrollment with a valid TOTP code.
+
+    Body: {"code": "<6-digit TOTP>"}
+
+    Verifies *code* against __totp_pending__.  On success:
+      - Promotes pending → __totp_secret__ (active)
+      - Generates + stores fresh recovery code hashes in __totp_recovery__
+      - Deletes __totp_pending__
+      - Returns {"enabled": true}
+
+    On bad code → 400 {"error": "totp_invalid"}
+    On no pending secret → 400 {"error": "no_pending_enrollment"}
+    Requires valid auth cookie.
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+
+    code = str(body.get("code", "")).strip()
+
+    try:
+        pending = _secretstore.get("__totp_pending__")
+    except Exception:
+        pending = None
+
+    if not pending:
+        return web.json_response({"error": "no_pending_enrollment"}, status=400)
+
+    if not _totp.verify(pending, code):
+        return web.json_response({"error": "totp_invalid"}, status=400)
+
+    # Enrollment confirmed — generate 10 fresh recovery codes and store hashes
+    codes = _totp.gen_recovery_codes(10)
+    hashes = [_totp.hash_code(c) for c in codes]
+
+    try:
+        _secretstore.set("__totp_secret__", pending, category="totp",
+                         notes="active TOTP secret")
+        _secretstore.set("__totp_recovery__", json.dumps(hashes), category="totp",
+                         notes="SHA-256 hashes of one-time recovery codes")
+        _secretstore.delete("__totp_pending__")
+    except Exception as exc:
+        return web.json_response({"error": f"store error: {exc}"}, status=503)
+
+    return web.json_response({
+        "enabled": True,
+        "recovery_codes": codes,  # shown once — operator must save these
+    })
+
+
+async def api_totp_disable(req: web.Request) -> web.Response:
+    """DELETE /api/auth/totp — disable TOTP (authenticated break-glass via cockpit).
+
+    Removes __totp_secret__, __totp_recovery__, and __totp_pending__ from the
+    vault.  Login immediately reverts to password-only.
+
+    Shell break-glass (no cockpit access needed):
+        secret rm __totp_secret__
+
+    Response: {"enabled": false}
+    Requires valid auth cookie.
+    """
+    try:
+        _secretstore.delete("__totp_secret__")
+    except Exception:
+        pass
+    try:
+        _secretstore.delete("__totp_recovery__")
+    except Exception:
+        pass
+    try:
+        _secretstore.delete("__totp_pending__")
+    except Exception:
+        pass
+    return web.json_response({"enabled": False})
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -8005,6 +8198,12 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/secrets/{name}", api_vault_get)
         app.router.add_post("/api/secrets", api_vault_set)
         app.router.add_delete("/api/secrets/{name}", api_vault_delete)
+
+        # Spec-026 Phase 2: TOTP second factor enrollment
+        app.router.add_get("/api/auth/totp/status", api_totp_status)
+        app.router.add_post("/api/auth/totp/enroll", api_totp_enroll)
+        app.router.add_post("/api/auth/totp/activate", api_totp_activate)
+        app.router.add_delete("/api/auth/totp", api_totp_disable)
 
         # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)

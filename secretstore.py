@@ -45,6 +45,12 @@ from cryptography.fernet import Fernet, InvalidToken
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}\Z")
 
+# Reserved internal names (Spec 026, Phase 2 — TOTP).
+# These match ^__.*__$ and are HIDDEN from list_meta() and the CLI list command
+# so TOTP internals never appear as user secrets.  Internal code may still
+# call get()/set()/delete() on them directly.
+_RESERVED_RE = re.compile(r"^__.*__$")
+
 
 def _validate_name(name: str) -> None:
     """Raise ValueError if name contains path-injection or invalid characters."""
@@ -188,14 +194,20 @@ def set(name: str, value: str, category: str = "", notes: str = "") -> None:
     _write_store(data)
 
 
-def list_meta() -> list:
+def list_meta(include_reserved: bool = False) -> list:
     """Return metadata for all secrets — names, categories, notes, updated_at.
 
     Values are NEVER included in the output.
+
+    Reserved names (matching ^__.*__$) are hidden by default so TOTP internals
+    do not appear in the vault list.  Pass include_reserved=True only for
+    internal tooling.
     """
     data = _read_store()
     result = []
     for name, entry in sorted(data.items()):
+        if not include_reserved and _RESERVED_RE.match(name):
+            continue
         result.append({
             "name": name,
             "category": entry.get("category", ""),

@@ -32,10 +32,37 @@ A full security audit (`~/vault/01-Projects/Claude-Ops-Bot/security-audit-2026-0
 - [ ] `WEB_COOKIE_SECURE=1` confirmed in the deployed environment.
 
 ### Phase 2 — Second factor on cockpit login (GATED — can lock out the operator)
-- [ ] After a correct password, the cockpit requires a **TOTP** code (authenticator app). Optional WebAuthn/passkey is a later iteration, out of scope here.
-- [ ] First-time enrollment flow produces a QR/secret and a set of **one-time recovery codes**.
-- [ ] A documented **break-glass** path exists (disable TOTP from the host shell) so the operator can never be permanently locked out.
-- [ ] TOTP secret and recovery codes are stored encrypted at rest (see Phase 3 backend), never in plaintext config.
+- [x] After a correct password, the cockpit requires a **TOTP** code (authenticator app). Optional WebAuthn/passkey is a later iteration, out of scope here.
+- [x] First-time enrollment flow produces a QR/secret and a set of **one-time recovery codes**.
+- [x] A documented **break-glass** path exists (disable TOTP from the host shell) so the operator can never be permanently locked out.
+- [x] TOTP secret and recovery codes are stored encrypted at rest (see Phase 3 backend), never in plaintext config.
+
+#### Phase 2 implementation notes (2026-06-12)
+
+**Safety guarantee:** TOTP is enforced ONLY when `__totp_secret__` is already active in the vault.  Until the operator completes enrollment → activation, login is password-only.  Deploying this code cannot lock anyone out.
+
+**Storage (encrypted in vault, hidden from `secret list` / `GET /api/secrets`):**
+- `__totp_secret__`  — active base32 TOTP secret
+- `__totp_pending__` — staged secret during enrollment (not yet active)
+- `__totp_recovery__` — JSON array of SHA-256 hashes of one-time recovery codes
+
+**Enrollment flow:**
+1. `POST /api/auth/totp/enroll` (authenticated) → returns `secret`, `otpauth_uri`, `recovery_codes[10]`. Does NOT activate.
+2. Scan the `otpauth_uri` QR with your authenticator app.
+3. `POST /api/auth/totp/activate {"code": "<6-digit>"}` → if code is valid, promotes pending → active; returns a fresh set of 10 recovery codes. **Save them.**
+4. Next login requires password + TOTP code.
+
+**Break-glass (lost authenticator / locked out):**
+```
+# On the host shell — removes the active secret instantly, no cockpit needed:
+secret rm __totp_secret__
+# Login reverts to password-only immediately (no restart required).
+```
+
+**Cockpit disable:**
+`DELETE /api/auth/totp` (authenticated session required) → removes all TOTP keys, returns `{"enabled": false}`.
+
+**Implementation:** `totp.py` — stdlib-only RFC 6238 + RFC 4226 (HMAC-SHA1). No pyotp dependency.
 
 ### Phase 3 — Built-in encrypted secret store + Vault UI (revised 2026-06-11; replaces the VaultWarden direction)
 **Decision:** NO external secret service. VaultWarden is the owner's PERSONAL password manager, not an infra dependency, and OSS users must never be forced to stand one up. Secrets live in a built-in encrypted-at-rest store with a thin CLI, usable identically from the terminal (Claude CLI) and the cockpit. Locked choices: master key = keyfile (0600); UI reveal = plain 👁 for now (tighten after Phase 2); migrate ALL ~50 genuine secrets; UI = a global "🔐 Vault" button.

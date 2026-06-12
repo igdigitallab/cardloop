@@ -79,6 +79,8 @@ def cmd_set(args: argparse.Namespace) -> int:
 
 def cmd_list(args: argparse.Namespace) -> int:
     try:
+        # Reserved names (^__.*__$) are hidden from the list — TOTP internals.
+        # Pass include_reserved=False (default) to suppress them.
         metas = secretstore.list_meta()
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
