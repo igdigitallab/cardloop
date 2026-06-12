@@ -119,7 +119,7 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
         className="session-reset-btn"
         onClick={requestReset}
         disabled={busy}
-        title="New session (with confirmation)"
+        title="New session (no summary)"
       >↺</button>
       <button
         className="session-selector-btn"

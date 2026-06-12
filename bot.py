@@ -96,6 +96,14 @@ _EXECUTOR_MODEL = os.environ.get("EXECUTOR_MODEL", "sonnet")
 _RESEARCHER_MODEL = os.environ.get("RESEARCHER_MODEL", "sonnet")
 _QUICK_MODEL = os.environ.get("QUICK_MODEL", "haiku")
 
+# Effort level for the conductor/main session.
+# "medium" reduces rate-limit burn (thinking weighs ~5× in the window) vs the
+# SDK default of "high". Gate behind env so operators can escalate without a
+# code change. Valid values: low | medium | high | xhigh | max.
+# Note: on Fable 5 thinking always runs high regardless; effort is silently
+# ignored or coerced by the CLI for subscription models — no SDK error is raised.
+_DEFAULT_EFFORT: str = os.environ.get("DEFAULT_EFFORT", "medium")
+
 DEFAULT_AGENTS: dict = {
     "executor": AgentDefinition(
         description="General code and infra execution agent. Writes files, runs bash commands.",
@@ -120,6 +128,9 @@ DEFAULT_AGENTS: dict = {
         ),
         model=_EXECUTOR_MODEL,
         permissionMode="bypassPermissions",
+        # Minimal tool set: executor needs read/write/run + web for doc lookups.
+        tools=["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch"],
+        maxTurns=40,
     ),
     "researcher": AgentDefinition(
         description="Read-only research agent. Web lookups, file reads, grep. No writes.",
@@ -130,6 +141,9 @@ DEFAULT_AGENTS: dict = {
         model=_RESEARCHER_MODEL,
         permissionMode="bypassPermissions",
         disallowedTools=["Write", "Edit", "NotebookEdit"],
+        # Minimal tool set: read-only lookups only.
+        tools=["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"],
+        maxTurns=20,
     ),
     "quick": AgentDefinition(
         description="Fast lookup and simple transform agent. Cheap, low-latency questions.",
@@ -138,6 +152,10 @@ DEFAULT_AGENTS: dict = {
         ),
         model=_QUICK_MODEL,
         permissionMode="bypassPermissions",
+        # Minimal tool set: lightweight lookups only; no web fetch needed for simple transforms.
+        tools=["Bash", "Read", "Glob", "Grep"],
+        effort="low",   # haiku + low effort: fastest possible response, no extended thinking overhead
+        maxTurns=10,
     ),
 }
 
@@ -176,6 +194,9 @@ def _build_agents_kwargs(agents_config: dict) -> dict:
                     model=override_model,
                     permissionMode=agent_def.permissionMode,
                     disallowedTools=agent_def.disallowedTools,
+                    tools=agent_def.tools,
+                    effort=agent_def.effort,
+                    maxTurns=agent_def.maxTurns,
                 )
             else:
                 overridden[agent_name] = agent_def
@@ -193,7 +214,8 @@ CONDUCTOR_PROMPT = (
     "You are an orchestrator. Delegate substantial execution to sub-agents via the Task tool — "
     "pass them a self-contained brief (no chat history; just what they need). Reserve your own "
     "turns for planning, decision-making, and synthesising results. Do not run long code "
-    "sequences or file-editing loops yourself."
+    "sequences or file-editing loops yourself. "
+    "Prefer ≤3–5 concurrent sub-agents; sequence tasks rather than parallelising unnecessarily."
 )
 
 # Maximum TaskProgressMessage events forwarded to SSE per task (prevents flood on long runs).
@@ -622,7 +644,12 @@ async def run_engine(  # type: ignore[return]
     Yields event dicts. SDK exceptions are wrapped as {"type": "error", "exc": ...}.
     """
     if system_prompt is None:
-        system_prompt = {"type": "preset", "preset": "claude_code", "append": TELEGRAM_NUDGE}
+        system_prompt = {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": TELEGRAM_NUDGE,
+            "exclude_dynamic_sections": True,
+        }
 
     resolved_model = MODELS.get(model, model) if model else MODELS.get(DEFAULT_MODEL, DEFAULT_MODEL)
 
@@ -650,6 +677,7 @@ async def run_engine(  # type: ignore[return]
         system_prompt=system_prompt,
         env=env or {},
         agents=effective_agents,
+        effort=_DEFAULT_EFFORT,  # type: ignore[arg-type]
     )
 
     audit(project_name, "TASK", short(prompt, 300))
@@ -924,7 +952,12 @@ async def run_agent(context, update, prompt: str):
             prompt=effective_prompt,
             session_key=k,
             model=model,
-            system_prompt={"type": "preset", "preset": "claude_code", "append": TELEGRAM_NUDGE},
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": TELEGRAM_NUDGE,
+                "exclude_dynamic_sections": True,
+            },
             env=agent_env,
             resume_session_id=resume_sid,
             **agent_kwargs,

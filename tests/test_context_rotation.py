@@ -92,35 +92,15 @@ def project_dir(tmp_path):
 
 # ─────────────────────────── Part 1: Auto rotation (api_project_chat) ───────
 
-async def test_rotation_triggered_above_threshold(aiohttp_client, tmp_path, project_dir):
-    """context_tokens=70000 > threshold → rotation SSE event sent."""
-    session_id_store = {}
-
+async def test_rotation_not_triggered_below_backstop(aiohttp_client, tmp_path, project_dir):
+    """context_tokens=70000 < 175K backstop → rotation must NOT fire."""
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "hello"}
         yield {"type": "result", "session_id": "sess-abc", "context_tokens": 70000}
 
-    async def fake_rotation_engine(**kwargs):
-        # The haiku summary run — returns a summary
-        yield {"type": "text", "text": "Summary: working on X."}
-        yield {"type": "result", "session_id": "sess-rotate", "context_tokens": 1000}
-
-    call_count = {"n": 0}
-
-    async def dispatch_engine(**kwargs):
-        call_count["n"] += 1
-        model = kwargs.get("model", "sonnet")
-        if model == "haiku":
-            async for e in fake_rotation_engine(**kwargs):
-                yield e
-        else:
-            async for e in fake_engine(**kwargs):
-                yield e
-
-    ctx = _make_ctx(tmp_path, project_dir, run_engine=dispatch_engine)
-    # Ensure rotation is on, threshold correct, and queue is empty (test isolation)
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
     with patch.object(_webapp, "CONTEXT_ROTATION", True), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", 60000), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", 175000), \
          patch.object(_webapp, "_QUEUE", {}):
         app = _make_app(ctx)
         client = await aiohttp_client(app)
@@ -133,20 +113,60 @@ async def test_rotation_triggered_above_threshold(aiohttp_client, tmp_path, proj
         events = await _read_sse(resp)
 
     types = [e.get("type") for e in events]
-    assert "rotation" in types, f"Expected rotation event, got: {types}"
+    assert "rotation" not in types, (
+        f"70K is below 175K backstop — rotation must NOT fire, got: {types}"
+    )
+
+
+async def test_rotation_triggered_above_backstop(aiohttp_client, tmp_path, project_dir):
+    """context_tokens=180000 > 175K backstop → rotation SSE event sent."""
+
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "hello"}
+        yield {"type": "result", "session_id": "sess-abc", "context_tokens": 180000}
+
+    async def fake_rotation_engine(**kwargs):
+        yield {"type": "text", "text": "Summary: working on X."}
+        yield {"type": "result", "session_id": "sess-rotate", "context_tokens": 1000}
+
+    async def dispatch_engine(**kwargs):
+        model = kwargs.get("model", "sonnet")
+        if model == "haiku":
+            async for e in fake_rotation_engine(**kwargs):
+                yield e
+        else:
+            async for e in fake_engine(**kwargs):
+                yield e
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=dispatch_engine)
+    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", 175000), \
+         patch.object(_webapp, "_QUEUE", {}):
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "Do something"},
+            headers=_auth_headers(ctx),
+        )
+        assert resp.status == 200
+        events = await _read_sse(resp)
+
+    types = [e.get("type") for e in events]
+    assert "rotation" in types, f"180K > 175K backstop — expected rotation event, got: {types}"
     rotation_evt = next(e for e in events if e.get("type") == "rotation")
-    assert rotation_evt.get("tokens") == 70000
+    assert rotation_evt.get("tokens") == 180000
 
 
-async def test_rotation_not_triggered_below_threshold(aiohttp_client, tmp_path, project_dir):
-    """context_tokens=30000 < threshold → no rotation event."""
+async def test_rotation_not_triggered_well_below_threshold(aiohttp_client, tmp_path, project_dir):
+    """context_tokens=30000 << 175K backstop → no rotation event."""
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "hi"}
         yield {"type": "result", "session_id": "sess-low", "context_tokens": 30000}
 
     ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
     with patch.object(_webapp, "CONTEXT_ROTATION", True), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", 60000):
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", 175000):
         app = _make_app(ctx)
         client = await aiohttp_client(app)
         resp = await client.post(
@@ -162,14 +182,14 @@ async def test_rotation_not_triggered_below_threshold(aiohttp_client, tmp_path, 
 
 
 async def test_rotation_toggle_off(aiohttp_client, tmp_path, project_dir):
-    """CONTEXT_ROTATION=False → no rotation even above threshold."""
+    """CONTEXT_ROTATION=False → no rotation even above 175K backstop."""
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "hi"}
-        yield {"type": "result", "session_id": "sess-x", "context_tokens": 70000}
+        yield {"type": "result", "session_id": "sess-x", "context_tokens": 180000}
 
     ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
     with patch.object(_webapp, "CONTEXT_ROTATION", False), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", 60000):
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", 175000):
         app = _make_app(ctx)
         client = await aiohttp_client(app)
         resp = await client.post(
@@ -232,7 +252,7 @@ async def test_rotation_failure_does_not_break_main_run(aiohttp_client, tmp_path
     """If _do_session_rotation throws, result event still arrives to client."""
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "working"}
-        yield {"type": "result", "session_id": "sess-ok", "context_tokens": 70000}
+        yield {"type": "result", "session_id": "sess-ok", "context_tokens": 180000}
 
     ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
 
@@ -241,7 +261,7 @@ async def test_rotation_failure_does_not_break_main_run(aiohttp_client, tmp_path
         raise RuntimeError("rotation exploded")
 
     with patch.object(_webapp, "CONTEXT_ROTATION", True), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", 60000), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", 175000), \
          patch.object(_webapp, "_do_session_rotation", bad_rotation):
         app = _make_app(ctx)
         client = await aiohttp_client(app)
@@ -464,7 +484,7 @@ def _tg_binding(project_dir) -> dict:
 async def _call_tg_hook(project_dir, context_tokens, tg_queue, rotation_stub, send_stub):
     """Invoke bot._maybe_rotate_tg with mocked rotation/send and a controlled queue."""
     with patch.object(_webapp, "CONTEXT_ROTATION", True), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", 60000), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", 175000), \
          patch.object(_webapp, "_do_session_rotation", rotation_stub), \
          patch.object(_bot, "_TG_QUEUE", tg_queue), \
          patch.object(_bot, "send", send_stub):
@@ -475,8 +495,8 @@ async def _call_tg_hook(project_dir, context_tokens, tg_queue, rotation_stub, se
         )
 
 
-async def test_tg_rotation_triggered_above_threshold(tmp_path, project_dir):
-    """TG hook: 70K tokens, empty queue → _do_session_rotation called + TG notification sent."""
+async def test_tg_rotation_triggered_above_backstop(tmp_path, project_dir):
+    """TG hook: 180K tokens (above 175K backstop), empty queue → _do_session_rotation called + TG notification sent."""
     calls = []
 
     async def rotation_stub(ctx, session_key, project, cwd):
@@ -484,7 +504,7 @@ async def test_tg_rotation_triggered_above_threshold(tmp_path, project_dir):
         return "summary text"
 
     send_stub = AsyncMock()
-    await _call_tg_hook(project_dir, 70000, {}, rotation_stub, send_stub)
+    await _call_tg_hook(project_dir, 180000, {}, rotation_stub, send_stub)
 
     assert len(calls) == 1, f"Rotation must be called once, got {len(calls)}"
     assert calls[0]["session_key"] == _TG_KEY
@@ -497,12 +517,12 @@ async def test_tg_rotation_triggered_above_threshold(tmp_path, project_dir):
 
 
 async def test_tg_rotation_skipped_when_queue_nonempty(tmp_path, project_dir):
-    """TG hook: 70K tokens but _TG_QUEUE[k] has a pending message → rotation NOT called."""
+    """TG hook: 180K tokens but _TG_QUEUE[k] has a pending message → rotation NOT called."""
     rotation_stub = AsyncMock(return_value="summary")
     send_stub = AsyncMock()
     queue = {_TG_KEY: [{"prompt": "queued message", "message_id": 7}]}
 
-    await _call_tg_hook(project_dir, 70000, queue, rotation_stub, send_stub)
+    await _call_tg_hook(project_dir, 180000, queue, rotation_stub, send_stub)
 
     rotation_stub.assert_not_awaited()
     send_stub.assert_not_awaited()

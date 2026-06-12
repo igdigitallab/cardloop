@@ -765,3 +765,146 @@ def test_project_settings_view_agents_config_absent():
     project = {"project": "proj", "cwd": "/tmp/x", "model": "sonnet"}
     view = _webapp._project_settings_view(project)
     assert view["agents_config"] == {}
+
+
+# ═══════════════════════════════════════════════════════════════
+# spec-029: SDK feature adoption — exclude_dynamic_sections,
+#           effort, minimal tools lists, fan-out cap.
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_default_agents_have_minimal_tools():
+    """All DEFAULT_AGENTS entries must declare an explicit tools list."""
+    for name, agent in bot.DEFAULT_AGENTS.items():
+        assert agent.tools is not None, f"{name}: tools must not be None"
+        assert len(agent.tools) > 0, f"{name}: tools list must not be empty"
+
+
+def test_executor_tools_include_write():
+    """executor agent must include Write/Edit (it writes files)."""
+    executor = bot.DEFAULT_AGENTS["executor"]
+    assert "Write" in executor.tools
+    assert "Edit" in executor.tools
+    assert "Bash" in executor.tools
+
+
+def test_researcher_tools_exclude_write():
+    """researcher agent must NOT have Write/Edit in tools list."""
+    researcher = bot.DEFAULT_AGENTS["researcher"]
+    assert "Write" not in researcher.tools
+    assert "Edit" not in researcher.tools
+
+
+def test_quick_agent_has_low_effort():
+    """quick (haiku) agent must have effort='low' to minimise rate-limit burn."""
+    quick = bot.DEFAULT_AGENTS["quick"]
+    assert quick.effort == "low", f"quick.effort should be 'low', got {quick.effort!r}"
+
+
+def test_agents_have_max_turns():
+    """All DEFAULT_AGENTS entries must declare a maxTurns cap."""
+    for name, agent in bot.DEFAULT_AGENTS.items():
+        assert agent.maxTurns is not None, f"{name}: maxTurns must be set"
+        assert agent.maxTurns > 0, f"{name}: maxTurns must be positive"
+
+
+def test_conductor_prompt_has_fan_out_cap():
+    """CONDUCTOR_PROMPT must mention a sub-agent count cap."""
+    # Any of these phrases indicates the fan-out guidance is present.
+    assert any(phrase in bot.CONDUCTOR_PROMPT for phrase in ["3", "5", "concurrent", "paralleliz"]), (
+        f"CONDUCTOR_PROMPT must contain fan-out cap guidance: {bot.CONDUCTOR_PROMPT!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_engine_passes_effort_to_opts(tmp_path):
+    """run_engine must pass effort to ClaudeAgentOptions."""
+    captured_opts = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured_opts["opts"] = options
+
+        async def query(self, prompt):
+            pass
+
+        async def receive_response(self):
+            return
+            yield
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    with patch.object(bot, "ClaudeSDKClient", FakeClient), \
+         patch.object(bot, "running", {}), \
+         patch.object(bot, "audit", lambda *a: None):
+        async for _ in bot.run_engine(
+            project_name="test",
+            cwd=str(tmp_path),
+            prompt="hi",
+            session_key="c:t",
+            model="sonnet",
+        ):
+            pass
+
+    opts = captured_opts.get("opts")
+    assert opts is not None
+    # effort must be set (non-None); exact value depends on DEFAULT_EFFORT env var.
+    assert opts.effort is not None, f"effort must be set on ClaudeAgentOptions, got None"
+
+
+@pytest.mark.asyncio
+async def test_run_engine_system_prompt_has_exclude_dynamic_sections(tmp_path):
+    """run_engine default system_prompt must include exclude_dynamic_sections=True."""
+    captured_opts = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured_opts["opts"] = options
+
+        async def query(self, prompt):
+            pass
+
+        async def receive_response(self):
+            return
+            yield
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    with patch.object(bot, "ClaudeSDKClient", FakeClient), \
+         patch.object(bot, "running", {}), \
+         patch.object(bot, "audit", lambda *a: None):
+        async for _ in bot.run_engine(
+            project_name="test",
+            cwd=str(tmp_path),
+            prompt="hi",
+            session_key="c:t",
+            model="sonnet",
+        ):
+            pass
+
+    opts = captured_opts.get("opts")
+    assert opts is not None
+    sp = opts.system_prompt
+    assert isinstance(sp, dict), f"system_prompt should be a dict, got {type(sp)}"
+    assert sp.get("exclude_dynamic_sections") is True, (
+        f"exclude_dynamic_sections must be True in default system_prompt, got: {sp}"
+    )
+
+
+def test_build_agents_kwargs_preserves_tools_and_effort(tmp_path):
+    """_build_agents_kwargs model override must preserve tools and effort from the base definition."""
+    kwargs = bot._build_agents_kwargs({"quick_model": "sonnet"})
+    assert "agents" in kwargs
+    quick = kwargs["agents"]["quick"]
+    base_quick = bot.DEFAULT_AGENTS["quick"]
+    assert quick.tools == base_quick.tools, "tools not preserved after model override"
+    assert quick.effort == base_quick.effort, "effort not preserved after model override"
+    assert quick.maxTurns == base_quick.maxTurns, "maxTurns not preserved after model override"

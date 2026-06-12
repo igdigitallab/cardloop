@@ -313,6 +313,8 @@ export interface TurnMetrics {
   cache_read_tokens: number
   fresh_tokens: number
   duration_ms: number | null
+  /** Subscription utilization % (0-100), null when not reported by this turn. */
+  utilization?: number | null
 }
 
 export interface ChatMessage {

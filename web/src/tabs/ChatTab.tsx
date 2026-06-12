@@ -184,6 +184,7 @@ function finalizeStreamingWithMetrics(
             cache_read_tokens: resultEvt.cache_read_tokens ?? 0,
             fresh_tokens: resultEvt.fresh_tokens ?? 0,
             duration_ms: resultEvt.duration_ms ?? null,
+            utilization: resultEvt.utilization ?? null,
           }
         : undefined
     const updated: ChatMessage = { ...last, streaming: false, ts: nowMs, metrics }
@@ -246,6 +247,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   // Spec-021: context rotation UI state
   const [rotateToast, setRotateToast] = useState<string | null>(null)
   const [rotating, setRotating] = useState(false)
+  // Context-token value at the END of the previous completed turn — source for the growth delta.
+  // null until a second turn arrives (no delta shown on the first turn).
+  const [prevContextTokens, setPrevContextTokens] = useState<number | null>(null)
   // Spec-022: cache freshness countdown — unix ms when the last turn completed (null = never)
   const [lastTurnEndMs, setLastTurnEndMs] = useState<number | null>(null)
   // Ticking second for the cache freshness countdown (independent of run ticker)
@@ -291,11 +295,15 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   }, [run])
 
   // Spec-022: tick every second for the cache freshness countdown.
-  // Runs always (while mounted) but only ticks the cacheTick state — cheap re-render.
+  // Only runs while a countdown is meaningful (lastTurnEndMs set and TTL not yet expired).
   useEffect(() => {
+    if (lastTurnEndMs === null) return
+    const ttlMs = CACHE_TTL_MIN * 60 * 1000
+    const remaining = ttlMs - (Date.now() - lastTurnEndMs)
+    if (remaining <= 0) return
     const id = setInterval(() => setCacheTick(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [])
+  }, [lastTurnEndMs])
 
   function histToMessages(items: HistoryMessage[]): ChatMessage[] {
     return items.map((m, i) => ({
@@ -315,6 +323,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setQueueLen(0)
     busActiveRef.current = false
     setContextTokens(null)
+    setPrevContextTokens(null)
     setAttachments([])
 
     Promise.all([
@@ -408,6 +417,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setQueueLen(0)
     busActiveRef.current = false
     setContextTokens(null)
+    setPrevContextTokens(null)
     setAttachments([])
     setCtxRefreshKey(k => k + 1)
     api.sessionHistory(projectId)
@@ -500,7 +510,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           if (evt.type === 'result') {
             const evtAny = evt as unknown as Record<string, unknown>
             if (typeof evtAny.context_tokens === 'number' && (evtAny.context_tokens as number) > 0) {
-              setContextTokens(evtAny.context_tokens as number)
+              // Snapshot the prior value before overwriting — feeds the growth delta badge.
+              setContextTokens(prev => { setPrevContextTokens(prev); return evtAny.context_tokens as number })
             }
             // Spec-022: reset cache freshness countdown on every completed turn
             setLastTurnEndMs(now)
@@ -510,6 +521,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           const evtRaw = evt as unknown as Record<string, any>
           if (evtRaw.type === 'rotation') {
             setContextTokens(0)
+            setPrevContextTokens(null)
             const msg = typeof evtRaw.message === 'string' ? evtRaw.message : 'Session rotated'
             setRotateToast(msg)
             setTimeout(() => setRotateToast(null), 5000)
@@ -642,19 +654,167 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             setTimeout(() => textareaRef.current?.focus(), 0)
           }}
         />
+        {/* Session health row — always visible when there are messages */}
         {messages.length > 0 && (() => {
           const real = contextTokens != null && contextTokens > 0
           const tokens = real ? contextTokens! : estimateTokens(messages)
-          const lvl = tokens >= 200_000 ? 'high' : tokens >= 120_000 ? 'mid' : 'low'
-          const lvlHint =
-            lvl === 'high' ? ' · context bloated — /reset' :
-            lvl === 'mid' ? ' · context growing' : ''
-          const title = real
-            ? `Actual session context size: ${tokens.toLocaleString('en')} tokens (full prompt is sent to the model each turn). Base floor ~11–14K — Claude Code system prompt + tools, remains even after /reset. 🟡 from 120K · 🔴 from 200K.`
+
+          // Token color scale: yellow at 120K, red at 200K (consistent with progress bar)
+          const tokenColor =
+            tokens >= 200_000 ? 'var(--color-red, #ef4444)' :
+            tokens >= 120_000 ? 'var(--color-yellow, #eab308)' :
+            'var(--color-muted, #9ca3af)'
+
+          // Progress bar fill fraction (0..1), capped at 1
+          const fillFrac = Math.min(tokens / 200_000, 1)
+          const barColor =
+            fillFrac >= 1 ? 'var(--color-red, #ef4444)' :
+            fillFrac >= 0.6 ? 'var(--color-yellow, #eab308)' :
+            'var(--color-green, #22c55e)'
+
+          // Cache warm/cold — timer-based but overridden by last turn's real cache_hit_pct
+          void cacheTick
+          const ttlMs = CACHE_TTL_MIN * 60 * 1000
+          let isWarm = false
+          let remainingSec = 0
+          if (lastTurnEndMs !== null) {
+            remainingSec = Math.max(0, (ttlMs - (Date.now() - lastTurnEndMs)) / 1000)
+            isWarm = remainingSec > 0
+          }
+          // Ground-truth override: if the last assistant turn shows a cold/low cache hit,
+          // treat as cold regardless of the timer (server-side cache may have been reset).
+          const lastAssistantMetrics = [...messages].reverse().find(
+            m => m.role === 'assistant' && m.metrics != null
+          )?.metrics
+          if (lastAssistantMetrics != null && lastAssistantMetrics.cache_hit_pct < CACHE_COLD_PCT) {
+            isWarm = false
+          }
+          const cacheLabel = isWarm
+            ? `♨️ ${fmtCountdown(remainingSec)}`
+            : '⚪ cold'
+          const cacheTip = isWarm
+            ? `Cache warm — approx. ${fmtCountdown(remainingSec)} remaining. Warm ≈ next turn cheap; cold ≈ full re-read.`
+            : 'Cache cold — next turn will re-read the full prompt at full price.'
+
+          // Wrap & reset button prominence depends on token level
+          const isProminent = tokens >= 120_000
+          const wrapBtnStyle: React.CSSProperties = isProminent
+            ? {
+                fontSize: 11, padding: '1px 6px', cursor: rotating ? 'wait' : 'pointer',
+                background: 'var(--bg-card)', border: `1px solid ${tokens >= 200_000 ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)'}`,
+                borderRadius: 4,
+                color: tokens >= 200_000 ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)',
+                fontWeight: 600,
+              }
+            : {
+                fontSize: 11, padding: '1px 6px', cursor: rotating ? 'wait' : 'pointer',
+                background: 'transparent', border: '1px solid var(--border)',
+                borderRadius: 4, color: 'var(--color-muted, #9ca3af)',
+              }
+
+          // Last turn utilization (null when not present)
+          const utilization = lastAssistantMetrics?.utilization ?? null
+
+          const tokenTip = real
+            ? `Actual session context size: ${tokens.toLocaleString('en')} tokens (full prompt is sent to the model each turn). There is an incompressible base floor — Claude Code system prompt + tools + CLAUDE.md + memory — that remains even after /reset. Yellow from 120K · Red from 200K.`
             : t['chat.token_count_rough']
+
+          // Context growth since the previous completed turn — only on real (server) numbers.
+          // null when no prior turn exists (first turn / right after a reset).
+          const deltaTokens = real && prevContextTokens != null ? tokens - prevContextTokens : null
+          const deltaLabel = deltaTokens != null && deltaTokens !== 0
+            ? `${deltaTokens > 0 ? '+' : '−'}${formatTokens(Math.abs(deltaTokens))}`
+            : null
+
           return (
-            <span className={`chat-stats-inline lvl-${lvl}`} title={title}>
-              💬 {messages.length} · {real ? '' : '~'}{formatTokens(tokens)}{lvlHint}
+            <span className="chat-session-health" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0,
+            }}>
+              {/* Message count */}
+              <span style={{ color: 'var(--color-muted, #9ca3af)' }}>
+                💬 {messages.length}
+              </span>
+              {/* Progress bar */}
+              <span
+                title={tokenTip}
+                style={{
+                  display: 'inline-block', width: 40, height: 5,
+                  background: 'var(--border, #374151)', borderRadius: 3,
+                  overflow: 'hidden', cursor: 'default', flexShrink: 0,
+                }}
+              >
+                <span style={{
+                  display: 'block', height: '100%',
+                  width: `${Math.round(fillFrac * 100)}%`,
+                  background: barColor,
+                  borderRadius: 3,
+                  transition: 'width 0.3s, background 0.3s',
+                }} />
+              </span>
+              {/* Token count */}
+              <span style={{ color: tokenColor, cursor: 'default' }} title={tokenTip}>
+                {real ? '' : '~'}{formatTokens(tokens)}
+              </span>
+              {/* Growth delta since the previous turn */}
+              {deltaLabel != null && (
+                <span
+                  style={{ color: 'var(--color-muted, #9ca3af)', cursor: 'default', fontSize: 11 }}
+                  title={`Context change since the previous turn: ${deltaLabel} tokens`}
+                >
+                  {deltaLabel}
+                </span>
+              )}
+              {/* Cache countdown */}
+              {(lastTurnEndMs !== null || lastAssistantMetrics != null) && (
+                <span style={{
+                  color: isWarm ? 'var(--color-green, #22c55e)' : 'var(--color-muted, #9ca3af)',
+                  cursor: 'default',
+                }} title={cacheTip}>
+                  {cacheLabel}
+                </span>
+              )}
+              {/* Wrap & reset — always present */}
+              <button
+                className="btn btn-sm"
+                style={wrapBtnStyle}
+                disabled={rotating || streaming}
+                title="Wrap & reset (summarize + fresh session)"
+                onClick={async () => {
+                  setRotating(true)
+                  try {
+                    const res = await fetch(`/api/projects/${projectId}/rotate`, {
+                      method: 'POST', credentials: 'include',
+                    })
+                    const data = await res.json() as Record<string, unknown>
+                    if (!res.ok) {
+                      setRotateToast(`Rotate failed: ${data.error ?? res.statusText}`)
+                    } else if (data.rotated) {
+                      setContextTokens(0)
+                      setPrevContextTokens(null)
+                      setRotateToast('Session rotated — handoff saved, fresh start')
+                    } else {
+                      setRotateToast(`Not rotated: ${data.reason ?? 'unknown reason'}`)
+                    }
+                  } catch (e: unknown) {
+                    setRotateToast(e instanceof Error ? e.message : String(e))
+                  } finally {
+                    setRotating(false)
+                    setTimeout(() => setRotateToast(null), 5000)
+                  }
+                }}
+              >
+                {rotating ? '…' : '♻ Wrap & reset'}
+              </button>
+              {/* Utilization — shown when available */}
+              {utilization != null && (
+                <span
+                  style={{ color: 'var(--color-muted, #9ca3af)', cursor: 'default' }}
+                  title={`Subscription utilization this turn: ${utilization}%`}
+                >
+                  ⏱ {utilization}%
+                </span>
+              )}
             </span>
           )
         })()}
@@ -676,85 +836,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             ))}
           </select>
         </div>
-        {/* Spec-021: context rotation indicator + wrap & reset button */}
-        {contextTokens != null && contextTokens > 0 && (() => {
-          const isRed = contextTokens > 60000
-          const isYellow = !isRed && contextTokens > 40000
-          if (!isYellow && !isRed) return null
-          const colorClass = isRed ? 'text-red-500' : 'text-yellow-500'
-          const tip = isRed
-            ? `Heavy context (${Math.round(contextTokens / 1000)}K tokens) — consider wrap & reset`
-            : `Context growing (${Math.round(contextTokens / 1000)}K tokens)`
-          return (
-            <span className={`chat-ctx-indicator ${colorClass}`} title={tip} style={{
-              display: 'inline-flex', alignItems: 'center', gap: 4,
-              fontSize: 12, marginLeft: 4, whiteSpace: 'nowrap',
-              color: isRed ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)',
-            }}>
-              <span>{Math.round(contextTokens / 1000)}K</span>
-              {isRed && (
-                <button
-                  className="btn btn-sm"
-                  style={{
-                    fontSize: 11, padding: '1px 6px', cursor: rotating ? 'wait' : 'pointer',
-                    background: 'var(--bg-card)', border: '1px solid var(--border)',
-                    borderRadius: 4, color: 'var(--color-red, #ef4444)',
-                  }}
-                  disabled={rotating || streaming}
-                  title="Wrap & reset — summarise session via haiku and start fresh"
-                  onClick={async () => {
-                    setRotating(true)
-                    try {
-                      const res = await fetch(`/api/projects/${projectId}/rotate`, {
-                        method: 'POST', credentials: 'include',
-                      })
-                      const data = await res.json() as Record<string, unknown>
-                      if (!res.ok) {
-                        setRotateToast(`Rotate failed: ${data.error ?? res.statusText}`)
-                      } else if (data.rotated) {
-                        setContextTokens(0)
-                        setRotateToast('Session rotated — handoff saved, fresh start')
-                      } else {
-                        setRotateToast(`Not rotated: ${data.reason ?? 'unknown reason'}`)
-                      }
-                    } catch (e: unknown) {
-                      setRotateToast(e instanceof Error ? e.message : String(e))
-                    } finally {
-                      setRotating(false)
-                      setTimeout(() => setRotateToast(null), 5000)
-                    }
-                  }}
-                >
-                  {rotating ? '…' : '♻ Wrap & reset'}
-                </button>
-              )}
-            </span>
-          )
-        })()}
-
-        {/* Spec-022: cache freshness countdown */}
-        {(() => {
-          // cacheTick drives re-renders every second
-          void cacheTick
-          const ttlMs = CACHE_TTL_MIN * 60 * 1000
-          if (lastTurnEndMs === null) return null
-          const elapsedMs = Date.now() - lastTurnEndMs
-          const remainingSec = Math.max(0, (ttlMs - elapsedMs) / 1000)
-          const isWarm = remainingSec > 0
-          return (
-            <span
-              title="Estimate — cache state isn't exposed by the API. Warm ≈ next turn cheap; cold ≈ next turn re-reads the full prompt at full price."
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 3,
-                fontSize: 12, marginLeft: 6, whiteSpace: 'nowrap',
-                color: isWarm ? 'var(--color-green, #22c55e)' : 'var(--color-muted, #9ca3af)',
-                cursor: 'default',
-              }}
-            >
-              {isWarm ? `♨️ cache ${fmtCountdown(remainingSec)}` : '⚪ cache cold'}
-            </span>
-          )
-        })()}
       </div>
 
       {/* Session context panel */}
@@ -832,7 +913,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                     ? `${Math.round(m.prompt_tokens / 1000)}K`
                     : `${m.prompt_tokens}`
                   const parts: string[] = []
-                  if (msg.ts) parts.push(fmtHHMM(msg.ts))
                   if (durStr) parts.push(`⏱ ${durStr}`)
                   parts.push(`${cacheEmoji ? cacheEmoji + ' ' : ''}cache ${m.cache_hit_pct}%`)
                   parts.push(`${ptK}`)

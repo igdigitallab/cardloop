@@ -56,9 +56,10 @@ _AUTO_RESUME_ON_RATE_LIMIT = int(os.environ.get("AUTO_RESUME_ON_RATE_LIMIT", "1"
 _AUTO_RESUME_MAX = int(os.environ.get("AUTO_RESUME_MAX", "3"))
 
 # ─────────────────────────── Context Rotation (Spec 021) ───────────────────────────
-# CONTEXT_ROTATE_AT: token count that triggers auto-rotation (default 60 000).
+# CONTEXT_ROTATE_AT: token count that triggers auto-rotation (default 175 000).
+# Acts as a single high-water safety backstop near the 200K hard wall.
 # CONTEXT_ROTATION=1 enables auto-rotation; set to 0 to disable globally.
-CONTEXT_ROTATE_AT = int(os.environ.get("CONTEXT_ROTATE_AT", "60000"))
+CONTEXT_ROTATE_AT = int(os.environ.get("CONTEXT_ROTATE_AT", "175000"))
 CONTEXT_ROTATION = os.environ.get("CONTEXT_ROTATION", "1") == "1"
 
 # Prompt sent to haiku to produce a handoff summary of the current session.

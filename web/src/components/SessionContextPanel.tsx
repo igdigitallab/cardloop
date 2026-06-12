@@ -45,7 +45,7 @@ export function SessionContextPanel({ projectId, refreshKey }: Props) {
       >
         <span className="ctx-panel-icon">📎</span>
         <span className="ctx-panel-label">
-          Context: {totalFiles} file{totalFiles === 1 ? '' : 's'}
+          Touched: {totalFiles} file{totalFiles === 1 ? '' : 's'}
           {ctx.commands.length > 0 && `, ${ctx.commands.length} command${ctx.commands.length === 1 ? '' : 's'}`}
         </span>
         <span className="ctx-panel-chevron">{open ? '▲' : '▼'}</span>
