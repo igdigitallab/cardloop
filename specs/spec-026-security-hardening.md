@@ -2,8 +2,12 @@
 
 **Project:** claude-ops
 **Date:** 2026-06-11
-**Status:** [ ] Draft / [ ] Ready / [x] In progress / [ ] Done
-**Progress:** Phase 0 deployed & smoke-tested (2026-06-11); Phase 1 firewall live + persistent (`claude-ops-firewall.service`); Phases 2 (TOTP) & 3 (vault) pending operator go.
+**Status:** [ ] Draft / [ ] Ready / [ ] In progress / [x] Done (deployed; Phase 2 awaiting operator enrollment)
+**Progress (2026-06-12):** ALL phases built, committed, pushed, deployed & verified live.
+- Phase 0 — login rate-limit by real IP + no self-lockout + empty-password fail-fast + `.env` 0600.
+- Phase 1 — cockpit `:8787` firewalled to the CF tunnel (`claude-ops-firewall.service`, persistent).
+- Phase 2 — TOTP (stdlib, lockout-safe: enforced only once active) + login UI + 🔐 Two-factor enrollment panel. **Operator action remaining:** enable it in cockpit → 🔐 Vault → Two-factor.
+- Phase 3 — built-in Fernet secret store + `secret` CLI (on PATH `/usr/local/bin/secret`) + `/api/secrets` + global 🔐 Vault UI + `secret:` resolver. Migration done: 83 secrets imported; `Credentials.md` gutted to an index (0 plaintext); original kept as encrypted `Credentials.md.enc`. Global `~/CLAUDE.md` quick-rules now use `$(secret get …)`.
 
 ---
 
