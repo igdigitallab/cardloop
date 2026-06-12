@@ -175,6 +175,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [deferDatetime, setDeferDatetime] = useState('')
   const [deferSubmitting, setDeferSubmitting] = useState(false)
   const [deferToast, setDeferToast] = useState<string | null>(null)
+  // Spec-021: context rotation UI state
+  const [rotateToast, setRotateToast] = useState<string | null>(null)
+  const [rotating, setRotating] = useState(false)
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
 
@@ -421,6 +424,15 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
               setContextTokens(evtAny.context_tokens as number)
             }
           }
+          // Spec-021: rotation event — session was cleared, reset context counter
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const evtRaw = evt as unknown as Record<string, any>
+          if (evtRaw.type === 'rotation') {
+            setContextTokens(0)
+            const msg = typeof evtRaw.message === 'string' ? evtRaw.message : 'Session rotated'
+            setRotateToast(msg)
+            setTimeout(() => setRotateToast(null), 5000)
+          }
 
           setMessages(prev => {
             switch (evt.type) {
@@ -581,6 +593,61 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             ))}
           </select>
         </div>
+        {/* Spec-021: context rotation indicator + wrap & reset button */}
+        {contextTokens != null && contextTokens > 0 && (() => {
+          const isRed = contextTokens > 60000
+          const isYellow = !isRed && contextTokens > 40000
+          if (!isYellow && !isRed) return null
+          const colorClass = isRed ? 'text-red-500' : 'text-yellow-500'
+          const tip = isRed
+            ? `Heavy context (${Math.round(contextTokens / 1000)}K tokens) — consider wrap & reset`
+            : `Context growing (${Math.round(contextTokens / 1000)}K tokens)`
+          return (
+            <span className={`chat-ctx-indicator ${colorClass}`} title={tip} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              fontSize: 12, marginLeft: 4, whiteSpace: 'nowrap',
+              color: isRed ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)',
+            }}>
+              <span>{Math.round(contextTokens / 1000)}K</span>
+              {isRed && (
+                <button
+                  className="btn btn-sm"
+                  style={{
+                    fontSize: 11, padding: '1px 6px', cursor: rotating ? 'wait' : 'pointer',
+                    background: 'var(--bg-card)', border: '1px solid var(--border)',
+                    borderRadius: 4, color: 'var(--color-red, #ef4444)',
+                  }}
+                  disabled={rotating || streaming}
+                  title="Wrap & reset — summarise session via haiku and start fresh"
+                  onClick={async () => {
+                    setRotating(true)
+                    try {
+                      const res = await fetch(`/api/projects/${projectId}/rotate`, {
+                        method: 'POST', credentials: 'include',
+                      })
+                      const data = await res.json() as Record<string, unknown>
+                      if (!res.ok) {
+                        setRotateToast(`Rotate failed: ${data.error ?? res.statusText}`)
+                      } else if (data.rotated) {
+                        setContextTokens(0)
+                        setRotateToast('Session rotated — handoff saved, fresh start')
+                      } else {
+                        setRotateToast(`Not rotated: ${data.reason ?? 'unknown reason'}`)
+                      }
+                    } catch (e: unknown) {
+                      setRotateToast(e instanceof Error ? e.message : String(e))
+                    } finally {
+                      setRotating(false)
+                      setTimeout(() => setRotateToast(null), 5000)
+                    }
+                  }}
+                >
+                  {rotating ? '…' : '♻ Wrap & reset'}
+                </button>
+              )}
+            </span>
+          )
+        })()}
       </div>
 
       {/* Session context panel */}
@@ -857,6 +924,18 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           boxShadow: '0 4px 16px rgba(0,0,0,0.15)', fontSize: 13, zIndex: 9999,
         }}>
           {deferToast}
+        </div>
+      )}
+
+      {/* Spec-021: Rotation toast */}
+      {rotateToast && (
+        <div style={{
+          position: 'fixed', bottom: deferToast ? 72 : 24, right: 24,
+          padding: '10px 18px', background: 'var(--bg-card)',
+          border: '1px solid var(--border)', borderRadius: 8,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.15)', fontSize: 13, zIndex: 9999,
+        }}>
+          ♻ {rotateToast}
         </div>
       )}
     </div>

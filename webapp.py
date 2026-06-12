@@ -49,6 +49,18 @@ _AUTO_RESUME_ON_RATE_LIMIT = int(os.environ.get("AUTO_RESUME_ON_RATE_LIMIT", "1"
 # Counted via auto_resume_count on the deferred record.
 _AUTO_RESUME_MAX = int(os.environ.get("AUTO_RESUME_MAX", "3"))
 
+# ─────────────────────────── Context Rotation (Spec 021) ───────────────────────────
+# CONTEXT_ROTATE_AT: token count that triggers auto-rotation (default 60 000).
+# CONTEXT_ROTATION=1 enables auto-rotation; set to 0 to disable globally.
+CONTEXT_ROTATE_AT = int(os.environ.get("CONTEXT_ROTATE_AT", "60000"))
+CONTEXT_ROTATION = os.environ.get("CONTEXT_ROTATION", "1") == "1"
+
+# Prompt sent to haiku to produce a handoff summary of the current session.
+ROTATION_SUMMARY_PROMPT = (
+    "Summarize this session for handoff: active tasks + their state, key decisions, "
+    "important file paths, unresolved questions. Be dense, ≤500 words, English."
+)
+
 # Strong references for long-lived background tasks created via asyncio.create_task.
 # Prevents GC from collecting tasks before they complete (Python docs warning).
 _BG_TASKS: set = set()
@@ -2922,6 +2934,90 @@ async def _move_card_after_run(
         print(f"[_run_card] error moving card {card_id}: {e}")
 
 
+async def _notify_tg_rotation(ctx: dict, session_key: str, tokens: int) -> None:
+    """Sends a TG message notifying that the session was auto-rotated. Non-critical."""
+    try:
+        ptb = ctx.get("ptb_app")
+        if ptb is None:
+            return
+        parts = session_key.split(":", 1)
+        chat_id = int(parts[0])
+        thread_id = int(parts[1]) if len(parts) > 1 and parts[1] not in ("0", "") else None
+        k = round(tokens / 1000)
+        await ptb.bot.send_message(
+            chat_id,
+            f"♻️ Session rotated at {k}K tokens — handoff saved to memory.",
+            message_thread_id=thread_id,
+        )
+    except Exception as e:
+        print(f"[rotation] TG notify failed: {e}")
+
+
+async def _do_session_rotation(ctx: dict, session_key: str, project: dict, cwd: str) -> "str | None":
+    """Summarise current session via haiku, save handoff, clear session.
+
+    Returns summary text on success, None on failure or if rotation is disabled.
+    Entire function is wrapped in try/except — rotation failure never breaks a run.
+    """
+    if not CONTEXT_ROTATION:
+        return None
+    try:
+        run_engine = ctx.get("run_engine")
+        if run_engine is None:
+            print("[rotation] run_engine not available — skipping rotation")
+            return None
+
+        name = project.get("name", "unknown")
+        rotate_session_key = session_key + ":rotate-summary"
+        resume_sid = ctx["sessions"].get(session_key)
+
+        # Collect haiku summary — uses a separate session_key to avoid touching the main lock
+        summary_parts: list[str] = []
+        async for event in run_engine(
+            project_name=name,
+            cwd=cwd,
+            prompt=ROTATION_SUMMARY_PROMPT,
+            session_key=rotate_session_key,
+            model="haiku",
+            resume_session_id=resume_sid,
+        ):
+            if event.get("type") == "text":
+                summary_parts.append(event["text"])
+
+        summary = "\n".join(summary_parts).strip() or "(no summary produced)"
+
+        # Save handoff file to <cwd>/.claude-ops/memory/session-handoff.md
+        mem_dir = Path(cwd) / ".claude-ops" / "memory"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        handoff_content = (
+            f"---\ntype: handoff\ncreated: {now_str}\n---\n\n"
+            f"# Session Handoff\n\n{summary}\n"
+        )
+        handoff_path = mem_dir / "session-handoff.md"
+        handoff_path.write_text(handoff_content, encoding="utf-8")
+
+        # Rebuild MEMORY.md index (reuse existing helper)
+        try:
+            _memory_reindex(cwd)
+        except Exception as idx_e:
+            print(f"[rotation] memory reindex failed: {idx_e}")
+
+        # Clear the main session — next turn starts fresh
+        ctx["sessions"].pop(session_key, None)
+        try:
+            ctx["save_sessions"]()
+        except Exception as ss_e:
+            print(f"[rotation] save_sessions failed: {ss_e}")
+
+        print(f"[rotation] session rotated for {session_key} — handoff saved")
+        return summary
+
+    except Exception as e:
+        print(f"[rotation] failed: {e}")
+        return None
+
+
 async def _notify_tg(ctx: AppCtx, session_key: str, prompt: str, ok: bool) -> None:
     """Sends a ping to the TG topic about card completion. Non-critical — errors are logged."""
     try:
@@ -2980,6 +3076,19 @@ async def _run_card(
     # In worktree mode the agent works in wt_path, otherwise in cwd
     effective_cwd = wt_info["wt_path"] if (run_mode == "worktree" and wt_info) else cwd
 
+    # Spec-021 Part 2: cwd-lock — prevent two runs in the same working directory
+    # (different session_keys, same cwd — e.g. two projects pointing to same dir).
+    _cwd_lock_key = effective_cwd
+    cwd_locks = ctx.get("cwd_locks")
+    if cwd_locks is None:
+        # Lazy init if start() hasn't added it yet
+        ctx["cwd_locks"] = {}
+        cwd_locks = ctx["cwd_locks"]
+    if cwd_locks.get(_cwd_lock_key):
+        print(f"[_run_card] cwd locked by another run: {_cwd_lock_key} — skipping card {card_id}")
+        return
+    cwd_locks[_cwd_lock_key] = True
+
     answer_parts: list[str] = []
     exc_info: str | None = None
     ok = False
@@ -2999,7 +3108,9 @@ async def _run_card(
                 "run_id": card_id,
             })
 
-            resume_sid = ctx["sessions"].get(session_key)
+            # Spec-021 Part 2: cards always start fresh — never resume the shared chat session.
+            # This isolates card context from chat history (and from other cards).
+            resume_sid = None
             # Project secrets — only from cwd of the main project (not worktree), isolated by cwd
             project_secrets = _secrets_read(cwd)
             agents_config = project.get("agents_config") or {}
@@ -3028,10 +3139,9 @@ async def _run_card(
                     })
                 elif etype == "result":
                     _card_last_result_event = event  # Phase D: capture for auto-resume
-                    if event.get("session_id"):
-                        ctx["sessions"][session_key] = event["session_id"]
-                        ctx["save_sessions"]()
-                        _inherit_label_from_free_chat(ctx, session_key, event["session_id"])
+                    # Spec-021 Part 2: do NOT write card session_id back to ctx["sessions"].
+                    # Cards are isolated — each card run is its own fresh session.
+                    pass
                 elif etype == "error":
                     raise event["exc"]
 
@@ -3095,6 +3205,8 @@ async def _run_card(
         })
         # lock is released UNCONDITIONALLY, even if sidecar write/move failed
         ctx["running"].pop(session_key, None)
+        # Spec-021 Part 2: release cwd-lock unconditionally
+        ctx.get("cwd_locks", {}).pop(_cwd_lock_key, None)
 
     # D: after releasing the lock — drain the queue (next card, if any)
     try:
@@ -5522,6 +5634,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
             print(f"[api_project_chat] client disconnected ({type(exc).__name__}), task continues in background")
 
     _chat_last_result_event: "dict | None" = None  # Phase D: track for auto-resume
+    # Spec-021: once-per-turn guard so we rotate at most once per run
+    _rotated_this_turn = False
 
     try:
         resume_sid = ctx["sessions"].get(session_key)
@@ -5553,7 +5667,32 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     ctx["sessions"][session_key] = sid
                     ctx["save_sessions"]()
                     _inherit_label_from_free_chat(ctx, session_key, sid)
-                await _send({"type": "result", "context_tokens": event.get("context_tokens", 0)})
+                ctx_tokens = event.get("context_tokens", 0)
+                await _send({"type": "result", "context_tokens": ctx_tokens})
+                # Spec-021: auto session rotation when context exceeds threshold
+                if (
+                    CONTEXT_ROTATION
+                    and ctx_tokens > CONTEXT_ROTATE_AT
+                    and not _rotated_this_turn
+                ):
+                    # Skip rotation if the card queue is draining (avoid mid-drain session clear)
+                    queue_busy = bool(_QUEUE.get(session_key))
+                    if queue_busy:
+                        print(f"[rotation] skipping — card queue not empty for {session_key}")
+                    else:
+                        _rotated_this_turn = True
+                        try:
+                            summary = await _do_session_rotation(ctx, session_key, project, cwd)
+                            if summary is not None:
+                                k = round(ctx_tokens / 1000)
+                                await _send({
+                                    "type": "rotation",
+                                    "tokens": ctx_tokens,
+                                    "message": f"Session rotated at {k}K tokens — handoff saved",
+                                })
+                                await _notify_tg_rotation(ctx, session_key, ctx_tokens)
+                        except Exception as _rot_exc:
+                            print(f"[rotation] post-result rotation error: {_rot_exc}")
             elif etype == "error":
                 exc = event.get("exc")
                 await _send({"type": "error", "error": str(exc) if exc else "unknown error"})
@@ -5632,6 +5771,45 @@ async def api_project_running(req: web.Request) -> web.Response:
         return web.json_response({"error": "project not found"}, status=404)
     session_key = project["tg_thread"]
     return web.json_response({"running": ctx["running"].get(session_key) is not None})
+
+
+# ─────────────────────────── Spec-021: Manual session rotate endpoint ────────
+
+async def api_project_rotate(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/rotate — force session rotation (manual wrap & reset).
+
+    Always runs rotation regardless of token threshold.
+    Returns {ok, rotated, reason?, summary_preview?}.
+    409 if project is busy (run in progress).
+    """
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    session_key = project["tg_thread"]
+    cwd = project["cwd"]
+
+    # Refuse if project is currently running
+    if ctx["running"].get(session_key) is not None:
+        return web.json_response({"error": "project busy"}, status=409)
+
+    # No active session — nothing to rotate
+    if ctx["sessions"].get(session_key) is None:
+        return web.json_response({"ok": True, "rotated": False, "reason": "no active session"})
+
+    # Force rotation
+    try:
+        summary = await _do_session_rotation(ctx, session_key, project, cwd)
+    except Exception as e:
+        return web.json_response({"error": f"rotation failed: {e}"}, status=500)
+
+    if summary is None:
+        return web.json_response({"ok": True, "rotated": False, "reason": "rotation disabled or run_engine unavailable"})
+
+    preview = summary[:200] if summary else ""
+    return web.json_response({"ok": True, "rotated": True, "summary_preview": preview})
 
 
 # ─────────────────────────── Session context (session-context) ─────────────
@@ -6825,6 +7003,8 @@ async def start(ptb_app, ctx: dict) -> None:
         _schedules._schedules_init(ctx)
         # Spec-020: Deferred Runs — initialise file path
         _deferred_init(ctx)
+        # Spec-021: cwd-lock dict — prevents simultaneous runs in the same working directory
+        ctx["cwd_locks"] = {}
         # Seed built-in default prompt templates (merge, never overwrite operator entries)
         _seed_default_prompts(ctx)
 
@@ -6881,6 +7061,8 @@ async def start(ptb_app, ctx: dict) -> None:
         # C1-stop: interrupt current agent run
         app.router.add_post("/api/projects/{id}/chat/stop", api_project_chat_stop)
         app.router.add_get("/api/projects/{id}/running", api_project_running)
+        # Spec-021: manual session rotation (wrap & reset)
+        app.router.add_post("/api/projects/{id}/rotate", api_project_rotate)
         # Agent skills: global (~/.claude/skills/) + project (<cwd>/.claude/skills/)
         app.router.add_get("/api/projects/{id}/skills", api_project_skills)
         # Incident scanner: manual run + active err-card count
