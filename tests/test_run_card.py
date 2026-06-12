@@ -312,3 +312,158 @@ async def test_run_card_fail_moves_to_failed(tmp_path):
 
     # running-замок снят
     assert "1001:42" not in ctx["running"]
+
+
+# ─────────────────────────── Spec-029 item 3: structured output ───────────────────────────
+
+
+async def test_run_card_structured_output_used_when_valid(tmp_path, monkeypatch):
+    """When STRUCTURED_CARDS=1 and structured_output is valid, sidecar uses structured summary."""
+    import webapp
+    monkeypatch.setattr(webapp, "STRUCTURED_CARDS", True)
+
+    from webapp import _run_card
+
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    card = {"id": "aabbcc", "text": "Structured task"}
+    _setup_board(cwd, "aabbcc", "in_progress")
+
+    structured = {
+        "summary": "Implemented the feature successfully",
+        "status": "done",
+        "changes": ["src/main.py", "tests/test_main.py"],
+    }
+
+    async def engine_with_structured(**kwargs):
+        yield {"type": "text", "text": "Prose answer from agent"}
+        yield {
+            "type": "result",
+            "session_id": "sess-123",
+            "structured_output": structured,
+        }
+
+    ctx = {
+        "sessions": {},
+        "running": {"1001:42": True},
+        "DATA": data_dir,
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "run_engine": engine_with_structured,
+        "ptb_app": None,
+    }
+    project = {"cwd": str(cwd), "name": "proj", "model": "sonnet"}
+
+    class FakeApp:
+        def __getitem__(self, k):
+            return None
+
+    await _run_card(ctx, FakeApp(), project, card, "1001:42")
+
+    sidecar = data_dir / "runs" / "aabbcc.md"
+    content = sidecar.read_text(encoding="utf-8")
+    # Structured summary must appear; raw prose must NOT replace it
+    assert "Implemented the feature successfully" in content, "Structured summary should be in sidecar"
+    assert "[DONE]" in content, "Status prefix should appear"
+    assert "src/main.py" in content, "Changes list should appear"
+    # Card still moves to review (ok=True, exception-based)
+    _, _, cols = _load_board(str(cwd))
+    assert any(c["id"] == "aabbcc" for c in cols["review"])
+
+
+async def test_run_card_structured_output_absent_falls_back_to_prose(tmp_path, monkeypatch):
+    """When STRUCTURED_CARDS=1 but structured_output is absent/None, prose path is used."""
+    import webapp
+    monkeypatch.setattr(webapp, "STRUCTURED_CARDS", True)
+
+    from webapp import _run_card
+
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    card = {"id": "aabbcc", "text": "Fallback task"}
+    _setup_board(cwd, "aabbcc", "in_progress")
+
+    async def engine_no_structured(**kwargs):
+        yield {"type": "text", "text": "Plain prose answer"}
+        # structured_output absent from result event (or None)
+        yield {"type": "result", "session_id": "sess-456", "structured_output": None}
+
+    ctx = {
+        "sessions": {},
+        "running": {"1001:42": True},
+        "DATA": data_dir,
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "run_engine": engine_no_structured,
+        "ptb_app": None,
+    }
+    project = {"cwd": str(cwd), "name": "proj", "model": "sonnet"}
+
+    class FakeApp:
+        def __getitem__(self, k):
+            return None
+
+    await _run_card(ctx, FakeApp(), project, card, "1001:42")
+
+    sidecar = data_dir / "runs" / "aabbcc.md"
+    content = sidecar.read_text(encoding="utf-8")
+    # Prose path used
+    assert "Plain prose answer" in content, "Prose fallback should appear in sidecar"
+    _, _, cols = _load_board(str(cwd))
+    assert any(c["id"] == "aabbcc" for c in cols["review"])
+
+
+async def test_run_card_structured_output_malformed_falls_back_to_prose(tmp_path, monkeypatch):
+    """When STRUCTURED_CARDS=1 but structured_output is malformed, prose path is used."""
+    import webapp
+    monkeypatch.setattr(webapp, "STRUCTURED_CARDS", True)
+
+    from webapp import _run_card
+
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    card = {"id": "aabbcc", "text": "Malformed structured task"}
+    _setup_board(cwd, "aabbcc", "in_progress")
+
+    async def engine_malformed(**kwargs):
+        yield {"type": "text", "text": "Prose from malformed run"}
+        # structured_output present but missing required fields
+        yield {
+            "type": "result",
+            "session_id": "sess-789",
+            "structured_output": {"unexpected_key": "no summary or status"},
+        }
+
+    ctx = {
+        "sessions": {},
+        "running": {"1001:42": True},
+        "DATA": data_dir,
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "run_engine": engine_malformed,
+        "ptb_app": None,
+    }
+    project = {"cwd": str(cwd), "name": "proj", "model": "sonnet"}
+
+    class FakeApp:
+        def __getitem__(self, k):
+            return None
+
+    await _run_card(ctx, FakeApp(), project, card, "1001:42")
+
+    sidecar = data_dir / "runs" / "aabbcc.md"
+    content = sidecar.read_text(encoding="utf-8")
+    # Prose fallback must be used — no crash, no structured prefix
+    assert "Prose from malformed run" in content, "Prose fallback should appear when structured_output malformed"
+    assert "[DONE]" not in content and "[PARTIAL]" not in content and "[FAILED]" not in content
+    _, _, cols = _load_board(str(cwd))
+    assert any(c["id"] == "aabbcc" for c in cols["review"])

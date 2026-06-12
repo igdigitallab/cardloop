@@ -66,6 +66,42 @@ CONTEXT_ROTATION = os.environ.get("CONTEXT_ROTATION", "1") == "1"
 # Suppressed once rotation fires (i.e. no warn if already at/above CONTEXT_ROTATE_AT).
 CONTEXT_WARN_AT = int(os.environ.get("CONTEXT_WARN_AT", "150000"))
 
+# Spec-029 item 3: structured card results via SDK output_format.
+# STRUCTURED_CARDS=1 enables requesting structured JSON output from card runs so the agent's
+# self-reported summary/status/changes are captured deterministically in structured_output.
+# Default OFF: the feature is fully fallback-guarded (missing/malformed → prose path), but is
+# kept off by default until validated in production to avoid any risk of regressing card runs.
+# The structured_output improves SUMMARY TEXT only; card board-column assignment (ok/failed)
+# is still driven by the exception-based `ok` flag — that path is unchanged.
+STRUCTURED_CARDS = os.environ.get("STRUCTURED_CARDS", "0") == "1"
+
+# JSON schema requested from the agent when STRUCTURED_CARDS=1.
+# The agent fills this at the end of its card run; we read structured_output from ResultMessage.
+_CARD_OUTPUT_SCHEMA: "dict" = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": "Brief summary of what was done (shown in Review column).",
+            },
+            "status": {
+                "type": "string",
+                "enum": ["done", "partial", "failed"],
+                "description": "Self-reported completion status.",
+            },
+            "changes": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of files/actions changed (optional, may be empty).",
+            },
+        },
+        "required": ["summary", "status"],
+        "additionalProperties": False,
+    },
+}
+
 # Prompt sent to haiku to produce a handoff summary of the current session.
 ROTATION_SUMMARY_PROMPT = (
     "Summarize this session for handoff: active tasks + their state, key decisions, "
@@ -3922,6 +3958,8 @@ async def _run_card(
     ok = False
     has_changes = False
     _card_last_result_event: "dict | None" = None  # Phase D: track for auto-resume
+    # Spec-029 item 3: holds parsed structured_output dict when STRUCTURED_CARDS=1 and valid.
+    _card_structured_output: "dict | None" = None
 
     try:
         try:
@@ -3946,6 +3984,8 @@ async def _run_card(
             agents_kwargs = _build_agents_kwargs(ctx, agents_config)
             # ephemeral=True: cards are always isolated — they MUST NOT reuse a live client
             # from the shared chat session (different cwd, synthetic session key).
+            # Spec-029 item 3: request structured output only when STRUCTURED_CARDS=1.
+            _card_output_fmt = _CARD_OUTPUT_SCHEMA if STRUCTURED_CARDS else None
             async for event in run_engine(
                 project_name=name,
                 cwd=effective_cwd,
@@ -3957,6 +3997,7 @@ async def _run_card(
                 **agents_kwargs,
                 ctx=ctx,
                 ephemeral=True,
+                output_format=_card_output_fmt,
             ):
                 etype = event["type"]
                 if etype == "text":
@@ -3976,7 +4017,15 @@ async def _run_card(
                     _card_last_result_event = event  # Phase D: capture for auto-resume
                     # Spec-021 Part 2: do NOT write card session_id back to ctx["sessions"].
                     # Cards are isolated — each card run is its own fresh session.
-                    pass
+                    # Spec-029 item 3: extract structured_output when STRUCTURED_CARDS=1.
+                    # Fallback: if absent/malformed/wrong-type, _card_structured_output stays None
+                    # and the prose path (answer_parts) is used — zero regression risk.
+                    if STRUCTURED_CARDS:
+                        _raw_so = event.get("structured_output")
+                        if isinstance(_raw_so, dict) and "summary" in _raw_so and "status" in _raw_so:
+                            _card_structured_output = _raw_so
+                        elif _raw_so is not None:
+                            print(f"[_run_card] structured_output malformed for {card_id}: {_raw_so!r} — falling back to prose")
                 elif etype == "error":
                     raise event["exc"]
 
@@ -4005,7 +4054,20 @@ async def _run_card(
             wt_branch = None
 
         # sidecar DATA/runs/<card_id>.md + JSON meta
-        answer_text = "\n".join(answer_parts).strip() or "(agent finished without a text response)"
+        # Spec-029 item 3: prefer structured summary when available and STRUCTURED_CARDS=1.
+        # Fallback: prose from answer_parts (always populated; structured path is additive only).
+        if _card_structured_output is not None:
+            _so_summary = str(_card_structured_output.get("summary", "")).strip()
+            _so_status = _card_structured_output.get("status", "")
+            _so_changes = _card_structured_output.get("changes") or []
+            _changes_text = ("\n\nChanges:\n" + "\n".join(f"- {c}" for c in _so_changes)) if _so_changes else ""
+            answer_text = (
+                f"[{_so_status.upper()}] {_so_summary}{_changes_text}"
+                if _so_summary else
+                "\n".join(answer_parts).strip() or "(agent finished without a text response)"
+            )
+        else:
+            answer_text = "\n".join(answer_parts).strip() or "(agent finished without a text response)"
         _write_sidecar(
             DATA, card_id, name, prompt, answer_text, ok, exc_info, diff_stat, diff_full,
             run_mode=run_mode,

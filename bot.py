@@ -893,6 +893,7 @@ async def run_engine(  # type: ignore[return]
     *,
     ctx: "dict | None" = None,
     ephemeral: bool = False,
+    output_format: "dict | None" = None,
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
@@ -913,6 +914,11 @@ async def run_engine(  # type: ignore[return]
         ephemeral             — if True, always use a fresh ClaudeSDKClient (no live-client
                                  reuse). Set by _run_card and _do_session_rotation which must
                                  be fully isolated from shared sessions.
+        output_format         — Spec-029 item 3: optional JSON-schema dict for structured output.
+                                 When provided, ClaudeAgentOptions.output_format is set and
+                                 ResultMessage.structured_output is passed through the result event.
+                                 Shape: {"type": "json_schema", "schema": {...}}.
+                                 None (default) → no change to existing behaviour (chat/TG runs).
 
     Yields event dicts. SDK exceptions are wrapped as {"type": "error", "exc": ...}.
     """
@@ -965,6 +971,8 @@ async def run_engine(  # type: ignore[return]
         # include_hook_events=False (default) — HookEventMessage lifecycle noise adds no extra
         # data beyond what the hook callback already captures, and would flood _process_messages.
         include_partial_messages=_stream_partial,
+        # Spec-029 item 3: structured output for card runs. None → no change (chat/TG paths).
+        output_format=output_format,
     )
 
     audit(project_name, "TASK", short(prompt, 300))
@@ -1058,6 +1066,10 @@ async def run_engine(  # type: ignore[return]
                     "prompt_tokens": _pt if _pt > 0 else last_ctx_tokens,
                     "cache_hit_pct": _cache_hit_pct,
                     "duration_ms": _dur,
+                    # Spec-029 item 3: structured output from ResultMessage (None when not requested
+                    # or when the CLI did not populate it). Consumers that set output_format should
+                    # read this field; all other consumers ignore it (it is always present as None).
+                    "structured_output": getattr(msg, "structured_output", None),
                 }
             elif isinstance(msg, SystemMessage):
                 if isinstance(msg, TaskStartedMessage):
