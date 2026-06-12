@@ -919,6 +919,104 @@ def _save_groups(ctx: dict, data: dict) -> None:
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+# ─────────────────────────── trash store (Spec-025) ─────────────────────────
+
+TRASH_RETENTION_DAYS = int(os.environ.get("TRASH_RETENTION_DAYS", "7"))
+
+
+def _trash_dir(ctx: dict) -> Path:
+    d = ctx["DATA"] / "trash"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def _path_allowlist_check(cwd: str, ctx: dict, _home_override: str | None = None) -> str | None:
+    """Returns an error string if cwd fails the path allowlist, else None (OK).
+
+    Rules (ALL must hold, else reject):
+    1. real is strictly under home (startswith home+sep) and real != home
+    2. real is not the bot dir (HERE) and not an ancestor of HERE
+    3. No symlink escape (realpath vs raw path stays under home)
+    """
+    try:
+        real = os.path.realpath(cwd)
+        home = os.path.realpath(_home_override if _home_override else os.path.expanduser("~"))
+        here = str(ctx.get("HERE", ""))
+        here_real = os.path.realpath(here) if here else None
+
+        # Rule 1: strictly under home
+        if not real.startswith(home + os.sep) or real == home:
+            return "cwd is not strictly under home directory"
+
+        # Rule 2: not the bot dir, not an ancestor of bot dir
+        if here_real:
+            if real == here_real:
+                return "cwd is the claude-ops-bot directory"
+            if here_real.startswith(real + os.sep):
+                return "cwd is an ancestor of the claude-ops-bot directory"
+
+        # Rule 3: symlink escape check — raw path (without realpath) must also start under home
+        raw_abs = os.path.abspath(cwd)
+        if not raw_abs.startswith(home + os.sep):
+            return "cwd resolves outside home via symlink"
+
+        return None  # all checks passed
+    except Exception as e:
+        return f"path resolution error: {e}"
+
+
+def _run_janitor_trash_purge(ctx: dict) -> list:
+    """Purge trash entries older than TRASH_RETENTION_DAYS.
+    Returns list of purged entry names.
+    CRITICAL: only ever rm's paths strictly under data/trash/."""
+    import time as _time
+    trash_dir = _trash_dir(ctx)
+    trash_real = trash_dir.resolve()
+    purged = []
+    now = _time.time()
+
+    for sidecar in list(trash_dir.glob("*.json")):
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            deleted_at_str = data.get("deleted_at", "")
+            deleted_ts = _time.mktime(_time.strptime(deleted_at_str, "%Y-%m-%dT%H:%M:%SZ"))
+            age_days = (now - deleted_ts) / 86400
+            if age_days < TRASH_RETENTION_DAYS:
+                continue
+
+            entry = sidecar.stem
+            folder = trash_dir / entry
+
+            # CRITICAL path guard: folder must be strictly under data/trash/
+            if folder.exists():
+                folder_real = folder.resolve()
+                if not str(folder_real).startswith(str(trash_real) + os.sep):
+                    print(f"[janitor-purge] REFUSED: {folder} is not under data/trash")
+                    continue
+                shutil.rmtree(str(folder_real))
+
+            sidecar.unlink(missing_ok=True)
+            purged.append(entry)
+            print(f"[janitor-purge] purged: {entry}")
+        except Exception as e:
+            print(f"[janitor-purge] WARNING: error purging {sidecar}: {e}")
+
+    return purged
+
+
+async def _janitor_trash_purge_loop(ctx: dict) -> None:
+    """Periodically purge trash entries older than TRASH_RETENTION_DAYS.
+    This is the ONLY place in the entire system that calls rm -rf,
+    and only on paths strictly under data/trash/."""
+    _PURGE_INTERVAL_SEC = 3600  # check every hour
+    while True:
+        await asyncio.sleep(_PURGE_INTERVAL_SEC)
+        try:
+            _run_janitor_trash_purge(ctx)
+        except Exception as e:
+            print(f"[janitor-purge] ERROR: {e}")
+
+
 def _find_project_by_id_any(ctx: dict, pid: str) -> dict | None:
     """Finds a project by id WITHOUT filtering archived ones.
     Searches topics and free_chats directly."""
@@ -1087,6 +1185,321 @@ async def api_project_unarchive(req: web.Request) -> web.Response:
     archived.discard(pid)
     _save_archived(ctx, archived)
     return web.json_response({"archived": False})
+
+
+# ─────────────────────────── Spec-025: Project Delete ────────────────────────
+
+async def api_project_delete_precheck(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/delete-precheck
+    Returns git status for the delete confirmation modal."""
+    import subprocess
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id_any(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    cwd = project["cwd"]
+    result: dict = {
+        "is_git": False,
+        "uncommitted_count": 0,
+        "unpushed_count": 0,
+        "branch": None,
+        "has_remote": False,
+    }
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            result["is_git"] = True
+            # Branch
+            rb = subprocess.run(
+                ["git", "-C", cwd, "branch", "--show-current"],
+                capture_output=True, text=True, timeout=5,
+            )
+            result["branch"] = rb.stdout.strip() or None
+            # Uncommitted (staged + unstaged)
+            rs = subprocess.run(
+                ["git", "-C", cwd, "status", "--porcelain"],
+                capture_output=True, text=True, timeout=5,
+            )
+            result["uncommitted_count"] = len([l for l in rs.stdout.splitlines() if l.strip()])
+            # Remote
+            rr = subprocess.run(
+                ["git", "-C", cwd, "remote"],
+                capture_output=True, text=True, timeout=5,
+            )
+            result["has_remote"] = bool(rr.stdout.strip())
+            # Unpushed commits
+            if result["has_remote"] and result["branch"]:
+                ru = subprocess.run(
+                    ["git", "-C", cwd, "rev-list", "--count", f"origin/{result['branch']}..HEAD"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if ru.returncode == 0:
+                    try:
+                        result["unpushed_count"] = int(ru.stdout.strip())
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+    return web.json_response(result)
+
+
+async def api_project_delete(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/delete  body: {confirm_name}
+    Moves the project cwd to data/trash/<id>-<ts>/ with a sidecar JSON.
+    Cleans up cockpit state. Deletes TG topic. Writes audit line.
+    NEVER rm's anything — only shutil.move."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+
+    # Parse body
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    confirm_name = body.get("confirm_name", "")
+
+    # Guardrail 1: project must exist (archived or not)
+    project = _find_project_by_id_any(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    # Guardrail 1b: must be archived
+    archived = _load_archived(ctx)
+    if pid not in archived:
+        return web.json_response({"error": "only archived projects can be deleted"}, status=409)
+
+    # Guardrail 2: confirm_name must match
+    project_name = project["name"]
+    if confirm_name != project_name:
+        return web.json_response({"error": "confirm_name does not match project name"}, status=400)
+
+    cwd = project["cwd"]
+    tg_thread = project.get("tg_thread", "")
+
+    # Guardrail 3: path allowlist
+    allowlist_err = _path_allowlist_check(cwd, ctx)
+    if allowlist_err:
+        return web.json_response({"error": f"path rejected: {allowlist_err}"}, status=400)
+
+    # Guardrail 4: not busy — check running dict by session key
+    if ctx["running"].get(tg_thread) is not None:
+        return web.json_response({"error": "project is busy"}, status=409)
+    # Also check if any running session maps to this cwd
+    for sk, val in list(ctx["running"].items()):
+        if val is not None:
+            topic_data = ctx["topics"].get(sk)
+            if topic_data and topic_data.get("cwd") == cwd:
+                return web.json_response({"error": "project is busy"}, status=409)
+
+    # All guardrails passed — proceed with move
+    ts = int(time.time())
+    trash_name = f"{pid}-{ts}"
+    trash_dir = _trash_dir(ctx)
+    trash_dest = trash_dir / trash_name
+    sidecar_path = trash_dir / f"{trash_name}.json"
+
+    # Parse TG topic info
+    tg_chat_id = None
+    tg_thread_id = None
+    if tg_thread and ":" in str(tg_thread):
+        parts = str(tg_thread).split(":", 1)
+        try:
+            tg_chat_id = int(parts[0])
+            tg_thread_id = int(parts[1])
+        except (ValueError, IndexError):
+            pass
+
+    # Step 1: Check cwd exists
+    cwd_path = Path(cwd)
+    if not cwd_path.exists():
+        return web.json_response({"error": "project directory does not exist"}, status=400)
+
+    # Step 2: Move cwd to trash
+    shutil.move(str(cwd_path), str(trash_dest))
+
+    # Write sidecar
+    sidecar = {
+        "id": pid,
+        "name": project_name,
+        "original_cwd": cwd,
+        "deleted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)),
+        "tg_chat": tg_chat_id,
+        "tg_thread": tg_thread_id,
+    }
+    try:
+        sidecar_path.write_text(json.dumps(sidecar, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[delete] WARNING: could not write sidecar: {e}")
+
+    # Step 3: Clean cockpit state (each in try/except — partial failure must not abort)
+    # topics.json — remove bindings for this cwd
+    try:
+        _maybe_reload_topics(ctx)
+        keys_to_remove = [k for k, b in ctx["topics"].items() if b.get("cwd") == cwd]
+        for k in keys_to_remove:
+            del ctx["topics"][k]
+        ctx["save_topics"]()
+    except Exception as e:
+        print(f"[delete] WARNING: topics cleanup failed: {e}")
+
+    # sessions.json
+    try:
+        sessions_to_remove = [k for k in list(ctx["sessions"].keys()) if k == tg_thread]
+        for k in sessions_to_remove:
+            del ctx["sessions"][k]
+        ctx["save_sessions"]()
+    except Exception as e:
+        print(f"[delete] WARNING: sessions cleanup failed: {e}")
+
+    # archived.json
+    try:
+        ar = _load_archived(ctx)
+        ar.discard(pid)
+        _save_archived(ctx, ar)
+    except Exception as e:
+        print(f"[delete] WARNING: archived cleanup failed: {e}")
+
+    # project_groups.json
+    try:
+        groups_data = _load_groups(ctx)
+        groups_data["assignments"].pop(pid, None)
+        _save_groups(ctx, groups_data)
+    except Exception as e:
+        print(f"[delete] WARNING: groups cleanup failed: {e}")
+
+    # timeline/<slug>.jsonl
+    try:
+        slug = _timeline_slug_from_cwd(cwd)
+        timeline_file = ctx["DATA"] / "timeline" / f"{slug}.jsonl"
+        if timeline_file.exists():
+            timeline_file.unlink()
+        rotated = ctx["DATA"] / "timeline" / f"{slug}.jsonl.1"
+        if rotated.exists():
+            rotated.unlink()
+    except Exception as e:
+        print(f"[delete] WARNING: timeline cleanup failed: {e}")
+
+    # Step 4: Write audit line
+    try:
+        audit_dir = ctx["DATA"] / "audit"
+        audit_dir.mkdir(exist_ok=True)
+        ts_str = time.strftime("%Y-%m-%dT%H:%M:%S")
+        with open(audit_dir / f"audit-{time.strftime('%Y-%m')}.log", "a", encoding="utf-8") as f:
+            f.write(f"{ts_str} [{project_name}] DELETE⚠️: id={pid} cwd={cwd} trash={trash_dest}\n")
+    except Exception as e:
+        print(f"[delete] WARNING: audit write failed: {e}")
+
+    # Step 5 (last, irreversible): delete TG topic
+    purge_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts + TRASH_RETENTION_DAYS * 86400))
+    if tg_chat_id and tg_thread_id:
+        try:
+            ptb_app = ctx.get("ptb_app")
+            if ptb_app:
+                await ptb_app.bot.delete_forum_topic(
+                    chat_id=tg_chat_id, message_thread_id=tg_thread_id
+                )
+        except Exception as e:
+            print(f"[delete] WARNING: deleteForumTopic failed: {e}")
+
+    return web.json_response({
+        "deleted": True,
+        "trash_path": str(trash_dest),
+        "purge_at": purge_at,
+    })
+
+
+async def api_trash_list(req: web.Request) -> web.Response:
+    """GET /api/trash — list trashed projects."""
+    ctx = req.app["ctx"]
+    trash_dir = _trash_dir(ctx)
+    result = []
+    now = time.time()
+    for sidecar in sorted(trash_dir.glob("*.json")):
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            deleted_at_str = data.get("deleted_at", "")
+            deleted_ts = time.mktime(time.strptime(deleted_at_str, "%Y-%m-%dT%H:%M:%SZ"))
+            days_left = max(0, TRASH_RETENTION_DAYS - int((now - deleted_ts) / 86400))
+            result.append({
+                "entry": sidecar.stem,
+                "id": data.get("id"),
+                "name": data.get("name"),
+                "original_cwd": data.get("original_cwd"),
+                "deleted_at": deleted_at_str,
+                "days_left": days_left,
+            })
+        except Exception:
+            pass
+    return web.json_response({"trash": result})
+
+
+async def api_trash_restore(req: web.Request) -> web.Response:
+    """POST /api/trash/{entry}/restore — move folder back, rebind topics.json.
+    Note: TG topic is NOT restored (already deleted)."""
+    ctx = req.app["ctx"]
+    entry = req.match_info["entry"]
+    # Validate entry name (no path traversal)
+    if "/" in entry or ".." in entry or not entry:
+        return web.json_response({"error": "invalid entry name"}, status=400)
+
+    trash_dir = _trash_dir(ctx)
+    sidecar_path = trash_dir / f"{entry}.json"
+    folder_path = trash_dir / entry
+
+    if not sidecar_path.exists():
+        return web.json_response({"error": "trash entry not found"}, status=404)
+
+    try:
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except Exception:
+        return web.json_response({"error": "could not read trash metadata"}, status=500)
+
+    original_cwd = sidecar.get("original_cwd")
+    if not original_cwd:
+        return web.json_response({"error": "missing original_cwd in sidecar"}, status=400)
+
+    # Check collision
+    if Path(original_cwd).exists():
+        return web.json_response(
+            {"error": f"cannot restore: original path is occupied: {original_cwd}"}, status=409
+        )
+
+    if not folder_path.exists():
+        return web.json_response({"error": "trash folder not found"}, status=404)
+
+    # Move folder back
+    shutil.move(str(folder_path), original_cwd)
+
+    # Rebind topics.json
+    pid = sidecar.get("id")
+    name = sidecar.get("name", pid)
+    tg_chat = sidecar.get("tg_chat")
+    tg_thread = sidecar.get("tg_thread")
+
+    if tg_chat and tg_thread:
+        session_key = f"{tg_chat}:{tg_thread}"
+        try:
+            _maybe_reload_topics(ctx)
+            ctx["topics"][session_key] = {
+                "project": name,
+                "cwd": original_cwd,
+                "model": ctx.get("DEFAULT_MODEL", "sonnet"),
+            }
+            ctx["save_topics"]()
+        except Exception as e:
+            print(f"[restore] WARNING: topics rebind failed: {e}")
+
+    # Remove sidecar
+    try:
+        sidecar_path.unlink()
+    except Exception:
+        pass
+
+    return web.json_response({"restored": True, "cwd": original_cwd})
 
 
 async def api_projects_archived(req: web.Request) -> web.Response:
@@ -7284,6 +7697,11 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/projects/archived", api_projects_archived)
         app.router.add_post("/api/projects/{id}/archive", api_project_archive)
         app.router.add_post("/api/projects/{id}/unarchive", api_project_unarchive)
+        # Spec-025: Project Delete (trash + grace period)
+        app.router.add_get("/api/projects/{id}/delete-precheck", api_project_delete_precheck)
+        app.router.add_post("/api/projects/{id}/delete", api_project_delete)
+        app.router.add_get("/api/trash", api_trash_list)
+        app.router.add_post("/api/trash/{entry}/restore", api_trash_restore)
         # Spec-024: Project Groups
         app.router.add_post("/api/projects/{id}/group", api_project_group_set)
         app.router.add_get("/api/project-groups", api_project_groups_get)
@@ -7417,5 +7835,8 @@ async def start(ptb_app, ctx: dict) -> None:
         # Spec-020: Deferred Runs — polling loop
         _spawn_bg(_deferred_loop(ctx))
         print(f"[webapp] deferred runs loop started (interval {_DEFERRED_POLL_SEC}s)")
+        # Spec-025: Trash purge janitor
+        _spawn_bg(_janitor_trash_purge_loop(ctx))
+        print(f"[webapp] janitor trash purge loop started (interval 3600s, retention {TRASH_RETENTION_DAYS}d)")
     except Exception as e:
         print(f"[webapp] ERROR during startup: {e}")

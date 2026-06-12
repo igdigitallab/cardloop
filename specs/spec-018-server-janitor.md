@@ -1,6 +1,8 @@
 ---
 created: 2026-06-10
+updated: 2026-06-11
 status: draft
+note: spec-025 (2026-06-11) added a trash-purge sweep to webapp.py (_janitor_trash_purge_loop / _run_janitor_trash_purge) that runs hourly and purges data/trash/ entries older than TRASH_RETENTION_DAYS (default 7). This is separate from spec-018's ~/.janitor-trash quarantine and lives in webapp.py, not in server-janitor/janitor.py.
 ---
 
 # Spec 018 — Server Janitor: on-demand audit and safe cleanup

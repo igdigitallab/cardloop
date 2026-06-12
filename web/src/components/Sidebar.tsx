@@ -3,6 +3,7 @@ import { Project, ProjectGroups } from '../types'
 import { api } from '../api'
 import { HealthDot } from './HealthDot'
 import { ConfirmModal } from './ConfirmModal'
+import { Modal, ModalHead } from './Modal'
 import { t } from '../i18n'
 import { useToast } from './Toast'
 
@@ -68,6 +69,17 @@ export function Sidebar({
   const [groups, setGroups] = useState<ProjectGroups>({ groups: [], assignments: {} })
   const [archivedProjects, setArchivedProjects] = useState<{ id: string; name: string; cwd: string }[]>([])
 
+  // Spec-025: Project Delete state
+  type Precheck = { is_git: boolean; uncommitted_count: number; unpushed_count: number; branch: string | null; has_remote: boolean }
+  type TrashItem = { entry: string; id: string; name: string; original_cwd: string; deleted_at: string; days_left: number }
+  const [hardDeleteTarget, setHardDeleteTarget] = useState<{ id: string; name: string } | null>(null)
+  const [deletePrecheck, setDeletePrecheck] = useState<Precheck | null>(null)
+  const [loadingPrecheck, setLoadingPrecheck] = useState(false)
+  const [deleteNameInput, setDeleteNameInput] = useState('')
+  const [deleteInProgress, setDeleteInProgress] = useState(false)
+  const [trashItems, setTrashItems] = useState<TrashItem[]>([])
+  const [trashCollapsed, setTrashCollapsed] = useState(true)
+
   // Per-project context menu
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [groupSubmenuId, setGroupSubmenuId] = useState<string | null>(null)
@@ -91,10 +103,18 @@ export function Sidebar({
     } catch { /* ignore */ }
   }, [])
 
+  const loadTrash = useCallback(async () => {
+    try {
+      const data = await api.trash()
+      setTrashItems(data.trash)
+    } catch { /* ignore */ }
+  }, [])
+
   useEffect(() => {
     loadGroups()
     loadArchived()
-  }, [loadGroups, loadArchived, projects])
+    loadTrash()
+  }, [loadGroups, loadArchived, loadTrash, projects])
 
   // Close menu on outside click
   useEffect(() => {
@@ -187,6 +207,64 @@ export function Sidebar({
       if (onProjectsReload) onProjectsReload()
     } catch {
       showToast(t['common.error'], 'error')
+    }
+  }
+
+  // Hard delete: open modal + fire precheck
+  async function openHardDelete(id: string, name: string) {
+    setHardDeleteTarget({ id, name })
+    setDeleteNameInput('')
+    setDeletePrecheck(null)
+    setLoadingPrecheck(true)
+    try {
+      const data = await api.deletePrecheck(id)
+      setDeletePrecheck(data)
+    } catch { /* show modal without precheck data */ }
+    setLoadingPrecheck(false)
+  }
+
+  async function doHardDelete() {
+    if (!hardDeleteTarget) return
+    setDeleteInProgress(true)
+    try {
+      await api.deleteProject(hardDeleteTarget.id, deleteNameInput)
+      setHardDeleteTarget(null)
+      await loadArchived()
+      await loadTrash()
+      showToast(t['sidebar.deleted'], 'success')
+      if (onProjectsReload) onProjectsReload()
+    } catch (e: unknown) {
+      const status = (e as { status?: number }).status
+      if (status === 409) {
+        showToast(t['sidebar.delete_busy'], 'error')
+      } else if (status === 400) {
+        const msg = (e as Error).message || ''
+        if (msg.includes('path rejected')) {
+          showToast(t['sidebar.delete_path_rejected'], 'error')
+        } else {
+          showToast(t['sidebar.delete_name_mismatch'], 'error')
+        }
+      } else {
+        showToast(t['common.error'], 'error')
+      }
+    }
+    setDeleteInProgress(false)
+  }
+
+  async function doRestoreTrash(entry: string) {
+    try {
+      await api.restoreTrash(entry)
+      await loadArchived()
+      await loadTrash()
+      showToast(t['sidebar.trash_restored'], 'success')
+      if (onProjectsReload) onProjectsReload()
+    } catch (e: unknown) {
+      const status = (e as { status?: number }).status
+      if (status === 409) {
+        showToast(t['sidebar.trash_collision'], 'error')
+      } else {
+        showToast(t['common.error'], 'error')
+      }
     }
   }
 
@@ -474,11 +552,43 @@ export function Sidebar({
                 {!archivedCollapsed && archivedProjects.map(ap => (
                   <div key={ap.id} className="project-item project-item-archived" title={ap.cwd}>
                     <span className="project-name">{ap.name}</span>
+                    <div className="sidebar-archived-actions">
+                      <button
+                        className="sidebar-restore-btn"
+                        onClick={e => { e.stopPropagation(); doRestore(ap.id) }}
+                      >
+                        {t['sidebar.restore']}
+                      </button>
+                      <button
+                        className="sidebar-delete-btn"
+                        onClick={e => { e.stopPropagation(); openHardDelete(ap.id, ap.name) }}
+                        title={t['sidebar.delete_permanently']}
+                      >
+                        {t['sidebar.delete_permanently']}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Trash section */}
+            {!hasSearch && trashItems.length > 0 && (
+              <div className="sidebar-group sidebar-trash-section">
+                <div className="sidebar-group-header" onClick={() => setTrashCollapsed(prev => !prev)}>
+                  <span className="sidebar-group-toggle">{trashCollapsed ? '▶' : '▼'}</span>
+                  <span className="sidebar-group-label">{t['sidebar.trash_section']}</span>
+                  <span className="sidebar-group-count">{trashItems.length}</span>
+                </div>
+                {!trashCollapsed && trashItems.map(item => (
+                  <div key={item.entry} className="project-item project-item-trash" title={item.original_cwd}>
+                    <span className="project-name">{item.name}</span>
+                    <span className="sidebar-trash-days">{t['sidebar.trash_days_left'].replace('{days}', String(item.days_left))}</span>
                     <button
                       className="sidebar-restore-btn"
-                      onClick={e => { e.stopPropagation(); doRestore(ap.id) }}
+                      onClick={e => { e.stopPropagation(); doRestoreTrash(item.entry) }}
                     >
-                      {t['sidebar.restore']}
+                      {t['sidebar.trash_restore']}
                     </button>
                   </div>
                 ))}
@@ -519,6 +629,80 @@ export function Sidebar({
           onConfirm={() => { doArchive(confirmArchive.id); setConfirmArchive(null) }}
           onCancel={() => setConfirmArchive(null)}
         />
+      )}
+
+      {/* Spec-025: Hard delete modal */}
+      {hardDeleteTarget && (
+        <Modal onClose={() => { if (!deleteInProgress) setHardDeleteTarget(null) }}>
+          <ModalHead title={t['sidebar.delete_confirm_title']} onClose={() => { if (!deleteInProgress) setHardDeleteTarget(null) }} />
+          <div className="run-modal-body">
+            {/* Precheck warnings */}
+            {loadingPrecheck && (
+              <p style={{ margin: '0 0 12px', color: 'var(--text2)', fontSize: 13 }}>Checking git status…</p>
+            )}
+            {!loadingPrecheck && deletePrecheck && (
+              <div style={{ marginBottom: 12 }}>
+                {!deletePrecheck.is_git && (
+                  <p style={{ margin: '0 0 6px', color: 'var(--red)', fontSize: 13, lineHeight: 1.4 }}>
+                    ⚠️ {t['sidebar.delete_warning_no_git']}
+                  </p>
+                )}
+                {deletePrecheck.is_git && deletePrecheck.uncommitted_count > 0 && deletePrecheck.unpushed_count > 0 && (
+                  <p style={{ margin: '0 0 6px', color: 'var(--red)', fontSize: 13, lineHeight: 1.4 }}>
+                    ⚠️ {t['sidebar.delete_warning_git']
+                      .replace('{uncommitted}', String(deletePrecheck.uncommitted_count))
+                      .replace('{unpushed}', String(deletePrecheck.unpushed_count))}
+                  </p>
+                )}
+                {deletePrecheck.is_git && deletePrecheck.uncommitted_count > 0 && deletePrecheck.unpushed_count === 0 && (
+                  <p style={{ margin: '0 0 6px', color: 'var(--red)', fontSize: 13, lineHeight: 1.4 }}>
+                    ⚠️ {t['sidebar.delete_warning_uncommitted']
+                      .replace('{uncommitted}', String(deletePrecheck.uncommitted_count))}
+                  </p>
+                )}
+                {deletePrecheck.is_git && deletePrecheck.uncommitted_count === 0 && deletePrecheck.unpushed_count > 0 && (
+                  <p style={{ margin: '0 0 6px', color: 'var(--red)', fontSize: 13, lineHeight: 1.4 }}>
+                    ⚠️ {t['sidebar.delete_warning_unpushed']
+                      .replace('{unpushed}', String(deletePrecheck.unpushed_count))}
+                  </p>
+                )}
+              </div>
+            )}
+
+            <p style={{ margin: '0 0 12px', fontSize: 13, lineHeight: 1.4, color: 'var(--text2)' }}>
+              {t['sidebar.delete_trash_notice']}
+            </p>
+
+            <p style={{ margin: '0 0 6px', fontSize: 13, fontWeight: 500 }}>{t['sidebar.delete_type_name']}</p>
+            <input
+              className="doc-textarea"
+              type="text"
+              value={deleteNameInput}
+              onChange={e => setDeleteNameInput(e.target.value)}
+              placeholder={hardDeleteTarget.name}
+              autoFocus
+              disabled={deleteInProgress}
+              style={{ marginBottom: 16 }}
+            />
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                className="btn-secondary"
+                onClick={() => setHardDeleteTarget(null)}
+                disabled={deleteInProgress}
+              >
+                {t['common.cancel']}
+              </button>
+              <button
+                className="btn-danger"
+                onClick={doHardDelete}
+                disabled={deleteNameInput !== hardDeleteTarget.name || deleteInProgress}
+              >
+                {deleteInProgress ? '…' : t['sidebar.delete_confirm_btn']}
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   )

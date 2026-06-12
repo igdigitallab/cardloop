@@ -414,6 +414,33 @@ export const api = {
   archivedProjects: () =>
     apiFetch<{ projects: { id: string; name: string; cwd: string }[] }>('/api/projects/archived'),
 
+  // Spec-025: Project Delete
+  deletePrecheck: (id: string) =>
+    apiFetch<{ is_git: boolean; uncommitted_count: number; unpushed_count: number; branch: string | null; has_remote: boolean }>(
+      `/api/projects/${id}/delete-precheck`
+    ),
+
+  deleteProject: (id: string, confirmName: string) =>
+    apiFetch<{ deleted: boolean; trash_path: string; purge_at: string }>(
+      `/api/projects/${id}/delete`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm_name: confirmName }),
+      }
+    ),
+
+  trash: () =>
+    apiFetch<{ trash: Array<{ entry: string; id: string; name: string; original_cwd: string; deleted_at: string; days_left: number }> }>(
+      '/api/trash'
+    ),
+
+  restoreTrash: (entry: string) =>
+    apiFetch<{ restored: boolean; cwd: string }>(
+      `/api/trash/${encodeURIComponent(entry)}/restore`,
+      { method: 'POST' }
+    ),
+
   // Spec-024: Project Groups
   projectGroups: () =>
     apiFetch<import('./types').ProjectGroups>('/api/project-groups'),
