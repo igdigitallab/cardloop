@@ -26,6 +26,7 @@ from claude_agent_sdk import (
     HookMatcher,
     RateLimitEvent,
     ResultMessage,
+    StreamEvent,
     SystemMessage,
     TaskNotificationMessage,
     TaskProgressMessage,
@@ -941,6 +942,13 @@ async def run_engine(  # type: ignore[return]
     # Spec-029 §2: PostToolUse hook — records tool output to audit log + timeline.
     _post_tool_hook = _make_post_tool_use_hook(project_name, session_key)
 
+    # Spec-029 §1: live streaming — emit text_delta events for incremental cockpit display.
+    # STREAM_PARTIAL=0 disables without code changes (e.g. for debugging or regression isolation).
+    # Default ON: clean reconciliation (the final {type:"text"} remains authoritative, deltas are
+    # preview-only; no double-render because the frontend replaces accumulated delta text on receipt
+    # of the finalized block via finalizeStreamingWithMetrics).
+    _stream_partial = os.environ.get("STREAM_PARTIAL", "1") not in ("0", "false", "False")
+
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,
@@ -956,6 +964,7 @@ async def run_engine(  # type: ignore[return]
         hooks={"PostToolUse": [HookMatcher(hooks=[_post_tool_hook])]},
         # include_hook_events=False (default) — HookEventMessage lifecycle noise adds no extra
         # data beyond what the hook callback already captures, and would flood _process_messages.
+        include_partial_messages=_stream_partial,
     )
 
     audit(project_name, "TASK", short(prompt, 300))
@@ -995,6 +1004,23 @@ async def run_engine(  # type: ignore[return]
                         yield {"type": "text", "text": blk.text}
                     elif isinstance(blk, ToolUseBlock):
                         yield {"type": "tool", "name": blk.name, "input": blk.input or {}}
+            elif isinstance(msg, StreamEvent):
+                # Spec-029 §1: incremental text delta for live cockpit streaming.
+                # Only content_block_delta / text_delta carries visible text — all other
+                # event subtypes (message_start, message_delta, content_block_start/stop,
+                # input_json_delta for tool calls, etc.) are silently ignored here.
+                # The finalised AssistantMessage TextBlock above remains the source of truth.
+                try:
+                    evt = msg.event
+                    if (
+                        evt.get("type") == "content_block_delta"
+                        and evt.get("delta", {}).get("type") == "text_delta"
+                    ):
+                        delta_text = evt["delta"].get("text", "")
+                        if delta_text:
+                            yield {"type": "text_delta", "text": delta_text}
+                except Exception:
+                    pass  # never let a malformed partial event break the turn
             elif isinstance(msg, RateLimitEvent):
                 i = msg.rate_limit_info
                 yield {
@@ -1404,6 +1430,9 @@ async def run_agent(context, update, prompt: str):
                     answer.append(f"\n_{line}_")   # append terminal result to final reply
                     await push_status()
                 webapp._bus_publish(k, {"kind": "subagent", "run_id": None, **event})
+
+            elif etype == "text_delta":
+                pass  # TG adapter: ignore streaming deltas — final reply built from {type:"text"} blocks
 
             elif etype == "error":
                 engine_exc = event["exc"]

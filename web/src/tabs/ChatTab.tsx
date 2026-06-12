@@ -10,6 +10,7 @@ import { SessionContextPanel } from '../components/SessionContextPanel'
 import {
   ChatMessage,
   ChatEventResult,
+  ChatEventTextDelta,
   ChatToolCall,
   HistoryMessage,
   Project,
@@ -156,6 +157,47 @@ function appendChunk(messages: ChatMessage[], chunk: StreamChunk): ChatMessage[]
     ? [...messages.slice(0, -1), { ...last!, streaming: false }]
     : messages
   return [...closed, { id: nextId(), role: 'assistant', text: '', tools: [chunk.tool], streaming: true }]
+}
+
+/**
+ * Spec-029 §1: Append an incremental text delta to the in-progress assistant bubble.
+ * Creates a new streaming assistant message if none is open yet.
+ * Behaviour mirrors appendChunk for the `text` kind — deltas always go to a text-only bubble.
+ */
+function appendDelta(messages: ChatMessage[], delta: string): ChatMessage[] {
+  const last = messages[messages.length - 1]
+  const lastIsAsstStreaming = !!(last && last.role === 'assistant' && last.streaming)
+  if (lastIsAsstStreaming && last!.tools.length === 0) {
+    // Append delta to existing streaming text bubble
+    return [...messages.slice(0, -1), { ...last!, text: last!.text + delta }]
+  }
+  if (lastIsAsstStreaming) {
+    // Close the current tool-containing bubble and start a fresh text bubble
+    return [
+      ...messages.slice(0, -1),
+      { ...last!, streaming: false },
+      { id: nextId(), role: 'assistant', text: delta, tools: [], streaming: true },
+    ]
+  }
+  // No open streaming bubble — create one
+  return [...messages, { id: nextId(), role: 'assistant', text: delta, tools: [], streaming: true }]
+}
+
+/**
+ * Spec-029 §1: Reconcile finalized text block with any accumulated delta text.
+ * When the finalized {type:"text"} block arrives after deltas, the canonical text
+ * replaces whatever was accumulated (ensuring exact match, no double-render).
+ * Falls back to appendChunk if the last message is not a pure streaming text bubble
+ * (e.g. no deltas arrived — first {type:"text"} in a non-delta session).
+ */
+function reconcileFinalText(messages: ChatMessage[], finalText: string): ChatMessage[] {
+  const last = messages[messages.length - 1]
+  if (last && last.role === 'assistant' && last.streaming && last.tools.length === 0) {
+    // Replace accumulated delta text with the canonical final text — no double-render
+    return [...messages.slice(0, -1), { ...last!, text: finalText }]
+  }
+  // No open text bubble (deltas never arrived, or last bubble has tools) — use normal append
+  return appendChunk(messages, { kind: 'text', text: finalText })
 }
 
 function finalizeStreaming(messages: ChatMessage[], err?: string): ChatMessage[] {
@@ -509,7 +551,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           if (!evt) return
 
           const now = Date.now()
-          if (evt.type === 'text') {
+          if (evt.type === 'text_delta' || evt.type === 'text') {
             setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
           } else if (evt.type === 'tool') {
             const { type: _t, ...toolFields } = evt as unknown as Record<string, unknown>
@@ -547,8 +589,15 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
 
           setMessages(prev => {
             switch (evt.type) {
+              case 'text_delta':
+                // Spec-029 §1: accumulate streaming delta into the in-progress bubble.
+                // The finalized {type:"text"} block below is still the source of truth —
+                // reconcileFinalText will overwrite with the canonical text on arrival.
+                return appendDelta(prev, (evt as unknown as ChatEventTextDelta).text)
               case 'text':
-                return appendChunk(prev, { kind: 'text', text: evt.text })
+                // Spec-029 §1: replace any accumulated delta text with the canonical final text.
+                // Falls back to appendChunk when no delta was accumulated (non-streaming sessions).
+                return reconcileFinalText(prev, evt.text)
               case 'tool': {
                 const { type: _t, ...toolFields } = evt as unknown as Record<string, unknown>
                 return appendChunk(prev, { kind: 'tool', tool: toolFields as unknown as ChatToolCall })

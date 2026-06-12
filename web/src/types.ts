@@ -252,6 +252,15 @@ export interface ChatEventText {
   text: string
 }
 
+// Spec-029 §1: incremental text delta for live streaming preview.
+// Deltas arrive before the finalised {type:"text"} block and are used to
+// update the in-progress assistant bubble in real time. The finalised text
+// block remains the source of truth; the UI reconciles on receipt.
+export interface ChatEventTextDelta {
+  type: 'text_delta'
+  text: string
+}
+
 // Rich tool call — kind discriminates rendering
 export interface RichToolBash   { name: string; kind: 'bash';   cmd: string; desc?: string }
 export interface RichToolEdit   { name: string; kind: 'edit';   file: string; old?: string; new?: string; count?: number; cell_type?: string }
@@ -292,6 +301,7 @@ export interface ChatEventRateLimit {
 
 export type ChatSSEEvent =
   | ChatEventText
+  | ChatEventTextDelta
   | ChatEventTool
   | ChatEventResult
   | ChatEventError

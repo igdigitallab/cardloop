@@ -3789,8 +3789,10 @@ async def _do_session_rotation(ctx: dict, session_key: str, project: dict, cwd: 
             ctx=ctx,
             ephemeral=True,
         ):
-            if event.get("type") == "text":
+            etype = event.get("type")
+            if etype == "text":
                 summary_parts.append(event["text"])
+            # text_delta: ignore — rotation summary is built from finalized text blocks only
 
         summary = "\n".join(summary_parts).strip() or "(no summary produced)"
 
@@ -3960,6 +3962,8 @@ async def _run_card(
                 if etype == "text":
                     answer_parts.append(event["text"])
                     _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": card_id})
+                elif etype == "text_delta":
+                    pass  # card runner: ignore streaming deltas — answer built from finalized {type:"text"} blocks
                 elif etype == "tool":
                     inp = event.get("input") or {}
                     tool_data = _format_tool(event.get("name", "?"), inp if isinstance(inp, dict) else {})
@@ -4964,6 +4968,8 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
             if etype == "text":
                 answer_parts.append(event["text"])
                 _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": record["id"]})
+            elif etype == "text_delta":
+                pass  # deferred runner: ignore streaming deltas — answer built from finalized {type:"text"} blocks
             elif etype == "result":
                 _deferred_last_result_event = event  # Phase D: capture for auto-resume
                 if event.get("session_id"):
@@ -6520,7 +6526,15 @@ async def api_project_chat(req: web.Request) -> web.Response:
             ephemeral=False,
         ):
             etype = event.get("type")
-            if etype == "text":
+            if etype == "text_delta":
+                # Spec-029 §1: forward incremental text delta to the cockpit over SSE.
+                # The existing {type:"text"} block (finalized AssistantMessage TextBlock) still
+                # arrives below and remains the source of truth — the UI reconciles by replacing
+                # the accumulated delta with the canonical final text.
+                # The _send wrapper's (ConnectionResetError, ConnectionAbortedError) guard covers
+                # benign client disconnects here exactly as it does for all other events.
+                await _send({"type": "text_delta", "text": event["text"]})
+            elif etype == "text":
                 await _send({"type": "text", "text": event["text"]})
             elif etype == "tool":
                 inp = event.get("input") or {}
