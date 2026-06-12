@@ -398,3 +398,69 @@ transition (`swipe-anim-left/right`) on the content area, then `onSwipeToProject
 Acceptance (Playwright 390×844): list back button appears from project & returns; ▾ menu
 lists 3+ open projects & switches; synthetic touch swipe switches to the adjacent tab;
 vertical feed scroll unaffected; desktop 1440×900 regression — sidebar/split/tabs unchanged.
+
+---
+
+## Phase H — Chrome compression (2026-06-11, operator feedback)
+
+Operator request after Phase G: maximize vertical chat space on phone (dark theme,
+Chrome in standalone/installed PWA mode — no address bar). All changes ≤768px only.
+
+### Baseline before (Playwright 390×844, mobile-on-project)
+| Row | Before |
+|-----|--------|
+| `.project-tabbar` | 45px |
+| `.mobile-inner-tabs` | 45px |
+| `.chat-session-bar` | 69px (2-row wrap) |
+| `.ctx-panel` | 24px |
+| **Total top chrome** | **183px** |
+
+### Changes shipped
+
+**HC1 — Project tabbar strip (≤768px):** `min-height` of `.project-tabbar` reduced to 38px;
+`.ptab` items: `min-height: 38px`, `padding: 0 10px`, `font-size: 12px`. Hamburger/back
+button keeps `min-height: 40px` as primary navigation action. Result: **41px** (actual
+height driven by content/padding rounding).
+
+**HC2 — Inner tab strip (≤768px):** `.mobile-inner-tab-btn` `min-height` reduced from
+44px → 40px, horizontal padding `0 12px` → `0 10px`. Result: **41px**.
+
+**HC3 — Session bar single-row (≤768px):** `.chat-session-bar` changed from
+`flex-wrap: wrap` to `flex-wrap: nowrap` with `min-height: 36px; padding: 3px 8px; gap: 5px`.
+The 2-row wrap (69px) collapses to a single compact row (36px). Model label icon hidden at
+≤768px (`display: none`) to save width. Stats badge gets `flex-shrink: 1; overflow: hidden`
+to truncate gracefully. The coarse-pointer 44px override for session buttons is suppressed
+at ≤768px (secondary controls inside the row — full-row tap zone is acceptable). Result: **36px**.
+
+**HC4 — Context panel hidden on mobile (≤768px):** `.ctx-panel { display: none }` at ≤768px.
+Files/commands list is non-critical information on phone. The 📎 icon expand-button is
+sacrificed. The panel remains fully functional on desktop (>768px).
+
+**HC5 — `100dvh` → `100svh` for shell (Chrome compression root cause fix):**
+`svh` (small viewport height) is defined as the viewport height with ALL browser UI
+present — address bar, navigation bar, etc. It is always the *minimum* available height
+and is the correct unit for installed PWA / standalone mode where `dvh` can return an
+intermediate value causing the bottom toolbar to be clipped. Fallback chain:
+`100%` (html/body base) → `100dvh` (`@supports dvh`) → `100svh` (`@supports svh`, wins).
+
+**HC6 — visualViewport handler fixed (ChatTab.tsx):** The Phase G keyboard handler used
+`window.innerHeight - vv.height` as keyboard detection, but in standalone mode
+`window.innerHeight` equals full screen while `vv.height` includes address-bar compensation
+— so the delta was large even without a keyboard. Fixed: use a baseline captured at mount
+(`baselineHeight = vv.height`) and only shrink when `baselineHeight - vv.height > 150px`
+(unambiguous keyboard open signal).
+
+**HC7 — `chat-input-area` explicit `flex-shrink: 0` at ≤768px:** Prevents the input area
+from being squeezed; the feed scrolls instead.
+
+### Result after (Playwright 390×844, ×780, ×700)
+| Row | After |
+|-----|-------|
+| `.project-tabbar` | 41px |
+| `.mobile-inner-tabs` | 41px |
+| `.chat-session-bar` | 36px |
+| `.ctx-panel` | 0px (hidden) |
+| **Total top chrome** | **118px** (−65px, −35%) |
+
+Send button and tools panel: **visible at all tested heights** (844, 780, 700px) without scroll.
+Desktop 1440×900: ctx-panel still visible, tabbar 37px — no regression.

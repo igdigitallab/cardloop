@@ -813,15 +813,43 @@
     font-size: 12px;
   }
 
-  .chat-session-bar {
-    padding: 4px 8px;
-    gap: 6px;
-    flex-wrap: wrap;
+  /* H2 (Chrome compression): Context panel hidden on mobile.
+     The session context (files/commands) is non-critical info on phone.
+     The expand/collapse functionality is sacrificed to gain vertical space.
+     On desktop (>768px) it remains fully visible and functional. */
+  .ctx-panel {
+    display: none;
   }
 
-  /* Input area: tighter padding, allow keyboard to push it up */
+  .chat-session-bar {
+    /* H (Chrome compression): single-row, no wrap, tighter padding */
+    padding: 3px 8px;
+    gap: 5px;
+    flex-wrap: nowrap;
+    min-height: 36px;
+    overflow: hidden;
+  }
+
+  /* Stats badge: allow shrinking/truncation so it doesn't push model off */
+  .chat-stats-inline {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 1;
+  }
+
+  /* Model label text: hide on very narrow screens to save space */
+  .chat-model-label {
+    display: none;
+  }
+
+  /* Input area: tighter padding; flex-shrink:0 ensures it is never squeezed
+     out of the viewport — the feed scrolls instead. */
   .chat-input-area {
     padding: 8px 10px;
+    gap: 6px;
+    flex-shrink: 0;
   }
 }
 
@@ -840,5 +868,27 @@
   .session-reset-btn {
     width: 44px;
     height: 44px;
+  }
+}
+
+/* H (Chrome compression): override the coarse-pointer 44px on ≤768px for the
+   session bar buttons so the bar stays at its compact 36px height.
+   These buttons sit inside a row — the transparent padding extends the real
+   tap zone to the full row height (≥36px), which is acceptable for secondary
+   controls (reset, session selector). The Send button and inner-tab buttons
+   keep their ≥40px targets. */
+@media (max-width: 768px) and (pointer: coarse) {
+  .session-selector-btn,
+  .session-reset-btn,
+  .ctx-panel-toggle,
+  .ctx-refresh-btn {
+    min-height: 28px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+
+  .session-reset-btn {
+    width: 28px;
+    height: 28px;
   }
 }

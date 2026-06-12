@@ -481,6 +481,40 @@
   }
 }
 
+/* H (Chrome compression): compact project-tabbar strip on mobile.
+   Visual height ~38px; tap target preserved at ≥40px via padding.
+   Hamburger / back button keeps its 44px for primary navigation. */
+@media (max-width: 768px) {
+  .project-tabbar {
+    min-height: 38px;
+  }
+
+  .ptab {
+    min-height: 38px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+
+  .ptab-hamburger {
+    min-height: 40px;
+    min-width: 40px;
+    padding: 0 10px;
+  }
+
+  .ptab-new {
+    min-height: 38px;
+  }
+
+  /* menu btn and folder btn already have their own 768px block below — override */
+  .ptab-menu-btn {
+    min-height: 38px !important;
+  }
+
+  .ptab-folder-btn {
+    min-height: 38px !important;
+  }
+}
+
 /* ── Project header: condense on mobile ─────────────────────── */
 @media (max-width: 640px) {
   .project-header {

@@ -434,8 +434,9 @@
 
   .mobile-inner-tab-btn {
     flex-shrink: 0;
-    padding: 0 12px;
-    min-height: 44px;
+    padding: 0 10px;
+    /* H (Chrome compression): reduced from 44px to 40px visual; still a comfortable touch target */
+    min-height: 40px;
     font-size: 12px;
     font-weight: 500;
     background: transparent;
@@ -495,7 +496,19 @@
   }
 }
 
-/* On older browsers without dvh, keep the existing 100% */
+/* H (Chrome compression): standalone/installed PWA fix.
+   svh = small viewport height (excludes ALL browser UI — address bar, nav bar).
+   dvh can still return an intermediate value in standalone mode on some Chrome
+   builds, causing the bottom toolbar to be clipped.
+   Prefer svh when available — it is the true "safe" fixed height for installed apps.
+   Falls back gracefully to dvh (above) on browsers without svh support. */
+@supports (height: 100svh) {
+  html, body, #root {
+    height: 100svh;
+  }
+}
+
+/* On older browsers without dvh/svh, keep the existing 100% */
 
 /* H3: Swipe animation when switching between open project chats */
 @media (max-width: 768px) {

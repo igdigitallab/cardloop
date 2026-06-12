@@ -182,16 +182,25 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
   }, [messages])
 
-  // D-05: Adjust layout when virtual keyboard appears on mobile
+  // D-05: Adjust chat-wrap height when the virtual keyboard appears on mobile.
+  // Phase H (Chrome compression fix): use vv.height relative to vv itself, not
+  // window.innerHeight. In standalone/installed PWA mode, window.innerHeight equals
+  // the full screen height while vv.height already accounts for the keyboard.
+  // We only shrink when the keyboard is unambiguously open (vv.height dropped by
+  // more than 150px vs. the baseline captured at mount) to avoid false triggers
+  // from address-bar show/hide in regular browser mode.
   useEffect(() => {
     if (!isTouchDevice) return
     const vv = window.visualViewport
     if (!vv) return
+    // Baseline: the full available height at mount (before any keyboard)
+    const baselineHeight = vv.height
     function onViewportResize() {
       const chatWrap = textareaRef.current?.closest('.chat-wrap') as HTMLElement | null
       if (!chatWrap) return
-      const keyboardHeight = window.innerHeight - vv!.height
-      chatWrap.style.height = keyboardHeight > 50
+      const reduction = baselineHeight - vv!.height
+      // Only shrink when the keyboard is clearly open (>150px reduction)
+      chatWrap.style.height = reduction > 150
         ? `${vv!.height}px`
         : ''
     }
