@@ -5,6 +5,7 @@ import { api } from '../api'
 import { PromptPicker } from '../components/PromptPicker'
 import { SkillPicker } from '../components/SkillPicker'
 import { ToolBlock } from '../components/ToolBlock'
+import { OptionPicker, parseOptionsBlock } from '../components/OptionPicker'
 import { SessionSelector } from '../components/SessionSelector'
 import { SessionContextPanel } from '../components/SessionContextPanel'
 import {
@@ -1197,6 +1198,18 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             (msg.ts - prevMsg.ts) > CACHE_TTL_MS
           )
 
+          // Option picker: parse ```options block from non-streaming assistant messages.
+          // Only the LAST assistant message gets an interactive picker; older ones are static.
+          const lastAssistantIdx = messages.reduceRight(
+            (found, m, i) => (found === -1 && m.role === 'assistant' ? i : found),
+            -1,
+          )
+          const isLastAssistant = msg.role === 'assistant' && idx === lastAssistantIdx
+          const parsedOpts =
+            msg.role === 'assistant' && msg.text && !msg.streaming
+              ? parseOptionsBlock(msg.text)
+              : null
+
           return (
             <div key={msg.id}>
               {showColdDivider && msg.ts != null && prevMsg!.ts != null && (
@@ -1227,11 +1240,25 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                     ))}
                   </div>
                 )}
-                {msg.text && (
+                {/* Option picker: when message ends with ```options block, split rendering */}
+                {parsedOpts ? (
+                  <>
+                    {parsedOpts.prefix && (
+                      <div className="chat-msg-body markdown-wrap">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{parsedOpts.prefix}</ReactMarkdown>
+                      </div>
+                    )}
+                    <OptionPicker
+                      options={parsedOpts.options}
+                      isActive={isLastAssistant && !run}
+                      onSelect={(value) => sendMessage(value)}
+                    />
+                  </>
+                ) : msg.text ? (
                   <div className="chat-msg-body markdown-wrap">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
                   </div>
-                )}
+                ) : null}
                 {msg.error && (
                   <div className="chat-msg-error">⚠ {msg.error}</div>
                 )}

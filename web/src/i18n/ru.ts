@@ -423,6 +423,10 @@ export const ru = {
   // ── Sub-agent lane (Spec-035) ────────────────────────────────────
   'chat.subagent_lane_label': 'субагенты',
 
+  // ── Option picker (CLI-style choice blocks) ──────────────────────
+  'chat.option_picker_label': 'Выберите вариант',
+  'chat.option_picker_hint': '↑↓ навигация · Enter выбор · 1–9 быстрый выбор',
+
   // ── Chat tab deferred runs (Spec 020) ────────────────────────────
   'chat.defer_title': 'Запланировать этот промпт на потом',
   'chat.defer_aria': 'Запланировать промпт на потом',

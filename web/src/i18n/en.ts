@@ -422,6 +422,10 @@ export const en = {
   // ── Sub-agent lane (Spec-035) ────────────────────────────────────
   'chat.subagent_lane_label': 'sub-agents',
 
+  // ── Option picker (CLI-style choice blocks) ──────────────────────
+  'chat.option_picker_label': 'Choose an option',
+  'chat.option_picker_hint': '↑↓ navigate · Enter confirm · 1–9 pick',
+
   // ── Chat tab deferred runs (Spec 020) ────────────────────────────
   'chat.defer_title': 'Schedule this prompt for later',
   'chat.defer_aria': 'Schedule prompt for later',

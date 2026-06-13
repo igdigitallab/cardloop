@@ -892,3 +892,85 @@
     height: 28px;
   }
 }
+
+/* ── Option Picker (CLI-style choice picker rendered from ```options blocks) ── */
+
+.option-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  outline: none;
+}
+
+.option-picker__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text2);
+  user-select: none;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+}
+
+.option-picker__row:hover:not(.option-picker__row--static) {
+  background: var(--bg4);
+  border-color: var(--border2);
+  color: var(--text);
+}
+
+.option-picker__row--highlighted {
+  background: rgba(107, 104, 245, 0.12);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.option-picker__row--selected {
+  background: rgba(107, 104, 245, 0.18);
+  border-color: var(--accent);
+  color: var(--text);
+  cursor: default;
+}
+
+.option-picker__row--static {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* Disabled picker (history / already selected) */
+.option-picker--disabled .option-picker__row:not(.option-picker__row--selected) {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.option-picker__num {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--accent);
+  min-width: 14px;
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.option-picker__label {
+  flex: 1;
+  line-height: 1.4;
+}
+
+.option-picker__check {
+  font-size: 12px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.option-picker__hint {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text3);
+  padding-left: 2px;
+}

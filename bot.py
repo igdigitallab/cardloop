@@ -259,7 +259,13 @@ TELEGRAM_NUDGE = (
     f"- Reply concisely{_lang_directive}, in natural prose: what you did → what's next. Do not echo the tool log "
     f"(it's visible in the status) and avoid long code listings — {OPERATOR_NAME} sees edits in files.\n"
     f"- To send a file/screenshot to {OPERATOR_NAME} in this topic: `tg-reply <path> [caption]`.\n"
-    "- Key decisions / pitfalls / rejected approaches → write to `.claude-ops/memory/` (see project CLAUDE.md)."
+    "- Key decisions / pitfalls / rejected approaches → write to `.claude-ops/memory/` (see project CLAUDE.md).\n"
+    # Option picker: the cockpit chat UI renders a CLI-style interactive picker when the
+    # agent ends a message with a ```options fenced block (2–6 mutually-exclusive choices).
+    # Use it sparingly — only when the user genuinely must pick one of a small closed set.
+    "- When presenting the operator a small set of mutually-exclusive choices (2–6 options), "
+    "you MAY end your message with a ```options fenced block (one choice per line) to render "
+    "a clickable picker in the chat UI; otherwise reply normally."
 )
 # AskUserQuestion = interactive prompt (no reply in TG -> agent hangs or decides on its own).
 DISALLOWED_TOOLS = ["AskUserQuestion"]
