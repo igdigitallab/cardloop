@@ -1175,26 +1175,29 @@
   cursor: default;
 }
 
-/* Close button (✕) in top-right corner */
+/* Close button (✕) — large, high-contrast, clear of the notch / address bar */
 .lightbox-close {
   position: fixed;
-  top: 16px;
-  right: 20px;
-  background: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  right: calc(env(safe-area-inset-right, 0px) + 12px);
+  background: rgba(0, 0, 0, 0.55);
+  border: 1.5px solid rgba(255, 255, 255, 0.55);
   color: #fff;
-  font-size: 20px;
+  font-size: 26px;
   line-height: 1;
-  width: 36px;
-  height: 36px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 10000;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
   transition: background 0.15s;
 }
-.lightbox-close:hover {
-  background: rgba(255, 255, 255, 0.22);
+.lightbox-close:hover,
+.lightbox-close:active {
+  background: rgba(0, 0, 0, 0.8);
 }

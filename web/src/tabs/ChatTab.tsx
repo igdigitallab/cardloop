@@ -356,12 +356,25 @@ interface CacheCountdownBadgeProps {
 
 // ─── Spec-038: inline image renderer + full-screen lightbox ──────────────────
 
-/** Full-screen lightbox overlay. Closes on backdrop click, ✕ button, or Esc. */
+/** Full-screen lightbox. Closes on tap anywhere, ✕ button, Esc, or device Back. */
 function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', handleKey)
-    return () => window.removeEventListener('keydown', handleKey)
+
+    // Hijack the device/browser Back button: opening pushes a history entry so
+    // Back closes the viewer instead of leaving the app. If closed via UI we
+    // pop that entry ourselves on cleanup.
+    let closedByBack = false
+    window.history.pushState({ copsLightbox: true }, '')
+    const onPop = () => { closedByBack = true; onClose() }
+    window.addEventListener('popstate', onPop)
+
+    return () => {
+      window.removeEventListener('keydown', handleKey)
+      window.removeEventListener('popstate', onPop)
+      if (!closedByBack) window.history.back()
+    }
   }, [onClose])
 
   // Portal to <body> so position:fixed escapes any transformed/contained
@@ -373,12 +386,12 @@ function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: ()
         onClick={onClose}
         aria-label="Close image"
       >✕</button>
-      {/* Stop propagation so clicking the image itself does not close */}
+      {/* Tap the image to close too (full-screen image leaves little backdrop) */}
       <img
         className="lightbox-img"
         src={src}
         alt={alt}
-        onClick={(e) => e.stopPropagation()}
+        onClick={onClose}
       />
     </div>,
     document.body,
