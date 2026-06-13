@@ -1,4 +1,5 @@
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
@@ -363,7 +364,9 @@ function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: ()
     return () => window.removeEventListener('keydown', handleKey)
   }, [onClose])
 
-  return (
+  // Portal to <body> so position:fixed escapes any transformed/contained
+  // ancestor (chat scroll containers) that would otherwise trap & clip it.
+  return createPortal(
     <div className="lightbox-overlay" onClick={onClose} role="dialog" aria-modal="true">
       <button
         className="lightbox-close"
@@ -377,7 +380,8 @@ function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: ()
         alt={alt}
         onClick={(e) => e.stopPropagation()}
       />
-    </div>
+    </div>,
+    document.body,
   )
 }
 

@@ -9087,18 +9087,26 @@ async def spa_handler(req: web.Request) -> web.Response:
     rel = req.path.lstrip("/") or "index.html"
     target = (dist / rel).resolve()
 
+    # Cache policy: Vite emits content-hashed files under /assets/ — cache them
+    # forever (immutable). Everything else (index.html, SPA fallback, favicon)
+    # must revalidate so a new deploy is picked up without a manual hard-refresh.
+    def _cache_headers(path_rel: str) -> dict:
+        if path_rel.startswith("assets/"):
+            return {"Cache-Control": "public, max-age=31536000, immutable"}
+        return {"Cache-Control": "no-cache"}
+
     # Guard against escaping dist
     try:
         target.relative_to(dist.resolve())
     except ValueError:
         # path traversal → serve index (safe)
-        return web.FileResponse(index)
+        return web.FileResponse(index, headers=_cache_headers("index.html"))
 
     if target.is_file():
-        return web.FileResponse(target)
+        return web.FileResponse(target, headers=_cache_headers(rel))
 
     # SPA fallback
-    return web.FileResponse(index)
+    return web.FileResponse(index, headers=_cache_headers("index.html"))
 
 
 # ─────────────────────────── Spec-019: Schedules API ───────────────────────
