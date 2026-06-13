@@ -2,6 +2,12 @@
 
 Архив завершённых карточек (append-only). **Сессии его НЕ читают** — гигиена контекста.
 
+## 2026-06-12
+- [x] Cards: own fresh session per card + cwd-lock <!--ops:2a0a1a--> — `_run_card` стартует с `resume_sid=None`, session_id не пишется обратно. `cwd_locks[effective_cwd]` блокирует параллельный запуск в одном cwd через `ephemeral=True`.
+- [x] TG-канал: контекст не дублируется <!--ops:9aa43f--> — NO BUG: session resume корректный, system_prompt — свежий dict на каждый вызов, рост контекста 1.01x/ход. 9 тестов в `tests/test_tg_session_resume.py`.
+- [x] Вкладка «Обзор» удалена, инфо перенесена в Настройки <!--ops:d124ae--> — `ProjectView.tsx` убрал таб, контент (git-state, структура) в `SettingsTab.tsx`. Кнопки аудита одинаковы для всех проектов. Файл-зомби `OverviewTab.tsx` удалён.
+- [x] Выделение сообщений пользователя в чате <!--ops:c14fec--> — `.chat-msg-user`: `background: rgba(107,104,245,0.07)` + `border-left: 2px solid var(--accent)`.
+
 ## 2026-06-02
 - [x] ⭐ Настройки проекта + глобальные настройки (UI): таб «⚙️ Настройки» <!--ops:f2ba02--> — per-project (git on/off флагман + модель/self_heal/notify/log_cmd/test_cmd, topics.json hot-reload) + глобальные (data/settings.json, провязаны в рантайм: self_heal master-kill, max_concurrent, scan_interval, дефолт-модель, watchdog stall/max). API GET/POST `/api/settings` + `/api/projects/{id}/settings` с валидацией. 20 тестов (test_settings.py).
 - [x] rename проекта сохраняет историю диалогов + Timeline (миграция SDK-каталога по slug); восстановлены family-emergency/autotopic-test; tests test_project_rename + test_forum_topic.

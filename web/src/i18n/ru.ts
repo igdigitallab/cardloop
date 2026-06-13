@@ -163,6 +163,9 @@ export const ru = {
   // ── Board tab ────────────────────────────────────────────────
   'board.loading': 'Загрузка доски...',
   'board.columns_label': 'колонки:',
+  'board.failed_tray_label': 'Ошибки',
+  'board.failed_tray_collapse': 'Свернуть трей ошибок',
+  'board.failed_tray_expand': 'Развернуть трей ошибок',
   'board.agent_running': 'Агент работает, авто-обновление...',
   'board.new_task_placeholder': 'Новая задача… (Enter — добавить)',
   'board.edit_hint': 'Двойной клик — редактировать',

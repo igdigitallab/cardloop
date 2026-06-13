@@ -14,7 +14,8 @@ interface Props {
   isActive?: boolean
 }
 
-const ORDER = ['backlog', 'in_progress', 'review', 'failed']
+// Columns shown in the board column row (Failed is excluded — it lives in the tray).
+const ORDER = ['backlog', 'in_progress', 'review']
 // Arrows ←/→ move through "parking" columns, SKIPPING in_progress: the only
 // way to run the agent is the 🤖 button (previously → from Backlog duplicated the robot).
 const PARK_ORDER = ['backlog', 'review', 'failed']
@@ -22,6 +23,7 @@ const POLL_FAST_MS = 3000   // when there are cards in In Progress (agent is run
 const POLL_SLOW_MS = 10000  // background poll (TASKS.md edits from agent via chat, external edits)
 
 const LS_BOARD_COLS = 'cops.boardVisibleCols'
+const LS_FAILED_COLLAPSED = 'cops.board.failedCollapsed'
 const DEFAULT_VISIBLE: string[] = ['backlog']  // default — Backlog only
 
 function readVisibleCols(): Set<string> {
@@ -38,6 +40,20 @@ function readVisibleCols(): Set<string> {
 
 function writeVisibleCols(s: Set<string>) {
   try { localStorage.setItem(LS_BOARD_COLS, JSON.stringify([...s])) } catch {}
+}
+
+function readFailedCollapsed(): boolean {
+  try {
+    const raw = localStorage.getItem(LS_FAILED_COLLAPSED)
+    if (raw === null) return true  // default: collapsed
+    return raw === 'true'
+  } catch {
+    return true
+  }
+}
+
+function writeFailedCollapsed(v: boolean) {
+  try { localStorage.setItem(LS_FAILED_COLLAPSED, String(v)) } catch {}
 }
 
 export function BoardTab({ projectId, isActive = true }: Props) {
@@ -79,6 +95,17 @@ export function BoardTab({ projectId, isActive = true }: Props) {
 
   // Visible columns (persisted in localStorage). Default — Backlog only.
   const [visibleCols, setVisibleCols] = useState<Set<string>>(() => readVisibleCols())
+
+  // Failed tray collapse state (persisted in localStorage). Default — collapsed.
+  const [failedCollapsed, setFailedCollapsed] = useState<boolean>(() => readFailedCollapsed())
+
+  function toggleFailedCollapsed() {
+    setFailedCollapsed(prev => {
+      const next = !prev
+      writeFailedCollapsed(next)
+      return next
+    })
+  }
 
   // Multi-select cards for batch sending to agent (sequential queue)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -370,6 +397,122 @@ export function BoardTab({ projectId, isActive = true }: Props) {
 
   const visibleOrder = ORDER.filter(k => visibleCols.has(k))
 
+  // Render a single card. Used by both the column loop and the failed tray.
+  // Defined here (inside the component) so it closes over all state and handlers.
+  function renderCard(
+    card: TaskCard,
+    { columnKey, parkIdx, isInProgress, canShowResult }: {
+      columnKey: string
+      parkIdx: number
+      isInProgress: boolean
+      canShowResult: boolean
+    }
+  ) {
+    const isIncident = isIncidentCard(card)
+    const isSel = selected.has(card.id)
+    const isQueued = board?.queued?.includes(card.id) ?? false
+    return (
+      <div
+        className={[
+          'board-card',
+          isInProgress ? 'board-card-running' : '',
+          dragCardId === card.id ? 'board-card-dragging' : '',
+          isIncident ? 'board-card-incident' : '',
+          isSel ? 'board-card-selected' : '',
+          isQueued ? 'board-card-queued' : '',
+        ].filter(Boolean).join(' ')}
+        key={card.id}
+        draggable={!isInProgress}
+        onDragStart={(e) => {
+          setDragCardId(card.id)
+          e.dataTransfer.effectAllowed = 'move'
+          e.dataTransfer.setData('text/plain', card.id)
+        }}
+        onDragEnd={() => { setDragCardId(null); setDragOverCol(null) }}
+      >
+        {parkIdx >= 0 && (
+          <input
+            type="checkbox"
+            className="board-card-check"
+            checked={isSel}
+            disabled={busy}
+            title="Select for batch send to agent"
+            onClick={e => e.stopPropagation()}
+            onChange={() => toggleSelect(card.id)}
+          />
+        )}
+        {isQueued && (
+          <div className="board-card-selrow">
+            <span className="board-card-queued-badge" title="Queued for agent run">⏳ queued</span>
+          </div>
+        )}
+        {editingCard?.id === card.id ? (
+          <textarea
+            className="board-card-edit-input"
+            value={editingCard.text}
+            autoFocus
+            rows={3}
+            onChange={e => setEditingCard({ id: card.id, text: e.target.value })}
+            onBlur={saveCardEdit}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveCardEdit() }
+              if (e.key === 'Escape') setEditingCard(null)
+            }}
+          />
+        ) : (
+          <div
+            className="board-card-text"
+            onDoubleClick={() => !isInProgress && setEditingCard({ id: card.id, text: card.text })}
+            title={isInProgress ? '' : t['board.edit_hint']}
+          >
+            {isIncident && <span className="card-incident-icon" title={t['board.incident_title']}>⚠ </span>}
+            {isInProgress && <span className="card-running-icon" title={t['board.card_running_title']}>⚙ </span>}
+            <span className="board-card-title">{card.text}</span>
+            {card.description && (
+              <button
+                className="board-card-desc-btn"
+                title={t['board.show_description']}
+                onClick={e => { e.stopPropagation(); openDescModal(card) }}
+              >📝</button>
+            )}
+          </div>
+        )}
+        <div className="board-card-actions">
+          {parkIdx >= 0 && (
+            <>
+              <button title={t['board.move_left']} aria-label={t['board.move_left_aria']} disabled={busy || parkIdx === 0}
+                onClick={() => move(card.id, PARK_ORDER[parkIdx - 1])}>←</button>
+              <button title={t['board.move_right']} aria-label={t['board.move_right_aria']} disabled={busy || parkIdx === PARK_ORDER.length - 1}
+                onClick={() => move(card.id, PARK_ORDER[parkIdx + 1])}>→</button>
+            </>
+          )}
+          {columnKey !== 'in_progress' && (
+            <button
+              title="🤖 Run by agent (→ In Progress)"
+              aria-label={t['board.handoff_aria']}
+              className="act-handoff"
+              disabled={busy}
+              onClick={() => move(card.id, 'in_progress')}
+            >🤖</button>
+          )}
+          {canShowResult && (
+            <button
+              title={t['board.show_result']}
+              aria-label={t['board.show_result_aria']}
+              className="act-result"
+              disabled={busy}
+              onClick={() => showResult(card.id)}
+            >📄</button>
+          )}
+          <button title={t['board.archive']} aria-label={t['board.archive_aria']} className="act-done" disabled={busy}
+            onClick={() => move(card.id, 'done')}>✓</button>
+          <button title={t['board.delete']} aria-label={t['board.delete_aria']} className="act-del" disabled={busy}
+            onClick={() => del(card.id)}>✕</button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="board-wrap">
       {error && <div className="error-state" style={{ marginBottom: 10 }}>⚠ {error}</div>}
@@ -451,116 +594,67 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                   </div>
                 )}
 
-                {col.cards.map(card => {
-                  const isIncident = isIncidentCard(card)
-                  const isSel = selected.has(card.id)
-                  const isQueued = board?.queued?.includes(card.id) ?? false
-                  return (
-                  <div
-                    className={[
-                      'board-card',
-                      isInProgress ? 'board-card-running' : '',
-                      dragCardId === card.id ? 'board-card-dragging' : '',
-                      isIncident ? 'board-card-incident' : '',
-                      isSel ? 'board-card-selected' : '',
-                      isQueued ? 'board-card-queued' : '',
-                    ].filter(Boolean).join(' ')}
-                    key={card.id}
-                    draggable={!isInProgress}
-                    onDragStart={(e) => {
-                      setDragCardId(card.id)
-                      e.dataTransfer.effectAllowed = 'move'
-                      e.dataTransfer.setData('text/plain', card.id)
-                    }}
-                    onDragEnd={() => { setDragCardId(null); setDragOverCol(null) }}
-                  >
-                    {parkIdx >= 0 && (
-                      <input
-                        type="checkbox"
-                        className="board-card-check"
-                        checked={isSel}
-                        disabled={busy}
-                        title="Select for batch send to agent"
-                        onClick={e => e.stopPropagation()}
-                        onChange={() => toggleSelect(card.id)}
-                      />
-                    )}
-                    {isQueued && (
-                      <div className="board-card-selrow">
-                        <span className="board-card-queued-badge" title="Queued for agent run">⏳ queued</span>
-                      </div>
-                    )}
-                    {editingCard?.id === card.id ? (
-                      <textarea
-                        className="board-card-edit-input"
-                        value={editingCard.text}
-                        autoFocus
-                        rows={3}
-                        onChange={e => setEditingCard({ id: card.id, text: e.target.value })}
-                        onBlur={saveCardEdit}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveCardEdit() }
-                          if (e.key === 'Escape') setEditingCard(null)
-                        }}
-                      />
-                    ) : (
-                      <div
-                        className="board-card-text"
-                        onDoubleClick={() => !isInProgress && setEditingCard({ id: card.id, text: card.text })}
-                        title={isInProgress ? '' : t['board.edit_hint']}
-                      >
-                        {isIncident && <span className="card-incident-icon" title={t['board.incident_title']}>⚠ </span>}
-                        {isInProgress && <span className="card-running-icon" title={t['board.card_running_title']}>⚙ </span>}
-                        <span className="board-card-title">{card.text}</span>
-                        {card.description && (
-                          <button
-                            className="board-card-desc-btn"
-                            title={t['board.show_description']}
-                            onClick={e => { e.stopPropagation(); openDescModal(card) }}
-                          >📝</button>
-                        )}
-                      </div>
-                    )}
-                    <div className="board-card-actions">
-                      {parkIdx >= 0 && (
-                        <>
-                          <button title={t['board.move_left']} aria-label={t['board.move_left_aria']} disabled={busy || parkIdx === 0}
-                            onClick={() => move(card.id, PARK_ORDER[parkIdx - 1])}>←</button>
-                          <button title={t['board.move_right']} aria-label={t['board.move_right_aria']} disabled={busy || parkIdx === PARK_ORDER.length - 1}
-                            onClick={() => move(card.id, PARK_ORDER[parkIdx + 1])}>→</button>
-                        </>
-                      )}
-                      {col.key !== 'in_progress' && (
-                        <button
-                          title="🤖 Run by agent (→ In Progress)"
-                          aria-label={t['board.handoff_aria']}
-                          className="act-handoff"
-                          disabled={busy}
-                          onClick={() => move(card.id, 'in_progress')}
-                        >🤖</button>
-                      )}
-                      {canShowResult && (
-                        <button
-                          title={t['board.show_result']}
-                          aria-label={t['board.show_result_aria']}
-                          className="act-result"
-                          disabled={busy}
-                          onClick={() => showResult(card.id)}
-                        >📄</button>
-                      )}
-                      <button title={t['board.archive']} aria-label={t['board.archive_aria']} className="act-done" disabled={busy}
-                        onClick={() => move(card.id, 'done')}>✓</button>
-                      <button title={t['board.delete']} aria-label={t['board.delete_aria']} className="act-del" disabled={busy}
-                        onClick={() => del(card.id)}>✕</button>
-                    </div>
-                  </div>
-                  )
-                })}
+                {col.cards.map(card =>
+                  renderCard(card, { columnKey: key, parkIdx, isInProgress, canShowResult })
+                )}
               </div>
             </div>
           )
         })}
       </div>
+
+      {/* Failed tray — rendered only when the failed column has ≥1 card */}
+      {(() => {
+        const failedCol = colByKey('failed')
+        if (!failedCol || failedCol.cards.length === 0) return null
+        const failedParkIdx = PARK_ORDER.indexOf('failed')
+        const trayLabel = failedCol.label || t['board.failed_tray_label']
+        const isDragOver = dragOverCol === 'failed' && dragCardId !== null
+        return (
+          <div className="board-failed-tray">
+            <button
+              className={`board-failed-tray-header${failedCollapsed ? ' collapsed' : ''}`}
+              aria-label={failedCollapsed ? t['board.failed_tray_expand'] : t['board.failed_tray_collapse']}
+              onClick={toggleFailedCollapsed}
+            >
+              <span className="board-failed-tray-chevron">{failedCollapsed ? '▶' : '▼'}</span>
+              <span className="board-failed-tray-title">🔴 {trayLabel} ({failedCol.cards.length})</span>
+            </button>
+            {!failedCollapsed && (
+              <div
+                className={`board-failed-tray-body${isDragOver ? ' board-col-drag-over' : ''}`}
+                onDragOver={(e) => {
+                  if (!dragCardId) return
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                  if (dragOverCol !== 'failed') setDragOverCol('failed')
+                }}
+                onDragLeave={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOverCol(null)
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  if (dragCardId) {
+                    const fromCol = cols.find(c => c.cards.some(card => card.id === dragCardId))
+                    if (fromCol?.key !== 'failed') move(dragCardId, 'failed')
+                  }
+                  setDragCardId(null)
+                  setDragOverCol(null)
+                }}
+              >
+                {failedCol.cards.map(card =>
+                  renderCard(card, {
+                    columnKey: 'failed',
+                    parkIdx: failedParkIdx,
+                    isInProgress: false,
+                    canShowResult: true,
+                  })
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })()}
 
       {selected.size > 0 && (
         <div className="board-batch-bar">

@@ -162,6 +162,9 @@ export const en = {
   // ── Board tab ────────────────────────────────────────────────
   'board.loading': 'Loading board...',
   'board.columns_label': 'columns:',
+  'board.failed_tray_label': 'Failed',
+  'board.failed_tray_collapse': 'Collapse failed tray',
+  'board.failed_tray_expand': 'Expand failed tray',
   'board.agent_running': 'Agent is running, auto-updating...',
   'board.new_task_placeholder': 'New task… (Enter to add)',
   'board.edit_hint': 'Double-click to edit',

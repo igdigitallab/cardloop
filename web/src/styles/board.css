@@ -307,6 +307,73 @@
 }
 .board-batch-clear:hover { color: var(--text, #ddd); border-color: var(--text-dim, #888); }
 
+/* ── Failed tray (Spec 032) ────────────────────────────────── */
+.board-failed-tray {
+  margin-top: 14px;
+  border-top: 1px solid color-mix(in srgb, var(--red, #dc2626) 25%, var(--border));
+  padding-top: 10px;
+}
+
+.board-failed-tray-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 0;
+  color: color-mix(in srgb, var(--red, #dc2626) 55%, var(--text2));
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  user-select: none;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition);
+}
+.board-failed-tray-header:hover {
+  color: color-mix(in srgb, var(--red, #dc2626) 75%, var(--text));
+}
+
+.board-failed-tray-chevron {
+  font-size: 10px;
+  opacity: 0.75;
+  transition: transform var(--transition);
+}
+
+.board-failed-tray-title {
+  font-size: 12px;
+}
+
+/* Expanded tray body: horizontal wrap */
+.board-failed-tray-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 0 4px;
+  min-height: 48px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition);
+}
+
+/* Drag-over highlight reuses the column class */
+.board-failed-tray-body.board-col-drag-over {
+  background: rgba(99,102,241,0.07);
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+  padding: 10px;
+}
+
+/* Cards in the tray: fixed min-width so they tile nicely */
+.board-failed-tray-body .board-card {
+  flex: 1 1 240px;
+  max-width: 340px;
+  /* Tone down the loud incident border inside the tray — it reads as archived failure */
+  border-left-color: color-mix(in srgb, var(--red, #dc2626) 45%, var(--border));
+}
+.board-failed-tray-body .board-card-incident {
+  background: linear-gradient(90deg, rgba(220,38,38,0.03), var(--bg3) 30%);
+}
+
 /* ══════════════════════════════════════════════════════════════
    RESPONSIVE — Board
    ══════════════════════════════════════════════════════════════ */
