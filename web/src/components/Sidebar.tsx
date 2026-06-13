@@ -6,6 +6,8 @@ import { ConfirmModal } from './ConfirmModal'
 import { Modal, ModalHead } from './Modal'
 import { t } from '../i18n'
 import { useToast } from './Toast'
+import { ThemeToggle } from './ThemeToggle'
+import { ThemeValue } from '../hooks/useTheme'
 
 interface Props {
   projects: Project[]
@@ -28,6 +30,8 @@ interface Props {
   onProjectsReload?: () => void
   /** Called when user right-clicks Open on a project — navigate to that project's settings tab */
   onOpenProjectSettings?: (id: string) => void
+  theme?: ThemeValue
+  onThemeChange?: (t: ThemeValue) => void
 }
 
 function unreadFor(p: Project, map: Record<string, number>): number {
@@ -73,6 +77,7 @@ export function Sidebar({
   unreadBySession, replyReadyIds, collapsed, onToggleCollapse, onReorder,
   onNewProject, newProjectBusy, drawerOpen, activeProjectId, onGoBack,
   onProjectsReload, onOpenProjectSettings,
+  theme, onThemeChange,
 }: Props) {
   const { showToast } = useToast()
   const [search, setSearch] = useState('')
@@ -1067,6 +1072,12 @@ export function Sidebar({
       </div>
 
       <div className="sidebar-footer">
+        {theme !== undefined && onThemeChange && (
+          <div className="sidebar-footer-theme">
+            <span className="sidebar-footer-theme-label">Theme</span>
+            <ThemeToggle theme={theme} onChange={onThemeChange} />
+          </div>
+        )}
         <button className="logout-btn" onClick={onLogout}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
             stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

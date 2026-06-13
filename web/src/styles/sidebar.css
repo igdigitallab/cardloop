@@ -340,6 +340,28 @@
   border-top: 1px solid var(--border);
 }
 
+.sidebar-footer-theme {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px 8px;
+  gap: 8px;
+}
+
+.sidebar-footer-theme-label {
+  font-size: 11px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+
+/* Let ThemeToggle fill the remaining space and center its buttons */
+.sidebar-footer-theme .theme-toggle {
+  flex: 1;
+  justify-content: center;
+}
+
 .logout-btn {
   width: 100%;
   display: flex;

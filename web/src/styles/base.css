@@ -212,12 +212,8 @@ body {
 .btn-danger:hover { background: rgba(220,60,60,0.3); }
 
 /* ── ThemeToggle ─────────────────────────────────────────────────────── */
-/* Fixed top-right, compact, touch-friendly (≥44px tap target on coarse) */
+/* Inline in sidebar footer, touch-friendly (≥44px tap target on coarse) */
 .theme-toggle {
-  position: fixed;
-  top: 8px;
-  right: 8px;
-  z-index: 1000;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -225,7 +221,6 @@ body {
   border: 1px solid var(--border2);
   border-radius: 20px;
   padding: 3px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
 }
 
 .theme-toggle-btn {

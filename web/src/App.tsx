@@ -13,7 +13,6 @@ import { VaultTab } from './tabs/VaultTab'
 import { useToast, ToastContainer } from './components/Toast'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
 import { useTheme } from './hooks/useTheme'
-import { ThemeToggle } from './components/ThemeToggle'
 
 const GLOBAL_FILES_ID = '__global__'
 const SCHEDULES_ID = '__schedules__'
@@ -631,7 +630,6 @@ export default function App() {
   return (
     <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''} mobile-on-${mobileScreen}`}>
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
-      <ThemeToggle theme={theme} onChange={setTheme} />
       {/* Backdrop for mobile drawer — tap to close */}
       <div
         className={`sidebar-backdrop${drawerOpen ? ' visible' : ''}`}
@@ -658,6 +656,8 @@ export default function App() {
         onGoBack={() => setMobileScreen('project')}
         onProjectsReload={loadProjects}
         onOpenProjectSettings={handleOpenProjectSettings}
+        theme={theme}
+        onThemeChange={setTheme}
       />
 
       <div className="main-area">
