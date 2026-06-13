@@ -260,6 +260,18 @@ export const ru = {
   'chat.input_placeholder_touch': 'Сообщение агенту…',
   'chat.look_at_files': 'Посмотри прикреплённые файлы.',
 
+  // ── Message queue ──────────────────────────────────────────────
+  'chat.queue_panel_label': 'Очередь сообщений',
+  'chat.queue_edit_btn': 'Изм.',
+  'chat.queue_delete_btn': 'Удалить',
+  'chat.queue_save_btn': 'Сохранить',
+  'chat.queue_cancel_btn': 'Отмена',
+  'chat.queue_item_aria': 'Сообщение в очереди',
+  'chat.queue_edit_aria': 'Изменить сообщение в очереди',
+  'chat.queue_delete_aria': 'Удалить из очереди',
+  'chat.queue_save_aria': 'Сохранить правку',
+  'chat.queue_cancel_aria': 'Отменить правку',
+
   // ── Session selector ─────────────────────────────────────────
   'session.new': 'новая',
   'session.just_now': 'только что',

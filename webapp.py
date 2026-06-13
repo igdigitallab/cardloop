@@ -6684,6 +6684,144 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     })
 
 
+# ─────────────────────────── Chat message queue (server-side) ───────────────
+# Per-session FIFO queue of messages the user submitted while the agent was
+# busy.  Stored in-memory (matches existing session patterns — data/ files are
+# not used because the queue lifetime is intentionally shorter than a restart).
+# Each item: {"id": str, "text": str, "created_at": float}
+#
+# Endpoints:
+#   GET    /api/projects/{id}/chat/queue          → {"items": [...]}
+#   POST   /api/projects/{id}/chat/queue          → {"item": {...}}  (enqueue)
+#   PATCH  /api/projects/{id}/chat/queue/{msg_id} → {"item": {...}}  (edit)
+#   DELETE /api/projects/{id}/chat/queue/{msg_id} → {"ok": true}     (remove)
+#
+# The existing chat endpoint (POST /chat) enqueues via _chat_queue_enqueue
+# instead of returning "busy" when a run is in progress.
+# When the run finishes the GET /live poll / done-SSE event is the signal for
+# the frontend to drain (it calls sendMessage with the first queued item).
+
+import uuid as _uuid_mod
+
+_CHAT_QUEUE: "dict[str, list[dict]]" = {}  # session_key → [{id, text, created_at}, ...]
+_CHAT_QUEUE_MAX = int(os.environ.get("CHAT_QUEUE_MAX", "20"))
+
+
+def _chat_queue_enqueue(session_key: str, text: str) -> "dict | None":
+    """Append a message to the chat queue for session_key.
+    Returns the new item dict, or None if the queue is full."""
+    lst = _CHAT_QUEUE.setdefault(session_key, [])
+    if len(lst) >= _CHAT_QUEUE_MAX:
+        return None
+    item: dict = {"id": str(_uuid_mod.uuid4()), "text": text, "created_at": time.time()}
+    lst.append(item)
+    return item
+
+
+def _chat_queue_get(session_key: str) -> list:
+    """Returns a copy of the queue for session_key."""
+    return list(_CHAT_QUEUE.get(session_key, []))
+
+
+def _chat_queue_pop(session_key: str) -> "dict | None":
+    """Pops and returns the oldest item, or None if empty."""
+    lst = _CHAT_QUEUE.get(session_key)
+    if not lst:
+        return None
+    item = lst.pop(0)
+    if not lst:
+        _CHAT_QUEUE.pop(session_key, None)
+    return item
+
+
+def _chat_queue_edit(session_key: str, msg_id: str, new_text: str) -> "dict | None":
+    """Edits the text of a queued item by id.  Returns the updated item or None if not found."""
+    for item in _CHAT_QUEUE.get(session_key, []):
+        if item["id"] == msg_id:
+            item["text"] = new_text
+            return dict(item)
+    return None
+
+
+def _chat_queue_delete(session_key: str, msg_id: str) -> bool:
+    """Removes item by id.  Returns True if found and removed."""
+    lst = _CHAT_QUEUE.get(session_key)
+    if not lst:
+        return False
+    for i, item in enumerate(lst):
+        if item["id"] == msg_id:
+            lst.pop(i)
+            if not lst:
+                _CHAT_QUEUE.pop(session_key, None)
+            return True
+    return False
+
+
+async def api_chat_queue_list(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/chat/queue — return pending queued messages."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = project["tg_thread"]
+    return web.json_response({"items": _chat_queue_get(session_key)})
+
+
+async def api_chat_queue_add(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/chat/queue — enqueue a message (called when project is busy)."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    text = (body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "empty text"}, status=400)
+    session_key = project["tg_thread"]
+    item = _chat_queue_enqueue(session_key, text)
+    if item is None:
+        return web.json_response({"error": "queue full"}, status=429)
+    return web.json_response({"item": item}, status=201)
+
+
+async def api_chat_queue_edit(req: web.Request) -> web.Response:
+    """PATCH /api/projects/{id}/chat/queue/{msg_id} — edit queued message text."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    msg_id = req.match_info["msg_id"]
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    new_text = (body.get("text") or "").strip()
+    if not new_text:
+        return web.json_response({"error": "empty text"}, status=400)
+    session_key = project["tg_thread"]
+    updated = _chat_queue_edit(session_key, msg_id, new_text)
+    if updated is None:
+        return web.json_response({"error": "not found (already consumed or invalid id)"}, status=404)
+    return web.json_response({"item": updated})
+
+
+async def api_chat_queue_delete(req: web.Request) -> web.Response:
+    """DELETE /api/projects/{id}/chat/queue/{msg_id} — remove a queued message."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    msg_id = req.match_info["msg_id"]
+    session_key = project["tg_thread"]
+    removed = _chat_queue_delete(session_key, msg_id)
+    if not removed:
+        return web.json_response({"error": "not found (already consumed or invalid id)"}, status=404)
+    return web.json_response({"ok": True})
+
+
 # ─────────────────────────── C1: SSE chat ───────────────────────────
 #
 # POST /api/projects/{id}/chat  body: {"prompt": str}
@@ -8614,6 +8752,11 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
         # C1-stop: interrupt current agent run
         app.router.add_post("/api/projects/{id}/chat/stop", api_project_chat_stop)
+        # Chat message queue (server-side persist across reload; editable/deletable)
+        app.router.add_get("/api/projects/{id}/chat/queue", api_chat_queue_list)
+        app.router.add_post("/api/projects/{id}/chat/queue", api_chat_queue_add)
+        app.router.add_patch("/api/projects/{id}/chat/queue/{msg_id}", api_chat_queue_edit)
+        app.router.add_delete("/api/projects/{id}/chat/queue/{msg_id}", api_chat_queue_delete)
         app.router.add_get("/api/projects/{id}/running", api_project_running)
         # Spec-021: manual session rotation (wrap & reset)
         app.router.add_post("/api/projects/{id}/rotate", api_project_rotate)

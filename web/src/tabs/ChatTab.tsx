@@ -488,8 +488,12 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const busActiveRef = useRef<boolean>(false)
-  const queueRef = useRef<string[]>([])
-  const [queueLen, setQueueLen] = useState<number>(0)
+  // Server-backed message queue: replaces the old client-only queueRef.
+  // Survives page reload via GET /api/projects/{id}/chat/queue on mount.
+  interface QueueItem { id: string; text: string; created_at: number }
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([])
+  const [queueEditId, setQueueEditId] = useState<string | null>(null)
+  const [queueEditText, setQueueEditText] = useState<string>('')
   const sendMessageRef = useRef<((text?: string) => Promise<void>) | null>(null)
   const streamingRef = useRef(false)
 
@@ -575,8 +579,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setServerStartedAt(null)
     setSubagents([])
     seenSubagentKeysRef.current = new Set()
-    queueRef.current = []
-    setQueueLen(0)
+    setQueueItems([])
+    setQueueEditId(null)
+    setQueueEditText('')
     busActiveRef.current = false
     setContextTokens(null)
     setPrevContextTokens(null)
@@ -588,10 +593,12 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
 
     Promise.all([
       api.sessionHistory(projectId),
+      api.chatQueue(projectId).catch(() => ({ items: [] as Array<{ id: string; text: string; created_at: number }> })),
       // Spec-035 L3: /live replaces /running — returns running state + turn history + started_at
       api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, cursor: 0, events: [] as Array<Record<string, unknown>> })),
-    ]).then(([histRes, liveRes]) => {
+    ]).then(([histRes, queueRes, liveRes]) => {
       if (cancelled) return
+      setQueueItems(queueRes.items)
       setContextTokens(histRes.context_tokens || null)
       // Spec-033: seed cache freshness anchor from the persisted transcript data
       if (histRes.last_turn_at != null) setLastTurnEndMs(histRes.last_turn_at)
@@ -744,8 +751,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setStreaming(false)
     setError('')
     setRun(null)
-    queueRef.current = []
-    setQueueLen(0)
+    setQueueItems([])
+    setQueueEditId(null)
     busActiveRef.current = false
     setContextTokens(null)
     setPrevContextTokens(null)
@@ -788,10 +795,12 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     if (streaming && overrideText === undefined) {
       const filePaths = readyFiles.map(a => `attached file: ${a.path}`)
       const fullText = filePaths.length > 0 ? `${effectiveText}\n\n${filePaths.join('\n')}` : effectiveText
-      queueRef.current.push(fullText)
-      setQueueLen(queueRef.current.length)
       setInput('')
       setAttachments([])
+      // Enqueue server-side so the message survives a page reload.
+      api.chatQueueAdd(projectId, fullText)
+        .then(res => setQueueItems(prev => [...prev, res.item]))
+        .catch(() => {/* queue full or network — silently drop */})
       return
     }
 
@@ -914,11 +923,15 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       textareaRef.current?.focus()
       setCtxRefreshKey(k => k + 1)
       onProjectsReload()
-      if (queueRef.current.length > 0) {
-        const next = queueRef.current.shift()!
-        setQueueLen(queueRef.current.length)
-        setTimeout(() => { sendMessageRef.current?.(next) }, 150)
-      }
+      // Drain server-side queue: pop the first item and send it.
+      setQueueItems(prev => {
+        if (prev.length === 0) return prev
+        const [first, ...rest] = prev
+        // Delete from server (fire-and-forget — UI already updated optimistically)
+        api.chatQueueDelete(projectId, first.id).catch(() => {/* non-critical */})
+        setTimeout(() => { sendMessageRef.current?.(first.text) }, 150)
+        return rest
+      })
     }
   }, [input, projectId, streaming, onProjectsReload, attachments])
 
@@ -986,8 +999,12 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     }
     abortRef.current?.abort()
     setStreaming(false)
-    queueRef.current = []
-    setQueueLen(0)
+    // Clear server-side queue entries (fire-and-forget per item)
+    setQueueItems(prev => {
+      prev.forEach(item => api.chatQueueDelete(projectId, item.id).catch(() => {}))
+      return []
+    })
+    setQueueEditId(null)
   }
 
   // Shared rotate handler — called from both the health-row button and the context warning banner.
@@ -1365,7 +1382,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           <RunStatusBar
             run={run}
             serverStartedAt={serverStartedAt}
-            queueLen={queueLen}
+            queueLen={queueItems.length}
             onStop={stopStream}
           />
         )}
@@ -1447,6 +1464,94 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             </div>
           )
         })()}
+        {/* Server-backed message queue panel — visible when messages are queued while agent runs.
+            Survives page reload via GET /api/projects/{id}/chat/queue hydration on mount. */}
+        {queueItems.length > 0 && (
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: 4,
+            padding: '6px 8px',
+            background: 'var(--color-bg-alt, rgba(0,0,0,0.04))',
+            border: '1px solid var(--color-border, #e5e7eb)',
+            borderRadius: 6,
+            margin: '4px 0',
+            flexShrink: 0,
+          }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-muted, #6b7280)', marginBottom: 2 }}>
+              {t['chat.queue_panel_label']} ({queueItems.length})
+            </span>
+            {queueItems.map((item, idx) => (
+              <div key={item.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                <span style={{ fontSize: 11, color: 'var(--color-muted, #9ca3af)', minWidth: 16, paddingTop: 2 }}>
+                  {idx + 1}.
+                </span>
+                {queueEditId === item.id ? (
+                  <>
+                    <textarea
+                      style={{
+                        flex: 1, fontSize: 12, padding: '3px 6px',
+                        border: '1px solid var(--color-primary, #6366f1)',
+                        borderRadius: 4, resize: 'vertical', minHeight: 36,
+                        background: 'var(--color-bg, #fff)', color: 'inherit',
+                      }}
+                      value={queueEditText}
+                      onChange={e => setQueueEditText(e.target.value)}
+                      aria-label={t['chat.queue_item_aria']}
+                    />
+                    <button
+                      style={{ fontSize: 11, padding: '2px 7px', cursor: 'pointer',
+                        background: 'var(--color-primary, #6366f1)', color: '#fff',
+                        border: 'none', borderRadius: 4, whiteSpace: 'nowrap' }}
+                      aria-label={t['chat.queue_save_aria']}
+                      onClick={() => {
+                        const trimmed = queueEditText.trim()
+                        if (!trimmed) return
+                        api.chatQueueEdit(projectId, item.id, trimmed)
+                          .then(res => {
+                            setQueueItems(prev => prev.map(q => q.id === item.id ? res.item : q))
+                            setQueueEditId(null)
+                          })
+                          .catch(() => setQueueEditId(null))
+                      }}
+                    >{t['chat.queue_save_btn']}</button>
+                    <button
+                      style={{ fontSize: 11, padding: '2px 7px', cursor: 'pointer',
+                        background: 'transparent', border: '1px solid var(--color-border, #d1d5db)',
+                        borderRadius: 4, whiteSpace: 'nowrap' }}
+                      aria-label={t['chat.queue_cancel_aria']}
+                      onClick={() => setQueueEditId(null)}
+                    >{t['chat.queue_cancel_btn']}</button>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ flex: 1, fontSize: 12, wordBreak: 'break-word', paddingTop: 2 }}
+                      aria-label={t['chat.queue_item_aria']}>
+                      {item.text}
+                    </span>
+                    <button
+                      style={{ fontSize: 11, padding: '2px 7px', cursor: 'pointer',
+                        background: 'transparent', border: '1px solid var(--color-border, #d1d5db)',
+                        borderRadius: 4, whiteSpace: 'nowrap', flexShrink: 0 }}
+                      aria-label={t['chat.queue_edit_aria']}
+                      onClick={() => { setQueueEditId(item.id); setQueueEditText(item.text) }}
+                    >{t['chat.queue_edit_btn']}</button>
+                    <button
+                      style={{ fontSize: 11, padding: '2px 7px', cursor: 'pointer',
+                        background: 'transparent', border: '1px solid var(--color-red, #ef4444)',
+                        borderRadius: 4, color: 'var(--color-red, #ef4444)', whiteSpace: 'nowrap', flexShrink: 0 }}
+                      aria-label={t['chat.queue_delete_aria']}
+                      onClick={() => {
+                        api.chatQueueDelete(projectId, item.id)
+                          .then(() => setQueueItems(prev => prev.filter(q => q.id !== item.id)))
+                          .catch(() => {/* already gone */})
+                        if (queueEditId === item.id) setQueueEditId(null)
+                      }}
+                    >{t['chat.queue_delete_btn']}</button>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         <div className="chat-composer">
           <textarea
             ref={textareaRef}

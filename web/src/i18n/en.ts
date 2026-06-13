@@ -259,6 +259,18 @@ export const en = {
   'chat.input_placeholder_touch': 'Message to agent…',
   'chat.look_at_files': 'Look at the attached files.',
 
+  // ── Message queue ──────────────────────────────────────────────
+  'chat.queue_panel_label': 'Queued messages',
+  'chat.queue_edit_btn': 'Edit',
+  'chat.queue_delete_btn': 'Delete',
+  'chat.queue_save_btn': 'Save',
+  'chat.queue_cancel_btn': 'Cancel',
+  'chat.queue_item_aria': 'Queued message',
+  'chat.queue_edit_aria': 'Edit queued message',
+  'chat.queue_delete_aria': 'Delete queued message',
+  'chat.queue_save_aria': 'Save edit',
+  'chat.queue_cancel_aria': 'Cancel edit',
+
   // ── Session selector ─────────────────────────────────────────
   'session.new': 'new',
   'session.just_now': 'just now',

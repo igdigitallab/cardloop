@@ -159,6 +159,35 @@ export const api = {
       method: 'POST',
     }),
 
+  // Chat message queue — server-side persist; survives page reload
+  chatQueue: (id: string) =>
+    apiFetch<{ items: Array<{ id: string; text: string; created_at: number }> }>(
+      `/api/projects/${id}/chat/queue`
+    ),
+  chatQueueAdd: (id: string, text: string) =>
+    apiFetch<{ item: { id: string; text: string; created_at: number } }>(
+      `/api/projects/${id}/chat/queue`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      }
+    ),
+  chatQueueEdit: (id: string, msgId: string, text: string) =>
+    apiFetch<{ item: { id: string; text: string; created_at: number } }>(
+      `/api/projects/${id}/chat/queue/${encodeURIComponent(msgId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      }
+    ),
+  chatQueueDelete: (id: string, msgId: string) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/projects/${id}/chat/queue/${encodeURIComponent(msgId)}`,
+      { method: 'DELETE' }
+    ),
+
   // Check whether there is an active run (for restoring UI after refresh)
   projectRunning: (id: string) =>
     apiFetch<{ running: boolean }>(`/api/projects/${id}/running`),
