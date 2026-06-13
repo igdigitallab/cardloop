@@ -138,6 +138,24 @@
 .board-add textarea:focus { outline: none; border-color: var(--accent); }
 .board-add .btn-primary { font-size: 12px; padding: 6px 10px; }
 
+/* Task B: right-side controls group pushed to the right of the column toggles strip */
+.board-col-toggles-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Archive toggle: styled like a col-toggle pill when in the strip */
+.board-archive-toggle-strip {
+  background: none; border: 1px solid var(--border2);
+  color: var(--text2); font-size: 11px; cursor: pointer;
+  padding: 3px 8px; border-radius: 10px;
+  transition: all var(--transition);
+}
+.board-archive-toggle-strip:hover { color: var(--text); border-color: var(--text3); }
+
+/* Legacy archive toggle (kept for compatibility) */
 .board-footer { margin-top: 14px; display: flex; align-items: center; gap: 14px; }
 .board-archive-toggle {
   background: none; border: none; color: var(--text2);
@@ -145,9 +163,56 @@
 }
 .board-archive-toggle:hover { color: var(--text); }
 .board-hint { font-size: 11px; color: var(--text3); }
+.board-hint-notexist { margin: 6px 0 10px; }
 .board-archive {
-  margin-top: 8px; padding: 12px 14px;
+  margin-bottom: 10px; padding: 12px 14px;
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+}
+
+/* Task A: auto-reconcile gear + popover */
+.board-reconcile-wrap {
+  position: relative;
+}
+.board-reconcile-gear {
+  font-size: 12px;
+  padding: 3px 7px;
+}
+.board-reconcile-popover {
+  position: absolute;
+  right: 0; top: calc(100% + 6px);
+  width: 240px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  z-index: 200;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.board-reconcile-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.board-reconcile-label {
+  font-size: 12px; color: var(--text2);
+}
+.board-reconcile-seg {
+  display: flex; gap: 3px;
+}
+.board-reconcile-seg-btn {
+  font-size: 11px; padding: 3px 7px;
+  border: 1px solid var(--border2); border-radius: 8px;
+  background: transparent; color: var(--text3); cursor: pointer;
+  transition: all var(--transition);
+}
+.board-reconcile-seg-btn.active {
+  background: var(--bg3); color: var(--text); border-color: var(--accent);
+}
+.board-reconcile-seg-btn:hover:not(:disabled):not(.active) {
+  color: var(--text2); border-color: var(--text3);
+}
+.board-reconcile-seg-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.board-reconcile-hint {
+  font-size: 10px; color: var(--text3); margin-top: 2px;
 }
 
 /* F1: авто-запуск карточки */

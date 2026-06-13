@@ -936,10 +936,13 @@ def _norm_title(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
-async def _apply_reconcile_ops(cwd: str, name: str, ops: list) -> None:
+async def _apply_reconcile_ops(cwd: str, name: str, ops: list, on_match: str = "done") -> None:
     """Apply a list of parsed reconcile ops under the board lock.
 
     Safety: no delete, cap 5, skip invalid. Audit-logs each applied op.
+
+    on_match: "done" → auto-archive cards moved to done column (default);
+              "review" → remap done→review so operator closes manually.
     """
     if not ops:
         return
@@ -998,6 +1001,12 @@ async def _apply_reconcile_ops(cwd: str, name: str, ops: list) -> None:
                     print(f"[reconcile] skip move — card {card_id!r} not found")
                     continue
 
+                # Policy remap: when on_match=="review", redirect done→review
+                # so the operator closes cards manually instead of auto-archiving.
+                if to_col == "done" and on_match == "review":
+                    to_col = "review"
+                    print(f"[reconcile] policy remap: done→review for card {card_id!r}")
+
                 if to_col == "done":
                     # Write to DONE.md (append-only archive)
                     from board import _done_path  # noqa: F401 (already imported indirectly)
@@ -1054,9 +1063,21 @@ async def reconcile_board(
     - TASKS.md not present in cwd → skip
     - JSON parse failure → no-op (no board change)
     """
-    # Gate: env flag
-    if os.environ.get("BOARD_RECONCILE", "1") not in ("1", "true", "True"):
+    # Gate: settings.json flag (overrides env when explicitly set).
+    # Falls back to env BOARD_RECONCILE if the setting is unset or unreadable.
+    try:
+        import webapp as _wa  # same import pattern as the watchdog (~line 1576)
+        _reconcile_enabled = _wa._get_global_setting("board_reconcile_enabled", None)
+    except Exception:
+        _reconcile_enabled = None
+
+    if _reconcile_enabled is False:
+        # Operator explicitly disabled the reconciler via UI.
         return
+    if _reconcile_enabled is None:
+        # Setting unset → fall back to env gate (original behavior).
+        if os.environ.get("BOARD_RECONCILE", "1") not in ("1", "true", "True"):
+            return
 
     # Gate: TASKS.md must exist
     if not _tasks_path(cwd).exists():
@@ -1132,7 +1153,14 @@ async def reconcile_board(
     if not ops:
         return  # empty list → nothing to do
 
-    await _apply_reconcile_ops(cwd, name, ops)
+    # Read the on_match policy from settings (hot-read, no cache issue).
+    try:
+        import webapp as _wa  # noqa: F811 — already imported above in this function scope
+        _on_match = _wa._get_global_setting("board_reconcile_on_match", "done") or "done"
+    except Exception:
+        _on_match = "done"
+
+    await _apply_reconcile_ops(cwd, name, ops, on_match=_on_match)
 
 
 # ─────────────────────────── ENGINE (async event generator) ───────────────────────────

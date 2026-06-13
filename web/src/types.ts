@@ -176,6 +176,9 @@ export interface GlobalSettingsEffective {
   default_model: string
   watchdog_stall_sec: number
   watchdog_max_sec: number
+  // Board reconciler settings (Task A)
+  board_reconcile_enabled?: boolean
+  board_reconcile_on_match?: 'done' | 'review'
 }
 
 export interface GlobalSettings {

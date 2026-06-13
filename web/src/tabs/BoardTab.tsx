@@ -99,6 +99,46 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   // Failed tray collapse state (persisted in localStorage). Default — collapsed.
   const [failedCollapsed, setFailedCollapsed] = useState<boolean>(() => readFailedCollapsed())
 
+  // Auto-reconcile settings popover (Task A).
+  const [showReconcilePopover, setShowReconcilePopover] = useState(false)
+  const [reconcileEnabled, setReconcileEnabled] = useState<boolean>(true)
+  const [reconcileOnMatch, setReconcileOnMatch] = useState<'done' | 'review'>('done')
+  const [reconcileLoading, setReconcileLoading] = useState(false)
+  const reconcilePopoverRef = useRef<HTMLDivElement>(null)
+
+  // Load reconcile settings on mount.
+  useEffect(() => {
+    api.settings().then(s => {
+      const eff = s.effective
+      if (typeof eff.board_reconcile_enabled === 'boolean') {
+        setReconcileEnabled(eff.board_reconcile_enabled)
+      }
+      if (eff.board_reconcile_on_match === 'review' || eff.board_reconcile_on_match === 'done') {
+        setReconcileOnMatch(eff.board_reconcile_on_match)
+      }
+    }).catch(() => {})
+  }, [])
+
+  // Close reconcile popover on outside click.
+  useEffect(() => {
+    if (!showReconcilePopover) return
+    function handler(e: MouseEvent) {
+      if (reconcilePopoverRef.current && !reconcilePopoverRef.current.contains(e.target as Node)) {
+        setShowReconcilePopover(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showReconcilePopover])
+
+  async function saveReconcileSetting(key: string, value: boolean | string) {
+    setReconcileLoading(true)
+    try {
+      await api.saveSettings({ [key]: value })
+    } catch { /* silently ignore — setting is best-effort */ }
+    finally { setReconcileLoading(false) }
+  }
+
   function toggleFailedCollapsed() {
     setFailedCollapsed(prev => {
       const next = !prev
@@ -601,7 +641,81 @@ export function BoardTab({ projectId, isActive = true }: Props) {
             </button>
           )
         })}
+
+        {/* Right-side controls group: Archive + Reconcile gear */}
+        <div className="board-col-toggles-right">
+          {/* Task B: Archive (Done) button — moved up from footer */}
+          <button className="board-archive-toggle board-archive-toggle-strip" onClick={toggleArchive}>
+            {showArchive ? '▾' : '▸'} {t['board.archive_toggle']} · {board?.done_count ?? 0}
+          </button>
+
+          {/* Task A: Auto-reconcile gear button */}
+          <div className="board-reconcile-wrap" ref={reconcilePopoverRef}>
+            <button
+              className={`board-col-toggle board-reconcile-gear ${reconcileEnabled ? 'on' : 'off'}`}
+              onClick={() => setShowReconcilePopover(prev => !prev)}
+              title={t['board.reconcile_gear_title']}
+            >
+              ⚙
+            </button>
+            {showReconcilePopover && (
+              <div className="board-reconcile-popover">
+                <div className="board-reconcile-row">
+                  <label className="board-reconcile-label">{t['board.reconcile_enabled_label']}</label>
+                  <input
+                    type="checkbox"
+                    checked={reconcileEnabled}
+                    disabled={reconcileLoading}
+                    onChange={e => {
+                      const v = e.target.checked
+                      setReconcileEnabled(v)
+                      saveReconcileSetting('board_reconcile_enabled', v)
+                    }}
+                  />
+                </div>
+                {reconcileEnabled && (
+                  <div className="board-reconcile-row">
+                    <label className="board-reconcile-label">{t['board.reconcile_on_match_label']}</label>
+                    <div className="board-reconcile-seg">
+                      <button
+                        className={`board-reconcile-seg-btn ${reconcileOnMatch === 'review' ? 'active' : ''}`}
+                        disabled={reconcileLoading}
+                        onClick={() => {
+                          setReconcileOnMatch('review')
+                          saveReconcileSetting('board_reconcile_on_match', 'review')
+                        }}
+                      >{t['board.reconcile_on_match_review']}</button>
+                      <button
+                        className={`board-reconcile-seg-btn ${reconcileOnMatch === 'done' ? 'active' : ''}`}
+                        disabled={reconcileLoading}
+                        onClick={() => {
+                          setReconcileOnMatch('done')
+                          saveReconcileSetting('board_reconcile_on_match', 'done')
+                        }}
+                      >{t['board.reconcile_on_match_done']}</button>
+                    </div>
+                  </div>
+                )}
+                <div className="board-reconcile-hint">{t['board.reconcile_hint']}</div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
+
+      {/* Archive panel — directly below the control strip for proximity to its button */}
+      {showArchive && (
+        <div className="board-archive">
+          {archive === null
+            ? <Spinner label={t['board.loading_archive']} />
+            : <div className="markdown-wrap"><ReactMarkdown remarkPlugins={[remarkGfm]}>{archive}</ReactMarkdown></div>}
+        </div>
+      )}
+
+      {/* Hint when TASKS.md not yet created — was in the footer, kept near top for visibility */}
+      {!board?.exists && (
+        <div className="board-hint board-hint-notexist">TASKS.md does not exist yet — will be created on the first task</div>
+      )}
 
       <div className="board-columns">
         {visibleOrder.map(key => {
@@ -674,23 +788,6 @@ export function BoardTab({ projectId, isActive = true }: Props) {
             🤖 Send to agent ({selected.size}) — queue
           </button>
           <button className="board-batch-clear" disabled={busy} onClick={() => setSelected(new Set())}>Deselect all</button>
-        </div>
-      )}
-
-      <div className="board-footer">
-        <button className="board-archive-toggle" onClick={toggleArchive}>
-          {showArchive ? '▾' : '▸'} Archive (Done) · {board?.done_count ?? 0}
-        </button>
-        {!board?.exists && (
-          <span className="board-hint">TASKS.md does not exist yet — will be created on the first task</span>
-        )}
-      </div>
-
-      {showArchive && (
-        <div className="board-archive">
-          {archive === null
-            ? <Spinner label={t['board.loading_archive']} />
-            : <div className="markdown-wrap"><ReactMarkdown remarkPlugins={[remarkGfm]}>{archive}</ReactMarkdown></div>}
         </div>
       )}
 

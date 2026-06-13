@@ -3012,6 +3012,12 @@ _GLOBAL_SETTINGS_SPEC = {
     # Spec-012 Ph3: global master flag for push endpoint. OFF by default —
     # operator must explicitly enable. Without this flag POST /incident → 404.
     "incident_push_enabled": ("bool", None, None),
+    # Board reconciler controls (Task A):
+    # - board_reconcile_enabled: when False the reconciler is a complete no-op.
+    # - board_reconcile_on_match: "done" → auto-archive matched cards;
+    #   "review" → remap done→review so operator closes manually.
+    "board_reconcile_enabled": ("bool", None, None),
+    "board_reconcile_on_match": ("enum", ("done", "review"), None),
 }
 
 
@@ -3182,6 +3188,13 @@ def _validate_global_settings(partial: dict) -> "tuple[dict, str | None]":
             if sv not in _ALLOWED_MODELS:
                 return {}, f"{key}: model not in {sorted(_ALLOWED_MODELS)}"
             clean[key] = sv
+        elif typ == "enum":
+            # lo holds the tuple of allowed values for enum specs
+            allowed = lo  # type: ignore[assignment]
+            sv = str(val).strip().lower()
+            if sv not in allowed:
+                return {}, f"{key}: must be one of {list(allowed)}"
+            clean[key] = sv
     return clean, None
 
 
@@ -3194,8 +3207,18 @@ async def api_settings_get(req: web.Request) -> web.Response:
         "default_model": _get_global_setting("default_model", ctx.get("DEFAULT_MODEL", "sonnet")),
         "watchdog_stall_sec": int(_get_global_setting("watchdog_stall_sec", int(os.environ.get("STALL_SECONDS", "300")))),
         "watchdog_max_sec": int(_get_global_setting("watchdog_max_sec", int(os.environ.get("MAX_SECONDS", "1800")))),
+        # Board reconciler settings (Task A); True/done are the defaults.
+        "board_reconcile_enabled": _get_global_setting("board_reconcile_enabled", True),
+        "board_reconcile_on_match": _get_global_setting("board_reconcile_on_match", "done"),
     }
-    spec = {k: {"type": v[0], "min": v[1], "max": v[2]} for k, v in _GLOBAL_SETTINGS_SPEC.items()}
+    # Build spec; enum specs use "allowed" list instead of min/max.
+    spec: dict = {}
+    for k, v in _GLOBAL_SETTINGS_SPEC.items():
+        typ, lo, hi = v
+        if typ == "enum":
+            spec[k] = {"type": typ, "allowed": list(lo), "min": None, "max": None}
+        else:
+            spec[k] = {"type": typ, "min": lo, "max": hi}
     return web.json_response({"stored": stored, "effective": effective, "spec": spec})
 
 
