@@ -14,8 +14,10 @@ interface Props {
   isActive?: boolean
 }
 
-// Columns shown in the board column row (Failed is excluded — it lives in the tray).
-const ORDER = ['backlog', 'in_progress', 'review']
+// Columns shown in the board column row.
+// in_progress is intentionally excluded — it is never shown as a column or offered in toggles.
+// Failed is also excluded — it lives in the collapsible tray above.
+const ORDER = ['backlog', 'review']
 // Arrows ←/→ move through "parking" columns, SKIPPING in_progress: the only
 // way to run the agent is the 🤖 button (previously → from Backlog duplicated the robot).
 const PARK_ORDER = ['backlog', 'review', 'failed']
@@ -572,7 +574,6 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       {(() => {
         const failedCol = colByKey('failed')
         if (!failedCol || failedCol.cards.length === 0) return null
-        const failedParkIdx = PARK_ORDER.indexOf('failed')
         const trayLabel = failedCol.label || t['board.failed_tray_label']
         const isDragOver = dragOverCol === 'failed' && dragCardId !== null
         return (
@@ -607,14 +608,62 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                   setDragOverCol(null)
                 }}
               >
-                {failedCol.cards.map(card =>
-                  renderCard(card, {
-                    columnKey: 'failed',
-                    parkIdx: failedParkIdx,
-                    isInProgress: false,
-                    canShowResult: true,
-                  })
-                )}
+                {failedCol.cards.map(card => {
+                  const isSel = selected.has(card.id)
+                  const isQueued = board?.queued?.includes(card.id) ?? false
+                  return (
+                    <div
+                      key={card.id}
+                      className={[
+                        'board-failed-row',
+                        isSel ? 'board-card-selected' : '',
+                        isQueued ? 'board-card-queued' : '',
+                      ].filter(Boolean).join(' ')}
+                    >
+                      <span className="board-failed-row-icon" title="Failed">🔴</span>
+                      <span
+                        className="board-failed-row-text"
+                        title={card.text}
+                      >{card.text}</span>
+                      <div className="board-failed-row-actions">
+                        <button
+                          title="🤖 Retry by agent (→ In Progress)"
+                          aria-label="Retry card with agent"
+                          className="act-handoff"
+                          disabled={busy}
+                          onClick={() => move(card.id, 'in_progress')}
+                        >🤖</button>
+                        <button
+                          title="View result"
+                          aria-label="View last run result"
+                          className="act-result"
+                          disabled={busy}
+                          onClick={() => showResult(card.id)}
+                        >📄</button>
+                        <button
+                          title="Move to Backlog"
+                          aria-label="Move card to backlog"
+                          disabled={busy}
+                          onClick={() => move(card.id, 'backlog')}
+                        >←</button>
+                        <button
+                          title="Archive (mark done)"
+                          aria-label="Archive card"
+                          className="act-done"
+                          disabled={busy}
+                          onClick={() => move(card.id, 'done')}
+                        >✓</button>
+                        <button
+                          title="Delete card"
+                          aria-label="Delete card"
+                          className="act-del"
+                          disabled={busy}
+                          onClick={() => del(card.id)}
+                        >✕</button>
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>

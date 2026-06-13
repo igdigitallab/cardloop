@@ -115,7 +115,21 @@
   font-family: inherit;
   outline: none;
 }
-.board-card-actions { display: flex; gap: 4px; }
+/* Card actions hidden by default; revealed on hover or keyboard focus for accessibility */
+.board-card-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+.board-card:hover .board-card-actions,
+.board-card:focus-within .board-card-actions {
+  opacity: 1;
+}
+/* Always show actions on touch devices (no reliable hover) */
+@media (hover: none) {
+  .board-card-actions { opacity: 1; }
+}
 .board-card-actions button {
   flex: 0 0 auto;
   background: var(--bg4); color: var(--text2);
@@ -138,22 +152,29 @@
 .board-add textarea:focus { outline: none; border-color: var(--accent); }
 .board-add .btn-primary { font-size: 12px; padding: 6px 10px; }
 
-/* Task B: right-side controls group pushed to the right of the column toggles strip */
+/* Right-side controls group pushed to the right of the column toggles strip */
 .board-col-toggles-right {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
 }
 
-/* Archive toggle: styled like a col-toggle pill when in the strip */
+/* Archive toggle: styled as a col-toggle pill, sits cleanly on the right of the strip */
 .board-archive-toggle-strip {
-  background: none; border: 1px solid var(--border2);
-  color: var(--text2); font-size: 11px; cursor: pointer;
-  padding: 3px 8px; border-radius: 10px;
+  background: none;
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 3px 10px;
+  border-radius: 10px;
   transition: all var(--transition);
+  white-space: nowrap;
 }
-.board-archive-toggle-strip:hover { color: var(--text); border-color: var(--text3); }
+.board-archive-toggle-strip:hover { color: var(--text); border-color: var(--text3); background: var(--bg3); }
 
 /* Legacy archive toggle (kept for compatibility) */
 .board-footer { margin-top: 14px; display: flex; align-items: center; gap: 14px; }
@@ -422,13 +443,14 @@
   font-size: 12px;
 }
 
-/* Expanded tray body: horizontal wrap */
+/* ── Failed tray rows: compact horizontal list (one per line) ── */
+/* The tray body is a vertical column — each failed card renders as a compact row */
 .board-failed-tray-body {
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 10px 0 4px;
-  min-height: 48px;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0 4px;
+  min-height: 32px;
   border-radius: var(--radius-sm);
   transition: background var(--transition);
 }
@@ -438,19 +460,75 @@
   background: rgba(99,102,241,0.07);
   outline: 2px dashed var(--accent);
   outline-offset: -2px;
-  padding: 10px;
+  padding: 6px;
 }
 
-/* Cards in the tray: fixed min-width so they tile nicely */
-.board-failed-tray-body .board-card {
-  flex: 1 1 240px;
-  max-width: 340px;
-  /* Tone down the loud incident border inside the tray — it reads as archived failure */
-  border-left-color: color-mix(in srgb, var(--red, #dc2626) 45%, var(--border));
+.board-failed-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-left: 3px solid color-mix(in srgb, var(--red, #dc2626) 55%, var(--border));
+  border-radius: var(--radius-sm);
+  min-width: 0;
 }
-.board-failed-tray-body .board-card-incident {
-  background: linear-gradient(90deg, rgba(220,38,38,0.03), var(--bg3) 30%);
+
+.board-failed-row-icon {
+  font-size: 11px;
+  flex-shrink: 0;
+  opacity: 0.8;
 }
+
+.board-failed-row-text {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.board-failed-row-actions {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+.board-failed-row:hover .board-failed-row-actions,
+.board-failed-row:focus-within .board-failed-row-actions {
+  opacity: 1;
+}
+/* Always show on touch */
+@media (hover: none) {
+  .board-failed-row-actions { opacity: 1; }
+}
+
+.board-failed-row-actions button {
+  background: var(--bg4);
+  color: var(--text2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.board-failed-row-actions button:hover:not(:disabled) { background: var(--border2); color: var(--text); }
+.board-failed-row-actions button:disabled { opacity: 0.3; cursor: default; }
+.board-failed-row-actions .act-handoff {
+  background: var(--accent) !important;
+  color: #fff !important;
+  border-color: var(--accent) !important;
+}
+.board-failed-row-actions .act-handoff:hover { filter: brightness(1.1); }
+.board-failed-row-actions .act-done:hover:not(:disabled) { background: rgba(52,199,123,0.18); color: var(--green); }
+.board-failed-row-actions .act-del { margin-left: 2px; }
+.board-failed-row-actions .act-del:hover:not(:disabled) { background: rgba(245,97,74,0.15); color: var(--red); }
 
 /* ══════════════════════════════════════════════════════════════
    RESPONSIVE — Board

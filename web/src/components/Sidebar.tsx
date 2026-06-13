@@ -852,12 +852,6 @@ export function Sidebar({
     return (
       <div className={`sidebar sidebar-collapsed-mode${drawerOpen ? ' drawer-open' : ''}`}>
         <button className="sidebar-toggle-btn collapsed" onClick={onToggleCollapse} title={t['sidebar.expand']}>☰</button>
-        <button
-          className="new-project-btn-collapsed"
-          onClick={onNewProject}
-          disabled={newProjectBusy}
-          title={t['sidebar.new_project']}
-        >{newProjectBusy ? '…' : '+'}</button>
       </div>
     )
   }
