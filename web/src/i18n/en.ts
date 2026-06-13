@@ -78,6 +78,9 @@ export const en = {
   'sidebar.manage_groups': 'Manage groups',
   'sidebar.delete_group_confirm': 'Delete group "{name}"? Members will become ungrouped.',
   'sidebar.rename_group': 'Rename group',
+  'sidebar.favorites': '⭐ Favorites',
+  'sidebar.add_to_favorites': '⭐ Add to favorites',
+  'sidebar.remove_from_favorites': '☆ Remove from favorites',
 
   // ── Project Tab Bar ──────────────────────────────────────────
   'tabbar.new_free_chat': 'New free chat',

@@ -490,6 +490,14 @@ export const api = {
       body: JSON.stringify({ order }),
     }),
 
+  // Spec-031: Favorites
+  setFavorite: (id: string, favorite: boolean) =>
+    apiFetch<{ ok: boolean }>(`/api/projects/${id}/favorite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ favorite }),
+    }),
+
   // Spec-026 Phase 2: TOTP 2FA
   totpStatus: () =>
     apiFetch<{ enabled: boolean }>('/api/auth/totp/status'),

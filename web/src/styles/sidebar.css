@@ -677,3 +677,39 @@
   background: rgba(107, 104, 245, 0.1);
   min-height: 32px;
 }
+
+/* ── Spec-031: Tree indentation for grouped children ─────────── */
+.sidebar-group-body {
+  margin-left: 9px;
+  padding-left: 9px;
+  border-left: 1px solid var(--border);
+  transition: border-color var(--transition);
+}
+.sidebar-group:hover .sidebar-group-body {
+  border-left-color: var(--border2);
+}
+
+/* ── Spec-031: Favorite star button ──────────────────────────── */
+.fav-star-btn {
+  background: transparent;
+  border: none;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  /* Use visibility so button always occupies its space (no layout shift) */
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity var(--transition), color var(--transition);
+  color: var(--text3);
+}
+.fav-star-btn.fav-star-active {
+  visibility: visible;
+  opacity: 1;
+  color: #f5a623;
+}
+.project-item:hover .fav-star-btn {
+  visibility: visible;
+  opacity: 1;
+}

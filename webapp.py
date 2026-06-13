@@ -900,6 +900,9 @@ def _collect_projects(ctx: dict) -> list[dict]:
     groups_data = _load_groups(ctx)
     assignments = groups_data["assignments"]
     valid_groups = set(groups_data["groups"])
+    # Spec-031: load favorites set once
+    fav_data = _load_favorites(ctx)
+    fav_set = set(fav_data.get("favorites", []))
     seen: set[str] = set()
     out = []
     for key, b in ctx["topics"].items():
@@ -925,6 +928,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "git_enabled": b.get("git_enabled", True) is not False,
             "agents_config": b.get("agents_config") or {},
             "group": raw_group if raw_group in valid_groups else None,
+            "favorite": pid in fav_set,
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -932,6 +936,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
     free = _load_free_chats(ctx)
     free_items = sorted(free.items(), key=lambda kv: kv[1].get("created_at", 0))
     for fid, b in free_items:
+        # Spec-031: read group assignment for free chats (previously hardcoded None)
+        raw_free_group = assignments.get(fid)
         out.append({
             "id": fid,
             "name": b.get("label", fid),
@@ -939,7 +945,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
             "tg_thread": fid,  # session_key for free = its own id (string with free- prefix)
             "is_free": True,
-            "group": None,
+            "group": raw_free_group if raw_free_group in valid_groups else None,
+            "favorite": fid in fav_set,
         })
     return out
 
@@ -998,6 +1005,36 @@ def _save_groups(ctx: dict, data: dict) -> None:
     _groups_path(ctx).write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+
+# ─────────────────────────── favorites store (Spec-031) ──────────────────────
+
+def _favorites_path(ctx: dict) -> Path:
+    return ctx["DATA"] / "project_favorites.json"
+
+
+def _load_favorites(ctx: dict) -> dict:
+    """Returns {favorites: [pid, ...]}. Defaults to empty on missing/corrupt file."""
+    p = _favorites_path(ctx)
+    if not p.exists():
+        return {"favorites": []}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"favorites": []}
+        favs = data.get("favorites", [])
+        if not isinstance(favs, list):
+            return {"favorites": []}
+        return {"favorites": favs}
+    except Exception:
+        return {"favorites": []}
+
+
+def _save_favorites(ctx: dict, data: dict) -> None:
+    _favorites_path(ctx).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
 
 # ─────────────────────────── trash store (Spec-025) ─────────────────────────
 
@@ -1672,6 +1709,31 @@ async def api_project_group_set(req: web.Request) -> web.Response:
     else:
         groups_data["assignments"].pop(pid, None)
     _save_groups(ctx, groups_data)
+    return web.json_response({"ok": True})
+
+
+async def api_project_favorite(req: web.Request) -> web.Response:
+    """Spec-031: POST /api/projects/{id}/favorite — toggle favorite status."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    favorite = body.get("favorite")
+    if not isinstance(favorite, bool):
+        return web.json_response({"error": "favorite must be a boolean"}, status=400)
+    fav_data = _load_favorites(ctx)
+    favs = fav_data.get("favorites", [])
+    if favorite:
+        if pid not in favs:
+            favs.append(pid)
+    else:
+        favs = [f for f in favs if f != pid]
+    _save_favorites(ctx, {"favorites": favs})
     return web.json_response({"ok": True})
 
 
@@ -8433,6 +8495,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/project-groups/rename", api_project_groups_rename)
         app.router.add_post("/api/project-groups/delete", api_project_groups_delete)
         app.router.add_post("/api/project-groups/reorder", api_project_groups_reorder)
+        # Spec-031: Favorites
+        app.router.add_post("/api/projects/{id}/favorite", api_project_favorite)
         app.router.add_get("/api/projects/{id}/claude-md", api_project_claude_md)
         app.router.add_post("/api/projects/{id}/claude-md", api_project_claude_md_write)
         app.router.add_get("/api/projects/{id}/readme", api_project_readme)

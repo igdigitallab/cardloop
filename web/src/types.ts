@@ -36,6 +36,8 @@ export interface Project {
   notify_on_error?: boolean
   /** Spec-024: virtual group label assigned to this project (null = ungrouped). */
   group?: string | null
+  /** Spec-031: whether this project/free-chat is starred. */
+  favorite?: boolean
 }
 
 // ─── Spec-024: Project Groups ────────────────────────────────────────────────

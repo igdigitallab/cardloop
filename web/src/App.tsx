@@ -152,6 +152,8 @@ export default function App() {
               p.name === n.name &&
               p.model === n.model &&
               p.incidents === n.incidents &&
+              p.group === n.group &&
+              p.favorite === n.favorite &&
               p.health.git?.branch === n.health.git?.branch &&
               p.health.git?.dirty === n.health.git?.dirty &&
               p.health.git?.unpushed === n.health.git?.unpushed

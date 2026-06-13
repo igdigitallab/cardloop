@@ -130,3 +130,5 @@
 - [x] Единый Schedules: cron + systemd timers + /schedule + celery + n8n · 2026-06-10
 - [x] [feature] Deferred prompt runs — schedule agent start at a set time or after rate-limit window reset · 2026-06-11
 - [x] [research] addyosmani/agent-skills as source of default executor playbooks for ClaudeOps · 2026-06-11
+- [x] TG-канал: очередь TG-сообщений (bot.py on_message — второе сообщение в очередь, не «уже работаю») · 2026-06-11
+- [x] Убого сделаны ... в списке проектов. Убрать вообще эти точки. Отправить в Архив нужно через настройки проекта во вкладке · 2026-06-12

@@ -79,6 +79,9 @@ export const ru = {
   'sidebar.manage_groups': 'Управление группами',
   'sidebar.delete_group_confirm': 'Удалить группу "{name}"? Её проекты станут без группы.',
   'sidebar.rename_group': 'Переименовать группу',
+  'sidebar.favorites': '⭐ Избранное',
+  'sidebar.add_to_favorites': '⭐ В избранное',
+  'sidebar.remove_from_favorites': '☆ Убрать из избранного',
 
   // ── Project Tab Bar ──────────────────────────────────────────
   'tabbar.new_free_chat': 'Новый свободный чат',

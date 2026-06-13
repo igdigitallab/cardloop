@@ -37,6 +37,7 @@ function unreadFor(p: Project, map: Record<string, number>): number {
 
 const LS_GROUP_PREFIX = 'cops.group.collapsed.'
 const LS_ARCHIVED_COLLAPSED = 'cops.group.collapsed.__archived__'
+const LS_FAVORITES_COLLAPSED = 'cops.group.collapsed.__favorites__'
 
 function readCollapsed(key: string, def: boolean): boolean {
   try {
@@ -92,6 +93,7 @@ export function Sidebar({
   const [trashCollapsed, setTrashCollapsed] = useState(true)
 
   const [archivedCollapsed, setArchivedCollapsed] = useState(() => readCollapsed(LS_ARCHIVED_COLLAPSED, true))
+  const [favoritesCollapsed, setFavoritesCollapsed] = useState(() => readCollapsed(LS_FAVORITES_COLLAPSED, false))
   const [groupCollapsed, setGroupCollapsed] = useState<Record<string, boolean>>({})
 
   // Inline rename state
@@ -273,6 +275,15 @@ export function Sidebar({
     }
   }
 
+  async function doSetFavorite(id: string, favorite: boolean) {
+    try {
+      await api.setFavorite(id, favorite)
+      if (onProjectsReload) onProjectsReload()
+    } catch {
+      showToast(t['common.error'], 'error')
+    }
+  }
+
   // ── Inline rename group ────────────────────────────────────────────────────
   function startRenameGroup(label: string) {
     setRenamingGroup(label)
@@ -378,8 +389,16 @@ export function Sidebar({
     const ungroupedEl = el?.closest('[data-ungrouped-zone]') as HTMLElement | null
 
     if (projectEl && projectEl.dataset.projectId !== id) {
-      setDragOverProjectId(projectEl.dataset.projectId ?? null)
-      setDragOverGroup(null)
+      const overProj = projects.find(proj => proj.id === projectEl.dataset.projectId)
+      const overGroup = overProj?.group ?? null
+      if (overGroup !== (ps.group ?? null)) {
+        // Hovering a project in a different group → highlight that whole group as the drop target
+        setDragOverProjectId(null)
+        setDragOverGroup(overGroup ?? '__ungrouped__')
+      } else {
+        setDragOverProjectId(projectEl.dataset.projectId ?? null)
+        setDragOverGroup(null)
+      }
     } else if (ungroupedEl) {
       setDragOverProjectId(null)
       setDragOverGroup('__ungrouped__')
@@ -407,15 +426,22 @@ export function Sidebar({
           doSetGroup(p.id, targetGroup)
         }
       } else if (dragOverProjectId && dragOverProjectId !== p.id) {
-        // Reorder within the same zone (same group or both ungrouped)
-        const ids = projects.map(proj => proj.id)
-        const fromIdx = ids.indexOf(p.id)
-        const toIdx = ids.indexOf(dragOverProjectId)
-        if (fromIdx !== -1 && toIdx !== -1) {
-          const next = [...ids]
-          next.splice(fromIdx, 1)
-          next.splice(toIdx, 0, p.id)
-          onReorder(next)
+        const targetProj = projects.find(proj => proj.id === dragOverProjectId)
+        const targetGroup = targetProj?.group ?? null
+        if (targetGroup !== (p.group ?? null)) {
+          // Dropped onto a project in a different group/zone → move into that group
+          doSetGroup(p.id, targetGroup)
+        } else {
+          // Same zone → reorder
+          const ids = projects.map(proj => proj.id)
+          const fromIdx = ids.indexOf(p.id)
+          const toIdx = ids.indexOf(dragOverProjectId)
+          if (fromIdx !== -1 && toIdx !== -1) {
+            const next = [...ids]
+            next.splice(fromIdx, 1)
+            next.splice(toIdx, 0, p.id)
+            onReorder(next)
+          }
         }
       }
     } else {
@@ -516,19 +542,25 @@ export function Sidebar({
   }
 
   // ── Data derived from state ───────────────────────────────────────────────
-  const nonFreeProjects = projects.filter(p => !p.is_free)
   const freeProjects = projects.filter(p => p.is_free)
-  const filtered = nonFreeProjects.filter(p => p.name.toLowerCase().includes(search.toLowerCase()))
   const filteredFree = freeProjects.filter(p => p.name.toLowerCase().includes(search.toLowerCase()))
 
+  // Favorites: all projects (real + free) that are starred (shown only when not searching)
+  const favorites = projects.filter(p => p.favorite)
+
+  // Grouping considers ALL projects (real + free) so free chats can be in groups
+  const allFiltered = projects.filter(p => p.name.toLowerCase().includes(search.toLowerCase()))
   const grouped = new Map<string, Project[]>()
   for (const g of groups.groups) grouped.set(g, [])
   const ungrouped: Project[] = []
-  for (const p of filtered) {
+  for (const p of allFiltered) {
     const g = p.group && groups.groups.includes(p.group) ? p.group : null
     if (g) grouped.get(g)!.push(p)
-    else ungrouped.push(p)
+    else if (!p.is_free) ungrouped.push(p)
+    // is_free without group → shown in dedicated free section below
   }
+  // Free chats without a group — shown in the dedicated bottom section
+  const ungroupedFree = filteredFree.filter(p => !p.group || !groups.groups.includes(p.group ?? ''))
 
   function toggleGroupCollapse(label: string) {
     setGroupCollapsed(prev => {
@@ -541,6 +573,13 @@ export function Sidebar({
   function toggleArchivedCollapse() {
     setArchivedCollapsed(prev => {
       writeCollapsed(LS_ARCHIVED_COLLAPSED, !prev)
+      return !prev
+    })
+  }
+
+  function toggleFavoritesCollapse() {
+    setFavoritesCollapsed(prev => {
+      writeCollapsed(LS_FAVORITES_COLLAPSED, !prev)
       return !prev
     })
   }
@@ -560,10 +599,8 @@ export function Sidebar({
         onPointerUp={e => handleProjectPointerUp(e, p)}
         onPointerCancel={e => handleProjectPointerCancel(e, p.id)}
         onContextMenu={e => {
-          if (!p.is_free) {
-            e.preventDefault()
-            openCtxMenu(e, { kind: 'project', id: p.id, group: p.group ?? null })
-          }
+          e.preventDefault()
+          openCtxMenu(e, { kind: 'project', id: p.id, group: p.group ?? null })
         }}
         className={[
           'project-item',
@@ -594,6 +631,13 @@ export function Sidebar({
         {replyReadyIds?.has(p.id) && selectedId !== p.id && (
           <span className="reply-ready-badge" title="Agent reply is ready" />
         )}
+        {/* Spec-031: favorite star button — visibility: hidden when not starred + not hovered, no layout shift */}
+        <button
+          className={`fav-star-btn${p.favorite ? ' fav-star-active' : ''}`}
+          onPointerDown={e => e.stopPropagation()}
+          onClick={e => { e.stopPropagation(); doSetFavorite(p.id, !p.favorite) }}
+          title={p.favorite ? t['sidebar.remove_from_favorites'] : t['sidebar.add_to_favorites']}
+        >{p.favorite ? '⭐' : '☆'}</button>
         {p.is_free && (
           <button
             className="free-delete-btn"
@@ -620,6 +664,69 @@ export function Sidebar({
     if (target.kind === 'project') {
       const pid = target.id
       const proj = projects.find(p => p.id === pid)
+      const isFreeChat = proj?.is_free === true
+
+      // Free-chat-flavored menu: Open · Move to group ▶ · Remove from group · favorite · separator · Delete
+      if (isFreeChat) {
+        return (
+          <div
+            ref={ctxMenuRef}
+            className="ctx-menu"
+            style={{ left: cx, top: cy }}
+            onPointerDown={e => e.stopPropagation()}
+          >
+            <div className="ctx-menu-item" onClick={() => { onSelect(pid); setCtxMenu(null) }}>
+              Open
+            </div>
+            <div className="ctx-menu-separator" />
+            <div
+              className="ctx-menu-item"
+              style={{ position: 'relative' }}
+              onMouseEnter={() => setCtxMenu(prev => prev ? { ...prev, submenuOpen: true } : prev)}
+              onMouseLeave={() => setCtxMenu(prev => prev ? { ...prev, submenuOpen: false } : prev)}
+            >
+              Move to group
+              <span className="ctx-menu-arrow">▶</span>
+              {submenuOpen && (
+                <div className="ctx-submenu">
+                  {groups.groups.map(g => (
+                    <div
+                      key={g}
+                      className={`ctx-menu-item${proj?.group === g ? ' disabled' : ''}`}
+                      onClick={() => {
+                        if (proj?.group !== g) doSetGroup(pid, g)
+                        setCtxMenu(null)
+                      }}
+                    >
+                      {proj?.group === g ? '✓ ' : ''}{g}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            {target.group && (
+              <div className="ctx-menu-item" onClick={() => { doSetGroup(pid, null); setCtxMenu(null) }}>
+                Remove from group
+              </div>
+            )}
+            <div className="ctx-menu-item" onClick={() => { doSetFavorite(pid, !proj?.favorite); setCtxMenu(null) }}>
+              {proj?.favorite ? t['sidebar.remove_from_favorites'] : t['sidebar.add_to_favorites']}
+            </div>
+            <div className="ctx-menu-separator" />
+            <div
+              className="ctx-menu-item danger"
+              onClick={() => {
+                setCtxMenu(null)
+                setConfirmDelete({ id: pid, name: proj?.name ?? pid })
+              }}
+            >
+              🗑 Delete free chat
+            </div>
+          </div>
+        )
+      }
+
+      // Regular project menu
       return (
         <div
           ref={ctxMenuRef}
@@ -685,6 +792,9 @@ export function Sidebar({
               Remove from group
             </div>
           )}
+          <div className="ctx-menu-item" onClick={() => { doSetFavorite(pid, !proj?.favorite); setCtxMenu(null) }}>
+            {proj?.favorite ? t['sidebar.remove_from_favorites'] : t['sidebar.add_to_favorites']}
+          </div>
           <div className="ctx-menu-separator" />
           <div
             className="ctx-menu-item danger"
@@ -791,6 +901,18 @@ export function Sidebar({
           <div className="projects-empty">{t['sidebar.loading']}</div>
         ) : (
           <>
+            {/* Spec-031: Favorites section — pinned above groups, only when not searching */}
+            {!hasSearch && favorites.length > 0 && (
+              <div className="sidebar-group sidebar-favorites-section">
+                <div className="sidebar-group-header" onClick={toggleFavoritesCollapse}>
+                  <span className="sidebar-group-toggle">{favoritesCollapsed ? '▶' : '▼'}</span>
+                  <span className="sidebar-group-label">{t['sidebar.favorites']}</span>
+                  <span className="sidebar-group-count">{favorites.length}</span>
+                </div>
+                {!favoritesCollapsed && favorites.map(renderProjectItem)}
+              </div>
+            )}
+
             {/* Named groups */}
             {!hasSearch && groups.groups.map(groupLabel => {
               const groupProjects = grouped.get(groupLabel) ?? []
@@ -843,13 +965,14 @@ export function Sidebar({
                     )}
                     <span className="sidebar-group-count">{groupProjects.length}</span>
                   </div>
+                  {/* Spec-031: tree-indented body for group children */}
                   {!isCollapsed && (
-                    <>
+                    <div className="sidebar-group-body">
                       {groupProjects.map(renderProjectItem)}
                       {groupProjects.length === 0 && (
                         <div className="sidebar-group-drop-hint">drop projects here</div>
                       )}
-                    </>
+                    </div>
                   )}
                 </div>
               )
@@ -858,10 +981,10 @@ export function Sidebar({
             {/* Ungrouped section or search results */}
             {hasSearch ? (
               <>
-                {filtered.length === 0 && filteredFree.length === 0 ? (
+                {allFiltered.length === 0 ? (
                   <div className="projects-empty">{t['sidebar.no_results']}</div>
                 ) : (
-                  filtered.map(renderProjectItem)
+                  allFiltered.map(renderProjectItem)
                 )}
               </>
             ) : (
@@ -889,8 +1012,8 @@ export function Sidebar({
               </>
             )}
 
-            {/* Free chats */}
-            {filteredFree.map(renderProjectItem)}
+            {/* Free chats without a group — dedicated bottom section */}
+            {ungroupedFree.map(renderProjectItem)}
 
             {/* Archived section */}
             {!hasSearch && archivedProjects.length > 0 && (
