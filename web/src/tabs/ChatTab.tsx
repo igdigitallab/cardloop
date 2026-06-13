@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
@@ -327,6 +327,134 @@ function makeAssistantMsg(): ChatMessage {
   return { id: nextId(), role: 'assistant', text: '', tools: [], streaming: true }
 }
 
+// ─── CacheCountdownBadge ─────────────────────────────────────────────────────
+// Isolated ticker so the parent ChatTab does NOT re-render on each second tick.
+
+interface CacheCountdownBadgeProps {
+  lastTurnEndMs: number | null
+  lastCacheHitPct: number | null
+  /** Last assistant turn metrics (derived from messages in parent, passed down to avoid re-computing). */
+  lastAssistantMetrics: TurnMetrics | undefined
+  /** Whether a run is currently active. */
+  isRunning: boolean
+}
+
+const CacheCountdownBadge = memo(function CacheCountdownBadge({
+  lastTurnEndMs,
+  lastCacheHitPct,
+  lastAssistantMetrics,
+  isRunning,
+}: CacheCountdownBadgeProps) {
+  // Own tick state — only this small component re-renders every second.
+  const [, setCacheTick] = useState<number>(Date.now())
+
+  useEffect(() => {
+    if (lastTurnEndMs === null) return
+    const remaining = CACHE_TTL_MS - (Date.now() - lastTurnEndMs)
+    if (remaining <= 0) return
+    const id = setInterval(() => setCacheTick(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [lastTurnEndMs])
+
+  let isWarm = false
+  let remainingSec = 0
+  if (isRunning) {
+    isWarm = true
+  } else if (lastTurnEndMs !== null) {
+    remainingSec = Math.max(0, (CACHE_TTL_MS - (Date.now() - lastTurnEndMs)) / 1000)
+    isWarm = remainingSec > 0
+  }
+
+  const effectiveCacheHitPct = lastAssistantMetrics?.cache_hit_pct ?? lastCacheHitPct
+  if (!isRunning && effectiveCacheHitPct != null && effectiveCacheHitPct < CACHE_COLD_PCT) {
+    isWarm = false
+  }
+
+  const cacheLabel = isRunning
+    ? '♨️ running'
+    : isWarm
+      ? `♨️ ${fmtCountdown(remainingSec)}`
+      : '⚪ cold'
+  const cacheTip = isRunning
+    ? 'Cache warm — agent is actively running and re-warming the prefix.'
+    : isWarm
+      ? `Cache warm — estimated ${fmtCountdown(remainingSec)} remaining in the 5-min window since last turn end. Actual warm/cold is confirmed by the measured cache-hit % of the last turn.`
+      : 'Cache cold — next turn will re-read the full prompt at full price.'
+
+  return (
+    <span style={{
+      color: isWarm ? 'var(--color-green, #22c55e)' : 'var(--color-muted, #9ca3af)',
+      cursor: 'default',
+    }} title={cacheTip}>
+      {cacheLabel}
+    </span>
+  )
+})
+
+// ─── RunStatusBar ─────────────────────────────────────────────────────────────
+// Isolated ticker so the parent ChatTab does NOT re-render on each second tick
+// while a run is active.
+
+interface RunStatusBarProps {
+  run: RunIndicator
+  serverStartedAt: number | null
+  queueLen: number
+  onStop: () => void
+}
+
+const RunStatusBar = memo(function RunStatusBar({
+  run,
+  serverStartedAt,
+  queueLen,
+  onStop,
+}: RunStatusBarProps) {
+  // Own tick state — only this small component re-renders every second.
+  const [tick, setTick] = useState<number>(Date.now())
+
+  useEffect(() => {
+    const id = setInterval(() => setTick(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const timerBase = serverStartedAt ?? run.startedAt
+  const elapsedSec = (tick - timerBase) / 1000
+  const silenceSec = (tick - run.lastEventAt) / 1000
+  const lvl = silenceSec > 120 ? 'silence-red' : silenceSec > 30 ? 'silence-yellow' : 'silence-ok'
+  const tool = run.currentTool
+  let icon = '💭'
+  let label: string
+  if (tool) {
+    icon = '🔧'
+    const hint = toolHint(tool)
+    label = hint ? `${tool.name} · ${hint}` : tool.name
+  } else if (silenceSec < 3 && elapsedSec > 1) {
+    icon = '✍'
+    label = t['chat.status_writing']
+  } else {
+    label = run.source === 'card' ? t['chat.status_card_running'] : t['chat.status_thinking']
+  }
+
+  return (
+    <div className={`chat-status-bar ${lvl}`}>
+      <span className="chat-status-icon">{icon}</span>
+      <span className="chat-status-text">{label}</span>
+      <span className="chat-status-time">· {formatDuration(elapsedSec)}</span>
+      {silenceSec > 30 && (
+        <span className="chat-status-silence">
+          ⚠ silence {formatDuration(silenceSec)}
+          {silenceSec > 120 && ' · possibly hung'}
+        </span>
+      )}
+      {queueLen > 0 && (
+        <span className="chat-status-queue" title={`${queueLen} message(s) queued, will send automatically`}>
+          ⏭ queued: {queueLen}
+        </span>
+      )}
+      <button className="chat-stop-btn" onClick={onStop} title={t['chat.stop_title']} aria-label={t['chat.stop_aria']}>{t['chat.stop_btn']}</button>
+    </div>
+  )
+})
+
 // ─── ChatTab ──────────────────────────────────────────────────────────────
 
 /** True on touch devices — `pointer: coarse` or `ontouchstart` present. */
@@ -352,9 +480,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   // Ref for deduplication: "task_id:subtype" keys seen via the POST stream, so bus
   // does not double-render the same subagent event on the originating tab.
   const seenSubagentKeysRef = useRef<Set<string>>(new Set())
-  // Ticking "now" — only ticks while there is an active run, to avoid re-rendering the whole tab
-  // on every second. The timer is localized: only the status bar reads `tick`.
-  const [tick, setTick] = useState<number>(Date.now())
+  // tick and cacheTick state removed — now owned by RunStatusBar and CacheCountdownBadge
+  // child components to prevent the message list from re-rendering every second.
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -391,8 +518,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [lastTurnEndMs, setLastTurnEndMs] = useState<number | null>(null)
   // Spec-033: last known cache-hit % seeded from session history on reload (null = no data yet)
   const [lastCacheHitPct, setLastCacheHitPct] = useState<number | null>(null)
-  // Ticking second for the cache freshness countdown (independent of run ticker)
-  const [cacheTick, setCacheTick] = useState<number>(Date.now())
 
   // Spec-035 L2: seed the SSE reconnect cursor after /live hydration
   const seedCursor = useSeedCursor()
@@ -429,22 +554,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     return () => vv.removeEventListener('resize', onViewportResize)
   }, [])
 
-  // Tick every second while there is an active run — localised to status bar only.
-  useEffect(() => {
-    if (!run) return
-    const id = setInterval(() => setTick(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [run])
-
-  // Spec-022/033: tick every second for the cache freshness countdown.
-  // Only runs while a countdown is meaningful (lastTurnEndMs set and TTL not yet expired).
-  useEffect(() => {
-    if (lastTurnEndMs === null) return
-    const remaining = CACHE_TTL_MS - (Date.now() - lastTurnEndMs)
-    if (remaining <= 0) return
-    const id = setInterval(() => setCacheTick(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [lastTurnEndMs])
+  // Tick timers removed from ChatTab — now owned by RunStatusBar and CacheCountdownBadge
+  // child components. This prevents the message list from re-rendering every second.
 
   function histToMessages(items: HistoryMessage[]): ChatMessage[] {
     return items.map((m, i) => ({
@@ -935,44 +1046,12 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             fillFrac >= 0.6 ? 'var(--color-yellow, #eab308)' :
             'var(--color-green, #22c55e)'
 
-          // Spec-033: cache warm/cold indicator.
-          // Priority (highest to lowest):
-          //   1. Active run → warm/running (cache is being continuously re-warmed).
-          //   2. Timer over CACHE_TTL_MS (5-min Anthropic default) → cold.
-          //   3. Ground-truth override: last measured cache_hit_pct < CACHE_COLD_PCT → cold.
-          //   4. No anchor data → badge hidden.
-          // NOTE: a sub-agent Task run that takes >5 min can let the main prefix go cold
-          // before the turn ends. The turn's final cache_hit_pct reveals this post-hoc.
-          void cacheTick
-          let isWarm = false
-          let isRunning = false
-          let remainingSec = 0
-          if (run != null) {
-            // Active run: treat as warm/running — agent continuously re-warms the prefix.
-            isWarm = true
-            isRunning = true
-          } else if (lastTurnEndMs !== null) {
-            remainingSec = Math.max(0, (CACHE_TTL_MS - (Date.now() - lastTurnEndMs)) / 1000)
-            isWarm = remainingSec > 0
-          }
-          // Ground-truth override: check in-page metrics first, then reload-seeded lastCacheHitPct.
+          // Spec-033: cache warm/cold indicator — rendered via CacheCountdownBadge child
+          // component so the countdown ticker does not re-render the entire ChatTab (and
+          // its message list) every second.
           const lastAssistantMetrics = [...messages].reverse().find(
             m => m.role === 'assistant' && m.metrics != null
           )?.metrics
-          const effectiveCacheHitPct = lastAssistantMetrics?.cache_hit_pct ?? lastCacheHitPct
-          if (!isRunning && effectiveCacheHitPct != null && effectiveCacheHitPct < CACHE_COLD_PCT) {
-            isWarm = false
-          }
-          const cacheLabel = isRunning
-            ? '♨️ running'
-            : isWarm
-              ? `♨️ ${fmtCountdown(remainingSec)}`
-              : '⚪ cold'
-          const cacheTip = isRunning
-            ? 'Cache warm — agent is actively running and re-warming the prefix.'
-            : isWarm
-              ? `Cache warm — estimated ${fmtCountdown(remainingSec)} remaining in the 5-min window since last turn end. Actual warm/cold is confirmed by the measured cache-hit % of the last turn.`
-              : 'Cache cold — next turn will re-read the full prompt at full price.'
 
           // Wrap & reset button prominence depends on token level
           const isProminent = tokens >= 120_000
@@ -1043,14 +1122,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                   {deltaLabel}
                 </span>
               )}
-              {/* Cache countdown — visible whenever there is any session cache data */}
+              {/* Cache countdown — rendered by CacheCountdownBadge (owns its own tick) */}
               {(lastTurnEndMs !== null || lastCacheHitPct != null || lastAssistantMetrics != null) && (
-                <span style={{
-                  color: isWarm ? 'var(--color-green, #22c55e)' : 'var(--color-muted, #9ca3af)',
-                  cursor: 'default',
-                }} title={cacheTip}>
-                  {cacheLabel}
-                </span>
+                <CacheCountdownBadge
+                  lastTurnEndMs={lastTurnEndMs}
+                  lastCacheHitPct={lastCacheHitPct}
+                  lastAssistantMetrics={lastAssistantMetrics}
+                  isRunning={run != null}
+                />
               )}
               {/* Wrap & reset — always present */}
               <button
@@ -1253,46 +1332,16 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             ))}
           </div>
         )}
-        {run && (() => {
-          // Spec-035: use server-authoritative started_at for the elapsed timer.
-          // Falls back to run.startedAt (client stamp) when server time is unavailable.
-          const timerBase = serverStartedAt ?? run.startedAt
-          const elapsedSec = (tick - timerBase) / 1000
-          const silenceSec = (tick - run.lastEventAt) / 1000
-          const lvl = silenceSec > 120 ? 'silence-red' : silenceSec > 30 ? 'silence-yellow' : 'silence-ok'
-          const tool = run.currentTool
-          let icon = '💭'
-          let label: string
-          if (tool) {
-            icon = '🔧'
-            const hint = toolHint(tool)
-            label = hint ? `${tool.name} · ${hint}` : tool.name
-          } else if (silenceSec < 3 && elapsedSec > 1) {
-            icon = '✍'
-            label = t['chat.status_writing']
-          } else {
-            label = run.source === 'card' ? t['chat.status_card_running'] : t['chat.status_thinking']
-          }
-          return (
-            <div className={`chat-status-bar ${lvl}`}>
-              <span className="chat-status-icon">{icon}</span>
-              <span className="chat-status-text">{label}</span>
-              <span className="chat-status-time">· {formatDuration(elapsedSec)}</span>
-              {silenceSec > 30 && (
-                <span className="chat-status-silence">
-                  ⚠ silence {formatDuration(silenceSec)}
-                  {silenceSec > 120 && ' · possibly hung'}
-                </span>
-              )}
-              {queueLen > 0 && (
-                <span className="chat-status-queue" title={`${queueLen} message(s) queued, will send automatically`}>
-                  ⏭ queued: {queueLen}
-                </span>
-              )}
-              <button className="chat-stop-btn" onClick={stopStream} title={t['chat.stop_title']} aria-label={t['chat.stop_aria']}>{t['chat.stop_btn']}</button>
-            </div>
-          )
-        })()}
+        {/* Run status bar — rendered by RunStatusBar (owns its own tick) so the message
+            list does not re-render every second while a run is active. */}
+        {run && (
+          <RunStatusBar
+            run={run}
+            serverStartedAt={serverStartedAt}
+            queueLen={queueLen}
+            onStop={stopStream}
+          />
+        )}
         {showPrompts && (
           <PromptPicker
             onSelect={handlePromptSelect}
