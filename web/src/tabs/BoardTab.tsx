@@ -7,6 +7,7 @@ import { Spinner } from '../components/Spinner'
 import { Modal, ModalHead } from '../components/Modal'
 import { useOnRunEnd, useFocusRefresh, useProjectActivity } from '../hooks/useProjectActivity'
 import { t } from '../i18n'
+import { MODELS, modelLabel } from '../lib/models'
 
 // ─── Live card run state ──────────────────────────────────────────────────────
 
@@ -219,8 +220,8 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   const [newText, setNewText] = useState('')
   const [showArchive, setShowArchive] = useState(false)
   const [archive, setArchive] = useState<string | null>(null)
-  // Full-task editor modal: double-click on any card → single multi-line textarea
-  const [taskEditModal, setTaskEditModal] = useState<{ id: string; text: string } | null>(null)
+  // Full-task editor modal: double-click on any card → single multi-line textarea + model picker
+  const [taskEditModal, setTaskEditModal] = useState<{ id: string; text: string; model: string } | null>(null)
 
   // Drag-and-drop
   const [dragCardId, setDragCardId] = useState<string | null>(null)
@@ -480,14 +481,15 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   function move(card: string, to: string) { run(api.moveTask(projectId, card, to)) }
   function del(card: string) { run(api.deleteTask(projectId, card)) }
 
-  /** Save the task text from the full-task editor modal and close it. */
+  /** Save the task text + model override from the full-task editor modal and close it. */
   async function saveTaskEdit() {
     if (!taskEditModal) return
-    const { id, text } = taskEditModal
+    const { id, text, model } = taskEditModal
     setTaskEditModal(null)
     const trimmed = text.trim()
     if (!trimmed) return
-    run(api.updateTask(projectId, id, trimmed))
+    // Pass model: '' means "clear override"; a non-empty value sets the override.
+    run(api.updateTask(projectId, id, trimmed, undefined, model))
   }
 
   function toggleArchive() {
@@ -642,12 +644,19 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         )}
         <div
           className="board-card-text"
-          onDoubleClick={() => !isRunning && setTaskEditModal({ id: card.id, text: card.text })}
+          onDoubleClick={() => !isRunning && setTaskEditModal({ id: card.id, text: card.text, model: card.model || '' })}
           title={card.text}
         >
           {isIncident && <span className="card-incident-icon" title={t['board.incident_title']}>⚠ </span>}
           {isRunning && <span className="card-running-icon" title={t['board.card_running_title']}>⚙ </span>}
           <span className="board-card-title">{card.text}</span>
+          {card.model && (
+            <span
+              className="board-card-model-badge"
+              title={t['board.card_model_badge_aria']}
+              aria-label={t['board.card_model_badge_aria']}
+            >{modelLabel(card.model)}</span>
+          )}
         </div>
         {/* spec-036 Phase 2a: live activity strip — shown when this card is being executed */}
         {liveRun?.cardId === card.id && <CardLiveStrip run={liveRun} />}
@@ -1121,13 +1130,29 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               value={taskEditModal.text}
               autoFocus
               rows={10}
-              onChange={e => setTaskEditModal({ id: taskEditModal.id, text: e.target.value })}
+              onChange={e => setTaskEditModal({ ...taskEditModal, text: e.target.value })}
               onKeyDown={e => {
                 if (e.key === 'Escape') setTaskEditModal(null)
               }}
               placeholder={t['board.edit_task_placeholder']}
               style={{ width: '100%', resize: 'vertical', fontFamily: 'monospace', fontSize: 13 }}
             />
+            {/* Card 43665f: per-card model override — (Default) means use board_card_model / sonnet */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+              <label style={{ fontSize: 12, color: 'var(--text3)', flexShrink: 0 }}>
+                {t['board.card_model_label']}
+              </label>
+              <select
+                value={taskEditModal.model}
+                onChange={e => setTaskEditModal({ ...taskEditModal, model: e.target.value })}
+                style={{ fontSize: 12, padding: '2px 6px' }}
+              >
+                <option value="">{t['board.card_model_default']}</option>
+                {MODELS.map(m => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
+            </div>
           </div>
         </Modal>
       )}

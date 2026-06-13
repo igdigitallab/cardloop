@@ -3018,6 +3018,9 @@ _GLOBAL_SETTINGS_SPEC = {
     #   "review" → remap done→review so operator closes manually.
     "board_reconcile_enabled": ("bool", None, None),
     "board_reconcile_on_match": ("enum", ("done", "review"), None),
+    # Card 43665f — model routing: default model used for board-card agent runs.
+    # "" / absent → falls back to "sonnet". Does NOT affect chat runs.
+    "board_card_model": ("model", None, None),
 }
 
 
@@ -3147,6 +3150,28 @@ def _effective_default_model(ctx: dict) -> str:
     return _get_global_setting("default_model", None) or ctx.get("DEFAULT_MODEL", "sonnet")
 
 
+def _effective_card_model(card: dict) -> str:
+    """Model resolution order for board-card agent runs (Card 43665f).
+
+    1. card['model'] if set and valid
+    2. board_card_model global setting if set and valid
+    3. fallback: 'sonnet'
+
+    Intentionally does NOT fall back to the project model — cards are cheap
+    by default while chat/interactive runs keep using the project model.
+    """
+    # 1. Per-card override
+    card_model = (card.get("model") or "").strip().lower()
+    if card_model in _ALLOWED_MODELS:
+        return card_model
+    # 2. Global board_card_model setting
+    global_card_model = (_get_global_setting("board_card_model", "") or "").strip().lower()
+    if global_card_model in _ALLOWED_MODELS:
+        return global_card_model
+    # 3. Cheap fallback
+    return "sonnet"
+
+
 def _git_enabled(project: dict) -> bool:
     """git_enabled per-project (topics.json). Default True (git enabled).
     False → cockpit does NOT use git: card runs are legacy, git-sync returns 409,
@@ -3210,6 +3235,8 @@ async def api_settings_get(req: web.Request) -> web.Response:
         # Board reconciler settings (Task A); True/done are the defaults.
         "board_reconcile_enabled": _get_global_setting("board_reconcile_enabled", True),
         "board_reconcile_on_match": _get_global_setting("board_reconcile_on_match", "done"),
+        # Card 43665f: board card model default (empty string = use sonnet).
+        "board_card_model": _get_global_setting("board_card_model", "") or "",
     }
     # Build spec; enum specs use "allowed" list instead of min/max.
     spec: dict = {}
@@ -4024,7 +4051,9 @@ async def _run_card(
     run_engine = ctx.get("run_engine")
     cwd = project["cwd"]
     name = project["name"]
-    model = project.get("model", ctx.get("DEFAULT_MODEL", "sonnet"))
+    # Card 43665f: model resolution — card override → board_card_model setting → sonnet.
+    # Deliberately does NOT use the project model (that is for chat runs).
+    model = _effective_card_model(card)
     prompt = card["text"]
     # If description is present — append it to the agent prompt
     card_desc = card.get("description")
@@ -4532,6 +4561,17 @@ async def api_update_task(req: web.Request) -> web.Response:
     description = body.get("description")
     if description is not None:
         description = str(description).strip() or None
+    # model: optional per-card override (Card 43665f). Empty/absent = clear override.
+    update_model = "model" in body
+    card_model: str | None = None
+    if update_model:
+        raw_model = (body.get("model") or "").strip().lower()
+        if raw_model and raw_model not in _ALLOWED_MODELS:
+            return web.json_response(
+                {"error": f"model: must be one of {sorted(_ALLOWED_MODELS)} or empty to clear"},
+                status=400,
+            )
+        card_model = raw_model or None  # "" → clear override
     cwd, name = project["cwd"], project["name"]
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
@@ -4545,6 +4585,11 @@ async def api_update_task(req: web.Request) -> web.Response:
                             card["description"] = description
                         else:
                             card.pop("description", None)
+                    if update_model:
+                        if card_model:
+                            card["model"] = card_model
+                        else:
+                            card.pop("model", None)
                     found = True
                     break
             if found:

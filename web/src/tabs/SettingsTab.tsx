@@ -107,6 +107,7 @@ export function SettingsTab({ projectId, project, health, refreshHealth }: Props
         default_model: ef.default_model || '',
         watchdog_stall_sec: ef.watchdog_stall_sec,
         watchdog_max_sec: ef.watchdog_max_sec,
+        board_card_model: ef.board_card_model || '',
       })
       setGlobMsg(`Saved ✓ (${Object.keys(r.stored).length} override(s))`)
     } catch (e) { setGlobMsg('⚠ ' + errMsg(e)) }
@@ -296,6 +297,16 @@ export function SettingsTab({ projectId, project, health, refreshHealth }: Props
         <Row title="Default model for new projects"
              hint="Applied when creating a new project. Existing projects are not affected.">
           <select value={e.default_model} onChange={ev => setE({ default_model: ev.target.value })}>
+            {MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+          </select>
+        </Row>
+
+        <Row title={t['settings.board_card_model']} hint={t['settings.board_card_model_hint']}>
+          <select
+            value={e.board_card_model || ''}
+            onChange={ev => setE({ board_card_model: ev.target.value })}
+          >
+            <option value="">{t['settings.board_card_model_default']}</option>
             {MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
         </Row>

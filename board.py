@@ -44,10 +44,30 @@ _CARD_RE = re.compile(r"^\s*[-*]\s*\[(.)\]\s*(.*)$")
 # Lines like "- text" without a checkbox — agents often write this way.
 # Inside a column section we treat these as Backlog cards (default status).
 _PLAIN_CARD_RE = re.compile(r"^\s*[-*]\s+(?!\[)(.+)$")
-# Single marker: <!--ops:ID--> — ID can be any word (including non-hex aliases).
-_MARKER_RE = re.compile(r"\s*<!--\s*ops:([\w-]+)\s*-->")
+# Marker format: <!--ops:ID--> or <!--ops:ID key=val key2=val2-->
+# The extra key=val pairs carry optional per-card metadata (e.g. model=haiku).
+_MARKER_RE = re.compile(r"\s*<!--\s*ops:([\w-]+)(\s[^>]*)?\s*-->")
 # Description lines: '  > text' (2 spaces + '>') immediately following a card
 _DESC_LINE_RE = re.compile(r"^  > (.*)$")
+
+# Allowed per-card model overrides — mirrors _ALLOWED_MODELS in webapp.py.
+# Kept here to avoid a circular import; webapp.py validates against its own set.
+_ALLOWED_CARD_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku", "fable"})
+
+
+def _parse_marker_meta(meta_str: str | None) -> dict:
+    """Parse the optional key=val pairs from a marker's metadata string.
+    Returns a dict of recognised fields (currently only 'model').
+    Unknown or malformed keys are silently ignored."""
+    result: dict = {}
+    if not meta_str:
+        return result
+    for part in meta_str.split():
+        if "=" in part:
+            k, _, v = part.partition("=")
+            if k == "model" and v in _ALLOWED_CARD_MODELS:
+                result["model"] = v
+    return result
 
 
 def _extract_id_and_text(rest: str) -> tuple[str, str]:
@@ -58,6 +78,18 @@ def _extract_id_and_text(rest: str) -> tuple[str, str]:
     cid = matches[0].group(1)
     clean = _MARKER_RE.sub("", rest).strip()
     return cid, clean
+
+
+def _extract_id_text_and_meta(rest: str) -> tuple[str, str, dict]:
+    """Like _extract_id_and_text but also returns parsed metadata dict."""
+    matches = list(_MARKER_RE.finditer(rest))
+    if not matches:
+        return _new_card_id(), rest.strip(), {}
+    m0 = matches[0]
+    cid = m0.group(1)
+    meta = _parse_marker_meta(m0.group(2))
+    clean = _MARKER_RE.sub("", rest).strip()
+    return cid, clean, meta
 
 
 def _tasks_path(cwd: str) -> Path:
@@ -139,19 +171,23 @@ def _parse_tasks(text: str):
             last_card = None
         m = _CARD_RE.match(line)
         if m and cur is not None:
-            cid, cardtext = _extract_id_and_text(m.group(2))
+            cid, cardtext, meta = _extract_id_text_and_meta(m.group(2))
             if cardtext:
                 card: dict = {"id": cid, "text": cardtext}
+                if meta.get("model"):
+                    card["model"] = meta["model"]
                 cols[cur].append(card)
                 last_card = card
         elif cur is not None:
             # No checkbox match — try plain '- text' (agent style)
             pm = _PLAIN_CARD_RE.match(line)
             if pm:
-                cid, cardtext = _extract_id_and_text(pm.group(1))
+                cid, cardtext, meta = _extract_id_text_and_meta(pm.group(1))
                 if cardtext:
                     # Plain cards always go to the current column (agent chose the section)
                     card = {"id": cid, "text": cardtext}
+                    if meta.get("model"):
+                        card["model"] = meta["model"]
                     cols[cur].append(card)
                     last_card = card
         elif not seen_header:
@@ -166,7 +202,10 @@ def _serialize_tasks(preamble: str, cols: dict, project_name: str) -> str:
     for key, label, status in BOARD_COLUMNS:
         out.append(f"## {label}")
         for card in cols[key]:
-            out.append(f"- [{status}] {card['text']} <!--ops:{card['id']}-->")
+            # Append optional model metadata to the ops marker when set.
+            card_model = card.get("model") or ""
+            marker_meta = f" model={card_model}" if card_model in _ALLOWED_CARD_MODELS else ""
+            out.append(f"- [{status}] {card['text']} <!--ops:{card['id']}{marker_meta}-->")
             desc = card.get("description")
             if desc:
                 for desc_line in desc.splitlines():

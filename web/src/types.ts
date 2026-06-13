@@ -59,6 +59,8 @@ export interface TaskCard {
   id: string
   text: string
   description?: string | null
+  /** Card 43665f: optional per-card model override (opus/sonnet/haiku/fable). */
+  model?: string | null
 }
 
 /** Incident card = id starts with 'err-'. UI highlights it with a red border. */
@@ -179,6 +181,8 @@ export interface GlobalSettingsEffective {
   // Board reconciler settings (Task A)
   board_reconcile_enabled?: boolean
   board_reconcile_on_match?: 'done' | 'review'
+  /** Card 43665f: default model for board-card agent runs. '' = use sonnet. */
+  board_card_model?: string
 }
 
 export interface GlobalSettings {

@@ -70,11 +70,22 @@ export const api = {
       method: 'DELETE',
     }),
 
-  updateTask: (id: string, card: string, text: string, description?: string | null) =>
+  updateTask: (
+    id: string,
+    card: string,
+    text: string,
+    description?: string | null,
+    /** Card 43665f: per-card model override. undefined = don't touch; '' = clear. */
+    model?: string | null,
+  ) =>
     apiFetch<import('./types').Board>(`/api/projects/${id}/tasks/${card}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, ...(description !== undefined ? { description } : {}) }),
+      body: JSON.stringify({
+        text,
+        ...(description !== undefined ? { description } : {}),
+        ...(model !== undefined ? { model } : {}),
+      }),
     }),
 
   tasksDone: (id: string) =>

@@ -226,6 +226,10 @@ export const en = {
   'board.gate_conflict': 'Merge conflict: ',
   'board.gate_applied_banner': 'Applied ✓',
   'board.gate_discarded_banner': 'Discarded ✗',
+  // Card 43665f: per-card model override
+  'board.card_model_label': 'Model',
+  'board.card_model_default': '— default (sonnet) —',
+  'board.card_model_badge_aria': 'Model override',
 
   // ── Chat tab ─────────────────────────────────────────────────
   'chat.empty_hint': 'Start a chat with the agent about this project.',
@@ -469,6 +473,10 @@ export const en = {
   'settings.conductor_prompt': 'Conductor prompt',
   'settings.conductor_prompt_hint': 'When off, fable sessions do not receive the orchestrator directive.',
   'settings.global_default': '— global default —',
+  // Card 43665f: board card model global setting
+  'settings.board_card_model': 'Board card model',
+  'settings.board_card_model_hint': 'Default model for board-card agent runs. Does not affect chat. sonnet when empty.',
+  'settings.board_card_model_default': '— sonnet (default) —',
 
   // ── Vault tab (Spec 026) ─────────────────────────────────────
   'vault.title': '🔐 Vault',

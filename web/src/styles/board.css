@@ -88,6 +88,21 @@
   background: linear-gradient(90deg, rgba(220,38,38,0.06), var(--bg3) 30%);
 }
 .card-incident-icon { color: var(--red, #dc2626); font-weight: 700; }
+/* Card 43665f: model override badge — shown inline after title, only when override is set */
+.board-card-model-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  background: var(--accent-subtle, rgba(99,102,241,0.12));
+  color: var(--accent, #6366f1);
+  vertical-align: middle;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
 
 .act-handoff {
   background: var(--accent) !important;

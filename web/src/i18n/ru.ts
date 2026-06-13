@@ -227,6 +227,10 @@ export const ru = {
   'board.gate_conflict': 'Конфликт merge: ',
   'board.gate_applied_banner': 'Применено ✓',
   'board.gate_discarded_banner': 'Отменено ✗',
+  // Card 43665f: per-card model override
+  'board.card_model_label': 'Модель',
+  'board.card_model_default': '— по умолчанию (sonnet) —',
+  'board.card_model_badge_aria': 'Переопределение модели',
 
   // ── Chat tab ─────────────────────────────────────────────────
   'chat.empty_hint': 'Начни чат с агентом по проекту.',
@@ -470,6 +474,10 @@ export const ru = {
   'settings.conductor_prompt': 'Conductor prompt',
   'settings.conductor_prompt_hint': 'Когда выключено — fable-сессии не получают директиву дирижёра.',
   'settings.global_default': '— глобальный дефолт —',
+  // Card 43665f: board card model global setting
+  'settings.board_card_model': 'Модель для карточек доски',
+  'settings.board_card_model_hint': 'Модель агента для запуска карточек доски. Не влияет на чат. По умолчанию: sonnet.',
+  'settings.board_card_model_default': '— sonnet (по умолчанию) —',
 
   // ── Vault tab (Spec 026) ─────────────────────────────────────
   'vault.title': '🔐 Хранилище',

@@ -14,6 +14,8 @@ from webapp import (
     _MARKER_RE,
     _parse_tasks,
     _serialize_tasks,
+    _effective_card_model,
+    _ALLOWED_MODELS,
 )
 
 
@@ -407,3 +409,198 @@ def test_count_potential_cards_description_lines_not_counted():
     assert potential == 1, (
         f"Description строки не должны считаться как карточки: potential={potential}"
     )
+
+
+# ─────────────────────────── Card 43665f: model field round-trip ───────────────
+
+
+def test_parse_card_with_model_metadata():
+    """Marker <!--ops:ID model=haiku--> is parsed; card carries model field."""
+    text = """\
+## Backlog
+- [ ] Task with model <!--ops:aaa001 model=haiku-->
+- [ ] Task without model <!--ops:aaa002-->
+"""
+    _, cols = _parse_tasks(text)
+    cards = cols["backlog"]
+    assert len(cards) == 2
+    assert cards[0]["id"] == "aaa001"
+    assert cards[0]["model"] == "haiku"
+    assert cards[1]["id"] == "aaa002"
+    assert cards[1].get("model") is None, "Card without model must not carry the field"
+
+
+def test_parse_card_invalid_model_ignored():
+    """Unknown model values in the marker are silently ignored (no model field)."""
+    text = """\
+## Backlog
+- [ ] Task <!--ops:bbb001 model=gpt-9-->
+"""
+    _, cols = _parse_tasks(text)
+    card = cols["backlog"][0]
+    assert card.get("model") is None, "Invalid model value must be dropped"
+
+
+def test_serialize_card_with_model():
+    """Cards with a valid model field emit model=<val> in the ops marker."""
+    preamble = "# Tasks — proj"
+    cols = {
+        "backlog": [{"id": "ccc001", "text": "My task", "model": "opus"}],
+        "in_progress": [], "review": [], "failed": [],
+    }
+    serialized = _serialize_tasks(preamble, cols, "proj")
+    assert "<!--ops:ccc001 model=opus-->" in serialized, (
+        f"Expected model in marker, got:\n{serialized}"
+    )
+
+
+def test_serialize_card_without_model_no_metadata():
+    """Cards without a model field emit the plain <!--ops:ID--> marker (no extra space/metadata)."""
+    preamble = "# Tasks — proj"
+    cols = {
+        "backlog": [{"id": "ddd001", "text": "Plain task"}],
+        "in_progress": [], "review": [], "failed": [],
+    }
+    serialized = _serialize_tasks(preamble, cols, "proj")
+    assert "<!--ops:ddd001-->" in serialized, (
+        f"Expected plain marker, got:\n{serialized}"
+    )
+    # Must NOT have any metadata
+    assert "model=" not in serialized
+
+
+def test_model_round_trip_parse_serialize_parse():
+    """Full round-trip: parse → serialize → parse preserves model field exactly."""
+    original = """\
+# Tasks — proj
+
+## Backlog
+- [ ] Task A <!--ops:eee001 model=fable-->
+- [ ] Task B <!--ops:eee002-->
+
+## In Progress
+
+## Review
+
+## Failed
+"""
+    preamble, cols = _parse_tasks(original)
+    serialized = _serialize_tasks(preamble, cols, "proj")
+    preamble2, cols2 = _parse_tasks(serialized)
+
+    card_a = cols2["backlog"][0]
+    card_b = cols2["backlog"][1]
+    assert card_a["id"] == "eee001"
+    assert card_a["model"] == "fable", f"model should survive round-trip: {card_a}"
+    assert card_b["id"] == "eee002"
+    assert card_b.get("model") is None, f"card without model should stay clean: {card_b}"
+
+
+def test_model_round_trip_stable():
+    """serialize → parse → serialize produces identical output (idempotent)."""
+    preamble = "# Tasks — proj"
+    cols = {
+        "backlog": [
+            {"id": "fff001", "text": "With model", "model": "sonnet"},
+            {"id": "fff002", "text": "No model"},
+        ],
+        "in_progress": [], "review": [], "failed": [],
+    }
+    s1 = _serialize_tasks(preamble, cols, "proj")
+    _, cols2 = _parse_tasks(s1)
+    s2 = _serialize_tasks(preamble, cols2, "proj")
+    assert s1 == s2, f"Serialization is not stable:\n--- first ---\n{s1}\n--- second ---\n{s2}"
+
+
+def test_existing_cards_no_model_survive_round_trip():
+    """Cards written before this feature (no model in marker) survive without corruption."""
+    text = """\
+# Tasks — legacy
+
+## Backlog
+- [ ] Old task A <!--ops:leg001-->
+- [ ] Old task B <!--ops:leg002-->
+
+## In Progress
+
+## Review
+
+## Failed
+"""
+    preamble, cols = _parse_tasks(text)
+    serialized = _serialize_tasks(preamble, cols, "legacy")
+    _, cols2 = _parse_tasks(serialized)
+
+    assert len(cols2["backlog"]) == 2
+    for card in cols2["backlog"]:
+        assert card.get("model") is None, f"Legacy card gained unexpected model: {card}"
+    # Markers must remain simple
+    assert "model=" not in serialized
+
+
+# ─────────────────────────── Card 43665f: _effective_card_model resolution ────
+
+
+def test_effective_card_model_uses_card_override():
+    """When card has a valid model, it is returned regardless of global settings."""
+    import unittest.mock as mock
+    card = {"id": "x", "text": "t", "model": "opus"}
+    with mock.patch("webapp._get_global_setting", return_value="haiku"):
+        result = _effective_card_model(card)
+    assert result == "opus", f"Expected 'opus' (card override), got {result!r}"
+
+
+def test_effective_card_model_falls_to_global_setting():
+    """When card has no model, board_card_model global setting is used."""
+    import unittest.mock as mock
+    card = {"id": "x", "text": "t"}
+
+    def _fake_get_setting(key, fallback=None):
+        if key == "board_card_model":
+            return "haiku"
+        return fallback
+
+    with mock.patch("webapp._get_global_setting", side_effect=_fake_get_setting):
+        result = _effective_card_model(card)
+    assert result == "haiku", f"Expected 'haiku' (global setting), got {result!r}"
+
+
+def test_effective_card_model_defaults_to_sonnet():
+    """When card has no model and global setting is absent, falls back to 'sonnet'."""
+    import unittest.mock as mock
+    card = {"id": "x", "text": "t"}
+    with mock.patch("webapp._get_global_setting", return_value=None):
+        result = _effective_card_model(card)
+    assert result == "sonnet", f"Expected 'sonnet' fallback, got {result!r}"
+
+
+def test_effective_card_model_ignores_invalid_card_model():
+    """Invalid card model value is skipped; falls through to global setting."""
+    import unittest.mock as mock
+    card = {"id": "x", "text": "t", "model": "gpt-5-turbo"}
+
+    def _fake_get_setting(key, fallback=None):
+        if key == "board_card_model":
+            return "fable"
+        return fallback
+
+    with mock.patch("webapp._get_global_setting", side_effect=_fake_get_setting):
+        result = _effective_card_model(card)
+    assert result == "fable", f"Invalid card model should fall through to global setting, got {result!r}"
+
+
+def test_effective_card_model_does_not_use_project_model():
+    """_effective_card_model never falls back to project model — only sonnet."""
+    import unittest.mock as mock
+    # Even if someone passes a project-dict-like thing with 'model', it must be
+    # treated as per-card override (not project model). When absent and global is
+    # empty, sonnet is the floor.
+    card = {"id": "x", "text": "t"}  # no 'model' key
+    with mock.patch("webapp._get_global_setting", return_value=""):
+        result = _effective_card_model(card)
+    assert result == "sonnet"
+    # Verify the allowed set is correct
+    assert "sonnet" in _ALLOWED_MODELS
+    assert "opus" in _ALLOWED_MODELS
+    assert "haiku" in _ALLOWED_MODELS
+    assert "fable" in _ALLOWED_MODELS
