@@ -1142,32 +1142,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     <div className="chat-wrap">
       {/* Spec-037: chat tabs strip — one tab per chat, + to create, dbl-click to rename */}
       {chats.length > 0 && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 0,
-          borderBottom: '1px solid var(--border, #374151)',
-          overflowX: 'auto', flexShrink: 0,
-          background: 'var(--bg, #111827)',
-          paddingLeft: 4,
-        }}>
+        <div className="chat-named-tabs-strip">
           {chats.map(chat => {
             const isActive = chat.id === activeChatId
             const isRenaming = renamingChatId === chat.id
             return (
               <div
                 key={chat.id}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 2,
-                  padding: '4px 8px 4px 10px',
-                  background: isActive ? 'var(--bg-card, #1f2937)' : 'transparent',
-                  borderBottom: isActive ? '2px solid var(--color-primary, #6366f1)' : '2px solid transparent',
-                  cursor: isActive ? 'default' : 'pointer',
-                  flexShrink: 0,
-                  fontSize: 12,
-                  color: isActive ? 'var(--text, #f9fafb)' : 'var(--color-muted, #9ca3af)',
-                  userSelect: 'none',
-                  whiteSpace: 'nowrap',
-                  maxWidth: 160,
-                }}
+                className={`chat-named-tab${isActive ? ' active' : ''}`}
                 onClick={() => { if (!isRenaming) handleSwitchChat(chat.id) }}
                 onDoubleClick={e => {
                   e.stopPropagation()
@@ -1202,18 +1184,13 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                     >{t['chat.tabs_rename_confirm']}</button>
                   </form>
                 ) : (
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 120 }}>{chat.name}</span>
+                  <span className="chat-named-tab-label">{chat.name}</span>
                 )}
-                {!isRenaming && (
+                {/* Close button only on the active tab — keeps non-active tabs safe to tap on touch */}
+                {!isRenaming && isActive && (
                   <button
-                    style={{
-                      fontSize: 10, lineHeight: 1, padding: '0 2px',
-                      background: 'transparent', border: 'none',
-                      cursor: chats.length <= 1 ? 'not-allowed' : 'pointer',
-                      color: 'var(--color-muted, #9ca3af)',
-                      opacity: chats.length <= 1 ? 0.3 : 0.7,
-                      flexShrink: 0, marginLeft: 2,
-                    }}
+                    className="chat-named-tab-close"
+                    disabled={chats.length <= 1}
                     title={chats.length <= 1 ? t['chat.tabs_close_last'] : t['chat.tabs_close_aria']}
                     aria-label={t['chat.tabs_close_aria']}
                     onClick={e => {
@@ -1226,12 +1203,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             )
           })}
           <button
-            style={{
-              padding: '4px 10px', fontSize: 14, lineHeight: 1,
-              background: 'transparent', border: 'none',
-              cursor: 'pointer', color: 'var(--color-muted, #9ca3af)',
-              flexShrink: 0,
-            }}
+            className="chat-named-tab-new"
             title={t['chat.tabs_new']}
             aria-label={t['chat.tabs_new_aria']}
             onClick={handleCreateChat}
@@ -1336,6 +1308,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
               {/* Growth delta since the previous turn */}
               {deltaLabel != null && (
                 <span
+                  className="chat-session-delta"
                   style={{ color: 'var(--color-muted, #9ca3af)', cursor: 'default', fontSize: 11 }}
                   title={`Context change since the previous turn: ${deltaLabel} tokens`}
                 >
@@ -1364,6 +1337,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
               {/* Utilization — shown when available */}
               {utilization != null && (
                 <span
+                  className="chat-session-utilization"
                   style={{ color: 'var(--color-muted, #9ca3af)', cursor: 'default' }}
                   title={`Subscription utilization this turn: ${utilization}%`}
                 >

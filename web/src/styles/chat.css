@@ -9,6 +9,124 @@
   overflow: hidden;
 }
 
+/* ── C1b: Named-chat tab strip (Spec-037) ────────────────────── */
+/* Container: scrollable row, no wrap, small gap between tabs */
+.chat-named-tabs-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  overflow-x: auto;
+  flex-shrink: 0;
+  padding-left: 4px;
+  /* hide scrollbar visually but keep scroll functionality */
+  scrollbar-width: none;
+}
+.chat-named-tabs-strip::-webkit-scrollbar { display: none; }
+
+/* Individual tab */
+.chat-named-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  background: transparent;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text2);
+  user-select: none;
+  white-space: nowrap;
+  max-width: 160px;
+  transition: background var(--transition), color var(--transition);
+  /* Ensure minimum tap height on all screens */
+  min-height: 32px;
+}
+.chat-named-tab:hover {
+  background: var(--bg3);
+  color: var(--text);
+}
+.chat-named-tab.active {
+  background: var(--bg-card, var(--bg2));
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  cursor: default;
+}
+
+/* Tab label text */
+.chat-named-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+/* Close button — only rendered on the active tab */
+.chat-named-tab-close {
+  font-size: 11px;
+  line-height: 1;
+  /* generous padding so the tap zone is wider than the glyph */
+  padding: 2px 5px;
+  margin-left: 4px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text2);
+  opacity: 0.6;
+  flex-shrink: 0;
+  border-radius: 3px;
+  transition: background var(--transition), color var(--transition), opacity var(--transition);
+}
+.chat-named-tab-close:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+.chat-named-tab-close:not(:disabled):hover {
+  background: var(--bg4);
+  color: var(--red);
+  opacity: 1;
+}
+
+/* New-chat "+" button */
+.chat-named-tab-new {
+  padding: 4px 10px;
+  font-size: 14px;
+  line-height: 1;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text2);
+  flex-shrink: 0;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  transition: color var(--transition);
+}
+.chat-named-tab-new:hover { color: var(--text); }
+
+/* Touch: larger tap targets so tabs are reliably switchable */
+@media (pointer: coarse) {
+  .chat-named-tab {
+    min-height: 44px;
+    padding: 8px 10px 8px 12px;
+    gap: 8px;
+  }
+
+  /* Close button: bigger hit area, visually larger glyph */
+  .chat-named-tab-close {
+    font-size: 14px;
+    padding: 6px 8px;
+    margin-left: 6px;
+  }
+
+  .chat-named-tab-new {
+    min-height: 44px;
+    padding: 0 14px;
+    font-size: 16px;
+  }
+}
+
 /* ── C2: Session selector bar ────────────────────────────────── */
 .chat-session-bar {
   padding: 6px 12px;

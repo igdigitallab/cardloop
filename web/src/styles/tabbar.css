@@ -593,11 +593,12 @@
   }
 }
 
-/* D-12: Folder button tap target ≥44px on mobile */
+/* D-12 / M-01: Folder buttons (Vault, Schedules, Files) are rarely used on phones
+   and crowd the project-tab list. Hide them on mobile; UsageBadge stays visible.
+   The freed space is absorbed by .ptab-list (flex: 1 already set on .ptab-spacer). */
 @media (max-width: 768px) {
   .ptab-folder-btn {
-    min-height: 44px;
-    padding: 0 14px;
+    display: none;
   }
 }
 
