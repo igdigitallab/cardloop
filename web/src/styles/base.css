@@ -1,6 +1,7 @@
 /* ── Reset & base ──────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* ── Dark theme (default) ──────────────────────────────────── */
 :root {
   --bg:        #0d0d0f;
   --bg2:       #141416;
@@ -22,6 +23,67 @@
   --radius-sm: 4px;
   --sidebar-w: 240px;
   --transition: 0.15s ease;
+}
+
+/* ── Dark theme: explicit data-theme="dark" override ───────── */
+:root[data-theme="dark"] {
+  --bg:        #0d0d0f;
+  --bg2:       #141416;
+  --bg3:       #1c1c1f;
+  --bg4:       #242428;
+  --border:    #2a2a2e;
+  --border2:   #38383e;
+  --text:      #e8e8ed;
+  --text2:     #9898a6;
+  --text3:     #5c5c6e;
+  --accent:    #6b68f5;
+  --accent-h:  #8582ff;
+  --green:     #34c77b;
+  --yellow:    #f5a623;
+  --red:       #f5614a;
+}
+
+/* ── Light theme vars (shared values) ──────────────────────── */
+/* Applied both via explicit data-theme and via OS media query  */
+
+/* Explicit: data-theme="light" */
+:root[data-theme="light"] {
+  --bg:        #ffffff;
+  --bg2:       #f5f5f7;
+  --bg3:       #e8e8ec;
+  --bg4:       #d8d8de;
+  --border:    #c4c4c8;
+  --border2:   #a0a0a8;
+  --text:      #0a0a0a;
+  --text2:     #2c2c2e;
+  --text3:     #4a4a4c;
+  --accent:    #4340d4;
+  --accent-h:  #3330b8;
+  --green:     #1a7a47;
+  --yellow:    #a05e00;
+  --red:       #b52a1a;
+  color-scheme: light;
+}
+
+/* Auto: OS preference, only when no explicit data-theme is set */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg:        #ffffff;
+    --bg2:       #f5f5f7;
+    --bg3:       #e8e8ec;
+    --bg4:       #d8d8de;
+    --border:    #c4c4c8;
+    --border2:   #a0a0a8;
+    --text:      #0a0a0a;
+    --text2:     #2c2c2e;
+    --text3:     #4a4a4c;
+    --accent:    #4340d4;
+    --accent-h:  #3330b8;
+    --green:     #1a7a47;
+    --yellow:    #a05e00;
+    --red:       #b52a1a;
+    color-scheme: light;
+  }
 }
 
 html, body { height: 100%; }
@@ -149,23 +211,65 @@ body {
 }
 .btn-danger:hover { background: rgba(220,60,60,0.3); }
 
-/* ── Light theme (prefers-color-scheme: light) ───────────────────────── */
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg:        #f5f5f7;
-    --bg2:       #ffffff;
-    --bg3:       #ececee;
-    --bg4:       #e2e2e5;
-    --border:    #d1d1d6;
-    --border2:   #b8b8c0;
-    --text:      #1c1c1e;
-    --text2:     #636366;
-    --text3:     #8e8e93;
-    --accent:    #5856d6;
-    --accent-h:  #4744cc;
-    --green:     #30a06a;
-    --yellow:    #d48a1a;
-    --red:       #d94030;
+/* ── ThemeToggle ─────────────────────────────────────────────────────── */
+/* Fixed top-right, compact, touch-friendly (≥44px tap target on coarse) */
+.theme-toggle {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 20px;
+  padding: 3px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+}
+
+.theme-toggle-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  height: 30px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--text3);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+  /* Ensure ≥44px tap target height on coarse pointers (mobile) */
+  position: relative;
+}
+
+/* Extend tap target without changing visual size */
+@media (pointer: coarse) {
+  .theme-toggle-btn::before {
+    content: '';
+    position: absolute;
+    inset: -7px -4px;
   }
-  body { color-scheme: light; }
+}
+
+.theme-toggle-btn:hover {
+  color: var(--text2);
+  background: var(--bg4);
+}
+
+.theme-toggle-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Ensure contrast in light mode — accent is dark enough but let's override text */
+:root[data-theme="light"] .theme-toggle-btn.active,
+:root:not([data-theme]) .theme-toggle-btn.active {
+  color: #ffffff;
 }
