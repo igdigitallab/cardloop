@@ -168,11 +168,10 @@ export const ru = {
   'board.failed_tray_expand': 'Развернуть трей ошибок',
   'board.agent_running': 'Агент работает, авто-обновление...',
   'board.new_task_placeholder': 'Новая задача… (Enter — добавить)',
-  'board.edit_hint': 'Двойной клик — редактировать',
+  'board.edit_task_modal_title': 'Редактировать задачу',
+  'board.edit_task_placeholder': 'Текст задачи…',
   'board.incident_title': 'Инцидент (источник: log/test)',
   'board.card_running_title': 'Выполняется агентом',
-  'board.show_description': 'Показать описание',
-  'board.add_description': 'Добавить описание',
   'board.move_left': '← влево',
   'board.move_left_aria': 'Переместить влево',
   'board.move_right': 'вправо →',
@@ -193,9 +192,6 @@ export const ru = {
   'board.reconcile_on_match_review': 'Переместить в Review',
   'board.reconcile_hint': 'Применяется ко всем доскам.',
   'board.result_modal_title': 'Результат выполнения',
-  'board.edit_description': 'Редактировать описание',
-  'board.save_description': 'Сохранить',
-  'board.description_placeholder': 'Описание задачи (markdown)…',
 
   // ── Board live activity (spec-036 Phase 2a) ──────────────────
   'board.dashboard_backlog': 'Очередь',

@@ -167,11 +167,10 @@ export const en = {
   'board.failed_tray_expand': 'Expand failed tray',
   'board.agent_running': 'Agent is running, auto-updating...',
   'board.new_task_placeholder': 'New task… (Enter to add)',
-  'board.edit_hint': 'Double-click to edit',
+  'board.edit_task_modal_title': 'Edit task',
+  'board.edit_task_placeholder': 'Task text…',
   'board.incident_title': 'Incident (source: log/test)',
   'board.card_running_title': 'Being processed by agent',
-  'board.show_description': 'Show description',
-  'board.add_description': 'Add description',
   'board.move_left': '← left',
   'board.move_left_aria': 'Move left',
   'board.move_right': 'right →',
@@ -192,9 +191,6 @@ export const en = {
   'board.reconcile_on_match_review': 'Move to Review',
   'board.reconcile_hint': 'Applies to all boards.',
   'board.result_modal_title': 'Run result',
-  'board.edit_description': 'Edit description',
-  'board.save_description': 'Save',
-  'board.description_placeholder': 'Task description (markdown)…',
 
   // ── Board live activity (spec-036 Phase 2a) ──────────────────
   'board.dashboard_backlog': 'Backlog',

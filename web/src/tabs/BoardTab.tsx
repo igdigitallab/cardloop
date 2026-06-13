@@ -219,12 +219,8 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   const [newText, setNewText] = useState('')
   const [showArchive, setShowArchive] = useState(false)
   const [archive, setArchive] = useState<string | null>(null)
-  // Inline card editing: double-click → textarea
-  const [editingCard, setEditingCard] = useState<{ id: string; text: string } | null>(null)
-
-  // Description modal: view + edit card description
-  const [descModal, setDescModal] = useState<{ card: TaskCard } | null>(null)
-  const [editingDesc, setEditingDesc] = useState<string | null>(null)  // null = read mode, string = edit mode
+  // Full-task editor modal: double-click on any card → single multi-line textarea
+  const [taskEditModal, setTaskEditModal] = useState<{ id: string; text: string } | null>(null)
 
   // Drag-and-drop
   const [dragCardId, setDragCardId] = useState<string | null>(null)
@@ -484,45 +480,14 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   function move(card: string, to: string) { run(api.moveTask(projectId, card, to)) }
   function del(card: string) { run(api.deleteTask(projectId, card)) }
 
-  async function saveCardEdit() {
-    if (!editingCard) return
-    const { id, text } = editingCard
-    setEditingCard(null)
+  /** Save the task text from the full-task editor modal and close it. */
+  async function saveTaskEdit() {
+    if (!taskEditModal) return
+    const { id, text } = taskEditModal
+    setTaskEditModal(null)
     const trimmed = text.trim()
     if (!trimmed) return
     run(api.updateTask(projectId, id, trimmed))
-  }
-
-  function openDescModal(card: TaskCard) {
-    setDescModal({ card })
-    setEditingDesc(null)
-  }
-
-  function closeDescModal() {
-    setDescModal(null)
-    setEditingDesc(null)
-  }
-
-  async function saveDescEdit() {
-    if (!descModal || editingDesc === null) return
-    const { card } = descModal
-    const newDesc = editingDesc.trim() || null
-    setEditingDesc(null)
-    setBusy(true); setError('')
-    try {
-      const fresh = await api.updateTask(projectId, card.id, card.text, newDesc)
-      setBoard(fresh)
-      schedulePoll(fresh)
-      // sync modal with updated data
-      for (const col of fresh.columns) {
-        const found = col.cards.find(c => c.id === card.id)
-        if (found) { setDescModal({ card: found }); break }
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
   }
 
   function toggleArchive() {
@@ -675,51 +640,18 @@ export function BoardTab({ projectId, isActive = true }: Props) {
             <span className="board-card-queued-badge" title="Queued for agent run">⏳ queued</span>
           </div>
         )}
-        {editingCard?.id === card.id ? (
-          <textarea
-            className="board-card-edit-input"
-            value={editingCard.text}
-            autoFocus
-            rows={3}
-            onChange={e => setEditingCard({ id: card.id, text: e.target.value })}
-            onBlur={saveCardEdit}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveCardEdit() }
-              if (e.key === 'Escape') setEditingCard(null)
-            }}
-          />
-        ) : (
-          <div
-            className="board-card-text"
-            onDoubleClick={() => !isRunning && setEditingCard({ id: card.id, text: card.text })}
-            title={isRunning ? '' : t['board.edit_hint']}
-          >
-            {isIncident && <span className="card-incident-icon" title={t['board.incident_title']}>⚠ </span>}
-            {isRunning && <span className="card-running-icon" title={t['board.card_running_title']}>⚙ </span>}
-            <span className="board-card-title">{card.text}</span>
-          </div>
-        )}
+        <div
+          className="board-card-text"
+          onDoubleClick={() => !isRunning && setTaskEditModal({ id: card.id, text: card.text })}
+          title={card.text}
+        >
+          {isIncident && <span className="card-incident-icon" title={t['board.incident_title']}>⚠ </span>}
+          {isRunning && <span className="card-running-icon" title={t['board.card_running_title']}>⚙ </span>}
+          <span className="board-card-title">{card.text}</span>
+        </div>
         {/* spec-036 Phase 2a: live activity strip — shown when this card is being executed */}
         {liveRun?.cardId === card.id && <CardLiveStrip run={liveRun} />}
         <div className="board-card-actions">
-          <button
-            className={`act-desc${card.description ? ' has-desc' : ''}`}
-            title={card.description ? t['board.show_description'] : t['board.add_description']}
-            aria-label={card.description ? t['board.show_description'] : t['board.add_description']}
-            disabled={busy}
-            onClick={e => {
-              e.stopPropagation()
-              openDescModal(card)
-              if (!card.description) setEditingDesc('')
-            }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <line x1="4" y1="7" x2="20" y2="7" />
-              <line x1="4" y1="12" x2="14" y2="12" />
-              <line x1="4" y1="17" x2="17" y2="17" />
-            </svg>
-          </button>
           {parkIdx >= 0 && (
             <>
               <button title={t['board.move_left']} aria-label={t['board.move_left_aria']} disabled={busy || parkIdx === 0}
@@ -1168,57 +1100,34 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         </div>
       )}
 
-      {/* Description modal */}
-      {descModal && (
-        <Modal onClose={closeDescModal}>
+      {/* Full-task editor modal — double-click any card to edit the whole task text */}
+      {taskEditModal && (
+        <Modal onClose={() => setTaskEditModal(null)}>
           <ModalHead
-            title={
-              <span style={{ fontWeight: 600, maxWidth: '92%', whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
-                {descModal.card.text}
-              </span>
-            }
-            onClose={closeDescModal}
+            title={t['board.edit_task_modal_title']}
+            onClose={() => setTaskEditModal(null)}
             extra={
-              editingDesc === null ? (
-                <button
-                  className="run-modal-close"
-                  title={t['board.edit_description']}
-                  style={{ fontSize: 14 }}
-                  onClick={() => setEditingDesc(descModal.card.description ?? '')}
-                >✎</button>
-              ) : (
-                <button
-                  className="btn-primary"
-                  style={{ padding: '2px 10px', fontSize: 13 }}
-                  disabled={busy}
-                  onClick={saveDescEdit}
-                >{t['board.save_description']}</button>
-              )
+              <button
+                className="btn-primary"
+                style={{ padding: '2px 10px', fontSize: 13 }}
+                disabled={busy}
+                onClick={saveTaskEdit}
+              >{t['common.save']}</button>
             }
           />
           <div className="run-modal-body">
-            {editingDesc !== null ? (
-              <textarea
-                className="board-desc-edit-input"
-                value={editingDesc}
-                autoFocus
-                rows={8}
-                onChange={e => setEditingDesc(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Escape') setEditingDesc(null)
-                }}
-                placeholder={t['board.description_placeholder']}
-                style={{ width: '100%', resize: 'vertical', fontFamily: 'monospace', fontSize: 13 }}
-              />
-            ) : descModal.card.description ? (
-              <div className="markdown-wrap">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{descModal.card.description}</ReactMarkdown>
-              </div>
-            ) : (
-              <div style={{ color: 'var(--text-dim, #888)', fontStyle: 'italic' }}>
-                No description. Click ✎ to add one.
-              </div>
-            )}
+            <textarea
+              className="board-desc-edit-input"
+              value={taskEditModal.text}
+              autoFocus
+              rows={10}
+              onChange={e => setTaskEditModal({ id: taskEditModal.id, text: e.target.value })}
+              onKeyDown={e => {
+                if (e.key === 'Escape') setTaskEditModal(null)
+              }}
+              placeholder={t['board.edit_task_placeholder']}
+              style={{ width: '100%', resize: 'vertical', fontFamily: 'monospace', fontSize: 13 }}
+            />
           </div>
         </Modal>
       )}
