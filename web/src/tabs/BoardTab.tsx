@@ -1,12 +1,165 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
-import { Board, BoardColumn, GateResult, RunResult, TaskCard, isIncidentCard } from '../types'
+import { ActivityEvent, Board, BoardColumn, GateResult, RichTool, RunResult, TaskCard, isIncidentCard } from '../types'
 import { Spinner } from '../components/Spinner'
 import { Modal, ModalHead } from '../components/Modal'
-import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
+import { useOnRunEnd, useFocusRefresh, useProjectActivity } from '../hooks/useProjectActivity'
 import { t } from '../i18n'
+
+// ─── Live card run state ──────────────────────────────────────────────────────
+
+interface CardRunState {
+  cardId: string
+  startedAt: number
+  lastEventAt: number
+  currentTool: RichTool | null
+}
+
+/** Formats M:SS duration. */
+function fmtDuration(sec: number): string {
+  const s = Math.max(0, Math.floor(sec))
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m}:${r.toString().padStart(2, '0')}`
+}
+
+// ─── CardLiveStrip — isolated ticker so board card list does NOT re-render/sec ─
+
+interface CardLiveStripProps {
+  run: CardRunState
+}
+
+/**
+ * Compact live strip rendered inside a running board card.
+ * Owns its own 1-second tick so re-renders are isolated to this element —
+ * the parent card list does not re-render every second (same pattern as
+ * ChatTab's RunStatusBar).
+ */
+const CardLiveStrip = memo(function CardLiveStrip({ run }: CardLiveStripProps) {
+  const [tick, setTick] = useState(Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setTick(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const elapsedSec = (tick - run.startedAt) / 1000
+  const silenceSec = (tick - run.lastEventAt) / 1000
+  const lvl = silenceSec > 120 ? 'silence-red' : silenceSec > 30 ? 'silence-yellow' : 'silence-ok'
+
+  const tool = run.currentTool
+  let icon = '💭'
+  let label: string
+  if (tool) {
+    icon = '🔧'
+    const hint = toolHintBoard(tool)
+    label = hint ? `${tool.name} · ${hint}` : tool.name
+  } else {
+    label = t['chat.status_card_running']
+  }
+
+  return (
+    <div className={`card-live-strip ${lvl}`}>
+      <span className="card-live-icon">{icon}</span>
+      <span className="card-live-label">{label}</span>
+      <span className="card-live-elapsed">· {fmtDuration(elapsedSec)}</span>
+      {silenceSec > 30 && (
+        <span className="card-live-silence">
+          ⚠ {t['board.card_live_silence_warn']} {fmtDuration(silenceSec)}
+          {silenceSec > 120 && ` · ${t['board.card_live_hung']}`}
+        </span>
+      )}
+    </div>
+  )
+})
+
+/** Short file/cmd hint for a tool — same logic as ChatTab's toolHint. */
+function toolHintBoard(tool: RichTool): string {
+  if (tool.kind === 'bash') {
+    const cmd = tool.cmd.trim().split('\n')[0]
+    return cmd.length > 45 ? cmd.slice(0, 45) + '…' : cmd
+  }
+  if (tool.kind === 'edit' || tool.kind === 'write' || tool.kind === 'read') {
+    return tool.file.split('/').pop() || tool.file
+  }
+  if (tool.kind === 'search') {
+    return tool.pattern.length > 35 ? tool.pattern.slice(0, 35) + '…' : tool.pattern
+  }
+  return ''
+}
+
+// ─── BoardDashboard — compact summary strip above the columns ─────────────────
+
+interface BoardDashboardProps {
+  board: Board
+  run: CardRunState | null
+}
+
+/**
+ * Compact project dashboard: column counts + live run indicator.
+ * The live elapsed timer is isolated in a child memo component.
+ */
+const BoardDashboard = memo(function BoardDashboard({ board, run }: BoardDashboardProps) {
+  const backlogCount = board.columns.find(c => c.key === 'backlog')?.cards.length ?? 0
+  const reviewCount = board.columns.find(c => c.key === 'review')?.cards.length ?? 0
+  const failedCount = board.columns.find(c => c.key === 'failed')?.cards.length ?? 0
+
+  // Find the card text of the currently running card
+  let runCardText: string | null = null
+  if (run) {
+    for (const col of board.columns) {
+      const found = col.cards.find(c => c.id === run.cardId)
+      if (found) { runCardText = found.text; break }
+    }
+  }
+
+  return (
+    <div className="board-dashboard">
+      <span className="board-dashboard-counts">
+        {backlogCount > 0 && (
+          <span className="board-dashboard-pill">{t['board.dashboard_backlog']} <strong>{backlogCount}</strong></span>
+        )}
+        {reviewCount > 0 && (
+          <span className="board-dashboard-pill board-dashboard-pill-review">{t['board.dashboard_review']} <strong>{reviewCount}</strong></span>
+        )}
+        {failedCount > 0 && (
+          <span className="board-dashboard-pill board-dashboard-pill-failed">{t['board.dashboard_failed']} <strong>{failedCount}</strong></span>
+        )}
+      </span>
+      {run && (
+        <BoardDashboardRun run={run} cardText={runCardText} />
+      )}
+    </div>
+  )
+})
+
+interface BoardDashboardRunProps {
+  run: CardRunState
+  cardText: string | null
+}
+
+/** Isolated ticker for the running card summary in the dashboard. */
+const BoardDashboardRun = memo(function BoardDashboardRun({ run, cardText }: BoardDashboardRunProps) {
+  const [tick, setTick] = useState(Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setTick(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const elapsedSec = (tick - run.startedAt) / 1000
+  const label = cardText
+    ? (cardText.length > 60 ? cardText.slice(0, 60) + '…' : cardText)
+    : run.cardId
+
+  return (
+    <span className="board-dashboard-running">
+      <span className="board-dashboard-running-icon">⚙</span>
+      <span className="board-dashboard-running-label">{t['board.dashboard_running']}: {label}</span>
+      <span className="board-dashboard-running-elapsed">· {fmtDuration(elapsedSec)}</span>
+    </span>
+  )
+})
 
 interface Props {
   projectId: string
@@ -148,6 +301,36 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       return next
     })
   }
+
+  // spec-036 Phase 2a: live run state — which card is currently being executed
+  const [liveRun, setLiveRun] = useState<CardRunState | null>(null)
+
+  // Subscribe to the activity bus and track which card is running
+  useProjectActivity((evt: ActivityEvent) => {
+    if (evt.kind === 'run_start') {
+      setLiveRun({
+        cardId: evt.run_id,
+        startedAt: Date.now(),
+        lastEventAt: Date.now(),
+        currentTool: null,
+      })
+    } else if (evt.kind === 'tool') {
+      setLiveRun(prev =>
+        prev && prev.cardId === evt.run_id
+          ? { ...prev, lastEventAt: Date.now(), currentTool: evt.tool }
+          : prev
+      )
+    } else if (evt.kind === 'text') {
+      setLiveRun(prev =>
+        prev && prev.cardId === evt.run_id
+          ? { ...prev, lastEventAt: Date.now(), currentTool: null }
+          : prev
+      )
+    } else if (evt.kind === 'run_end') {
+      // Clear live run only when the matching card finishes
+      setLiveRun(prev => (prev && prev.cardId === evt.run_id ? null : prev))
+    }
+  })
 
   // Multi-select cards for batch sending to agent (sequential queue)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -453,18 +636,22 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     const isIncident = isIncidentCard(card)
     const isSel = selected.has(card.id)
     const isQueued = board?.queued?.includes(card.id) ?? false
+    // spec-036: a card lights up (yellow border) when isInProgress (legacy column-based)
+    // OR when the live activity bus identifies this card as the currently running one.
+    const isLiveRunning = liveRun?.cardId === card.id
+    const isRunning = isInProgress || isLiveRunning
     return (
       <div
         className={[
           'board-card',
-          isInProgress ? 'board-card-running' : '',
+          isRunning ? 'board-card-running' : '',
           dragCardId === card.id ? 'board-card-dragging' : '',
           isIncident ? 'board-card-incident' : '',
           isSel ? 'board-card-selected' : '',
           isQueued ? 'board-card-queued' : '',
         ].filter(Boolean).join(' ')}
         key={card.id}
-        draggable={!isInProgress}
+        draggable={!isRunning}
         onDragStart={(e) => {
           setDragCardId(card.id)
           e.dataTransfer.effectAllowed = 'move'
@@ -504,14 +691,16 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         ) : (
           <div
             className="board-card-text"
-            onDoubleClick={() => !isInProgress && setEditingCard({ id: card.id, text: card.text })}
-            title={isInProgress ? '' : t['board.edit_hint']}
+            onDoubleClick={() => !isRunning && setEditingCard({ id: card.id, text: card.text })}
+            title={isRunning ? '' : t['board.edit_hint']}
           >
             {isIncident && <span className="card-incident-icon" title={t['board.incident_title']}>⚠ </span>}
-            {isInProgress && <span className="card-running-icon" title={t['board.card_running_title']}>⚙ </span>}
+            {isRunning && <span className="card-running-icon" title={t['board.card_running_title']}>⚙ </span>}
             <span className="board-card-title">{card.text}</span>
           </div>
         )}
+        {/* spec-036 Phase 2a: live activity strip — shown when this card is being executed */}
+        {liveRun?.cardId === card.id && <CardLiveStrip run={liveRun} />}
         <div className="board-card-actions">
           <button
             className={`act-desc${card.description ? ' has-desc' : ''}`}
@@ -765,6 +954,9 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       {!board?.exists && (
         <div className="board-hint board-hint-notexist">TASKS.md does not exist yet — will be created on the first task</div>
       )}
+
+      {/* spec-036 Phase 2a: project dashboard summary */}
+      {board && <BoardDashboard board={board} run={liveRun} />}
 
       <div className="board-columns">
         {visibleOrder.map(key => {

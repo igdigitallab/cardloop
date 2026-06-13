@@ -197,6 +197,16 @@ export const ru = {
   'board.save_description': 'Сохранить',
   'board.description_placeholder': 'Описание задачи (markdown)…',
 
+  // ── Board live activity (spec-036 Phase 2a) ──────────────────
+  'board.dashboard_backlog': 'Очередь',
+  'board.dashboard_review': 'Ревью',
+  'board.dashboard_failed': 'Ошибки',
+  'board.dashboard_running': 'работает',
+  'board.card_live_tool': 'Инструмент',
+  'board.card_live_elapsed': 'прошло',
+  'board.card_live_silence_warn': 'тишина',
+  'board.card_live_hung': 'возможно завис',
+
   // ── C2-gate ──────────────────────────────────────────────────
   // Spec 009: quality gate
   'board.gate_check': '🧪 Проверить',

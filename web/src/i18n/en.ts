@@ -196,6 +196,16 @@ export const en = {
   'board.save_description': 'Save',
   'board.description_placeholder': 'Task description (markdown)…',
 
+  // ── Board live activity (spec-036 Phase 2a) ──────────────────
+  'board.dashboard_backlog': 'Backlog',
+  'board.dashboard_review': 'Review',
+  'board.dashboard_failed': 'Failed',
+  'board.dashboard_running': 'running',
+  'board.card_live_tool': 'Tool',
+  'board.card_live_elapsed': 'elapsed',
+  'board.card_live_silence_warn': 'silence',
+  'board.card_live_hung': 'possibly hung',
+
   // ── C2-gate ──────────────────────────────────────────────────
   // Spec 009: quality gate
   'board.gate_check': '🧪 Check',

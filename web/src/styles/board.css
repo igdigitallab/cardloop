@@ -406,6 +406,116 @@
 }
 .board-batch-clear:hover { color: var(--text, #ddd); border-color: var(--text-dim, #888); }
 
+/* ── spec-036 Phase 2a: live card strip ──────────────────────── */
+.card-live-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 4px 6px;
+  margin-bottom: 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 200, 0, 0.06);
+  border: 1px solid rgba(255, 200, 0, 0.18);
+  min-width: 0;
+}
+.card-live-strip.silence-yellow {
+  background: rgba(245, 166, 35, 0.1);
+  border-color: rgba(245, 166, 35, 0.35);
+}
+.card-live-strip.silence-red {
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.35);
+}
+.card-live-icon {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+.card-live-label {
+  color: var(--text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.card-live-elapsed {
+  color: var(--text3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.card-live-silence {
+  color: var(--yellow, #f5a623);
+  font-size: 10px;
+  flex-basis: 100%;
+}
+.card-live-strip.silence-red .card-live-silence {
+  color: var(--red, #dc2626);
+}
+
+/* ── spec-036 Phase 2a: board dashboard summary strip ─────────── */
+.board-dashboard {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  min-height: 28px;
+}
+.board-dashboard-counts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.board-dashboard-pill {
+  color: var(--text3);
+  white-space: nowrap;
+}
+.board-dashboard-pill strong {
+  color: var(--text2);
+  font-weight: 600;
+}
+.board-dashboard-pill-review strong {
+  color: var(--accent-h);
+}
+.board-dashboard-pill-failed strong {
+  color: var(--red, #dc2626);
+}
+.board-dashboard-running {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--yellow, #f5a623);
+  font-size: 11px;
+  overflow: hidden;
+  min-width: 0;
+}
+.board-dashboard-running-icon {
+  flex-shrink: 0;
+  animation: spin 2s linear infinite;
+  display: inline-block;
+}
+.board-dashboard-running-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+.board-dashboard-running-elapsed {
+  color: var(--text3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ── Failed tray (Spec 032) ────────────────────────────────── */
 .board-failed-tray {
   margin-bottom: 14px;
