@@ -112,6 +112,17 @@ interface Props {
 }
 
 type ModelKey = 'fable' | 'opus' | 'sonnet' | 'haiku'
+type ThinkMode = 'max' | 'default' | 'min'
+
+const THINK_MODES: { value: ThinkMode; labelKey: 'chat.think_mode_max' | 'chat.think_mode_default' | 'chat.think_mode_min' }[] = [
+  { value: 'max',     labelKey: 'chat.think_mode_max' },
+  { value: 'default', labelKey: 'chat.think_mode_default' },
+  { value: 'min',     labelKey: 'chat.think_mode_min' },
+]
+
+function thinkModeStorageKey(projectId: string) {
+  return `cops.chat.thinkmode.${projectId}`
+}
 
 /** Rough token estimate: ~4 characters per token (common heuristic for English/Russian). */
 function estimateTokens(messages: ChatMessage[]): number {
@@ -472,6 +483,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [error, setError] = useState('')
   const [ctxRefreshKey, setCtxRefreshKey] = useState(0)
   const [changingModel, setChangingModel] = useState(false)
+  // Thinking mode selector — persisted per-project in localStorage; default = "default"
+  const [thinkMode, setThinkMode] = useState<ThinkMode>(() => {
+    try {
+      const stored = localStorage.getItem(thinkModeStorageKey(projectId))
+      if (stored === 'max' || stored === 'default' || stored === 'min') return stored
+    } catch { /* localStorage unavailable */ }
+    return 'default'
+  })
   const [run, setRun] = useState<RunIndicator | null>(null)
   // Spec-035: server-authoritative turn start timestamp (epoch ms).
   // Set from /live started_at; null when not available (falls back to run.startedAt).
@@ -526,6 +545,24 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
 
   // Spec-035 L2: seed the SSE reconnect cursor after /live hydration
   const seedCursor = useSeedCursor()
+
+  // Re-load thinkMode from localStorage when projectId changes
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(thinkModeStorageKey(projectId))
+      if (stored === 'max' || stored === 'default' || stored === 'min') {
+        setThinkMode(stored)
+        return
+      }
+    } catch { /* localStorage unavailable */ }
+    setThinkMode('default')
+  }, [projectId])
+
+  // Persist thinkMode to localStorage whenever it changes
+  const handleThinkModeChange = useCallback((mode: ThinkMode) => {
+    setThinkMode(mode)
+    try { localStorage.setItem(thinkModeStorageKey(projectId), mode) } catch { /* ignore */ }
+  }, [projectId])
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
 
@@ -825,7 +862,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: fullPrompt }),
+        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode }),
         signal: ac.signal,
       })
 
@@ -933,7 +970,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
         return rest
       })
     }
-  }, [input, projectId, streaming, onProjectsReload, attachments])
+  }, [input, projectId, streaming, onProjectsReload, attachments, thinkMode])
 
   useEffect(() => { sendMessageRef.current = sendMessage }, [sendMessage])
 
@@ -1169,6 +1206,54 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 </span>
               )}
             </span>
+          )
+        })()}
+        {/* Thinking mode selector — compact, per-project localStorage persistence.
+            Disabled (greyed + tooltip) for fable model: thinking always runs high on Fable 5. */}
+        {(() => {
+          const isFable = project.model === 'fable' || project.model?.startsWith('fable')
+          const selectorTitle = isFable
+            ? t['chat.think_mode_fable_hint']
+            : t['chat.think_mode_hint']
+          return (
+            <div
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                opacity: isFable ? 0.45 : 1,
+                transition: 'opacity 0.2s',
+              }}
+              title={selectorTitle}
+            >
+              <span style={{ fontSize: 11, color: 'var(--color-muted, #9ca3af)', userSelect: 'none' }}>
+                {t['chat.think_mode_label']}
+              </span>
+              {THINK_MODES.map(m => (
+                <button
+                  key={m.value}
+                  style={{
+                    fontSize: 11,
+                    padding: '1px 6px',
+                    cursor: isFable || streaming ? 'default' : 'pointer',
+                    background: thinkMode === m.value
+                      ? 'var(--color-primary, #6366f1)'
+                      : 'transparent',
+                    color: thinkMode === m.value
+                      ? '#fff'
+                      : 'var(--color-muted, #9ca3af)',
+                    border: `1px solid ${thinkMode === m.value ? 'var(--color-primary, #6366f1)' : 'var(--border, #374151)'}`,
+                    borderRadius: 4,
+                    lineHeight: 1.4,
+                    transition: 'background 0.15s, color 0.15s, border-color 0.15s',
+                  }}
+                  disabled={isFable || streaming}
+                  onClick={() => { if (!isFable) handleThinkModeChange(m.value) }}
+                  aria-label={`Set thinking mode to ${m.value}`}
+                  aria-pressed={thinkMode === m.value}
+                >
+                  {t[m.labelKey]}
+                </button>
+              ))}
+            </div>
           )
         })()}
         <div className="chat-model-selector" title={t['chat.model_hint']}>

@@ -1202,6 +1202,7 @@ async def run_engine(  # type: ignore[return]
     ctx: "dict | None" = None,
     ephemeral: bool = False,
     output_format: "dict | None" = None,
+    effort: "str | None" = None,
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
@@ -1227,6 +1228,10 @@ async def run_engine(  # type: ignore[return]
                                  ResultMessage.structured_output is passed through the result event.
                                  Shape: {"type": "json_schema", "schema": {...}}.
                                  None (default) → no change to existing behaviour (chat/TG runs).
+        effort                — thinking effort override for this run. None (default) → uses
+                                 _DEFAULT_EFFORT (env DEFAULT_EFFORT, default "medium"). Pass an
+                                 explicit value ("low", "medium", "high") to override per-request.
+                                 Note: on Fable 5 effort is silently coerced by the CLI regardless.
 
     Yields event dicts. SDK exceptions are wrapped as {"type": "error", "exc": ...}.
     """
@@ -1283,7 +1288,7 @@ async def run_engine(  # type: ignore[return]
         system_prompt=system_prompt,
         env=env or {},
         agents=effective_agents,
-        effort=_DEFAULT_EFFORT,  # type: ignore[arg-type]
+        effort=effort if effort is not None else _DEFAULT_EFFORT,  # type: ignore[arg-type]
         hooks={"PostToolUse": [HookMatcher(hooks=[_post_tool_hook])]},
         # include_hook_events=False (default) — HookEventMessage lifecycle noise adds no extra
         # data beyond what the hook callback already captures, and would flood _process_messages.

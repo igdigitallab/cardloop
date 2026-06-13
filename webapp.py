@@ -6908,6 +6908,18 @@ async def api_project_chat(req: web.Request) -> web.Response:
     if not prompt:
         return web.json_response({"error": "empty prompt"}, status=400)
 
+    # Thinking mode selector: "max" | "default" | "min" (from UI). Map to run_engine effort values.
+    # "default" → None (run_engine uses _DEFAULT_EFFORT env; unchanged behaviour for all callers).
+    # "max"     → "high" (highest effort for non-fable models; fable ignores it per SDK note).
+    # "min"     → "low"  (no extended thinking; fastest / cheapest for non-fable models).
+    _think_mode = (body.get("think_mode") or "default").strip()
+    _effort_override: "str | None" = None
+    if _think_mode == "max":
+        _effort_override = "high"
+    elif _think_mode == "min":
+        _effort_override = "low"
+    # "default" → _effort_override stays None → run_engine uses _DEFAULT_EFFORT
+
     # Resolve project
     project = _find_project_by_id(ctx, pid)
     if project is None:
@@ -6999,6 +7011,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             print(f"[rotation] handoff injection failed (continuing without it): {_inj_exc}")
             effective_prompt = prompt
         # ephemeral=False: chat sessions share state with the project (resumable, context-tracked).
+        # effort: None when think_mode="default" (preserves _DEFAULT_EFFORT); "high"/"low" otherwise.
         async for event in run_engine(
             project_name=name,
             cwd=cwd,
@@ -7010,6 +7023,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             **agents_kwargs,
             ctx=ctx,
             ephemeral=False,
+            effort=_effort_override,
         ):
             etype = event.get("type")
             # Spec-035: buffer every event in the live turn ring + publish seq-tagged copy to bus

@@ -442,6 +442,14 @@ export const ru = {
   'schedules.deferred_cancel_title': 'Отменить отложенный запуск',
   'schedules.deferred_cancelled': 'Отложенный запуск отменён',
 
+  // ── Thinking mode selector ───────────────────────────────────────
+  'chat.think_mode_label': 'Думать',
+  'chat.think_mode_max': 'Макс',
+  'chat.think_mode_default': 'Норм',
+  'chat.think_mode_min': 'Мин',
+  'chat.think_mode_hint': 'Глубина думания на этот ход (Макс / Норм / Мин). Не влияет на Fable 5 — там всегда максимум.',
+  'chat.think_mode_fable_hint': 'Глубина думания (не влияет на Fable 5 — там всегда максимум)',
+
   // ── Sub-agent lane (Spec-035) ────────────────────────────────────
   'chat.subagent_lane_label': 'субагенты',
 

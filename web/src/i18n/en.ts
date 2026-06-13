@@ -441,6 +441,14 @@ export const en = {
   'schedules.deferred_cancel_title': 'Cancel this deferred run',
   'schedules.deferred_cancelled': 'Deferred run cancelled',
 
+  // ── Thinking mode selector ───────────────────────────────────────
+  'chat.think_mode_label': 'Thinking',
+  'chat.think_mode_max': 'Max',
+  'chat.think_mode_default': 'Default',
+  'chat.think_mode_min': 'Min',
+  'chat.think_mode_hint': 'Thinking effort for this turn (Max / Default / Min). Has no effect on Fable 5 — thinking always runs high.',
+  'chat.think_mode_fable_hint': 'Thinking effort (inert for Fable 5 — thinking always runs high regardless)',
+
   // ── Sub-agent lane (Spec-035) ────────────────────────────────────
   'chat.subagent_lane_label': 'sub-agents',
 

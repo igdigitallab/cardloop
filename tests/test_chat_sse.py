@@ -407,3 +407,72 @@ async def test_two_simultaneous_chat_requests(aiohttp_client, tmp_path, project_
     )
     error_text = " ".join(e.get("error", "") for e in error_events)
     assert "busy" in error_text, f"Ошибка должна содержать 'занят': {error_text}"
+
+
+# ─────────────────────────── think_mode → effort mapping ─────────────────────
+
+
+async def test_chat_think_mode_max_passes_high_effort(aiohttp_client, tmp_path, project_dir):
+    """think_mode='max' in request body → run_engine receives effort='high'."""
+    captured = {}
+
+    async def fake_engine(**kwargs):
+        captured["effort"] = kwargs.get("effort")
+        yield {"type": "text", "text": "ok"}
+        yield {"type": "result", "session_id": "s1"}
+
+    ctx = _make_chat_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    app = _make_app(ctx)
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/api/projects/myproject/chat",
+        json={"prompt": "Go", "think_mode": "max"},
+        headers=_auth_headers(ctx),
+    )
+    await resp.read()
+    assert captured.get("effort") == "high", f"Expected effort='high', got: {captured}"
+
+
+async def test_chat_think_mode_min_passes_low_effort(aiohttp_client, tmp_path, project_dir):
+    """think_mode='min' in request body → run_engine receives effort='low'."""
+    captured = {}
+
+    async def fake_engine(**kwargs):
+        captured["effort"] = kwargs.get("effort")
+        yield {"type": "text", "text": "ok"}
+        yield {"type": "result", "session_id": "s2"}
+
+    ctx = _make_chat_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    app = _make_app(ctx)
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/api/projects/myproject/chat",
+        json={"prompt": "Go", "think_mode": "min"},
+        headers=_auth_headers(ctx),
+    )
+    await resp.read()
+    assert captured.get("effort") == "low", f"Expected effort='low', got: {captured}"
+
+
+async def test_chat_think_mode_default_passes_none_effort(aiohttp_client, tmp_path, project_dir):
+    """think_mode='default' (or absent) → run_engine receives effort=None (preserves _DEFAULT_EFFORT)."""
+    captured = {"effort": "sentinel"}  # distinguish "not set" from None
+
+    async def fake_engine(**kwargs):
+        captured["effort"] = kwargs.get("effort", "not_passed")
+        yield {"type": "text", "text": "ok"}
+        yield {"type": "result", "session_id": "s3"}
+
+    ctx = _make_chat_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    app = _make_app(ctx)
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/api/projects/myproject/chat",
+        json={"prompt": "Go", "think_mode": "default"},
+        headers=_auth_headers(ctx),
+    )
+    await resp.read()
+    assert captured.get("effort") is None, f"Expected effort=None, got: {captured}"
