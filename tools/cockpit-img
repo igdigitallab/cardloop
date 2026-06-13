@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# cockpit-img — push a screenshot into the cockpit chat as an inline image.
+#
+# Usage:  cockpit-img <path-to-image> [caption]
+#
+# The script copies the image into $COPS_MEDIA_DIR (set by the cockpit agent
+# launcher) and prints one markdown line to stdout:
+#   ![caption](/api/projects/<COPS_PROJECT_ID>/media/<filename>)
+#
+# The agent includes that line in its reply text; react-markdown renders it
+# inline in the cockpit chat with a click-to-fullscreen lightbox (spec-038).
+#
+# Env vars (set automatically by the cockpit project agent launcher):
+#   COPS_MEDIA_DIR    — absolute path to data/chat-media/<project_id>/
+#   COPS_PROJECT_ID   — project id used to build the /api/projects/... URL
+#
+# Supported formats: png jpg jpeg webp gif
+# Size cap: 15 MB
+set -euo pipefail
+
+# ── help ────────────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || -z "${1:-}" ]]; then
+  cat <<'EOF'
+cockpit-img — push a screenshot into the cockpit chat (inline lightbox).
+
+Usage:  cockpit-img <path-to-image> [caption]
+
+Prints one markdown line:  ![caption](/api/projects/<id>/media/<filename>)
+Include that line in your reply and the cockpit will render it inline.
+
+Supported formats: png jpg jpeg webp gif  |  Max size: 15 MB
+Env (set by cockpit launcher): COPS_MEDIA_DIR, COPS_PROJECT_ID
+EOF
+  exit 0
+fi
+
+# ── validate args ────────────────────────────────────────────────────────────
+FILE="${1:-}"
+CAPTION="${2:-screenshot}"
+
+[[ -f "$FILE" ]] || { echo "cockpit-img: file not found: $FILE" >&2; exit 1; }
+
+# ── require env ─────────────────────────────────────────────────────────────
+: "${COPS_MEDIA_DIR:?cockpit-img: COPS_MEDIA_DIR is not set — run from a cockpit project agent context}"
+: "${COPS_PROJECT_ID:?cockpit-img: COPS_PROJECT_ID is not set — run from a cockpit project agent context}"
+
+# ── validate extension ───────────────────────────────────────────────────────
+EXT_LC="${FILE##*.}"
+EXT_LC="${EXT_LC,,}"
+case "$EXT_LC" in
+  png|jpg|jpeg|webp|gif) ;;
+  *) echo "cockpit-img: unsupported image format '$EXT_LC' (allowed: png jpg jpeg webp gif)" >&2; exit 1 ;;
+esac
+
+# ── size cap (15 MB) ─────────────────────────────────────────────────────────
+MAX_BYTES=$((15 * 1024 * 1024))
+FILE_BYTES=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null || echo 0)
+if [[ "$FILE_BYTES" -gt "$MAX_BYTES" ]]; then
+  echo "cockpit-img: file too large ($(( FILE_BYTES / 1024 / 1024 )) MB > 15 MB limit)" >&2
+  exit 1
+fi
+
+# ── build dest filename: <unix_ts>_<sanitized_basename>.<ext> ───────────────
+TS=$(date +%s)
+BASENAME=$(basename "$FILE")
+# Strip extension, sanitize: keep alphanumeric + dash + dot, collapse runs of _
+NAME_NO_EXT="${BASENAME%.*}"
+SAFE_NAME=$(printf '%s' "$NAME_NO_EXT" | tr -cs '[:alnum:]._-' '_' | sed 's/__*/_/g; s/^_//; s/_$//')
+[[ -z "$SAFE_NAME" ]] && SAFE_NAME="img"
+DEST_FILENAME="${TS}_${SAFE_NAME}.${EXT_LC}"
+
+# ── ensure media dir exists and copy ────────────────────────────────────────
+mkdir -p "$COPS_MEDIA_DIR"
+cp "$FILE" "$COPS_MEDIA_DIR/$DEST_FILENAME"
+
+# ── emit markdown line to stdout ─────────────────────────────────────────────
+printf '![%s](/api/projects/%s/media/%s)\n' "$CAPTION" "$COPS_PROJECT_ID" "$DEST_FILENAME"

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
@@ -352,6 +352,56 @@ interface CacheCountdownBadgeProps {
   /** Whether a run is currently active. */
   isRunning: boolean
 }
+
+// ─── Spec-038: inline image renderer + full-screen lightbox ──────────────────
+
+/** Full-screen lightbox overlay. Closes on backdrop click, ✕ button, or Esc. */
+function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose])
+
+  return (
+    <div className="lightbox-overlay" onClick={onClose} role="dialog" aria-modal="true">
+      <button
+        className="lightbox-close"
+        onClick={onClose}
+        aria-label="Close image"
+      >✕</button>
+      {/* Stop propagation so clicking the image itself does not close */}
+      <img
+        className="lightbox-img"
+        src={src}
+        alt={alt}
+        onClick={(e) => e.stopPropagation()}
+      />
+    </div>
+  )
+}
+
+/** Custom img renderer for ReactMarkdown: shows a thumbnail; click opens Lightbox. */
+function ChatImage({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
+  const [open, setOpen] = useState(false)
+  if (!src) return null
+  return (
+    <>
+      <img
+        className="chat-msg-img"
+        src={src}
+        alt={alt ?? ''}
+        loading="lazy"
+        onClick={() => setOpen(true)}
+      />
+      {open && (
+        <Lightbox src={src} alt={alt ?? ''} onClose={() => setOpen(false)} />
+      )}
+    </>
+  )
+}
+
+const _mdComponents = { img: ChatImage }
 
 const CacheCountdownBadge = memo(function CacheCountdownBadge({
   lastTurnEndMs,
@@ -1486,7 +1536,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                   <>
                     {parsedOpts.prefix && (
                       <div className="chat-msg-body markdown-wrap">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{parsedOpts.prefix}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{parsedOpts.prefix}</ReactMarkdown>
                       </div>
                     )}
                     <OptionPicker
@@ -1497,7 +1547,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                   </>
                 ) : msg.text ? (
                   <div className="chat-msg-body markdown-wrap">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{msg.text}</ReactMarkdown>
                   </div>
                 ) : null}
                 {msg.error && (

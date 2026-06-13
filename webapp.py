@@ -4114,6 +4114,14 @@ async def _run_card(
             # Project secrets — only from cwd of the main project (not worktree), isolated by cwd.
             # secret: references are resolved against the built-in store before injecting into the agent env.
             project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
+            # Spec-038: inject cockpit media env (same pattern as api_project_chat).
+            _card_media_dir = ctx["DATA"] / "chat-media" / project["id"]
+            _card_media_dir.mkdir(parents=True, exist_ok=True)
+            project_secrets = {
+                **project_secrets,
+                "COPS_PROJECT_ID": project["id"],
+                "COPS_MEDIA_DIR": str(_card_media_dir),
+            }
             agents_config = project.get("agents_config") or {}
             agents_kwargs = _build_agents_kwargs(ctx, agents_config)
             # ephemeral=True: cards are always isolated — they MUST NOT reuse a live client
@@ -5578,6 +5586,60 @@ async def api_project_upload(req: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
     return web.json_response({"path": str(dest), "name": filename, "size": size})
+
+
+# ──────────────────────── chat media (spec-038) ──────────────────────────────
+#
+# GET /api/projects/{id}/media/{filename}
+# Serves agent-produced screenshots stored under data/chat-media/<project_id>/.
+# Auth: inherited from the /api/* cookie middleware (cops_auth).
+# Path-traversal guard: rejects any filename containing /, \, or ..; also
+# verifies os.path.realpath of the resolved file stays inside the media dir.
+
+_MEDIA_CONTENT_TYPES: dict[str, str] = {
+    "png":  "image/png",
+    "jpg":  "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "gif":  "image/gif",
+}
+
+
+async def api_project_media(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/media/{filename} — serve agent screenshot to the cockpit."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    filename = req.match_info["filename"]
+
+    # Path-traversal guard: reject suspicious filenames before any filesystem access.
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return web.json_response({"error": "invalid filename"}, status=400)
+
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    content_type = _MEDIA_CONTENT_TYPES.get(ext)
+    if content_type is None:
+        return web.json_response({"error": "unsupported media type"}, status=415)
+
+    DATA: Path = ctx["DATA"]
+    media_dir = DATA / "chat-media" / project["id"]
+    target = media_dir / filename
+
+    # Secondary guard: confirm the resolved real path is inside the media dir.
+    try:
+        real_target = os.path.realpath(str(target))
+        real_media  = os.path.realpath(str(media_dir))
+    except Exception:
+        return web.json_response({"error": "invalid path"}, status=400)
+    if not real_target.startswith(real_media + os.sep) and real_target != real_media:
+        return web.json_response({"error": "invalid filename"}, status=400)
+
+    if not target.exists():
+        return web.json_response({"error": "file not found"}, status=404)
+
+    return web.FileResponse(target, headers={"Content-Type": content_type})
 
 
 async def api_project_git_sync(req: web.Request) -> web.Response:
@@ -7353,6 +7415,15 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # Project secrets are injected into the agent's env (values only in-process, not in the API).
         # secret: references are resolved against the built-in store; TG vars are merged after (they win).
         project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
+        # Spec-038: inject cockpit media env so the cockpit-img helper knows where to write files
+        # and which URL prefix to emit — mirroring how the TG channel injects TG_CHAT_ID/TG_THREAD_ID.
+        _media_dir = ctx["DATA"] / "chat-media" / project["id"]
+        _media_dir.mkdir(parents=True, exist_ok=True)
+        project_secrets = {
+            **project_secrets,
+            "COPS_PROJECT_ID": project["id"],
+            "COPS_MEDIA_DIR": str(_media_dir),
+        }
         agents_config = project.get("agents_config") or {}
         agents_kwargs = _build_agents_kwargs(ctx, agents_config)
         # Spec-021 Phase 4: inject handoff summary into the first turn of a fresh session.
@@ -9237,6 +9308,8 @@ async def start(ptb_app, ctx: dict) -> None:
         # Project test runner (auto-detect pytest/npm/make)
         app.router.add_post("/api/projects/{id}/test", api_project_test)
         app.router.add_post("/api/projects/{id}/upload", api_project_upload)
+        # Spec-038: serve agent-produced screenshots to the cockpit chat (auth-guarded)
+        app.router.add_get("/api/projects/{id}/media/{filename}", api_project_media)
         # Project model change (takes effect on next request)
         app.router.add_post("/api/projects/{id}/model", api_project_set_model)
         # Subscription limits (5h + weekly) — for badge in tab bar
