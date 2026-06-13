@@ -163,6 +163,10 @@ export const api = {
   projectRunning: (id: string) =>
     apiFetch<{ running: boolean }>(`/api/projects/${id}/running`),
 
+  // Spec-035 L3: cold-open snapshot — current LiveTurn buffer (running state + event history)
+  projectLive: (id: string) =>
+    apiFetch<import('./types').LiveTurnSnapshot>(`/api/projects/${id}/live`),
+
   // Agent skills (global + project)
   projectSkills: (id: string) =>
     apiFetch<{

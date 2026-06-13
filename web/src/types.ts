@@ -395,8 +395,43 @@ export interface ActivityEventRunEnd {
   run_id: string
 }
 
+// ─── Spec-035 L4: sub-agent bus event ────────────────────────────────────────
+// Arrives via /activity-stream from either:
+//   - TG consumer (bot.py:1727): {kind:"subagent", run_id:null, type:"subagent", ...}
+//   - Chat path (webapp.py L1 publish): {seq:N, type:"subagent", ...} (no kind field)
+// We treat both: check kind==="subagent" OR type==="subagent".
+export interface ActivityEventSubagent {
+  kind: 'subagent'
+  run_id: string | null
+  // engine fields
+  type?: string
+  subtype: 'started' | 'progress' | 'notification'
+  task_id: string
+  description: string | null
+  status: string | null
+  summary: string | null
+  last_tool_name: string | null
+  // seq from live turn buffer (optional — may be absent on older TG-sourced events)
+  seq?: number
+}
+
+/** Spec-035 L3: response from GET /api/projects/{id}/live */
+export interface LiveTurnSnapshot {
+  running: boolean
+  turn_id: string | null
+  /** Server wall-clock epoch (seconds, float) — the one timer source of truth. */
+  started_at: number | null
+  model: string | null
+  cost_usd: number | null
+  /** Latest seq in the buffer — subscribe activity-stream from here to avoid duplicates. */
+  cursor: number
+  /** Buffered events in chronological order (oldest to newest). */
+  events: Array<Record<string, unknown>>
+}
+
 export type ActivityEvent =
   | ActivityEventRunStart
   | ActivityEventText
   | ActivityEventTool
   | ActivityEventRunEnd
+  | ActivityEventSubagent

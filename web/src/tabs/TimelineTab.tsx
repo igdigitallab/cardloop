@@ -176,11 +176,13 @@ export function TimelineTab({ projectId }: Props) {
   // ── Live events via existing SSE ──────────────────────────────────────────
 
   useProjectActivity(evt => {
-    // Compose a TimelineEvent from the ActivityEvent
+    // Compose a TimelineEvent from the ActivityEvent.
+    // ActivityEventSubagent.run_id may be null (not undefined) — normalize to avoid TS error.
+    const evtNormalized = { ...evt, run_id: (evt as { run_id?: string | null }).run_id ?? undefined }
     const te: TimelineEvent = {
       ts: Date.now() / 1000,
       session_key: '',  // not known from SSE, ok
-      ...evt,
+      ...evtNormalized,
     }
     const liveKey = `${te.ts}:${te.kind}:${te.run_id ?? ''}`
     setEvents(prev => [...prev, te])

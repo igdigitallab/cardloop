@@ -412,6 +412,9 @@ export const en = {
   'schedules.deferred_cancel_title': 'Cancel this deferred run',
   'schedules.deferred_cancelled': 'Deferred run cancelled',
 
+  // ── Sub-agent lane (Spec-035) ────────────────────────────────────
+  'chat.subagent_lane_label': 'sub-agents',
+
   // ── Chat tab deferred runs (Spec 020) ────────────────────────────
   'chat.defer_title': 'Schedule this prompt for later',
   'chat.defer_aria': 'Schedule prompt for later',

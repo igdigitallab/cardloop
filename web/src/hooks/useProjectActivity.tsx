@@ -19,6 +19,8 @@ type Handler = (evt: ActivityEvent) => void
 interface BusValue {
   /** Subscribe to ALL bus events. Returns unsubscribe. */
   subscribe: (h: Handler) => () => void
+  /** Spec-035 L2: seed the SSE cursor so reconnects skip already-applied events. */
+  seedCursor: (seq: number) => void
 }
 
 const BusContext = createContext<BusValue | null>(null)
@@ -42,10 +44,19 @@ export function ProjectActivityProvider({ projectId, active = true, children }: 
   const handlersRef = useRef<Set<Handler>>(new Set())
   // True once we have been inactive — used to fire a catch-up event on return.
   const wasInactiveRef = useRef(false)
+  // Spec-035 L2: track the highest seq seen so far — used as ?since= on reconnect to
+  // avoid replaying events the client already processed. -1 means "no seq seen yet".
+  const lastSeqRef = useRef<number>(-1)
 
   const subscribe = useCallback((h: Handler) => {
     handlersRef.current.add(h)
     return () => { handlersRef.current.delete(h) }
+  }, [])
+
+  // Allow external code (e.g. ChatTab after /live hydration) to seed the cursor so
+  // the first connect does not replay events already applied from the snapshot.
+  const seedCursor = useCallback((seq: number) => {
+    if (seq > lastSeqRef.current) lastSeqRef.current = seq
   }, [])
 
   // Single SSE connection per projectId, held only while `active`.
@@ -71,7 +82,11 @@ export function ProjectActivityProvider({ projectId, active = true, children }: 
     async function connect() {
       while (alive) {
         try {
-          const res = await fetch(`/api/projects/${projectId}/activity-stream`, {
+          // Spec-035 L2: pass ?since= cursor so the server replays only the gap.
+          // lastSeqRef.current stays -1 until we see a seq-tagged event, at which point
+          // reconnects will skip already-processed events.
+          const since = lastSeqRef.current >= 0 ? `?since=${lastSeqRef.current}` : ''
+          const res = await fetch(`/api/projects/${projectId}/activity-stream${since}`, {
             credentials: 'include',
             signal: ac.signal,
           })
@@ -92,6 +107,11 @@ export function ProjectActivityProvider({ projectId, active = true, children }: 
               if (!ln.startsWith('data: ')) continue
               try {
                 const evt = JSON.parse(ln.slice(6)) as ActivityEvent
+                // Track highest seq for reconnect cursor
+                const seq = (evt as unknown as Record<string, unknown>).seq
+                if (typeof seq === 'number' && seq > lastSeqRef.current) {
+                  lastSeqRef.current = seq
+                }
                 for (const h of handlersRef.current) {
                   try { h(evt) } catch { /* subscriber must not crash the bus */ }
                 }
@@ -110,10 +130,17 @@ export function ProjectActivityProvider({ projectId, active = true, children }: 
   }, [projectId, active])
 
   return (
-    <BusContext.Provider value={{ subscribe }}>
+    <BusContext.Provider value={{ subscribe, seedCursor }}>
       {children}
     </BusContext.Provider>
   )
+}
+
+/** Spec-035 L2: seed the SSE reconnect cursor (call after /live hydration). */
+// eslint-disable-next-line react-refresh/only-export-components -- hooks + provider co-located by design
+export function useSeedCursor(): (seq: number) => void {
+  const ctx = useContext(BusContext)
+  return useCallback((seq: number) => ctx?.seedCursor(seq), [ctx])
 }
 
 /** Subscribe to ALL bus events. handler may be unstable (we use a ref internally). */

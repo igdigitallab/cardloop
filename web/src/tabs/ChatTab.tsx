@@ -16,11 +16,92 @@ import {
   Project,
   RichTool,
   TurnMetrics,
+  ActivityEventSubagent,
 } from '../types'
-import { useProjectActivity } from '../hooks/useProjectActivity'
+import { useProjectActivity, useSeedCursor } from '../hooks/useProjectActivity'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
 import { t } from '../i18n'
+
+// ─── Spec-035: Sub-agent lane ─────────────────────────────────────────────────
+
+/** Live state of a single sub-agent spawned during this turn. */
+interface SubagentEntry {
+  task_id: string
+  description: string
+  last_tool_name: string | null
+  /** 'running' until a notification event arrives. */
+  status: 'running' | 'completed' | 'failed'
+}
+
+/** Reduce a raw subagent bus/SSE event into a SubagentEntry state update. */
+function applySubagentEvent(
+  prev: SubagentEntry[],
+  evt: ActivityEventSubagent,
+): SubagentEntry[] {
+  const { task_id, subtype, description, status, last_tool_name } = evt
+  const existing = prev.find(e => e.task_id === task_id)
+  if (subtype === 'started') {
+    if (existing) return prev // idempotent
+    return [...prev, {
+      task_id,
+      description: description ?? '',
+      last_tool_name: null,
+      status: 'running',
+    }]
+  }
+  if (subtype === 'progress') {
+    if (!existing) {
+      // progress before started — create entry
+      return [...prev, {
+        task_id,
+        description: description ?? '',
+        last_tool_name: last_tool_name ?? null,
+        status: 'running',
+      }]
+    }
+    return prev.map(e => e.task_id !== task_id ? e : {
+      ...e,
+      last_tool_name: last_tool_name ?? e.last_tool_name,
+      // update description if provided (progress events carry it)
+      description: description ?? e.description,
+    })
+  }
+  if (subtype === 'notification') {
+    const terminal: SubagentEntry['status'] = status === 'completed' ? 'completed' : 'failed'
+    if (!existing) {
+      return [...prev, {
+        task_id,
+        description: description ?? '',
+        last_tool_name: null,
+        status: terminal,
+      }]
+    }
+    return prev.map(e => e.task_id !== task_id ? e : { ...e, status: terminal })
+  }
+  return prev
+}
+
+/** Coerce a raw bus/SSE event object into ActivityEventSubagent, handling both shapes:
+ *  - {kind:"subagent", ...}  (TG consumer path)
+ *  - {type:"subagent", ...}  (chat path via live buffer, no kind field)
+ */
+function toSubagentEvent(raw: Record<string, unknown>): ActivityEventSubagent | null {
+  const isSubagent = raw['kind'] === 'subagent' || raw['type'] === 'subagent'
+  if (!isSubagent) return null
+  return {
+    kind: 'subagent',
+    run_id: (raw['run_id'] as string | null) ?? null,
+    type: raw['type'] as string | undefined,
+    subtype: raw['subtype'] as ActivityEventSubagent['subtype'],
+    task_id: (raw['task_id'] as string) ?? '',
+    description: (raw['description'] as string | null) ?? null,
+    status: (raw['status'] as string | null) ?? null,
+    summary: (raw['summary'] as string | null) ?? null,
+    last_tool_name: (raw['last_tool_name'] as string | null) ?? null,
+    seq: raw['seq'] as number | undefined,
+  }
+}
 
 interface Props {
   project: Project
@@ -263,6 +344,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [ctxRefreshKey, setCtxRefreshKey] = useState(0)
   const [changingModel, setChangingModel] = useState(false)
   const [run, setRun] = useState<RunIndicator | null>(null)
+  // Spec-035: server-authoritative turn start timestamp (epoch ms).
+  // Set from /live started_at; null when not available (falls back to run.startedAt).
+  const [serverStartedAt, setServerStartedAt] = useState<number | null>(null)
+  // Spec-035: sub-agent lane — live state of spawned sub-agents in the current turn.
+  const [subagents, setSubagents] = useState<SubagentEntry[]>([])
+  // Ref for deduplication: "task_id:subtype" keys seen via the POST stream, so bus
+  // does not double-render the same subagent event on the originating tab.
+  const seenSubagentKeysRef = useRef<Set<string>>(new Set())
   // Ticking "now" — only ticks while there is an active run, to avoid re-rendering the whole tab
   // on every second. The timer is localized: only the status bar reads `tick`.
   const [tick, setTick] = useState<number>(Date.now())
@@ -304,6 +393,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [lastCacheHitPct, setLastCacheHitPct] = useState<number | null>(null)
   // Ticking second for the cache freshness countdown (independent of run ticker)
   const [cacheTick, setCacheTick] = useState<number>(Date.now())
+
+  // Spec-035 L2: seed the SSE reconnect cursor after /live hydration
+  const seedCursor = useSeedCursor()
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
 
@@ -368,6 +460,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setStreaming(false)
     setError('')
     setRun(null)
+    setServerStartedAt(null)
+    setSubagents([])
+    seenSubagentKeysRef.current = new Set()
     queueRef.current = []
     setQueueLen(0)
     busActiveRef.current = false
@@ -381,29 +476,74 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
 
     Promise.all([
       api.sessionHistory(projectId),
-      api.projectRunning(projectId).catch(() => ({ running: false })),
-    ]).then(([histRes, runRes]) => {
+      // Spec-035 L3: /live replaces /running — returns running state + turn history + started_at
+      api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, cursor: 0, events: [] as Array<Record<string, unknown>> })),
+    ]).then(([histRes, liveRes]) => {
       if (cancelled) return
-      setMessages(histToMessages(histRes.messages))
       setContextTokens(histRes.context_tokens || null)
-      // Spec-033: seed cache freshness anchor from the persisted transcript data so
-      // the countdown survives a page reload instead of vanishing.
-      if (histRes.last_turn_at != null) {
-        setLastTurnEndMs(histRes.last_turn_at)
-      }
-      if (histRes.last_cache_hit_pct != null) {
-        setLastCacheHitPct(histRes.last_cache_hit_pct)
-      }
-      if (runRes.running) {
+      // Spec-033: seed cache freshness anchor from the persisted transcript data
+      if (histRes.last_turn_at != null) setLastTurnEndMs(histRes.last_turn_at)
+      if (histRes.last_cache_hit_pct != null) setLastCacheHitPct(histRes.last_cache_hit_pct)
+
+      if (liveRes.running && liveRes.events.length > 0) {
+        // ── Spec-035 L4: hydrate transcript from live buffer ──────────────────
+        // Replay buffered events on top of session history to reconstruct the
+        // in-flight turn. History is appended first; then the live events play.
+        const histMsgs = histToMessages(histRes.messages)
+        // Open a streaming assistant message for the ongoing turn
+        const liveUserMsg = makeUserMsg('…')
+        const liveAssistantMsg = makeAssistantMsg()
+        let liveMsgs: ChatMessage[] = [...histMsgs, liveUserMsg, liveAssistantMsg]
+        const liveSubagents: SubagentEntry[] = []
+        for (const ev of liveRes.events) {
+          const etype = ev['type'] as string | undefined
+          if (etype === 'text') {
+            liveMsgs = reconcileFinalText(liveMsgs, ev['text'] as string ?? '')
+          } else if (etype === 'text_delta') {
+            liveMsgs = appendDelta(liveMsgs, ev['text'] as string ?? '')
+          } else if (etype === 'tool') {
+            const { type: _t, seq: _s, ...toolFields } = ev
+            liveMsgs = appendChunk(liveMsgs, { kind: 'tool', tool: toolFields as unknown as ChatToolCall })
+          } else if (etype === 'subagent') {
+            const sEvt = toSubagentEvent(ev)
+            if (sEvt) {
+              const updated = applySubagentEvent(liveSubagents, sEvt)
+              liveSubagents.length = 0
+              liveSubagents.push(...updated)
+            }
+          }
+          // result/error/done would only appear if the turn already finished —
+          // server sets running=true only for ongoing turns, so these are absent.
+        }
+        setMessages(liveMsgs)
+        setSubagents([...liveSubagents])
+        // Spec-035: server-authoritative timer — convert epoch seconds to ms
+        const startMs = liveRes.started_at != null ? liveRes.started_at * 1000 : Date.now()
+        setServerStartedAt(startMs)
         busActiveRef.current = true
-        setRun({ startedAt: Date.now(), lastEventAt: Date.now(), currentTool: null, source: 'card' })
+        const now = Date.now()
+        setRun({ startedAt: startMs, lastEventAt: now, currentTool: null, source: 'card' })
+        // Seed the SSE cursor so the activity-stream subscription starts from where
+        // the snapshot left off — no gap, no duplicates.
+        seedCursor(liveRes.cursor)
+      } else if (liveRes.running) {
+        // Running but no buffered events yet (turn just started)
+        const startMs = liveRes.started_at != null ? liveRes.started_at * 1000 : Date.now()
+        setMessages(histToMessages(histRes.messages))
+        setServerStartedAt(startMs)
+        busActiveRef.current = true
+        setRun({ startedAt: startMs, lastEventAt: Date.now(), currentTool: null, source: 'card' })
+        seedCursor(liveRes.cursor)
+      } else {
+        setMessages(histToMessages(histRes.messages))
       }
     }).catch(() => { if (!cancelled) setMessages([]) })
 
     return () => { cancelled = true }
-  }, [projectId])
+  }, [projectId, seedCursor])
 
-  // Periodic poll of /running while tab is active (restores indicator after bus miss)
+  // Periodic poll of /live while tab is active (restores indicator after bus miss).
+  // Spec-035: uses /live (not /running) so we get started_at for the server-authoritative timer.
   useEffect(() => {
     if (!isActive) return
     let cancelled = false
@@ -411,18 +551,23 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     async function sync() {
       if (cancelled || streamingRef.current) return
       try {
-        const res = await api.projectRunning(projectId)
+        const res = await api.projectLive(projectId)
         if (cancelled) return
         if (res.running) {
           if (!busActiveRef.current) {
             busActiveRef.current = true
-            const now = Date.now()
-            setRun(r => r ?? { startedAt: now, lastEventAt: now, currentTool: null, source: 'card' })
+            // Spec-035: use server started_at to avoid re-stamping the timer on each poll
+            const startMs = res.started_at != null ? res.started_at * 1000 : Date.now()
+            setServerStartedAt(prev => prev ?? startMs)
+            setRun(r => r ?? { startedAt: startMs, lastEventAt: Date.now(), currentTool: null, source: 'card' })
           }
         } else {
           if (busActiveRef.current) {
             busActiveRef.current = false
             setRun(null)
+            setServerStartedAt(null)
+            setSubagents([])
+            seenSubagentKeysRef.current = new Set()
             setMessages(prev => finalizeStreaming(prev))
           }
         }
@@ -459,10 +604,23 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       setRun(r => r ? { ...r, lastEventAt: now, currentTool: tool } : r)
       setMessages(prev => appendChunk(prev, { kind: 'tool', tool }))
 
+    } else if (evt.kind === 'subagent') {
+      // Spec-035: sub-agent lane — process bus subagent events when not streaming on this tab.
+      if (!busActiveRef.current) return
+      const sEvt = evt as ActivityEventSubagent
+      // Dedupe: skip if this (task_id, subtype) combination was already processed via POST stream.
+      const dedupeKey = `${sEvt.task_id}:${sEvt.subtype}`
+      if (seenSubagentKeysRef.current.has(dedupeKey)) return
+      seenSubagentKeysRef.current.add(dedupeKey)
+      setSubagents(prev => applySubagentEvent(prev, sEvt))
+
     } else if (evt.kind === 'run_end') {
       if (!busActiveRef.current) return
       busActiveRef.current = false
       setRun(null)
+      setServerStartedAt(null)
+      setSubagents([])
+      seenSubagentKeysRef.current = new Set()
       setMessages(prev => finalizeStreaming(prev))
       setCtxRefreshKey(k => k + 1)
     }
@@ -1063,8 +1221,43 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           </div>
         )}
         {dragOver && <div className="chat-drop-hint">📎 Drop files here</div>}
+        {/* Spec-035: sub-agent lane — rendered while a run is active and subagents are present */}
+        {run && subagents.length > 0 && (
+          <div style={{
+            padding: '4px 8px',
+            borderTop: '1px solid var(--border, #374151)',
+            fontSize: 11,
+            color: 'var(--color-muted, #9ca3af)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+          }}>
+            <span style={{ fontWeight: 600, marginBottom: 2 }}>{t['chat.subagent_lane_label']}</span>
+            {subagents.map(sa => (
+              <div key={sa.task_id} style={{
+                paddingLeft: 12,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+              }}>
+                <span>{sa.status === 'completed' ? '✓' : sa.status === 'failed' ? '✗' : '⚙'}</span>
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {sa.description || sa.task_id}
+                </span>
+                {sa.last_tool_name && sa.status === 'running' && (
+                  <span style={{ color: 'var(--color-muted, #9ca3af)', fontStyle: 'italic' }}>
+                    ↳ [{sa.last_tool_name}]
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         {run && (() => {
-          const elapsedSec = (tick - run.startedAt) / 1000
+          // Spec-035: use server-authoritative started_at for the elapsed timer.
+          // Falls back to run.startedAt (client stamp) when server time is unavailable.
+          const timerBase = serverStartedAt ?? run.startedAt
+          const elapsedSec = (tick - timerBase) / 1000
           const silenceSec = (tick - run.lastEventAt) / 1000
           const lvl = silenceSec > 120 ? 'silence-red' : silenceSec > 30 ? 'silence-yellow' : 'silence-ok'
           const tool = run.currentTool

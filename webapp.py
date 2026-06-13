@@ -19,6 +19,7 @@ import shutil
 import time
 import traceback as _tb
 import uuid as _uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Optional, TypedDict
@@ -162,8 +163,14 @@ def _bus_unsubscribe_global(q: "asyncio.Queue[dict]") -> None:
     _bus_global.discard(q)
 
 
-def _bus_publish(session_key: str, event: dict) -> None:
-    """Publishes an event to all subscriber queues. Full queue → drop (non-blocking)."""
+def _bus_publish(session_key: str, event: dict, persist: bool = True) -> None:
+    """Publishes an event to all subscriber queues. Full queue → drop (non-blocking).
+
+    persist=True (default) — also append to the timeline JSONL (prior behaviour for all callers).
+    persist=False — live fan-out only, no timeline write. Used by the spec-035 per-event
+    web-chat publish so the SSE/LiveTurn feed gets every event without changing timeline
+    granularity (chat text was never per-event persisted; tool events already reach the
+    timeline via the PostToolUse hook — avoid double-recording)."""
     subscribers = _bus.get(session_key)
     if subscribers:
         for q in list(subscribers):  # list() — snapshot, since _bus_unsubscribe may be called concurrently
@@ -179,8 +186,71 @@ def _bus_publish(session_key: str, event: dict) -> None:
                 q.put_nowait(enriched)
             except asyncio.QueueFull:
                 pass
-    # Timeline persistence — single write point for all bus events
-    _timeline_append(session_key, event)
+    # Timeline persistence — single write point for all bus events (unless persist=False)
+    if persist:
+        _timeline_append(session_key, event)
+
+
+# ─────────────────────────── live turn buffer (spec-035) ─────────────────────
+# In-memory ring buffer of events for the current (or last) agent turn.
+# Keyed by session_key. Retained for 300s after turn completion for reconnect replay.
+
+_live_turns: dict[str, dict] = {}
+
+_LIVE_TURN_MAXLEN = 2000  # ring buffer cap per session
+_LIVE_TURN_RETAIN_SEC = 300  # seconds to keep a completed turn in memory
+
+
+def _live_turn_create(session_key: str, model: str) -> dict:
+    """Creates a new LiveTurn for session_key and stores it. Returns the turn dict."""
+    turn: dict = {
+        "turn_id": str(_uuid.uuid4()),
+        "started_at": time.time(),
+        "model": model,
+        "status": "running",
+        "seq": 0,  # monotonic counter — next seq to assign
+        "events": deque(maxlen=_LIVE_TURN_MAXLEN),
+        "cost_usd": None,
+    }
+    _live_turns[session_key] = turn
+    return turn
+
+
+def _live_turn_append(session_key: str, event: dict) -> dict:
+    """Assigns the next seq to event, appends to the ring buffer, updates cost_usd.
+    Returns the seq-tagged event dict (shallow copy + seq)."""
+    turn = _live_turns.get(session_key)
+    if turn is None:
+        return event  # guard: no active turn (shouldn't happen in normal flow)
+    seq = turn["seq"]
+    turn["seq"] = seq + 1
+    tagged = {"seq": seq, **event}
+    turn["events"].append(tagged)
+    # Accumulate cost from result events if present
+    cost = event.get("cost_usd")
+    if cost is not None:
+        try:
+            turn["cost_usd"] = (turn["cost_usd"] or 0.0) + float(cost)
+        except (TypeError, ValueError):
+            pass
+    return tagged
+
+
+def _live_turn_finish(session_key: str, status: str) -> None:
+    """Marks the LiveTurn as done/error (idempotent). Schedules cleanup after retain period."""
+    turn = _live_turns.get(session_key)
+    if turn is None or turn["status"] != "running":
+        return  # idempotent — already finished or gone
+    turn["status"] = status
+    try:
+        asyncio.get_event_loop().call_later(_LIVE_TURN_RETAIN_SEC, _live_turn_drop, session_key)
+    except RuntimeError:
+        pass  # no running loop (e.g., during tests with custom loops) — skip cleanup scheduling
+
+
+def _live_turn_drop(session_key: str) -> None:
+    """Removes the LiveTurn from memory."""
+    _live_turns.pop(session_key, None)
 
 
 # ─────────────────────────── timeline persistence ─────────────────────────────
@@ -4479,9 +4549,16 @@ async def api_tasks_done(req: web.Request) -> web.Response:
 # GET /api/activity-stream                — global stream of all sessions
 # Client holds the connection; finally guarantees unsubscription on disconnect.
 
-async def _sse_stream(req: web.Request, q: "asyncio.Queue[dict]", unsubscribe) -> web.StreamResponse:
+async def _sse_stream(
+    req: web.Request,
+    q: "asyncio.Queue[dict]",
+    unsubscribe,
+    replay_events: "list | None" = None,
+) -> web.StreamResponse:
     """Shared SSE loop: reads from queue q, writes to StreamResponse.
-    unsubscribe — callable(q) for GUARANTEED unsubscription in finally."""
+    unsubscribe — callable(q) for GUARANTEED unsubscription in finally.
+    replay_events — optional list of seq-tagged events to emit before entering the live loop
+    (spec-035 reconnect replay). Events with a 'seq' field are emitted with SSE 'id:' prefix."""
     resp = web.StreamResponse(
         status=200,
         headers={
@@ -4492,11 +4569,24 @@ async def _sse_stream(req: web.Request, q: "asyncio.Queue[dict]", unsubscribe) -
     )
     await resp.prepare(req)
     try:
+        # Spec-035 L2: replay buffered events for reconnecting clients
+        if replay_events:
+            for rev in replay_events:
+                payload = json.dumps(rev, ensure_ascii=False)
+                seq = rev.get("seq")
+                if seq is not None:
+                    await resp.write(f"id: {seq}\ndata: {payload}\n\n".encode())
+                else:
+                    await resp.write(f"data: {payload}\n\n".encode())
         while True:
             try:
                 event = await asyncio.wait_for(q.get(), timeout=25.0)
                 payload = json.dumps(event, ensure_ascii=False)
-                await resp.write(f"data: {payload}\n\n".encode())
+                seq = event.get("seq")
+                if seq is not None:
+                    await resp.write(f"id: {seq}\ndata: {payload}\n\n".encode())
+                else:
+                    await resp.write(f"data: {payload}\n\n".encode())
             except asyncio.TimeoutError:
                 # Heartbeat — keep the connection alive through a tunnel (Cloudflare / nginx).
                 # Client may have dropped — write would then raise ConnectionResetError; this is normal,
@@ -4517,21 +4607,72 @@ async def _sse_stream(req: web.Request, q: "asyncio.Queue[dict]", unsubscribe) -
 
 
 async def api_project_activity_stream(req: web.Request) -> web.StreamResponse:
-    """GET /api/projects/{id}/activity-stream — bus event stream for a specific project."""
+    """GET /api/projects/{id}/activity-stream — bus event stream for a specific project.
+    Spec-035 L2: supports reconnect replay via Last-Event-ID header or ?since= query param."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     session_key = project["tg_thread"]
+    # Spec-035: resolve reconnect cursor from Last-Event-ID header or ?since= query param
+    cursor_str = req.headers.get("Last-Event-ID") or req.rel_url.query.get("since")
+    replay_events: list = []
+    if cursor_str is not None:
+        try:
+            cursor = int(cursor_str)
+            turn = _live_turns.get(session_key)
+            if turn is not None:
+                replay_events = [e for e in turn["events"] if e["seq"] > cursor]
+        except (ValueError, TypeError):
+            pass  # invalid cursor — skip replay
     q = _bus_subscribe(session_key)
-    return await _sse_stream(req, q, lambda q: _bus_unsubscribe(session_key, q))
+    return await _sse_stream(req, q, lambda q: _bus_unsubscribe(session_key, q), replay_events=replay_events)
 
 
 async def api_activity_stream_all(req: web.Request) -> web.StreamResponse:
     """GET /api/activity-stream — unified stream of ALL bus events (unread indicators in sidebar)."""
     q = _bus_subscribe_global()
     return await _sse_stream(req, q, _bus_unsubscribe_global)
+
+
+async def api_project_live(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/live — snapshot of the current (or last) LiveTurn buffer.
+
+    Spec-035 L3: returns {running, turn_id, started_at, model, cost_usd, cursor, events}.
+    cursor = latest seq in the buffer; clients subscribe from this point to avoid duplicate events.
+    events = all buffered events in chronological order (oldest to newest).
+    Retained for 300 s after turn completion so cold-open UIs can replay the full turn.
+    """
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = project["tg_thread"]
+    running = ctx["running"].get(session_key) is not None
+    turn = _live_turns.get(session_key)
+    if turn is None:
+        return web.json_response({
+            "running": running,
+            "turn_id": None,
+            "started_at": None,
+            "model": None,
+            "cost_usd": None,
+            "cursor": 0,
+            "events": [],
+        })
+    events_list = list(turn["events"])
+    cursor = events_list[-1]["seq"] if events_list else turn["seq"]
+    return web.json_response({
+        "running": running,
+        "turn_id": turn["turn_id"],
+        "started_at": turn["started_at"],
+        "model": turn["model"],
+        "cost_usd": turn["cost_usd"],
+        "cursor": cursor,
+        "events": events_list,
+    })
 
 
 # ─────────────────────────── timeline read endpoint ───────────────────────────
@@ -6589,6 +6730,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
 
     # Reserve slot SYNCHRONOUSLY before first await
     ctx["running"][session_key] = True
+    # Spec-035: start live turn buffer for this session
+    _live_turn_create(session_key, model)
 
     resp = web.StreamResponse(
         status=200,
@@ -6663,6 +6806,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
             ephemeral=False,
         ):
             etype = event.get("type")
+            # Spec-035: buffer every event in the live turn ring + publish seq-tagged copy to bus
+            _live_ev = _live_turn_append(session_key, event)
+            _bus_publish(session_key, _live_ev, persist=False)
             if etype == "text_delta":
                 # Spec-029 §1: forward incremental text delta to the cockpit over SSE.
                 # The existing {type:"text"} block (finalized AssistantMessage TextBlock) still
@@ -6775,6 +6921,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 })
             # other types — ignore
 
+        # Spec-035: mark turn as done before sending the final SSE frame
+        _live_turn_finish(session_key, "done")
         await _send({"type": "done"})
 
         # spec-034 L2: board reconciler — schedule as background task (never blocks the response).
@@ -6798,6 +6946,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
     finally:
         # Lock released UNCONDITIONALLY (even if the generator threw an exception)
         ctx["running"].pop(session_key, None)
+        # Spec-035: ensure turn is finished (idempotent — no-op if already marked done)
+        _live_turn_finish(session_key, "error")
 
     return resp
 
@@ -8453,6 +8603,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/notify-on-error", api_project_notify_toggle)
         # Activity-stream: live bus event stream (cards, external runs)
         app.router.add_get("/api/projects/{id}/activity-stream", api_project_activity_stream)
+        # Spec-035: live turn snapshot (cold open + replay cursor)
+        app.router.add_get("/api/projects/{id}/live", api_project_live)
         # Timeline: project event history (JSONL bus log) + pagination
         app.router.add_get("/api/projects/{id}/timeline", api_project_timeline)
         # Global stream of all events (for unread indicators in sidebar)

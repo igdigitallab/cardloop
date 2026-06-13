@@ -413,6 +413,9 @@ export const ru = {
   'schedules.deferred_cancel_title': 'Отменить отложенный запуск',
   'schedules.deferred_cancelled': 'Отложенный запуск отменён',
 
+  // ── Sub-agent lane (Spec-035) ────────────────────────────────────
+  'chat.subagent_lane_label': 'субагенты',
+
   // ── Chat tab deferred runs (Spec 020) ────────────────────────────
   'chat.defer_title': 'Запланировать этот промпт на потом',
   'chat.defer_aria': 'Запланировать промпт на потом',
