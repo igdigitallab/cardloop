@@ -12,6 +12,8 @@ import { SchedulesTab } from './tabs/SchedulesTab'
 import { VaultTab } from './tabs/VaultTab'
 import { useToast, ToastContainer } from './components/Toast'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
+import { useTheme } from './hooks/useTheme'
+import { ThemeToggle } from './components/ThemeToggle'
 
 const GLOBAL_FILES_ID = '__global__'
 const SCHEDULES_ID = '__schedules__'
@@ -80,6 +82,7 @@ function readSplitWidth(): number {
 }
 
 export default function App() {
+  const [theme, setTheme] = useTheme()
   const { toasts, showToast, dismiss } = useToast()
   const [authState, setAuthState] = useState<AuthState>('loading')
   // Mobile navigation: 'list' = project list screen, 'project' = project detail screen
@@ -628,6 +631,7 @@ export default function App() {
   return (
     <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''} mobile-on-${mobileScreen}`}>
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
+      <ThemeToggle theme={theme} onChange={setTheme} />
       {/* Backdrop for mobile drawer — tap to close */}
       <div
         className={`sidebar-backdrop${drawerOpen ? ' visible' : ''}`}
