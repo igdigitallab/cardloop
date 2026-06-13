@@ -293,6 +293,44 @@
   background: rgba(100, 150, 255, 0.18);
 }
 
+/* Card 5e1c0a: spec action button — muted when no spec, accented when spec exists */
+.board-card-actions .act-spec {
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text3, var(--text2)); opacity: 0.7;
+  font-size: 12px;
+}
+.board-card-actions .act-spec:hover:not(:disabled) { opacity: 1; color: var(--text); }
+.board-card-actions .act-spec.has-spec {
+  color: var(--accent); opacity: 1; border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.board-card-actions .act-spec.has-spec:hover:not(:disabled) { background: rgba(100, 150, 255, 0.18); }
+
+/* Persistent spec indicator dot shown on card face (visible without hovering) */
+.board-card-spec-dot {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--accent);
+  margin-left: 4px;
+  opacity: 0.85;
+  vertical-align: middle;
+  line-height: 1;
+}
+
+/* Spec modal textarea — wide, tall, monospace */
+.spec-modal-textarea {
+  width: 100%;
+  min-height: 320px;
+  resize: vertical;
+  font-family: monospace;
+  font-size: 13px;
+  padding: 8px;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--text);
+  box-sizing: border-box;
+}
+
 /* F1: модалка результата */
 .run-modal-overlay {
   position: fixed; inset: 0;

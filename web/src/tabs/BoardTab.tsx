@@ -223,6 +223,9 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   // Full-task editor modal: double-click on any card → single multi-line textarea + model picker
   const [taskEditModal, setTaskEditModal] = useState<{ id: string; text: string; model: string } | null>(null)
 
+  // Card 5e1c0a: spec modal state
+  const [specModal, setSpecModal] = useState<{ cardId: string; content: string; loading: boolean; saving: boolean } | null>(null)
+
   // Drag-and-drop
   const [dragCardId, setDragCardId] = useState<string | null>(null)
   const [dragOverCol, setDragOverCol] = useState<string | null>(null)
@@ -521,6 +524,33 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     }
   }
 
+  // Card 5e1c0a: open spec modal — fetch current content, then show editor
+  async function openSpec(cardId: string) {
+    setSpecModal({ cardId, content: '', loading: true, saving: false })
+    try {
+      const r = await api.getCardSpec(projectId, cardId)
+      setSpecModal(prev => prev ? { ...prev, content: r.content, loading: false } : null)
+    } catch (e) {
+      setSpecModal(prev => prev ? { ...prev, content: `⚠ Load error: ${e instanceof Error ? e.message : String(e)}`, loading: false } : null)
+    }
+  }
+
+  // Card 5e1c0a: save spec and refresh board (so has_spec indicator updates)
+  async function saveSpec() {
+    if (!specModal) return
+    const { cardId, content } = specModal
+    setSpecModal(prev => prev ? { ...prev, saving: true } : null)
+    try {
+      await api.putCardSpec(projectId, cardId, content)
+      setSpecModal(null)
+      // Refresh board so has_spec updates
+      await refreshNow()
+    } catch (e) {
+      setSpecModal(prev => prev ? { ...prev, saving: false } : null)
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   // C2-gate: show toast and hide after 4 seconds
   function showToast(msg: string) {
     setGateToast(msg)
@@ -657,6 +687,14 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               aria-label={t['board.card_model_badge_aria']}
             >{modelLabel(card.model)}</span>
           )}
+          {/* Card 5e1c0a: persistent spec indicator — visible without hover */}
+          {card.has_spec && (
+            <span
+              className="board-card-spec-dot"
+              title={t['board.spec_indicator_aria']}
+              aria-label={t['board.spec_indicator_aria']}
+            >📋</span>
+          )}
         </div>
         {/* spec-036 Phase 2a: live activity strip — shown when this card is being executed */}
         {liveRun?.cardId === card.id && <CardLiveStrip run={liveRun} />}
@@ -678,6 +716,14 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               onClick={() => move(card.id, 'in_progress')}
             >🤖</button>
           )}
+          {/* Card 5e1c0a: hover-only spec action button */}
+          <button
+            title={t['board.spec_btn']}
+            aria-label={t['board.spec_btn_aria']}
+            className={`act-spec${card.has_spec ? ' has-spec' : ''}`}
+            disabled={busy}
+            onClick={() => openSpec(card.id)}
+          >📋</button>
           {canShowResult && (
             <button
               title={t['board.show_result']}
@@ -1153,6 +1199,42 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                 ))}
               </select>
             </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Card 5e1c0a: spec modal — view/edit attached markdown doc */}
+      {specModal && (
+        <Modal onClose={() => !specModal.saving && setSpecModal(null)}>
+          <ModalHead
+            title={t['board.spec_modal_title']}
+            onClose={() => !specModal.saving && setSpecModal(null)}
+            extra={
+              <button
+                className="btn-primary"
+                style={{ padding: '2px 10px', fontSize: 13 }}
+                disabled={specModal.loading || specModal.saving}
+                onClick={saveSpec}
+              >{specModal.saving ? t['board.spec_saving'] : t['board.spec_save']}</button>
+            }
+          />
+          <div className="run-modal-body">
+            {specModal.loading
+              ? <Spinner label={t['common.loading']} />
+              : (
+                <textarea
+                  className="spec-modal-textarea"
+                  value={specModal.content}
+                  autoFocus
+                  disabled={specModal.saving}
+                  placeholder={t['board.spec_placeholder']}
+                  onChange={e => setSpecModal(prev => prev ? { ...prev, content: e.target.value } : null)}
+                  onKeyDown={e => {
+                    if (e.key === 'Escape' && !specModal.saving) setSpecModal(null)
+                  }}
+                />
+              )
+            }
           </div>
         </Modal>
       )}

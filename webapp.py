@@ -3481,8 +3481,8 @@ async def api_project_tasks(req: web.Request) -> web.Response:
                         )
                     else:
                         tp.write_text(canon, encoding="utf-8")
-    # F: add card queue to response
-    payload = _board_payload(cwd)
+    # F: add card queue to response; annotate has_spec per card (card 5e1c0a)
+    payload = _board_payload_with_specs(cwd, ctx["DATA"])
     payload["queued"] = _queue_for(project["tg_thread"])
     return web.json_response(payload)
 
@@ -3513,7 +3513,7 @@ async def api_create_task(req: web.Request) -> web.Response:
             new_card["description"] = description
         cols[column].insert(0, new_card)
         _save_board(cwd, name, preamble, cols)
-    return web.json_response(_board_payload(cwd))
+    return web.json_response(_board_payload_with_specs(cwd, ctx["DATA"]))
 
 
 # _pop_card is imported from board (spec-034 L0)
@@ -4382,18 +4382,18 @@ async def api_move_task(req: web.Request) -> web.Response:
                     return web.json_response({"error": "card not found"}, status=404)
                 cols["in_progress"].append(card)
                 _save_board(cwd, name, preamble, cols)
-            return web.json_response(_board_payload(cwd))
+            return web.json_response(_board_payload_with_specs(cwd, ctx["DATA"]))
 
         # Use _start_card_run (race-safe: lock reserved synchronously inside)
         result = await _start_card_run(ctx, req.app, project, card_id)
         if result["started"]:
-            return web.json_response(_board_payload(cwd))
+            return web.json_response(_board_payload_with_specs(cwd, ctx["DATA"]))
         elif result.get("reason") == "busy":
             # Project busy — queue the card instead of 409.
             # "enqueued":True signals queuing; board["queued"] is the current queue list
             # (don't overwrite it with the flag).
             _queue_enqueue(session_key, card_id)
-            board = _board_payload(cwd)
+            board = _board_payload_with_specs(cwd, ctx["DATA"])
             board["queued"] = _queue_for(session_key)
             return web.json_response({**board, "ok": True, "enqueued": True})
         else:
@@ -4432,7 +4432,7 @@ async def api_move_task(req: web.Request) -> web.Response:
             return web.json_response({"error": "unknown column"}, status=400)
     # F: card manually moved out of queue — remove from queue
     _queue_remove(session_key, card_id)
-    return web.json_response(_board_payload(cwd))
+    return web.json_response(_board_payload_with_specs(cwd, ctx["DATA"]))
 
 
 async def api_delete_task(req: web.Request) -> web.Response:
@@ -4455,7 +4455,7 @@ async def api_delete_task(req: web.Request) -> web.Response:
         _save_board(cwd, name, preamble, cols)
     # F: card deleted — remove from queue
     _queue_remove(session_key, card_id)
-    return web.json_response(_board_payload(cwd))
+    return web.json_response(_board_payload_with_specs(cwd, ctx["DATA"]))
 
 
 async def api_run_batch(req: web.Request) -> web.Response:
@@ -4597,7 +4597,7 @@ async def api_update_task(req: web.Request) -> web.Response:
         if not found:
             return web.json_response({"error": "card not found"}, status=404)
         _save_board(cwd, name, preamble, cols)
-    return web.json_response(_board_payload(cwd))
+    return web.json_response(_board_payload_with_specs(cwd, ctx["DATA"]))
 
 
 async def api_tasks_done(req: web.Request) -> web.Response:
@@ -6163,6 +6163,107 @@ async def api_card_run(req: web.Request) -> web.Response:
         content = sidecar.read_text(encoding="utf-8", errors="replace")
         return web.json_response({"content": content, "exists": True, "meta": meta})
     return web.json_response({"content": "", "exists": False, "meta": meta})
+
+
+# ─────────────────────────── Card spec sidecar (card 5e1c0a) ───────────────────────────
+
+
+def _card_specs_dir(data_dir: Path) -> Path:
+    """Returns the card-specs directory path (data/card-specs/). Does not create it."""
+    return data_dir / "card-specs"
+
+
+def _card_spec_path(data_dir: Path, card_id: str) -> Path:
+    """Returns the sidecar path for the given card_id.  Caller must have validated card_id."""
+    return _card_specs_dir(data_dir) / f"{card_id}.md"
+
+
+def _board_payload_with_specs(cwd: str, data_dir: Path) -> dict:
+    """Like _board_payload(cwd) but annotates each card with has_spec: bool.
+
+    Cost: one os.listdir() on data/card-specs/ (O(1) I/O), then an O(cards) set lookup
+    per card — never a stat() per card.
+    """
+    payload = _board_payload(cwd)
+    # Build the set of card ids that have a spec sidecar.
+    specs_dir = _card_specs_dir(data_dir)
+    spec_ids: set[str] = set()
+    try:
+        for name in specs_dir.iterdir():
+            if name.suffix == ".md":
+                spec_ids.add(name.stem)
+    except (FileNotFoundError, NotADirectoryError):
+        pass  # dir absent → no specs yet
+    # Annotate cards in every column.
+    for col in payload.get("columns", []):
+        for card in col.get("cards", []):
+            card["has_spec"] = card["id"] in spec_ids
+    return payload
+
+
+async def api_card_spec_get(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/cards/{card}/spec — read card spec sidecar.
+
+    Returns { exists: bool, content: str }.
+    """
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    card_id = req.match_info["card"]
+    if not _valid_card_id(card_id):
+        return web.json_response({"error": "bad card id"}, status=400)
+    DATA: Path = ctx["DATA"]
+    spec_path = _card_spec_path(DATA, card_id)
+    if spec_path.exists():
+        content = spec_path.read_text(encoding="utf-8", errors="replace")
+        return web.json_response({"exists": True, "content": content})
+    return web.json_response({"exists": False, "content": ""})
+
+
+async def api_card_spec_put(req: web.Request) -> web.Response:
+    """PUT /api/projects/{id}/cards/{card}/spec — write (or delete) card spec sidecar.
+
+    Body: { content: str }
+    Empty/whitespace content → delete the file (exists:false).
+    Atomic write via tmp file + rename.
+    Returns new state: { exists: bool, content: str }.
+    """
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    card_id = req.match_info["card"]
+    if not _valid_card_id(card_id):
+        return web.json_response({"error": "bad card id"}, status=400)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    content: str = body.get("content", "")
+    DATA: Path = ctx["DATA"]
+    spec_path = _card_spec_path(DATA, card_id)
+
+    if not content or not content.strip():
+        # Empty → delete file if it exists.
+        try:
+            spec_path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            return web.json_response({"error": f"delete error: {e}"}, status=500)
+        return web.json_response({"exists": False, "content": ""})
+
+    # Non-empty → write atomically.
+    try:
+        specs_dir = _card_specs_dir(DATA)
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        tmp = spec_path.with_suffix(".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.rename(spec_path)
+    except Exception as e:
+        return web.json_response({"error": f"write error: {e}"}, status=500)
+    return web.json_response({"exists": True, "content": content})
 
 
 async def api_card_apply(req: web.Request) -> web.Response:
@@ -8803,6 +8904,9 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/cards/run-batch", api_run_batch)
         # F1: card result sidecar
         app.router.add_get("/api/projects/{id}/tasks/{card}/run", api_card_run)
+        # Card 5e1c0a: card spec sidecar (optional attached markdown doc)
+        app.router.add_get("/api/projects/{id}/cards/{card}/spec", api_card_spec_get)
+        app.router.add_put("/api/projects/{id}/cards/{card}/spec", api_card_spec_put)
         # C2-gate: apply / discard worktree card; quality gate (check)
         app.router.add_post("/api/projects/{id}/tasks/{card}/apply", api_card_apply)
         app.router.add_post("/api/projects/{id}/tasks/{card}/discard", api_card_discard)

@@ -531,6 +531,15 @@ export const en = {
   'totp.enabled_toast': '2FA enabled',
   'totp.disabled_toast': '2FA disabled',
   'totp.loading': 'Loading 2FA status…',
+
+  // Card 5e1c0a: card spec sidecar
+  'board.spec_btn': 'Spec',
+  'board.spec_btn_aria': 'Open card spec document',
+  'board.spec_indicator_aria': 'Spec attached',
+  'board.spec_modal_title': 'Card Spec',
+  'board.spec_save': 'Save',
+  'board.spec_saving': 'Saving…',
+  'board.spec_placeholder': 'Write a spec or design doc for this card (markdown)…',
 } as const
 
 export type TKey = keyof typeof en

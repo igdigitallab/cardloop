@@ -532,6 +532,15 @@ export const ru = {
   'totp.enabled_toast': '2FA включена',
   'totp.disabled_toast': '2FA отключена',
   'totp.loading': 'Загрузка статуса 2FA…',
+
+  // Card 5e1c0a: card spec sidecar
+  'board.spec_btn': 'Spec',
+  'board.spec_btn_aria': 'Открыть спек карточки',
+  'board.spec_indicator_aria': 'Спек прикреплён',
+  'board.spec_modal_title': 'Спек карточки',
+  'board.spec_save': 'Сохранить',
+  'board.spec_saving': 'Сохраняю…',
+  'board.spec_placeholder': 'Напишите спек или дизайн-doc для этой карточки (markdown)…',
 } as const
 
 export type TKey = keyof typeof ru

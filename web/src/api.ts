@@ -94,6 +94,17 @@ export const api = {
   cardRun: (id: string, card: string) =>
     apiFetch<import('./types').RunResult>(`/api/projects/${id}/tasks/${card}/run`),
 
+  // Card 5e1c0a: card spec sidecar
+  getCardSpec: (id: string, card: string) =>
+    apiFetch<import('./types').CardSpec>(`/api/projects/${id}/cards/${card}/spec`),
+
+  putCardSpec: (id: string, card: string, content: string) =>
+    apiFetch<import('./types').CardSpec>(`/api/projects/${id}/cards/${card}/spec`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    }),
+
   // Batch-send cards to agent → sequential queue (one at a time)
   runBatch: (id: string, cardIds: string[]) =>
     apiFetch<{ ok: boolean; queued: number; started: string | null }>(`/api/projects/${id}/cards/run-batch`, {

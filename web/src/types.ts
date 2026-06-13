@@ -61,6 +61,14 @@ export interface TaskCard {
   description?: string | null
   /** Card 43665f: optional per-card model override (opus/sonnet/haiku/fable). */
   model?: string | null
+  /** Card 5e1c0a: true when a spec sidecar (data/card-specs/<id>.md) exists. */
+  has_spec?: boolean
+}
+
+/** GET /api/projects/{id}/cards/{card}/spec response. */
+export interface CardSpec {
+  exists: boolean
+  content: string
 }
 
 /** Incident card = id starts with 'err-'. UI highlights it with a red border. */
