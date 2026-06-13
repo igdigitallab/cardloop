@@ -252,6 +252,21 @@ export interface ProjectMemory {
   exists: boolean
 }
 
+// ─── Spec-037: Multi-chat per project ─────────────────────────────────────
+
+/** A single named chat thread within a project. */
+export interface Chat {
+  id: string
+  name: string
+  session_id: string | null
+  created_at: number
+}
+
+export interface ChatsResponse {
+  active: string
+  chats: Chat[]
+}
+
 // ─── C2: Session management ────────────────────────────────────────────────
 
 export interface SessionInfo {

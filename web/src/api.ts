@@ -142,6 +142,33 @@ export const api = {
       `/api/projects/${id}/file?path=${encodeURIComponent(path)}`
     ),
 
+  // Spec-037: multi-chat per project
+  chats: (id: string) =>
+    apiFetch<import('./types').ChatsResponse>(`/api/projects/${id}/chats`),
+
+  createChat: (id: string, name?: string) =>
+    apiFetch<import('./types').Chat>(`/api/projects/${id}/chats`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(name ? { name } : {}),
+    }),
+
+  patchChat: (id: string, chatId: string, patch: { name?: string; active?: boolean }) =>
+    apiFetch<{ active: string; chat: import('./types').Chat }>(
+      `/api/projects/${id}/chats/${encodeURIComponent(chatId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      }
+    ),
+
+  deleteChat: (id: string, chatId: string) =>
+    apiFetch<{ ok: boolean; active: string }>(
+      `/api/projects/${id}/chats/${encodeURIComponent(chatId)}`,
+      { method: 'DELETE' }
+    ),
+
   // C2: session management
   sessions: (id: string) =>
     apiFetch<{ sessions: import('./types').SessionInfo[] }>(`/api/projects/${id}/sessions`),

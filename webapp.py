@@ -6447,6 +6447,214 @@ async def api_card_discard(req: web.Request) -> web.Response:
         return web.json_response({"error": f"internal error: {e}"}, status=500)
 
 
+# ─────────────────────────── Multi-chat per project (spec-037) ───────────────
+#
+# data/chats.json: { "<project_id>": { "active": "<chat_id>", "chats": [...] } }
+# Each chat owns its own session_id (null = fresh).
+# ctx["sessions"] is kept as a DERIVED CACHE of active-chat session_id so that
+# TG (run_agent) and _run_card continue to work unchanged via read-through.
+
+_CHATS_LOCK: asyncio.Lock | None = None
+
+
+def _chats_lock() -> asyncio.Lock:
+    """Returns (lazily created) the global chats.json mutation lock."""
+    global _CHATS_LOCK
+    if _CHATS_LOCK is None:
+        _CHATS_LOCK = asyncio.Lock()
+    return _CHATS_LOCK
+
+
+def _chats_path(ctx: dict) -> Path:
+    return ctx["DATA"] / "chats.json"
+
+
+def _load_chats(ctx: dict) -> dict:
+    """Loads chats.json. Missing or corrupt → {}."""
+    p = _chats_path(ctx)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_chats(ctx: dict, data: dict) -> None:
+    """Atomically writes chats.json (tmp + os.replace)."""
+    p = _chats_path(ctx)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(p)
+
+
+def _new_chat_id() -> str:
+    """Generates a short opaque chat id (same pattern as card ids: secrets.token_hex(3))."""
+    return secrets.token_hex(3)
+
+
+def _valid_chat_id(chat_id: str) -> bool:
+    """True if chat_id is safe to use as a dict key (no traversal chars, reasonable length)."""
+    import re as _re
+    return bool(_re.fullmatch(r"[a-f0-9]{6}", chat_id))
+
+
+def _mirror_active_chat_to_sessions(ctx: dict, project_id: str, session_key: str, chats_data: dict) -> None:
+    """Mirror the active chat's session_id into ctx['sessions'] so TG/cards read through.
+    Also persists sessions.json. Call inside the chats lock after any mutation that changes
+    active chat or its session_id."""
+    entry = chats_data.get(project_id)
+    if not entry:
+        return
+    active_id = entry.get("active")
+    if not active_id:
+        return
+    chat = next((c for c in entry.get("chats", []) if c["id"] == active_id), None)
+    if chat is None:
+        return
+    sid = chat.get("session_id")
+    if sid:
+        ctx["sessions"][session_key] = sid
+    else:
+        ctx["sessions"].pop(session_key, None)
+    try:
+        ctx["save_sessions"]()
+    except Exception as _e:
+        print(f"[chats] save_sessions error: {_e}")
+
+
+def _ensure_chat_entry(ctx: dict, project_id: str, session_key: str) -> dict:
+    """Returns the chats.json block for project_id, seeding it from the existing session if absent.
+    Caller MUST hold _chats_lock(). Returns the FULL chats_data dict (mutated in place)."""
+    chats_data = _load_chats(ctx)
+    if project_id in chats_data:
+        return chats_data
+    # Migration: seed "Main" from the existing live session_id (zero context loss).
+    existing_sid = ctx["sessions"].get(session_key) or None
+    chat_id = _new_chat_id()
+    chats_data[project_id] = {
+        "active": chat_id,
+        "chats": [
+            {
+                "id": chat_id,
+                "name": "Main",
+                "session_id": existing_sid,
+                "created_at": time.time(),
+            }
+        ],
+    }
+    _save_chats(ctx, chats_data)
+    return chats_data
+
+
+# ─── Chats CRUD endpoints ────────────────────────────────────────────────────
+
+
+async def api_project_chats_list(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/chats → {active, chats:[{id,name,session_id,created_at}]}"""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = project["tg_thread"]
+    async with _chats_lock():
+        chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
+        entry = chats_data[project["id"]]
+    return web.json_response({"active": entry["active"], "chats": entry["chats"]})
+
+
+async def api_project_chats_create(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/chats  {name?} → created chat entry"""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    name = (body.get("name") or "").strip() or "Chat"
+    if len(name) > 80:
+        name = name[:80]
+    session_key = project["tg_thread"]
+    async with _chats_lock():
+        chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
+        entry = chats_data[project["id"]]
+        chat_id = _new_chat_id()
+        new_chat = {"id": chat_id, "name": name, "session_id": None, "created_at": time.time()}
+        entry["chats"].append(new_chat)
+        _save_chats(ctx, chats_data)
+    return web.json_response(new_chat, status=201)
+
+
+async def api_project_chats_patch(req: web.Request) -> web.Response:
+    """PATCH /api/projects/{id}/chats/{chat_id}  {name?, active?}
+    Rename and/or set the active chat.
+    Setting active=true mirrors that chat's session_id into ctx['sessions']."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    chat_id = req.match_info["chat_id"]
+    if not _valid_chat_id(chat_id):
+        return web.json_response({"error": "invalid chat_id"}, status=400)
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    session_key = project["tg_thread"]
+    async with _chats_lock():
+        chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
+        entry = chats_data[project["id"]]
+        chat = next((c for c in entry["chats"] if c["id"] == chat_id), None)
+        if chat is None:
+            return web.json_response({"error": "chat not found"}, status=404)
+        if "name" in body:
+            name = (body["name"] or "").strip()
+            if name:
+                chat["name"] = name[:80]
+        if body.get("active"):
+            entry["active"] = chat_id
+            _save_chats(ctx, chats_data)
+            _mirror_active_chat_to_sessions(ctx, project["id"], session_key, chats_data)
+        else:
+            _save_chats(ctx, chats_data)
+    return web.json_response({"active": entry["active"], "chat": chat})
+
+
+async def api_project_chats_delete(req: web.Request) -> web.Response:
+    """DELETE /api/projects/{id}/chats/{chat_id}
+    Removes the chat. Refuses if it is the last one.
+    If the active chat is deleted, falls back to another chat as active and mirrors
+    its session_id into ctx['sessions']."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    chat_id = req.match_info["chat_id"]
+    if not _valid_chat_id(chat_id):
+        return web.json_response({"error": "invalid chat_id"}, status=400)
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = project["tg_thread"]
+    async with _chats_lock():
+        chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
+        entry = chats_data[project["id"]]
+        if len(entry["chats"]) <= 1:
+            return web.json_response({"error": "cannot delete the last chat"}, status=400)
+        was_active = entry["active"] == chat_id
+        entry["chats"] = [c for c in entry["chats"] if c["id"] != chat_id]
+        if was_active:
+            # Fall back to the first remaining chat
+            entry["active"] = entry["chats"][0]["id"]
+        _save_chats(ctx, chats_data)
+        if was_active:
+            _mirror_active_chat_to_sessions(ctx, project["id"], session_key, chats_data)
+    return web.json_response({"ok": True, "active": entry["active"]})
+
+
 # ─────────────────────────── C2: project sessions ───────────────────────────
 
 def _sdk_sessions_dir(cwd: str) -> Path:
@@ -6639,6 +6847,20 @@ async def api_project_set_session(req: web.Request) -> web.Response:
     action = body.get("action")
 
     if action == "new":
+        # Spec-037: reset the ACTIVE chat's session_id (not all sessions).
+        # Also mirror into ctx["sessions"] as derived cache.
+        async with _chats_lock():
+            _ss_data = _load_chats(ctx)
+            _ss_proj = _ss_data.get(project["id"])
+            if _ss_proj:
+                _ss_active_id = _ss_proj.get("active")
+                _ss_active = next(
+                    (c for c in _ss_proj.get("chats", []) if c["id"] == _ss_active_id),
+                    None,
+                )
+                if _ss_active is not None:
+                    _ss_active["session_id"] = None
+                    _save_chats(ctx, _ss_data)
         ctx["sessions"].pop(tg_thread, None)
         ctx["save_sessions"]()
         # Clear context-warn state so a fresh session can warn again.
@@ -6662,6 +6884,19 @@ async def api_project_set_session(req: web.Request) -> web.Response:
         candidate = sdk_dir / f"{session_id}.jsonl"
         if not candidate.is_file():
             return web.json_response({"error": "session not found"}, status=400)
+        # Spec-037: write session_id to the active chat entry + mirror to ctx["sessions"].
+        async with _chats_lock():
+            _sr_data = _load_chats(ctx)
+            _sr_proj = _sr_data.get(project["id"])
+            if _sr_proj:
+                _sr_active_id = _sr_proj.get("active")
+                _sr_active = next(
+                    (c for c in _sr_proj.get("chats", []) if c["id"] == _sr_active_id),
+                    None,
+                )
+                if _sr_active is not None:
+                    _sr_active["session_id"] = session_id
+                    _save_chats(ctx, _sr_data)
         ctx["sessions"][tg_thread] = session_id
         ctx["save_sessions"]()
         return web.json_response({"active": session_id})
@@ -7021,6 +7256,11 @@ async def api_project_chat(req: web.Request) -> web.Response:
         _effort_override = "low"
     # "default" → _effort_override stays None → run_engine uses _DEFAULT_EFFORT
 
+    # Spec-037: optional chat_id to target a specific chat tab (falls back to active chat).
+    _req_chat_id: "str | None" = (body.get("chat_id") or "").strip() or None
+    if _req_chat_id and not _valid_chat_id(_req_chat_id):
+        return web.json_response({"error": "invalid chat_id"}, status=400)
+
     # Resolve project
     project = _find_project_by_id(ctx, pid)
     if project is None:
@@ -7082,9 +7322,34 @@ async def api_project_chat(req: web.Request) -> web.Response:
     _rotated_this_turn = False
     # spec-034 L2: accumulate agent reply text for board reconciler
     _chat_answer_parts: list = []
+    # Spec-037: the resolved chat_id for this run (used to write session_id back)
+    _active_chat_id_for_run: "str | None" = None
 
     try:
-        resume_sid = ctx["sessions"].get(session_key)
+        # Spec-037: resolve session_id from the active chat (or explicitly requested chat).
+        # Falls back to ctx["sessions"] so existing code paths are unaffected if chats.json
+        # does not yet exist (migration seeds it on first access, but guard anyway).
+        _chat_resume_sid: "str | None" = None
+        try:
+            async with _chats_lock():
+                _chat_entry = _ensure_chat_entry(ctx, project["id"], session_key)
+                _proj_chats = _chat_entry.get(project["id"], {})
+                _target_chat_id = _req_chat_id or _proj_chats.get("active")
+                _target_chat = next(
+                    (c for c in _proj_chats.get("chats", []) if c["id"] == _target_chat_id),
+                    None,
+                )
+                if _target_chat is not None:
+                    _active_chat_id_for_run = _target_chat["id"]
+                    _chat_resume_sid = _target_chat.get("session_id") or None
+                    # Keep ctx["sessions"] in sync (derived cache)
+                    if _chat_resume_sid:
+                        ctx["sessions"][session_key] = _chat_resume_sid
+                    else:
+                        ctx["sessions"].pop(session_key, None)
+        except Exception as _ce:
+            print(f"[api_project_chat] chats resolve error (falling back): {_ce}")
+        resume_sid = _chat_resume_sid if _chat_resume_sid is not None else ctx["sessions"].get(session_key)
         # Project secrets are injected into the agent's env (values only in-process, not in the API).
         # secret: references are resolved against the built-in store; TG vars are merged after (they win).
         project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
@@ -7149,8 +7414,37 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 _chat_last_result_event = event  # Phase D: capture for auto-resume
                 sid = event.get("session_id")
                 if sid:
-                    ctx["sessions"][session_key] = sid
-                    ctx["save_sessions"]()
+                    # Spec-037: write session_id back to the specific chat entry (atomic).
+                    # Also mirrors to ctx["sessions"] as derived cache so TG/cards still work.
+                    _wrote_back = False
+                    if _active_chat_id_for_run:
+                        try:
+                            async with _chats_lock():
+                                _cb_data = _load_chats(ctx)
+                                _cb_proj = _cb_data.get(project["id"])
+                                if _cb_proj:
+                                    _cb_chat = next(
+                                        (c for c in _cb_proj.get("chats", [])
+                                         if c["id"] == _active_chat_id_for_run),
+                                        None,
+                                    )
+                                    if _cb_chat is not None:
+                                        _cb_chat["session_id"] = sid
+                                        _save_chats(ctx, _cb_data)
+                                        _wrote_back = True
+                                        # Mirror active chat → ctx["sessions"]
+                                        if _cb_proj.get("active") == _active_chat_id_for_run:
+                                            ctx["sessions"][session_key] = sid
+                                            try:
+                                                ctx["save_sessions"]()
+                                            except Exception:
+                                                pass
+                        except Exception as _wb_exc:
+                            print(f"[api_project_chat] session_id write-back error: {_wb_exc}")
+                    if not _wrote_back:
+                        # Fallback: legacy flat-map path (no chats entry yet or error)
+                        ctx["sessions"][session_key] = sid
+                        ctx["save_sessions"]()
                     _inherit_label_from_free_chat(ctx, session_key, sid)
                 ctx_tokens = event.get("context_tokens", 0)
                 # Spec-022: pass through per-turn cost visibility fields
@@ -8961,6 +9255,11 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/sessions/{sid}/label", api_project_session_label)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)
         app.router.add_get("/api/projects/{id}/session-history", api_project_session_history)
+        # Spec-037: multi-chat per project
+        app.router.add_get("/api/projects/{id}/chats", api_project_chats_list)
+        app.router.add_post("/api/projects/{id}/chats", api_project_chats_create)
+        app.router.add_route("PATCH", "/api/projects/{id}/chats/{chat_id}", api_project_chats_patch)
+        app.router.add_delete("/api/projects/{id}/chats/{chat_id}", api_project_chats_delete)
         # File browser (read-only)
         app.router.add_get("/api/projects/{id}/files", api_project_files)
         app.router.add_get("/api/projects/{id}/file", api_project_file)

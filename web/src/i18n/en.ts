@@ -540,6 +540,16 @@ export const en = {
   'board.spec_save': 'Save',
   'board.spec_saving': 'Saving…',
   'board.spec_placeholder': 'Write a spec or design doc for this card (markdown)…',
+
+  // ── Spec-037: multi-chat per project ────────────────────────────────────────
+  'chat.tabs_new': 'New chat',
+  'chat.tabs_new_aria': 'Create a new chat',
+  'chat.tabs_rename_placeholder': 'Chat name',
+  'chat.tabs_rename_confirm': 'Rename',
+  'chat.tabs_rename_cancel': 'Cancel',
+  'chat.tabs_close_aria': 'Close chat',
+  'chat.tabs_close_last': 'Cannot close the last chat',
+  'chat.tabs_loading': 'Loading chats…',
 } as const
 
 export type TKey = keyof typeof en

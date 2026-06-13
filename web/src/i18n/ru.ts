@@ -541,6 +541,16 @@ export const ru = {
   'board.spec_save': 'Сохранить',
   'board.spec_saving': 'Сохраняю…',
   'board.spec_placeholder': 'Напишите спек или дизайн-doc для этой карточки (markdown)…',
+
+  // ── Spec-037: multi-chat per project ────────────────────────────────────────
+  'chat.tabs_new': 'Новый чат',
+  'chat.tabs_new_aria': 'Создать новый чат',
+  'chat.tabs_rename_placeholder': 'Название чата',
+  'chat.tabs_rename_confirm': 'Переименовать',
+  'chat.tabs_rename_cancel': 'Отмена',
+  'chat.tabs_close_aria': 'Закрыть чат',
+  'chat.tabs_close_last': 'Нельзя закрыть последний чат',
+  'chat.tabs_loading': 'Загрузка чатов…',
 } as const
 
 export type TKey = keyof typeof ru

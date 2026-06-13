@@ -9,6 +9,7 @@ import { OptionPicker, parseOptionsBlock } from '../components/OptionPicker'
 import { SessionSelector } from '../components/SessionSelector'
 import { SessionContextPanel } from '../components/SessionContextPanel'
 import {
+  Chat,
   ChatMessage,
   ChatEventResult,
   ChatEventTextDelta,
@@ -120,8 +121,9 @@ const THINK_MODES: { value: ThinkMode; labelKey: 'chat.think_mode_max' | 'chat.t
   { value: 'min',     labelKey: 'chat.think_mode_min' },
 ]
 
-function thinkModeStorageKey(projectId: string) {
-  return `cops.chat.thinkmode.${projectId}`
+function thinkModeStorageKey(projectId: string, chatId?: string) {
+  // Spec-037: per-chat storage key; falls back to per-project for callers without a chat yet
+  return chatId ? `cops.chat.thinkmode.${projectId}:${chatId}` : `cops.chat.thinkmode.${projectId}`
 }
 
 /** Rough token estimate: ~4 characters per token (common heuristic for English/Russian). */
@@ -476,6 +478,28 @@ const isTouchDevice: boolean =
 
 export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const projectId = project.id
+
+  // ─── Spec-037: multi-chat tabs ────────────────────────────────────────────
+  const [chats, setChats] = useState<Chat[]>([])
+  const [activeChatId, setActiveChatId] = useState<string | null>(null)
+  // Rename-in-place: null when not renaming, chat id when editing
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+
+  // Load chats on project change
+  useEffect(() => {
+    let cancelled = false
+    api.chats(projectId).then(res => {
+      if (cancelled) return
+      setChats(res.chats)
+      setActiveChatId(res.active)
+    }).catch(() => { /* non-critical — chat tabs unavailable */ })
+    return () => { cancelled = true }
+  }, [projectId])
+
+  // The effective chat id: activeChatId from server (null until loaded = render nothing special)
+  const effectiveChatId = activeChatId ?? ''
+
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [contextTokens, setContextTokens] = useState<number | null>(null)
   const [input, setInput] = useState('')
@@ -483,10 +507,11 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [error, setError] = useState('')
   const [ctxRefreshKey, setCtxRefreshKey] = useState(0)
   const [changingModel, setChangingModel] = useState(false)
-  // Thinking mode selector — persisted per-project in localStorage; default = "default"
+  // Thinking mode selector — persisted per-chat in localStorage; default = "default"
+  // Spec-037: key is <projectId>:<chatId> so each chat has its own setting.
   const [thinkMode, setThinkMode] = useState<ThinkMode>(() => {
     try {
-      const stored = localStorage.getItem(thinkModeStorageKey(projectId))
+      const stored = localStorage.getItem(thinkModeStorageKey(projectId, effectiveChatId || undefined))
       if (stored === 'max' || stored === 'default' || stored === 'min') return stored
     } catch { /* localStorage unavailable */ }
     return 'default'
@@ -546,23 +571,23 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   // Spec-035 L2: seed the SSE reconnect cursor after /live hydration
   const seedCursor = useSeedCursor()
 
-  // Re-load thinkMode from localStorage when projectId changes
+  // Re-load thinkMode from localStorage when projectId or activeChatId changes (per-chat key)
   useEffect(() => {
     try {
-      const stored = localStorage.getItem(thinkModeStorageKey(projectId))
+      const stored = localStorage.getItem(thinkModeStorageKey(projectId, effectiveChatId || undefined))
       if (stored === 'max' || stored === 'default' || stored === 'min') {
         setThinkMode(stored)
         return
       }
     } catch { /* localStorage unavailable */ }
     setThinkMode('default')
-  }, [projectId])
+  }, [projectId, effectiveChatId])
 
-  // Persist thinkMode to localStorage whenever it changes
+  // Persist thinkMode to localStorage whenever it changes (per-chat key)
   const handleThinkModeChange = useCallback((mode: ThinkMode) => {
     setThinkMode(mode)
-    try { localStorage.setItem(thinkModeStorageKey(projectId), mode) } catch { /* ignore */ }
-  }, [projectId])
+    try { localStorage.setItem(thinkModeStorageKey(projectId, effectiveChatId || undefined), mode) } catch { /* ignore */ }
+  }, [projectId, effectiveChatId])
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
 
@@ -696,7 +721,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     }).catch(() => { if (!cancelled) setMessages([]) })
 
     return () => { cancelled = true }
-  }, [projectId, seedCursor])
+  // Spec-037: re-hydrate when the active chat changes (activeChatId drives all chat state)
+  }, [projectId, effectiveChatId, seedCursor])
 
   // Periodic poll of /live while tab is active (restores indicator after bus miss).
   // Spec-035: uses /live (not /running) so we get started_at for the server-authoritative timer.
@@ -862,7 +888,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode }),
+        // Spec-037: pass active chat_id so the backend writes session_id to the right chat entry
+        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
         signal: ac.signal,
       })
 
@@ -1071,8 +1098,146 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     }
   }
 
+  // ─── Spec-037: chat tab handlers ─────────────────────────────────────────
+
+  async function handleSwitchChat(chatId: string) {
+    if (chatId === activeChatId || streaming) return
+    try {
+      const res = await api.patchChat(projectId, chatId, { active: true })
+      setActiveChatId(res.active)
+      setChats(prev => prev.map(c => c.id === res.chat.id ? res.chat : c))
+    } catch { /* non-critical */ }
+  }
+
+  async function handleCreateChat() {
+    try {
+      const newChat = await api.createChat(projectId)
+      setChats(prev => [...prev, newChat])
+      // Switch to newly created chat
+      const res = await api.patchChat(projectId, newChat.id, { active: true })
+      setActiveChatId(res.active)
+    } catch { /* non-critical */ }
+  }
+
+  async function handleDeleteChat(chatId: string) {
+    if (chats.length <= 1) return
+    try {
+      const res = await api.deleteChat(projectId, chatId)
+      setChats(prev => prev.filter(c => c.id !== chatId))
+      setActiveChatId(res.active)
+    } catch { /* non-critical */ }
+  }
+
+  async function handleRenameChat(chatId: string, newName: string) {
+    const name = newName.trim()
+    if (!name) return
+    try {
+      const res = await api.patchChat(projectId, chatId, { name })
+      setChats(prev => prev.map(c => c.id === chatId ? res.chat : c))
+    } catch { /* non-critical */ }
+    setRenamingChatId(null)
+  }
+
   return (
     <div className="chat-wrap">
+      {/* Spec-037: chat tabs strip — one tab per chat, + to create, dbl-click to rename */}
+      {chats.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 0,
+          borderBottom: '1px solid var(--border, #374151)',
+          overflowX: 'auto', flexShrink: 0,
+          background: 'var(--bg, #111827)',
+          paddingLeft: 4,
+        }}>
+          {chats.map(chat => {
+            const isActive = chat.id === activeChatId
+            const isRenaming = renamingChatId === chat.id
+            return (
+              <div
+                key={chat.id}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 2,
+                  padding: '4px 8px 4px 10px',
+                  background: isActive ? 'var(--bg-card, #1f2937)' : 'transparent',
+                  borderBottom: isActive ? '2px solid var(--color-primary, #6366f1)' : '2px solid transparent',
+                  cursor: isActive ? 'default' : 'pointer',
+                  flexShrink: 0,
+                  fontSize: 12,
+                  color: isActive ? 'var(--text, #f9fafb)' : 'var(--color-muted, #9ca3af)',
+                  userSelect: 'none',
+                  whiteSpace: 'nowrap',
+                  maxWidth: 160,
+                }}
+                onClick={() => { if (!isRenaming) handleSwitchChat(chat.id) }}
+                onDoubleClick={e => {
+                  e.stopPropagation()
+                  setRenamingChatId(chat.id)
+                  setRenameValue(chat.name)
+                }}
+                title={chat.name}
+              >
+                {isRenaming ? (
+                  <form
+                    style={{ display: 'flex', alignItems: 'center', gap: 3 }}
+                    onSubmit={e => { e.preventDefault(); handleRenameChat(chat.id, renameValue) }}
+                    onClick={e => e.stopPropagation()}
+                  >
+                    <input
+                      autoFocus
+                      style={{
+                        fontSize: 11, padding: '1px 4px', width: 90,
+                        background: 'var(--bg, #111827)', color: 'var(--text, #f9fafb)',
+                        border: '1px solid var(--color-primary, #6366f1)', borderRadius: 3,
+                      }}
+                      value={renameValue}
+                      onChange={e => setRenameValue(e.target.value)}
+                      placeholder={t['chat.tabs_rename_placeholder']}
+                      onKeyDown={e => { if (e.key === 'Escape') setRenamingChatId(null) }}
+                    />
+                    <button
+                      type="submit"
+                      style={{ fontSize: 10, padding: '1px 4px', cursor: 'pointer',
+                        background: 'var(--color-primary, #6366f1)', color: '#fff',
+                        border: 'none', borderRadius: 3 }}
+                    >{t['chat.tabs_rename_confirm']}</button>
+                  </form>
+                ) : (
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 120 }}>{chat.name}</span>
+                )}
+                {!isRenaming && (
+                  <button
+                    style={{
+                      fontSize: 10, lineHeight: 1, padding: '0 2px',
+                      background: 'transparent', border: 'none',
+                      cursor: chats.length <= 1 ? 'not-allowed' : 'pointer',
+                      color: 'var(--color-muted, #9ca3af)',
+                      opacity: chats.length <= 1 ? 0.3 : 0.7,
+                      flexShrink: 0, marginLeft: 2,
+                    }}
+                    title={chats.length <= 1 ? t['chat.tabs_close_last'] : t['chat.tabs_close_aria']}
+                    aria-label={t['chat.tabs_close_aria']}
+                    onClick={e => {
+                      e.stopPropagation()
+                      if (chats.length > 1) handleDeleteChat(chat.id)
+                    }}
+                  >×</button>
+                )}
+              </div>
+            )
+          })}
+          <button
+            style={{
+              padding: '4px 10px', fontSize: 14, lineHeight: 1,
+              background: 'transparent', border: 'none',
+              cursor: 'pointer', color: 'var(--color-muted, #9ca3af)',
+              flexShrink: 0,
+            }}
+            title={t['chat.tabs_new']}
+            aria-label={t['chat.tabs_new_aria']}
+            onClick={handleCreateChat}
+          >+</button>
+        </div>
+      )}
       {/* Session selector bar + stats + model selector */}
       <div className="chat-session-bar">
         <SessionSelector
