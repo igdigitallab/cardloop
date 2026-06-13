@@ -33,9 +33,21 @@ from claude_agent_sdk import (
     TaskStartedMessage,
     TextBlock,
     ToolUseBlock,
+    query as _sdk_query,  # spec-034 L2: one-shot haiku reconcile
 )
 from claude_agent_sdk.types import HookContext, PostToolUseHookInput
 import webapp          # web cockpit (webapp.py) — started alongside the bot, state shared via ctx
+from board import (  # spec-034 L0/L1/L2
+    board_summary,
+    _load_board,
+    _save_board,
+    _get_board_lock,
+    _tasks_path,
+    _pop_card,
+    _new_card_id,
+    _count_potential_cards,
+    BOARD_COLUMNS,
+)
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
@@ -251,6 +263,15 @@ TELEGRAM_NUDGE = (
 )
 # AskUserQuestion = interactive prompt (no reply in TG -> agent hangs or decides on its own).
 DISALLOWED_TOOLS = ["AskUserQuestion"]
+
+# spec-034 L1: Board protocol block injected into system_prompt["append"] when TASKS.md exists.
+# Verbatim from spec — the cockpit owns the workflow rules, not per-project CLAUDE.md.
+BOARD_PROTOCOL = (
+    "\n## Board protocol (this project has a kanban board — it is the source of truth)\n"
+    "- A new task/bug/request → it belongs on the board. For multi-step work, record a card first, then do it.\n"
+    "- The open cards below are the live state. Do not let work happen invisibly off the board.\n"
+    "- The cockpit reconciles the board after each turn — you do not need to hand-edit TASKS.md.\n"
+)
 
 TOPICS_F = DATA / "topics.json"      # LAYER 1: thread -> project binding (persistent)
 SESSIONS_F = DATA / "sessions.json"  # LAYER 2: thread -> session_id (cleared by /reset)
@@ -861,6 +882,259 @@ def _schedule_idle_eviction(session_key: str, ctx: "dict | None") -> "asyncio.Ta
     return asyncio.ensure_future(_idle_waiter())
 
 
+# ─────────────────────────── Board context helpers (spec-034 L1) ─────────────────────────
+#
+# _build_board_append: builds the board protocol block + current open-card snapshot.
+# Factored out so it can be unit-tested without instantiating run_engine.
+
+
+def _build_board_append(cwd: str) -> str:
+    """Return the board protocol + open-card snapshot to append to system_prompt.
+
+    Returns '' when TASKS.md does not exist in cwd (guard: inject nothing).
+    The returned string is ready to concatenate with a newline separator.
+    """
+    summary = board_summary(cwd)
+    if not summary:
+        # board_summary returns '' when TASKS.md does not exist
+        return ""
+    return BOARD_PROTOCOL + "\n" + summary + "\n"
+
+
+# ─────────────────────────── Board reconciler (spec-034 L2) ──────────────────────────
+#
+# reconcile_board: background task fired after every chat turn.
+# Makes ONE haiku one-shot (no tools) to extract board ops from the completed turn.
+# Applied under the per-cwd board lock via board.py primitives.
+# Safety: no delete, cap 5 ops/turn, JSON fail = no-op, BOARD_RECONCILE gate.
+
+_RECONCILE_OPS_CAP = 5
+
+# System prompt for the haiku reconciler — tells the model exactly what to produce.
+_RECONCILE_SYSTEM = (
+    "You are a board reconciliation assistant. Given a user message, an agent reply, "
+    "and the current open board cards, you output ONLY a JSON array of board operations. "
+    "Nothing else — no prose, no markdown fences, just the raw JSON array.\n\n"
+    "Allowed operations:\n"
+    '  {"op":"create","text":"short card title","column":"review|backlog","description":"optional detail"}\n'
+    '  {"op":"move","id":"card-id","to":"review|done|in_progress"}\n\n'
+    "Rules:\n"
+    "- Output [] (empty array) if the turn was a question, clarification, or general chat.\n"
+    "- Output [] if all mentioned work already has a matching open card.\n"
+    "- Use 'create' only when work was done or requested that has NO matching open card.\n"
+    "- Use 'move' to mark a card done (to=done) or move to review if work just completed.\n"
+    "- Default column for new work just done this turn: 'review'. For future work: 'backlog'.\n"
+    "- Never suggest deleting a card. Max 5 operations total.\n"
+    "- Before creating a card, check the open cards list — reuse an existing card (move) "
+    "rather than creating a duplicate.\n"
+    "- Keep titles short (under 80 chars)."
+)
+
+
+def _norm_title(text: str) -> str:
+    """Normalise a card title for deduplication (lowercase, strip punctuation/spaces)."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+async def _apply_reconcile_ops(cwd: str, name: str, ops: list) -> None:
+    """Apply a list of parsed reconcile ops under the board lock.
+
+    Safety: no delete, cap 5, skip invalid. Audit-logs each applied op.
+    """
+    if not ops:
+        return
+
+    lock = _get_board_lock(cwd)
+    async with lock:
+        raw, preamble, cols = _load_board(cwd)
+        pre_count = _count_potential_cards(raw)
+
+        applied = 0
+        for op in ops[:_RECONCILE_OPS_CAP]:
+            if not isinstance(op, dict):
+                continue
+            op_type = op.get("op")
+
+            if op_type == "create":
+                text = (op.get("text") or "").strip()
+                if not text:
+                    continue
+                column = op.get("column") or "backlog"
+                if column not in ("backlog", "in_progress", "review"):
+                    column = "backlog"
+                description = op.get("description") or None
+
+                # Dedupe: skip if normalised title matches any open card
+                norm = _norm_title(text)
+                open_cols = ("backlog", "in_progress", "review")
+                existing_norms = {
+                    _norm_title(c["text"])
+                    for col_key in open_cols
+                    for c in cols.get(col_key, [])
+                }
+                if norm in existing_norms:
+                    print(f"[reconcile] skip create (duplicate): {text!r}")
+                    continue
+
+                card_id = _new_card_id()
+                card: dict = {"id": card_id, "text": text}
+                if description:
+                    card["description"] = description
+                cols[column].append(card)
+                print(f"[reconcile] create card {card_id!r} in {column!r}: {text!r}")
+                applied += 1
+
+            elif op_type == "move":
+                card_id = (op.get("id") or "").strip()
+                to_col = op.get("to") or ""
+                if not card_id or not to_col:
+                    continue
+                if to_col not in ("backlog", "in_progress", "review", "done"):
+                    print(f"[reconcile] skip move — unknown target column {to_col!r}")
+                    continue
+
+                card = _pop_card(cols, card_id)
+                if card is None:
+                    print(f"[reconcile] skip move — card {card_id!r} not found")
+                    continue
+
+                if to_col == "done":
+                    # Write to DONE.md (append-only archive)
+                    from board import _done_path  # noqa: F401 (already imported indirectly)
+                    done_p = _done_path(cwd)
+                    done_line = f"- [x] {card['text']} <!--ops:{card['id']}-->\n"
+                    with open(done_p, "a", encoding="utf-8") as df:
+                        df.write(done_line)
+                    print(f"[reconcile] move card {card_id!r} → done (archived)")
+                else:
+                    cols[to_col].append(card)
+                    print(f"[reconcile] move card {card_id!r} → {to_col!r}")
+                applied += 1
+
+            if applied >= _RECONCILE_OPS_CAP:
+                break
+
+        if applied == 0:
+            return  # nothing to write
+
+        # Data-loss guard: skip write if parsed card count dropped (indicates parser fault)
+        new_raw_test = ""
+        try:
+            from board import _serialize_tasks  # noqa: F401
+            from board import _serialize_tasks as _st
+            new_raw_test = _st(preamble, cols, name)
+            new_count = _count_potential_cards(new_raw_test)
+            if new_count < pre_count - _RECONCILE_OPS_CAP:
+                print(
+                    f"[reconcile] data-loss guard: card count dropped "
+                    f"{pre_count} → {new_count}, aborting write"
+                )
+                return
+        except Exception as _guard_exc:
+            print(f"[reconcile] data-loss guard check failed: {_guard_exc}, aborting write")
+            return
+
+        _save_board(cwd, name, preamble, cols)
+
+
+async def reconcile_board(
+    cwd: str,
+    name: str,
+    user_msg: str,
+    agent_summary: str,
+) -> None:
+    """Background board reconciler — fires after every chat turn.
+
+    Makes ONE haiku one-shot call (no tools) to extract board ops.
+    Applied under board lock. Never blocks the operator's reply (caller must
+    asyncio.create_task this coroutine).
+
+    Gates:
+    - BOARD_RECONCILE env != "1" → skip entirely (no-op)
+    - TASKS.md not present in cwd → skip
+    - JSON parse failure → no-op (no board change)
+    """
+    # Gate: env flag
+    if os.environ.get("BOARD_RECONCILE", "1") not in ("1", "true", "True"):
+        return
+
+    # Gate: TASKS.md must exist
+    if not _tasks_path(cwd).exists():
+        return
+
+    # Build the current board snapshot for the reconciler
+    summary = board_summary(cwd)
+
+    reconcile_model = os.environ.get("BOARD_RECONCILE_MODEL", "haiku")
+
+    # Build the user-facing prompt for haiku
+    prompt_parts = [
+        "## User message",
+        user_msg[:2000] if user_msg else "(none)",
+        "",
+        "## Agent reply",
+        agent_summary[:3000] if agent_summary else "(none)",
+        "",
+        "## Open board cards",
+        summary if summary else "Board is empty.",
+        "",
+        "Output ONLY a JSON array of operations (or [] for none).",
+    ]
+    reconcile_prompt = "\n".join(prompt_parts)
+
+    opts = ClaudeAgentOptions(
+        model=reconcile_model,
+        permission_mode="bypassPermissions",
+        cwd=cwd,
+        system_prompt=_RECONCILE_SYSTEM,  # plain string — no tools, no preset
+        allowed_tools=[],   # no tools — read-only classification pass
+        disallowed_tools=[],
+        effort="low",
+    )
+
+    # Collect haiku response.
+    # _sdk_query (= claude_agent_sdk.query) is an async generator function — iterate directly,
+    # do NOT await it first (that would raise TypeError for async generators).
+    text_parts: list[str] = []
+    try:
+        async for msg in _sdk_query(prompt=reconcile_prompt, options=opts):
+            if isinstance(msg, AssistantMessage):
+                for blk in msg.content:
+                    if isinstance(blk, TextBlock) and blk.text.strip():
+                        text_parts.append(blk.text)
+    except Exception as exc:
+        print(f"[reconcile] haiku call failed: {exc!r}")
+        return
+
+    raw_response = "\n".join(text_parts).strip()
+    if not raw_response:
+        return
+
+    # Parse JSON — on failure, no-op
+    try:
+        ops = json.loads(raw_response)
+        if not isinstance(ops, list):
+            print(f"[reconcile] unexpected JSON (not a list): {raw_response[:200]!r}")
+            return
+    except json.JSONDecodeError as exc:
+        # Try extracting a JSON array from prose (model sometimes wraps in markdown)
+        m = re.search(r"\[.*\]", raw_response, re.DOTALL)
+        if m:
+            try:
+                ops = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                print(f"[reconcile] JSON parse failed: {exc!r} — no-op")
+                return
+        else:
+            print(f"[reconcile] JSON parse failed: {exc!r} — no-op")
+            return
+
+    if not ops:
+        return  # empty list → nothing to do
+
+    await _apply_reconcile_ops(cwd, name, ops)
+
+
 # ─────────────────────────── ENGINE (async event generator) ───────────────────────────
 #
 # run_engine — independent event generator. Knows nothing about Telegram, aiohttp, or any transport.
@@ -938,6 +1212,15 @@ async def run_engine(  # type: ignore[return]
         sep = "\n" if existing_append else ""
         system_prompt = dict(system_prompt)
         system_prompt["append"] = existing_append + sep + CONDUCTOR_PROMPT
+
+    # spec-034 L1: Board-aware context injection — append board protocol + open-card snapshot
+    # when cwd contains TASKS.md. Guard: _build_board_append returns '' if TASKS.md absent.
+    _board_block = _build_board_append(cwd)
+    if _board_block:
+        existing_append = system_prompt.get("append") or ""
+        sep = "\n" if existing_append else ""
+        system_prompt = dict(system_prompt)
+        system_prompt["append"] = existing_append + sep + _board_block
 
     # Sub-agent roster: use provided agents or fall back to the default roster.
     effective_agents = agents if agents is not None else DEFAULT_AGENTS
@@ -1512,6 +1795,12 @@ async def run_agent(context, update, prompt: str):
     # Fires only in the warn zone (>= CONTEXT_WARN_AT, < CONTEXT_ROTATE_AT); muted after rotation.
     await _maybe_warn_tg(context, chat, thread, k, _tg_last_result_event)
 
+    # spec-034 L2: board reconciler — schedule as background task (never blocks the reply).
+    agent_reply = "\n".join(answer).strip()
+    asyncio.create_task(
+        reconcile_board(cwd=cwd, name=b["project"], user_msg=prompt, agent_summary=agent_reply)
+    )
+
 
 # ─────────────────────────── handlers ───────────────────────────
 async def fetch_files(context, msg) -> list:
@@ -2045,6 +2334,8 @@ def _build_ctx(ptb_app) -> dict:
         # importing bot.py; webapp passes ctx to run_engine which reads these fields).
         "PERSISTENT_CLIENT": PERSISTENT_CLIENT,
         "live_clients": _live_clients,
+        # spec-034 L2: board reconciler callable (webapp.py must not import bot.py directly)
+        "reconcile_board": reconcile_board,
     }
 
 

@@ -179,6 +179,19 @@
   background: rgba(100, 150, 255, 0.18); color: var(--accent);
 }
 
+/* Description trigger — clean notes glyph, muted when empty, accented when a description exists */
+.board-card-actions .act-desc {
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text3, var(--text2)); opacity: 0.7;
+}
+.board-card-actions .act-desc:hover:not(:disabled) { opacity: 1; color: var(--text); }
+.board-card-actions .act-desc.has-desc {
+  color: var(--accent); opacity: 1; border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.board-card-actions .act-desc.has-desc:hover:not(:disabled) {
+  background: rgba(100, 150, 255, 0.18);
+}
+
 /* F1: модалка результата */
 .run-modal-overlay {
   position: fixed; inset: 0;
@@ -309,9 +322,9 @@
 
 /* ── Failed tray (Spec 032) ────────────────────────────────── */
 .board-failed-tray {
-  margin-top: 14px;
-  border-top: 1px solid color-mix(in srgb, var(--red, #dc2626) 25%, var(--border));
-  padding-top: 10px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--red, #dc2626) 25%, var(--border));
+  padding-bottom: 10px;
 }
 
 .board-failed-tray-header {

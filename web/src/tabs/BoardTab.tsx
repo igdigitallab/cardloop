@@ -468,16 +468,27 @@ export function BoardTab({ projectId, isActive = true }: Props) {
             {isIncident && <span className="card-incident-icon" title={t['board.incident_title']}>⚠ </span>}
             {isInProgress && <span className="card-running-icon" title={t['board.card_running_title']}>⚙ </span>}
             <span className="board-card-title">{card.text}</span>
-            {card.description && (
-              <button
-                className="board-card-desc-btn"
-                title={t['board.show_description']}
-                onClick={e => { e.stopPropagation(); openDescModal(card) }}
-              >📝</button>
-            )}
           </div>
         )}
         <div className="board-card-actions">
+          <button
+            className={`act-desc${card.description ? ' has-desc' : ''}`}
+            title={card.description ? t['board.show_description'] : t['board.add_description']}
+            aria-label={card.description ? t['board.show_description'] : t['board.add_description']}
+            disabled={busy}
+            onClick={e => {
+              e.stopPropagation()
+              openDescModal(card)
+              if (!card.description) setEditingDesc('')
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <line x1="4" y1="7" x2="20" y2="7" />
+              <line x1="4" y1="12" x2="14" y2="12" />
+              <line x1="4" y1="17" x2="17" y2="17" />
+            </svg>
+          </button>
           {parkIdx >= 0 && (
             <>
               <button title={t['board.move_left']} aria-label={t['board.move_left_aria']} disabled={busy || parkIdx === 0}
@@ -516,6 +527,59 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   return (
     <div className="board-wrap">
       {error && <div className="error-state" style={{ marginBottom: 10 }}>⚠ {error}</div>}
+
+      {/* Failed tray — pinned at the TOP, only when the failed column has ≥1 card */}
+      {(() => {
+        const failedCol = colByKey('failed')
+        if (!failedCol || failedCol.cards.length === 0) return null
+        const failedParkIdx = PARK_ORDER.indexOf('failed')
+        const trayLabel = failedCol.label || t['board.failed_tray_label']
+        const isDragOver = dragOverCol === 'failed' && dragCardId !== null
+        return (
+          <div className="board-failed-tray">
+            <button
+              className={`board-failed-tray-header${failedCollapsed ? ' collapsed' : ''}`}
+              aria-label={failedCollapsed ? t['board.failed_tray_expand'] : t['board.failed_tray_collapse']}
+              onClick={toggleFailedCollapsed}
+            >
+              <span className="board-failed-tray-chevron">{failedCollapsed ? '▶' : '▼'}</span>
+              <span className="board-failed-tray-title">🔴 {trayLabel} ({failedCol.cards.length})</span>
+            </button>
+            {!failedCollapsed && (
+              <div
+                className={`board-failed-tray-body${isDragOver ? ' board-col-drag-over' : ''}`}
+                onDragOver={(e) => {
+                  if (!dragCardId) return
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                  if (dragOverCol !== 'failed') setDragOverCol('failed')
+                }}
+                onDragLeave={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOverCol(null)
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  if (dragCardId) {
+                    const fromCol = cols.find(c => c.cards.some(card => card.id === dragCardId))
+                    if (fromCol?.key !== 'failed') move(dragCardId, 'failed')
+                  }
+                  setDragCardId(null)
+                  setDragOverCol(null)
+                }}
+              >
+                {failedCol.cards.map(card =>
+                  renderCard(card, {
+                    columnKey: 'failed',
+                    parkIdx: failedParkIdx,
+                    isInProgress: false,
+                    canShowResult: true,
+                  })
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })()}
 
       {/* Column toggles — show/hide. If a hidden column has cards, highlight the counter. */}
       <div className="board-col-toggles">
@@ -602,59 +666,6 @@ export function BoardTab({ projectId, isActive = true }: Props) {
           )
         })}
       </div>
-
-      {/* Failed tray — rendered only when the failed column has ≥1 card */}
-      {(() => {
-        const failedCol = colByKey('failed')
-        if (!failedCol || failedCol.cards.length === 0) return null
-        const failedParkIdx = PARK_ORDER.indexOf('failed')
-        const trayLabel = failedCol.label || t['board.failed_tray_label']
-        const isDragOver = dragOverCol === 'failed' && dragCardId !== null
-        return (
-          <div className="board-failed-tray">
-            <button
-              className={`board-failed-tray-header${failedCollapsed ? ' collapsed' : ''}`}
-              aria-label={failedCollapsed ? t['board.failed_tray_expand'] : t['board.failed_tray_collapse']}
-              onClick={toggleFailedCollapsed}
-            >
-              <span className="board-failed-tray-chevron">{failedCollapsed ? '▶' : '▼'}</span>
-              <span className="board-failed-tray-title">🔴 {trayLabel} ({failedCol.cards.length})</span>
-            </button>
-            {!failedCollapsed && (
-              <div
-                className={`board-failed-tray-body${isDragOver ? ' board-col-drag-over' : ''}`}
-                onDragOver={(e) => {
-                  if (!dragCardId) return
-                  e.preventDefault()
-                  e.dataTransfer.dropEffect = 'move'
-                  if (dragOverCol !== 'failed') setDragOverCol('failed')
-                }}
-                onDragLeave={(e) => {
-                  if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOverCol(null)
-                }}
-                onDrop={(e) => {
-                  e.preventDefault()
-                  if (dragCardId) {
-                    const fromCol = cols.find(c => c.cards.some(card => card.id === dragCardId))
-                    if (fromCol?.key !== 'failed') move(dragCardId, 'failed')
-                  }
-                  setDragCardId(null)
-                  setDragOverCol(null)
-                }}
-              >
-                {failedCol.cards.map(card =>
-                  renderCard(card, {
-                    columnKey: 'failed',
-                    parkIdx: failedParkIdx,
-                    isInProgress: false,
-                    canShowResult: true,
-                  })
-                )}
-              </div>
-            )}
-          </div>
-        )
-      })()}
 
       {selected.size > 0 && (
         <div className="board-batch-bar">

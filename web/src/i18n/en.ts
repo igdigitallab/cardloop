@@ -171,6 +171,7 @@ export const en = {
   'board.incident_title': 'Incident (source: log/test)',
   'board.card_running_title': 'Being processed by agent',
   'board.show_description': 'Show description',
+  'board.add_description': 'Add description',
   'board.move_left': '← left',
   'board.move_left_aria': 'Move left',
   'board.move_right': 'right →',

@@ -172,6 +172,7 @@ export const ru = {
   'board.incident_title': 'Инцидент (источник: log/test)',
   'board.card_running_title': 'Выполняется агентом',
   'board.show_description': 'Показать описание',
+  'board.add_description': 'Добавить описание',
   'board.move_left': '← влево',
   'board.move_left_aria': 'Переместить влево',
   'board.move_right': 'вправо →',

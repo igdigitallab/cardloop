@@ -57,10 +57,10 @@ function formatDuration(sec: number): string {
   return `${m}:${r.toString().padStart(2, '0')}`
 }
 
-// ─── Spec-022: Cost visibility constants ──────────────────────────────────────
-// Cache TTL in minutes. Basis: Claude Code writes hour-TTL cache — observed
-// ephemeral_1h_input_tokens in usage. This is an ESTIMATE; isolated in one constant.
-const CACHE_TTL_MIN = 60
+// ─── Spec-022 / Spec-033: Cost visibility constants ───────────────────────────
+// Anthropic default ephemeral prompt-cache TTL = 5 min (not 60; 1-hour TTL is
+// opt-in via cache_control.ttl:"1h" and this app does NOT set it).
+const CACHE_TTL_MS = 5 * 60 * 1000  // Anthropic default ephemeral prompt-cache TTL = 5 min
 const CACHE_WARM_PCT = 70   // ≥70% cache-hit → warm (♨️)
 const CACHE_COLD_PCT = 30   // <30% cache-hit → cold (🧊)
 
@@ -298,8 +298,10 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   // Context-token value at the END of the previous completed turn — source for the growth delta.
   // null until a second turn arrives (no delta shown on the first turn).
   const [prevContextTokens, setPrevContextTokens] = useState<number | null>(null)
-  // Spec-022: cache freshness countdown — unix ms when the last turn completed (null = never)
+  // Spec-022/033: cache freshness countdown — unix ms when the last turn completed (null = never)
   const [lastTurnEndMs, setLastTurnEndMs] = useState<number | null>(null)
+  // Spec-033: last known cache-hit % seeded from session history on reload (null = no data yet)
+  const [lastCacheHitPct, setLastCacheHitPct] = useState<number | null>(null)
   // Ticking second for the cache freshness countdown (independent of run ticker)
   const [cacheTick, setCacheTick] = useState<number>(Date.now())
 
@@ -342,12 +344,11 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     return () => clearInterval(id)
   }, [run])
 
-  // Spec-022: tick every second for the cache freshness countdown.
+  // Spec-022/033: tick every second for the cache freshness countdown.
   // Only runs while a countdown is meaningful (lastTurnEndMs set and TTL not yet expired).
   useEffect(() => {
     if (lastTurnEndMs === null) return
-    const ttlMs = CACHE_TTL_MIN * 60 * 1000
-    const remaining = ttlMs - (Date.now() - lastTurnEndMs)
+    const remaining = CACHE_TTL_MS - (Date.now() - lastTurnEndMs)
     if (remaining <= 0) return
     const id = setInterval(() => setCacheTick(Date.now()), 1000)
     return () => clearInterval(id)
@@ -375,6 +376,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setAttachments([])
     setContextWarnFromBackend(false)
     setWarnDismissedAtTokens(null)
+    setLastTurnEndMs(null)
+    setLastCacheHitPct(null)
 
     Promise.all([
       api.sessionHistory(projectId),
@@ -383,6 +386,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       if (cancelled) return
       setMessages(histToMessages(histRes.messages))
       setContextTokens(histRes.context_tokens || null)
+      // Spec-033: seed cache freshness anchor from the persisted transcript data so
+      // the countdown survives a page reload instead of vanishing.
+      if (histRes.last_turn_at != null) {
+        setLastTurnEndMs(histRes.last_turn_at)
+      }
+      if (histRes.last_cache_hit_pct != null) {
+        setLastCacheHitPct(histRes.last_cache_hit_pct)
+      }
       if (runRes.running) {
         busActiveRef.current = true
         setRun({ startedAt: Date.now(), lastEventAt: Date.now(), currentTool: null, source: 'card' })
@@ -766,29 +777,44 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             fillFrac >= 0.6 ? 'var(--color-yellow, #eab308)' :
             'var(--color-green, #22c55e)'
 
-          // Cache warm/cold — timer-based but overridden by last turn's real cache_hit_pct
+          // Spec-033: cache warm/cold indicator.
+          // Priority (highest to lowest):
+          //   1. Active run → warm/running (cache is being continuously re-warmed).
+          //   2. Timer over CACHE_TTL_MS (5-min Anthropic default) → cold.
+          //   3. Ground-truth override: last measured cache_hit_pct < CACHE_COLD_PCT → cold.
+          //   4. No anchor data → badge hidden.
+          // NOTE: a sub-agent Task run that takes >5 min can let the main prefix go cold
+          // before the turn ends. The turn's final cache_hit_pct reveals this post-hoc.
           void cacheTick
-          const ttlMs = CACHE_TTL_MIN * 60 * 1000
           let isWarm = false
+          let isRunning = false
           let remainingSec = 0
-          if (lastTurnEndMs !== null) {
-            remainingSec = Math.max(0, (ttlMs - (Date.now() - lastTurnEndMs)) / 1000)
+          if (run != null) {
+            // Active run: treat as warm/running — agent continuously re-warms the prefix.
+            isWarm = true
+            isRunning = true
+          } else if (lastTurnEndMs !== null) {
+            remainingSec = Math.max(0, (CACHE_TTL_MS - (Date.now() - lastTurnEndMs)) / 1000)
             isWarm = remainingSec > 0
           }
-          // Ground-truth override: if the last assistant turn shows a cold/low cache hit,
-          // treat as cold regardless of the timer (server-side cache may have been reset).
+          // Ground-truth override: check in-page metrics first, then reload-seeded lastCacheHitPct.
           const lastAssistantMetrics = [...messages].reverse().find(
             m => m.role === 'assistant' && m.metrics != null
           )?.metrics
-          if (lastAssistantMetrics != null && lastAssistantMetrics.cache_hit_pct < CACHE_COLD_PCT) {
+          const effectiveCacheHitPct = lastAssistantMetrics?.cache_hit_pct ?? lastCacheHitPct
+          if (!isRunning && effectiveCacheHitPct != null && effectiveCacheHitPct < CACHE_COLD_PCT) {
             isWarm = false
           }
-          const cacheLabel = isWarm
-            ? `♨️ ${fmtCountdown(remainingSec)}`
-            : '⚪ cold'
-          const cacheTip = isWarm
-            ? `Cache warm — approx. ${fmtCountdown(remainingSec)} remaining. Warm ≈ next turn cheap; cold ≈ full re-read.`
-            : 'Cache cold — next turn will re-read the full prompt at full price.'
+          const cacheLabel = isRunning
+            ? '♨️ running'
+            : isWarm
+              ? `♨️ ${fmtCountdown(remainingSec)}`
+              : '⚪ cold'
+          const cacheTip = isRunning
+            ? 'Cache warm — agent is actively running and re-warming the prefix.'
+            : isWarm
+              ? `Cache warm — estimated ${fmtCountdown(remainingSec)} remaining in the 5-min window since last turn end. Actual warm/cold is confirmed by the measured cache-hit % of the last turn.`
+              : 'Cache cold — next turn will re-read the full prompt at full price.'
 
           // Wrap & reset button prominence depends on token level
           const isProminent = tokens >= 120_000
@@ -859,8 +885,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                   {deltaLabel}
                 </span>
               )}
-              {/* Cache countdown */}
-              {(lastTurnEndMs !== null || lastAssistantMetrics != null) && (
+              {/* Cache countdown — visible whenever there is any session cache data */}
+              {(lastTurnEndMs !== null || lastCacheHitPct != null || lastAssistantMetrics != null) && (
                 <span style={{
                   color: isWarm ? 'var(--color-green, #22c55e)' : 'var(--color-muted, #9ca3af)',
                   cursor: 'default',
@@ -925,13 +951,13 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           const isEmpty = !msg.text && msg.tools.length === 0 && !msg.error
           if (isEmpty && msg.role === 'assistant') return null
 
-          // Spec-022: cold-start divider — gap between prev assistant turn end and this user msg
+          // Spec-022/033: cold-start divider — gap between prev assistant turn end and this user msg
           const prevMsg = idx > 0 ? messages[idx - 1] : null
           const showColdDivider = (
             msg.role === 'user' &&
             msg.ts != null &&
             prevMsg?.ts != null &&
-            (msg.ts - prevMsg.ts) > CACHE_TTL_MIN * 60 * 1000
+            (msg.ts - prevMsg.ts) > CACHE_TTL_MS
           )
 
           return (

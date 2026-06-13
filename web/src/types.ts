@@ -320,6 +320,17 @@ export interface HistoryMessage {
   tools: RichTool[]
 }
 
+/** Response shape for GET /api/projects/{id}/session-history */
+export interface SessionHistoryResponse {
+  messages: HistoryMessage[]
+  session_id: string | null
+  context_tokens?: number
+  /** Unix milliseconds of the last assistant turn (from transcript timestamp or file mtime). null if no assistant turn. */
+  last_turn_at?: number | null
+  /** Cache-hit % of the last assistant turn: round(cache_read / (cache_read + input_tokens) * 100). null if no usage. */
+  last_cache_hit_pct?: number | null
+}
+
 /** Per-turn cost metrics stamped onto assistant messages when result event arrives. */
 export interface TurnMetrics {
   cache_hit_pct: number

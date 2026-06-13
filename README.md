@@ -2,13 +2,34 @@
 
 # Claude-Ops
 
-**A browser-based IDE for managing projects via the Claude Agent SDK** — no terminal required, accessible from any device. One engine, three input channels: a web cockpit, Telegram, and kanban cards. Fully autonomous: describe a task → the agent diagnoses, edits code, deploys, and reports back.
+**Mission control for a fleet of AI agents** — a browser-based IDE for running projects through the Claude Agent SDK. No terminal required, accessible from any device. One engine, three input channels: a web cockpit, Telegram, and kanban cards. Fully autonomous: describe a task → the agent diagnoses, edits code, deploys, and reports back.
+
+You don't lose the thread. Every task you mention becomes a card and moves **Backlog → In Progress → Review** in real time — and the board keeps itself honest, so nothing rots in the backlog half-done.
 
 ```
  Cockpit   ──┐
  Telegram  ──┼──→  run_engine()  ──→  Claude Agent SDK  ──→  files / git / deploy
  Card      ──┘     (async generator)     (subscription)        (full-auto)
 ```
+
+---
+
+## The board is the source of truth
+
+Most agent tools are a chat box — you ask, it works, and you lose track of what is done, in
+flight, or forgotten. Claude-Ops makes the **kanban board** the shared working memory between
+you and the agents:
+
+- **Board-aware agents.** Every turn — in the cockpit, in Telegram, or from a card — the agent
+  sees the live board. New work belongs on the board, not in a disappearing chat log.
+- **Self-maintaining.** After each turn the system reconciles the board against what actually
+  happened (commits, diffs, the agent's own summary): new work gets a card, finished work moves
+  to Review. The backlog stops filling with tasks that were quietly completed days ago.
+- **Visible.** Open a project and you watch the work move across columns in real time — what's
+  queued, what's running, what's waiting on you.
+
+`TASKS.md` in each repo is the on-disk truth; the board is just its live view. See
+[`specs/spec-034-board-centric-os.md`](specs/spec-034-board-centric-os.md) for the design.
 
 ---
 

@@ -149,7 +149,7 @@ export const api = {
     }),
 
   sessionHistory: (id: string, sessionId?: string) =>
-    apiFetch<{ messages: import('./types').HistoryMessage[]; session_id: string | null; context_tokens?: number }>(
+    apiFetch<import('./types').SessionHistoryResponse>(
       `/api/projects/${id}/session-history${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`
     ),
 

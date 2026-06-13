@@ -2151,173 +2151,31 @@ async def api_project_activity(req: web.Request) -> web.Response:
 
 # ─────────────────────────── task board (TASKS.md / DONE.md) ───────────────────────────
 #
-# Spec=Kanban=2 files. TASKS.md (sections = columns) — the only file sessions read.
-# DONE.md (archive) — append-only, agents do NOT read it (context hygiene).
-# Source of truth = markdown in the project repo; no DB for the plan.
+# Board primitives live in board.py (spec-034 L0). Re-exported here for backward compatibility
+# so that existing call sites and tests (which import from webapp) are unchanged.
 
-BOARD_COLUMNS = [
-    ("backlog",     "Backlog",     " "),
-    ("in_progress", "In Progress", "~"),
-    ("review",      "Review",      "?"),
-    ("failed",      "Failed",      "!"),
-]
-_LABEL_TO_COL = {lbl.lower(): key for key, lbl, _ in BOARD_COLUMNS}
-
-# One lock per cwd — serialises all cockpit writes to the board (GET canonicalise + mutations).
-# The agent writes the file directly and does not participate in the lock, so the lock only
-# protects the cockpit↔cockpit race.
-_board_locks: dict[str, asyncio.Lock] = {}
-
-def _get_board_lock(cwd: str) -> asyncio.Lock:
-    if cwd not in _board_locks:
-        _board_locks[cwd] = asyncio.Lock()
-    return _board_locks[cwd]
-
-_CARD_RE = re.compile(r"^\s*[-*]\s*\[(.)\]\s*(.*)$")
-# Lines like "- text" without a checkbox — agents often write this way.
-# Inside a column section we treat these as Backlog cards (default status).
-_PLAIN_CARD_RE = re.compile(r"^\s*[-*]\s+(?!\[)(.+)$")
-# Single marker: <!--ops:ID--> — ID can be any word (including non-hex aliases).
-_MARKER_RE = re.compile(r"\s*<!--\s*ops:([\w-]+)\s*-->")
-# Description lines: '  > text' (2 spaces + '>') immediately following a card
-_DESC_LINE_RE = re.compile(r"^  > (.*)$")
-
-
-def _extract_id_and_text(rest: str) -> tuple[str, str]:
-    """Extract ID and strip ALL ops markers from text. First marker = canonical ID."""
-    matches = list(_MARKER_RE.finditer(rest))
-    if not matches:
-        return _new_card_id(), rest.strip()
-    cid = matches[0].group(1)
-    clean = _MARKER_RE.sub("", rest).strip()
-    return cid, clean
-
-
-def _tasks_path(cwd: str) -> Path:
-    return Path(cwd) / "TASKS.md"
-
-
-def _done_path(cwd: str) -> Path:
-    return Path(cwd) / "DONE.md"
-
-
-def _new_card_id() -> str:
-    return secrets.token_hex(3)
-
-
-# Regular card = hex(+dash) OR alphanumeric slug like jan-9e2d; incident = 'err-<hash6>'.
-# The err- prefix is explicitly allowed. No dots/slashes → traversal impossible.
-# Extended to [a-z0-9-] so user-defined IDs like "jan-9e2d" pass validation.
-_CARD_ID_RE = re.compile(r"^(err-)?[a-z0-9-]{4,20}$")
-
-
-def _valid_card_id(card_id: str) -> bool:
-    """True if card_id matches the expected format (hex+dash, 4-20 chars)."""
-    return bool(_CARD_ID_RE.fullmatch(card_id))
-
-
-
-def _count_potential_cards(raw: str) -> int:
-    """How many lines in raw COULD be cards (any format).
-    Used as a guard: if after parse+serialize the card count dropped —
-    the parser didn't recognise some format and a write would destroy data.
-    Counts lines like '- ...' or '* ...' INSIDE a ## section (not preamble)."""
-    count = 0
-    in_section = False
-    for line in raw.splitlines():
-        h = line.strip()
-        if h.startswith("##"):
-            in_section = True
-            continue
-        if not in_section:
-            continue
-        s = h
-        if s.startswith(("- ", "* ")) and len(s) > 2:
-            count += 1
-    return count
-
-
-def _parse_tasks(text: str):
-    """(preamble, cols) — preamble = everything before the first recognised '## <Column>'.
-    Cards with checkbox '- [ ] text' — parsed into the matching column.
-    Cards without checkbox '- text' — parsed as Backlog (agents sometimes write this way).
-    Description lines '  > text' immediately after a card — collected into card['description'].
-    Non-card lines inside sections are discarded on re-serialisation."""
-    cols = {key: [] for key, _, _ in BOARD_COLUMNS}
-    preamble_lines: list[str] = []
-    cur = None
-    seen_header = False
-    last_card: dict | None = None  # last added card — description receiver
-    for line in text.splitlines():
-        h = line.strip()
-        if h.startswith("##"):
-            name = h.lstrip("#").strip().lower()
-            cur = _LABEL_TO_COL.get(name)  # None for unknown sections
-            last_card = None  # new section resets receiver
-            if cur is not None:
-                seen_header = True
-            elif not seen_header:
-                preamble_lines.append(line)
-            continue
-        # Description line — '  > text', immediately after a card
-        if cur is not None and last_card is not None:
-            dm = _DESC_LINE_RE.match(line)
-            if dm:
-                desc_line = dm.group(1)
-                if last_card.get("description") is None:
-                    last_card["description"] = desc_line
-                else:
-                    last_card["description"] += "\n" + desc_line
-                continue
-            # Any other line — end of description block
-            last_card = None
-        m = _CARD_RE.match(line)
-        if m and cur is not None:
-            cid, cardtext = _extract_id_and_text(m.group(2))
-            if cardtext:
-                card: dict = {"id": cid, "text": cardtext}
-                cols[cur].append(card)
-                last_card = card
-        elif cur is not None:
-            # No checkbox match — try plain '- text' (agent style)
-            pm = _PLAIN_CARD_RE.match(line)
-            if pm:
-                cid, cardtext = _extract_id_and_text(pm.group(1))
-                if cardtext:
-                    # Plain cards always go to the current column (agent chose the section)
-                    card = {"id": cid, "text": cardtext}
-                    cols[cur].append(card)
-                    last_card = card
-        elif not seen_header:
-            preamble_lines.append(line)
-    return "\n".join(preamble_lines).rstrip(), cols
-
-
-def _serialize_tasks(preamble: str, cols: dict, project_name: str) -> str:
-    if not preamble.strip():
-        preamble = f"# Tasks — {project_name}"
-    out = [preamble, ""]
-    for key, label, status in BOARD_COLUMNS:
-        out.append(f"## {label}")
-        for card in cols[key]:
-            out.append(f"- [{status}] {card['text']} <!--ops:{card['id']}-->")
-            desc = card.get("description")
-            if desc:
-                for desc_line in desc.splitlines():
-                    out.append(f"  > {desc_line}")
-        out.append("")
-    return "\n".join(out).rstrip() + "\n"
-
-
-def _load_board(cwd: str):
-    tp = _tasks_path(cwd)
-    raw = tp.read_text(encoding="utf-8") if tp.exists() else ""
-    preamble, cols = _parse_tasks(raw)
-    return raw, preamble, cols
-
-
-def _save_board(cwd: str, name: str, preamble: str, cols: dict) -> None:
-    _tasks_path(cwd).write_text(_serialize_tasks(preamble, cols, name), encoding="utf-8")
+from board import (  # noqa: E402
+    BOARD_COLUMNS,
+    _CARD_ID_RE,
+    _CARD_RE,
+    _DESC_LINE_RE,
+    _LABEL_TO_COL,
+    _MARKER_RE,
+    _PLAIN_CARD_RE,
+    _board_locks,
+    _count_potential_cards,
+    _done_path,
+    _extract_id_and_text,
+    _get_board_lock,
+    _load_board,
+    _new_card_id,
+    _parse_tasks,
+    _pop_card,
+    _save_board,
+    _serialize_tasks,
+    _tasks_path,
+    _valid_card_id,
+)
 
 
 # ─────────────────────────── Error scanner (incidents) ───────────────────────────
@@ -3466,15 +3324,8 @@ async def _error_scanner_loop(ctx: dict):
         await asyncio.sleep(int(_get_global_setting("scan_interval_sec", _SCAN_INTERVAL_SEC)))
 
 
-def _board_payload(cwd: str) -> dict:
-    tp, dp = _tasks_path(cwd), _done_path(cwd)
-    _, _, cols = _load_board(cwd)
-    columns = [{"key": k, "label": l, "cards": cols[k]} for k, l, _ in BOARD_COLUMNS]
-    done_count = 0
-    if dp.exists():
-        done_count = sum(1 for ln in dp.read_text(encoding="utf-8", errors="replace").splitlines()
-                         if _CARD_RE.match(ln))
-    return {"columns": columns, "done_count": done_count, "exists": tp.exists()}
+# _board_payload is imported from board (spec-034 L0)
+from board import _board_payload  # noqa: E402 (already imported above; re-stated for clarity)
 
 
 async def api_project_tasks(req: web.Request) -> web.Response:
@@ -3545,13 +3396,7 @@ async def api_create_task(req: web.Request) -> web.Response:
     return web.json_response(_board_payload(cwd))
 
 
-def _pop_card(cols: dict, card_id: str):
-    for k in cols:
-        for i, c in enumerate(cols[k]):
-            if c["id"] == card_id:
-                return cols[k].pop(i)
-    return None
-
+# _pop_card is imported from board (spec-034 L0)
 
 # ─────────────────────────── F1: card auto-run ───────────────────────────
 
@@ -6564,7 +6409,29 @@ def _session_context_tokens(jsonl_path: Path) -> int:
     """Actual session context size = prompt tokens of the last assistant turn
     (input + cache_read + cache_creation). Matches get_context_usage().totalTokens.
     0 if no transcript/usage."""
-    last = 0
+    ctx, _, _ = _session_last_turn(jsonl_path)
+    return ctx
+
+
+def _session_last_turn(jsonl_path: Path) -> "tuple[int, int | None, int | None]":
+    """Single-pass scan of a session transcript returning data from the last assistant turn.
+
+    Returns:
+        (context_tokens, last_turn_at_ms, last_cache_hit_pct)
+
+        context_tokens   — prompt tokens of the last assistant turn
+                           (input + cache_read + cache_creation); 0 if absent.
+        last_turn_at_ms  — unix milliseconds of the last assistant line's "timestamp"
+                           field (ISO-8601). Falls back to the file's mtime if the
+                           field is absent or unparseable. None if no assistant turn.
+        last_cache_hit_pct — cache hit % for the last assistant turn per the formula:
+                             round(cache_read / (cache_read + input_tokens) * 100).
+                             Note: cache_creation is NOT included in the ratio (it is
+                             the write side, not the read side). None if no usage.
+    """
+    context_tokens = 0
+    last_turn_at_ms: "int | None" = None
+    last_cache_hit_pct: "int | None" = None
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -6577,15 +6444,51 @@ def _session_context_tokens(jsonl_path: Path) -> int:
                     continue
                 if o.get("type") != "assistant":
                     continue
+                # Context tokens (input + cache_read + cache_creation)
                 u = (o.get("message") or {}).get("usage") or {}
                 pt = (u.get("input_tokens", 0)
                       + u.get("cache_read_input_tokens", 0)
                       + u.get("cache_creation_input_tokens", 0))
                 if pt:
-                    last = pt
+                    context_tokens = pt
+                # Timestamp → epoch ms
+                ts_raw = o.get("timestamp")
+                ts_ms: "int | None" = None
+                if ts_raw:
+                    try:
+                        # Handle trailing Z (not supported by fromisoformat before 3.11)
+                        ts_str = ts_raw.rstrip("Z").replace("Z", "+00:00")
+                        if ts_str.endswith("+00:00") or "+" in ts_str[10:] or ts_str.count("-") > 2:
+                            from datetime import datetime, timezone
+                            dt = datetime.fromisoformat(ts_str)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            ts_ms = int(dt.timestamp() * 1000)
+                        else:
+                            from datetime import datetime, timezone
+                            dt = datetime.fromisoformat(ts_str).replace(tzinfo=timezone.utc)
+                            ts_ms = int(dt.timestamp() * 1000)
+                    except Exception:
+                        ts_ms = None
+                last_turn_at_ms = ts_ms
+                # Cache hit % — mirror bot.py formula (cache_read / (cache_read + input_tokens))
+                # cache_creation is the write side (not counted in hit ratio)
+                cache_read = u.get("cache_read_input_tokens", 0) or 0
+                input_fresh = u.get("input_tokens", 0) or 0
+                ratio_pt = cache_read + input_fresh
+                if ratio_pt > 0:
+                    last_cache_hit_pct = round(cache_read / ratio_pt * 100)
+                else:
+                    last_cache_hit_pct = None
     except Exception:
         pass
-    return last
+    # If we found an assistant turn but no parseable timestamp, fall back to file mtime
+    if last_turn_at_ms is None and last_cache_hit_pct is not None:
+        try:
+            last_turn_at_ms = int(jsonl_path.stat().st_mtime * 1000)
+        except Exception:
+            pass
+    return context_tokens, last_turn_at_ms, last_cache_hit_pct
 
 
 async def api_project_session_history(req: web.Request) -> web.Response:
@@ -6607,10 +6510,13 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     if not jsonl.is_file():
         return web.json_response({"messages": [], "session_id": sid})
 
+    context_tokens, last_turn_at_ms, last_cache_hit_pct = _session_last_turn(jsonl)
     return web.json_response({
         "messages": _session_history(jsonl),
         "session_id": sid,
-        "context_tokens": _session_context_tokens(jsonl),
+        "context_tokens": context_tokens,
+        "last_turn_at": last_turn_at_ms,
+        "last_cache_hit_pct": last_cache_hit_pct,
     })
 
 
@@ -6712,6 +6618,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
     _chat_last_result_event: "dict | None" = None  # Phase D: track for auto-resume
     # Spec-021: once-per-turn guard so we rotate at most once per run
     _rotated_this_turn = False
+    # spec-034 L2: accumulate agent reply text for board reconciler
+    _chat_answer_parts: list = []
 
     try:
         resume_sid = ctx["sessions"].get(session_key)
@@ -6765,6 +6673,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 await _send({"type": "text_delta", "text": event["text"]})
             elif etype == "text":
                 await _send({"type": "text", "text": event["text"]})
+                _chat_answer_parts.append(event["text"])  # spec-034 L2: collect for reconciler
             elif etype == "tool":
                 inp = event.get("input") or {}
                 tool_data = _format_tool(event["name"], inp if isinstance(inp, dict) else {})
@@ -6867,6 +6776,14 @@ async def api_project_chat(req: web.Request) -> web.Response:
             # other types — ignore
 
         await _send({"type": "done"})
+
+        # spec-034 L2: board reconciler — schedule as background task (never blocks the response).
+        _reconcile_fn = ctx.get("reconcile_board")
+        if _reconcile_fn is not None:
+            _agent_reply = "\n".join(_chat_answer_parts).strip()
+            asyncio.ensure_future(
+                _reconcile_fn(cwd=cwd, name=name, user_msg=prompt, agent_summary=_agent_reply)
+            )
 
         # Phase D: auto-resume if killed by rate-limit (before lock release so session_key is valid)
         _resume_sid_chat = ctx["sessions"].get(session_key)
