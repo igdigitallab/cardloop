@@ -467,3 +467,62 @@ async def test_run_card_structured_output_malformed_falls_back_to_prose(tmp_path
     assert "[DONE]" not in content and "[PARTIAL]" not in content and "[FAILED]" not in content
     _, _, cols = _load_board(str(cwd))
     assert any(c["id"] == "aabbcc" for c in cols["review"])
+
+
+# ─────────────────────────── Guard: project without "id" ───────────────────────────
+
+
+async def test_run_card_no_project_id_does_not_crash(tmp_path):
+    """_run_card must not raise when project dict has no 'id' key.
+
+    Spec-038 media-dir injection must be skipped silently; the run must
+    complete normally and write a sidecar.
+    """
+    from webapp import _run_card
+
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    card = {"id": "aabbcc", "text": "Task without project id"}
+    _setup_board(cwd, "aabbcc", "in_progress")
+
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "Done without id"}
+        yield {"type": "result", "session_id": "sess-noid"}
+
+    ctx = {
+        "sessions": {},
+        "running": {"1001:99": True},
+        "DATA": data_dir,
+        "DEFAULT_MODEL": "sonnet",
+        "save_sessions": lambda: None,
+        "run_engine": fake_engine,
+        "ptb_app": None,
+    }
+
+    # Project dict intentionally omits "id" — this is the bug trigger.
+    project = {"cwd": str(cwd), "name": "proj", "model": "sonnet"}
+
+    class FakeApp:
+        def __getitem__(self, k):
+            return None
+
+    # Must not raise KeyError: 'id'
+    await _run_card(ctx, FakeApp(), project, card, "1001:99")
+
+    # running lock released
+    assert "1001:99" not in ctx["running"]
+
+    # Sidecar written — run completed normally
+    sidecar = data_dir / "runs" / "aabbcc.md"
+    assert sidecar.exists(), "Sidecar must be written even when project has no 'id'"
+    assert "Done without id" in sidecar.read_text(encoding="utf-8")
+
+    # Card moved to review
+    _, _, cols = _load_board(str(cwd))
+    assert any(c["id"] == "aabbcc" for c in cols["review"]), "Card must reach Review"
+
+    # Media dir must NOT have been created (no id — injection skipped)
+    assert not (data_dir / "chat-media").exists(), "chat-media dir must not be created when project has no id"

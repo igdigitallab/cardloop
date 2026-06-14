@@ -3953,13 +3953,16 @@ async def _run_card(
             # secret: references are resolved against the built-in store before injecting into the agent env.
             project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
             # Spec-038: inject cockpit media env (same pattern as api_project_chat).
-            _card_media_dir = ctx["DATA"] / "chat-media" / project["id"]
-            _card_media_dir.mkdir(parents=True, exist_ok=True)
-            project_secrets = {
-                **project_secrets,
-                "COPS_PROJECT_ID": project["id"],
-                "COPS_MEDIA_DIR": str(_card_media_dir),
-            }
+            # Guard: project may lack "id" in test/minimal contexts — skip media injection then.
+            _proj_id = project.get("id")
+            if _proj_id:
+                _card_media_dir = ctx["DATA"] / "chat-media" / _proj_id
+                _card_media_dir.mkdir(parents=True, exist_ok=True)
+                project_secrets = {
+                    **project_secrets,
+                    "COPS_PROJECT_ID": _proj_id,
+                    "COPS_MEDIA_DIR": str(_card_media_dir),
+                }
             agents_config = project.get("agents_config") or {}
             agents_kwargs = _build_agents_kwargs(ctx, agents_config)
             # ephemeral=True: cards are always isolated — they MUST NOT reuse a live client
