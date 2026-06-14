@@ -370,7 +370,7 @@ async def test_flag_off_uses_fresh_client_each_turn(tmp_path):
 
 @pytest.mark.asyncio
 async def test_ephemeral_never_stores_live_client(tmp_path):
-    """_run_card and _do_session_rotation pass ephemeral=True.
+    """_run_card passes ephemeral=True (spec-039: _do_session_rotation removed).
 
     Even with flag ON no live entry should be stored for ephemeral session keys.
     """

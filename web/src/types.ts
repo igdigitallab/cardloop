@@ -38,6 +38,10 @@ export interface Project {
   group?: string | null
   /** Spec-031: whether this project/free-chat is starred. */
   favorite?: boolean
+  /** ops:b2a081 — true while an agent turn is in flight for this project. */
+  running?: boolean
+  /** ops:b2a081 — true when a turn just finished and the operator hasn't opened the tab yet. */
+  awaiting?: boolean
 }
 
 // ─── Spec-024: Project Groups ────────────────────────────────────────────────
@@ -459,9 +463,19 @@ export interface LiveTurnSnapshot {
   events: Array<Record<string, unknown>>
 }
 
+// ─── Spec-039: native auto-compact notification ────────────────────────────────
+// Emitted by the PreCompact hook in bot.py when the CLI compacts in place.
+// The session is kept — only a toast is shown in the cockpit.
+export interface ActivityEventCompact {
+  kind: 'compact'
+  trigger: string
+  project: string
+}
+
 export type ActivityEvent =
   | ActivityEventRunStart
   | ActivityEventText
   | ActivityEventTool
   | ActivityEventRunEnd
   | ActivityEventSubagent
+  | ActivityEventCompact

@@ -204,7 +204,7 @@
   text-align: center;
 }
 
-/* Reply-ready dot: agent finished a run while this tab was not active */
+/* Reply-ready dot: agent finished a run while this tab was not active (ops:b2a081) */
 .ptab-reply-ready {
   display: inline-block;
   width: 7px;
@@ -213,6 +213,35 @@
   background: var(--green);
   box-shadow: 0 0 5px rgba(52, 199, 123, 0.7);
   flex-shrink: 0;
+}
+
+/* Working dot: agent turn currently in flight — pulsing amber dot (ops:b2a081) */
+.ptab-working {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--yellow);
+  box-shadow: 0 0 4px rgba(245, 166, 35, 0.6);
+  flex-shrink: 0;
+  animation: ptab-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes ptab-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.75); }
+}
+
+/* Mobile dropdown: working dot variant */
+.ptab-menu-dot-working {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--yellow);
+  box-shadow: 0 0 4px rgba(245, 166, 35, 0.6);
+  flex-shrink: 0;
+  animation: ptab-pulse 1.2s ease-in-out infinite;
 }
 
 .ptab-close {

@@ -91,6 +91,10 @@ export const en = {
   'tabbar.open_sidebar': 'Open sidebar',
   'tabbar.open_tabs_menu': 'Switch between open projects',
   'tabbar.open_tabs_count': 'Open tabs',
+  /** ops:b2a081 — tooltip for the pulsing dot shown while an agent turn is in flight */
+  'tabbar.working_title': 'Agent is working…',
+  /** ops:b2a081 — tooltip for the attention badge shown after a turn finishes on a background tab */
+  'tabbar.awaiting_title': 'Agent reply ready — click to view',
 
   // ── Mobile navigation ────────────────────────────────────────
   'mobile.chat_tab': '💬 Chat',
@@ -550,6 +554,27 @@ export const en = {
   'chat.tabs_close_aria': 'Close chat',
   'chat.tabs_close_last': 'Cannot close the last chat',
   'chat.tabs_loading': 'Loading chats…',
+
+  // ── Spec-039: session-health (no auto-reset) ─────────────────────────────────
+  // Session health bar tooltip
+  'chat.session_bar_tip': 'Actual session context size: {tokens} tokens (full prompt sent each turn). There is an incompressible base floor — Claude Code system prompt + tools + CLAUDE.md + memory — that stays even after /reset. Amber from ~150K · Red from ~190K. The session is NEVER auto-reset; native auto-compact fires ~190K and compacts in place keeping the session.',
+  // Reset button label + tooltip
+  'chat.reset_session_btn': '↺ Reset session',
+  'chat.reset_session_tip': 'Reset session — start a fresh context (a brief handoff summary is saved). Use when context is full or a clean slate is needed.',
+  // Reset result toasts
+  'chat.reset_done': 'Session reset — fresh start',
+  'chat.reset_no_session': 'No active session to reset',
+  'chat.reset_failed': 'Reset failed: {reason}',
+  // Auto-compact toast (Spec-039: native CLI compact fired)
+  'chat.compact_toast': 'Context compacted · session kept',
+  // Context warn banner — new framing (no mention of auto-rotate)
+  'chat.ctx_warn_approaching': '⚠ Context ~{nK}K — auto-compact fires at ~190K. A large turn may hit the 200K wall.',
+  'chat.ctx_warn_critical': '⚠ Context {nK}K — critically close to the 200K wall. Consider resetting the session.',
+  // 200K wall error card
+  'chat.wall_error_msg': 'Session hit the 200K context wall — context overflow.',
+  'chat.wall_reset_btn': 'Reset session',
+  // Scroll-to-bottom pill (shown when user has scrolled up while messages arrive)
+  'chat.scroll_to_bottom': '↓ New messages',
 } as const
 
 export type TKey = keyof typeof en

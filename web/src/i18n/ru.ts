@@ -92,6 +92,8 @@ export const ru = {
   'tabbar.open_sidebar': 'Открыть сайдбар',
   'tabbar.open_tabs_menu': 'Переключить между открытыми проектами',
   'tabbar.open_tabs_count': 'Открытые вкладки',
+  'tabbar.working_title': 'Агент работает…',
+  'tabbar.awaiting_title': 'Агент ответил — нажмите, чтобы посмотреть',
 
   // ── Mobile navigation ────────────────────────────────────────
   'mobile.chat_tab': '💬 Chat',
@@ -551,6 +553,27 @@ export const ru = {
   'chat.tabs_close_aria': 'Закрыть чат',
   'chat.tabs_close_last': 'Нельзя закрыть последний чат',
   'chat.tabs_loading': 'Загрузка чатов…',
+
+  // ── Spec-039: session-health (no auto-reset) ─────────────────────────────────
+  // Session health bar tooltip
+  'chat.session_bar_tip': 'Реальный размер контекста сессии: {tokens} токенов (полный промпт отправляется модели каждый ход). Есть несжимаемый минимум — системный промпт Claude Code + инструменты + CLAUDE.md + память — он остаётся даже после /reset. Янтарный от ~150K · Красный от ~190K. Сессия никогда не сбрасывается автоматически — только нативный auto-compact (~190K), который сжимает контекст без потери сессии.',
+  // Reset button label + tooltip
+  'chat.reset_session_btn': '↺ Сбросить сессию',
+  'chat.reset_session_tip': 'Сбросить сессию — начать свежий контекст (сохранит краткое резюме). Используй, когда контекст переполнен или нужен чистый старт.',
+  // Reset result toasts
+  'chat.reset_done': 'Сессия сброшена — свежий старт',
+  'chat.reset_no_session': 'Нет активной сессии для сброса',
+  'chat.reset_failed': 'Сброс не удался: {reason}',
+  // Auto-compact toast (Spec-039: native CLI compact fired)
+  'chat.compact_toast': 'Контекст сжат · сессия сохранена',
+  // Context warn banner — new framing (no mention of auto-rotate)
+  'chat.ctx_warn_approaching': '⚠ Контекст ~{nK}K — скоро auto-compact (~190K). Крупный ход может упереться в стену 200K.',
+  'chat.ctx_warn_critical': '⚠ Контекст {nK}K — критически близко к стене 200K. Рекомендуется сбросить сессию.',
+  // 200K wall error card
+  'chat.wall_error_msg': 'Сессия упёрлась в стену 200K — контекст переполнен.',
+  'chat.wall_reset_btn': 'Сбросить сессию',
+  // Scroll-to-bottom pill (shown when user has scrolled up while messages arrive)
+  'chat.scroll_to_bottom': '↓ Новые сообщения',
 } as const
 
 export type TKey = keyof typeof ru

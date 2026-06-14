@@ -877,11 +877,13 @@ def _make_fake_ctx_with_topic(tmp_path, project="myproject", session_key="100:10
 
 @pytest.mark.asyncio
 async def test_auto_resume_creates_deferred_on_429(tmp_path):
-    """_maybe_auto_resume creates a fire_on_reset deferred record when api_error_status==429."""
+    """_maybe_auto_resume creates a fire_on_reset deferred record when api_error_status==429.
+    Note: default is now OFF (spec-039); patch to 1 to test the function's internal logic."""
     ctx = _make_fake_ctx_with_topic(tmp_path)
     result_event = {"type": "result", "session_id": "sess-abc123", "api_error_status": 429}
 
-    with patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+    with patch.object(_webapp, "_AUTO_RESUME_ON_RATE_LIMIT", 1), \
+         patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
         await _webapp._maybe_auto_resume(
             ctx=ctx,
             session_key="100:10",
@@ -963,7 +965,8 @@ async def test_auto_resume_toggle_off_no_record(tmp_path):
 
 @pytest.mark.asyncio
 async def test_auto_resume_loop_guard_notifies_not_creates(tmp_path):
-    """When auto_resume_count >= AUTO_RESUME_MAX, sends TG warning instead of creating record."""
+    """When auto_resume_count >= AUTO_RESUME_MAX, sends TG warning instead of creating record.
+    Note: default is now OFF (spec-039); patch to 1 to test the loop-guard logic."""
     ctx = _make_fake_ctx_with_topic(tmp_path)
     result_event = {"type": "result", "api_error_status": 429}
 
@@ -973,7 +976,8 @@ async def test_auto_resume_loop_guard_notifies_not_creates(tmp_path):
 
     max_val = _webapp._AUTO_RESUME_MAX  # default 3
 
-    with patch.object(_webapp, "_notify_operator", side_effect=capture_notify):
+    with patch.object(_webapp, "_AUTO_RESUME_ON_RATE_LIMIT", 1), \
+         patch.object(_webapp, "_notify_operator", side_effect=capture_notify):
         await _webapp._maybe_auto_resume(
             ctx=ctx,
             session_key="100:10",
@@ -990,11 +994,13 @@ async def test_auto_resume_loop_guard_notifies_not_creates(tmp_path):
 
 @pytest.mark.asyncio
 async def test_auto_resume_counter_increments(tmp_path):
-    """auto_resume_count is incremented correctly in the created record."""
+    """auto_resume_count is incremented correctly in the created record.
+    Note: default is now OFF (spec-039); patch to 1 to test the counter logic."""
     ctx = _make_fake_ctx_with_topic(tmp_path)
     result_event = {"type": "result", "api_error_status": 429}
 
-    with patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+    with patch.object(_webapp, "_AUTO_RESUME_ON_RATE_LIMIT", 1), \
+         patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
         # Simulate 2nd in chain (parent_count=2; max default=3 so still allowed)
         await _webapp._maybe_auto_resume(
             ctx=ctx,
@@ -1011,7 +1017,8 @@ async def test_auto_resume_counter_increments(tmp_path):
 
 @pytest.mark.asyncio
 async def test_auto_resume_notification_sent(tmp_path):
-    """_maybe_auto_resume sends a TG notification on successful auto-resume creation."""
+    """_maybe_auto_resume sends a TG notification on successful auto-resume creation.
+    Note: default is now OFF (spec-039); patch to 1 to test notification path."""
     ctx = _make_fake_ctx_with_topic(tmp_path)
     result_event = {"type": "result", "api_error_status": 429}
 
@@ -1019,7 +1026,8 @@ async def test_auto_resume_notification_sent(tmp_path):
     async def capture_notify(ctx, text):
         notify_calls.append(text)
 
-    with patch.object(_webapp, "_notify_operator", side_effect=capture_notify):
+    with patch.object(_webapp, "_AUTO_RESUME_ON_RATE_LIMIT", 1), \
+         patch.object(_webapp, "_notify_operator", side_effect=capture_notify):
         await _webapp._maybe_auto_resume(
             ctx=ctx,
             session_key="100:10",

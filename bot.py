@@ -35,7 +35,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
     query as _sdk_query,  # spec-034 L2: one-shot haiku reconcile
 )
-from claude_agent_sdk.types import HookContext, PostToolUseHookInput
+from claude_agent_sdk.types import HookContext, PostToolUseHookInput, PreCompactHookInput
 import webapp          # web cockpit (webapp.py) — started alongside the bot, state shared via ctx
 from board import (  # spec-034 L0/L1/L2
     board_summary,
@@ -373,7 +373,7 @@ _live_clients: "dict[str, _LiveEntry]" = {}  # session_key -> _LiveEntry
 # NOTE: In-memory only — lost on service restart between rotation and next turn; that is acceptable.
 pending_handoff: "dict[str, str]" = {}
 # Context early-warn: tracks session keys that have already received the CONTEXT_WARN_AT alert.
-# Cleared on rotation (_do_session_rotation) and on /reset so a fresh session can warn again.
+# Cleared on /reset so a fresh session can warn again.
 context_warned: "set[str]" = set()
 
 # ─────────────────────────── TG message queue ───────────────────────────
@@ -623,8 +623,8 @@ def short(cmd: str, limit=90) -> str:
 
 # ─────────────────────────── audit + watchdog ───────────────────────────
 AUDIT_DIR = DATA / "audit"
-STALL_SECONDS = int(os.environ.get("STALL_SECONDS", "300"))   # no events for N sec -> interrupt
-MAX_SECONDS = int(os.environ.get("MAX_SECONDS", "1800"))      # overall task ceiling (30 min)
+STALL_SECONDS = int(os.environ.get("STALL_SECONDS", "300"))   # kept for settings UI; stall interrupt removed (spec-039)
+MAX_SECONDS = int(os.environ.get("MAX_SECONDS", "7200"))      # absolute turn ceiling (2 h) — spec-039
 
 # ── Spec-028: persistent (long-lived) client feature flag ─────────────────────────────────────
 # PERSISTENT_CLIENT=0 (default OFF) → behaviour is byte-identical to pre-028; all existing tests pass.
@@ -759,6 +759,48 @@ def _make_post_tool_use_hook(project_name: str, session_key: str):
     return _post_tool_use_hook
 
 
+# ─────────────────────────── Spec-039: PreCompact observe hook ─────────────────────────────────
+
+def _make_pre_compact_hook(project_name: str, session_key: str):
+    """Return an async HookCallback that emits an audit line + bus/SSE event when native
+    auto-compact fires inside a long-lived ClaudeSDKClient (PERSISTENT_CLIENT=1).
+
+    Observe-only: the hook returns an empty dict, which is a valid SyncHookJSONOutput and
+    does NOT block or alter the compaction.  A crash inside the hook is silenced so it
+    never breaks a turn.
+    """
+    async def _pre_compact_hook(
+        hook_input: "PreCompactHookInput",
+        tool_use_id: "str | None",
+        context: "HookContext",
+    ) -> dict:
+        """Record native auto-compact to audit log and cockpit activity bus. Never raises."""
+        try:
+            trigger = (
+                hook_input.get("trigger", "auto")
+                if isinstance(hook_input, dict)
+                else getattr(hook_input, "trigger", "auto")
+            )
+            audit(project_name, "COMPACT", f"native auto-compact trigger={trigger}")
+
+            # Publish to the cockpit activity bus / SSE so the UI can show a toast.
+            # Mirror the same pattern used by PostToolUse (webapp._bus_publish).
+            try:
+                webapp._bus_publish(session_key, {
+                    "kind": "compact",
+                    "trigger": trigger,
+                    "project": project_name,
+                })
+            except Exception:
+                pass  # webapp not initialised or publish error — never break a turn
+        except Exception:
+            pass  # entire hook body is guarded — never propagate to the SDK
+
+        return {}  # empty SyncHookJSONOutput — observe-only, no model-visible side-effects
+
+    return _pre_compact_hook
+
+
 # ─────────────────────────── Spec-028: live-client helpers ─────────────────────────────────────
 #
 # These helpers are only active when PERSISTENT_CLIENT=1.
@@ -820,7 +862,7 @@ async def _get_or_create_live_client(
 
     Returns None whenever the persistent-client path should NOT be taken:
     - Feature flag is OFF (PERSISTENT_CLIENT=False)
-    - The call site explicitly requests ephemeral isolation (_run_card, _do_session_rotation)
+    - The call site explicitly requests ephemeral isolation (_run_card)
     - ctx is None (ctx-less test/legacy callers; they use the standard `async with` path)
 
     On flag-ON + non-ephemeral:
@@ -1221,8 +1263,8 @@ async def run_engine(  # type: ignore[return]
                                  lookup and live-client registry when PERSISTENT_CLIENT=1.
                                  None → falls back to module-level globals (pre-028 behaviour).
         ephemeral             — if True, always use a fresh ClaudeSDKClient (no live-client
-                                 reuse). Set by _run_card and _do_session_rotation which must
-                                 be fully isolated from shared sessions.
+                                 reuse). Set by _run_card which must be fully isolated from
+                                 shared sessions.
         output_format         — Spec-029 item 3: optional JSON-schema dict for structured output.
                                  When provided, ClaudeAgentOptions.output_format is set and
                                  ResultMessage.structured_output is passed through the result event.
@@ -1270,6 +1312,11 @@ async def run_engine(  # type: ignore[return]
     # Spec-029 §2: PostToolUse hook — records tool output to audit log + timeline.
     _post_tool_hook = _make_post_tool_use_hook(project_name, session_key)
 
+    # Spec-039: PreCompact hook — observe-only; emits audit line + bus event when native
+    # auto-compact fires inside a long-lived client (PERSISTENT_CLIENT=1).  Safe no-op when
+    # flag is OFF because the hook only fires if a PreCompact SDK event is emitted.
+    _pre_compact_hook = _make_pre_compact_hook(project_name, session_key)
+
     # Spec-029 §1: live streaming — emit text_delta events for incremental cockpit display.
     # STREAM_PARTIAL=0 disables without code changes (e.g. for debugging or regression isolation).
     # Default ON: clean reconciliation (the final {type:"text"} remains authoritative, deltas are
@@ -1289,7 +1336,10 @@ async def run_engine(  # type: ignore[return]
         env=env or {},
         agents=effective_agents,
         effort=effort if effort is not None else _DEFAULT_EFFORT,  # type: ignore[arg-type]
-        hooks={"PostToolUse": [HookMatcher(hooks=[_post_tool_hook])]},
+        hooks={
+            "PostToolUse": [HookMatcher(hooks=[_post_tool_hook])],
+            "PreCompact": [HookMatcher(hooks=[_pre_compact_hook])],
+        },
         # include_hook_events=False (default) — HookEventMessage lifecycle noise adds no extra
         # data beyond what the hook callback already captures, and would flood _process_messages.
         include_partial_messages=_stream_partial,
@@ -1301,8 +1351,8 @@ async def run_engine(  # type: ignore[return]
 
     # Spec-028 Phase 1: resolve which running-dict to use.
     # ctx is provided by call sites that have a context dict (run_agent, api_project_chat,
-    # _execute_deferred).  Legacy / ctx-less callers (tests, _maybe_rotate_tg slim ctx) fall
-    # back to the module-global `running` dict — behaviour is identical to pre-028.
+    # _execute_deferred).  Legacy / ctx-less callers (tests) fall back to the module-global
+    # `running` dict — behaviour is identical to pre-028.
     _running: dict = ctx["running"] if ctx is not None and "running" in ctx else running
 
     last_ctx_tokens = 0   # real context size = prompt tokens of the last AssistantMessage
@@ -1474,85 +1524,8 @@ async def run_engine(  # type: ignore[return]
 # Renders the status message (edit), watchdog, heartbeat, audit log, and final reply.
 # Behaviour is 1-to-1 with the original — only the event source is replaced by the generator.
 
-async def _maybe_rotate_tg(context, chat, thread, k: str, b: dict, last_result_event: "dict | None"):
-    """Spec-021: auto session rotation for the TG channel.
-
-    Mirrors the web-path guards: global toggle (CONTEXT_ROTATION), token threshold
-    (CONTEXT_ROTATE_AT), and a TG-queue-drain guard — rotation is skipped while
-    _TG_QUEUE[k] has pending messages and fires after the last drained turn instead.
-    Called exactly once at the end of run_agent, so no once-per-turn flag is needed
-    (unlike the web path, which checks inside the event loop).
-
-    Wiring: direct call into webapp._do_session_rotation — same direction as the
-    existing webapp._maybe_auto_resume call (only webapp->bot imports are forbidden).
-    Rotation failure must never break the TG turn — the whole body is guarded.
-    """
-    try:
-        ctx_tokens = (last_result_event or {}).get("context_tokens", 0) or 0
-        if not webapp.CONTEXT_ROTATION or ctx_tokens <= webapp.CONTEXT_ROTATE_AT:
-            return
-        if _TG_QUEUE.get(k):
-            print(f"[rotation] skipping — TG queue not empty for {k}")
-            return
-        # _do_session_rotation only reads run_engine/sessions/save_sessions from ctx.
-        # ptb_app is intentionally omitted: the TG notification is sent below via
-        # send() (already in the right chat/thread, with retry) instead of
-        # webapp._notify_tg_rotation — exactly one notification, never both.
-        rot_ctx = {
-            "sessions": sessions,
-            "save_sessions": save_sessions,
-            "run_engine": run_engine,
-        }
-        rot_project = {"name": b["project"], "model": b.get("model", DEFAULT_MODEL)}
-        summary = await webapp._do_session_rotation(rot_ctx, k, rot_project, b["cwd"])
-        if summary is not None:
-            # Spec-021 Phase 4: mark pending handoff so next turn gets the summary injected.
-            try:
-                pending_handoff[k] = summary
-            except Exception as _ph_exc:
-                print(f"[rotation] failed to store pending_handoff: {_ph_exc}")
-            await send(
-                context, chat, thread,
-                md_to_html(f"♻️ Session rotated at {ctx_tokens // 1000}K tokens — handoff saved"),
-                parse_mode=ParseMode.HTML,
-            )
-    except Exception as rot_exc:
-        print(f"[rotation] TG-path rotation failed (continuing with old session): {rot_exc}")
-
-
-async def _maybe_warn_tg(context, chat, thread, k: str, last_result_event: "dict | None"):
-    """Spec-021: one-time early context warning for the TG channel.
-
-    Fires when context crosses webapp.CONTEXT_WARN_AT (upward only) and has not yet
-    reached the hard backstop webapp.CONTEXT_ROTATE_AT.  Tracks the crossing in the
-    module-level context_warned set so the warning is sent at most once per session.
-    Cleared by cmd_reset (/reset) and by _do_session_rotation so a fresh session can warn again.
-
-    Mirrors the anti-spam and try/except guard pattern of _maybe_rotate_tg.
-    """
-    try:
-        ctx_tokens = (last_result_event or {}).get("context_tokens", 0) or 0
-        warn_at = webapp.CONTEXT_WARN_AT
-        rotate_at = webapp.CONTEXT_ROTATE_AT
-        # Only fire in the warn zone (at/above warn threshold but below the rotation backstop).
-        if not (warn_at <= ctx_tokens < rotate_at):
-            return
-        # Anti-spam: only on the upward crossing (first turn in the warn zone).
-        if k in context_warned:
-            return
-        context_warned.add(k)
-        k_display = round(ctx_tokens / 1000)
-        backstop_k = round(rotate_at / 1000)
-        await send(
-            context, chat, thread,
-            md_to_html(
-                f"⚠️ Контекст ~{k_display}K (бэкстоп {backstop_k}K). "
-                f"Стоит /rotate или сжать следующий запрос, пока не влетел в жирный ход."
-            ),
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception as warn_exc:
-        print(f"[context-warn] TG-path warn failed: {warn_exc}")
+# spec-039: _maybe_rotate_tg and _maybe_warn_tg removed — TG auto-rotation and
+# TG context-warn ping deleted. No code path may auto-reset a session by token count.
 
 
 async def run_agent(context, update, prompt: str):
@@ -1608,26 +1581,22 @@ async def run_agent(context, update, prompt: str):
             pass
 
     async def watchdog():
-        """Interrupts a stalled task: no events for stall_s OR max_s exceeded.
-        Thresholds come from cockpit global settings (settings.json), falling back to env defaults."""
-        stall_s, max_s = STALL_SECONDS, MAX_SECONDS
+        """Absolute turn ceiling: interrupts only when MAX_SECONDS is exceeded.
+
+        spec-039: stall interrupt removed — a quiet or long-running turn must not be
+        interrupted. Only the absolute ceiling (watchdog_max_sec, default 7200 s) fires.
+        The interrupt ends the current turn only; the session and live client survive.
+        """
+        max_s = MAX_SECONDS
         try:
             import webapp as _wa
-            stall_s = int(_wa._get_global_setting("watchdog_stall_sec", STALL_SECONDS) or STALL_SECONDS)
             max_s = int(_wa._get_global_setting("watchdog_max_sec", MAX_SECONDS) or MAX_SECONDS)
         except Exception:
             pass
         try:
             while True:
-                await asyncio.sleep(min(stall_s, 20))
-                now = time.time()
-                idle = now - last_event[0]
-                if idle > stall_s:
-                    if stall_s < 60:
-                        stalled["reason"] = f"no events for {int(idle)}s"
-                    else:
-                        stalled["reason"] = f"no events for {int(idle // 60)} min"
-                elif now - t_start > max_s:
+                await asyncio.sleep(20)
+                if time.time() - t_start > max_s:
                     stalled["reason"] = f"exceeded limit of {max_s // 60} min"
                 cl = running.get(k)
                 if stalled["reason"] and hasattr(cl, "interrupt"):
@@ -1810,29 +1779,8 @@ async def run_agent(context, update, prompt: str):
         pass
     audit(b["project"], "DONE", f"edits={n_edits}" + (f" STALLED:{stalled['reason']}" if stalled["reason"] else ""))
 
-    # Phase D: auto-resume if TG run was killed by rate-limit
-    _tg_ctx = {
-        "topics": topics,
-        "sessions": sessions,
-        "running": running,
-        "rate_limits": rate_limits,
-        "ptb_app": context.application if hasattr(context, "application") else None,
-    }
-    _resume_sid_tg = sessions.get(k)
-    await webapp._maybe_auto_resume(
-        ctx=_tg_ctx,
-        session_key=k,
-        original_prompt=prompt,
-        last_result_event=_tg_last_result_event,
-        resume_session_id=_resume_sid_tg,
-    )
-
-    # Spec-021: auto session rotation for the TG channel (after auto-resume check).
-    await _maybe_rotate_tg(context, chat, thread, k, b, _tg_last_result_event)
-
-    # Context early-warning: one-time TG alert when approaching the rotation backstop.
-    # Fires only in the warn zone (>= CONTEXT_WARN_AT, < CONTEXT_ROTATE_AT); muted after rotation.
-    await _maybe_warn_tg(context, chat, thread, k, _tg_last_result_event)
+    # spec-039: auto-resume and TG auto-rotation/warn calls removed.
+    # _maybe_auto_resume default is now OFF; _maybe_rotate_tg / _maybe_warn_tg deleted.
 
     # spec-034 L2: board reconciler — schedule as background task (never blocks the reply).
     agent_reply = "\n".join(answer).strip()
@@ -2064,6 +2012,11 @@ async def cmd_reset(update, context):
     cleared = _tg_queue_clear(k)
     # Clear context-warn state so a fresh session can warn again.
     context_warned.discard(k)
+    # spec-039: evict the live client so PERSISTENT_CLIENT=1 truly starts fresh.
+    try:
+        await _evict_live_client(k, None)
+    except Exception as _exc:
+        print(f"[cmd_reset] live-client eviction error for {k}: {_exc!r}")
     b = topics.get(k) or binding_for(update)
     proj = b["project"] if b else "—"
     queue_note = f" Queue cleared ({cleared} message(s))." if cleared else ""
@@ -2373,9 +2326,45 @@ def _build_ctx(ptb_app) -> dict:
         # importing bot.py; webapp passes ctx to run_engine which reads these fields).
         "PERSISTENT_CLIENT": PERSISTENT_CLIENT,
         "live_clients": _live_clients,
+        # spec-039: eviction callable exposed via ctx so webapp.py can evict live clients
+        # without importing bot.py.  Signature: async (session_key: str, ctx: dict|None) -> None.
+        "evict_live_client": _evict_live_client,
         # spec-034 L2: board reconciler callable (webapp.py must not import bot.py directly)
         "reconcile_board": reconcile_board,
     }
+
+
+async def _graceful_shutdown(registry: "dict[str, object]") -> None:
+    """Flush session state and evict all live clients on process shutdown.
+
+    spec-039 safety constraint (cgroup gotcha): this function MUST NOT call
+    systemctl, kill, or os._exit — it only persists state on the way down.
+    Process termination is owned entirely by systemd.  Idempotent and exception-safe.
+
+    `registry` is the live-client dict to drain (in production: the module-level
+    `_live_clients`).  Eviction is done via a synthetic ctx so _evict_live_client
+    pops from the correct dict regardless of whether it matches `_live_clients`.
+    """
+    # 1. Persist in-flight session_ids so the next startup can resume them.
+    try:
+        save_sessions()
+        print("[shutdown] sessions.json flushed")
+    except Exception as exc:
+        print(f"[shutdown] WARNING: failed to flush sessions.json: {exc!r}")
+
+    # 2. Gracefully disconnect all live CLI subprocesses.
+    if not registry:
+        return
+    keys = list(registry.keys())
+    print(f"[shutdown] evicting {len(keys)} live client(s): {keys}")
+    # Build a synthetic ctx so _evict_live_client targets `registry`, not `_live_clients`,
+    # in the rare case they are different objects (tests, future multi-registry setups).
+    _shutdown_ctx = {"live_clients": registry}
+    for key in keys:
+        try:
+            await _evict_live_client(key, _shutdown_ctx)
+        except Exception as exc:
+            print(f"[shutdown] WARNING: eviction failed for {key}: {exc!r}")
 
 
 async def _amain() -> None:
@@ -2389,6 +2378,25 @@ async def _amain() -> None:
     PTB is started via the manual lifecycle (initialize/start/start_polling)
     rather than run_polling() so it does NOT take over the loop.
     """
+    # spec-039: stop event — SIGTERM/SIGINT handlers set this instead of raising;
+    # the main coroutine awaits it, then performs graceful cleanup and returns.
+    # Systemd owns process termination — we never call os._exit or kill ourselves
+    # (cgroup gotcha: any such call inside the cgroup tears down the daemon mid-flight).
+    _stop_event = asyncio.Event()
+
+    def _handle_shutdown_signal():
+        print("[signal] shutdown requested — initiating graceful flush")
+        _stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    import signal as _signal
+    for _sig in (_signal.SIGTERM, _signal.SIGINT):
+        try:
+            loop.add_signal_handler(_sig, _handle_shutdown_signal)
+        except (NotImplementedError, RuntimeError):
+            # Windows / restricted environments — fall back to default behaviour.
+            pass
+
     if BOT_TOKEN:
         # ── Telegram mode ──────────────────────────────────────────────────
         ptb_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -2426,11 +2434,40 @@ async def _amain() -> None:
 
         # Idle until shutdown signal
         try:
-            await asyncio.Event().wait()
+            await _stop_event.wait()
         finally:
-            await ptb_app.updater.stop()
-            await ptb_app.stop()
-            await ptb_app.shutdown()
+            # spec-039 graceful shutdown — two-phase:
+            # Phase 1 (UNBOUNDED): flush sessions + evict live clients.  Must always
+            #   run fully — losing session state on restart is worse than a slow stop.
+            await _graceful_shutdown(_live_clients)
+
+            # Phase 2 (BOUNDED ≤12 s): tear down webapp background loops + aiohttp
+            #   runner, then stop PTB.  Wrapped in wait_for so we can never again
+            #   block long enough for systemd's TimeoutStopSec to fire.
+            async def _bounded_teardown_tg() -> None:
+                await webapp.stop()
+                await ptb_app.updater.stop()
+                await ptb_app.stop()
+                await ptb_app.shutdown()
+
+            try:
+                await asyncio.wait_for(_bounded_teardown_tg(), timeout=12.0)
+                print("[shutdown] clean teardown complete")
+            except asyncio.TimeoutError:
+                # State is already flushed (Phase 1 finished).  Log and fall through
+                # so asyncio.run() can cancel remaining tasks and exit the loop.
+                print("[shutdown] WARNING: bounded teardown timed out (12 s) — "
+                      "forcing loop exit; state was already flushed in Phase 1")
+
+            # Phase 3: cancel any remaining non-current tasks so asyncio.run() returns
+            # immediately rather than waiting for them to drain.
+            current = asyncio.current_task()
+            remaining = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+            if remaining:
+                print(f"[shutdown] cancelling {len(remaining)} lingering task(s)")
+                for t in remaining:
+                    t.cancel()
+                await asyncio.gather(*remaining, return_exceptions=True)
     else:
         # ── Web-only mode ─────────────────────────────────────────────────
         # No BOT_TOKEN set.  The web cockpit and engine run standalone.
@@ -2441,7 +2478,28 @@ async def _amain() -> None:
         print("Claude-Ops-Bot started (web-only mode, no Telegram).")
 
         # Idle until shutdown signal
-        await asyncio.Event().wait()
+        try:
+            await _stop_event.wait()
+        finally:
+            # Phase 1 (UNBOUNDED): flush state.
+            await _graceful_shutdown(_live_clients)
+
+            # Phase 2 (BOUNDED ≤12 s): tear down webapp.
+            try:
+                await asyncio.wait_for(webapp.stop(), timeout=12.0)
+                print("[shutdown] clean teardown complete (web-only)")
+            except asyncio.TimeoutError:
+                print("[shutdown] WARNING: bounded teardown timed out (12 s) — "
+                      "forcing loop exit; state was already flushed in Phase 1")
+
+            # Phase 3: cancel lingering tasks.
+            current = asyncio.current_task()
+            remaining = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+            if remaining:
+                print(f"[shutdown] cancelling {len(remaining)} lingering task(s)")
+                for t in remaining:
+                    t.cancel()
+                await asyncio.gather(*remaining, return_exceptions=True)
 
 
 def _check_web_password(password: str) -> None:

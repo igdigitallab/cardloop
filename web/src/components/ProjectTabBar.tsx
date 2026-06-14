@@ -9,6 +9,8 @@ interface Props {
   unreadBySession: Record<string, number>
   /** Project IDs where the agent finished a run while the tab was not active */
   replyReadyIds?: Set<string>
+  /** Project IDs where an agent turn is currently in flight (working indicator) */
+  runningIds?: Set<string>
   onActivate: (id: string) => void
   onClose: (id: string) => void
   onRename: (id: string, label: string) => void
@@ -34,13 +36,15 @@ interface Props {
 }
 
 function TabItem({
-  project, isActive, unread, replyReady, onActivate, onClose, onRename, activeRef,
+  project, isActive, unread, replyReady, isRunning, onActivate, onClose, onRename, activeRef,
 }: {
   project: Project
   isActive: boolean
   unread: number
   /** True when the agent finished a reply while this tab was not active */
   replyReady?: boolean
+  /** True while an agent turn is in flight for this project */
+  isRunning?: boolean
   onActivate: () => void
   onClose: () => void
   onRename: (label: string) => void
@@ -100,11 +104,15 @@ function TabItem({
       ) : (
         <span className="ptab-name">{project.name}</span>
       )}
+
+      {!editing && isRunning && (
+        <span className="ptab-working" title={t['tabbar.working_title']} aria-label={t['tabbar.working_title']} />
+      )}
       {!editing && unread > 0 && !isActive && (
         <span className="ptab-unread" title={`${unread} new`}>{unread > 99 ? '99+' : unread}</span>
       )}
-      {!editing && replyReady && !isActive && (
-        <span className="ptab-reply-ready" title="Agent reply is ready" />
+      {!editing && replyReady && !isActive && !isRunning && (
+        <span className="ptab-reply-ready" title={t['tabbar.awaiting_title']} />
       )}
       {!editing && isActive && (
         <button
@@ -120,7 +128,7 @@ function TabItem({
 }
 
 export function ProjectTabBar({
-  projects, activeId, unreadBySession, replyReadyIds, onActivate, onClose, onRename, onNewFree,
+  projects, activeId, unreadBySession, replyReadyIds, runningIds, onActivate, onClose, onRename, onNewFree,
   globalFilesOpen, globalFilesActive, onOpenGlobalFiles, onCloseGlobalFiles,
   schedulesOpen, schedulesActive, onOpenSchedules, onCloseSchedules,
   vaultOpen, vaultActive, onOpenVault, onCloseVault,
@@ -180,6 +188,7 @@ export function ProjectTabBar({
                   const unread = sk ? (unreadBySession[sk] || 0) : 0
                   const isActive = p.id === activeId
                   const hasIncidents = (p.incidents ?? 0) > 0
+                  const isRunning = runningIds?.has(p.id)
                   return (
                     <button
                       key={p.id}
@@ -189,8 +198,11 @@ export function ProjectTabBar({
                       onClick={() => { onActivate(p.id); setTabMenuOpen(false) }}
                     >
                       <span className="ptab-menu-name">{p.name}</span>
-                      {replyReadyIds?.has(p.id) && !isActive && (
-                        <span className="ptab-menu-dot ptab-menu-dot-green" title="Agent reply ready" />
+                      {isRunning && (
+                        <span className="ptab-menu-dot ptab-menu-dot-working" title={t['tabbar.working_title']} />
+                      )}
+                      {replyReadyIds?.has(p.id) && !isActive && !isRunning && (
+                        <span className="ptab-menu-dot ptab-menu-dot-green" title={t['tabbar.awaiting_title']} />
                       )}
                       {hasIncidents && (
                         <span className="ptab-menu-badge" title={`${p.incidents} incident(s)`}>
@@ -219,6 +231,7 @@ export function ProjectTabBar({
               isActive={isActive}
               unread={unread}
               replyReady={replyReadyIds?.has(p.id)}
+              isRunning={runningIds?.has(p.id)}
               onActivate={() => onActivate(p.id)}
               onClose={() => onClose(p.id)}
               onRename={(label) => onRename(p.id, label)}

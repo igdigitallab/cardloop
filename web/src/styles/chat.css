@@ -166,7 +166,34 @@
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  /* Keep the bar on one line; scroll horizontally if content exceeds width
+     rather than allowing children to wrap onto a second line. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.chat-session-bar::-webkit-scrollbar { display: none; }
+
+/* Prevent any direct child of the session bar from shrinking to nothing —
+   each control must stay at its natural width; the bar scrolls instead. */
+.chat-session-bar > * {
+  flex-shrink: 0;
+}
+
+/* Session health inline group: may shrink slightly to give room to other items,
+   but never below its minimum readable width. */
+.chat-session-health {
+  flex-shrink: 1;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+/* Reset / action buttons inside the session bar must not wrap their label. */
+.chat-session-bar .btn.btn-sm {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* Model selector в шапке чата */
@@ -1136,7 +1163,7 @@
   padding-left: 2px;
 }
 
-/* ── Spec-038: inline chat image + lightbox ──────────────────── */
+/* ── Spec-038: inline chat image/video + lightbox ────────────── */
 
 /* Thumbnail rendered by ChatImage inside ReactMarkdown */
 .chat-msg-img {
@@ -1151,6 +1178,20 @@
   border: 1px solid var(--border);
   object-fit: contain;
   background: var(--bg2);
+}
+
+/* Inline video preview rendered by ChatImage — same sizing as images */
+.chat-msg-video {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  border-radius: 6px;
+  cursor: zoom-in;
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  background: #000;
 }
 
 /* Full-screen lightbox overlay */
@@ -1172,6 +1213,16 @@
   object-fit: contain;
   border-radius: 6px;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  cursor: default;
+}
+
+/* Video inside the lightbox — contained to viewport, native controls */
+.lightbox-video {
+  max-width: 95vw;
+  max-height: 95vh;
+  border-radius: 6px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  background: #000;
   cursor: default;
 }
 
@@ -1200,4 +1251,38 @@
 .lightbox-close:hover,
 .lightbox-close:active {
   background: rgba(0, 0, 0, 0.8);
+}
+
+/* ── Scroll-to-bottom pill (stick-to-bottom pattern) ────────── */
+/* Floats over the bottom-right of the .chat-feed scroll container.
+   Visible only when the user has scrolled up while new messages arrive. */
+.chat-scroll-pill {
+  position: absolute;
+  bottom: 12px;
+  right: 14px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  background: var(--accent, #6366f1);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  border: none;
+  border-radius: 20px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  opacity: 0.95;
+  transition: opacity 0.15s, transform 0.15s;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+.chat-scroll-pill:hover {
+  opacity: 1;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+.chat-scroll-pill:active {
+  transform: translateY(0);
 }

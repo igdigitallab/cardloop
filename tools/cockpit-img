@@ -1,34 +1,37 @@
 #!/usr/bin/env bash
-# cockpit-img — push a screenshot into the cockpit chat as an inline image.
+# cockpit-img — push a screenshot or video into the cockpit chat as inline media.
 #
-# Usage:  cockpit-img <path-to-image> [caption]
+# Usage:  cockpit-img <path-to-file> [caption]
 #
-# The script copies the image into $COPS_MEDIA_DIR (set by the cockpit agent
+# The script copies the file into $COPS_MEDIA_DIR (set by the cockpit agent
 # launcher) and prints one markdown line to stdout:
 #   ![caption](/api/projects/<COPS_PROJECT_ID>/media/<filename>)
 #
 # The agent includes that line in its reply text; react-markdown renders it
-# inline in the cockpit chat with a click-to-fullscreen lightbox (spec-038).
+# inline in the cockpit chat.  Images open in a full-screen lightbox; video
+# files render as an HTML5 <video> player with the same lightbox overlay
+# (spec-038 + spec-038 video extension).
 #
 # Env vars (set automatically by the cockpit project agent launcher):
 #   COPS_MEDIA_DIR    — absolute path to data/chat-media/<project_id>/
 #   COPS_PROJECT_ID   — project id used to build the /api/projects/... URL
 #
-# Supported formats: png jpg jpeg webp gif
-# Size cap: 15 MB
+# Supported image formats: png jpg jpeg webp gif  (size cap: 15 MB)
+# Supported video formats: mp4 webm mov ogg ogv   (size cap: 200 MB)
 set -euo pipefail
 
 # ── help ────────────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || -z "${1:-}" ]]; then
   cat <<'EOF'
-cockpit-img — push a screenshot into the cockpit chat (inline lightbox).
+cockpit-img — push a screenshot or video into the cockpit chat (inline viewer).
 
-Usage:  cockpit-img <path-to-image> [caption]
+Usage:  cockpit-img <path-to-file> [caption]
 
 Prints one markdown line:  ![caption](/api/projects/<id>/media/<filename>)
 Include that line in your reply and the cockpit will render it inline.
 
-Supported formats: png jpg jpeg webp gif  |  Max size: 15 MB
+Supported images: png jpg jpeg webp gif  |  Max size: 15 MB
+Supported videos: mp4 webm mov ogg ogv   |  Max size: 200 MB
 Env (set by cockpit launcher): COPS_MEDIA_DIR, COPS_PROJECT_ID
 EOF
   exit 0
@@ -44,19 +47,28 @@ CAPTION="${2:-screenshot}"
 : "${COPS_MEDIA_DIR:?cockpit-img: COPS_MEDIA_DIR is not set — run from a cockpit project agent context}"
 : "${COPS_PROJECT_ID:?cockpit-img: COPS_PROJECT_ID is not set — run from a cockpit project agent context}"
 
-# ── validate extension ───────────────────────────────────────────────────────
+# ── validate extension and pick size cap ────────────────────────────────────
 EXT_LC="${FILE##*.}"
 EXT_LC="${EXT_LC,,}"
 case "$EXT_LC" in
-  png|jpg|jpeg|webp|gif) ;;
-  *) echo "cockpit-img: unsupported image format '$EXT_LC' (allowed: png jpg jpeg webp gif)" >&2; exit 1 ;;
+  png|jpg|jpeg|webp|gif)
+    MAX_BYTES=$((15 * 1024 * 1024))
+    MAX_LABEL="15 MB"
+    ;;
+  mp4|webm|mov|ogg|ogv)
+    MAX_BYTES=$((200 * 1024 * 1024))
+    MAX_LABEL="200 MB"
+    ;;
+  *)
+    echo "cockpit-img: unsupported format '$EXT_LC' (images: png jpg jpeg webp gif; videos: mp4 webm mov ogg ogv)" >&2
+    exit 1
+    ;;
 esac
 
-# ── size cap (15 MB) ─────────────────────────────────────────────────────────
-MAX_BYTES=$((15 * 1024 * 1024))
+# ── size cap ─────────────────────────────────────────────────────────────────
 FILE_BYTES=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null || echo 0)
 if [[ "$FILE_BYTES" -gt "$MAX_BYTES" ]]; then
-  echo "cockpit-img: file too large ($(( FILE_BYTES / 1024 / 1024 )) MB > 15 MB limit)" >&2
+  echo "cockpit-img: file too large ($(( FILE_BYTES / 1024 / 1024 )) MB > $MAX_LABEL limit)" >&2
   exit 1
 fi
 
@@ -66,7 +78,7 @@ BASENAME=$(basename "$FILE")
 # Strip extension, sanitize: keep alphanumeric + dash + dot, collapse runs of _
 NAME_NO_EXT="${BASENAME%.*}"
 SAFE_NAME=$(printf '%s' "$NAME_NO_EXT" | tr -cs '[:alnum:]._-' '_' | sed 's/__*/_/g; s/^_//; s/_$//')
-[[ -z "$SAFE_NAME" ]] && SAFE_NAME="img"
+[[ -z "$SAFE_NAME" ]] && SAFE_NAME="media"
 DEST_FILENAME="${TS}_${SAFE_NAME}.${EXT_LC}"
 
 # ── ensure media dir exists and copy ────────────────────────────────────────

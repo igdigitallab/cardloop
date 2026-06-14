@@ -97,6 +97,8 @@ export default function App() {
   const { unreadBySession, incrementUnread, clearUnreadForSession, resetUnread } = useUnreadTracker()
   // Reply-ready: project IDs where the agent finished a run while the tab was not active
   const [replyReadyIds, setReplyReadyIds] = useState<Set<string>>(() => new Set())
+  // ops:b2a081 — project IDs where an agent turn is currently in flight (working indicator)
+  const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set())
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => readBool(LS_SIDEBAR_COLLAPSED, false))
   // Request to open a project's Settings tab (from sidebar context menu). nonce bumps so
   // repeat requests for an already-open project still fire the effect in ProjectView.
@@ -162,6 +164,22 @@ export default function App() {
             )
           })
         return same ? prev : res.projects
+      })
+      // ops:b2a081 — sync running/awaiting sets from backend on every poll.
+      // This makes the indicators refresh-durable: after a page reload the backend
+      // knows the real state and we restore it here without needing SSE history.
+      const backendRunning = new Set(res.projects.filter(p => p.running).map(p => p.id))
+      const backendAwaiting = new Set(res.projects.filter(p => p.awaiting).map(p => p.id))
+      setRunningIds(prev => {
+        const same = prev.size === backendRunning.size && [...prev].every(id => backendRunning.has(id))
+        return same ? prev : backendRunning
+      })
+      setReplyReadyIds(prev => {
+        // Merge: keep locally known reply-ready ids PLUS backend-known ones
+        // (SSE is the primary source, backend poll is the refresh-durability fallback)
+        const merged = new Set([...prev, ...backendAwaiting])
+        const same = merged.size === prev.size && [...merged].every(id => prev.has(id))
+        return same ? prev : merged
       })
       projectsLoadedRef.current = true
     } catch {
@@ -287,6 +305,8 @@ export default function App() {
   }, [projects])
 
   // Global SSE activity stream → unread indicators + live git-status refresh
+  // ops:b2a081: also drives runningIds (working indicator) and replyReadyIds (attention badge).
+  // Single EventSource = O(1) connections regardless of how many tabs are open.
   useEffect(() => {
     if (authState !== 'authed') return
 
@@ -297,15 +317,28 @@ export default function App() {
       const sk = payload.session_key
       if (!sk) return
 
+      const findProj = () =>
+        projectsRef.current.find(p => p.tg_thread != null && String(p.tg_thread) === sk)
+
+      if (payload.kind === 'run_start') {
+        // Agent started a new turn — show working indicator; clear any stale attention badge
+        const proj = findProj()
+        if (!proj) return
+        setRunningIds(prev => { const n = new Set(prev); n.add(proj.id); return n })
+        setReplyReadyIds(prev => { if (!prev.has(proj.id)) return prev; const n = new Set(prev); n.delete(proj.id); return n })
+        return
+      }
+
       // run_end → agent may have written files → refresh project list
       // (git.dirty/unpushed in header and sidebar will become current)
       if (payload.kind === 'run_end') {
         loadProjects()
-        // Mark project as reply-ready when its tab is not currently active
-        const proj = sk
-          ? projectsRef.current.find(p => p.tg_thread != null && String(p.tg_thread) === sk)
-          : null
-        if (proj && proj.id !== activeIdRef.current) {
+        const proj = findProj()
+        if (!proj) return
+        // Clear working indicator
+        setRunningIds(prev => { if (!prev.has(proj.id)) return prev; const n = new Set(prev); n.delete(proj.id); return n })
+        // Mark project as attention-needed when its tab is not currently active
+        if (proj.id !== activeIdRef.current) {
           setReplyReadyIds(prev => {
             const next = new Set(prev)
             next.add(proj.id)
@@ -317,9 +350,9 @@ export default function App() {
 
       // Only count meaningful events for unread
       if (payload.kind !== 'text' && payload.kind !== 'tool') return
-      const proj = projectsRef.current.find(p => p.tg_thread != null && String(p.tg_thread) === sk)
+      const proj = findProj()
       if (proj && proj.id === activeIdRef.current) return
-      incrementUnread(sk)
+      if (proj) incrementUnread(sk)
     }
     es.onerror = () => { /* EventSource will reconnect automatically */ }
     return () => { es.close() }
@@ -358,6 +391,9 @@ export default function App() {
       next.delete(id)
       return next
     })
+    // ops:b2a081 — notify backend that the operator has opened this tab
+    // so the server-side awaiting flag clears (survives page refresh)
+    api.projectSeen(id).catch(() => { /* non-critical — best effort */ })
   }, [clearUnreadForSession])
 
   // Open project (sidebar click) — add to openIds (if not there) + activate
@@ -666,6 +702,7 @@ export default function App() {
           activeId={activeId}
           unreadBySession={unreadBySession}
           replyReadyIds={replyReadyIds}
+          runningIds={runningIds}
           onActivate={handleTabActivate}
           onClose={handleTabClose}
           onRename={handleRenameTab}

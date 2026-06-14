@@ -467,16 +467,15 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     const raw = newText.trim()
     if (!raw) return
     setNewText('')
-    // Auto-split: first line / first 120 chars = title, the rest = description
+    // Multi-line input: first line = title, remaining lines = description.
+    // Single-line input (no matter the length): send as-is — no character cap.
+    // The backend stores the full text; long single-line tasks are NOT truncated.
     let title = raw
     let description: string | null = null
     const nlIdx = raw.indexOf('\n')
     if (nlIdx !== -1) {
       title = raw.slice(0, nlIdx).trim()
       description = raw.slice(nlIdx + 1).trim() || null
-    } else if (raw.length > 120) {
-      title = raw.slice(0, 120).trimEnd()
-      description = raw.slice(120).trim() || null
     }
     run(api.createTask(projectId, title, 'backlog', description))
   }

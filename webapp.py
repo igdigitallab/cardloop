@@ -51,7 +51,7 @@ _DEFERRED_FILE: "Path | None" = None  # set in _deferred_init(ctx)
 # Phase D: auto-resume on rate-limit
 # AUTO_RESUME_ON_RATE_LIMIT=1 (default) — create a fire_on_reset deferred record whenever a run
 # terminates with api_error_status=429 (rate-limited mid-flight). Set to 0 to disable.
-_AUTO_RESUME_ON_RATE_LIMIT = int(os.environ.get("AUTO_RESUME_ON_RATE_LIMIT", "1"))
+_AUTO_RESUME_ON_RATE_LIMIT = int(os.environ.get("AUTO_RESUME_ON_RATE_LIMIT", "0"))  # spec-039: default OFF
 # Maximum consecutive auto-resume records allowed in one chain (loop guard).
 # Counted via auto_resume_count on the deferred record.
 _AUTO_RESUME_MAX = int(os.environ.get("AUTO_RESUME_MAX", "3"))
@@ -113,6 +113,14 @@ ROTATION_SUMMARY_PROMPT = (
 # Prevents GC from collecting tasks before they complete (Python docs warning).
 _BG_TASKS: set = set()
 
+# spec-039 shutdown: the 5 always-on background loops spawned at startup are tracked
+# here so webapp.stop() can cancel + await them.  Populated exclusively by start().
+_STARTUP_BG_TASKS: list = []
+
+# spec-039 shutdown: the AppRunner created in start() is stored here so stop() can
+# call runner.cleanup().  None until start() completes.
+_runner = None
+
 
 def _spawn_bg(coro):
     """Creates a fire-and-forget task, protected from GC via _BG_TASKS.
@@ -134,6 +142,14 @@ _bus: dict[str, set[asyncio.Queue]] = {}
 # Global subscribers — receive ALL events from all sessions, with session_key injected.
 # Used for the application-wide activity stream (unread indicators in the sidebar).
 _bus_global: set[asyncio.Queue] = set()
+
+# ── Tab activity state (board card ops:b2a081) ───────────────────────────────
+# session_key → timestamp of last run_end (set when a turn finishes).
+# Cleared by POST /api/projects/{id}/seen (operator opened the tab).
+# Used to compute awaiting = last_finished_ts > last_seen_ts.
+_awaiting: dict[str, float] = {}
+# session_key → timestamp of last operator "seen" action (tab focus/open).
+_seen: dict[str, float] = {}
 
 
 def _bus_subscribe(session_key: str) -> "asyncio.Queue[dict]":
@@ -189,6 +205,14 @@ def _bus_publish(session_key: str, event: dict, persist: bool = True) -> None:
     # Timeline persistence — single write point for all bus events (unless persist=False)
     if persist:
         _timeline_append(session_key, event)
+    # Tab activity state — track awaiting (run finished, operator hasn't looked yet).
+    # run_end → project is now awaiting operator attention.
+    # run_start → new run started, clear any previous awaiting marker.
+    kind = event.get("kind")
+    if kind == "run_end":
+        _awaiting[session_key] = time.time()
+    elif kind == "run_start":
+        _awaiting.pop(session_key, None)
 
 
 # ─────────────────────────── live turn buffer (spec-035) ─────────────────────
@@ -1369,18 +1393,27 @@ async def api_projects(req: web.Request) -> web.Response:
             return 0
         return sum(1 for col_cards in cols.values() for c in col_cards if _is_incident_card(c))
 
+    def _activity_state(p: dict) -> dict:
+        """Returns running/awaiting state for a project (O(1) dict lookup)."""
+        sk = p.get("tg_thread", "")
+        running = ctx["running"].get(sk) is not None
+        finished_ts = _awaiting.get(sk, 0.0)
+        seen_ts = _seen.get(sk, 0.0)
+        awaiting = finished_ts > 0 and finished_ts > seen_ts
+        return {"running": running, "awaiting": awaiting}
+
     async def enrich(p: dict) -> dict:
         # For free chats git checks are meaningless (cwd is usually $HOME, not a project repo)
         if p.get("is_free"):
-            return {**p, "health": {"git": None}, "incidents": 0}
+            return {**p, "health": {"git": None}, "incidents": 0, **_activity_state(p)}
         # git disabled by project setting — don't show git status
         if not _git_enabled(p):
-            return {**p, "health": {"git": None}, "incidents": _count_incidents(p["cwd"])}
+            return {**p, "health": {"git": None}, "incidents": _count_incidents(p["cwd"]), **_activity_state(p)}
         try:
             git = await _git_info(p["cwd"])
         except Exception:
             git = None
-        return {**p, "health": {"git": git}, "incidents": _count_incidents(p["cwd"])}
+        return {**p, "health": {"git": git}, "incidents": _count_incidents(p["cwd"]), **_activity_state(p)}
 
     try:
         enriched = await asyncio.gather(*[enrich(p) for p in projects])
@@ -1588,6 +1621,14 @@ async def api_project_delete(req: web.Request) -> web.Response:
         ctx["save_sessions"]()
     except Exception as e:
         print(f"[delete] WARNING: sessions cleanup failed: {e}")
+
+    # spec-039: evict any live client for this session key
+    try:
+        _evict_fn = ctx.get("evict_live_client")
+        if _evict_fn is not None and tg_thread:
+            await _evict_fn(tg_thread, ctx)
+    except Exception as e:
+        print(f"[delete] WARNING: live-client eviction failed: {e}")
 
     # archived.json
     try:
@@ -3007,7 +3048,7 @@ _SETTINGS_MTIME: float = 0.0
 _GLOBAL_SETTINGS_SPEC = {
     "scan_interval_sec": ("int", 30, 3600),
     "default_model": ("model", None, None),          # "" → ctx default
-    "watchdog_stall_sec": ("int", 30, 7200),
+    # watchdog_stall_sec removed — stall interrupt deleted (spec-039)
     "watchdog_max_sec": ("int", 60, 14400),
     # Spec-012 Ph3: global master flag for push endpoint. OFF by default —
     # operator must explicitly enable. Without this flag POST /incident → 404.
@@ -3230,8 +3271,8 @@ async def api_settings_get(req: web.Request) -> web.Response:
     effective = {
         "scan_interval_sec": int(_get_global_setting("scan_interval_sec", _SCAN_INTERVAL_SEC)),
         "default_model": _get_global_setting("default_model", ctx.get("DEFAULT_MODEL", "sonnet")),
-        "watchdog_stall_sec": int(_get_global_setting("watchdog_stall_sec", int(os.environ.get("STALL_SECONDS", "300")))),
-        "watchdog_max_sec": int(_get_global_setting("watchdog_max_sec", int(os.environ.get("MAX_SECONDS", "1800")))),
+        # watchdog_stall_sec removed (spec-039)
+        "watchdog_max_sec": int(_get_global_setting("watchdog_max_sec", int(os.environ.get("MAX_SECONDS", "7200")))),
         # Board reconciler settings (Task A); True/done are the defaults.
         "board_reconcile_enabled": _get_global_setting("board_reconcile_enabled", True),
         "board_reconcile_on_match": _get_global_setting("board_reconcile_on_match", "done"),
@@ -3805,213 +3846,10 @@ async def _move_card_after_run(
         print(f"[_run_card] error moving card {card_id}: {e}")
 
 
-async def _notify_tg_rotation(ctx: dict, session_key: str, tokens: int) -> None:
-    """Sends a TG message notifying that the session was auto-rotated. Non-critical."""
-    try:
-        ptb = ctx.get("ptb_app")
-        if ptb is None:
-            return
-        parts = session_key.split(":", 1)
-        chat_id = int(parts[0])
-        thread_id = int(parts[1]) if len(parts) > 1 and parts[1] not in ("0", "") else None
-        k = round(tokens / 1000)
-        await ptb.bot.send_message(
-            chat_id,
-            f"♻️ Session rotated at {k}K tokens — handoff saved to memory.",
-            message_thread_id=thread_id,
-        )
-    except Exception as e:
-        print(f"[rotation] TG notify failed: {e}")
-
-
-async def _notify_tg_context_warn(ctx: dict, session_key: str, tokens: int) -> None:
-    """Sends a one-time TG warning when context crosses CONTEXT_WARN_AT. Non-critical.
-    Called only on the upward crossing (anti-spam); caller owns the once-per-session guard."""
-    try:
-        ptb = ctx.get("ptb_app")
-        if ptb is None:
-            return
-        parts = session_key.split(":", 1)
-        chat_id = int(parts[0])
-        thread_id = int(parts[1]) if len(parts) > 1 and parts[1] not in ("0", "") else None
-        k = round(tokens / 1000)
-        backstop_k = round(CONTEXT_ROTATE_AT / 1000)
-        await ptb.bot.send_message(
-            chat_id,
-            f"⚠️ Context ~{k}K (backstop {backstop_k}K). Consider /rotate or compress the next prompt.",
-            message_thread_id=thread_id,
-        )
-    except Exception as e:
-        print(f"[context-warn] TG notify failed: {e}")
-
-
-_ROTATION_TAIL_EVENTS = 15   # max events to read from the tail of the jsonl transcript
-_ROTATION_TAIL_MAX_CHARS = 8000  # hard cap on tail text size sent to haiku
-
-
-def _build_rotation_tail_prompt(jsonl_path: Path, tail_events: int = _ROTATION_TAIL_EVENTS, max_chars: int = _ROTATION_TAIL_MAX_CHARS) -> str:
-    """Read the last N events from a session jsonl transcript and build a cheap summary prompt.
-
-    Only extracts human turns (string content) and assistant text blocks — skips tool calls,
-    attachments, and queue-operation events to keep the tail concise.
-
-    Returns a prompt string with the tail inlined, or ROTATION_SUMMARY_PROMPT (bare, no tail)
-    if the file is unreadable or produces no usable content.
-    """
-    try:
-        lines: list[str] = []
-        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
-            for raw in fh:
-                raw = raw.strip()
-                if raw:
-                    lines.append(raw)
-
-        tail_lines = lines[-tail_events:] if len(lines) > tail_events else lines
-        parts: list[str] = []
-        for raw in tail_lines:
-            try:
-                ev = json.loads(raw)
-            except Exception:
-                continue
-            etype = ev.get("type")
-            msg = ev.get("message") or {}
-            content = msg.get("content")
-            if etype == "user" and isinstance(content, str) and content.strip():
-                parts.append(f"[user] {content.strip()}")
-            elif etype == "assistant" and isinstance(content, list):
-                text_blocks = [
-                    b.get("text", "")
-                    for b in content
-                    if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
-                ]
-                if text_blocks:
-                    parts.append(f"[assistant] {' '.join(text_blocks).strip()}")
-
-        if not parts:
-            return ROTATION_SUMMARY_PROMPT
-
-        tail_text = "\n".join(parts)
-        # Truncate from the front if over the char limit (keep the most recent content).
-        if len(tail_text) > max_chars:
-            tail_text = "…" + tail_text[-max_chars:]
-
-        return (
-            "Below are the last few turns of a session that is about to be rotated.\n"
-            "Summarize for handoff: active tasks + their state, key decisions, "
-            "important file paths, unresolved questions. Be dense, ≤500 words, English.\n\n"
-            f"<session-tail>\n{tail_text}\n</session-tail>"
-        )
-    except Exception as e:
-        print(f"[rotation] tail-prompt build failed ({e}) — falling back to bare prompt")
-        return ROTATION_SUMMARY_PROMPT
-
-
-async def _do_session_rotation(ctx: dict, session_key: str, project: dict, cwd: str) -> "str | None":
-    """Summarise current session via haiku, save handoff, clear session.
-
-    Uses a fresh haiku session with only the transcript tail inlined (Task 2 optimisation).
-    This avoids re-paying the full ~175K context when asking for the handoff summary.
-    Falls back to the bare prompt if the jsonl is unreadable.
-
-    Returns summary text on success, None on failure or if rotation is disabled.
-    Entire function is wrapped in try/except — rotation failure never breaks a run.
-    """
-    if not CONTEXT_ROTATION:
-        return None
-    try:
-        run_engine = ctx.get("run_engine")
-        if run_engine is None:
-            print("[rotation] run_engine not available — skipping rotation")
-            return None
-
-        name = project.get("name", "unknown")
-        rotate_session_key = session_key + ":rotate-summary"
-        resume_sid = ctx["sessions"].get(session_key)
-
-        # Task 2: build a tail-only prompt so haiku starts fresh (no full 175K re-pay).
-        # Derive the jsonl path deterministically from cwd + session_id.
-        summary_prompt = ROTATION_SUMMARY_PROMPT
-        if resume_sid:
-            try:
-                jsonl_path = _sdk_sessions_dir(cwd) / f"{resume_sid}.jsonl"
-                if jsonl_path.is_file():
-                    summary_prompt = _build_rotation_tail_prompt(jsonl_path)
-                    print(f"[rotation] using tail prompt from {jsonl_path.name} ({len(summary_prompt)} chars)")
-                else:
-                    print(f"[rotation] jsonl not found at {jsonl_path} — using bare prompt")
-            except Exception as _tp_exc:
-                print(f"[rotation] tail-prompt lookup failed ({_tp_exc}) — using bare prompt")
-
-        # Collect haiku summary — fresh session (resume_session_id=None) to avoid re-paying
-        # the full ~175K context.  Falls back to ROTATION_SUMMARY_PROMPT if tail unavailable.
-        # ephemeral=True: rotation runs must NEVER reuse a live persistent client — they use a
-        # synthetic session key and must be fully isolated from the main chat session.
-        summary_parts: list[str] = []
-        async for event in run_engine(
-            project_name=name,
-            cwd=cwd,
-            prompt=summary_prompt,
-            session_key=rotate_session_key,
-            model="haiku",
-            resume_session_id=None,
-            ctx=ctx,
-            ephemeral=True,
-        ):
-            etype = event.get("type")
-            if etype == "text":
-                summary_parts.append(event["text"])
-            # text_delta: ignore — rotation summary is built from finalized text blocks only
-
-        summary = "\n".join(summary_parts).strip() or "(no summary produced)"
-
-        # Save handoff file to <cwd>/.claude-ops/memory/session-handoff.md
-        mem_dir = Path(cwd) / ".claude-ops" / "memory"
-        mem_dir.mkdir(parents=True, exist_ok=True)
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        handoff_content = (
-            f"---\ntype: handoff\ncreated: {now_str}\n---\n\n"
-            f"# Session Handoff\n\n{summary}\n"
-        )
-        handoff_path = mem_dir / "session-handoff.md"
-        handoff_path.write_text(handoff_content, encoding="utf-8")
-
-        # Rebuild MEMORY.md index (reuse existing helper)
-        try:
-            _memory_reindex(cwd)
-        except Exception as idx_e:
-            print(f"[rotation] memory reindex failed: {idx_e}")
-
-        # Clear the main session — next turn starts fresh
-        ctx["sessions"].pop(session_key, None)
-        try:
-            ctx["save_sessions"]()
-        except Exception as ss_e:
-            print(f"[rotation] save_sessions failed: {ss_e}")
-
-        # Spec-021 Phase 4: mark pending handoff so the next chat turn gets the summary injected.
-        # ctx["pending_handoff"] is the shared dict from bot.py (wired via _build_ctx).
-        # Callers that use a slim rot_ctx (TG path) may not include it — that path marks it directly.
-        try:
-            ph = ctx.get("pending_handoff")
-            if ph is not None:
-                ph[session_key] = summary
-        except Exception as _ph_exc:
-            print(f"[rotation] failed to store pending_handoff: {_ph_exc}")
-
-        # Clear context-warn state so a fresh session can warn again.
-        try:
-            cw = ctx.get("context_warned")
-            if cw is not None:
-                cw.discard(session_key)
-        except Exception as _cw_exc:
-            print(f"[rotation] failed to clear context_warned: {_cw_exc}")
-
-        print(f"[rotation] session rotated for {session_key} — handoff saved")
-        return summary
-
-    except Exception as e:
-        print(f"[rotation] failed: {e}")
-        return None
+# spec-039: _notify_tg_rotation, _notify_tg_context_warn, _build_rotation_tail_prompt,
+# and _do_session_rotation removed — auto-rotation machinery deleted.
+# CONTEXT_ROTATE_AT / CONTEXT_ROTATION / CONTEXT_WARN_AT constants are kept as dead
+# no-ops so env-var reads and any remaining references don't break.
 
 
 async def _notify_tg(ctx: AppCtx, session_key: str, prompt: str, ok: bool) -> None:
@@ -5597,11 +5435,18 @@ async def api_project_upload(req: web.Request) -> web.Response:
 # verifies os.path.realpath of the resolved file stays inside the media dir.
 
 _MEDIA_CONTENT_TYPES: dict[str, str] = {
+    # Images (spec-038)
     "png":  "image/png",
     "jpg":  "image/jpeg",
     "jpeg": "image/jpeg",
     "webp": "image/webp",
     "gif":  "image/gif",
+    # Videos (spec-038 extension)
+    "mp4":  "video/mp4",
+    "webm": "video/webm",
+    "mov":  "video/quicktime",
+    "ogg":  "video/ogg",
+    "ogv":  "video/ogg",
 }
 
 
@@ -6932,6 +6777,13 @@ async def api_project_set_session(req: web.Request) -> web.Response:
                 _cw.discard(tg_thread)
         except Exception:
             pass
+        # spec-039: evict the live client so PERSISTENT_CLIENT=1 truly starts fresh.
+        try:
+            _evict_fn = ctx.get("evict_live_client")
+            if _evict_fn is not None:
+                await _evict_fn(tg_thread, ctx)
+        except Exception as _exc:
+            print(f"[api_project_set_session] live-client eviction error for {tg_thread}: {_exc!r}")
         return web.json_response({"active": None})
 
     elif action == "resume":
@@ -7129,8 +6981,8 @@ async def api_project_session_history(req: web.Request) -> web.Response:
 
 # ─────────────────────────── Chat message queue (server-side) ───────────────
 # Per-session FIFO queue of messages the user submitted while the agent was
-# busy.  Stored in-memory (matches existing session patterns — data/ files are
-# not used because the queue lifetime is intentionally shorter than a restart).
+# busy.  Persisted to DATA/chat-queue.json so queued messages survive a page
+# reload or server restart.
 # Each item: {"id": str, "text": str, "created_at": float}
 #
 # Endpoints:
@@ -7148,6 +7000,34 @@ import uuid as _uuid_mod
 
 _CHAT_QUEUE: "dict[str, list[dict]]" = {}  # session_key → [{id, text, created_at}, ...]
 _CHAT_QUEUE_MAX = int(os.environ.get("CHAT_QUEUE_MAX", "20"))
+_CHAT_QUEUE_FILE: "Path | None" = None  # set by _chat_queue_init() in start()
+
+
+def _chat_queue_init(ctx: dict) -> None:
+    """Called from start() — sets the persistence path and loads existing queue from disk.
+    Safe to call multiple times (idempotent); swallows all I/O errors."""
+    global _CHAT_QUEUE_FILE
+    _CHAT_QUEUE_FILE = ctx["DATA"] / "chat-queue.json"
+    try:
+        if _CHAT_QUEUE_FILE.exists():
+            raw = json.loads(_CHAT_QUEUE_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                _CHAT_QUEUE.clear()
+                _CHAT_QUEUE.update(raw)
+    except Exception:
+        pass  # corrupted file — start fresh, do not break startup
+
+
+def _chat_queue_flush() -> None:
+    """Atomically persist _CHAT_QUEUE to disk.  Swallows all I/O errors."""
+    if _CHAT_QUEUE_FILE is None:
+        return
+    try:
+        tmp = _CHAT_QUEUE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_CHAT_QUEUE, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_CHAT_QUEUE_FILE)
+    except Exception:
+        pass
 
 
 def _chat_queue_enqueue(session_key: str, text: str) -> "dict | None":
@@ -7158,6 +7038,7 @@ def _chat_queue_enqueue(session_key: str, text: str) -> "dict | None":
         return None
     item: dict = {"id": str(_uuid_mod.uuid4()), "text": text, "created_at": time.time()}
     lst.append(item)
+    _chat_queue_flush()
     return item
 
 
@@ -7174,6 +7055,7 @@ def _chat_queue_pop(session_key: str) -> "dict | None":
     item = lst.pop(0)
     if not lst:
         _CHAT_QUEUE.pop(session_key, None)
+    _chat_queue_flush()
     return item
 
 
@@ -7182,6 +7064,7 @@ def _chat_queue_edit(session_key: str, msg_id: str, new_text: str) -> "dict | No
     for item in _CHAT_QUEUE.get(session_key, []):
         if item["id"] == msg_id:
             item["text"] = new_text
+            _chat_queue_flush()
             return dict(item)
     return None
 
@@ -7196,6 +7079,7 @@ def _chat_queue_delete(session_key: str, msg_id: str) -> bool:
             lst.pop(i)
             if not lst:
                 _CHAT_QUEUE.pop(session_key, None)
+            _chat_queue_flush()
             return True
     return False
 
@@ -7380,8 +7264,6 @@ async def api_project_chat(req: web.Request) -> web.Response:
             print(f"[api_project_chat] client disconnected ({type(exc).__name__}), task continues in background")
 
     _chat_last_result_event: "dict | None" = None  # Phase D: track for auto-resume
-    # Spec-021: once-per-turn guard so we rotate at most once per run
-    _rotated_this_turn = False
     # spec-034 L2: accumulate agent reply text for board reconciler
     _chat_answer_parts: list = []
     # Spec-037: the resolved chat_id for this run (used to write session_id back)
@@ -7463,8 +7345,20 @@ async def api_project_chat(req: web.Request) -> web.Response:
             effort=_effort_override,
         ):
             etype = event.get("type")
-            # Spec-035: buffer every event in the live turn ring + publish seq-tagged copy to bus
-            _live_ev = _live_turn_append(session_key, event)
+            # Spec-035 + bug-A fix: buffer every event in the live turn ring.
+            # For tool events, buffer the already-formatted rich event (same shape as the SSE
+            # payload) so that cold-open replay via GET /live produces identical rendering to
+            # the live SSE stream.  Raw engine tool events carry {name, input} but no `kind`
+            # field; the frontend ToolBlock falls back to the bare-name "other" branch when
+            # `kind` is absent, causing replayed tool calls to collapse to bare names on
+            # tab-switch / browser refresh.  Formatting before buffering fixes this.
+            if etype == "tool":
+                inp = event.get("input") or {}
+                tool_data = _format_tool(event["name"], inp if isinstance(inp, dict) else {})
+                _buffered_event = {"type": "tool", **tool_data}
+            else:
+                _buffered_event = event
+            _live_ev = _live_turn_append(session_key, _buffered_event)
             _bus_publish(session_key, _live_ev, persist=False)
             if etype == "text_delta":
                 # Spec-029 §1: forward incremental text delta to the cockpit over SSE.
@@ -7478,8 +7372,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 await _send({"type": "text", "text": event["text"]})
                 _chat_answer_parts.append(event["text"])  # spec-034 L2: collect for reconciler
             elif etype == "tool":
-                inp = event.get("input") or {}
-                tool_data = _format_tool(event["name"], inp if isinstance(inp, dict) else {})
+                # tool_data already computed above for buffering — reuse it
                 await _send({"type": "tool", **tool_data})
             elif etype == "result":
                 _chat_last_result_event = event  # Phase D: capture for auto-resume
@@ -7551,36 +7444,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     "utilization": _utilization,
                     **({"context_warn": True} if _ctx_warn else {}),
                 })
-                # Context warn: send one-time TG notification on the upward crossing.
-                if _ctx_warn:
-                    try:
-                        await _notify_tg_context_warn(ctx, session_key, ctx_tokens)
-                    except Exception as _cw_notify_exc:
-                        print(f"[context-warn] notification failed: {_cw_notify_exc}")
-                # Spec-021: auto session rotation when context exceeds threshold
-                if (
-                    CONTEXT_ROTATION
-                    and ctx_tokens > CONTEXT_ROTATE_AT
-                    and not _rotated_this_turn
-                ):
-                    # Skip rotation if the card queue is draining (avoid mid-drain session clear)
-                    queue_busy = bool(_QUEUE.get(session_key))
-                    if queue_busy:
-                        print(f"[rotation] skipping — card queue not empty for {session_key}")
-                    else:
-                        _rotated_this_turn = True
-                        try:
-                            summary = await _do_session_rotation(ctx, session_key, project, cwd)
-                            if summary is not None:
-                                k = round(ctx_tokens / 1000)
-                                await _send({
-                                    "type": "rotation",
-                                    "tokens": ctx_tokens,
-                                    "message": f"Session rotated at {k}K tokens — handoff saved",
-                                })
-                                await _notify_tg_rotation(ctx, session_key, ctx_tokens)
-                        except Exception as _rot_exc:
-                            print(f"[rotation] post-result rotation error: {_rot_exc}")
+                # spec-039: TG context-warn ping and auto-rotation removed.
+                # context_warn=True in the SSE result frame above still feeds the cockpit.
             elif etype == "error":
                 exc = event.get("exc")
                 await _send({"type": "error", "error": str(exc) if exc else "unknown error"})
@@ -7673,14 +7538,36 @@ async def api_project_running(req: web.Request) -> web.Response:
     return web.json_response({"running": ctx["running"].get(session_key) is not None})
 
 
+async def api_project_seen(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/seen — operator opened/focused the project tab.
+
+    Clears the awaiting marker so the attention badge disappears.
+    Returns {ok: true, awaiting: false} on success.
+    This is the O(1) approach: no per-tab SSE, just a lightweight POST on tab focus.
+    """
+    ctx = req.app["ctx"]
+    project = _find_project_by_id_any(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = project["tg_thread"]
+    _seen[session_key] = time.time()
+    # Clear awaiting only if the last_seen timestamp is ≥ last_finished timestamp.
+    finished_ts = _awaiting.get(session_key, 0.0)
+    seen_ts = _seen[session_key]
+    if seen_ts >= finished_ts:
+        _awaiting.pop(session_key, None)
+    return web.json_response({"ok": True, "awaiting": False})
+
+
 # ─────────────────────────── Spec-021: Manual session rotate endpoint ────────
 
 async def api_project_rotate(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/rotate — force session rotation (manual wrap & reset).
+    """POST /api/projects/{id}/rotate — cockpit "Wrap & reset" button.
 
-    Always runs rotation regardless of token threshold.
-    Returns {ok, rotated, reason?, summary_preview?}.
-    409 if project is busy (run in progress).
+    spec-039: auto-rotation removed.  This is now a MANUAL reset: pop the session and
+    evict the live client so the next turn starts completely fresh.  Returns
+    {ok: true, reset: true} on success, {ok: true, reset: false} when there is
+    nothing to clear (no active session).  409 if the project is currently running.
     """
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -7689,27 +7576,36 @@ async def api_project_rotate(req: web.Request) -> web.Response:
         return web.json_response({"error": "project not found"}, status=404)
 
     session_key = project["tg_thread"]
-    cwd = project["cwd"]
 
     # Refuse if project is currently running
     if ctx["running"].get(session_key) is not None:
         return web.json_response({"error": "project busy"}, status=409)
 
-    # No active session — nothing to rotate
-    if ctx["sessions"].get(session_key) is None:
-        return web.json_response({"ok": True, "rotated": False, "reason": "no active session"})
+    # Nothing to do when no active session exists
+    if ctx["sessions"].get(session_key) is None and session_key not in ctx.get("live_clients", {}):
+        return web.json_response({"ok": True, "reset": False, "reason": "no active session"})
 
-    # Force rotation
+    # Pop the session record and persist
+    ctx["sessions"].pop(session_key, None)
+    ctx["save_sessions"]()
+
+    # Clear context-warn state so the fresh session can warn again
     try:
-        summary = await _do_session_rotation(ctx, session_key, project, cwd)
-    except Exception as e:
-        return web.json_response({"error": f"rotation failed: {e}"}, status=500)
+        _cw = ctx.get("context_warned")
+        if _cw is not None:
+            _cw.discard(session_key)
+    except Exception:
+        pass
 
-    if summary is None:
-        return web.json_response({"ok": True, "rotated": False, "reason": "rotation disabled or run_engine unavailable"})
+    # Evict live client so PERSISTENT_CLIENT=1 truly starts fresh
+    try:
+        _evict_fn = ctx.get("evict_live_client")
+        if _evict_fn is not None:
+            await _evict_fn(session_key, ctx)
+    except Exception as _exc:
+        print(f"[api_project_rotate] live-client eviction error for {session_key}: {_exc!r}")
 
-    preview = summary[:200] if summary else ""
-    return web.json_response({"ok": True, "rotated": True, "summary_preview": preview})
+    return web.json_response({"ok": True, "reset": True})
 
 
 # ─────────────────────────── Session context (session-context) ─────────────
@@ -9200,6 +9096,8 @@ async def start(ptb_app, ctx: dict) -> None:
 
         # Timeline: initialise bus persistence (DATA/timeline/)
         _timeline_init(ctx)
+        # Chat message queue: initialise persistence and reload surviving items (DATA/chat-queue.json)
+        _chat_queue_init(ctx)
         _settings_init(ctx)
         _ui_state_init(ctx)
         # Spec-012 Ph0: initialise paths to scan_state + dismissed_incidents files
@@ -9294,6 +9192,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_patch("/api/projects/{id}/chat/queue/{msg_id}", api_chat_queue_edit)
         app.router.add_delete("/api/projects/{id}/chat/queue/{msg_id}", api_chat_queue_delete)
         app.router.add_get("/api/projects/{id}/running", api_project_running)
+        # ops:b2a081 — tab activity: operator marks project as seen (clears attention badge)
+        app.router.add_post("/api/projects/{id}/seen", api_project_seen)
         # Spec-021: manual session rotation (wrap & reset)
         app.router.add_post("/api/projects/{id}/rotate", api_project_rotate)
         # Agent skills: global (~/.claude/skills/) + project (<cwd>/.claude/skills/)
@@ -9398,26 +9298,63 @@ async def start(ptb_app, ctx: dict) -> None:
         # an HTTPS reverse proxy and WEB_COOKIE_SECURE=true.
         web_host = os.environ.get("WEB_HOST", "127.0.0.1")
 
+        global _runner
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, web_host, port)
         await site.start()
+        _runner = runner  # stored for stop() to call runner.cleanup()
         print(f"[webapp] listening on {web_host}:{port}")
 
         # Background incident scanner: log_cmd → cards in Failed
-        _spawn_bg(_error_scanner_loop(ctx))
+        _STARTUP_BG_TASKS.append(_spawn_bg(_error_scanner_loop(ctx)))
         print(f"[webapp] incident scanner started (interval {_SCAN_INTERVAL_SEC}s)")
         # Card Queue: backstop drain loop (restart-resume + TG-interleave)
-        _spawn_bg(_queue_drain_loop(ctx))
+        _STARTUP_BG_TASKS.append(_spawn_bg(_queue_drain_loop(ctx)))
         # Spec-019: Schedules registry — background scan loop
-        _spawn_bg(_schedules._schedules_scan_loop(ctx))
+        _STARTUP_BG_TASKS.append(_spawn_bg(_schedules._schedules_scan_loop(ctx)))
         print(f"[webapp] schedules scanner started (interval {_schedules._SCAN_INTERVAL_SEC}s)")
         print(f"[webapp] queue drain loop started (interval {_QUEUE_DRAIN_INTERVAL_SEC}s)")
         # Spec-020: Deferred Runs — polling loop
-        _spawn_bg(_deferred_loop(ctx))
+        _STARTUP_BG_TASKS.append(_spawn_bg(_deferred_loop(ctx)))
         print(f"[webapp] deferred runs loop started (interval {_DEFERRED_POLL_SEC}s)")
         # Spec-025: Trash purge janitor
-        _spawn_bg(_janitor_trash_purge_loop(ctx))
+        _STARTUP_BG_TASKS.append(_spawn_bg(_janitor_trash_purge_loop(ctx)))
         print(f"[webapp] janitor trash purge loop started (interval 3600s, retention {TRASH_RETENTION_DAYS}d)")
     except Exception as e:
         print(f"[webapp] ERROR during startup: {e}")
+
+
+async def stop() -> None:
+    """Tear down the webapp: cancel startup background loops and clean up the aiohttp runner.
+
+    spec-039 shutdown: called from _amain()'s finally block (both TG and web-only branches)
+    after _graceful_shutdown() has already flushed state.  Safe to call even if start()
+    was never reached (tasks list empty, runner None).
+
+    Does NOT call systemctl / kill / os._exit — cgroup gotcha (GOTCHAS.md).
+    """
+    global _runner
+
+    # 1. Cancel all 5 always-on startup background loops and wait for them to exit.
+    if _STARTUP_BG_TASKS:
+        tasks_snapshot = list(_STARTUP_BG_TASKS)
+        _STARTUP_BG_TASKS.clear()
+        for t in tasks_snapshot:
+            if not t.done():
+                t.cancel()
+        # Gather with return_exceptions so one stubborn task doesn't prevent the others
+        # from being awaited.  Suppressed CancelledError is expected here.
+        results = await asyncio.gather(*tasks_snapshot, return_exceptions=True)
+        cancelled = sum(1 for r in results if isinstance(r, asyncio.CancelledError))
+        print(f"[webapp] stopped {len(tasks_snapshot)} background loop(s) ({cancelled} cancelled cleanly)")
+
+    # 2. Clean up the aiohttp AppRunner (closes the TCP site and frees the socket).
+    if _runner is not None:
+        try:
+            await _runner.cleanup()
+            print("[webapp] aiohttp runner cleaned up")
+        except Exception as exc:
+            print(f"[webapp] WARNING: runner.cleanup() raised: {exc!r}")
+        finally:
+            _runner = None

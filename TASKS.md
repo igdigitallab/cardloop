@@ -8,31 +8,19 @@
 > 2026-05-31: рефакторинг-проход закрыт — 25 карточек (security, рефактор бэк/фронт, OSS-доки, тесты 207→300) ушли в DONE.md. Карта кода → ARCHITECTURE.md. Ниже — только фичи/roadmap.
 
 ## Backlog
-- [ ] Когда скрываешь меню с проектами, остается маленькая полоска, это ОК и там иконка + (добавить проект). Она там не нужно. <!--ops:3ced61-->
-  > Просто скрываем меню и все.
-- [ ] В самом низу доски есть Archive. Его часто вообще не вижно. Можно его вынести куда то отдельно. Например где строка COLU <!--ops:f3ffbf-->
-  > MNS, только справа и продумать как красиво это отображать.
-- [ ] В терминале Claude CLI умеет делать карточки в выбором вариант 1, 2, 3 или 4. и просто стралками (или мышкой) выбираешь. <!--ops:c728cf-->
-  > Наш так не умеет, нужно сделать так же.
-- [ ] spec-034 Фаза 2 — спека-как-деталь-карточки (sidecar по card-id) + live-активность агента прямо на карточке доски <!--ops:5e1c0a-->
-  > Две части. (1) Спека-деталь: у карточки опциональный прикреплённый документ (sidecar data/card-specs/<id>.md, как data/runs/), статус карточки = статус спеки, открывается кликом по карточке — без отдельной вкладки Specs. (2) Live-on-card: на карточке in_progress видно, какой инструмент агент крутит прямо сейчас, маркеры возраста/протухания, заметный Failed, дашборд проекта. Это «скриншот, который продаёт». Делать ПОСЛЕ spec-035 — его LiveTurn-буфер и есть фид для индикатора на карточке (см. spec-035 §«Relationship»).
-- [ ] Сделать возможность редактировать/удалять сообщения которые в очереди на отправку. Пока агент что-то делает можно ему до <!--ops:66055d-->
-  > бавить сообщения, но пока он не прочитал, сделать возможность удалить из очереди/ редактировать / прочитать. Кстати после обновления страницы (видимость очереди вообще пропадает, может даже и сами сообщения из очереди пропадают)
-- [ ] Карточки, при двойном клике можно редатировать карту прямо в доске. При нажатии на кнопку Description, можно редактирова <!--ops:0adff6-->
-  > ть Description, но нельзя редатировать главное. Короче надо продумать как лучше сделать. И еще может при наведении на карточку т.е. Высвечивать полный Task вместо helper сейчас стоит "Double-click to edit" - это лишь идея, ее нужно тебе додумать. Да и вообще сделать тогда сразу при двойном клике редатикрование не внутри задачи, а как сейчас открывается Descrition и там задача полностью. Без разделения на Description и заголовок. КОроче продумать и может вообще убрать этот Description и иконку тоже. Просто задача на доске сокращается (как уже сделано), двойной клик открывается для редактирования, а при наведении просто чтение полной задачи. И все.
 - [ ] Сделать возможность управления Antigravity CLI и Codex CLI <!--ops:04f84f-->
-- [ ] Token economy: model routing per work type — board cards default to sonnet (cheap execution), chat stays on project model, per-card model field + global default in settings. Biggest untouched cost lever (idea 2026-06-11, conductor session) <!--ops:43665f-->
-- [ ] Решить вопрос с удалением проекта. В том числе и, допустим, надо при удалении решать полностью удалять проекты, все смен <!--ops:207822-->
-  > ные файлы с ним. Вижу, просто удаляем проект из. Claude ops. Нужен твой совет.
-- [ ] Глобальные ключи + общий UI хранилища credentials <!--ops:a7b2c1-->
-  > Проектные секреты (.claude-ops/secrets/, UI вкладка, доступ агенту) — СДЕЛАНО в Spec 007. Осталось: глобальные ключи (кросс-проектные) + единый UI.
-- [ ] Thinking mode: селектор режима мышления (max/min/default) в чате <!--ops:4df23a-->
-  > Версии моделей (Opus 4.8/Sonnet 4.6/Haiku 4.5) + убран дубль селектора — СДЕЛАНО в spec-011 Ф2. Осталось: режимы мышления.
-- [ ] multi-chat: несколько чатов на один проект, каждый со своим session_id; полоса вкладок чатов <!--ops:3a00f3-->
+  > Пропущено по запросу Игоря (2026-06-13) — единственная оставшаяся в Backlog.
 
 ## In Progress
 
 ## Review
-- [?] Добавить уведомления - что ответ от AI готов во вкладки наверху. <!--ops:09d84b-->
+- [?] UX audit: identify cockpit rough edges <!--ops:60100f-->
+  > Live UX walkthrough via Playwright — comprehensive audit of board, chat, settings, logs, files, memory, activity, vault views. Report with prioritized findings generated (report saved).
+- [?] Feature: photo upload to chat with Ode viewer <!--ops:4b020c-->
+  > Support sending photos directly from cockpit to chat and opening in Ode app
+- [?] Fix: mobile screenshot viewer close interaction <!--ops:5fa4f2-->
+  > Tap anywhere/system back closes viewer without exiting service; 48×48 close button with safe area consideration
+- [?] Fix: mobile sidebar scroll issue (project selection) <!--ops:56a219-->
+  > Deployed to :8787. Allow scrolling project list instead of drag interaction. Needs user test confirmation + git commit.
 
 ## Failed

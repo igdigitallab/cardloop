@@ -120,30 +120,15 @@ async def test_rotation_not_triggered_below_backstop(aiohttp_client, tmp_path, p
     )
 
 
-async def test_rotation_triggered_above_backstop(aiohttp_client, tmp_path, project_dir):
-    """context_tokens=180000 > 175K backstop → rotation SSE event sent."""
+async def test_rotation_not_triggered_above_backstop(aiohttp_client, tmp_path, project_dir):
+    """spec-039: auto-rotation removed — no rotation event even above 175K backstop."""
 
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "hello"}
         yield {"type": "result", "session_id": "sess-abc", "context_tokens": 180000}
 
-    async def fake_rotation_engine(**kwargs):
-        yield {"type": "text", "text": "Summary: working on X."}
-        yield {"type": "result", "session_id": "sess-rotate", "context_tokens": 1000}
-
-    async def dispatch_engine(**kwargs):
-        model = kwargs.get("model", "sonnet")
-        if model == "haiku":
-            async for e in fake_rotation_engine(**kwargs):
-                yield e
-        else:
-            async for e in fake_engine(**kwargs):
-                yield e
-
-    ctx = _make_ctx(tmp_path, project_dir, run_engine=dispatch_engine)
-    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", 175000), \
-         patch.object(_webapp, "_QUEUE", {}):
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    with patch.object(_webapp, "_QUEUE", {}):
         app = _make_app(ctx)
         client = await aiohttp_client(app)
         resp = await client.post(
@@ -155,9 +140,9 @@ async def test_rotation_triggered_above_backstop(aiohttp_client, tmp_path, proje
         events = await _read_sse(resp)
 
     types = [e.get("type") for e in events]
-    assert "rotation" in types, f"180K > 175K backstop — expected rotation event, got: {types}"
-    rotation_evt = next(e for e in events if e.get("type") == "rotation")
-    assert rotation_evt.get("tokens") == 180000
+    assert "rotation" not in types, (
+        f"spec-039: auto-rotation removed — rotation event must NOT appear, got: {types}"
+    )
 
 
 async def test_rotation_not_triggered_well_below_threshold(aiohttp_client, tmp_path, project_dir):
@@ -205,91 +190,21 @@ async def test_rotation_toggle_off(aiohttp_client, tmp_path, project_dir):
     assert "rotation" not in types, f"Rotation disabled — should not fire, got: {types}"
 
 
-async def test_rotation_session_cleared(tmp_path, project_dir):
-    """After _do_session_rotation, sessions[key] is removed."""
-    summary_text = "Task: build feature. Status: in progress."
-
-    async def haiku_engine(**kwargs):
-        yield {"type": "text", "text": summary_text}
-        yield {"type": "result", "session_id": "haiku-sess", "context_tokens": 500}
-
-    session_key = "1001:42"
-    project = {"name": "myproject", "cwd": str(project_dir)}
-    ctx = _make_ctx(tmp_path, project_dir)
-    ctx["sessions"][session_key] = "old-session-id"
-    ctx["run_engine"] = haiku_engine
-
-    with patch.object(_webapp, "CONTEXT_ROTATION", True):
-        result = await _webapp._do_session_rotation(ctx, session_key, project, str(project_dir))
-
-    assert result is not None, "Expected summary text"
-    assert session_key not in ctx["sessions"], "Session key should be cleared after rotation"
-
-
-async def test_rotation_handoff_file_written(tmp_path, project_dir):
-    """After rotation, handoff file exists in cwd/.claude-ops/memory/."""
-    summary_text = "Handoff content here."
-
-    async def haiku_engine(**kwargs):
-        yield {"type": "text", "text": summary_text}
-        yield {"type": "result", "session_id": "haiku-sess", "context_tokens": 500}
-
-    session_key = "1001:42"
-    project = {"name": "myproject", "cwd": str(project_dir)}
-    ctx = _make_ctx(tmp_path, project_dir)
-    ctx["sessions"][session_key] = "old-session-id"
-    ctx["run_engine"] = haiku_engine
-
-    with patch.object(_webapp, "CONTEXT_ROTATION", True):
-        await _webapp._do_session_rotation(ctx, session_key, project, str(project_dir))
-
-    handoff_path = project_dir / ".claude-ops" / "memory" / "session-handoff.md"
-    assert handoff_path.exists(), "Handoff file should be created"
-    content = handoff_path.read_text(encoding="utf-8")
-    assert "type: handoff" in content
-    assert summary_text in content
-
-
-async def test_rotation_summary_uses_no_full_transcript_resume(tmp_path, project_dir):
-    """Task 2: _do_session_rotation calls run_engine with resume_session_id=None (fresh haiku session).
-    No full-transcript resume — the 175K context is NOT re-paid for the summary call."""
-    captured = {}
-
-    async def haiku_engine(**kwargs):
-        captured["resume"] = kwargs.get("resume_session_id")
-        yield {"type": "text", "text": "Summary: feature X in progress."}
-        yield {"type": "result", "session_id": "haiku-fresh", "context_tokens": 500}
-
-    session_key = "1001:42"
-    project = {"name": "myproject", "cwd": str(project_dir)}
-    ctx = _make_ctx(tmp_path, project_dir)
-    ctx["sessions"][session_key] = "fat-session-id"
-    ctx["run_engine"] = haiku_engine
-
-    with patch.object(_webapp, "CONTEXT_ROTATION", True):
-        await _webapp._do_session_rotation(ctx, session_key, project, str(project_dir))
-
-    assert captured.get("resume") is None, (
-        f"Task 2: rotation summary must use resume_session_id=None (fresh session), "
-        f"got: {captured.get('resume')!r}"
+def test_rotation_removed_no_do_session_rotation():
+    """spec-039: _do_session_rotation deleted — auto-rotation machinery removed."""
+    assert not hasattr(_webapp, "_do_session_rotation"), (
+        "_do_session_rotation must be removed (spec-039)"
     )
 
 
-async def test_rotation_failure_does_not_break_main_run(aiohttp_client, tmp_path, project_dir):
-    """If _do_session_rotation throws, result event still arrives to client."""
+async def test_result_event_arrives_above_backstop(aiohttp_client, tmp_path, project_dir):
+    """spec-039: even above the old 175K backstop, result event arrives and no rotation fires."""
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "working"}
         yield {"type": "result", "session_id": "sess-ok", "context_tokens": 180000}
 
     ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
-
-    # Make rotation always fail
-    async def bad_rotation(*args, **kwargs):
-        raise RuntimeError("rotation exploded")
-
-    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", 175000), \
-         patch.object(_webapp, "_do_session_rotation", bad_rotation):
+    with patch.object(_webapp, "_QUEUE", {}):
         app = _make_app(ctx)
         client = await aiohttp_client(app)
         resp = await client.post(
@@ -300,15 +215,16 @@ async def test_rotation_failure_does_not_break_main_run(aiohttp_client, tmp_path
         assert resp.status == 200
         events = await _read_sse(resp)
 
-    # result event must still arrive
     result_events = [e for e in events if e.get("type") == "result"]
-    assert len(result_events) > 0, f"result event must arrive even when rotation fails, got: {events}"
+    assert len(result_events) > 0, f"result event must arrive above the old backstop, got: {events}"
+    rotation_events = [e for e in events if e.get("type") == "rotation"]
+    assert len(rotation_events) == 0, f"rotation must not fire (spec-039): {events}"
 
 
 # ─────────────────────────── Part 1: /rotate endpoint ───────────────────────
 
 async def test_rotate_endpoint_no_session(aiohttp_client, tmp_path, project_dir):
-    """POST /rotate with no active session → rotated=false."""
+    """POST /rotate with no active session → reset=false (spec-039: real reset, not stub)."""
     ctx = _make_ctx(tmp_path, project_dir)
     # sessions is empty — no active session
     app = _make_app(ctx)
@@ -320,7 +236,7 @@ async def test_rotate_endpoint_no_session(aiohttp_client, tmp_path, project_dir)
     assert resp.status == 200
     data = await resp.json()
     assert data["ok"] is True
-    assert data["rotated"] is False
+    assert data["reset"] is False
     assert data.get("reason") == "no active session"
 
 
@@ -342,31 +258,25 @@ async def test_rotate_endpoint_busy(aiohttp_client, tmp_path, project_dir):
     assert "busy" in data.get("error", "").lower()
 
 
-async def test_rotate_endpoint_success(aiohttp_client, tmp_path, project_dir):
-    """POST /rotate with active session → rotated=true."""
-    async def haiku_engine(**kwargs):
-        yield {"type": "text", "text": "Summary: X task in progress."}
-        yield {"type": "result", "session_id": "h-sess", "context_tokens": 400}
-
-    ctx = _make_ctx(tmp_path, project_dir, run_engine=haiku_engine)
+async def test_rotate_endpoint_stub_response(aiohttp_client, tmp_path, project_dir):
+    """spec-039: POST /rotate with active session → ok=True, reset=True (real reset, spec-039 Part 2)."""
+    ctx = _make_ctx(tmp_path, project_dir)
+    ctx["evict_live_client"] = None  # no live client eviction needed in this test
     session_key = "1001:42"
     ctx["sessions"][session_key] = "existing-session-id"
 
-    with patch.object(_webapp, "CONTEXT_ROTATION", True):
-        app = _make_app(ctx)
-        client = await aiohttp_client(app)
-        resp = await client.post(
-            "/api/projects/myproject/rotate",
-            headers=_auth_headers(ctx),
-        )
-        assert resp.status == 200
-        data = await resp.json()
-
+    app = _make_app(ctx)
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/api/projects/myproject/rotate",
+        headers=_auth_headers(ctx),
+    )
+    assert resp.status == 200
+    data = await resp.json()
     assert data["ok"] is True
-    assert data["rotated"] is True
-    assert "summary_preview" in data
-    # Session should be cleared after rotation
-    assert session_key not in ctx["sessions"]
+    assert data["reset"] is True
+    # Session must be cleared by the real reset
+    assert ctx["sessions"].get(session_key) is None
 
 
 # ─────────────────────────── Part 2: Fresh card sessions + cwd-lock ─────────
@@ -499,71 +409,15 @@ async def test_cwd_lock_released_on_finish(tmp_path, project_dir):
     )
 
 
-# ─────────────────────────── TG-path hook (_maybe_rotate_tg in bot.py) ──────
+# ─────────────────────────── TG-path hook (spec-039: removed) ──────────────
 
 _TG_KEY = "1001:42"
 
 
-def _tg_binding(project_dir) -> dict:
-    return {"project": "myproject", "cwd": str(project_dir), "model": "sonnet"}
-
-
-async def _call_tg_hook(project_dir, context_tokens, tg_queue, rotation_stub, send_stub):
-    """Invoke bot._maybe_rotate_tg with mocked rotation/send and a controlled queue."""
-    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", 175000), \
-         patch.object(_webapp, "_do_session_rotation", rotation_stub), \
-         patch.object(_bot, "_TG_QUEUE", tg_queue), \
-         patch.object(_bot, "send", send_stub):
-        await _bot._maybe_rotate_tg(
-            None, 1001, 42, _TG_KEY,
-            _tg_binding(project_dir),
-            {"context_tokens": context_tokens},
-        )
-
-
-async def test_tg_rotation_triggered_above_backstop(tmp_path, project_dir):
-    """TG hook: 180K tokens (above 175K backstop), empty queue → _do_session_rotation called + TG notification sent."""
-    calls = []
-
-    async def rotation_stub(ctx, session_key, project, cwd):
-        calls.append({"ctx": ctx, "session_key": session_key, "project": project, "cwd": cwd})
-        return "summary text"
-
-    send_stub = AsyncMock()
-    await _call_tg_hook(project_dir, 180000, {}, rotation_stub, send_stub)
-
-    assert len(calls) == 1, f"Rotation must be called once, got {len(calls)}"
-    assert calls[0]["session_key"] == _TG_KEY
-    assert calls[0]["cwd"] == str(project_dir)
-    assert calls[0]["project"]["name"] == "myproject"
-    # ctx must carry exactly what _do_session_rotation reads — incl. run_engine
-    assert calls[0]["ctx"]["run_engine"] is _bot.run_engine
-    assert "ptb_app" not in calls[0]["ctx"], "No ptb_app — TG notify goes via send(), not _notify_tg_rotation"
-    send_stub.assert_awaited_once()
-
-
-async def test_tg_rotation_skipped_when_queue_nonempty(tmp_path, project_dir):
-    """TG hook: 180K tokens but _TG_QUEUE[k] has a pending message → rotation NOT called."""
-    rotation_stub = AsyncMock(return_value="summary")
-    send_stub = AsyncMock()
-    queue = {_TG_KEY: [{"prompt": "queued message", "message_id": 7}]}
-
-    await _call_tg_hook(project_dir, 180000, queue, rotation_stub, send_stub)
-
-    rotation_stub.assert_not_awaited()
-    send_stub.assert_not_awaited()
-
-
-async def test_tg_rotation_skipped_below_threshold(tmp_path, project_dir):
-    """TG hook: 30K tokens < threshold → rotation NOT called."""
-    rotation_stub = AsyncMock(return_value="summary")
-    send_stub = AsyncMock()
-
-    await _call_tg_hook(project_dir, 30000, {}, rotation_stub, send_stub)
-
-    rotation_stub.assert_not_awaited()
-    send_stub.assert_not_awaited()
+def test_tg_rotation_hooks_removed():
+    """spec-039: _maybe_rotate_tg and _maybe_warn_tg deleted from bot.py."""
+    assert not hasattr(_bot, "_maybe_rotate_tg"), "_maybe_rotate_tg must be removed (spec-039)"
+    assert not hasattr(_bot, "_maybe_warn_tg"), "_maybe_warn_tg must be removed (spec-039)"
 
 
 # ─────────────────────────── Part 3: Handoff auto-injection (Spec-021 Phase 4) ─
@@ -571,26 +425,11 @@ async def test_tg_rotation_skipped_below_threshold(tmp_path, project_dir):
 SESSION_KEY = "1001:42"
 
 
-async def test_pending_handoff_set_after_rotation(tmp_path, project_dir):
-    """_do_session_rotation stores summary in ctx['pending_handoff'][session_key]."""
-    summary_text = "We were building feature X. Next step: add tests."
-
-    async def haiku_engine(**kwargs):
-        yield {"type": "text", "text": summary_text}
-        yield {"type": "result", "session_id": "haiku-sess", "context_tokens": 500}
-
-    project = {"name": "myproject", "cwd": str(project_dir)}
-    ctx = _make_ctx(tmp_path, project_dir)
-    ctx["sessions"][SESSION_KEY] = "old-session-id"
-    ctx["run_engine"] = haiku_engine
-
-    with patch.object(_webapp, "CONTEXT_ROTATION", True):
-        result = await _webapp._do_session_rotation(ctx, SESSION_KEY, project, str(project_dir))
-
-    assert result == summary_text
-    assert ctx["pending_handoff"].get(SESSION_KEY) == summary_text, (
-        f"pending_handoff must be set after rotation, got: {ctx['pending_handoff']}"
-    )
+def test_pending_handoff_key_exists_in_ctx():
+    """pending_handoff dict is still wired into ctx for manual use; _do_session_rotation removed."""
+    # The dict itself is still part of ctx (used by manual handoff injection in chat turns).
+    # _do_session_rotation is gone — no auto-rotation populates it.
+    assert not hasattr(_webapp, "_do_session_rotation"), "_do_session_rotation removed (spec-039)"
 
 
 async def test_handoff_injected_into_next_chat_turn(aiohttp_client, tmp_path, project_dir):
@@ -764,11 +603,10 @@ async def test_context_warn_fires_on_crossing(aiohttp_client, tmp_path, project_
         yield {"type": "result", "session_id": "sess-w", "context_tokens": warn_at}
 
     ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
-    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
+    # spec-039: _notify_tg_context_warn removed; SSE context_warn flag to cockpit is preserved.
+    with patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
          patch.object(_webapp, "CONTEXT_WARN_AT", warn_at), \
-         patch.object(_webapp, "_QUEUE", {}), \
-         patch.object(_webapp, "_notify_tg_context_warn", AsyncMock()):
+         patch.object(_webapp, "_QUEUE", {}):
         app = _make_app(ctx)
         client = await aiohttp_client(app)
         resp = await client.post(
@@ -803,11 +641,10 @@ async def test_context_warn_does_not_refire(aiohttp_client, tmp_path, project_di
     # Pre-mark as already warned — simulates a session that already crossed the threshold.
     ctx["context_warned"].add(SESSION_KEY)
 
-    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
+    # spec-039: _notify_tg_context_warn removed; patch omitted.
+    with patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
          patch.object(_webapp, "CONTEXT_WARN_AT", warn_at), \
-         patch.object(_webapp, "_QUEUE", {}), \
-         patch.object(_webapp, "_notify_tg_context_warn", AsyncMock()):
+         patch.object(_webapp, "_QUEUE", {}):
         app = _make_app(ctx)
         client = await aiohttp_client(app)
         resp = await client.post(
@@ -860,7 +697,11 @@ async def test_context_warn_absent_below_threshold(aiohttp_client, tmp_path, pro
 
 
 async def test_context_warn_absent_at_or_above_rotate_at(aiohttp_client, tmp_path, project_dir):
-    """context_tokens at/above CONTEXT_ROTATE_AT → rotation fires, warn must NOT also fire."""
+    """context_tokens at/above CONTEXT_ROTATE_AT → context_warn absent (above warn zone).
+
+    spec-039: auto-rotation removed; warn zone is CONTEXT_WARN_AT <= tokens < CONTEXT_ROTATE_AT,
+    so tokens >= CONTEXT_ROTATE_AT are outside the warn zone and context_warn stays absent.
+    """
     warn_at = 150000
     rotate_at = 175000
 
@@ -868,24 +709,11 @@ async def test_context_warn_absent_at_or_above_rotate_at(aiohttp_client, tmp_pat
         yield {"type": "text", "text": "hello"}
         yield {"type": "result", "session_id": "sess-over", "context_tokens": rotate_at + 1}
 
-    async def fake_rotation_engine(**kwargs):
-        yield {"type": "text", "text": "Summary."}
-        yield {"type": "result", "session_id": "rot-sess", "context_tokens": 500}
-
-    async def dispatch(**kwargs):
-        if kwargs.get("model") == "haiku":
-            async for e in fake_rotation_engine(**kwargs):
-                yield e
-        else:
-            async for e in fake_engine(**kwargs):
-                yield e
-
-    ctx = _make_ctx(tmp_path, project_dir, run_engine=dispatch)
-    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
-         patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    # spec-039: _notify_tg_context_warn removed; patch omitted.
+    with patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
          patch.object(_webapp, "CONTEXT_WARN_AT", warn_at), \
-         patch.object(_webapp, "_QUEUE", {}), \
-         patch.object(_webapp, "_notify_tg_context_warn", AsyncMock()) as mock_warn_notify:
+         patch.object(_webapp, "_QUEUE", {}):
         app = _make_app(ctx)
         client = await aiohttp_client(app)
         resp = await client.post(
@@ -895,35 +723,33 @@ async def test_context_warn_absent_at_or_above_rotate_at(aiohttp_client, tmp_pat
         )
         assert resp.status == 200
         events = await _read_sse(resp)
-        # Warn TG notify must NOT fire when tokens are at/above the rotation backstop.
-        mock_warn_notify.assert_not_awaited()
 
     result_events = [e for e in events if e.get("type") == "result"]
     assert len(result_events) == 1
     assert "context_warn" not in result_events[0], (
-        f"context_warn must be absent when rotation fires (tokens >= CONTEXT_ROTATE_AT), got: {result_events[0]}"
+        f"context_warn must be absent when tokens >= CONTEXT_ROTATE_AT (outside warn zone), got: {result_events[0]}"
     )
 
 
-async def test_context_warn_cleared_after_rotation(tmp_path, project_dir):
-    """After _do_session_rotation, context_warned entry for session_key is removed."""
-    summary_text = "Task: X. Status: done."
-
-    async def haiku_engine(**kwargs):
-        yield {"type": "text", "text": summary_text}
-        yield {"type": "result", "session_id": "haiku-r", "context_tokens": 400}
-
+async def test_context_warn_cleared_after_manual_reset(aiohttp_client, tmp_path, project_dir):
+    """POST /session action=new clears context_warned (duplicate of web_reset test; _do_session_rotation removed)."""
     ctx = _make_ctx(tmp_path, project_dir)
-    ctx["sessions"][SESSION_KEY] = "old-sess"
-    ctx["run_engine"] = haiku_engine
-    # Simulate that the warn already fired before rotation.
     ctx["context_warned"].add(SESSION_KEY)
+    ctx["sessions"][SESSION_KEY] = "some-session"
 
-    with patch.object(_webapp, "CONTEXT_ROTATION", True):
-        await _webapp._do_session_rotation(ctx, SESSION_KEY, project={"name": "myproject", "cwd": str(project_dir)}, cwd=str(project_dir))
-
+    from aiohttp import web as _web
+    app = _web.Application(middlewares=[_webapp.auth_middleware])
+    app["ctx"] = ctx
+    app.router.add_post("/api/projects/{id}/session", _webapp.api_project_set_session)
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/api/projects/myproject/session",
+        json={"action": "new"},
+        headers=_auth_headers(ctx),
+    )
+    assert resp.status == 200
     assert SESSION_KEY not in ctx["context_warned"], (
-        "context_warned must be cleared after rotation so a fresh session can warn again"
+        "context_warned must be cleared on /session action=new"
     )
 
 

@@ -210,7 +210,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 8px;
+  /* Reduced from 7px to 5px vertical padding to shorten card height.
+     Content (name, dot, badges) is single-line so nothing is clipped. */
+  padding: 5px 8px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background var(--transition);
@@ -233,8 +235,11 @@
 .project-item-free:hover .free-delete-btn { opacity: 1; }
 .free-delete-btn:hover { color: var(--red); background: var(--bg4); }
 
-/* Sidebar reordering (pointer events — works on mouse AND touch) */
-.project-item { cursor: grab; touch-action: none; }
+/* Sidebar reordering (pointer events — works on mouse AND touch).
+   pan-y: browser handles vertical scroll; pointercancel fires if the browser
+   claims the gesture for scrolling, which the cancel handlers already clean up.
+   Drag on touch is gated behind a long-press (see Sidebar.tsx handlers). */
+.project-item { cursor: grab; touch-action: pan-y; }
 .project-item.sidebar-item-dragging { opacity: 0.35; cursor: grabbing; }
 .project-item.sidebar-item-drag-over { border-top: 2px solid var(--accent); margin-top: -2px; }
 

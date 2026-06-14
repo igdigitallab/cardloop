@@ -512,6 +512,81 @@ def test_model_round_trip_stable():
     assert s1 == s2, f"Serialization is not stable:\n--- first ---\n{s1}\n--- second ---\n{s2}"
 
 
+# ─────────────────────────── Long-text round-trip (bug fix d1ebd5) ─────────────
+
+def test_long_single_line_task_round_trips_fully():
+    """A task whose title is >120 chars (but no newline) must survive write→read intact.
+
+    Regression guard: the old addCard() front-end code truncated single-line text at
+    120 chars and moved the overflow to description, causing the visible card title to
+    be cut off at 120 characters. The fix removes that truncation — the full text is
+    stored on the '- [ ] ...' line and must be recovered verbatim by _parse_tasks."""
+    long_title = "A" * 60 + " " + "B" * 60  # 121 chars, no newline
+    cols_in = {
+        "backlog": [{"id": "long01", "text": long_title}],
+        "in_progress": [], "review": [], "failed": [],
+    }
+    serialized = _serialize_tasks("# Tasks — proj", cols_in, "proj")
+
+    # The long title must appear verbatim on a single card line (no split)
+    assert f"- [ ] {long_title} <!--ops:long01-->" in serialized, (
+        f"Long title must be on a single line in TASKS.md:\n{serialized}"
+    )
+
+    # Round-trip: parse back
+    _, cols_out = _parse_tasks(serialized)
+    cards = cols_out["backlog"]
+    assert len(cards) == 1, "Exactly one card expected after round-trip"
+    assert cards[0]["text"] == long_title, (
+        f"Full text must be preserved: expected {long_title!r}, got {cards[0]['text']!r}"
+    )
+    assert cards[0].get("description") is None, (
+        "No description should be auto-generated for a long single-line task"
+    )
+
+
+def test_long_multiline_task_round_trips_fully():
+    """A multi-line task: first line = title stored on '- [ ]', rest = description '  > ' lines.
+
+    This path is correct in the original code and must continue to work after the fix."""
+    title = "Fix the authentication flow"
+    rest = "Check OAuth token expiry.\nUpdate the refresh logic.\nAdd integration test."
+    cols_in = {
+        "backlog": [{"id": "ml01", "text": title, "description": rest}],
+        "in_progress": [], "review": [], "failed": [],
+    }
+    serialized = _serialize_tasks("# Tasks — proj", cols_in, "proj")
+
+    # Title on card line
+    assert f"- [ ] {title} <!--ops:ml01-->" in serialized
+    # Description lines present
+    for line in rest.splitlines():
+        assert f"  > {line}" in serialized, f"Missing description line: {line!r}"
+
+    # Round-trip
+    _, cols_out = _parse_tasks(serialized)
+    cards = cols_out["backlog"]
+    assert len(cards) == 1
+    assert cards[0]["text"] == title
+    assert cards[0]["description"] == rest, (
+        f"Multi-line description must survive round-trip:\nexpected {rest!r}\ngot {cards[0]['description']!r}"
+    )
+
+
+def test_long_single_line_count_guard_not_triggered():
+    """A single long-title card counts as exactly 1 potential card — wipe-guard must not fire."""
+    long_title = "X" * 300  # extremely long, no newlines
+    cols_in = {
+        "backlog": [{"id": "guard1", "text": long_title}],
+        "in_progress": [], "review": [], "failed": [],
+    }
+    serialized = _serialize_tasks("# Tasks — proj", cols_in, "proj")
+    potential = _count_potential_cards(serialized)
+    assert potential == 1, (
+        f"Long single-line card must count as 1 potential card, got {potential}"
+    )
+
+
 def test_existing_cards_no_model_survive_round_trip():
     """Cards written before this feature (no model in marker) survive without corruption."""
     text = """\

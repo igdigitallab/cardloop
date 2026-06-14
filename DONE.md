@@ -2,6 +2,19 @@
 
 Архив завершённых карточек (append-only). **Сессии его НЕ читают** — гигиена контекста.
 
+## 2026-06-13
+- [x] Spec-039: переписан + реализован + задеплоен (LIVE) <!--ops:b1dc7d--> — переписан под «stop killing sessions»: убраны авто-ротация (spec-021), auto-resume на 429, stall-watchdog (остался только аварийный max 2ч); `PERSISTENT_CLIENT=1` → фоновый `run_in_background` выживает между ходами + нативный авто-compact сжимает на месте ~190K без сброса сессии; ручной `/reset` + кокпит «Wrap&reset» реально евиктят live-client; SIGTERM graceful (сохраняет сессии при рестарте); кокпит говорит правду (бар к 200K краснеет, тост на compact, карточка «стена 200K — Reset»). 1227 тестов pass, сборка чистая. Спека: `specs/spec-039-stop-killing-sessions.md`.
+- [x] Investigate & fix: background processes / other sessions get killed <!--ops:c8a86f--> — root cause найден: каждый ход = отдельный CLI-подпроцесс (`async with ClaudeSDKClient`), фоновый `run_in_background` — его detached-ребёнок, гибнет с подпроцессом на конце хода (SIGTERM→SIGKILL). НЕ watchdog и НЕ ротация. Фикс = `PERSISTENT_CLIENT=1` (подпроцесс живёт между ходами), в составе spec-039. Закрыто тем же деплоем. Остаточный edge: idle-evict (TTL 1ч) / `/reset` / рестарт.
+
+- [x] Chat: tool-логи не теряют детали при свитче вкладок/рефреше + очередь сообщений переживает рестарт <!--ops:51a612--> — root cause: live SSE форматировал tool-события через `_format_tool`, а в буфер реплея клался СЫРОЙ ивент → при переподключении детали (cmd/output) терялись. Фикс: буферим форматированное (live==replay). Очередь `_CHAT_QUEUE` была in-memory → персист в `data/chat-queue.json` (atomic). 18 тестов.
+- [x] Chat: отправка ВИДЕО в чат (не только фото) <!--ops:adb7ea--> — расширен spec-038: Content-Type карта (mp4/webm/mov/ogg), хелпер `cockpit-img` принимает видео (cap 200MB), фронт детектит видео по расширению → `<video controls>` + лайтбокс, Range/seeking из коробки. 24 теста. Хелпер синхронизирован в /usr/local/bin.
+- [x] Chat: авто-скролл больше не дёргает вниз при чтении <!--ops:d378a6--> — stick-to-bottom: авто-следование только если ≤80px от низа; иначе пилюля «↓ Новые сообщения»; отправка ре-пинит.
+- [x] Board: длинный текст задачи не обрезается при добавлении <!--ops:d1ebd5--> — снят клиентский обрез 120 символов в `BoardTab.addCard()`; full-text round-trips. 3 теста.
+- [x] Вкладки: индикатор активности + «ждёт ответа» <!--ops:b2a081--> — working-dot пока AI работает, attention-badge когда закончил на фоновой вкладке, гаснет при открытии вкладки. Один общий SSE (O(1), без per-tab стримов = не воскрешён баг исчерпания соединений); бэкенд `_awaiting`/`_seen` + поля в `/api/projects` + POST `/seen`. 13 тестов.
+- [x] Spec: decouple core from Telegram <!--ops:4698ec--> — написана `specs/spec-040-decouple-telegram.md`: 4-фазный план (нейтральные session-ключи → extract engine.py → cockpit-only за флагом → выпил PTB), полный inventory связности, open questions. ДИЗАЙН (реализация — отдельные карточки по фазам). Попутно найден латентный баг: `TELEGRAM_NUDGE` = дефолтный system_prompt для ВСЕХ каналов, включая кокпит (фикс запланирован в Phase 1).
+- [x] Fix: modes/session-bar wrapping + высота карточек <!--ops:29b29a--> — `.chat-session-bar`: `flex-wrap:nowrap`+`overflow-x:auto`+`white-space:nowrap` на кнопках (не переносится на 2-ю строку); `.project-item` padding 7→5px. Не сломаны новые activity-dot/reply-badge и мобайл.
+- [x] Fix: spec-039 shutdown повис на 90с (регресс этой же сессии) <!--ops:spec039fix--> — SIGTERM-handler флашил сессии, но процесс не выходил: aiohttp `AppRunner` не закрывался + 5 фоновых циклов webapp не отменялись → `asyncio.run` висел до SIGKILL (`timeout`). Фикс: `webapp.stop()` (cancel циклов + `runner.cleanup()`), `_amain` оборачивает teardown в `asyncio.wait_for(12с)` + добивает зависшие таски. Подтверждено на реальном кейсе: рестарт 93с→6с, лог «clean teardown complete» / «Deactivated successfully». 4 теста.
+
 ## 2026-06-12
 - [x] Cards: own fresh session per card + cwd-lock <!--ops:2a0a1a--> — `_run_card` стартует с `resume_sid=None`, session_id не пишется обратно. `cwd_locks[effective_cwd]` блокирует параллельный запуск в одном cwd через `ephemeral=True`.
 - [x] TG-канал: контекст не дублируется <!--ops:9aa43f--> — NO BUG: session resume корректный, system_prompt — свежий dict на каждый вызов, рост контекста 1.01x/ход. 9 тестов в `tests/test_tg_session_resume.py`.
@@ -139,3 +152,20 @@
 - [x] TG-канал: очередь TG-сообщений (bot.py on_message — второе сообщение в очередь, не «уже работаю») · 2026-06-11
 - [x] Убого сделаны ... в списке проектов. Убрать вообще эти точки. Отправить в Архив нужно через настройки проекта во вкладке · 2026-06-12
 - [x] Live-trace: видеть что делают субагенты внутри сессии + не терять историю/таймер после обновления страницы → spec-035 <!--ops:847153-->
+- [x] spec-034 Фаза 2 — спека-как-деталь-карточки (sidecar по card-id) + live-активность агента прямо на карточке доски <!--ops:5e1c0a-->
+- [x] Token economy: model routing per work type — board cards default to sonnet (cheap execution), chat stays on project model, per-card model field + global default in settings. Biggest untouched cost lever (idea 2026-06-11, conductor session) <!--ops:43665f-->
+- [x] Карточки, при двойном клике можно редатировать карту прямо в доске. При нажатии на кнопку Description, можно редактирова <!--ops:0adff6-->
+- [x] В терминале Claude CLI умеет делать карточки в выбором вариант 1, 2, 3 или 4. и просто стралками (или мышкой) выбираешь. <!--ops:c728cf-->
+- [x] Сделать карточки Failed не карточками а горизонтальными строками. <!--ops:adf1c9-->
+- [x] Когда скрываешь меню с проектами, остается маленькая полоска, это ОК и там иконка + (добавить проект). Она там не нужно. · 2026-06-13
+- [x] В самом низу доски есть Archive. Его часто вообще не вижно. Можно его вынести куда то отдельно. Например где строка COLU · 2026-06-13
+- [x] Сделать возможность редактировать/удалять сообщения которые в очереди на отправку. Пока агент что-то делает можно ему до · 2026-06-13
+- [x] Thinking mode: селектор режима мышления (max/min/default) в чате · 2026-06-13
+- [x] multi-chat: несколько чатов на один проект, каждый со своим session_id; полоса вкладок чатов · 2026-06-13
+- [x] Решить вопрос с удалением проекта. В том числе и, допустим, надо при удалении решать полностью удалять проекты, все смен · 2026-06-13
+- [x] Глобальные ключи + общий UI хранилища credentials · 2026-06-13
+- [x] Добавить уведомления - что ответ от AI готов во вкладки наверху. · 2026-06-13
+- [x] Mobile: add light theme and improve text contrast <!--ops:721575-->
+- [x] Mobile: fix tab switching and enlarge close button <!--ops:5947aa-->
+- [x] Mobile: fix status bar layout wrapping to single line <!--ops:c4fe16-->
+- [x] Mobile: hide icons (secrets, schedule, files) in project tab bar <!--ops:3575a4-->

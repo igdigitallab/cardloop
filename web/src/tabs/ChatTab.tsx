@@ -20,6 +20,7 @@ import {
   RichTool,
   TurnMetrics,
   ActivityEventSubagent,
+  ActivityEventCompact,
 } from '../types'
 import { useProjectActivity, useSeedCursor } from '../hooks/useProjectActivity'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
@@ -354,10 +355,19 @@ interface CacheCountdownBadgeProps {
   isRunning: boolean
 }
 
-// ─── Spec-038: inline image renderer + full-screen lightbox ──────────────────
+// ─── Spec-038: inline image/video renderer + full-screen lightbox ────────────
 
-/** Full-screen lightbox. Closes on tap anywhere, ✕ button, Esc, or device Back. */
+/** Returns true if the URL points to a video file (by extension). */
+function _isVideoSrc(src: string): boolean {
+  const ext = src.split('?')[0].split('.').pop()?.toLowerCase() ?? ''
+  return ['mp4', 'webm', 'mov', 'ogg', 'ogv'].includes(ext)
+}
+
+/** Full-screen lightbox. Closes on tap anywhere, ✕ button, Esc, or device Back.
+ *  Renders an <img> for images and a <video autoPlay controls> for video. */
 function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
+  const isVideo = _isVideoSrc(src)
+
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', handleKey)
@@ -384,33 +394,56 @@ function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: ()
       <button
         className="lightbox-close"
         onClick={onClose}
-        aria-label="Close image"
+        aria-label="Close"
       >✕</button>
-      {/* Tap the image to close too (full-screen image leaves little backdrop) */}
-      <img
-        className="lightbox-img"
-        src={src}
-        alt={alt}
-        onClick={onClose}
-      />
+      {isVideo ? (
+        // Stop propagation so clicking the video controls doesn't close the lightbox.
+        <video
+          className="lightbox-video"
+          src={src}
+          controls
+          autoPlay
+          onClick={(e) => e.stopPropagation()}
+        />
+      ) : (
+        /* Tap the image to close too (full-screen image leaves little backdrop) */
+        <img
+          className="lightbox-img"
+          src={src}
+          alt={alt}
+          onClick={onClose}
+        />
+      )}
     </div>,
     document.body,
   )
 }
 
-/** Custom img renderer for ReactMarkdown: shows a thumbnail; click opens Lightbox. */
+/** Custom img renderer for ReactMarkdown: detects video by extension and renders
+ *  either a thumbnail <img> or a <video> preview; click opens the Lightbox. */
 function ChatImage({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
   const [open, setOpen] = useState(false)
   if (!src) return null
+  const isVideo = _isVideoSrc(src)
   return (
     <>
-      <img
-        className="chat-msg-img"
-        src={src}
-        alt={alt ?? ''}
-        loading="lazy"
-        onClick={() => setOpen(true)}
-      />
+      {isVideo ? (
+        <video
+          className="chat-msg-video"
+          src={src}
+          controls
+          preload="metadata"
+          onClick={() => setOpen(true)}
+        />
+      ) : (
+        <img
+          className="chat-msg-img"
+          src={src}
+          alt={alt ?? ''}
+          loading="lazy"
+          onClick={() => setOpen(true)}
+        />
+      )}
       {open && (
         <Lightbox src={src} alt={alt ?? ''} onClose={() => setOpen(false)} />
       )}
@@ -538,6 +571,9 @@ const RunStatusBar = memo(function RunStatusBar({
 
 // ─── ChatTab ──────────────────────────────────────────────────────────────
 
+// Distance from the scroll container bottom (px) within which the user is considered "pinned".
+const SCROLL_PIN_THRESHOLD = 80
+
 /** True on touch devices — `pointer: coarse` or `ontouchstart` present. */
 const isTouchDevice: boolean =
   typeof window !== 'undefined' &&
@@ -596,6 +632,13 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   // child components to prevent the message list from re-rendering every second.
 
   const bottomRef = useRef<HTMLDivElement>(null)
+  // feedRef: the scrollable .chat-feed container — used for stick-to-bottom logic.
+  const feedRef = useRef<HTMLDivElement>(null)
+  // pinnedRef: true when the user is scrolled within SCROLL_PIN_THRESHOLD of the bottom.
+  // A ref (not state) so scroll-event updates don't trigger re-renders.
+  const pinnedRef = useRef<boolean>(true)
+  // showNewMsgPill: shows the "↓ New messages" button when unpinned and new content arrives.
+  const [showNewMsgPill, setShowNewMsgPill] = useState<boolean>(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const busActiveRef = useRef<boolean>(false)
@@ -618,9 +661,11 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [deferDatetime, setDeferDatetime] = useState('')
   const [deferSubmitting, setDeferSubmitting] = useState(false)
   const [deferToast, setDeferToast] = useState<string | null>(null)
-  // Spec-021: context rotation UI state
+  // Spec-021/039: manual reset + auto-compact UI state
   const [rotateToast, setRotateToast] = useState<string | null>(null)
   const [rotating, setRotating] = useState(false)
+  // Spec-039: toast shown when native auto-compact fires (kind:"compact" bus event)
+  const [compactToast, setCompactToast] = useState(false)
   // Context early-warning banner state.
   // contextWarnFromBackend: set true when the backend sends context_warn=true on a result event.
   // warnDismissedAtTokens: the token count when the user dismissed the banner (null = not dismissed).
@@ -658,8 +703,37 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
 
+  // Stick-to-bottom: auto-scroll only when the user is pinned (within SCROLL_PIN_THRESHOLD of bottom).
+  // When unpinned (user scrolled up), new content does NOT jump the viewport — instead the pill
+  // appears. The user clicking the pill re-pins and scrolls to bottom.
+
+  // Scrolls the feed to the bottom and re-pins. Call on intentional actions (send, initial load).
+  const scrollToBottom = useCallback(() => {
+    const feed = feedRef.current
+    if (!feed) return
+    feed.scrollTop = feed.scrollHeight
+    pinnedRef.current = true
+    setShowNewMsgPill(false)
+  }, [])
+
+  // onScroll: update pinned state based on how close the user is to the bottom.
+  const handleFeedScroll = useCallback(() => {
+    const feed = feedRef.current
+    if (!feed) return
+    const distFromBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight
+    const nowPinned = distFromBottom <= SCROLL_PIN_THRESHOLD
+    pinnedRef.current = nowPinned
+    if (nowPinned) setShowNewMsgPill(false)
+  }, [])
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
+    if (pinnedRef.current) {
+      // User is pinned to bottom — auto-follow new content.
+      bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
+    } else {
+      // User has scrolled up — show the pill so they know new content arrived.
+      setShowNewMsgPill(true)
+    }
   }, [messages])
 
   // D-05: Adjust chat-wrap height when the virtual keyboard appears on mobile.
@@ -719,6 +793,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setWarnDismissedAtTokens(null)
     setLastTurnEndMs(null)
     setLastCacheHitPct(null)
+    // Re-pin on project/chat switch so initial load lands at the bottom.
+    pinnedRef.current = true
+    setShowNewMsgPill(false)
 
     Promise.all([
       api.sessionHistory(projectId),
@@ -872,6 +949,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       seenSubagentKeysRef.current = new Set()
       setMessages(prev => finalizeStreaming(prev))
       setCtxRefreshKey(k => k + 1)
+
+    } else if (evt.kind === 'compact') {
+      // Spec-039: native CLI auto-compact fired — session is kept, context is smaller.
+      // Show a brief non-intrusive toast and refresh the context token counter.
+      void (evt as ActivityEventCompact) // type assertion for exhaustiveness
+      setCompactToast(true)
+      setTimeout(() => setCompactToast(false), 5000)
+      setCtxRefreshKey(k => k + 1)
     }
   })
 
@@ -945,6 +1030,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
 
     const userMsg = makeUserMsg(fullPrompt)
     const assistantMsg = makeAssistantMsg()
+    // Sending a message is an intentional action — re-pin to bottom regardless of scroll position.
+    pinnedRef.current = true
+    setShowNewMsgPill(false)
     setMessages(prev => [...prev, userMsg, assistantMsg])
 
     const ac = new AbortController()
@@ -997,16 +1085,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             // Spec-022: reset cache freshness countdown on every completed turn
             setLastTurnEndMs(now)
           }
-          // Spec-021: rotation event — session was cleared, reset context counter
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const evtRaw = evt as unknown as Record<string, any>
-          if (evtRaw.type === 'rotation') {
-            setContextTokens(0)
-            setPrevContextTokens(null)
-            const msg = typeof evtRaw.message === 'string' ? evtRaw.message : 'Session rotated'
-            setRotateToast(msg)
-            setTimeout(() => setRotateToast(null), 5000)
-          }
+          // Spec-039: "rotation" SSE event is no longer emitted by the backend (auto-rotation
+          // was removed). This block is a graceful no-op kept for backwards compatibility in
+          // case an older server instance is running during a deploy transition.
 
           setMessages(prev => {
             switch (evt.type) {
@@ -1138,7 +1219,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setQueueEditId(null)
   }
 
-  // Shared rotate handler — called from both the health-row button and the context warning banner.
+  // Shared reset handler — called from both the health-row button and the context warning banner.
+  // Spec-039: backend now returns {ok:true, reset:true} on success (field was "rotated" before).
   async function handleRotate() {
     setRotating(true)
     try {
@@ -1147,18 +1229,22 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       })
       const data = await res.json() as Record<string, unknown>
       if (!res.ok) {
-        setRotateToast(`Rotate failed: ${data.error ?? res.statusText}`)
-      } else if (data.rotated) {
+        const reason = String(data.error ?? res.statusText)
+        setRotateToast(t['chat.reset_failed'].replace('{reason}', reason))
+      } else if (data.reset) {
+        // Backend confirmed a real eviction and fresh session start.
         setContextTokens(0)
         setPrevContextTokens(null)
         setContextWarnFromBackend(false)
         setWarnDismissedAtTokens(null)
-        setRotateToast('Session rotated — handoff saved, fresh start')
+        setRotateToast(t['chat.reset_done'])
       } else {
-        setRotateToast(`Not rotated: ${data.reason ?? 'unknown reason'}`)
+        // reset:false — no active session was present.
+        setRotateToast(t['chat.reset_no_session'])
       }
     } catch (e: unknown) {
-      setRotateToast(e instanceof Error ? e.message : String(e))
+      const reason = e instanceof Error ? e.message : String(e)
+      setRotateToast(t['chat.reset_failed'].replace('{reason}', reason))
     } finally {
       setRotating(false)
       setTimeout(() => setRotateToast(null), 5000)
@@ -1292,17 +1378,19 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           const real = contextTokens != null && contextTokens > 0
           const tokens = real ? contextTokens! : estimateTokens(messages)
 
-          // Token color scale: yellow at 120K, red at 200K (consistent with progress bar)
+          // Spec-039: color scale reflects the new thresholds.
+          // Amber from ~150K (approaching auto-compact at ~190K), red from ~190K (near wall).
           const tokenColor =
-            tokens >= 200_000 ? 'var(--color-red, #ef4444)' :
-            tokens >= 120_000 ? 'var(--color-yellow, #eab308)' :
+            tokens >= 190_000 ? 'var(--color-red, #ef4444)' :
+            tokens >= 150_000 ? 'var(--color-yellow, #eab308)' :
             'var(--color-muted, #9ca3af)'
 
-          // Progress bar fill fraction (0..1), capped at 1
+          // Progress bar fill fraction (0..1), capped at 1.
+          // Red threshold lowered to 190K (auto-compact zone), amber at 150K.
           const fillFrac = Math.min(tokens / 200_000, 1)
           const barColor =
-            fillFrac >= 1 ? 'var(--color-red, #ef4444)' :
-            fillFrac >= 0.6 ? 'var(--color-yellow, #eab308)' :
+            fillFrac >= 0.95 ? 'var(--color-red, #ef4444)' :
+            fillFrac >= 0.75 ? 'var(--color-yellow, #eab308)' :
             'var(--color-green, #22c55e)'
 
           // Spec-033: cache warm/cold indicator — rendered via CacheCountdownBadge child
@@ -1312,14 +1400,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             m => m.role === 'assistant' && m.metrics != null
           )?.metrics
 
-          // Wrap & reset button prominence depends on token level
-          const isProminent = tokens >= 120_000
+          // Spec-039: reset button prominence uses updated thresholds (amber 150K, red 190K).
+          const isProminent = tokens >= 150_000
           const wrapBtnStyle: React.CSSProperties = isProminent
             ? {
                 fontSize: 11, padding: '1px 6px', cursor: rotating ? 'wait' : 'pointer',
-                background: 'var(--bg-card)', border: `1px solid ${tokens >= 200_000 ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)'}`,
+                background: 'var(--bg-card)', border: `1px solid ${tokens >= 190_000 ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)'}`,
                 borderRadius: 4,
-                color: tokens >= 200_000 ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)',
+                color: tokens >= 190_000 ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)',
                 fontWeight: 600,
               }
             : {
@@ -1331,8 +1419,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           // Last turn utilization (null when not present)
           const utilization = lastAssistantMetrics?.utilization ?? null
 
+          // Spec-039: tooltip tells the truth — no auto-reset, auto-compact at ~190K.
           const tokenTip = real
-            ? `Actual session context size: ${tokens.toLocaleString('en')} tokens (full prompt is sent to the model each turn). There is an incompressible base floor — Claude Code system prompt + tools + CLAUDE.md + memory — that remains even after /reset. Yellow from 120K · Red from 200K.`
+            ? t['chat.session_bar_tip'].replace('{tokens}', tokens.toLocaleString('en'))
             : t['chat.token_count_rough']
 
           // Context growth since the previous completed turn — only on real (server) numbers.
@@ -1391,15 +1480,15 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                   isRunning={run != null}
                 />
               )}
-              {/* Wrap & reset — always present */}
+              {/* Reset session — always present. Spec-039: manual reset only, never auto. */}
               <button
                 className="btn btn-sm"
                 style={wrapBtnStyle}
                 disabled={rotating || streaming}
-                title="Wrap & reset (summarize + fresh session)"
+                title={t['chat.reset_session_tip']}
                 onClick={handleRotate}
               >
-                {rotating ? '…' : '♻ Wrap & reset'}
+                {rotating ? '…' : t['chat.reset_session_btn']}
               </button>
               {/* Utilization — shown when available */}
               {utilization != null && (
@@ -1485,7 +1574,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       {/* Session context panel */}
       <SessionContextPanel projectId={projectId} refreshKey={ctxRefreshKey} />
 
-      <div className="chat-feed">
+      <div className="chat-feed" ref={feedRef} onScroll={handleFeedScroll} style={{ position: 'relative' }}>
         {messages.length === 0 && (
           <div className="chat-empty">
             <div className="chat-empty-icon">💬</div>
@@ -1567,9 +1656,58 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{msg.text}</ReactMarkdown>
                   </div>
                 ) : null}
-                {msg.error && (
-                  <div className="chat-msg-error">⚠ {msg.error}</div>
-                )}
+                {msg.error && (() => {
+                  // Spec-039: detect 200K context-wall errors and render a prominent card
+                  // with a one-click reset button.
+                  //
+                  // Detection condition: the error string contains any of the Anthropic API
+                  // error codes for context overflow. The CLI forwards the API error text
+                  // as `str(exc)`, which includes the error_code and message:
+                  //   - "prompt_too_long" — official API error code
+                  //   - "prompt is too long" — human-readable message variant
+                  //   - "context_length_exceeded" — alternative code seen on some models
+                  // Secondary heuristic: context ≥ 195K at the time of error (catches cases
+                  // where the exact string is different but the wall is clearly the cause).
+                  const errLow = msg.error.toLowerCase()
+                  const isWallError = (
+                    errLow.includes('prompt_too_long') ||
+                    errLow.includes('prompt is too long') ||
+                    errLow.includes('context_length_exceeded') ||
+                    (contextTokens != null && contextTokens >= 195_000)
+                  )
+                  if (isWallError) {
+                    return (
+                      <div style={{
+                        marginTop: 8, padding: '10px 14px',
+                        background: 'rgba(239,68,68,0.08)',
+                        border: '1px solid var(--color-red, #ef4444)',
+                        borderRadius: 6, fontSize: 13,
+                        color: 'var(--color-red, #ef4444)',
+                        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                      }}>
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          🧱 {t['chat.wall_error_msg']}
+                        </span>
+                        <button
+                          style={{
+                            fontSize: 12, padding: '3px 10px',
+                            cursor: rotating ? 'wait' : 'pointer',
+                            background: 'var(--bg-card)',
+                            border: '1px solid var(--color-red, #ef4444)',
+                            borderRadius: 4,
+                            color: 'var(--color-red, #ef4444)',
+                            fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0,
+                          }}
+                          disabled={rotating || streaming}
+                          onClick={handleRotate}
+                        >
+                          {rotating ? '…' : t['chat.wall_reset_btn']}
+                        </button>
+                      </div>
+                    )
+                  }
+                  return <div className="chat-msg-error">⚠ {msg.error}</div>
+                })()}
                 {/* Spec-022: per-turn metric footer on assistant messages */}
                 {msg.role === 'assistant' && msg.metrics && !msg.streaming && (() => {
                   const m = msg.metrics
@@ -1606,6 +1744,16 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
         })}
 
         <div ref={bottomRef} />
+        {/* Stick-to-bottom pill: visible only when user has scrolled up and new messages arrive. */}
+        {showNewMsgPill && (
+          <button
+            className="chat-scroll-pill"
+            onClick={scrollToBottom}
+            aria-label={t['chat.scroll_to_bottom']}
+          >
+            {t['chat.scroll_to_bottom']}
+          </button>
+        )}
       </div>
 
       {error && !messages.some(m => m.error === error) && (
@@ -1690,19 +1838,22 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             onClose={() => setShowSkills(false)}
           />
         )}
-        {/* Context early-warning banner — shown above the composer when context approaches limits */}
+        {/* Context early-warning banner — shown above the composer when context approaches limits.
+            Spec-039: framing updated — no mention of auto-rotate (that is gone). The banner is
+            ambient-only (dismissible); no popup/modal. Thresholds: amber ~150K, red ~190K. */}
         {(() => {
           const warnTokens = contextTokens != null && contextTokens > 0
             ? contextTokens
             : estimateTokens(messages)
+          // Spec-039: escalation threshold raised to 190K (matches auto-compact zone).
           const WARN_THRESHOLD = 150_000
-          const ESCALATE_THRESHOLD = 175_000
+          const ESCALATE_THRESHOLD = 190_000
           const isEscalated = warnTokens >= ESCALATE_THRESHOLD
           const isInWarnZone = warnTokens >= WARN_THRESHOLD && !isEscalated
           // Trigger: backend flag OR token-count fallback
           const shouldWarn = contextWarnFromBackend || isInWarnZone || isEscalated
           if (!shouldWarn) return null
-          // Dismiss gate: once dismissed, suppress unless we've escalated into the ≥175K zone
+          // Dismiss gate: once dismissed, suppress unless we've escalated into the ≥190K zone
           if (warnDismissedAtTokens !== null && !isEscalated) return null
           const nK = Math.round(warnTokens / 1000)
           const bannerColor = isEscalated
@@ -1711,9 +1862,10 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           const bannerBg = isEscalated
             ? 'rgba(239,68,68,0.08)'
             : 'rgba(234,179,8,0.08)'
+          // Spec-039: banner text no longer mentions auto-rotate. Uses i18n keys.
           const bannerText = isEscalated
-            ? `⚠️ Context ${nK}K — auto-rotate backstop at 175K. Wrap now to avoid losing the session.`
-            : `⚠️ Context ~${nK}K — consider wrapping the session before a large turn (auto-rotate backstop at 175K).`
+            ? t['chat.ctx_warn_critical'].replace('{nK}', String(nK))
+            : t['chat.ctx_warn_approaching'].replace('{nK}', String(nK))
           return (
             <div style={{
               display: 'flex', alignItems: 'center', gap: 8,
@@ -1735,10 +1887,10 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                   flexShrink: 0,
                 }}
                 disabled={rotating || streaming}
-                title="Wrap & reset (summarize + fresh session)"
+                title={t['chat.reset_session_tip']}
                 onClick={handleRotate}
               >
-                {rotating ? '…' : '♻ Wrap & reset'}
+                {rotating ? '…' : t['chat.reset_session_btn']}
               </button>
               <button
                 style={{
@@ -2005,7 +2157,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
         </div>
       )}
 
-      {/* Spec-021: Rotation toast */}
+      {/* Spec-021/039: Manual reset toast */}
       {rotateToast && (
         <div style={{
           position: 'fixed', bottom: deferToast ? 72 : 24, right: 24,
@@ -2013,7 +2165,23 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           border: '1px solid var(--border)', borderRadius: 8,
           boxShadow: '0 4px 16px rgba(0,0,0,0.15)', fontSize: 13, zIndex: 9999,
         }}>
-          ♻ {rotateToast}
+          ↺ {rotateToast}
+        </div>
+      )}
+
+      {/* Spec-039: Auto-compact toast — shown when native CLI compact fires (kind:"compact" bus event).
+          Non-intrusive fixed position; does not steal focus or block interaction. */}
+      {compactToast && (
+        <div style={{
+          position: 'fixed',
+          bottom: deferToast ? 120 : rotateToast ? 72 : 24,
+          right: 24,
+          padding: '10px 18px', background: 'var(--bg-card)',
+          border: '1px solid var(--color-green, #22c55e)', borderRadius: 8,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.15)', fontSize: 13, zIndex: 9999,
+          color: 'var(--color-green, #22c55e)',
+        }}>
+          ✦ {t['chat.compact_toast']}
         </div>
       )}
     </div>

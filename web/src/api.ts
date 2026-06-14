@@ -208,6 +208,12 @@ export const api = {
       method: 'POST',
     }),
 
+  // ops:b2a081 — mark project as seen (clears attention badge on background tabs)
+  projectSeen: (id: string) =>
+    apiFetch<{ ok: boolean; awaiting: boolean }>(`/api/projects/${id}/seen`, {
+      method: 'POST',
+    }),
+
   // Chat message queue — server-side persist; survives page reload
   chatQueue: (id: string) =>
     apiFetch<{ items: Array<{ id: string; text: string; created_at: number }> }>(
