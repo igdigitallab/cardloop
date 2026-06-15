@@ -56,16 +56,20 @@ _AUTO_RESUME_ON_RATE_LIMIT = int(os.environ.get("AUTO_RESUME_ON_RATE_LIMIT", "0"
 # Counted via auto_resume_count on the deferred record.
 _AUTO_RESUME_MAX = int(os.environ.get("AUTO_RESUME_MAX", "3"))
 
-# ─────────────────────────── Context Rotation (Spec 021) ───────────────────────────
-# CONTEXT_ROTATE_AT: token count that triggers auto-rotation (default 175 000).
-# Acts as a single high-water safety backstop near the 200K hard wall.
-# CONTEXT_ROTATION=1 enables auto-rotation; set to 0 to disable globally.
-CONTEXT_ROTATE_AT = int(os.environ.get("CONTEXT_ROTATE_AT", "175000"))
+# ─────────────────────────── Context Window + Rotation (Spec 021 / Spec 039) ───────────────────────
+# CONTEXT_WINDOW: the real model context window in tokens.
+# Defaults to 1 000 000 (Opus 4.8 on Claude Max subscription — confirmed via get_context_usage()).
+# Override via env if the window ever changes.
+CONTEXT_WINDOW = int(os.environ.get("CONTEXT_WINDOW", "1000000"))
+# CONTEXT_ROTATE_AT: token count that triggers auto-rotation (dead code since spec-039).
+# Kept so env-var reads don't break; default scaled to 95% of CONTEXT_WINDOW.
+CONTEXT_ROTATE_AT = int(os.environ.get("CONTEXT_ROTATE_AT", str(int(CONTEXT_WINDOW * 0.95))))
 CONTEXT_ROTATION = os.environ.get("CONTEXT_ROTATION", "1") == "1"
-# CONTEXT_WARN_AT: token count that triggers a one-time early warning (default 150 000).
+# CONTEXT_WARN_AT: token count that triggers a one-time early warning.
 # Fires on the first turn that crosses this threshold (upward only), before the hard backstop.
 # Suppressed once rotation fires (i.e. no warn if already at/above CONTEXT_ROTATE_AT).
-CONTEXT_WARN_AT = int(os.environ.get("CONTEXT_WARN_AT", "150000"))
+# Default: 85% of CONTEXT_WINDOW (~850 000); honor env override if set.
+CONTEXT_WARN_AT = int(os.environ.get("CONTEXT_WARN_AT", str(int(CONTEXT_WINDOW * 0.85))))
 
 # Spec-029 item 3: structured card results via SDK output_format.
 # STRUCTURED_CARDS=1 enables requesting structured JSON output from card runs so the agent's
@@ -5169,7 +5173,11 @@ async def _deferred_loop(ctx: dict) -> None:
                         if limit is None:
                             continue
                         util = limit.get("utilization")
-                        if util is not None and util < _DEFERRED_FREE_THRESHOLD:
+                        strict_reset = record.get("strict_reset")
+                        if (not strict_reset) and util is not None and util < _DEFERRED_FREE_THRESHOLD:
+                            # Free-window shortcut: auto-resume records fire early when
+                            # the window is already mostly free. Strict (button-created)
+                            # records skip this and wait for the actual reset boundary.
                             fire_now = True
                         else:
                             resets_at = limit.get("resets_at")
@@ -5251,6 +5259,7 @@ async def api_deferred_create(req: web.Request) -> web.Response:
     prompt = (body.get("prompt") or "").strip()
     fire_at = body.get("fire_at")
     fire_on_reset = body.get("fire_on_reset", False)
+    card_id = body.get("card_id")
 
     if not project:
         return web.json_response({"error": "project required"}, status=400)
@@ -5261,13 +5270,20 @@ async def api_deferred_create(req: web.Request) -> web.Response:
     if not fire_at and not fire_on_reset:
         return web.json_response({"error": "provide exactly one of fire_at or fire_on_reset"}, status=400)
 
-    # Validate project exists in topics
-    topics = ctx["topics"]
-    session_key = None
-    for k, v in topics.items():
-        if v.get("project") == project:
-            session_key = k
-            break
+    # Resolve project: try by id first (frontend sends basename(cwd)), fall back to display name.
+    # _find_project_by_id returns a dict with keys: id, name, cwd, tg_thread, ...
+    proj = _find_project_by_id(ctx, project)
+    if proj is not None:
+        session_key = proj["tg_thread"]
+        project = proj.get("name") or project  # store display name for notifications/list
+    else:
+        # Fallback: match by display name (TG /later path and tests that pass a display name)
+        topics = ctx["topics"]
+        session_key = None
+        for k, v in topics.items():
+            if v.get("project") == project:
+                session_key = k
+                break
     if session_key is None:
         return web.json_response({"error": f"unknown project: {project}"}, status=400)
 
@@ -5288,6 +5304,12 @@ async def api_deferred_create(req: web.Request) -> web.Response:
         "error": None,
         "attempts": 0,
     }
+    if card_id is not None:
+        record["card_id"] = card_id
+    # Explicit user-initiated "after reset" always means the real reset boundary,
+    # never the util<10% free-window shortcut (which is reserved for auto-resume).
+    if fire_on_reset:
+        record["strict_reset"] = True
 
     records = _load_deferred()
     records.append(record)
@@ -6977,6 +6999,7 @@ async def api_project_session_history(req: web.Request) -> web.Response:
         "messages": _session_history(jsonl),
         "session_id": sid,
         "context_tokens": context_tokens,
+        "context_window": CONTEXT_WINDOW,
         "last_turn_at": last_turn_at_ms,
         "last_cache_hit_pct": last_cache_hit_pct,
     })
@@ -7240,6 +7263,16 @@ async def api_project_chat(req: web.Request) -> web.Response:
     ctx["running"][session_key] = True
     # Spec-035: start live turn buffer for this session
     _live_turn_create(session_key, model)
+    # Generate a short run id so the bus run_start/run_end pair is correlated.
+    _chat_run_id = _uuid.uuid4().hex[:6]
+    # Publish run_start to the activity bus so other tabs (and recovery after stream drop)
+    # can reconstruct the in-flight turn without requiring a hard refresh.
+    _bus_publish(session_key, {
+        "kind": "run_start",
+        "source": "chat",
+        "prompt": prompt,
+        "run_id": _chat_run_id,
+    }, persist=True)
 
     resp = web.StreamResponse(
         status=200,
@@ -7269,6 +7302,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
     _chat_last_result_event: "dict | None" = None  # Phase D: track for auto-resume
     # spec-034 L2: accumulate agent reply text for board reconciler
     _chat_answer_parts: list = []
+    # Tracks whether the run completed successfully (used for bus run_end outcome).
+    _chat_run_ok: bool = False
     # Spec-037: the resolved chat_id for this run (used to write session_id back)
     _active_chat_id_for_run: "str | None" = None
 
@@ -7439,6 +7474,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 await _send({
                     "type": "result",
                     "context_tokens": ctx_tokens,
+                    "context_window": CONTEXT_WINDOW,
                     "cache_read_tokens": event.get("cache_read_tokens"),
                     "fresh_tokens": event.get("fresh_tokens"),
                     "prompt_tokens": event.get("prompt_tokens"),
@@ -7477,6 +7513,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
 
         # Spec-035: mark turn as done before sending the final SSE frame
         _live_turn_finish(session_key, "done")
+        _chat_run_ok = True
         await _send({"type": "done"})
 
         # spec-034 L2: board reconciler — schedule as background task (never blocks the response).
@@ -7502,6 +7539,14 @@ async def api_project_chat(req: web.Request) -> web.Response:
         ctx["running"].pop(session_key, None)
         # Spec-035: ensure turn is finished (idempotent — no-op if already marked done)
         _live_turn_finish(session_key, "error")
+        # Publish run_end to the activity bus so other tabs can finalize the in-flight turn
+        # display and so the originating tab can recover after a dropped direct stream.
+        _bus_publish(session_key, {
+            "kind": "run_end",
+            "source": "chat",
+            "outcome": "ok" if _chat_run_ok else "fail",
+            "run_id": _chat_run_id,
+        }, persist=True)
 
     return resp
 

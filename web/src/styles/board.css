@@ -444,6 +444,18 @@
 }
 .board-card-queued { opacity: 0.92; }
 
+/* ── Defer-after-reset: queued badge + active toggle ─────────────── */
+.board-card-defer-badge {
+  font-size: 10px; font-weight: 700; color: #f0b34a;
+  background: rgba(240,179,74,0.14); border-radius: 4px; padding: 1px 5px;
+  margin-left: 4px; white-space: nowrap;
+}
+.act-defer-active {
+  color: #f0b34a;
+  background: rgba(240,179,74,0.16);
+  border-color: rgba(240,179,74,0.5);
+}
+
 .board-batch-bar {
   position: sticky; bottom: 8px; z-index: 20;
   display: flex; align-items: center; gap: 10px;

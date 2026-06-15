@@ -112,8 +112,11 @@ async def test_live_trace_events_published_to_bus(aiohttp_client, tmp_path, proj
         _webapp._bus_unsubscribe(session_key, q)
 
     assert len(events_received) > 0, "Bus must receive events"
-    assert all("seq" in e for e in events_received), f"All bus events must have seq: {events_received}"
-    seqs = [e["seq"] for e in events_received]
+    # run_start / run_end are lifecycle bus events published outside the live-turn buffer;
+    # they do not carry a seq. Only live-turn events (type=text/result/tool/…) must have seq.
+    live_turn_events = [e for e in events_received if "seq" in e]
+    assert len(live_turn_events) > 0, f"Must receive seq-tagged live-turn events: {events_received}"
+    seqs = [e["seq"] for e in live_turn_events]
     assert seqs == sorted(seqs), "seq must be monotonically increasing"
     assert seqs == list(range(seqs[0], seqs[-1] + 1)), "seq must have no gaps"
 

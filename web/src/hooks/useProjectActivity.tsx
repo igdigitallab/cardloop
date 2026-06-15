@@ -10,7 +10,7 @@
  *     useOnRunEnd(() => reload())               ← in each tab/section
  */
 import {
-  createContext, useContext, useEffect, useRef, useCallback, ReactNode,
+  createContext, useContext, useEffect, useRef, useCallback, useMemo, ReactNode,
 } from 'react'
 import { ActivityEvent } from '../types'
 
@@ -129,8 +129,14 @@ export function ProjectActivityProvider({ projectId, active = true, children }: 
     return () => { alive = false; ac.abort() }
   }, [projectId, active])
 
+  // Memoize the context value so the object identity is stable between re-renders.
+  // subscribe and seedCursor are already stable useCallbacks, but a plain object literal
+  // would be recreated on every render — causing seedCursor identity to flip downstream
+  // and triggering ChatTab's hydration effect (which aborts the live /chat SSE stream).
+  const value = useMemo(() => ({ subscribe, seedCursor }), [subscribe, seedCursor])
+
   return (
-    <BusContext.Provider value={{ subscribe, seedCursor }}>
+    <BusContext.Provider value={value}>
       {children}
     </BusContext.Provider>
   )

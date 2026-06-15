@@ -472,6 +472,25 @@ export const en = {
   'chat.defer_queue': 'Queue run',
   'chat.defer_submitting': 'Queueing...',
   'chat.defer_queued': 'Deferred run queued',
+  'chat.defer_after_reset_btn': '⏱ After reset',
+  'chat.defer_after_reset_title': 'Queue this prompt to run after the 5-hour window resets',
+  'chat.defer_after_reset_toast': 'Will run after reset (~{time})',
+  'chat.defer_after_reset_toast_plain': 'Will run after the 5-hour window resets',
+  'chat.defer_pending_chip_title': 'Pending deferred runs — click to manage',
+  'chat.defer_pending_cancel': 'Cancel',
+  'chat.defer_pending_no_items': 'No pending deferred runs',
+  // Split-button tooltip for the ▾ dropdown part
+  'chat.defer_split_arrow_title': 'Schedule at a specific time (modal)',
+
+  // Board card: defer-after-reset action
+  'board.card_defer_title': 'Queue this card to run after the 5-hour window resets',
+  'board.card_defer_aria': 'Queue after reset',
+  'board.card_defer_toast': 'Will run after reset',
+  'board.card_defer_title_queued': 'Cancel scheduled run (queued for after reset)',
+  'board.card_defer_aria_queued': 'Cancel scheduled run',
+  'board.card_defer_toast_queued': '⏱ Scheduled — will run after reset',
+  'board.card_defer_toast_cancelled': 'Cancelled',
+  'board.card_defer_badge': '⏱ after reset',
 
   'tabbar.schedules': 'Schedules',
   'settings.subagents_title': 'Sub-agents',
@@ -557,7 +576,7 @@ export const en = {
 
   // ── Spec-039: session-health (no auto-reset) ─────────────────────────────────
   // Session health bar tooltip
-  'chat.session_bar_tip': 'Actual session context size: {tokens} tokens (full prompt sent each turn). There is an incompressible base floor — Claude Code system prompt + tools + CLAUDE.md + memory — that stays even after /reset. Amber from ~150K · Red from ~190K. The session is NEVER auto-reset; native auto-compact fires ~190K and compacts in place keeping the session.',
+  'chat.session_bar_tip': 'Actual session context size: {tokens} tokens (full prompt sent each turn). There is an incompressible base floor — Claude Code system prompt + tools + CLAUDE.md + memory — that stays even after /reset. Amber from 75% of window · Red from 90% of window. The session is NEVER auto-reset; native auto-compact fires near the limit and compacts in place keeping the session.',
   // Reset button label + tooltip
   'chat.reset_session_btn': '↺ Reset session',
   'chat.reset_session_tip': 'Reset session — start a fresh context (a brief handoff summary is saved). Use when context is full or a clean slate is needed.',
@@ -567,11 +586,11 @@ export const en = {
   'chat.reset_failed': 'Reset failed: {reason}',
   // Auto-compact toast (Spec-039: native CLI compact fired)
   'chat.compact_toast': 'Context compacted · session kept',
-  // Context warn banner — new framing (no mention of auto-rotate)
-  'chat.ctx_warn_approaching': '⚠ Context ~{nK}K — auto-compact fires at ~190K. A large turn may hit the 200K wall.',
-  'chat.ctx_warn_critical': '⚠ Context {nK}K — critically close to the 200K wall. Consider resetting the session.',
-  // 200K wall error card
-  'chat.wall_error_msg': 'Session hit the 200K context wall — context overflow.',
+  // Context warn banner — window-agnostic framing (no hardcoded ceiling)
+  'chat.ctx_warn_approaching': '⚠ Context ~{nK}K — approaching the window limit; auto-compact will fire soon.',
+  'chat.ctx_warn_critical': '⚠ Context {nK}K — critically close to the context limit. Consider resetting the session.',
+  // context-limit error card
+  'chat.wall_error_msg': 'Session hit the context limit — window overflow.',
   'chat.wall_reset_btn': 'Reset session',
   // Scroll-to-bottom pill (shown when user has scrolled up while messages arrive)
   'chat.scroll_to_bottom': '↓ New messages',

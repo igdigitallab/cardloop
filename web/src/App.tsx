@@ -183,7 +183,10 @@ export default function App() {
       })
       projectsLoadedRef.current = true
     } catch {
-      setProjects([])
+      // A transient /api/projects failure must not unmount the whole UI — keep the
+      // previously-loaded list so open project tabs and in-flight chat streams survive.
+      // First-load behavior is unaffected: projects starts as [] and the Welcome screen
+      // shows until the first successful poll.
     } finally {
       setProjectsLoading(false)
     }

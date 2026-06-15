@@ -471,6 +471,25 @@ export const ru = {
   'chat.defer_queue': 'В очередь',
   'chat.defer_submitting': 'Ставлю в очередь...',
   'chat.defer_queued': 'Отложенный запуск поставлен в очередь',
+  'chat.defer_after_reset_btn': '⏱ После сброса',
+  'chat.defer_after_reset_title': 'Запустить этот промпт после сброса 5-часового окна',
+  'chat.defer_after_reset_toast': 'Запущу после сброса (~{time})',
+  'chat.defer_after_reset_toast_plain': 'Запущу после сброса 5-часового окна',
+  'chat.defer_pending_chip_title': 'Отложенные запуски в очереди — нажмите для управления',
+  'chat.defer_pending_cancel': 'Отменить',
+  'chat.defer_pending_no_items': 'Нет отложенных запусков',
+  // Split-button tooltip for the ▾ dropdown part
+  'chat.defer_split_arrow_title': 'Запланировать на конкретное время (окно)',
+
+  // Board card: defer-after-reset action
+  'board.card_defer_title': 'Запустить карточку после сброса 5-часового окна',
+  'board.card_defer_aria': 'Отложить до сброса',
+  'board.card_defer_toast': 'Запущу после сброса',
+  'board.card_defer_title_queued': 'Отменить запланированный запуск (после сброса)',
+  'board.card_defer_aria_queued': 'Отменить запланированный запуск',
+  'board.card_defer_toast_queued': '⏱ Запланировано — запущу после сброса',
+  'board.card_defer_toast_cancelled': 'Отменено',
+  'board.card_defer_badge': '⏱ после сброса',
 
   'tabbar.schedules': 'Расписания',
   'settings.subagents_title': 'Субагенты',
@@ -556,7 +575,7 @@ export const ru = {
 
   // ── Spec-039: session-health (no auto-reset) ─────────────────────────────────
   // Session health bar tooltip
-  'chat.session_bar_tip': 'Реальный размер контекста сессии: {tokens} токенов (полный промпт отправляется модели каждый ход). Есть несжимаемый минимум — системный промпт Claude Code + инструменты + CLAUDE.md + память — он остаётся даже после /reset. Янтарный от ~150K · Красный от ~190K. Сессия никогда не сбрасывается автоматически — только нативный auto-compact (~190K), который сжимает контекст без потери сессии.',
+  'chat.session_bar_tip': 'Реальный размер контекста сессии: {tokens} токенов (полный промпт отправляется модели каждый ход). Есть несжимаемый минимум — системный промпт Claude Code + инструменты + CLAUDE.md + память — он остаётся даже после /reset. Янтарный от 75% окна · Красный от 90% окна. Сессия никогда не сбрасывается автоматически — только нативный auto-compact, который сжимает контекст без потери сессии.',
   // Reset button label + tooltip
   'chat.reset_session_btn': '↺ Сбросить сессию',
   'chat.reset_session_tip': 'Сбросить сессию — начать свежий контекст (сохранит краткое резюме). Используй, когда контекст переполнен или нужен чистый старт.',
@@ -566,11 +585,11 @@ export const ru = {
   'chat.reset_failed': 'Сброс не удался: {reason}',
   // Auto-compact toast (Spec-039: native CLI compact fired)
   'chat.compact_toast': 'Контекст сжат · сессия сохранена',
-  // Context warn banner — new framing (no mention of auto-rotate)
-  'chat.ctx_warn_approaching': '⚠ Контекст ~{nK}K — скоро auto-compact (~190K). Крупный ход может упереться в стену 200K.',
-  'chat.ctx_warn_critical': '⚠ Контекст {nK}K — критически близко к стене 200K. Рекомендуется сбросить сессию.',
-  // 200K wall error card
-  'chat.wall_error_msg': 'Сессия упёрлась в стену 200K — контекст переполнен.',
+  // Context warn banner — window-agnostic framing (no hardcoded ceiling)
+  'chat.ctx_warn_approaching': '⚠ Контекст ~{nK}K — приближается к лимиту окна, скоро auto-compact.',
+  'chat.ctx_warn_critical': '⚠ Контекст {nK}K — критически близко к лимиту контекста. Рекомендуется сбросить сессию.',
+  // context-limit error card
+  'chat.wall_error_msg': 'Сессия упёрлась в лимит контекста — окно переполнено.',
   'chat.wall_reset_btn': 'Сбросить сессию',
   // Scroll-to-bottom pill (shown when user has scrolled up while messages arrive)
   'chat.scroll_to_bottom': '↓ Новые сообщения',

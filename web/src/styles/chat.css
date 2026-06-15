@@ -293,10 +293,10 @@
 }
 
 .session-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 200;
+  /* Portaled to document.body — position/top/left are set via inline style on
+     desktop (computed from button rect). Mobile overrides to bottom-sheet below. */
+  position: fixed;
+  z-index: 10001;
   min-width: 320px;
   max-width: 440px;
   background: var(--bg2);
@@ -737,6 +737,40 @@
 @media (pointer: coarse) {
   .chat-tool-btn { min-width: 44px; height: 40px; }
   .chat-toolbar-tools { padding: 4px; }
+}
+
+/* Split defer button: ⏱ main | ▾ dropdown */
+.chat-defer-split {
+  display: inline-flex;
+  align-items: stretch;
+  white-space: nowrap;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.chat-defer-split .chat-tool-btn {
+  border-radius: 0;
+  padding: 0 8px;
+}
+.chat-defer-split .chat-tool-btn:first-child {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  min-width: 34px;
+}
+.chat-defer-split .chat-defer-arrow {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  min-width: 20px;
+  padding: 0 5px;
+  font-size: 11px;
+  border-left: 1px solid var(--border);
+}
+.chat-defer-split:has(button:disabled) .chat-tool-btn,
+.chat-defer-split .chat-tool-btn:disabled,
+.chat-defer-split .chat-defer-arrow:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+@media (pointer: coarse) {
+  .chat-defer-split .chat-tool-btn:first-child { min-width: 38px; }
+  .chat-defer-split .chat-defer-arrow { min-width: 26px; }
 }
 
 .chat-textarea {

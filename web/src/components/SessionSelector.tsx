@@ -1,11 +1,12 @@
 /**
  * Session selector dropdown + confirm-reset modal.
  * Manages session switching for the chat panel.
+ * The dropdown is portaled to document.body to escape any ancestor stacking context.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api'
 import { SessionInfo } from '../types'
-import { useClickOutside } from '../hooks/useClickOutside'
 import { Modal, ModalHead } from './Modal'
 
 interface Props {
@@ -38,15 +39,28 @@ function relTime(iso: string): string {
   }
 }
 
+/** Anchor width used when clamping the dropdown to avoid right-edge overflow. */
+const DROPDOWN_ANCHOR_WIDTH = 360
+
 export function SessionSelector({ projectId, onSessionChange, onInsertResetPrompt }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  // Ref on the outer wrapper (button area) — used for outside-click detection
   const dropRef = useRef<HTMLDivElement>(null)
+  // Ref on the toggle button — used to compute anchored position
+  const btnRef = useRef<HTMLButtonElement>(null)
+  // Ref on the portaled dropdown list — used for outside-click detection
+  const dropdownRef = useRef<HTMLDivElement>(null)
+
   const [confirmReset, setConfirmReset] = useState(false)
   const [resetPromptText, setResetPromptText] = useState(DEFAULT_RESET_PROMPT)
   const [renameModal, setRenameModal] = useState<{ session: SessionInfo; value: string } | null>(null)
+
+  // Computed desktop anchor style (null = mobile, let CSS bottom-sheet win)
+  const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties | null>(null)
 
   const loadSessions = useCallback(async () => {
     try {
@@ -63,7 +77,67 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
     setError('')
   }, [projectId, loadSessions])
 
-  useClickOutside(dropRef, () => setOpen(false), open)
+  // Compute anchored position from the toggle button rect.
+  // Returns null on mobile so CSS bottom-sheet takes over.
+  function computeStyle(): React.CSSProperties | null {
+    if (window.matchMedia('(max-width: 768px)').matches) return null
+    const btn = btnRef.current
+    if (!btn) return null
+    const rect = btn.getBoundingClientRect()
+    let left = rect.left
+    if (left + DROPDOWN_ANCHOR_WIDTH > window.innerWidth) {
+      left = window.innerWidth - DROPDOWN_ANCHOR_WIDTH - 8
+    }
+    return {
+      position: 'fixed',
+      top: rect.bottom + 4,
+      left,
+      zIndex: 10001,
+    }
+  }
+
+  // Recompute anchor whenever the dropdown opens or the window resizes/scrolls.
+  useEffect(() => {
+    if (!open) return
+    setDropdownStyle(computeStyle())
+
+    function update() {
+      setDropdownStyle(computeStyle())
+    }
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true) // capture scroll anywhere
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  // Outside-click: close only when the click is outside BOTH the selector wrapper
+  // AND the portaled dropdown. Also close on Esc.
+  useEffect(() => {
+    if (!open) return
+
+    function onMouseDown(e: MouseEvent) {
+      const target = e.target as Node
+      const insideSelector = dropRef.current?.contains(target) ?? false
+      const insideDropdown = dropdownRef.current?.contains(target) ?? false
+      if (!insideSelector && !insideDropdown) {
+        setOpen(false)
+      }
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open])
 
   const activeSession = sessions.find(s => s.is_active)
   const activeLabel = activeSession
@@ -113,6 +187,56 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
     }
   }
 
+  // The portaled dropdown element. On mobile dropdownStyle is null, so no
+  // inline position/top/left — the CSS bottom-sheet rules take effect instead.
+  const dropdown = (
+    <div
+      className="session-dropdown"
+      role="listbox"
+      ref={dropdownRef}
+      style={dropdownStyle ?? undefined}
+    >
+      <button
+        className="session-dropdown-item session-new-item"
+        onClick={requestReset}
+        disabled={busy}
+      >
+        ➕ New session
+      </button>
+      {sessions.length > 0 && <div className="session-dropdown-sep" />}
+      {sessions.map(s => (
+        <div key={s.session_id} className="session-dropdown-row">
+          <button
+            className={`session-dropdown-item${s.is_active ? ' active' : ''}`}
+            onClick={() => switchSession('resume', s.session_id)}
+            disabled={busy}
+            title={s.label ? `${s.label}\n— ${s.preview}` : s.preview}
+            role="option"
+            aria-selected={s.is_active}
+          >
+            <span className="session-item-check">{s.is_active ? '✓' : ''}</span>
+            <span className="session-item-preview">
+              {s.label
+                ? <><strong>{s.label}</strong> <span className="session-item-sub">— {s.preview}</span></>
+                : s.preview}
+            </span>
+            <span className="session-item-time">{relTime(s.last_used)}</span>
+          </button>
+          <button
+            className="session-rename-btn"
+            onClick={e => { e.stopPropagation(); setRenameModal({ session: s, value: s.label || '' }); setOpen(false) }}
+            disabled={busy}
+            title="Rename session"
+            aria-label="Rename session"
+          >✎</button>
+        </div>
+      ))}
+      {sessions.length === 0 && (
+        <div className="session-dropdown-empty">no saved sessions</div>
+      )}
+    </div>
+  )
+
   return (
     <div className="session-selector" ref={dropRef}>
       <button
@@ -123,6 +247,7 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
       >↺</button>
       <button
         className="session-selector-btn"
+        ref={btnRef}
         onClick={() => { setOpen(o => !o); if (!open) loadSessions() }}
         disabled={busy}
         title="Select session"
@@ -136,48 +261,8 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
 
       {error && <div className="session-error">{error}</div>}
 
-      {open && (
-        <div className="session-dropdown" role="listbox">
-          <button
-            className="session-dropdown-item session-new-item"
-            onClick={requestReset}
-            disabled={busy}
-          >
-            ➕ New session
-          </button>
-          {sessions.length > 0 && <div className="session-dropdown-sep" />}
-          {sessions.map(s => (
-            <div key={s.session_id} className="session-dropdown-row">
-              <button
-                className={`session-dropdown-item${s.is_active ? ' active' : ''}`}
-                onClick={() => switchSession('resume', s.session_id)}
-                disabled={busy}
-                title={s.label ? `${s.label}\n— ${s.preview}` : s.preview}
-                role="option"
-                aria-selected={s.is_active}
-              >
-                <span className="session-item-check">{s.is_active ? '✓' : ''}</span>
-                <span className="session-item-preview">
-                  {s.label
-                    ? <><strong>{s.label}</strong> <span className="session-item-sub">— {s.preview}</span></>
-                    : s.preview}
-                </span>
-                <span className="session-item-time">{relTime(s.last_used)}</span>
-              </button>
-              <button
-                className="session-rename-btn"
-                onClick={e => { e.stopPropagation(); setRenameModal({ session: s, value: s.label || '' }); setOpen(false) }}
-                disabled={busy}
-                title="Rename session"
-                aria-label="Rename session"
-              >✎</button>
-            </div>
-          ))}
-          {sessions.length === 0 && (
-            <div className="session-dropdown-empty">no saved sessions</div>
-          )}
-        </div>
-      )}
+      {/* Dropdown portaled to document.body to escape ancestor stacking contexts */}
+      {open && createPortal(dropdown, document.body)}
 
       {/* Rename modal */}
       {renameModal && (

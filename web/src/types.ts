@@ -311,6 +311,7 @@ export type ChatEventTool = RichTool & { type: 'tool' }
 export interface ChatEventResult {
   type: 'result'
   context_tokens?: number
+  context_window?: number
   cache_read_tokens?: number | null
   fresh_tokens?: number | null
   prompt_tokens?: number | null
@@ -359,6 +360,7 @@ export interface SessionHistoryResponse {
   messages: HistoryMessage[]
   session_id: string | null
   context_tokens?: number
+  context_window?: number
   /** Unix milliseconds of the last assistant turn (from transcript timestamp or file mtime). null if no assistant turn. */
   last_turn_at?: number | null
   /** Cache-hit % of the last assistant turn: round(cache_read / (cache_read + input_tokens) * 100). null if no usage. */

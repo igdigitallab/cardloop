@@ -128,6 +128,11 @@ function thinkModeStorageKey(projectId: string, chatId?: string) {
   return chatId ? `cops.chat.thinkmode.${projectId}:${chatId}` : `cops.chat.thinkmode.${projectId}`
 }
 
+function draftStorageKey(projectId: string, chatId?: string) {
+  // Per-chat draft key; falls back to per-project when chatId is not yet known.
+  return chatId ? `cops.chat.draft.${projectId}:${chatId}` : `cops.chat.draft.${projectId}`
+}
+
 /** Rough token estimate: ~4 characters per token (common heuristic for English/Russian). */
 function estimateTokens(messages: ChatMessage[]): number {
   let total = 0
@@ -605,6 +610,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [contextTokens, setContextTokens] = useState<number | null>(null)
+  const [contextWindow, setContextWindow] = useState<number>(1_000_000)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState('')
@@ -650,6 +656,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [queueEditText, setQueueEditText] = useState<string>('')
   const sendMessageRef = useRef<((text?: string) => Promise<void>) | null>(null)
   const streamingRef = useRef(false)
+  // Track previous isActive to detect false→true reactivation transitions.
+  const prevIsActiveRef = useRef<boolean>(isActive ?? false)
 
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [dragOver, setDragOver] = useState(false)
@@ -661,6 +669,11 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [deferDatetime, setDeferDatetime] = useState('')
   const [deferSubmitting, setDeferSubmitting] = useState(false)
   const [deferToast, setDeferToast] = useState<string | null>(null)
+  // One-click "after reset" button state
+  const [deferAfterResetBusy, setDeferAfterResetBusy] = useState(false)
+  // Pending deferred runs chip: count + popover + records
+  const [pendingDeferred, setPendingDeferred] = useState<unknown[]>([])
+  const [showPendingDeferred, setShowPendingDeferred] = useState(false)
   // Spec-021/039: manual reset + auto-compact UI state
   const [rotateToast, setRotateToast] = useState<string | null>(null)
   const [rotating, setRotating] = useState(false)
@@ -701,7 +714,49 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     try { localStorage.setItem(thinkModeStorageKey(projectId, effectiveChatId || undefined), mode) } catch { /* ignore */ }
   }, [projectId, effectiveChatId])
 
+  // Persist the chat input draft to localStorage on every change so a stream abort,
+  // projects refresh, or accidental tab close doesn't wipe unsent text.
+  // Cleared on successful send (see sendMessage below).
+  useEffect(() => {
+    try {
+      const key = draftStorageKey(projectId, effectiveChatId || undefined)
+      if (input) {
+        localStorage.setItem(key, input)
+      } else {
+        localStorage.removeItem(key)
+      }
+    } catch { /* localStorage unavailable */ }
+  }, [input, projectId, effectiveChatId])
+
   useEffect(() => { streamingRef.current = streaming }, [streaming])
+
+  // Close pending-deferred popover on outside click
+  useEffect(() => {
+    if (!showPendingDeferred) return
+    const handler = () => setShowPendingDeferred(false)
+    document.addEventListener('click', handler)
+    return () => document.removeEventListener('click', handler)
+  }, [showPendingDeferred])
+
+  // Load pending deferred runs for this project (for the queued chip).
+  // Filters client-side by session_key === String(project.tg_thread) — reliable; backend project
+  // filter matches by display name which may differ from the id we send.
+  const refreshPendingDeferred = useCallback(async () => {
+    if (!project.tg_thread) return
+    try {
+      const all = await api.deferredList('?status=pending')
+      const sk = String(project.tg_thread)
+      setPendingDeferred((all as Array<Record<string, unknown>>).filter(r => r['session_key'] === sk))
+    } catch {
+      // Non-fatal — chip just shows stale data
+    }
+  }, [project.tg_thread])
+
+  useEffect(() => {
+    refreshPendingDeferred()
+    const id = setInterval(refreshPendingDeferred, 45_000)
+    return () => clearInterval(id)
+  }, [refreshPendingDeferred])
 
   // Stick-to-bottom: auto-scroll only when the user is pinned (within SCROLL_PIN_THRESHOLD of bottom).
   // When unpinned (user scrolled up), new content does NOT jump the viewport — instead the pill
@@ -771,41 +826,20 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     }))
   }
 
-  useEffect(() => {
-    let cancelled = false
-    abortRef.current?.abort()
-    setMessages([])
-    setInput('')
-    setStreaming(false)
-    setError('')
-    setRun(null)
-    setServerStartedAt(null)
-    setSubagents([])
-    seenSubagentKeysRef.current = new Set()
-    setQueueItems([])
-    setQueueEditId(null)
-    setQueueEditText('')
-    busActiveRef.current = false
-    setContextTokens(null)
-    setPrevContextTokens(null)
-    setAttachments([])
-    setContextWarnFromBackend(false)
-    setWarnDismissedAtTokens(null)
-    setLastTurnEndMs(null)
-    setLastCacheHitPct(null)
-    // Re-pin on project/chat switch so initial load lands at the bottom.
-    pinnedRef.current = true
-    setShowNewMsgPill(false)
-
+  // Fetch /live + history and rebuild the in-flight turn (or restore the final answer).
+  // Callers supply isCancelled() so each call site manages its own cancellation token.
+  // This is intentionally a one-shot fetch — no persistent connection added.
+  const hydrateFromServer = useCallback((isCancelled: () => boolean) => {
     Promise.all([
       api.sessionHistory(projectId),
       api.chatQueue(projectId).catch(() => ({ items: [] as Array<{ id: string; text: string; created_at: number }> })),
       // Spec-035 L3: /live replaces /running — returns running state + turn history + started_at
       api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, cursor: 0, events: [] as Array<Record<string, unknown>> })),
     ]).then(([histRes, queueRes, liveRes]) => {
-      if (cancelled) return
+      if (isCancelled()) return
       setQueueItems(queueRes.items)
       setContextTokens(histRes.context_tokens || null)
+      if (histRes.context_window != null && histRes.context_window > 0) setContextWindow(histRes.context_window)
       // Spec-033: seed cache freshness anchor from the persisted transcript data
       if (histRes.last_turn_at != null) setLastTurnEndMs(histRes.last_turn_at)
       if (histRes.last_cache_hit_pct != null) setLastCacheHitPct(histRes.last_cache_hit_pct)
@@ -862,11 +896,65 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       } else {
         setMessages(histToMessages(histRes.messages))
       }
-    }).catch(() => { if (!cancelled) setMessages([]) })
+    }).catch(() => { if (!isCancelled()) setMessages([]) })
+  }, [projectId, effectiveChatId, seedCursor]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    let cancelled = false
+    abortRef.current?.abort()
+    setMessages([])
+    // Restore any saved draft for this project+chat; fall back to empty string.
+    try {
+      const savedDraft = localStorage.getItem(draftStorageKey(projectId, effectiveChatId || undefined))
+      setInput(savedDraft ?? '')
+    } catch {
+      setInput('')
+    }
+    setStreaming(false)
+    setError('')
+    setRun(null)
+    setServerStartedAt(null)
+    setSubagents([])
+    seenSubagentKeysRef.current = new Set()
+    setQueueItems([])
+    setQueueEditId(null)
+    setQueueEditText('')
+    busActiveRef.current = false
+    setContextTokens(null)
+    setPrevContextTokens(null)
+    setAttachments([])
+    setContextWarnFromBackend(false)
+    setWarnDismissedAtTokens(null)
+    setLastTurnEndMs(null)
+    setLastCacheHitPct(null)
+    // Re-pin on project/chat switch so initial load lands at the bottom.
+    pinnedRef.current = true
+    setShowNewMsgPill(false)
+
+    hydrateFromServer(() => cancelled)
 
     return () => { cancelled = true }
   // Spec-037: re-hydrate when the active chat changes (activeChatId drives all chat state)
   }, [projectId, effectiveChatId, seedCursor])
+
+  // Re-hydrate on tab reactivation (false→true transition).
+  // Fixes missed SSE events while the tab was inactive: fetches /live + history and
+  // rebuilds the in-flight turn (or restores the final answer) without a page refresh.
+  // Guard: skip if a direct /chat stream is already rendering (streamingRef.current).
+  // No setMessages([]) before fetch — swap after resolve to avoid a blank flash.
+  useEffect(() => {
+    const wasActive = prevIsActiveRef.current
+    prevIsActiveRef.current = isActive ?? false
+
+    // Only act on false→true transitions; skip initial mount (mount effect already hydrates).
+    if (!isActive || wasActive) return
+    // Direct /chat stream is rendering live — don't clobber it.
+    if (streamingRef.current) return
+
+    let cancelled = false
+    hydrateFromServer(() => cancelled)
+    return () => { cancelled = true }
+  }, [isActive, hydrateFromServer])
 
   // Periodic poll of /live while tab is active (restores indicator after bus miss).
   // Spec-035: uses /live (not /running) so we get started_at for the server-authoritative timer.
@@ -976,7 +1064,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setWarnDismissedAtTokens(null)
     setCtxRefreshKey(k => k + 1)
     api.sessionHistory(projectId)
-      .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens || null) })
+      .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens || null); if (res.context_window != null && res.context_window > 0) setContextWindow(res.context_window) })
       .catch(() => setMessages([]))
   }, [projectId])
 
@@ -1073,6 +1161,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             if (typeof evtAny.context_tokens === 'number' && (evtAny.context_tokens as number) > 0) {
               // Snapshot the prior value before overwriting — feeds the growth delta badge.
               setContextTokens(prev => { setPrevContextTokens(prev); return evtAny.context_tokens as number })
+            }
+            if (typeof evtAny.context_window === 'number' && (evtAny.context_window as number) > 0) {
+              setContextWindow(evtAny.context_window as number)
             }
             // Thread context_warn from backend: if true, mark the banner as active and clear any
             // previous dismiss (a fresh backend signal means the operator should see it again).
@@ -1378,16 +1469,18 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           const real = contextTokens != null && contextTokens > 0
           const tokens = real ? contextTokens! : estimateTokens(messages)
 
-          // Spec-039: color scale reflects the new thresholds.
-          // Amber from ~150K (approaching auto-compact at ~190K), red from ~190K (near wall).
+          // Color scale relative to the real context window.
+          // Amber at 75% of window (approaching auto-compact), red at 90%.
+          const warnAt = contextWindow * 0.75
+          const critAt = contextWindow * 0.90
           const tokenColor =
-            tokens >= 190_000 ? 'var(--color-red, #ef4444)' :
-            tokens >= 150_000 ? 'var(--color-yellow, #eab308)' :
+            tokens >= critAt ? 'var(--color-red, #ef4444)' :
+            tokens >= warnAt ? 'var(--color-yellow, #eab308)' :
             'var(--color-muted, #9ca3af)'
 
           // Progress bar fill fraction (0..1), capped at 1.
-          // Red threshold lowered to 190K (auto-compact zone), amber at 150K.
-          const fillFrac = Math.min(tokens / 200_000, 1)
+          // Denominator is the real context window reported by the backend.
+          const fillFrac = Math.min(tokens / contextWindow, 1)
           const barColor =
             fillFrac >= 0.95 ? 'var(--color-red, #ef4444)' :
             fillFrac >= 0.75 ? 'var(--color-yellow, #eab308)' :
@@ -1400,14 +1493,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             m => m.role === 'assistant' && m.metrics != null
           )?.metrics
 
-          // Spec-039: reset button prominence uses updated thresholds (amber 150K, red 190K).
-          const isProminent = tokens >= 150_000
+          // Reset button prominence: amber at 75% of window, red at 90%.
+          const isProminent = tokens >= warnAt
           const wrapBtnStyle: React.CSSProperties = isProminent
             ? {
                 fontSize: 11, padding: '1px 6px', cursor: rotating ? 'wait' : 'pointer',
-                background: 'var(--bg-card)', border: `1px solid ${tokens >= 190_000 ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)'}`,
+                background: 'var(--bg-card)', border: `1px solid ${tokens >= critAt ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)'}`,
                 borderRadius: 4,
-                color: tokens >= 190_000 ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)',
+                color: tokens >= critAt ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)',
                 fontWeight: 600,
               }
             : {
@@ -1673,7 +1766,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                     errLow.includes('prompt_too_long') ||
                     errLow.includes('prompt is too long') ||
                     errLow.includes('context_length_exceeded') ||
-                    (contextTokens != null && contextTokens >= 195_000)
+                    (contextTokens != null && contextTokens >= contextWindow * 0.95)
                   )
                   if (isWallError) {
                     return (
@@ -1845,9 +1938,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           const warnTokens = contextTokens != null && contextTokens > 0
             ? contextTokens
             : estimateTokens(messages)
-          // Spec-039: escalation threshold raised to 190K (matches auto-compact zone).
-          const WARN_THRESHOLD = 150_000
-          const ESCALATE_THRESHOLD = 190_000
+          // Thresholds scale with the real context window: warn at 85%, escalate at 95%.
+          const WARN_THRESHOLD = contextWindow * 0.85
+          const ESCALATE_THRESHOLD = contextWindow * 0.95
           const isEscalated = warnTokens >= ESCALATE_THRESHOLD
           const isInWarnZone = warnTokens >= WARN_THRESHOLD && !isEscalated
           // Trigger: backend flag OR token-count fallback
@@ -2028,25 +2121,112 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 title={t['chat.skills_title']}
                 aria-label={t['chat.skills_aria']}
               >🛠</button>
-              <button
-                className={`chat-tool-btn${showDefer ? ' active' : ''}`}
-                onClick={() => {
-                  setShowDefer(s => !s)
-                  setShowPrompts(false)
-                  setShowSkills(false)
-                  // Default datetime = now + 30 min
-                  if (!deferDatetime) {
-                    const d = new Date(Date.now() + 30 * 60 * 1000)
-                    const pad = (n: number) => String(n).padStart(2, '0')
-                    setDeferDatetime(
-                      `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-                    )
-                  }
-                }}
-                title={t['chat.defer_title']}
-                aria-label={t['chat.defer_aria']}
-              >⏱</button>
+              {/* Split defer button: ⏱ = one-click after-reset | ▾ = open modal for specific time */}
+              <span className="chat-defer-split">
+                <button
+                  className="chat-tool-btn"
+                  disabled={!input.trim() || deferAfterResetBusy}
+                  title={t['chat.defer_after_reset_title']}
+                  aria-label={t['chat.defer_aria']}
+                  onClick={async () => {
+                    if (!input.trim()) return
+                    setDeferAfterResetBusy(true)
+                    try {
+                      await api.deferredCreate({ project: project.id, prompt: input, fire_on_reset: true })
+                      setInput('')
+                      // Attempt to include reset time in toast
+                      let toastMsg: string = t['chat.defer_after_reset_toast_plain']
+                      try {
+                        const usage = await api.usage()
+                        const fiveH = usage.limits['five_hour']
+                        if (fiveH?.resets_at) {
+                          const d = new Date(fiveH.resets_at * 1000)
+                          const hh = String(d.getHours()).padStart(2, '0')
+                          const mm = String(d.getMinutes()).padStart(2, '0')
+                          toastMsg = t['chat.defer_after_reset_toast'].replace('{time}', `${hh}:${mm}`)
+                        }
+                      } catch { /* usage unavailable — use plain message */ }
+                      setDeferToast(toastMsg)
+                      setTimeout(() => setDeferToast(null), 4000)
+                      await refreshPendingDeferred()
+                    } catch (e: unknown) {
+                      setDeferToast(e instanceof Error ? e.message : String(e))
+                      setTimeout(() => setDeferToast(null), 4000)
+                    } finally {
+                      setDeferAfterResetBusy(false)
+                    }
+                  }}
+                >{deferAfterResetBusy ? '…' : '⏱'}</button>
+                <button
+                  className="chat-tool-btn chat-defer-arrow"
+                  disabled={!input.trim()}
+                  title={t['chat.defer_split_arrow_title']}
+                  aria-label={t['chat.defer_split_arrow_title']}
+                  onClick={() => {
+                    setShowDefer(true)
+                    setShowPrompts(false)
+                    setShowSkills(false)
+                    // Default datetime = now + 30 min
+                    if (!deferDatetime) {
+                      const d = new Date(Date.now() + 30 * 60 * 1000)
+                      const pad = (n: number) => String(n).padStart(2, '0')
+                      setDeferDatetime(
+                        `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+                      )
+                    }
+                  }}
+                >▾</button>
+              </span>
             </div>
+            {/* Pending deferred runs chip */}
+            {pendingDeferred.length > 0 && (
+              <div style={{ position: 'relative' }}>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  title={t['chat.defer_pending_chip_title']}
+                  style={{ fontSize: 12, padding: '3px 7px', opacity: 0.85 }}
+                  onClick={() => setShowPendingDeferred(s => !s)}
+                >
+                  ⏱ {pendingDeferred.length}
+                </button>
+                {showPendingDeferred && (
+                  <div
+                    style={{
+                      position: 'absolute', bottom: '110%', right: 0,
+                      background: 'var(--bg-card)', border: '1px solid var(--border)',
+                      borderRadius: 8, padding: '8px 0', minWidth: 260, maxWidth: 360,
+                      boxShadow: '0 4px 16px rgba(0,0,0,0.2)', zIndex: 500,
+                    }}
+                    onClick={e => e.stopPropagation()}
+                  >
+                    {(pendingDeferred as Array<Record<string, unknown>>).map(rec => (
+                      <div key={String(rec['id'])} style={{
+                        display: 'flex', alignItems: 'flex-start', gap: 8,
+                        padding: '6px 12px', borderBottom: '1px solid var(--border)',
+                      }}>
+                        <span style={{ flex: 1, fontSize: 12, color: 'var(--text)', wordBreak: 'break-word' }}>
+                          <span style={{ opacity: 0.55, marginRight: 4 }}>
+                            {rec['fire_on_reset'] ? '↺' : '🕐'}
+                          </span>
+                          {String(rec['prompt'] ?? '').slice(0, 80)}
+                        </span>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          style={{ fontSize: 11, padding: '2px 6px', flexShrink: 0 }}
+                          title={t['chat.defer_pending_cancel']}
+                          onClick={async () => {
+                            try {
+                              await api.deferredDelete(String(rec['id']))
+                              await refreshPendingDeferred()
+                            } catch { /* ignore */ }
+                          }}
+                        >✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <button
               className="btn-primary chat-send-btn"
               disabled={!input.trim() && attachments.filter(a => a.path).length === 0}
@@ -2130,6 +2310,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                     setInput('')
                     setDeferToast(t['chat.defer_queued'])
                     setTimeout(() => setDeferToast(null), 4000)
+                    await refreshPendingDeferred()
                   } catch (e: unknown) {
                     setDeferToast(e instanceof Error ? e.message : String(e))
                     setTimeout(() => setDeferToast(null), 4000)

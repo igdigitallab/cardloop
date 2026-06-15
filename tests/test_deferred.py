@@ -188,6 +188,40 @@ async def test_create_deferred_fire_on_reset(aiohttp_client, deferred_app, fake_
     records = _webapp._load_deferred()
     assert records[0]["fire_on_reset"] is True
     assert records[0]["fire_at"] is None
+    # Button/endpoint-created fire_on_reset records are strict: they wait for the
+    # real reset boundary and skip the util<10% free-window shortcut.
+    assert records[0]["strict_reset"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_deferred_stores_card_id(aiohttp_client, deferred_app, fake_ctx):
+    """POST /api/deferred with card_id stores it on the record."""
+    fake_ctx["topics"]["100:10"] = _make_topic("myproject")
+    client = await aiohttp_client(deferred_app)
+    resp = await client.post(
+        "/api/deferred",
+        json={"project": "myproject", "prompt": "do something", "fire_on_reset": True, "card_id": "card-abc"},
+        headers=auth_headers(fake_ctx),
+    )
+    assert resp.status == 201
+    records = _webapp._load_deferred()
+    assert records[0]["card_id"] == "card-abc"
+    assert records[0]["strict_reset"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_deferred_fire_at_not_strict(aiohttp_client, deferred_app, fake_ctx):
+    """POST /api/deferred with fire_at does NOT set strict_reset (only fire_on_reset does)."""
+    fake_ctx["topics"]["100:10"] = _make_topic("myproject")
+    client = await aiohttp_client(deferred_app)
+    resp = await client.post(
+        "/api/deferred",
+        json={"project": "myproject", "prompt": "do something", "fire_at": "2099-01-01T00:00:00Z"},
+        headers=auth_headers(fake_ctx),
+    )
+    assert resp.status == 201
+    records = _webapp._load_deferred()
+    assert "strict_reset" not in records[0]
 
 
 @pytest.mark.asyncio
@@ -695,6 +729,116 @@ async def test_deferred_loop_fire_on_reset_free_window(fake_ctx):
 
 
 @pytest.mark.asyncio
+async def test_deferred_loop_strict_reset_skips_free_window(fake_ctx):
+    """A strict_reset record does NOT fire on the util<10% free window; it waits for resets_at."""
+    fake_ctx["topics"]["100:10"] = _make_topic("myproject")
+
+    _webapp._save_deferred([{
+        "id": "def-strict",
+        "project": "myproject",
+        "session_key": "100:10",
+        "prompt": "explicit after-reset",
+        "fire_at": None,
+        "fire_on_reset": True,
+        "strict_reset": True,
+        "status": "pending",
+        "fired_at": None,
+        "error": None,
+        "attempts": 0,
+    }])
+
+    # Low utilization (would trigger the free-window shortcut for a non-strict record),
+    # but resets_at is in the future → strict record must NOT fire yet.
+    free_usage = {"five_hour": {"utilization": 0.05, "resets_at": time.time() + 18000, "status": "allowed"}}
+
+    spawned: list = []
+
+    def mock_spawn_bg(coro):
+        spawned.append(coro)
+        try:
+            coro.close()
+        except Exception:
+            pass
+
+    with patch.object(_webapp, "_get_cached_usage_data", new_callable=AsyncMock, return_value=free_usage), \
+         patch.object(_webapp, "_spawn_bg", side_effect=mock_spawn_bg), \
+         patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            call_count = 0
+            async def controlled_sleep(n):
+                nonlocal call_count
+                call_count += 1
+                if call_count >= 2:
+                    raise asyncio.CancelledError()
+            mock_sleep.side_effect = controlled_sleep
+            try:
+                await _webapp._deferred_loop(fake_ctx)
+            except asyncio.CancelledError:
+                pass
+
+    # Did NOT fire despite util 0.05 — strict records wait for the reset boundary.
+    assert len(spawned) == 0, "Strict record must not early-fire on the free window"
+    records = _webapp._load_deferred()
+    pending = next(r for r in records if r["id"] == "def-strict")
+    assert pending["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_deferred_loop_strict_reset_fires_at_resets_at(fake_ctx):
+    """A strict_reset record fires once time >= resets_at + jitter, even with low utilization."""
+    fake_ctx["topics"]["100:10"] = _make_topic("myproject")
+
+    now = time.time()
+    _webapp._save_deferred([{
+        "id": "def-strict-due",
+        "project": "myproject",
+        "session_key": "100:10",
+        "prompt": "explicit after-reset due",
+        "fire_at": None,
+        "fire_on_reset": True,
+        "strict_reset": True,
+        "status": "pending",
+        "fired_at": None,
+        "error": None,
+        "attempts": 0,
+        "_jitter": 30,  # fire_now = now >= (now-100) + 30 = True
+    }])
+
+    # Low utilization but resets_at already past → strict record fires at the boundary.
+    past_usage = {"five_hour": {"utilization": 0.05, "resets_at": now - 100, "status": "allowed"}}
+
+    spawned: list = []
+
+    def mock_spawn_bg(coro):
+        spawned.append(coro)
+        try:
+            coro.close()
+        except Exception:
+            pass
+
+    with patch.object(_webapp, "_get_cached_usage_data", new_callable=AsyncMock, return_value=past_usage), \
+         patch.object(_webapp, "_spawn_bg", side_effect=mock_spawn_bg), \
+         patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            call_count = 0
+            async def controlled_sleep(n):
+                nonlocal call_count
+                call_count += 1
+                if call_count >= 2:
+                    raise asyncio.CancelledError()
+            mock_sleep.side_effect = controlled_sleep
+            try:
+                await _webapp._deferred_loop(fake_ctx)
+            except asyncio.CancelledError:
+                pass
+
+    records = _webapp._load_deferred()
+    fired = next(r for r in records if r["id"] == "def-strict-due")
+    assert fired["status"] == "fired"
+    assert len(spawned) == 1
+
+
+@pytest.mark.asyncio
 async def test_deferred_loop_fire_on_reset_waits_for_resets_at(fake_ctx):
     """fire_on_reset does NOT fire when utilization=0.90; fires when time >= resets_at + jitter."""
     fake_ctx["topics"]["100:10"] = _make_topic("myproject")
@@ -897,6 +1041,9 @@ async def test_auto_resume_creates_deferred_on_429(tmp_path):
     r = records[0]
     assert r["status"] == "pending"
     assert r["fire_on_reset"] is True
+    # Auto-resume records are NOT strict: they keep the util<10% free-window shortcut
+    # so a rate-limited run resumes as soon as the window is mostly free.
+    assert "strict_reset" not in r
     assert r["auto_resume"] is True
     assert r["auto_resume_count"] == 1
     assert r["resume_session_id"] == "sess-abc123"

@@ -243,6 +243,12 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   // Toast for gate messages
   const [gateToast, setGateToast] = useState<string>('')
 
+  // Card defer-after-reset: track busy per card id
+  const [cardDeferBusy, setCardDeferBusy] = useState<Set<string>>(new Set())
+  // Card defer-after-reset: map card_id -> pending deferred record id (for the stateful toggle).
+  // Populated from GET /api/deferred?status=pending, filtered to cards on THIS board.
+  const [deferMap, setDeferMap] = useState<Record<string, string>>({})
+
   // Spec 009: quality gate — test check result before applying
   const [gateResult, setGateResult] = useState<GateResult | null>(null)
   const [gateChecking, setGateChecking] = useState(false)
@@ -402,6 +408,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         const fresh = await api.tasks(projectIdRef.current)
         setBoard(fresh)
         schedulePoll(fresh)
+        refreshDeferMap()
       } catch {
         schedulePoll(b)
       }
@@ -414,6 +421,36 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       const fresh = await api.tasks(projectIdRef.current)
       setBoard(fresh)
       schedulePoll(fresh)
+      refreshDeferMap()
+    } catch { /* silently ignore — next poll tick will retry */ }
+  }
+
+  // Keep the latest board in a ref so the deferred-map refresher can filter by
+  // the current board's card ids without re-creating the callback every render.
+  const boardRef = useRef<Board | null>(null)
+  boardRef.current = board
+
+  // Collect all card ids currently on the board (across every column).
+  function collectCardIds(b: Board | null): Set<string> {
+    const ids = new Set<string>()
+    if (!b) return ids
+    for (const col of b.columns) for (const c of col.cards) ids.add(c.id)
+    return ids
+  }
+
+  // Refresh the card_id -> deferred-record-id map for pending "after reset" runs
+  // belonging to cards on THIS board. Called on load/poll and after queue/cancel.
+  async function refreshDeferMap() {
+    try {
+      const recs = await api.deferredList('?status=pending')
+      const boardIds = collectCardIds(boardRef.current)
+      const next: Record<string, string> = {}
+      for (const r of recs as Array<{ id?: string; card_id?: string }>) {
+        const cid = r.card_id
+        const rid = r.id
+        if (cid && rid && boardIds.has(cid)) next[cid] = rid
+      }
+      setDeferMap(next)
     } catch { /* silently ignore — next poll tick will retry */ }
   }
 
@@ -423,11 +460,13 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     setShowArchive(false); setArchive(null)
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
 
+    setDeferMap({})  // reset stale map when switching projects
     api.tasks(projectId).then(b => {
       if (!cancelled) {
         setBoard(b)
         setLoading(false)
         schedulePoll(b)
+        refreshDeferMap()
       }
     }).catch(e => {
       if (!cancelled) { setError(String(e.message || e)); setLoading(false) }
@@ -611,6 +650,44 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     }
   }
 
+  // Card ⏱ "after reset" toggle: queue when not queued, cancel when queued.
+  // Idempotent — the per-card busy guard blocks a double-submit; once queued, a
+  // second click cancels rather than creating a duplicate record.
+  async function toggleCardDefer(card: TaskCard) {
+    if (cardDeferBusy.has(card.id)) return
+    const existingId = deferMap[card.id]
+    setCardDeferBusy(prev => new Set(prev).add(card.id))
+    try {
+      if (existingId) {
+        // Queued → cancel the pending deferred run.
+        await api.deferredDelete(existingId)
+        setDeferMap(prev => {
+          const next = { ...prev }; delete next[card.id]; return next
+        })
+        showToast(t['board.card_defer_toast_cancelled'])
+      } else {
+        // Not queued → schedule (strict reset, fires only at the next boundary).
+        if (!card.text.trim()) return
+        const r = await api.deferredCreate({
+          project: projectId,
+          prompt: card.text,
+          fire_on_reset: true,
+          card_id: card.id,
+        })
+        setDeferMap(prev => ({ ...prev, [card.id]: r.id }))
+        showToast(t['board.card_defer_toast_queued'])
+      }
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCardDeferBusy(prev => {
+        const next = new Set(prev); next.delete(card.id); return next
+      })
+      // Reconcile with the server in case the record fired/cancelled elsewhere.
+      refreshDeferMap()
+    }
+  }
+
   if (loading) return <Spinner label={t['board.loading']} />
 
   const cols = board?.columns ?? []
@@ -694,6 +771,14 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               aria-label={t['board.spec_indicator_aria']}
             >📋</span>
           )}
+          {/* Defer-after-reset: visible badge when this card has a pending "after reset" run */}
+          {deferMap[card.id] && (
+            <span
+              className="board-card-defer-badge"
+              title={t['board.card_defer_title_queued']}
+              aria-label={t['board.card_defer_aria_queued']}
+            >{t['board.card_defer_badge']}</span>
+          )}
         </div>
         {/* spec-036 Phase 2a: live activity strip — shown when this card is being executed */}
         {liveRun?.cardId === card.id && <CardLiveStrip run={liveRun} />}
@@ -732,6 +817,23 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               onClick={() => showResult(card.id)}
             >📄</button>
           )}
+          {/* Defer-after-reset: stateful toggle. Not queued → schedule the card's
+              prompt to run after the 5-hour window resets (strict reset boundary).
+              Queued → active/highlighted; click cancels the pending run.
+              Decoupled from the card state machine — the card stays where it is. */}
+          {(() => {
+            const queued = !!deferMap[card.id]
+            return (
+              <button
+                title={queued ? t['board.card_defer_title_queued'] : t['board.card_defer_title']}
+                aria-label={queued ? t['board.card_defer_aria_queued'] : t['board.card_defer_aria']}
+                aria-pressed={queued}
+                className={`act-defer${queued ? ' act-defer-active' : ''}`}
+                disabled={busy || cardDeferBusy.has(card.id) || (!queued && !card.text.trim())}
+                onClick={() => toggleCardDefer(card)}
+              >⏱</button>
+            )
+          })()}
           <button title={t['board.archive']} aria-label={t['board.archive_aria']} className="act-done" disabled={busy}
             onClick={() => move(card.id, 'done')}>✓</button>
           <button title={t['board.delete']} aria-label={t['board.delete_aria']} className="act-del" disabled={busy}
@@ -800,6 +902,13 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                         className="board-failed-row-text"
                         title={card.text}
                       >{card.text}</span>
+                      {deferMap[card.id] && (
+                        <span
+                          className="board-card-defer-badge"
+                          title={t['board.card_defer_title_queued']}
+                          aria-label={t['board.card_defer_aria_queued']}
+                        >{t['board.card_defer_badge']}</span>
+                      )}
                       <div className="board-failed-row-actions">
                         <button
                           title="🤖 Retry by agent (→ In Progress)"
@@ -821,6 +930,19 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                           disabled={busy}
                           onClick={() => move(card.id, 'backlog')}
                         >←</button>
+                        {(() => {
+                          const queued = !!deferMap[card.id]
+                          return (
+                            <button
+                              title={queued ? t['board.card_defer_title_queued'] : t['board.card_defer_title']}
+                              aria-label={queued ? t['board.card_defer_aria_queued'] : t['board.card_defer_aria']}
+                              aria-pressed={queued}
+                              className={`act-defer${queued ? ' act-defer-active' : ''}`}
+                              disabled={busy || cardDeferBusy.has(card.id) || (!queued && !card.text.trim())}
+                              onClick={() => toggleCardDefer(card)}
+                            >⏱</button>
+                          )
+                        })()}
                         <button
                           title="Archive (mark done)"
                           aria-label="Archive card"
