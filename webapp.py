@@ -8624,15 +8624,21 @@ async def api_new_project(req: web.Request) -> web.Response:
         shutil.rmtree(str(cwd), ignore_errors=True)
         return web.json_response({"error": f"error writing templates: {e}"}, status=500)
 
-    # Register in topics.json. Try to create a REAL forum topic in TG —
-    # the bot is an admin of the supergroup with manage_topics, so the project is immediately
-    # available in Telegram (chat + card auto-run). The project name is set LATER
-    # by onboarding, so we create the topic with a placeholder; on rename the topic
-    # name is synced via editForumTopic (_sync_forum_topic_name).
-    # If creating the topic fails (no rights/API error) — fall back to
-    # a synthetic key chat:ts (as before), project is still created.
+    # Register in topics.json.
+    # spec-040 Phase 0: new projects always get a slug-based session key (transport-neutral).
+    # If TG is running, we also create a forum topic and store its chat:thread in the
+    # ``tg_key`` field so the TG adapter can still route messages to this project
+    # (binding_for reverse-lookup).  Removed in Phase D.
+    pid = _project_id(str(cwd))
+    session_key = pid  # slug key — canonical from Phase 0 onward
+
+    topic_entry: dict = {
+        "project": display_name,
+        "cwd": str(cwd),
+        "model": _effective_default_model(ctx),
+    }
+
     group_chat_id = ctx.get("GROUP_CHAT_ID") or 0
-    thread_id = None
     ptb_app = ctx.get("ptb_app")
     if ptb_app and group_chat_id:
         try:
@@ -8640,21 +8646,18 @@ async def api_new_project(req: web.Request) -> web.Response:
                 chat_id=group_chat_id,
                 name=(display_name if name else "🆕 New project"),
             )
-            thread_id = topic.message_thread_id
-            print(f"[new_project] forum topic created: thread={thread_id}")
+            tg_thread_id = topic.message_thread_id
+            tg_key = f"{group_chat_id}:{tg_thread_id}"
+            topic_entry["tg_key"] = tg_key
+            print(f"[new_project] forum topic created: thread={tg_thread_id}, session_key={session_key!r}")
         except Exception as e:
-            print(f"[new_project] create_forum_topic failed ({e}) — synthetic key")
-    session_key = f"{group_chat_id}:{thread_id if thread_id is not None else ts}"
-    ctx["topics"][session_key] = {
-        "project": display_name,
-        "cwd": str(cwd),
-        "model": _effective_default_model(ctx),
-    }
+            print(f"[new_project] create_forum_topic failed ({e}) — cockpit-only project")
+
+    ctx["topics"][session_key] = topic_entry
     save_topics = ctx.get("save_topics")
     if callable(save_topics):
         save_topics()
 
-    pid = _project_id(str(cwd))
     project = _find_project_by_id(ctx, pid)
     if project is None:
         # Build a minimal object in case a cwd duplicate displaced our entry

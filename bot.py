@@ -270,6 +270,20 @@ TELEGRAM_NUDGE = (
 # AskUserQuestion = interactive prompt (no reply in TG -> agent hangs or decides on its own).
 DISALLOWED_TOOLS = ["AskUserQuestion"]
 
+# spec-040 Phase 0: neutral default used by run_engine() when caller passes system_prompt=None.
+# Transport-agnostic — no TG-specific formatting or channel assumptions.
+DEFAULT_NUDGE = (
+    "You are Claude Code running as an automated engineering assistant in the cockpit IDE. "
+    "Follow the project CLAUDE.md and ~/CLAUDE.md (already loaded) — all working rules are there.\n"
+    f"- No interactive dialogs: if you need clarification or a choice — ask as plain text at the "
+    f"end of your reply and finish the turn; {OPERATOR_NAME} will reply in the next message.\n"
+    f"- Reply concisely{_lang_directive}, in natural prose: what you did → what's next.\n"
+    "- Key decisions / pitfalls / rejected approaches → write to `.claude-ops/memory/` (see project CLAUDE.md).\n"
+    "- When presenting a small set of mutually-exclusive choices (2–6 options), you MAY end your "
+    "message with a ```options fenced block (one choice per line) to render a clickable picker "
+    "in the chat UI; otherwise reply normally."
+)
+
 # spec-034 L1: Board protocol block injected into system_prompt["append"] when TASKS.md exists.
 # Verbatim from spec — the cockpit owns the workflow rules, not per-project CLAUDE.md.
 BOARD_PROTOCOL = (
@@ -340,6 +354,21 @@ def resolve_project(name: str):
     return None
 
 
+# ─────────────────────────── session-key constructor ───────────────────────────
+def key_of(cwd: str) -> str:
+    """Canonical session-key constructor: project slug derived from cwd.
+
+    Phase 0 (spec-040): all new session keys go through here so the format is defined
+    in one place. Designed for future multi-user extension — the signature stays
+    ``key_of(cwd)`` and an optional ``user_id`` parameter can be added later to
+    produce ``{user_id}:{slug}`` keys without touching every call site.
+
+    Defined early (before state loading) because _migrate_session_keys calls it at
+    module load time.
+    """
+    return Path(cwd.rstrip("/")).name
+
+
 # ─────────────────────────── state ───────────────────────────
 def _read(f, default):
     try:
@@ -348,10 +377,109 @@ def _read(f, default):
         return default
 
 
-topics = _read(TOPICS_F, {})       # "chat:thread" -> {project, cwd, model}
-sessions = _read(SESSIONS_F, {})   # "chat:thread" -> session_id
-costs = {}                         # "chat:thread" -> last cost usd
-running = {}                       # "chat:thread" -> ClaudeSDKClient (for /stop)
+def _migrate_session_keys(
+    topics_data: dict,
+    sessions_data: dict,
+) -> "tuple[dict, dict, int]":
+    """spec-040 Phase 0: rename legacy ``chat:thread`` keys to slug-based keys.
+
+    Rules:
+    - Only keys whose format is ``<digits>:<digits-or-zero>`` (TG chat:thread) are
+      migrated; ``free-*`` and ``glasses:*`` keys and any already-slug keys are left
+      untouched (idempotent).
+    - The slug is derived from the entry's ``cwd`` field via ``key_of(cwd)``.
+    - Entries without a ``cwd`` are skipped with a warning (kept under old key).
+    - Slug collisions (two TG keys mapping to the same slug) keep the FIRST entry
+      encountered; the duplicate is skipped and a warning is printed.
+    - Migrated topic entries get a ``"tg_key"`` field added — stores the original
+      ``chat:thread`` string so that ``binding_for()`` can still route TG messages
+      to the correct project after migration.  Removed in Phase D.
+    - sessions_data values (session_id strings) are preserved verbatim so SDK resume
+      keeps working.
+    - Repeated calls are no-ops (keys no longer match the TG pattern after migration).
+
+    Returns ``(new_topics, new_sessions, migrated_count)``.
+    """
+    import re
+    _tg_key_pat = re.compile(r"^-?\d+:\d+$")
+
+    new_topics: dict = {}
+    new_sessions: dict = {}
+    migrated = 0
+
+    # --- topics ---
+    for k, v in topics_data.items():
+        if not _tg_key_pat.match(k):
+            # Already neutral key (slug / free-* / glasses:* / etc.) — keep as-is.
+            if k in new_topics:
+                print(f"[migrate] WARNING: duplicate neutral key {k!r} in topics — keeping first")
+            else:
+                new_topics[k] = v
+            continue
+
+        cwd = v.get("cwd", "")
+        if not cwd:
+            print(f"[migrate] WARNING: topics key {k!r} has no cwd — skipping")
+            new_topics[k] = v  # keep under old key rather than lose the entry
+            continue
+
+        slug = key_of(cwd)
+        if slug in new_topics:
+            print(f"[migrate] WARNING: slug collision {slug!r} "
+                  f"(from {k!r} cwd={cwd!r}) — keeping existing entry, skipping duplicate")
+            continue
+
+        # Store original TG key in the value so binding_for() can reverse-lookup after
+        # migration.  This field is removed in Phase D when TG is fully deleted.
+        entry = dict(v)
+        entry["tg_key"] = k
+        new_topics[slug] = entry
+        migrated += 1
+
+    # --- sessions ---
+    # Build a reverse map: old TG key -> slug (from topics migration above).
+    old_to_slug: dict[str, str] = {}
+    for k, v in topics_data.items():
+        if _tg_key_pat.match(k):
+            cwd = v.get("cwd", "")
+            if cwd:
+                old_to_slug[k] = key_of(cwd)
+
+    for k, session_id in sessions_data.items():
+        if not _tg_key_pat.match(k):
+            new_sessions[k] = session_id
+            continue
+
+        slug = old_to_slug.get(k)
+        if slug is None:
+            # Session key has no matching topic — keep under old key to preserve session_id.
+            print(f"[migrate] WARNING: sessions key {k!r} has no matching topic entry — "
+                  f"keeping under old key")
+            new_sessions[k] = session_id
+            continue
+
+        if slug in new_sessions:
+            print(f"[migrate] WARNING: slug collision {slug!r} in sessions — keeping existing")
+            continue
+
+        new_sessions[slug] = session_id
+
+    return new_topics, new_sessions, migrated
+
+
+topics = _read(TOPICS_F, {})       # slug -> {project, cwd, model}
+sessions = _read(SESSIONS_F, {})   # slug -> session_id
+
+# spec-040 Phase 0: idempotent startup migration — rename legacy chat:thread keys to slugs.
+_topics_migrated, _sessions_migrated, _n_migrated = _migrate_session_keys(topics, sessions)
+if _n_migrated:
+    topics = _topics_migrated
+    sessions = _sessions_migrated
+    TOPICS_F.write_text(json.dumps(topics, ensure_ascii=False, indent=2))
+    SESSIONS_F.write_text(json.dumps(sessions, ensure_ascii=False, indent=2))
+    print(f"[migrate] Phase 0: migrated {_n_migrated} session key(s) to slug format")
+costs = {}                         # session_key -> last cost usd
+running = {}                       # session_key -> ClaudeSDKClient (for /stop)
 rate_limits = {}                   # rate_limit_type -> {status, resets_at, utilization, ts} (passive)
 
 # ── Spec-028 Phase 2: live-client registry ────────────────────────────────────────────────────
@@ -444,7 +572,11 @@ def save_sessions():
     SESSIONS_F.write_text(json.dumps(sessions, ensure_ascii=False, indent=2))
 
 
-def key_of(update: Update) -> str:
+def _tg_key_of(update: Update) -> str:
+    """TG-specific key constructor: ``{chat_id}:{thread_id}``.
+
+    Used ONLY by the Telegram adapter (bot.py). Will be deleted in Phase D.
+    """
     chat = update.effective_chat.id
     thread = update.effective_message.message_thread_id or 0
     return f"{chat}:{thread}"
@@ -452,15 +584,38 @@ def key_of(update: Update) -> str:
 
 def binding_for(update: Update) -> dict:
     """Topic binding. General / no topic -> default. Name-based auto-binding is NOT here
-    (that's in on_topic_created). Here we only read + return default for General."""
-    k = key_of(update)
+    (that's in on_topic_created). Here we only read + return default for General.
+
+    Phase 0 compat: after key migration topics.json uses slug keys, but each migrated
+    entry carries a ``tg_key`` field with the original ``chat:thread`` string.  We do
+    a two-pass lookup: direct key hit first (pre-migration entries), then reverse scan
+    on ``tg_key`` (post-migration entries).  The scan is O(n) but n ≤ ~50 in practice.
+    Removed in Phase D.
+    """
+    k = _tg_key_of(update)
     if k in topics:
         return topics[k]
+    # Phase 0 reverse-lookup: find the entry whose tg_key matches.
+    for entry in topics.values():
+        if entry.get("tg_key") == k:
+            return entry
     # topic without a binding -> fall back to DEFAULT_CWD, mark project as unbound
     thread = update.effective_message.message_thread_id
     if not thread:
         return {"project": "General", "cwd": DEFAULT_CWD, "model": DEFAULT_MODEL}
     return None  # unknown topic -> ask user to run /project
+
+
+def _tg_key_in_topics(tg_key: str) -> bool:
+    """Phase 0 compat: check whether a TG chat:thread key is bound to any project.
+
+    After migration topics uses slug keys, so direct ``tg_key in topics`` fails.
+    We also scan entries for the ``tg_key`` field added by migration.
+    Removed in Phase D.
+    """
+    if tg_key in topics:
+        return True
+    return any(v.get("tg_key") == tg_key for v in topics.values())
 
 
 # ─────────────────────────── auth ───────────────────────────
@@ -1278,10 +1433,12 @@ async def run_engine(  # type: ignore[return]
     Yields event dicts. SDK exceptions are wrapped as {"type": "error", "exc": ...}.
     """
     if system_prompt is None:
+        # spec-040 Phase 0: use transport-neutral DEFAULT_NUDGE, not TELEGRAM_NUDGE.
+        # Callers (TG adapter, cockpit) may pass an explicit system_prompt to override.
         system_prompt = {
             "type": "preset",
             "preset": "claude_code",
-            "append": TELEGRAM_NUDGE,
+            "append": DEFAULT_NUDGE,
             "exclude_dynamic_sections": True,
         }
 
@@ -1531,10 +1688,12 @@ async def run_engine(  # type: ignore[return]
 async def run_agent(context, update, prompt: str):
     chat = update.effective_chat.id
     thread = update.effective_message.message_thread_id or 0
-    k = key_of(update)
+    k = _tg_key_of(update)
     b = topics.get(k) or binding_for(update)
     cwd, model = b["cwd"], b.get("model", DEFAULT_MODEL)
-    # slot already reserved in on_message (running[k]=True) — here we just do the work
+    # spec-040 Phase 0: session_key is the slug (transport-neutral); k is TG-only.
+    # on_message reserves running[session_key] (not running[k]).
+    session_key = key_of(cwd)
 
     # Spec-028 Phase 1: build a ctx dict so run_engine uses the shared running dict and,
     # when PERSISTENT_CLIENT=1, the live-client registry.
@@ -1616,7 +1775,9 @@ async def run_agent(context, update, prompt: str):
     engine_exc = None
     subagent_progress_counts: dict = {}   # task_id -> count of progress events seen
     _tg_last_result_event: dict | None = None  # Phase D: track for auto-resume
-    webapp._bus_publish(k, {"kind": "run_start", "source": "tg", "prompt": prompt, "run_id": None})
+    # spec-040 Phase 0: publish to cockpit bus using slug session_key (not TG chat:thread).
+    # Cockpit subscribes by session_key = project["tg_thread"] which is now the slug.
+    webapp._bus_publish(session_key, {"kind": "run_start", "source": "tg", "prompt": prompt, "run_id": None})
     try:
         # Project secrets (Spec 007) augment env; TG_CHAT_ID/TG_THREAD_ID take priority.
         # secret: references are resolved against the built-in store; TG vars are merged after so they always win.
@@ -1626,11 +1787,11 @@ async def run_agent(context, update, prompt: str):
         agent_kwargs = _build_agents_kwargs(agents_config)
         # Spec-021 Phase 4: inject handoff summary into the first turn of a fresh session.
         # Only fires when there is no existing session (post-rotation) and a pending handoff exists.
-        resume_sid = sessions.get(k)
+        resume_sid = sessions.get(session_key)
         effective_prompt = prompt
         try:
-            if resume_sid is None and k in pending_handoff:
-                summary = pending_handoff.pop(k)
+            if resume_sid is None and session_key in pending_handoff:
+                summary = pending_handoff.pop(session_key)
                 effective_prompt = (
                     "<prior-session-summary>\n"
                     "The previous session was rotated to stay lean. Summary of where we left off below.\n"
@@ -1640,7 +1801,7 @@ async def run_agent(context, update, prompt: str):
                     "</prior-session-summary>\n\n"
                     f"{prompt}"
                 )
-                print(f"[rotation] injected handoff into first post-rotation turn for {k}")
+                print(f"[rotation] injected handoff into first post-rotation turn for {session_key}")
         except Exception as _inj_exc:
             print(f"[rotation] handoff injection failed (continuing without it): {_inj_exc}")
             effective_prompt = prompt
@@ -1648,12 +1809,12 @@ async def run_agent(context, update, prompt: str):
             project_name=b["project"],
             cwd=cwd,
             prompt=effective_prompt,
-            session_key=k,
+            session_key=session_key,
             model=model,
             system_prompt={
                 "type": "preset",
                 "preset": "claude_code",
-                "append": TELEGRAM_NUDGE,
+                "append": TELEGRAM_NUDGE,  # TG adapter keeps TG-specific nudge
                 "exclude_dynamic_sections": True,
             },
             env=agent_env,
@@ -1668,7 +1829,7 @@ async def run_agent(context, update, prompt: str):
             if etype == "text":
                 answer.append(event["text"])
                 log_lines.append("💬 " + short(event["text"].replace("\n", " "), 70))
-                webapp._bus_publish(k, {"kind": "text", "text": event["text"], "run_id": None})
+                webapp._bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": None})
 
             elif etype == "tool":
                 name = event["name"]
@@ -1684,7 +1845,7 @@ async def run_agent(context, update, prompt: str):
                     audit(b["project"], name.upper(), fp)
                 else:
                     log_lines.append(f"🔧 {name}")
-                webapp._bus_publish(k, {
+                webapp._bus_publish(session_key, {
                     "kind": "tool", "run_id": None,
                     "tool": webapp._format_tool(name, inp if isinstance(inp, dict) else {}),
                 })
@@ -1693,10 +1854,10 @@ async def run_agent(context, update, prompt: str):
             elif etype == "result":
                 _tg_last_result_event = event  # Phase D: capture for auto-resume
                 if event.get("session_id"):
-                    sessions[k] = event["session_id"]
+                    sessions[session_key] = event["session_id"]
                     save_sessions()
                 if event.get("cost_usd") is not None:
-                    costs[k] = event["cost_usd"]
+                    costs[session_key] = event["cost_usd"]
 
             elif etype == "rate_limit":
                 rl_type = event.get("rate_limit_type")
@@ -1732,7 +1893,7 @@ async def run_agent(context, update, prompt: str):
                     log_lines.append(line)
                     answer.append(f"\n_{line}_")   # append terminal result to final reply
                     await push_status()
-                webapp._bus_publish(k, {"kind": "subagent", "run_id": None, **event})
+                webapp._bus_publish(session_key, {"kind": "subagent", "run_id": None, **event})
 
             elif etype == "text_delta":
                 pass  # TG adapter: ignore streaming deltas — final reply built from {type:"text"} blocks
@@ -1745,7 +1906,7 @@ async def run_agent(context, update, prompt: str):
     finally:
         hb.cancel()
         wd.cancel()
-        webapp._bus_publish(k, {
+        webapp._bus_publish(session_key, {
             "kind": "run_end",
             "outcome": "ok" if engine_exc is None else "fail",
             "run_id": None,
@@ -1819,13 +1980,17 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_file = bool(msg.document or msg.photo)
     if not text and not has_file:
         return
-    k = key_of(update)
-    if k not in topics and msg.message_thread_id:
+    k = _tg_key_of(update)
+    if not _tg_key_in_topics(k) and msg.message_thread_id:
         await send(context, update.effective_chat.id, msg.message_thread_id,
                    "🔌 Topic is not bound to a project. Bind it: /project <name>")
         return
+    # spec-040 Phase 0: derive slug session_key for engine state (running/sessions/costs).
+    # k (chat:thread) is still used for TG queue operations; session_key (slug) for everything else.
+    _b = binding_for(update)
+    session_key = key_of(_b["cwd"]) if (_b and _b.get("cwd")) else k
     # race-condition guard: reserve slot SYNCHRONOUSLY before the first await
-    if k in running:
+    if session_key in running:
         # Engine is busy — enqueue the message instead of rejecting it.
         # Build the full prompt first (attachments are not downloaded here — queue plain text only).
         base_text = (msg.text or msg.caption or "").strip()
@@ -1847,7 +2012,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        "⚠️ File attachments cannot be queued while a run is in progress. "
                        "Please resend after the current turn finishes.")
         return
-    running[k] = True  # placeholder; run_engine will replace with the real client
+    running[session_key] = True  # placeholder; run_engine will replace with the real client
     cid, tid = update.effective_chat.id, msg.message_thread_id
     try:
         # attachments -> download, pass paths to agent
@@ -1869,7 +2034,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(cid, ChatAction.TYPING, message_thread_id=tid or None)
         asyncio.create_task(safe_run(context, update, prompt))
     except Exception as e:
-        running.pop(k, None)
+        running.pop(session_key, None)
         await send(context, cid, tid, f"⚠️ Task launch error: {e}")
 
 
@@ -1880,7 +2045,7 @@ async def _drain_tg_queue(context, update) -> None:
     Sends a status notice before starting the queued run so the operator sees it was dequeued.
     If the queue is empty, returns immediately (no-op).
     """
-    k = key_of(update)
+    k = _tg_key_of(update)
     item = _tg_queue_pop(k)
     if item is None:
         return
@@ -1895,12 +2060,15 @@ async def _drain_tg_queue(context, update) -> None:
     except Exception:
         pass
     # Reserve the slot synchronously before the first await (same race guard as on_message).
-    if k in running:
+    # spec-040 Phase 0: use slug session_key, not TG key, for running dict.
+    _b_drain = binding_for(update)
+    _sk_drain = key_of(_b_drain["cwd"]) if (_b_drain and _b_drain.get("cwd")) else k
+    if _sk_drain in running:
         # Another message snuck in between pop and now — put the item back at the front.
         _TG_QUEUE.setdefault(k, []).insert(0, item)
         _tg_queue_flush()
         return
-    running[k] = True
+    running[_sk_drain] = True
     try:
         await context.bot.send_chat_action(chat, ChatAction.TYPING, message_thread_id=thread or None)
     except Exception:
@@ -1912,7 +2080,10 @@ async def _safe_run_queued(context, update, prompt: str) -> None:
     """Runs a dequeued prompt through run_agent, then drains again (chain drain)."""
     chat = update.effective_chat.id
     thread = update.effective_message.message_thread_id
-    k = key_of(update)
+    k = _tg_key_of(update)
+    # spec-040 Phase 0: resolve slug session_key for running dict (matches on_message reservation).
+    _b2 = binding_for(update)
+    _sk2 = key_of(_b2["cwd"]) if (_b2 and _b2.get("cwd")) else k
     try:
         await run_agent(context, update, prompt)
     except Exception as e:
@@ -1921,7 +2092,7 @@ async def _safe_run_queued(context, update, prompt: str) -> None:
         else:
             await report_error(context, chat, thread, f"run_agent(queued) · {short(prompt, 60)}", e)
     finally:
-        running.pop(k, None)
+        running.pop(_sk2, None)
         await _drain_tg_queue(context, update)
 
 
@@ -1929,7 +2100,10 @@ async def safe_run(context, update, prompt):
     """Background task wrapper: PTB does not catch exceptions from asyncio.create_task itself."""
     chat = update.effective_chat.id
     thread = update.effective_message.message_thread_id
-    k = key_of(update)
+    k = _tg_key_of(update)
+    # spec-040 Phase 0: resolve slug session_key for running dict (matches on_message reservation).
+    _b3 = binding_for(update)
+    _sk3 = key_of(_b3["cwd"]) if (_b3 and _b3.get("cwd")) else k
     try:
         await run_agent(context, update, prompt)
     except Exception as e:
@@ -1940,7 +2114,7 @@ async def safe_run(context, update, prompt):
         else:
             await report_error(context, chat, thread, f"run_agent · {short(prompt, 60)}", e)
     finally:
-        running.pop(k, None)  # always clear the reservation, even if run_agent crashed before its try
+        running.pop(_sk3, None)  # always clear the reservation, even if run_agent crashed before its try
         # Drain the queue: if messages were enqueued while this run was active, start the next one.
         await _drain_tg_queue(context, update)
 
@@ -1966,10 +2140,13 @@ async def on_topic_created(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = update.effective_message
     name = msg.forum_topic_created.name
-    k = key_of(update)
+    k = _tg_key_of(update)
     r = resolve_project(name)
     if r:
-        topics[k] = {"project": r[0], "cwd": r[1], "model": DEFAULT_MODEL}
+        # spec-040 Phase 0: register under slug key; store tg_key for TG reverse lookup.
+        slug = key_of(r[1])
+        topics[slug] = {"project": r[0], "cwd": r[1], "model": DEFAULT_MODEL, "tg_key": k}
+        topics.pop(k, None)  # remove stale TG-key entry if any
         save_topics()
         await send(context, update.effective_chat.id, msg.message_thread_id,
                    f"✅ Bound topic to <b>{r[0]}</b>\n<code>{r[1]}</code>", parse_mode=ParseMode.HTML)
@@ -1991,13 +2168,14 @@ async def cmd_start(update, context):
 async def cmd_whoami(update, context):
     if not authorized(update):
         return
-    k = key_of(update)
+    k = _tg_key_of(update)
     b = topics.get(k) or binding_for(update)
     if not b:
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
                    "🔌 Topic not bound. /project <name>")
         return
-    sid = sessions.get(k, "—")
+    session_key = key_of(b["cwd"])
+    sid = sessions.get(session_key, "—")
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
                f"📍 <b>{b['project']}</b>\ncwd: <code>{b['cwd']}</code>\nmodel: {b.get('model', DEFAULT_MODEL)}\n"
                f"session: <code>{sid}</code>", parse_mode=ParseMode.HTML)
@@ -2006,18 +2184,19 @@ async def cmd_whoami(update, context):
 async def cmd_reset(update, context):
     if not authorized(update):
         return
-    k = key_of(update)
-    sessions.pop(k, None)
+    k = _tg_key_of(update)
+    b = topics.get(k) or binding_for(update)
+    session_key = key_of(b["cwd"]) if (b and b.get("cwd")) else k
+    sessions.pop(session_key, None)
     save_sessions()
     cleared = _tg_queue_clear(k)
     # Clear context-warn state so a fresh session can warn again.
-    context_warned.discard(k)
+    context_warned.discard(session_key)
     # spec-039: evict the live client so PERSISTENT_CLIENT=1 truly starts fresh.
     try:
-        await _evict_live_client(k, None)
+        await _evict_live_client(session_key, None)
     except Exception as _exc:
-        print(f"[cmd_reset] live-client eviction error for {k}: {_exc!r}")
-    b = topics.get(k) or binding_for(update)
+        print(f"[cmd_reset] live-client eviction error for {session_key}: {_exc!r}")
     proj = b["project"] if b else "—"
     queue_note = f" Queue cleared ({cleared} message(s))." if cleared else ""
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
@@ -2027,14 +2206,16 @@ async def cmd_reset(update, context):
 async def cmd_resume(update, context):
     if not authorized(update):
         return
-    k = key_of(update)
+    k = _tg_key_of(update)
+    b = topics.get(k) or binding_for(update)
+    session_key = key_of(b["cwd"]) if (b and b.get("cwd")) else k
     if context.args:
-        sessions[k] = context.args[0]
+        sessions[session_key] = context.args[0]
         save_sessions()
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
                    f"⏯ Resuming session <code>{context.args[0]}</code>", parse_mode=ParseMode.HTML)
     else:
-        sid = sessions.get(k, "—")
+        sid = sessions.get(session_key, "—")
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
                    f"Current topic session: <code>{sid}</code>", parse_mode=ParseMode.HTML)
 
@@ -2042,7 +2223,7 @@ async def cmd_resume(update, context):
 async def cmd_model(update, context):
     if not authorized(update):
         return
-    k = key_of(update)
+    k = _tg_key_of(update)
     b = topics.get(k) or binding_for(update)
     if not b:
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
@@ -2053,7 +2234,9 @@ async def cmd_model(update, context):
                    "Usage: /model opus|sonnet|haiku")
         return
     b["model"] = context.args[0]
-    if k in topics:
+    # After Phase 0 migration, topics key is the slug; fall back to TG key for pre-migration entries.
+    _sk_model = key_of(b["cwd"]) if b.get("cwd") else k
+    if _sk_model in topics or k in topics:
         save_topics()
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
                f"🧠 Topic model: <b>{context.args[0]}</b> (takes effect from the next request)", parse_mode=ParseMode.HTML)
@@ -2071,9 +2254,14 @@ async def cmd_project(update, context):
         await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
                    "❌ Project/path not found.")
         return
-    k = key_of(update)
-    prev = topics.get(k, {})
-    topics[k] = {"project": r[0], "cwd": r[1], "model": prev.get("model", DEFAULT_MODEL)}
+    k = _tg_key_of(update)
+    slug = key_of(r[1])
+    prev = topics.get(slug) or topics.get(k, {})
+    # spec-040 Phase 0: register under slug key; store tg_key for TG reverse lookup.
+    topics[slug] = {"project": r[0], "cwd": r[1], "model": prev.get("model", DEFAULT_MODEL),
+                    "tg_key": k}
+    # Remove any stale TG-key entry for this slot.
+    topics.pop(k, None)
     save_topics()
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
                f"📌 Topic bound to <b>{r[0]}</b>\n<code>{r[1]}</code>", parse_mode=ParseMode.HTML)
@@ -2090,10 +2278,12 @@ async def cmd_newtopic(update, context):
     name = " ".join(context.args)
     res = await context.bot.create_forum_topic(chat_id=update.effective_chat.id, name=name)
     tid = res.message_thread_id
-    k = f"{update.effective_chat.id}:{tid}"
+    tg_key = f"{update.effective_chat.id}:{tid}"
     r = resolve_project(name)
     if r:
-        topics[k] = {"project": r[0], "cwd": r[1], "model": DEFAULT_MODEL}
+        # spec-040 Phase 0: register under slug key; store tg_key for TG reverse lookup.
+        slug = key_of(r[1])
+        topics[slug] = {"project": r[0], "cwd": r[1], "model": DEFAULT_MODEL, "tg_key": tg_key}
         save_topics()
         note = f" → bound to <code>{r[1]}</code>"
     else:
@@ -2106,7 +2296,7 @@ async def cmd_newtopic(update, context):
 async def cmd_diff(update, context):
     if not authorized(update):
         return
-    k = key_of(update)
+    k = _tg_key_of(update)
     b = topics.get(k) or binding_for(update)
     if not b:
         return
@@ -2123,8 +2313,10 @@ async def cmd_diff(update, context):
 async def cmd_cost(update, context):
     if not authorized(update):
         return
-    k = key_of(update)
-    c = costs.get(k)
+    k = _tg_key_of(update)
+    b = topics.get(k) or binding_for(update)
+    session_key = key_of(b["cwd"]) if (b and b.get("cwd")) else k
+    c = costs.get(session_key)
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
                f"💰 Last request: ${c:.4f}" if c is not None else "💰 No data yet")
 
@@ -2176,8 +2368,10 @@ async def cmd_usage(update, context):
 async def cmd_stop(update, context):
     if not authorized(update):
         return
-    k = key_of(update)
-    client = running.get(k)
+    k = _tg_key_of(update)
+    b = topics.get(k) or binding_for(update)
+    session_key = key_of(b["cwd"]) if (b and b.get("cwd")) else k
+    client = running.get(session_key)
     cid, tid = update.effective_chat.id, update.effective_message.message_thread_id
     if client is None:
         await send(context, cid, tid, "Nothing to interrupt.")
@@ -2247,13 +2441,15 @@ async def cmd_later(update, context):
     if not prompt_text:
         await send(context, cid, tid, "Usage: /later <time_spec> <prompt>")
         return
-    k = key_of(update)
-    binding = topics.get(k)
+    k = _tg_key_of(update)
+    binding = topics.get(k) or binding_for(update)
     if binding is None:
         await send(context, cid, tid,
                    "This topic is not bound to a project. Use /project <name> first.")
         return
     project = binding.get("project", "")
+    # spec-040 Phase 0: deferred records use the slug session_key.
+    later_session_key = key_of(binding["cwd"]) if binding.get("cwd") else k
     try:
         fire_at, fire_on_reset = _parse_time_spec(time_spec)
     except ValueError as e:
@@ -2262,7 +2458,7 @@ async def cmd_later(update, context):
     record = {
         "id": webapp._new_deferred_id(),
         "project": project,
-        "session_key": k,
+        "session_key": later_session_key,
         "prompt": prompt_text[:4096],
         "fire_at": fire_at,
         "fire_on_reset": fire_on_reset,
@@ -2315,7 +2511,8 @@ def _build_ctx(ptb_app) -> dict:
         # PTB app reference for TG pings from _run_card and notify_on_error.
         # None in web-only mode — all callers guard on ptb_app is None → no-op.
         "ptb_app": ptb_app,
-        # Needed to synthesise session_key "<chat>:<thread>" when creating new projects
+        # TG group chat id — used by api_new_project to create forum topics in TG mode.
+        # Removed in Phase D.
         "GROUP_CHAT_ID": GROUP_CHAT_ID,
         # Spec-021 Phase 4: pending handoff summaries awaiting injection (shared with webapp via ctx)
         "pending_handoff": pending_handoff,

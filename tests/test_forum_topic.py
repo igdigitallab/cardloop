@@ -170,10 +170,15 @@ async def test_new_project_creates_forum_topic(aiohttp_client, ft_app, ft_ctx, t
     assert data["name"].startswith("untitled-")
     assert (tmp_path / "projects" / data["name"]).is_dir()
 
-    # ключ сессии = "<group>:<thread_id фейкового топика>", запись в topics есть
-    session_key = f"-100500:{ft_ctx['ptb_app'].bot._new_thread_id}"
-    assert session_key in ft_ctx["topics"]
-    assert ft_ctx["topics"][session_key]["cwd"].endswith(data["name"])
+    # spec-040 Phase 0: session key is now the slug (project name), not chat:thread.
+    # The original TG chat:thread is stored in the topic entry's "tg_key" field.
+    slug = data["name"]
+    assert slug in ft_ctx["topics"], f"slug {slug!r} not found in topics {list(ft_ctx['topics'].keys())}"
+    topic_entry = ft_ctx["topics"][slug]
+    assert topic_entry["cwd"].endswith(data["name"])
+    # tg_key stores the original chat:thread for TG reverse lookup
+    expected_tg_key = f"-100500:{ft_ctx['ptb_app'].bot._new_thread_id}"
+    assert topic_entry.get("tg_key") == expected_tg_key
 
 
 async def test_new_project_named_uses_name_for_topic(aiohttp_client, ft_app, ft_ctx, tmp_path, monkeypatch):

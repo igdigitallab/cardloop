@@ -205,13 +205,19 @@ def test_tg_queue_clear_persists(tmp_path):
 
 
 async def test_on_message_enqueues_when_busy(tmp_path):
-    """on_message: when running[k] is set, the message is queued (not rejected)."""
+    """on_message: when running[session_key] is set, the message is queued (not rejected).
+
+    spec-040 Phase 0: running dict uses slug session_key (not TG chat:thread).
+    TG queue still uses the TG chat:thread key (k) for enqueueing.
+    """
     _reset_queue(tmp_path)
     k = _session_key()
 
-    # Simulate a binding and running state
-    bot.topics[k] = {"project": "testproj", "cwd": str(tmp_path), "model": "sonnet"}
-    bot.running[k] = True  # busy
+    # Simulate a binding and running state.
+    # spec-040 Phase 0: topics uses slug key with tg_key field.
+    slug = tmp_path.name  # slug = basename of cwd
+    bot.topics[slug] = {"project": "testproj", "cwd": str(tmp_path), "model": "sonnet", "tg_key": k}
+    bot.running[slug] = True  # busy — running uses slug, not TG key
 
     # send() passes text as 2nd positional arg: send_message(chat, text, ...)
     sent_texts = []
@@ -225,10 +231,10 @@ async def test_on_message_enqueues_when_busy(tmp_path):
     try:
         await bot.on_message(update, context)
     finally:
-        bot.topics.pop(k, None)
-        bot.running.pop(k, None)
+        bot.topics.pop(slug, None)
+        bot.running.pop(slug, None)
 
-    # Queue should contain the message
+    # Queue should contain the message (keyed by TG chat:thread for TG operations)
     assert bot._tg_queue_len(k) == 1
     queued = bot._TG_QUEUE.get(k, [])
     assert queued[0]["prompt"] == "second message"
@@ -240,14 +246,18 @@ async def test_on_message_enqueues_when_busy(tmp_path):
 
 
 async def test_on_message_queue_full_sends_notice(tmp_path):
-    """on_message: when queue is full, sends a 'queue full' notice."""
+    """on_message: when queue is full, sends a 'queue full' notice.
+
+    spec-040 Phase 0: running uses slug key; TG queue still uses chat:thread key.
+    """
     _reset_queue(tmp_path)
     k = _session_key()
     original_max = bot.TG_QUEUE_MAX
     bot.TG_QUEUE_MAX = 2
 
-    bot.topics[k] = {"project": "testproj", "cwd": str(tmp_path), "model": "sonnet"}
-    bot.running[k] = True
+    slug = tmp_path.name
+    bot.topics[slug] = {"project": "testproj", "cwd": str(tmp_path), "model": "sonnet", "tg_key": k}
+    bot.running[slug] = True  # busy — slug key
 
     # Pre-fill the queue
     bot._tg_queue_enqueue(k, "x", 1)
@@ -263,8 +273,8 @@ async def test_on_message_queue_full_sends_notice(tmp_path):
     try:
         await bot.on_message(update, context)
     finally:
-        bot.topics.pop(k, None)
-        bot.running.pop(k, None)
+        bot.topics.pop(slug, None)
+        bot.running.pop(slug, None)
         bot.TG_QUEUE_MAX = original_max
 
     # Queue should remain at max (not grow)
