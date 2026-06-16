@@ -467,17 +467,27 @@ def _migrate_session_keys(
     return new_topics, new_sessions, migrated
 
 
+def _run_startup_migration() -> None:
+    """spec-040 Phase 0: run session-key migration exactly once at service startup.
+
+    Called from _amain() before building ctx or starting any server.
+    Must NOT be called at import time — doing so would mutate data/*.json as a side-effect
+    of ``import bot`` in tests, corrupting production data files.
+    """
+    global topics, sessions
+    new_t, new_s, n = _migrate_session_keys(topics, sessions)
+    if n:
+        topics = new_t
+        sessions = new_s
+        TOPICS_F.write_text(json.dumps(topics, ensure_ascii=False, indent=2))
+        SESSIONS_F.write_text(json.dumps(sessions, ensure_ascii=False, indent=2))
+        print(f"[migrate] Phase 0: migrated {n} session key(s) to slug format")
+
+
 topics = _read(TOPICS_F, {})       # slug -> {project, cwd, model}
 sessions = _read(SESSIONS_F, {})   # slug -> session_id
-
-# spec-040 Phase 0: idempotent startup migration — rename legacy chat:thread keys to slugs.
-_topics_migrated, _sessions_migrated, _n_migrated = _migrate_session_keys(topics, sessions)
-if _n_migrated:
-    topics = _topics_migrated
-    sessions = _sessions_migrated
-    TOPICS_F.write_text(json.dumps(topics, ensure_ascii=False, indent=2))
-    SESSIONS_F.write_text(json.dumps(sessions, ensure_ascii=False, indent=2))
-    print(f"[migrate] Phase 0: migrated {_n_migrated} session key(s) to slug format")
+# NOTE: migration of legacy chat:thread keys is NOT done here (import-time side-effect).
+# It runs in _run_startup_migration(), called from _amain() before serving requests.
 costs = {}                         # session_key -> last cost usd
 running = {}                       # session_key -> ClaudeSDKClient (for /stop)
 rate_limits = {}                   # rate_limit_type -> {status, resets_at, utilization, ts} (passive)
@@ -2593,6 +2603,11 @@ async def _amain() -> None:
         except (NotImplementedError, RuntimeError):
             # Windows / restricted environments — fall back to default behaviour.
             pass
+
+    # spec-040 Phase 0: migrate legacy chat:thread session keys to slug format.
+    # Runs here (startup, before serving) — NOT at import time — to avoid mutating
+    # data/*.json as a side-effect of ``import bot`` in tests.
+    _run_startup_migration()
 
     if BOT_TOKEN:
         # ── Telegram mode ──────────────────────────────────────────────────
