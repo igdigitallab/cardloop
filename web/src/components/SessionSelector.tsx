@@ -240,12 +240,6 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
   return (
     <div className="session-selector" ref={dropRef}>
       <button
-        className="session-reset-btn"
-        onClick={requestReset}
-        disabled={busy}
-        title="New session (no summary)"
-      >↺</button>
-      <button
         className="session-selector-btn"
         ref={btnRef}
         onClick={() => { setOpen(o => !o); if (!open) loadSessions() }}

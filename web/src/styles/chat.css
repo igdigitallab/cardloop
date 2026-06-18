@@ -166,7 +166,8 @@
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  /* Spec-040: tighter gap — the bar is now a compact single line. */
+  gap: 7px;
   /* Keep the bar on one line; scroll horizontally if content exceeds width
      rather than allowing children to wrap onto a second line. */
   flex-wrap: nowrap;
@@ -196,12 +197,28 @@
   flex-shrink: 0;
 }
 
+/* Left group: single reset + session selector, kept tight together. */
+.chat-session-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Right group: model selector + thinking dropdown — pushed to the right edge. */
+.chat-session-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* Model selector в шапке чата */
 .chat-model-selector {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-left: auto;
 }
 .chat-model-label {
   font-size: 12px;
@@ -219,6 +236,11 @@
 }
 .chat-model-select:disabled { opacity: 0.5; cursor: not-allowed; }
 .chat-model-select:hover:not(:disabled) { border-color: var(--accent); }
+
+/* Thinking-mode dropdown — same control sizing as the model select; the two
+   form one "model · think" cluster inside .chat-session-right. */
+.chat-think-selector { opacity: 1; transition: opacity 0.2s; }
+.chat-think-selector .chat-model-select:disabled { opacity: 0.6; }
 
 /* Inline-статистика в шапке чата (рядом с SessionSelector и Model) */
 .chat-stats-inline {
@@ -259,28 +281,6 @@
 }
 
 .session-selector-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.session-reset-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: 1px solid var(--border2);
-  border-radius: var(--radius-sm);
-  color: var(--text3);
-  font-size: 14px;
-  width: 26px;
-  height: 26px;
-  cursor: pointer;
-  transition: color var(--transition), border-color var(--transition), background var(--transition);
-  margin-right: 4px;
-}
-.session-reset-btn:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--bg4);
-}
-.session-reset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .session-icon { font-size: 10px; color: var(--accent); }
 .session-label { font-family: var(--mono); font-size: 11px; }
@@ -1078,18 +1078,13 @@
 /* ── Touch targets: all interactive buttons ≥44×44 ──────────── */
 @media (pointer: coarse) {
   .session-selector-btn,
-  .session-reset-btn,
+  .chat-session-reset,
   .chat-stop-btn,
   .ctx-panel-toggle,
   .ctx-refresh-btn {
     min-height: 44px;
     padding-top: 8px;
     padding-bottom: 8px;
-  }
-
-  .session-reset-btn {
-    width: 44px;
-    height: 44px;
   }
 }
 
@@ -1101,17 +1096,12 @@
    keep their ≥40px targets. */
 @media (max-width: 768px) and (pointer: coarse) {
   .session-selector-btn,
-  .session-reset-btn,
+  .chat-session-reset,
   .ctx-panel-toggle,
   .ctx-refresh-btn {
     min-height: 28px;
     padding-top: 4px;
     padding-bottom: 4px;
-  }
-
-  .session-reset-btn {
-    width: 28px;
-    height: 28px;
   }
 }
 

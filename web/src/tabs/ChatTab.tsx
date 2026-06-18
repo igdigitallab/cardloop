@@ -151,6 +151,19 @@ function formatTokens(n: number): string {
   return `${Math.round(n / 1000)}K`
 }
 
+/**
+ * Formats a context-window maximum as a short denominator: 1_000_000 → "1M",
+ * 2_000_000 → "2M", 200_000 → "200K". Used for the "used / max" context label
+ * so the window reads "196K / 1M" rather than "196K / 1000K".
+ */
+function formatMax(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`
+  }
+  return formatTokens(n)
+}
+
 /** Formats duration: 0:05, 1:23, 12:45. */
 function formatDuration(sec: number): string {
   const s = Math.max(0, Math.floor(sec))
@@ -348,18 +361,6 @@ function makeAssistantMsg(): ChatMessage {
   return { id: nextId(), role: 'assistant', text: '', tools: [], streaming: true }
 }
 
-// ─── CacheCountdownBadge ─────────────────────────────────────────────────────
-// Isolated ticker so the parent ChatTab does NOT re-render on each second tick.
-
-interface CacheCountdownBadgeProps {
-  lastTurnEndMs: number | null
-  lastCacheHitPct: number | null
-  /** Last assistant turn metrics (derived from messages in parent, passed down to avoid re-computing). */
-  lastAssistantMetrics: TurnMetrics | undefined
-  /** Whether a run is currently active. */
-  isRunning: boolean
-}
-
 // ─── Spec-038: inline image/video renderer + full-screen lightbox ────────────
 
 /** Returns true if the URL points to a video file (by extension). */
@@ -457,58 +458,6 @@ function ChatImage({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
 }
 
 const _mdComponents = { img: ChatImage }
-
-const CacheCountdownBadge = memo(function CacheCountdownBadge({
-  lastTurnEndMs,
-  lastCacheHitPct,
-  lastAssistantMetrics,
-  isRunning,
-}: CacheCountdownBadgeProps) {
-  // Own tick state — only this small component re-renders every second.
-  const [, setCacheTick] = useState<number>(Date.now())
-
-  useEffect(() => {
-    if (lastTurnEndMs === null) return
-    const remaining = CACHE_TTL_MS - (Date.now() - lastTurnEndMs)
-    if (remaining <= 0) return
-    const id = setInterval(() => setCacheTick(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [lastTurnEndMs])
-
-  let isWarm = false
-  let remainingSec = 0
-  if (isRunning) {
-    isWarm = true
-  } else if (lastTurnEndMs !== null) {
-    remainingSec = Math.max(0, (CACHE_TTL_MS - (Date.now() - lastTurnEndMs)) / 1000)
-    isWarm = remainingSec > 0
-  }
-
-  const effectiveCacheHitPct = lastAssistantMetrics?.cache_hit_pct ?? lastCacheHitPct
-  if (!isRunning && effectiveCacheHitPct != null && effectiveCacheHitPct < CACHE_COLD_PCT) {
-    isWarm = false
-  }
-
-  const cacheLabel = isRunning
-    ? '♨️ running'
-    : isWarm
-      ? `♨️ ${fmtCountdown(remainingSec)}`
-      : '⚪ cold'
-  const cacheTip = isRunning
-    ? 'Cache warm — agent is actively running and re-warming the prefix.'
-    : isWarm
-      ? `Cache warm — estimated ${fmtCountdown(remainingSec)} remaining in the 5-min window since last turn end. Actual warm/cold is confirmed by the measured cache-hit % of the last turn.`
-      : 'Cache cold — next turn will re-read the full prompt at full price.'
-
-  return (
-    <span style={{
-      color: isWarm ? 'var(--color-green, #22c55e)' : 'var(--color-muted, #9ca3af)',
-      cursor: 'default',
-    }} title={cacheTip}>
-      {cacheLabel}
-    </span>
-  )
-})
 
 // ─── RunStatusBar ─────────────────────────────────────────────────────────────
 // Isolated ticker so the parent ChatTab does NOT re-render on each second tick
@@ -896,6 +845,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       } else {
         setMessages(histToMessages(histRes.messages))
       }
+      // Clear any stale error banner left over from a prior aborted stream so
+      // the operator sees the recovered content, not an old error.
+      setError('')
     }).catch(() => { if (!isCancelled()) setMessages([]) })
   }, [projectId, effectiveChatId, seedCursor]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1215,7 +1167,11 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       setMessages(prev => finalizeStreaming(prev))
 
     } catch (err) {
+      // Suppress intentional aborts regardless of how the browser names the error.
+      // AbortError is the spec name; TypeError: "Failed to fetch" / "The user aborted a request"
+      // can appear in Chrome/Firefox when the signal fires mid-stream.
       if (err instanceof Error && err.name === 'AbortError') return
+      if (abortRef.current?.signal.aborted) return
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg)
       setMessages(prev => finalizeStreaming(prev, msg))
@@ -1454,17 +1410,61 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           >+</button>
         </div>
       )}
-      {/* Session selector bar + stats + model selector */}
+      {/* Session selector bar.
+          Layout (left → right): [↺ reset] [◉ session ▾]  [▰▰▱ used / max]  ···(push right)···  [model ▾] [🧠 think ▾]
+          The single ↺ here is the only reset in the bar (wrap & reset — saves a
+          brief handoff summary, then resets). "New session (no summary)" still
+          lives inside the session ▾ dropdown. */}
       <div className="chat-session-bar">
-        <SessionSelector
-          projectId={projectId}
-          onSessionChange={handleSessionChange}
-          onInsertResetPrompt={(text) => {
-            setInput(text)
-            setTimeout(() => textareaRef.current?.focus(), 0)
-          }}
-        />
-        {/* Session health row — always visible when there are messages */}
+        {/* Left group: single reset + session selector, grouped together. */}
+        <div className="chat-session-left">
+          {(() => {
+            // Reset button prominence mirrors the context fill: amber at 75% of
+            // the window, red at 90%. Computed here (not inside the health IIFE)
+            // so the single ↺ can sit at the far left, before the selector.
+            const realTokens = contextTokens != null && contextTokens > 0
+              ? contextTokens
+              : estimateTokens(messages)
+            const warnAt = contextWindow * 0.75
+            const critAt = contextWindow * 0.90
+            const isProminent = realTokens >= warnAt
+            const wrapBtnStyle: React.CSSProperties = isProminent
+              ? {
+                  fontSize: 13, lineHeight: 1, padding: '2px 7px', cursor: rotating ? 'wait' : 'pointer',
+                  background: 'var(--bg-card)', border: `1px solid ${realTokens >= critAt ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)'}`,
+                  borderRadius: 4,
+                  color: realTokens >= critAt ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)',
+                  fontWeight: 600,
+                }
+              : {
+                  fontSize: 13, lineHeight: 1, padding: '2px 7px', cursor: rotating ? 'wait' : 'pointer',
+                  background: 'transparent', border: '1px solid var(--border)',
+                  borderRadius: 4, color: 'var(--color-muted, #9ca3af)',
+                }
+            return (
+              <button
+                className="btn btn-sm chat-session-reset"
+                style={wrapBtnStyle}
+                disabled={rotating || streaming}
+                title={t['chat.reset_session_tip']}
+                onClick={handleRotate}
+                aria-label={t['chat.reset_session_btn']}
+              >
+                {rotating ? '…' : '↺'}
+              </button>
+            )
+          })()}
+          <SessionSelector
+            projectId={projectId}
+            onSessionChange={handleSessionChange}
+            onInsertResetPrompt={(text) => {
+              setInput(text)
+              setTimeout(() => textareaRef.current?.focus(), 0)
+            }}
+          />
+        </div>
+        {/* Session health row — context "used / max" + progress bar.
+            Always visible when there are messages. */}
         {messages.length > 0 && (() => {
           const real = contextTokens != null && contextTokens > 0
           const tokens = real ? contextTokens! : estimateTokens(messages)
@@ -1486,36 +1486,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             fillFrac >= 0.75 ? 'var(--color-yellow, #eab308)' :
             'var(--color-green, #22c55e)'
 
-          // Spec-033: cache warm/cold indicator — rendered via CacheCountdownBadge child
-          // component so the countdown ticker does not re-render the entire ChatTab (and
-          // its message list) every second.
+          // Spec-040: last assistant metrics feed the cache warm/cold + utilization
+          // lines folded into the token tooltip (no live ticker — hover-only now).
           const lastAssistantMetrics = [...messages].reverse().find(
             m => m.role === 'assistant' && m.metrics != null
           )?.metrics
 
-          // Reset button prominence: amber at 75% of window, red at 90%.
-          const isProminent = tokens >= warnAt
-          const wrapBtnStyle: React.CSSProperties = isProminent
-            ? {
-                fontSize: 11, padding: '1px 6px', cursor: rotating ? 'wait' : 'pointer',
-                background: 'var(--bg-card)', border: `1px solid ${tokens >= critAt ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)'}`,
-                borderRadius: 4,
-                color: tokens >= critAt ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)',
-                fontWeight: 600,
-              }
-            : {
-                fontSize: 11, padding: '1px 6px', cursor: rotating ? 'wait' : 'pointer',
-                background: 'transparent', border: '1px solid var(--border)',
-                borderRadius: 4, color: 'var(--color-muted, #9ca3af)',
-              }
-
           // Last turn utilization (null when not present)
           const utilization = lastAssistantMetrics?.utilization ?? null
-
-          // Spec-039: tooltip tells the truth — no auto-reset, auto-compact at ~190K.
-          const tokenTip = real
-            ? t['chat.session_bar_tip'].replace('{tokens}', tokens.toLocaleString('en'))
-            : t['chat.token_count_rough']
 
           // Context growth since the previous completed turn — only on real (server) numbers.
           // null when no prior turn exists (first turn / right after a reset).
@@ -1524,16 +1502,62 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             ? `${deltaTokens > 0 ? '+' : '−'}${formatTokens(Math.abs(deltaTokens))}`
             : null
 
+          // Spec-040: compact session bar — the secondary stats (message count,
+          // growth delta, cache warmth, utilization) are no longer rendered inline.
+          // They are folded into the token-count / progress-bar tooltip as static
+          // lines computed once at render (no live ticking — hover-only now).
+
+          // Cache warm/cold line — static replica of CacheCountdownBadge's display.
+          // Mirrors the same warm/cold decision and countdown estimate, but frozen
+          // at render time instead of ticking every second.
+          const isCacheRunning = run != null
+          let cacheIsWarm = false
+          let cacheRemainingSec = 0
+          if (isCacheRunning) {
+            cacheIsWarm = true
+          } else if (lastTurnEndMs !== null) {
+            cacheRemainingSec = Math.max(0, (CACHE_TTL_MS - (Date.now() - lastTurnEndMs)) / 1000)
+            cacheIsWarm = cacheRemainingSec > 0
+          }
+          const effectiveCacheHitPct = lastAssistantMetrics?.cache_hit_pct ?? lastCacheHitPct
+          if (!isCacheRunning && effectiveCacheHitPct != null && effectiveCacheHitPct < CACHE_COLD_PCT) {
+            cacheIsWarm = false
+          }
+          const hasCacheInfo = lastTurnEndMs !== null || lastCacheHitPct != null || lastAssistantMetrics != null
+          const cacheLine = !hasCacheInfo
+            ? null
+            : isCacheRunning
+              ? t['chat.session_bar_cache_running']
+              : cacheIsWarm
+                ? t['chat.session_bar_cache_warm']
+                    .replace('{remaining}', fmtCountdown(cacheRemainingSec))
+                    .replace('{pct}', effectiveCacheHitPct != null ? `${Math.round(effectiveCacheHitPct)}%` : '—')
+                : t['chat.session_bar_cache_cold']
+
+          // Spec-040: multi-line tooltip — primary context line + folded secondary stats.
+          const tokenTipLines: string[] = [
+            real
+              ? t['chat.session_bar_tip'].replace('{tokens}', tokens.toLocaleString('en'))
+              : t['chat.token_count_rough'],
+            t['chat.session_bar_messages'].replace('{n}', messages.length.toLocaleString('en')),
+          ]
+          if (deltaLabel != null) {
+            tokenTipLines.push(t['chat.session_bar_delta'].replace('{delta}', deltaLabel))
+          }
+          if (cacheLine != null) {
+            tokenTipLines.push(cacheLine)
+          }
+          if (utilization != null) {
+            tokenTipLines.push(t['chat.session_bar_util'].replace('{pct}', String(utilization)))
+          }
+          const tokenTip = tokenTipLines.join('\n')
+
           return (
             <span className="chat-session-health" style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
               fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0,
             }}>
-              {/* Message count */}
-              <span style={{ color: 'var(--color-muted, #9ca3af)' }}>
-                💬 {messages.length}
-              </span>
-              {/* Progress bar */}
+              {/* Progress bar — richer multi-line tooltip folds in secondary stats */}
               <span
                 title={tokenTip}
                 style={{
@@ -1550,117 +1574,61 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                   transition: 'width 0.3s, background 0.3s',
                 }} />
               </span>
-              {/* Token count */}
+              {/* Context "used / max" — e.g. "196K / 1M". The denominator is the
+                  real context window (formatMax → "1M") and now serves as the
+                  sole context-window indicator (replaces the old 1M model badge). */}
               <span style={{ color: tokenColor, cursor: 'default' }} title={tokenTip}>
                 {real ? '' : '~'}{formatTokens(tokens)}
+                <span style={{ color: 'var(--color-muted, #9ca3af)' }}> / {formatMax(contextWindow)}</span>
               </span>
-              {/* Growth delta since the previous turn */}
-              {deltaLabel != null && (
-                <span
-                  className="chat-session-delta"
-                  style={{ color: 'var(--color-muted, #9ca3af)', cursor: 'default', fontSize: 11 }}
-                  title={`Context change since the previous turn: ${deltaLabel} tokens`}
-                >
-                  {deltaLabel}
-                </span>
-              )}
-              {/* Cache countdown — rendered by CacheCountdownBadge (owns its own tick) */}
-              {(lastTurnEndMs !== null || lastCacheHitPct != null || lastAssistantMetrics != null) && (
-                <CacheCountdownBadge
-                  lastTurnEndMs={lastTurnEndMs}
-                  lastCacheHitPct={lastCacheHitPct}
-                  lastAssistantMetrics={lastAssistantMetrics}
-                  isRunning={run != null}
-                />
-              )}
-              {/* Reset session — always present. Spec-039: manual reset only, never auto. */}
-              <button
-                className="btn btn-sm"
-                style={wrapBtnStyle}
-                disabled={rotating || streaming}
-                title={t['chat.reset_session_tip']}
-                onClick={handleRotate}
-              >
-                {rotating ? '…' : t['chat.reset_session_btn']}
-              </button>
-              {/* Utilization — shown when available */}
-              {utilization != null && (
-                <span
-                  className="chat-session-utilization"
-                  style={{ color: 'var(--color-muted, #9ca3af)', cursor: 'default' }}
-                  title={`Subscription utilization this turn: ${utilization}%`}
-                >
-                  ⏱ {utilization}%
-                </span>
-              )}
             </span>
           )
         })()}
-        {/* Thinking mode selector — compact, per-project localStorage persistence.
-            Disabled (greyed + tooltip) for fable model: thinking always runs high on Fable 5. */}
-        {(() => {
-          const isFable = project.model === 'fable' || project.model?.startsWith('fable')
-          const selectorTitle = isFable
-            ? t['chat.think_mode_fable_hint']
-            : t['chat.think_mode_hint']
-          return (
-            <div
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 3,
-                opacity: isFable ? 0.45 : 1,
-                transition: 'opacity 0.2s',
-              }}
-              title={selectorTitle}
+        {/* Right group: model selector + thinking-mode dropdown — one "model · think"
+            cluster. margin-left:auto on .chat-session-right pushes it to the right edge. */}
+        <div className="chat-session-right">
+          <div className="chat-model-selector" title={t['chat.model_hint']}>
+            <span className="chat-model-label">◆</span>
+            <select
+              className="chat-model-select"
+              value={project.model}
+              onChange={e => handleModelChange(e.target.value as ModelKey)}
+              disabled={changingModel || streaming}
             >
-              <span style={{ fontSize: 11, color: 'var(--color-muted, #9ca3af)', userSelect: 'none' }}>
-                {t['chat.think_mode_label']}
-              </span>
-              {THINK_MODES.map(m => (
-                <button
-                  key={m.value}
-                  style={{
-                    fontSize: 11,
-                    padding: '1px 6px',
-                    cursor: isFable || streaming ? 'default' : 'pointer',
-                    background: thinkMode === m.value
-                      ? 'var(--color-primary, #6366f1)'
-                      : 'transparent',
-                    color: thinkMode === m.value
-                      ? '#fff'
-                      : 'var(--color-muted, #9ca3af)',
-                    border: `1px solid ${thinkMode === m.value ? 'var(--color-primary, #6366f1)' : 'var(--border, #374151)'}`,
-                    borderRadius: 4,
-                    lineHeight: 1.4,
-                    transition: 'background 0.15s, color 0.15s, border-color 0.15s',
-                  }}
-                  disabled={isFable || streaming}
-                  onClick={() => { if (!isFable) handleThinkModeChange(m.value) }}
-                  aria-label={`Set thinking mode to ${m.value}`}
-                  aria-pressed={thinkMode === m.value}
-                >
-                  {t[m.labelKey]}
-                </button>
+              {/* Unknown stored alias: show it as-is instead of silently displaying
+                  (and on next change POST-ing) a different model. */}
+              {!MODELS.some(m => m.value === project.model) && (
+                <option value={project.model}>{modelLabel(project.model)}</option>
+              )}
+              {MODELS.map(m => (
+                <option key={m.value} value={m.value}>{m.label}</option>
               ))}
-            </div>
-          )
-        })()}
-        <div className="chat-model-selector" title={t['chat.model_hint']}>
-          <span className="chat-model-label">🧠</span>
-          <select
-            className="chat-model-select"
-            value={project.model}
-            onChange={e => handleModelChange(e.target.value as ModelKey)}
-            disabled={changingModel || streaming}
-          >
-            {/* Unknown stored alias: show it as-is instead of silently displaying
-                (and on next change POST-ing) a different model. */}
-            {!MODELS.some(m => m.value === project.model) && (
-              <option value={project.model}>{modelLabel(project.model)}</option>
-            )}
-            {MODELS.map(m => (
-              <option key={m.value} value={m.value}>{m.label}</option>
-            ))}
-          </select>
+            </select>
+          </div>
+          {/* Thinking mode — compact dropdown, per-chat localStorage persistence.
+              Disabled (greyed + tooltip) for fable: thinking always runs high on Fable 5. */}
+          {(() => {
+            const isFable = project.model === 'fable' || project.model?.startsWith('fable')
+            const selectorTitle = isFable
+              ? t['chat.think_mode_fable_hint']
+              : t['chat.think_mode_hint']
+            return (
+              <div className="chat-model-selector chat-think-selector" title={selectorTitle}>
+                <span className="chat-model-label" aria-hidden="true">🧠</span>
+                <select
+                  className="chat-model-select"
+                  value={thinkMode}
+                  onChange={e => { if (!isFable) handleThinkModeChange(e.target.value as ThinkMode) }}
+                  disabled={isFable || streaming}
+                  aria-label={t['chat.think_mode_label']}
+                >
+                  {THINK_MODES.map(m => (
+                    <option key={m.value} value={m.value}>{t[m.labelKey]}</option>
+                  ))}
+                </select>
+              </div>
+            )
+          })()}
         </div>
       </div>
 

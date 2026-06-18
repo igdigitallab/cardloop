@@ -449,7 +449,7 @@ export const ru = {
   'chat.think_mode_max': 'Макс',
   'chat.think_mode_default': 'Норм',
   'chat.think_mode_min': 'Мин',
-  'chat.think_mode_hint': 'Глубина думания на этот ход (Макс / Норм / Мин). Не влияет на Fable 5 — там всегда максимум.',
+  'chat.think_mode_hint': 'Глубина думания на следующий ход (Макс / Норм / Мин). Не влияет на Fable 5 — там всегда максимум.',
   'chat.think_mode_fable_hint': 'Глубина думания (не влияет на Fable 5 — там всегда максимум)',
 
   // ── Sub-agent lane (Spec-035) ────────────────────────────────────
@@ -576,9 +576,16 @@ export const ru = {
   // ── Spec-039: session-health (no auto-reset) ─────────────────────────────────
   // Session health bar tooltip
   'chat.session_bar_tip': 'Реальный размер контекста сессии: {tokens} токенов (полный промпт отправляется модели каждый ход). Есть несжимаемый минимум — системный промпт Claude Code + инструменты + CLAUDE.md + память — он остаётся даже после /reset. Янтарный от 75% окна · Красный от 90% окна. Сессия никогда не сбрасывается автоматически — только нативный auto-compact, который сжимает контекст без потери сессии.',
-  // Reset button label + tooltip
+  // Reset button label + tooltip (Spec-040: кнопка только иконка; строка идёт в aria-label)
   'chat.reset_session_btn': '↺ Сбросить сессию',
   'chat.reset_session_tip': 'Сбросить сессию — начать свежий контекст (сохранит краткое резюме). Используй, когда контекст переполнен или нужен чистый старт.',
+  // Spec-040: вторичная статистика свёрнута в тултип счётчика токенов (по строке на пункт)
+  'chat.session_bar_messages': '💬 {n} сообщений в сессии',
+  'chat.session_bar_delta': '↕ {delta} токенов за последний ход',
+  'chat.session_bar_cache_running': '♨️ Кэш тёплый — агент работает и прогревает префикс',
+  'chat.session_bar_cache_warm': '♨️ Кэш тёплый — ~{remaining} до конца 5-мин окна (последний ход: попадание {pct})',
+  'chat.session_bar_cache_cold': '⚪ Кэш холодный — следующий ход перечитает весь промпт по полной цене',
+  'chat.session_bar_util': '⏱ {pct}% утилизации подписки за этот ход',
   // Reset result toasts
   'chat.reset_done': 'Сессия сброшена — свежий старт',
   'chat.reset_no_session': 'Нет активной сессии для сброса',

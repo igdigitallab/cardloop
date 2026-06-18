@@ -450,7 +450,7 @@ export const en = {
   'chat.think_mode_max': 'Max',
   'chat.think_mode_default': 'Default',
   'chat.think_mode_min': 'Min',
-  'chat.think_mode_hint': 'Thinking effort for this turn (Max / Default / Min). Has no effect on Fable 5 — thinking always runs high.',
+  'chat.think_mode_hint': 'Thinking effort for the next turn (Max / Default / Min). Has no effect on Fable 5 — thinking always runs high.',
   'chat.think_mode_fable_hint': 'Thinking effort (inert for Fable 5 — thinking always runs high regardless)',
 
   // ── Sub-agent lane (Spec-035) ────────────────────────────────────
@@ -577,9 +577,16 @@ export const en = {
   // ── Spec-039: session-health (no auto-reset) ─────────────────────────────────
   // Session health bar tooltip
   'chat.session_bar_tip': 'Actual session context size: {tokens} tokens (full prompt sent each turn). There is an incompressible base floor — Claude Code system prompt + tools + CLAUDE.md + memory — that stays even after /reset. Amber from 75% of window · Red from 90% of window. The session is NEVER auto-reset; native auto-compact fires near the limit and compacts in place keeping the session.',
-  // Reset button label + tooltip
+  // Reset button label + tooltip (Spec-040: button is icon-only; this stays as aria-label)
   'chat.reset_session_btn': '↺ Reset session',
   'chat.reset_session_tip': 'Reset session — start a fresh context (a brief handoff summary is saved). Use when context is full or a clean slate is needed.',
+  // Spec-040: secondary stats folded into the token-count tooltip (one line each)
+  'chat.session_bar_messages': '💬 {n} messages in this session',
+  'chat.session_bar_delta': '↕ {delta} tokens since last turn',
+  'chat.session_bar_cache_running': '♨️ Cache warm — agent is running and re-warming the prefix',
+  'chat.session_bar_cache_warm': '♨️ Cache warm — ~{remaining} left in the 5-min window (last turn hit {pct})',
+  'chat.session_bar_cache_cold': '⚪ Cache cold — next turn re-reads the full prompt at full price',
+  'chat.session_bar_util': '⏱ {pct}% subscription utilization this turn',
   // Reset result toasts
   'chat.reset_done': 'Session reset — fresh start',
   'chat.reset_no_session': 'No active session to reset',
