@@ -169,3 +169,5 @@
 - [x] Mobile: fix tab switching and enlarge close button <!--ops:5947aa-->
 - [x] Mobile: fix status bar layout wrapping to single line <!--ops:c4fe16-->
 - [x] Mobile: hide icons (secrets, schedule, files) in project tab bar <!--ops:3575a4-->
+- [x] Commit recovered frontend <!--ops:4317f6-->
+- [x] E2E: verify send/queue behavior (regression 056ffb) <!--ops:b2f3c1-->
