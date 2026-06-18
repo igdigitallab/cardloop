@@ -24,6 +24,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookMatcher,
+    ProcessError,
     RateLimitEvent,
     ResultMessage,
     StreamEvent,
@@ -1664,6 +1665,16 @@ async def run_engine(  # type: ignore[return]
         try:
             async for event in _process_messages(live):
                 yield event
+        except ProcessError as exc:
+            if exc.exit_code == 143:
+                # SIGTERM to the CLI subprocess — expected on interrupt/stop/service shutdown.
+                # Log concisely and do not propagate; avoids asyncio "never retrieved" noise.
+                print(f"[engine] subprocess terminated (143) — expected on interrupt/shutdown ({session_key})")
+            else:
+                # Subprocess state is unknown after an error — evict so the next turn reconnects fresh.
+                print(f"[live-client] error during turn for {session_key} ({exc!r}) — evicting")
+                await _evict_live_client(session_key, ctx)
+                yield {"type": "error", "exc": exc}
         except Exception as exc:
             # Subprocess state is unknown after an error — evict so the next turn reconnects fresh.
             print(f"[live-client] error during turn for {session_key} ({exc!r}) — evicting")
@@ -1681,6 +1692,13 @@ async def run_engine(  # type: ignore[return]
                 _running[session_key] = client  # replace True-placeholder (for /stop)
                 async for event in _process_messages(client):
                     yield event
+        except ProcessError as exc:
+            if exc.exit_code == 143:
+                # SIGTERM to the CLI subprocess — expected on interrupt/stop/service shutdown.
+                # Log concisely and do not propagate; avoids asyncio "never retrieved" noise.
+                print(f"[engine] subprocess terminated (143) — expected on interrupt/shutdown ({session_key})")
+            else:
+                yield {"type": "error", "exc": exc}
         except Exception as exc:
             yield {"type": "error", "exc": exc}
 

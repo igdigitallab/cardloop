@@ -4585,15 +4585,43 @@ async def api_project_live(req: web.Request) -> web.Response:
         })
     events_list = list(turn["events"])
     cursor = events_list[-1]["seq"] if events_list else turn["seq"]
-    return web.json_response({
-        "running": running,
-        "turn_id": turn["turn_id"],
-        "started_at": turn["started_at"],
-        "model": turn["model"],
-        "cost_usd": turn["cost_usd"],
-        "cursor": cursor,
-        "events": events_list,
-    })
+    try:
+        return web.json_response({
+            "running": running,
+            "turn_id": turn["turn_id"],
+            "started_at": turn["started_at"],
+            "model": turn["model"],
+            "cost_usd": turn["cost_usd"],
+            "cursor": cursor,
+            "events": events_list,
+        })
+    except (TypeError, ValueError):
+        # Secondary defence: if an event payload is still not JSON-safe despite the
+        # buffering-site coercion above, sanitise by converting non-serialisable values
+        # to their string representation so the endpoint never returns a 500.
+        import json as _json
+
+        def _safe(obj):
+            if isinstance(obj, dict):
+                return {k: _safe(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_safe(v) for v in obj]
+            try:
+                _json.dumps(obj)
+                return obj
+            except (TypeError, ValueError):
+                return str(obj)
+
+        safe_events = [_safe(e) for e in events_list]
+        return web.json_response({
+            "running": running,
+            "turn_id": turn["turn_id"],
+            "started_at": turn["started_at"],
+            "model": turn["model"],
+            "cost_usd": turn["cost_usd"],
+            "cursor": cursor,
+            "events": safe_events,
+        })
 
 
 # ─────────────────────────── timeline read endpoint ───────────────────────────
@@ -6844,6 +6872,24 @@ async def api_project_set_session(req: web.Request) -> web.Response:
         return web.json_response({"error": "action must be 'new' or 'resume'"}, status=400)
 
 
+_SERVICE_BLOCK_RE = re.compile(
+    r"<(?P<tag>task-notification|prior-session-summary|system-reminder"
+    r"|command-name|command-message|command-args)"
+    r"[^>]*>.*?</(?P=tag)>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_service_blocks(text: str) -> str:
+    """Remove SDK-injected service XML blocks from a user-turn string.
+
+    Blocks stripped: <task-notification>, <prior-session-summary>,
+    <system-reminder>, <command-name>, <command-message>, <command-args>.
+    Returns the cleaned text with surrounding whitespace removed.
+    """
+    return _SERVICE_BLOCK_RE.sub("", text).strip()
+
+
 def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
     """Parses an SDK session transcript → feed [{role, text, tools}].
     user(str)=human reply; user(list)=tool_result, skip.
@@ -6865,8 +6911,10 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
                     continue
                 if t == "user":
                     c = m.get("content")
-                    if isinstance(c, str) and c.strip():
-                        msgs.append({"role": "user", "text": c.strip(), "tools": []})
+                    if isinstance(c, str):
+                        cleaned = _strip_service_blocks(c)
+                        if cleaned:
+                            msgs.append({"role": "user", "text": cleaned, "tools": []})
                     # content-list on user = tool_result → skip (not a human reply)
                 elif t == "assistant":
                     c = m.get("content")
@@ -7394,6 +7442,15 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 inp = event.get("input") or {}
                 tool_data = _format_tool(event["name"], inp if isinstance(inp, dict) else {})
                 _buffered_event = {"type": "tool", **tool_data}
+            elif etype == "error":
+                # Coerce exc to string before buffering so the live buffer is always
+                # JSON-serializable.  Raw exception objects (e.g. ProcessError) would
+                # cause a TypeError in web.json_response at GET /live.
+                exc_obj = event.get("exc")
+                _buffered_event = {
+                    "type": "error",
+                    "error": str(exc_obj) if exc_obj is not None else event.get("error", "unknown error"),
+                }
             else:
                 _buffered_event = event
             _live_ev = _live_turn_append(session_key, _buffered_event)
