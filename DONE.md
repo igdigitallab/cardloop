@@ -171,3 +171,6 @@
 - [x] Mobile: hide icons (secrets, schedule, files) in project tab bar <!--ops:3575a4-->
 - [x] Commit recovered frontend <!--ops:4317f6-->
 - [x] E2E: verify send/queue behavior (regression 056ffb) <!--ops:b2f3c1-->
+- [x] Verify spec-039 with Antigravity client <!--ops:df95f7-->
+- [x] Antigravity: spec-041 pointwise verification <!--ops:9e794a-->
+- [x] spec-041 block A: Fix ChatTab.tsx A1/A2/A4 <!--ops:bea94c-->
