@@ -605,6 +605,11 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [queueEditText, setQueueEditText] = useState<string>('')
   const sendMessageRef = useRef<((text?: string) => Promise<void>) | null>(null)
   const streamingRef = useRef(false)
+  // Spec-041 A4: always-current projectId for use in async drain callbacks.
+  const projectIdRef = useRef(projectId)
+  projectIdRef.current = projectId
+  // Spec-041 A2: guard to prevent double-firing of queue drain.
+  const drainingRef = useRef(false)
   // Track previous isActive to detect false→true reactivation transitions.
   const prevIsActiveRef = useRef<boolean>(isActive ?? false)
 
@@ -935,6 +940,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             setSubagents([])
             seenSubagentKeysRef.current = new Set()
             setMessages(prev => finalizeStreaming(prev))
+            // Spec-041 A2: drain queued message on poll-detected turn completion.
+            drainQueue()
           }
         }
       } catch { /* non-critical */ }
@@ -989,6 +996,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       seenSubagentKeysRef.current = new Set()
       setMessages(prev => finalizeStreaming(prev))
       setCtxRefreshKey(k => k + 1)
+      // Spec-041 A2: drain queued message on bus-originated turn completion.
+      drainQueue()
 
     } else if (evt.kind === 'compact') {
       // Spec-039: native CLI auto-compact fired — session is kept, context is smaller.
@@ -1041,13 +1050,42 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     })
   }
 
+  // Spec-041 A2+A4: shared drain logic — pops the first queued item and sends it.
+  // Called from sendMessage finally, bus run_end, and /live poll completion.
+  // Uses refs (projectIdRef, drainingRef, sendMessageRef) so it is closure-safe
+  // and does not need to be in the useCallback dependency arrays.
+  const drainQueue = useCallback(() => {
+    setQueueItems(prev => {
+      if (prev.length === 0) return prev
+      // Spec-041 A2: guard against double-firing from concurrent completion paths.
+      if (drainingRef.current) return prev
+      drainingRef.current = true
+      const [first, ...rest] = prev
+      // Spec-041 A4: capture the current projectId at drain time to avoid
+      // cross-project sends if the user switched projects before the timeout.
+      const drainProjectId = projectIdRef.current
+      // Delete from server (fire-and-forget — UI already updated optimistically)
+      api.chatQueueDelete(drainProjectId, first.id).catch(() => {/* non-critical */})
+      setTimeout(() => {
+        // Spec-041 A4: verify the active project hasn't changed since we started draining.
+        if (projectIdRef.current === drainProjectId) {
+          sendMessageRef.current?.(first.text)
+        }
+        drainingRef.current = false
+      }, 150)
+      return rest
+    })
+  }, [])
+
   const sendMessage = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim()
     const readyFiles = overrideText === undefined ? attachments.filter(a => a.path) : []
     const effectiveText = text || (readyFiles.length > 0 ? t['chat.look_at_files'] : '')
     if (!effectiveText) return
 
-    if (streaming && overrideText === undefined) {
+    // Spec-041 A1: enqueue whenever a turn is active — either a direct stream
+    // OR a bus/SSE/poll-adopted run — so the message isn't lost to a "busy" 409.
+    if ((streaming || busActiveRef.current) && overrideText === undefined) {
       const filePaths = readyFiles.map(a => `attached file: ${a.path}`)
       const fullText = filePaths.length > 0 ? `${effectiveText}\n\n${filePaths.join('\n')}` : effectiveText
       setInput('')
@@ -1182,15 +1220,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       textareaRef.current?.focus()
       setCtxRefreshKey(k => k + 1)
       onProjectsReload()
-      // Drain server-side queue: pop the first item and send it.
-      setQueueItems(prev => {
-        if (prev.length === 0) return prev
-        const [first, ...rest] = prev
-        // Delete from server (fire-and-forget — UI already updated optimistically)
-        api.chatQueueDelete(projectId, first.id).catch(() => {/* non-critical */})
-        setTimeout(() => { sendMessageRef.current?.(first.text) }, 150)
-        return rest
-      })
+      // Spec-041 A2: drain via shared helper (also called from bus/poll paths).
+      drainQueue()
     }
   }, [input, projectId, streaming, onProjectsReload, attachments, thinkMode])
 
