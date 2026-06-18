@@ -1,10 +1,23 @@
 ---
 created: 2026-06-13
-updated: 2026-06-13
-status: in-progress
-phases_shipped: none
+updated: 2026-06-18
+status: done
+phases_shipped: core (acceptance 1-4 met)
 relates_to: spec-028 (persistent client enabled), spec-021/027 (custom rotation removed)
 ---
+
+> **Verification 2026-06-18** (cross-checked with Antigravity/Gemini, independently confirmed):
+> Acceptance 1–4 MET — background jobs survive across turns (PERSISTENT_CLIENT live-client
+> registry), `/reset` (`cmd_reset`) and cockpit New-Session (`api_project_set_session`)
+> evict the live client, auto-reset-by-token removed in favour of native in-place auto-compact
+> (`_make_pre_compact_hook`), mid-turn restart flushes `sessions.json` via `_graceful_shutdown`
+> so the session id survives. Tests green under the canonical gate
+> (`env -u WEB_COOKIE_SECURE pytest` → 1324 passed; the 7 `test_tab_activity_state` failures
+> seen otherwise are a WEB_COOKIE_SECURE env artifact, not a regression).
+> Acceptance 5 carve-out: two pre-existing, project-wide hygiene violations (Russian logic
+> literals in webapp.py:8849; hardcoded Coolify UUID default in schedules.py:718) are NOT
+> spec-039 deliverables — tracked separately under OSS-hardening spec-014 (board cards
+> ops:45ae3c, ops:58412e).
 
 # Spec 039 — Stop Killing Sessions (no auto-reset, background survives)
 
