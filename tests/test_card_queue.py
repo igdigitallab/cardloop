@@ -80,7 +80,7 @@ def _make_project(cwd: Path, session_key: str = "1001:42") -> dict:
         "name": cwd.name,
         "cwd": str(cwd),
         "model": "sonnet",
-        "tg_thread": session_key,
+        "session_key": session_key,
         "is_free": False,
         "git_enabled": False,
     }

@@ -167,7 +167,7 @@ def test_busy_guard_logic(tmp_path):
 
     project = _find_project_by_id_any(ctx, "my-project")
     assert project is not None
-    session_key = project["tg_thread"]
+    session_key = project["session_key"]
 
     # Not busy
     assert ctx["running"].get(session_key) is None

@@ -294,7 +294,7 @@ async def test_card_uses_fresh_session(tmp_path, project_dir):
     project = {
         "name": "myproject",
         "cwd": str(project_dir),
-        "tg_thread": session_key,
+        "session_key": session_key,
         "model": "sonnet",
     }
     card = {"id": "aabbcc", "text": "Build feature", "description": None}
@@ -322,7 +322,7 @@ async def test_card_does_not_write_session(tmp_path, project_dir):
     project = {
         "name": "myproject",
         "cwd": str(project_dir),
-        "tg_thread": session_key,
+        "session_key": session_key,
         "model": "sonnet",
     }
     card = {"id": "aabbcc", "text": "Build feature", "description": None}
@@ -354,13 +354,13 @@ async def test_cwd_lock_blocks_concurrent_card(tmp_path, project_dir):
     project_a = {
         "name": "myproject",
         "cwd": str(project_dir),
-        "tg_thread": "1001:42",
+        "session_key": "1001:42",
         "model": "sonnet",
     }
     project_b = {
         "name": "myproject",
         "cwd": str(project_dir),  # same cwd
-        "tg_thread": "1001:99",  # different session_key
+        "session_key": "1001:99",  # different session_key
         "model": "sonnet",
     }
     card_a = {"id": "aabb11", "text": "Card A", "description": None}
@@ -393,7 +393,7 @@ async def test_cwd_lock_released_on_finish(tmp_path, project_dir):
     project = {
         "name": "myproject",
         "cwd": str(project_dir),
-        "tg_thread": session_key,
+        "session_key": session_key,
         "model": "sonnet",
     }
     card = {"id": "aabbcc", "text": "Task", "description": None}
@@ -536,7 +536,7 @@ async def test_card_run_not_affected_by_handoff(tmp_path, project_dir):
     project = {
         "name": "myproject",
         "cwd": str(project_dir),
-        "tg_thread": session_key,
+        "session_key": session_key,
         "model": "sonnet",
     }
     card = {"id": "aabbcc", "text": "Build widget", "description": None}

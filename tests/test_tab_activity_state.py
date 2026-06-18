@@ -37,7 +37,7 @@ def _make_project(cwd: str, session_key: str = "chat:1001") -> dict:
         "name": "Test Project",
         "cwd": cwd,
         "model": "sonnet",
-        "tg_thread": session_key,
+        "session_key": session_key,
         "is_free": False,
     }
 

@@ -20,6 +20,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 import bot
+import engine
 
 
 # ─────────────────────────── helpers ────────────────────────────────────────────────────────────
@@ -106,9 +107,9 @@ async def test_live_client_reused_across_turns(tmp_path):
     live_client = _make_live_client([turn1_msgs, turn2_msgs])
     ctx = _make_ctx()
 
-    with patch.object(bot, "PERSISTENT_CLIENT", True), \
-         patch.object(bot, "ClaudeSDKClient", return_value=live_client), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "PERSISTENT_CLIENT", True), \
+         patch.object(engine, "ClaudeSDKClient", return_value=live_client), \
+         patch.object(engine, "audit", lambda *a: None):
 
         # Turn 1
         events1 = []
@@ -192,9 +193,9 @@ async def test_running_placeholder_and_interrupt_guard(tmp_path):
         "Watchdog guard: True placeholder must NOT have 'interrupt'"
     )
 
-    with patch.object(bot, "PERSISTENT_CLIENT", True), \
-         patch.object(bot, "ClaudeSDKClient", return_value=live_client), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "PERSISTENT_CLIENT", True), \
+         patch.object(engine, "ClaudeSDKClient", return_value=live_client), \
+         patch.object(engine, "audit", lambda *a: None):
 
         # run_engine should replace the True placeholder with the real client.
         async for _ in bot.run_engine(
@@ -256,9 +257,9 @@ async def test_dead_client_evicted_and_fresh_on_next_turn(tmp_path):
 
     ctx = _make_ctx()
 
-    with patch.object(bot, "PERSISTENT_CLIENT", True), \
-         patch.object(bot, "ClaudeSDKClient", side_effect=_factory), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "PERSISTENT_CLIENT", True), \
+         patch.object(engine, "ClaudeSDKClient", side_effect=_factory), \
+         patch.object(engine, "audit", lambda *a: None):
 
         # Turn 1 — dead client, should yield an error event and evict.
         events1 = []
@@ -342,9 +343,9 @@ async def test_flag_off_uses_fresh_client_each_turn(tmp_path):
 
     ctx = _make_ctx()
 
-    with patch.object(bot, "PERSISTENT_CLIENT", False), \
-         patch.object(bot, "ClaudeSDKClient", return_value=fresh_client), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "PERSISTENT_CLIENT", False), \
+         patch.object(engine, "ClaudeSDKClient", return_value=fresh_client), \
+         patch.object(engine, "audit", lambda *a: None):
 
         async for _ in bot.run_engine(
             project_name="proj",
@@ -390,9 +391,9 @@ async def test_ephemeral_never_stores_live_client(tmp_path):
 
     ctx = _make_ctx()
 
-    with patch.object(bot, "PERSISTENT_CLIENT", True), \
-         patch.object(bot, "ClaudeSDKClient", return_value=fresh_client), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "PERSISTENT_CLIENT", True), \
+         patch.object(engine, "ClaudeSDKClient", return_value=fresh_client), \
+         patch.object(engine, "audit", lambda *a: None):
 
         async for _ in bot.run_engine(
             project_name="proj",
@@ -440,9 +441,9 @@ async def test_model_switch_evicts_and_reconnects(tmp_path):
 
     ctx = _make_ctx()
 
-    with patch.object(bot, "PERSISTENT_CLIENT", True), \
-         patch.object(bot, "ClaudeSDKClient", side_effect=_factory), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "PERSISTENT_CLIENT", True), \
+         patch.object(engine, "ClaudeSDKClient", side_effect=_factory), \
+         patch.object(engine, "audit", lambda *a: None):
 
         # Turn 1 with sonnet
         async for _ in bot.run_engine(

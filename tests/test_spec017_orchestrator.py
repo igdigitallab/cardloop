@@ -16,6 +16,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 import bot
+import engine
 import webapp as _webapp
 
 
@@ -37,28 +38,24 @@ def test_allowed_models_includes_fable():
 def test_default_model_is_fable(monkeypatch):
     """When DEFAULT_MODEL env is unset the hard-coded default must be 'fable'."""
     monkeypatch.delenv("DEFAULT_MODEL", raising=False)
-    import importlib
-    # Read the source default directly — we can't reload bot without side effects,
-    # but we can verify the module constant reflects the env-or-default logic.
-    # bot.DEFAULT_MODEL is already resolved at import time from the env;
-    # assert the fallback in the source is 'fable'.
+    # DEFAULT_MODEL is defined in engine.py (Phase B: engine extracted from bot).
+    # Search both bot and engine source to be robust against future moves.
+    # Accepts both os.environ.get("DEFAULT_MODEL", ...) and os.getenv("DEFAULT_MODEL", ...).
     import inspect, ast
-    src = inspect.getsource(bot)
-    # Find the os.environ.get("DEFAULT_MODEL", ...) call and check default value
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "get"
-                and len(node.args) >= 2):
-            if (isinstance(node.args[0], ast.Constant)
-                    and node.args[0].value == "DEFAULT_MODEL"):
-                default_val = node.args[1].value if isinstance(node.args[1], ast.Constant) else None
-                assert default_val == "fable", (
-                    f"DEFAULT_MODEL fallback should be 'fable', got {default_val!r}"
-                )
-                return
-    pytest.fail("Could not find os.environ.get('DEFAULT_MODEL', ...) in bot.py source")
+    for mod in (bot, engine):
+        src = inspect.getsource(mod)
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr in ("get", "getenv") and len(node.args) >= 2:
+                    if (isinstance(node.args[0], ast.Constant)
+                            and node.args[0].value == "DEFAULT_MODEL"):
+                        default_val = node.args[1].value if isinstance(node.args[1], ast.Constant) else None
+                        assert default_val == "fable", (
+                            f"DEFAULT_MODEL fallback should be 'fable', got {default_val!r}"
+                        )
+                        return
+    pytest.fail("Could not find os.environ.get/os.getenv('DEFAULT_MODEL', ...) in bot.py or engine.py source")
 
 
 def test_model_fable_accepted_by_settings(tmp_path):
@@ -249,9 +246,9 @@ async def test_run_engine_yields_subagent_started(tmp_path):
     started, _, _ = _make_sdk_mocks()
     fake_client = _make_fake_client([started])
 
-    with patch.object(bot, "ClaudeSDKClient", return_value=fake_client), \
-         patch.object(bot, "running", {}), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "ClaudeSDKClient", return_value=fake_client), \
+         patch.object(engine, "running", {}), \
+         patch.object(engine, "audit", lambda *a: None):
         events = []
         async for ev in bot.run_engine(
             project_name="test",
@@ -277,9 +274,9 @@ async def test_run_engine_yields_subagent_notification(tmp_path):
     _, _, notification = _make_sdk_mocks()
     fake_client = _make_fake_client([notification])
 
-    with patch.object(bot, "ClaudeSDKClient", return_value=fake_client), \
-         patch.object(bot, "running", {}), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "ClaudeSDKClient", return_value=fake_client), \
+         patch.object(engine, "running", {}), \
+         patch.object(engine, "audit", lambda *a: None):
         events = []
         async for ev in bot.run_engine(
             project_name="test",
@@ -331,9 +328,9 @@ async def test_run_engine_passes_agents_to_opts(tmp_path):
         async def __aexit__(self, *args):
             return False
 
-    with patch.object(bot, "ClaudeSDKClient", FakeClient), \
-         patch.object(bot, "running", {}), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "ClaudeSDKClient", FakeClient), \
+         patch.object(engine, "running", {}), \
+         patch.object(engine, "audit", lambda *a: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),
@@ -371,9 +368,9 @@ async def test_conductor_prompt_injected_for_fable(tmp_path):
         async def __aexit__(self, *args):
             return False
 
-    with patch.object(bot, "ClaudeSDKClient", FakeClient), \
-         patch.object(bot, "running", {}), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "ClaudeSDKClient", FakeClient), \
+         patch.object(engine, "running", {}), \
+         patch.object(engine, "audit", lambda *a: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),
@@ -419,9 +416,9 @@ async def test_conductor_prompt_not_injected_for_sonnet(tmp_path):
         async def __aexit__(self, *args):
             return False
 
-    with patch.object(bot, "ClaudeSDKClient", FakeClient), \
-         patch.object(bot, "running", {}), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "ClaudeSDKClient", FakeClient), \
+         patch.object(engine, "running", {}), \
+         patch.object(engine, "audit", lambda *a: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),
@@ -448,9 +445,9 @@ async def test_non_task_system_messages_still_silenced(tmp_path):
     other_msg = SystemMessage(subtype="some_other_subtype", data={})
     fake_client = _make_fake_client([other_msg])
 
-    with patch.object(bot, "ClaudeSDKClient", return_value=fake_client), \
-         patch.object(bot, "running", {}), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "ClaudeSDKClient", return_value=fake_client), \
+         patch.object(engine, "running", {}), \
+         patch.object(engine, "audit", lambda *a: None):
         events = []
         async for ev in bot.run_engine(
             project_name="test",
@@ -706,9 +703,9 @@ async def test_conductor_prompt_skipped_when_toggle_off(tmp_path):
         async def __aexit__(self, *args):
             return False
 
-    with patch.object(bot, "ClaudeSDKClient", FakeClient), \
-         patch.object(bot, "running", {}), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "ClaudeSDKClient", FakeClient), \
+         patch.object(engine, "running", {}), \
+         patch.object(engine, "audit", lambda *a: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),
@@ -838,9 +835,9 @@ async def test_run_engine_passes_effort_to_opts(tmp_path):
         async def __aexit__(self, *args):
             return False
 
-    with patch.object(bot, "ClaudeSDKClient", FakeClient), \
-         patch.object(bot, "running", {}), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "ClaudeSDKClient", FakeClient), \
+         patch.object(engine, "running", {}), \
+         patch.object(engine, "audit", lambda *a: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),
@@ -878,9 +875,9 @@ async def test_run_engine_system_prompt_has_exclude_dynamic_sections(tmp_path):
         async def __aexit__(self, *args):
             return False
 
-    with patch.object(bot, "ClaudeSDKClient", FakeClient), \
-         patch.object(bot, "running", {}), \
-         patch.object(bot, "audit", lambda *a: None):
+    with patch.object(engine, "ClaudeSDKClient", FakeClient), \
+         patch.object(engine, "running", {}), \
+         patch.object(engine, "audit", lambda *a: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),

@@ -31,7 +31,8 @@ from board import (
     board_summary,
 )
 import bot as bot_module
-from bot import _build_board_append, reconcile_board, _apply_reconcile_ops
+import engine
+from engine import _build_board_append, reconcile_board, _apply_reconcile_ops
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -199,7 +200,7 @@ async def test_reconcile_creates_card_on_completed_work(tmp_path, monkeypatch):
 
     create_op = json.dumps([{"op": "create", "text": "New feature done", "column": "review"}])
 
-    monkeypatch.setattr(bot_module, "_sdk_query", _make_haiku_mock(create_op))
+    monkeypatch.setattr(engine, "_sdk_query", _make_haiku_mock(create_op))
     await reconcile_board(
         cwd=cwd,
         name="test-project",
@@ -220,7 +221,7 @@ async def test_reconcile_no_ops_on_question(tmp_path, monkeypatch):
     original_content = (tmp_path / "TASKS.md").read_text(encoding="utf-8")
 
     empty_ops = "[]"
-    monkeypatch.setattr(bot_module, "_sdk_query", _make_haiku_mock(empty_ops))
+    monkeypatch.setattr(engine, "_sdk_query", _make_haiku_mock(empty_ops))
     await reconcile_board(
         cwd=cwd,
         name="test-project",
@@ -241,7 +242,7 @@ async def test_reconcile_disabled_by_env(tmp_path, monkeypatch):
     monkeypatch.setenv("BOARD_RECONCILE", "0")
 
     mock_sdk = AsyncMock(side_effect=Exception("should not be called"))
-    monkeypatch.setattr(bot_module, "_sdk_query", mock_sdk)
+    monkeypatch.setattr(engine, "_sdk_query", mock_sdk)
     await reconcile_board(
         cwd=cwd,
         name="test-project",
@@ -263,7 +264,7 @@ async def test_reconcile_malformed_json_noop(tmp_path, monkeypatch):
     original_content = (tmp_path / "TASKS.md").read_text(encoding="utf-8")
 
     bad_json = "this is not json at all!"
-    monkeypatch.setattr(bot_module, "_sdk_query", _make_haiku_mock(bad_json))
+    monkeypatch.setattr(engine, "_sdk_query", _make_haiku_mock(bad_json))
     # Must not raise
     await reconcile_board(
         cwd=cwd,
@@ -282,7 +283,7 @@ async def test_reconcile_no_tasks_md_skips(tmp_path, monkeypatch):
     cwd = str(tmp_path)  # no TASKS.md
 
     mock_sdk = AsyncMock(side_effect=Exception("should not be called"))
-    monkeypatch.setattr(bot_module, "_sdk_query", mock_sdk)
+    monkeypatch.setattr(engine, "_sdk_query", mock_sdk)
     await reconcile_board(
         cwd=cwd,
         name="test-project",
@@ -301,7 +302,7 @@ async def test_reconcile_move_card_to_done(tmp_path, monkeypatch):
     cwd = str(tmp_path)
 
     move_op = json.dumps([{"op": "move", "id": "inprog1", "to": "done"}])
-    monkeypatch.setattr(bot_module, "_sdk_query", _make_haiku_mock(move_op))
+    monkeypatch.setattr(engine, "_sdk_query", _make_haiku_mock(move_op))
     await reconcile_board(
         cwd=cwd,
         name="test-project",
@@ -325,7 +326,7 @@ async def test_reconcile_dedupe_create(tmp_path, monkeypatch):
 
     # "Existing backlog card" already exists with id exist1
     dup_op = json.dumps([{"op": "create", "text": "Existing backlog card", "column": "backlog"}])
-    monkeypatch.setattr(bot_module, "_sdk_query", _make_haiku_mock(dup_op))
+    monkeypatch.setattr(engine, "_sdk_query", _make_haiku_mock(dup_op))
     await reconcile_board(
         cwd=cwd,
         name="test-project",
@@ -351,7 +352,7 @@ async def test_reconcile_caps_at_5_ops(tmp_path, monkeypatch):
         {"op": "create", "text": f"New card {i}", "column": "backlog"}
         for i in range(10)
     ])
-    monkeypatch.setattr(bot_module, "_sdk_query", _make_haiku_mock(many_ops))
+    monkeypatch.setattr(engine, "_sdk_query", _make_haiku_mock(many_ops))
     await reconcile_board(
         cwd=cwd,
         name="test-project",

@@ -36,7 +36,7 @@ def test_single_project(tmp_path):
     assert p["name"] == "my-proj"
     assert p["cwd"] == "/home/igor/my-proj"
     assert p["model"] == "opus"
-    assert p["tg_thread"] == "-100:42"
+    assert p["session_key"] == "-100:42"
     assert p["is_free"] is False
 
 

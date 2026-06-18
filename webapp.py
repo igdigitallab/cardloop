@@ -991,7 +991,7 @@ def _maybe_reload_topics(ctx: dict) -> None:
 
 def _collect_projects(ctx: dict) -> list[dict]:
     """Deduplicates by cwd, builds a project list from ctx["topics"].
-    Appends free-chats as virtual projects (id=free-<uuid>, tg_thread=its own id).
+    Appends free-chats as virtual projects (id=free-<uuid>, session_key=its own id).
     Archived project ids are excluded from the result."""
     _maybe_reload_topics(ctx)
     archived = _load_archived(ctx)
@@ -1012,13 +1012,13 @@ def _collect_projects(ctx: dict) -> list[dict]:
         if pid in archived:
             continue
         raw_group = assignments.get(pid)
-        # tg_thread — string key "chat:thread"
+        # session_key — string key (session identifier for this project)
         out.append({
             "id": pid,
             "name": b.get("project", pid),
             "cwd": cwd,
             "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
-            "tg_thread": key,
+            "session_key": key,
             "is_free": False,
             "log_cmd": b.get("log_cmd"),
             "test_cmd": b.get("test_cmd"),
@@ -1041,7 +1041,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "name": b.get("label", fid),
             "cwd": b.get("cwd", str(Path.home())),
             "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
-            "tg_thread": fid,  # session_key for free = its own id (string with free- prefix)
+            "session_key": fid,  # session_key for free = its own id (string with free- prefix)
             "is_free": True,
             "group": raw_free_group if raw_free_group in valid_groups else None,
             "favorite": fid in fav_set,
@@ -1248,7 +1248,7 @@ def _find_project_by_id_any(ctx: dict, pid: str) -> dict | None:
                 "name": b.get("project", pid),
                 "cwd": cwd,
                 "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
-                "tg_thread": key,
+                "session_key": key,
                 "is_free": False,
             }
     # Also check free chats
@@ -1260,7 +1260,7 @@ def _find_project_by_id_any(ctx: dict, pid: str) -> dict | None:
             "name": b.get("label", pid),
             "cwd": b.get("cwd", str(Path.home())),
             "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
-            "tg_thread": pid,
+            "session_key": pid,
             "is_free": True,
         }
     return None
@@ -1399,7 +1399,7 @@ async def api_projects(req: web.Request) -> web.Response:
 
     def _activity_state(p: dict) -> dict:
         """Returns running/awaiting state for a project (O(1) dict lookup)."""
-        sk = p.get("tg_thread", "")
+        sk = p.get("session_key") or p.get("tg_thread", "")
         running = ctx["running"].get(sk) is not None
         finished_ts = _awaiting.get(sk, 0.0)
         seen_ts = _seen.get(sk, 0.0)
@@ -1435,7 +1435,7 @@ async def api_project_archive(req: web.Request) -> web.Response:
         return web.json_response({"error": "project not found"}, status=404)
     if project.get("is_free"):
         return web.json_response({"error": "free chats cannot be archived"}, status=400)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     if ctx["running"].get(session_key) is not None:
         return web.json_response({"error": "project busy"}, status=409)
     archived = _load_archived(ctx)
@@ -1549,7 +1549,7 @@ async def api_project_delete(req: web.Request) -> web.Response:
         return web.json_response({"error": "confirm_name does not match project name"}, status=400)
 
     cwd = project["cwd"]
-    tg_thread = project.get("tg_thread", "")
+    _session_key_del = project.get("session_key") or project.get("tg_thread", "")
 
     # Guardrail 3: path allowlist
     allowlist_err = _path_allowlist_check(cwd, ctx)
@@ -1557,7 +1557,7 @@ async def api_project_delete(req: web.Request) -> web.Response:
         return web.json_response({"error": f"path rejected: {allowlist_err}"}, status=400)
 
     # Guardrail 4: not busy — check running dict by session key
-    if ctx["running"].get(tg_thread) is not None:
+    if ctx["running"].get(_session_key_del) is not None:
         return web.json_response({"error": "project is busy"}, status=409)
     # Also check if any running session maps to this cwd
     for sk, val in list(ctx["running"].items()):
@@ -1576,8 +1576,8 @@ async def api_project_delete(req: web.Request) -> web.Response:
     # Parse TG topic info
     tg_chat_id = None
     tg_thread_id = None
-    if tg_thread and ":" in str(tg_thread):
-        parts = str(tg_thread).split(":", 1)
+    if _session_key_del and ":" in str(_session_key_del):
+        parts = str(_session_key_del).split(":", 1)
         try:
             tg_chat_id = int(parts[0])
             tg_thread_id = int(parts[1])
@@ -1619,7 +1619,7 @@ async def api_project_delete(req: web.Request) -> web.Response:
 
     # sessions.json
     try:
-        sessions_to_remove = [k for k in list(ctx["sessions"].keys()) if k == tg_thread]
+        sessions_to_remove = [k for k in list(ctx["sessions"].keys()) if k == _session_key_del]
         for k in sessions_to_remove:
             del ctx["sessions"][k]
         ctx["save_sessions"]()
@@ -1629,8 +1629,8 @@ async def api_project_delete(req: web.Request) -> web.Response:
     # spec-039: evict any live client for this session key
     try:
         _evict_fn = ctx.get("evict_live_client")
-        if _evict_fn is not None and tg_thread:
-            await _evict_fn(tg_thread, ctx)
+        if _evict_fn is not None and _session_key_del:
+            await _evict_fn(_session_key_del, ctx)
     except Exception as e:
         print(f"[delete] WARNING: live-client eviction failed: {e}")
 
@@ -2705,7 +2705,7 @@ async def _scan_and_ingest(project: dict, ctx: dict | None = None) -> dict:
     if added > 0 and ctx and project.get("notify_on_error"):
         try:
             ptb_app = ctx.get("ptb_app")
-            tg_thread_str = project.get("tg_thread", "")
+            tg_thread_str = project.get("session_key") or project.get("tg_thread", "")
             if ptb_app and ":" in tg_thread_str:
                 chat_s, thread_s = tg_thread_str.split(":", 1)
                 chat_id = int(chat_s)
@@ -3415,7 +3415,7 @@ async def _send_tg_ping(ctx: dict, project: dict, msg: str) -> None:
     """Sends an HTML message to the project's TG topic. Non-critical."""
     try:
         ptb_app = ctx.get("ptb_app")
-        tg_thread_str = project.get("tg_thread", "")
+        tg_thread_str = project.get("session_key") or project.get("tg_thread", "")
         if ptb_app and tg_thread_str and ":" in str(tg_thread_str):
             chat_s, thread_s = str(tg_thread_str).split(":", 1)
             chat_id = int(chat_s)
@@ -3528,7 +3528,7 @@ async def api_project_tasks(req: web.Request) -> web.Response:
                         tp.write_text(canon, encoding="utf-8")
     # F: add card queue to response; annotate has_spec per card (card 5e1c0a)
     payload = _board_payload_with_specs(cwd, ctx["DATA"])
-    payload["queued"] = _queue_for(project["tg_thread"])
+    payload["queued"] = _queue_for((project.get("session_key") or project.get("tg_thread", "")))
     return web.json_response(payload)
 
 
@@ -4111,7 +4111,7 @@ async def _start_card_run(ctx: AppCtx, app, project: dict, card_id: str) -> dict
     Race-safety guarantee: check AND set of ctx["running"][session_key] happen
     without a single await between them — this is the only guard against double-start.
     """
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     cwd = project["cwd"]
     name = project["name"]
 
@@ -4153,7 +4153,7 @@ async def _drain_queue(ctx: AppCtx, app, project: dict) -> "str | None":
     If project is busy — returns None. Skips stale/missing cards.
     Returns card_id if a run was started, otherwise None.
     """
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     cwd = project["cwd"]
 
     # Fast non-await check: busy → do nothing
@@ -4222,7 +4222,7 @@ async def api_move_task(req: web.Request) -> web.Response:
 
     # ── F1: auto-launch on move to in_progress ──
     if to == "in_progress":
-        session_key = project["tg_thread"]
+        session_key = (project.get("session_key") or project.get("tg_thread", ""))
         run_engine = ctx.get("run_engine")
 
         # Degraded mode: if engine is unavailable (old launch) — behave as plain move
@@ -4257,7 +4257,7 @@ async def api_move_task(req: web.Request) -> web.Response:
             return web.json_response({"error": reason}, status=400)
 
     # ── Regular move (backlog / review / failed / done) ──
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
         card = _pop_card(cols, card_id)
@@ -4297,7 +4297,7 @@ async def api_delete_task(req: web.Request) -> web.Response:
     if not _valid_card_id(card_id):
         return web.json_response({"error": "bad card id"}, status=400)
     cwd, name = project["cwd"], project["name"]
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
         if _pop_card(cols, card_id) is None:
@@ -4329,7 +4329,7 @@ async def api_run_batch(req: web.Request) -> web.Response:
     if not isinstance(raw_ids, list):
         return web.json_response({"error": "card_ids must be a list"}, status=400)
 
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     cwd = project["cwd"]
 
     # Runnable columns — card must be in one of these
@@ -4383,7 +4383,7 @@ async def _queue_drain_loop(ctx: dict) -> None:
                     try:
                         if proj.get("is_free"):
                             continue
-                        session_key = proj["tg_thread"]
+                        session_key = (proj.get("session_key") or proj.get("tg_thread", ""))
                         if not _queue_for(session_key):
                             continue
                         await _drain_queue(ctx, _aiohttp_app, proj)
@@ -4535,7 +4535,7 @@ async def api_project_activity_stream(req: web.Request) -> web.StreamResponse:
     project = _find_project_by_id(ctx, pid)
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     # Spec-035: resolve reconnect cursor from Last-Event-ID header or ?since= query param
     cursor_str = req.headers.get("Last-Event-ID") or req.rel_url.query.get("since")
     replay_events: list = []
@@ -4570,7 +4570,7 @@ async def api_project_live(req: web.Request) -> web.Response:
     project = _find_project_by_id(ctx, pid)
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     running = ctx["running"].get(session_key) is not None
     turn = _live_turns.get(session_key)
     if turn is None:
@@ -4701,7 +4701,7 @@ async def api_project_timeline(req: web.Request) -> web.Response:
         except (ValueError, TypeError):
             pass
 
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     events = _timeline_read_events(str(session_key), limit, before)
     return web.json_response({"events": events})
 
@@ -5299,10 +5299,10 @@ async def api_deferred_create(req: web.Request) -> web.Response:
         return web.json_response({"error": "provide exactly one of fire_at or fire_on_reset"}, status=400)
 
     # Resolve project: try by id first (frontend sends basename(cwd)), fall back to display name.
-    # _find_project_by_id returns a dict with keys: id, name, cwd, tg_thread, ...
+    # _find_project_by_id returns a dict with keys: id, name, cwd, session_key, ...
     proj = _find_project_by_id(ctx, project)
     if proj is not None:
-        session_key = proj["tg_thread"]
+        session_key = (proj.get("session_key") or proj.get("tg_thread", ""))
         project = proj.get("name") or project  # store display name for notifications/list
     else:
         # Fallback: match by display name (TG /later path and tests that pass a display name)
@@ -6518,7 +6518,7 @@ async def api_project_chats_list(req: web.Request) -> web.Response:
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     async with _chats_lock():
         chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
         entry = chats_data[project["id"]]
@@ -6538,7 +6538,7 @@ async def api_project_chats_create(req: web.Request) -> web.Response:
     name = (body.get("name") or "").strip() or "Chat"
     if len(name) > 80:
         name = name[:80]
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     async with _chats_lock():
         chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
         entry = chats_data[project["id"]]
@@ -6565,7 +6565,7 @@ async def api_project_chats_patch(req: web.Request) -> web.Response:
         body = await req.json()
     except Exception:
         return web.json_response({"error": "bad request"}, status=400)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     async with _chats_lock():
         chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
         entry = chats_data[project["id"]]
@@ -6598,7 +6598,7 @@ async def api_project_chats_delete(req: web.Request) -> web.Response:
     project = _find_project_by_id(ctx, pid)
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     async with _chats_lock():
         chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
         entry = chats_data[project["id"]]
@@ -6719,8 +6719,8 @@ async def api_project_sessions(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    tg_thread = project["tg_thread"]
-    active_sid = ctx["sessions"].get(tg_thread)
+    _sk = (project.get("session_key") or project.get("tg_thread", ""))
+    active_sid = ctx["sessions"].get(_sk)
     sdk_dir = _sdk_sessions_dir(project["cwd"])
 
     if not sdk_dir.is_dir():
@@ -6790,10 +6790,10 @@ async def api_project_set_session(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    tg_thread = project["tg_thread"]
+    _sk = (project.get("session_key") or project.get("tg_thread", ""))
 
     # Lock: cannot change session while project is busy
-    if ctx["running"].get(tg_thread) is not None:
+    if ctx["running"].get(_sk) is not None:
         return web.json_response(
             {"error": "project busy, session change unavailable"},
             status=409,
@@ -6821,22 +6821,22 @@ async def api_project_set_session(req: web.Request) -> web.Response:
                 if _ss_active is not None:
                     _ss_active["session_id"] = None
                     _save_chats(ctx, _ss_data)
-        ctx["sessions"].pop(tg_thread, None)
+        ctx["sessions"].pop(_sk, None)
         ctx["save_sessions"]()
         # Clear context-warn state so a fresh session can warn again.
         try:
             _cw = ctx.get("context_warned")
             if _cw is not None:
-                _cw.discard(tg_thread)
+                _cw.discard(_sk)
         except Exception:
             pass
         # spec-039: evict the live client so PERSISTENT_CLIENT=1 truly starts fresh.
         try:
             _evict_fn = ctx.get("evict_live_client")
             if _evict_fn is not None:
-                await _evict_fn(tg_thread, ctx)
+                await _evict_fn(_sk, ctx)
         except Exception as _exc:
-            print(f"[api_project_set_session] live-client eviction error for {tg_thread}: {_exc!r}")
+            print(f"[api_project_set_session] live-client eviction error for {_sk}: {_exc!r}")
         return web.json_response({"active": None})
 
     elif action == "resume":
@@ -6864,7 +6864,7 @@ async def api_project_set_session(req: web.Request) -> web.Response:
                 if _sr_active is not None:
                     _sr_active["session_id"] = session_id
                     _save_chats(ctx, _sr_data)
-        ctx["sessions"][tg_thread] = session_id
+        ctx["sessions"][_sk] = session_id
         ctx["save_sessions"]()
         return web.json_response({"active": session_id})
 
@@ -7031,7 +7031,7 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    sid = req.rel_url.query.get("session_id", "") or ctx["sessions"].get(project["tg_thread"])
+    sid = req.rel_url.query.get("session_id", "") or ctx["sessions"].get((project.get("session_key") or project.get("tg_thread", "")))
     if not sid:
         return web.json_response({"messages": [], "session_id": None})
     # Sanitise (basename-only)
@@ -7164,7 +7164,7 @@ async def api_chat_queue_list(req: web.Request) -> web.Response:
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     return web.json_response({"items": _chat_queue_get(session_key)})
 
 
@@ -7181,7 +7181,7 @@ async def api_chat_queue_add(req: web.Request) -> web.Response:
     text = (body.get("text") or "").strip()
     if not text:
         return web.json_response({"error": "empty text"}, status=400)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     item = _chat_queue_enqueue(session_key, text)
     if item is None:
         return web.json_response({"error": "queue full"}, status=429)
@@ -7202,7 +7202,7 @@ async def api_chat_queue_edit(req: web.Request) -> web.Response:
     new_text = (body.get("text") or "").strip()
     if not new_text:
         return web.json_response({"error": "empty text"}, status=400)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     updated = _chat_queue_edit(session_key, msg_id, new_text)
     if updated is None:
         return web.json_response({"error": "not found (already consumed or invalid id)"}, status=404)
@@ -7216,7 +7216,7 @@ async def api_chat_queue_delete(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     msg_id = req.match_info["msg_id"]
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     removed = _chat_queue_delete(session_key, msg_id)
     if not removed:
         return web.json_response({"error": "not found (already consumed or invalid id)"}, status=404)
@@ -7233,7 +7233,7 @@ async def api_chat_queue_delete(req: web.Request) -> web.Response:
 #   data: {"type":"error","error":"..."}
 #   data: {"type":"done"}
 #
-# Lock SHARED with TG and F1 cards (session_key = project["tg_thread"]).
+# Lock SHARED with TG and F1 cards (session_key = (project.get("session_key") or project.get("tg_thread", ""))).
 # Disconnect-resilient: if client closed the tab (ConnectionResetError on write),
 # the run_engine generator continues to completion, session_id is saved, lock is released.
 
@@ -7289,7 +7289,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     cwd = project["cwd"]
     name = project["name"]
     model = project.get("model", ctx.get("DEFAULT_MODEL", "sonnet"))
-    session_key = project["tg_thread"]  # SHARED key with TG and F1
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))  # SHARED key with TG and F1
 
     # Lock check (SYNCHRONOUSLY — before first await, against race)
     if ctx["running"].get(session_key) is not None:
@@ -7620,7 +7620,7 @@ async def api_project_chat_stop(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     client = ctx["running"].get(session_key)
 
     if client is not None and hasattr(client, "interrupt"):
@@ -7639,7 +7639,7 @@ async def api_project_running(req: web.Request) -> web.Response:
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     return web.json_response({"running": ctx["running"].get(session_key) is not None})
 
 
@@ -7654,7 +7654,7 @@ async def api_project_seen(req: web.Request) -> web.Response:
     project = _find_project_by_id_any(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     _seen[session_key] = time.time()
     # Clear awaiting only if the last_seen timestamp is ≥ last_finished timestamp.
     finished_ts = _awaiting.get(session_key, 0.0)
@@ -7680,7 +7680,7 @@ async def api_project_rotate(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
 
     # Refuse if project is currently running
     if ctx["running"].get(session_key) is not None:
@@ -7791,7 +7791,7 @@ async def api_project_session_context(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    sid = req.rel_url.query.get("session_id", "") or ctx["sessions"].get(project["tg_thread"])
+    sid = req.rel_url.query.get("session_id", "") or ctx["sessions"].get((project.get("session_key") or project.get("tg_thread", "")))
     if not sid:
         return web.json_response({"read": [], "edited": [], "commands": [], "session_id": None})
 
@@ -8723,7 +8723,7 @@ async def api_new_project(req: web.Request) -> web.Response:
             "name": display_name,
             "cwd": str(cwd),
             "model": _effective_default_model(ctx),
-            "tg_thread": session_key,
+            "session_key": session_key,
             "is_free": False,
         }
 
@@ -8775,7 +8775,7 @@ async def api_project_rename(req: web.Request) -> web.Response:
             status=400,
         )
 
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     if ctx["running"].get(session_key) is not None:
         return web.json_response({"error": "project busy, cannot rename"}, status=409)
 
@@ -8988,7 +8988,7 @@ async def api_project_audit(req: web.Request) -> web.Response:
         return web.json_response({"error": "project not found"}, status=404)
 
     run_engine = ctx.get("run_engine")
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     cwd = project["cwd"]
     name = project["name"]
 
@@ -9045,7 +9045,7 @@ async def api_project_upgrade(req: web.Request) -> web.Response:
         return web.json_response({"error": "project not found"}, status=404)
 
     run_engine = ctx.get("run_engine")
-    session_key = project["tg_thread"]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
     cwd = project["cwd"]
     name = project["name"]
 

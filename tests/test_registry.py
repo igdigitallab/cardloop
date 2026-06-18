@@ -152,8 +152,9 @@ class TestEnvFallbacks:
 
     def _get_constants(self, monkeypatch, env: dict):
         """Импортирует bot с заданным env, возвращает нужные константы."""
-        # очищаем кэш
+        # очищаем кэш — also evict engine so env-dependent constants re-evaluate
         sys.modules.pop("bot", None)
+        sys.modules.pop("engine", None)
         for k, v in env.items():
             monkeypatch.setenv(k, v)
         # убеждаемся что нет лишних значений

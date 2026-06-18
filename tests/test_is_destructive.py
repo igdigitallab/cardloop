@@ -7,7 +7,7 @@
 """
 import pytest
 
-from bot import _is_destructive
+from engine import _is_destructive
 
 
 # ─────────────────────────── позитивные кейсы (должно вернуть True) ───────────────────────────

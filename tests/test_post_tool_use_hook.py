@@ -25,8 +25,9 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 import bot as _bot
+import engine as _engine
 import webapp as _webapp
-from bot import (
+from engine import (
     _HOOK_OUTPUT_TRUNCATE,
     _make_post_tool_use_hook,
     _tool_response_to_str,
@@ -38,10 +39,16 @@ from webapp import _timeline_append, _timeline_init, _timeline_path
 # ─────────────────────────── helpers ──────────────────────────────────────────
 
 def _reset_timeline(tmp_path: Path, session_key: str, cwd: str) -> None:
-    """Initialise webapp timeline state for a single project."""
+    """Initialise webapp timeline state for a single project.
+
+    Also registers webapp's _timeline_append and _bus_publish into engine so that
+    _make_post_tool_use_hook (which lives in engine.py) can write to the timeline.
+    """
     data = tmp_path / "data"
     data.mkdir(parents=True, exist_ok=True)
     _timeline_init({"DATA": data, "topics": {session_key: {"project": "proj", "cwd": cwd}}})
+    # Inject webapp callbacks into engine so timeline writes work without a running server.
+    _engine._register_webapp_callbacks(_webapp._timeline_append, _webapp._bus_publish)
 
 
 def _run(coro):
@@ -123,8 +130,8 @@ class TestHookAuditLine:
     def test_writes_result_audit_line(self, tmp_path):
         """PostToolUse hook produces a RESULT line in the audit log."""
         audit_dir = tmp_path / "audit"
-        original = _bot.AUDIT_DIR
-        _bot.AUDIT_DIR = audit_dir
+        original = _engine.AUDIT_DIR
+        _engine.AUDIT_DIR = audit_dir
         try:
             hook = _make_post_tool_use_hook("myproject", "42:100")
             hook_input = {
@@ -149,13 +156,13 @@ class TestHookAuditLine:
             assert "ok" in content
             assert "hi" in content
         finally:
-            _bot.AUDIT_DIR = original
+            _engine.AUDIT_DIR = original
 
     def test_error_tool_response_marks_err(self, tmp_path):
         """tool_response with error key → audit line contains 'err'."""
         audit_dir = tmp_path / "audit"
-        original = _bot.AUDIT_DIR
-        _bot.AUDIT_DIR = audit_dir
+        original = _engine.AUDIT_DIR
+        _engine.AUDIT_DIR = audit_dir
         try:
             hook = _make_post_tool_use_hook("myproject", "42:100")
             hook_input = {
@@ -174,13 +181,13 @@ class TestHookAuditLine:
             content = list(audit_dir.glob("*.log"))[0].read_text()
             assert "err" in content
         finally:
-            _bot.AUDIT_DIR = original
+            _engine.AUDIT_DIR = original
 
     def test_different_tool_names_recorded(self, tmp_path):
         """Hook records the correct tool name for non-Bash tools."""
         audit_dir = tmp_path / "audit"
-        original = _bot.AUDIT_DIR
-        _bot.AUDIT_DIR = audit_dir
+        original = _engine.AUDIT_DIR
+        _engine.AUDIT_DIR = audit_dir
         try:
             hook = _make_post_tool_use_hook("proj", "1:1")
             for tool in ("Read", "Edit", "Write"):
@@ -201,7 +208,7 @@ class TestHookAuditLine:
             for tool in ("Read", "Edit", "Write"):
                 assert tool in content
         finally:
-            _bot.AUDIT_DIR = original
+            _engine.AUDIT_DIR = original
 
 
 # ─────────────────────────── unit: hook writes tool_result timeline event ─────
@@ -214,8 +221,8 @@ class TestHookTimelineEvent:
         _reset_timeline(tmp_path, session_key, cwd)
 
         audit_dir = tmp_path / "audit"
-        original_audit = _bot.AUDIT_DIR
-        _bot.AUDIT_DIR = audit_dir
+        original_audit = _engine.AUDIT_DIR
+        _engine.AUDIT_DIR = audit_dir
         try:
             hook = _make_post_tool_use_hook("proj", session_key)
             hook_input = {
@@ -242,7 +249,7 @@ class TestHookTimelineEvent:
             assert tr["status"] == "ok"
             assert "file1" in tr["output"] or "file2" in tr["output"]
         finally:
-            _bot.AUDIT_DIR = original_audit
+            _engine.AUDIT_DIR = original_audit
 
     def test_timeline_event_output_truncated(self, tmp_path):
         """Long tool output is truncated in the timeline event."""
@@ -251,8 +258,8 @@ class TestHookTimelineEvent:
         _reset_timeline(tmp_path, session_key, cwd)
 
         audit_dir = tmp_path / "audit"
-        original_audit = _bot.AUDIT_DIR
-        _bot.AUDIT_DIR = audit_dir
+        original_audit = _engine.AUDIT_DIR
+        _engine.AUDIT_DIR = audit_dir
         try:
             hook = _make_post_tool_use_hook("proj", session_key)
             long_stdout = "y" * (_HOOK_OUTPUT_TRUNCATE + 500)
@@ -279,7 +286,7 @@ class TestHookTimelineEvent:
             assert len(output) <= _HOOK_OUTPUT_TRUNCATE + 1  # +1 for ellipsis
             assert output.endswith("…")
         finally:
-            _bot.AUDIT_DIR = original_audit
+            _engine.AUDIT_DIR = original_audit
 
 
 # ─────────────────────────── unit: exception safety ───────────────────────────
@@ -299,7 +306,7 @@ class TestHookExceptionSafety:
             "cwd": "/tmp",
             "permission_mode": "bypassPermissions",
         }
-        with patch.object(_bot, "audit", side_effect=RuntimeError("audit exploded")):
+        with patch.object(_engine, "audit", side_effect=RuntimeError("audit exploded")):
             result = _run(hook(hook_input, "t", {}))
         assert result == {}
 
@@ -318,8 +325,8 @@ class TestHookExceptionSafety:
     def test_timeline_failure_does_not_propagate(self, tmp_path):
         """If _timeline_append raises, the hook still returns {} and the audit line is written."""
         audit_dir = tmp_path / "audit"
-        original_audit = _bot.AUDIT_DIR
-        _bot.AUDIT_DIR = audit_dir
+        original_audit = _engine.AUDIT_DIR
+        _engine.AUDIT_DIR = audit_dir
         try:
             hook = _make_post_tool_use_hook("proj", "1:1")
             hook_input = {
@@ -341,7 +348,7 @@ class TestHookExceptionSafety:
             assert logs
             assert "Read" in logs[0].read_text()
         finally:
-            _bot.AUDIT_DIR = original_audit
+            _engine.AUDIT_DIR = original_audit
 
 
 # ─────────────────────────── unit: secrets / env never written ────────────────
@@ -367,8 +374,8 @@ class TestHookSecretsGuard:
         call-site (env is never passed to audit anywhere).  We verify the hook
         records the output normally and does NOT inject additional 'env' keys."""
         audit_dir = tmp_path / "audit"
-        original_audit = _bot.AUDIT_DIR
-        _bot.AUDIT_DIR = audit_dir
+        original_audit = _engine.AUDIT_DIR
+        _engine.AUDIT_DIR = audit_dir
         cwd = str(tmp_path / "proj")
         session_key = "77:1"
         _reset_timeline(tmp_path, session_key, cwd)
@@ -395,7 +402,7 @@ class TestHookSecretsGuard:
                         obj = json.loads(line)
                         assert "env" not in obj
         finally:
-            _bot.AUDIT_DIR = original_audit
+            _engine.AUDIT_DIR = original_audit
 
 
 # ─────────────────────────── unit: include_hook_events stays False ────────────

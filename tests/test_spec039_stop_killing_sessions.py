@@ -25,6 +25,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 import bot
+import engine
 import webapp as _webapp
 
 
@@ -181,7 +182,7 @@ async def test_graceful_shutdown_saves_sessions_no_self_kill():
     def _fake_save():
         save_called.append(True)
 
-    with patch.object(bot, "save_sessions", _fake_save), \
+    with patch.object(engine, "save_sessions", _fake_save), \
          patch("os._exit", side_effect=AssertionError("os._exit must NOT be called")) as mock_exit, \
          patch("os.kill", side_effect=AssertionError("os.kill must NOT be called")) as mock_kill:
 
@@ -204,7 +205,7 @@ async def test_graceful_shutdown_saves_sessions_no_self_kill():
 async def test_graceful_shutdown_empty_registry():
     """_graceful_shutdown with an empty registry must not raise and must flush sessions."""
     save_called = []
-    with patch.object(bot, "save_sessions", lambda: save_called.append(True)):
+    with patch.object(engine, "save_sessions", lambda: save_called.append(True)):
         await bot._graceful_shutdown({})
     assert save_called
 
@@ -217,7 +218,7 @@ async def test_graceful_shutdown_tolerates_disconnect_failure():
     entry_b = _make_live_entry("b:2")
     registry = {"a:1": entry_a, "b:2": entry_b}
 
-    with patch.object(bot, "save_sessions", MagicMock()):
+    with patch.object(engine, "save_sessions", MagicMock()):
         # Must not raise even when disconnect fails on one entry
         await bot._graceful_shutdown(registry)
 
@@ -245,14 +246,15 @@ async def test_pre_compact_hook_emits_audit_and_bus_event():
     def _fake_audit(project, kind, text):
         audit_lines.append((project, kind, text))
 
-    hook_fn = bot._make_pre_compact_hook(project_name, session_key)
+    hook_fn = engine._make_pre_compact_hook(project_name, session_key)
 
     # Simulate the SDK calling the hook with a PreCompact event
     fake_input = {"hook_event_name": "PreCompact", "trigger": "auto"}
 
     import webapp as _webapp
-    with patch.object(bot, "audit", _fake_audit), \
-         patch.object(_webapp, "_bus_publish", _fake_bus_publish):
+    with patch.object(engine, "audit", _fake_audit), \
+         patch.object(_webapp, "_bus_publish", _fake_bus_publish), \
+         patch.object(engine, "_bus_publish_cb", _fake_bus_publish):
 
         result = await hook_fn(fake_input, None, None)
 
@@ -277,7 +279,7 @@ async def test_pre_compact_hook_emits_audit_and_bus_event():
 @pytest.mark.asyncio
 async def test_pre_compact_hook_never_raises():
     """PreCompact hook must never propagate exceptions — it's guarded end-to-end."""
-    hook_fn = bot._make_pre_compact_hook("proj", "chat:x")
+    hook_fn = engine._make_pre_compact_hook("proj", "chat:x")
 
     # Pass a completely broken input — must still return {} without raising
     result = await hook_fn(None, None, None)
@@ -314,9 +316,9 @@ async def test_pre_compact_hook_registered_in_opts(tmp_path):
         client.receive_response = _recv
         return client
 
-    with patch.object(bot, "PERSISTENT_CLIENT", False), \
-         patch.object(bot, "ClaudeSDKClient", side_effect=_fake_sdk_client), \
-         patch.object(bot, "audit", MagicMock()):
+    with patch.object(engine, "PERSISTENT_CLIENT", False), \
+         patch.object(engine, "ClaudeSDKClient", side_effect=_fake_sdk_client), \
+         patch.object(engine, "audit", MagicMock()):
 
         async for _ in bot.run_engine(
             project_name="proj",
