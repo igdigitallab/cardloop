@@ -225,6 +225,7 @@ BOARD_PROTOCOL = (
 
 TOPICS_F = DATA / "topics.json"      # LAYER 1: thread -> project binding (persistent)
 SESSIONS_F = DATA / "sessions.json"  # LAYER 2: thread -> session_id (cleared by /reset)
+HANDOFF_F = DATA / "handoff.json"    # spec-042: pending handoff summaries (survive restarts)
 
 
 def _norm(s: str) -> str:
@@ -438,10 +439,10 @@ class _LiveEntry:
 
 
 _live_clients: "dict[str, _LiveEntry]" = {}  # session_key -> _LiveEntry
-# Spec-021 Phase 4: one-shot handoff summaries pending injection into the next turn after rotation.
+# Spec-021 Phase 4 / spec-042: one-shot handoff summaries pending injection into the next turn after rotation.
 # {session_key: summary_text}. Cleared immediately after injection so it fires exactly once.
-# NOTE: In-memory only — lost on service restart between rotation and next turn; that is acceptable.
-pending_handoff: "dict[str, str]" = {}
+# spec-042: persisted to HANDOFF_F (data/handoff.json) so summaries survive service restarts.
+pending_handoff: "dict[str, str]" = _read(HANDOFF_F, {})
 # Context early-warn: tracks session keys that have already received the CONTEXT_WARN_AT alert.
 # Cleared on /reset so a fresh session can warn again.
 context_warned: "set[str]" = set()
@@ -453,6 +454,11 @@ def save_topics():
 
 def save_sessions():
     SESSIONS_F.write_text(json.dumps(sessions, ensure_ascii=False, indent=2))
+
+
+def save_handoff():
+    """Persist pending_handoff to disk (spec-042). Called after rotation stores or injection pops an entry."""
+    HANDOFF_F.write_text(json.dumps(pending_handoff, ensure_ascii=False, indent=2))
 
 
 def short(cmd: str, limit=90) -> str:
@@ -1440,8 +1446,10 @@ def _build_ctx(ptb_app, *, web_port: int = None, web_password: str = None,
         # TG group chat id — used by api_new_project to create forum topics in TG mode.
         # Removed in Phase D.
         "GROUP_CHAT_ID": _group_chat_id,
-        # Spec-021 Phase 4: pending handoff summaries awaiting injection (shared with webapp via ctx)
+        # Spec-021 Phase 4 / spec-042: pending handoff summaries awaiting injection (shared with webapp via ctx)
         "pending_handoff": pending_handoff,
+        # spec-042: callable to persist pending_handoff to disk (save_handoff in engine.py).
+        "save_handoff": save_handoff,
         # Context early-warn: tracks session keys that have already fired the CONTEXT_WARN_AT alert.
         # Shared by reference — webapp.py reads/writes it via ctx["context_warned"].
         "context_warned": context_warned,

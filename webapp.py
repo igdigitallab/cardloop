@@ -6808,6 +6808,30 @@ def _session_preview(jsonl_path: Path) -> str:
     return "(untitled)"
 
 
+def _session_message_count(jsonl_path: Path) -> int:
+    """Count user+assistant message records in a session jsonl (spec-042 label).
+
+    Cheap full-file scan; used only by the sessions-list endpoint (≤30 sessions).
+    Tolerant of malformed lines — best-effort, never raises."""
+    count = 0
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                msg = obj.get("message", {})
+                if isinstance(msg, dict) and msg.get("role") in ("user", "assistant"):
+                    count += 1
+    except Exception:
+        pass
+    return count
+
+
 async def api_project_sessions(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/sessions — list of SDK sessions for the project."""
     ctx = req.app["ctx"]
@@ -6841,6 +6865,7 @@ async def api_project_sessions(req: web.Request) -> web.Response:
                 "preview": preview,
                 "is_active": sid == active_sid,
                 "label": labels.get(sid) or None,
+                "message_count": _session_message_count(f),
             })
     except Exception:
         pass
@@ -7620,6 +7645,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 ph = ctx.get("pending_handoff") or {}
                 pending_summary = ph.pop(session_key, None)
                 if pending_summary is not None:
+                    # spec-042: persist the pop so a restart doesn't re-inject the same summary
+                    ctx.get("save_handoff", lambda: None)()
                     effective_prompt = (
                         "<prior-session-summary>\n"
                         "The previous session was rotated to stay lean. Summary of where we left off below.\n"
@@ -7897,12 +7924,27 @@ async def api_project_rotate(req: web.Request) -> web.Response:
     evict the live client so the next turn starts completely fresh.  Returns
     {ok: true, reset: true} on success, {ok: true, reset: false} when there is
     nothing to clear (no active session).  409 if the project is currently running.
+
+    spec-042: accepts optional JSON body {handoff: true} to generate a cheap haiku
+    summary of the current session transcript BEFORE clearing the session.  The summary
+    is stored in pending_handoff[session_key] and persisted to disk so it survives
+    restarts.  The first fresh-session turn will auto-inject it via <prior-session-summary>.
+    Response includes {handoff: true/false} indicating whether a summary was stored.
     """
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
+
+    # Parse optional JSON body tolerantly — missing body or non-JSON is treated as {}
+    try:
+        body = await req.json() if req.can_read_body else {}
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+    do_handoff = bool(body.get("handoff"))
 
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
 
@@ -7913,6 +7955,27 @@ async def api_project_rotate(req: web.Request) -> web.Response:
     # Nothing to do when no active session exists
     if ctx["sessions"].get(session_key) is None and session_key not in ctx.get("live_clients", {}):
         return web.json_response({"ok": True, "reset": False, "reason": "no active session"})
+
+    # spec-042: build handoff summary BEFORE popping the session so we still have the session_id
+    stored = False
+    if do_handoff:
+        sid = ctx["sessions"].get(session_key)
+        if sid:
+            cwd = project.get("cwd") or ""
+            if not cwd:
+                # Fall back to topics lookup (same as other routes)
+                _topic = ctx.get("topics", {}).get(session_key, {})
+                cwd = _topic.get("cwd", "") if isinstance(_topic, dict) else ""
+            try:
+                summary = await _build_handoff(ctx, session_key, cwd, sid)
+                if summary:
+                    ctx["pending_handoff"][session_key] = summary
+                    ctx.get("save_handoff", lambda: None)()
+                    stored = True
+                    print(f"[api_project_rotate] handoff summary stored for {session_key} ({len(summary)} chars)")
+            except Exception as _hoff_exc:
+                # Never block the reset because of a summary failure
+                print(f"[api_project_rotate] handoff build failed (continuing with blank reset): {_hoff_exc!r}")
 
     # Pop the session record and persist
     ctx["sessions"].pop(session_key, None)
@@ -7934,7 +7997,7 @@ async def api_project_rotate(req: web.Request) -> web.Response:
     except Exception as _exc:
         print(f"[api_project_rotate] live-client eviction error for {session_key}: {_exc!r}")
 
-    return web.json_response({"ok": True, "reset": True})
+    return web.json_response({"ok": True, "reset": True, "handoff": stored})
 
 
 # ─────────────────────────── Session context (session-context) ─────────────
@@ -8004,6 +8067,215 @@ def _session_context(jsonl_path: Path) -> dict:
         pass
 
     return {"read": read, "edited": edited, "commands": commands}
+
+
+# ─────────────────────────── spec-042: handoff producer ─────────────────────
+
+# Lazy import of claude_agent_sdk types needed only for handoff generation.
+# These mirror the imports in engine.py (which owns the canonical SDK imports).
+# noqa: E402 — placed near the consumer functions for readability.
+from claude_agent_sdk import (  # noqa: E402
+    AssistantMessage as _AssistantMessage,
+    ClaudeAgentOptions as _ClaudeAgentOptions,
+    TextBlock as _TextBlock,
+    query as _sdk_query_handoff,
+)
+
+# Max chars of rendered dialog sent to haiku in a single chunk.
+# ~150k chars ≈ ~40k tokens; well within haiku's 200k token window.
+_HANDOFF_CHUNK_CHARS = 150_000
+# Max number of map-reduce chunks before truncating (log a warning).
+_HANDOFF_MAX_CHUNKS = 8
+
+
+async def _build_handoff(ctx: dict, session_key: str, cwd: str, session_id: "str | None") -> str:
+    """Build a handoff summary string for the given session (spec-042).
+
+    Returns a non-empty string on success, or "" when there is nothing useful to say
+    (no session, empty transcript, haiku failure — all treated as blank handoff).
+    Never raises; the caller must always get a string back so the reset can proceed.
+
+    Structure of the returned string:
+        [narrative from haiku]
+
+        ---
+        Files touched: ...
+        Commands: ...
+        Recent commits: ...
+        Open cards:
+        ...
+    """
+    try:
+        return await _build_handoff_inner(ctx, session_key, cwd, session_id)
+    except Exception as exc:
+        print(f"[handoff] _build_handoff unexpected error for {session_key}: {exc!r}")
+        return ""
+
+
+async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id: "str | None") -> str:
+    """Inner implementation — wrapped by _build_handoff for exception safety."""
+
+    # ── 1. Locate transcript ──────────────────────────────────────────────────
+    if not session_id:
+        return ""
+
+    jsonl_path = _sdk_sessions_dir(cwd) / f"{session_id}.jsonl"
+    if not jsonl_path.exists():
+        print(f"[handoff] transcript not found: {jsonl_path}")
+        return ""
+
+    # Empty file check
+    try:
+        if jsonl_path.stat().st_size == 0:
+            return ""
+    except OSError:
+        return ""
+
+    # ── 2. Final board reconcile (best-effort) ────────────────────────────────
+    _reconcile_fn = ctx.get("reconcile_board")
+    if _reconcile_fn is not None:
+        try:
+            # Use the project name from the session_key lookup via ctx topics
+            _project_name = ""
+            _topic_entry = ctx.get("topics", {}).get(session_key, {})
+            if isinstance(_topic_entry, dict):
+                _project_name = _topic_entry.get("project", "")
+            await _reconcile_fn(cwd=cwd, name=_project_name, user_msg="", agent_summary="")
+        except Exception as _rec_exc:
+            print(f"[handoff] reconcile_board failed (non-blocking): {_rec_exc!r}")
+
+    # ── 3. Deterministic FACTS (no model call) ────────────────────────────────
+    context_info = _session_context(jsonl_path)
+    edited_files = context_info.get("edited", [])
+    commands = context_info.get("commands", [])
+
+    # Recent git commits (last 15, wrapped in try for non-git dirs)
+    recent_commits: list[str] = []
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "-C", cwd, "log", "--oneline", "-n", "15"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            recent_commits = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+    except Exception as _git_exc:
+        print(f"[handoff] git log failed (non-blocking): {_git_exc!r}")
+
+    # Open board cards
+    open_cards = ""
+    try:
+        from board import board_summary as _board_summary
+        open_cards = _board_summary(cwd) or ""
+    except Exception as _board_exc:
+        print(f"[handoff] board_summary failed (non-blocking): {_board_exc!r}")
+
+    # ── 4. Narrative via haiku (map-reduce for large transcripts) ─────────────
+    narrative = ""
+    try:
+        history = _session_history(jsonl_path, limit=1000)  # no UI limit — full transcript
+        rendered_parts: list[str] = []
+        for entry in history:
+            role = entry.get("role", "?")
+            text = (entry.get("text") or "").strip()
+            tools = entry.get("tools") or []
+            if text:
+                rendered_parts.append(f"[{role}]: {text}")
+            for t in tools:
+                rendered_parts.append(f"[tool]: {t}")
+        full_dialog = "\n".join(rendered_parts)
+
+        if full_dialog:
+            handoff_model = os.environ.get("HANDOFF_MODEL", "haiku")
+            opts = _ClaudeAgentOptions(
+                model=handoff_model,
+                permission_mode="bypassPermissions",
+                cwd=cwd,
+                allowed_tools=[],
+                disallowed_tools=[],
+                effort="low",
+            )
+
+            if len(full_dialog) <= _HANDOFF_CHUNK_CHARS:
+                # Single-pass — common case
+                narrative = await _haiku_summarize(
+                    ROTATION_SUMMARY_PROMPT + "\n\n" + full_dialog, opts
+                )
+            else:
+                # Map-reduce for large transcripts
+                chunks = []
+                offset = 0
+                while offset < len(full_dialog):
+                    chunks.append(full_dialog[offset : offset + _HANDOFF_CHUNK_CHARS])
+                    offset += _HANDOFF_CHUNK_CHARS
+
+                if len(chunks) > _HANDOFF_MAX_CHUNKS:
+                    print(
+                        f"[handoff] transcript too large: {len(chunks)} chunks, "
+                        f"truncating to {_HANDOFF_MAX_CHUNKS} for {session_key}"
+                    )
+                    chunks = chunks[:_HANDOFF_MAX_CHUNKS]
+
+                chunk_summaries: list[str] = []
+                for i, chunk in enumerate(chunks):
+                    chunk_prompt = (
+                        f"Summarize this portion (part {i + 1}/{len(chunks)}) of the session for handoff. "
+                        "Key decisions, actions, file changes, open questions. Dense, ≤200 words, English.\n\n"
+                        + chunk
+                    )
+                    chunk_summary = await _haiku_summarize(chunk_prompt, opts)
+                    if chunk_summary:
+                        chunk_summaries.append(chunk_summary)
+
+                if chunk_summaries:
+                    combined = "\n\n---\n".join(chunk_summaries)
+                    final_prompt = (
+                        ROTATION_SUMMARY_PROMPT
+                        + "\n\nThese are partial summaries — combine into one handoff:\n\n"
+                        + combined
+                    )
+                    narrative = await _haiku_summarize(final_prompt, opts)
+    except Exception as _narr_exc:
+        print(f"[handoff] narrative generation failed (non-blocking): {_narr_exc!r}")
+
+    # ── 5. Assemble ───────────────────────────────────────────────────────────
+    parts: list[str] = []
+    if narrative:
+        parts.append(narrative)
+
+    fact_lines: list[str] = []
+    if edited_files:
+        fact_lines.append("Files touched: " + ", ".join(edited_files[:30]))
+    if commands:
+        fact_lines.append("Commands: " + " | ".join(commands[:20]))
+    if recent_commits:
+        fact_lines.append("Recent commits:\n" + "\n".join(f"  {c}" for c in recent_commits))
+    if open_cards:
+        fact_lines.append("Open cards:\n" + open_cards)
+
+    if fact_lines:
+        parts.append("---\n" + "\n".join(fact_lines))
+
+    return "\n\n".join(parts)
+
+
+async def _haiku_summarize(prompt: str, opts: "_ClaudeAgentOptions") -> str:
+    """Send a one-shot prompt to haiku (or HANDOFF_MODEL) and return the text response.
+
+    Returns "" on failure or empty response. Never raises.
+    Mirrors the pattern used in engine.py reconcile_board (engine.py:1018-1030).
+    """
+    text_parts: list[str] = []
+    try:
+        async for msg in _sdk_query_handoff(prompt=prompt, options=opts):
+            if isinstance(msg, _AssistantMessage):
+                for blk in msg.content:
+                    if isinstance(blk, _TextBlock) and blk.text.strip():
+                        text_parts.append(blk.text)
+    except Exception as exc:
+        print(f"[handoff] haiku call failed: {exc!r}")
+        return ""
+    return "\n".join(text_parts).strip()
 
 
 async def api_project_session_context(req: web.Request) -> web.Response:

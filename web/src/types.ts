@@ -275,10 +275,14 @@ export interface ChatsResponse {
 
 export interface SessionInfo {
   session_id: string
-  last_used: string   // ISO datetime string
+  last_used: string   // ISO datetime string (file mtime — used as session timestamp)
   preview: string
   is_active: boolean
   label?: string | null
+  /** ISO datetime of session creation — provided by backend when available (spec-042). */
+  created?: string | null
+  /** Total message count in the session — provided by backend when available (spec-042). */
+  message_count?: number | null
 }
 
 // ─── C1: Chat SSE events ───────────────────────────────────────────────────

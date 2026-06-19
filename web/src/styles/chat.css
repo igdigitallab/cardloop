@@ -386,6 +386,37 @@
   font-style: italic;
 }
 
+/* ── spec-042: two-line session label (primary + dimmed preview) ─── */
+/* Applied to the session-item-preview span when showing structured labels. */
+.session-item-two-line .session-item-preview {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+}
+.session-item-label-block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.session-item-label-primary {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-item-label-secondary {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── #2 Переименование сессии ───────────────────────────────────── */
 .session-dropdown-row { display: flex; align-items: stretch; gap: 2px; }
 .session-dropdown-row .session-dropdown-item { flex: 1; min-width: 0; }

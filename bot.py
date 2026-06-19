@@ -87,7 +87,7 @@ from engine import (
     AUDIT_DIR, STALL_SECONDS, MAX_SECONDS,
     PERSISTENT_CLIENT, LIVE_CLIENT_TTL_SEC, LIVE_CLIENT_MAX,
     topics, sessions, costs, running, rate_limits, pending_handoff, context_warned,
-    save_topics, save_sessions,
+    save_topics, save_sessions, save_handoff,
     key_of, resolve_project, build_registry, REGISTRY, _REG_RAW,
     _read, _migrate_session_keys, _run_startup_migration,
     audit, short, _is_destructive,
@@ -504,6 +504,7 @@ async def run_agent(context, update, prompt: str):
         try:
             if resume_sid is None and session_key in pending_handoff:
                 summary = pending_handoff.pop(session_key)
+                save_handoff()  # spec-042: persist the pop so restart doesn't re-inject
                 effective_prompt = (
                     "<prior-session-summary>\n"
                     "The previous session was rotated to stay lean. Summary of where we left off below.\n"

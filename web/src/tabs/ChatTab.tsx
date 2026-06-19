@@ -635,6 +635,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   // Spec-021/039: manual reset + auto-compact UI state
   const [rotateToast, setRotateToast] = useState<string | null>(null)
   const [rotating, setRotating] = useState(false)
+  // spec-042: unified reset-confirm modal (replaces direct no-confirm handleRotate calls)
+  const [resetModalOpen, setResetModalOpen] = useState(false)
   // Spec-039: toast shown when native auto-compact fires (kind:"compact" bus event)
   const [compactToast, setCompactToast] = useState(false)
   // Context early-warning banner state.
@@ -1296,25 +1298,25 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setQueueEditId(null)
   }
 
-  // Shared reset handler — called from both the health-row button and the context warning banner.
-  // Spec-039: backend now returns {ok:true, reset:true} on success (field was "rotated" before).
-  async function handleRotate() {
+  // Shared reset handler — called after the unified confirm modal resolves.
+  // spec-042: accepts handoff flag forwarded to POST /api/projects/{id}/rotate {handoff}.
+  // handoff=true  → backend builds a cheap haiku summary seeded into the next session.
+  // handoff=false → blank reset (prior behaviour).
+  async function handleRotate(handoff: boolean) {
+    setResetModalOpen(false)
     setRotating(true)
     try {
-      const res = await fetch(`/api/projects/${projectId}/rotate`, {
-        method: 'POST', credentials: 'include',
-      })
-      const data = await res.json() as Record<string, unknown>
-      if (!res.ok) {
-        const reason = String(data.error ?? res.statusText)
-        setRotateToast(t['chat.reset_failed'].replace('{reason}', reason))
-      } else if (data.reset) {
+      const data = await api.rotate(projectId, handoff)
+      if (data.reset) {
         // Backend confirmed a real eviction and fresh session start.
         setContextTokens(0)
         setPrevContextTokens(null)
         setContextWarnFromBackend(false)
         setWarnDismissedAtTokens(null)
-        setRotateToast(t['chat.reset_done'])
+        const toastMsg = handoff
+          ? 'New session — prior context will be handed off'
+          : t['chat.reset_done']
+        setRotateToast(toastMsg)
       } else {
         // reset:false — no active session was present.
         setRotateToast(t['chat.reset_no_session'])
@@ -1477,7 +1479,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 style={wrapBtnStyle}
                 disabled={rotating || streaming}
                 title={t['chat.reset_session_tip']}
-                onClick={handleRotate}
+                onClick={() => setResetModalOpen(true)}
                 aria-label={t['chat.reset_session_btn']}
               >
                 {rotating ? '…' : '↺'}
@@ -1487,10 +1489,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           <SessionSelector
             projectId={projectId}
             onSessionChange={handleSessionChange}
-            onInsertResetPrompt={(text) => {
-              setInput(text)
-              setTimeout(() => textareaRef.current?.focus(), 0)
-            }}
+            onRequestReset={() => setResetModalOpen(true)}
           />
         </div>
         {/* Session health row — context "used / max" + progress bar.
@@ -1790,7 +1789,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                             fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0,
                           }}
                           disabled={rotating || streaming}
-                          onClick={handleRotate}
+                          onClick={() => setResetModalOpen(true)}
                         >
                           {rotating ? '…' : t['chat.wall_reset_btn']}
                         </button>
@@ -1979,7 +1978,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 }}
                 disabled={rotating || streaming}
                 title={t['chat.reset_session_tip']}
-                onClick={handleRotate}
+                onClick={() => setResetModalOpen(true)}
               >
                 {rotating ? '…' : t['chat.reset_session_btn']}
               </button>
@@ -2434,6 +2433,46 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
         }}>
           {deferToast}
         </div>
+      )}
+
+      {/* spec-042: Unified reset-confirm modal — two choices + cancel.
+          Opened by every ↺ entry point (toolbar, wall-error button, context banner). */}
+      {resetModalOpen && (
+        <Modal onClose={() => setResetModalOpen(false)}>
+          <ModalHead title="New session" onClose={() => setResetModalOpen(false)} />
+          <div className="run-modal-body">
+            <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--color-muted, #6b7280)', lineHeight: 1.5 }}>
+              Choose how to start the next session:
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
+              <button
+                className="btn btn-primary"
+                style={{ justifyContent: 'flex-start', textAlign: 'left', padding: '10px 14px' }}
+                onClick={() => handleRotate(true)}
+                disabled={rotating}
+              >
+                <strong>New session + handoff</strong>
+                <span style={{ display: 'block', fontWeight: 400, fontSize: 11, marginTop: 2, opacity: 0.8 }}>
+                  A compact summary of the prior session is built by a cheap model and seeded into the new one — no context is lost.
+                </span>
+              </button>
+              <button
+                className="btn btn-secondary"
+                style={{ justifyContent: 'flex-start', textAlign: 'left', padding: '10px 14px' }}
+                onClick={() => handleRotate(false)}
+                disabled={rotating}
+              >
+                <strong>New session (blank)</strong>
+                <span style={{ display: 'block', fontWeight: 400, fontSize: 11, marginTop: 2, opacity: 0.8 }}>
+                  Fresh start with no prior context carried over.
+                </span>
+              </button>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn btn-secondary" onClick={() => setResetModalOpen(false)}>Cancel</button>
+            </div>
+          </div>
+        </Modal>
       )}
 
       {/* Spec-021/039: Manual reset toast */}

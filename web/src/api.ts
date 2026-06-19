@@ -173,6 +173,19 @@ export const api = {
   sessions: (id: string) =>
     apiFetch<{ sessions: import('./types').SessionInfo[] }>(`/api/projects/${id}/sessions`),
 
+  // spec-042: rotate with optional handoff flag.
+  // handoff=true → backend builds a cheap summary and seeds the next session.
+  // handoff=false (or omitted) → blank reset (prior behaviour).
+  rotate: (id: string, handoff: boolean) =>
+    apiFetch<{ ok: boolean; reset: boolean; handoff: boolean }>(
+      `/api/projects/${id}/rotate`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ handoff }),
+      }
+    ),
+
   setSession: (id: string, body: { action: 'new' } | { action: 'resume'; session_id: string }) =>
     apiFetch<{ active: string | null }>(`/api/projects/${id}/session`, {
       method: 'POST',

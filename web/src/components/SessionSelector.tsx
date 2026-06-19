@@ -1,7 +1,11 @@
 /**
- * Session selector dropdown + confirm-reset modal.
+ * Session selector dropdown.
  * Manages session switching for the chat panel.
  * The dropdown is portaled to document.body to escape any ancestor stacking context.
+ *
+ * spec-042: reset flow is fully delegated to the parent (ChatTab) via onRequestReset.
+ *   The parent owns the unified reset-confirm modal with "New session + handoff" /
+ *   "New session (blank)" choices. This component no longer shows its own reset modal.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -12,28 +16,43 @@ import { Modal, ModalHead } from './Modal'
 interface Props {
   projectId: string
   onSessionChange: () => void
-  /** Called when the user wants to insert a "wrap-up prompt" into the chat input. */
-  onInsertResetPrompt?: (text: string) => void
+  /**
+   * spec-042: called when the user clicks "New session" in the dropdown.
+   * The parent opens the unified reset-confirm modal (handoff vs blank).
+   * If not provided, the "New session" button is hidden (fallback for contexts
+   * where reset is not applicable).
+   */
+  onRequestReset?: () => void
 }
 
-const DEFAULT_RESET_PROMPT =
-  "Wrapping up the session. Before you go:\n" +
-  "1. Review the card list in TASKS.md, mark completed ones (move to Done via my command or tell me).\n" +
-  "2. Check for any junk temporary files in cwd (untitled, scratch, .bak) — suggest deleting them.\n" +
-  "3. If there are uncommitted changes — a short description of what and why (commit message).\n" +
-  "Don't write code, just check and report."
-
-/** Format ISO datetime as relative time */
-function relTime(iso: string): string {
+/** Format ISO datetime as absolute clock string for session labels. */
+function fmtSessionTime(iso: string): string {
   try {
-    const diff = Date.now() - new Date(iso).getTime()
-    const mins = Math.floor(diff / 60000)
-    if (mins < 2) return 'just now'
-    if (mins < 60) return `${mins}m ago`
-    const hrs = Math.floor(mins / 60)
-    if (hrs < 24) return `${hrs}h ago`
-    const days = Math.floor(hrs / 24)
-    return `${days}d ago`
+    const d = new Date(iso)
+    const now = new Date()
+    const sameDay =
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate()
+    if (sameDay) {
+      // Today: show time only, e.g. "14:32"
+      return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    }
+    const yesterday = new Date(now)
+    yesterday.setDate(yesterday.getDate() - 1)
+    const sameYesterday =
+      d.getFullYear() === yesterday.getFullYear() &&
+      d.getMonth() === yesterday.getMonth() &&
+      d.getDate() === yesterday.getDate()
+    if (sameYesterday) {
+      return 'Yesterday ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    }
+    // Older: short date + time
+    return (
+      d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
+      ' ' +
+      d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    )
   } catch {
     return ''
   }
@@ -42,7 +61,7 @@ function relTime(iso: string): string {
 /** Anchor width used when clamping the dropdown to avoid right-edge overflow. */
 const DROPDOWN_ANCHOR_WIDTH = 360
 
-export function SessionSelector({ projectId, onSessionChange, onInsertResetPrompt }: Props) {
+export function SessionSelector({ projectId, onSessionChange, onRequestReset }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -55,8 +74,6 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
   // Ref on the portaled dropdown list — used for outside-click detection
   const dropdownRef = useRef<HTMLDivElement>(null)
 
-  const [confirmReset, setConfirmReset] = useState(false)
-  const [resetPromptText, setResetPromptText] = useState(DEFAULT_RESET_PROMPT)
   const [renameModal, setRenameModal] = useState<{ session: SessionInfo; value: string } | null>(null)
 
   // Computed desktop anchor style (null = mobile, let CSS bottom-sheet win)
@@ -168,12 +185,6 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
     }
   }
 
-  function requestReset() {
-    setResetPromptText(DEFAULT_RESET_PROMPT)
-    setConfirmReset(true)
-    setOpen(false)
-  }
-
   async function commitRename() {
     if (!renameModal) return
     const { session, value } = renameModal
@@ -187,6 +198,42 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
     }
   }
 
+  /**
+   * Render a human-readable label for a session entry (spec-042 session clarity).
+   * Primary line: "Session · <start time>"
+   * Secondary line (dimmed): first-message preview
+   *
+   * Note: the backend provides `last_used` (file mtime, used as session timestamp)
+   * and `preview` (first human-readable message). `message_count` and a separate
+   * `created` timestamp are NOT yet provided by the backend — using `last_used`
+   * as the time indicator until the backend exposes those fields.
+   */
+  function renderSessionLabel(s: SessionInfo) {
+    // Use `created` if the backend provides it (future), else fall back to `last_used`.
+    const timeStr = fmtSessionTime(s.created ?? s.last_used)
+    const msgs = typeof s.message_count === 'number' && s.message_count > 0
+      ? ` · ${s.message_count} msgs`
+      : ''
+    const primaryLine = `Session · ${timeStr}${msgs}`
+
+    if (s.label) {
+      // Named session: show user label as strong, then the standard "Session · time" sub-line
+      return (
+        <span className="session-item-label-block">
+          <span className="session-item-label-primary"><strong>{s.label}</strong></span>
+          <span className="session-item-label-secondary">{primaryLine} · {s.preview}</span>
+        </span>
+      )
+    }
+
+    return (
+      <span className="session-item-label-block">
+        <span className="session-item-label-primary">{primaryLine}</span>
+        <span className="session-item-label-secondary">{s.preview}</span>
+      </span>
+    )
+  }
+
   // The portaled dropdown element. On mobile dropdownStyle is null, so no
   // inline position/top/left — the CSS bottom-sheet rules take effect instead.
   const dropdown = (
@@ -196,31 +243,30 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
       ref={dropdownRef}
       style={dropdownStyle ?? undefined}
     >
-      <button
-        className="session-dropdown-item session-new-item"
-        onClick={requestReset}
-        disabled={busy}
-      >
-        ➕ New session
-      </button>
+      {onRequestReset && (
+        <button
+          className="session-dropdown-item session-new-item"
+          onClick={() => { setOpen(false); onRequestReset() }}
+          disabled={busy}
+        >
+          ➕ New session
+        </button>
+      )}
       {sessions.length > 0 && <div className="session-dropdown-sep" />}
       {sessions.map(s => (
         <div key={s.session_id} className="session-dropdown-row">
           <button
-            className={`session-dropdown-item${s.is_active ? ' active' : ''}`}
+            className={`session-dropdown-item session-item-two-line${s.is_active ? ' active' : ''}`}
             onClick={() => switchSession('resume', s.session_id)}
             disabled={busy}
-            title={s.label ? `${s.label}\n— ${s.preview}` : s.preview}
+            title={s.label ? `${s.label}\n${s.preview}` : s.preview}
             role="option"
             aria-selected={s.is_active}
           >
             <span className="session-item-check">{s.is_active ? '✓' : ''}</span>
             <span className="session-item-preview">
-              {s.label
-                ? <><strong>{s.label}</strong> <span className="session-item-sub">— {s.preview}</span></>
-                : s.preview}
+              {renderSessionLabel(s)}
             </span>
-            <span className="session-item-time">{relTime(s.last_used)}</span>
           </button>
           <button
             className="session-rename-btn"
@@ -281,51 +327,6 @@ export function SessionSelector({ projectId, onSessionChange, onInsertResetPromp
             </div>
           </div>
         </Modal>
-      )}
-
-      {/* Reset confirm modal */}
-      {confirmReset && (
-        <div className="reset-confirm-overlay" onClick={() => setConfirmReset(false)}>
-          <div className="reset-confirm-modal" onClick={e => e.stopPropagation()}>
-            <div className="reset-confirm-head">
-              <span>New session</span>
-              <button className="reset-confirm-close" onClick={() => setConfirmReset(false)}>✕</button>
-            </div>
-            <div className="reset-confirm-body">
-              <p className="reset-confirm-hint">
-                The current session context will be reset. Before closing, you can send the agent a "wrap-up" prompt (it will mark completed cards and check for junk):
-              </p>
-              <textarea
-                className="reset-confirm-textarea"
-                value={resetPromptText}
-                onChange={e => setResetPromptText(e.target.value)}
-                rows={7}
-              />
-              <div className="reset-confirm-actions">
-                <button
-                  className="reset-confirm-btn-cancel"
-                  onClick={() => setConfirmReset(false)}
-                  disabled={busy}
-                >Cancel</button>
-                <button
-                  className="reset-confirm-btn-skip"
-                  onClick={() => { setConfirmReset(false); switchSession('new') }}
-                  disabled={busy}
-                  title="Reset session without sending a prompt"
-                >Just new session</button>
-                <button
-                  className="reset-confirm-btn-send"
-                  onClick={() => {
-                    if (onInsertResetPrompt) onInsertResetPrompt(resetPromptText)
-                    setConfirmReset(false)
-                  }}
-                  disabled={busy || !onInsertResetPrompt}
-                  title="Insert prompt into chat — send it, then click ↺ again for a new session"
-                >📋 Insert into chat</button>
-              </div>
-            </div>
-          </div>
-        </div>
       )}
     </div>
   )
