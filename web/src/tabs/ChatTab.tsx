@@ -916,6 +916,33 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     return () => { cancelled = true }
   }, [isActive, hydrateFromServer])
 
+  // Mobile resume: clear stale error banner + re-hydrate when screen turns back on.
+  // The existing reactivation effect only fires on false→true isActive transitions, so
+  // if the chat tab was already active when the screen went off, the banner persists.
+  // This effect catches visibilitychange→visible and the network "online" event while
+  // the tab is active, and re-hydrates as long as no live stream is in progress.
+  useEffect(() => {
+    if (!isActive) return
+
+    const onResume = () => {
+      if (document.visibilityState !== 'visible') return
+      // Don't clobber an actively rendering /chat stream.
+      if (streamingRef.current) return
+      let cancelled = false
+      hydrateFromServer(() => cancelled)
+      // Cancellation cleanup runs on the next resume event or unmount.
+      return () => { cancelled = true }
+    }
+
+    document.addEventListener('visibilitychange', onResume)
+    window.addEventListener('online', onResume)
+    return () => {
+      document.removeEventListener('visibilitychange', onResume)
+      window.removeEventListener('online', onResume)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- hydrateFromServer is stable (useCallback); streamingRef is a ref
+  }, [isActive, hydrateFromServer])
+
   // Periodic poll of /live while tab is active (restores indicator after bus miss).
   // Spec-035: uses /live (not /running) so we get started_at for the server-authoritative timer.
   useEffect(() => {

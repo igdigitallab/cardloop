@@ -310,10 +310,21 @@ export default function App() {
   // Global SSE activity stream → unread indicators + live git-status refresh
   // ops:b2a081: also drives runningIds (working indicator) and replyReadyIds (attention badge).
   // Single EventSource = O(1) connections regardless of how many tabs are open.
-  useEffect(() => {
-    if (authState !== 'authed') return
+  //
+  // esRef holds the live EventSource so connectActivityStream can replace it on mobile resume
+  // without needing authState to change (the original trigger).
+  const esRef = useRef<EventSource | null>(null)
+
+  const connectActivityStream = useCallback(() => {
+    // Close any existing connection before opening a new one (avoids duplicate listeners).
+    if (esRef.current) {
+      esRef.current.close()
+      esRef.current = null
+    }
 
     const es = new EventSource('/api/activity-stream')
+    esRef.current = es
+
     es.onmessage = (ev) => {
       let payload: { kind?: string; session_key?: string; text?: string; level?: string }
       try { payload = JSON.parse(ev.data) } catch { return }
@@ -365,9 +376,49 @@ export default function App() {
       if (proj) incrementUnread(sk)
     }
     es.onerror = () => { /* EventSource will reconnect automatically */ }
-    return () => { es.close() }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- incrementUnread + showToast are stable (useCallback)
-  }, [authState, loadProjects])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- incrementUnread + showToast are stable (useCallback); loadProjects/projectsRef/activeIdRef are stable refs
+  }, [loadProjects, showToast, incrementUnread])
+
+  // Initial SSE connection — (re)created when auth state changes.
+  useEffect(() => {
+    if (authState !== 'authed') {
+      // Logged out: close any open stream.
+      esRef.current?.close()
+      esRef.current = null
+      return
+    }
+    connectActivityStream()
+    return () => {
+      esRef.current?.close()
+      esRef.current = null
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- connectActivityStream is stable after auth
+  }, [authState, connectActivityStream])
+
+  // Mobile resume self-heal: iOS/Android kill the EventSource when the screen turns off.
+  // On resume (visibilitychange→visible or network online event), reconnect if the socket
+  // is closed or missing, then revalidate auth and refresh project list.
+  useEffect(() => {
+    if (authState !== 'authed') return
+
+    const onResume = () => {
+      if (document.visibilityState !== 'visible') return
+      if (!esRef.current || esRef.current.readyState === EventSource.CLOSED) {
+        connectActivityStream()
+      }
+      // Re-validate auth (drops to login screen on 401) and refresh project data.
+      checkAuth()
+      loadProjects()
+    }
+
+    document.addEventListener('visibilitychange', onResume)
+    window.addEventListener('online', onResume)
+    return () => {
+      document.removeEventListener('visibilitychange', onResume)
+      window.removeEventListener('online', onResume)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- connectActivityStream/checkAuth/loadProjects are stable useCallbacks
+  }, [authState, connectActivityStream, checkAuth, loadProjects])
 
   // Live git-status refresh: poll every 15s + on window/tab focus
   useEffect(() => {
