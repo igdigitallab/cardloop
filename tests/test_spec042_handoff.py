@@ -382,3 +382,34 @@ async def test_rotate_response_includes_handoff_key_blank(aiohttp_client, tmp_pa
     data = await resp.json()
     assert "handoff" in data, f"Response must include 'handoff' key, got: {data}"
     assert data["handoff"] is False
+
+
+# ─────────────────────────── 8. _build_session_title ─────────────────────────
+
+async def test_build_session_title_cleans_noisy_output():
+    """_build_session_title strips surrounding quotes, trailing period, returns ≤60 chars."""
+    async def _fake_haiku(prompt, opts):
+        return '"Fix mobile network error."'
+
+    with patch.object(_webapp, "_haiku_summarize", _fake_haiku):
+        result = await _webapp._build_session_title("Some session summary about mobile networking.")
+
+    assert result == "Fix mobile network error", f"Unexpected result: {result!r}"
+    assert len(result) <= 60
+
+
+async def test_build_session_title_empty_summary_returns_empty():
+    """_build_session_title returns '' without calling the model when summary is blank."""
+    called = []
+
+    async def _fake_haiku(prompt, opts):
+        called.append(True)
+        return "Should not be called"
+
+    with patch.object(_webapp, "_haiku_summarize", _fake_haiku):
+        result_empty = await _webapp._build_session_title("")
+        result_blank = await _webapp._build_session_title("   ")
+
+    assert result_empty == "", f"Empty summary should return '', got: {result_empty!r}"
+    assert result_blank == "", f"Blank summary should return '', got: {result_blank!r}"
+    assert not called, "_haiku_summarize must not be called for blank/empty summary"

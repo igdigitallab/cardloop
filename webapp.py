@@ -8013,6 +8013,17 @@ async def api_project_rotate(req: web.Request) -> web.Response:
                         ctx.get("save_handoff", lambda: None)()
                         stored = True
                         print(f"[api_project_rotate] handoff summary stored for {session_key} ({len(summary)} chars)")
+                        # Auto-title the closed session (best-effort, never blocks reset)
+                        try:
+                            _labels = _load_session_labels(ctx)
+                            if sid_for_handoff not in _labels:  # never override a manual rename
+                                _title = await _build_session_title(summary)
+                                if _title:
+                                    _labels[sid_for_handoff] = _title
+                                    _save_session_labels(ctx, _labels)
+                                    print(f"[handoff] auto-titled session {sid_for_handoff}: {_title!r}")
+                        except Exception as _title_exc:
+                            print(f"[handoff] auto-title failed (non-blocking): {_title_exc!r}")
                 except Exception as _hoff_exc:
                     # Never block the reset because of a summary failure
                     print(f"[api_project_rotate] handoff build failed (continuing with blank reset): {_hoff_exc!r}")
@@ -8322,6 +8333,47 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
         parts.append("---\n" + "\n".join(fact_lines))
 
     return "\n\n".join(parts)
+
+
+async def _build_session_title(summary: str) -> str:
+    """Generate a short human-readable title for a closed session (spec-042 extension).
+
+    Uses the already-built handoff summary as input (cheap: small text, single pass).
+    Returns "" when summary is blank or the model call fails — never raises.
+    The caller should only persist the title when a non-empty string is returned.
+    """
+    if not summary or not summary.strip():
+        return ""
+    try:
+        handoff_model = os.environ.get("HANDOFF_MODEL", "haiku")
+        opts = _ClaudeAgentOptions(
+            model=handoff_model,
+            permission_mode="bypassPermissions",
+            cwd="",
+            allowed_tools=[],
+            disallowed_tools=[],
+            effort="low",
+        )
+        truncated = summary[:1500]
+        prompt = (
+            "Produce a concise title of at most 6 words for a work-session history list. "
+            "Output ONLY the title — no surrounding quotes, no trailing punctuation, no explanation.\n\n"
+            + truncated
+        )
+        raw = await _haiku_summarize(prompt, opts)
+        if not raw:
+            return ""
+        # Post-process: first line only, strip quotes/backticks, trailing period, collapse whitespace
+        title = raw.splitlines()[0]
+        title = title.strip().strip("\"'`")
+        if title.endswith("."):
+            title = title[:-1]
+        title = " ".join(title.split())
+        title = title[:60]
+        return title
+    except Exception as exc:
+        print(f"[handoff] _build_session_title failed (non-blocking): {exc!r}")
+        return ""
 
 
 async def _haiku_summarize(prompt: str, opts: "_ClaudeAgentOptions") -> str:
