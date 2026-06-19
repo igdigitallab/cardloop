@@ -695,6 +695,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
 
+  const errorRef = useRef('')
+  useEffect(() => { errorRef.current = error }, [error])
+
   // Load pending deferred runs for this project (for the queued chip).
   // Filters client-side by session_key === project.session_key.
   const refreshPendingDeferred = useCallback(async () => {
@@ -855,7 +858,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       // Clear any stale error banner left over from a prior aborted stream so
       // the operator sees the recovered content, not an old error.
       setError('')
-    }).catch(() => { if (!isCancelled()) setMessages([]) })
+    }).catch(() => { if (!isCancelled()) { setMessages([]); setError('') } })
   }, [projectId, effectiveChatId, seedCursor]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -926,8 +929,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
 
     const onResume = () => {
       if (document.visibilityState !== 'visible') return
-      // Don't clobber an actively rendering /chat stream.
-      if (streamingRef.current) return
+      // Don't clobber an actively rendering /chat stream; but if an error banner is
+      // showing the stream is frozen — still recover so the banner gets cleared.
+      if (streamingRef.current && !errorRef.current) return
       let cancelled = false
       hydrateFromServer(() => cancelled)
       // Cancellation cleanup runs on the next resume event or unmount.
