@@ -5404,6 +5404,61 @@ async def api_deferred_delete(req: web.Request) -> web.Response:
     return web.json_response({"cancelled": True})
 
 
+async def api_deferred_update(req: web.Request) -> web.Response:
+    """PATCH /api/deferred/{id} — edit a pending deferred run (prompt and/or trigger)."""
+    deferred_id = req.match_info["id"]
+    records = _load_deferred()
+    rec = next((r for r in records if r["id"] == deferred_id), None)
+    if rec is None:
+        return web.json_response({"error": "not found"}, status=404)
+    status = rec.get("status")
+    if status != "pending":
+        return web.json_response({"error": f"cannot edit: status is {status}"}, status=409)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+
+    # Edit prompt if provided
+    if "prompt" in body:
+        prompt = (body["prompt"] or "").strip()
+        if not prompt:
+            return web.json_response({"error": "prompt required"}, status=400)
+        rec["prompt"] = prompt[:4096]
+
+    # Edit trigger if provided
+    fire_at = body.get("fire_at")
+    fire_on_reset = body.get("fire_on_reset")
+    has_fire_at = "fire_at" in body and fire_at
+    has_fire_on_reset = "fire_on_reset" in body and fire_on_reset
+
+    if has_fire_at and has_fire_on_reset:
+        return web.json_response({"error": "provide exactly one of fire_at or fire_on_reset"}, status=400)
+
+    if has_fire_at:
+        if _iso_to_unix(fire_at) is None:
+            return web.json_response({"error": "invalid fire_at format (ISO-8601 UTC)"}, status=400)
+        rec["fire_at"] = fire_at
+        rec["fire_on_reset"] = False
+        rec.pop("strict_reset", None)
+        rec.pop("_jitter", None)
+        rec.pop("reset_wait_reason", None)
+    elif has_fire_on_reset:
+        rec["fire_on_reset"] = True
+        rec["fire_at"] = None
+        rec["strict_reset"] = True
+        rec.pop("_jitter", None)
+        rec.pop("reset_wait_reason", None)
+    # else: neither trigger key present — leave existing trigger as-is
+
+    # Reset retry state on any successful edit
+    rec["attempts"] = 0
+    rec["error"] = None
+
+    _save_deferred(records)
+    return web.json_response(rec)
+
+
 # ─────────────────────────── project model change ───────────────────────────
 #
 # POST /api/projects/{id}/model  {model: "opus"|"sonnet"|"haiku"}
@@ -9412,6 +9467,7 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_post("/api/deferred", api_deferred_create)
         app.router.add_get("/api/deferred", api_deferred_list)
         app.router.add_delete("/api/deferred/{id}", api_deferred_delete)
+        app.router.add_patch("/api/deferred/{id}", api_deferred_update)
 
         # Spec-026 Phase 3: Global Vault (built-in encrypted secret store)
         app.router.add_get("/api/secrets", api_vault_list)

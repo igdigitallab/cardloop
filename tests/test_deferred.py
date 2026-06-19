@@ -70,6 +70,7 @@ def deferred_app(fake_ctx):
     app.router.add_post("/api/deferred", _webapp.api_deferred_create)
     app.router.add_get("/api/deferred", _webapp.api_deferred_list)
     app.router.add_delete("/api/deferred/{id}", _webapp.api_deferred_delete)
+    app.router.add_patch("/api/deferred/{id}", _webapp.api_deferred_update)
     app.router.add_get("/api/schedules", _webapp.api_schedules_get)
     return app
 
@@ -1337,3 +1338,239 @@ async def test_execute_deferred_uses_resume_session_id(tmp_path):
 
     assert len(run_engine_calls) == 1
     assert run_engine_calls[0]["resume_session_id"] == "interrupted-session-xyz"
+
+
+# ─────────────────────────── API: update (PATCH) ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_update_deferred_prompt(aiohttp_client, deferred_app, fake_ctx):
+    """PATCH /api/deferred/{id} — edit prompt of a pending record → 200, prompt updated, attempts reset."""
+    _webapp._save_deferred([{
+        "id": "def-upd001",
+        "project": "p1",
+        "session_key": "100:10",
+        "prompt": "old prompt",
+        "fire_at": "2099-01-01T00:00:00Z",
+        "fire_on_reset": False,
+        "status": "pending",
+        "attempts": 3,
+        "error": "some error",
+        "created": _webapp._utcnow_iso(),
+        "fired_at": None,
+    }])
+    client = await aiohttp_client(deferred_app)
+    resp = await client.patch(
+        "/api/deferred/def-upd001",
+        json={"prompt": "new prompt text"},
+        headers=auth_headers(fake_ctx),
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["prompt"] == "new prompt text"
+    assert body["attempts"] == 0
+    assert body["error"] is None
+
+    records = _webapp._load_deferred()
+    assert records[0]["prompt"] == "new prompt text"
+    assert records[0]["attempts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_update_deferred_switch_to_fire_at(aiohttp_client, deferred_app, fake_ctx):
+    """PATCH — switch a fire_on_reset record to fire_at → fire_at set, fire_on_reset False, strict_reset removed."""
+    _webapp._save_deferred([{
+        "id": "def-upd002",
+        "project": "p1",
+        "session_key": "100:10",
+        "prompt": "do stuff",
+        "fire_at": None,
+        "fire_on_reset": True,
+        "strict_reset": True,
+        "_jitter": 42,
+        "reset_wait_reason": "waiting",
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "created": _webapp._utcnow_iso(),
+        "fired_at": None,
+    }])
+    new_fire_at = _webapp._unix_to_iso(time.time() + 3600)
+    client = await aiohttp_client(deferred_app)
+    resp = await client.patch(
+        "/api/deferred/def-upd002",
+        json={"fire_at": new_fire_at},
+        headers=auth_headers(fake_ctx),
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["fire_at"] == new_fire_at
+    assert body["fire_on_reset"] is False
+    assert "strict_reset" not in body
+    assert "_jitter" not in body
+    assert "reset_wait_reason" not in body
+
+    records = _webapp._load_deferred()
+    assert records[0]["fire_at"] == new_fire_at
+    assert records[0]["fire_on_reset"] is False
+    assert "strict_reset" not in records[0]
+
+
+@pytest.mark.asyncio
+async def test_update_deferred_switch_to_fire_on_reset(aiohttp_client, deferred_app, fake_ctx):
+    """PATCH — switch a fire_at record to fire_on_reset → fire_on_reset True, strict_reset True, fire_at None."""
+    _webapp._save_deferred([{
+        "id": "def-upd003",
+        "project": "p1",
+        "session_key": "100:10",
+        "prompt": "do stuff",
+        "fire_at": "2099-06-01T12:00:00Z",
+        "fire_on_reset": False,
+        "_jitter": 10,
+        "status": "pending",
+        "attempts": 1,
+        "error": None,
+        "created": _webapp._utcnow_iso(),
+        "fired_at": None,
+    }])
+    client = await aiohttp_client(deferred_app)
+    resp = await client.patch(
+        "/api/deferred/def-upd003",
+        json={"fire_on_reset": True},
+        headers=auth_headers(fake_ctx),
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["fire_on_reset"] is True
+    assert body["strict_reset"] is True
+    assert body["fire_at"] is None
+    assert "_jitter" not in body
+
+    records = _webapp._load_deferred()
+    assert records[0]["fire_on_reset"] is True
+    assert records[0]["strict_reset"] is True
+    assert records[0]["fire_at"] is None
+    assert "_jitter" not in records[0]
+
+
+@pytest.mark.asyncio
+async def test_update_deferred_invalid_fire_at(aiohttp_client, deferred_app, fake_ctx):
+    """PATCH — invalid fire_at format → 400."""
+    _webapp._save_deferred([{
+        "id": "def-upd004",
+        "project": "p1",
+        "session_key": "100:10",
+        "prompt": "do stuff",
+        "fire_at": "2099-06-01T12:00:00Z",
+        "fire_on_reset": False,
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "created": _webapp._utcnow_iso(),
+        "fired_at": None,
+    }])
+    client = await aiohttp_client(deferred_app)
+    resp = await client.patch(
+        "/api/deferred/def-upd004",
+        json={"fire_at": "not-a-date"},
+        headers=auth_headers(fake_ctx),
+    )
+    assert resp.status == 400
+    body = await resp.json()
+    assert "invalid fire_at" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_update_deferred_both_triggers_rejected(aiohttp_client, deferred_app, fake_ctx):
+    """PATCH — providing both fire_at and fire_on_reset → 400."""
+    _webapp._save_deferred([{
+        "id": "def-upd005",
+        "project": "p1",
+        "session_key": "100:10",
+        "prompt": "do stuff",
+        "fire_at": "2099-06-01T12:00:00Z",
+        "fire_on_reset": False,
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "created": _webapp._utcnow_iso(),
+        "fired_at": None,
+    }])
+    client = await aiohttp_client(deferred_app)
+    resp = await client.patch(
+        "/api/deferred/def-upd005",
+        json={"fire_at": _webapp._unix_to_iso(time.time() + 3600), "fire_on_reset": True},
+        headers=auth_headers(fake_ctx),
+    )
+    assert resp.status == 400
+    body = await resp.json()
+    assert "exactly one" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_update_deferred_empty_prompt_rejected(aiohttp_client, deferred_app, fake_ctx):
+    """PATCH — empty prompt → 400."""
+    _webapp._save_deferred([{
+        "id": "def-upd006",
+        "project": "p1",
+        "session_key": "100:10",
+        "prompt": "do stuff",
+        "fire_at": "2099-06-01T12:00:00Z",
+        "fire_on_reset": False,
+        "status": "pending",
+        "attempts": 0,
+        "error": None,
+        "created": _webapp._utcnow_iso(),
+        "fired_at": None,
+    }])
+    client = await aiohttp_client(deferred_app)
+    resp = await client.patch(
+        "/api/deferred/def-upd006",
+        json={"prompt": "   "},
+        headers=auth_headers(fake_ctx),
+    )
+    assert resp.status == 400
+    body = await resp.json()
+    assert "prompt required" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_update_deferred_non_pending_rejected(aiohttp_client, deferred_app, fake_ctx):
+    """PATCH — editing a fired record → 409."""
+    _webapp._save_deferred([{
+        "id": "def-upd007",
+        "project": "p1",
+        "session_key": "100:10",
+        "prompt": "do stuff",
+        "fire_at": None,
+        "fire_on_reset": False,
+        "status": "fired",
+        "attempts": 1,
+        "error": None,
+        "created": _webapp._utcnow_iso(),
+        "fired_at": _webapp._utcnow_iso(),
+    }])
+    client = await aiohttp_client(deferred_app)
+    resp = await client.patch(
+        "/api/deferred/def-upd007",
+        json={"prompt": "new prompt"},
+        headers=auth_headers(fake_ctx),
+    )
+    assert resp.status == 409
+    body = await resp.json()
+    assert "cannot edit" in body["error"]
+    assert "fired" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_update_deferred_not_found(aiohttp_client, deferred_app, fake_ctx):
+    """PATCH — unknown id → 404."""
+    client = await aiohttp_client(deferred_app)
+    resp = await client.patch(
+        "/api/deferred/def-nonexistent",
+        json={"prompt": "new prompt"},
+        headers=auth_headers(fake_ctx),
+    )
+    assert resp.status == 404
+    body = await resp.json()
+    assert "not found" in body["error"]
