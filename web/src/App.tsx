@@ -315,8 +315,15 @@ export default function App() {
 
     const es = new EventSource('/api/activity-stream')
     es.onmessage = (ev) => {
-      let payload: { kind?: string; session_key?: string }
+      let payload: { kind?: string; session_key?: string; text?: string; level?: string }
       try { payload = JSON.parse(ev.data) } catch { return }
+
+      if (payload.kind === 'notification') {
+        const note = payload as { text?: string; level?: string }
+        if (note.text) showToast(note.text, (note.level as 'error' | 'info' | 'success') ?? 'info')
+        return
+      }
+
       const sk = payload.session_key
       if (!sk) return
 
@@ -359,7 +366,7 @@ export default function App() {
     }
     es.onerror = () => { /* EventSource will reconnect automatically */ }
     return () => { es.close() }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- incrementUnread is stable (useCallback)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- incrementUnread + showToast are stable (useCallback)
   }, [authState, loadProjects])
 
   // Live git-status refresh: poll every 15s + on window/tab focus

@@ -1043,6 +1043,53 @@ async def test_notify_operator_no_allowed_users():
     mock_bot.send_message.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_notify_operator_publishes_cockpit_notification():
+    """_notify_operator publishes a cockpit notification on the global bus (spec-041 B5).
+
+    Verifies that the bus event carries kind=='notification', the correct level derived
+    from the message prefix, and the original text — even when ptb_app is None.
+    """
+    import asyncio as _asyncio
+
+    ctx = {"ptb_app": None}
+
+    # --- success level via "[OK]" prefix ---
+    q = _webapp._bus_subscribe_global()
+    try:
+        await _webapp._notify_operator(ctx, "[OK] Deferred run complete [proj]: hi")
+        event = q.get_nowait()
+    finally:
+        _webapp._bus_unsubscribe_global(q)
+
+    assert event.get("kind") == "notification"
+    assert event.get("level") == "success"
+    assert event.get("text") == "[OK] Deferred run complete [proj]: hi"
+
+    # --- error level via "[ERROR]" prefix ---
+    q2 = _webapp._bus_subscribe_global()
+    try:
+        await _webapp._notify_operator(ctx, "[ERROR] Something went wrong")
+        event2 = q2.get_nowait()
+    finally:
+        _webapp._bus_unsubscribe_global(q2)
+
+    assert event2.get("kind") == "notification"
+    assert event2.get("level") == "error"
+    assert event2.get("text") == "[ERROR] Something went wrong"
+
+    # --- info level for any other prefix ---
+    q3 = _webapp._bus_subscribe_global()
+    try:
+        await _webapp._notify_operator(ctx, "[QUEUED] run scheduled")
+        event3 = q3.get_nowait()
+    finally:
+        _webapp._bus_unsubscribe_global(q3)
+
+    assert event3.get("kind") == "notification"
+    assert event3.get("level") == "info"
+
+
 # ─────────────────────────── Prompt truncation ────────────────────────────────
 
 @pytest.mark.asyncio

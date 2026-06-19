@@ -5065,7 +5065,21 @@ async def _get_cached_usage_data(ctx: dict) -> dict:
 
 
 async def _notify_operator(ctx: dict, text: str) -> None:
-    """Sends a TG message to the first allowed user. Non-critical — errors are logged."""
+    """Surface an operator notification in the cockpit via the global activity bus
+    (primary channel since spec-040 removed Telegram). Also sends TG if a bot is
+    configured (legacy; skipped when ptb_app is None). Non-critical — errors logged."""
+    # In-cockpit toast — derive a level from the message prefix used by callers.
+    if text.startswith("[ERROR]"):
+        level = "error"
+    elif text.startswith("[OK]"):
+        level = "success"
+    else:
+        level = "info"
+    try:
+        _bus_publish("__notify__", {"kind": "notification", "level": level, "text": text}, persist=False)
+    except Exception as e:
+        print(f"[deferred] cockpit notify error: {e}")
+    # Legacy TG path — no-op after TG removal (ptb_app is None).
     ptb_app = ctx.get("ptb_app")
     if ptb_app is None:
         return
