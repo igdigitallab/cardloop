@@ -39,6 +39,11 @@ import totp as _totp
 
 # ─────────────────────────── named constants ───────────────────────────
 
+# Scratch dir for internal one-shot helper queries (handoff summarizer, auto-titler, etc.)
+# so their transcripts never appear in any project's session dropdown.
+_OPS_SCRATCH_CWD = str(Path.home() / ".claude" / "ops-scratch")
+Path(_OPS_SCRATCH_CWD).mkdir(parents=True, exist_ok=True)
+
 _BUS_QUEUE_SIZE = 100   # maxsize per-session bus queue; full → drop (non-blocking)
 _BUS_GLOBAL_SIZE = 200  # maxsize global bus queue (all sessions)
 
@@ -8320,7 +8325,7 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
             opts = _ClaudeAgentOptions(
                 model=handoff_model,
                 permission_mode="bypassPermissions",
-                cwd=cwd,
+                cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
                 allowed_tools=[],
                 disallowed_tools=[],
                 effort="low",
@@ -8403,7 +8408,7 @@ async def _build_session_title(summary: str) -> str:
         opts = _ClaudeAgentOptions(
             model=handoff_model,
             permission_mode="bypassPermissions",
-            cwd="",
+            cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
             allowed_tools=[],
             disallowed_tools=[],
             effort="low",

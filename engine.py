@@ -54,6 +54,11 @@ HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
 DATA.mkdir(exist_ok=True)
 
+# Scratch dir for internal one-shot helper queries (reconciler, etc.) so their
+# transcripts never appear in any project's session dropdown.
+_OPS_SCRATCH_CWD = str(Path.home() / ".claude" / "ops-scratch")
+Path(_OPS_SCRATCH_CWD).mkdir(parents=True, exist_ok=True)
+
 DEFAULT_CWD = os.getenv("DEFAULT_CWD", str(Path.home()))
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "fable")
 
@@ -1014,7 +1019,7 @@ async def reconcile_board(
     opts = ClaudeAgentOptions(
         model=reconcile_model,
         permission_mode="bypassPermissions",
-        cwd=cwd,
+        cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
         system_prompt=_RECONCILE_SYSTEM,  # plain string — no tools, no preset
         allowed_tools=[],   # no tools — read-only classification pass
         disallowed_tools=[],

@@ -174,3 +174,9 @@
 - [x] Verify spec-039 with Antigravity client <!--ops:df95f7-->
 - [x] Antigravity: spec-041 pointwise verification <!--ops:9e794a-->
 - [x] spec-041 block A: Fix ChatTab.tsx A1/A2/A4 <!--ops:bea94c-->
+- [x] UX audit: identify cockpit rough edges <!--ops:60100f-->
+- [x] spec-042 written: reset/handoff and session UX <!--ops:7d3c77-->
+- [x] Implement spec-042: cheap handoff reset (+ closes spec-041 C5 + session-label clarity) <!--ops:5b042c-->
+- [x] Spec-043 research: session context floor analysis <!--ops:4345ee-->
+- [x] Spec-043: Implement context cost and caching strategy <!--ops:444758-->
+- [x] Feature: auto-label closed sessions via haiku in _build_handoff <!--ops:e73583-->
