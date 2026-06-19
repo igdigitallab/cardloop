@@ -7155,7 +7155,9 @@ async def api_project_session_history(req: web.Request) -> web.Response:
 
     sid = req.rel_url.query.get("session_id", "") or ctx["sessions"].get((project.get("session_key") or project.get("tg_thread", "")))
     if not sid:
-        return web.json_response({"messages": [], "session_id": None})
+        # Spec-043 C: explicit context_tokens:0 so the frontend can distinguish
+        # "fresh session (known zero)" from "no data yet (null/missing)".
+        return web.json_response({"messages": [], "session_id": None, "context_tokens": 0, "last_cache_hit_pct": None})
     # Sanitise (basename-only)
     if sid != Path(sid).name or sid in (".", ".."):
         return web.json_response({"error": "invalid session_id"}, status=400)

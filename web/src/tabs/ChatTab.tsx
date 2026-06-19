@@ -654,6 +654,9 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [lastTurnEndMs, setLastTurnEndMs] = useState<number | null>(null)
   // Spec-033: last known cache-hit % seeded from session history on reload (null = no data yet)
   const [lastCacheHitPct, setLastCacheHitPct] = useState<number | null>(null)
+  // Spec-043 C: fresh (non-cached) tokens from the last completed turn — indicates "expensive" portion.
+  // null until first SSE result; 0 = fully warm; positive = portion billed at full price this turn.
+  const [lastFreshTokens, setLastFreshTokens] = useState<number | null>(null)
 
   // Spec-035 L2: seed the SSE reconnect cursor after /live hydration
   const seedCursor = useSeedCursor()
@@ -791,7 +794,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     ]).then(([histRes, queueRes, liveRes]) => {
       if (isCancelled()) return
       setQueueItems(queueRes.items)
-      setContextTokens(histRes.context_tokens || null)
+      setContextTokens(histRes.context_tokens != null ? histRes.context_tokens : null)
       if (histRes.context_window != null && histRes.context_window > 0) setContextWindow(histRes.context_window)
       // Spec-033: seed cache freshness anchor from the persisted transcript data
       if (histRes.last_turn_at != null) setLastTurnEndMs(histRes.last_turn_at)
@@ -883,6 +886,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setWarnDismissedAtTokens(null)
     setLastTurnEndMs(null)
     setLastCacheHitPct(null)
+    setLastFreshTokens(null)
     // Re-pin on project/chat switch so initial load lands at the bottom.
     pinnedRef.current = true
     setShowNewMsgPill(false)
@@ -1022,9 +1026,11 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setAttachments([])
     setContextWarnFromBackend(false)
     setWarnDismissedAtTokens(null)
+    setLastCacheHitPct(null)
+    setLastFreshTokens(null)
     setCtxRefreshKey(k => k + 1)
     api.sessionHistory(projectId)
-      .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens || null); if (res.context_window != null && res.context_window > 0) setContextWindow(res.context_window) })
+      .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens != null ? res.context_tokens : null); if (res.context_window != null && res.context_window > 0) setContextWindow(res.context_window) })
       .catch(() => setMessages([]))
   }, [projectId])
 
@@ -1135,7 +1141,10 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           }
           if (evt.type === 'result') {
             const evtAny = evt as unknown as Record<string, unknown>
-            if (typeof evtAny.context_tokens === 'number' && (evtAny.context_tokens as number) > 0) {
+            // Spec-043 C fix: update on any numeric context_tokens (including 0) so a fresh
+            // session with 0 tokens clears the stale large value instead of letting it linger.
+            // The old guard (`> 0`) caused the "104k stale value" bug after rotate.
+            if (typeof evtAny.context_tokens === 'number') {
               // Snapshot the prior value before overwriting — feeds the growth delta badge.
               setContextTokens(prev => { setPrevContextTokens(prev); return evtAny.context_tokens as number })
             }
@@ -1152,6 +1161,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             }
             // Spec-022: reset cache freshness countdown on every completed turn
             setLastTurnEndMs(now)
+            // Spec-043 C: update cache-hit % and fresh tokens from the SSE result so the
+            // tooltip cost signal reflects the most recent completed turn without a page reload.
+            if (typeof evtAny.cache_hit_pct === 'number') {
+              setLastCacheHitPct(evtAny.cache_hit_pct as number)
+            }
+            if (typeof evtAny.fresh_tokens === 'number') {
+              setLastFreshTokens(evtAny.fresh_tokens as number)
+            }
           }
           // Spec-039: "rotation" SSE event is no longer emitted by the backend (auto-rotation
           // was removed). This block is a graceful no-op kept for backwards compatibility in
@@ -1316,14 +1333,23 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       const data = await api.rotate(projectId, handoff)
       if (data.reset) {
         // Backend confirmed a real eviction and fresh session start.
-        setContextTokens(0)
+        // Keep contextTokens(0) set optimistically above; also clear cost-signal state.
         setPrevContextTokens(null)
         setContextWarnFromBackend(false)
         setWarnDismissedAtTokens(null)
+        setLastCacheHitPct(null)
+        setLastFreshTokens(null)
         const toastMsg = handoff
           ? 'New session — prior context will be handed off'
           : t['chat.reset_done']
         setRotateToast(toastMsg)
+        // Spec-043 C: drive the counter from the backend so the displayed value reflects
+        // the actual (now-empty) new session rather than a client-side assumption.
+        // One-shot fire-and-forget; rotCancelled is a local flag captured by the closure
+        // (no cleanup needed — rotate is a singular non-repeating action per session).
+        // eslint-disable-next-line prefer-const
+        let _rotCancelled = false
+        hydrateFromServer(() => _rotCancelled)
       } else {
         // reset:false — no active session was present.
         setRotateToast(t['chat.reset_no_session'])
@@ -1586,6 +1612,22 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           }
           if (cacheLine != null) {
             tokenTipLines.push(cacheLine)
+          }
+          // Spec-043 C: honest cost signal — show how much of the context is fresh (billed
+          // at full ×1.0) vs cached (×0.10). Helps operators see a large context is still
+          // cheap when warm, and prevents unnecessary resets on large-but-warm sessions.
+          const effectiveFreshTokens = lastAssistantMetrics?.fresh_tokens ?? lastFreshTokens
+          if (effectiveFreshTokens != null && effectiveCacheHitPct != null && effectiveCacheHitPct > 0) {
+            const freshK = formatTokens(effectiveFreshTokens)
+            const hitPct = Math.round(effectiveCacheHitPct)
+            tokenTipLines.push(
+              `⚙ Cost: ~${freshK} fresh (×1.0) · ${hitPct}% cached (×0.10) — warm sessions are cheap`
+            )
+          } else if (effectiveFreshTokens != null && effectiveCacheHitPct === 0) {
+            const freshK = formatTokens(effectiveFreshTokens)
+            tokenTipLines.push(
+              `⚙ Cost: ${freshK} fresh tokens — cache cold, this turn billed at full price`
+            )
           }
           if (utilization != null) {
             tokenTipLines.push(t['chat.session_bar_util'].replace('{pct}', String(utilization)))

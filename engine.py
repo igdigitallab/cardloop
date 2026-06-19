@@ -1230,17 +1230,33 @@ async def run_engine(  # type: ignore[return]
         nonlocal last_ctx_tokens, last_usage, _turn_start_ms
         _turn_start_ms = __import__("time").monotonic() * 1000
         await client.query(prompt)
+        # Spec-043 C: track the max pt seen across all AssistantMessages in this turn
+        # where a usage object is actually present (not None).  Using MAX rather than
+        # last-seen protects against intermediate tool-use AssistantMessages that may
+        # carry a usage dict with partial/0 values before the final message arrives
+        # with the real full-context count.
+        # Distinguishing "usage present = 0" (write 0) from "no usage on message"
+        # (skip) ensures a turn where the SDK omits usage entirely does NOT silently
+        # carry forward the previous turn's stale value.
+        _turn_max_pt: "int | None" = None  # None = no usage-bearing message seen yet this turn
         async for msg in client.receive_response():
             if isinstance(msg, AssistantMessage):
                 # usage of the last assistant message = full prompt of the current turn:
                 # input + cache_read + cache_creation == get_context_usage().totalTokens (verified)
-                u = getattr(msg, "usage", None) or {}
-                pt = (u.get("input_tokens", 0)
-                      + u.get("cache_read_input_tokens", 0)
-                      + u.get("cache_creation_input_tokens", 0))
-                if pt:
-                    last_ctx_tokens = pt
-                last_usage = u  # capture for the result event
+                _raw_usage = getattr(msg, "usage", None)
+                # Normalise: dict → use as-is; truthy non-dict (rare) → {}; None → sentinel.
+                u: "dict | None" = _raw_usage if isinstance(_raw_usage, dict) else (
+                    {} if _raw_usage is not None else None
+                )
+                if u is not None:
+                    # Usage object IS present on this message (even if all counts are 0).
+                    # Track the maximum so the final full-context message wins over any
+                    # preceding partial/zero values from intermediate tool-use messages.
+                    pt = (u.get("input_tokens", 0)
+                          + u.get("cache_read_input_tokens", 0)
+                          + u.get("cache_creation_input_tokens", 0))
+                    _turn_max_pt = pt if _turn_max_pt is None else max(_turn_max_pt, pt)
+                    last_usage = u  # capture for the result event (last-seen wins for cost math)
                 for blk in msg.content:
                     if isinstance(blk, TextBlock) and blk.text.strip():
                         yield {"type": "text", "text": blk.text}
@@ -1273,6 +1289,12 @@ async def run_engine(  # type: ignore[return]
                     "utilization": i.utilization,
                 }
             elif isinstance(msg, ResultMessage):
+                # Spec-043 C: commit the best (max) pt seen from AssistantMessages this turn.
+                # _turn_max_pt is None only when NO AssistantMessage had a usage object at all
+                # (e.g. error-only turns) — in that case we leave last_ctx_tokens unchanged
+                # rather than overwriting it with a stale 0.
+                if _turn_max_pt is not None:
+                    last_ctx_tokens = _turn_max_pt
                 # Spec-022: per-turn cost visibility fields
                 _u = last_usage
                 _cache_read = _u.get("cache_read_input_tokens", 0) or 0
