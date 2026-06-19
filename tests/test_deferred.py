@@ -929,6 +929,66 @@ async def test_deferred_loop_fire_on_reset_waits_for_resets_at(fake_ctx):
     assert fired["status"] == "fired"
 
 
+# ─────────────────────────── _deferred_loop reset_fallback ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_deferred_loop_fires_via_reset_fallback_when_resets_at_unavailable(fake_ctx):
+    """fire_on_reset record whose created is >6h ago and usage has no resets_at fires via fallback."""
+    fake_ctx["topics"]["100:10"] = _make_topic("myproject")
+
+    # created more than DEFERRED_RESET_FALLBACK_SEC ago
+    old_created = _webapp._unix_to_iso(time.time() - _webapp._DEFERRED_RESET_FALLBACK_SEC - 60)
+
+    _webapp._save_deferred([{
+        "id": "def-fallback01",
+        "project": "myproject",
+        "session_key": "100:10",
+        "prompt": "fire via fallback",
+        "fire_at": None,
+        "fire_on_reset": True,
+        "status": "pending",
+        "fired_at": None,
+        "error": None,
+        "attempts": 0,
+        "created": old_created,
+    }])
+
+    # usage returns five_hour dict but without resets_at (API can't determine reset boundary)
+    no_resets_at_usage = {"five_hour": {"utilization": 0.90, "status": "allowed"}}
+
+    spawned: list = []
+
+    def mock_spawn_bg(coro):
+        spawned.append(coro)
+        try:
+            coro.close()
+        except Exception:
+            pass
+
+    with patch.object(_webapp, "_get_cached_usage_data", new_callable=AsyncMock, return_value=no_resets_at_usage), \
+         patch.object(_webapp, "_spawn_bg", side_effect=mock_spawn_bg), \
+         patch.object(_webapp, "_notify_operator", new_callable=AsyncMock):
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            call_count = 0
+            async def controlled_sleep(n):
+                nonlocal call_count
+                call_count += 1
+                if call_count >= 2:
+                    raise asyncio.CancelledError()
+            mock_sleep.side_effect = controlled_sleep
+            try:
+                await _webapp._deferred_loop(fake_ctx)
+            except asyncio.CancelledError:
+                pass
+
+    records = _webapp._load_deferred()
+    fired = next(r for r in records if r["id"] == "def-fallback01")
+    assert fired["status"] == "fired", f"Expected 'fired' but got '{fired['status']}'"
+    assert fired.get("fired_via") == "reset_fallback", f"Expected fired_via='reset_fallback', got {fired.get('fired_via')!r}"
+    assert len(spawned) == 1, f"Expected _spawn_bg called once, got {len(spawned)}"
+
+
 # ─────────────────────────── _deferred_init ───────────────────────────────────
 
 def test_deferred_init_sets_file_path(tmp_path):

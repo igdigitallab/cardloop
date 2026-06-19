@@ -46,6 +46,7 @@ _BUS_GLOBAL_SIZE = 200  # maxsize global bus queue (all sessions)
 _DEFERRED_POLL_SEC = int(os.environ.get("DEFERRED_POLL_SEC", "30"))
 _DEFERRED_MAX_ATTEMPTS = int(os.environ.get("DEFERRED_MAX_ATTEMPTS", "5"))
 _DEFERRED_FREE_THRESHOLD = float(os.environ.get("DEFERRED_FREE_THRESHOLD", "0.10"))
+_DEFERRED_RESET_FALLBACK_SEC = int(os.environ.get("DEFERRED_RESET_FALLBACK_SEC", str(6 * 3600)))
 _DEFERRED_FILE: "Path | None" = None  # set in _deferred_init(ctx)
 
 # Phase D: auto-resume on rate-limit
@@ -5195,31 +5196,58 @@ async def _deferred_loop(ctx: dict) -> None:
                 fire_now = False
 
                 if fire_on_reset:
+                    reset_unknown = False
                     try:
                         usage = await _get_cached_usage_data(ctx)
                         limit = usage.get("five_hour")
                         if limit is None:
-                            continue
-                        util = limit.get("utilization")
-                        strict_reset = record.get("strict_reset")
-                        if (not strict_reset) and util is not None and util < _DEFERRED_FREE_THRESHOLD:
-                            # Free-window shortcut: auto-resume records fire early when
-                            # the window is already mostly free. Strict (button-created)
-                            # records skip this and wait for the actual reset boundary.
-                            fire_now = True
+                            reset_unknown = True
                         else:
-                            resets_at = limit.get("resets_at")
-                            if resets_at is None:
-                                continue
-                            jitter = record.get("_jitter")
-                            if jitter is None:
-                                jitter = _random.randint(30, 90)
-                                record["_jitter"] = jitter
-                                changed = True
-                            fire_now = (time.time() >= resets_at + jitter)
+                            util = limit.get("utilization")
+                            strict_reset = record.get("strict_reset")
+                            if (not strict_reset) and util is not None and util < _DEFERRED_FREE_THRESHOLD:
+                                # Free-window shortcut: auto-resume records fire early when
+                                # the window is already mostly free. Strict (button-created)
+                                # records skip this and wait for the actual reset boundary.
+                                fire_now = True
+                            else:
+                                resets_at = limit.get("resets_at")
+                                if resets_at is None:
+                                    reset_unknown = True
+                                else:
+                                    jitter = record.get("_jitter")
+                                    if jitter is None:
+                                        jitter = _random.randint(30, 90)
+                                        record["_jitter"] = jitter
+                                        changed = True
+                                    fire_now = (time.time() >= resets_at + jitter)
                     except Exception as e:
                         print(f"[deferred_loop] usage fetch error: {e}")
-                        continue
+                        reset_unknown = True
+
+                    if reset_unknown and not fire_now:
+                        # Fallback: usage API can't tell us the reset boundary. A 5h window always
+                        # resets within 5h, so after _DEFERRED_RESET_FALLBACK_SEC the window has
+                        # certainly reset — fire anyway instead of leaving the record pending forever.
+                        created_ts = _iso_to_unix(record.get("created") or "")
+                        elapsed = (time.time() - created_ts) if created_ts else None
+                        if elapsed is not None and elapsed >= _DEFERRED_RESET_FALLBACK_SEC:
+                            fire_now = True
+                            record["fired_via"] = "reset_fallback"
+                            record.pop("reset_wait_reason", None)
+                            changed = True
+                            print(f"[deferred_loop] {record['id']}: reset boundary unavailable for {int(elapsed)}s — firing via fallback")
+                        else:
+                            if record.get("reset_wait_reason") != "usage_unavailable":
+                                record["reset_wait_reason"] = "usage_unavailable"
+                                changed = True
+                            _el = int(elapsed) if elapsed is not None else "?"
+                            print(f"[deferred_loop] {record['id']}: reset boundary unavailable, waiting for fallback (elapsed={_el}s / {_DEFERRED_RESET_FALLBACK_SEC}s)")
+                            continue
+                    elif not fire_now and record.get("reset_wait_reason"):
+                        # usage healthy again — clear stale stuck reason
+                        record.pop("reset_wait_reason", None)
+                        changed = True
                 elif fire_at:
                     try:
                         ts = _iso_to_unix(fire_at)
