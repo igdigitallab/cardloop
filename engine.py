@@ -1186,6 +1186,7 @@ async def run_engine(  # type: ignore[return]
     # of the finalized block via finalizeStreamingWithMetrics).
     _stream_partial = os.environ.get("STREAM_PARTIAL", "1") not in ("0", "false", "False")
 
+    print(f"[session] resume {session_key} sid={resume_session_id or 'NEW'}")
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,

@@ -7619,6 +7619,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     _chat_resume_sid = _target_chat.get("session_id") or None
                     # Keep ctx["sessions"] in sync (derived cache)
                     if _chat_resume_sid:
+                        print(f"[session] chat-resume-write {session_key} sid={_chat_resume_sid}")
                         ctx["sessions"][session_key] = _chat_resume_sid
                     else:
                         ctx["sessions"].pop(session_key, None)
@@ -7932,6 +7933,12 @@ async def api_project_rotate(req: web.Request) -> web.Response:
     is stored in pending_handoff[session_key] and persisted to disk so it survives
     restarts.  The first fresh-session turn will auto-inject it via <prior-session-summary>.
     Response includes {handoff: true/false} indicating whether a summary was stored.
+
+    BUG FIX (chats.json dual-layer): clearing only ctx["sessions"] is futile because
+    _mirror_active_chat_to_sessions and api_project_chat re-populate sessions from the
+    active chat's session_id on every turn.  We now clear BOTH layers atomically.
+    A running-lock sentinel is held for the whole operation so a concurrent turn cannot
+    resurrect the session through the chat-layer fallback.
     """
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
@@ -7954,52 +7961,108 @@ async def api_project_rotate(req: web.Request) -> web.Response:
     if ctx["running"].get(session_key) is not None:
         return web.json_response({"error": "project busy"}, status=409)
 
-    # Nothing to do when no active session exists
-    if ctx["sessions"].get(session_key) is None and session_key not in ctx.get("live_clients", {}):
-        return web.json_response({"ok": True, "reset": False, "reason": "no active session"})
+    # Reserve the running slot for the duration of the rotate so a concurrent
+    # turn cannot slip through and resurrect the session via the chats-layer fallback.
+    # We use True (not a string) because api_project_chat_stop checks hasattr(value, "interrupt")
+    # — True has no such attribute and is safely ignored by the stop endpoint.
+    ctx["running"][session_key] = True
+    try:
+        # Resolve the effective session_id from BOTH layers.  ctx["sessions"] is a
+        # derived cache; chats.json is the source of truth for named chats (spec-037).
+        _layer1_sid = ctx["sessions"].get(session_key)
+        _active_chat_sid: "str | None" = None
+        _chats_entry: "dict | None" = None   # the project's block in chats_data
+        _chats_data_snapshot: "dict | None" = None
+        try:
+            _cd = _load_chats(ctx)
+            _entry = _cd.get(project["id"])
+            if _entry:
+                _active_id = _entry.get("active")
+                _active_chat = next(
+                    (c for c in _entry.get("chats", []) if c["id"] == _active_id),
+                    None,
+                )
+                if _active_chat:
+                    _active_chat_sid = _active_chat.get("session_id") or None
+                    _chats_entry = _entry
+                    _chats_data_snapshot = _cd
+        except Exception as _ce:
+            print(f"[session] rotate chats-read error for {session_key}: {_ce!r}")
 
-    # spec-042: build handoff summary BEFORE popping the session so we still have the session_id
-    stored = False
-    if do_handoff:
-        sid = ctx["sessions"].get(session_key)
-        if sid:
-            cwd = project.get("cwd") or ""
-            if not cwd:
-                # Fall back to topics lookup (same as other routes)
-                _topic = ctx.get("topics", {}).get(session_key, {})
-                cwd = _topic.get("cwd", "") if isinstance(_topic, dict) else ""
+        effective_sid = _layer1_sid or _active_chat_sid
+
+        # Nothing to do when no active session exists in either layer
+        if effective_sid is None and session_key not in ctx.get("live_clients", {}):
+            return web.json_response({"ok": True, "reset": False, "reason": "no active session"})
+
+        # spec-042: build handoff summary BEFORE clearing so we still have the session_id.
+        # Build outside the chats lock — _build_handoff may await and could deadlock.
+        stored = False
+        if do_handoff:
+            sid_for_handoff = effective_sid
+            if sid_for_handoff:
+                cwd = project.get("cwd") or ""
+                if not cwd:
+                    # Fall back to topics lookup (same as other routes)
+                    _topic = ctx.get("topics", {}).get(session_key, {})
+                    cwd = _topic.get("cwd", "") if isinstance(_topic, dict) else ""
+                try:
+                    summary = await _build_handoff(ctx, session_key, cwd, sid_for_handoff)
+                    if summary:
+                        ctx["pending_handoff"][session_key] = summary
+                        ctx.get("save_handoff", lambda: None)()
+                        stored = True
+                        print(f"[api_project_rotate] handoff summary stored for {session_key} ({len(summary)} chars)")
+                except Exception as _hoff_exc:
+                    # Never block the reset because of a summary failure
+                    print(f"[api_project_rotate] handoff build failed (continuing with blank reset): {_hoff_exc!r}")
+
+        # Clear BOTH layers atomically.
+        # Order: clear chats.json first (source of truth), then sessions (derived cache),
+        # so no mirror call can re-add the session_id after we've removed it from sessions.
+        print(f"[session] rotate-clear-chat {session_key} active_chat_sid={_active_chat_sid!r}")
+        if _chats_entry is not None and _chats_data_snapshot is not None:
             try:
-                summary = await _build_handoff(ctx, session_key, cwd, sid)
-                if summary:
-                    ctx["pending_handoff"][session_key] = summary
-                    ctx.get("save_handoff", lambda: None)()
-                    stored = True
-                    print(f"[api_project_rotate] handoff summary stored for {session_key} ({len(summary)} chars)")
-            except Exception as _hoff_exc:
-                # Never block the reset because of a summary failure
-                print(f"[api_project_rotate] handoff build failed (continuing with blank reset): {_hoff_exc!r}")
+                async with _chats_lock():
+                    # Re-load under the lock to avoid clobbering concurrent writes
+                    _fresh = _load_chats(ctx)
+                    _fresh_entry = _fresh.get(project["id"])
+                    if _fresh_entry:
+                        _fresh_active_id = _fresh_entry.get("active")
+                        for _c in _fresh_entry.get("chats", []):
+                            if _c["id"] == _fresh_active_id:
+                                _c["session_id"] = None
+                                break
+                    _save_chats(ctx, _fresh)
+            except Exception as _cl_exc:
+                print(f"[session] rotate chats-clear error for {session_key}: {_cl_exc!r}")
 
-    # Pop the session record and persist
-    ctx["sessions"].pop(session_key, None)
-    ctx["save_sessions"]()
+        # Pop the sessions layer and persist
+        ctx["sessions"].pop(session_key, None)
+        ctx["save_sessions"]()
+        print(f"[session] rotate-done {session_key} (both layers cleared, handoff={stored})")
 
-    # Clear context-warn state so the fresh session can warn again
-    try:
-        _cw = ctx.get("context_warned")
-        if _cw is not None:
-            _cw.discard(session_key)
-    except Exception:
-        pass
+        # Clear context-warn state so the fresh session can warn again
+        try:
+            _cw = ctx.get("context_warned")
+            if _cw is not None:
+                _cw.discard(session_key)
+        except Exception:
+            pass
 
-    # Evict live client so PERSISTENT_CLIENT=1 truly starts fresh
-    try:
-        _evict_fn = ctx.get("evict_live_client")
-        if _evict_fn is not None:
-            await _evict_fn(session_key, ctx)
-    except Exception as _exc:
-        print(f"[api_project_rotate] live-client eviction error for {session_key}: {_exc!r}")
+        # Evict live client so PERSISTENT_CLIENT=1 truly starts fresh
+        try:
+            _evict_fn = ctx.get("evict_live_client")
+            if _evict_fn is not None:
+                await _evict_fn(session_key, ctx)
+        except Exception as _exc:
+            print(f"[api_project_rotate] live-client eviction error for {session_key}: {_exc!r}")
 
-    return web.json_response({"ok": True, "reset": True, "handoff": stored})
+        return web.json_response({"ok": True, "reset": True, "handoff": stored})
+
+    finally:
+        # Always release the sentinel so subsequent turns are not blocked
+        ctx["running"].pop(session_key, None)
 
 
 # ─────────────────────────── Session context (session-context) ─────────────
