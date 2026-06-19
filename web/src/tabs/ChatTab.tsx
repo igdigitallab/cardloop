@@ -635,6 +635,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   // Spec-021/039: manual reset + auto-compact UI state
   const [rotateToast, setRotateToast] = useState<string | null>(null)
   const [rotating, setRotating] = useState(false)
+  // Which kind of reset is in progress — drives the progress indicator text.
+  const [rotatingKind, setRotatingKind] = useState<'handoff' | 'blank' | null>(null)
   // spec-042: unified reset-confirm modal (replaces direct no-confirm handleRotate calls)
   const [resetModalOpen, setResetModalOpen] = useState(false)
   // Spec-039: toast shown when native auto-compact fires (kind:"compact" bus event)
@@ -1305,6 +1307,11 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   async function handleRotate(handoff: boolean) {
     setResetModalOpen(false)
     setRotating(true)
+    setRotatingKind(handoff ? 'handoff' : 'blank')
+    // Immediately clear the stale session view so the UI is visibly responsive.
+    setMessages([])
+    setContextTokens(0)
+    setPrevContextTokens(null)
     try {
       const data = await api.rotate(projectId, handoff)
       if (data.reset) {
@@ -1324,8 +1331,12 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     } catch (e: unknown) {
       const reason = e instanceof Error ? e.message : String(e)
       setRotateToast(t['chat.reset_failed'].replace('{reason}', reason))
+      // Restore history so the user can see the pre-reset messages again.
+      let cancelled = false
+      hydrateFromServer(() => cancelled)
     } finally {
       setRotating(false)
+      setRotatingKind(null)
       setTimeout(() => setRotateToast(null), 5000)
     }
   }
@@ -1665,7 +1676,19 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       <SessionContextPanel projectId={projectId} refreshKey={ctxRefreshKey} />
 
       <div className="chat-feed" ref={feedRef} onScroll={handleFeedScroll} style={{ position: 'relative' }}>
-        {messages.length === 0 && (
+        {rotating && (
+          <div className="chat-empty">
+            <div className="chat-status-bar" style={{ justifyContent: 'center', padding: '12px 20px', fontSize: 13 }}>
+              <span className="att-spinner" style={{ fontSize: 18 }}>↻</span>
+              <span style={{ fontWeight: 500 }}>
+                {rotatingKind === 'handoff'
+                  ? 'Compressing session & handing off context… this can take up to a minute'
+                  : 'Starting a new session…'}
+              </span>
+            </div>
+          </div>
+        )}
+        {!rotating && messages.length === 0 && (
           <div className="chat-empty">
             <div className="chat-empty-icon">💬</div>
             <p>{t['chat.empty_hint']}<br />{t['chat.empty_session_hint']}</p>
@@ -2089,10 +2112,13 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           <textarea
             ref={textareaRef}
             className="chat-textarea"
-            placeholder={streaming
+            placeholder={rotating
+              ? (rotatingKind === 'handoff' ? 'Compressing session…' : 'Starting new session…')
+              : streaming
               ? t['chat.input_placeholder_busy']
               : isTouchDevice ? t['chat.input_placeholder_touch'] : t['chat.input_placeholder']}
             value={input}
+            disabled={rotating}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
@@ -2188,7 +2214,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             )}
             <button
               className="btn-primary chat-send-btn"
-              disabled={!input.trim() && attachments.filter(a => a.path).length === 0}
+              disabled={rotating || (!input.trim() && attachments.filter(a => a.path).length === 0)}
               onClick={() => sendMessage()}
               title={streaming ? t['chat.queue_title'] : t['chat.send_title']}
             >
