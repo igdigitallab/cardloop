@@ -153,32 +153,40 @@ async def test_chat_empty_prompt_returns_400(aiohttp_client, tmp_path, project_d
 # ─────────────────────────── chat: занятый проект ───────────────────────────
 
 
-async def test_chat_busy_project_returns_sse_error(aiohttp_client, tmp_path, project_dir):
-    """api_project_chat при running[session_key] != None → SSE-ошибка «занят»."""
+async def test_chat_busy_project_enqueues_message(aiohttp_client, tmp_path, project_dir):
+    """Spec-041 A3: api_project_chat when session is busy → SSE frame type=queued, message in queue."""
+    import webapp as _webapp
 
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "ok"}
 
     ctx = _make_chat_ctx(tmp_path, project_dir, run_engine=fake_engine)
-    # Эмулируем занятость
+    # Simulate busy session
     ctx["running"]["1001:42"] = True
+
+    # Ensure chat queue is initialised for the tmp data dir
+    _webapp._chat_queue_init(ctx)
 
     app = _make_app(ctx)
     client = await aiohttp_client(app)
 
     resp = await client.post(
         "/api/projects/myproject/chat",
-        json={"prompt": "Hello"},
+        json={"prompt": "Hello queued"},
         headers=_auth_headers(ctx),
     )
     assert resp.status == 200
     assert "text/event-stream" in resp.headers.get("Content-Type", "")
     events = await _read_sse_events(resp)
-    error_events = [e for e in events if e.get("type") == "error"]
-    assert len(error_events) > 0
-    # Проверяем что текст ошибки содержит «занят»
-    error_texts = [e.get("error", "") for e in error_events]
-    assert any("busy" in t for t in error_texts), f"Ошибка должна содержать 'занят': {error_texts}"
+    # Must have a 'queued' frame, not an error
+    queued_events = [e for e in events if e.get("type") == "queued"]
+    assert len(queued_events) == 1, f"Expected 'queued' SSE frame, got: {events}"
+    item = queued_events[0]["item"]
+    assert item["text"] == "Hello queued"
+    # Verify the message is in the server-side queue
+    session_key = "1001:42"
+    queue = _webapp._chat_queue_get(session_key)
+    assert any(i["id"] == item["id"] for i in queue), "Message not found in chat queue"
 
 
 # ─────────────────────────── chat: нормальная работа ───────────────────────────
@@ -388,25 +396,25 @@ async def test_two_simultaneous_chat_requests(aiohttp_client, tmp_path, project_
     # Движок стартует синхронно — даём ему немного времени
     await asyncio.sleep(0.05)
 
-    # Второй запрос должен увидеть «занят»
+    # Spec-041 A3: the second request must be ENQUEUED (not rejected) while the first runs.
     resp2 = await client.post(
         "/api/projects/myproject/chat",
         json={"prompt": "Second"},
         headers=h,
     )
     events2 = await _read_sse_events(resp2)
-    error_events = [e for e in events2 if e.get("type") == "error"]
+    queued_events = [e for e in events2 if e.get("type") == "queued"]
 
-    # Освобождаем первый запрос
+    # The second prompt is now sitting in the chat queue (captured before we release the first run).
+    assert len(queued_events) == 1, (
+        f"Second request should get a 'queued' SSE frame, got: {events2}"
+    )
+    assert queued_events[0]["item"]["text"] == "Second"
+
+    # Release the first request — its finally then drains "Second" from the queue.
     engine_can_finish.set()
     resp1 = await task1
     await resp1.read()
-
-    assert len(error_events) > 0, (
-        f"Второй запрос должен получить SSE error 'занят', события: {events2}"
-    )
-    error_text = " ".join(e.get("error", "") for e in error_events)
-    assert "busy" in error_text, f"Ошибка должна содержать 'занят': {error_text}"
 
 
 # ─────────────────────────── think_mode → effort mapping ─────────────────────

@@ -336,6 +336,12 @@ export interface ChatEventRateLimit {
   status: string
 }
 
+/** Spec-041 A3: backend was busy and enqueued the prompt instead of starting a turn. */
+export interface ChatEventQueued {
+  type: 'queued'
+  item: { id: string; text: string; created_at: number }
+}
+
 export type ChatSSEEvent =
   | ChatEventText
   | ChatEventTextDelta
@@ -344,6 +350,7 @@ export type ChatSSEEvent =
   | ChatEventError
   | ChatEventDone
   | ChatEventRateLimit
+  | ChatEventQueued
 
 // ─── Chat message (UI state) ───────────────────────────────────────────────
 

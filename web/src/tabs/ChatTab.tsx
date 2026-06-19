@@ -604,13 +604,10 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [queueItems, setQueueItems] = useState<QueueItem[]>([])
   const [queueEditId, setQueueEditId] = useState<string | null>(null)
   const [queueEditText, setQueueEditText] = useState<string>('')
-  const sendMessageRef = useRef<((text?: string) => Promise<void>) | null>(null)
   const streamingRef = useRef(false)
-  // Spec-041 A4: always-current projectId for use in async drain callbacks.
+  // Spec-041 A3: always-current projectId for use in async drain callbacks.
   const projectIdRef = useRef(projectId)
   projectIdRef.current = projectId
-  // Spec-041 A2: guard to prevent double-firing of queue drain.
-  const drainingRef = useRef(false)
   // Track previous isActive to detect false→true reactivation transitions.
   const prevIsActiveRef = useRef<boolean>(isActive ?? false)
 
@@ -1047,31 +1044,19 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     })
   }
 
-  // Spec-041 A2+A4: shared drain logic — pops the first queued item and sends it.
-  // Called from sendMessage finally, bus run_end, and /live poll completion.
-  // Uses refs (projectIdRef, drainingRef, sendMessageRef) so it is closure-safe
-  // and does not need to be in the useCallback dependency arrays.
+  // Spec-041 A3: drainQueue no longer re-sends messages — the backend is the sole
+  // deliverer.  This function only refreshes the queue display so the panel stays in
+  // sync as the backend drains queued items.  Called from sendMessage finally, bus
+  // run_end, and /live poll completion — same call sites as before.
   const drainQueue = useCallback(() => {
-    setQueueItems(prev => {
-      if (prev.length === 0) return prev
-      // Spec-041 A2: guard against double-firing from concurrent completion paths.
-      if (drainingRef.current) return prev
-      drainingRef.current = true
-      const [first, ...rest] = prev
-      // Spec-041 A4: capture the current projectId at drain time to avoid
-      // cross-project sends if the user switched projects before the timeout.
-      const drainProjectId = projectIdRef.current
-      // Delete from server (fire-and-forget — UI already updated optimistically)
-      api.chatQueueDelete(drainProjectId, first.id).catch(() => {/* non-critical */})
-      setTimeout(() => {
-        // Spec-041 A4: verify the active project hasn't changed since we started draining.
-        if (projectIdRef.current === drainProjectId) {
-          sendMessageRef.current?.(first.text)
+    const currentProjectId = projectIdRef.current
+    api.chatQueue(currentProjectId)
+      .then(res => {
+        if (projectIdRef.current === currentProjectId) {
+          setQueueItems(res.items)
         }
-        drainingRef.current = false
-      }, 150)
-      return rest
-    })
+      })
+      .catch(() => {/* non-critical — stale display is acceptable */})
   }, [])
 
   const sendMessage = useCallback(async (overrideText?: string) => {
@@ -1167,6 +1152,24 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           // was removed). This block is a graceful no-op kept for backwards compatibility in
           // case an older server instance is running during a deploy transition.
 
+          // Spec-041 A3: backend was busy — message was enqueued server-side instead of
+          // starting a turn.  Stop streaming state, remove the optimistic bubbles that were
+          // appended for this send, and refresh the queue display.  The backend drain loop
+          // (or the lock-release drain) will deliver the message and emit run_start/run_end
+          // on the activity bus so the tab re-renders the real turn.
+          if (evt.type === 'queued') {
+            setStreaming(false)
+            setRun(null)
+            // Remove the optimistic user + assistant bubbles added for this aborted send.
+            setMessages(prev => prev.slice(0, -2))
+            // Refresh queue display from server so the newly-enqueued item appears.
+            const currentProjectId = projectIdRef.current
+            api.chatQueue(currentProjectId)
+              .then(res => { if (projectIdRef.current === currentProjectId) setQueueItems(res.items) })
+              .catch(() => {/* non-critical */})
+            return
+          }
+
           setMessages(prev => {
             switch (evt.type) {
               case 'text_delta':
@@ -1221,8 +1224,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       drainQueue()
     }
   }, [input, projectId, streaming, onProjectsReload, attachments, thinkMode])
-
-  useEffect(() => { sendMessageRef.current = sendMessage }, [sendMessage])
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {

@@ -7320,6 +7320,125 @@ async def api_chat_queue_delete(req: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+# ─────────────────────────── Chat queue backend drain ───────────────────────────
+# Spec-041 A3: backend-authoritative delivery of queued chat messages.
+# Mirrors _execute_deferred / _queue_drain_loop for the chat queue.
+
+
+async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
+    """Dispatch one queued chat message through run_engine.
+
+    The CALLER must reserve ctx['running'][session_key] synchronously before
+    spawning this coroutine (see _chat_queue_drain_one).  This function does NOT
+    reserve the lock itself — only releases it in finally.
+    """
+    run_id = _uuid.uuid4().hex[:6]
+    outcome = "fail"
+    try:
+        topics = ctx["topics"]
+        topic = topics.get(session_key)
+        if topic is None:
+            print(f"[chat_queue] session_key {session_key!r} not in topics — dropping item {item['id']}")
+            return
+        cwd = topic.get("cwd") or ctx.get("DEFAULT_CWD") or str(Path.home())
+        project_name = topic.get("project", "unknown")
+        model = topic.get("model") or ctx.get("DEFAULT_MODEL", "sonnet")
+        prompt = item["text"]
+
+        run_engine = ctx.get("run_engine")
+        if run_engine is None:
+            raise RuntimeError("run_engine not available in ctx")
+
+        project_secrets = _secrets_read(cwd)
+        agents_config = topic.get("agents_config") or {}
+        agents_kwargs = _build_agents_kwargs(ctx, agents_config)
+
+        _bus_publish(session_key, {
+            "kind": "run_start",
+            "source": "chat",
+            "prompt": prompt,
+            "run_id": run_id,
+        })
+
+        resume_session_id = ctx["sessions"].get(session_key)
+
+        async for event in run_engine(
+            project_name=project_name,
+            cwd=cwd,
+            prompt=prompt,
+            session_key=session_key,
+            model=model,
+            resume_session_id=resume_session_id,
+            env=project_secrets,
+            **agents_kwargs,
+            ctx=ctx,
+            ephemeral=False,
+        ):
+            etype = event["type"]
+            if etype == "text":
+                _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": run_id})
+            elif etype == "result":
+                if event.get("session_id"):
+                    ctx["sessions"][session_key] = event["session_id"]
+                    ctx["save_sessions"]()
+            elif etype == "error":
+                raise event["exc"]
+
+        outcome = "ok"
+        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "ok", "run_id": run_id})
+
+    except Exception as e:
+        print(f"[chat_queue] execute error for {session_key} item {item['id']}: {e}")
+        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id})
+
+    finally:
+        ctx["running"].pop(session_key, None)
+        # Chain: if more items are queued for this session, fire the next one immediately.
+        try:
+            await _chat_queue_drain_one(ctx, session_key)
+        except Exception as _drain_exc:
+            print(f"[chat_queue] chain drain error for {session_key}: {_drain_exc}")
+
+
+async def _chat_queue_drain_one(ctx: dict, session_key: str) -> bool:
+    """Pop and dispatch the next queued chat item for session_key if the session is free.
+
+    Returns True if an item was dequeued and spawned, False otherwise.
+    The lock is reserved SYNCHRONOUSLY before any await/spawn to prevent races.
+    """
+    if ctx["running"].get(session_key) is not None:
+        return False
+    items = _chat_queue_get(session_key)
+    if not items:
+        return False
+    item = _chat_queue_pop(session_key)
+    if item is None:
+        return False
+    # Reserve lock synchronously before the first await.
+    ctx["running"][session_key] = True
+    _spawn_bg(_chat_queue_execute(ctx, session_key, item))
+    return True
+
+
+async def _chat_queue_drain_loop(ctx: dict) -> None:
+    """Backstop loop: every _QUEUE_DRAIN_INTERVAL_SEC checks all session_keys with queued
+    chat items and drains them.  Handles: restart (queue survived it), lock freed by
+    non-chat path (card/TG) without triggering chain drain.
+    """
+    await asyncio.sleep(12)  # give the bot time to settle
+    while True:
+        try:
+            session_keys = list(_CHAT_QUEUE.keys())
+            for sk in session_keys:
+                try:
+                    await _chat_queue_drain_one(ctx, sk)
+                except Exception as pe:
+                    print(f"[chat_queue_drain_loop] session {sk!r} error: {pe}")
+        except Exception as e:
+            print(f"[chat_queue_drain_loop] error: {e}")
+        await asyncio.sleep(_QUEUE_DRAIN_INTERVAL_SEC)
+
+
 # ─────────────────────────── C1: SSE chat ───────────────────────────
 #
 # POST /api/projects/{id}/chat  body: {"prompt": str}
@@ -7389,6 +7508,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     session_key = (project.get("session_key") or project.get("tg_thread", ""))  # SHARED key with TG and F1
 
     # Lock check (SYNCHRONOUSLY — before first await, against race)
+    # Spec-041 A3: enqueue on busy instead of returning an error — backend drains it.
     if ctx["running"].get(session_key) is not None:
         resp = web.StreamResponse(
             status=200,
@@ -7397,10 +7517,11 @@ async def api_project_chat(req: web.Request) -> web.Response:
                      "X-Accel-Buffering": "no"},
         )
         await resp.prepare(req)
-        payload = json.dumps(
-            {"type": "error", "error": "project busy (TG/card/chat)"},
-            ensure_ascii=False,
-        )
+        item = _chat_queue_enqueue(session_key, prompt)
+        if item is None:
+            payload = json.dumps({"type": "error", "error": "queue full"}, ensure_ascii=False)
+        else:
+            payload = json.dumps({"type": "queued", "item": item}, ensure_ascii=False)
         await resp.write(f"data: {payload}\n\n".encode())
         return resp
 
@@ -7701,6 +7822,12 @@ async def api_project_chat(req: web.Request) -> web.Response:
             "outcome": "ok" if _chat_run_ok else "fail",
             "run_id": _chat_run_id,
         }, persist=True)
+        # Spec-041 A3: snappy delivery — drain next queued chat item immediately on lock release.
+        # Wrap in try/except so a drain failure never breaks the response teardown.
+        try:
+            await _chat_queue_drain_one(ctx, session_key)
+        except Exception as _cqd_exc:
+            print(f"[api_project_chat] chat queue drain error: {_cqd_exc}")
 
     return resp
 
@@ -9517,6 +9644,9 @@ async def start(ptb_app, ctx: dict) -> None:
         print(f"[webapp] incident scanner started (interval {_SCAN_INTERVAL_SEC}s)")
         # Card Queue: backstop drain loop (restart-resume + TG-interleave)
         _STARTUP_BG_TASKS.append(_spawn_bg(_queue_drain_loop(ctx)))
+        # Spec-041 A3: Chat Queue backstop drain loop
+        _STARTUP_BG_TASKS.append(_spawn_bg(_chat_queue_drain_loop(ctx)))
+        print(f"[webapp] chat queue drain loop started (interval {_QUEUE_DRAIN_INTERVAL_SEC}s)")
         # Spec-019: Schedules registry — background scan loop
         _STARTUP_BG_TASKS.append(_spawn_bg(_schedules._schedules_scan_loop(ctx)))
         print(f"[webapp] schedules scanner started (interval {_schedules._SCAN_INTERVAL_SEC}s)")
