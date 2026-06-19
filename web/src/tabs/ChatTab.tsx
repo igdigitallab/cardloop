@@ -27,6 +27,7 @@ import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
 import { t } from '../i18n'
 import { Modal, ModalHead } from '../components/Modal'
+import { Paperclip, ClipboardList, Wrench, Clock, ChevronDown, Square } from 'lucide-react'
 
 // ─── Spec-035: Sub-agent lane ─────────────────────────────────────────────────
 
@@ -519,7 +520,7 @@ const RunStatusBar = memo(function RunStatusBar({
           ⏭ queued: {queueLen}
         </span>
       )}
-      <button className="chat-stop-btn" onClick={onStop} title={t['chat.stop_title']} aria-label={t['chat.stop_aria']}>{t['chat.stop_btn']}</button>
+      <button className="chat-stop-btn" onClick={onStop} title={t['chat.stop_title']} aria-label={t['chat.stop_aria']}><Square size={13} /> {t['chat.stop_btn']}</button>
     </div>
   )
 })
@@ -2105,19 +2106,19 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 onClick={() => fileInputRef.current?.click()}
                 title={t['chat.attach_file_title']}
                 aria-label={t['chat.attach_file_aria']}
-              >📎</button>
+              ><Paperclip size={16} /></button>
               <button
                 className={`chat-tool-btn${showPrompts ? ' active' : ''}`}
                 onClick={() => { setShowPrompts(s => !s); setShowSkills(false) }}
                 title={t['chat.prompts_title']}
                 aria-label={t['chat.prompts_aria']}
-              >📋</button>
+              ><ClipboardList size={16} /></button>
               <button
                 className={`chat-tool-btn${showSkills ? ' active' : ''}`}
                 onClick={() => { setShowSkills(s => !s); setShowPrompts(false) }}
                 title={t['chat.skills_title']}
                 aria-label={t['chat.skills_aria']}
-              >🛠</button>
+              ><Wrench size={16} /></button>
               {/* Split defer button: ⏱ = one-click after-reset | ▾ = open modal for specific time */}
               <span className="chat-defer-split">
                 <button
@@ -2153,7 +2154,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                       setDeferAfterResetBusy(false)
                     }
                   }}
-                >{deferAfterResetBusy ? '…' : '⏱'}</button>
+                >{deferAfterResetBusy ? '…' : <Clock size={16} />}</button>
                 <button
                   className="chat-tool-btn chat-defer-arrow"
                   disabled={!input.trim()}
@@ -2172,7 +2173,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                       )
                     }
                   }}
-                >▾</button>
+                ><ChevronDown size={14} /></button>
               </span>
             </div>
             {/* Pending deferred runs chip — opens management modal */}
@@ -2183,7 +2184,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 style={{ fontSize: 12, padding: '3px 7px', opacity: 0.85 }}
                 onClick={() => setShowPendingDeferred(s => !s)}
               >
-                ⏱ {pendingDeferred.length}
+                <Clock size={14} /> {pendingDeferred.length}
               </button>
             )}
             <button

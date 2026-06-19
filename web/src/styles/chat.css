@@ -675,11 +675,15 @@
 }
 
 .chat-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   background: none;
   border: 1px solid var(--border2);
   color: var(--text3);
   font-size: 11px;
   padding: 2px 8px;
+  min-height: 28px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background var(--transition), color var(--transition);
@@ -689,6 +693,10 @@
 /* В status-bar кнопка стоп прижата вправо, если справа уже есть "тишина" — рядом */
 .chat-status-bar .chat-stop-btn { margin-left: auto; }
 .chat-status-bar .chat-status-silence + .chat-stop-btn { margin-left: 8px; }
+/* Touch target for stop button */
+@media (pointer: coarse) {
+  .chat-stop-btn { min-height: 44px; padding: 0 12px; }
+}
 
 /* ── Композер: textarea сверху, toolbar снизу ─────────────────── */
 .chat-composer {
@@ -733,10 +741,19 @@
   background: var(--accent);
   color: #fff;
 }
+/* Lucide SVG icons inherit currentColor via stroke:currentColor by default */
+.chat-tool-btn svg { display: block; }
 /* Touch-устройства: больше touch-зона */
 @media (pointer: coarse) {
   .chat-tool-btn { min-width: 44px; height: 40px; }
   .chat-toolbar-tools { padding: 4px; }
+}
+/* Unified focus-visible ring using accent token */
+.chat-tool-btn:focus-visible,
+.chat-stop-btn:focus-visible,
+.chat-send-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Split defer button: ⏱ main | ▾ dropdown */
