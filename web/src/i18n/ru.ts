@@ -478,6 +478,9 @@ export const ru = {
   'chat.defer_pending_chip_title': 'Отложенные запуски в очереди — нажмите для управления',
   'chat.defer_pending_cancel': 'Отменить',
   'chat.defer_pending_no_items': 'Нет отложенных запусков',
+  'chat.defer_manage_title': 'Запланированные запуски',
+  'chat.defer_waiting_usage': 'ожидание — данные об использовании недоступны',
+  'chat.defer_edit': 'Изменить',
   // Split-button tooltip for the ▾ dropdown part
   'chat.defer_split_arrow_title': 'Запланировать на конкретное время (окно)',
 

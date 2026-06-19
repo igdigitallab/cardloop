@@ -26,6 +26,7 @@ import { useProjectActivity, useSeedCursor } from '../hooks/useProjectActivity'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
 import { t } from '../i18n'
+import { Modal, ModalHead } from '../components/Modal'
 
 // ─── Spec-035: Sub-agent lane ─────────────────────────────────────────────────
 
@@ -625,9 +626,14 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [deferToast, setDeferToast] = useState<string | null>(null)
   // One-click "after reset" button state
   const [deferAfterResetBusy, setDeferAfterResetBusy] = useState(false)
-  // Pending deferred runs chip: count + popover + records
+  // Pending deferred runs chip: count + modal + records
   const [pendingDeferred, setPendingDeferred] = useState<unknown[]>([])
   const [showPendingDeferred, setShowPendingDeferred] = useState(false)
+  // Inline edit state for the deferred-runs management modal
+  const [editingDeferredId, setEditingDeferredId] = useState<string | null>(null)
+  const [editDeferredPrompt, setEditDeferredPrompt] = useState('')
+  const [editDeferredMode, setEditDeferredMode] = useState<'time' | 'reset'>('time')
+  const [editDeferredDatetime, setEditDeferredDatetime] = useState('')
   // Spec-021/039: manual reset + auto-compact UI state
   const [rotateToast, setRotateToast] = useState<string | null>(null)
   const [rotating, setRotating] = useState(false)
@@ -683,14 +689,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   }, [input, projectId, effectiveChatId])
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
-
-  // Close pending-deferred popover on outside click
-  useEffect(() => {
-    if (!showPendingDeferred) return
-    const handler = () => setShowPendingDeferred(false)
-    document.addEventListener('click', handler)
-    return () => document.removeEventListener('click', handler)
-  }, [showPendingDeferred])
 
   // Load pending deferred runs for this project (for the queued chip).
   // Filters client-side by session_key === project.session_key.
@@ -2176,54 +2174,16 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                 >▾</button>
               </span>
             </div>
-            {/* Pending deferred runs chip */}
+            {/* Pending deferred runs chip — opens management modal */}
             {pendingDeferred.length > 0 && (
-              <div style={{ position: 'relative' }}>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  title={t['chat.defer_pending_chip_title']}
-                  style={{ fontSize: 12, padding: '3px 7px', opacity: 0.85 }}
-                  onClick={() => setShowPendingDeferred(s => !s)}
-                >
-                  ⏱ {pendingDeferred.length}
-                </button>
-                {showPendingDeferred && (
-                  <div
-                    style={{
-                      position: 'absolute', bottom: '110%', right: 0,
-                      background: 'var(--bg-card)', border: '1px solid var(--border)',
-                      borderRadius: 8, padding: '8px 0', minWidth: 260, maxWidth: 360,
-                      boxShadow: '0 4px 16px rgba(0,0,0,0.2)', zIndex: 500,
-                    }}
-                    onClick={e => e.stopPropagation()}
-                  >
-                    {(pendingDeferred as Array<Record<string, unknown>>).map(rec => (
-                      <div key={String(rec['id'])} style={{
-                        display: 'flex', alignItems: 'flex-start', gap: 8,
-                        padding: '6px 12px', borderBottom: '1px solid var(--border)',
-                      }}>
-                        <span style={{ flex: 1, fontSize: 12, color: 'var(--text)', wordBreak: 'break-word' }}>
-                          <span style={{ opacity: 0.55, marginRight: 4 }}>
-                            {rec['fire_on_reset'] ? '↺' : '🕐'}
-                          </span>
-                          {String(rec['prompt'] ?? '').slice(0, 80)}
-                        </span>
-                        <button
-                          className="btn btn-secondary btn-sm"
-                          style={{ fontSize: 11, padding: '2px 6px', flexShrink: 0 }}
-                          title={t['chat.defer_pending_cancel']}
-                          onClick={async () => {
-                            try {
-                              await api.deferredDelete(String(rec['id']))
-                              await refreshPendingDeferred()
-                            } catch { /* ignore */ }
-                          }}
-                        >✕</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <button
+                className="btn btn-secondary btn-sm"
+                title={t['chat.defer_pending_chip_title']}
+                style={{ fontSize: 12, padding: '3px 7px', opacity: 0.85 }}
+                onClick={() => setShowPendingDeferred(s => !s)}
+              >
+                ⏱ {pendingDeferred.length}
+              </button>
             )}
             <button
               className="btn-primary chat-send-btn"
@@ -2236,6 +2196,144 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
           </div>
         </div>
       </div>
+
+      {/* Deferred Runs Management Modal */}
+      {showPendingDeferred && (
+        <Modal onClose={() => { setShowPendingDeferred(false); setEditingDeferredId(null) }}>
+          <ModalHead
+            title={t['chat.defer_manage_title']}
+            onClose={() => { setShowPendingDeferred(false); setEditingDeferredId(null) }}
+          />
+          <div className="run-modal-body">
+            {pendingDeferred.length === 0 ? (
+              <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: 0 }}>
+                {t['chat.defer_pending_no_items']}
+              </p>
+            ) : (
+              <ul className="chat-defer-mgr-list">
+                {(pendingDeferred as Array<Record<string, unknown>>).map(rec => {
+                  const id = String(rec['id'])
+                  const isEditing = editingDeferredId === id
+                  const fireOnReset = Boolean(rec['fire_on_reset'])
+                  const fireAt = rec['fire_at'] ? String(rec['fire_at']) : null
+                  const waitReason = rec['reset_wait_reason'] ? String(rec['reset_wait_reason']) : null
+                  const prompt = String(rec['prompt'] ?? '')
+
+                  return (
+                    <li key={id} className="chat-defer-mgr-row">
+                      {isEditing ? (
+                        // Edit mode
+                        <div className="chat-defer-mgr-edit">
+                          <textarea
+                            className="chat-defer-mgr-edit-textarea"
+                            value={editDeferredPrompt}
+                            onChange={e => setEditDeferredPrompt(e.target.value)}
+                            rows={4}
+                          />
+                          <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                            <button
+                              className={`btn btn-sm ${editDeferredMode === 'time' ? 'btn-primary' : 'btn-secondary'}`}
+                              onClick={() => setEditDeferredMode('time')}
+                            >{t['chat.defer_mode_time']}</button>
+                            <button
+                              className={`btn btn-sm ${editDeferredMode === 'reset' ? 'btn-primary' : 'btn-secondary'}`}
+                              onClick={() => setEditDeferredMode('reset')}
+                            >{t['chat.defer_mode_reset']}</button>
+                          </div>
+                          {editDeferredMode === 'time' && (
+                            <input
+                              type="datetime-local"
+                              value={editDeferredDatetime}
+                              onChange={e => setEditDeferredDatetime(e.target.value)}
+                              style={{ marginTop: 6, width: '100%', fontSize: 13, padding: '5px 7px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', boxSizing: 'border-box' }}
+                            />
+                          )}
+                          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                            <button
+                              className="btn btn-sm btn-primary"
+                              onClick={async () => {
+                                try {
+                                  const body: Record<string, unknown> = { prompt: editDeferredPrompt }
+                                  if (editDeferredMode === 'reset') {
+                                    body['fire_on_reset'] = true
+                                  } else {
+                                    body['fire_at'] = new Date(editDeferredDatetime).toISOString()
+                                  }
+                                  await api.deferredUpdate(id, body)
+                                  await refreshPendingDeferred()
+                                  setEditingDeferredId(null)
+                                } catch (e) {
+                                  setDeferToast(e instanceof Error ? e.message : String(e))
+                                  setTimeout(() => setDeferToast(null), 4000)
+                                }
+                              }}
+                            >Save</button>
+                            <button
+                              className="btn btn-sm btn-secondary"
+                              onClick={() => setEditingDeferredId(null)}
+                            >Cancel</button>
+                          </div>
+                        </div>
+                      ) : (
+                        // View mode
+                        <>
+                          <div className="chat-defer-mgr-meta">
+                            <span className="chat-defer-mgr-trigger">
+                              {fireOnReset
+                                ? <>↺ {t['chat.defer_mode_reset']}</>
+                                : <>🕐 {fireAt ? new Date(fireAt).toLocaleString() : t['chat.defer_mode_time']}</>
+                              }
+                            </span>
+                            {waitReason === 'usage_unavailable' && (
+                              <span className="chat-defer-mgr-badge">
+                                {t['chat.defer_waiting_usage']}
+                              </span>
+                            )}
+                          </div>
+                          <p className="chat-defer-mgr-prompt">{prompt}</p>
+                          <div className="chat-defer-mgr-actions">
+                            <button
+                              className="btn btn-sm btn-secondary"
+                              onClick={() => {
+                                setEditingDeferredId(id)
+                                setEditDeferredPrompt(prompt)
+                                setEditDeferredMode(fireOnReset ? 'reset' : 'time')
+                                // Pre-fill datetime-local from existing fire_at (strip seconds+ms for input compat)
+                                if (fireAt) {
+                                  const d = new Date(fireAt)
+                                  const pad = (n: number) => String(n).padStart(2, '0')
+                                  setEditDeferredDatetime(
+                                    `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+                                  )
+                                } else {
+                                  setEditDeferredDatetime('')
+                                }
+                              }}
+                            >{t['chat.defer_edit']}</button>
+                            <button
+                              className="btn btn-sm btn-secondary"
+                              title={t['chat.defer_pending_cancel']}
+                              onClick={async () => {
+                                try {
+                                  await api.deferredDelete(id)
+                                  await refreshPendingDeferred()
+                                } catch (e) {
+                                  setDeferToast(e instanceof Error ? e.message : String(e))
+                                  setTimeout(() => setDeferToast(null), 4000)
+                                }
+                              }}
+                            >{t['chat.defer_pending_cancel']}</button>
+                          </div>
+                        </>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+        </Modal>
+      )}
 
       {/* Deferred Run Modal */}
       {showDefer && (

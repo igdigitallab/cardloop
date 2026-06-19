@@ -479,6 +479,9 @@ export const en = {
   'chat.defer_pending_chip_title': 'Pending deferred runs — click to manage',
   'chat.defer_pending_cancel': 'Cancel',
   'chat.defer_pending_no_items': 'No pending deferred runs',
+  'chat.defer_manage_title': 'Scheduled runs',
+  'chat.defer_waiting_usage': 'waiting — usage data unavailable',
+  'chat.defer_edit': 'Edit',
   // Split-button tooltip for the ▾ dropdown part
   'chat.defer_split_arrow_title': 'Schedule at a specific time (modal)',
 

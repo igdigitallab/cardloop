@@ -495,6 +495,9 @@ export const api = {
   deferredDelete: (id: string) =>
     apiFetch<{ cancelled: boolean }>(`/api/deferred/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  deferredUpdate: (id: string, body: Record<string, unknown>) =>
+    apiFetch<Record<string, unknown>>(`/api/deferred/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
   // Spec-023: Project Archive
   archiveProject: (id: string) =>
     apiFetch<{ archived: boolean }>(`/api/projects/${id}/archive`, { method: 'POST' }),
