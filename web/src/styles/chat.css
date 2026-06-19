@@ -308,6 +308,15 @@
   overflow-y: auto;
 }
 
+/* Backdrop for mobile bottom-sheet. Hidden on desktop; shown via ≤768px media query. */
+.session-dropdown-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 498; /* below the sheet (499) */
+}
+
 .session-dropdown-item {
   display: flex;
   align-items: baseline;
@@ -1048,8 +1057,16 @@
   .chat-model-select {
     font-size: 16px;
   }
+}
 
-  /* Session dropdown: full-width on mobile */
+/* ── Session dropdown bottom-sheet (matches computeStyle ≤768px breakpoint) ── */
+@media (max-width: 768px) {
+  /* Dim backdrop behind the bottom-sheet; hidden on desktop via default display:none */
+  .session-dropdown-backdrop {
+    display: block;
+  }
+
+  /* Session dropdown: full-width bottom sheet */
   .session-dropdown {
     position: fixed;
     left: 8px;
@@ -1060,7 +1077,8 @@
     min-width: 0;
     max-height: 50vh;
     border-radius: var(--radius) var(--radius) 0 0;
-    z-index: 500;
+    /* Sit above the backdrop (z-index 498) */
+    z-index: 499;
   }
 }
 

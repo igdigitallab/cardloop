@@ -301,8 +301,16 @@ export function SessionSelector({ projectId, onSessionChange, onRequestReset }: 
 
       {error && <div className="session-error">{error}</div>}
 
-      {/* Dropdown portaled to document.body to escape ancestor stacking contexts */}
-      {open && createPortal(dropdown, document.body)}
+      {/* Dropdown + backdrop portaled to document.body to escape ancestor stacking contexts.
+          The backdrop is hidden on desktop via CSS (display:none default); on mobile (≤768px)
+          it becomes display:block to dim content behind the bottom-sheet. */}
+      {open && createPortal(
+        <>
+          <div className="session-dropdown-backdrop" onClick={() => setOpen(false)} />
+          {dropdown}
+        </>,
+        document.body
+      )}
 
       {/* Rename modal */}
       {renameModal && (
