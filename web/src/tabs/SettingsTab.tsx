@@ -141,8 +141,8 @@ export function SettingsTab({ projectId, project, health, refreshHealth }: Props
           <div className="info-card">
             <div className="info-card-label">{t['overview.tg_thread']}</div>
             <div className="info-card-value">
-              {project.tg_thread !== null ? (
-                <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>#{project.tg_thread}</span>
+              {project.session_key ? (
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{project.session_key}</span>
               ) : (
                 <span style={{ color: 'var(--text3)' }}>{t['overview.not_bound']}</span>
               )}

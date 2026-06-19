@@ -184,7 +184,7 @@ export function ProjectTabBar({
             {tabMenuOpen && (
               <div className="ptab-menu-dropdown" role="listbox">
                 {projects.map(p => {
-                  const sk = p.tg_thread != null ? String(p.tg_thread) : null
+                  const sk = p.session_key ?? null
                   const unread = sk ? (unreadBySession[sk] || 0) : 0
                   const isActive = p.id === activeId
                   const hasIncidents = (p.incidents ?? 0) > 0
@@ -221,7 +221,7 @@ export function ProjectTabBar({
       )}
       <div className="ptab-list">
         {projects.map(p => {
-          const sk = p.tg_thread != null ? String(p.tg_thread) : null
+          const sk = p.session_key ?? null
           const unread = sk ? (unreadBySession[sk] || 0) : 0
           const isActive = p.id === activeId
           return (

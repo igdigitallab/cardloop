@@ -35,8 +35,8 @@ interface Props {
 }
 
 function unreadFor(p: Project, map: Record<string, number>): number {
-  if (p.tg_thread == null) return 0
-  return map[String(p.tg_thread)] || 0
+  if (!p.session_key) return 0
+  return map[p.session_key] || 0
 }
 
 const LS_GROUP_PREFIX = 'cops.group.collapsed.'

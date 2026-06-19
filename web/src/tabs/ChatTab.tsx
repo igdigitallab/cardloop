@@ -693,18 +693,17 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   }, [showPendingDeferred])
 
   // Load pending deferred runs for this project (for the queued chip).
-  // Filters client-side by session_key === String(project.tg_thread) — reliable; backend project
-  // filter matches by display name which may differ from the id we send.
+  // Filters client-side by session_key === project.session_key.
   const refreshPendingDeferred = useCallback(async () => {
-    if (!project.tg_thread) return
+    if (!project.session_key) return
     try {
       const all = await api.deferredList('?status=pending')
-      const sk = String(project.tg_thread)
+      const sk = project.session_key
       setPendingDeferred((all as Array<Record<string, unknown>>).filter(r => r['session_key'] === sk))
     } catch {
       // Non-fatal — chip just shows stale data
     }
-  }, [project.tg_thread])
+  }, [project.session_key])
 
   useEffect(() => {
     refreshPendingDeferred()

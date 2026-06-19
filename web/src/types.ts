@@ -22,8 +22,8 @@ export interface Project {
   name: string
   cwd: string
   model: string
-  /** For regular projects = number (chat:thread from TG). For free chats = their string id. */
-  tg_thread: number | string | null
+  /** Session key (e.g. "chat:thread" for projects, "free-<uuid>" for free chats). Backend `session_key`. */
+  session_key: string
   health: ProjectHealth
   /** True for free chats (no TG/git, cwd=$HOME). */
   is_free?: boolean

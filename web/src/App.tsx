@@ -321,7 +321,7 @@ export default function App() {
       if (!sk) return
 
       const findProj = () =>
-        projectsRef.current.find(p => p.tg_thread != null && String(p.tg_thread) === sk)
+        projectsRef.current.find(p => p.session_key === sk)
 
       if (payload.kind === 'run_start') {
         // Agent started a new turn — show working indicator; clear any stale attention badge
@@ -385,7 +385,7 @@ export default function App() {
 
   const clearUnread = useCallback((id: string) => {
     const proj = projectsRef.current.find(p => p.id === id)
-    const sk = proj?.tg_thread != null ? String(proj.tg_thread) : null
+    const sk = proj?.session_key ?? null
     if (sk) clearUnreadForSession(sk)
     // Also clear reply-ready indicator when the user switches to this tab
     setReplyReadyIds(prev => {
