@@ -358,6 +358,93 @@ async def test_sessions_require_auth(aiohttp_client, sessions_app):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 2b. _session_context_tokens unit tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_jsonl_with_usage(tmp_path, usages: list[dict]) -> "Path":
+    """Write a .jsonl file with assistant messages carrying the given usage dicts."""
+    lines = []
+    for u in usages:
+        msg = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hello"}],
+                "usage": u,
+            },
+        }
+        lines.append(json.dumps(msg))
+    p = tmp_path / "test_session.jsonl"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def test_session_context_tokens_returns_last_usage(tmp_path):
+    """_session_context_tokens sums tokens from the LAST assistant usage block."""
+    p = _make_jsonl_with_usage(tmp_path, [
+        # First turn — should be ignored
+        {"input_tokens": 100, "cache_read_input_tokens": 200, "cache_creation_input_tokens": 50},
+        # Last turn — should be used
+        {"input_tokens": 10, "cache_read_input_tokens": 500, "cache_creation_input_tokens": 300},
+    ])
+    result = _webapp._session_context_tokens(p)
+    assert result == 10 + 500 + 300, f"Expected 810 tokens, got {result}"
+
+
+def test_session_context_tokens_no_usage_returns_zero(tmp_path):
+    """_session_context_tokens returns 0 when no usage blocks are present."""
+    p = tmp_path / "empty.jsonl"
+    p.write_text(
+        json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n",
+        encoding="utf-8",
+    )
+    result = _webapp._session_context_tokens(p)
+    assert result == 0, f"Expected 0 tokens, got {result}"
+
+
+def test_session_context_tokens_missing_file_returns_zero(tmp_path):
+    """_session_context_tokens returns 0 for a non-existent file (never raises)."""
+    result = _webapp._session_context_tokens(tmp_path / "nonexistent.jsonl")
+    assert result == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2c. /live pending_handoff field
+# ══════════════════════════════════════════════════════════════════════════════
+
+@pytest.fixture
+def live_app(project_ctx):
+    return _make_app(project_ctx, [
+        ("GET", "/api/projects/{id}/live", _webapp.api_project_live),
+    ])
+
+
+async def test_live_includes_pending_handoff_null(aiohttp_client, live_app, project_ctx):
+    """GET /live includes pending_handoff key (null when no handoff is set)."""
+    _webapp._live_turns.clear()
+    client = await aiohttp_client(live_app)
+    resp = await client.get("/api/projects/myproj/live", headers=_auth(project_ctx))
+    assert resp.status == 200
+    data = await resp.json()
+    assert "pending_handoff" in data, "Response must include pending_handoff key"
+    assert data["pending_handoff"] is None
+
+
+async def test_live_includes_pending_handoff_value(aiohttp_client, live_app, project_ctx):
+    """GET /live returns pending_handoff string when one is stored in ctx."""
+    _webapp._live_turns.clear()
+    project_ctx["pending_handoff"] = {"0:1": "Session summary: worked on feature X"}
+    client = await aiohttp_client(live_app)
+    resp = await client.get("/api/projects/myproj/live", headers=_auth(project_ctx))
+    assert resp.status == 200
+    data = await resp.json()
+    assert data.get("pending_handoff") == "Session summary: worked on feature X"
+    # Clean up
+    del project_ctx["pending_handoff"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 3. Free chats  —  POST /api/free / DELETE /api/free/{id}
 # ══════════════════════════════════════════════════════════════════════════════
 

@@ -283,6 +283,8 @@ export interface SessionInfo {
   created?: string | null
   /** Total message count in the session — provided by backend when available (spec-042). */
   message_count?: number | null
+  /** Context token count (input + cache) from the last assistant turn in the session. */
+  context_tokens?: number | null
 }
 
 // ─── C1: Chat SSE events ───────────────────────────────────────────────────
@@ -474,6 +476,8 @@ export interface LiveTurnSnapshot {
   cursor: number
   /** Buffered events in chronological order (oldest to newest). */
   events: Array<Record<string, unknown>>
+  /** Pending handoff summary from the previous session (if any). */
+  pending_handoff?: string | null
 }
 
 // ─── Spec-039: native auto-compact notification ────────────────────────────────

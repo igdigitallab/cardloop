@@ -58,6 +58,13 @@ function fmtSessionTime(iso: string): string {
   }
 }
 
+/** Format a context token count as a compact string: 168000 → "168K", 1200000 → "1.2M". */
+function fmtCtx(n: number): string {
+  if (n < 1000) return `${n}`
+  if (n < 1_000_000) return `${Math.round(n / 1000)}K`
+  return `${(n / 1_000_000).toFixed(1)}M`
+}
+
 /** Anchor width used when clamping the dropdown to avoid right-edge overflow. */
 const DROPDOWN_ANCHOR_WIDTH = 360
 
@@ -214,7 +221,10 @@ export function SessionSelector({ projectId, onSessionChange, onRequestReset }: 
     const msgs = typeof s.message_count === 'number' && s.message_count > 0
       ? ` · ${s.message_count} msgs`
       : ''
-    const primaryLine = `Session · ${timeStr}${msgs}`
+    const ctx = typeof s.context_tokens === 'number' && s.context_tokens > 0
+      ? ` · ${fmtCtx(s.context_tokens)}`
+      : ''
+    const primaryLine = `Session · ${timeStr}${msgs}${ctx}`
 
     if (s.label) {
       // Named session: show user label as strong, then the standard "Session · time" sub-line

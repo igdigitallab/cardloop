@@ -560,6 +560,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const effectiveChatId = activeChatId ?? ''
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [pendingHandoff, setPendingHandoff] = useState<string | null>(null)
   const [contextTokens, setContextTokens] = useState<number | null>(null)
   const [contextWindow, setContextWindow] = useState<number>(1_000_000)
   const [input, setInput] = useState('')
@@ -793,7 +794,7 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       api.sessionHistory(projectId),
       api.chatQueue(projectId).catch(() => ({ items: [] as Array<{ id: string; text: string; created_at: number }> })),
       // Spec-035 L3: /live replaces /running — returns running state + turn history + started_at
-      api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, cursor: 0, events: [] as Array<Record<string, unknown>> })),
+      api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, cursor: 0, events: [] as Array<Record<string, unknown>>, pending_handoff: null as string | null })),
     ]).then(([histRes, queueRes, liveRes]) => {
       if (isCancelled()) return
       setQueueItems(queueRes.items)
@@ -802,6 +803,8 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       // Spec-033: seed cache freshness anchor from the persisted transcript data
       if (histRes.last_turn_at != null) setLastTurnEndMs(histRes.last_turn_at)
       if (histRes.last_cache_hit_pct != null) setLastCacheHitPct(histRes.last_cache_hit_pct)
+
+      setPendingHandoff(liveRes.pending_handoff ?? null)
 
       if (liveRes.running && liveRes.events.length > 0) {
         // ── Spec-035 L4: hydrate transcript from live buffer ──────────────────
@@ -1761,10 +1764,16 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             </div>
           </div>
         )}
-        {!rotating && messages.length === 0 && (
+        {!rotating && messages.length === 0 && !pendingHandoff && (
           <div className="chat-empty">
             <div className="chat-empty-icon">💬</div>
             <p>{t['chat.empty_hint']}<br />{t['chat.empty_session_hint']}</p>
+          </div>
+        )}
+        {!rotating && messages.length === 0 && pendingHandoff && (
+          <div className="chat-handoff-card">
+            <div className="chat-handoff-card-header">↩ Carried over from previous session</div>
+            <div className="chat-handoff-card-body">{pendingHandoff}</div>
           </div>
         )}
 

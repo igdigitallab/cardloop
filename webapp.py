@@ -4574,6 +4574,7 @@ async def api_project_live(req: web.Request) -> web.Response:
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
     running = ctx["running"].get(session_key) is not None
     turn = _live_turns.get(session_key)
+    pending_handoff = (ctx.get("pending_handoff") or {}).get(session_key) or None
     if turn is None:
         return web.json_response({
             "running": running,
@@ -4583,6 +4584,7 @@ async def api_project_live(req: web.Request) -> web.Response:
             "cost_usd": None,
             "cursor": 0,
             "events": [],
+            "pending_handoff": pending_handoff,
         })
     events_list = list(turn["events"])
     cursor = events_list[-1]["seq"] if events_list else turn["seq"]
@@ -4595,6 +4597,7 @@ async def api_project_live(req: web.Request) -> web.Response:
             "cost_usd": turn["cost_usd"],
             "cursor": cursor,
             "events": events_list,
+            "pending_handoff": pending_handoff,
         })
     except (TypeError, ValueError):
         # Secondary defence: if an event payload is still not JSON-safe despite the
@@ -4622,6 +4625,7 @@ async def api_project_live(req: web.Request) -> web.Response:
             "cost_usd": turn["cost_usd"],
             "cursor": cursor,
             "events": safe_events,
+            "pending_handoff": pending_handoff,
         })
 
 
@@ -6832,6 +6836,55 @@ def _session_message_count(jsonl_path: Path) -> int:
     return count
 
 
+def _session_context_tokens(jsonl_path: Path) -> int:
+    """Return the context token count from the LAST assistant message with usage data.
+
+    Reads the transcript .jsonl and sums input_tokens + cache_read_input_tokens +
+    cache_creation_input_tokens from the usage object on the last assistant turn.
+    Reads from the end (last 64 KB) for efficiency.
+    Returns 0 if no usage found or on any error.
+    """
+    try:
+        last_usage: dict | None = None
+        chunk_size = 65536
+        with open(jsonl_path, "rb") as fh:
+            fh.seek(0, 2)  # seek to end
+            file_size = fh.tell()
+            read_start = max(0, file_size - chunk_size)
+            fh.seek(read_start)
+            raw = fh.read()
+        # Decode and split into lines; first line may be partial — skip it if we seeked mid-file
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if read_start > 0 and lines:
+            lines = lines[1:]  # drop potentially partial first line
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            msg = obj.get("message", {})
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") != "assistant":
+                continue
+            usage = msg.get("usage")
+            if isinstance(usage, dict):
+                last_usage = usage
+        if last_usage is None:
+            return 0
+        return (
+            (last_usage.get("input_tokens") or 0)
+            + (last_usage.get("cache_read_input_tokens") or 0)
+            + (last_usage.get("cache_creation_input_tokens") or 0)
+        )
+    except Exception:
+        return 0
+
+
 async def api_project_sessions(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/sessions — list of SDK sessions for the project."""
     ctx = req.app["ctx"]
@@ -6866,6 +6919,7 @@ async def api_project_sessions(req: web.Request) -> web.Response:
                 "is_active": sid == active_sid,
                 "label": labels.get(sid) or None,
                 "message_count": _session_message_count(f),
+                "context_tokens": _session_context_tokens(f),
             })
     except Exception:
         pass
