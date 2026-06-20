@@ -768,6 +768,7 @@ export default function App() {
           onClose={handleTabClose}
           onRename={handleRenameTab}
           onNewFree={handleNewFree}
+          onReorderOpen={(newIds) => setOpenIds(newIds)}
           globalFilesOpen={globalFilesOpen}
           globalFilesActive={activeId === GLOBAL_FILES_ID}
           onOpenGlobalFiles={handleOpenGlobalFiles}

@@ -168,17 +168,44 @@
   padding: 0 14px;
   font-size: 13px;
   color: var(--text2);
-  cursor: pointer;
+  cursor: grab;
   border-right: 1px solid var(--border);
   background: var(--bg2);
   white-space: nowrap;
-  transition: background var(--transition), color var(--transition);
+  transition: background var(--transition), color var(--transition), opacity var(--transition);
   user-select: none;
   position: relative;
   max-width: 220px;
   min-height: 36px;
 }
 .ptab:hover { background: var(--bg3); color: var(--text); }
+
+/* Drag-and-drop: dragged tab appears semi-transparent with grab cursor */
+.ptab[data-drag-active] {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+/* Drop indicator: 2px accent border on the side where the item will land */
+.ptab[data-drag-over="before"] {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.ptab[data-drag-over="after"] {
+  box-shadow: inset -2px 0 0 var(--accent);
+}
+/* Preserve active tab's bottom underline when also showing a drop indicator */
+.ptab.active[data-drag-over="before"] {
+  box-shadow: inset 2px 0 0 var(--accent), inset 0 -2px 0 var(--accent);
+}
+.ptab.active[data-drag-over="after"] {
+  box-shadow: inset -2px 0 0 var(--accent), inset 0 -2px 0 var(--accent);
+}
+.ptab.ptab-free.active[data-drag-over="before"] {
+  box-shadow: inset 2px 0 0 var(--accent), inset 0 -2px 0 var(--accent-h);
+}
+.ptab.ptab-free.active[data-drag-over="after"] {
+  box-shadow: inset -2px 0 0 var(--accent), inset 0 -2px 0 var(--accent-h);
+}
 .ptab.active {
   background: var(--bg);
   color: var(--text);

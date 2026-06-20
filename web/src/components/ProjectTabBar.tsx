@@ -15,6 +15,8 @@ interface Props {
   onClose: (id: string) => void
   onRename: (id: string, label: string) => void
   onNewFree: () => void
+  /** Called when the user reorders tabs via drag-and-drop; receives the new ordered ID array */
+  onReorderOpen?: (newIds: string[]) => void
   globalFilesOpen: boolean
   globalFilesActive: boolean
   onOpenGlobalFiles: () => void
@@ -37,6 +39,8 @@ interface Props {
 
 function TabItem({
   project, isActive, unread, replyReady, isRunning, onActivate, onClose, onRename, activeRef,
+  dragActive, dragOver,
+  onPointerDown, onPointerMove, onPointerUp, onPointerCancel,
 }: {
   project: Project
   isActive: boolean
@@ -49,6 +53,14 @@ function TabItem({
   onClose: () => void
   onRename: (label: string) => void
   activeRef?: React.RefObject<HTMLDivElement>
+  /** True when this tab is the one being dragged */
+  dragActive?: boolean
+  /** 'before' | 'after' | null — drop indicator position relative to this tab */
+  dragOver?: 'before' | 'after' | null
+  onPointerDown?: (e: React.PointerEvent) => void
+  onPointerMove?: (e: React.PointerEvent) => void
+  onPointerUp?: (e: React.PointerEvent) => void
+  onPointerCancel?: (e: React.PointerEvent) => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(project.name)
@@ -82,11 +94,18 @@ function TabItem({
     <div
       ref={activeRef}
       className={`ptab ${isActive ? 'active' : ''} ${project.is_free ? 'ptab-free' : ''}`}
+      data-tab-id={project.id}
+      data-drag-active={dragActive ? '' : undefined}
+      data-drag-over={dragOver ?? undefined}
       onClick={() => !editing && onActivate()}
       onDoubleClick={() => {
         if (project.is_free) setEditing(true)
       }}
       title={editing ? '' : (project.is_free ? `${project.cwd} (double-click to rename)` : project.cwd)}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
     >
       {editing ? (
         <input
@@ -129,6 +148,7 @@ function TabItem({
 
 export function ProjectTabBar({
   projects, activeId, unreadBySession, replyReadyIds, runningIds, onActivate, onClose, onRename, onNewFree,
+  onReorderOpen,
   globalFilesOpen, globalFilesActive, onOpenGlobalFiles, onCloseGlobalFiles,
   schedulesOpen, schedulesActive, onOpenSchedules, onCloseSchedules,
   vaultOpen, vaultActive, onOpenVault, onCloseVault,
@@ -139,6 +159,99 @@ export function ProjectTabBar({
   // H2: Open-tabs dropdown state + click-outside handling
   const [tabMenuOpen, setTabMenuOpen] = useState(false)
   const tabMenuRef = useRef<HTMLDivElement>(null)
+
+  // ── Drag-and-drop reorder state ────────────────────────────────────────────
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
+  const [dragOverSide, setDragOverSide] = useState<'before' | 'after' | null>(null)
+  const dragPointerState = useRef<{
+    id: string
+    startX: number
+    startY: number
+    moved: boolean
+    pointerId: number
+  } | null>(null)
+
+  function handleTabPointerDown(e: React.PointerEvent, id: string) {
+    // Only primary button (mouse) or any pointer type (touch/pen)
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    dragPointerState.current = {
+      id,
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
+      pointerId: e.pointerId,
+    }
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  }
+
+  function handleTabPointerMove(e: React.PointerEvent, id: string) {
+    const ps = dragPointerState.current
+    if (!ps || ps.id !== id) return
+
+    const dx = e.clientX - ps.startX
+    const dy = e.clientY - ps.startY
+
+    // Activate drag after 8px movement threshold
+    if (!ps.moved && Math.sqrt(dx * dx + dy * dy) > 8) {
+      ps.moved = true
+      setDragId(id)
+    }
+
+    if (!ps.moved) return
+
+    // Detect which tab we are hovering over using elementsFromPoint (works through pointer capture)
+    const els = document.elementsFromPoint(e.clientX, e.clientY)
+    const tabEl = els.find(el => el.hasAttribute('data-tab-id')) as HTMLElement | undefined
+
+    if (tabEl && tabEl.getAttribute('data-tab-id') !== id) {
+      const overId = tabEl.getAttribute('data-tab-id')!
+      const rect = tabEl.getBoundingClientRect()
+      const side: 'before' | 'after' = e.clientX < rect.left + rect.width / 2 ? 'before' : 'after'
+      setDragOverId(overId)
+      setDragOverSide(side)
+    } else {
+      setDragOverId(null)
+      setDragOverSide(null)
+    }
+  }
+
+  function handleTabPointerUp(e: React.PointerEvent, id: string) {
+    const ps = dragPointerState.current
+    if (!ps || ps.id !== id) return
+    ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
+
+    if (ps.moved && dragOverId && dragOverId !== id && onReorderOpen) {
+      const ids = projects.map(p => p.id)
+      const fromIdx = ids.indexOf(id)
+      const toIdx = ids.indexOf(dragOverId)
+      if (fromIdx !== -1 && toIdx !== -1) {
+        const next = [...ids]
+        // Remove the dragged item first
+        next.splice(fromIdx, 1)
+        // After removal, the target index may have shifted down by 1 if fromIdx < toIdx
+        const adjustedTo = fromIdx < toIdx ? toIdx - 1 : toIdx
+        // Insert before or after the drop target
+        const insertAt = dragOverSide === 'after' ? adjustedTo + 1 : adjustedTo
+        next.splice(insertAt, 0, id)
+        onReorderOpen(next)
+      }
+    }
+
+    dragPointerState.current = null
+    setDragId(null)
+    setDragOverId(null)
+    setDragOverSide(null)
+  }
+
+  function handleTabPointerCancel(_e: React.PointerEvent, id: string) {
+    const ps = dragPointerState.current
+    if (!ps || ps.id !== id) return
+    dragPointerState.current = null
+    setDragId(null)
+    setDragOverId(null)
+    setDragOverSide(null)
+  }
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -236,6 +349,12 @@ export function ProjectTabBar({
               onClose={() => onClose(p.id)}
               onRename={(label) => onRename(p.id, label)}
               activeRef={isActive ? activeTabRef : undefined}
+              dragActive={dragId === p.id}
+              dragOver={dragOverId === p.id ? dragOverSide : null}
+              onPointerDown={(e) => handleTabPointerDown(e, p.id)}
+              onPointerMove={(e) => handleTabPointerMove(e, p.id)}
+              onPointerUp={(e) => handleTabPointerUp(e, p.id)}
+              onPointerCancel={(e) => handleTabPointerCancel(e, p.id)}
             />
           )
         })}
