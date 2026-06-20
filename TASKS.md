@@ -8,6 +8,7 @@
 > 2026-05-31: рефакторинг-проход закрыт — 25 карточек (security, рефактор бэк/фронт, OSS-доки, тесты 207→300) ушли в DONE.md. Карта кода → ARCHITECTURE.md. Ниже — только фичи/roadmap.
 
 ## Backlog
+- [ ] Допустим я сделал OpenSource этот проект. Как его поднимать или я хочу сделать своей племяннице отдельную VM с ее ClaudeOps, там будет полностью VM ее задачи, проекты и прочее и ее подписка на Claude. Как это сделать? <!--ops:2dca4d-->
 - [ ] Глобальный редизайн: https://styles.refero.design/style/0fd67ec5-7e9c-4ca9-b368-5d9c7388477a <!--ops:56979f-->
 - [ ] сделать возможность переноса вкладок проектов (которые наверху), т.е. менять местами. <!--ops:ab5479-->
 - [ ] сделать нормальный логин и пароль. ? <!--ops:e518e2-->
@@ -22,6 +23,16 @@
   > Point 3: schedules.py:718 COOLIFY_SERVER_UUID default="f0kgss8ccgksokkscgc0sk4s" is live infra UUID. Violates anti-hardcode; move to .env/config
 - [ ] Design: surface external background processes (Agy/Codex/long bash) in the cockpit <!--ops:6c9a57-->
   > Когда агент запускает внешний фоновый процесс (`ask`/`agy`, Codex, долгий bash run_in_background) — кокпит НЕ показывает, что что-то выполняется: нет индикатора/строки «running», нельзя увидеть прогресс или остановить. Сейчас видно только обычные ходы агента. Придумать решение: реестр активных внешних процессов (pid/команда/старт/статус) + индикатор в UI (баннер/спиннер/панель), желательно с возможностью stop и хвостом вывода. Учесть, что процессы детачнутые, могут пережить ход. Связано с картой 04f84f (управление Antigravity/Codex CLI).
+- [ ] Bug: Sub-agent activity not visible in cockpit <!--ops:5ba5ac-->
+  > Orchestrator spawns agents but indicator doesn't show activity; user can't tell work is happening
+- [ ] Bug: Ghost 'running' indicator not resetting <!--ops:3cfeb7-->
+  > Status stuck on 'running' when completion signal is lost (related to 784e8e)
+- [ ] Feature: Conversable orchestrator while sub-agents work <!--ops:035154-->
+  > Allow user to continue chat with main orchestrator instead of blocking until all agents finish. Currently queued messages wait for completion.
+- [ ] Feature: Make global settings easily accessible <!--ops:921e4a-->
+  > Surface global settings UI (currently hidden in project context menu) with dedicated entry point. Should include default thinking depth setting.
+- [ ] UI: Show actual thinking level instead of 'default' <!--ops:90a27f-->
+  > Display resolved effort level (e.g. 'medium') in header instead of 'default' so user knows current setting. Currently DEFAULT_EFFORT=medium is invisible.
 
 ## In Progress
 - [~] /compact visual feedback during compression <!--ops:96ccc7-->
@@ -48,3 +59,9 @@
   > first=2026-06-18T11:33
   > last=2026-06-18T13:33
   > excerpt=asyncio Task exception was never retrieved
+- [!] [ERR] ERROR: claude_agent_sdk._internal.query Fatal error in message reader: Command failed w <!--ops:err-538a69-->
+  > source=log
+  > seen=1
+  > first=2026-06-19T19:50
+  > last=2026-06-19T19:50
+  > excerpt=claude_agent_sdk._internal.query Fatal error in message reader: Command failed with exit code 143 (exit code: 143)
