@@ -283,7 +283,17 @@
 .session-selector-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .session-icon { font-size: 10px; color: var(--accent); }
-.session-label { font-family: var(--mono); font-size: 11px; }
+.session-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  display: inline-block;
+  max-width: 200px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
 .session-chevron { font-size: 8px; color: var(--text3); }
 
 .session-error {
@@ -1130,6 +1140,11 @@
   /* Model label text: hide on very narrow screens to save space */
   .chat-model-label {
     display: none;
+  }
+
+  /* Cap session label width on mobile so a long title doesn't push indicators / force scroll */
+  .session-label {
+    max-width: 120px;
   }
 
   /* Input area: tighter padding; flex-shrink:0 ensures it is never squeezed
