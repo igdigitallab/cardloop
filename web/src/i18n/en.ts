@@ -596,6 +596,8 @@ export const en = {
   'chat.reset_failed': 'Reset failed: {reason}',
   // Auto-compact toast (Spec-039: native CLI compact fired)
   'chat.compact_toast': 'Context compacted · session kept',
+  // Live compaction in-progress indicator (shown while compact is running, before toast resolves)
+  'chat.compacting_inprogress': 'Compacting context to free up space… keeps the session',
   // Context warn banner — window-agnostic framing (no hardcoded ceiling)
   'chat.ctx_warn_approaching': '⚠ Context ~{nK}K — approaching the window limit; auto-compact will fire soon.',
   'chat.ctx_warn_critical': '⚠ Context {nK}K — critically close to the context limit. Consider resetting the session.',

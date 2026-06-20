@@ -521,7 +521,7 @@ const CacheCountdownBadge = memo(function CacheCountdownBadge({
 
   return (
     <span style={{
-      color: isWarm ? 'var(--color-green, #22c55e)' : 'var(--color-muted, #9ca3af)',
+      color: isWarm ? 'var(--green)' : 'var(--text2)',
       cursor: 'default',
       fontSize: 11,
       whiteSpace: 'nowrap',
@@ -786,6 +786,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const [resetModalOpen, setResetModalOpen] = useState(false)
   // Spec-039: toast shown when native auto-compact fires (kind:"compact" bus event)
   const [compactToast, setCompactToast] = useState(false)
+  // Live compaction-in-progress indicator: true from compact event until first assistant output or run end.
+  const [isCompacting, setIsCompacting] = useState(false)
+  // Ref mirror so SSE/bus event closures can read the current value without stale closure issues.
+  const isCompactingRef = useRef(false)
+  // Fallback safety timer ref — clears the indicator after 120s if no resume event arrives.
+  const compactFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Context early-warning banner state.
   // contextWarnFromBackend: set true when the backend sends context_warn=true on a result event.
   // warnDismissedAtTokens: the token count when the user dismissed the banner (null = not dismissed).
@@ -842,6 +848,19 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
   const errorRef = useRef('')
   useEffect(() => { errorRef.current = error }, [error])
+
+  // Keep the ref in sync with the state so SSE/bus closures can read the live value.
+  useEffect(() => { isCompactingRef.current = isCompacting }, [isCompacting])
+
+  // Cleanup fallback timer on unmount to avoid ghost state after tab switch / unmount.
+  useEffect(() => {
+    return () => {
+      if (compactFallbackTimerRef.current !== null) {
+        clearTimeout(compactFallbackTimerRef.current)
+        compactFallbackTimerRef.current = null
+      }
+    }
+  }, [])
 
   // Load pending deferred runs for this project (for the queued chip).
   // Filters client-side by session_key === project.session_key.
@@ -1149,11 +1168,25 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
     } else if (evt.kind === 'text') {
       if (!busActiveRef.current) return
+      // Compaction ended — first text output means the turn resumed.
+      if (isCompactingRef.current) {
+        if (compactFallbackTimerRef.current !== null) { clearTimeout(compactFallbackTimerRef.current); compactFallbackTimerRef.current = null }
+        isCompactingRef.current = false
+        setIsCompacting(false)
+        setTimeout(() => setCompactToast(false), 4000)
+      }
       setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
       setMessages(prev => appendChunk(prev, { kind: 'text', text: evt.text }))
 
     } else if (evt.kind === 'tool') {
       if (!busActiveRef.current) return
+      // Compaction ended — first tool call means the turn resumed.
+      if (isCompactingRef.current) {
+        if (compactFallbackTimerRef.current !== null) { clearTimeout(compactFallbackTimerRef.current); compactFallbackTimerRef.current = null }
+        isCompactingRef.current = false
+        setIsCompacting(false)
+        setTimeout(() => setCompactToast(false), 4000)
+      }
       const tool: ChatToolCall = evt.tool
       setRun(r => r ? { ...r, lastEventAt: now, currentTool: tool } : r)
       setMessages(prev => appendChunk(prev, { kind: 'tool', tool }))
@@ -1178,13 +1211,30 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setMessages(prev => finalizeStreaming(prev))
       // Spec-041 A2: drain queued message on bus-originated turn completion.
       drainQueue()
+      // Compaction resolves when run ends (covers edge-case where no text/tool arrived).
+      if (isCompactingRef.current) {
+        if (compactFallbackTimerRef.current !== null) { clearTimeout(compactFallbackTimerRef.current); compactFallbackTimerRef.current = null }
+        isCompactingRef.current = false
+        setIsCompacting(false)
+        setTimeout(() => setCompactToast(false), 4000)
+      }
 
     } else if (evt.kind === 'compact') {
       // Spec-039: native CLI auto-compact fired — session is kept, context is smaller.
-      // Show a brief non-intrusive toast and refresh the context token counter.
+      // Show a persistent live indicator for the duration of compaction (can be 30–60s),
+      // plus the bottom-right toast. The indicator clears when assistant output resumes.
       void (evt as ActivityEventCompact) // type assertion for exhaustiveness
       setCompactToast(true)
-      setTimeout(() => setCompactToast(false), 5000)
+      setIsCompacting(true)
+      isCompactingRef.current = true
+      // Fallback safety: force-clear after 120s to prevent a stuck ghost indicator.
+      if (compactFallbackTimerRef.current !== null) clearTimeout(compactFallbackTimerRef.current)
+      compactFallbackTimerRef.current = setTimeout(() => {
+        compactFallbackTimerRef.current = null
+        setIsCompacting(false)
+        isCompactingRef.current = false
+        setCompactToast(false)
+      }, 120_000)
     }
   })
 
@@ -1367,6 +1417,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             return
           }
 
+          // First assistant output (any kind) clears the live compaction indicator.
+          if (isCompactingRef.current && (evt.type === 'text_delta' || evt.type === 'text' || evt.type === 'tool')) {
+            if (compactFallbackTimerRef.current !== null) { clearTimeout(compactFallbackTimerRef.current); compactFallbackTimerRef.current = null }
+            isCompactingRef.current = false
+            setIsCompacting(false)
+            setTimeout(() => setCompactToast(false), 4000)
+          }
+
           setMessages(prev => {
             switch (evt.type) {
               case 'text_delta':
@@ -1418,6 +1476,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       onProjectsReload()
       // Spec-041 A2: drain via shared helper (also called from bus/poll paths).
       drainQueue()
+      // Ensure compaction indicator is cleared when the turn ends (covers error/abort paths).
+      if (isCompactingRef.current) {
+        if (compactFallbackTimerRef.current !== null) { clearTimeout(compactFallbackTimerRef.current); compactFallbackTimerRef.current = null }
+        isCompactingRef.current = false
+        setIsCompacting(false)
+        setTimeout(() => setCompactToast(false), 4000)
+      }
     }
   }, [input, projectId, streaming, onProjectsReload, attachments, thinkMode])
 
@@ -1614,7 +1679,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                     style={{
                       fontSize: 11, padding: '1px 4px', width: 90,
                       background: 'var(--bg, #111827)', color: 'var(--text, #f9fafb)',
-                      border: '1px solid var(--color-primary, #6366f1)', borderRadius: 3,
+                      border: '1px solid var(--accent)', borderRadius: 3,
                     }}
                     value={renameValue}
                     onChange={e => setRenameValue(e.target.value)}
@@ -1624,7 +1689,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   <button
                     type="submit"
                     style={{ fontSize: 10, padding: '1px 4px', cursor: 'pointer',
-                      background: 'var(--color-primary, #6366f1)', color: '#fff',
+                      background: 'var(--accent)', color: '#fff',
                       border: 'none', borderRadius: 3 }}
                   >{t['chat.tabs_rename_confirm']}</button>
                 </form>
@@ -1672,15 +1737,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             const wrapBtnStyle: React.CSSProperties = isProminent
               ? {
                   fontSize: 13, lineHeight: 1, padding: '2px 7px', cursor: rotating ? 'wait' : 'pointer',
-                  background: 'var(--bg-card)', border: `1px solid ${realTokens >= critAt ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)'}`,
+                  background: 'var(--bg-card)', border: `1px solid ${realTokens >= critAt ? 'var(--red)' : 'var(--yellow)'}`,
                   borderRadius: 4,
-                  color: realTokens >= critAt ? 'var(--color-red, #ef4444)' : 'var(--color-yellow, #eab308)',
+                  color: realTokens >= critAt ? 'var(--red)' : 'var(--yellow)',
                   fontWeight: 600,
                 }
               : {
                   fontSize: 13, lineHeight: 1, padding: '2px 7px', cursor: rotating ? 'wait' : 'pointer',
                   background: 'transparent', border: '1px solid var(--border)',
-                  borderRadius: 4, color: 'var(--color-muted, #9ca3af)',
+                  borderRadius: 4, color: 'var(--text2)',
                 }
             return (
               <button
@@ -1714,15 +1779,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             const warnAt = contextWindow * 0.75
             const critAt = contextWindow * 0.90
             const tokenColor =
-              tokens >= critAt ? 'var(--color-red, #ef4444)' :
-              tokens >= warnAt ? 'var(--color-yellow, #eab308)' :
-              'var(--color-muted, #9ca3af)'
+              tokens >= critAt ? 'var(--red)' :
+              tokens >= warnAt ? 'var(--yellow)' :
+              'var(--text2)'
 
             const fillFrac = Math.min(tokens / contextWindow, 1)
             const barColor =
-              fillFrac >= 0.95 ? 'var(--color-red, #ef4444)' :
-              fillFrac >= 0.75 ? 'var(--color-yellow, #eab308)' :
-              'var(--color-green, #22c55e)'
+              fillFrac >= 0.95 ? 'var(--red)' :
+              fillFrac >= 0.75 ? 'var(--yellow)' :
+              'var(--green)'
 
             const lastAssistantMetrics = [...messages].reverse().find(
               m => m.role === 'assistant' && m.metrics != null
@@ -1811,7 +1876,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 </span>
                 <span style={{ color: tokenColor, cursor: 'default' }} title={tokenTip}>
                   {real ? '' : '~'}{formatTokens(tokens)}
-                  <span style={{ color: 'var(--color-muted, #9ca3af)' }}> / {formatMax(contextWindow)}</span>
+                  <span style={{ color: 'var(--text2)' }}> / {formatMax(contextWindow)}</span>
                 </span>
                 {(lastTurnEndMs !== null || lastCacheHitPct != null || lastAssistantMetrics != null) && (
                   <CacheCountdownBadge
@@ -1928,7 +1993,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               {showColdDivider && msg.ts != null && prevMsg!.ts != null && (
                 <div style={{
                   display: 'flex', alignItems: 'center', margin: '8px 0', gap: 8,
-                  color: 'var(--color-muted, #9ca3af)', fontSize: 11,
+                  color: 'var(--text2)', fontSize: 11,
                 }}>
                   <div style={{ flex: 1, height: 1, background: 'var(--border, #374151)' }} />
                   <span>⚪ paused {fmtGap(msg.ts - prevMsg!.ts)} · cache cold</span>
@@ -1940,7 +2005,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 {msg.ts != null && (
                   <div style={{
                     textAlign: 'right', fontSize: 10,
-                    color: 'var(--color-muted, #9ca3af)',
+                    color: 'var(--text2)',
                     marginBottom: 2, userSelect: 'none',
                   }}>
                     {fmtHHMM(msg.ts)}
@@ -1996,9 +2061,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                       <div style={{
                         marginTop: 8, padding: '10px 14px',
                         background: 'rgba(239,68,68,0.08)',
-                        border: '1px solid var(--color-red, #ef4444)',
+                        border: '1px solid var(--red)',
                         borderRadius: 6, fontSize: 13,
-                        color: 'var(--color-red, #ef4444)',
+                        color: 'var(--red)',
                         display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
                       }}>
                         <span style={{ flex: 1, minWidth: 0 }}>
@@ -2009,9 +2074,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                             fontSize: 12, padding: '3px 10px',
                             cursor: rotating ? 'wait' : 'pointer',
                             background: 'var(--bg-card)',
-                            border: '1px solid var(--color-red, #ef4444)',
+                            border: '1px solid var(--red)',
                             borderRadius: 4,
-                            color: 'var(--color-red, #ef4444)',
+                            color: 'var(--red)',
                             fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0,
                           }}
                           disabled={rotating || streaming}
@@ -2045,7 +2110,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                       title="Facts from this turn's usage — cache-read is billed ~10%, fresh tokens at full price."
                       style={{
                         fontSize: 10, marginTop: 4,
-                        color: 'var(--color-muted, #9ca3af)',
+                        color: 'var(--text2)',
                         userSelect: 'none', whiteSpace: 'nowrap', overflow: 'hidden',
                         textOverflow: 'ellipsis',
                       }}
@@ -2113,7 +2178,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             padding: '4px 8px',
             borderTop: '1px solid var(--border, #374151)',
             fontSize: 11,
-            color: 'var(--color-muted, #9ca3af)',
+            color: 'var(--text2)',
             display: 'flex',
             flexDirection: 'column',
             gap: 2,
@@ -2131,7 +2196,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   {sa.description || sa.task_id}
                 </span>
                 {sa.last_tool_name && sa.status === 'running' && (
-                  <span style={{ color: 'var(--color-muted, #9ca3af)', fontStyle: 'italic' }}>
+                  <span style={{ color: 'var(--text2)', fontStyle: 'italic' }}>
                     ↳ [{sa.last_tool_name}]
                   </span>
                 )}
@@ -2148,6 +2213,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             queueLen={queueItems.length}
             onStop={stopStream}
           />
+        )}
+        {/* Live compaction indicator — shown while native auto-compact is running (can be 30–60s).
+            Non-blocking inline row using existing .chat-status-bar + .att-spinner classes. */}
+        {isCompacting && !run && (
+          <div className="chat-status-bar" style={{ margin: '0 0 4px 0' }}>
+            <span className="att-spinner" />
+            <span>{t['chat.compacting_inprogress']}</span>
+          </div>
         )}
         {showPrompts && (
           <PromptPicker
@@ -2181,8 +2254,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           if (warnDismissedAtTokens !== null && !isEscalated) return null
           const nK = Math.round(warnTokens / 1000)
           const bannerColor = isEscalated
-            ? 'var(--color-red, #ef4444)'
-            : 'var(--color-yellow, #eab308)'
+            ? 'var(--red)'
+            : 'var(--yellow)'
           const bannerBg = isEscalated
             ? 'rgba(239,68,68,0.08)'
             : 'rgba(234,179,8,0.08)'
@@ -2535,8 +2608,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         <div style={{
           position: 'fixed', bottom: 24, right: 24,
           padding: '10px 18px', background: 'var(--bg-card)',
-          border: '1px solid var(--border)', borderRadius: 8,
-          boxShadow: '0 4px 16px rgba(0,0,0,0.15)', fontSize: 13, zIndex: 9999,
+          border: '1px solid var(--border2)', borderRadius: 8,
+          fontSize: 13, zIndex: 9999,
         }}>
           {deferToast}
         </div>
@@ -2548,7 +2621,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         <Modal onClose={() => setResetModalOpen(false)}>
           <ModalHead title="New session" onClose={() => setResetModalOpen(false)} />
           <div className="run-modal-body">
-            <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--color-muted, #6b7280)', lineHeight: 1.5 }}>
+            <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--text2)', lineHeight: 1.5 }}>
               Choose how to start the next session:
             </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
@@ -2587,26 +2660,32 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         <div style={{
           position: 'fixed', bottom: deferToast ? 72 : 24, right: 24,
           padding: '10px 18px', background: 'var(--bg-card)',
-          border: '1px solid var(--border)', borderRadius: 8,
-          boxShadow: '0 4px 16px rgba(0,0,0,0.15)', fontSize: 13, zIndex: 9999,
+          border: '1px solid var(--border2)', borderRadius: 8,
+          fontSize: 13, zIndex: 9999,
         }}>
           ↺ {rotateToast}
         </div>
       )}
 
-      {/* Spec-039: Auto-compact toast — shown when native CLI compact fires (kind:"compact" bus event).
-          Non-intrusive fixed position; does not steal focus or block interaction. */}
+      {/* Spec-039: Auto-compact toast — one slot, two states:
+          - isCompacting=true  → in-progress: spinner + compacting text, neutral border
+          - isCompacting=false → done: ✦ + done text, green border (auto-dismisses after 4s) */}
       {compactToast && (
         <div style={{
           position: 'fixed',
           bottom: deferToast ? 120 : rotateToast ? 72 : 24,
           right: 24,
           padding: '10px 18px', background: 'var(--bg-card)',
-          border: '1px solid var(--color-green, #22c55e)', borderRadius: 8,
-          boxShadow: '0 4px 16px rgba(0,0,0,0.15)', fontSize: 13, zIndex: 9999,
-          color: 'var(--color-green, #22c55e)',
+          border: isCompacting ? '1px solid var(--border2)' : '1px solid var(--green)',
+          borderRadius: 8,
+          fontSize: 13, zIndex: 9999,
+          color: isCompacting ? 'var(--text2)' : 'var(--green)',
+          display: 'flex', alignItems: 'center', gap: 8,
         }}>
-          ✦ {t['chat.compact_toast']}
+          {isCompacting
+            ? <><span className="att-spinner" />{t['chat.compacting_inprogress']}</>
+            : <>✦ {t['chat.compact_toast']}</>
+          }
         </div>
       )}
     </div>

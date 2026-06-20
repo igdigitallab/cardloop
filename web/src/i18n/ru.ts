@@ -595,6 +595,8 @@ export const ru = {
   'chat.reset_failed': 'Сброс не удался: {reason}',
   // Auto-compact toast (Spec-039: native CLI compact fired)
   'chat.compact_toast': 'Контекст сжат · сессия сохранена',
+  // Live compaction in-progress indicator (shown while compact is running, before toast resolves)
+  'chat.compacting_inprogress': 'Сжатие контекста, чтобы освободить место… сессия сохранится',
   // Context warn banner — window-agnostic framing (no hardcoded ceiling)
   'chat.ctx_warn_approaching': '⚠ Контекст ~{nK}K — приближается к лимиту окна, скоро auto-compact.',
   'chat.ctx_warn_critical': '⚠ Контекст {nK}K — критически близко к лимиту контекста. Рекомендуется сбросить сессию.',
