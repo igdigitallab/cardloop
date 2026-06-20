@@ -38,7 +38,7 @@
 .timeline-empty-title {
   font-size: 15px;
   font-weight: 600;
-  color: var(--text1);
+  color: var(--text);
 }
 
 .timeline-empty-text {
@@ -62,23 +62,23 @@
   gap: 6px;
   padding: 4px 12px;
   font-size: 12.5px;
-  border-bottom: 1px solid var(--border-faint, color-mix(in srgb, var(--border) 50%, transparent));
+  border-bottom: 1px solid var(--border);
   transition: background 0.15s;
 }
 
 .timeline-row:hover {
-  background: var(--surface2, var(--bg2));
+  background: var(--bg2);
 }
 
 /* run_start / run_end get slightly more visual weight */
 .timeline-row--run_start,
 .timeline-row--run_end {
-  background: var(--surface1, var(--bg1));
+  background: var(--bg3);
   font-weight: 500;
 }
 
 .timeline-row--run_end.timeline-row--fail {
-  color: var(--red, #e55);
+  color: var(--red);
 }
 
 /* Icon column */
@@ -104,7 +104,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text1);
+  color: var(--text);
 }
 
 /* run_id badge */
@@ -114,7 +114,7 @@
   color: var(--text3);
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 0 4px;
   font-family: monospace;
 }
@@ -124,7 +124,7 @@
   flex-shrink: 0;
   font-size: 10px;
   font-weight: 600;
-  color: var(--green, #3c9);
+  color: var(--green);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   animation: tl-pulse 1.5s ease-in-out 3;

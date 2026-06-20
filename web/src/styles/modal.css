@@ -5,8 +5,7 @@
   left: 0; right: 0;
   background: var(--bg2);
   border: 1px solid var(--border2);
-  border-radius: var(--radius);
-  box-shadow: 0 4px 24px rgba(0,0,0,.35);
+  border-radius: var(--radius-lg);
   display: flex; flex-direction: column;
   max-height: 420px;
   z-index: 200;
@@ -21,7 +20,7 @@
 .prompt-picker-title { font-size: 13px; font-weight: 600; color: var(--text); }
 .prompt-picker-close {
   background: none; border: none; color: var(--text3);
-  font-size: 12px; cursor: pointer; padding: 2px 6px; border-radius: 4px;
+  font-size: 12px; cursor: pointer; padding: 2px 6px; border-radius: var(--radius-sm);
   transition: color var(--transition), background var(--transition);
 }
 .prompt-picker-close:hover { color: var(--text); background: var(--bg4); }
@@ -46,7 +45,7 @@
 .prompt-group-caret { font-size: 10px; flex-shrink: 0; }
 .prompt-group-name { flex: 1; }
 .prompt-group-count {
-  background: var(--bg4); color: var(--text3); border-radius: 10px;
+  background: var(--bg4); color: var(--text3); border-radius: var(--radius-pill);
   font-size: 10px; padding: 1px 6px; font-weight: 500;
 }
 .prompt-group-items { display: flex; flex-direction: column; gap: 3px; padding: 2px 0 4px 10px; }
@@ -66,7 +65,7 @@
 .prompt-edit-btn, .prompt-delete-btn {
   flex: 0 0 auto; background: none; border: none;
   color: var(--text3); font-size: 11px; cursor: pointer;
-  padding: 2px 5px; border-radius: 3px; opacity: 0;
+  padding: 2px 5px; border-radius: var(--radius-sm); opacity: 0;
   transition: opacity var(--transition), color var(--transition), background var(--transition);
   margin-top: 1px;
 }
@@ -130,13 +129,13 @@
     width: 100%;
     max-width: 100%;
     max-height: 90svh;
-    border-radius: var(--radius) var(--radius) 0 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     padding-bottom: env(safe-area-inset-bottom, 0);
   }
 
   /* test-output modal inside board cards */
   .test-output-modal {
-    border-radius: var(--radius) var(--radius) 0 0 !important;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
   }
 
   /* Reset confirm modal */
@@ -147,7 +146,7 @@
   .reset-confirm-modal {
     width: 100%;
     max-width: 100%;
-    border-radius: var(--radius) var(--radius) 0 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     padding-bottom: env(safe-area-inset-bottom, 0);
   }
 
@@ -158,7 +157,7 @@
     left: 0;
     right: 0;
     top: auto;
-    border-radius: var(--radius) var(--radius) 0 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     max-height: 70svh;
     padding-bottom: env(safe-area-inset-bottom, 0);
     z-index: 400;

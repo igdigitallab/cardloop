@@ -57,7 +57,7 @@
 }
 
 .file-tree-row.active {
-  background: var(--bg4);
+  background: var(--accent-subtle);
   color: var(--text);
 }
 
@@ -145,7 +145,7 @@
 .files-code-block {
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   padding: 14px 16px;
   font-family: var(--mono);
   font-size: 12px;
@@ -231,7 +231,7 @@
   color: var(--text2);
   padding: 1px 0;
 }
-.log-line:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+.log-line:hover { color: var(--text); background: var(--bg3); }
 .logs-no-output {
   color: var(--text3);
   font-size: 13px;

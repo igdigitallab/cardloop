@@ -393,9 +393,8 @@ export function SchedulesTab() {
           right: 24,
           padding: '10px 18px',
           background: 'var(--bg-card)',
-          border: '1px solid var(--border)',
+          border: '1px solid var(--border2)',
           borderRadius: 8,
-          boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
           fontSize: 13,
           zIndex: 9999,
         }}>

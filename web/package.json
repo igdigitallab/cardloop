@@ -11,6 +11,8 @@
     "format": "prettier --write src"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "^5.2.9",
+    "@fontsource-variable/geist-mono": "^5.2.8",
     "lucide-react": "^1.21.0",
     "qrcode.react": "^4.2.0",
     "react": "^18.3.1",

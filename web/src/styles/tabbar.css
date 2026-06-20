@@ -1,4 +1,4 @@
-/* ── Project Tab Bar (открытые проекты как вкладки) ─────────── */
+/* ── Project Tab Bar (open projects as browser-style tabs) ─────── */
 .project-tabbar {
   display: flex;
   align-items: stretch;
@@ -56,7 +56,7 @@
 
 .ptab-spacer { flex: 1; }
 
-/* Кнопка «+» в полосе вкладок — открывает новый свободный чат (как в браузерах) */
+/* "+" button in the tab strip — opens a new free chat (browser-style) */
 .ptab-new {
   background: transparent;
   border: none;
@@ -77,7 +77,7 @@
   color: var(--accent-h);
 }
 
-/* Кнопка глобального файлового браузера (📁) в правой части таббара */
+/* Global file browser button in the right side of the tabbar */
 .ptab-folder-btn {
   background: transparent; border: none; cursor: pointer;
   color: var(--text3); font-size: 16px; padding: 0 10px;
@@ -88,13 +88,13 @@
 .ptab-folder-btn:hover { color: var(--accent-h); background: var(--bg3); }
 .ptab-folder-btn.active { color: var(--accent-h); }
 
-/* Специальная вкладка файлового браузера */
+/* Special tab for the global file browser */
 .ptab-global-files { font-style: normal; }
 
-/* Метка корня в файловом браузере */
+/* Root hint label in the file browser */
 .files-root-hint { color: var(--text3); font-size: 11px; font-family: var(--mono); margin-left: 4px; }
 
-/* Usage Badge — в правом углу полосы вкладок */
+/* Usage Badge — right corner of the tab strip */
 .usage-badge-wrap {
   position: relative;
   display: flex;
@@ -111,7 +111,7 @@
   font-size: 11px;
   font-family: var(--mono);
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -121,9 +121,9 @@
   transition: background var(--transition), color var(--transition), border-color var(--transition);
 }
 .usage-badge:hover { background: var(--bg3); color: var(--text); }
-.usage-badge.usage-green  { color: var(--green);  border-color: rgba(52,199,123,0.4); }
-.usage-badge.usage-yellow { color: var(--yellow); border-color: rgba(245,166,35,0.4); }
-.usage-badge.usage-red    { color: var(--red);    border-color: rgba(245,97,74,0.4); }
+.usage-badge.usage-green  { color: var(--green);  border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.usage-badge.usage-yellow { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 40%, transparent); }
+.usage-badge.usage-red    { color: var(--red);    border-color: color-mix(in srgb, var(--red) 40%, transparent); }
 .usage-badge.usage-dim    { color: var(--text3); }
 .usage-icon { font-size: 12px; }
 .usage-sep { opacity: 0.4; }
@@ -133,12 +133,12 @@
   right: 8px;
   top: calc(100% + 4px);
   background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-lg);
   padding: 6px;
   min-width: 240px;
   z-index: 100;
-  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  box-shadow: none;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -151,7 +151,7 @@
   align-items: center;
   font-size: 11px;
   padding: 4px 8px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 .usage-row.usage-green  { color: var(--green); }
 .usage-row.usage-yellow { color: var(--yellow); }
@@ -183,6 +183,7 @@
   background: var(--bg);
   color: var(--text);
   font-weight: 500;
+  /* Achromatic underline active indicator — no heavy fill */
   box-shadow: inset 0 -2px 0 var(--accent);
 }
 
@@ -194,12 +195,12 @@
 
 .ptab-unread {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   font-size: 9px;
   font-weight: 600;
   line-height: 1;
   padding: 2px 5px;
-  border-radius: 8px;
+  border-radius: var(--radius-pill);
   min-width: 14px;
   text-align: center;
 }
@@ -211,7 +212,6 @@
   height: 7px;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 5px rgba(52, 199, 123, 0.7);
   flex-shrink: 0;
 }
 
@@ -222,7 +222,6 @@
   height: 7px;
   border-radius: 50%;
   background: var(--yellow);
-  box-shadow: 0 0 4px rgba(245, 166, 35, 0.6);
   flex-shrink: 0;
   animation: ptab-pulse 1.2s ease-in-out infinite;
 }
@@ -239,7 +238,6 @@
   height: 7px;
   border-radius: 50%;
   background: var(--yellow);
-  box-shadow: 0 0 4px rgba(245, 166, 35, 0.6);
   flex-shrink: 0;
   animation: ptab-pulse 1.2s ease-in-out infinite;
 }
@@ -251,7 +249,7 @@
   font-size: 12px;
   cursor: pointer;
   padding: 2px 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   line-height: 1;
   opacity: 0;
   transition: background var(--transition), color var(--transition), opacity var(--transition);
@@ -261,17 +259,17 @@
 .ptab.active:hover .ptab-close { opacity: 1; }
 .ptab-close:hover { background: var(--bg4); color: var(--red); }
 
-/* Свободные чаты — лёгкий пунктир в подсветке активного */
+/* Free chats — lighter underline on the active indicator */
 .ptab.ptab-free.active { box-shadow: inset 0 -2px 0 var(--accent-h); }
 
-/* Inline-input для переименования вкладки */
+/* Inline rename input for tab labels */
 .ptab-rename-input {
   background: var(--bg);
   border: 1px solid var(--accent);
   color: var(--text);
   font-size: 13px;
   padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   outline: none;
   min-width: 100px;
   max-width: 200px;
@@ -295,7 +293,7 @@
   height: 36px;
   background: var(--bg4);
   border: 1px solid var(--border2);
-  border-radius: 8px;
+  border-radius: var(--radius);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -327,7 +325,7 @@
   color: var(--text2);
   background: var(--bg3);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px 7px;
 }
 
@@ -353,19 +351,19 @@
 .git-dirty { color: var(--yellow); font-size: 11px; }
 .git-unpushed { color: var(--text2); font-size: 11px; }
 
-/* Иконка видимости GitHub-репо: 🔒 приватный / 🌐 открытый (только иконка, текст в title) */
+/* GitHub repo visibility icon: lock = private / globe = public (icon only, text in title) */
 .git-vis { font-size: 12px; line-height: 1; cursor: default; opacity: 0.85; }
 .git-vis:hover { opacity: 1; }
 
-/* Большая яркая точка статуса git перед веткой */
+/* Prominent git sync status dot before branch name */
 .git-sync-dot {
   width: 9px;
   height: 9px;
   border-radius: 50%;
   flex-shrink: 0;
 }
-.git-sync-dot.green  { background: var(--green);  box-shadow: 0 0 6px rgba(52,199,123,0.7); }
-.git-sync-dot.yellow { background: var(--yellow); box-shadow: 0 0 6px rgba(245,166,35,0.7); }
+.git-sync-dot.green  { background: var(--green); }
+.git-sync-dot.yellow { background: var(--yellow); }
 .git-sync-dot.gray   { background: var(--text3); }
 
 .git-sync-btn {
@@ -375,14 +373,14 @@
   font-size: 11px;
   font-weight: 600;
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   margin-left: 6px;
   transition: background var(--transition), border-color var(--transition), color var(--transition);
 }
 .git-sync-btn:hover:not(:disabled) {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   border-color: var(--accent);
 }
 .git-sync-btn:disabled { opacity: 0.6; cursor: wait; }
@@ -437,7 +435,7 @@
   background: var(--bg4);
   border: 1px solid var(--border2);
   color: var(--text3);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 1px 5px;
 }
 
@@ -455,7 +453,7 @@
   cursor: pointer;
   font-size: 13px;
   padding: 2px 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   opacity: 0.5;
   line-height: 1;
   transition: opacity var(--transition);
@@ -483,7 +481,7 @@
   transition: background var(--transition), color var(--transition);
   flex-shrink: 0;
 }
-.rename-confirm-btn:hover { background: var(--green); color: #fff; border-color: var(--green); }
+.rename-confirm-btn:hover { background: var(--green); color: var(--accent-fg); border-color: var(--green); }
 .rename-cancel-btn:hover  { background: var(--bg4);  color: var(--red); border-color: var(--red); }
 
 /* ══════════════════════════════════════════════════════════════
@@ -672,9 +670,9 @@
     top: calc(100% + 2px);
     left: 0;
     background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    border: 1px solid var(--border2);
+    border-radius: var(--radius-lg);
+    box-shadow: none;
     z-index: 200;
     min-width: 200px;
     max-width: 280px;
@@ -709,7 +707,7 @@
   .ptab-menu-item.active {
     color: var(--text);
     font-weight: 600;
-    background: var(--bg3);
+    background: var(--accent-subtle);
   }
 
   .ptab-menu-name {
@@ -727,7 +725,6 @@
   }
   .ptab-menu-dot-green {
     background: var(--green);
-    box-shadow: 0 0 5px rgba(52,199,123,0.7);
   }
 
   .ptab-menu-badge {
@@ -744,7 +741,7 @@
   gap: 5px;
   font-size: 11px;
   padding: 2px 7px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   border: 1px solid var(--border2);
   background: var(--bg3);
@@ -752,6 +749,6 @@
   transition: background var(--transition), color var(--transition);
 }
 .health-badge:hover { background: var(--bg4); color: var(--text); }
-.health-badge.health-badge-green  { color: var(--green);  border-color: rgba(52,199,123,0.35); }
-.health-badge.health-badge-yellow { color: var(--yellow); border-color: rgba(245,166,35,0.35); }
-.health-badge.health-badge-red    { color: var(--yellow); border-color: rgba(245,166,35,0.35); }
+.health-badge.health-badge-green  { color: var(--green);  border-color: color-mix(in srgb, var(--green) 35%, transparent); }
+.health-badge.health-badge-yellow { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 35%, transparent); }
+.health-badge.health-badge-red    { color: var(--red);    border-color: color-mix(in srgb, var(--red) 35%, transparent); }

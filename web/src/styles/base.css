@@ -3,68 +3,96 @@
 
 /* ── Dark theme (default) ──────────────────────────────────── */
 :root {
-  --bg:        #0d0d0f;
-  --bg2:       #141416;
-  --bg3:       #1c1c1f;
-  --bg4:       #242428;
-  --border:    #2a2a2e;
-  --border2:   #38383e;
-  --text:      #e8e8ed;
-  --text2:     #9898a6;
-  --text3:     #5c5c6e;
-  --accent:    #6b68f5;
-  --accent-h:  #8582ff;
-  --green:     #34c77b;
-  --yellow:    #f5a623;
-  --red:       #f5614a;
-  --mono:      'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
-  --sans:      -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  --radius:    8px;
-  --radius-sm: 4px;
+  /* Background scale — carbon */
+  --bg:        #0a0a0a;
+  --bg2:       #141414;
+  --bg3:       #1c1c1c;
+  --bg4:       #242424;
+
+  /* Borders */
+  --border:    #262626;
+  --border2:   #333333;
+
+  /* Text */
+  --text:      #fafafa;
+  --text2:     #a1a1a1;
+  --text3:     #6b6b6b;
+
+  /* Accent — achromatic (white on dark, shadcn dark pattern) */
+  --accent:    #fafafa;
+  --accent-h:  #e5e5e5;
+  --accent-fg: #0a0a0a;       /* text on top of --accent fill */
+
+  /* Semantic colors — restrained, semantic-only */
+  --green:     #22c55e;
+  --yellow:    #eab308;
+  --red:       #ef4444;
+
+  /* Accent tint */
+  --accent-subtle: rgba(250,250,250,0.07);
+
+  /* Typography */
+  --sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Geist Mono Variable', 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Radius scale */
+  --radius-sm:   4px;
+  --radius:      10px;
+  --radius-lg:   14px;
+  --radius-pill: 26px;
+
+  /* Shadows — flat/border-first; --ring for focus only */
+  --shadow: none;
+  --ring:   0 0 0 2px rgba(250,250,250,0.25);
+
+  /* Misc */
   --sidebar-w: 240px;
   --transition: 0.15s ease;
-  --text-muted: var(--text2);
-  --text-dim: var(--text3);
-  --text1: var(--text);
-  --bg-card: var(--bg2);
-  --bg-secondary: var(--bg2);
-  --bg-hover: var(--bg3);
-  --bg-elev: var(--bg3);
-  --bg1: var(--bg);
-  --surface1: var(--bg);
-  --surface2: var(--bg2);
-  --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
-  --accent-subtle: rgba(107,104,245,0.12);
+
+  /* Semantic aliases — same var names, now resolving against new base */
+  --text-muted:     var(--text2);
+  --text-dim:       var(--text3);
+  --text1:          var(--text);
+  --bg-card:        var(--bg2);
+  --bg-secondary:   var(--bg2);
+  --bg-hover:       var(--bg3);
+  --bg-elev:        var(--bg3);
+  --bg1:            var(--bg);
+  --surface1:       var(--bg);
+  --surface2:       var(--bg2);
+  --border-faint:   color-mix(in srgb, var(--border) 50%, transparent);
 }
 
 /* ── Dark theme: explicit data-theme="dark" override ───────── */
 :root[data-theme="dark"] {
-  --bg:        #0d0d0f;
-  --bg2:       #141416;
-  --bg3:       #1c1c1f;
-  --bg4:       #242428;
-  --border:    #2a2a2e;
-  --border2:   #38383e;
-  --text:      #e8e8ed;
-  --text2:     #9898a6;
-  --text3:     #5c5c6e;
-  --accent:    #6b68f5;
-  --accent-h:  #8582ff;
-  --green:     #34c77b;
-  --yellow:    #f5a623;
-  --red:       #f5614a;
-  --text-muted: var(--text2);
-  --text-dim: var(--text3);
-  --text1: var(--text);
-  --bg-card: var(--bg2);
+  --bg:        #0a0a0a;
+  --bg2:       #141414;
+  --bg3:       #1c1c1c;
+  --bg4:       #242424;
+  --border:    #262626;
+  --border2:   #333333;
+  --text:      #fafafa;
+  --text2:     #a1a1a1;
+  --text3:     #6b6b6b;
+  --accent:    #fafafa;
+  --accent-h:  #e5e5e5;
+  --accent-fg: #0a0a0a;
+  --green:     #22c55e;
+  --yellow:    #eab308;
+  --red:       #ef4444;
+  --accent-subtle: rgba(250,250,250,0.07);
+  --ring:      0 0 0 2px rgba(250,250,250,0.25);
+  --text-muted:   var(--text2);
+  --text-dim:     var(--text3);
+  --text1:        var(--text);
+  --bg-card:      var(--bg2);
   --bg-secondary: var(--bg2);
-  --bg-hover: var(--bg3);
-  --bg-elev: var(--bg3);
-  --bg1: var(--bg);
-  --surface1: var(--bg);
-  --surface2: var(--bg2);
+  --bg-hover:     var(--bg3);
+  --bg-elev:      var(--bg3);
+  --bg1:          var(--bg);
+  --surface1:     var(--bg);
+  --surface2:     var(--bg2);
   --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
-  --accent-subtle: rgba(107,104,245,0.12);
 }
 
 /* ── Light theme vars (shared values) ──────────────────────── */
@@ -73,64 +101,68 @@
 /* Explicit: data-theme="light" */
 :root[data-theme="light"] {
   --bg:        #ffffff;
-  --bg2:       #f5f5f7;
-  --bg3:       #e8e8ec;
-  --bg4:       #d8d8de;
-  --border:    #c4c4c8;
-  --border2:   #a0a0a8;
+  --bg2:       #fafafa;
+  --bg3:       #f2f2f2;
+  --bg4:       #ececec;
+  --border:    #e5e5e5;
+  --border2:   #d4d4d4;
   --text:      #0a0a0a;
-  --text2:     #2c2c2e;
-  --text3:     #4a4a4c;
-  --accent:    #4340d4;
-  --accent-h:  #3330b8;
-  --green:     #1a7a47;
-  --yellow:    #a05e00;
-  --red:       #b52a1a;
+  --text2:     #737373;
+  --text3:     #a1a1a1;
+  --accent:    #0a0a0a;        /* achromatic — primary action is black in light */
+  --accent-h:  #262626;
+  --accent-fg: #ffffff;        /* text on top of --accent fill */
+  --green:     #16a34a;
+  --yellow:    #ca8a04;
+  --red:       #dc2626;
+  --accent-subtle: rgba(10,10,10,0.05);
   color-scheme: light;
-  --text-muted: var(--text2);
-  --text-dim: var(--text3);
-  --text1: var(--text);
-  --bg-card: var(--bg2);
+  --ring:      0 0 0 2px rgba(10,10,10,0.15);
+  --text-muted:   var(--text2);
+  --text-dim:     var(--text3);
+  --text1:        var(--text);
+  --bg-card:      var(--bg2);
   --bg-secondary: var(--bg2);
-  --bg-hover: var(--bg3);
-  --bg-elev: var(--bg3);
-  --bg1: var(--bg);
-  --surface1: var(--bg);
-  --surface2: var(--bg2);
+  --bg-hover:     var(--bg3);
+  --bg-elev:      var(--bg3);
+  --bg1:          var(--bg);
+  --surface1:     var(--bg);
+  --surface2:     var(--bg2);
   --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
-  --accent-subtle: rgba(107,104,245,0.12);
 }
 
 /* Auto: OS preference, only when no explicit data-theme is set */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
     --bg:        #ffffff;
-    --bg2:       #f5f5f7;
-    --bg3:       #e8e8ec;
-    --bg4:       #d8d8de;
-    --border:    #c4c4c8;
-    --border2:   #a0a0a8;
+    --bg2:       #fafafa;
+    --bg3:       #f2f2f2;
+    --bg4:       #ececec;
+    --border:    #e5e5e5;
+    --border2:   #d4d4d4;
     --text:      #0a0a0a;
-    --text2:     #2c2c2e;
-    --text3:     #4a4a4c;
-    --accent:    #4340d4;
-    --accent-h:  #3330b8;
-    --green:     #1a7a47;
-    --yellow:    #a05e00;
-    --red:       #b52a1a;
+    --text2:     #737373;
+    --text3:     #a1a1a1;
+    --accent:    #0a0a0a;
+    --accent-h:  #262626;
+    --accent-fg: #ffffff;
+    --green:     #16a34a;
+    --yellow:    #ca8a04;
+    --red:       #dc2626;
+    --accent-subtle: rgba(10,10,10,0.05);
     color-scheme: light;
-    --text-muted: var(--text2);
-    --text-dim: var(--text3);
-    --text1: var(--text);
-    --bg-card: var(--bg2);
+    --ring:      0 0 0 2px rgba(10,10,10,0.15);
+    --text-muted:   var(--text2);
+    --text-dim:     var(--text3);
+    --text1:        var(--text);
+    --bg-card:      var(--bg2);
     --bg-secondary: var(--bg2);
-    --bg-hover: var(--bg3);
-    --bg-elev: var(--bg3);
-    --bg1: var(--bg);
-    --surface1: var(--bg);
-    --surface2: var(--bg2);
+    --bg-hover:     var(--bg3);
+    --bg-elev:      var(--bg3);
+    --bg1:          var(--bg);
+    --surface1:     var(--bg);
+    --surface2:     var(--bg2);
     --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
-    --accent-subtle: rgba(107,104,245,0.12);
   }
 }
 
@@ -181,8 +213,8 @@ body {
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  background: rgba(245, 97, 74, 0.08);
-  border: 1px solid rgba(245, 97, 74, 0.25);
+  background: rgba(239,68,68,0.08);
+  border: 1px solid rgba(239,68,68,0.25);
   border-radius: var(--radius-sm);
   color: var(--red);
   font-size: 13px;
@@ -223,7 +255,7 @@ body {
 .error-boundary-msg { font-size: 15px; color: var(--text); }
 .error-boundary-detail {
   font-size: 11px; color: var(--text-dim); background: var(--bg2);
-  border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;
   max-width: 500px; overflow-x: auto; white-space: pre-wrap; word-break: break-all;
 }
 
@@ -234,14 +266,14 @@ body {
 }
 .toast {
   display: flex; align-items: flex-start; gap: 10px;
-  padding: 10px 14px; border-radius: 6px;
-  background: var(--bg3); border: 1px solid var(--border);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  padding: 10px 14px; border-radius: var(--radius);
+  background: var(--bg3); border: 1px solid var(--border2);
+  /* flat — no box-shadow */
   font-size: 13px; animation: toast-in 0.2s ease;
 }
 @keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
-.toast-error  { border-color: var(--red,#e55); }
-.toast-success{ border-color: var(--green,#4caf50); }
+.toast-error  { border-color: var(--red); }
+.toast-success{ border-color: var(--green); }
 .toast-info   { border-color: var(--accent); }
 .toast-msg { flex: 1; line-height: 1.4; color: var(--text); }
 .toast-close {
@@ -253,11 +285,11 @@ body {
 
 /* ── btn-danger ──────────────────────────────────────────────────────── */
 .btn-danger {
-  padding: 6px 14px; border-radius: 5px; border: 1px solid var(--red,#e55);
-  background: rgba(220,60,60,0.15); color: var(--red,#e55);
-  font-size: 13px; cursor: pointer; transition: background 0.15s;
+  padding: 6px 14px; border-radius: var(--radius); border: 1px solid var(--red);
+  background: transparent; color: var(--red);
+  font-size: 13px; font-family: var(--sans); cursor: pointer; transition: background var(--transition);
 }
-.btn-danger:hover { background: rgba(220,60,60,0.3); }
+.btn-danger:hover { background: rgba(239,68,68,0.1); }
 
 /* ── ThemeToggle ─────────────────────────────────────────────────────── */
 /* Inline in sidebar footer, touch-friendly (≥44px tap target on coarse) */
@@ -266,8 +298,8 @@ body {
   align-items: center;
   gap: 2px;
   background: var(--bg3);
-  border: 1px solid var(--border2);
-  border-radius: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
   padding: 3px;
 }
 
@@ -279,11 +311,12 @@ body {
   height: 30px;
   padding: 0 8px;
   border: none;
-  border-radius: 16px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--text3);
   font-size: 11px;
   font-weight: 500;
+  font-family: var(--sans);
   cursor: pointer;
   transition: background var(--transition), color var(--transition);
   white-space: nowrap;
@@ -308,11 +341,7 @@ body {
 
 .theme-toggle-btn.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
 }
 
-/* Ensure contrast in light mode — accent is dark enough but let's override text */
-:root[data-theme="light"] .theme-toggle-btn.active,
-:root:not([data-theme]) .theme-toggle-btn.active {
-  color: #ffffff;
-}
+/* Light mode contrast overrides are now handled by --accent-fg token */

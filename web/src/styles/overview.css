@@ -9,7 +9,7 @@
 .info-card {
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: 16px;
 }
 
@@ -37,7 +37,7 @@
 .git-card {
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: 16px;
 }
 
@@ -88,23 +88,23 @@
 .markdown-wrap p { margin-bottom: 0.8em; color: var(--text2); }
 .markdown-wrap p:first-child { margin-top: 0; }
 
-.markdown-wrap a { color: var(--accent-h); text-decoration: none; }
-.markdown-wrap a:hover { text-decoration: underline; }
+.markdown-wrap a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.markdown-wrap a:hover { color: var(--accent-h); }
 
 .markdown-wrap code {
   font-family: var(--mono);
   font-size: 12px;
   background: var(--bg3);
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 1px 5px;
-  color: var(--accent-h);
+  color: var(--text);
 }
 
 .markdown-wrap pre {
-  background: var(--bg2);
+  background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   padding: 14px 16px;
   overflow-x: auto;
   margin-bottom: 1em;
@@ -127,11 +127,11 @@
 .markdown-wrap li { margin-bottom: 3px; }
 
 .markdown-wrap blockquote {
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid var(--border2);
   padding: 6px 14px;
   margin: 0 0 0.8em;
   background: var(--bg2);
-  border-radius: 0 4px 4px 0;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   color: var(--text2);
 }
 
@@ -248,7 +248,7 @@
   position: absolute;
   top: 6px; right: 10px;
   width: 28px; height: 28px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border2);
   background: var(--bg2);
   color: var(--text3);
@@ -292,7 +292,7 @@
   resize: vertical;
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 12px;
   color: var(--text);
   font-family: var(--mono);
@@ -324,14 +324,14 @@
   padding: 10px 12px;
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .memory-empty code {
   font-family: var(--mono);
   font-size: 11.5px;
   background: var(--bg3);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 
 /* ── Memory CRUD: action buttons in sidebar ────────────────────── */
@@ -350,13 +350,13 @@
   cursor: pointer;
   color: var(--text3);
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   line-height: 1;
   transition: background var(--transition), color var(--transition);
 }
 .memory-action-btn:hover { background: var(--bg4); color: var(--text2); }
-.memory-action-btn--danger:hover { background: rgba(220,50,50,0.15); color: #e55; }
+.memory-action-btn--danger:hover { background: rgba(220,50,50,0.15); color: var(--red); }
 
 /* Memory edit modal — wider than default */
 .memory-edit-modal { min-width: min(600px, 90vw); }
@@ -385,9 +385,9 @@
 .test-output {
   max-height: 360px;
   overflow: auto;
-  background: var(--bg2);
+  background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 10px 12px;
   font-family: var(--mono);
   font-size: 11.5px;

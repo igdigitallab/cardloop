@@ -86,7 +86,7 @@
   padding: 3px 9px;
   white-space: nowrap;
 }
-.split-close-btn:hover { background: rgba(245,97,74,0.1); color: var(--red); border-color: var(--red); }
+.split-close-btn:hover { background: color-mix(in srgb, var(--red) 10%, transparent); color: var(--red); border-color: var(--red); }
 
 /* ── Main Content ──────────────────────────────────────────── */
 .main-content {
@@ -274,7 +274,8 @@
   .sidebar.drawer-open,
   .sidebar.sidebar-collapsed-mode.drawer-open {
     transform: translateX(0);
-    box-shadow: 4px 0 32px rgba(0, 0, 0, 0.6);
+    box-shadow: none;
+    border-right: 1px solid var(--border);
   }
 
   /* Main area takes full width (drawer overlays it) */

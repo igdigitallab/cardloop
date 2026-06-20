@@ -25,7 +25,7 @@
   width: 26px;
   height: 26px;
   background: var(--accent);
-  border-radius: 6px;
+  border-radius: var(--radius);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -40,7 +40,7 @@
   flex: 1;
 }
 
-/* Кнопка свернуть/развернуть сайдбар */
+/* Sidebar collapse/expand toggle button */
 .sidebar-toggle-btn {
   background: transparent;
   border: none;
@@ -49,7 +49,7 @@
   font-size: 14px;
   width: 22px;
   height: 22px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -64,7 +64,7 @@
   font-size: 16px;
 }
 
-/* Свёрнутый сайдбар — узкая полоса с иконками проектов */
+/* Collapsed sidebar — narrow icon strip */
 .sidebar.sidebar-collapsed-mode {
   width: 56px;
   min-width: 56px;
@@ -84,7 +84,7 @@
   position: relative;
   width: 44px;
   height: 44px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--bg3);
   border: 1px solid transparent;
   color: var(--text);
@@ -96,7 +96,7 @@
 }
 .project-icon-btn:hover { background: var(--bg4); }
 .project-icon-btn.active {
-  background: var(--bg4);
+  background: var(--accent-subtle);
   border-color: var(--accent);
 }
 
@@ -114,7 +114,7 @@
   height: 8px;
   border-radius: 50%;
   background: var(--accent-h);
-  box-shadow: 0 0 6px rgba(133, 130, 255, 0.7);
+  box-shadow: none;
 }
 
 /* Reply-ready dot (collapsed sidebar): agent finished while tab was not active */
@@ -126,7 +126,6 @@
   height: 7px;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 5px rgba(52, 199, 123, 0.7);
 }
 
 .search-input {
@@ -144,7 +143,7 @@
   background-position: 9px center;
 }
 
-.search-input:focus { border-color: var(--accent); }
+.search-input:focus { border-color: var(--accent); box-shadow: var(--ring); }
 .search-input::placeholder { color: var(--text3); }
 
 .sidebar-section-label {
@@ -183,7 +182,7 @@
   background: var(--bg3);
   color: var(--text2);
   border: 1px dashed var(--border2);
-  border-radius: 8px;
+  border-radius: var(--radius);
   font-size: 18px;
   line-height: 1;
   cursor: pointer;
@@ -213,23 +212,27 @@
   /* Reduced from 7px to 5px vertical padding to shorten card height.
      Content (name, dot, badges) is single-line so nothing is clipped. */
   padding: 5px 8px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   cursor: pointer;
   transition: background var(--transition);
   user-select: none;
 }
 
 .project-item:hover { background: var(--bg3); }
-.project-item.active { background: var(--bg4); }
+.project-item.active {
+  background: var(--accent-subtle);
+  border-left: 2px solid var(--accent);
+  padding-left: 6px; /* compensate for border to avoid layout shift */
+}
 .project-item.has-unread .project-name { color: var(--accent-h); font-weight: 500; }
 
-/* Свободные чаты — тот же project-item, но компактнее + крестик удаления */
+/* Free chats — same project-item, more compact + delete button */
 .project-item-free { padding-right: 4px; }
 .project-item-free .free-icon { font-size: 12px; flex-shrink: 0; }
 .free-delete-btn {
   background: transparent; border: none; color: var(--text3);
   font-size: 11px; cursor: pointer; padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   opacity: 0; transition: opacity var(--transition), color var(--transition), background var(--transition);
 }
 .project-item-free:hover .free-delete-btn { opacity: 1; }
@@ -263,13 +266,13 @@
 
 .incidents-badge {
   margin-left: auto;
-  background: var(--red, #dc2626);
-  color: #fff;
+  background: var(--red);
+  color: var(--accent-fg);
   font-size: 10px;
   font-weight: 600;
   line-height: 1;
   padding: 3px 6px;
-  border-radius: 9px;
+  border-radius: var(--radius-pill);
   min-width: 18px;
   text-align: center;
   flex-shrink: 0;
@@ -277,8 +280,8 @@
   animation: incident-pulse 2s ease-in-out infinite;
 }
 @keyframes incident-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.5); }
-  50%      { box-shadow: 0 0 0 4px rgba(220,38,38,0); }
+  0%, 100% { box-shadow: none; border-color: var(--red); }
+  50%      { box-shadow: 0 0 0 3px rgba(220,38,38,0.15); }
 }
 .incidents-dot-collapsed {
   position: absolute;
@@ -291,12 +294,12 @@
 .unread-badge {
   margin-left: auto;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   font-size: 10px;
   font-weight: 600;
   line-height: 1;
   padding: 3px 6px;
-  border-radius: 9px;
+  border-radius: var(--radius-pill);
   min-width: 18px;
   text-align: center;
   flex-shrink: 0;
@@ -309,7 +312,6 @@
   height: 8px;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 5px rgba(52, 199, 123, 0.7);
   flex-shrink: 0;
   margin-left: auto;
 }
@@ -321,8 +323,8 @@
   flex-shrink: 0;
 }
 
-.health-dot.green  { background: var(--green); box-shadow: 0 0 5px rgba(52,199,123,0.5); }
-.health-dot.yellow { background: var(--yellow); box-shadow: 0 0 5px rgba(245,166,35,0.5); }
+.health-dot.green  { background: var(--green); }
+.health-dot.yellow { background: var(--yellow); }
 .health-dot.gray   { background: var(--text3); }
 
 .project-name {
@@ -485,7 +487,7 @@
   font-size: 10px;
   color: var(--text3);
   background: var(--bg3);
-  border-radius: 9px;
+  border-radius: var(--radius-pill);
   padding: 1px 6px;
   min-width: 18px;
   text-align: center;
@@ -511,7 +513,7 @@
 
 /* Group drag states */
 .sidebar-group.group-drag-over .sidebar-group-header {
-  background: rgba(107, 104, 245, 0.15);
+  background: var(--accent-subtle);
   border-radius: var(--radius-sm);
 }
 .sidebar-group-drop-hint {
@@ -533,7 +535,7 @@
   flex: 1;
   background: var(--bg4);
   border: 1px solid var(--accent);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--text);
   font-size: 11px;
   font-weight: 600;
@@ -559,7 +561,7 @@
 .sidebar-restore-btn {
   background: transparent;
   border: 1px solid var(--border2);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--text2);
   font-size: 10px;
   padding: 2px 6px;
@@ -570,14 +572,14 @@
 .sidebar-delete-btn {
   background: transparent;
   border: 1px solid var(--border2);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--text3);
   font-size: 10px;
   padding: 2px 6px;
   cursor: pointer;
   transition: background var(--transition), color var(--transition);
 }
-.sidebar-delete-btn:hover { background: rgba(245,97,74,0.1); color: var(--red); border-color: var(--red); }
+.sidebar-delete-btn:hover { background: color-mix(in srgb, var(--red) 10%, transparent); color: var(--red); border-color: var(--red); }
 
 /* Trash section */
 .sidebar-trash-section {}
@@ -606,7 +608,7 @@
 }
 .sidebar-manage-groups-btn:hover { background: var(--bg3); color: var(--text2); border-color: var(--text3); }
 
-/* New group button — sits next to ＋ New project */
+/* New group button — sits next to + New project */
 .new-group-btn {
   margin: 0 0 0 4px;
   padding: 8px 10px;
@@ -643,8 +645,8 @@
   z-index: 9999;
   background: var(--bg3);
   border: 1px solid var(--border2);
-  border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
   min-width: 168px;
   padding: 4px 0;
   user-select: none;
@@ -663,7 +665,7 @@
 }
 .ctx-menu-item:hover { background: var(--bg4); }
 .ctx-menu-item.danger { color: var(--red); }
-.ctx-menu-item.danger:hover { background: rgba(245,97,74,0.08); }
+.ctx-menu-item.danger:hover { background: color-mix(in srgb, var(--red) 8%, transparent); }
 .ctx-menu-item.disabled { opacity: 0.45; pointer-events: none; }
 .ctx-menu-separator {
   height: 1px;
@@ -682,8 +684,8 @@
   top: -4px;
   background: var(--bg3);
   border: 1px solid var(--border2);
-  border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
   min-width: 150px;
   padding: 4px 0;
   z-index: 10000;
@@ -701,7 +703,7 @@
   transition: background var(--transition);
 }
 .sidebar-ungrouped-drop-zone.drop-active {
-  background: rgba(107, 104, 245, 0.1);
+  background: var(--accent-subtle);
   min-height: 32px;
 }
 
@@ -734,7 +736,7 @@
 .fav-star-btn.fav-star-active {
   visibility: visible;
   opacity: 1;
-  color: #f5a623;
+  color: #f5a623; /* intentional amber/gold — semantic star color, not accent */
 }
 .project-item:hover .fav-star-btn {
   visibility: visible;
