@@ -235,15 +235,6 @@ export interface ProjectLogs {
   cmd?: string | null
 }
 
-// ─── Session Context (Feature A) ──────────────────────────────────────────
-
-export interface SessionContext {
-  read: string[]
-  edited: string[]
-  commands: string[]
-  session_id: string | null
-}
-
 // ─── Project Memory (Feature B) ───────────────────────────────────────────
 
 export interface MemoryFile {

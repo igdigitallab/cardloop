@@ -729,24 +729,16 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
         />
       )}
 
-      {/* RIGHT: permanent chat panel */}
+      {/* RIGHT: permanent chat panel — collapse button is now inside ChatTab's merged toolbar */}
       <div className="project-chat-pane" style={chatStyle}>
-        <div className="project-chat-pane-header">
-          <span>💬 Project chat</span>
-          {!narrow && (
-            <button
-              className="chat-collapse-btn"
-              onClick={toggleCollapse}
-              title={collapsed ? t['split.expand_chat'] : t['split.collapse_chat']}
-              aria-label={collapsed ? t['split.expand_chat'] : t['split.collapse_chat']}
-              aria-expanded={!collapsed}
-            >
-              {collapsed ? '⟨' : '⟩'}
-            </button>
-          )}
-        </div>
         <ErrorBoundary label="Chat">
-          <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
+          <ChatTab
+            project={project}
+            onProjectsReload={onProjectsReload}
+            isActive={isActive}
+            collapsed={collapsed}
+            onToggleCollapse={toggleCollapse}
+          />
         </ErrorBoundary>
       </div>
 

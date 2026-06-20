@@ -23,6 +23,18 @@
   --radius-sm: 4px;
   --sidebar-w: 240px;
   --transition: 0.15s ease;
+  --text-muted: var(--text2);
+  --text-dim: var(--text3);
+  --text1: var(--text);
+  --bg-card: var(--bg2);
+  --bg-secondary: var(--bg2);
+  --bg-hover: var(--bg3);
+  --bg-elev: var(--bg3);
+  --bg1: var(--bg);
+  --surface1: var(--bg);
+  --surface2: var(--bg2);
+  --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
+  --accent-subtle: rgba(107,104,245,0.12);
 }
 
 /* ── Dark theme: explicit data-theme="dark" override ───────── */
@@ -41,6 +53,18 @@
   --green:     #34c77b;
   --yellow:    #f5a623;
   --red:       #f5614a;
+  --text-muted: var(--text2);
+  --text-dim: var(--text3);
+  --text1: var(--text);
+  --bg-card: var(--bg2);
+  --bg-secondary: var(--bg2);
+  --bg-hover: var(--bg3);
+  --bg-elev: var(--bg3);
+  --bg1: var(--bg);
+  --surface1: var(--bg);
+  --surface2: var(--bg2);
+  --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
+  --accent-subtle: rgba(107,104,245,0.12);
 }
 
 /* ── Light theme vars (shared values) ──────────────────────── */
@@ -63,6 +87,18 @@
   --yellow:    #a05e00;
   --red:       #b52a1a;
   color-scheme: light;
+  --text-muted: var(--text2);
+  --text-dim: var(--text3);
+  --text1: var(--text);
+  --bg-card: var(--bg2);
+  --bg-secondary: var(--bg2);
+  --bg-hover: var(--bg3);
+  --bg-elev: var(--bg3);
+  --bg1: var(--bg);
+  --surface1: var(--bg);
+  --surface2: var(--bg2);
+  --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
+  --accent-subtle: rgba(107,104,245,0.12);
 }
 
 /* Auto: OS preference, only when no explicit data-theme is set */
@@ -83,6 +119,18 @@
     --yellow:    #a05e00;
     --red:       #b52a1a;
     color-scheme: light;
+    --text-muted: var(--text2);
+    --text-dim: var(--text3);
+    --text1: var(--text);
+    --bg-card: var(--bg2);
+    --bg-secondary: var(--bg2);
+    --bg-hover: var(--bg3);
+    --bg-elev: var(--bg3);
+    --bg1: var(--bg);
+    --surface1: var(--bg);
+    --surface2: var(--bg2);
+    --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
+    --accent-subtle: rgba(107,104,245,0.12);
   }
 }
 

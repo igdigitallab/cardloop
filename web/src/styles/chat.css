@@ -9,22 +9,7 @@
   overflow: hidden;
 }
 
-/* ── C1b: Named-chat tab strip (Spec-037) ────────────────────── */
-/* Container: scrollable row, no wrap, small gap between tabs */
-.chat-named-tabs-strip {
-  display: flex;
-  align-items: stretch;
-  gap: 2px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-  overflow-x: auto;
-  flex-shrink: 0;
-  padding-left: 4px;
-  /* hide scrollbar visually but keep scroll functionality */
-  scrollbar-width: none;
-}
-.chat-named-tabs-strip::-webkit-scrollbar { display: none; }
-
+/* ── C1b: Named-chat tabs (Spec-037; spec-045: merged into .chat-session-bar) ── */
 /* Individual tab */
 .chat-named-tab {
   display: flex;
@@ -132,11 +117,6 @@
    similar in slimness to the project tabs. The transparent padding keeps the
    effective hit area ~32px which is acceptable for a navigational strip. */
 @media (max-width: 768px) and (pointer: coarse) {
-  .chat-named-tabs-strip {
-    /* Don't reserve extra vertical space for the strip */
-    align-items: center;
-  }
-
   .chat-named-tab {
     min-height: 28px;
     padding: 4px 8px 4px 10px;
@@ -158,22 +138,21 @@
   }
 }
 
-/* ── C2: Session selector bar ────────────────────────────────── */
+/* ── C2: Session selector bar (spec-045: merged with chat-tabs-strip) ── */
+/* This single row contains: [tabs] [+] [sep] [↺] [session▾] ···(auto)··· [ctx][cache][model][think][⟩] */
 .chat-session-bar {
-  padding: 6px 12px;
+  padding: 4px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--bg2);
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  /* Spec-040: tighter gap — the bar is now a compact single line. */
-  gap: 7px;
-  /* Keep the bar on one line; scroll horizontally if content exceeds width
-     rather than allowing children to wrap onto a second line. */
+  gap: 4px;
   flex-wrap: nowrap;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
+  min-height: 36px;
 }
 .chat-session-bar::-webkit-scrollbar { display: none; }
 
@@ -241,6 +220,77 @@
    form one "model · think" cluster inside .chat-session-right. */
 .chat-think-selector { opacity: 1; transition: opacity 0.2s; }
 .chat-think-selector .chat-model-select:disabled { opacity: 0.6; }
+
+/* Compact thinking-mode button + popover — replaces the full-width <select>.
+   Shows "🧠 Min / Default / Max" as a small button; popover lists options. */
+.chat-think-btn-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.chat-think-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  font-size: 11px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  outline: none;
+  transition: border-color var(--transition), background var(--transition);
+}
+.chat-think-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg4);
+}
+.chat-think-btn:disabled {
+  cursor: not-allowed;
+}
+.chat-think-btn[aria-expanded="true"] {
+  border-color: var(--accent);
+}
+.chat-think-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 90px;
+  background: var(--bg-card, var(--bg3));
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-sm, 4px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  z-index: 10002;
+  overflow: hidden;
+}
+.chat-think-option {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text2);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition);
+}
+.chat-think-option:hover {
+  background: var(--bg4);
+}
+.chat-think-option.selected {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--bg4);
+}
+
+/* Thin vertical separator between chat tabs and session controls in the merged row */
+.chat-toolbar-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border2);
+  flex-shrink: 0;
+  align-self: center;
+}
 
 /* Inline-статистика в шапке чата (рядом с SessionSelector и Model) */
 .chat-stats-inline {
@@ -663,61 +713,92 @@
   background: var(--bg2);
 }
 
+/* ── RunStatusBar ── */
 .chat-status-bar {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 12px;
   color: var(--text2);
-  padding: 4px 8px;
-  border-radius: 4px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
   background: var(--bg3);
-  transition: background var(--transition), color var(--transition);
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
 }
 .chat-status-bar.silence-yellow {
   background: rgba(245,166,35,0.10);
+  border-color: rgba(245,166,35,0.25);
   color: var(--yellow);
 }
 .chat-status-bar.silence-red {
   background: rgba(245,97,74,0.15);
+  border-color: rgba(245,97,74,0.30);
   color: var(--red);
   animation: chat-pulse-red 2s infinite;
 }
 
-.chat-status-icon {
-  font-size: 14px;
+/* Pulsing dot — replaces emoji icon */
+.chat-status-pulse {
   flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: chat-dot-pulse 1.8s ease-in-out infinite;
+}
+.chat-status-bar.silence-yellow .chat-status-pulse { background: var(--yellow); }
+.chat-status-bar.silence-red .chat-status-pulse    { background: var(--red); }
+
+@keyframes chat-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.35; transform: scale(0.7); }
 }
 
+/* PART 1 FIX: text takes all free space → all right-side elements are naturally pushed right */
 .chat-status-text {
   font-weight: 500;
-  flex-shrink: 0;
+  /* flex:1 makes this element consume all remaining space, truncating if needed */
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* Time chip — monospace, subtle pill */
 .chat-status-time {
   font-family: var(--mono);
   font-size: 11px;
-  opacity: 0.7;
+  color: var(--text3);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
   flex-shrink: 0;
+  white-space: nowrap;
 }
 
+/* Silence badge — no margin-left:auto (text already flex:1 pushes it right) */
 .chat-status-silence {
   font-size: 11px;
   font-weight: 500;
-  margin-left: auto;
-  padding-left: 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
+/* Queue chip — compact pill, no margin-left:auto */
 .chat-status-queue {
   font-size: 11px;
-  color: var(--accent-h);
-  background: rgba(107,104,245,0.15);
-  padding: 2px 8px;
+  color: var(--accent);
+  background: rgba(99,102,241,0.12);
+  border: 1px solid rgba(99,102,241,0.22);
+  padding: 1px 6px;
   border-radius: 8px;
   font-weight: 500;
-  margin-left: auto;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
-.chat-status-silence + .chat-status-queue { margin-left: 8px; }
 
 @keyframes chat-pulse-red {
   0%, 100% { background: rgba(245,97,74,0.15); }
@@ -733,71 +814,101 @@
   color: var(--text3);
   font-size: 11px;
   padding: 2px 8px;
-  min-height: 28px;
+  min-height: 26px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background var(--transition), color var(--transition);
+  flex-shrink: 0;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
 }
-
 .chat-stop-btn:hover { background: rgba(245,97,74,0.12); color: var(--red); border-color: var(--red); }
-/* В status-bar кнопка стоп прижата вправо, если справа уже есть "тишина" — рядом */
-.chat-status-bar .chat-stop-btn { margin-left: auto; }
-.chat-status-bar .chat-status-silence + .chat-stop-btn { margin-left: 8px; }
+/* Stop is the last child — naturally at far right; no margin-left:auto needed */
+
 /* Touch target for stop button */
 @media (pointer: coarse) {
   .chat-stop-btn { min-height: 44px; padding: 0 12px; }
 }
 
-/* ── Композер: textarea сверху, toolbar снизу ─────────────────── */
+/* ── Composer: unified rounded box (ChatGPT/Claude style) ──────── */
+/* The box itself: single border, no double-frame. focus-within highlights the border. */
 .chat-composer {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  background: var(--bg3);
+  padding: 6px 8px;
+  transition: border-color var(--transition);
 }
-.chat-toolbar {
+.chat-composer:focus-within {
+  border-color: var(--accent);
+}
+
+/* Textarea: borderless, transparent — sits flush inside the box */
+.chat-textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  outline: none;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 4px 4px;
+  resize: none;
+  min-height: 42px;
+}
+.chat-textarea:focus { outline: none; border: none; }
+.chat-textarea:disabled { opacity: 0.5; cursor: not-allowed; }
+.chat-textarea::placeholder { color: var(--text3); }
+
+/* Bottom bar inside the box: icons left, Send right */
+.chat-composer-bar {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
 }
+
+/* Tool icon group: no background/border pill — ghost icons directly in the bar */
 .chat-toolbar-tools {
   display: inline-flex;
   align-items: center;
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 3px;
-  gap: 2px;
+  gap: 1px;
 }
+
 .chat-tool-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 40px;
-  height: 36px;
+  min-width: 28px;
+  height: 28px;
   background: transparent;
   border: none;
   border-radius: var(--radius-sm);
-  color: var(--text2);
+  color: var(--text3);
   cursor: pointer;
-  font-size: 17px;
-  padding: 0 10px;
+  font-size: 15px;
+  padding: 0 6px;
   line-height: 1;
   transition: background var(--transition), color var(--transition), transform 60ms ease;
 }
-.chat-tool-btn:hover { background: var(--border2); color: var(--text); }
-.chat-tool-btn:active { transform: scale(0.94); }
+.chat-tool-btn:hover { background: var(--bg4, var(--border2)); color: var(--text2); }
+.chat-tool-btn:active { transform: scale(0.92); }
 .chat-tool-btn.active {
   background: var(--accent);
   color: #fff;
 }
 /* Lucide SVG icons inherit currentColor via stroke:currentColor by default */
 .chat-tool-btn svg { display: block; }
-/* Touch-устройства: больше touch-зона */
+
+/* Touch: larger tap zone without expanding visual size */
 @media (pointer: coarse) {
-  .chat-tool-btn { min-width: 44px; height: 40px; }
-  .chat-toolbar-tools { padding: 4px; }
+  .chat-tool-btn { min-width: 36px; height: 36px; }
 }
+
 /* Unified focus-visible ring using accent token */
 .chat-tool-btn:focus-visible,
 .chat-stop-btn:focus-visible,
@@ -806,76 +917,27 @@
   outline-offset: 2px;
 }
 
-/* Split defer button: ⏱ main | ▾ dropdown */
-.chat-defer-split {
-  display: inline-flex;
-  align-items: stretch;
-  white-space: nowrap;
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-.chat-defer-split .chat-tool-btn {
-  border-radius: 0;
-  padding: 0 8px;
-}
-.chat-defer-split .chat-tool-btn:first-child {
-  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
-  min-width: 34px;
-}
-.chat-defer-split .chat-defer-arrow {
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  min-width: 20px;
-  padding: 0 5px;
-  font-size: 11px;
-  border-left: 1px solid var(--border);
-}
-.chat-defer-split:has(button:disabled) .chat-tool-btn,
-.chat-defer-split .chat-tool-btn:disabled,
-.chat-defer-split .chat-defer-arrow:disabled {
-  opacity: 0.38;
-  cursor: not-allowed;
-}
-@media (pointer: coarse) {
-  .chat-defer-split .chat-tool-btn:first-child { min-width: 38px; }
-  .chat-defer-split .chat-defer-arrow { min-width: 26px; }
-}
-
-.chat-textarea {
-  flex: 1 1 auto;
-  min-width: 0;
-  background: var(--bg3);
-  border: 1px solid var(--border2);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-family: var(--sans);
-  font-size: 13px;
-  line-height: 1.5;
-  padding: 8px 12px;
-  resize: none;
-  transition: border-color var(--transition);
-  min-height: 64px;
-}
-
-.chat-textarea:focus { outline: none; border-color: var(--accent); }
-.chat-textarea:disabled { opacity: 0.5; cursor: not-allowed; }
-.chat-textarea::placeholder { color: var(--text3); }
-
+/* Send button: compact, pushed to the right via margin-left:auto */
 .chat-send-btn {
   flex: 0 0 auto;
+  margin-left: auto;
   width: auto !important;
-  min-width: 130px;
-  height: 40px;
-  padding: 0 18px !important;
+  min-width: 64px;
+  height: 30px;
+  padding: 0 14px !important;
   white-space: nowrap;
   font-weight: 600;
+  font-size: 13px;
   letter-spacing: 0.2px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 4px;
+  border-radius: var(--radius-sm, 6px);
 }
-@media (pointer: coarse) {
-  .chat-send-btn { height: 44px; min-width: 140px; }
+@media (max-width: 768px) {
+  /* Keep Send compact and non-overflowing on mobile */
+  .chat-send-btn { min-width: 52px; height: 28px; padding: 0 10px !important; font-size: 12px; }
 }
 
 .chat-error-banner {
@@ -903,105 +965,126 @@
   background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
   font-size: 11px; padding: 3px 6px; max-width: 180px;
 }
-.chat-att-chip.att-uploading { opacity: 0.65; border-style: dashed; }
+.chat-att-chip.att-uploading { opacity: 0.70; border-style: dashed; }
 .chat-att-chip.att-error { border-color: var(--red); }
+/* File-type icon inside attachment chip */
+.att-icon { flex-shrink: 0; color: var(--text3); display: flex; align-items: center; }
 .att-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; color: var(--text2); }
-.att-spinner { animation: spin 1.2s linear infinite; display: inline-block; font-size: 11px; color: var(--text3); }
+/* CSS-only spinner: rotating ring, replaces ↻ text glyph */
+.att-spinner {
+  flex-shrink: 0;
+  display: inline-block;
+  width: 10px; height: 10px;
+  border: 1.5px solid var(--border2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 .att-err-icon { color: var(--red); font-size: 11px; }
 .att-remove {
   background: none; border: none; color: var(--text3); cursor: pointer;
   font-size: 10px; padding: 0; line-height: 1; flex: 0 0 auto;
 }
 .att-remove:hover { color: var(--red); }
-
-/* ── Feature A: Session Context Panel ─────────────────────────── */
-.ctx-panel {
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-  flex-shrink: 0;
+@media (pointer: coarse) {
+  .att-remove { min-width: 28px; min-height: 28px; display: flex; align-items: center; justify-content: center; }
 }
 
-.ctx-panel-toggle {
+/* ── Queue panel (Part 3) ───────────────────────────────────────── */
+.chat-queue-panel {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 6px 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+.chat-queue-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text3);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+.chat-queue-header-label {
+  font-weight: 400;
+  opacity: 0.8;
+}
+.chat-queue-row {
   display: flex;
   align-items: center;
   gap: 5px;
-  width: 100%;
-  background: none;
-  border: none;
-  padding: 5px 12px;
-  cursor: pointer;
-  color: var(--text3);
-  font-size: 11px;
-  text-align: left;
-  transition: background var(--transition), color var(--transition);
+  min-height: 28px;
 }
-
-.ctx-panel-toggle:hover { background: var(--bg2); color: var(--text2); }
-
-.ctx-panel-icon { flex-shrink: 0; }
-.ctx-panel-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ctx-panel-chevron { flex-shrink: 0; font-size: 8px; }
-
-.ctx-refresh-btn {
-  background: none;
-  border: none;
+.chat-queue-idx {
+  font-size: 11px;
   color: var(--text3);
-  font-size: 12px;
-  padding: 0 4px;
-  cursor: pointer;
+  min-width: 14px;
   flex-shrink: 0;
-  border-radius: 3px;
-  line-height: 1;
-  transition: color var(--transition), background var(--transition);
 }
-.ctx-refresh-btn:hover:not(:disabled) { color: var(--accent); background: var(--bg3); }
-.ctx-refresh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-.ctx-panel-body {
-  padding: 6px 12px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 240px;
-  overflow-y: auto;
-}
-
-.ctx-loading {
-  font-size: 11px;
-  color: var(--text3);
-  font-style: italic;
-}
-
-.ctx-section { display: flex; flex-direction: column; gap: 2px; }
-
-.ctx-section-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--text3);
-  margin-bottom: 2px;
-}
-
-.ctx-list {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.ctx-item {
-  font-family: var(--mono);
-  font-size: 10px;
+.chat-queue-text {
+  flex: 1;
+  font-size: 12px;
   color: var(--text2);
-  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  padding: 1px 0;
-  line-height: 1.5;
+  white-space: nowrap;
+  min-width: 0;
 }
-
-.ctx-item-edited { color: var(--yellow); }
-.ctx-item-cmd { color: var(--text3); }
+/* Edit mode: textarea + text action buttons */
+.chat-queue-edit-area {
+  flex: 1;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  resize: vertical;
+  min-height: 36px;
+  background: var(--bg2);
+  color: var(--text);
+  font-family: var(--sans);
+}
+.chat-queue-action-btn {
+  font-size: 11px;
+  padding: 2px 7px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  color: var(--text2);
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background var(--transition), color var(--transition);
+}
+.chat-queue-action-btn:hover { background: var(--bg2); }
+.chat-queue-action-btn.chat-queue-save {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.chat-queue-action-btn.chat-queue-save:hover { opacity: 0.85; }
+/* Icon-only edit/delete buttons */
+.chat-queue-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text3);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition), color var(--transition);
+}
+.chat-queue-icon-btn:hover { background: var(--bg2); color: var(--text); }
+.chat-queue-icon-btn.chat-queue-icon-delete:hover { color: var(--red); }
+@media (pointer: coarse) {
+  .chat-queue-icon-btn { min-width: 36px; min-height: 36px; }
+}
 
 /* ── Reset confirm modal (ops:a01372) ───────────────────────────── */
 .reset-confirm-overlay {
@@ -1092,21 +1175,8 @@
   }
 }
 
-/* ── Chat pane header: condense ─────────────────────────────── */
+/* ── Chat session bar: mobile overrides ─────────────────────── */
 @media (max-width: 768px) {
-  .project-chat-pane-header {
-    padding: 6px 10px;
-    font-size: 12px;
-  }
-
-  /* H2 (Chrome compression): Context panel hidden on mobile.
-     The session context (files/commands) is non-critical info on phone.
-     The expand/collapse functionality is sacrificed to gain vertical space.
-     On desktop (>768px) it remains fully visible and functional. */
-  .ctx-panel {
-    display: none;
-  }
-
   .chat-session-bar {
     /* H (Chrome compression): true single-row horizontal scroll — no wrapping.
        Children must not shrink (flex:0 0 auto applied below), so the bar
@@ -1160,9 +1230,7 @@
 @media (pointer: coarse) {
   .session-selector-btn,
   .chat-session-reset,
-  .chat-stop-btn,
-  .ctx-panel-toggle,
-  .ctx-refresh-btn {
+  .chat-stop-btn {
     min-height: 44px;
     padding-top: 8px;
     padding-bottom: 8px;
@@ -1170,16 +1238,10 @@
 }
 
 /* H (Chrome compression): override the coarse-pointer 44px on ≤768px for the
-   session bar buttons so the bar stays at its compact 36px height.
-   These buttons sit inside a row — the transparent padding extends the real
-   tap zone to the full row height (≥36px), which is acceptable for secondary
-   controls (reset, session selector). The Send button and inner-tab buttons
-   keep their ≥40px targets. */
+   session bar buttons so the bar stays at its compact 36px height. */
 @media (max-width: 768px) and (pointer: coarse) {
   .session-selector-btn,
-  .chat-session-reset,
-  .ctx-panel-toggle,
-  .ctx-refresh-btn {
+  .chat-session-reset {
     min-height: 28px;
     padding-top: 4px;
     padding-bottom: 4px;

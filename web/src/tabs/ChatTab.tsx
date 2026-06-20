@@ -8,7 +8,6 @@ import { SkillPicker } from '../components/SkillPicker'
 import { ToolBlock } from '../components/ToolBlock'
 import { OptionPicker, parseOptionsBlock } from '../components/OptionPicker'
 import { SessionSelector } from '../components/SessionSelector'
-import { SessionContextPanel } from '../components/SessionContextPanel'
 import {
   Chat,
   ChatMessage,
@@ -27,7 +26,7 @@ import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
 import { t } from '../i18n'
 import { Modal, ModalHead } from '../components/Modal'
-import { Paperclip, ClipboardList, Wrench, Clock, ChevronDown, Square } from 'lucide-react'
+import { Paperclip, ClipboardList, Wrench, Clock, Square, Pencil, Trash2, File, Image } from 'lucide-react'
 
 // ─── Spec-035: Sub-agent lane ─────────────────────────────────────────────────
 
@@ -114,6 +113,10 @@ interface Props {
   onProjectsReload: () => void
   /** When the project tab becomes visible (false→true) — check running status. */
   isActive?: boolean
+  /** Desktop-split only: whether the chat pane is collapsed. Passed only from the desktop-split render site. */
+  collapsed?: boolean
+  /** Desktop-split only: toggle function for collapsing/expanding the chat pane. Passed only from the desktop-split render site. */
+  onToggleCollapse?: () => void
 }
 
 type ModelKey = 'fable' | 'opus' | 'sonnet' | 'haiku'
@@ -461,6 +464,152 @@ function ChatImage({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
 
 const _mdComponents = { img: ChatImage }
 
+// ─── CacheCountdownBadge ─────────────────────────────────────────────────────
+// Isolated ticker so the parent ChatTab does NOT re-render on each second tick.
+// Restored from commit 6e286cb (flicker-safe memo pattern).
+
+interface CacheCountdownBadgeProps {
+  lastTurnEndMs: number | null
+  lastCacheHitPct: number | null
+  /** Last assistant turn metrics (derived from messages in parent, passed down to avoid re-computing). */
+  lastAssistantMetrics: TurnMetrics | undefined
+  /** Whether a run is currently active. */
+  isRunning: boolean
+}
+
+const CacheCountdownBadge = memo(function CacheCountdownBadge({
+  lastTurnEndMs,
+  lastCacheHitPct,
+  lastAssistantMetrics,
+  isRunning,
+}: CacheCountdownBadgeProps) {
+  // Own tick state — only this small component re-renders every second.
+  const [, setCacheTick] = useState<number>(Date.now())
+
+  useEffect(() => {
+    if (lastTurnEndMs === null) return
+    const remaining = CACHE_TTL_MS - (Date.now() - lastTurnEndMs)
+    if (remaining <= 0) return
+    const id = setInterval(() => setCacheTick(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [lastTurnEndMs])
+
+  let isWarm = false
+  let remainingSec = 0
+  if (isRunning) {
+    isWarm = true
+  } else if (lastTurnEndMs !== null) {
+    remainingSec = Math.max(0, (CACHE_TTL_MS - (Date.now() - lastTurnEndMs)) / 1000)
+    isWarm = remainingSec > 0
+  }
+
+  const effectiveCacheHitPct = lastAssistantMetrics?.cache_hit_pct ?? lastCacheHitPct
+  if (!isRunning && effectiveCacheHitPct != null && effectiveCacheHitPct < CACHE_COLD_PCT) {
+    isWarm = false
+  }
+
+  const cacheLabel = isRunning
+    ? '♨️ running'
+    : isWarm
+      ? `♨️ ${fmtCountdown(remainingSec)}`
+      : '⚪ cold'
+  const cacheTip = isRunning
+    ? 'Cache warm — agent is actively running and re-warming the prefix.'
+    : isWarm
+      ? `Cache warm — estimated ${fmtCountdown(remainingSec)} remaining in the 5-min window since last turn end. Actual warm/cold is confirmed by the measured cache-hit % of the last turn.`
+      : 'Cache cold — next turn will re-read the full prompt at full price.'
+
+  return (
+    <span style={{
+      color: isWarm ? 'var(--color-green, #22c55e)' : 'var(--color-muted, #9ca3af)',
+      cursor: 'default',
+      fontSize: 11,
+      whiteSpace: 'nowrap',
+    }} title={cacheTip}>
+      {cacheLabel}
+    </span>
+  )
+})
+
+// ─── ThinkModeButton ─────────────────────────────────────────────────────────
+// Compact button that shows "🧠 <level>" and opens a small popover to change
+// the thinking mode. Replaces the full-width <select> to save session-bar width.
+
+interface ThinkModeButtonProps {
+  value: ThinkMode
+  disabled: boolean
+  isFable: boolean
+  title: string
+  onChange: (mode: ThinkMode) => void
+}
+
+const ThinkModeButton = memo(function ThinkModeButton({
+  value,
+  disabled,
+  isFable,
+  title,
+  onChange,
+}: ThinkModeButtonProps) {
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  // Close on outside click or Escape
+  useEffect(() => {
+    if (!open) return
+    function handleOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', handleOutside)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleOutside)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [open])
+
+  const currentMode = THINK_MODES.find(m => m.value === value)
+  const currentLabel = currentMode ? t[currentMode.labelKey] : value
+
+  return (
+    <div className="chat-think-btn-wrap" ref={containerRef} title={title}>
+      <button
+        className="chat-think-btn"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => { if (!disabled) setOpen(v => !v) }}
+        style={{ opacity: isFable ? 0.45 : 1 }}
+      >
+        🧠 {currentLabel}
+      </button>
+      {open && (
+        <div className="chat-think-menu" role="listbox" aria-label={t['chat.think_mode_label']}>
+          {THINK_MODES.map(m => (
+            <div
+              key={m.value}
+              role="option"
+              aria-selected={value === m.value}
+              className={`chat-think-option${value === m.value ? ' selected' : ''}`}
+              onMouseDown={e => {
+                e.preventDefault()
+                onChange(m.value)
+                setOpen(false)
+              }}
+            >
+              {t[m.labelKey]}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+})
+
 // ─── RunStatusBar ─────────────────────────────────────────────────────────────
 // Isolated ticker so the parent ChatTab does NOT re-render on each second tick
 // while a run is active.
@@ -491,14 +640,11 @@ const RunStatusBar = memo(function RunStatusBar({
   const silenceSec = (tick - run.lastEventAt) / 1000
   const lvl = silenceSec > 120 ? 'silence-red' : silenceSec > 30 ? 'silence-yellow' : 'silence-ok'
   const tool = run.currentTool
-  let icon = '💭'
   let label: string
   if (tool) {
-    icon = '🔧'
     const hint = toolHint(tool)
     label = hint ? `${tool.name} · ${hint}` : tool.name
   } else if (silenceSec < 3 && elapsedSec > 1) {
-    icon = '✍'
     label = t['chat.status_writing']
   } else {
     label = run.source === 'card' ? t['chat.status_card_running'] : t['chat.status_thinking']
@@ -506,9 +652,11 @@ const RunStatusBar = memo(function RunStatusBar({
 
   return (
     <div className={`chat-status-bar ${lvl}`}>
-      <span className="chat-status-icon">{icon}</span>
+      {/* Pulsing dot replaces emoji icon — color inherits from bar state via CSS */}
+      <span className="chat-status-pulse" aria-hidden="true" />
+      {/* flex:1 on text truncates long tool names instead of pushing siblings right */}
       <span className="chat-status-text">{label}</span>
-      <span className="chat-status-time">· {formatDuration(elapsedSec)}</span>
+      <span className="chat-status-time">{formatDuration(elapsedSec)}</span>
       {silenceSec > 30 && (
         <span className="chat-status-silence">
           ⚠ silence {formatDuration(silenceSec)}
@@ -517,9 +665,10 @@ const RunStatusBar = memo(function RunStatusBar({
       )}
       {queueLen > 0 && (
         <span className="chat-status-queue" title={`${queueLen} message(s) queued, will send automatically`}>
-          ⏭ queued: {queueLen}
+          ⏭ {queueLen}
         </span>
       )}
+      {/* Stop is last child — sits at far right naturally, no margin-left:auto needed */}
       <button className="chat-stop-btn" onClick={onStop} title={t['chat.stop_title']} aria-label={t['chat.stop_aria']}><Square size={13} /> {t['chat.stop_btn']}</button>
     </div>
   )
@@ -535,7 +684,7 @@ const isTouchDevice: boolean =
   typeof window !== 'undefined' &&
   (window.matchMedia?.('(pointer: coarse)').matches || 'ontouchstart' in window)
 
-export function ChatTab({ project, onProjectsReload, isActive }: Props) {
+export function ChatTab({ project, onProjectsReload, isActive, collapsed, onToggleCollapse }: Props) {
   const projectId = project.id
 
   // ─── Spec-037: multi-chat tabs ────────────────────────────────────────────
@@ -566,7 +715,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState('')
-  const [ctxRefreshKey, setCtxRefreshKey] = useState(0)
   const [changingModel, setChangingModel] = useState(false)
   // Thinking mode selector — persisted per-chat in localStorage; default = "default"
   // Spec-037: key is <projectId>:<chatId> so each chat has its own setting.
@@ -618,10 +766,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showPrompts, setShowPrompts] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
-  const [showDefer, setShowDefer] = useState(false)
-  const [deferMode, setDeferMode] = useState<'time' | 'reset'>('time')
-  const [deferDatetime, setDeferDatetime] = useState('')
-  const [deferSubmitting, setDeferSubmitting] = useState(false)
   const [deferToast, setDeferToast] = useState<string | null>(null)
   // One-click "after reset" button state
   const [deferAfterResetBusy, setDeferAfterResetBusy] = useState(false)
@@ -1032,7 +1176,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       setSubagents([])
       seenSubagentKeysRef.current = new Set()
       setMessages(prev => finalizeStreaming(prev))
-      setCtxRefreshKey(k => k + 1)
       // Spec-041 A2: drain queued message on bus-originated turn completion.
       drainQueue()
 
@@ -1042,7 +1185,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       void (evt as ActivityEventCompact) // type assertion for exhaustiveness
       setCompactToast(true)
       setTimeout(() => setCompactToast(false), 5000)
-      setCtxRefreshKey(k => k + 1)
     }
   })
 
@@ -1062,7 +1204,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
     setWarnDismissedAtTokens(null)
     setLastCacheHitPct(null)
     setLastFreshTokens(null)
-    setCtxRefreshKey(k => k + 1)
     api.sessionHistory(projectId)
       .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens != null ? res.context_tokens : null); if (res.context_window != null && res.context_window > 0) setContextWindow(res.context_window) })
       .catch(() => setMessages([]))
@@ -1274,7 +1415,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
       setRun(null)
       abortRef.current = null
       textareaRef.current?.focus()
-      setCtxRefreshKey(k => k + 1)
       onProjectsReload()
       // Spec-041 A2: drain via shared helper (also called from bus/poll paths).
       drainQueue()
@@ -1443,82 +1583,80 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
 
   return (
     <div className="chat-wrap">
-      {/* Spec-037: chat tabs strip — one tab per chat, + to create, dbl-click to rename */}
-      {chats.length > 0 && (
-        <div className="chat-named-tabs-strip">
-          {chats.map(chat => {
-            const isActive = chat.id === activeChatId
-            const isRenaming = renamingChatId === chat.id
-            return (
-              <div
-                key={chat.id}
-                className={`chat-named-tab${isActive ? ' active' : ''}`}
-                onClick={() => { if (!isRenaming) handleSwitchChat(chat.id) }}
-                onDoubleClick={e => {
-                  e.stopPropagation()
-                  setRenamingChatId(chat.id)
-                  setRenameValue(chat.name)
-                }}
-                title={chat.name}
-              >
-                {isRenaming ? (
-                  <form
-                    style={{ display: 'flex', alignItems: 'center', gap: 3 }}
-                    onSubmit={e => { e.preventDefault(); handleRenameChat(chat.id, renameValue) }}
-                    onClick={e => e.stopPropagation()}
-                  >
-                    <input
-                      autoFocus
-                      style={{
-                        fontSize: 11, padding: '1px 4px', width: 90,
-                        background: 'var(--bg, #111827)', color: 'var(--text, #f9fafb)',
-                        border: '1px solid var(--color-primary, #6366f1)', borderRadius: 3,
-                      }}
-                      value={renameValue}
-                      onChange={e => setRenameValue(e.target.value)}
-                      placeholder={t['chat.tabs_rename_placeholder']}
-                      onKeyDown={e => { if (e.key === 'Escape') setRenamingChatId(null) }}
-                    />
-                    <button
-                      type="submit"
-                      style={{ fontSize: 10, padding: '1px 4px', cursor: 'pointer',
-                        background: 'var(--color-primary, #6366f1)', color: '#fff',
-                        border: 'none', borderRadius: 3 }}
-                    >{t['chat.tabs_rename_confirm']}</button>
-                  </form>
-                ) : (
-                  <span className="chat-named-tab-label">{chat.name}</span>
-                )}
-                {/* Close button only on the active tab — keeps non-active tabs safe to tap on touch */}
-                {!isRenaming && isActive && (
-                  <button
-                    className="chat-named-tab-close"
-                    disabled={chats.length <= 1}
-                    title={chats.length <= 1 ? t['chat.tabs_close_last'] : t['chat.tabs_close_aria']}
-                    aria-label={t['chat.tabs_close_aria']}
-                    onClick={e => {
-                      e.stopPropagation()
-                      if (chats.length > 1) handleDeleteChat(chat.id)
+      {/* Spec-045: merged toolbar — chat tabs (left) + session controls + right cluster in ONE row.
+          Layout: [tab…] [+]  [↺] [◉ session ▾]  ·(auto)·  [▬ ctx] [♨️ cache] [◆ model ▾] [🧠 think] [⟩]
+          The ⟩ collapse button renders only when onToggleCollapse is provided (desktop-split). */}
+      <div className="chat-session-bar">
+        {/* Left: chat tabs inline */}
+        {chats.map(chat => {
+          const isActive = chat.id === activeChatId
+          const isRenaming = renamingChatId === chat.id
+          return (
+            <div
+              key={chat.id}
+              className={`chat-named-tab${isActive ? ' active' : ''}`}
+              onClick={() => { if (!isRenaming) handleSwitchChat(chat.id) }}
+              onDoubleClick={e => {
+                e.stopPropagation()
+                setRenamingChatId(chat.id)
+                setRenameValue(chat.name)
+              }}
+              title={chat.name}
+            >
+              {isRenaming ? (
+                <form
+                  style={{ display: 'flex', alignItems: 'center', gap: 3 }}
+                  onSubmit={e => { e.preventDefault(); handleRenameChat(chat.id, renameValue) }}
+                  onClick={e => e.stopPropagation()}
+                >
+                  <input
+                    autoFocus
+                    style={{
+                      fontSize: 11, padding: '1px 4px', width: 90,
+                      background: 'var(--bg, #111827)', color: 'var(--text, #f9fafb)',
+                      border: '1px solid var(--color-primary, #6366f1)', borderRadius: 3,
                     }}
-                  >×</button>
-                )}
-              </div>
-            )
-          })}
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    placeholder={t['chat.tabs_rename_placeholder']}
+                    onKeyDown={e => { if (e.key === 'Escape') setRenamingChatId(null) }}
+                  />
+                  <button
+                    type="submit"
+                    style={{ fontSize: 10, padding: '1px 4px', cursor: 'pointer',
+                      background: 'var(--color-primary, #6366f1)', color: '#fff',
+                      border: 'none', borderRadius: 3 }}
+                  >{t['chat.tabs_rename_confirm']}</button>
+                </form>
+              ) : (
+                <span className="chat-named-tab-label">{chat.name}</span>
+              )}
+              {/* Close button only on the active tab */}
+              {!isRenaming && isActive && (
+                <button
+                  className="chat-named-tab-close"
+                  disabled={chats.length <= 1}
+                  title={chats.length <= 1 ? t['chat.tabs_close_last'] : t['chat.tabs_close_aria']}
+                  aria-label={t['chat.tabs_close_aria']}
+                  onClick={e => {
+                    e.stopPropagation()
+                    if (chats.length > 1) handleDeleteChat(chat.id)
+                  }}
+                >×</button>
+              )}
+            </div>
+          )
+        })}
+        {chats.length > 0 && (
           <button
             className="chat-named-tab-new"
             title={t['chat.tabs_new']}
             aria-label={t['chat.tabs_new_aria']}
             onClick={handleCreateChat}
           >+</button>
-        </div>
-      )}
-      {/* Session selector bar.
-          Layout (left → right): [↺ reset] [◉ session ▾]  [▰▰▱ used / max]  ···(push right)···  [model ▾] [🧠 think ▾]
-          The single ↺ here is the only reset in the bar (wrap & reset — saves a
-          brief handoff summary, then resets). "New session (no summary)" still
-          lives inside the session ▾ dropdown. */}
-      <div className="chat-session-bar">
+        )}
+        {/* Separator between tabs and session controls */}
+        {chats.length > 0 && <span className="chat-toolbar-sep" />}
         {/* Left group: single reset + session selector, grouped together. */}
         <div className="chat-session-left">
           {(() => {
@@ -1563,146 +1701,130 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             onRequestReset={() => setResetModalOpen(true)}
           />
         </div>
-        {/* Session health row — context "used / max" + progress bar.
-            Always visible when there are messages. */}
-        {messages.length > 0 && (() => {
-          const real = contextTokens != null && contextTokens > 0
-          const tokens = real ? contextTokens! : estimateTokens(messages)
-
-          // Color scale relative to the real context window.
-          // Amber at 75% of window (approaching auto-compact), red at 90%.
-          const warnAt = contextWindow * 0.75
-          const critAt = contextWindow * 0.90
-          const tokenColor =
-            tokens >= critAt ? 'var(--color-red, #ef4444)' :
-            tokens >= warnAt ? 'var(--color-yellow, #eab308)' :
-            'var(--color-muted, #9ca3af)'
-
-          // Progress bar fill fraction (0..1), capped at 1.
-          // Denominator is the real context window reported by the backend.
-          const fillFrac = Math.min(tokens / contextWindow, 1)
-          const barColor =
-            fillFrac >= 0.95 ? 'var(--color-red, #ef4444)' :
-            fillFrac >= 0.75 ? 'var(--color-yellow, #eab308)' :
-            'var(--color-green, #22c55e)'
-
-          // Spec-040: last assistant metrics feed the cache warm/cold + utilization
-          // lines folded into the token tooltip (no live ticker — hover-only now).
-          const lastAssistantMetrics = [...messages].reverse().find(
-            m => m.role === 'assistant' && m.metrics != null
-          )?.metrics
-
-          // Last turn utilization (null when not present)
-          const utilization = lastAssistantMetrics?.utilization ?? null
-
-          // Context growth since the previous completed turn — only on real (server) numbers.
-          // null when no prior turn exists (first turn / right after a reset).
-          const deltaTokens = real && prevContextTokens != null ? tokens - prevContextTokens : null
-          const deltaLabel = deltaTokens != null && deltaTokens !== 0
-            ? `${deltaTokens > 0 ? '+' : '−'}${formatTokens(Math.abs(deltaTokens))}`
-            : null
-
-          // Spec-040: compact session bar — the secondary stats (message count,
-          // growth delta, cache warmth, utilization) are no longer rendered inline.
-          // They are folded into the token-count / progress-bar tooltip as static
-          // lines computed once at render (no live ticking — hover-only now).
-
-          // Cache warm/cold line — static replica of CacheCountdownBadge's display.
-          // Mirrors the same warm/cold decision and countdown estimate, but frozen
-          // at render time instead of ticking every second.
-          const isCacheRunning = run != null
-          let cacheIsWarm = false
-          let cacheRemainingSec = 0
-          if (isCacheRunning) {
-            cacheIsWarm = true
-          } else if (lastTurnEndMs !== null) {
-            cacheRemainingSec = Math.max(0, (CACHE_TTL_MS - (Date.now() - lastTurnEndMs)) / 1000)
-            cacheIsWarm = cacheRemainingSec > 0
-          }
-          const effectiveCacheHitPct = lastAssistantMetrics?.cache_hit_pct ?? lastCacheHitPct
-          if (!isCacheRunning && effectiveCacheHitPct != null && effectiveCacheHitPct < CACHE_COLD_PCT) {
-            cacheIsWarm = false
-          }
-          const hasCacheInfo = lastTurnEndMs !== null || lastCacheHitPct != null || lastAssistantMetrics != null
-          const cacheLine = !hasCacheInfo
-            ? null
-            : isCacheRunning
-              ? t['chat.session_bar_cache_running']
-              : cacheIsWarm
-                ? t['chat.session_bar_cache_warm']
-                    .replace('{remaining}', fmtCountdown(cacheRemainingSec))
-                    .replace('{pct}', effectiveCacheHitPct != null ? `${Math.round(effectiveCacheHitPct)}%` : '—')
-                : t['chat.session_bar_cache_cold']
-
-          // Spec-040: multi-line tooltip — primary context line + folded secondary stats.
-          const tokenTipLines: string[] = [
-            real
-              ? t['chat.session_bar_tip'].replace('{tokens}', tokens.toLocaleString('en'))
-              : t['chat.token_count_rough'],
-            t['chat.session_bar_messages'].replace('{n}', messages.length.toLocaleString('en')),
-          ]
-          if (deltaLabel != null) {
-            tokenTipLines.push(t['chat.session_bar_delta'].replace('{delta}', deltaLabel))
-          }
-          if (cacheLine != null) {
-            tokenTipLines.push(cacheLine)
-          }
-          // Spec-043 C: honest cost signal — show how much of the context is fresh (billed
-          // at full ×1.0) vs cached (×0.10). Helps operators see a large context is still
-          // cheap when warm, and prevents unnecessary resets on large-but-warm sessions.
-          const effectiveFreshTokens = lastAssistantMetrics?.fresh_tokens ?? lastFreshTokens
-          if (effectiveFreshTokens != null && effectiveCacheHitPct != null && effectiveCacheHitPct > 0) {
-            const freshK = formatTokens(effectiveFreshTokens)
-            const hitPct = Math.round(effectiveCacheHitPct)
-            tokenTipLines.push(
-              `⚙ Cost: ~${freshK} fresh (×1.0) · ${hitPct}% cached (×0.10) — warm sessions are cheap`
-            )
-          } else if (effectiveFreshTokens != null && effectiveCacheHitPct === 0) {
-            const freshK = formatTokens(effectiveFreshTokens)
-            tokenTipLines.push(
-              `⚙ Cost: ${freshK} fresh tokens — cache cold, this turn billed at full price`
-            )
-          }
-          if (utilization != null) {
-            tokenTipLines.push(t['chat.session_bar_util'].replace('{pct}', String(utilization)))
-          }
-          const tokenTip = tokenTipLines.join('\n')
-
-          return (
-            <span className="chat-session-health" style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0,
-            }}>
-              {/* Progress bar — richer multi-line tooltip folds in secondary stats */}
-              <span
-                title={tokenTip}
-                style={{
-                  display: 'inline-block', width: 40, height: 5,
-                  background: 'var(--border, #374151)', borderRadius: 3,
-                  overflow: 'hidden', cursor: 'default', flexShrink: 0,
-                }}
-              >
-                <span style={{
-                  display: 'block', height: '100%',
-                  width: `${Math.round(fillFrac * 100)}%`,
-                  background: barColor,
-                  borderRadius: 3,
-                  transition: 'width 0.3s, background 0.3s',
-                }} />
-              </span>
-              {/* Context "used / max" — e.g. "196K / 1M". The denominator is the
-                  real context window (formatMax → "1M") and now serves as the
-                  sole context-window indicator (replaces the old 1M model badge). */}
-              <span style={{ color: tokenColor, cursor: 'default' }} title={tokenTip}>
-                {real ? '' : '~'}{formatTokens(tokens)}
-                <span style={{ color: 'var(--color-muted, #9ca3af)' }}> / {formatMax(contextWindow)}</span>
-              </span>
-            </span>
-          )
-        })()}
-        {/* Right group: model selector + thinking-mode dropdown — one "model · think"
-            cluster. margin-left:auto on .chat-session-right pushes it to the right edge. */}
+        {/* Right group: context health + cache badge + model + think + collapse.
+            margin-left:auto (on .chat-session-right) pushes it to the right edge. */}
         <div className="chat-session-right">
+          {/* Session health — context "used / max" + progress bar + cache badge.
+              Always visible when there are messages. */}
+          {messages.length > 0 && (() => {
+            const real = contextTokens != null && contextTokens > 0
+            const tokens = real ? contextTokens! : estimateTokens(messages)
+
+            // Color scale relative to the real context window.
+            const warnAt = contextWindow * 0.75
+            const critAt = contextWindow * 0.90
+            const tokenColor =
+              tokens >= critAt ? 'var(--color-red, #ef4444)' :
+              tokens >= warnAt ? 'var(--color-yellow, #eab308)' :
+              'var(--color-muted, #9ca3af)'
+
+            const fillFrac = Math.min(tokens / contextWindow, 1)
+            const barColor =
+              fillFrac >= 0.95 ? 'var(--color-red, #ef4444)' :
+              fillFrac >= 0.75 ? 'var(--color-yellow, #eab308)' :
+              'var(--color-green, #22c55e)'
+
+            const lastAssistantMetrics = [...messages].reverse().find(
+              m => m.role === 'assistant' && m.metrics != null
+            )?.metrics
+
+            const utilization = lastAssistantMetrics?.utilization ?? null
+            const deltaTokens = real && prevContextTokens != null ? tokens - prevContextTokens : null
+            const deltaLabel = deltaTokens != null && deltaTokens !== 0
+              ? `${deltaTokens > 0 ? '+' : '−'}${formatTokens(Math.abs(deltaTokens))}`
+              : null
+
+            const isCacheRunning = run != null
+            let cacheIsWarm = false
+            let cacheRemainingSec = 0
+            if (isCacheRunning) {
+              cacheIsWarm = true
+            } else if (lastTurnEndMs !== null) {
+              cacheRemainingSec = Math.max(0, (CACHE_TTL_MS - (Date.now() - lastTurnEndMs)) / 1000)
+              cacheIsWarm = cacheRemainingSec > 0
+            }
+            const effectiveCacheHitPct = lastAssistantMetrics?.cache_hit_pct ?? lastCacheHitPct
+            if (!isCacheRunning && effectiveCacheHitPct != null && effectiveCacheHitPct < CACHE_COLD_PCT) {
+              cacheIsWarm = false
+            }
+            const hasCacheInfo = lastTurnEndMs !== null || lastCacheHitPct != null || lastAssistantMetrics != null
+            const cacheLine = !hasCacheInfo
+              ? null
+              : isCacheRunning
+                ? t['chat.session_bar_cache_running']
+                : cacheIsWarm
+                  ? t['chat.session_bar_cache_warm']
+                      .replace('{remaining}', fmtCountdown(cacheRemainingSec))
+                      .replace('{pct}', effectiveCacheHitPct != null ? `${Math.round(effectiveCacheHitPct)}%` : '—')
+                  : t['chat.session_bar_cache_cold']
+
+            const tokenTipLines: string[] = [
+              real
+                ? t['chat.session_bar_tip'].replace('{tokens}', tokens.toLocaleString('en'))
+                : t['chat.token_count_rough'],
+              t['chat.session_bar_messages'].replace('{n}', messages.length.toLocaleString('en')),
+            ]
+            if (deltaLabel != null) {
+              tokenTipLines.push(t['chat.session_bar_delta'].replace('{delta}', deltaLabel))
+            }
+            if (cacheLine != null) {
+              tokenTipLines.push(cacheLine)
+            }
+            const effectiveFreshTokens = lastAssistantMetrics?.fresh_tokens ?? lastFreshTokens
+            if (effectiveFreshTokens != null && effectiveCacheHitPct != null && effectiveCacheHitPct > 0) {
+              const freshK = formatTokens(effectiveFreshTokens)
+              const hitPct = Math.round(effectiveCacheHitPct)
+              tokenTipLines.push(
+                `⚙ Cost: ~${freshK} fresh (×1.0) · ${hitPct}% cached (×0.10) — warm sessions are cheap`
+              )
+            } else if (effectiveFreshTokens != null && effectiveCacheHitPct === 0) {
+              const freshK = formatTokens(effectiveFreshTokens)
+              tokenTipLines.push(
+                `⚙ Cost: ${freshK} fresh tokens — cache cold, this turn billed at full price`
+              )
+            }
+            if (utilization != null) {
+              tokenTipLines.push(t['chat.session_bar_util'].replace('{pct}', String(utilization)))
+            }
+            const tokenTip = tokenTipLines.join('\n')
+
+            return (
+              <span className="chat-session-health" style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0,
+              }}>
+                <span
+                  title={tokenTip}
+                  style={{
+                    display: 'inline-block', width: 40, height: 5,
+                    background: 'var(--border, #374151)', borderRadius: 3,
+                    overflow: 'hidden', cursor: 'default', flexShrink: 0,
+                  }}
+                >
+                  <span style={{
+                    display: 'block', height: '100%',
+                    width: `${Math.round(fillFrac * 100)}%`,
+                    background: barColor,
+                    borderRadius: 3,
+                    transition: 'width 0.3s, background 0.3s',
+                  }} />
+                </span>
+                <span style={{ color: tokenColor, cursor: 'default' }} title={tokenTip}>
+                  {real ? '' : '~'}{formatTokens(tokens)}
+                  <span style={{ color: 'var(--color-muted, #9ca3af)' }}> / {formatMax(contextWindow)}</span>
+                </span>
+                {(lastTurnEndMs !== null || lastCacheHitPct != null || lastAssistantMetrics != null) && (
+                  <CacheCountdownBadge
+                    lastTurnEndMs={lastTurnEndMs}
+                    lastCacheHitPct={lastCacheHitPct}
+                    lastAssistantMetrics={lastAssistantMetrics}
+                    isRunning={run != null}
+                  />
+                )}
+              </span>
+            )
+          })()}
+          {/* Model selector */}
           <div className="chat-model-selector" title={t['chat.model_hint']}>
             <span className="chat-model-label">◆</span>
             <select
@@ -1711,8 +1833,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
               onChange={e => handleModelChange(e.target.value as ModelKey)}
               disabled={changingModel || streaming}
             >
-              {/* Unknown stored alias: show it as-is instead of silently displaying
-                  (and on next change POST-ing) a different model. */}
               {!MODELS.some(m => m.value === project.model) && (
                 <option value={project.model}>{modelLabel(project.model)}</option>
               )}
@@ -1721,35 +1841,36 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
               ))}
             </select>
           </div>
-          {/* Thinking mode — compact dropdown, per-chat localStorage persistence.
-              Disabled (greyed + tooltip) for fable: thinking always runs high on Fable 5. */}
+          {/* Thinking mode — compact button+popover. Disabled for fable. */}
           {(() => {
             const isFable = project.model === 'fable' || project.model?.startsWith('fable')
             const selectorTitle = isFable
               ? t['chat.think_mode_fable_hint']
               : t['chat.think_mode_hint']
             return (
-              <div className="chat-model-selector chat-think-selector" title={selectorTitle}>
-                <span className="chat-model-label" aria-hidden="true">🧠</span>
-                <select
-                  className="chat-model-select"
-                  value={thinkMode}
-                  onChange={e => { if (!isFable) handleThinkModeChange(e.target.value as ThinkMode) }}
-                  disabled={isFable || streaming}
-                  aria-label={t['chat.think_mode_label']}
-                >
-                  {THINK_MODES.map(m => (
-                    <option key={m.value} value={m.value}>{t[m.labelKey]}</option>
-                  ))}
-                </select>
-              </div>
+              <ThinkModeButton
+                value={thinkMode}
+                disabled={isFable || streaming}
+                isFable={isFable}
+                title={selectorTitle}
+                onChange={handleThinkModeChange}
+              />
             )
           })()}
+          {/* Collapse button — only when onToggleCollapse is provided (desktop-split site). */}
+          {onToggleCollapse && (
+            <button
+              className="chat-collapse-btn"
+              onClick={onToggleCollapse}
+              title={collapsed ? t['split.expand_chat'] : t['split.collapse_chat']}
+              aria-label={collapsed ? t['split.expand_chat'] : t['split.collapse_chat']}
+              aria-expanded={!collapsed}
+            >
+              {collapsed ? '⟨' : '⟩'}
+            </button>
+          )}
         </div>
       </div>
-
-      {/* Session context panel */}
-      <SessionContextPanel projectId={projectId} refreshKey={ctxRefreshKey} />
 
       <div className="chat-feed" ref={feedRef} onScroll={handleFeedScroll} style={{ position: 'relative' }}>
         {rotating && (
@@ -1967,14 +2088,22 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
         />
         {attachments.length > 0 && (
           <div className="chat-attachments">
-            {attachments.map(a => (
-              <div key={a.id} className={`chat-att-chip${a.error ? ' att-error' : a.uploading ? ' att-uploading' : ''}`}>
-                <span className="att-name" title={a.name}>{a.name}</span>
-                {a.uploading && <span className="att-spinner">↻</span>}
-                {a.error && <span className="att-err-icon" title={a.error}>⚠</span>}
-                <button className="att-remove" onClick={() => setAttachments(prev => prev.filter(x => x.id !== a.id))} title={t['chat.remove_file']} aria-label={t['chat.remove_file_aria']}>✕</button>
-              </div>
-            ))}
+            {attachments.map(a => {
+              // Pick an icon: image types get Image, everything else gets File
+              const isImage = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(a.name)
+              const AttIcon = isImage ? Image : File
+              return (
+                <div key={a.id} className={`chat-att-chip${a.error ? ' att-error' : a.uploading ? ' att-uploading' : ''}`}>
+                  {/* File-type icon */}
+                  <span className="att-icon"><AttIcon size={12} /></span>
+                  <span className="att-name" title={a.name}>{a.name}</span>
+                  {/* Upload progress affordance: spinner while uploading, error icon on failure */}
+                  {a.uploading && <span className="att-spinner" aria-label="Uploading…" />}
+                  {a.error && <span className="att-err-icon" title={a.error}>⚠</span>}
+                  <button className="att-remove" onClick={() => setAttachments(prev => prev.filter(x => x.id !== a.id))} title={t['chat.remove_file']} aria-label={t['chat.remove_file_aria']}>✕</button>
+                </div>
+              )
+            })}
           </div>
         )}
         {dragOver && <div className="chat-drop-hint">📎 Drop files here</div>}
@@ -2105,40 +2234,23 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
         {/* Server-backed message queue panel — visible when messages are queued while agent runs.
             Survives page reload via GET /api/projects/{id}/chat/queue hydration on mount. */}
         {queueItems.length > 0 && (
-          <div style={{
-            display: 'flex', flexDirection: 'column', gap: 4,
-            padding: '6px 8px',
-            background: 'var(--color-bg-alt, rgba(0,0,0,0.04))',
-            border: '1px solid var(--color-border, #e5e7eb)',
-            borderRadius: 6,
-            margin: '4px 0',
-            flexShrink: 0,
-          }}>
-            <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-muted, #6b7280)', marginBottom: 2 }}>
-              {t['chat.queue_panel_label']} ({queueItems.length})
+          <div className="chat-queue-panel">
+            <span className="chat-queue-header">
+              ⏭ {queueItems.length} <span className="chat-queue-header-label">{t['chat.queue_panel_label']}</span>
             </span>
             {queueItems.map((item, idx) => (
-              <div key={item.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-                <span style={{ fontSize: 11, color: 'var(--color-muted, #9ca3af)', minWidth: 16, paddingTop: 2 }}>
-                  {idx + 1}.
-                </span>
+              <div key={item.id} className="chat-queue-row">
+                <span className="chat-queue-idx">{idx + 1}.</span>
                 {queueEditId === item.id ? (
                   <>
                     <textarea
-                      style={{
-                        flex: 1, fontSize: 12, padding: '3px 6px',
-                        border: '1px solid var(--color-primary, #6366f1)',
-                        borderRadius: 4, resize: 'vertical', minHeight: 36,
-                        background: 'var(--color-bg, #fff)', color: 'inherit',
-                      }}
+                      className="chat-queue-edit-area"
                       value={queueEditText}
                       onChange={e => setQueueEditText(e.target.value)}
                       aria-label={t['chat.queue_item_aria']}
                     />
                     <button
-                      style={{ fontSize: 11, padding: '2px 7px', cursor: 'pointer',
-                        background: 'var(--color-primary, #6366f1)', color: '#fff',
-                        border: 'none', borderRadius: 4, whiteSpace: 'nowrap' }}
+                      className="chat-queue-action-btn chat-queue-save"
                       aria-label={t['chat.queue_save_aria']}
                       onClick={() => {
                         const trimmed = queueEditText.trim()
@@ -2152,44 +2264,40 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
                       }}
                     >{t['chat.queue_save_btn']}</button>
                     <button
-                      style={{ fontSize: 11, padding: '2px 7px', cursor: 'pointer',
-                        background: 'transparent', border: '1px solid var(--color-border, #d1d5db)',
-                        borderRadius: 4, whiteSpace: 'nowrap' }}
+                      className="chat-queue-action-btn"
                       aria-label={t['chat.queue_cancel_aria']}
                       onClick={() => setQueueEditId(null)}
                     >{t['chat.queue_cancel_btn']}</button>
                   </>
                 ) : (
                   <>
-                    <span style={{ flex: 1, fontSize: 12, wordBreak: 'break-word', paddingTop: 2 }}
-                      aria-label={t['chat.queue_item_aria']}>
+                    <span className="chat-queue-text" aria-label={t['chat.queue_item_aria']}>
                       {item.text}
                     </span>
                     <button
-                      style={{ fontSize: 11, padding: '2px 7px', cursor: 'pointer',
-                        background: 'transparent', border: '1px solid var(--color-border, #d1d5db)',
-                        borderRadius: 4, whiteSpace: 'nowrap', flexShrink: 0 }}
+                      className="chat-queue-icon-btn"
                       aria-label={t['chat.queue_edit_aria']}
+                      title={t['chat.queue_edit_btn']}
                       onClick={() => { setQueueEditId(item.id); setQueueEditText(item.text) }}
-                    >{t['chat.queue_edit_btn']}</button>
+                    ><Pencil size={13} /></button>
                     <button
-                      style={{ fontSize: 11, padding: '2px 7px', cursor: 'pointer',
-                        background: 'transparent', border: '1px solid var(--color-red, #ef4444)',
-                        borderRadius: 4, color: 'var(--color-red, #ef4444)', whiteSpace: 'nowrap', flexShrink: 0 }}
+                      className="chat-queue-icon-btn chat-queue-icon-delete"
                       aria-label={t['chat.queue_delete_aria']}
+                      title={t['chat.queue_delete_btn']}
                       onClick={() => {
                         api.chatQueueDelete(projectId, item.id)
                           .then(() => setQueueItems(prev => prev.filter(q => q.id !== item.id)))
                           .catch(() => {/* already gone */})
                         if (queueEditId === item.id) setQueueEditId(null)
                       }}
-                    >{t['chat.queue_delete_btn']}</button>
+                    ><Trash2 size={13} /></button>
                   </>
                 )}
               </div>
             ))}
           </div>
         )}
+        {/* Unified composer box: textarea on top, slim bottom bar with icons-left + Send-right */}
         <div className="chat-composer">
           <textarea
             ref={textareaRef}
@@ -2204,94 +2312,72 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            rows={3}
+            rows={2}
           />
-          <div className="chat-toolbar">
+          <div className="chat-composer-bar">
             <div className="chat-toolbar-tools">
               <button
                 className="chat-tool-btn"
                 onClick={() => fileInputRef.current?.click()}
                 title={t['chat.attach_file_title']}
                 aria-label={t['chat.attach_file_aria']}
-              ><Paperclip size={16} /></button>
+              ><Paperclip size={15} /></button>
               <button
                 className={`chat-tool-btn${showPrompts ? ' active' : ''}`}
                 onClick={() => { setShowPrompts(s => !s); setShowSkills(false) }}
                 title={t['chat.prompts_title']}
                 aria-label={t['chat.prompts_aria']}
-              ><ClipboardList size={16} /></button>
+              ><ClipboardList size={15} /></button>
               <button
                 className={`chat-tool-btn${showSkills ? ' active' : ''}`}
                 onClick={() => { setShowSkills(s => !s); setShowPrompts(false) }}
                 title={t['chat.skills_title']}
                 aria-label={t['chat.skills_aria']}
-              ><Wrench size={16} /></button>
-              {/* Split defer button: ⏱ = one-click after-reset | ▾ = open modal for specific time */}
-              <span className="chat-defer-split">
-                <button
-                  className="chat-tool-btn"
-                  disabled={!input.trim() || deferAfterResetBusy}
-                  title={t['chat.defer_after_reset_title']}
-                  aria-label={t['chat.defer_aria']}
-                  onClick={async () => {
-                    if (!input.trim()) return
-                    setDeferAfterResetBusy(true)
+              ><Wrench size={15} /></button>
+              <button
+                className="chat-tool-btn"
+                disabled={!input.trim() || deferAfterResetBusy}
+                title={t['chat.defer_after_reset_title']}
+                aria-label={t['chat.defer_aria']}
+                onClick={async () => {
+                  if (!input.trim()) return
+                  setDeferAfterResetBusy(true)
+                  try {
+                    await api.deferredCreate({ project: project.id, prompt: input, fire_on_reset: true })
+                    setInput('')
+                    // Attempt to include reset time in toast
+                    let toastMsg: string = t['chat.defer_after_reset_toast_plain']
                     try {
-                      await api.deferredCreate({ project: project.id, prompt: input, fire_on_reset: true })
-                      setInput('')
-                      // Attempt to include reset time in toast
-                      let toastMsg: string = t['chat.defer_after_reset_toast_plain']
-                      try {
-                        const usage = await api.usage()
-                        const fiveH = usage.limits['five_hour']
-                        if (fiveH?.resets_at) {
-                          const d = new Date(fiveH.resets_at * 1000)
-                          const hh = String(d.getHours()).padStart(2, '0')
-                          const mm = String(d.getMinutes()).padStart(2, '0')
-                          toastMsg = t['chat.defer_after_reset_toast'].replace('{time}', `${hh}:${mm}`)
-                        }
-                      } catch { /* usage unavailable — use plain message */ }
-                      setDeferToast(toastMsg)
-                      setTimeout(() => setDeferToast(null), 4000)
-                      await refreshPendingDeferred()
-                    } catch (e: unknown) {
-                      setDeferToast(e instanceof Error ? e.message : String(e))
-                      setTimeout(() => setDeferToast(null), 4000)
-                    } finally {
-                      setDeferAfterResetBusy(false)
-                    }
-                  }}
-                >{deferAfterResetBusy ? '…' : <Clock size={16} />}</button>
-                <button
-                  className="chat-tool-btn chat-defer-arrow"
-                  disabled={!input.trim()}
-                  title={t['chat.defer_split_arrow_title']}
-                  aria-label={t['chat.defer_split_arrow_title']}
-                  onClick={() => {
-                    setShowDefer(true)
-                    setShowPrompts(false)
-                    setShowSkills(false)
-                    // Default datetime = now + 30 min
-                    if (!deferDatetime) {
-                      const d = new Date(Date.now() + 30 * 60 * 1000)
-                      const pad = (n: number) => String(n).padStart(2, '0')
-                      setDeferDatetime(
-                        `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-                      )
-                    }
-                  }}
-                ><ChevronDown size={14} /></button>
-              </span>
+                      const usage = await api.usage()
+                      const fiveH = usage.limits['five_hour']
+                      if (fiveH?.resets_at) {
+                        const d = new Date(fiveH.resets_at * 1000)
+                        const hh = String(d.getHours()).padStart(2, '0')
+                        const mm = String(d.getMinutes()).padStart(2, '0')
+                        toastMsg = t['chat.defer_after_reset_toast'].replace('{time}', `${hh}:${mm}`)
+                      }
+                    } catch { /* usage unavailable — use plain message */ }
+                    setDeferToast(toastMsg)
+                    setTimeout(() => setDeferToast(null), 4000)
+                    await refreshPendingDeferred()
+                  } catch (e: unknown) {
+                    setDeferToast(e instanceof Error ? e.message : String(e))
+                    setTimeout(() => setDeferToast(null), 4000)
+                  } finally {
+                    setDeferAfterResetBusy(false)
+                  }
+                }}
+              >{deferAfterResetBusy ? '…' : <Clock size={15} />}</button>
             </div>
             {/* Pending deferred runs chip — opens management modal */}
             {pendingDeferred.length > 0 && (
               <button
                 className="btn btn-secondary btn-sm"
                 title={t['chat.defer_pending_chip_title']}
-                style={{ fontSize: 12, padding: '3px 7px', opacity: 0.85 }}
+                style={{ fontSize: 11, padding: '2px 6px', opacity: 0.85 }}
                 onClick={() => setShowPendingDeferred(s => !s)}
               >
-                <Clock size={14} /> {pendingDeferred.length}
+                <Clock size={13} /> {pendingDeferred.length}
               </button>
             )}
             <button
@@ -2442,93 +2528,6 @@ export function ChatTab({ project, onProjectsReload, isActive }: Props) {
             )}
           </div>
         </Modal>
-      )}
-
-      {/* Deferred Run Modal */}
-      {showDefer && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
-        }}
-          onClick={() => setShowDefer(false)}
-        >
-          <div style={{
-            background: 'var(--bg-card)', border: '1px solid var(--border)',
-            borderRadius: 10, padding: 24, minWidth: 340, maxWidth: 480,
-            boxShadow: '0 8px 32px rgba(0,0,0,0.25)',
-          }}
-            onClick={e => e.stopPropagation()}
-          >
-            <h3 style={{ margin: '0 0 16px', fontSize: 16 }}>{t['chat.defer_modal_title']}</h3>
-            {/* Mode tabs */}
-            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-              <button
-                className={`btn btn-sm ${deferMode === 'time' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setDeferMode('time')}
-              >{t['chat.defer_mode_time']}</button>
-              <button
-                className={`btn btn-sm ${deferMode === 'reset' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setDeferMode('reset')}
-              >{t['chat.defer_mode_reset']}</button>
-            </div>
-            {deferMode === 'time' && (
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 13, display: 'block', marginBottom: 4 }}>{t['chat.defer_fire_at']}</label>
-                <input
-                  type="datetime-local"
-                  value={deferDatetime}
-                  onChange={e => setDeferDatetime(e.target.value)}
-                  style={{ width: '100%', fontSize: 14, padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', boxSizing: 'border-box' }}
-                />
-              </div>
-            )}
-            {deferMode === 'reset' && (
-              <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
-                {t['chat.defer_reset_hint']}
-              </p>
-            )}
-            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
-              {t['chat.defer_prompt_preview']}: <em>{input.slice(0, 80) || '(empty)'}</em>
-            </p>
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button className="btn btn-secondary btn-sm" onClick={() => setShowDefer(false)}>
-                {t['common.cancel']}
-              </button>
-              <button
-                className="btn btn-primary btn-sm"
-                disabled={deferSubmitting || !input.trim() || (deferMode === 'time' && !deferDatetime)}
-                onClick={async () => {
-                  setDeferSubmitting(true)
-                  try {
-                    const body: Record<string, unknown> = {
-                      project: project.id,
-                      prompt: input,
-                    }
-                    if (deferMode === 'reset') {
-                      body.fire_on_reset = true
-                    } else {
-                      // Convert local datetime-local to ISO-8601 UTC
-                      body.fire_at = new Date(deferDatetime).toISOString()
-                    }
-                    await api.deferredCreate(body)
-                    setShowDefer(false)
-                    setInput('')
-                    setDeferToast(t['chat.defer_queued'])
-                    setTimeout(() => setDeferToast(null), 4000)
-                    await refreshPendingDeferred()
-                  } catch (e: unknown) {
-                    setDeferToast(e instanceof Error ? e.message : String(e))
-                    setTimeout(() => setDeferToast(null), 4000)
-                  } finally {
-                    setDeferSubmitting(false)
-                  }
-                }}
-              >
-                {deferSubmitting ? t['chat.defer_submitting'] : t['chat.defer_queue']}
-              </button>
-            </div>
-          </div>
-        </div>
       )}
 
       {/* Defer toast */}

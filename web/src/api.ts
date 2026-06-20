@@ -281,12 +281,6 @@ export const api = {
       `/api/projects/${id}/incidents`
     ),
 
-  // Feature A: session context (read/edited/commands)
-  sessionContext: (id: string, sessionId?: string) =>
-    apiFetch<import('./types').SessionContext>(
-      `/api/projects/${id}/session-context${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`
-    ),
-
   // Feature B: project memory files
   memory: (id: string) =>
     apiFetch<import('./types').ProjectMemory>(`/api/projects/${id}/memory`),
