@@ -16,8 +16,10 @@ import re
 import secrets
 import shlex
 import shutil
+import subprocess
 import time
 import traceback as _tb
+import unicodedata
 import uuid as _uuid
 from collections import deque
 from datetime import datetime, timezone
@@ -3232,7 +3234,7 @@ def _git_enabled(project: dict) -> bool:
 
 # ─────────────────────── API: settings (global + per-project) ───────────────────────
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal")
 
 
 def _validate_global_settings(partial: dict) -> "tuple[dict, str | None]":
@@ -9249,33 +9251,133 @@ async def api_project_secrets_delete(req: web.Request) -> web.Response:
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$")
 
-_NEW_PROJECT_PROMPT = """\
-🚀 New project initialising. Folder: {cwd}.
+# ── Archetype helpers ──────────────────────────────────────────────────────────
 
-Starter templates are already in the root: CLAUDE.md, TASKS.md, README.md, .gitignore. This is a scaffold — it needs to be adapted.
+def _infer_archetype(intent: str) -> str:
+    """Infer project archetype from intent string.
 
-STEP 1 — ask me (in one message, as plain text, at the end of your reply):
-- What is the project and its goal (1-2 sentences)?
-- Stack/language/infrastructure?
-- Are there existing drafts/files/code somewhere else? Exact paths if you know them.
-- What are the first 3-5 tasks?
+    Returns one of: 'software' | 'content' | 'ops' | 'scratchpad'.
+    Default is 'software' — most common for power users.
+    """
+    text = intent.lower()
+    software_kw = {
+        "build", "code", "app", "bot", "api", "service", "deploy", "backend", "frontend",
+        "website", "web", "server", "library", "package", "cli", "script", "nextjs", "react",
+        "python", "node", "django", "flask", "fastapi", "docker", "kubernetes",
+    }
+    ops_kw = {
+        "automate", "automation", "infra", "infrastructure", "pipeline", "workflow", "monitor",
+        "devops", "cron", "schedule", "backup", "migrate", "setup", "configure",
+        "install", "provision",
+    }
+    content_kw = {
+        "write", "blog", "post", "article", "research", "study", "plan", "document",
+        "report", "essay", "book", "content", "draft", "newsletter", "marketing", "seo",
+        "copy", "creative",
+    }
+    words = set(text.split())
+    if words & software_kw:
+        return "software"
+    if words & ops_kw:
+        return "ops"
+    if words & content_kw:
+        return "content"
+    return "software"
 
-STEP 2 (after my answers):
-- If I mentioned existing folders → scan them (Read several files), brief summary.
-- Rewrite the "What this is" / "Stack" / "Commands" sections in CLAUDE.md to match my answers. The "Cockpit rules" section — DO NOT TOUCH, it is shared across all projects.
-- Replace starter cards in TASKS.md → ## Backlog (put my real 3-5 tasks, remove the placeholder "Fill in …" cards if done).
-- Fill in README.md.
-- If needed, create `specs/`, `tests/`, etc. — as appropriate.
-- If it's a web service/bot → add a global error handler (FastAPI/aiohttp middleware, PTB add_error_handler, CLI try/except in main → logger.error). Otherwise the cockpit won't see runtime errors. Log with the standard line `UNHANDLED exc_class=<Type> path=<route>`.
 
-STEP 3 — project name:
-- Suggest a short kebab-case slug (e.g. `my-cool-bot`). Ask "rename now?"
-- If OK — ask me to click the ✏️ button in the project header (it calls the rename API — folder will be moved, topics.json updated without restart).
+def _intent_to_slug(intent: str) -> str:
+    """Derive a kebab-case slug from an intent string."""
+    # Normalize unicode → ASCII approximation
+    text = unicodedata.normalize("NFKD", intent).encode("ascii", "ignore").decode()
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s-]", "", text)
+    text = re.sub(r"[\s-]+", "-", text).strip("-")
+    # Truncate to 40 chars, trim trailing dash
+    text = text[:40].rstrip("-")
+    if len(text) < 2:
+        return ""
+    return text
 
-STEP 4 — git init (no commit/push, no explicit approval needed from me).
 
-Don't dump a script, lead a dialogue step by step. 3-5 focused questions at a time, then wait for my answer.\
-"""
+def _intent_to_display_name(intent: str) -> str:
+    """Derive a human-friendly display name from intent string (max 5 words, title-cased)."""
+    words = intent.strip().split()[:5]
+    return " ".join(w.capitalize() for w in words) if words else ""
+
+
+def _render_template_archetype(template_name: str, vars: dict, here: Path, project_type: str) -> str:
+    """Render a template file, stripping archetype-conditional blocks.
+
+    Supported markers (must be on their own lines):
+      {{#if_software_ops}} ... {{/if_software_ops}}  — kept for software/ops, removed for others
+      {{#if_content}} ... {{/if_content}}             — kept for content, removed for others
+      {{#if_scratchpad}} ... {{/if_scratchpad}}       — kept for scratchpad, removed for others
+    """
+    text = _render_template(template_name, vars, here)
+
+    def _process_block(t: str, tag: str, keep: bool) -> str:
+        open_tag = "{{#" + tag + "}}"
+        close_tag = "{{/" + tag + "}}"
+        while open_tag in t:
+            start = t.index(open_tag)
+            end = t.index(close_tag, start) + len(close_tag)
+            inner = t[start + len(open_tag):t.index(close_tag, start)]
+            if keep:
+                t = t[:start] + inner + t[end:]
+            else:
+                # Remove the block including any surrounding blank line
+                block = t[start:end]
+                t = t[:start] + t[end:]
+                # Clean up double blank lines left behind
+                t = re.sub(r"\n{3,}", "\n\n", t)
+        return t
+
+    is_software_ops = project_type in ("software", "ops")
+    text = _process_block(text, "if_software_ops", is_software_ops)
+    text = _process_block(text, "if_content", project_type == "content")
+    text = _process_block(text, "if_scratchpad", project_type == "scratchpad")
+    return text
+
+
+def _build_onboarding_prompt(project_type: str, cwd: str, intent: str) -> str:
+    """Build an archetype-aware onboarding prompt for a new project."""
+    git_step = (
+        "\n- After scaffolding: run `git init` + initial commit if not already done."
+        if project_type in ("software", "ops") else ""
+    )
+    stack_step = (
+        "\n- Ask about the stack (1 question) if not obvious from the intent."
+        if project_type in ("software", "ops") else ""
+    )
+    error_handler_step = (
+        "\nSTEP 3 — error handler:\n"
+        "- If this is a service or bot, add a global error handler "
+        "(FastAPI/aiohttp middleware, PTB add_error_handler, or CLI try/except in main → logger.error). "
+        "The cockpit scanner greps for `UNHANDLED exc_class=<Type> path=<route>`. "
+        "Without it the cockpit is blind to runtime errors.\n"
+        "- Update ## ClaudeOps Integration Status in CLAUDE.md once set up."
+        if project_type in ("software", "ops") else ""
+    )
+
+    return (
+        f"New {project_type} project initialized. Folder: {cwd}.\n"
+        f"Intent: \"{intent}\"\n\n"
+        f"Starter files are in place. Your job: be a proactive partner, not an interrogator.\n\n"
+        f"STEP 1 — Propose and scaffold immediately:\n"
+        f"- Based on the intent \"{intent}\", infer the project goal, then:\n"
+        f"- Rewrite the Goal section in CLAUDE.md (1-2 sentences about what and why).\n"
+        f"- Add 3 real starter tasks to ## Backlog in TASKS.md (remove placeholder cards). "
+        f"Make them specific and actionable: verb + object + done-criterion.\n"
+        f"- End with ONE brief question: ask what's most important to clarify first, "
+        f"or suggest \"start with task 1?\""
+        f"{git_step}{stack_step}\n\n"
+        f"STEP 2 — After my response:\n"
+        f"- Adapt CLAUDE.md further based on what I say.\n"
+        f"- If I mentioned existing code/files → scan them (Read a few), brief summary.\n"
+        f"- Fill in README.md minimally."
+        f"{error_handler_step}\n\n"
+        f"Keep it lean. Propose, don't interrogate. Lead with action, not questions."
+    )
 
 def _build_audit_prompt(ctx: dict, project_name: str) -> str:
     """Audit prompt: preamble + baseline checklist from templates/reference/audit-prompt.md.
@@ -9306,46 +9408,88 @@ def _render_template(template_name: str, vars: dict, here: Path) -> str:
 
 async def api_new_project(req: web.Request) -> web.Response:
     """POST /api/projects/new — creates a new project folder with starter templates and
-    launches initialisation via run_engine (like an F1 card)."""
+    launches initialisation via run_engine (like an F1 card).
+
+    Body (all optional):
+      intent: str  — what the user wants to work on (free-text)
+      type:   str  — archetype override: 'software'|'content'|'ops'|'scratchpad'
+      name:   str  — legacy display name override (kept for back-compat)
+    """
     ctx = req.app["ctx"]
     run_engine = ctx.get("run_engine")
 
-    # Parse body (name is optional)
+    # Parse body
     try:
         body = await req.json()
     except Exception:
         body = {}
-    name = (body.get("name") or "").strip() or None
 
-    # Create folder ~/projects/untitled-<ts>/
+    intent: str = (body.get("intent") or "").strip()
+    name: str = (body.get("name") or "").strip()  # legacy compat
+    project_type: str = (body.get("type") or "").strip()
+
+    # Infer archetype from intent if not supplied
+    if not project_type:
+        project_type = _infer_archetype(intent) if intent else "software"
+
+    # Derive slug from intent; fall back to untitled-<ts>
+    ts = int(time.time())
+    derived_slug = _intent_to_slug(intent) if intent else ""
+    slug = derived_slug if derived_slug else f"untitled-{ts}"
+
+    # Derive display name: intent-derived > legacy name arg > slug
+    if intent:
+        display_name = _intent_to_display_name(intent) or slug
+    elif name:
+        display_name = name
+    else:
+        display_name = slug
+
+    # Create folder ~/projects/<slug>/
     projects_dir = Path.home() / "projects"
     projects_dir.mkdir(exist_ok=True)
-    ts = int(time.time())
-    slug = f"untitled-{ts}"
     cwd = projects_dir / slug
+
+    # If slug already exists (e.g. from a previous run with same intent), disambiguate with ts
+    if cwd.exists():
+        slug = f"{slug}-{ts}"
+        cwd = projects_dir / slug
+
     try:
         cwd.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
         return web.json_response({"error": f"folder already exists: {cwd}"}, status=409)
 
-    display_name = name or slug
     here: Path = ctx["HERE"]
     tpl_vars = {
         "name": display_name,
         "date": time.strftime("%Y-%m-%d"),
         "slug": slug,
+        "type": project_type,
     }
 
-    # Write templates
+    # Write templates (archetype-aware)
     try:
-        (cwd / "CLAUDE.md").write_text(_render_template("CLAUDE.md.tpl", tpl_vars, here), encoding="utf-8")
-        (cwd / "README.md").write_text(_render_template("README.md.tpl", tpl_vars, here), encoding="utf-8")
-        (cwd / ".gitignore").write_text(_render_template(".gitignore.tpl", tpl_vars, here), encoding="utf-8")
+        (cwd / "CLAUDE.md").write_text(
+            _render_template_archetype("CLAUDE.md.tpl", tpl_vars, here, project_type),
+            encoding="utf-8",
+        )
+        (cwd / "README.md").write_text(
+            _render_template("README.md.tpl", tpl_vars, here),
+            encoding="utf-8",
+        )
 
-        # TASKS.md: render template, then parse and add starter card to In Progress
-        tasks_raw = _render_template("TASKS.md.tpl", tpl_vars, here)
+        # .gitignore only for software/ops
+        if project_type in ("software", "ops"):
+            (cwd / ".gitignore").write_text(
+                _render_template(".gitignore.tpl", tpl_vars, here),
+                encoding="utf-8",
+            )
+
+        # TASKS.md: render template (archetype-aware), then parse and add init card to In Progress
+        tasks_raw = _render_template_archetype("TASKS.md.tpl", tpl_vars, here, project_type)
         preamble, cols = _parse_tasks(tasks_raw)
-        init_card = {"id": _new_card_id(), "text": "🚀 Initialise project"}
+        init_card = {"id": _new_card_id(), "text": "Initialise project"}
         cols["in_progress"].append(init_card)
         (cwd / "TASKS.md").write_text(_serialize_tasks(preamble, cols, display_name), encoding="utf-8")
     except Exception as e:
@@ -9353,34 +9497,39 @@ async def api_new_project(req: web.Request) -> web.Response:
         shutil.rmtree(str(cwd), ignore_errors=True)
         return web.json_response({"error": f"error writing templates: {e}"}, status=500)
 
+    # git init for software/ops (non-fatal)
+    if project_type in ("software", "ops"):
+        try:
+            _git_env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "Claude-Ops",
+                "GIT_AUTHOR_EMAIL": "claude-ops@localhost",
+                "GIT_COMMITTER_NAME": "Claude-Ops",
+                "GIT_COMMITTER_EMAIL": "claude-ops@localhost",
+            }
+            subprocess.run(["git", "init"], cwd=str(cwd), check=True, capture_output=True)
+            subprocess.run(["git", "add", "."], cwd=str(cwd), check=True, capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", "Initial scaffold"],
+                cwd=str(cwd), check=True, capture_output=True, env=_git_env,
+            )
+            print(f"[new_project] git init + initial commit in {cwd}")
+        except Exception as e:
+            print(f"[new_project] git init failed (non-fatal): {e}")
+
     # Register in topics.json.
-    # spec-040 Phase 0: new projects always get a slug-based session key (transport-neutral).
-    # If TG is running, we also create a forum topic and store its chat:thread in the
-    # ``tg_key`` field so the TG adapter can still route messages to this project
-    # (binding_for reverse-lookup).  Removed in Phase D.
+    # spec-040 Phase 0+D: new projects get a slug-based session key (transport-neutral).
+    # TG forum topic creation removed in Phase D.
     pid = _project_id(str(cwd))
     session_key = pid  # slug key — canonical from Phase 0 onward
 
     topic_entry: dict = {
+        "id": str(_uuid.uuid4()),  # spec-046: stable UUID for future migration
         "project": display_name,
         "cwd": str(cwd),
         "model": _effective_default_model(ctx),
+        "type": project_type,
     }
-
-    group_chat_id = ctx.get("GROUP_CHAT_ID") or 0
-    ptb_app = ctx.get("ptb_app")
-    if ptb_app and group_chat_id:
-        try:
-            topic = await ptb_app.bot.create_forum_topic(
-                chat_id=group_chat_id,
-                name=(display_name if name else "🆕 New project"),
-            )
-            tg_thread_id = topic.message_thread_id
-            tg_key = f"{group_chat_id}:{tg_thread_id}"
-            topic_entry["tg_key"] = tg_key
-            print(f"[new_project] forum topic created: thread={tg_thread_id}, session_key={session_key!r}")
-        except Exception as e:
-            print(f"[new_project] create_forum_topic failed ({e}) — cockpit-only project")
 
     ctx["topics"][session_key] = topic_entry
     save_topics = ctx.get("save_topics")
@@ -9401,18 +9550,25 @@ async def api_new_project(req: web.Request) -> web.Response:
 
     # If run_engine is unavailable — return without launching (degraded mode)
     if run_engine is None:
-        return web.json_response({"id": pid, "cwd": str(cwd), "name": display_name, "started": False})
+        return web.json_response({
+            "id": pid, "cwd": str(cwd), "name": display_name,
+            "session_key": session_key, "started": False,
+        })
 
     # Check lock (theoretically free slot — just created)
     if ctx["running"].get(session_key) is not None:
-        return web.json_response({"id": pid, "cwd": str(cwd), "name": display_name, "started": False})
+        return web.json_response({
+            "id": pid, "cwd": str(cwd), "name": display_name,
+            "session_key": session_key, "started": False,
+        })
 
     # Reserve slot SYNCHRONOUSLY (race guard — same as in api_move_task)
     ctx["running"][session_key] = True
 
-    # Replace card text with onboarding prompt BEFORE launching the task
-    # (run_engine receives card["text"] as prompt)
-    init_card["text"] = _NEW_PROJECT_PROMPT.format(cwd=str(cwd))
+    # Build archetype-aware onboarding prompt and assign to init_card
+    init_card["text"] = _build_onboarding_prompt(project_type, str(cwd), intent)
+    # Use the project's default model for onboarding (not board_card_model)
+    init_card["model"] = _effective_default_model(ctx)
     _spawn_bg(_run_card(ctx, req.app, project, init_card, session_key))
 
     return web.json_response({

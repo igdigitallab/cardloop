@@ -149,8 +149,11 @@ async def test_rename_syncs_forum_topic_name(aiohttp_client, ft_app, ft_ctx, mon
 
 
 # ───────────────── HTTP: новый проект создаёт forum-топик ─────────────────
+# spec-046 Phase D: TG forum topic creation removed from api_new_project.
+# These tests verify old Phase B/C behaviour and are now skipped.
 
 
+@pytest.mark.skip(reason="spec-046 Phase D: TG forum topic creation removed from api_new_project")
 async def test_new_project_creates_forum_topic(aiohttp_client, ft_app, ft_ctx, tmp_path, monkeypatch):
     """POST /api/projects/new → create_forum_topic вызван, thread_id → ключ сессии в topics."""
     # ~/projects → tmp, чтобы не плодить реальные папки
@@ -181,6 +184,7 @@ async def test_new_project_creates_forum_topic(aiohttp_client, ft_app, ft_ctx, t
     assert topic_entry.get("tg_key") == expected_tg_key
 
 
+@pytest.mark.skip(reason="spec-046 Phase D: TG forum topic creation removed from api_new_project")
 async def test_new_project_named_uses_name_for_topic(aiohttp_client, ft_app, ft_ctx, tmp_path, monkeypatch):
     """Если имя передано — топик создаётся сразу с этим именем (не плейсхолдер)."""
     monkeypatch.setattr(_webapp.Path, "home", staticmethod(lambda: tmp_path))

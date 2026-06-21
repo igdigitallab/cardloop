@@ -180,10 +180,14 @@ async def test_new_project_no_auth_returns_401(aiohttp_client, new_project_app):
 
 
 async def test_new_project_409_on_existing_dir(aiohttp_client, new_project_app, base_ctx, tmp_path, monkeypatch):
-    """Если директория уже существует (FileExistsError) → 409."""
+    """spec-046: duplicate slug is disambiguated with -<ts> suffix, not rejected with 409.
+
+    Old behaviour: same timestamp → 409.
+    New behaviour: slug already exists → append -<ts> → new unique folder → 200.
+    """
     monkeypatch.setattr(_webapp.Path, "home", staticmethod(lambda: tmp_path))
 
-    # Подменяем time.time чтобы два вызова подряд дали одинаковый slug
+    # Patch time.time so both calls get the same base slug
     import webapp
 
     _fixed_ts = 9999999999
@@ -193,14 +197,20 @@ async def test_new_project_409_on_existing_dir(aiohttp_client, new_project_app, 
 
     monkeypatch.setattr(webapp.time, "time", fixed_time)
 
-    # Первый вызов — создаёт директорию
+    # First call — creates untitled-9999999999
     client = await aiohttp_client(new_project_app)
     resp1 = await client.post("/api/projects/new", json={}, headers=_auth(base_ctx))
     assert resp1.status == 200
+    data1 = await resp1.json()
 
-    # Второй вызов с тем же timestamp → та же папка уже существует → 409
+    # Second call with same timestamp — slug collides → disambiguated with -<ts> suffix → also 200
     resp2 = await client.post("/api/projects/new", json={}, headers=_auth(base_ctx))
-    assert resp2.status == 409
+    assert resp2.status == 200
+    data2 = await resp2.json()
+
+    # The two projects must have different IDs and different directories
+    assert data1["id"] != data2["id"]
+    assert data1["cwd"] != data2["cwd"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════

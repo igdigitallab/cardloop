@@ -1,16 +1,19 @@
 # {{name}}
 
-_Создан {{date}}. Инициализируется._
+_Created {{date}}. Initializing._
 
-## Что это
-_Заполнить во время онбординга._
+## What this is
 
-## Запуск
+_Fill in during onboarding._
+
+## Getting started
+
 ```bash
-# заполнить
+# fill in
 ```
 
-## Структура
-- `CLAUDE.md` — правила для агентов и команды
-- `TASKS.md` — живая доска (канбан в кокпите)
-- `DONE.md` — архив завершённых задач
+## Structure
+
+- `CLAUDE.md` — agent rules and commands
+- `TASKS.md` — live board (kanban in cockpit)
+- `DONE.md` — archive of completed tasks

@@ -1,123 +1,122 @@
 # CLAUDE.md — {{name}}
 
-> Создан {{date}} через «+ Новый проект» в кокпите Claude-Ops.
-> Этот файл — главные правила и команды для агентов, работающих в этом проекте.
-> Error handler snippets (FastAPI / aiohttp / PTB / CLI) → `reference/error-handler.md`.
+> Created {{date}} via "+ New project" in the Claude-Ops cockpit.
+> This file is the primary rules and commands document for agents working in this project.
+> Edit it during onboarding and as the project evolves.
 
-## Что это
-_2-3 предложения: что делает проект, для кого. Заполнить во время онбординга._
+## Goal
 
-## Стек
-- Язык/фреймворк: …
-- Инфра: …
-- Внешние API: …
+_2-3 sentences: what this project does, and why. Fill in during onboarding._
 
-## Команды
+{{#if_software_ops}}
+## Stack
+
+- Language / framework: …
+- Infrastructure: …
+- External APIs: …
+
+## Commands
+
 ```bash
-# запуск/тесты/деплой — заполнить
+# start / test / deploy — fill in during onboarding
 ```
 
+{{/if_software_ops}}
 ## Gotchas
-- _Сюда — грабли, на которые наступили, чтобы не повторять._
 
-## Секреты проекта
+_Paste hard-won lessons here so they are never repeated._
 
-Секреты (API-ключи, токены, пароли) хранятся в `.claude-ops/secrets/secrets.env`.
+## Project Secrets
 
-**Расположение:** `<cwd>/.claude-ops/secrets/secrets.env` — `chmod 600`, НЕ коммитится в git (gitignored автоматически).
+Secrets (API keys, tokens, passwords) live in `.claude-ops/secrets/secrets.env`.
 
-**Доступ агента:** при каждом запуске задачи секреты подмешиваются в `env` процесса агента — доступны как обычные переменные окружения (`os.environ["STRIPE_KEY"]` и т.п.).
+**Location:** `<cwd>/.claude-ops/secrets/secrets.env` — `chmod 600`, NOT committed to git (gitignored automatically).
 
-**Управление:** вкладка «🔑 Ключи» в кокпите (только имена ключей, значения не отображаются) — или вручную: `echo 'MY_KEY=value' >> .claude-ops/secrets/secrets.env && chmod 600 .claude-ops/secrets/secrets.env`.
+**Agent access:** at every task run the secrets are injected into the agent process env — available as plain env vars (`os.environ["STRIPE_KEY"]` etc.).
 
-**⚠️ Gotcha:**
-- Имена ключей: только заглавные `A-Z`, цифры, `_` (env-совместимые).
-- Значения не возвращаются через API — только write-only из кокпита.
-- Не логируются в audit-лог, не попадают в git.
+**Management:** the "🔑 Keys" tab in the cockpit (key names only, values are never displayed) — or manually: `echo 'MY_KEY=value' >> .claude-ops/secrets/secrets.env && chmod 600 .claude-ops/secrets/secrets.env`.
 
-## Память проекта
+**⚠️ Rules:**
+- Key names: uppercase `A-Z`, digits, `_` only (env-compatible).
+- Values are write-only from the cockpit — never returned via API.
+- Not logged in the audit log, not committed to git.
 
-Накапливаемые знания, которые путешествуют с репо: `.claude-ops/memory/`.
+## Project Memory
 
-**Структура:** `MEMORY.md` — индекс (одна строка на запись). `<slug>.md` — одна запись.
+Accumulated knowledge that travels with the repo: `.claude-ops/memory/`.
 
-**Формат записи:**
+**Structure:** `MEMORY.md` — index (one line per entry). `<slug>.md` — one entry per file.
+
+**Entry format:**
 ```
 ---
 type: decision | gotcha | rejected | convention
 created: YYYY-MM-DD
 ---
-Суть. Для decision/rejected — **Почему:** причина.
+Summary. For decision/rejected — **Why:** reason.
 ```
 
-**Когда писать:**
-- `decision` — архитектурное или технологическое решение + почему так, а не иначе.
-- `gotcha` — грабли, на которые наступили, чтобы не наступить снова.
-- `rejected` — что оператор или проект отвергли + почему (не предлагать снова).
-- `convention` — договорённость о стиле, именовании, подходе.
+**When to write:**
+- `decision` — architectural or technology choice + why this, not that.
+- `gotcha` — a trap encountered, so it is never hit again.
+- `rejected` — something the operator or project rejected + why (do not suggest again).
+- `convention` — agreed style, naming, or approach.
 
-Агент пишет сюда через обычный Write (путь относительный: `.claude-ops/memory/<slug>.md`).
-Память коммитится в git — видна при клоне, история сохраняется.
+Agent writes here via normal Write (relative path: `.claude-ops/memory/<slug>.md`).
+Memory is committed to git — visible on clone, history preserved.
 
 ---
-
+{{#if_software_ops}}
 ## Error Handler
 
-**ОБЯЗАТЕЛЕН для сервисов/ботов.** Кокпит-сканер грепает строку `UNHANDLED exc_class=<Type> path=<route>` — она обязана быть в логе. Готовые сниппеты (FastAPI / aiohttp / PTB / CLI / incident-push) → `reference/error-handler.md`.
+**Required for services and bots.** The cockpit scanner greps for the string `UNHANDLED exc_class=<Type> path=<route>` — it must appear in the log. Ready snippets (FastAPI / aiohttp / PTB / CLI / incident-push) → `reference/error-handler.md`.
 
 ---
 
-## Правила работы в кокпите (НЕ удалять — общие для всех проектов)
+{{/if_software_ops}}
+## Cockpit Rules (do NOT remove — shared across all projects)
 
-**Доска (TASKS.md):**
-- Карточка: `- [ ] текст <!--ops:ID-->` строго внутри секции колонки.
-- Колонки: `## Backlog` / `## In Progress` / `## Review` / `## Failed`.
-- НЕЛЬЗЯ: нумерованные списки (`1.`), вложенные подсписки, таблицы внутри секций, текст вне секций (кроме преамбулы файла до первой `##`).
-- Маркер `<!--ops:ID-->` ставится автоматически при первом GET — не убирать.
-- Формулировка задачи: глагол + объект + критерий «готово». Плохо: «починить логи». Хорошо: «настроить log_cmd в topics.json для X, GET /api/projects/X/logs возвращает строки».
-- Выполненное → `DONE.md` (архив, сессии его НЕ читают — гигиена контекста).
+**Board (TASKS.md):**
+- Card format: `- [ ] text <!--ops:ID-->` strictly inside a column section.
+- Columns: `## Backlog` / `## In Progress` / `## Review` / `## Failed`.
+- NOT allowed: numbered lists (`1.`), nested sublists, tables inside sections, text outside sections (except the preamble before the first `##`).
+- The `<!--ops:ID-->` marker is added automatically on the first GET — do not remove it.
+- Card wording: verb + object + done-criterion. Bad: "fix logs". Good: "configure log_cmd in topics.json for X so that GET /api/projects/X/logs returns lines".
+- Completed work → `DONE.md` (archive; sessions do NOT read it — context hygiene).
 
-**Сессии:**
-- Один проект = одна общая сессия (TG + чат в кокпите + карточки делят её).
-- Переключение темы = `/reset` (новая сессия), не дописывать в текущую — контекст забивается.
-- Сессия в кокпите видна на любом устройстве (продолжать с телефона из браузера).
+**Sessions:**
+- One project = one shared session (TG + cockpit chat + cards all share it).
+- Topic switch = `/reset` (new session), do not append to the current one — context gets polluted.
+- A session in the cockpit is visible on any device (continue from phone via browser).
 
-**Файлы:**
-- `data/` (если есть) и `.env*` — НЕ в git (см. .gitignore).
-- README.md — короткое описание для будущего; CLAUDE.md — главное.
+**Files:**
+- `data/` (if present) and `.env*` — NOT in git (see .gitignore).
+- README.md — short description for the future; CLAUDE.md is the primary document.
 
-**Аудит:**
-- Раз в неделю — кнопка «🩺 Аудит проекта» в Overview-табе. Агент проверит структуру и создаст карточки на исправления.
+**Audit:**
+- Once a week — the "🩺 Project Audit" button in the Overview tab. The agent checks the structure and creates cards for issues found.
 
-**Самолечение (опция):**
-- Тумблер «🔧 Самолечение» в Overview — OFF по умолчанию. Включать осознанно.
-- При включении: новые ошибки (из log_cmd) → агент авто-чинит в worktree → карточка в Review.
-- **Незыблемо:** агент НИКОГДА не применяет изменения без человека. Merge — всегда руками («✓ Применить»).
-- Требует: git-репо + clean tree + log_cmd в topics.json.
+**Self-healing (optional):**
+- The "🔧 Self-heal" toggle in Overview — OFF by default. Enable deliberately.
+- When enabled: new errors (from log_cmd) → agent auto-fixes in a worktree → card in Review.
+- **Non-negotiable:** the agent NEVER applies changes without a human. Merge is always manual ("✓ Apply").
+- Requires: git repo + clean tree + log_cmd in topics.json.
 
-**Возможности ClaudeOps — что подключить:**
+**ClaudeOps capabilities — what to connect:**
 
-| Возможность | Что делает | Как завести |
-|---|---|---|
-| **error handler** | **ОБЯЗАТЕЛЕН для сервисов/ботов.** Пишет необработанные исключения в лог → кокпит ловит инцидент. | Добавить по типу проекта (см. `## Error Handler` выше). |
-| **log_cmd** | Кокпит читает логи проекта (вкладка «Логи», основа сканера ошибок). | В `topics.json` для проекта: `"log_cmd": "journalctl -u my-svc -n 300 --no-pager"`. |
-| **test_cmd** | Кнопка «Прогнать тесты» + quality gate при самолечении. НЕ гоняется в фоне. | В `topics.json`: `"test_cmd": "pytest -q"`. Путь относителен cwd. |
-| **самолечение (git+clean)** | При новом инциденте агент авто-чинит в worktree → карточка в Review для ревью человеком. | Тумблер в Overview. Требует git-репо + clean tree + log_cmd. |
-| **notify_on_error** | TG-пинг оператору при новом инциденте. | Тумблер «🔔 Уведомлять» в Overview. |
-| **healthz/liveness** | Для сервисов: проект отдаёт эндпоинт `/healthz` (или `/_health`) — кокпит сможет пинговать (на будущее). | Добавить роут, отдающий 200 + `{"ok":true}`. |
-| **память** | `.claude-ops/memory/` — знания, путешествующие с репо (решения, gotchas). | Создаётся автоматически при первой записи агента. |
-| **секреты** | `.claude-ops/secrets/secrets.env` — ключи/токены в env агента. | Вкладка «🔑 Ключи» в кокпите, или `echo 'KEY=val' >> ...secrets.env`. |
+See `reference/cockpit-capabilities.md` for the full capabilities table.
 
 ---
-
-## ClaudeOps conformance
-<!-- Заполняется при онбординге. Кокпит читает это в health. Формат строки: "- <возможность>: <да: где / нет>" -->
-- error handler: нет
-- log_cmd: нет
-- test_cmd: нет
-- самолечение (git+clean): нет
-- память (.claude-ops/memory): нет
-- секреты (.claude-ops/secrets): нет
-- notify_on_error: нет
-- healthz/liveness (сервисам): нет
-- incident push: нет
+{{#if_software_ops}}
+## ClaudeOps Integration Status
+<!-- Fill in during onboarding. Cockpit reads this in health. Format: "- <capability>: <yes: where / no>" -->
+- error handler: no
+- log_cmd: no
+- test_cmd: no
+- self-heal (git+clean): no
+- memory (.claude-ops/memory): no
+- secrets (.claude-ops/secrets): no
+- notify_on_error: no
+- healthz/liveness (services): no
+- incident push: no
+{{/if_software_ops}}
