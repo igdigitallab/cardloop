@@ -36,32 +36,44 @@ def _mock_req(cf_ip=None, xff=None, remote=None):
     return req
 
 
-def test_client_ip_prefers_cf_connecting_ip():
-    """CF-Connecting-IP takes highest priority."""
+def test_client_ip_prefers_cf_connecting_ip(monkeypatch):
+    """CF-Connecting-IP wins — but only when the peer is a trusted proxy."""
+    monkeypatch.setenv("TRUSTED_PROXIES", "9.10.11.12")
     req = _mock_req(cf_ip="1.2.3.4", xff="5.6.7.8", remote="9.10.11.12")
     assert _client_ip(req) == "1.2.3.4"
 
 
-def test_client_ip_falls_back_to_xff():
-    """Without CF-Connecting-IP, use first X-Forwarded-For entry."""
+def test_client_ip_falls_back_to_xff(monkeypatch):
+    """Without CF-Connecting-IP, use first X-Forwarded-For entry (trusted peer)."""
+    monkeypatch.setenv("TRUSTED_PROXIES", "127.0.0.1")
     req = _mock_req(xff="10.0.0.1, 10.0.0.2", remote="127.0.0.1")
     assert _client_ip(req) == "10.0.0.1"
 
 
-def test_client_ip_strips_xff_whitespace():
-    """X-Forwarded-For entry is stripped of surrounding whitespace."""
+def test_client_ip_strips_xff_whitespace(monkeypatch):
+    """X-Forwarded-For entry is stripped of surrounding whitespace (trusted peer)."""
+    monkeypatch.setenv("TRUSTED_PROXIES", "127.0.0.0/8")
     req = _mock_req(xff="  203.0.113.5 , 10.0.0.1", remote="127.0.0.1")
     assert _client_ip(req) == "203.0.113.5"
 
 
-def test_client_ip_falls_back_to_remote():
+def test_client_ip_ignores_spoofed_headers_from_untrusted_peer(monkeypatch):
+    """An untrusted peer cannot spoof CF/XFF — the socket peer is used."""
+    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
+    req = _mock_req(cf_ip="1.2.3.4", xff="5.6.7.8", remote="203.0.113.99")
+    assert _client_ip(req) == "203.0.113.99"
+
+
+def test_client_ip_falls_back_to_remote(monkeypatch):
     """Without CF or XFF headers, fall back to req.remote."""
+    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
     req = _mock_req(remote="192.168.1.50")
     assert _client_ip(req) == "192.168.1.50"
 
 
-def test_client_ip_unknown_when_all_missing():
+def test_client_ip_unknown_when_all_missing(monkeypatch):
     """If all sources are empty/None, return 'unknown'."""
+    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
     req = _mock_req(remote=None)
     assert _client_ip(req) == "unknown"
 
@@ -102,8 +114,11 @@ def multi_ip_ctx(tmp_path):
 
 
 @pytest.fixture
-def multi_ip_app(multi_ip_ctx):
+def multi_ip_app(multi_ip_ctx, monkeypatch):
     from aiohttp import web
+    # The test client's socket peer is loopback; trust it so the per-request
+    # CF-Connecting-IP header is honoured (these tests simulate distinct IPs).
+    monkeypatch.setenv("TRUSTED_PROXIES", "127.0.0.0/8,::1")
     app = web.Application(middlewares=[_webapp.auth_middleware])
     app["ctx"] = multi_ip_ctx
     app.router.add_post("/api/login", _webapp.api_login)

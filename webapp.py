@@ -11,6 +11,7 @@ import glob
 import hashlib
 import json
 import logging
+import ipaddress
 import os
 import re
 import secrets
@@ -494,19 +495,50 @@ _RETRY_AFTER_BASE = 30   # seconds for first throttle response
 _RETRY_AFTER_CAP = 900   # maximum back-off cap (15 min)
 
 
-def _client_ip(req) -> str:
-    """Extract the real client IP from a request, respecting reverse-proxy headers.
+def _peer_is_trusted_proxy(remote: str) -> bool:
+    """True if the direct socket peer is in TRUSTED_PROXIES (CSV of IPs/CIDRs).
 
-    Priority: CF-Connecting-IP (set by Cloudflare) → first X-Forwarded-For entry
-    (set by Traefik / other proxies) → req.remote (socket peer) → "unknown".
+    Empty/unset TRUSTED_PROXIES → no peer is trusted, so forwarding headers are
+    ignored (prevents a direct client from spoofing CF-Connecting-IP / XFF to
+    evade the rate limiter). Set this to your reverse proxy's address(es) when
+    deploying behind Cloudflare / Traefik / nginx.
     """
-    cf_ip = req.headers.get("CF-Connecting-IP", "").strip()
-    if cf_ip:
-        return cf_ip
-    xff = req.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-    if xff:
-        return xff
-    return req.remote or "unknown"
+    raw = os.environ.get("TRUSTED_PROXIES", "").strip()
+    if not raw or not remote:
+        return False
+    try:
+        ip = ipaddress.ip_address(remote)
+    except ValueError:
+        return False
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if ip in ipaddress.ip_network(part, strict=False):
+                return True
+        except (ValueError, TypeError):
+            # malformed entry, or IPv4/IPv6 version mismatch — skip
+            continue
+    return False
+
+
+def _client_ip(req) -> str:
+    """Extract the real client IP from a request.
+
+    Forwarding headers (CF-Connecting-IP → first X-Forwarded-For entry) are
+    honoured ONLY when the direct peer (req.remote) is a configured trusted
+    proxy; otherwise the socket peer is used. Falls back to "unknown".
+    """
+    remote = req.remote or "unknown"
+    if _peer_is_trusted_proxy(remote):
+        cf_ip = req.headers.get("CF-Connecting-IP", "").strip()
+        if cf_ip:
+            return cf_ip
+        xff = req.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        if xff:
+            return xff
+    return remote
 
 
 def _check_rate_limit(ip: str) -> tuple[bool, int]:
