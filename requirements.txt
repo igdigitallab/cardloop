@@ -1,0 +1,27 @@
+# Production runtime dependencies for Claude-Ops.
+# Python >= 3.11 required (developed and tested on 3.12).
+# Dev/test deps live in requirements-dev.txt.
+#
+# Install:  python -m venv venv && venv/bin/pip install -r requirements.txt
+
+# Claude Agent SDK — >=0.2.96 is REQUIRED: older SDKs silently downgrade the
+# "fable" model alias to opus without erroring.
+claude-agent-sdk>=0.2.96
+
+# Telegram transport (optional channel; pinned for reproducibility).
+python-telegram-bot==22.7
+
+# aiohttp cockpit (web server + SSE).
+aiohttp==3.13.5
+
+# Cron/interval scheduling for the autorun board.
+APScheduler==3.11.2
+
+# Encrypted secret store (Fernet) + auth crypto.
+cryptography>=48
+
+# .env loading.
+python-dotenv>=1.2
+
+# Structured concurrency primitives used by the SDK and engine.
+anyio>=4.13
