@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
+import { Paperclip, File as FileIcon, Image as ImageIcon } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { mdComponents } from '../components/markdown'
@@ -9,6 +10,19 @@ import { Modal, ModalHead } from '../components/Modal'
 import { useOnRunEnd, useFocusRefresh, useProjectActivity } from '../hooks/useProjectActivity'
 import { t } from '../i18n'
 import { MODELS, modelLabel } from '../lib/models'
+
+// ─── Backlog attachments ──────────────────────────────────────────────────────
+// File/image upload for new backlog cards — mirrors ChatTab's composer attachments.
+// Uploaded files land in data/inbox/ via /api/projects/{id}/upload; their path is
+// appended to the new card's description as `attached file: <path>` lines so the
+// agent can read them when the card runs.
+interface Attachment {
+  id: string
+  name: string
+  path?: string
+  uploading: boolean
+  error?: string
+}
 
 // ─── Live card run state ──────────────────────────────────────────────────────
 
@@ -219,6 +233,10 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [newText, setNewText] = useState('')
+  // New-card file attachments (uploaded to data/inbox/, paths appended to description)
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [addDragOver, setAddDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [showArchive, setShowArchive] = useState(false)
   const [archive, setArchive] = useState<string | null>(null)
   // Full-task editor modal: double-click on any card → single multi-line textarea + model picker
@@ -459,6 +477,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     let cancelled = false
     setLoading(true); setError(''); setBoard(null)
     setShowArchive(false); setArchive(null)
+    setAttachments([])  // drop stale attachments when switching projects
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
 
     setDeferMap({})  // reset stale map when switching projects
@@ -503,10 +522,35 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     }
   }
 
+  // Upload one file to the project inbox; returns its server path.
+  async function uploadFile(file: File): Promise<string> {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch(`/api/projects/${projectId}/upload`, {
+      method: 'POST', credentials: 'include', body: form,
+    })
+    if (!res.ok) throw new Error(await res.text().catch(() => res.statusText))
+    const data = await res.json()
+    return data.path as string
+  }
+
+  // Queue files for upload, tracking per-file progress/error in the chip list.
+  function addFiles(files: FileList | File[]) {
+    Array.from(files).forEach(file => {
+      const id = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      setAttachments(prev => [...prev, { id, name: file.name, uploading: true }])
+      uploadFile(file)
+        .then(path => setAttachments(prev => prev.map(a => a.id === id ? { ...a, uploading: false, path } : a)))
+        .catch(e => setAttachments(prev => prev.map(a => a.id === id ? { ...a, uploading: false, error: String(e?.message || e) } : a)))
+    })
+  }
+
   function addCard() {
     const raw = newText.trim()
-    if (!raw) return
+    const readyFiles = attachments.filter(a => a.path)
+    if (!raw && readyFiles.length === 0) return
     setNewText('')
+    setAttachments([])
     // Multi-line input: first line = title, remaining lines = description.
     // Single-line input (no matter the length): send as-is — no character cap.
     // The backend stores the full text; long single-line tasks are NOT truncated.
@@ -516,6 +560,15 @@ export function BoardTab({ projectId, isActive = true }: Props) {
     if (nlIdx !== -1) {
       title = raw.slice(0, nlIdx).trim()
       description = raw.slice(nlIdx + 1).trim() || null
+    }
+    // Attachments: append `attached file: <path>` lines to the description so the
+    // agent can open them. When the card has no text, the file name becomes the title.
+    if (readyFiles.length > 0) {
+      if (!title) {
+        title = readyFiles.length === 1 ? readyFiles[0].name : `${readyFiles.length} attached files`
+      }
+      const fileLines = readyFiles.map(a => `attached file: ${a.path}`).join('\n')
+      description = description ? `${description}\n\n${fileLines}` : fileLines
     }
     run(api.createTask(projectId, title, 'backlog', description))
   }
@@ -1107,7 +1160,19 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                 }}
               >
                 {key === 'backlog' && (
-                  <div className="board-add">
+                  <div
+                    className={`board-add${addDragOver ? ' board-add-dragover' : ''}`}
+                    onDragOver={e => { e.preventDefault(); e.stopPropagation(); setAddDragOver(true) }}
+                    onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setAddDragOver(false) }}
+                    onDrop={e => {
+                      e.preventDefault(); e.stopPropagation(); setAddDragOver(false)
+                      if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files)
+                    }}
+                  >
+                    <input
+                      ref={fileInputRef} type="file" multiple hidden
+                      onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }}
+                    />
                     <textarea
                       placeholder={t['board.new_task_placeholder']}
                       value={newText}
@@ -1117,8 +1182,35 @@ export function BoardTab({ projectId, isActive = true }: Props) {
                       }}
                       rows={2}
                     />
-                    <button className="btn-primary" disabled={busy || !newText.trim()}
-                      onClick={addCard}>+ Add</button>
+                    {attachments.length > 0 && (
+                      <div className="chat-attachments">
+                        {attachments.map(a => {
+                          const isImage = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(a.name)
+                          const AttIcon = isImage ? ImageIcon : FileIcon
+                          return (
+                            <div key={a.id} className={`chat-att-chip${a.error ? ' att-error' : a.uploading ? ' att-uploading' : ''}`}>
+                              <span className="att-icon"><AttIcon size={12} /></span>
+                              <span className="att-name" title={a.name}>{a.name}</span>
+                              {a.uploading && <span className="att-spinner" aria-label="Uploading…" />}
+                              {a.error && <span className="att-err-icon" title={a.error}>⚠</span>}
+                              <button className="att-remove" title="Remove file" aria-label="Remove file"
+                                onClick={() => setAttachments(prev => prev.filter(x => x.id !== a.id))}>✕</button>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                    <div className="board-add-actions">
+                      <button
+                        className="board-add-attach"
+                        title="Attach file or image"
+                        aria-label="Attach file or image"
+                        disabled={busy}
+                        onClick={() => fileInputRef.current?.click()}
+                      ><Paperclip size={14} /></button>
+                      <button className="btn-primary" disabled={busy || (!newText.trim() && attachments.filter(a => a.path).length === 0)}
+                        onClick={addCard}>+ Add</button>
+                    </div>
                   </div>
                 )}
 
