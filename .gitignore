@@ -30,3 +30,4 @@ web/dist/
 .DS_Store
 Thumbs.db
 .claude/
+claude-ops-bot.service

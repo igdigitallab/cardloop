@@ -52,9 +52,9 @@ entry whose redirect target's parent directory does not exist must appear as
   `networking-crm-sync.timer`, `networking-crm-health.timer`); all currently live per
   `systemctl list-timers`.
 - **In-process schedulers** (statically known, registered in `data/schedules.json`):
-  - `pyrogram_bot`: finance job + `claude_health` via `JobQueue`
-  - `proxmon-bot`: health-check job via `JobQueue`
-  - `line_vpn_bot`: expiry-check job via `aioschedule`
+  - `example-bot`: finance job + `claude_health` via `JobQueue`
+  - `example-bot`: health-check job via `JobQueue`
+  - `example-bot`: expiry-check job via `aioschedule`
   - `content-editor`: digest + publish jobs via `APScheduler`
 - **n8n**: container running, 0 workflows configured.
 - **Coolify**: scheduled tasks API available; no active tasks currently known.

@@ -190,9 +190,9 @@ async def test_new_project_named_uses_name_for_topic(aiohttp_client, ft_app, ft_
     monkeypatch.setattr(_webapp.Path, "home", staticmethod(lambda: tmp_path))
 
     client = await aiohttp_client(ft_app)
-    resp = await client.post("/api/projects/new", json={"name": "khronika"}, headers=_auth(ft_ctx))
+    resp = await client.post("/api/projects/new", json={"name": "example-project"}, headers=_auth(ft_ctx))
     assert resp.status == 200
 
     creates = ft_ctx["ptb_app"].bot.create_calls
     assert len(creates) == 1
-    assert creates[0]["name"] == "khronika"
+    assert creates[0]["name"] == "example-project"

@@ -49,23 +49,23 @@ def _reset_timeline_state(data_dir: Path, topics: dict) -> None:
 
 class TestTimelineSlug:
     def test_slug_replaces_slashes(self):
-        """/home/igor/myproject → -home-igor-myproject."""
-        slug = _timeline_slug_from_cwd("/home/igor/myproject")
-        assert slug == "-home-igor-myproject"
+        """/home/youruser/myproject → -home-youruser-myproject."""
+        slug = _timeline_slug_from_cwd("/home/youruser/myproject")
+        assert slug == "-home-youruser-myproject"
 
     def test_slug_stable(self):
         """Тот же cwd → тот же slug при повторном вызове."""
-        cwd = "/home/igor/some-project"
+        cwd = "/home/youruser/some-project"
         assert _timeline_slug_from_cwd(cwd) == _timeline_slug_from_cwd(cwd)
 
     def test_slug_no_path_components(self):
         """Slug не содержит '/' (нет path-traversal через имя файла)."""
-        slug = _timeline_slug_from_cwd("/home/igor/my/nested/project")
+        slug = _timeline_slug_from_cwd("/home/youruser/my/nested/project")
         assert "/" not in slug
 
     def test_slug_basename_project(self):
         """Basename часть присутствует в slug."""
-        slug = _timeline_slug_from_cwd("/home/igor/claude-ops-bot")
+        slug = _timeline_slug_from_cwd("/home/youruser/claude-ops-bot")
         assert "claude-ops-bot" in slug
 
 

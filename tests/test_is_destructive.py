@@ -34,7 +34,7 @@ from engine import _is_destructive
     "docker-compose down -v",
     "systemctl restart nginx",
     "systemctl stop my-service",
-    "curl coolify.coscore.us/api/v1/deploy",
+    "curl coolify.example.com/api/v1/deploy",
     "cmd --force",
 ])
 def test_destructive_commands(cmd):

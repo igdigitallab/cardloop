@@ -142,7 +142,7 @@ class TestHookAuditLine:
                 "tool_use_id": "tid-001",
                 "session_id": "sess-abc",
                 "transcript_path": "/tmp/t.jsonl",
-                "cwd": "/home/igor/myproject",
+                "cwd": "/home/youruser/myproject",
                 "permission_mode": "bypassPermissions",
             }
             result = _run(hook(hook_input, "tid-001", {}))
@@ -173,7 +173,7 @@ class TestHookAuditLine:
                 "tool_use_id": "tid-002",
                 "session_id": "sess-abc",
                 "transcript_path": "/tmp/t.jsonl",
-                "cwd": "/home/igor/myproject",
+                "cwd": "/home/youruser/myproject",
                 "permission_mode": "bypassPermissions",
             }
             _run(hook(hook_input, "tid-002", {}))

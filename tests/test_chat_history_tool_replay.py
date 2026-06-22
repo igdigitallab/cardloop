@@ -141,7 +141,7 @@ class TestBugAToolReplayShape:
     async def test_read_tool_event_has_kind_in_buffer(self, aiohttp_client, tmp_path, project_dir):
         """Read tool events in the live buffer carry kind='read' and file field."""
         async def fake_engine(**kwargs):
-            yield {"type": "tool", "name": "Read", "input": {"file_path": "/home/igor/TASKS.md"}}
+            yield {"type": "tool", "name": "Read", "input": {"file_path": "/tmp/test-project/TASKS.md"}}
             yield {"type": "result", "session_id": "s1"}
 
         ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
@@ -159,7 +159,7 @@ class TestBugAToolReplayShape:
         ev = tool_events[0]
 
         assert ev["kind"] == "read"
-        assert ev["file"] == "/home/igor/TASKS.md"
+        assert ev["file"] == "/tmp/test-project/TASKS.md"
         assert "input" not in ev
 
     # ── A3: Edit tool event buffered with kind='edit' ─────────────────────────

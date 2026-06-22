@@ -1,8 +1,11 @@
 """
-Tests for /home/igor/server-janitor/janitor-quarantine.
+Tests for the janitor-quarantine script (server-janitor project).
 
 All tests redirect the trash dir to a temp path via the JANITOR_TRASH env var
 so they never touch the real ~/.janitor-trash.
+
+The script path is resolved via the JANITOR_SCRIPT env var, or defaults to
+a well-known relative location. Tests are skipped if the script is not found.
 """
 
 import json
@@ -14,7 +17,15 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path("/home/igor/server-janitor/janitor-quarantine")
+_SCRIPT_DEFAULT = Path("/home/youruser/server-janitor/janitor-quarantine")
+SCRIPT = Path(os.environ.get("JANITOR_SCRIPT", str(_SCRIPT_DEFAULT)))
+
+if not SCRIPT.exists():
+    pytest.skip(
+        f"janitor-quarantine script not found at {SCRIPT} — "
+        "set JANITOR_SCRIPT env var to the correct path",
+        allow_module_level=True,
+    )
 
 
 def _run(args: list[str], env_override: dict | None = None) -> subprocess.CompletedProcess:
@@ -120,15 +131,15 @@ def test_quarantine_missing_path_exits_nonzero(tmp_path):
 
 def test_quarantine_refuses_path_outside_home(tmp_path):
     """Paths outside $HOME should be refused (safety check)."""
-    # /tmp is outside /home/igor so the safety check should reject it
+    # /tmp is outside $HOME so the safety check should reject it
     outside = tmp_path / "outside_file.txt"
     outside.write_text("outside")
     trash_env = _trash_env(tmp_path)
 
-    # Override HOME so /tmp is definitively outside
+    # Override HOME to a specific path so /tmp is definitively outside
     env = os.environ.copy()
     env.update(trash_env)
-    env["HOME"] = "/home/igor"  # ensure the check is against /home/igor
+    env["HOME"] = "/home/youruser"  # ensure the check is against a non-/tmp path
 
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "quarantine", "/tmp/outside_safety_test", "--reason", "test"],
@@ -151,7 +162,7 @@ def test_purge_removes_old_entries(tmp_path):
     (old_dir / "old_file.txt").write_text("old")
     # Write a minimal manifest
     manifest = old_dir / "manifest.json"
-    manifest.write_text(json.dumps([{"item": "old_file.txt", "from": "/home/igor/old_file.txt", "why": "test", "size": "4B", "date": "2026-01-01T00:00:00+00:00"}]))
+    manifest.write_text(json.dumps([{"item": "old_file.txt", "from": "/tmp/test-project/old_file.txt", "why": "test", "size": "4B", "date": "2026-01-01T00:00:00+00:00"}]))
 
     trash_env = _trash_env(tmp_path)
     result = _run(["purge", "--older-than", "30"], env_override=trash_env)

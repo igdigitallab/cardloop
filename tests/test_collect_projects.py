@@ -25,7 +25,7 @@ def test_empty_topics(tmp_path):
 
 def test_single_project(tmp_path):
     ctx = {
-        "topics": {"-100:42": {"project": "my-proj", "cwd": "/home/igor/my-proj", "model": "opus"}},
+        "topics": {"-100:42": {"project": "my-proj", "cwd": "/tmp/test-project/my-proj", "model": "opus"}},
         "DATA": tmp_path,
         "DEFAULT_MODEL": "sonnet",
     }
@@ -34,7 +34,7 @@ def test_single_project(tmp_path):
     p = out[0]
     assert p["id"] == "my-proj"
     assert p["name"] == "my-proj"
-    assert p["cwd"] == "/home/igor/my-proj"
+    assert p["cwd"] == "/tmp/test-project/my-proj"
     assert p["model"] == "opus"
     assert p["session_key"] == "-100:42"
     assert p["is_free"] is False

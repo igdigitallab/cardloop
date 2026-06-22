@@ -66,7 +66,7 @@ Source: board card `ops:dc5ee0`. Builds on the existing group backend (`project_
 ＋ New project   ＋ New group        ← both buttons at top, next to each other
 ▼ Work            3
   🟢 rightforms
-  🟡 khronika-portal
+  🟡 example-portal
 ▶ Personal        2                  ← collapsed
 ▼ Experiments     0
   ⌁ drop projects here               ← empty group = drop hint

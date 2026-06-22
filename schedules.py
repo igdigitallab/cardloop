@@ -715,7 +715,7 @@ async def _collect_coolify(ctx: dict) -> list[dict]:
         log.debug("[schedules] COOLIFY_API_TOKEN not set — coolify source skipped")
         return records
 
-    server_uuid = os.environ.get("COOLIFY_SERVER_UUID", "f0kgss8ccgksokkscgc0sk4s")
+    server_uuid = os.environ.get("COOLIFY_SERVER_UUID", "")
     base_url = os.environ.get("COOLIFY_API_BASE", "http://localhost:8000/api/v1")
     url = f"{base_url}/servers/{server_uuid}/scheduled-tasks"
 

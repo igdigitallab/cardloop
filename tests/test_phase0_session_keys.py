@@ -24,18 +24,18 @@ import bot
 
 class TestKeyOf:
     def test_returns_basename(self):
-        assert bot.key_of("/home/igor/claude-ops-bot") == "claude-ops-bot"
+        assert bot.key_of("/home/youruser/claude-ops-bot") == "claude-ops-bot"
 
     def test_trailing_slash_stripped(self):
-        assert bot.key_of("/home/igor/claude-ops-bot/") == "claude-ops-bot"
+        assert bot.key_of("/home/youruser/claude-ops-bot/") == "claude-ops-bot"
 
     def test_nested_path(self):
-        assert bot.key_of("/home/igor/projects/sac-tech") == "sac-tech"
+        assert bot.key_of("/home/youruser/projects/sac-tech") == "sac-tech"
 
     def test_cwd_equals_project_id(self):
         """key_of must produce the same result as _webapp._project_id for the same cwd."""
         import webapp as _webapp
-        cwd = "/home/igor/rightforms-app"
+        cwd = "/home/youruser/rightforms-app"
         assert bot.key_of(cwd) == _webapp._project_id(cwd)
 
 
@@ -105,8 +105,8 @@ class TestMigrateSessionKeys:
     def test_basic_migration(self):
         """TG chat:thread keys are renamed to slugs."""
         topics = self._topics([
-            ("-100123:7", "/home/igor/rightforms-app", "rightforms-app"),
-            ("-100123:8", "/home/igor/claude-ops-bot", "claude-ops-bot"),
+            ("-100123:7", "/home/youruser/rightforms-app", "rightforms-app"),
+            ("-100123:8", "/home/youruser/claude-ops-bot", "claude-ops-bot"),
         ])
         sessions = self._sessions([
             ("-100123:7", "uuid-aaa"),
@@ -123,7 +123,7 @@ class TestMigrateSessionKeys:
 
     def test_session_ids_preserved(self):
         """session_id values must be preserved after key rename."""
-        topics = self._topics([("-100123:7", "/home/igor/myproject", "myproject")])
+        topics = self._topics([("-100123:7", "/home/youruser/myproject", "myproject")])
         sessions = self._sessions([("-100123:7", "session-abc-123")])
 
         new_t, new_s, _ = bot._migrate_session_keys(topics, sessions)
@@ -132,7 +132,7 @@ class TestMigrateSessionKeys:
 
     def test_tg_key_field_added(self):
         """Migrated topic entries must carry the original tg_key for TG reverse lookup."""
-        topics = self._topics([("-100123:42", "/home/igor/myproject", "myproject")])
+        topics = self._topics([("-100123:42", "/home/youruser/myproject", "myproject")])
         sessions = {}
 
         new_t, _, _ = bot._migrate_session_keys(topics, sessions)
@@ -143,7 +143,7 @@ class TestMigrateSessionKeys:
 
     def test_idempotent(self):
         """Second run with already-migrated data produces migrated=0 and identical dicts."""
-        topics = self._topics([("-100123:7", "/home/igor/proj", "proj")])
+        topics = self._topics([("-100123:7", "/home/youruser/proj", "proj")])
         sessions = self._sessions([("-100123:7", "session-x")])
 
         new_t, new_s, migrated1 = bot._migrate_session_keys(topics, sessions)
@@ -155,7 +155,7 @@ class TestMigrateSessionKeys:
 
     def test_free_keys_untouched(self):
         """free-* keys are not migrated."""
-        topics = {"free-abcd1234": {"project": "chat", "cwd": "/home/igor", "model": "sonnet"}}
+        topics = {"free-abcd1234": {"project": "chat", "cwd": "/home/youruser", "model": "sonnet"}}
         sessions = {"free-abcd1234": "session-free"}
 
         new_t, new_s, migrated = bot._migrate_session_keys(topics, sessions)
@@ -235,7 +235,7 @@ class TestBindingForReverseLookup:
             bot.topics.clear()
             bot.topics["myproject"] = {
                 "project": "myproject",
-                "cwd": "/home/igor/myproject",
+                "cwd": "/home/youruser/myproject",
                 "model": "sonnet",
                 "tg_key": "-100123:42",
             }
@@ -245,7 +245,7 @@ class TestBindingForReverseLookup:
 
             assert result is not None
             assert result["project"] == "myproject"
-            assert result["cwd"] == "/home/igor/myproject"
+            assert result["cwd"] == "/home/youruser/myproject"
         finally:
             bot.topics.clear()
             bot.topics.update(original_topics)
@@ -257,7 +257,7 @@ class TestBindingForReverseLookup:
             bot.topics.clear()
             bot.topics["-100123:42"] = {
                 "project": "oldproject",
-                "cwd": "/home/igor/oldproject",
+                "cwd": "/home/youruser/oldproject",
                 "model": "sonnet",
             }
 

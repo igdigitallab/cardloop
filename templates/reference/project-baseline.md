@@ -13,8 +13,8 @@
 Необработанные исключения шлют admin'у в Telegram готовый промпт в `<pre>` блоке для long-press → Copy → paste в новую Claude-сессию.
 
 **Каноничные реализации:**
-- `pyrogram_bot/lib/error_prompt.py`
-- `line_vpn_bot/bot_lib/error_alerts.py` (с rate-limit + quiet-list для known-non-actionable)
+- `example-bot/lib/error_prompt.py`
+- `example-bot/bot_lib/error_alerts.py` (с rate-limit + quiet-list для known-non-actionable)
 
 **Что должно быть в промпт-блоке:**
 - `Проект: <name>` + путь к коду
@@ -43,9 +43,9 @@
 **Critical paths (обязательно для прод-ботов):**
 - Каждый сервис должен иметь свой список critical paths в `CLAUDE.md` проекта
 - Примеры:
-  - `line_vpn_bot`: `_issue_subscription`, `block_user`, `payment_callback`, Hiddify `create_or_get_user`
-  - `pyrogram_bot`: `start_session`, `claude_runner.run_session_turn`, message routing
-  - `proxmon-bot`: threshold logic (hysteresis + sustained counter), `clear_alert` behavior
+  - `example-bot`: `_issue_subscription`, `block_user`, `payment_callback`, provider `create_or_get_user`
+  - `example-bot`: `start_session`, `claude_runner.run_session_turn`, message routing
+  - `example-bot`: threshold logic (hysteresis + sustained counter), `clear_alert` behavior
   - `rightforms-app`: form-validation pipeline, PDF generation
 - НЕ требуем coverage %, требуем покрытие именно critical paths
 
@@ -87,8 +87,8 @@ pip install safety && safety check -r requirements.txt
 - Docker `HEALTHCHECK` в Dockerfile
 
 **Боты с long-polling:**
-- Опционально. Если бот корректно умирает при ошибке — `docker ps` через proxmon-bot достаточно.
-- Если бот может "висеть" живой но не отвечать — heartbeat-файл (`/tmp/<bot>.alive` раз в минуту) + проверка в proxmon-bot.
+- Опционально. Если бот корректно умирает при ошибке — `docker ps` через example-bot достаточно.
+- Если бот может "висеть" живой но не отвечать — heartbeat-файл (`/tmp/<bot>.alive` раз в минуту) + проверка в example-bot.
 
 ---
 

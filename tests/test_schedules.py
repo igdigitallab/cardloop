@@ -92,7 +92,7 @@ def test_collector_parses_crontab_lines():
 # Comment — skip
 CRON_TZ=America/Los_Angeles
 
-*/10 * * * * /home/igor/scripts/router-monitor.sh >> /home/igor/logs/monitor.log 2>&1
+*/10 * * * * /home/youruser/scripts/router-monitor.sh >> /home/youruser/logs/monitor.log 2>&1
 0 4 * * * bash ~/scripts/backup.sh >> ~/logs/backup.log 2>&1
 @reboot /usr/bin/start-something.sh
 """
@@ -112,10 +112,10 @@ CRON_TZ=America/Los_Angeles
 
     # Regression: command must be the FULL remainder including the redirect tail.
     # The original parser used split(None, 6) and kept only the first token
-    # ("/home/igor/scripts/router-monitor.sh" without ">> ... 2>&1"), which made
+    # ("/home/youruser/scripts/router-monitor.sh" without ">> ... 2>&1"), which made
     # broken-redirect detection and the mtime last_run heuristic blind.
     monitor_cmd = next(c for c in commands if "/router-monitor.sh" in c)
-    assert ">> /home/igor/logs/monitor.log 2>&1" in monitor_cmd, monitor_cmd
+    assert ">> /home/youruser/logs/monitor.log 2>&1" in monitor_cmd, monitor_cmd
 
 
 def test_collector_cron_d_full_command_with_redirect():
@@ -576,7 +576,7 @@ async def test_investigate_creates_backlog_card(aiohttp_client, schedules_app, f
         "source_statuses": [],
         "records": [{
             "id": record_id, "source": "cron", "schedule": "*/5 * * * *",
-            "command": "bash /home/igor/scripts/check.sh", "project": "mybot",
+            "command": "bash /home/youruser/scripts/check.sh", "project": "mybot",
             "status": "unknown", "purpose": None, "annotations": {},
             "last_run": None, "next_run": None,
         }],
@@ -872,7 +872,7 @@ def test_resolve_project_exec_start_path_match(tmp_path):
         "ptb_app": None,
     }
     # Simulate full ExecStart passed as command (argv includes project path)
-    exec_start = f"{{ path=/home/igor/networking-os/.venv/bin/python ; argv[]={venv_python} -m networking.crm ; }}"
+    exec_start = f"{{ path=/home/youruser/networking-os/.venv/bin/python ; argv[]={venv_python} -m networking.crm ; }}"
     result = _sched._resolve_project(fake_ctx, exec_start, unit_name="networking-crm-alert.timer")
     assert result == "networking-os", f"Expected networking-os via path match, got {result!r}"
 
@@ -903,11 +903,11 @@ def test_resolve_project_unit_name_no_match_for_system_units(tmp_path):
 
 def test_resolve_project_unit_name_strips_timer_suffix(tmp_path):
     """Unit name with .timer suffix is stripped before token comparison."""
-    project_dir = tmp_path / "proxmon-bot"
+    project_dir = tmp_path / "example-bot"
     project_dir.mkdir()
     fake_ctx = {
         "topics": {
-            "1:2": {"project": "proxmon-bot", "cwd": str(project_dir), "model": "fable"},
+            "1:2": {"project": "example-bot", "cwd": str(project_dir), "model": "fable"},
         },
         "sessions": {},
         "running": {},
@@ -920,10 +920,10 @@ def test_resolve_project_unit_name_strips_timer_suffix(tmp_path):
         "run_engine": None,
         "ptb_app": None,
     }
-    # proxmon-health.timer → tokens [proxmon, health]; project proxmon-bot → tokens [proxmon, bot]
-    # share 1 token 'proxmon' → matches proxmon-bot
-    result = _sched._resolve_project(fake_ctx, "/usr/bin/true", unit_name="proxmon-health.timer")
-    assert result == "proxmon-bot", f"Expected proxmon-bot, got {result!r}"
+    # example-health.timer → tokens [example, health]; project example-bot → tokens [example, bot]
+    # share 1 token 'example' → matches example-bot
+    result = _sched._resolve_project(fake_ctx, "/usr/bin/true", unit_name="example-health.timer")
+    assert result == "example-bot", f"Expected example-bot, got {result!r}"
 
 
 # ─────────────────────────── Task 2: in-process static registry ──────────────
@@ -933,7 +933,7 @@ def test_collect_in_process_returns_all_entries(tmp_path):
     static_path = tmp_path / "schedules.json"
     entries = [
         {"id": f"ip-test-{i:03d}", "source": "in_process", "schedule": "every 5m",
-         "command": f"job_{i}", "project": "pyrogram_bot",
+         "command": f"job_{i}", "project": "example-bot",
          "status": "unknown", "purpose": f"Test job {i}", "last_run": None, "next_run": None,
          "annotations": {}}
         for i in range(11)
@@ -951,12 +951,12 @@ def test_collect_in_process_preserves_project_field(tmp_path):
     """Each in-process entry keeps its declared project field."""
     static_path = tmp_path / "schedules.json"
     entries = [
-        {"id": "ip-pyro-1", "source": "in_process", "schedule": "every 4h",
-         "command": "finance_job", "project": "pyrogram_bot",
+        {"id": "ip-example-1", "source": "in_process", "schedule": "every 4h",
+         "command": "finance_job", "project": "example-bot",
          "status": "unknown", "purpose": "Finance categorization", "last_run": None, "next_run": None,
          "annotations": {}},
-        {"id": "ip-proxmon-1", "source": "in_process", "schedule": "every 60s",
-         "command": "health_job", "project": "proxmon-bot",
+        {"id": "ip-example-2", "source": "in_process", "schedule": "every 60s",
+         "command": "health_job", "project": "example-bot",
          "status": "unknown", "purpose": "Health check", "last_run": None, "next_run": None,
          "annotations": {}},
     ]
@@ -964,5 +964,4 @@ def test_collect_in_process_preserves_project_field(tmp_path):
     _sched._STATIC_PATH = static_path
     records = _sched._collect_in_process()
     projects = {r["project"] for r in records}
-    assert "pyrogram_bot" in projects
-    assert "proxmon-bot" in projects
+    assert "example-bot" in projects

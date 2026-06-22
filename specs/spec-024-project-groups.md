@@ -44,8 +44,8 @@ the project's code, memory, board, binding, or disk path.
 
 ```json
 {
-  "groups": ["Khronika", "IGGO", "Personal"],      // ordered list of group labels
-  "assignments": { "<project_id>": "Khronika" }    // project_id -> group label
+  "groups": ["example-project", "GroupA", "Personal"],      // ordered list of group labels
+  "assignments": { "<project_id>": "example-project" }    // project_id -> group label
 }
 ```
 

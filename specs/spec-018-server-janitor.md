@@ -22,13 +22,13 @@ An inventory run on 2026-06-10 revealed the following on `docker-core` (`$HOME`)
 
 - **33 `CLAUDE.md` files** spread across the home tree; at least 5 are stale (last
   modified >20 days ago, abandoned project scaffolding).
-- **Duplicate / mergeable project directories**: `line_vpn_bot` + `linevpn-portal`;
+- **Duplicate / mergeable project directories**: `example-bot` + `example-portal`;
   `navidrome` + `navidrome-coolify`; `song-maker` + `music-bot` + `music` (all three
   dead since 2024-05-24); `cloakbrowser-env` + `cloakbrowser-manager`.
 - **~2.5 GB of node_modules**: npm-global 752 MB, npx-cache ~850 MB,
-  `teleprompter` 234 MB, `pyrogram_bot/scripts/finance` 185 MB.
+  `teleprompter` 234 MB, `example-bot/scripts/finance` 185 MB.
 - **~1.3 GB of Python venvs**; 141 MB of `__pycache__` directories.
-- **138 MB of loose SQL dumps** from the `khronika` project scattered in `$HOME`
+- **138 MB of loose SQL dumps** from the `example-project` project scattered in `$HOME`
   (dated 2024-05-22 – 2024-05-25, never moved to a proper archive location).
 - **`pdf-tools-env`**: 144 MB venv with no active project referencing it.
 - **n8n container**: running for 2 weeks with 0 workflows configured.
@@ -127,8 +127,8 @@ explicit operator action on the board.
 ~/.janitor-trash/
   2026-06-10/
     manifest.json        # [{item, from, why, verdict, ts}]
-    line_vpn_bot/        # moved directory
-    khronika_dump_*.sql  # moved files
+    example-bot/         # moved directory
+    example-project_dump_*.sql  # moved files
 ```
 
 - Executor uses `mv`, not `rm`.
