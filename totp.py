@@ -101,6 +101,30 @@ def totp_now(
     return _hotp(key_bytes, counter, digits)
 
 
+def _matched_counter(
+    secret_b32: str,
+    code: str,
+    window: int,
+    t: float,
+    step: int,
+    digits: int,
+) -> Optional[int]:
+    """Return the time-counter that a code matches within ±window, else None.
+
+    Uses hmac.compare_digest for constant-time comparison.
+    """
+    if not code or len(code) != digits or not code.isdigit():
+        return None
+    key_bytes = _b32decode(secret_b32)
+    current_counter = int(t) // step
+    for delta in range(-window, window + 1):
+        counter = current_counter + delta
+        expected = _hotp(key_bytes, counter, digits)
+        if hmac.compare_digest(code, expected):
+            return counter
+    return None
+
+
 def verify(
     secret_b32: str,
     code: str,
@@ -114,18 +138,43 @@ def verify(
     Uses hmac.compare_digest for constant-time comparison to prevent
     timing side-channels.  A window of 1 accepts the previous step,
     the current step, and the next step (covers ±30 s clock skew).
+
+    Stateless — does NOT prevent replay within the window. For the auth path
+    use verify_no_replay().
     """
-    if not code or len(code) != digits or not code.isdigit():
-        return False
     if t is None:
         t = time.time()
-    key_bytes = _b32decode(secret_b32)
-    current_counter = int(t) // step
-    for delta in range(-window, window + 1):
-        expected = _hotp(key_bytes, current_counter + delta, digits)
-        if hmac.compare_digest(code, expected):
-            return True
-    return False
+    return _matched_counter(secret_b32, code, window, t, step, digits) is not None
+
+
+# In-memory replay guard: the highest TOTP counter accepted per secret.
+# Resets on process restart — acceptable: at worst a code stays replayable
+# within its own 30 s window across a restart (the pre-existing behaviour).
+_last_accepted_counter: dict = {}
+
+
+def verify_no_replay(
+    secret_b32: str,
+    code: str,
+    window: int = 1,
+    t: Optional[float] = None,
+    step: int = 30,
+    digits: int = 6,
+) -> bool:
+    """Like verify(), but rejects a code whose time-counter was already accepted
+    for this secret. Prevents a captured TOTP code from being replayed inside
+    its validity window. State is in-memory (see _last_accepted_counter).
+    """
+    if t is None:
+        t = time.time()
+    counter = _matched_counter(secret_b32, code, window, t, step, digits)
+    if counter is None:
+        return False
+    last = _last_accepted_counter.get(secret_b32)
+    if last is not None and counter <= last:
+        return False  # replay — this counter was already used
+    _last_accepted_counter[secret_b32] = counter
+    return True
 
 
 def provisioning_uri(secret_b32: str, account: str, issuer: str) -> str:
@@ -152,14 +201,14 @@ def provisioning_uri(secret_b32: str, account: str, issuer: str) -> str:
 def gen_recovery_codes(n: int = 10) -> list:
     """Generate *n* one-time recovery codes.
 
-    Each code is 8 hex characters split into two groups of 4 (e.g. "a1b2-c3d4"),
-    giving 32 bits of entropy per code — enough for a one-time emergency token.
+    Each code is 16 hex characters split into four groups of 4
+    (e.g. "a1b2-c3d4-e5f6-0718"), giving 64 bits of entropy per code.
     Returns a plain list of strings; these are shown to the operator ONCE.
     """
     codes = []
     for _ in range(n):
-        raw = secrets.token_hex(4)  # 8 hex chars = 4 bytes = 32 bits
-        codes.append(f"{raw[:4]}-{raw[4:]}")
+        raw = secrets.token_hex(8)  # 16 hex chars = 8 bytes = 64 bits
+        codes.append(f"{raw[:4]}-{raw[4:8]}-{raw[8:12]}-{raw[12:]}")
     return codes
 
 

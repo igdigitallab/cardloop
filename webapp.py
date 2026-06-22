@@ -1358,8 +1358,8 @@ async def api_login(req: web.Request) -> web.Response:
             _record_attempt(ip, False)
             return web.json_response({"error": "totp_required"}, status=401)
 
-        # Try TOTP first
-        if _totp.verify(active_secret, totp_code):
+        # Try TOTP first (with replay protection — a code can't be reused in-window)
+        if _totp.verify_no_replay(active_secret, totp_code):
             pass  # valid — fall through to issue cookie
         else:
             # Try recovery code

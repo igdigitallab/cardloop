@@ -75,6 +75,25 @@ def test_verify_accepts_within_window():
     assert _totp.verify(secret, code_prev, window=1, t=t) is True
 
 
+def test_verify_no_replay_rejects_reuse():
+    """verify_no_replay() accepts a code once, then rejects the same code (replay)."""
+    secret = _totp.random_base32()
+    _totp._last_accepted_counter.pop(secret, None)  # isolate from other tests
+    t = time.time()
+    code = _totp.totp_now(secret, t=t)
+    assert _totp.verify_no_replay(secret, code, t=t) is True   # first use OK
+    assert _totp.verify_no_replay(secret, code, t=t) is False  # replay rejected
+
+
+def test_recovery_codes_are_64_bit():
+    """gen_recovery_codes → 16 hex chars in four groups (64 bits)."""
+    codes = _totp.gen_recovery_codes(3)
+    for c in codes:
+        groups = c.split("-")
+        assert len(groups) == 4 and all(len(g) == 4 for g in groups), c
+        assert len(c.replace("-", "")) == 16  # 16 hex = 64 bits
+
+
 def test_recovery_codes_hash_and_verify():
     """gen_recovery_codes → hash_code → verify_and_consume round-trip."""
     codes = _totp.gen_recovery_codes(5)
