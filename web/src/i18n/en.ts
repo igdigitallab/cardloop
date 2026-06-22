@@ -29,7 +29,10 @@ export const en = {
 
   // ── App / Welcome ────────────────────────────────────────────
   'app.connecting': 'Connecting...',
-  'app.welcome_hint': 'Select a project in the left sidebar to view its details',
+  'app.welcome_title': 'What do you want to work on?',
+  'app.welcome_hint': 'Describe it and the agent sets up a workspace — or pick a project on the left.',
+  'app.intent_placeholder': 'e.g. Build a Next.js landing page, Research competitors, Plan a trip…',
+  'app.intent_create': 'Create',
   'app.free_chat_busy': 'Free chat is busy right now — stop the agent first',
 
   // ── Sidebar ──────────────────────────────────────────────────

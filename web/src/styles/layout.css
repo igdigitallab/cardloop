@@ -229,9 +229,52 @@
 .welcome p {
   font-size: 13px;
   text-align: center;
-  max-width: 260px;
+  max-width: 320px;
   line-height: 1.6;
 }
+
+.welcome-intent {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  width: 100%;
+  max-width: 440px;
+}
+
+.welcome-intent-input {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  padding: 0 12px;
+  font-size: 14px;
+  color: var(--text1);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+}
+
+.welcome-intent-input::placeholder { color: var(--text3); }
+
+.welcome-intent-input:focus {
+  border-color: var(--border-strong, var(--text3));
+  background: var(--bg1);
+}
+
+.welcome-intent-btn {
+  flex: 0 0 auto;
+  height: 38px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--bg1);
+  background: var(--text1);
+  border: 1px solid var(--text1);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.welcome-intent-btn:disabled { opacity: 0.5; cursor: default; }
 
 /* ── Свободный чат — чат на всю ширину, без левой панели и сплита */
 .project-free-layout {

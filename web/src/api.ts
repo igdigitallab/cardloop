@@ -30,9 +30,14 @@ export const api = {
   projects: () =>
     apiFetch<{ projects: import('./types').Project[] }>('/api/projects'),
 
-  newProject: () =>
-    apiFetch<{ ok: boolean; id: string; name: string; session_key: string; cwd: string }>(
-      '/api/projects/new', { method: 'POST' }
+  newProject: (intent?: string, type?: string) =>
+    apiFetch<{ id: string; name: string; session_key: string; cwd: string; started: boolean }>(
+      '/api/projects/new',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ intent: intent || '', type: type || '' }),
+      }
     ),
 
   claudeMd: (id: string) =>

@@ -581,16 +581,21 @@ export default function App() {
     document.addEventListener('mouseup', onUp)
   }, [])
 
-  // Create a new project (untitled-<ts>), open it immediately + onboarding card will start
+  // Create a new project, open it immediately + onboarding card will start.
+  // Optional intent string → backend infers archetype, derives name/slug, scaffolds + seeds tasks.
+  // The sidebar "+ New project" button calls this with a MouseEvent (blank create) — guarded by typeof.
   const [newProjectBusy, setNewProjectBusy] = useState(false)
-  const handleNewProject = useCallback(async () => {
+  const [intentDraft, setIntentDraft] = useState('')
+  const handleNewProject = useCallback(async (intent?: string) => {
     if (newProjectBusy) return
+    const intentStr = typeof intent === 'string' ? intent.trim() : ''
     setNewProjectBusy(true)
     try {
-      const res = await api.newProject()
+      const res = await api.newProject(intentStr || undefined)
       await loadProjects()
       setOpenIds(prev => prev.includes(res.id) ? prev : [...prev, res.id])
       setActiveId(res.id)
+      setIntentDraft('')
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       showToast(`Could not create project: ${msg}`)
@@ -875,8 +880,29 @@ export default function App() {
           <div className="main-content">
             <div className="welcome">
               <div className="welcome-icon">⚡</div>
-              <h2>Claude-Ops</h2>
+              <h2>{t['app.welcome_title']}</h2>
               <p>{t['app.welcome_hint']}</p>
+              <form
+                className="welcome-intent"
+                onSubmit={e => { e.preventDefault(); void handleNewProject(intentDraft) }}
+              >
+                <input
+                  className="welcome-intent-input"
+                  type="text"
+                  placeholder={t['app.intent_placeholder']}
+                  value={intentDraft}
+                  onChange={e => setIntentDraft(e.target.value)}
+                  disabled={newProjectBusy}
+                  autoFocus
+                />
+                <button
+                  className="welcome-intent-btn"
+                  type="submit"
+                  disabled={newProjectBusy}
+                >
+                  {newProjectBusy ? '⏳' : t['app.intent_create']}
+                </button>
+              </form>
             </div>
           </div>
         )}
