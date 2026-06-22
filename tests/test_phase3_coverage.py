@@ -780,12 +780,22 @@ async def test_run_log_cmd_timeout_returns_empty_string():
     assert result == "", f"При timeout должна возвращаться пустая строка, получили {result!r}"
 
 
-async def test_run_log_cmd_fast_echo_returns_output():
-    """_run_log_cmd быстрой команды → stdout возвращается."""
+async def test_run_log_cmd_fast_echo_returns_output(tmp_path):
+    """_run_log_cmd of an allowlisted command → stdout is returned."""
     from webapp import _run_log_cmd
 
-    result = await _run_log_cmd("echo hello_log")
-    assert "hello_log" in result, f"Ожидали 'hello_log' в выводе, получили {result!r}"
+    f = tmp_path / "log.txt"
+    f.write_text("hello_log\n")
+    result = await _run_log_cmd(f"cat {f}")  # 'cat' is on the diag allowlist
+    assert "hello_log" in result, f"Expected 'hello_log' in output, got {result!r}"
+
+
+async def test_run_log_cmd_rejects_non_allowlisted():
+    """_run_log_cmd of a non-allowlisted / unsafe command → '' (not executed)."""
+    from webapp import _run_log_cmd
+
+    assert await _run_log_cmd("echo hi") == ""  # echo not on allowlist
+    assert await _run_log_cmd("cat /etc/passwd; rm -rf /tmp/x") == ""  # chaining blocked
 
 
 async def test_run_log_cmd_nonexistent_command_returns_empty():

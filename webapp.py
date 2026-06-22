@@ -2548,13 +2548,49 @@ def _incident_title(err: dict) -> str:
     return f"[{err['source'].upper()}] {msg}"
 
 
+# ── R1: diagnostic-command allowlist (log_cmd / test_cmd) ────────────────────
+# log_cmd is a UI-controlled string exec'd by the background scanner and the
+# /logs route. Even with shlex.split + exec (no shell), an unrestricted value is
+# arbitrary command execution. Restrict to a small set of read-only diagnostic
+# tools and forbid any shell metacharacters.
+_DIAG_CMD_FORBIDDEN = set(";|&$`><(){}\n\r")
+_DIAG_CMD_ALLOWED = {
+    "journalctl", "docker", "tail", "head", "cat", "grep",
+    "pytest", "python", "python3", "npm", "make", "cargo", "go",
+}
+
+
+def _validate_diag_cmd(cmd: str) -> bool:
+    """True if `cmd` is a safe diagnostic command (log_cmd / test_cmd).
+
+    Empty → True (unset). Otherwise: no shell metacharacters, and the first
+    token's basename must be a known-safe tool (e.g. `journalctl -u <unit>`,
+    `docker logs <name>`, `tail -f <file>`, `venv/bin/python -m pytest`).
+    """
+    if not cmd or not cmd.strip():
+        return True
+    if any(ch in cmd for ch in _DIAG_CMD_FORBIDDEN):
+        return False
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    return os.path.basename(parts[0]) in _DIAG_CMD_ALLOWED
+
+
 async def _run_log_cmd(log_cmd: str, timeout: float = 10.0, raise_on_timeout: bool = False) -> str:
     """Runs log_cmd and returns stdout (+ stderr).
     UI-controlled cmd from topics.json → exec (not shell) to prevent injection.
+    Defensively re-validated against the diagnostic allowlist before exec.
     raise_on_timeout=True: on timeout kills the process and re-raises asyncio.TimeoutError
     (instead of returning ""). Used by the HTTP route to return 504.
     raise_on_timeout=False (default): swallows TimeoutError and returns "" —
     preserves the scanner's behaviour (_scan_project_errors)."""
+    if not _validate_diag_cmd(log_cmd):
+        _log.warning("log_cmd rejected by allowlist (not executed): %r", log_cmd)
+        return ""
     try:
         proc = await asyncio.create_subprocess_exec(
             *shlex.split(log_cmd),
@@ -3453,7 +3489,15 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
                     )
             updates[k] = clean_cfg if clean_cfg else None
         else:  # log_cmd / test_cmd — strings; empty → reset key
-            updates[k] = str(v) if v else None
+            sv = str(v) if v else ""
+            if sv and not _validate_diag_cmd(sv):
+                return web.json_response(
+                    {"error": f"{k}: rejected — only safe diagnostic commands are allowed "
+                              f"(e.g. 'journalctl -u <unit>', 'docker logs <name>', 'tail -f <file>'); "
+                              f"no shell metacharacters (; | & $ ` > < ( ) {{ }})"},
+                    status=400,
+                )
+            updates[k] = sv if sv else None
 
     cwd = project["cwd"]
     changed = 0
