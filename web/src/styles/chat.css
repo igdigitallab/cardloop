@@ -601,6 +601,41 @@
   padding: 0;
 }
 
+/* Copy-message button — appears on hover at the bottom of assistant messages */
+.msg-copy-btn {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  font-size: 10px;
+  line-height: 1.6;
+  border-radius: 4px;
+  background: none;
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  color: var(--text2, #aaa);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+  font-family: var(--sans, sans-serif);
+  pointer-events: none;
+  user-select: none;
+}
+
+.chat-msg:hover .msg-copy-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.msg-copy-btn:hover {
+  color: var(--text, #fff);
+  background: var(--bg2, rgba(255,255,255,0.06));
+}
+
+.msg-copy-btn--ok {
+  color: var(--green, #4ade80) !important;
+  opacity: 1 !important;
+  pointer-events: none;
+}
+
 /* Tool calls */
 .chat-tools {
   display: flex;

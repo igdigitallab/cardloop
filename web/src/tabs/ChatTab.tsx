@@ -409,6 +409,31 @@ function ChatImage({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
 
 const _mdComponents = { ...mdComponents, img: ChatImage }
 
+// ─── MsgCopyButton ────────────────────────────────────────────────────────────
+// Copies the full markdown text of a completed assistant message to the clipboard.
+// Visible on hover of the parent .chat-msg container (CSS-driven opacity).
+
+function MsgCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch { /* clipboard blocked */ }
+  }
+  return (
+    <button
+      className={`msg-copy-btn${copied ? ' msg-copy-btn--ok' : ''}`}
+      onClick={handleCopy}
+      title="Copy message"
+      aria-label="Copy message"
+    >
+      {copied ? '✓ Copied' : 'Copy'}
+    </button>
+  )
+}
+
 // ─── CacheCountdownBadge ─────────────────────────────────────────────────────
 // Isolated ticker so the parent ChatTab does NOT re-render on each second tick.
 // Restored from commit 6e286cb (flicker-safe memo pattern).
@@ -2064,6 +2089,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                     </div>
                   )
                 })()}
+                {/* Copy-message button: visible on hover for completed assistant messages */}
+                {msg.role === 'assistant' && !msg.streaming && msg.text && (
+                  <MsgCopyButton text={msg.text} />
+                )}
               </div>
             </div>
           )

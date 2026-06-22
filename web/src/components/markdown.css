@@ -56,3 +56,43 @@ pre:has(> .mermaid-diagram) {
   color: var(--text2, #999);
   font-size: 12px;
 }
+
+/* ── Copy button for fenced code blocks ──────────────────────────────────── */
+.code-block-wrap {
+  position: relative;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  border-radius: 4px;
+  background: var(--bg2, rgba(0,0,0,0.45));
+  border: 1px solid var(--border, rgba(255,255,255,0.15));
+  color: var(--text2, #aaa);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  font-family: var(--sans, sans-serif);
+  pointer-events: none;
+}
+
+.code-block-wrap:hover .code-copy-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.code-copy-btn:hover {
+  color: var(--text, #fff);
+  background: var(--bg3, rgba(0,0,0,0.65));
+}
+
+.code-copy-btn--ok {
+  color: var(--green, #4ade80) !important;
+  opacity: 1 !important;
+  pointer-events: none;
+}
