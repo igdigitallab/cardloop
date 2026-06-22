@@ -6131,6 +6131,15 @@ _GLOBAL_FS_EXCLUDE: set[str] = {
     "dist", ".worktrees", ".mypy_cache", ".pytest_cache",
 }
 
+# Directories under $HOME that must never be listed or read — they contain
+# credentials, private keys, or operator-specific config.
+_GLOBAL_SENSITIVE_DIRS: frozenset[str] = frozenset({
+    ".ssh",
+    ".gnupg",
+    ".claude",
+    ".config",  # covers .config/claude-ops and any other sensitive sub-dirs
+})
+
 
 def _resolve_global_safe(home: Path, rel: str):
     """Like _resolve_safe, but root = $HOME. Raises ValueError on traversal."""
@@ -6141,6 +6150,22 @@ def _resolve_global_safe(home: Path, rel: str):
     return target
 
 
+def _is_global_sensitive_path(target: Path, home: Path) -> bool:
+    """Return True if *target* is inside (or is) a sensitive $HOME subdirectory.
+
+    Sensitive top-level dirs: .ssh, .gnupg, .claude, .config — these hold
+    private keys, GPG keyrings, Claude credentials, and operator config.
+    """
+    try:
+        rel = target.relative_to(home)
+    except ValueError:
+        return False  # not under home at all — _resolve_global_safe already blocks this
+    parts = rel.parts
+    if not parts:
+        return False  # home itself — not sensitive
+    return parts[0] in _GLOBAL_SENSITIVE_DIRS
+
+
 async def api_global_files(req: web.Request) -> web.Response:
     """GET /api/global/files?path=<rel> — directory listing from $HOME."""
     home = Path.home()
@@ -6149,6 +6174,10 @@ async def api_global_files(req: web.Request) -> web.Response:
         target = _resolve_global_safe(home, rel)
     except ValueError:
         return web.json_response({"error": "invalid path"}, status=400)
+
+    # Block sensitive credential directories
+    if _is_global_sensitive_path(target, home):
+        return web.json_response({"error": "access denied"}, status=403)
 
     if not target.exists() or not target.is_dir():
         return web.json_response({"error": "not a directory"}, status=404)
@@ -6166,6 +6195,9 @@ async def api_global_files(req: web.Request) -> web.Response:
         for item in items:
             name = item.name
             if item.is_dir() and name in _GLOBAL_FS_EXCLUDE:
+                continue
+            # Hide sensitive subdirectories from listing
+            if item.is_dir() and name in _GLOBAL_SENSITIVE_DIRS:
                 continue
             if item.is_file() and _is_secret_name(name):
                 continue
@@ -6194,6 +6226,10 @@ async def api_global_file(req: web.Request) -> web.Response:
         target = _resolve_global_safe(home, rel)
     except ValueError:
         return web.json_response({"error": "invalid path"}, status=400)
+
+    # Block sensitive credential directories (listing + reading)
+    if _is_global_sensitive_path(target, home):
+        return web.json_response({"error": "access denied"}, status=403)
 
     # Check secrets BEFORE reading (anti-traversal kept via _resolve_global_safe)
     if _is_secret_name(target.name):
