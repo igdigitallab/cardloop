@@ -197,3 +197,32 @@
 - [x] P0 SECURITY: auth hardening (R2/R3/R4/R5) <!--ops:5c61b1-->
 - [x] P1 Launch plan: HN title + awesome-claude-code PR <!--ops:c3d828-->
 - [x] P2 docker-compose.yml (HARD requirement, cockpit-only) <!--ops:f60b5b-->
+- [x] Feature: photo upload to chat with Ode viewer <!--ops:4b020c-->
+- [x] Fix: mobile screenshot viewer close interaction <!--ops:5fa4f2-->
+- [x] Fix: api_project_rotate must clear session_id in chats.json <!--ops:dff9aa-->
+- [x] Fix: mobile network error after screen wake (EventSource + error banner) <!--ops:9b71e9-->
+- [x] Fix: mobile dropdown backdrop and positioning <!--ops:e1db52-->
+- [x] UI: Show actual thinking level instead of 'default' <!--ops:90a27f-->
+- [x] Implement spec-045: Chat window densification <!--ops:8f65ea-->
+- [x] /compact visual feedback during compression <!--ops:96ccc7-->
+- [x] Global redesign: Graphite & Chalk <!--ops:79b153-->
+- [x] Fix: increase mobile font size (14→15px on ≤768px) <!--ops:94d30c-->
+- [x] Update: 3 principles consolidated in 'Scan, don't assume' <!--ops:1aef51-->
+- [x] spec-046 Phase A: Project templates + git init automation <!--ops:52468e-->
+- [x] Implement spec-046: project creation redesign (full) <!--ops:463ddc-->
+- [x] Spec-046 Phase A: Frontend intent field + welcome screen <!--ops:0cdf6a-->
+- [x] P1 Record 20-second demo GIF (highest-leverage asset) <!--ops:8f94e4-->
+- [x] Build and verify Docker image (Dockerfile check) <!--ops:5dae23-->
+- [x] Fix: npm ci fails on eslint peer dependency conflict <!--ops:69713f-->
+- [x] P0 Sanitize OPSEC/khronika names in HEAD <!--ops:b2e1d1-->
+- [x] P0 Untrack claude-ops-bot.service, document .service.template <!--ops:d4c3f3-->
+- [x] P0 ToS compliance notice + make API-key auth first-class <!--ops:071c6c-->
+- [x] P0 SECURITY R1: log_cmd/test_cmd = arbitrary RCE <!--ops:4b50a0-->
+- [x] P0 SECURITY: endpoint/fs hardening (R6/R7/Y2/Y5/Y1) <!--ops:6d72c2-->
+- [x] P1 README hook line + why this exists story <!--ops:7e83d3-->
+- [x] P1 Security Model section in README <!--ops:a1b606-->
+- [x] P1 README positioning content <!--ops:b2c717-->
+- [x] P2 Create requirements.txt (prod deps, pinned) <!--ops:d4e939-->
+- [x] P2 .github/ CI with venv bootstrap + issue/PR templates <!--ops:0a1c6d-->
+- [x] P2 Fix CI-breaking test_janitor_quarantine <!--ops:293e9f-->
+- [x] Fix: Hardcoded Coolify UUID default in schedules.py (spec-014) <!--ops:58412e-->
