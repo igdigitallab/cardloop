@@ -70,5 +70,7 @@
 ## Review
 - [?] Global tools moved to sidebar tools row (mobile parity) + ⚙ global settings <!--ops:b3f1a2-->
   > Terminal/Vault/Files/Schedules launchers moved from the top ProjectTabBar (desktop-only, hidden on mobile) into a compact icon row in the sidebar — reachable on phones via the off-canvas drawer. Added 5th ⚙ icon opening a new global GlobalSettingsTab (extracted from SettingsTab's global block) → closes 921e4a. Built & shipped to dist. NEEDS: Igor's visual check on desktop + phone.
+- [?] Fix: CI test environment issues (tg_queue + quality_gate) <!--ops:81cbca-->
+  > Fixed ALLOWED_USERS not set in CI (auth gate rejection) and pytest detection in quality_gate. Added autouse fixture and venv symlink. All 1406 tests pass under CI environment.
 
 ## Failed

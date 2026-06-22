@@ -24,6 +24,18 @@ sys.path.insert(0, str(ROOT))
 import bot
 
 
+# bot.ALLOWED_USERS is populated from the ALLOWED_USERS env var at import time.
+# On a clean machine / CI there is no .env, so it is empty and on_message rejects
+# every update — making the on_message tests pass only on the operator's box.
+# Pin a known test user so these tests are deterministic everywhere.
+TEST_USER_ID = 999000
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_user(monkeypatch):
+    monkeypatch.setattr(bot, "ALLOWED_USERS", {TEST_USER_ID})
+
+
 # ─────────────────────────── helpers ───────────────────────────
 
 
@@ -52,7 +64,7 @@ def _make_update(chat_id: int = 1001, thread_id: int = 42, text: str = "hello",
     msg.forward_origin = None
     msg.message_id = msg_id
     update.effective_message = msg
-    update.effective_user.id = next(iter(bot.ALLOWED_USERS), 0)
+    update.effective_user.id = TEST_USER_ID
     return update
 
 

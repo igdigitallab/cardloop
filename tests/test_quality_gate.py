@@ -62,6 +62,16 @@ def _make_ctx_with_project(data_dir: Path, cwd: str) -> dict:
     }
 
 
+def _link_venv(proj: Path) -> None:
+    """Make the gate detect 'venv/bin/python -m pytest' (which HAS pytest) instead
+    of a bare 'python3'. _detect_test_cmd prefers proj/venv/bin/python; without it
+    the fallback is the system python3, which lacks pytest on CI / a clean machine
+    → every "expect safe" gate test would falsely come back risky."""
+    vbin = proj / "venv" / "bin"
+    vbin.mkdir(parents=True, exist_ok=True)
+    (vbin / "python").symlink_to(sys.executable)
+
+
 def _make_passing_project(tmp_path: Path) -> Path:
     """Проект с pytest + тест который проходит."""
     p = tmp_path / "passing_proj"
@@ -69,6 +79,7 @@ def _make_passing_project(tmp_path: Path) -> Path:
     (p / "tests").mkdir()
     (p / "tests" / "__init__.py").write_text("")
     (p / "tests" / "test_ok.py").write_text("def test_always_pass(): assert 1 == 1\n")
+    _link_venv(p)
     return p
 
 
@@ -79,6 +90,7 @@ def _make_failing_project(tmp_path: Path) -> Path:
     (p / "tests").mkdir()
     (p / "tests" / "__init__.py").write_text("")
     (p / "tests" / "test_fail.py").write_text("def test_always_fail(): assert False, 'intentional'\n")
+    _link_venv(p)
     return p
 
 
@@ -152,6 +164,7 @@ async def test_gate_secrets_in_env(tmp_path):
             assert val == 'hello_world', f'Got: {val!r}'
     """)
     (proj / "tests" / "test_secret.py").write_text(test_code)
+    _link_venv(proj)
 
     # Без секрета — тест падает
     result_no_secret = await _run_quality_gate(str(proj))
@@ -178,6 +191,7 @@ async def test_gate_output_truncated(tmp_path):
             assert False
     """)
     (proj / "tests" / "test_loud.py").write_text(test_code)
+    _link_venv(proj)
 
     result = await _run_quality_gate(str(proj))
     assert result["verdict"] == "risky"
@@ -458,6 +472,7 @@ async def test_api_check_passing_project_in_wt(tmp_git, tmp_path):
     (wt / "tests").mkdir()
     (wt / "tests" / "__init__.py").write_text("")
     (wt / "tests" / "test_ok.py").write_text("def test_pass(): assert True\n")
+    _link_venv(wt)
 
     meta = {
         "card_id": card_id,
