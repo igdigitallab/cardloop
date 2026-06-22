@@ -602,12 +602,15 @@ async def test_trash_list_shows_entries(tmp_path):
 # ─────────────────────────── api_trash_restore ───────────────────────────────
 
 @pytest.mark.asyncio
-async def test_restore_moves_back_and_rebinds(tmp_path):
+async def test_restore_moves_back_and_rebinds(tmp_path, monkeypatch):
     """Restore: moves folder back + rebinds topics.json."""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    original_cwd = tmp_path / "home" / "restored-project"
-    (tmp_path / "home").mkdir(exist_ok=True)
+    # Use tmp_path as the fake home so the allowlist check passes.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(exist_ok=True)
+    original_cwd = fake_home / "restored-project"
+    monkeypatch.setattr("os.path.expanduser", lambda p: str(fake_home) if p == "~" else p)
 
     save_topics_called = [False]
 
@@ -664,12 +667,16 @@ async def test_restore_moves_back_and_rebinds(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_restore_collision_409(tmp_path):
+async def test_restore_collision_409(tmp_path, monkeypatch):
     """Restore collision: original path occupied → 409."""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    original_cwd = tmp_path / "home" / "occupied-project"
-    (tmp_path / "home").mkdir(exist_ok=True)
+    # Use tmp_path as the fake home so the restore allowlist check passes and
+    # we reach the collision check.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(exist_ok=True)
+    original_cwd = fake_home / "occupied-project"
+    monkeypatch.setattr("os.path.expanduser", lambda p: str(fake_home) if p == "~" else p)
     original_cwd.mkdir()  # Already exists!
 
     ctx = {

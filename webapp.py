@@ -1763,6 +1763,14 @@ async def api_trash_restore(req: web.Request) -> web.Response:
     if not original_cwd:
         return web.json_response({"error": "missing original_cwd in sidecar"}, status=400)
 
+    # Validate restore destination against the path allowlist before moving anything.
+    # Prevents a tampered sidecar from restoring a folder to an arbitrary path.
+    allowlist_err = _path_allowlist_check(original_cwd, ctx)
+    if allowlist_err:
+        return web.json_response(
+            {"error": f"restore destination rejected: {allowlist_err}"}, status=400
+        )
+
     # Check collision
     if Path(original_cwd).exists():
         return web.json_response(
