@@ -546,6 +546,20 @@ def _record_attempt(ip: str, success: bool) -> None:
 
 
 @web.middleware
+async def security_headers_middleware(request: web.Request, handler):
+    """Add conservative HTTP security headers to every response.
+
+    Deliberately omits Content-Security-Policy because the SPA loads inline
+    scripts / dynamic imports that a strict CSP would break.
+    """
+    response = await handler(request)
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return response
+
+
+@web.middleware
 async def error_middleware(request: web.Request, handler):
     """Outer middleware: logs unhandled exceptions and returns JSON 500."""
     try:
@@ -10047,7 +10061,10 @@ async def start(ptb_app, ctx: dict) -> None:
         # Seed built-in default prompt templates (merge, never overwrite operator entries)
         _seed_default_prompts(ctx)
 
-        app = web.Application(middlewares=[error_middleware, auth_middleware], client_max_size=20 * 1024 * 1024)
+        app = web.Application(
+            middlewares=[security_headers_middleware, error_middleware, auth_middleware],
+            client_max_size=20 * 1024 * 1024,
+        )
         app["ctx"] = ctx
 
         # F1: save reference to PTB app for TG pings from _run_card
