@@ -3970,6 +3970,10 @@ async def _notify_tg(ctx: AppCtx, session_key: str, prompt: str, ok: bool) -> No
         if ptb is None:
             return
         parts = session_key.split(":", 1)
+        # Cockpit-created projects are keyed by project_id (e.g. 'claude-ops-bot'), not a numeric
+        # TG 'chat:thread' key — there is no TG topic to ping. Skip quietly instead of int()-crashing.
+        if not parts[0].lstrip("-").isdigit():
+            return
         chat_id = int(parts[0])
         thread_id = int(parts[1]) if len(parts) > 1 and parts[1] not in ("0", "") else None
         icon = "✅" if ok else "❌"
@@ -4016,7 +4020,11 @@ async def _run_card(
         f"{prompt}\n\n[This is board card '{card_id}' in project '{name}'. Complete the task. "
         f"When done — the card will automatically move to Review for human inspection: "
         f"finish the work and end with a BRIEF summary of what was done (it will appear in Review). "
-        f"Do NOT edit TASKS.md manually — the cockpit handles the move.]"
+        f"Do NOT edit TASKS.md manually — the cockpit handles the move. "
+        f"Do NOT restart the service (restart-self.sh / systemctl restart) during this run — it runs "
+        f"inside the service process and a restart would abort this card run mid-work (exit 143 → Failed). "
+        f"If your changes require a service restart to take effect, finish the work and say so in your "
+        f"summary; the operator will restart afterwards.]"
     )
     DATA: Path = ctx["DATA"]
 

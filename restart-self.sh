@@ -10,10 +10,15 @@
 # сервиса → он переживает смерть бота и гарантированно доводит restart до конца.
 set -euo pipefail
 
+# --on-active=6: задержка должна быть с запасом БОЛЬШЕ времени, которое harness
+# тратит на фиксацию текущего хода/ответа. При 1с рестарт SIGTERM-ил процесс-ход
+# агента (он живёт в этом же cgroup) ДО коммита результата tool-call → harness
+# показывал ложный «Command failed with exit code 143». 6с дают ходу гарантированно
+# завершиться и доставиться; рестарт срабатывает позже, без видимой «ошибки».
 sudo systemd-run --collect --quiet \
   --unit="cops-self-restart-$(date +%s)" \
-  --on-active=1 --timer-property=AccuracySec=200ms \
+  --on-active=6 --timer-property=AccuracySec=200ms \
   systemctl restart claude-ops-bot
 
-echo "🔁 Рестарт claude-ops-bot запланирован (~1-2с, detached через systemd-run, вне cgroup)."
-echo "   Текущий процесс скоро завершится; веб (:8787) и Telegram-бот поднимутся сами."
+echo "🔁 Рестарт claude-ops-bot запланирован (~6с, detached через systemd-run, вне cgroup)."
+echo "   Заверши ход СРАЗУ после этой команды (без bash-хвоста) — веб (:8787) и Telegram-бот поднимутся сами."
