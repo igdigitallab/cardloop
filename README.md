@@ -1,47 +1,144 @@
-> README = what it is and how to run it. Code map → ARCHITECTURE.md. Working rules and gotchas → CLAUDE.md. API → docs/API.md. Contributing and setup → CONTRIBUTING.md.
-
 # Cardloop
 
-**Mission control for a fleet of AI agents** — a browser-based IDE for running projects through the Claude Agent SDK. No terminal required, accessible from any device. One engine, three input channels: a web cockpit, Telegram, and kanban cards. Fully autonomous: describe a task → the agent diagnoses, edits code, deploys, and reports back.
+**The kanban board is your agent's working memory — and the cards move themselves.**
 
-You don't lose the thread. Every task you mention becomes a card and moves **Backlog → In Progress → Review** in real time — and the board keeps itself honest, so nothing rots in the backlog half-done.
+Cardloop is a self-hosted ops center for Claude agents. Describe a task in chat or drop a card
+on the board; the agent diagnoses, edits code, commits, deploys, and moves the card to **Review** —
+and you watch it happen from your phone. One engine, three ways in: a web cockpit (PWA), Telegram,
+and the kanban board itself. **Runs on your Claude subscription — no API key, no per-token billing.**
 
+<!--
+  ▶ DEMO GIF GOES HERE (highest-leverage asset).
+  Record ~20s: drop a card → it moves to In Progress → agent works → diff appears → card lands in Review → phone ping.
+  Then replace this comment with:  ![Cardloop demo](docs/demo.gif)
+-->
+
+[![CI](https://github.com/cardloop/cardloop/actions/workflows/ci.yml/badge.svg)](https://github.com/cardloop/cardloop/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](./LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
+
+> _"Claude" is a trademark of Anthropic, PBC. Cardloop is an independent project — not affiliated
+> with, endorsed by, or sponsored by Anthropic. It wraps the official `claude` CLI, which you
+> install separately. See [Legal & Terms](#legal--terms)._
+
+---
+
+## Why this exists
+
+Every agent tool is a chat box. You ask, it works, the conversation scrolls away — and a week
+later you can't tell what shipped, what's half-done, and what you asked for twice. The agent has
+no memory of the *project*, only of the *conversation*.
+
+Cardloop was built for one person running many projects from a phone. The fix was to stop treating
+the board as a UI and start treating it as **the agent's memory**: an on-disk `TASKS.md` that every
+turn reads and writes. Work doesn't live in a chat log that disappears — it lives on a board that
+the agent keeps honest. Mention a task and it becomes a card. Finish one and it moves itself to
+Review. Nothing rots in the backlog half-done.
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    C[Cockpit PWA]
+    T[Telegram]
+    K[Kanban card]
+    C --> E
+    T --> E
+    K --> E
+    E[run_engine&#40;&#41;<br/>async generator] --> SDK[Claude Agent SDK<br/>subscription auth]
+    SDK --> O[files / git / deploy]
+    E -. reconciles .-> B[(TASKS.md<br/>board)]
+    K --- B
 ```
- Cockpit   ──┐
- Telegram  ──┼──→  run_engine()  ──→  Claude Agent SDK  ──→  files / git / deploy
- Card      ──┘     (async generator)     (subscription)        (full-auto)
-```
 
-> _"Claude" is a trademark of Anthropic, PBC. Cardloop is an independent project — not affiliated with, endorsed by, or sponsored by Anthropic. It wraps the official `claude` CLI, which you install separately. See [Legal & Terms](#legal--terms)._
+One transport-agnostic `run_engine()` generator feeds every channel. Whatever you do — type in the
+cockpit, message the bot, or move a card — runs through the same engine, against the same session,
+and updates the same board.
 
 ---
 
 ## The board is the source of truth
 
-Most agent tools are a chat box — you ask, it works, and you lose track of what is done, in
-flight, or forgotten. Cardloop makes the **kanban board** the shared working memory between
-you and the agents:
+Cardloop makes the **kanban board** the shared working memory between you and the agents:
 
-- **Board-aware agents.** Every turn — in the cockpit, in Telegram, or from a card — the agent
-  sees the live board. New work belongs on the board, not in a disappearing chat log.
+- **Board-aware agents.** Every turn — cockpit, Telegram, or card — the agent sees the live board.
+  New work belongs on the board, not in a disappearing chat log.
 - **Self-maintaining.** After each turn the system reconciles the board against what actually
-  happened (commits, diffs, the agent's own summary): new work gets a card, finished work moves
-  to Review. The backlog stops filling with tasks that were quietly completed days ago.
-- **Visible.** Open a project and you watch the work move across columns in real time — what's
-  queued, what's running, what's waiting on you.
+  happened (commits, diffs, the agent's own summary): new work gets a card, finished work moves to
+  Review. The backlog stops filling with tasks that were quietly completed days ago.
+- **Visible.** Open a project and watch work move across columns in real time — queued, running,
+  waiting on you.
 
-`TASKS.md` in each repo is the on-disk truth; the board is just its live view. See
-[`specs/spec-034-board-centric-os.md`](specs/spec-034-board-centric-os.md) for the design.
+### What the board looks like
+
+`TASKS.md` in each repo *is* the board — sections are columns, lines are cards:
+
+```markdown
+## Backlog
+- [a1b2c3] Add rate-limit headers to the login endpoint
+- [d4e5f6] Write the onboarding email copy
+
+## In Progress
+- [99aa88] Fix mobile chat scroll jumping on keyboard open
+
+## Review
+- [77bb66] Bump vite to v8 + verify build  ← agent finished; diff waiting for you
+
+## Done
+- [55cc44] Add requirements.txt
+```
+
+The lifecycle: **you add a card → drag it to In Progress → the engine runs the task → result + git
+diff are attached → the card lands in Review (or Failed) → you get a ping.** Move a card, and the
+agent picks it up. See [`specs/spec-034-board-centric-os.md`](specs/spec-034-board-centric-os.md)
+for the design.
+
+---
+
+## How this is different
+
+The "personal AI ops center" niche is wide open. Most neighbours are either a chat UI bolted onto
+an agent, or multi-provider orchestration frameworks. Cardloop's bets are narrower and opinionated:
+
+- **Kanban-as-working-memory.** `TASKS.md` is on-disk truth and the agent moves its own cards.
+  Most tools lose the thread the moment the chat ends; here the board *is* the thread.
+- **Three channels, one session.** Telegram + PWA + autorun cards share a single engine and
+  session — start on your phone, finish in the browser.
+- **Subscription-first.** No API key, no per-token meter (see below).
+- **Mobile-first PWA done right.** SSE reconnect on wake, safe-area, pinch-zoom, install to home
+  screen. It's meant to be run from a phone.
+- **Production-grade internals.** 1400+ tests, transport-agnostic engine, encrypted secret vault,
+  C2 destructive-command gate, double path-traversal defence.
+
+Trade-offs, stated plainly: it's **Claude-only** (competitors are multi-provider), and `webapp.py`
+is a large monolith we're decomposing in the open. PRs welcome.
+
+---
+
+## Runs on your Claude subscription (no API key)
+
+This is a feature, not a footnote. The engine reads `~/.claude/.credentials.json` (the OAuth token
+issued by `claude login`) and drives the official `claude` CLI — so a Cardloop instance costs
+**nothing per token** on top of your existing Claude Max/Pro subscription.
+
+`bot.py` deliberately removes `ANTHROPIC_API_KEY` from the environment at startup to force
+subscription auth; if it's set, the SDK silently switches to pay-per-token API billing. For
+multi-user or commercial deployments you **should** use an API key instead — see
+[Legal & Terms](#legal--terms) for the Anthropic ToS nuance.
 
 ---
 
 ## Three channels
 
-### Cockpit (YOUR_DOMAIN)
+### Cockpit (`YOUR_DOMAIN`)
 
 A browser IDE — React + Vite SPA with an aiohttp backend.
 
-**Sidebar:** projects with drag-and-drop sorting, collapse, unread badges. **Project tabs** at the top — switch between projects without losing state.
+**Sidebar:** projects with drag-and-drop sorting, collapse, unread badges. **Project tabs** at the
+top — switch between projects without losing state.
 
 **Tabs per project (left panel ~55%):**
 
@@ -54,120 +151,89 @@ A browser IDE — React + Vite SPA with an aiohttp backend.
 | **Files** | Project file tree + viewer (MD render, code mono) |
 | **Memory** | Agent memory files |
 
-**Chat (right panel ~45%, persistent):**
-- SSE stream, CLI-style tool rendering (Bash/Edit/Read/Write with diff).
-- **Shared sessions** — start in Telegram, continue in the browser (and vice versa).
-- Model (sonnet/opus/haiku) switchable on the fly.
-- Message queue, pulse indicator, token statistics.
-- Prompt library with categories and variables.
-- "Stop" button actually interrupts the agent (`client.interrupt`).
-- Session selection and management.
+**Chat (right panel ~45%, persistent):** SSE stream, CLI-style tool rendering (Bash/Edit/Read/Write
+with diff), shared sessions (start in Telegram, continue in the browser), on-the-fly model switch,
+message queue, prompt library, real interrupt (`client.interrupt`).
 
-**Kanban board:**
-- `TASKS.md` in the repo is the source of truth. Sections = columns, lines = cards.
-- Move cards with buttons, drag-and-drop, or inline editing.
-- **Auto-run:** moving a card to In Progress → engine executes the task → result + git-diff → Review / Failed → Telegram notification.
-- Three-layer data-loss protection.
+**Also:** free-form chats, global `$HOME` file browser, attachments (📎 / drag-drop / Ctrl+V),
+subscription usage badge (5h + week), project creation/audit/health-check/rename.
 
-**Additional features:**
-- Free-form chats (not tied to a project).
-- Global file browser (`$HOME`) with inline editing.
-- Attachments: 📎, drag-and-drop, Ctrl+V.
-- Usage badge: subscription limits (5h + week).
-- Project creation (templates + onboarding agent), audit, upgrade, health-check, rename.
+### Telegram channel *(optional)*
 
-### Telegram channel
+Forum group, `@YOUR_BOT`. **Each topic = a project** (`thread_id → cwd`).
 
-Forum group "Development", @YOUR_BOT. **Each topic = a project** (mapped `thread_id → cwd`).
-
-- Write a task → the agent works in the project directory.
+- Write a task → the agent works in that project's directory.
 - Forward an alert or screenshot → the agent diagnoses and fixes it.
-- Files (up to 20MB): documents and photos are handled by the agent.
-- Commands: `/reset` `/resume` `/model` `/project` `/newtopic` `/diff` `/cost` `/usage` `/stop` `/whoami`
+- Files up to 20 MB. Commands: `/reset` `/resume` `/model` `/project` `/newtopic` `/diff` `/cost`
+  `/usage` `/stop` `/whoami`.
 
 ### Kanban auto-run
 
-Moving a card to In Progress → `_run_card` in webapp.py triggers `run_engine` → result written to `data/runs/<card>.md` → card moves to Review/Failed → notification sent to the TG topic.
-
----
-
-## Authorization: important warning
-
-> **Cardloop uses subscription-based auth, not an API key.**
-
-The engine reads `~/.claude/.credentials.json` (claudeAiOauth, issued on `claude login`).
-
-**Do not set `ANTHROPIC_API_KEY`** in `.env` or the environment — `bot.py` explicitly removes this variable at startup. If it is present, the SDK will switch to pay-per-token API billing instead of the subscription.
-
-**Access is strictly controlled by `ALLOWED_USERS`** — only the listed Telegram user IDs can interact with the bot and cockpit.
+Moving a card to In Progress → `_run_card` triggers `run_engine` → result written to
+`data/runs/<card>.md` → card moves to Review/Failed → notification.
 
 ---
 
 ## Quickstart
 
-The minimum required setup is Claude subscription auth + a web password. Telegram is optional.
+Minimum setup is Claude subscription auth + a web password. Telegram is optional.
 
 ```bash
 # 1. Clone
-git clone https://github.com/YOUR_GITHUB/claude-ops-bot.git && cd claude-ops-bot
+git clone https://github.com/cardloop/cardloop.git && cd cardloop
 
-# 2. Python
-python3 -m venv venv && venv/bin/pip install -r requirements-dev.txt
+# 2. Python (>= 3.11)
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 
 # 3. Config
 cp .env.example .env
 # Required: WEB_PASSWORD, WEB_COOKIE_SALT
 # Optional: BOT_TOKEN + GROUP_CHAT_ID + ALLOWED_USERS  (Telegram channel)
-# Claude auth: run `claude login` once — credentials stored in ~/.claude/.credentials.json
+# Behind a proxy: set TRUSTED_PROXIES + WEB_COOKIE_SECURE=true  (see Security model)
 
-# 4. Frontend
+# 4. Claude auth (subscription) — run once
+claude login   # stores ~/.claude/.credentials.json
+
+# 5. Frontend
 cd web && npm install && npm run build && cd ..
 
-# 5. Run
-venv/bin/python bot.py  # Cockpit → http://localhost:8787
+# 6. Run
+venv/bin/python bot.py   # Cockpit → http://localhost:8787
 ```
 
-**Minimal (web only):** set `WEB_PASSWORD` and `WEB_COOKIE_SALT`, leave `BOT_TOKEN` empty — the bot starts without Telegram.
+**Web only:** set `WEB_PASSWORD` + `WEB_COOKIE_SALT`, leave `BOT_TOKEN` empty — starts without Telegram.
+**Public access:** put it behind a reverse proxy (Cloudflare Tunnel, nginx, Caddy) pointing at
+`localhost:8787`, and read the Security model below first. By default it listens on localhost only.
 
-**With Telegram:** additionally set `BOT_TOKEN`, `GROUP_CHAT_ID`, and `ALLOWED_USERS`.
-
-**Public access:** put the service behind a reverse proxy (Cloudflare Tunnel, nginx, Caddy, etc.) and point your domain to `localhost:8787`. By default it only listens on localhost.
-
-Details (tests, lint, deploy) → [CONTRIBUTING.md](CONTRIBUTING.md).
+Details (tests, lint, deploy, systemd) → [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-## Access
+## Security model
 
-| Channel | Address |
-|---|---|
-| **Cockpit** | `https://YOUR_DOMAIN` (Cloudflare Tunnel / reverse proxy) / `localhost:8787` (local) |
-| **Telegram** | Forum group "Development", @YOUR_BOT *(optional)* |
+Cardloop is a **single-operator tool that runs agents with full host access**. Read this before
+exposing it to a network.
 
-- **Cockpit auth:** `WEB_PASSWORD` in `.env`.
-- **Telegram auth:** `ALLOWED_USERS` (user ID whitelist).
-- **SDK auth:** subscription (`~/.claude/.credentials.json`), **not `ANTHROPIC_API_KEY`**.
+- **Agents run with `bypassPermissions` — full host access by design.** They edit files, run git,
+  and deploy without per-action prompts. Run Cardloop only on a host you're comfortable handing to
+  an autonomous agent. A C2-style gate guards the most destructive commands, but the model is
+  "trusted operator," not "sandboxed."
+- **Single-user, not multi-tenant.** Cockpit auth is a web password + optional TOTP 2FA; Telegram
+  is gated by an `ALLOWED_USERS` whitelist. There is no per-user isolation.
+- **An authenticated session can read the decrypted secret vault.** By design — the vault's
+  confidentiality reduces to your login (password + TOTP) and the session cookie.
+- **`log_cmd` is allowlisted.** Diagnostic commands are restricted to a safe set
+  (journalctl/docker/tail/…) with shell metacharacters rejected — no arbitrary command execution
+  through settings.
+- **The global file browser excludes** `~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.config/claude-ops`,
+  and `.env*`.
+- **Put it behind HTTPS.** Set `WEB_COOKIE_SECURE=true` whenever you're not on `localhost`. Behind
+  a reverse proxy, set `TRUSTED_PROXIES` (CSV of proxy IPs/CIDRs) so the login rate-limiter sees
+  real client IPs instead of the proxy's.
+- **Rate-limit state is in-memory** and resets on restart.
 
----
-
-## Operations
-
-```bash
-# Logs
-sudo journalctl -u claude-ops-bot -f
-
-# Restart from inside the agent (THE ONLY safe method)
-bash $HOME/claude-ops-bot/restart-self.sh
-
-# Restart from terminal
-sudo systemctl restart claude-ops-bot
-
-# Frontend (after editing web/)
-cd $HOME/claude-ops-bot/web && npm run build
-
-# Tests
-cd $HOME/claude-ops-bot && venv/bin/python -m pytest -q
-```
+Found a vulnerability? Please open a private security advisory rather than a public issue.
 
 ---
 
@@ -177,16 +243,16 @@ cd $HOME/claude-ops-bot && venv/bin/python -m pytest -q
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Code map: where to find what, flow diagram |
 | [CLAUDE.md](CLAUDE.md) | Working rules and gotchas for agents |
-| [docs/API.md](docs/API.md) | HTTP API reference (56 routes) |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Contributing: setup, tests, lint, commit style |
+| [docs/API.md](docs/API.md) | HTTP API reference |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, tests, lint, commit style |
 | `TASKS.md` | Live board (kanban) — backlog and current tasks |
-| `DONE.md` | Archive of completed work. Sessions do NOT read this. |
 
 ---
 
 ## Tech stack
 
-Python 3.11 · aiohttp · python-telegram-bot · Claude Agent SDK · React 18 · Vite · TypeScript · systemd · Cloudflare Tunnel · pytest
+Python 3.11 · aiohttp · python-telegram-bot · Claude Agent SDK · React 18 · Vite · TypeScript ·
+systemd · pytest
 
 ---
 
@@ -206,7 +272,7 @@ API or OAuth tokens directly.
   (`ANTHROPIC_API_KEY`), not a subscription. Authenticating *other* users against *their* Claude
   subscriptions through a hosted service is not permitted by Anthropic's Consumer Terms.
 - By default `bot.py` removes `ANTHROPIC_API_KEY` from the environment to force subscription
-  (CLI) auth. To run in API-key mode, see the auth configuration in the Quickstart.
+  (CLI) auth. To run in API-key mode, set it in your environment before launch.
 
 This project is provided "as is" under the [MIT License](./LICENSE); see also the
 [NOTICE](./NOTICE) file for third-party attributions.
