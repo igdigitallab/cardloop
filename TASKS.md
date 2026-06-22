@@ -56,8 +56,6 @@
   > spec-041 §3.7. secret.py key-storage CLI has NO tests — add tests/test_secret_cli.py (subprocess set/get/list/delete), high priority (trust anchor). bot.py 28% (TG transport), schedules.py 59% (systemd). 2 slow tests (13.3s+8s) in rotate/handoff.
 - [ ] P3 Document/fix architecture debt (state-on-restart, single-user, schema-version) <!--ops:a1b717-->
   > spec-041 §3.8. running{}/_live_clients{} lost on restart → cards stuck In Progress (no indicator). Single-user hardcoded key_of(cwd)=basename (engine.py:303) → collision data-loss. No data-schema versioning. Circular imports unchecked. Surface first three in Security Model.
-- [ ] Deploy Cardloop на VM племяннице <!--ops:824bcd-->
-  > Развернуть изолированный инстанс Cardloop на отдельной VM в офисе для племяницы (первый внешний пользователь). Включает: код без git-истории, .env, systemd-юнит, deploy-runbook. Открыты: VM локация, подписка Claude, способ доступа, Telegram сейчас/позже.
 
 ## In Progress
 - [~] сделать нормальный логин и пароль. ? <!--ops:e518e2-->
@@ -71,5 +69,7 @@
   > Fixed ALLOWED_USERS not set in CI (auth gate rejection) and pytest detection in quality_gate. Added autouse fixture and venv symlink. All 1406 tests pass under CI environment.
 - [?] Redesign project cards UX: kebab menu + drag handle <!--ops:b88c94-->
   > Rethink card interaction: explicit ⋯ menu (not long-press), grip handle (⠿) for drag-only, mobile bottom-sheet actions. Scope choice: both sidebar+tabs vs sidebar-only first.
+- [?] Deploy Cardloop на VM племяннице <!--ops:824bcd-->
+  > Развернуть изолированный инстанс Cardloop на отдельной VM в офисе для племяницы (первый внешний пользователь). Включает: код без git-истории, .env, systemd-юнит, deploy-runbook. Открыты: VM локация, подписка Claude, способ доступа, Telegram сейчас/позже.
 
 ## Failed
