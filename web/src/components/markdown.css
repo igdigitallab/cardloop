@@ -1,0 +1,58 @@
+/* Mermaid diagram rendering inside markdown (ops:mermaid). */
+
+.mermaid-diagram {
+  position: relative;
+  margin: 12px 0;
+}
+
+.mermaid-svg {
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+  cursor: zoom-in;
+}
+
+.mermaid-svg svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ⤢ expand button — opens the diagram full-screen with zoom/pan */
+.mermaid-expand {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.25));
+  color: var(--text, #fff);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+.mermaid-expand:hover {
+  opacity: 1;
+}
+
+/* Neutralise the <pre> that react-markdown wraps the code block in,
+   so the diagram is not boxed in code-block chrome. */
+pre:has(> .mermaid-diagram) {
+  background: none !important;
+  border: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+.mermaid-error {
+  white-space: pre-wrap;
+  color: var(--text2, #999);
+  font-size: 12px;
+}

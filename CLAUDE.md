@@ -1,10 +1,10 @@
 > CLAUDE.md = правила работы и gotchas для агентов. Карта кода → ARCHITECTURE.md. API → docs/API.md. Запуск → CONTRIBUTING.md. Subsystem gotchas → GOTCHAS.md.
 
-# CLAUDE.md — Claude-Ops
+# CLAUDE.md — Cardloop
 
 IDE-среда для управления проектами через Claude Agent SDK. Три канала: кокпит (`YOUR_DOMAIN`), Telegram (@YOUR_BOT), канбан-автозапуск. Один движок `run_engine()`, full-auto.
 
-Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
+Specs: `~/vault/01-Projects/Cardloop-Bot/specs/`.
 
 ---
 
@@ -16,6 +16,8 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - `data/sessions.json` — **СЛОЙ 2**: `"chat:thread" → session_id`. Чистит только `/reset`.
 - `data/prompts.json` — шаблоны промтов кокпита (CRUD через `/api/prompts`). **НЕ в git**.
 - `claude-ops-bot.service` → `/etc/systemd/system/`.
+- `web/src/components/markdown.tsx` — общий `mdComponents` для ВСЕХ `<ReactMarkdown>` (Files/CLAUDE.md/Board/Memory/Chat). Рендерит ```mermaid блоки как живые SVG: `mermaid@11` лениво (`await import` → свой чанк, не грузит основной бандл), `securityLevel:'strict'`, `suppressErrorRendering:true` (при ошибке синтаксиса — фолбэк на исходник, без «бомбы»). ⚠️ Новый `<ReactMarkdown>` — подключать `components={mdComponents}`, иначе схемы не отрисуются.
+- `web/src/components/Lightbox.tsx` — общий фуллскрин-просмотрщик с зумом (пинч/колесо/кнопки) + пан (pointer events, `touch-action:none`). Используют и чат-картинки/видео (`ChatImage`, проп `video`), и mermaid-диаграммы (проп `svg`, кнопка ⤢ + тап). НЕ плодить второй лайтбокс.
 
 Подробнее — ARCHITECTURE.md.
 
@@ -28,7 +30,7 @@ Specs: `~/vault/01-Projects/Claude-Ops-Bot/specs/`.
 - ⚠️ Перед коммитом нового: проверить, что секрет/значение не попало в трекаемые файлы.
 - ⚠️ **Anti-hardcode (проект идёт в OSS).** В трекаемый код/доки — НИКАКОГО персонального/инфра-хардкода: пути → `$HOME`/относительные (не `/home/<user>/…`), ID/токены/пароли → `.env` (+ плейсхолдер в `.env.example`), реестр проектов → `data/registry.json` (gitignored), имя оператора/язык → env (`OPERATOR_NAME`/`RESPONSE_LANGUAGE`). Реальное значение оператора — только в gitignored-конфиге; в код идёт чтение из него. Новую персональную/инфра-константу не вписывать в код — параметризовать. Детали и инвентарь → `specs/spec-014-oss-hardening.md`; мультиюзер → `specs/spec-013-multi-user.md`.
 - ⚠️ **English-only (the project ships in English).** All NEW code, comments, docstrings, log/print output, user-facing strings, UI, and docs MUST be in English. Do not add Russian text to the codebase. The agent's **reply** language is controlled separately by env `RESPONSE_LANGUAGE` (not hardcoded) — Igor's instance keeps it `по-русски`, so the agent still answers in Russian while the code/UI stay English. Plan & progress → `specs/spec-015-oss-runtime.md`.
-- Параллельные агенты → `git worktree add .worktrees/<name> -b <branch>`; после — `git worktree prune`.
+- Параллельные агенты → `isolation: worktree` (Agent сам создаёт worktree). Ручной `git worktree add .worktrees/<name> -b <branch>` — только если worktree нужен без Agent. После — `git worktree prune`.
 
 ---
 

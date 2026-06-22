@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { mdComponents } from '../components/markdown'
 import { api } from '../api'
 import { MemoryFile, ProjectMemory } from '../types'
 import { Spinner } from '../components/Spinner'
@@ -327,7 +328,7 @@ export function MemoryTab({ projectId }: Props) {
                   title={t['memory.edit_btn_aria']}
                 >✎</button>
               )}
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedFile.content}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{selectedFile.content}</ReactMarkdown>
             </div>
           )}
         </div>

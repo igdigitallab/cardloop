@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { mdComponents } from './markdown'
 import { ClaudeMd } from '../types'
 import { Spinner } from './Spinner'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
@@ -122,7 +123,7 @@ export function EditableMarkdown({ projectId, load, save, spinnerLabel, emptyLab
     <div className="markdown-wrap doc-view" onDoubleClick={startEdit}
       title={t['editable.dblclick_title']}>
       <button className="doc-edit-fab" onClick={startEdit} title={t['editable.edit_title']}>✎</button>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.content}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{data.content}</ReactMarkdown>
     </div>
   )
 }

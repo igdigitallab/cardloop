@@ -142,6 +142,11 @@ function TabItem({
           ✕
         </button>
       )}
+      {!editing && (
+        <span className="ptab-drag-handle" aria-label="Drag to reorder" title="Drag to reorder">
+          <i /><i />
+        </span>
+      )}
     </div>
   )
 }
@@ -175,6 +180,12 @@ export function ProjectTabBar({
   function handleTabPointerDown(e: React.PointerEvent, id: string) {
     // Only primary button (mouse) or any pointer type (touch/pen)
     if (e.pointerType === 'mouse' && e.button !== 0) return
+    // On touch/pen, only start a reorder drag from the dedicated grip handle —
+    // plain swipes elsewhere must scroll the tab strip, taps must activate.
+    if (e.pointerType !== 'mouse') {
+      const onHandle = (e.target as HTMLElement).closest?.('.ptab-drag-handle')
+      if (!onHandle) return
+    }
     dragPointerState.current = {
       id,
       startX: e.clientX,

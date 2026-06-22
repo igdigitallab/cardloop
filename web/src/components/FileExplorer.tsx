@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import React from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { mdComponents } from './markdown'
 import { FileContent, FileEntry, FileListing } from '../types'
 import { Spinner } from './Spinner'
 
@@ -391,7 +392,7 @@ export function FileExplorer({
                 />
               ) : fileContent.lang === 'md' ? (
                 <div className="markdown-wrap">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{fileContent.content}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{fileContent.content}</ReactMarkdown>
                 </div>
               ) : (
                 <pre className="files-code-block"><code>{fileContent.content}</code></pre>

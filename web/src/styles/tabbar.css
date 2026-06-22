@@ -302,6 +302,28 @@
   max-width: 200px;
 }
 
+/* Drag grip — two horizontal lines. Hidden on desktop (whole tab is draggable there);
+   on touch it is the ONLY way to start a reorder (plain swipe scrolls the strip). */
+.ptab-drag-handle {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 0 2px;
+  margin-left: 2px;
+  cursor: grab;
+  touch-action: none; /* let the grip drag without the strip scrolling */
+}
+.ptab-drag-handle i {
+  display: block;
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--text3);
+}
+.ptab-drag-handle:active { cursor: grabbing; }
+
 /* ── Project Header ────────────────────────────────────────── */
 .project-header {
   padding: 20px 24px 0;
@@ -528,11 +550,16 @@
   /* Ensure project tabs have enough tap target height */
   .ptab {
     min-height: 44px;
+    /* On touch, whole tab must not imply draggable — only the grip handle does */
+    cursor: default;
   }
 
   .ptab-new {
     min-height: 44px;
   }
+
+  /* Reveal the grip handle on touch/tablet; hidden on desktop */
+  .ptab-drag-handle { display: flex; }
 }
 
 /* H (Chrome compression): compact project-tabbar strip on mobile.

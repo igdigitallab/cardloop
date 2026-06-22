@@ -176,6 +176,11 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Slightly larger base text on phones for readability */
+@media (max-width: 768px) {
+  body { font-size: 15px; }
+}
+
 #root { height: 100%; }
 
 /* ── Scrollbar ─────────────────────────────────────────────── */

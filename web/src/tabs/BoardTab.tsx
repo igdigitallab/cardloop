@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { mdComponents } from '../components/markdown'
 import { api } from '../api'
 import { ActivityEvent, Board, BoardColumn, GateResult, RichTool, RunResult, TaskCard, isIncidentCard } from '../types'
 import { Spinner } from '../components/Spinner'
@@ -1054,7 +1055,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         <div className="board-archive">
           {archive === null
             ? <Spinner label={t['board.loading_archive']} />
-            : <div className="markdown-wrap"><ReactMarkdown remarkPlugins={[remarkGfm]}>{archive}</ReactMarkdown></div>}
+            : <div className="markdown-wrap"><ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{archive}</ReactMarkdown></div>}
         </div>
       )}
 
@@ -1153,7 +1154,7 @@ export function BoardTab({ projectId, isActive = true }: Props) {
             )}
             {!runResultLoading && runResult?.exists && (
               <div className="markdown-wrap">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{runResult.content}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{runResult.content}</ReactMarkdown>
               </div>
             )}
             {/* C2-gate: buttons / banner based on meta */}

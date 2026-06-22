@@ -8,6 +8,7 @@ import { t } from '../i18n'
 import { useToast } from './Toast'
 import { ThemeToggle } from './ThemeToggle'
 import { ThemeValue } from '../hooks/useTheme'
+import { ActionMenu, KebabButton, ActionMenuSection, ActionMenuItem } from './ActionMenu'
 
 interface Props {
   projects: Project[]
@@ -55,16 +56,14 @@ function writeCollapsed(key: string, val: boolean) {
   try { localStorage.setItem(key, String(val)) } catch {}
 }
 
-// ── Context menu types ────────────────────────────────────────────────────────
+// ── Context menu target types ─────────────────────────────────────────────────
 type CtxMenuTarget =
   | { kind: 'project'; id: string; group: string | null }
   | { kind: 'group'; label: string }
 
-interface CtxMenuState {
+interface ActionMenuState {
   target: CtxMenuTarget
-  x: number
-  y: number
-  submenuOpen: boolean
+  anchorRect: DOMRect
 }
 
 // ── Drag state ────────────────────────────────────────────────────────────────
@@ -109,9 +108,8 @@ export function Sidebar({
   // Confirm delete group modal
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<string | null>(null)
 
-  // Context menu state
-  const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null)
-  const ctxMenuRef = useRef<HTMLDivElement>(null)
+  // Action menu state (replaces old ctxMenu)
+  const [actionMenu, setActionMenu] = useState<ActionMenuState | null>(null)
 
   // Drag state
   const [dragSubject, setDragSubject] = useState<DragSubject | null>(null)
@@ -119,13 +117,38 @@ export function Sidebar({
   const [dragOverGroup, setDragOverGroup] = useState<string | null>(null)  // group label or '__ungrouped__'
   const [dragOverGroupHeader, setDragOverGroupHeader] = useState<string | null>(null)
 
-  const pointerState = useRef<{
-    id: string; kind: 'project' | 'group'
-    startX: number; startY: number; moved: boolean; pointerId: number
-    longPressTimer?: ReturnType<typeof setTimeout>
-    group?: string | null  // current group for project
-    label?: string  // group label for group drags
+  // Refs mirroring drag-over state so doc-level handlers always read fresh values
+  // without stale closure risk.
+  const dragOverGroupRef = useRef<string | null>(null)
+  const dragOverProjectIdRef = useRef<string | null>(null)
+  const dragOverGroupHeaderRef = useRef<string | null>(null)
+  // Mirror all three setters so we update ref and state together
+  function setDragOverGroupSynced(v: string | null) {
+    dragOverGroupRef.current = v
+    setDragOverGroup(v)
+  }
+  function setDragOverProjectIdSynced(v: string | null) {
+    dragOverProjectIdRef.current = v
+    setDragOverProjectId(v)
+  }
+  function setDragOverGroupHeaderSynced(v: string | null) {
+    dragOverGroupHeaderRef.current = v
+    setDragOverGroupHeader(v)
+  }
+
+  // Single drag ref — replaces pointerState + touchLongPress + touchDragActive
+  // https://developer.mozilla.org/en-US/docs/Web/API/Pointer_events#determining_button_states
+  const dragRef = useRef<{
+    kind: 'project' | 'group'
+    id: string
+    group: string | null   // project's current group (null = ungrouped)
+    startX: number
+    startY: number
+    moved: boolean
   } | null>(null)
+
+  // Suppress the synthetic click that fires after a touch-pointerup when a drag occurred
+  const suppressClick = useRef(false)
 
   // Load data
   const loadGroups = useCallback(async () => {
@@ -163,28 +186,13 @@ export function Sidebar({
     }
   }, [renamingGroup])
 
-  // Close context menu on outside click or Escape
-  useEffect(() => {
-    if (!ctxMenu) return
-    function handleMouseDown(e: MouseEvent) {
-      if (ctxMenuRef.current && !ctxMenuRef.current.contains(e.target as Node)) {
-        setCtxMenu(null)
-      }
-    }
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') setCtxMenu(null)
-    }
-    document.addEventListener('mousedown', handleMouseDown)
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('mousedown', handleMouseDown)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [ctxMenu])
+  // ── Action menu opener ────────────────────────────────────────────────────
+  function openActionMenu(anchorRect: DOMRect, target: CtxMenuTarget) {
+    setActionMenu({ target, anchorRect })
+  }
 
-  // ── Context menu opener ───────────────────────────────────────────────────
-  function openCtxMenu(e: React.MouseEvent | { clientX: number; clientY: number }, target: CtxMenuTarget) {
-    setCtxMenu({ target, x: (e as React.MouseEvent).clientX, y: (e as React.MouseEvent).clientY, submenuOpen: false })
+  function closeActionMenu() {
+    setActionMenu(null)
   }
 
   // ── Archive action ────────────────────────────────────────────────────────
@@ -293,7 +301,7 @@ export function Sidebar({
   function startRenameGroup(label: string) {
     setRenamingGroup(label)
     setRenameValue(label)
-    setCtxMenu(null)
+    closeActionMenu()
   }
 
   async function commitRenameGroup() {
@@ -353,197 +361,195 @@ export function Sidebar({
     }
   }
 
-  // ── Pointer drag handlers ─────────────────────────────────────────────────
-
-  function handleProjectPointerDown(e: React.PointerEvent, p: Project) {
-    if (e.button !== 0 && e.pointerType === 'mouse') return
-    // Long-press timer for touch context menu
-    const timer = setTimeout(() => {
-      if (pointerState.current && !pointerState.current.moved) {
-        openCtxMenu({ clientX: e.clientX, clientY: e.clientY }, { kind: 'project', id: p.id, group: p.group ?? null })
-        pointerState.current = null
-        setDragSubject(null)
-        ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
+  // ── Shared drop-commit logic ──────────────────────────────────────────────
+  function commitProjectDrop(
+    p: Project,
+    overGroup: string | null,
+    overProjectId: string | null,
+  ) {
+    if (overGroup !== null) {
+      const targetGroup = overGroup === '__ungrouped__' ? null : overGroup
+      if (targetGroup !== (p.group ?? null)) {
+        doSetGroup(p.id, targetGroup)
       }
-    }, 500)
-    pointerState.current = {
-      id: p.id, kind: 'project',
-      startX: e.clientX, startY: e.clientY, moved: false,
-      pointerId: e.pointerId, longPressTimer: timer,
-      group: p.group ?? null,
+    } else if (overProjectId && overProjectId !== p.id) {
+      const targetProj = projects.find(proj => proj.id === overProjectId)
+      const targetGroup = targetProj?.group ?? null
+      if (targetGroup !== (p.group ?? null)) {
+        doSetGroup(p.id, targetGroup)
+      } else {
+        const ids = projects.map(proj => proj.id)
+        const fromIdx = ids.indexOf(p.id)
+        const toIdx = ids.indexOf(overProjectId)
+        if (fromIdx !== -1 && toIdx !== -1) {
+          const next = [...ids]
+          next.splice(fromIdx, 1)
+          next.splice(toIdx, 0, p.id)
+          onReorder(next)
+        }
+      }
     }
-    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
   }
 
-  function handleProjectPointerMove(e: React.PointerEvent, id: string) {
-    const ps = pointerState.current
-    if (!ps || ps.id !== id || ps.kind !== 'project') return
-    const dx = e.clientX - ps.startX
-    const dy = e.clientY - ps.startY
-    if (!ps.moved && Math.sqrt(dx * dx + dy * dy) > 6) {
-      ps.moved = true
-      if (ps.longPressTimer) clearTimeout(ps.longPressTimer)
-      setDragSubject({ kind: 'project', id })
-    }
-    if (!ps.moved) return
-
-    // Detect drop target — use elementsFromPoint to see through captured element
-    const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null
+  // Helper: given a client point, update dragOver state based on what's under it.
+  function updateDragOverFromPoint(clientX: number, clientY: number, draggedId: string, draggedGroup: string | null) {
+    const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null
     const projectEl = el?.closest('[data-project-id]') as HTMLElement | null
     const groupEl = el?.closest('[data-group]') as HTMLElement | null
     const ungroupedEl = el?.closest('[data-ungrouped-zone]') as HTMLElement | null
 
-    if (projectEl && projectEl.dataset.projectId !== id) {
+    if (projectEl && projectEl.dataset.projectId !== draggedId) {
       const overProj = projects.find(proj => proj.id === projectEl.dataset.projectId)
       const overGroup = overProj?.group ?? null
-      if (overGroup !== (ps.group ?? null)) {
-        // Hovering a project in a different group → highlight that whole group as the drop target
-        setDragOverProjectId(null)
-        setDragOverGroup(overGroup ?? '__ungrouped__')
+      if (overGroup !== (draggedGroup ?? null)) {
+        setDragOverProjectIdSynced(null)
+        setDragOverGroupSynced(overGroup ?? '__ungrouped__')
       } else {
-        setDragOverProjectId(projectEl.dataset.projectId ?? null)
-        setDragOverGroup(null)
+        setDragOverProjectIdSynced(projectEl.dataset.projectId ?? null)
+        setDragOverGroupSynced(null)
       }
     } else if (ungroupedEl) {
-      setDragOverProjectId(null)
-      setDragOverGroup('__ungrouped__')
+      setDragOverProjectIdSynced(null)
+      setDragOverGroupSynced('__ungrouped__')
     } else if (groupEl && groupEl.dataset.group) {
-      setDragOverProjectId(null)
-      setDragOverGroup(groupEl.dataset.group)
+      setDragOverProjectIdSynced(null)
+      setDragOverGroupSynced(groupEl.dataset.group)
     } else {
-      setDragOverProjectId(null)
-      setDragOverGroup(null)
+      setDragOverProjectIdSynced(null)
+      setDragOverGroupSynced(null)
     }
   }
 
-  function handleProjectPointerUp(e: React.PointerEvent, p: Project) {
-    const ps = pointerState.current
-    if (!ps || ps.id !== p.id || ps.kind !== 'project') return
-    if (ps.longPressTimer) clearTimeout(ps.longPressTimer)
-    ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
+  // Helper: given a client point, update group-header drag-over state.
+  function updateGroupDragOverFromPoint(clientX: number, clientY: number, draggedLabel: string) {
+    const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null
+    const headerEl = el?.closest('[data-group-header]') as HTMLElement | null
+    if (headerEl && headerEl.dataset.groupHeader && headerEl.dataset.groupHeader !== draggedLabel) {
+      setDragOverGroupHeaderSynced(headerEl.dataset.groupHeader)
+    } else {
+      setDragOverGroupHeaderSynced(null)
+    }
+  }
 
-    if (ps.moved) {
-      // Determine what we dropped onto
-      if (dragOverGroup !== null) {
-        // Drop onto a group zone or ungrouped zone
-        const targetGroup = dragOverGroup === '__ungrouped__' ? null : dragOverGroup
-        if (targetGroup !== (p.group ?? null)) {
-          doSetGroup(p.id, targetGroup)
-        }
-      } else if (dragOverProjectId && dragOverProjectId !== p.id) {
-        const targetProj = projects.find(proj => proj.id === dragOverProjectId)
-        const targetGroup = targetProj?.group ?? null
-        if (targetGroup !== (p.group ?? null)) {
-          // Dropped onto a project in a different group/zone → move into that group
-          doSetGroup(p.id, targetGroup)
-        } else {
-          // Same zone → reorder
-          const ids = projects.map(proj => proj.id)
-          const fromIdx = ids.indexOf(p.id)
-          const toIdx = ids.indexOf(dragOverProjectId)
+  // ── Document-level pointer handlers ───────────────────────────────────────
+  //
+  // Defined as stable ref callbacks so add/removeEventListener always receives
+  // the SAME function reference. They read drag-over state via refs (not
+  // stale closure on state values).
+  //
+  // Pattern: https://developer.mozilla.org/en-US/docs/Web/API/Pointer_events
+
+  const onDocPointerMove = useRef((e: PointerEvent) => {
+    const d = dragRef.current
+    if (!d) return
+    if (!d.moved) {
+      if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 6) return
+      d.moved = true
+      if (d.kind === 'project') setDragSubject({ kind: 'project', id: d.id })
+      else setDragSubject({ kind: 'group', label: d.id })
+    }
+    if (d.kind === 'project') updateDragOverFromPoint(e.clientX, e.clientY, d.id, d.group)
+    else updateGroupDragOverFromPoint(e.clientX, e.clientY, d.id)
+  }).current
+
+  const cleanupDocListeners = useRef(() => {
+    window.removeEventListener('pointermove', onDocPointerMove)
+    window.removeEventListener('pointerup', onDocPointerUpFn.current)
+    window.removeEventListener('pointercancel', onDocPointerCancelFn.current)
+  })
+
+  // onDocPointerUp reads projects (state) to commit drop — keep stable via ref
+  // that captures the latest projects via a wrapper that calls projectsRef.current
+  const projectsRef = useRef(projects)
+  useEffect(() => { projectsRef.current = projects }, [projects])
+
+  const groupsRef = useRef(groups)
+  useEffect(() => { groupsRef.current = groups }, [groups])
+
+  const onDocPointerUpFn = useRef((e: PointerEvent) => {
+    const d = dragRef.current
+    cleanupDocListeners.current()
+    dragRef.current = null
+
+    if (d?.moved) {
+      suppressClick.current = true
+      setTimeout(() => { suppressClick.current = false }, 50)
+
+      if (d.kind === 'project') {
+        const proj = projectsRef.current.find(p => p.id === d.id)
+        if (proj) commitProjectDrop(proj, dragOverGroupRef.current, dragOverProjectIdRef.current)
+      } else {
+        // Group reorder
+        const overHeader = dragOverGroupHeaderRef.current
+        if (overHeader && overHeader !== d.id) {
+          const cur = groupsRef.current.groups
+          const fromIdx = cur.indexOf(d.id)
+          const toIdx = cur.indexOf(overHeader)
           if (fromIdx !== -1 && toIdx !== -1) {
-            const next = [...ids]
+            const next = [...cur]
             next.splice(fromIdx, 1)
-            next.splice(toIdx, 0, p.id)
-            onReorder(next)
+            next.splice(toIdx, 0, d.id)
+            doReorderGroups(next)
           }
         }
       }
-    } else {
-      onSelect(p.id)
     }
 
-    pointerState.current = null
     setDragSubject(null)
-    setDragOverProjectId(null)
-    setDragOverGroup(null)
+    setDragOverProjectIdSynced(null)
+    setDragOverGroupSynced(null)
+    setDragOverGroupHeaderSynced(null)
+    void e  // silence unused-param lint
+  })
+
+  const onDocPointerCancelFn = useRef((_e: PointerEvent) => {
+    cleanupDocListeners.current()
+    dragRef.current = null
+    setDragSubject(null)
+    setDragOverProjectIdSynced(null)
+    setDragOverGroupSynced(null)
+    setDragOverGroupHeaderSynced(null)
+  })
+
+  // Keep cleanupDocListeners up-to-date with the stable handler refs
+  useEffect(() => {
+    cleanupDocListeners.current = () => {
+      window.removeEventListener('pointermove', onDocPointerMove)
+      window.removeEventListener('pointerup', onDocPointerUpFn.current)
+      window.removeEventListener('pointercancel', onDocPointerCancelFn.current)
+    }
+  }, [onDocPointerMove])
+
+  function attachDocListeners() {
+    window.addEventListener('pointermove', onDocPointerMove)
+    window.addEventListener('pointerup', onDocPointerUpFn.current)
+    window.addEventListener('pointercancel', onDocPointerCancelFn.current)
   }
 
-  function handleProjectPointerCancel(_e: React.PointerEvent, id: string) {
-    const ps = pointerState.current
-    if (!ps || ps.id !== id) return
-    if (ps.longPressTimer) clearTimeout(ps.longPressTimer)
-    pointerState.current = null
-    setDragSubject(null)
-    setDragOverProjectId(null)
-    setDragOverGroup(null)
+  // ── Project pointer-down handler ──────────────────────────────────────────
+  function handleProjectPointerDown(e: React.PointerEvent, p: Project) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    const isTouch = e.pointerType !== 'mouse'
+    const onGrip = !!(e.target as HTMLElement).closest?.('.sidebar-drag-handle')
+    const onExcluded = !!(e.target as HTMLElement).closest?.('.sidebar-kebab-btn, .fav-star-btn, .free-delete-btn')
+    if (onExcluded) return
+    // Touch: only the grip initiates drag; body touch scrolls normally
+    if (isTouch && !onGrip) return
+
+    dragRef.current = { kind: 'project', id: p.id, group: p.group ?? null, startX: e.clientX, startY: e.clientY, moved: false }
+    attachDocListeners()
   }
 
-  // Group header drag
+  // ── Group header pointer-down handler ─────────────────────────────────────
   function handleGroupPointerDown(e: React.PointerEvent, label: string) {
-    if (e.button !== 0 && e.pointerType === 'mouse') return
-    // Long-press for touch context menu on group header
-    const timer = setTimeout(() => {
-      if (pointerState.current && !pointerState.current.moved) {
-        openCtxMenu({ clientX: e.clientX, clientY: e.clientY }, { kind: 'group', label })
-        pointerState.current = null
-        setDragSubject(null)
-        ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
-      }
-    }, 500)
-    pointerState.current = {
-      id: label, kind: 'group',
-      startX: e.clientX, startY: e.clientY, moved: false,
-      pointerId: e.pointerId, longPressTimer: timer,
-      label,
-    }
-    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
-  }
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    const isTouch = e.pointerType !== 'mouse'
+    const onGrip = !!(e.target as HTMLElement).closest?.('.sidebar-drag-handle')
+    // Touch: only grip initiates drag
+    if (isTouch && !onGrip) return
 
-  function handleGroupPointerMove(e: React.PointerEvent, label: string) {
-    const ps = pointerState.current
-    if (!ps || ps.id !== label || ps.kind !== 'group') return
-    const dx = e.clientX - ps.startX
-    const dy = e.clientY - ps.startY
-    if (!ps.moved && Math.sqrt(dx * dx + dy * dy) > 6) {
-      ps.moved = true
-      if (ps.longPressTimer) clearTimeout(ps.longPressTimer)
-      setDragSubject({ kind: 'group', label })
-    }
-    if (!ps.moved) return
-
-    const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null
-    const headerEl = el?.closest('[data-group-header]') as HTMLElement | null
-    if (headerEl && headerEl.dataset.groupHeader && headerEl.dataset.groupHeader !== label) {
-      setDragOverGroupHeader(headerEl.dataset.groupHeader)
-    } else {
-      setDragOverGroupHeader(null)
-    }
-  }
-
-  function handleGroupPointerUp(e: React.PointerEvent, label: string) {
-    const ps = pointerState.current
-    if (!ps || ps.id !== label || ps.kind !== 'group') return
-    if (ps.longPressTimer) clearTimeout(ps.longPressTimer)
-    ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
-
-    if (ps.moved && dragOverGroupHeader && dragOverGroupHeader !== label) {
-      const cur = groups.groups
-      const fromIdx = cur.indexOf(label)
-      const toIdx = cur.indexOf(dragOverGroupHeader)
-      if (fromIdx !== -1 && toIdx !== -1) {
-        const next = [...cur]
-        next.splice(fromIdx, 1)
-        next.splice(toIdx, 0, label)
-        doReorderGroups(next)
-      }
-    } else if (!ps.moved) {
-      // Click on header = toggle collapse
-      toggleGroupCollapse(label)
-    }
-
-    pointerState.current = null
-    setDragSubject(null)
-    setDragOverGroupHeader(null)
-  }
-
-  function handleGroupPointerCancel(_e: React.PointerEvent, label: string) {
-    const ps = pointerState.current
-    if (!ps || ps.id !== label) return
-    if (ps.longPressTimer) clearTimeout(ps.longPressTimer)
-    pointerState.current = null
-    setDragSubject(null)
-    setDragOverGroupHeader(null)
+    dragRef.current = { kind: 'group', id: label, group: null, startX: e.clientX, startY: e.clientY, moved: false }
+    attachDocListeners()
   }
 
   // ── Data derived from state ───────────────────────────────────────────────
@@ -589,6 +595,169 @@ export function Sidebar({
     })
   }
 
+  // ── Action menu section builders ──────────────────────────────────────────
+
+  function buildProjectMenuSections(p: Project): ActionMenuSection[] {
+    const pid = p.id
+    const isFree = p.is_free === true
+
+    // --- "Move to group" submenu contents ---
+    const groupSubItems = groups.groups.map(g => ({
+      label: g,
+      checked: p.group === g,
+      disabled: p.group === g,
+      onClick: () => { if (p.group !== g) doSetGroup(pid, g) },
+    }))
+
+    const moveToGroupSubmenu: ActionMenuSection[] = [
+      {
+        items: [
+          {
+            label: 'No group',
+            checked: !p.group,
+            disabled: !p.group,
+            onClick: () => doSetGroup(pid, null),
+          },
+          ...groupSubItems,
+          {
+            label: '+ New group…',
+            onClick: async () => {
+              const tempName = `Group ${groups.groups.length + 1}`
+              try {
+                const data = await api.createGroup(tempName)
+                setGroups({ groups: data.groups, assignments: data.assignments })
+                await doSetGroup(pid, tempName)
+                startRenameGroup(tempName)
+              } catch {
+                showToast(t['common.error'], 'error')
+              }
+            },
+          },
+        ],
+      },
+    ]
+
+    // The drill-in item that navigates into the submenu
+    const moveToGroupItem: ActionMenuItem = {
+      label: 'Move to group',
+      submenu: moveToGroupSubmenu,
+    }
+
+    // --- Free chat menu (short top-level) ---
+    if (isFree) {
+      return [
+        {
+          // Section A: primary action
+          items: [
+            { label: 'Open', onClick: () => onSelect(pid) },
+          ],
+        },
+        {
+          // Section B: favorite
+          items: [
+            {
+              label: p.favorite ? t['sidebar.remove_from_favorites'] : t['sidebar.add_to_favorites'],
+              onClick: () => doSetFavorite(pid, !p.favorite),
+            },
+            // Section C: move to group (drill-in)
+            moveToGroupItem,
+          ],
+        },
+        {
+          // Section D: danger
+          items: [
+            {
+              label: 'Delete free chat',
+              icon: '🗑',
+              danger: true,
+              onClick: () => setConfirmDelete({ id: pid, name: p.name }),
+            },
+          ],
+        },
+      ]
+    }
+
+    // --- Normal project menu (short top-level) ---
+    return [
+      {
+        // Section A: primary actions
+        items: [
+          { label: 'Open', onClick: () => onSelect(pid) },
+          ...(onOpenProjectSettings
+            ? [{ label: 'Settings', icon: '⚙', onClick: () => onOpenProjectSettings(pid) }]
+            : []),
+        ],
+      },
+      {
+        // Section B: favorite + move to group (drill-in)
+        items: [
+          {
+            label: p.favorite ? t['sidebar.remove_from_favorites'] : t['sidebar.add_to_favorites'],
+            onClick: () => doSetFavorite(pid, !p.favorite),
+          },
+          moveToGroupItem,
+        ],
+      },
+      {
+        // Section C: danger
+        items: [
+          {
+            label: 'Archive',
+            icon: '🗄',
+            danger: true,
+            onClick: () => setConfirmArchive({ id: pid, name: p.name }),
+          },
+        ],
+      },
+    ]
+  }
+
+  function buildGroupMenuSections(label: string): ActionMenuSection[] {
+    const isCollapsed = groupCollapsed[label] ?? false
+    return [
+      {
+        items: [
+          { label: 'Rename', icon: '✏', onClick: () => startRenameGroup(label) },
+          {
+            label: 'New project in group',
+            icon: '+',
+            onClick: () => { onNewProject() },
+          },
+          {
+            label: isCollapsed ? 'Expand' : 'Collapse',
+            onClick: () => toggleGroupCollapse(label),
+          },
+        ],
+      },
+      {
+        items: [
+          {
+            label: 'Delete group',
+            icon: '🗑',
+            danger: true,
+            onClick: () => setConfirmDeleteGroup(label),
+          },
+        ],
+      },
+    ]
+  }
+
+  // ── Six-dot drag grip ─────────────────────────────────────────────────────
+  function DragGrip() {
+    return (
+      <span className="sidebar-drag-handle" aria-label="Drag to reorder" title="Drag to reorder">
+        <span className="grip-dots">
+          <span className="grip-dot" />
+          <span className="grip-dot" />
+          <span className="grip-dot" />
+          <span className="grip-dot" />
+          <span className="grip-dot" />
+          <span className="grip-dot" />
+        </span>
+      </span>
+    )
+  }
+
   // ── Project item renderer ─────────────────────────────────────────────────
   function renderProjectItem(p: Project) {
     const unread = unreadFor(p, unreadBySession)
@@ -600,12 +769,13 @@ export function Sidebar({
         key={p.id}
         data-project-id={p.id}
         onPointerDown={e => handleProjectPointerDown(e, p)}
-        onPointerMove={e => handleProjectPointerMove(e, p.id)}
-        onPointerUp={e => handleProjectPointerUp(e, p)}
-        onPointerCancel={e => handleProjectPointerCancel(e, p.id)}
+        onClick={() => { if (suppressClick.current) return; onSelect(p.id) }}
         onContextMenu={e => {
+          // Desktop right-click: open action menu anchored to click position
           e.preventDefault()
-          openCtxMenu(e, { kind: 'project', id: p.id, group: p.group ?? null })
+          // Build a synthetic DOMRect from the click coordinates
+          const rect = new DOMRect(e.clientX, e.clientY, 0, 0)
+          openActionMenu(rect, { kind: 'project', id: p.id, group: p.group ?? null })
         }}
         className={[
           'project-item',
@@ -616,7 +786,6 @@ export function Sidebar({
           isDragOver ? 'sidebar-item-drag-over' : '',
         ].filter(Boolean).join(' ')}
         title={p.cwd}
-        style={{ touchAction: 'none' }}
       >
         {p.is_free
           ? <span className="free-icon">🏠</span>
@@ -636,7 +805,7 @@ export function Sidebar({
         {replyReadyIds?.has(p.id) && selectedId !== p.id && (
           <span className="reply-ready-badge" title="Agent reply is ready" />
         )}
-        {/* Spec-031: favorite star button — visibility: hidden when not starred + not hovered, no layout shift */}
+        {/* Favorite star — visibility:hidden when inactive to avoid layout shift */}
         <button
           className={`fav-star-btn${p.favorite ? ' fav-star-active' : ''}`}
           onPointerDown={e => e.stopPropagation()}
@@ -651,205 +820,14 @@ export function Sidebar({
             title={t['sidebar.delete_free_chat']}
           >✕</button>
         )}
+        {/* Explicit kebab button — the ONLY way to open the action menu on touch */}
+        <KebabButton
+          label="More actions"
+          onClick={rect => openActionMenu(rect, { kind: 'project', id: p.id, group: p.group ?? null })}
+        />
+        <DragGrip />
       </div>
     )
-  }
-
-  // ── Context menu renderer ─────────────────────────────────────────────────
-  function renderCtxMenu() {
-    if (!ctxMenu) return null
-    const { target, x, y, submenuOpen } = ctxMenu
-
-    // Clamp to viewport
-    const menuW = 180
-    const menuH = 220
-    const cx = Math.min(x, window.innerWidth - menuW - 8)
-    const cy = Math.min(y, window.innerHeight - menuH - 8)
-
-    if (target.kind === 'project') {
-      const pid = target.id
-      const proj = projects.find(p => p.id === pid)
-      const isFreeChat = proj?.is_free === true
-
-      // Free-chat-flavored menu: Open · Move to group ▶ · Remove from group · favorite · separator · Delete
-      if (isFreeChat) {
-        return (
-          <div
-            ref={ctxMenuRef}
-            className="ctx-menu"
-            style={{ left: cx, top: cy }}
-            onPointerDown={e => e.stopPropagation()}
-          >
-            <div className="ctx-menu-item" onClick={() => { onSelect(pid); setCtxMenu(null) }}>
-              Open
-            </div>
-            <div className="ctx-menu-separator" />
-            <div
-              className="ctx-menu-item"
-              style={{ position: 'relative' }}
-              onMouseEnter={() => setCtxMenu(prev => prev ? { ...prev, submenuOpen: true } : prev)}
-              onMouseLeave={() => setCtxMenu(prev => prev ? { ...prev, submenuOpen: false } : prev)}
-            >
-              Move to group
-              <span className="ctx-menu-arrow">▶</span>
-              {submenuOpen && (
-                <div className="ctx-submenu">
-                  {groups.groups.map(g => (
-                    <div
-                      key={g}
-                      className={`ctx-menu-item${proj?.group === g ? ' disabled' : ''}`}
-                      onClick={() => {
-                        if (proj?.group !== g) doSetGroup(pid, g)
-                        setCtxMenu(null)
-                      }}
-                    >
-                      {proj?.group === g ? '✓ ' : ''}{g}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-            {target.group && (
-              <div className="ctx-menu-item" onClick={() => { doSetGroup(pid, null); setCtxMenu(null) }}>
-                Remove from group
-              </div>
-            )}
-            <div className="ctx-menu-item" onClick={() => { doSetFavorite(pid, !proj?.favorite); setCtxMenu(null) }}>
-              {proj?.favorite ? t['sidebar.remove_from_favorites'] : t['sidebar.add_to_favorites']}
-            </div>
-            <div className="ctx-menu-separator" />
-            <div
-              className="ctx-menu-item danger"
-              onClick={() => {
-                setCtxMenu(null)
-                setConfirmDelete({ id: pid, name: proj?.name ?? pid })
-              }}
-            >
-              🗑 Delete free chat
-            </div>
-          </div>
-        )
-      }
-
-      // Regular project menu
-      return (
-        <div
-          ref={ctxMenuRef}
-          className="ctx-menu"
-          style={{ left: cx, top: cy }}
-          onPointerDown={e => e.stopPropagation()}
-        >
-          <div className="ctx-menu-item" onClick={() => { onSelect(pid); setCtxMenu(null) }}>
-            Open
-          </div>
-          {onOpenProjectSettings && (
-            <div className="ctx-menu-item" onClick={() => { onOpenProjectSettings(pid); setCtxMenu(null) }}>
-              ⚙ Settings
-            </div>
-          )}
-          <div className="ctx-menu-separator" />
-          <div
-            className="ctx-menu-item"
-            style={{ position: 'relative' }}
-            onMouseEnter={() => setCtxMenu(prev => prev ? { ...prev, submenuOpen: true } : prev)}
-            onMouseLeave={() => setCtxMenu(prev => prev ? { ...prev, submenuOpen: false } : prev)}
-          >
-            Move to group
-            <span className="ctx-menu-arrow">▶</span>
-            {submenuOpen && (
-              <div className="ctx-submenu">
-                {groups.groups.map(g => (
-                  <div
-                    key={g}
-                    className={`ctx-menu-item${proj?.group === g ? ' disabled' : ''}`}
-                    onClick={() => {
-                      if (proj?.group !== g) doSetGroup(pid, g)
-                      setCtxMenu(null)
-                    }}
-                  >
-                    {proj?.group === g ? '✓ ' : ''}{g}
-                  </div>
-                ))}
-                <div className="ctx-menu-separator" />
-                <div
-                  className="ctx-menu-item"
-                  onClick={async () => {
-                    setCtxMenu(null)
-                    // Create a new group and immediately assign this project
-                    const tempName = `Group ${groups.groups.length + 1}`
-                    try {
-                      const data = await api.createGroup(tempName)
-                      setGroups({ groups: data.groups, assignments: data.assignments })
-                      await doSetGroup(pid, tempName)
-                      startRenameGroup(tempName)
-                    } catch {
-                      showToast(t['common.error'], 'error')
-                    }
-                  }}
-                >
-                  ➕ New group…
-                </div>
-              </div>
-            )}
-          </div>
-          {target.group && (
-            <div className="ctx-menu-item" onClick={() => { doSetGroup(pid, null); setCtxMenu(null) }}>
-              Remove from group
-            </div>
-          )}
-          <div className="ctx-menu-item" onClick={() => { doSetFavorite(pid, !proj?.favorite); setCtxMenu(null) }}>
-            {proj?.favorite ? t['sidebar.remove_from_favorites'] : t['sidebar.add_to_favorites']}
-          </div>
-          <div className="ctx-menu-separator" />
-          <div
-            className="ctx-menu-item danger"
-            onClick={() => {
-              setCtxMenu(null)
-              setConfirmArchive({ id: pid, name: proj?.name ?? pid })
-            }}
-          >
-            🗄 Archive
-          </div>
-        </div>
-      )
-    }
-
-    if (target.kind === 'group') {
-      const label = target.label
-      const isCollapsed = groupCollapsed[label] ?? false
-      return (
-        <div
-          ref={ctxMenuRef}
-          className="ctx-menu"
-          style={{ left: cx, top: cy }}
-          onPointerDown={e => e.stopPropagation()}
-        >
-          <div className="ctx-menu-item" onClick={() => { startRenameGroup(label) }}>
-            ✏ Rename
-          </div>
-          <div className="ctx-menu-item" onClick={() => {
-            setCtxMenu(null)
-            // Create a new project in this group
-            onNewProject()
-            // Note: we can't pre-assign the group at creation time (no API for that),
-            // but user can drag or context-menu to assign after creation.
-          }}>
-            ➕ New project in group
-          </div>
-          <div className="ctx-menu-item" onClick={() => { toggleGroupCollapse(label); setCtxMenu(null) }}>
-            {isCollapsed ? 'Expand' : 'Collapse'}
-          </div>
-          <div className="ctx-menu-separator" />
-          <div
-            className="ctx-menu-item danger"
-            onClick={() => { setCtxMenu(null); setConfirmDeleteGroup(label) }}
-          >
-            🗑 Delete group
-          </div>
-        </div>
-      )
-    }
-    return null
   }
 
   // ── Collapsed sidebar ─────────────────────────────────────────────────────
@@ -868,7 +846,7 @@ export function Sidebar({
       <div className="sidebar-header">
         <div className="sidebar-logo">
           <div className="sidebar-logo-icon">⚡</div>
-          <span className="sidebar-logo-text">Claude-Ops</span>
+          <span className="sidebar-logo-text">Cardloop</span>
           <button className="sidebar-toggle-btn" onClick={onToggleCollapse} title={t['sidebar.collapse']}>⟨</button>
         </div>
         {onGoBack && activeProjectId && activeProjectId !== '__global__' && activeProjectId !== '__schedules__' && activeProjectId !== '__vault__' && (
@@ -885,7 +863,7 @@ export function Sidebar({
         />
       </div>
 
-      {/* ＋ New project + ＋ New group row */}
+      {/* New project + New group row */}
       <div className="sidebar-new-btns">
         <button className="new-project-btn" onClick={onNewProject} disabled={newProjectBusy} title={t['sidebar.new_project_hint']}>
           {newProjectBusy ? '⏳ creating…' : `＋ ${t['sidebar.new_project']}`}
@@ -900,7 +878,7 @@ export function Sidebar({
           <div className="projects-empty">{t['sidebar.loading']}</div>
         ) : (
           <>
-            {/* Spec-031: Favorites section — pinned above groups, only when not searching */}
+            {/* Favorites section — pinned above groups, only when not searching */}
             {!hasSearch && favorites.length > 0 && (
               <div className="sidebar-group sidebar-favorites-section">
                 <div className="sidebar-group-header" onClick={toggleFavoritesCollapse}>
@@ -937,12 +915,19 @@ export function Sidebar({
                     ].filter(Boolean).join(' ')}
                     data-group-header={groupLabel}
                     onPointerDown={e => handleGroupPointerDown(e, groupLabel)}
-                    onPointerMove={e => handleGroupPointerMove(e, groupLabel)}
-                    onPointerUp={e => handleGroupPointerUp(e, groupLabel)}
-                    onPointerCancel={e => handleGroupPointerCancel(e, groupLabel)}
-                    onContextMenu={e => { e.preventDefault(); openCtxMenu(e, { kind: 'group', label: groupLabel }) }}
+                    onClick={e => {
+                      if (suppressClick.current) return
+                      // Only toggle collapse when click is NOT on an interactive child
+                      const target = e.target as HTMLElement
+                      if (target.closest('.sidebar-kebab-btn, .sidebar-group-rename-input')) return
+                      toggleGroupCollapse(groupLabel)
+                    }}
+                    onContextMenu={e => {
+                      e.preventDefault()
+                      const rect = new DOMRect(e.clientX, e.clientY, 0, 0)
+                      openActionMenu(rect, { kind: 'group', label: groupLabel })
+                    }}
                     onDoubleClick={() => startRenameGroup(groupLabel)}
-                    style={{ touchAction: 'none' }}
                   >
                     <span className="sidebar-group-toggle">{isCollapsed ? '▶' : '▼'}</span>
                     {renamingGroup === groupLabel ? (
@@ -963,8 +948,14 @@ export function Sidebar({
                       <span className="sidebar-group-label">{groupLabel}</span>
                     )}
                     <span className="sidebar-group-count">{groupProjects.length}</span>
+                    {/* Kebab for group — opens action menu */}
+                    <KebabButton
+                      label="Group actions"
+                      onClick={rect => openActionMenu(rect, { kind: 'group', label: groupLabel })}
+                    />
+                    <DragGrip />
                   </div>
-                  {/* Spec-031: tree-indented body for group children */}
+                  {/* Tree-indented body for group children */}
                   {!isCollapsed && (
                     <div className="sidebar-group-body">
                       {groupProjects.map(renderProjectItem)}
@@ -1089,8 +1080,20 @@ export function Sidebar({
         </button>
       </div>
 
-      {/* Context menu portal */}
-      {renderCtxMenu()}
+      {/* Action menu — adaptive dropdown (desktop) or bottom sheet (mobile) */}
+      {actionMenu && (
+        <ActionMenu
+          anchorRect={actionMenu.anchorRect}
+          sections={(() => {
+            const tgt = actionMenu.target
+            if (tgt.kind === 'group') return buildGroupMenuSections(tgt.label)
+            const proj = projects.find(p => p.id === tgt.id)
+            if (!proj) return []
+            return buildProjectMenuSections(proj)
+          })()}
+          onClose={closeActionMenu}
+        />
+      )}
 
       {confirmDelete && (
         <ConfirmModal
@@ -1124,7 +1127,7 @@ export function Sidebar({
         />
       )}
 
-      {/* Spec-025: Hard delete modal */}
+      {/* Hard delete modal */}
       {hardDeleteTarget && (
         <Modal onClose={() => { if (!deleteInProgress) setHardDeleteTarget(null) }}>
           <ModalHead title={t['sidebar.delete_confirm_title']} onClose={() => { if (!deleteInProgress) setHardDeleteTarget(null) }} />

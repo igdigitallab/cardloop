@@ -2,6 +2,10 @@
 
 Архив завершённых карточек (append-only). **Сессии его НЕ читают** — гигиена контекста.
 
+## 2026-06-21
+- [x] Feature: Mermaid diagram rendering in markdown views <!--ops:20db9e--> — блоки ```mermaid рендерятся живыми SVG-диаграммами во всех markdown-поверхностях (Файлы проекта, CLAUDE.md, Доска, Память, Чат). Браузерный mermaid@11, ноль нагрузки на сервер, ленивый импорт в отдельный чанк. Общий компонент `web/src/components/markdown.tsx` (`mdComponents`) подключён во все 6 точек ReactMarkdown. При ошибке синтаксиса — фолбэк на исходник (`suppressErrorRendering`).
+- [x] Feature: zoom/pan Lightbox shared by chat images + mermaid diagrams <!--ops:6605db--> — `Lightbox` вынесен в общий `web/src/components/Lightbox.tsx` с зумом (пинч/колесо/кнопки − ⟲ +) и паном (pointer events, `touch-action:none` → зумится контент, не вьюпорт). Переиспользован чат-картинками/видео И диаграммами; у mermaid — кнопка ⤢ + тап-на-открытие. Фон оверлея near-opaque + blur(10px) + обводка контента, чтобы фон не просвечивал. Чинит мобильный зум.
+
 ## 2026-06-13
 - [x] Spec-039: переписан + реализован + задеплоен (LIVE) <!--ops:b1dc7d--> — переписан под «stop killing sessions»: убраны авто-ротация (spec-021), auto-resume на 429, stall-watchdog (остался только аварийный max 2ч); `PERSISTENT_CLIENT=1` → фоновый `run_in_background` выживает между ходами + нативный авто-compact сжимает на месте ~190K без сброса сессии; ручной `/reset` + кокпит «Wrap&reset» реально евиктят live-client; SIGTERM graceful (сохраняет сессии при рестарте); кокпит говорит правду (бар к 200K краснеет, тост на compact, карточка «стена 200K — Reset»). 1227 тестов pass, сборка чистая. Спека: `specs/spec-039-stop-killing-sessions.md`.
 - [x] Investigate & fix: background processes / other sessions get killed <!--ops:c8a86f--> — root cause найден: каждый ход = отдельный CLI-подпроцесс (`async with ClaudeSDKClient`), фоновый `run_in_background` — его detached-ребёнок, гибнет с подпроцессом на конце хода (SIGTERM→SIGKILL). НЕ watchdog и НЕ ротация. Фикс = `PERSISTENT_CLIENT=1` (подпроцесс живёт между ходами), в составе spec-039. Закрыто тем же деплоем. Остаточный edge: idle-evict (TTL 1ч) / `/reset` / рестарт.
@@ -180,3 +184,16 @@
 - [x] Spec-043 research: session context floor analysis <!--ops:4345ee-->
 - [x] Spec-043: Implement context cost and caching strategy <!--ops:444758-->
 - [x] Feature: auto-label closed sessions via haiku in _build_handoff <!--ops:e73583-->
+- [x] Глобальный редизайн: https://styles.refero.design/style/0fd67ec5-7e9c-4ca9-b368-5d9c7388477a <!--ops:56979f-->
+- [x] Fix: mobile sidebar scroll issue (project selection) <!--ops:56a219-->
+- [x] Fix: mobile project tab drag-and-drop with grip handle <!--ops:f441f8-->
+- [x] Fix: engine.py effort default medium→high <!--ops:bf257d-->
+- [x] Fix: engine.py missing 'local' in setting_sources <!--ops:6b0d20-->
+- [x] Refactor: Reduce context bloat in ~/CLAUDE.md <!--ops:e838d8-->
+- [x] P0 Project name decision gate: keep vs rename <!--ops:3a4f9f-->
+- [x] P0 Trademark disclaimer (Claude™) in README + package.json + repo About <!--ops:f6a5b5-->
+- [x] P0 Create NOTICE file (Apache-2.0 attribution) <!--ops:182d7d-->
+- [x] P0 De-anonymize LICENSE author line <!--ops:293e8e-->
+- [x] P0 SECURITY: auth hardening (R2/R3/R4/R5) <!--ops:5c61b1-->
+- [x] P1 Launch plan: HN title + awesome-claude-code PR <!--ops:c3d828-->
+- [x] P2 docker-compose.yml (HARD requirement, cockpit-only) <!--ops:f60b5b-->

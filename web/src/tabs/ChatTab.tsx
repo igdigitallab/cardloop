@@ -1,7 +1,8 @@
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { Lightbox } from '../components/Lightbox'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { mdComponents } from '../components/markdown'
 import { api } from '../api'
 import { PromptPicker } from '../components/PromptPicker'
 import { SkillPicker } from '../components/SkillPicker'
@@ -374,62 +375,6 @@ function _isVideoSrc(src: string): boolean {
   return ['mp4', 'webm', 'mov', 'ogg', 'ogv'].includes(ext)
 }
 
-/** Full-screen lightbox. Closes on tap anywhere, ✕ button, Esc, or device Back.
- *  Renders an <img> for images and a <video autoPlay controls> for video. */
-function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
-  const isVideo = _isVideoSrc(src)
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', handleKey)
-
-    // Hijack the device/browser Back button: opening pushes a history entry so
-    // Back closes the viewer instead of leaving the app. If closed via UI we
-    // pop that entry ourselves on cleanup.
-    let closedByBack = false
-    window.history.pushState({ copsLightbox: true }, '')
-    const onPop = () => { closedByBack = true; onClose() }
-    window.addEventListener('popstate', onPop)
-
-    return () => {
-      window.removeEventListener('keydown', handleKey)
-      window.removeEventListener('popstate', onPop)
-      if (!closedByBack) window.history.back()
-    }
-  }, [onClose])
-
-  // Portal to <body> so position:fixed escapes any transformed/contained
-  // ancestor (chat scroll containers) that would otherwise trap & clip it.
-  return createPortal(
-    <div className="lightbox-overlay" onClick={onClose} role="dialog" aria-modal="true">
-      <button
-        className="lightbox-close"
-        onClick={onClose}
-        aria-label="Close"
-      >✕</button>
-      {isVideo ? (
-        // Stop propagation so clicking the video controls doesn't close the lightbox.
-        <video
-          className="lightbox-video"
-          src={src}
-          controls
-          autoPlay
-          onClick={(e) => e.stopPropagation()}
-        />
-      ) : (
-        /* Tap the image to close too (full-screen image leaves little backdrop) */
-        <img
-          className="lightbox-img"
-          src={src}
-          alt={alt}
-          onClick={onClose}
-        />
-      )}
-    </div>,
-    document.body,
-  )
-}
-
 /** Custom img renderer for ReactMarkdown: detects video by extension and renders
  *  either a thumbnail <img> or a <video> preview; click opens the Lightbox. */
 function ChatImage({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
@@ -456,13 +401,13 @@ function ChatImage({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
         />
       )}
       {open && (
-        <Lightbox src={src} alt={alt ?? ''} onClose={() => setOpen(false)} />
+        <Lightbox src={src} alt={alt ?? ''} video={isVideo} onClose={() => setOpen(false)} />
       )}
     </>
   )
 }
 
-const _mdComponents = { img: ChatImage }
+const _mdComponents = { ...mdComponents, img: ChatImage }
 
 // ─── CacheCountdownBadge ─────────────────────────────────────────────────────
 // Isolated ticker so the parent ChatTab does NOT re-render on each second tick.

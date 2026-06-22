@@ -939,6 +939,8 @@
 @media (max-width: 768px) {
   /* Keep Send compact and non-overflowing on mobile */
   .chat-send-btn { min-width: 52px; height: 28px; padding: 0 10px !important; font-size: 12px; }
+  /* Larger, more readable message text on phones */
+  .chat-msg-body { font-size: 15px; line-height: 1.5; }
 }
 
 .chat-error-banner {
@@ -1367,7 +1369,11 @@
   position: fixed;
   inset: 0;
   z-index: 9999;
-  background: rgba(0, 0, 0, 0.85);
+  /* Near-opaque + blur so whatever is behind (e.g. the chat image) becomes an
+     unrecognisable blur and never bleeds through / merges with the open one. */
+  background: rgba(10, 10, 12, 0.96);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1418,6 +1424,72 @@
 }
 .lightbox-close:hover,
 .lightbox-close:active {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+/* Zoom/pan stage (ops:6605db) — own gesture handling, viewport must NOT pan/zoom */
+.lightbox-stage {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+  cursor: zoom-in;
+}
+.lightbox-stage.is-zoomed {
+  cursor: grab;
+}
+.lightbox-zoomable {
+  max-width: 95vw;
+  max-height: 95vh;
+  object-fit: contain;
+  transform-origin: center center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-select: none;
+  /* Light hairline + drop shadow separates the content edge from the backdrop
+     regardless of the content's own colour (dark images don't vanish). */
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14), 0 10px 50px rgba(0, 0, 0, 0.7);
+}
+.lightbox-svg :global(svg),
+.lightbox-svg svg {
+  max-width: 95vw;
+  max-height: 95vh;
+  height: auto;
+}
+
+/* Zoom controls (− ⟲ +) — bottom-center, clear of the home indicator */
+.lightbox-zoom-ctrls {
+  position: fixed;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 18px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  z-index: 10000;
+}
+.lightbox-zoom-ctrls button {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1.5px solid rgba(255, 255, 255, 0.55);
+  color: #fff;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  transition: background 0.15s;
+}
+.lightbox-zoom-ctrls button:hover,
+.lightbox-zoom-ctrls button:active {
   background: rgba(0, 0, 0, 0.8);
 }
 

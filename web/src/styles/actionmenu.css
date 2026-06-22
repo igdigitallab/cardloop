@@ -1,0 +1,289 @@
+/* ── ActionMenu — adaptive action menu (sidebar kebab) ───────── */
+
+/* ── Shared item styles (dropdown + sheet) ──────────────────── */
+
+.action-menu-section {
+  /* logical grouping; separator is appended between sections in TSX */
+}
+
+.action-menu-section-title {
+  padding: 6px 12px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text3);
+  user-select: none;
+}
+
+.action-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  font-size: 13px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.action-menu-item:hover:not(:disabled) { background: var(--bg4); }
+.action-menu-item.danger { color: var(--red); }
+.action-menu-item.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+.action-menu-item.disabled,
+.action-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.action-menu-item-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+}
+
+.action-menu-item-label {
+  flex: 1;
+}
+
+.action-menu-item-check {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.action-menu-item-chevron {
+  margin-left: auto;
+  font-size: 14px;
+  color: var(--text3);
+  line-height: 1;
+}
+
+/* Back row — sticky top row in drill view */
+.action-menu-back-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text2);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  text-align: left;
+  user-select: none;
+  transition: background var(--transition), color var(--transition);
+}
+.action-menu-back-row:hover { background: var(--bg4); color: var(--text); }
+
+.action-menu-back-chevron {
+  font-size: 16px;
+  color: var(--text3);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.action-menu-back-label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Sheet: larger back row for touch */
+.action-menu-sheet .action-menu-back-row {
+  min-height: 52px;
+  font-size: 15px;
+  padding: 12px 20px;
+}
+.action-menu-sheet .action-menu-back-chevron {
+  font-size: 20px;
+}
+
+.action-menu-separator {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+/* ── Desktop dropdown ────────────────────────────────────────── */
+
+.action-menu-dropdown {
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-lg);
+  min-width: 188px;
+  padding: 4px 0;
+  user-select: none;
+  /* No box-shadow (border-first design system) */
+}
+
+/* ── Mobile bottom sheet ─────────────────────────────────────── */
+
+.action-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9990;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-end;
+  justify-content: stretch;
+  /* Prevent scroll bleed-through */
+  overscroll-behavior: contain;
+}
+
+.action-menu-sheet {
+  width: 100%;
+  background: var(--bg3);
+  border-top: 1px solid var(--border2);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  max-height: 80vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Slide-up animation */
+  animation: sheet-up 0.18s ease-out;
+}
+
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+.action-menu-sheet-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border2);
+  margin: 10px auto 6px;
+}
+
+.action-menu-sheet-body {
+  padding: 4px 0 8px;
+}
+
+/* Sheet items are larger for touch */
+.action-menu-sheet .action-menu-item {
+  min-height: 52px;
+  font-size: 15px;
+  padding: 12px 20px;
+}
+
+.action-menu-sheet .action-menu-section-title {
+  padding: 10px 20px 4px;
+  font-size: 11px;
+}
+
+/* ── Kebab trigger button ────────────────────────────────────── */
+
+.sidebar-kebab-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  /* Desktop: hidden until row hover */
+  width: 28px;
+  height: 28px;
+  opacity: 0;
+  transition: opacity var(--transition), background var(--transition), color var(--transition);
+}
+
+.sidebar-kebab-btn:hover {
+  background: var(--bg4);
+  color: var(--text2);
+}
+
+/* Show on row hover or when row has focused child */
+.project-item:hover .sidebar-kebab-btn,
+.project-item:focus-within .sidebar-kebab-btn,
+.sidebar-group-header:hover .sidebar-kebab-btn,
+.sidebar-group-header:focus-within .sidebar-kebab-btn {
+  opacity: 1;
+}
+
+/* Touch (coarse pointer) or narrow viewport: always visible, larger hit area */
+@media (pointer: coarse), (max-width: 1024px) {
+  .sidebar-kebab-btn {
+    opacity: 1;
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* ── Six-dot drag grip (replaces two-bar design) ──────────────── */
+
+.sidebar-drag-handle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  align-self: stretch;
+  padding: 0 8px;
+  cursor: grab;
+  touch-action: none;
+  /* iOS/Android: suppress long-press callout and text-selection on the grip
+     so the touchstart is not cancelled before the drag activates. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 2×3 dot grid using a 6-element dot container */
+.sidebar-drag-handle .grip-dots {
+  display: grid;
+  grid-template-columns: repeat(2, 4px);
+  grid-template-rows: repeat(3, 4px);
+  gap: 3px;
+  pointer-events: none;
+  /* Inherit callout/selection suppression so the dots themselves don't trigger it */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sidebar-drag-handle .grip-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text3);
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sidebar-drag-handle:active { cursor: grabbing; }
+.sidebar-drag-handle:active .grip-dot { background: var(--text); }
+
+/* Touch/tablet: show grip with ≥44px hit area */
+@media (max-width: 1024px) {
+  .sidebar-drag-handle {
+    display: flex;
+    min-width: 44px;
+  }
+}
+
+/* Desktop: show grip on row hover */
+@media (min-width: 1025px) {
+  .project-item:hover .sidebar-drag-handle,
+  .sidebar-group-header:hover .sidebar-drag-handle {
+    display: flex;
+  }
+}

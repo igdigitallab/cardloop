@@ -77,7 +77,7 @@ _QUICK_MODEL = os.getenv("QUICK_MODEL", "haiku")
 # code change. Valid values: low | medium | high | xhigh | max.
 # Note: on Fable 5 thinking always runs high regardless; effort is silently
 # ignored or coerced by the CLI for subscription models — no SDK error is raised.
-_DEFAULT_EFFORT: str = os.getenv("DEFAULT_EFFORT", "medium")
+_DEFAULT_EFFORT: str = os.getenv("DEFAULT_EFFORT", "high")
 
 DEFAULT_AGENTS: dict = {
     "executor": AgentDefinition(
@@ -1197,7 +1197,7 @@ async def run_engine(  # type: ignore[return]
         fallback_model=fallback,
         permission_mode="bypassPermissions",
         cwd=cwd,
-        setting_sources=["user", "project"],
+        setting_sources=["user", "project", "local"],
         resume=resume_session_id,
         disallowed_tools=DISALLOWED_TOOLS,
         system_prompt=system_prompt,
