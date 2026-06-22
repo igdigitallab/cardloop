@@ -8416,7 +8416,7 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
             handoff_model = os.environ.get("HANDOFF_MODEL", "haiku")
             opts = _ClaudeAgentOptions(
                 model=handoff_model,
-                permission_mode="bypassPermissions",
+                permission_mode="default",  # internal helper, no tools — no need to bypass
                 cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
                 allowed_tools=[],
                 disallowed_tools=[],
@@ -8499,7 +8499,7 @@ async def _build_session_title(summary: str) -> str:
         handoff_model = os.environ.get("HANDOFF_MODEL", "haiku")
         opts = _ClaudeAgentOptions(
             model=handoff_model,
-            permission_mode="bypassPermissions",
+            permission_mode="default",  # internal helper, no tools — no need to bypass
             cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
             allowed_tools=[],
             disallowed_tools=[],
@@ -8954,6 +8954,12 @@ async def api_vault_get(req: web.Request) -> web.Response:
     The decrypted value is returned on-demand.  Every call is audit-logged
     (name only, never the value).
     Requires valid auth cookie.
+
+    SECURITY NOTE (spec-041 R2): any holder of a valid 30-day auth session can
+    read the decrypted vault. This is by design (single-operator tool) and is
+    documented in the README Security Model. The vault's confidentiality reduces
+    to the session cookie + login (password + optional TOTP).
+    TODO(security): consider a re-auth / step-up challenge before reveal.
     """
     name = req.match_info["name"]
     if not _VAULT_NAME_RE.match(name):
