@@ -650,6 +650,44 @@
   flex-shrink: 0;
 }
 
+/* ── Global tools row (Terminal / Vault / Files / Schedules / Settings) ── */
+.sidebar-tools {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin: 0 12px 8px;
+  padding: 4px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.sidebar-tool-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  background: transparent;
+  color: var(--text2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.sidebar-tool-btn:hover {
+  background: var(--bg4);
+  color: var(--text1);
+}
+.sidebar-tool-btn.active {
+  background: var(--bg4);
+  color: var(--text1);
+  border-color: var(--accent);
+}
+
 /* ── Context menu (right-click on desktop) ───────────────────── */
 .ctx-menu {
   position: fixed;

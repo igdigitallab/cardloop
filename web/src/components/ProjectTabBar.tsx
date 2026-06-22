@@ -33,6 +33,10 @@ interface Props {
   terminalActive: boolean
   onOpenTerminal: () => void
   onCloseTerminal: () => void
+  settingsGlobalOpen: boolean
+  settingsGlobalActive: boolean
+  onOpenSettingsGlobal: () => void
+  onCloseSettingsGlobal: () => void
   /** Toggles the mobile off-canvas sidebar drawer */
   onToggleDrawer?: () => void
   /** Current mobile navigation screen ('list' | 'project') */
@@ -162,6 +166,7 @@ export function ProjectTabBar({
   schedulesOpen, schedulesActive, onOpenSchedules, onCloseSchedules,
   vaultOpen, vaultActive, onOpenVault, onCloseVault,
   terminalOpen, terminalActive, onOpenTerminal, onCloseTerminal,
+  settingsGlobalOpen, settingsGlobalActive, onOpenSettingsGlobal, onCloseSettingsGlobal,
   onToggleDrawer, mobileScreen, onGoToProjectList,
 }: Props) {
   const activeTabRef = useRef<HTMLDivElement>(null)
@@ -442,6 +447,23 @@ export function ProjectTabBar({
             )}
           </div>
         )}
+        {/* Global settings special tab */}
+        {settingsGlobalOpen && (
+          <div
+            className={`ptab ptab-global-files ${settingsGlobalActive ? 'active' : ''}`}
+            onClick={onOpenSettingsGlobal}
+            title="Global settings"
+          >
+            <span className="ptab-name">⚙ Settings</span>
+            {settingsGlobalActive && (
+              <button
+                className="ptab-close"
+                onClick={e => { e.stopPropagation(); onCloseSettingsGlobal() }}
+                title="Close"
+              >✕</button>
+            )}
+          </div>
+        )}
         <button
           className="ptab-new"
           onClick={onNewFree}
@@ -451,38 +473,9 @@ export function ProjectTabBar({
         </button>
       </div>
       <div className="ptab-spacer" />
-      {/* Terminal button */}
-      <button
-        className={`ptab-folder-btn${terminalActive ? ' active' : ''}`}
-        onClick={onOpenTerminal}
-        title="Terminal"
-      >
-        ⌨
-      </button>
-      {/* Vault button */}
-      <button
-        className={`ptab-folder-btn${vaultActive ? ' active' : ''}`}
-        onClick={onOpenVault}
-        title="Vault"
-      >
-        🔐
-      </button>
-      {/* Schedules button */}
-      <button
-        className={`ptab-folder-btn${schedulesActive ? ' active' : ''}`}
-        onClick={onOpenSchedules}
-        title="Schedules"
-      >
-        🗓
-      </button>
-      {/* Global file browser button */}
-      <button
-        className={`ptab-folder-btn${globalFilesActive ? ' active' : ''}`}
-        onClick={onOpenGlobalFiles}
-        title="Server files (~)"
-      >
-        📁
-      </button>
+      {/* Global tool launchers (Terminal / Vault / Schedules / Files / Settings)
+          now live in the sidebar tools row — see Sidebar.tsx. Kept off the top bar
+          to declutter it and to give the launchers mobile parity (sidebar = drawer). */}
       <UsageBadge />
     </div>
   )

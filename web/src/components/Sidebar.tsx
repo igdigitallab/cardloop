@@ -33,6 +33,17 @@ interface Props {
   onOpenProjectSettings?: (id: string) => void
   theme?: ThemeValue
   onThemeChange?: (t: ThemeValue) => void
+  // ── Global tool launchers (moved here from the top tab bar for mobile parity) ──
+  onOpenTerminal?: () => void
+  terminalActive?: boolean
+  onOpenVault?: () => void
+  vaultActive?: boolean
+  onOpenGlobalFiles?: () => void
+  globalFilesActive?: boolean
+  onOpenSchedules?: () => void
+  schedulesActive?: boolean
+  onOpenSettingsGlobal?: () => void
+  settingsGlobalActive?: boolean
 }
 
 function unreadFor(p: Project, map: Record<string, number>): number {
@@ -77,6 +88,9 @@ export function Sidebar({
   onNewProject, newProjectBusy, drawerOpen, activeProjectId, onGoBack,
   onProjectsReload, onOpenProjectSettings,
   theme, onThemeChange,
+  onOpenTerminal, terminalActive, onOpenVault, vaultActive,
+  onOpenGlobalFiles, globalFilesActive, onOpenSchedules, schedulesActive,
+  onOpenSettingsGlobal, settingsGlobalActive,
 }: Props) {
   const { showToast } = useToast()
   const [search, setSearch] = useState('')
@@ -871,6 +885,22 @@ export function Sidebar({
         <button className="new-group-btn" onClick={doCreateGroup} title="New group">
           ＋ group
         </button>
+      </div>
+
+      {/* Global tools — Terminal / Vault / Files / Schedules / Settings.
+          Moved here from the top tab bar so they are reachable on mobile
+          (the sidebar is the off-canvas drawer on phones). */}
+      <div className="sidebar-tools">
+        <button className={`sidebar-tool-btn${terminalActive ? ' active' : ''}`}
+                onClick={onOpenTerminal} title="Terminal" aria-label="Terminal">⌨</button>
+        <button className={`sidebar-tool-btn${vaultActive ? ' active' : ''}`}
+                onClick={onOpenVault} title="Vault" aria-label="Vault">🔐</button>
+        <button className={`sidebar-tool-btn${globalFilesActive ? ' active' : ''}`}
+                onClick={onOpenGlobalFiles} title="Server files (~)" aria-label="Server files">📁</button>
+        <button className={`sidebar-tool-btn${schedulesActive ? ' active' : ''}`}
+                onClick={onOpenSchedules} title="Schedules" aria-label="Schedules">🗓</button>
+        <button className={`sidebar-tool-btn${settingsGlobalActive ? ' active' : ''}`}
+                onClick={onOpenSettingsGlobal} title="Global settings" aria-label="Global settings">⚙</button>
       </div>
 
       <div className="projects-list">

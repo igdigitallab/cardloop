@@ -30,8 +30,6 @@
   > Status stuck on 'running' when completion signal is lost (related to 784e8e)
 - [ ] Feature: Conversable orchestrator while sub-agents work <!--ops:035154-->
   > Allow user to continue chat with main orchestrator instead of blocking until all agents finish. Currently queued messages wait for completion.
-- [ ] Feature: Make global settings easily accessible <!--ops:921e4a-->
-  > Surface global settings UI (currently hidden in project context menu) with dedicated entry point. Should include default thinking depth setting.
 - [ ] Fix: Global CLAUDE.md blocks sub-agent code execution <!--ops:30db09-->
   > ~/CLAUDE.md 'no code, delegate to agents' rule applies globally to all agents; needs role-based gating so executors can code without delegating
 - [ ] P0 Sanitize personal paths/domains/names in HEAD <!--ops:c3d2e2-->
@@ -70,7 +68,7 @@
   > spec-041 §0.2. Author field of EVERY commit is `Igor <zira777ru@gmail.com>` → needs git filter-repo --mailmap (replace-text does NOT touch author headers). Plus --replace-text list: 282311426, @ziraclaudebot, ops-igor-2026 (old pwd), tg.session path, 1780365319, pve, proxmox-tunnel, coscore.us/crm/firecrawl, /home/igor. Orphan/squash NOT needed. Coordinate force-push; verify with git grep over --all after.
 
 ## Review
-- [?] 99% работу у меня сейчас идет через наш сервис, вот этот, но иногда нужно сделать какие-то выполнить какие-то команды без участия чата или же клода. То есть сделать это просто через терминал. я хочу добавить новый функционал сделать некую может быть добавить просто чистый терминал. Как новая вкладка, чтобы открывался просто чистый терминал. <!--ops:cadb81-->
-  > Built & committed (f276fc3): xterm Terminal tab + PTY-over-WebSocket /api/terminal/ws (behind auth), wired into ProjectTabBar/App. Card had fallen to Failed because the card-run agent self-restarted to apply backend changes → killed its own run (exit 143). Work survived in the wip commit. NEEDS: human test of the Terminal tab in the cockpit.
+- [?] Global tools moved to sidebar tools row (mobile parity) + ⚙ global settings <!--ops:b3f1a2-->
+  > Terminal/Vault/Files/Schedules launchers moved from the top ProjectTabBar (desktop-only, hidden on mobile) into a compact icon row in the sidebar — reachable on phones via the off-canvas drawer. Added 5th ⚙ icon opening a new global GlobalSettingsTab (extracted from SettingsTab's global block) → closes 921e4a. Built & shipped to dist. NEEDS: Igor's visual check on desktop + phone.
 
 ## Failed

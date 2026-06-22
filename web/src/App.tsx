@@ -11,6 +11,7 @@ import { GlobalFilesTab } from './tabs/GlobalFilesTab'
 import { SchedulesTab } from './tabs/SchedulesTab'
 import { VaultTab } from './tabs/VaultTab'
 import { TerminalTab } from './tabs/TerminalTab'
+import { GlobalSettingsTab } from './tabs/GlobalSettingsTab'
 import { useToast, ToastContainer } from './components/Toast'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
 import { useTheme } from './hooks/useTheme'
@@ -19,6 +20,7 @@ const GLOBAL_FILES_ID = '__global__'
 const SCHEDULES_ID = '__schedules__'
 const VAULT_ID = '__vault__'
 const TERMINAL_ID = '__terminal__'
+const SETTINGS_ID = '__settings__'
 
 type AuthState = 'loading' | 'unauthed' | 'authed'
 
@@ -120,6 +122,8 @@ export default function App() {
   const [vaultOpen, setVaultOpen] = useState<boolean>(false)
   // Terminal tab (global)
   const [terminalOpen, setTerminalOpen] = useState<boolean>(false)
+  // Global settings tab (global)
+  const [settingsGlobalOpen, setSettingsGlobalOpen] = useState<boolean>(false)
   // Current active project — for SSE handler, no re-subscription on every select
   const activeIdRef = useRef<string | null>(null)
   const projectsRef = useRef<Project[]>([])
@@ -292,7 +296,7 @@ export default function App() {
       const next = prev.filter(id => valid.has(id))
       return next.length === prev.length ? prev : next
     })
-    setActiveId(prev => prev === GLOBAL_FILES_ID || prev === SCHEDULES_ID || prev === VAULT_ID || prev === TERMINAL_ID || (prev && valid.has(prev)) ? prev : null)
+    setActiveId(prev => prev === GLOBAL_FILES_ID || prev === SCHEDULES_ID || prev === VAULT_ID || prev === TERMINAL_ID || prev === SETTINGS_ID || (prev && valid.has(prev)) ? prev : null)
     setSplitPairs(prev => {
       const next: Record<string, string> = {}
       let changed = false
@@ -488,6 +492,8 @@ export default function App() {
   const handleOpenGlobalFiles = useCallback(() => {
     setGlobalFilesOpen(true)
     setActiveId(GLOBAL_FILES_ID)
+    setDrawerOpen(false)
+    setMobileScreen('project')
   }, [])
 
   const handleCloseGlobalFiles = useCallback(() => {
@@ -498,6 +504,8 @@ export default function App() {
   const handleOpenSchedules = useCallback(() => {
     setSchedulesOpen(true)
     setActiveId(SCHEDULES_ID)
+    setDrawerOpen(false)
+    setMobileScreen('project')
   }, [])
 
   const handleCloseSchedules = useCallback(() => {
@@ -508,6 +516,8 @@ export default function App() {
   const handleOpenVault = useCallback(() => {
     setVaultOpen(true)
     setActiveId(VAULT_ID)
+    setDrawerOpen(false)
+    setMobileScreen('project')
   }, [])
 
   const handleCloseVault = useCallback(() => {
@@ -518,11 +528,25 @@ export default function App() {
   const handleOpenTerminal = useCallback(() => {
     setTerminalOpen(true)
     setActiveId(TERMINAL_ID)
+    setDrawerOpen(false)
+    setMobileScreen('project')
   }, [])
 
   const handleCloseTerminal = useCallback(() => {
     setTerminalOpen(false)
     setActiveId(prev => prev === TERMINAL_ID ? (openIds[0] || null) : prev)
+  }, [openIds])
+
+  const handleOpenSettings = useCallback(() => {
+    setSettingsGlobalOpen(true)
+    setActiveId(SETTINGS_ID)
+    setDrawerOpen(false)
+    setMobileScreen('project')
+  }, [])
+
+  const handleCloseSettings = useCallback(() => {
+    setSettingsGlobalOpen(false)
+    setActiveId(prev => prev === SETTINGS_ID ? (openIds[0] || null) : prev)
   }, [openIds])
 
   const handleSidebarReorder = useCallback((ids: string[]) => {
@@ -774,6 +798,16 @@ export default function App() {
         onOpenProjectSettings={handleOpenProjectSettings}
         theme={theme}
         onThemeChange={setTheme}
+        onOpenTerminal={handleOpenTerminal}
+        terminalActive={activeId === TERMINAL_ID}
+        onOpenVault={handleOpenVault}
+        vaultActive={activeId === VAULT_ID}
+        onOpenGlobalFiles={handleOpenGlobalFiles}
+        globalFilesActive={activeId === GLOBAL_FILES_ID}
+        onOpenSchedules={handleOpenSchedules}
+        schedulesActive={activeId === SCHEDULES_ID}
+        onOpenSettingsGlobal={handleOpenSettings}
+        settingsGlobalActive={activeId === SETTINGS_ID}
       />
 
       <div className="main-area">
@@ -804,6 +838,10 @@ export default function App() {
           terminalActive={activeId === TERMINAL_ID}
           onOpenTerminal={handleOpenTerminal}
           onCloseTerminal={handleCloseTerminal}
+          settingsGlobalOpen={settingsGlobalOpen}
+          settingsGlobalActive={activeId === SETTINGS_ID}
+          onOpenSettingsGlobal={handleOpenSettings}
+          onCloseSettingsGlobal={handleCloseSettings}
           onToggleDrawer={() => setDrawerOpen(prev => !prev)}
           mobileScreen={mobileScreen}
           onGoToProjectList={() => setMobileScreen('list')}
@@ -865,6 +903,21 @@ export default function App() {
             }}
           >
             <TerminalTab isActive={activeId === TERMINAL_ID} />
+          </div>
+        )}
+
+        {/* Global settings tab — global, always mounted when open */}
+        {settingsGlobalOpen && (
+          <div
+            className="main-content"
+            style={{
+              display: activeId === SETTINGS_ID ? 'flex' : 'none',
+              flexDirection: 'column',
+              padding: 0,
+              overflow: 'hidden',
+            }}
+          >
+            <GlobalSettingsTab />
           </div>
         )}
 
