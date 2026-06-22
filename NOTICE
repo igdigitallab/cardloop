@@ -1,11 +1,11 @@
-Claude-Ops
-Copyright (c) 2026 claude-ops-bot contributors
+Cardloop
+Copyright (c) 2026 Cardloop contributors
 
 This product is licensed under the terms in the LICENSE file at the root of
 this repository.
 
 This product is not affiliated with, endorsed by, or sponsored by Anthropic,
-PBC. "Claude" is a trademark of Anthropic, PBC. Claude-Ops wraps the official
+PBC. "Claude" is a trademark of Anthropic, PBC. Cardloop wraps the official
 `claude` CLI, which you install separately under Anthropic's own terms.
 
 ------------------------------------------------------------------------------

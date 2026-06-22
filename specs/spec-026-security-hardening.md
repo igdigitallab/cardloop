@@ -18,7 +18,7 @@ ClaudeOps is, by design, a **trusted server administrator**: every channel can d
 1. **Secrets must not sit in plaintext at rest.** Today the operator's master credentials live in a plaintext file that leaks "for free" via backups, an accidental commit, or anyone who can read the disk. Move secrets behind an encrypted vault; resolve them only at the moment of use.
 2. **The door must be stronger than one password.** Because the cockpit is the key to everything, the only meaningful defense against an *intruder* is to keep them out of the cockpit and to fix the brute-force weaknesses. Add a second factor and repair the rate-limiter and network exposure.
 
-A full security audit (`~/vault/01-Projects/Claude-Ops-Bot/security-audit-2026-06-11.md`) produced the finding inventory behind this spec.
+A full security audit (`~/vault/01-Projects/Cardloop-Bot/security-audit-2026-06-11.md`) produced the finding inventory behind this spec.
 
 ---
 

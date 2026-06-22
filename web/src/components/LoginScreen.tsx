@@ -61,7 +61,7 @@ export function LoginScreen({ onLogin }: Props) {
       <div className="login-card">
         <div className="login-logo">
           <div className="login-logo-icon">⚡</div>
-          <span className="login-logo-text">Claude-Ops</span>
+          <span className="login-logo-text">Cardloop</span>
         </div>
         <h2>{t['login.title']}</h2>
         <p className="login-sub">{totpMode ? t['login.subtitle_2fa'] : t['login.subtitle']}</p>

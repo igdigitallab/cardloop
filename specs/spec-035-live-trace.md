@@ -197,7 +197,7 @@ In `web/src/tabs/ChatTab.tsx` (and the shared `hooks/useProjectActivity.tsx`):
   end still replays it; then drop to free memory.
 - **Multiple viewers + originating tab.** Dedupe by `seq` so the originating tab (which may
   also receive via `_send`) does not double-render.
-- **Live self-host.** Claude-Ops streams its own turns; the buffer is read-only state, no board
+- **Live self-host.** Cardloop streams its own turns; the buffer is read-only state, no board
   writes, no engine coupling — cannot corrupt anything.
 - **Restart sensitivity.** `bot.py` / `webapp.py` changes need a service restart to take
   effect; the bot runs in its own cgroup, so activate only via `restart-self.sh` as the final

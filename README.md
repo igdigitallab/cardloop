@@ -1,6 +1,6 @@
 > README = what it is and how to run it. Code map → ARCHITECTURE.md. Working rules and gotchas → CLAUDE.md. API → docs/API.md. Contributing and setup → CONTRIBUTING.md.
 
-# Claude-Ops
+# Cardloop
 
 **Mission control for a fleet of AI agents** — a browser-based IDE for running projects through the Claude Agent SDK. No terminal required, accessible from any device. One engine, three input channels: a web cockpit, Telegram, and kanban cards. Fully autonomous: describe a task → the agent diagnoses, edits code, deploys, and reports back.
 
@@ -12,12 +12,14 @@ You don't lose the thread. Every task you mention becomes a card and moves **Bac
  Card      ──┘     (async generator)     (subscription)        (full-auto)
 ```
 
+> _"Claude" is a trademark of Anthropic, PBC. Cardloop is an independent project — not affiliated with, endorsed by, or sponsored by Anthropic. It wraps the official `claude` CLI, which you install separately. See [Legal & Terms](#legal--terms)._
+
 ---
 
 ## The board is the source of truth
 
 Most agent tools are a chat box — you ask, it works, and you lose track of what is done, in
-flight, or forgotten. Claude-Ops makes the **kanban board** the shared working memory between
+flight, or forgotten. Cardloop makes the **kanban board** the shared working memory between
 you and the agents:
 
 - **Board-aware agents.** Every turn — in the cockpit, in Telegram, or from a card — the agent
@@ -91,7 +93,7 @@ Moving a card to In Progress → `_run_card` in webapp.py triggers `run_engine` 
 
 ## Authorization: important warning
 
-> **Claude-Ops uses subscription-based auth, not an API key.**
+> **Cardloop uses subscription-based auth, not an API key.**
 
 The engine reads `~/.claude/.credentials.json` (claudeAiOauth, issued on `claude login`).
 
@@ -185,6 +187,29 @@ cd $HOME/claude-ops-bot && venv/bin/python -m pytest -q
 ## Tech stack
 
 Python 3.11 · aiohttp · python-telegram-bot · Claude Agent SDK · React 18 · Vite · TypeScript · systemd · Cloudflare Tunnel · pytest
+
+---
+
+## Legal & Terms
+
+**Trademark.** "Claude" and "Anthropic" are trademarks of Anthropic, PBC. Cardloop is an
+independent open-source project and is not affiliated with, endorsed by, or sponsored by
+Anthropic. Cardloop invokes the official `claude` CLI; it does not reimplement, bundle, or
+modify Anthropic's software.
+
+**Anthropic Terms of Service.** Cardloop runs the official `claude` CLI and never touches the
+API or OAuth tokens directly.
+
+- **Personal use** on your own Claude subscription is what the project targets. You are
+  responsible for complying with your own Anthropic subscription terms.
+- **Multi-user or commercial / hosted** deployments must use an Anthropic **API key**
+  (`ANTHROPIC_API_KEY`), not a subscription. Authenticating *other* users against *their* Claude
+  subscriptions through a hosted service is not permitted by Anthropic's Consumer Terms.
+- By default `bot.py` removes `ANTHROPIC_API_KEY` from the environment to force subscription
+  (CLI) auth. To run in API-key mode, see the auth configuration in the Quickstart.
+
+This project is provided "as is" under the [MIT License](./LICENSE); see also the
+[NOTICE](./NOTICE) file for third-party attributions.
 
 ---
 

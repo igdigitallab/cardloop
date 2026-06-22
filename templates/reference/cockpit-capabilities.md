@@ -1,4 +1,4 @@
-# Claude-Ops Cockpit — Capabilities Reference
+# Cardloop Cockpit — Capabilities Reference
 
 A quick guide to what the cockpit can do and how to enable each feature.
 

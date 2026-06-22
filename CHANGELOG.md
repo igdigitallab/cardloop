@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Claude-Ops. Format — reverse chronological.
+All notable changes to Cardloop. Format — reverse chronological.
 Versions follow semver-like conventions (0.x while the project is under active development).
 
 > Discipline: when a new feature ships — add a line here + mark the card in TASKS.md → DONE.md. A tag is placed on a stable point (`git tag vX.Y.Z`).

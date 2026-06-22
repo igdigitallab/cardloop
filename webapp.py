@@ -1,5 +1,5 @@
 """
-webapp.py — browser cockpit for Claude-Ops-Bot.
+webapp.py — browser cockpit for Cardloop-Bot.
 
 Runs in the same process/loop as the PTB bot.
 All state objects are passed via ctx — mutations are visible to the bot.
@@ -9642,9 +9642,9 @@ async def api_new_project(req: web.Request) -> web.Response:
         try:
             _git_env = {
                 **os.environ,
-                "GIT_AUTHOR_NAME": "Claude-Ops",
+                "GIT_AUTHOR_NAME": "Cardloop",
                 "GIT_AUTHOR_EMAIL": "claude-ops@localhost",
-                "GIT_COMMITTER_NAME": "Claude-Ops",
+                "GIT_COMMITTER_NAME": "Cardloop",
                 "GIT_COMMITTER_EMAIL": "claude-ops@localhost",
             }
             subprocess.run(["git", "init"], cwd=str(cwd), check=True, capture_output=True)

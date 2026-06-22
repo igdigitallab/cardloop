@@ -1,6 +1,6 @@
 # CLAUDE.md — {{name}}
 
-> Created {{date}} via "+ New project" in the Claude-Ops cockpit.
+> Created {{date}} via "+ New project" in the Cardloop cockpit.
 > This file is the primary rules and commands document for agents working in this project.
 > Edit it during onboarding and as the project evolves.
 

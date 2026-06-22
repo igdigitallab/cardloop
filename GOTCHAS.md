@@ -1,4 +1,4 @@
-# GOTCHAS.md — Claude-Ops subsystem gotchas
+# GOTCHAS.md — Cardloop subsystem gotchas
 
 Subsystem-level gotchas. Turn-1 safety guards (Auth, Рестарт/cgroup) live in CLAUDE.md.
 

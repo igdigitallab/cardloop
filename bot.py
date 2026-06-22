@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Claude-Ops-Bot — Claude Code over Telegram.
+Cardloop-Bot — Claude Code over Telegram.
 Forum group: each topic is bound to a project (thread_id -> cwd).
 Full permissions (bypassPermissions), subscription auth (no ANTHROPIC_API_KEY by default),
-global + project CLAUDE.md loaded via setting_sources. Spec: ~/vault/01-Projects/Claude-Ops-Bot/.
+global + project CLAUDE.md loaded via setting_sources. Spec: ~/vault/01-Projects/Cardloop-Bot/.
 
 spec-040 Phase B: this file is a thin PTB shim.  The transport-neutral engine block
 (run_engine, state dicts, audit, reconcile_board, etc.) now lives in engine.py.
@@ -874,7 +874,7 @@ async def cmd_start(update, context):
     if not authorized(update):
         return
     await send(context, update.effective_chat.id, update.effective_message.message_thread_id,
-               "👋 Claude-Ops. Send a task or forward an alert to a project topic.\n"
+               "👋 Cardloop. Send a task or forward an alert to a project topic.\n"
                "Commands: /whoami /reset /resume /model /project /newtopic /diff /cost /stop")
 
 
@@ -1273,7 +1273,7 @@ async def _amain() -> None:
         await ptb_app.start()
         await ptb_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
 
-        print("Claude-Ops-Bot started (Telegram + web cockpit).")
+        print("Cardloop-Bot started (Telegram + web cockpit).")
 
         # Idle until shutdown signal
         try:
@@ -1318,7 +1318,7 @@ async def _amain() -> None:
         # simply absent; all ptb_app guards in webapp produce no-ops.
         ctx = _build_ctx(None)
         await webapp.start(None, ctx)
-        print("Claude-Ops-Bot started (web-only mode, no Telegram).")
+        print("Cardloop-Bot started (web-only mode, no Telegram).")
 
         # Idle until shutdown signal
         try:

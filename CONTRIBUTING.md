@@ -1,6 +1,6 @@
 > CONTRIBUTING = как настроить окружение, тесты, lint и сделать коммит. Карта кода → ARCHITECTURE.md. Правила работы → CLAUDE.md.
 
-# Contributing to Claude-Ops
+# Contributing to Cardloop
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ venv/bin/python bot.py
 
 ## Auth note
 
-Claude-Ops uses **subscription auth** via `~/.claude/.credentials.json` (claudeAiOauth).
+Cardloop uses **subscription auth** via `~/.claude/.credentials.json` (claudeAiOauth).
 Do **not** set `ANTHROPIC_API_KEY` — the engine explicitly removes it; setting it would
 switch billing to API pay-per-token mode instead of using your Claude subscription.
 

@@ -1,6 +1,6 @@
 > API = таблица HTTP-роутов. Карта кода → ARCHITECTURE.md. Правила работы → CLAUDE.md. Запуск → CONTRIBUTING.md.
 
-# Claude-Ops HTTP API Reference
+# Cardloop HTTP API Reference
 
 Backend: `aiohttp`, port `WEB_PORT` (default `8787`).
 

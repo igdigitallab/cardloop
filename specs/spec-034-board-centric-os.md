@@ -96,7 +96,7 @@ board operations:
 - nothing — most turns (questions, chit-chat, follow-ups) produce zero ops.
 
 Applied under the board lock via `board.py` primitives. **Safety rules** (this runs against a
-live board, including Claude-Ops' own):
+live board, including Cardloop' own):
 
 - **Conservative.** Only `create`/`move`; never delete a card. Completed work is moved to
   `review` (human confirms), not silently to `done`, unless a card maps 1:1 to a fresh commit
@@ -151,7 +151,7 @@ nothing is lost within the session.
 
 ## Edge cases / safety
 
-- **Live self-host.** Claude-Ops manages its own board; a misfiring reconciler must not
+- **Live self-host.** Cardloop manages its own board; a misfiring reconciler must not
   scramble it → conservative writes, dedupe, cap, flag, audit lines.
 - **Concurrency.** All board writes go through the existing per-cwd board lock; respect the
   existing data-loss guard (skip write if parsed card count dropped).

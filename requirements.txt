@@ -1,4 +1,4 @@
-# Production runtime dependencies for Claude-Ops.
+# Production runtime dependencies for Cardloop.
 # Python >= 3.11 required (developed and tested on 3.12).
 # Dev/test deps live in requirements-dev.txt.
 #

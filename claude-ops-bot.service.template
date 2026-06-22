@@ -11,7 +11,7 @@
 #   (тогда %i = имя пользователя, %h = home dir)
 
 [Unit]
-Description=Claude-Ops-Bot (Claude Code via Telegram, forum-topics per project)
+Description=Cardloop-Bot (Claude Code via Telegram, forum-topics per project)
 After=network-online.target
 Wants=network-online.target
 

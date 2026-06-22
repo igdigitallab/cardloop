@@ -193,8 +193,8 @@ a future enhancement for P2 (navigating between open projects without the drawer
 **E1 — manifest.json** (`web/public/manifest.json`):
 ```json
 {
-  "name": "Claude-Ops",
-  "short_name": "Claude-Ops",
+  "name": "Cardloop",
+  "short_name": "Cardloop",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0e0e13",

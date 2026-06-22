@@ -45,5 +45,5 @@ Thumbs.db
 *.sublime-project
 *.sublime-workspace
 
-# Claude-Ops: project memory (.claude-ops/memory/) IS committed — do NOT ignore.
+# Cardloop: project memory (.claude-ops/memory/) IS committed — do NOT ignore.
 # Private data (keys, secrets) → .claude-ops/secrets/ only (gitignored above).

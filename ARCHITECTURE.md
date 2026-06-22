@@ -1,10 +1,10 @@
 > ARCHITECTURE = code map (where to find what). Gotchas → CLAUDE.md. HTTP contract → docs/API.md. Running → CONTRIBUTING.md.
 
-# ARCHITECTURE.md — Claude-Ops
+# ARCHITECTURE.md — Cardloop
 
 Navigation guide for the codebase. Source of truth = the code; this file is the map. Changing behavior → find the right file and line here.
 
-> Claude-Ops — a browser IDE for managing projects via the Claude Agent SDK. Three input channels, one engine, full-auto.
+> Cardloop — a browser IDE for managing projects via the Claude Agent SDK. Three input channels, one engine, full-auto.
 > **Single process** (aiohttp + python-telegram-bot): `bot.py` imports `webapp.py` and runs the cockpit in the same event loop. Shared `running` lock → no race condition between channels on the same cwd.
 
 ```

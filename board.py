@@ -1,5 +1,5 @@
 """
-board.py — shared kanban board primitives for Claude-Ops-Bot.
+board.py — shared kanban board primitives for Cardloop-Bot.
 
 Extracted from webapp.py (spec-034 L0) so that both webapp.py and bot.py
 share one source of truth for reading and writing TASKS.md / DONE.md.
@@ -7,7 +7,7 @@ share one source of truth for reading and writing TASKS.md / DONE.md.
 All names are re-exported from webapp.py for backward compatibility.
 """
 
-# spec-034: https://github.com/igor/claude-ops-bot/specs/spec-034-board-centric-os.md
+# spec-034: https://github.com/cardloop/cardloop/specs/spec-034-board-centric-os.md
 
 import asyncio
 import re
