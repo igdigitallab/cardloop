@@ -29,6 +29,10 @@ interface Props {
   vaultActive: boolean
   onOpenVault: () => void
   onCloseVault: () => void
+  terminalOpen: boolean
+  terminalActive: boolean
+  onOpenTerminal: () => void
+  onCloseTerminal: () => void
   /** Toggles the mobile off-canvas sidebar drawer */
   onToggleDrawer?: () => void
   /** Current mobile navigation screen ('list' | 'project') */
@@ -157,6 +161,7 @@ export function ProjectTabBar({
   globalFilesOpen, globalFilesActive, onOpenGlobalFiles, onCloseGlobalFiles,
   schedulesOpen, schedulesActive, onOpenSchedules, onCloseSchedules,
   vaultOpen, vaultActive, onOpenVault, onCloseVault,
+  terminalOpen, terminalActive, onOpenTerminal, onCloseTerminal,
   onToggleDrawer, mobileScreen, onGoToProjectList,
 }: Props) {
   const activeTabRef = useRef<HTMLDivElement>(null)
@@ -420,6 +425,23 @@ export function ProjectTabBar({
             )}
           </div>
         )}
+        {/* Terminal special tab */}
+        {terminalOpen && (
+          <div
+            className={`ptab ptab-global-files ${terminalActive ? 'active' : ''}`}
+            onClick={onOpenTerminal}
+            title="Terminal"
+          >
+            <span className="ptab-name">⌨ Terminal</span>
+            {terminalActive && (
+              <button
+                className="ptab-close"
+                onClick={e => { e.stopPropagation(); onCloseTerminal() }}
+                title="Close"
+              >✕</button>
+            )}
+          </div>
+        )}
         <button
           className="ptab-new"
           onClick={onNewFree}
@@ -429,6 +451,14 @@ export function ProjectTabBar({
         </button>
       </div>
       <div className="ptab-spacer" />
+      {/* Terminal button */}
+      <button
+        className={`ptab-folder-btn${terminalActive ? ' active' : ''}`}
+        onClick={onOpenTerminal}
+        title="Terminal"
+      >
+        ⌨
+      </button>
       {/* Vault button */}
       <button
         className={`ptab-folder-btn${vaultActive ? ' active' : ''}`}

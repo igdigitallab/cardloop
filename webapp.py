@@ -2390,6 +2390,7 @@ _LOG_NOISE_SUBSTRINGS = (
     "telegram.ext.updater",         # PTB polling — transient, auto-retried by network_retry_loop
     "telegram.error.networkerror",  # TG API 5xx (Bad Gateway etc.) — auto-retried
     "telegram.error.timedout",      # TG API timeouts — auto-retried
+    "exit code 143",                # SDK subprocess killed by SIGTERM on service restart — expected, not a bug
 )
 
 
@@ -9080,6 +9081,108 @@ async def api_vault_delete(req: web.Request) -> web.Response:
     return web.json_response({"name": name, "deleted": True})
 
 
+# ────────────────────────────────── Terminal WebSocket ───────────────────────
+# Spawns a login bash shell in a PTY and proxies stdin/stdout over WebSocket.
+# Auth is handled by auth_middleware (cookie check on the upgrade request).
+
+async def api_terminal_ws(req: web.Request) -> web.WebSocketResponse:
+    """GET /api/terminal/ws — bidirectional PTY terminal over WebSocket."""
+    import pty as _pty
+    import fcntl as _fcntl
+    import struct as _struct
+    import termios as _termios
+
+    ws = web.WebSocketResponse()
+    await ws.prepare(req)
+
+    master_fd, slave_fd = _pty.openpty()
+
+    # Inherit current env and set a sane TERM
+    env = {**os.environ, "TERM": "xterm-256color", "COLORTERM": "truecolor"}
+    proc = await asyncio.create_subprocess_exec(
+        "/bin/bash", "--login",
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+
+    loop = asyncio.get_running_loop()
+    # Queue bounded to avoid unbounded memory growth if frontend lags
+    pty_queue: "asyncio.Queue[bytes | None]" = asyncio.Queue(maxsize=512)
+
+    def _on_pty_readable() -> None:
+        try:
+            data = os.read(master_fd, 4096)
+            if data:
+                try:
+                    pty_queue.put_nowait(data)
+                except asyncio.QueueFull:
+                    pass  # drop oldest? for now just skip
+        except OSError:
+            try:
+                pty_queue.put_nowait(None)  # signal EOF
+            except asyncio.QueueFull:
+                pass
+
+    loop.add_reader(master_fd, _on_pty_readable)
+
+    async def _flush_to_ws() -> None:
+        while True:
+            data = await pty_queue.get()
+            if data is None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+                return
+            try:
+                await ws.send_bytes(data)
+            except Exception:
+                return
+
+    sender = asyncio.create_task(_flush_to_ws())
+
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.BINARY:
+                try:
+                    os.write(master_fd, msg.data)
+                except OSError:
+                    break
+            elif msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    obj = json.loads(msg.data)
+                    if obj.get("type") == "resize":
+                        cols = max(1, int(obj.get("cols", 80)))
+                        rows = max(1, int(obj.get("rows", 24)))
+                        winsize = _struct.pack("HHHH", rows, cols, 0, 0)
+                        _fcntl.ioctl(master_fd, _termios.TIOCSWINSZ, winsize)
+                except Exception:
+                    pass
+            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                break
+    finally:
+        loop.remove_reader(master_fd)
+        sender.cancel()
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        try:
+            await proc.wait()
+        except Exception:
+            pass
+
+    return ws
+
+
 # ─────────────────────────── TOTP enrollment API (Spec 026, Phase 2) ──────────
 #
 # All four endpoints require an authenticated cookie (covered by auth_middleware).
@@ -10362,6 +10465,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/secrets/{name}", api_vault_get)
         app.router.add_post("/api/secrets", api_vault_set)
         app.router.add_delete("/api/secrets/{name}", api_vault_delete)
+
+        app.router.add_get("/api/terminal/ws", api_terminal_ws)
 
         # Spec-026 Phase 2: TOTP second factor enrollment
         app.router.add_get("/api/auth/totp/status", api_totp_status)

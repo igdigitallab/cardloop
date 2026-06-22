@@ -10,6 +10,7 @@ import { Spinner } from './components/Spinner'
 import { GlobalFilesTab } from './tabs/GlobalFilesTab'
 import { SchedulesTab } from './tabs/SchedulesTab'
 import { VaultTab } from './tabs/VaultTab'
+import { TerminalTab } from './tabs/TerminalTab'
 import { useToast, ToastContainer } from './components/Toast'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
 import { useTheme } from './hooks/useTheme'
@@ -17,6 +18,7 @@ import { useTheme } from './hooks/useTheme'
 const GLOBAL_FILES_ID = '__global__'
 const SCHEDULES_ID = '__schedules__'
 const VAULT_ID = '__vault__'
+const TERMINAL_ID = '__terminal__'
 
 type AuthState = 'loading' | 'unauthed' | 'authed'
 
@@ -116,6 +118,8 @@ export default function App() {
   const [schedulesOpen, setSchedulesOpen] = useState<boolean>(false)
   // Vault tab (global)
   const [vaultOpen, setVaultOpen] = useState<boolean>(false)
+  // Terminal tab (global)
+  const [terminalOpen, setTerminalOpen] = useState<boolean>(false)
   // Current active project — for SSE handler, no re-subscription on every select
   const activeIdRef = useRef<string | null>(null)
   const projectsRef = useRef<Project[]>([])
@@ -288,7 +292,7 @@ export default function App() {
       const next = prev.filter(id => valid.has(id))
       return next.length === prev.length ? prev : next
     })
-    setActiveId(prev => prev === GLOBAL_FILES_ID || prev === SCHEDULES_ID || prev === VAULT_ID || (prev && valid.has(prev)) ? prev : null)
+    setActiveId(prev => prev === GLOBAL_FILES_ID || prev === SCHEDULES_ID || prev === VAULT_ID || prev === TERMINAL_ID || (prev && valid.has(prev)) ? prev : null)
     setSplitPairs(prev => {
       const next: Record<string, string> = {}
       let changed = false
@@ -509,6 +513,16 @@ export default function App() {
   const handleCloseVault = useCallback(() => {
     setVaultOpen(false)
     setActiveId(prev => prev === VAULT_ID ? (openIds[0] || null) : prev)
+  }, [openIds])
+
+  const handleOpenTerminal = useCallback(() => {
+    setTerminalOpen(true)
+    setActiveId(TERMINAL_ID)
+  }, [])
+
+  const handleCloseTerminal = useCallback(() => {
+    setTerminalOpen(false)
+    setActiveId(prev => prev === TERMINAL_ID ? (openIds[0] || null) : prev)
   }, [openIds])
 
   const handleSidebarReorder = useCallback((ids: string[]) => {
@@ -786,6 +800,10 @@ export default function App() {
           vaultActive={activeId === VAULT_ID}
           onOpenVault={handleOpenVault}
           onCloseVault={handleCloseVault}
+          terminalOpen={terminalOpen}
+          terminalActive={activeId === TERMINAL_ID}
+          onOpenTerminal={handleOpenTerminal}
+          onCloseTerminal={handleCloseTerminal}
           onToggleDrawer={() => setDrawerOpen(prev => !prev)}
           mobileScreen={mobileScreen}
           onGoToProjectList={() => setMobileScreen('list')}
@@ -835,11 +853,26 @@ export default function App() {
           </div>
         )}
 
+        {/* Terminal tab — global, always mounted when open */}
+        {terminalOpen && (
+          <div
+            className="main-content"
+            style={{
+              display: activeId === TERMINAL_ID ? 'flex' : 'none',
+              flexDirection: 'column',
+              padding: 0,
+              overflow: 'hidden',
+            }}
+          >
+            <TerminalTab isActive={activeId === TERMINAL_ID} />
+          </div>
+        )}
+
         {/* All open ProjectViews — always mounted, inactive ones are hidden */}
         {openProjects.map(p => {
           const splitId = splitPairs[p.id]
           const splitProject = splitId ? projects.find(x => x.id === splitId) : undefined
-          const isActive = p.id === activeId && activeId !== GLOBAL_FILES_ID
+          const isActive = p.id === activeId && activeId !== GLOBAL_FILES_ID && activeId !== TERMINAL_ID
           return (
             <div
               key={p.id}
@@ -876,7 +909,7 @@ export default function App() {
         })}
 
         {/* Welcome — only when no open projects and not in the global file browser, schedules, or vault */}
-        {!hasOpen && activeId !== GLOBAL_FILES_ID && activeId !== SCHEDULES_ID && activeId !== VAULT_ID && (
+        {!hasOpen && activeId !== GLOBAL_FILES_ID && activeId !== SCHEDULES_ID && activeId !== VAULT_ID && activeId !== TERMINAL_ID && (
           <div className="main-content">
             <div className="welcome">
               <div className="welcome-icon">⚡</div>

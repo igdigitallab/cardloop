@@ -226,3 +226,4 @@
 - [x] P2 .github/ CI with venv bootstrap + issue/PR templates <!--ops:0a1c6d-->
 - [x] P2 Fix CI-breaking test_janitor_quarantine <!--ops:293e9f-->
 - [x] Fix: Hardcoded Coolify UUID default in schedules.py (spec-014) <!--ops:58412e-->
+- [x] сделать возможность переноса вкладок проектов (которые наверху), т.е. менять местами. · 2026-06-22
