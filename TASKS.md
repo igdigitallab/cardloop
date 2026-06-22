@@ -56,11 +56,11 @@
   > spec-041 §3.7. secret.py key-storage CLI has NO tests — add tests/test_secret_cli.py (subprocess set/get/list/delete), high priority (trust anchor). bot.py 28% (TG transport), schedules.py 59% (systemd). 2 slow tests (13.3s+8s) in rotate/handoff.
 - [ ] P3 Document/fix architecture debt (state-on-restart, single-user, schema-version) <!--ops:a1b717-->
   > spec-041 §3.8. running{}/_live_clients{} lost on restart → cards stuck In Progress (no indicator). Single-user hardcoded key_of(cwd)=basename (engine.py:303) → collision data-loss. No data-schema versioning. Circular imports unchecked. Surface first three in Security Model.
+- [ ] Deploy Cardloop на VM племяннице <!--ops:824bcd-->
+  > Развернуть изолированный инстанс Cardloop на отдельной VM в офисе для племяницы (первый внешний пользователь). Включает: код без git-истории, .env, systemd-юнит, deploy-runbook. Открыты: VM локация, подписка Claude, способ доступа, Telegram сейчас/позже.
 
 ## In Progress
 - [~] сделать нормальный логин и пароль. ? <!--ops:e518e2-->
-- [~] Redesign project cards UX: kebab menu + drag handle <!--ops:b88c94-->
-  > Rethink card interaction: explicit ⋯ menu (not long-press), grip handle (⠿) for drag-only, mobile bottom-sheet actions. Scope choice: both sidebar+tabs vs sidebar-only first.
 - [~] P0 Rewrite git history: --mailmap (author email) + --replace-text <!--ops:a1f0c0-->
   > spec-041 §0.2. Author field of EVERY commit is `Igor <zira777ru@gmail.com>` → needs git filter-repo --mailmap (replace-text does NOT touch author headers). Plus --replace-text list: 282311426, @ziraclaudebot, ops-igor-2026 (old pwd), tg.session path, 1780365319, pve, proxmox-tunnel, coscore.us/crm/firecrawl, /home/igor. Orphan/squash NOT needed. Coordinate force-push; verify with git grep over --all after.
 
@@ -69,5 +69,7 @@
   > Terminal/Vault/Files/Schedules launchers moved from the top ProjectTabBar (desktop-only, hidden on mobile) into a compact icon row in the sidebar — reachable on phones via the off-canvas drawer. Added 5th ⚙ icon opening a new global GlobalSettingsTab (extracted from SettingsTab's global block) → closes 921e4a. Built & shipped to dist. NEEDS: Igor's visual check on desktop + phone.
 - [?] Fix: CI test environment issues (tg_queue + quality_gate) <!--ops:81cbca-->
   > Fixed ALLOWED_USERS not set in CI (auth gate rejection) and pytest detection in quality_gate. Added autouse fixture and venv symlink. All 1406 tests pass under CI environment.
+- [?] Redesign project cards UX: kebab menu + drag handle <!--ops:b88c94-->
+  > Rethink card interaction: explicit ⋯ menu (not long-press), grip handle (⠿) for drag-only, mobile bottom-sheet actions. Scope choice: both sidebar+tabs vs sidebar-only first.
 
 ## Failed

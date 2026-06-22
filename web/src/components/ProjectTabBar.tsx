@@ -190,6 +190,9 @@ export function ProjectTabBar({
   function handleTabPointerDown(e: React.PointerEvent, id: string) {
     // Only primary button (mouse) or any pointer type (touch/pen)
     if (e.pointerType === 'mouse' && e.button !== 0) return
+    // Never start a drag from interactive controls inside the tab (close button,
+    // rename input) — otherwise pointer capture hijacks their click.
+    if ((e.target as HTMLElement).closest?.('.ptab-close, .ptab-rename-input')) return
     // On touch/pen, only start a reorder drag from the dedicated grip handle —
     // plain swipes elsewhere must scroll the tab strip, taps must activate.
     if (e.pointerType !== 'mouse') {
@@ -203,7 +206,9 @@ export function ProjectTabBar({
       moved: false,
       pointerId: e.pointerId,
     }
-    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    // NOTE: do NOT setPointerCapture here. Capturing on pointerdown makes the
+    // subsequent `click` event dispatch to the capture element (the tab), so the
+    // close button's onClick never fires. Capture only once a drag truly starts.
   }
 
   function handleTabPointerMove(e: React.PointerEvent, id: string) {
@@ -217,6 +222,8 @@ export function ProjectTabBar({
     if (!ps.moved && Math.sqrt(dx * dx + dy * dy) > 8) {
       ps.moved = true
       setDragId(id)
+      // Capture now (not on pointerdown) so taps/clicks still reach their target
+      try { (e.currentTarget as HTMLElement).setPointerCapture(ps.pointerId) } catch { /* noop */ }
     }
 
     if (!ps.moved) return
@@ -240,7 +247,10 @@ export function ProjectTabBar({
   function handleTabPointerUp(e: React.PointerEvent, id: string) {
     const ps = dragPointerState.current
     if (!ps || ps.id !== id) return
-    ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
+    // Only release if we actually captured (capture happens on drag start, not pointerdown)
+    if (ps.moved) {
+      try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId) } catch { /* noop */ }
+    }
 
     if (ps.moved && dragOverId && dragOverId !== id && onReorderOpen) {
       const ids = projects.map(p => p.id)
