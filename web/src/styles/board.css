@@ -58,8 +58,8 @@
 .board-col-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 9px 12px;
+  gap: 8px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
@@ -144,9 +144,11 @@
   outline: none;
   box-shadow: none;
 }
-/* Card actions hidden by default; revealed on hover or keyboard focus for accessibility */
+/* Card actions: quick handoff + kebab. Hidden until hover/focus on desktop,
+   always visible on touch (no reliable hover). */
 .board-card-actions {
   display: flex;
+  align-items: center;
   gap: 4px;
   opacity: 0;
   transition: opacity var(--transition);
@@ -155,9 +157,20 @@
 .board-card:focus-within .board-card-actions {
   opacity: 1;
 }
-/* Always show actions on touch devices (no reliable hover) */
 @media (hover: none) {
   .board-card-actions { opacity: 1; }
+}
+/* Kebab — subtle, pushed to the right; reveals with the row */
+.board-card-actions .board-card-kebab {
+  margin-left: auto;
+  opacity: 1;
+  width: 30px; height: 30px;
+  background: transparent;
+  border: none;
+  color: var(--text3);
+}
+.board-card-actions .board-card-kebab:hover:not(:disabled) {
+  background: var(--bg4); color: var(--text);
 }
 .board-card-actions button {
   flex: 0 0 auto;
@@ -172,14 +185,15 @@
 .board-card-actions .act-del { margin-left: auto; }
 .board-card-actions .act-del:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 15%, transparent); color: var(--red); }
 
-.board-add { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.board-add { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
 .board-add textarea {
   background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
-  font-family: var(--sans); font-size: 13px; padding: 7px 9px; resize: vertical; width: 100%;
+  font-family: var(--sans); font-size: 13px; padding: 6px 8px; resize: vertical; width: 100%;
+  min-height: 34px;
 }
 .board-add textarea:focus { outline: none; border-color: var(--accent); }
-.board-add .btn-primary { font-size: 12px; padding: 6px 10px; }
+.board-add .btn-primary { font-size: 12px; padding: 5px 10px; }
 .board-add.board-add-dragover {
   outline: 2px dashed var(--accent);
   outline-offset: 2px;

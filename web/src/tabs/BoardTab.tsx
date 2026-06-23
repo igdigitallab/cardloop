@@ -7,6 +7,7 @@ import { api } from '../api'
 import { ActivityEvent, Board, BoardColumn, GateResult, RichTool, RunResult, TaskCard, isIncidentCard } from '../types'
 import { Spinner } from '../components/Spinner'
 import { Modal, ModalHead } from '../components/Modal'
+import { ActionMenu, ActionMenuSection, KebabButton } from '../components/ActionMenu'
 import { useOnRunEnd, useFocusRefresh, useProjectActivity } from '../hooks/useProjectActivity'
 import { t } from '../i18n'
 import { MODELS, modelLabel } from '../lib/models'
@@ -369,6 +370,10 @@ export function BoardTab({ projectId, isActive = true }: Props) {
       return next
     })
   }
+
+  // Per-card action menu (kebab → adaptive ActionMenu: desktop dropdown / mobile
+  // bottom-sheet). Keeps cards clean — actions no longer crowd every card.
+  const [cardMenu, setCardMenu] = useState<{ rect: DOMRect; sections: ActionMenuSection[] } | null>(null)
 
   const [selected, setSelected] = useState<Set<string>>(new Set())
   function toggleSelect(cardId: string) {
@@ -850,15 +855,9 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         {/* spec-036 Phase 2a: live activity strip — shown when this card is being executed */}
         {liveRun?.cardId === card.id && <CardLiveStrip run={liveRun} />}
         <div className="board-card-actions">
-          {parkIdx >= 0 && (
-            <>
-              <button title={t['board.move_left']} aria-label={t['board.move_left_aria']} disabled={busy || parkIdx === 0}
-                onClick={() => move(card.id, PARK_ORDER[parkIdx - 1])}>←</button>
-              <button title={t['board.move_right']} aria-label={t['board.move_right_aria']} disabled={busy || parkIdx === PARK_ORDER.length - 1}
-                onClick={() => move(card.id, PARK_ORDER[parkIdx + 1])}>→</button>
-            </>
-          )}
-          {columnKey !== 'in_progress' && (
+          {/* Quick action: one tap to hand off to the agent (the common case).
+              Hidden while the card is already running / in progress. */}
+          {columnKey !== 'in_progress' && !isRunning && (
             <button
               title="🤖 Run by agent (→ In Progress)"
               aria-label={t['board.handoff_aria']}
@@ -867,47 +866,60 @@ export function BoardTab({ projectId, isActive = true }: Props) {
               onClick={() => move(card.id, 'in_progress')}
             >🤖</button>
           )}
-          {/* Card 5e1c0a: hover-only spec action button */}
-          <button
-            title={t['board.spec_btn']}
-            aria-label={t['board.spec_btn_aria']}
-            className={`act-spec${card.has_spec ? ' has-spec' : ''}`}
-            disabled={busy}
-            onClick={() => openSpec(card.id)}
-          >📋</button>
-          {canShowResult && (
-            <button
-              title={t['board.show_result']}
-              aria-label={t['board.show_result_aria']}
-              className="act-result"
-              disabled={busy}
-              onClick={() => showResult(card.id)}
-            >📄</button>
-          )}
-          {/* Defer-after-reset: stateful toggle. Not queued → schedule the card's
-              prompt to run after the 5-hour window resets (strict reset boundary).
-              Queued → active/highlighted; click cancels the pending run.
-              Decoupled from the card state machine — the card stays where it is. */}
-          {(() => {
-            const queued = !!deferMap[card.id]
-            return (
-              <button
-                title={queued ? t['board.card_defer_title_queued'] : t['board.card_defer_title']}
-                aria-label={queued ? t['board.card_defer_aria_queued'] : t['board.card_defer_aria']}
-                aria-pressed={queued}
-                className={`act-defer${queued ? ' act-defer-active' : ''}`}
-                disabled={busy || cardDeferBusy.has(card.id) || (!queued && !card.text.trim())}
-                onClick={() => toggleCardDefer(card)}
-              >⏱</button>
-            )
-          })()}
-          <button title={t['board.archive']} aria-label={t['board.archive_aria']} className="act-done" disabled={busy}
-            onClick={() => move(card.id, 'done')}>✓</button>
-          <button title={t['board.delete']} aria-label={t['board.delete_aria']} className="act-del" disabled={busy}
-            onClick={() => del(card.id)}>✕</button>
+          {/* Everything else lives in the kebab menu to keep the card clean. */}
+          <KebabButton
+            label={t['board.card_actions_aria']}
+            className="board-card-kebab"
+            onClick={rect => setCardMenu({ rect, sections: buildCardSections(card, { columnKey, parkIdx, canShowResult }) })}
+          />
         </div>
       </div>
     )
+  }
+
+  // Build the action-menu sections for a card. Mirrors the old inline button row,
+  // grouped into sections (primary → move → tools → danger).
+  function buildCardSections(
+    card: TaskCard,
+    { columnKey, parkIdx, canShowResult }: { columnKey: string; parkIdx: number; canShowResult: boolean }
+  ): ActionMenuSection[] {
+    const queued = !!deferMap[card.id]
+    const sections: ActionMenuSection[] = []
+
+    const primary: ActionMenuSection['items'] = []
+    if (columnKey !== 'in_progress') {
+      primary.push({ label: t['board.menu_run'], icon: '🤖', disabled: busy, onClick: () => move(card.id, 'in_progress') })
+    }
+    primary.push({ label: t['board.menu_archive'], icon: '✓', disabled: busy, onClick: () => move(card.id, 'done') })
+    sections.push({ items: primary })
+
+    if (parkIdx >= 0) {
+      sections.push({ items: [
+        { label: t['board.move_left_aria'], icon: '←', disabled: busy || parkIdx === 0, onClick: () => move(card.id, PARK_ORDER[parkIdx - 1]) },
+        { label: t['board.move_right_aria'], icon: '→', disabled: busy || parkIdx === PARK_ORDER.length - 1, onClick: () => move(card.id, PARK_ORDER[parkIdx + 1]) },
+      ] })
+    }
+
+    const tools: ActionMenuSection['items'] = [
+      { label: t['board.menu_edit'], icon: '✏️', onClick: () => setTaskEditModal({ id: card.id, text: card.text, model: card.model || '' }) },
+      { label: t['board.spec_btn'], icon: '📋', checked: card.has_spec, disabled: busy, onClick: () => openSpec(card.id) },
+    ]
+    if (canShowResult) {
+      tools.push({ label: t['board.show_result'], icon: '📄', disabled: busy, onClick: () => showResult(card.id) })
+    }
+    tools.push({
+      label: queued ? t['board.menu_defer_cancel'] : t['board.menu_defer'],
+      icon: '⏱', checked: queued,
+      disabled: busy || cardDeferBusy.has(card.id) || (!queued && !card.text.trim()),
+      onClick: () => toggleCardDefer(card),
+    })
+    sections.push({ items: tools })
+
+    sections.push({ items: [
+      { label: t['board.menu_delete'], icon: '🗑', danger: true, disabled: busy, onClick: () => del(card.id) },
+    ] })
+
+    return sections
   }
 
   return (
@@ -1235,6 +1247,14 @@ export function BoardTab({ projectId, isActive = true }: Props) {
           )
         })}
       </div>
+
+      {cardMenu && (
+        <ActionMenu
+          anchorRect={cardMenu.rect}
+          sections={cardMenu.sections}
+          onClose={() => setCardMenu(null)}
+        />
+      )}
 
       {selected.size > 0 && (
         <div className="board-batch-bar">
