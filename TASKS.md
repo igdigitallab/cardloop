@@ -73,5 +73,7 @@
 - [?] Иногда агенты умеют вешать сервисные мониторы на какие-то задачи и в через терминал через Клод клиента эти сервисные мониторы отображаются их можно видеть я хочу сделать так чтобы можно было увидеть эти сервисные мониторы и у нас <!--ops:b6f5cc-->
 - [?] Fix: Compact projects list spacing <!--ops:b1467c-->
   > Reduced kebab button (36→30px) & padding (7→3px) to compact row height to ~36px. Commit 0eb43e9. Awaiting verification on phone.
+- [?] Truncate board card text to 3 lines with expand/collapse <!--ops:09d37c-->
+  > Implemented text truncation on cards (3-line preview) with tap-to-expand. Reduces visual clutter, especially on mobile. Commit 6ee1c04.
 
 ## Failed
