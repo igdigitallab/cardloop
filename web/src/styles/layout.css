@@ -459,8 +459,17 @@
     /* D-07: Fade right edge to indicate horizontal scrollability */
     -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
     mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
+    /* Auto-collapse on scroll (see ProjectView navCollapsed). */
+    max-height: 56px;
+    transition: max-height 0.22s ease, opacity 0.2s ease, border-color 0.2s ease;
   }
   .mobile-inner-tabs::-webkit-scrollbar { display: none; }
+  .mobile-inner-tabs.collapsed {
+    max-height: 0;
+    opacity: 0;
+    border-bottom-color: transparent;
+    pointer-events: none;
+  }
 
   .mobile-inner-tab-btn {
     flex-shrink: 0;

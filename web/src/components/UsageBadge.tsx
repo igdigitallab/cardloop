@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 
 interface RawLimit {
@@ -48,9 +48,21 @@ function fmtPct(u: number | null): string {
   return `${Math.round(u * 100)}%`
 }
 
-export function UsageBadge() {
+export function UsageBadge({ compact = false }: { compact?: boolean } = {}) {
   const [data, setData] = useState<UsageData | null>(null)
   const [hover, setHover] = useState(false)
+  // compact (mobile): tap toggles the full breakdown instead of opening an external link.
+  const [expanded, setExpanded] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!expanded) return
+    function onOut(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setExpanded(false)
+    }
+    document.addEventListener('mousedown', onOut)
+    return () => document.removeEventListener('mousedown', onOut)
+  }, [expanded])
 
   useEffect(() => {
     let cancelled = false
@@ -100,27 +112,43 @@ export function UsageBadge() {
   const icon = fiveH ? '⏱' : '📅'
   const pct = fmtPct(primary.utilization)
 
+  const showDropdown = hover || expanded
+
   return (
     <div
-      className="usage-badge-wrap"
+      className={`usage-badge-wrap${compact ? ' usage-compact' : ''}`}
+      ref={wrapRef}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
-      <a
-        className={`usage-badge ${pickClass(primary)}`}
-        href={USAGE_URL}
-        target="_blank"
-        rel="noopener noreferrer"
-        onClick={openUsage}
-        title="Claude Code subscription limits (click — claude.ai/settings/usage)"
-      >
-        <span className="usage-icon">{icon}</span>
-        {pct && <span>{pct}</span>}
-        {pct && <span className="usage-sep">—</span>}
-        <span>{fmtReset(primary.resets_at, now)}</span>
-      </a>
+      {compact ? (
+        // Mobile: a button that toggles the full breakdown (no external navigation).
+        <button
+          className={`usage-badge ${pickClass(primary)}`}
+          onClick={() => setExpanded(e => !e)}
+          title="Subscription limits — tap for the full breakdown"
+          aria-expanded={expanded}
+        >
+          <span className="usage-icon">{icon}</span>
+          {pct && <span>{pct}</span>}
+        </button>
+      ) : (
+        <a
+          className={`usage-badge ${pickClass(primary)}`}
+          href={USAGE_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={openUsage}
+          title="Claude Code subscription limits (click — claude.ai/settings/usage)"
+        >
+          <span className="usage-icon">{icon}</span>
+          {pct && <span>{pct}</span>}
+          {pct && <span className="usage-sep">—</span>}
+          <span>{fmtReset(primary.resets_at, now)}</span>
+        </a>
+      )}
 
-      {hover && (
+      {showDropdown && (
         <div className="usage-dropdown">
           {['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'overage'].map(k => {
             const d = data.limits[k]
@@ -140,6 +168,17 @@ export function UsageBadge() {
               </div>
             )
           })}
+          {compact && (
+            <a
+              className="usage-dropdown-link"
+              href={USAGE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={openUsage}
+            >
+              Open on claude.ai →
+            </a>
+          )}
         </div>
       )}
     </div>

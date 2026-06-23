@@ -193,6 +193,92 @@
   flex-shrink: 0;
 }
 
+/* Compact session-state cluster inside the composer bar — rendered by ChatTab only
+   on a narrow viewport. Holds the glanceable state: context icon + rate-limit + model
+   (+ think). On desktop these live in the top session bar instead. */
+.composer-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* No margin-left:auto — the cluster sits just after the tool icons (left); the Send
+     button (its own margin-left:auto) stays at the far right. Avoids the right-jam. */
+}
+.composer-meta-ctx-wrap { position: relative; display: inline-flex; }
+.composer-meta-ctx {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: transparent;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+  line-height: 1;
+}
+.composer-meta-ctx-num {
+  font-size: 11px;
+  font-family: var(--mono);
+  font-weight: 500;
+}
+.composer-meta .usage-badge-wrap { border-left: none; padding: 0; }
+/* Compact (mobile) rate-limit breakdown opens UPWARD — the chip sits at screen bottom. */
+.usage-compact .usage-dropdown { top: auto; bottom: calc(100% + 6px); right: 0; }
+.usage-dropdown-link {
+  margin-top: 4px;
+  padding: 5px 6px 2px;
+  border-top: 1px solid var(--border);
+  color: var(--accent-h);
+  font-size: 11px;
+  text-decoration: none;
+}
+
+/* Combined model+think pill + its upward popover (mobile composer). */
+.composer-modelthink { position: relative; display: inline-flex; }
+.composer-modelthink-btn {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.composer-modelthink-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.composer-modelthink-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  min-width: 160px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-md);
+  padding: 4px;
+  z-index: 50;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.composer-modelthink-sec {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text3);
+  padding: 6px 8px 2px;
+}
+
+.composer-meta-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  z-index: 50;
+}
+
 /* Model selector в шапке чата */
 .chat-model-selector {
   display: flex;
@@ -1216,9 +1302,9 @@
 /* ── Chat session bar: mobile overrides ─────────────────────── */
 @media (max-width: 768px) {
   .chat-session-bar {
-    /* H (Chrome compression): true single-row horizontal scroll — no wrapping.
-       Children must not shrink (flex:0 0 auto applied below), so the bar
-       scrolls rather than wrapping the wrap/reset button to a 2nd line. */
+    /* Row3 stays at the top (session management: sub-chats + reset + session
+       selector). Context/model/think moved OUT to the composer bar (.composer-meta),
+       so this bar is light and no longer overflows in practice. */
     padding: 3px 8px;
     gap: 5px;
     flex-wrap: nowrap;
@@ -1227,13 +1313,25 @@
     overflow-y: hidden;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
+    /* Auto-collapse on scroll (driven by ProjectView via chromeCollapsed prop). */
+    max-height: 44px;
+    transition: max-height 0.22s ease, opacity 0.2s ease, padding 0.2s ease, border-color 0.2s ease;
   }
   .chat-session-bar::-webkit-scrollbar { display: none; }
 
-  /* Every direct child must stay at its intrinsic width and not shrink,
-     so the bar scrolls horizontally rather than collapsing content. */
   .chat-session-bar > * {
     flex: 0 0 auto;
+  }
+
+  .chat-session-bar.collapsed {
+    max-height: 0;
+    min-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    opacity: 0;
+    border-bottom-color: transparent;
+    overflow: hidden;
+    pointer-events: none;
   }
 
   /* Stats badge: allow shrinking/truncation so it doesn't push model off */

@@ -570,6 +570,12 @@
     min-height: 38px;
   }
 
+  /* Rate-limit moved OFF the project-tab row — it now lives in the composer control
+     bar (see .usage-badge-mobile). Hide the tab-bar instance on mobile only. */
+  .project-tabbar > .usage-badge-wrap {
+    display: none;
+  }
+
   .ptab {
     min-height: 38px;
     padding: 0 10px;

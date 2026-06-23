@@ -132,16 +132,9 @@ function TabItem({
         <span className="ptab-name">{project.name}</span>
       )}
 
-      {!editing && isRunning && (
-        <span className="ptab-working" title={t['tabbar.working_title']} aria-label={t['tabbar.working_title']} />
-      )}
-      {!editing && unread > 0 && !isActive && (
-        <span className="ptab-unread" title={`${unread} new`}>{unread > 99 ? '99+' : unread}</span>
-      )}
-      {!editing && replyReady && !isActive && !isRunning && (
-        <span className="ptab-reply-ready" title={t['tabbar.awaiting_title']} />
-      )}
-      {!editing && isActive && (
+      {/* Single trailing slot: close on the active tab, otherwise ONE status indicator
+          (priority running → reply-ready → unread) instead of three stacked badges. */}
+      {!editing && (isActive ? (
         <button
           className="ptab-close"
           onClick={(e) => { e.stopPropagation(); onClose() }}
@@ -149,12 +142,13 @@ function TabItem({
         >
           ✕
         </button>
-      )}
-      {!editing && (
-        <span className="ptab-drag-handle" aria-label="Drag to reorder" title="Drag to reorder">
-          <i /><i />
-        </span>
-      )}
+      ) : isRunning ? (
+        <span className="ptab-working" title={t['tabbar.working_title']} aria-label={t['tabbar.working_title']} />
+      ) : replyReady ? (
+        <span className="ptab-reply-ready" title={t['tabbar.awaiting_title']} />
+      ) : unread > 0 ? (
+        <span className="ptab-unread" title={`${unread} new`}>{unread > 99 ? '99+' : unread}</span>
+      ) : null)}
     </div>
   )
 }
@@ -171,11 +165,7 @@ export function ProjectTabBar({
 }: Props) {
   const activeTabRef = useRef<HTMLDivElement>(null)
 
-  // H2: Open-tabs dropdown state + click-outside handling
-  const [tabMenuOpen, setTabMenuOpen] = useState(false)
-  const tabMenuRef = useRef<HTMLDivElement>(null)
-
-  // ── Drag-and-drop reorder state ────────────────────────────────────────────
+  // ── Drag-and-drop reorder state (desktop mouse only; touch reorder removed) ──
   const [dragId, setDragId] = useState<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const [dragOverSide, setDragOverSide] = useState<'before' | 'after' | null>(null)
@@ -284,18 +274,6 @@ export function ProjectTabBar({
     setDragOverSide(null)
   }
 
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (tabMenuRef.current && !tabMenuRef.current.contains(e.target as Node)) {
-        setTabMenuOpen(false)
-      }
-    }
-    if (tabMenuOpen) {
-      document.addEventListener('mousedown', handleClickOutside)
-    }
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [tabMenuOpen])
-
   // D5: auto-scroll active tab into view when activeId changes
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ behavior: 'smooth', inline: 'nearest' })
@@ -313,56 +291,6 @@ export function ProjectTabBar({
       >
         {mobileScreen === 'project' ? '‹' : '☰'}
       </button>
-      {/* H2: Open-tabs dropdown menu — mobile only. Lives OUTSIDE .ptab-list:
-          the list has overflow-x:auto which would clip the absolute dropdown. */}
-      {projects.length > 0 && (
-        <div className="ptab-menu-wrap" ref={tabMenuRef}>
-            <button
-              className="ptab-menu-btn"
-              onClick={() => setTabMenuOpen(s => !s)}
-              title={t['tabbar.open_tabs_menu']}
-              aria-label={t['tabbar.open_tabs_count']}
-            >
-              ▾ {projects.length}
-            </button>
-            {tabMenuOpen && (
-              <div className="ptab-menu-dropdown" role="listbox">
-                {projects.map(p => {
-                  const sk = p.session_key ?? null
-                  const unread = sk ? (unreadBySession[sk] || 0) : 0
-                  const isActive = p.id === activeId
-                  const hasIncidents = (p.incidents ?? 0) > 0
-                  const isRunning = runningIds?.has(p.id)
-                  return (
-                    <button
-                      key={p.id}
-                      className={`ptab-menu-item${isActive ? ' active' : ''}`}
-                      role="option"
-                      aria-selected={isActive}
-                      onClick={() => { onActivate(p.id); setTabMenuOpen(false) }}
-                    >
-                      <span className="ptab-menu-name">{p.name}</span>
-                      {isRunning && (
-                        <span className="ptab-menu-dot ptab-menu-dot-working" title={t['tabbar.working_title']} />
-                      )}
-                      {replyReadyIds?.has(p.id) && !isActive && !isRunning && (
-                        <span className="ptab-menu-dot ptab-menu-dot-green" title={t['tabbar.awaiting_title']} />
-                      )}
-                      {hasIncidents && (
-                        <span className="ptab-menu-badge" title={`${p.incidents} incident(s)`}>
-                          🚨 {p.incidents}
-                        </span>
-                      )}
-                      {unread > 0 && !isActive && (
-                        <span className="ptab-unread">{unread > 99 ? '99+' : unread}</span>
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-        </div>
-      )}
       <div className="ptab-list">
         {projects.map(p => {
           const sk = p.session_key ?? null

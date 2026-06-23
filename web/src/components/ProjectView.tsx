@@ -435,17 +435,34 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   const SWIPE_H_THRESHOLD = 60   // minimum horizontal distance to trigger switch
   const SWIPE_V_MAX       = 30   // maximum vertical drift (to not conflict with scroll)
 
-  const swipeStart = useRef<{ x: number; y: number; onScrollable: boolean } | null>(null)
+  const swipeStart = useRef<{ x: number; y: number; scroller: HTMLElement | null } | null>(null)
   const [swipeAnim, setSwipeAnim] = useState<'left' | 'right' | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
 
-  function isOnHScrollable(el: EventTarget | null): boolean {
+  // Row2 (section tabs) auto-collapse while reading: hidden when the chat feed scrolls
+  // DOWN, revealed on scroll up / near top.
+  const [navCollapsed, setNavCollapsed] = useState(false)
+  const lastFeedScroll = useRef(0)
+  const scrollAccum = useRef(0)
+  const collapsedRef = useRef(false)      // mirrors navCollapsed for the scroll handler
+  const collapseLockUntil = useRef(0)     // ignore scroll churn until this timestamp (ms)
+
+  // Nearest ancestor that can ACTUALLY scroll horizontally — real overflow (not 1px
+  // sub-pixel rounding) AND overflow-x is auto/scroll. The old check returned true for
+  // any element a hair wider than its box (code blocks, tables, even rounding), which
+  // silently disabled the swipe depending on WHERE the finger landed — the root cause
+  // of "swipe doesn't switch on the first try". Now we only defer to an element that
+  // genuinely scrolls, and only while it still has room to scroll (see handleTouchEnd).
+  function hScrollableAncestor(el: EventTarget | null): HTMLElement | null {
     let node = el as HTMLElement | null
     while (node && node !== contentRef.current) {
-      if (node.scrollWidth > node.clientWidth) return true
+      if (node.scrollWidth - node.clientWidth > 8) {
+        const ox = getComputedStyle(node).overflowX
+        if (ox === 'auto' || ox === 'scroll') return node
+      }
       node = node.parentElement
     }
-    return false
+    return null
   }
 
   function handleTouchStart(e: React.TouchEvent) {
@@ -454,30 +471,39 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     swipeStart.current = {
       x: touch.clientX,
       y: touch.clientY,
-      onScrollable: isOnHScrollable(e.target),
+      scroller: hScrollableAncestor(e.target),
     }
   }
 
   function handleTouchMove(e: React.TouchEvent) {
-    if (!swipeStart.current || swipeStart.current.onScrollable) return
+    if (!swipeStart.current) return
     if (mobileInnerTab !== null) return
     const touch = e.touches[0]
     const dy = Math.abs(touch.clientY - swipeStart.current.y)
-    // Prevent scroll conflict: if vertical drift exceeds max, cancel swipe detection
+    // Vertical drift dominates → it's a scroll, not a horizontal swipe: cancel.
     if (dy > SWIPE_V_MAX) {
       swipeStart.current = null
     }
   }
 
   function handleTouchEnd(e: React.TouchEvent) {
-    if (!swipeStart.current || swipeStart.current.onScrollable) return
+    if (!swipeStart.current) return
     if (mobileInnerTab !== null) return
     const touch = e.changedTouches[0]
     const dx = touch.clientX - swipeStart.current.x
     const dy = Math.abs(touch.clientY - swipeStart.current.y)
+    const scroller = swipeStart.current.scroller
     swipeStart.current = null
 
     if (Math.abs(dx) < SWIPE_H_THRESHOLD || dy > SWIPE_V_MAX) return
+    // If the swipe began inside a genuinely h-scrollable element that still has room to
+    // scroll in the swipe direction, let it consume the gesture instead of switching.
+    if (scroller) {
+      const atLeftEdge = scroller.scrollLeft <= 0
+      const atRightEdge = scroller.scrollLeft + scroller.clientWidth >= scroller.scrollWidth - 1
+      if (dx > 0 && !atLeftEdge) return   // swipe right → element still scrolls left
+      if (dx < 0 && !atRightEdge) return  // swipe left  → element still scrolls right
+    }
     if (!openProjectIds || !onSwipeToProject) return
 
     const currentIdx = openProjectIds.indexOf(project.id)
@@ -495,6 +521,53 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
       onSwipeToProject(openProjectIds[nextIdx])
     }, 180)  // matches CSS transition duration
   }
+
+  // Collapse the top/section chrome while the chat feed scrolls DOWN, reveal on scroll
+  // up / near top. `scroll` does not bubble → capture-phase listener keyed on .chat-feed.
+  // Two guards kill the jitter: (1) direction is accumulated, only flipping past a 36px
+  // deadzone; (2) after a flip we IGNORE scroll for ~320ms — collapsing grows the feed and
+  // the browser clamps scrollTop near the bottom, which would otherwise read as a reverse
+  // scroll and oscillate the state every frame during the height transition.
+  function applyCollapse(next: boolean) {
+    if (collapsedRef.current === next) return
+    collapsedRef.current = next
+    setNavCollapsed(next)
+    collapseLockUntil.current = performance.now() + 320
+  }
+  useEffect(() => {
+    if (!narrow) return
+    function onScroll(e: Event) {
+      const el = e.target as HTMLElement | null
+      if (!el || !el.classList?.contains('chat-feed')) return
+      const st = el.scrollTop
+      // Absorb the reflow churn that our own collapse/expand triggers.
+      if (performance.now() < collapseLockUntil.current) {
+        lastFeedScroll.current = st
+        scrollAccum.current = 0
+        return
+      }
+      const dy = st - lastFeedScroll.current
+      lastFeedScroll.current = st
+      if (st < 48) { scrollAccum.current = 0; applyCollapse(false); return }  // near top → show
+      if (dy === 0) return
+      // Reset the accumulator whenever the scroll direction reverses.
+      if ((dy > 0) !== (scrollAccum.current >= 0)) scrollAccum.current = 0
+      scrollAccum.current += dy
+      if (scrollAccum.current > 36) { scrollAccum.current = 0; applyCollapse(true) }
+      else if (scrollAccum.current < -36) { scrollAccum.current = 0; applyCollapse(false) }
+    }
+    document.addEventListener('scroll', onScroll, true)
+    return () => document.removeEventListener('scroll', onScroll, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [narrow])
+
+  // Always reveal the chrome when switching section or project.
+  useEffect(() => {
+    collapsedRef.current = false
+    collapseLockUntil.current = 0
+    scrollAccum.current = 0
+    setNavCollapsed(false)
+  }, [mobileInnerTab, project.id])
 
   // Free chat — no left tab panel, chat at full width.
   if (project.is_free) {
@@ -530,7 +603,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
       <ProjectActivityProvider projectId={project.id} active={isActive}>
         <div className="main-content mobile-project-layout">
           {/* Inner tab strip — Row 2 (Row 1 = ProjectTabBar with back btn + usage badge) */}
-          <nav className="mobile-inner-tabs" aria-label={t['tab.sections_aria']}>
+          <nav className={`mobile-inner-tabs${navCollapsed ? ' collapsed' : ''}`} aria-label={t['tab.sections_aria']}>
             <button
               className={`mobile-inner-tab-btn ${mobileInnerTab === null ? 'active' : ''}`}
               onClick={() => setMobileInnerTab(null)}
@@ -557,7 +630,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
           >
             {mobileInnerTab === null ? (
               <ErrorBoundary label="Chat">
-                <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} />
+                <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} chromeCollapsed={navCollapsed} />
               </ErrorBoundary>
             ) : (
               <>

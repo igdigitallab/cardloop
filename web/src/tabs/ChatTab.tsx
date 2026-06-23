@@ -9,6 +9,7 @@ import { SkillPicker } from '../components/SkillPicker'
 import { ToolBlock } from '../components/ToolBlock'
 import { OptionPicker, parseOptionsBlock } from '../components/OptionPicker'
 import { SessionSelector } from '../components/SessionSelector'
+import { UsageBadge } from '../components/UsageBadge'
 import {
   Chat,
   ChatMessage,
@@ -27,7 +28,7 @@ import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
 import { t } from '../i18n'
 import { Modal, ModalHead } from '../components/Modal'
-import { Paperclip, ClipboardList, Wrench, Clock, Square, Pencil, Trash2, File, Image } from 'lucide-react'
+import { Paperclip, ClipboardList, Wrench, Clock, Square, Pencil, Trash2, File, Image, Flame, Snowflake } from 'lucide-react'
 
 // ─── Spec-035: Sub-agent lane ─────────────────────────────────────────────────
 
@@ -118,6 +119,8 @@ interface Props {
   collapsed?: boolean
   /** Desktop-split only: toggle function for collapsing/expanding the chat pane. Passed only from the desktop-split render site. */
   onToggleCollapse?: () => void
+  /** Mobile only: when true, collapse the top session bar (Row3) — driven by ProjectView's scroll detection. */
+  chromeCollapsed?: boolean
 }
 
 type ModelKey = 'fable' | 'opus' | 'sonnet' | 'haiku'
@@ -580,6 +583,84 @@ const ThinkModeButton = memo(function ThinkModeButton({
   )
 })
 
+// ─── ModelThinkButton ────────────────────────────────────────────────────────
+// Mobile-only combined pill: "<Model> · <H|M|L>" that opens ONE popover to pick both
+// the model and the thinking level. Think is folded INTO the model control (no
+// separate think button on mobile). Desktop keeps the separate <select> + ThinkModeButton.
+const THINK_TAG: Record<ThinkMode, string> = { max: 'H', default: 'M', min: 'L' }
+
+const ModelThinkButton = memo(function ModelThinkButton({
+  model, thinkValue, disabled, onModelChange, onThinkChange,
+}: {
+  model: string
+  thinkValue: ThinkMode
+  disabled: boolean
+  onModelChange: (m: ModelKey) => void
+  onThinkChange: (mode: ThinkMode) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const isFable = model === 'fable' || model.startsWith('fable')
+
+  useEffect(() => {
+    if (!open) return
+    function onOut(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onOut)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onOut)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const tag = isFable ? '' : THINK_TAG[thinkValue]
+  return (
+    <div className="composer-modelthink" ref={ref}>
+      <button
+        className="composer-modelthink-btn"
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => { if (!disabled) setOpen(o => !o) }}
+      >
+        {modelLabel(model)}{tag ? ` · ${tag}` : ''}
+      </button>
+      {open && (
+        <div className="composer-modelthink-menu" role="listbox">
+          <div className="composer-modelthink-sec">{t['chat.model_hint']}</div>
+          {MODELS.map(m => (
+            <div
+              key={m.value}
+              role="option"
+              aria-selected={m.value === model}
+              className={`chat-think-option${m.value === model ? ' selected' : ''}`}
+              onMouseDown={e => { e.preventDefault(); onModelChange(m.value as ModelKey); setOpen(false) }}
+            >
+              {m.label}
+            </div>
+          ))}
+          <div className="composer-modelthink-sec">{t['chat.think_mode_label']}</div>
+          {THINK_MODES.map(m => (
+            <div
+              key={m.value}
+              role="option"
+              aria-selected={m.value === thinkValue}
+              className={`chat-think-option${m.value === thinkValue ? ' selected' : ''}`}
+              style={isFable ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
+              onMouseDown={e => { e.preventDefault(); if (isFable) return; onThinkChange(m.value); setOpen(false) }}
+            >
+              {t[m.labelKey]}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+})
+
 // ─── RunStatusBar ─────────────────────────────────────────────────────────────
 // Isolated ticker so the parent ChatTab does NOT re-render on each second tick
 // while a run is active.
@@ -654,7 +735,7 @@ const isTouchDevice: boolean =
   typeof window !== 'undefined' &&
   (window.matchMedia?.('(pointer: coarse)').matches || 'ontouchstart' in window)
 
-export function ChatTab({ project, onProjectsReload, isActive, collapsed, onToggleCollapse }: Props) {
+export function ChatTab({ project, onProjectsReload, isActive, collapsed, onToggleCollapse, chromeCollapsed }: Props) {
   const projectId = project.id
 
   // ─── Spec-037: multi-chat tabs ────────────────────────────────────────────
@@ -682,6 +763,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const [pendingHandoff, setPendingHandoff] = useState<string | null>(null)
   const [contextTokens, setContextTokens] = useState<number | null>(null)
   const [contextWindow, setContextWindow] = useState<number>(1_000_000)
+  // Narrow-viewport flag: on mobile the context/model/think cluster is rendered inside
+  // the composer bar (.composer-meta); on desktop it stays in the top session bar.
+  const [isMobile, setIsMobile] = useState<boolean>(
+    () => typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 768px)').matches,
+  )
+  // Context-state popover (the 🔥/❄ icon in the composer bar) open flag.
+  const [ctxOpen, setCtxOpen] = useState(false)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState('')
@@ -908,6 +996,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     }
     vv.addEventListener('resize', onViewportResize)
     return () => vv.removeEventListener('resize', onViewportResize)
+  }, [])
+
+  // Track the narrow-viewport breakpoint (must match the 768px CSS breakpoint) so the
+  // context/model/think cluster renders in the composer bar on mobile, top bar on desktop.
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)')
+    const onChange = () => setIsMobile(mq.matches)
+    onChange()
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
   }, [])
 
   // Tick timers removed from ChatTab — now owned by RunStatusBar and CacheCountdownBadge
@@ -1621,7 +1719,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       {/* Spec-045: merged toolbar — chat tabs (left) + session controls + right cluster in ONE row.
           Layout: [tab…] [+]  [↺] [◉ session ▾]  ·(auto)·  [▬ ctx] [♨️ cache] [◆ model ▾] [🧠 think] [⟩]
           The ⟩ collapse button renders only when onToggleCollapse is provided (desktop-split). */}
-      <div className="chat-session-bar">
+      <div className={`chat-session-bar${isMobile && chromeCollapsed ? ' collapsed' : ''}`}>
         {/* Left: chat tabs inline */}
         {chats.map(chat => {
           const isActive = chat.id === activeChatId
@@ -1740,8 +1838,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             margin-left:auto (on .chat-session-right) pushes it to the right edge. */}
         <div className="chat-session-right">
           {/* Session health — context "used / max" + progress bar + cache badge.
-              Always visible when there are messages. */}
-          {messages.length > 0 && (() => {
+              Desktop only: on mobile this lives in the composer bar (.composer-meta). */}
+          {!isMobile && messages.length > 0 && (() => {
             const real = contextTokens != null && contextTokens > 0
             const tokens = real ? contextTokens! : estimateTokens(messages)
 
@@ -1859,25 +1957,27 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               </span>
             )
           })()}
-          {/* Model selector */}
-          <div className="chat-model-selector" title={t['chat.model_hint']}>
-            <span className="chat-model-label">◆</span>
-            <select
-              className="chat-model-select"
-              value={project.model}
-              onChange={e => handleModelChange(e.target.value as ModelKey)}
-              disabled={changingModel || streaming}
-            >
-              {!MODELS.some(m => m.value === project.model) && (
-                <option value={project.model}>{modelLabel(project.model)}</option>
-              )}
-              {MODELS.map(m => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
-          </div>
-          {/* Thinking mode — compact button+popover. Disabled for fable. */}
-          {(() => {
+          {/* Model selector — desktop only (mobile: in the composer bar). */}
+          {!isMobile && (
+            <div className="chat-model-selector" title={t['chat.model_hint']}>
+              <span className="chat-model-label">◆</span>
+              <select
+                className="chat-model-select"
+                value={project.model}
+                onChange={e => handleModelChange(e.target.value as ModelKey)}
+                disabled={changingModel || streaming}
+              >
+                {!MODELS.some(m => m.value === project.model) && (
+                  <option value={project.model}>{modelLabel(project.model)}</option>
+                )}
+                {MODELS.map(m => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {/* Thinking mode — compact button+popover. Disabled for fable. Desktop only. */}
+          {!isMobile && (() => {
             const isFable = project.model === 'fable' || project.model?.startsWith('fable')
             const selectorTitle = isFable
               ? t['chat.think_mode_fable_hint']
@@ -2426,6 +2526,47 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               >
                 <Clock size={13} /> {pendingDeferred.length}
               </button>
+            )}
+            {/* Mobile session-state cluster: context icon + rate-limit + model + think.
+                On desktop these live in the top session bar (see !isMobile gates). */}
+            {isMobile && (
+              <div className="composer-meta">
+                {(() => {
+                  const real = contextTokens != null && contextTokens > 0
+                  const tokens = real ? contextTokens! : estimateTokens(messages)
+                  const fillFrac = Math.min(tokens / contextWindow, 1)
+                  const color = fillFrac >= 0.90 ? 'var(--red)' : fillFrac >= 0.75 ? 'var(--yellow)' : 'var(--green)'
+                  const warm = run != null || (lastTurnEndMs != null && (Date.now() - lastTurnEndMs) < CACHE_TTL_MS)
+                  return (
+                    <span className="composer-meta-ctx-wrap">
+                      <button
+                        type="button"
+                        className="composer-meta-ctx"
+                        style={{ color }}
+                        title={`Context ${real ? '' : '~'}${formatTokens(tokens)} / ${formatMax(contextWindow)} · cache ${warm ? 'warm' : 'cold'}`}
+                        onClick={() => setCtxOpen(o => !o)}
+                      >
+                        {warm ? <Flame size={15} /> : <Snowflake size={15} />}
+                        <span className="composer-meta-ctx-num">{real ? '' : '~'}{formatTokens(tokens)}</span>
+                      </button>
+                      {ctxOpen && (
+                        <div className="composer-meta-popover" onClick={() => setCtxOpen(false)}>
+                          <div>Context: {real ? '' : '~'}{formatTokens(tokens)} / {formatMax(contextWindow)}</div>
+                          <div style={{ color: 'var(--text2)' }}>Cache: {warm ? 'warm' : 'cold'}</div>
+                        </div>
+                      )}
+                    </span>
+                  )
+                })()}
+                <UsageBadge compact />
+                <ModelThinkButton
+                  model={project.model}
+                  thinkValue={thinkMode}
+                  disabled={changingModel || streaming}
+                  onModelChange={handleModelChange}
+                  onThinkChange={handleThinkModeChange}
+                />
+              </div>
             )}
             <button
               className="btn-primary chat-send-btn"
