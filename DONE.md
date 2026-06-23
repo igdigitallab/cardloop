@@ -238,3 +238,4 @@
 - [x] Show token context numbers in input frame (270K display) <!--ops:45e75e-->
 - [x] Fix: Feed jerk on scroll during collapse animation <!--ops:238629-->
 - [x] Redesign project cards UX: kebab menu + drag handle <!--ops:b88c94-->
+- [x] Fix: Composer button (Stop/Queue) alignment when agent running <!--ops:487362-->

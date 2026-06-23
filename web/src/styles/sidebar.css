@@ -251,12 +251,13 @@
   .project-item { cursor: grab; }
 }
 
-/* Touch: compact rows with a comfortable (but tighter) tap target */
+/* Touch: dense rows. Height is driven by the kebab + padding, not min-height,
+   so both are trimmed (see kebab sizing in actionmenu.css). */
 @media (pointer: coarse) {
   .project-item {
-    min-height: 40px;
-    padding-top: 7px;
-    padding-bottom: 7px;
+    min-height: 32px;
+    padding-top: 3px;
+    padding-bottom: 3px;
   }
 }
 

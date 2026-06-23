@@ -71,7 +71,5 @@
 - [?] Fix: CLAUDE.md scroll containment <!--ops:fc696b-->
   > Scroll containment fix for CLAUDE.md display component
 - [?] Иногда агенты умеют вешать сервисные мониторы на какие-то задачи и в через терминал через Клод клиента эти сервисные мониторы отображаются их можно видеть я хочу сделать так чтобы можно было увидеть эти сервисные мониторы и у нас <!--ops:b6f5cc-->
-- [?] Fix: Composer button (Stop/Queue) alignment when agent running <!--ops:487362-->
-  > Moved margin-left:auto from internal Queue button to cluster wrapper. Stabilizes right-edge positioning across Send/Stop/Stop+Queue states. (3dbcadf)
 
 ## Failed
