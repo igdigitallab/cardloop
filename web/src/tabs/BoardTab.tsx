@@ -854,25 +854,13 @@ export function BoardTab({ projectId, isActive = true }: Props) {
         </div>
         {/* spec-036 Phase 2a: live activity strip — shown when this card is being executed */}
         {liveRun?.cardId === card.id && <CardLiveStrip run={liveRun} />}
-        <div className="board-card-actions">
-          {/* Quick action: one tap to hand off to the agent (the common case).
-              Hidden while the card is already running / in progress. */}
-          {columnKey !== 'in_progress' && !isRunning && (
-            <button
-              title="🤖 Run by agent (→ In Progress)"
-              aria-label={t['board.handoff_aria']}
-              className="act-handoff"
-              disabled={busy}
-              onClick={() => move(card.id, 'in_progress')}
-            >🤖</button>
-          )}
-          {/* Everything else lives in the kebab menu to keep the card clean. */}
-          <KebabButton
-            label={t['board.card_actions_aria']}
-            className="board-card-kebab"
-            onClick={rect => setCardMenu({ rect, sections: buildCardSections(card, { columnKey, parkIdx, canShowResult }) })}
-          />
-        </div>
+        {/* All actions (run / archive / move / edit / spec / defer / delete) live
+            in the kebab menu — keeps the card face clean and compact. */}
+        <KebabButton
+          label={t['board.card_actions_aria']}
+          className="board-card-kebab"
+          onClick={rect => setCardMenu({ rect, sections: buildCardSections(card, { columnKey, parkIdx, canShowResult }) })}
+        />
       </div>
     )
   }

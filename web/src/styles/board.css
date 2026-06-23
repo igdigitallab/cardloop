@@ -80,7 +80,7 @@
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 9px 10px;
+  padding: 8px 10px;
   position: relative;
   box-shadow: none;
 }
@@ -117,7 +117,7 @@
 .act-handoff:hover { border-color: var(--accent-h) !important; background: var(--accent-h) !important; }
 .board-card-text {
   font-size: 13px; line-height: 1.4; color: var(--text);
-  white-space: pre-wrap; word-break: break-word; margin-bottom: 8px;
+  white-space: pre-wrap; word-break: break-word; margin-bottom: 4px;
   cursor: pointer;
 }
 /* Collapsed preview: clamp long (often voice-dictated) prompts to 3 lines with
@@ -144,32 +144,27 @@
   outline: none;
   box-shadow: none;
 }
-/* Card actions: quick handoff + kebab. Hidden until hover/focus on desktop,
-   always visible on touch (no reliable hover). */
-.board-card-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity var(--transition);
-}
-.board-card:hover .board-card-actions,
-.board-card:focus-within .board-card-actions {
-  opacity: 1;
-}
-@media (hover: none) {
-  .board-card-actions { opacity: 1; }
-}
-/* Kebab — subtle, pushed to the right; reveals with the row */
-.board-card-actions .board-card-kebab {
-  margin-left: auto;
-  opacity: 1;
-  width: 30px; height: 30px;
+/* On-card kebab — the ONLY control on the card face. Subtle, right-aligned at
+   the bottom edge; reveals on hover/focus (desktop) and always shows on touch.
+   Scoped under .board-card to outrank the base .sidebar-kebab-btn rules. */
+.board-card .board-card-kebab {
+  display: flex; align-items: center; justify-content: center;
+  margin: -2px 0 0 auto;
+  width: 28px; height: 24px;
   background: transparent;
   border: none;
+  border-radius: var(--radius-sm);
   color: var(--text3);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition), background var(--transition), color var(--transition);
 }
-.board-card-actions .board-card-kebab:hover:not(:disabled) {
+.board-card:hover .board-card-kebab,
+.board-card:focus-within .board-card-kebab { opacity: 1; }
+@media (hover: none) {
+  .board-card .board-card-kebab { opacity: 1; }
+}
+.board-card .board-card-kebab:hover:not(:disabled) {
   background: var(--bg4); color: var(--text);
 }
 .board-card-actions button {

@@ -75,5 +75,7 @@
   > Reduced kebab button (36→30px) & padding (7→3px) to compact row height to ~36px. Commit 0eb43e9. Awaiting verification on phone.
 - [?] Truncate board card text to 3 lines with expand/collapse <!--ops:09d37c-->
   > Implemented text truncation on cards (3-line preview) with tap-to-expand. Reduces visual clutter, especially on mobile. Commit 6ee1c04.
+- [?] Board redesign: card actions kebab menu <!--ops:59e50b-->
+  > Hide card buttons behind kebab menu (⋮). Reused ActionMenu for adaptive UI (desktop dropdown / mobile bottom-sheet). Updated CSS for compact layout. Committed 1b6ba06.
 
 ## Failed
