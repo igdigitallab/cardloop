@@ -480,6 +480,28 @@ export interface ActivityEventCompact {
   project: string
 }
 
+// ─── Background-task monitors (card b6f5cc) ────────────────────────────────────
+// Long-running shells / Monitor / Workflow tasks the agent started. Live updates arrive
+// as {kind:"monitor", monitor: Monitor}; snapshot via GET /api/projects/{id}/monitors.
+export interface Monitor {
+  id: string
+  kind: 'bash' | 'monitor' | 'workflow' | 'task' | string
+  label: string
+  status: 'running' | 'stopped' | 'done' | 'failed' | string
+  started: number
+  ts: number
+  tail?: string
+  agent?: string | null
+  persistent?: boolean
+  /** Set on a bus event when the monitor was dismissed/cleared — drop it from the list. */
+  removed?: boolean
+}
+
+export interface ActivityEventMonitor {
+  kind: 'monitor'
+  monitor: Monitor
+}
+
 export type ActivityEvent =
   | ActivityEventRunStart
   | ActivityEventText
@@ -487,3 +509,4 @@ export type ActivityEvent =
   | ActivityEventRunEnd
   | ActivityEventSubagent
   | ActivityEventCompact
+  | ActivityEventMonitor

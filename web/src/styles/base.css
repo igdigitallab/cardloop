@@ -176,6 +176,14 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Lock the page to the viewport width — no horizontal pan/overscroll on mobile.
+   A descendant 1px wider than the screen otherwise lets the whole app drift L/R. */
+html, body, #root {
+  max-width: 100%;
+  overflow-x: hidden;
+  overscroll-behavior-x: none;
+}
+
 /* Slightly larger base text on phones for readability */
 @media (max-width: 768px) {
   body { font-size: 15px; }

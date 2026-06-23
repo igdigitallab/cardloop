@@ -53,6 +53,14 @@ export const api = {
   projectLogs: (id: string) =>
     apiFetch<import('./types').ProjectLogs>(`/api/projects/${id}/logs`),
 
+  // Card b6f5cc: background-task monitors (long-running shells / Monitor / Workflow tasks).
+  monitors: (id: string) =>
+    apiFetch<{ monitors: import('./types').Monitor[] }>(`/api/projects/${id}/monitors`),
+
+  // Dismiss a lingering monitor row (does not kill the shell — read-only clear).
+  dismissMonitor: (id: string, mid: string) =>
+    apiFetch<{ ok: boolean; removed: boolean }>(`/api/projects/${id}/monitors/${mid}`, { method: 'DELETE' }),
+
   tasks: (id: string) =>
     apiFetch<import('./types').Board>(`/api/projects/${id}/tasks`),
 

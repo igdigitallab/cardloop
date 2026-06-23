@@ -512,13 +512,15 @@ def audit(project: str, kind: str, text: str):
 # None until webapp is initialised (tests / import-time calls are safe no-ops).
 _timeline_append_cb = None
 _bus_publish_cb = None
+_monitor_update_cb = None
 
 
-def _register_webapp_callbacks(timeline_append, bus_publish):
+def _register_webapp_callbacks(timeline_append, bus_publish, monitor_update=None):
     """Inject webapp callbacks so engine.py can publish events without importing webapp."""
-    global _timeline_append_cb, _bus_publish_cb
+    global _timeline_append_cb, _bus_publish_cb, _monitor_update_cb
     _timeline_append_cb = timeline_append
     _bus_publish_cb = bus_publish
+    _monitor_update_cb = monitor_update
 
 
 # ─────────────────────────── Spec-029 §2: PostToolUse hook ────────────────────────────────────
@@ -571,6 +573,120 @@ def _tool_response_to_str(tool_response: object) -> str:
     return single
 
 
+# ─────────────────────────── Background-task monitors (card b6f5cc) ────────────────────────────
+#
+# Claude Code agents can start long-running "service monitors" that survive a single turn:
+#   - background Bash shells     — Bash(run_in_background=True), polled via BashOutput, KillShell
+#   - Monitor / Workflow tasks   — run until TaskStop or session end (the literal "monitor" tools)
+# In the terminal client these appear in a tasks panel.  We surface the same in the cockpit by
+# reading their lifecycle out of the PostToolUse stream — no extra SDK plumbing needed.
+#
+# _monitor_delta() is a PURE function: given one tool result it returns a partial monitor record
+# (or None).  webapp._monitor_update() owns the registry + timestamps + live bus fan-out.
+
+def _rget(obj, key, default=None):
+    """Read a key from a tool_response that may be a dict OR an attribute-style object."""
+    try:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+    except Exception:
+        return default
+
+
+_MONITOR_TAIL_MAX = 2000  # chars — keep the END of the output (it's a tail)
+
+
+def _monitor_tail(tr) -> str:
+    """Extract a clean, multi-line output tail from a tool_response for the monitor panel.
+
+    Unlike _tool_response_to_str (single-line audit, repr() fallback), this preserves newlines
+    (rendered in <pre>) and returns "" — not an ugly dict repr — when there is no output yet."""
+    try:
+        if isinstance(tr, dict):
+            out = str(tr.get("stdout", "") or "")
+            err = str(tr.get("stderr", "") or "")
+            parts = []
+            if out:
+                parts.append(out)
+            if err:
+                parts.append(f"[stderr] {err}")
+            s = "\n".join(parts)
+        else:
+            s = str(tr or "")
+    except Exception:
+        return ""
+    s = s.strip()
+    if len(s) > _MONITOR_TAIL_MAX:
+        s = "…" + s[-_MONITOR_TAIL_MAX:]
+    return s
+
+
+def _monitor_delta(tool_name, tool_input, tool_response, agent_type):
+    """Map a single tool result to a background-monitor delta, or None if irrelevant.
+
+    Returned dict always carries "id"; first-seen deltas also carry kind/label/status.
+    Never raises — the caller is on the hot path."""
+    try:
+        ti = tool_input if isinstance(tool_input, dict) else {}
+        tr = tool_response
+
+        if tool_name == "Bash" and ti.get("run_in_background"):
+            bid = _rget(tr, "backgroundTaskId")
+            if not bid:
+                return None
+            return {"id": str(bid), "kind": "bash", "status": "running",
+                    "label": str(ti.get("command") or "")[:200],
+                    "tail": _monitor_tail(tr), "agent": agent_type}
+
+        if tool_name == "Monitor":
+            tid = _rget(tr, "taskId")
+            if not tid:
+                return None
+            label = ti.get("description") or ti.get("prompt") or ti.get("command") or "monitor"
+            return {"id": str(tid), "kind": "monitor", "status": "running",
+                    "label": str(label)[:200], "persistent": bool(_rget(tr, "persistent")),
+                    "agent": agent_type}
+
+        if tool_name == "Workflow":
+            tid = _rget(tr, "taskId")
+            if not tid:
+                return None
+            return {"id": str(tid), "kind": "workflow", "status": "running",
+                    "label": str(_rget(tr, "workflowName") or ti.get("name") or "workflow")[:200],
+                    "agent": agent_type}
+
+        if tool_name == "BashOutput":
+            bid = ti.get("bash_id") or _rget(tr, "backgroundTaskId")
+            if not bid:
+                return None
+            # backgroundTaskId is present in the response only WHILE the command runs; its
+            # absence on a poll means the shell has finished.  Otherwise keep status as-is
+            # (long-running by nature) and just refresh the output tail.
+            d = {"id": str(bid), "tail": _monitor_tail(tr)}
+            if isinstance(tr, (dict,)) or hasattr(tr, "backgroundTaskId"):
+                if not _rget(tr, "backgroundTaskId"):
+                    d["status"] = "done"
+            return d
+
+        if tool_name in ("TaskOutput", "TaskGet"):
+            tid = ti.get("task_id") or ti.get("taskId")
+            if not tid:
+                return None
+            return {"id": str(tid), "tail": _monitor_tail(tr)}
+
+        if tool_name == "KillShell":
+            sid = ti.get("shell_id")
+            return {"id": str(sid), "status": "stopped"} if sid else None
+
+        if tool_name == "TaskStop":
+            tid = ti.get("task_id") or ti.get("taskId")
+            return {"id": str(tid), "status": "stopped"} if tid else None
+    except Exception:
+        return None
+    return None
+
+
 def _make_post_tool_use_hook(project_name: str, session_key: str):
     """Return an async HookCallback that records tool output in the audit log and timeline.
 
@@ -587,8 +703,19 @@ def _make_post_tool_use_hook(project_name: str, session_key: str):
         try:
             tool_name = hook_input.get("tool_name", "?") if isinstance(hook_input, dict) else getattr(hook_input, "tool_name", "?")
             tool_response = hook_input.get("tool_response") if isinstance(hook_input, dict) else getattr(hook_input, "tool_response", None)
+            tool_input = hook_input.get("tool_input") if isinstance(hook_input, dict) else getattr(hook_input, "tool_input", None)
+            agent_type = hook_input.get("agent_type") if isinstance(hook_input, dict) else getattr(hook_input, "agent_type", None)
 
             output_str = _tool_response_to_str(tool_response)
+
+            # Background-task monitors (card b6f5cc): surface long-running shells / monitor tasks.
+            try:
+                if _monitor_update_cb:
+                    delta = _monitor_delta(tool_name, tool_input, tool_response, agent_type)
+                    if delta:
+                        _monitor_update_cb(session_key, delta)
+            except Exception:
+                pass  # monitor tracking is best-effort — never break a turn
 
             # Determine ok/err: dict with "error" key, or exception-like object.
             is_err = False
@@ -1355,6 +1482,21 @@ async def run_engine(  # type: ignore[return]
                         "last_tool_name": getattr(msg, "last_tool_name", None),
                     }
                 elif isinstance(msg, TaskNotificationMessage):
+                    # Card b6f5cc: a task-completion notification whose task_id matches a tracked
+                    # background monitor (bg-bash / Monitor tool) flips it to a terminal status.
+                    # only_existing guard → a plain sub-agent task_id never spawns a phantom monitor.
+                    try:
+                        if _monitor_update_cb and msg.task_id:
+                            # TaskNotificationStatus is Literal['completed','failed','stopped'].
+                            _st = str(getattr(msg, "status", "") or "").lower()
+                            _mst = {"completed": "done", "failed": "failed",
+                                    "stopped": "stopped"}.get(_st)
+                            print(f"[monitor] task-notification id={msg.task_id} status={_st!r} → {_mst}")
+                            if _mst:
+                                _monitor_update_cb(session_key, {"id": str(msg.task_id), "status": _mst},
+                                                   only_existing=True)
+                    except Exception:
+                        pass
                     yield {
                         "type": "subagent",
                         "subtype": "notification",
@@ -1439,7 +1581,7 @@ def _build_ctx(ptb_app, *, web_port: int = None, web_password: str = None,
     (they cannot be read from env in engine.py because bot.py already read and applied them).
     """
     import webapp as _webapp  # lazy — called only at startup after webapp is fully loaded
-    _register_webapp_callbacks(_webapp._timeline_append, _webapp._bus_publish)
+    _register_webapp_callbacks(_webapp._timeline_append, _webapp._bus_publish, _webapp._monitor_update)
 
     _web_port = web_port if web_port is not None else int(os.getenv("WEB_PORT", "8787"))
     _web_password = web_password if web_password is not None else os.getenv("WEB_PASSWORD", "")

@@ -24,6 +24,8 @@ import {
   ActivityEventCompact,
 } from '../types'
 import { useProjectActivity, useSeedCursor } from '../hooks/useProjectActivity'
+import { useMonitors } from '../hooks/useMonitors'
+import { MonitorsPanel } from '../components/MonitorsPanel'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
 import { t } from '../i18n'
@@ -669,17 +671,22 @@ interface RunStatusBarProps {
   run: RunIndicator
   serverStartedAt: number | null
   queueLen: number
-  onStop: () => void
+  subagents: SubagentEntry[]
+  monitorCount: number
 }
 
+// Compact single-line run indicator (~28px). Stop lives in the composer now; sub-agents
+// fold into an expandable disclosure (tap the ⚙ chip) instead of an always-open tall lane.
 const RunStatusBar = memo(function RunStatusBar({
   run,
   serverStartedAt,
   queueLen,
-  onStop,
+  subagents,
+  monitorCount,
 }: RunStatusBarProps) {
   // Own tick state — only this small component re-renders every second.
   const [tick, setTick] = useState<number>(Date.now())
+  const [expanded, setExpanded] = useState(false)
 
   useEffect(() => {
     const id = setInterval(() => setTick(Date.now()), 1000)
@@ -701,26 +708,55 @@ const RunStatusBar = memo(function RunStatusBar({
     label = run.source === 'card' ? t['chat.status_card_running'] : t['chat.status_thinking']
   }
 
+  const runningAgents = subagents.filter(s => s.status === 'running').length
+  const hasAgents = subagents.length > 0
+
   return (
-    <div className={`chat-status-bar ${lvl}`}>
-      {/* Pulsing dot replaces emoji icon — color inherits from bar state via CSS */}
-      <span className="chat-status-pulse" aria-hidden="true" />
-      {/* flex:1 on text truncates long tool names instead of pushing siblings right */}
-      <span className="chat-status-text">{label}</span>
-      <span className="chat-status-time">{formatDuration(elapsedSec)}</span>
-      {silenceSec > 30 && (
-        <span className="chat-status-silence">
-          ⚠ silence {formatDuration(silenceSec)}
-          {silenceSec > 120 && ' · possibly hung'}
-        </span>
+    <div className="chat-runbar-wrap">
+      <div className={`chat-status-bar ${lvl}`}>
+        {/* Pulsing dot replaces emoji icon — color inherits from bar state via CSS */}
+        <span className="chat-status-pulse" aria-hidden="true" />
+        {/* flex:1 on text truncates long tool names instead of pushing siblings right */}
+        <span className="chat-status-text">{label}</span>
+        <span className="chat-status-time">{formatDuration(elapsedSec)}</span>
+        {silenceSec > 30 && (
+          <span className="chat-status-silence">
+            ⚠ {formatDuration(silenceSec)}{silenceSec > 120 && ' · hung?'}
+          </span>
+        )}
+        {hasAgents && (
+          <button
+            className="chat-runbar-chip"
+            onClick={() => setExpanded(e => !e)}
+            title={t['chat.subagent_lane_label']}
+            aria-expanded={expanded}
+          >
+            ⚙ {runningAgents > 0 ? `${runningAgents}/${subagents.length}` : subagents.length}
+            <span className="chat-runbar-caret" style={{ transform: expanded ? 'rotate(90deg)' : 'none' }}>›</span>
+          </button>
+        )}
+        {monitorCount > 0 && (
+          <span className="chat-runbar-chip static" title="Background monitors">▦ {monitorCount}</span>
+        )}
+        {queueLen > 0 && (
+          <span className="chat-status-queue" title={`${queueLen} message(s) queued, will send automatically`}>
+            ⏭ {queueLen}
+          </span>
+        )}
+      </div>
+      {expanded && hasAgents && (
+        <div className="chat-runbar-agents">
+          {subagents.map(sa => (
+            <div key={sa.task_id} className="chat-runbar-agent-row">
+              <span>{sa.status === 'completed' ? '✓' : sa.status === 'failed' ? '✗' : '⚙'}</span>
+              <span className="chat-runbar-agent-desc">{sa.description || sa.task_id}</span>
+              {sa.last_tool_name && sa.status === 'running' && (
+                <span className="chat-runbar-agent-tool">↳ {sa.last_tool_name}</span>
+              )}
+            </div>
+          ))}
+        </div>
       )}
-      {queueLen > 0 && (
-        <span className="chat-status-queue" title={`${queueLen} message(s) queued, will send automatically`}>
-          ⏭ {queueLen}
-        </span>
-      )}
-      {/* Stop is last child — sits at far right naturally, no margin-left:auto needed */}
-      <button className="chat-stop-btn" onClick={onStop} title={t['chat.stop_title']} aria-label={t['chat.stop_aria']}><Square size={13} /> {t['chat.stop_btn']}</button>
     </div>
   )
 })
@@ -737,6 +773,9 @@ const isTouchDevice: boolean =
 
 export function ChatTab({ project, onProjectsReload, isActive, collapsed, onToggleCollapse, chromeCollapsed }: Props) {
   const projectId = project.id
+
+  // Card b6f5cc: background-task monitors (long-running shells / Monitor / Workflow tasks).
+  const { monitors, dismiss: dismissMonitor } = useMonitors(projectId, isActive ?? true)
 
   // ─── Spec-037: multi-chat tabs ────────────────────────────────────────────
   const [chats, setChats] = useState<Chat[]>([])
@@ -2011,7 +2050,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         {rotating && (
           <div className="chat-empty">
             <div className="chat-status-bar" style={{ justifyContent: 'center', padding: '12px 20px', fontSize: 13 }}>
-              <span className="att-spinner" style={{ fontSize: 18 }}>↻</span>
+              <span className="att-spinner" style={{ width: 14, height: 14 }} />
               <span style={{ fontWeight: 500 }}>
                 {rotatingKind === 'handoff'
                   ? 'Compressing session & handing off context… this can take up to a minute'
@@ -2246,46 +2285,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           </div>
         )}
         {dragOver && <div className="chat-drop-hint">📎 Drop files here</div>}
-        {/* Spec-035: sub-agent lane — rendered while a run is active and subagents are present */}
-        {run && subagents.length > 0 && (
-          <div style={{
-            padding: '4px 8px',
-            borderTop: '1px solid var(--border, #374151)',
-            fontSize: 11,
-            color: 'var(--text2)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 2,
-          }}>
-            <span style={{ fontWeight: 600, marginBottom: 2 }}>{t['chat.subagent_lane_label']}</span>
-            {subagents.map(sa => (
-              <div key={sa.task_id} style={{
-                paddingLeft: 12,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-              }}>
-                <span>{sa.status === 'completed' ? '✓' : sa.status === 'failed' ? '✗' : '⚙'}</span>
-                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {sa.description || sa.task_id}
-                </span>
-                {sa.last_tool_name && sa.status === 'running' && (
-                  <span style={{ color: 'var(--text2)', fontStyle: 'italic' }}>
-                    ↳ [{sa.last_tool_name}]
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-        {/* Run status bar — rendered by RunStatusBar (owns its own tick) so the message
-            list does not re-render every second while a run is active. */}
+        {/* Compact run status bar (owns its own tick so the message list doesn't re-render
+            every second). Sub-agents fold into its expandable disclosure; Stop is in the composer. */}
         {run && (
           <RunStatusBar
             run={run}
             serverStartedAt={serverStartedAt}
             queueLen={queueItems.length}
-            onStop={stopStream}
+            subagents={subagents}
+            monitorCount={monitors.filter(m => m.status === 'running').length}
           />
         )}
         {/* Live compaction indicator — shown while native auto-compact is running (can be 30–60s).
@@ -2296,6 +2304,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             <span>{t['chat.compacting_inprogress']}</span>
           </div>
         )}
+        {/* Card b6f5cc: background-task monitors (shells / Monitor / Workflow tasks). */}
+        <MonitorsPanel monitors={monitors} onDismiss={dismissMonitor} />
         {showPrompts && (
           <PromptPicker
             onSelect={handlePromptSelect}
@@ -2568,14 +2578,51 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 />
               </div>
             )}
-            <button
-              className="btn-primary chat-send-btn"
-              disabled={rotating || (!input.trim() && attachments.filter(a => a.path).length === 0)}
-              onClick={() => sendMessage()}
-              title={streaming ? t['chat.queue_title'] : t['chat.send_title']}
-            >
-              {streaming ? t['chat.queue'] : t['chat.send']}
-            </button>
+            {(() => {
+              const busy = !!run || streaming
+              const hasContent = input.trim().length > 0 || attachments.filter(a => a.path).length > 0
+              // Running + nothing typed → Stop replaces Send.
+              if (busy && !hasContent) {
+                return (
+                  <button
+                    className="chat-send-btn chat-send-btn-stop"
+                    disabled={rotating}
+                    onClick={stopStream}
+                    title={t['chat.stop_title']}
+                    aria-label={t['chat.stop_aria']}
+                  ><Square size={14} /> {t['chat.stop']}</button>
+                )
+              }
+              // Running + typed text → Queue is primary, with a small Stop beside it.
+              if (busy && hasContent) {
+                return (
+                  <div className="chat-send-cluster">
+                    <button
+                      className="chat-stop-mini"
+                      disabled={rotating}
+                      onClick={stopStream}
+                      title={t['chat.stop_title']}
+                      aria-label={t['chat.stop_aria']}
+                    ><Square size={14} /></button>
+                    <button
+                      className="btn-primary chat-send-btn"
+                      disabled={rotating}
+                      onClick={() => sendMessage()}
+                      title={t['chat.queue_title']}
+                    >{t['chat.queue']}</button>
+                  </div>
+                )
+              }
+              // Idle → Send.
+              return (
+                <button
+                  className="btn-primary chat-send-btn"
+                  disabled={rotating || !hasContent}
+                  onClick={() => sendMessage()}
+                  title={t['chat.send_title']}
+                >{t['chat.send']}</button>
+              )
+            })()}
           </div>
         </div>
       </div>

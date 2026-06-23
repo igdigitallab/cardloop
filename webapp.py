@@ -228,6 +228,73 @@ def _bus_publish(session_key: str, event: dict, persist: bool = True) -> None:
         _awaiting.pop(session_key, None)
 
 
+# ─────────────────────────── background-task monitors (card b6f5cc) ──────────
+# session_key → {monitor_id → record}. Long-running shells / Monitor / Workflow tasks the
+# agent started, surfaced read-only in the cockpit (terminal client shows the same panel).
+# Fed from engine's PostToolUse hook via _monitor_update(); fanned out live over the bus.
+_monitors: dict[str, dict[str, dict]] = {}
+_MONITORS_MAX = 30  # cap per session — drop oldest terminal entries beyond this
+
+
+def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) -> None:
+    """Merge a monitor delta into the registry and fan it out over the bus (no timeline write).
+
+    Called from engine._post_tool_use_hook (sync). Stamps server-side timestamps so the engine
+    stays pure. Never raises — best-effort live state.
+
+    only_existing=True — skip when the id is not already tracked. Used by completion signals
+    (task-notification / poll) so a sub-agent task_id can't spawn a phantom monitor."""
+    try:
+        mid = delta.get("id")
+        if not mid:
+            return
+        bucket = _monitors.setdefault(session_key, {})
+        rec = bucket.get(mid)
+        if rec is None and only_existing:
+            return
+        now = time.time()
+        if rec is None:
+            rec = {"id": mid, "kind": delta.get("kind", "task"), "label": delta.get("label", ""),
+                   "status": "running", "started": now, "tail": "", "agent": None}
+            bucket[mid] = rec
+        # Merge known fields (delta may be partial — e.g. a tail/status-only update).
+        for k in ("kind", "label", "status", "tail", "agent", "persistent"):
+            if delta.get(k) not in (None, ""):
+                rec[k] = delta[k]
+        rec["ts"] = now
+        # Trim: keep all running + most recent terminal entries.
+        if len(bucket) > _MONITORS_MAX:
+            terminal = sorted(
+                (r for r in bucket.values() if r.get("status") != "running"),
+                key=lambda r: r.get("ts", 0))
+            for r in terminal[: len(bucket) - _MONITORS_MAX]:
+                bucket.pop(r["id"], None)
+        _bus_publish(session_key, {"kind": "monitor", "monitor": rec}, persist=False)
+    except Exception:
+        pass
+
+
+def _monitors_clear(session_key: str) -> None:
+    """Drop a session's monitors (called on rotate/reset — old shells die with the session)."""
+    _monitors.pop(session_key, None)
+
+
+def _monitor_dismiss(session_key: str, mid: str) -> bool:
+    """Remove a single monitor and broadcast its removal. Returns True if it existed.
+
+    Card b6f5cc: a raw background-bash shell's natural completion is a CLI-internal input
+    injection the engine can't observe, so it can linger as "running". This gives the operator
+    an explicit way to clear a monitor row. Frontend drops any monitor event with removed=True."""
+    bucket = _monitors.get(session_key)
+    if not bucket or mid not in bucket:
+        return False
+    bucket.pop(mid, None)
+    if not bucket:
+        _monitors.pop(session_key, None)
+    _bus_publish(session_key, {"kind": "monitor", "monitor": {"id": mid, "removed": True}}, persist=False)
+    return True
+
+
 # ─────────────────────────── live turn buffer (spec-035) ─────────────────────
 # In-memory ring buffer of events for the current (or last) agent turn.
 # Keyed by session_key. Retained for 300s after turn completion for reconnect replay.
@@ -4672,6 +4739,37 @@ async def api_activity_stream_all(req: web.Request) -> web.StreamResponse:
     return await _sse_stream(req, q, _bus_unsubscribe_global)
 
 
+async def api_project_monitors(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/monitors — snapshot of the session's background-task monitors.
+
+    Card b6f5cc: long-running shells / Monitor / Workflow tasks the agent started.
+    Live updates arrive over the activity-stream as {kind:"monitor"} events; this is the
+    initial hydration. Running monitors first, then most-recent terminal ones."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    mons = list(_monitors.get(session_key, {}).values())
+    mons.sort(key=lambda r: (r.get("status") != "running", -r.get("ts", 0)))
+    return web.json_response({"monitors": mons})
+
+
+async def api_project_monitor_dismiss(req: web.Request) -> web.Response:
+    """DELETE /api/projects/{id}/monitors/{mid} — operator dismisses a monitor row.
+
+    Card b6f5cc: lets the operator clear a lingering monitor (raw bg-bash whose natural
+    completion the engine can't observe). Read-only otherwise — this does NOT kill the shell."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    removed = _monitor_dismiss(session_key, req.match_info["mid"])
+    return web.json_response({"ok": True, "removed": removed})
+
+
 async def api_project_live(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/live — snapshot of the current (or last) LiveTurn buffer.
 
@@ -8255,6 +8353,8 @@ async def api_project_rotate(req: web.Request) -> web.Response:
         # Pop the sessions layer and persist
         ctx["sessions"].pop(session_key, None)
         ctx["save_sessions"]()
+        # Background-task monitors die with the session — drop them (card b6f5cc).
+        _monitors_clear(session_key)
         print(f"[session] rotate-done {session_key} (both layers cleared, handoff={stored})")
 
         # Clear context-warn state so the fresh session can warn again
@@ -10323,6 +10423,8 @@ async def start(ptb_app, ctx: dict) -> None:
         app.router.add_get("/api/ui-state", api_ui_state_get)
         app.router.add_put("/api/ui-state", api_ui_state_put)
         app.router.add_get("/api/projects/{id}/settings", api_project_settings_get)
+        app.router.add_get("/api/projects/{id}/monitors", api_project_monitors)
+        app.router.add_delete("/api/projects/{id}/monitors/{mid}", api_project_monitor_dismiss)
         app.router.add_post("/api/projects/{id}/settings", api_project_settings_post)
         # "+ New project" — creates untitled-<ts>/, adds to topics.json, spawns onboarding
         app.router.add_post("/api/projects/new", api_new_project)

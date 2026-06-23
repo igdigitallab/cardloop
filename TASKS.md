@@ -10,7 +10,6 @@
 ## Backlog
 - [ ] Я все время забываю, какой задачей мы занимаемся в проекте. Вот, то есть в последней. Я хочу, может быть, как-то куда-то, может быть, выводить, над какой задачей мы работаем. Потому что я вот и каким образом это будет автоматически подтягиваться. И чтобы мне потом вспомнить, мне приходится листать, какую задачу я ставил там, и искать и понимать, вспоминать. <!--ops:e63055-->
 - [ ] Сейчас у нас только наверху в карточке проекта Но в самом проекте Я имею в виду отображается гид коммит сделан или не сделал Но возможно как-то стоит улучшить вообще интеграцию скитхабом то есть может быть там отображать где-то ещё историю версии или что-нибудь э даже файл ну я не знаю вот как лучше всего сделать так чтобы было максимально удобно пользоваться моим сервисом удобно и чтобы он был самый главный суперфункциональным то есть мы делаем сервис для разработки и общения для создания ну не только для разработки но и всё равно будет подключаться github даже для простоведения переписки там ведение проектов не обязательно чтобы это было разработка <!--ops:ce9a15-->
-- [ ] Иногда агенты умеют вешать сервисные мониторы на какие-то задачи и в через терминал через Клод клиента эти сервисные мониторы отображаются их можно видеть я хочу сделать так чтобы можно было увидеть эти сервисные мониторы и у нас <!--ops:b6f5cc-->
 - [ ] Допустим я сделал OpenSource этот проект. Как его поднимать или я хочу сделать своей племяннице отдельную VM с ее ClaudeOps, там будет полностью VM ее задачи, проекты и прочее и ее подписка на Claude. Как это сделать? <!--ops:2dca4d-->
 - [ ] Сделать возможность управления Antigravity CLI и Codex CLI <!--ops:04f84f-->
   > Пропущено по запросу Игоря (2026-06-13) — единственная оставшаяся в Backlog.
@@ -23,8 +22,6 @@
   > Когда агент запускает внешний фоновый процесс (`ask`/`agy`, Codex, долгий bash run_in_background) — кокпит НЕ показывает, что что-то выполняется: нет индикатора/строки «running», нельзя увидеть прогресс или остановить. Сейчас видно только обычные ходы агента. Придумать решение: реестр активных внешних процессов (pid/команда/старт/статус) + индикатор в UI (баннер/спиннер/панель), желательно с возможностью stop и хвостом вывода. Учесть, что процессы детачнутые, могут пережить ход. Связано с картой 04f84f (управление Antigravity/Codex CLI).
 - [ ] Bug: Sub-agent activity not visible in cockpit <!--ops:5ba5ac-->
   > Orchestrator spawns agents but indicator doesn't show activity; user can't tell work is happening
-- [ ] Bug: Ghost 'running' indicator not resetting <!--ops:3cfeb7-->
-  > Status stuck on 'running' when completion signal is lost (related to 784e8e)
 - [ ] Feature: Conversable orchestrator while sub-agents work <!--ops:035154-->
   > Allow user to continue chat with main orchestrator instead of blocking until all agents finish. Currently queued messages wait for completion.
 - [ ] Fix: Global CLAUDE.md blocks sub-agent code execution <!--ops:30db09-->
@@ -61,15 +58,20 @@
 - [~] сделать нормальный логин и пароль. ? <!--ops:e518e2-->
 - [~] P0 Rewrite git history: --mailmap (author email) + --replace-text <!--ops:a1f0c0-->
   > spec-041 §0.2. Author field of EVERY commit is `Igor <zira777ru@gmail.com>` → needs git filter-repo --mailmap (replace-text does NOT touch author headers). Plus --replace-text list: 282311426, @ziraclaudebot, ops-igor-2026 (old pwd), tg.session path, 1780365319, pve, proxmox-tunnel, coscore.us/crm/firecrawl, /home/igor. Orphan/squash NOT needed. Coordinate force-push; verify with git grep over --all after.
+- [~] Bug: Ghost 'running' indicator not resetting <!--ops:3cfeb7-->
+  > Status stuck on 'running' when completion signal is lost (related to 784e8e)
 
 ## Review
-- [?] Global tools moved to sidebar tools row (mobile parity) + ⚙ global settings <!--ops:b3f1a2-->
-  > Terminal/Vault/Files/Schedules launchers moved from the top ProjectTabBar (desktop-only, hidden on mobile) into a compact icon row in the sidebar — reachable on phones via the off-canvas drawer. Added 5th ⚙ icon opening a new global GlobalSettingsTab (extracted from SettingsTab's global block) → closes 921e4a. Built & shipped to dist. NEEDS: Igor's visual check on desktop + phone.
 - [?] Fix: CI test environment issues (tg_queue + quality_gate) <!--ops:81cbca-->
   > Fixed ALLOWED_USERS not set in CI (auth gate rejection) and pytest detection in quality_gate. Added autouse fixture and venv symlink. All 1406 tests pass under CI environment.
 - [?] Redesign project cards UX: kebab menu + drag handle <!--ops:b88c94-->
   > Rethink card interaction: explicit ⋯ menu (not long-press), grip handle (⠿) for drag-only, mobile bottom-sheet actions. Scope choice: both sidebar+tabs vs sidebar-only first.
-- [?] Deploy Cardloop на VM племяннице <!--ops:824bcd-->
-  > Развернуть изолированный инстанс Cardloop на отдельной VM в офисе для племяницы (первый внешний пользователь). Включает: код без git-истории, .env, systemd-юнит, deploy-runbook. Открыты: VM локация, подписка Claude, способ доступа, Telegram сейчас/позже.
+- [?] Fix spinner animation in compress-session banner <!--ops:7d8ed1-->
+  > Remove duplicate spinning elements (CSS border + text glyph) from .att-spinner
+- [?] Fix: Chat horizontal scroll lock <!--ops:f164de-->
+  > Viewport width constraint: added max-width: 100%, overflow-x: hidden, overscroll-behavior-x on root to prevent page drag left/right from child overflow
+- [?] Fix: CLAUDE.md scroll containment <!--ops:fc696b-->
+  > Scroll containment fix for CLAUDE.md display component
+- [?] Иногда агенты умеют вешать сервисные мониторы на какие-то задачи и в через терминал через Клод клиента эти сервисные мониторы отображаются их можно видеть я хочу сделать так чтобы можно было увидеть эти сервисные мониторы и у нас <!--ops:b6f5cc-->
 
 ## Failed

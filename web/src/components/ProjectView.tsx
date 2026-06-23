@@ -633,7 +633,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                 <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} chromeCollapsed={navCollapsed} />
               </ErrorBoundary>
             ) : (
-              <>
+              <div className="tab-content">
                 {mobileInnerTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'logs'      && <ErrorBoundary label="Logs"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
                 {mobileInnerTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} /></ErrorBoundary>}
@@ -641,7 +641,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                 {mobileInnerTab === 'memory'    && <ErrorBoundary label="Memory"><MemoryTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} /></ErrorBoundary>}
-              </>
+              </div>
             )}
           </div>
           <HealthRunEndRefresher refresh={refreshHealth} />
