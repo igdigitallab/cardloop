@@ -118,7 +118,15 @@
 .board-card-text {
   font-size: 13px; line-height: 1.4; color: var(--text);
   white-space: pre-wrap; word-break: break-word; margin-bottom: 8px;
-  cursor: default;
+  cursor: pointer;
+}
+/* Collapsed preview: clamp long (often voice-dictated) prompts to 3 lines with
+   a fade-out, so the board stays scannable. Tapping the text expands it. */
+.board-card-text.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
 }
 .board-card-edit-input {
   width: 100%;

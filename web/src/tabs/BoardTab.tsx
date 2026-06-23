@@ -358,6 +358,18 @@ export function BoardTab({ projectId, isActive = true }: Props) {
   })
 
   // Multi-select cards for batch sending to agent (sequential queue)
+  // Cards clamp their (often long, voice-dictated) text to a few lines; tapping
+  // the text expands/collapses it. Keeps the board scannable without losing
+  // access to the full prompt. Double-click still opens the edit modal.
+  const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set())
+  function toggleExpand(cardId: string) {
+    setExpandedCards(prev => {
+      const next = new Set(prev)
+      if (next.has(cardId)) next.delete(cardId); else next.add(cardId)
+      return next
+    })
+  }
+
   const [selected, setSelected] = useState<Set<string>>(new Set())
   function toggleSelect(cardId: string) {
     setSelected(prev => {
@@ -803,7 +815,8 @@ export function BoardTab({ projectId, isActive = true }: Props) {
           </div>
         )}
         <div
-          className="board-card-text"
+          className={`board-card-text${expandedCards.has(card.id) ? '' : ' clamped'}`}
+          onClick={() => toggleExpand(card.id)}
           onDoubleClick={() => !isRunning && setTaskEditModal({ id: card.id, text: card.text, model: card.model || '' })}
           title={card.text}
         >
