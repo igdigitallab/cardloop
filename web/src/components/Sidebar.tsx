@@ -541,26 +541,21 @@ export function Sidebar({
   }
 
   // ── Project pointer-down handler ──────────────────────────────────────────
+  // Drag-to-reorder is DESKTOP-ONLY (direct mouse drag on the row, no handle).
+  // Touch has no reordering: taps select, vertical swipe scrolls the list.
   function handleProjectPointerDown(e: React.PointerEvent, p: Project) {
-    if (e.pointerType === 'mouse' && e.button !== 0) return
-    const isTouch = e.pointerType !== 'mouse'
-    const onGrip = !!(e.target as HTMLElement).closest?.('.sidebar-drag-handle')
+    if (e.pointerType !== 'mouse' || e.button !== 0) return
     const onExcluded = !!(e.target as HTMLElement).closest?.('.sidebar-kebab-btn, .fav-star-btn, .free-delete-btn')
     if (onExcluded) return
-    // Touch: only the grip initiates drag; body touch scrolls normally
-    if (isTouch && !onGrip) return
 
     dragRef.current = { kind: 'project', id: p.id, group: p.group ?? null, startX: e.clientX, startY: e.clientY, moved: false }
     attachDocListeners()
   }
 
   // ── Group header pointer-down handler ─────────────────────────────────────
+  // Desktop-only group reordering via direct mouse drag on the header.
   function handleGroupPointerDown(e: React.PointerEvent, label: string) {
-    if (e.pointerType === 'mouse' && e.button !== 0) return
-    const isTouch = e.pointerType !== 'mouse'
-    const onGrip = !!(e.target as HTMLElement).closest?.('.sidebar-drag-handle')
-    // Touch: only grip initiates drag
-    if (isTouch && !onGrip) return
+    if (e.pointerType !== 'mouse' || e.button !== 0) return
 
     dragRef.current = { kind: 'group', id: label, group: null, startX: e.clientX, startY: e.clientY, moved: false }
     attachDocListeners()
@@ -756,22 +751,6 @@ export function Sidebar({
     ]
   }
 
-  // ── Six-dot drag grip ─────────────────────────────────────────────────────
-  function DragGrip() {
-    return (
-      <span className="sidebar-drag-handle" aria-label="Drag to reorder" title="Drag to reorder">
-        <span className="grip-dots">
-          <span className="grip-dot" />
-          <span className="grip-dot" />
-          <span className="grip-dot" />
-          <span className="grip-dot" />
-          <span className="grip-dot" />
-          <span className="grip-dot" />
-        </span>
-      </span>
-    )
-  }
-
   // ── Project item renderer ─────────────────────────────────────────────────
   function renderProjectItem(p: Project) {
     const unread = unreadFor(p, unreadBySession)
@@ -839,7 +818,6 @@ export function Sidebar({
           label="More actions"
           onClick={rect => openActionMenu(rect, { kind: 'project', id: p.id, group: p.group ?? null })}
         />
-        <DragGrip />
       </div>
     )
   }
@@ -983,7 +961,6 @@ export function Sidebar({
                       label="Group actions"
                       onClick={rect => openActionMenu(rect, { kind: 'group', label: groupLabel })}
                     />
-                    <DragGrip />
                   </div>
                   {/* Tree-indented body for group children */}
                   {!isCollapsed && (

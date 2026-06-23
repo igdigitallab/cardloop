@@ -242,21 +242,21 @@
 .project-item-free:hover .free-delete-btn { opacity: 1; }
 .free-delete-btn:hover { color: var(--red); background: var(--bg4); }
 
-/* Sidebar reordering (pointer events — works on mouse AND touch).
-   pan-y: browser handles vertical scroll; pointercancel fires if the browser
-   claims the gesture for scrolling, which the cancel handlers already clean up.
-   Drag on touch is gated to the grip handle only (see Sidebar.tsx handlers). */
-.project-item { cursor: grab; touch-action: pan-y; }
+/* Sidebar reordering is DESKTOP-ONLY (direct mouse drag on the row — no handle).
+   grab cursor only on a fine pointer; touch never drags, so the list scrolls
+   freely (touch-action: auto). See Sidebar.tsx handlers. */
 .project-item.sidebar-item-dragging { opacity: 0.35; cursor: grabbing; }
 .project-item.sidebar-item-drag-over { border-top: 2px solid var(--accent); margin-top: -2px; }
-/* Drag grip styles live in actionmenu.css (shared with kebab layout) */
+@media (pointer: fine) {
+  .project-item { cursor: grab; }
+}
 
-/* Touch targets ≥44px on coarse pointer (finger touch) */
+/* Touch: compact rows with a comfortable (but tighter) tap target */
 @media (pointer: coarse) {
   .project-item {
-    min-height: 44px;
-    padding-top: 9px;
-    padding-bottom: 9px;
+    min-height: 40px;
+    padding-top: 7px;
+    padding-bottom: 7px;
   }
 }
 

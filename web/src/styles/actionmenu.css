@@ -219,71 +219,14 @@
   opacity: 1;
 }
 
-/* Touch (coarse pointer) or narrow viewport: always visible, larger hit area */
+/* Touch (coarse pointer) or narrow viewport: always visible, compact hit area */
 @media (pointer: coarse), (max-width: 1024px) {
   .sidebar-kebab-btn {
     opacity: 1;
-    width: 44px;
-    height: 44px;
+    width: 36px;
+    height: 36px;
   }
 }
 
-/* ── Six-dot drag grip (replaces two-bar design) ──────────────── */
-
-.sidebar-drag-handle {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  align-self: stretch;
-  padding: 0 8px;
-  cursor: grab;
-  touch-action: none;
-  /* iOS/Android: suppress long-press callout and text-selection on the grip
-     so the touchstart is not cancelled before the drag activates. */
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-/* 2×3 dot grid using a 6-element dot container */
-.sidebar-drag-handle .grip-dots {
-  display: grid;
-  grid-template-columns: repeat(2, 4px);
-  grid-template-rows: repeat(3, 4px);
-  gap: 3px;
-  pointer-events: none;
-  /* Inherit callout/selection suppression so the dots themselves don't trigger it */
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-.sidebar-drag-handle .grip-dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--text3);
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-.sidebar-drag-handle:active { cursor: grabbing; }
-.sidebar-drag-handle:active .grip-dot { background: var(--text); }
-
-/* Touch/tablet: show grip with ≥44px hit area */
-@media (max-width: 1024px) {
-  .sidebar-drag-handle {
-    display: flex;
-    min-width: 44px;
-  }
-}
-
-/* Desktop: show grip on row hover */
-@media (min-width: 1025px) {
-  .project-item:hover .sidebar-drag-handle,
-  .sidebar-group-header:hover .sidebar-drag-handle {
-    display: flex;
-  }
-}
+/* Six-dot drag grip removed (2026-06-23): reordering is now desktop-only via
+   direct mouse drag on the row; touch has no reordering. No handle on either. */
