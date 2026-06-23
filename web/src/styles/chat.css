@@ -996,22 +996,6 @@
   background: color-mix(in srgb, var(--red) 22%, transparent);
   border-color: var(--red);
 }
-/* Anchor the whole cluster to the right edge so the primary button (Queue) lands
-   in the exact spot Send/Stop occupy; the mini Stop appears to its left without
-   shifting it. Drop the inner auto-margin so Queue hugs Stop with just the gap. */
-.chat-send-cluster { display: inline-flex; align-items: stretch; gap: 6px; margin-left: auto; }
-.chat-send-cluster .chat-send-btn { margin-left: 0; }
-.chat-stop-mini {
-  display: inline-flex; align-items: center; justify-content: center;
-  background: none;
-  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
-  color: var(--red);
-  border-radius: var(--radius-sm);
-  padding: 0 9px; min-width: 36px;
-  cursor: pointer;
-  transition: background var(--transition), border-color var(--transition);
-}
-.chat-stop-mini:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 16%, transparent); border-color: var(--red); }
 
 /* ── Composer: unified rounded box (ChatGPT/Claude style) ──────── */
 /* The box itself: single border, no double-frame. focus-within highlights the border. */

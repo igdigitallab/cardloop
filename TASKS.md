@@ -64,8 +64,6 @@
 ## Review
 - [?] Fix: CI test environment issues (tg_queue + quality_gate) <!--ops:81cbca-->
   > Fixed ALLOWED_USERS not set in CI (auth gate rejection) and pytest detection in quality_gate. Added autouse fixture and venv symlink. All 1406 tests pass under CI environment.
-- [?] Redesign project cards UX: kebab menu + drag handle <!--ops:b88c94-->
-  > Rethink card interaction: explicit ⋯ menu (not long-press), grip handle (⠿) for drag-only, mobile bottom-sheet actions. Scope choice: both sidebar+tabs vs sidebar-only first.
 - [?] Fix spinner animation in compress-session banner <!--ops:7d8ed1-->
   > Remove duplicate spinning elements (CSS border + text glyph) from .att-spinner
 - [?] Fix: Chat horizontal scroll lock <!--ops:f164de-->

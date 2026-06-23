@@ -2581,7 +2581,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             {(() => {
               const busy = !!run || streaming
               const hasContent = input.trim().length > 0 || attachments.filter(a => a.path).length > 0
-              // Running + nothing typed → Stop replaces Send.
+              // ONE button, fixed position — never shifts. Running: typed text →
+              // Queue, empty → Stop. Idle → Send. (Per Igor: clear the text to
+              // expose Stop while a run is active.)
               if (busy && !hasContent) {
                 return (
                   <button
@@ -2593,24 +2595,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   ><Square size={14} /> {t['chat.stop']}</button>
                 )
               }
-              // Running + typed text → Queue is primary, with a small Stop beside it.
               if (busy && hasContent) {
                 return (
-                  <div className="chat-send-cluster">
-                    <button
-                      className="chat-stop-mini"
-                      disabled={rotating}
-                      onClick={stopStream}
-                      title={t['chat.stop_title']}
-                      aria-label={t['chat.stop_aria']}
-                    ><Square size={14} /></button>
-                    <button
-                      className="btn-primary chat-send-btn"
-                      disabled={rotating}
-                      onClick={() => sendMessage()}
-                      title={t['chat.queue_title']}
-                    >{t['chat.queue']}</button>
-                  </div>
+                  <button
+                    className="btn-primary chat-send-btn"
+                    disabled={rotating}
+                    onClick={() => sendMessage()}
+                    title={t['chat.queue_title']}
+                  >{t['chat.queue']}</button>
                 )
               }
               // Idle → Send.

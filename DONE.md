@@ -237,3 +237,4 @@
 - [x] Global tools moved to sidebar tools row (mobile parity) + ⚙ global settings <!--ops:b3f1a2-->
 - [x] Show token context numbers in input frame (270K display) <!--ops:45e75e-->
 - [x] Fix: Feed jerk on scroll during collapse animation <!--ops:238629-->
+- [x] Redesign project cards UX: kebab menu + drag handle <!--ops:b88c94-->
