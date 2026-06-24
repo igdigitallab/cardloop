@@ -1,0 +1,360 @@
+/* ── Reset & base ──────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Dark theme (default) ──────────────────────────────────── */
+:root {
+  /* Background scale — carbon */
+  --bg:        #0a0a0a;
+  --bg2:       #141414;
+  --bg3:       #1c1c1c;
+  --bg4:       #242424;
+
+  /* Borders */
+  --border:    #262626;
+  --border2:   #333333;
+
+  /* Text */
+  --text:      #fafafa;
+  --text2:     #a1a1a1;
+  --text3:     #6b6b6b;
+
+  /* Accent — achromatic (white on dark, shadcn dark pattern) */
+  --accent:    #fafafa;
+  --accent-h:  #e5e5e5;
+  --accent-fg: #0a0a0a;       /* text on top of --accent fill */
+
+  /* Semantic colors — restrained, semantic-only */
+  --green:     #22c55e;
+  --yellow:    #eab308;
+  --red:       #ef4444;
+
+  /* Accent tint */
+  --accent-subtle: rgba(250,250,250,0.07);
+
+  /* Typography */
+  --sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Geist Mono Variable', 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Radius scale */
+  --radius-sm:   4px;
+  --radius:      10px;
+  --radius-lg:   14px;
+  --radius-pill: 26px;
+
+  /* Shadows — flat/border-first; --ring for focus only */
+  --shadow: none;
+  --ring:   0 0 0 2px rgba(250,250,250,0.25);
+
+  /* Misc */
+  --sidebar-w: 240px;
+  --transition: 0.15s ease;
+
+  /* Semantic aliases — same var names, now resolving against new base */
+  --text-muted:     var(--text2);
+  --text-dim:       var(--text3);
+  --text1:          var(--text);
+  --bg-card:        var(--bg2);
+  --bg-secondary:   var(--bg2);
+  --bg-hover:       var(--bg3);
+  --bg-elev:        var(--bg3);
+  --bg1:            var(--bg);
+  --surface1:       var(--bg);
+  --surface2:       var(--bg2);
+  --border-faint:   color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+/* ── Dark theme: explicit data-theme="dark" override ───────── */
+:root[data-theme="dark"] {
+  --bg:        #0a0a0a;
+  --bg2:       #141414;
+  --bg3:       #1c1c1c;
+  --bg4:       #242424;
+  --border:    #262626;
+  --border2:   #333333;
+  --text:      #fafafa;
+  --text2:     #a1a1a1;
+  --text3:     #6b6b6b;
+  --accent:    #fafafa;
+  --accent-h:  #e5e5e5;
+  --accent-fg: #0a0a0a;
+  --green:     #22c55e;
+  --yellow:    #eab308;
+  --red:       #ef4444;
+  --accent-subtle: rgba(250,250,250,0.07);
+  --ring:      0 0 0 2px rgba(250,250,250,0.25);
+  --text-muted:   var(--text2);
+  --text-dim:     var(--text3);
+  --text1:        var(--text);
+  --bg-card:      var(--bg2);
+  --bg-secondary: var(--bg2);
+  --bg-hover:     var(--bg3);
+  --bg-elev:      var(--bg3);
+  --bg1:          var(--bg);
+  --surface1:     var(--bg);
+  --surface2:     var(--bg2);
+  --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+/* ── Light theme vars (shared values) ──────────────────────── */
+/* Applied both via explicit data-theme and via OS media query  */
+
+/* Explicit: data-theme="light" */
+:root[data-theme="light"] {
+  --bg:        #ffffff;
+  --bg2:       #fafafa;
+  --bg3:       #f2f2f2;
+  --bg4:       #ececec;
+  --border:    #e5e5e5;
+  --border2:   #d4d4d4;
+  --text:      #0a0a0a;
+  --text2:     #737373;
+  --text3:     #a1a1a1;
+  --accent:    #0a0a0a;        /* achromatic — primary action is black in light */
+  --accent-h:  #262626;
+  --accent-fg: #ffffff;        /* text on top of --accent fill */
+  --green:     #16a34a;
+  --yellow:    #ca8a04;
+  --red:       #dc2626;
+  --accent-subtle: rgba(10,10,10,0.05);
+  color-scheme: light;
+  --ring:      0 0 0 2px rgba(10,10,10,0.15);
+  --text-muted:   var(--text2);
+  --text-dim:     var(--text3);
+  --text1:        var(--text);
+  --bg-card:      var(--bg2);
+  --bg-secondary: var(--bg2);
+  --bg-hover:     var(--bg3);
+  --bg-elev:      var(--bg3);
+  --bg1:          var(--bg);
+  --surface1:     var(--bg);
+  --surface2:     var(--bg2);
+  --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+/* Auto: OS preference, only when no explicit data-theme is set */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg:        #ffffff;
+    --bg2:       #fafafa;
+    --bg3:       #f2f2f2;
+    --bg4:       #ececec;
+    --border:    #e5e5e5;
+    --border2:   #d4d4d4;
+    --text:      #0a0a0a;
+    --text2:     #737373;
+    --text3:     #a1a1a1;
+    --accent:    #0a0a0a;
+    --accent-h:  #262626;
+    --accent-fg: #ffffff;
+    --green:     #16a34a;
+    --yellow:    #ca8a04;
+    --red:       #dc2626;
+    --accent-subtle: rgba(10,10,10,0.05);
+    color-scheme: light;
+    --ring:      0 0 0 2px rgba(10,10,10,0.15);
+    --text-muted:   var(--text2);
+    --text-dim:     var(--text3);
+    --text1:        var(--text);
+    --bg-card:      var(--bg2);
+    --bg-secondary: var(--bg2);
+    --bg-hover:     var(--bg3);
+    --bg-elev:      var(--bg3);
+    --bg1:          var(--bg);
+    --surface1:     var(--bg);
+    --surface2:     var(--bg2);
+    --border-faint: color-mix(in srgb, var(--border) 50%, transparent);
+  }
+}
+
+html, body { height: 100%; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Lock the page to the viewport width — no horizontal pan/overscroll on mobile.
+   A descendant 1px wider than the screen otherwise lets the whole app drift L/R. */
+html, body, #root {
+  max-width: 100%;
+  overflow-x: hidden;
+  overscroll-behavior-x: none;
+}
+
+/* Slightly larger base text on phones for readability */
+@media (max-width: 768px) {
+  body { font-size: 15px; }
+}
+
+#root { height: 100%; }
+
+/* ── Scrollbar ─────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text3); }
+
+/* ── Spinner ───────────────────────────────────────────────── */
+.spinner-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  gap: 10px;
+  color: var(--text3);
+  font-size: 13px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+/* ── Error state ───────────────────────────────────────────── */
+.error-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(239,68,68,0.08);
+  border: 1px solid rgba(239,68,68,0.25);
+  border-radius: var(--radius-sm);
+  color: var(--red);
+  font-size: 13px;
+  max-width: 500px;
+}
+
+/* ── No content ────────────────────────────────────────────── */
+.no-content {
+  color: var(--text3);
+  font-size: 13px;
+  padding: 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Disabled Tab Placeholder ──────────────────────────────── */
+.tab-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 300px;
+  gap: 12px;
+  color: var(--text3);
+}
+
+.tab-placeholder-icon { font-size: 32px; opacity: 0.3; }
+.tab-placeholder h3 { font-size: 16px; font-weight: 500; color: var(--text2); }
+.tab-placeholder p { font-size: 13px; }
+
+/* ── ErrorBoundary fallback ───────────────────────────────────────────── */
+.error-boundary-fallback {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 40px 24px; text-align: center; height: 100%;
+}
+.error-boundary-icon { font-size: 36px; }
+.error-boundary-msg { font-size: 15px; color: var(--text); }
+.error-boundary-detail {
+  font-size: 11px; color: var(--text-dim); background: var(--bg2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;
+  max-width: 500px; overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+}
+
+/* ── Toast notifications ─────────────────────────────────────────────── */
+.toast-container {
+  position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+  display: flex; flex-direction: column; gap: 8px; max-width: 360px;
+}
+.toast {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 14px; border-radius: var(--radius);
+  background: var(--bg3); border: 1px solid var(--border2);
+  /* flat — no box-shadow */
+  font-size: 13px; animation: toast-in 0.2s ease;
+}
+@keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+.toast-error  { border-color: var(--red); }
+.toast-success{ border-color: var(--green); }
+.toast-info   { border-color: var(--accent); }
+.toast-msg { flex: 1; line-height: 1.4; color: var(--text); }
+.toast-close {
+  background: none; border: none; cursor: pointer;
+  color: var(--text-dim); font-size: 12px; padding: 0; line-height: 1;
+  flex-shrink: 0; margin-top: 1px;
+}
+.toast-close:hover { color: var(--text); }
+
+/* ── btn-danger ──────────────────────────────────────────────────────── */
+.btn-danger {
+  padding: 6px 14px; border-radius: var(--radius); border: 1px solid var(--red);
+  background: transparent; color: var(--red);
+  font-size: 13px; font-family: var(--sans); cursor: pointer; transition: background var(--transition);
+}
+.btn-danger:hover { background: rgba(239,68,68,0.1); }
+
+/* ── ThemeToggle ─────────────────────────────────────────────────────── */
+/* Inline in sidebar footer, touch-friendly (≥44px tap target on coarse) */
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 3px;
+}
+
+.theme-toggle-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  height: 30px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text3);
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--sans);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+  /* Ensure ≥44px tap target height on coarse pointers (mobile) */
+  position: relative;
+}
+
+/* Extend tap target without changing visual size */
+@media (pointer: coarse) {
+  .theme-toggle-btn::before {
+    content: '';
+    position: absolute;
+    inset: -7px -4px;
+  }
+}
+
+.theme-toggle-btn:hover {
+  color: var(--text2);
+  background: var(--bg4);
+}
+
+.theme-toggle-btn.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* Light mode contrast overrides are now handled by --accent-fg token */

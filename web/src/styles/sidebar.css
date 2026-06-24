@@ -1,0 +1,852 @@
+/* ── Sidebar ───────────────────────────────────────────────── */
+.sidebar {
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  padding: 20px 16px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.sidebar-logo-icon {
+  width: 26px;
+  height: 26px;
+  background: var(--accent);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.sidebar-logo-text {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  flex: 1;
+}
+
+/* Sidebar collapse/expand toggle button */
+.sidebar-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 14px;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), color var(--transition);
+}
+.sidebar-toggle-btn:hover { background: var(--bg3); color: var(--text); }
+
+.sidebar-toggle-btn.collapsed {
+  width: 44px;
+  height: 44px;
+  margin: 8px auto 4px;
+  font-size: 16px;
+}
+
+/* Collapsed sidebar — narrow icon strip */
+.sidebar.sidebar-collapsed-mode {
+  width: 56px;
+  min-width: 56px;
+  padding-top: 4px;
+}
+
+.projects-list-collapsed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 6px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.project-icon-btn {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius);
+  background: var(--bg3);
+  border: 1px solid transparent;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), border-color var(--transition);
+}
+.project-icon-btn:hover { background: var(--bg4); }
+.project-icon-btn.active {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+}
+
+.project-icon-letter {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+.unread-dot-collapsed {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-h);
+  box-shadow: none;
+}
+
+/* Reply-ready dot (collapsed sidebar): agent finished while tab was not active */
+.reply-ready-dot-collapsed {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.search-input {
+  width: 100%;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px 7px 30px;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--transition);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%235c5c6e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 9px center;
+}
+
+.search-input:focus { border-color: var(--accent); box-shadow: var(--ring); }
+.search-input::placeholder { color: var(--text3); }
+
+.sidebar-section-label {
+  padding: 12px 16px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text3);
+}
+
+.new-project-btn {
+  margin: 10px 12px 6px;
+  padding: 8px 12px;
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px dashed var(--border2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  text-align: center;
+}
+.new-project-btn:hover:not(:disabled) {
+  background: var(--bg4);
+  border-color: var(--accent);
+  color: var(--accent-h);
+}
+.new-project-btn:disabled { opacity: 0.55; cursor: wait; }
+
+.new-project-btn-collapsed {
+  width: 36px;
+  height: 36px;
+  margin: 4px auto 6px;
+  background: var(--bg3);
+  color: var(--text2);
+  border: 1px dashed var(--border2);
+  border-radius: var(--radius);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.new-project-btn-collapsed:hover:not(:disabled) {
+  background: var(--bg4);
+  border-color: var(--accent);
+  color: var(--accent-h);
+}
+.new-project-btn-collapsed:disabled { opacity: 0.55; cursor: wait; }
+
+.projects-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px;
+}
+
+.project-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Reduced from 7px to 5px vertical padding to shorten card height.
+     Content (name, dot, badges) is single-line so nothing is clipped. */
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--transition);
+  user-select: none;
+  /* iOS/Android: prevent text-selection and long-press callout from
+     hijacking the drag gesture before we can handle it. */
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.project-item:hover { background: var(--bg3); }
+.project-item.active {
+  background: var(--accent-subtle);
+  border-left: 2px solid var(--accent);
+  padding-left: 6px; /* compensate for border to avoid layout shift */
+}
+.project-item.has-unread .project-name { color: var(--accent-h); font-weight: 500; }
+
+/* Free chats — same project-item, more compact + delete button */
+.project-item-free { padding-right: 4px; }
+.project-item-free .free-icon { font-size: 12px; flex-shrink: 0; }
+.free-delete-btn {
+  background: transparent; border: none; color: var(--text3);
+  font-size: 11px; cursor: pointer; padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  opacity: 0; transition: opacity var(--transition), color var(--transition), background var(--transition);
+}
+.project-item-free:hover .free-delete-btn { opacity: 1; }
+.free-delete-btn:hover { color: var(--red); background: var(--bg4); }
+
+/* Sidebar reordering is DESKTOP-ONLY (direct mouse drag on the row — no handle).
+   grab cursor only on a fine pointer; touch never drags, so the list scrolls
+   freely (touch-action: auto). See Sidebar.tsx handlers. */
+.project-item.sidebar-item-dragging { opacity: 0.35; cursor: grabbing; }
+.project-item.sidebar-item-drag-over { border-top: 2px solid var(--accent); margin-top: -2px; }
+@media (pointer: fine) {
+  .project-item { cursor: grab; }
+}
+
+/* Touch: dense rows. Height is driven by the kebab + padding, not min-height,
+   so both are trimmed (see kebab sizing in actionmenu.css). */
+@media (pointer: coarse) {
+  .project-item {
+    min-height: 32px;
+    padding-top: 3px;
+    padding-bottom: 3px;
+  }
+}
+
+/* Search input: font ≥16px on mobile to prevent iOS auto-zoom */
+@media (max-width: 640px) {
+  .search-input {
+    font-size: 16px;
+  }
+}
+
+.project-icon-btn.free.active { border-color: var(--accent-h); }
+
+.incidents-badge {
+  margin-left: auto;
+  background: var(--red);
+  color: var(--accent-fg);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: var(--radius-pill);
+  min-width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  letter-spacing: 0.2px;
+  animation: incident-pulse 2s ease-in-out infinite;
+}
+@keyframes incident-pulse {
+  0%, 100% { box-shadow: none; border-color: var(--red); }
+  50%      { box-shadow: 0 0 0 3px rgba(220,38,38,0.15); }
+}
+.incidents-dot-collapsed {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.unread-badge {
+  margin-left: auto;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: var(--radius-pill);
+  min-width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* Reply-ready badge (expanded sidebar): green dot, agent reply waiting */
+.reply-ready-badge {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.health-dot.green  { background: var(--green); }
+.health-dot.yellow { background: var(--yellow); }
+.health-dot.gray   { background: var(--text3); }
+
+.project-name {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.projects-empty {
+  padding: 24px 16px;
+  color: var(--text3);
+  font-size: 13px;
+  text-align: center;
+}
+
+.sidebar-footer {
+  padding: 12px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-footer-theme {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px 8px;
+  gap: 8px;
+}
+
+.sidebar-footer-theme-label {
+  font-size: 11px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+
+/* Let ThemeToggle fill the remaining space and center its buttons */
+.sidebar-footer-theme .theme-toggle {
+  flex: 1;
+  justify-content: center;
+}
+
+.logout-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.logout-btn:hover { background: var(--bg3); color: var(--red); }
+
+/* spec-047: version badge + self-update affordance */
+.version-badge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px 8px;
+  font-size: 11px;
+  color: var(--text3);
+}
+.version-badge--updating {
+  justify-content: flex-start;
+  color: var(--text2);
+}
+.version-badge-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.version-badge-ver { color: var(--text2); }
+.version-update-btn {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--text);
+  color: var(--bg);
+  border: none;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--transition);
+}
+.version-update-btn:hover { opacity: 0.85; }
+.version-check-btn {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text3);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.version-check-btn:hover:not(:disabled):not(.version-check-btn--disabled) {
+  background: var(--bg3);
+  color: var(--text2);
+}
+.version-check-btn--disabled { cursor: default; opacity: 0.7; }
+.version-error { color: var(--red); flex-shrink: 0; }
+.version-spinner {
+  display: inline-block;
+  width: 11px; height: 11px;
+  margin-right: 6px;
+  border: 2px solid var(--border);
+  border-top-color: var(--text2);
+  border-radius: 50%;
+  animation: version-spin 0.7s linear infinite;
+  vertical-align: -1px;
+}
+@keyframes version-spin { to { transform: rotate(360deg); } }
+
+/* D-03: Touch — always show free-delete-btn (no hover on touch) */
+@media (hover: none) {
+  .project-item-free .free-delete-btn {
+    opacity: 1;
+  }
+}
+
+/* Directive 2: Hide sidebar toggle on mobile — mobile uses its own nav stack */
+@media (max-width: 768px) {
+  .sidebar-toggle-btn {
+    display: none;
+  }
+}
+
+/* D-09: Upsize collapse toggle on coarse pointer (touch) devices */
+@media (pointer: coarse) {
+  .sidebar-toggle-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* D-10: New project button tap target ≥44px on mobile */
+@media (max-width: 768px) {
+  .new-project-btn {
+    min-height: 44px;
+    padding-top: 11px;
+    padding-bottom: 11px;
+  }
+}
+
+/* D-11: Logout button tap target ≥44px on mobile */
+@media (max-width: 768px) {
+  .logout-btn {
+    min-height: 44px;
+    padding-top: 11px;
+    padding-bottom: 11px;
+  }
+}
+
+/* H1: Back-to-project button — mobile only, visible when a project is active */
+.sidebar-back-btn {
+  display: none;
+}
+@media (max-width: 768px) {
+  .sidebar-back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 44px;
+    background: var(--bg3);
+    border: none;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    gap: 6px;
+    transition: background var(--transition), color var(--transition);
+  }
+  .sidebar-back-btn:hover {
+    background: var(--bg4);
+    color: var(--text);
+  }
+}
+
+/* ── Group header & items (Spec-024 / Spec-030) ──────────────── */
+.sidebar-group { margin-bottom: 2px; }
+.sidebar-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 3px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  user-select: none;
+  /* iOS/Android: prevent text-selection callout from stealing the drag. */
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  transition: background var(--transition);
+  touch-action: pan-y;
+}
+.sidebar-group-header:hover { background: var(--bg3); }
+.sidebar-group-toggle {
+  font-size: 9px;
+  color: var(--text3);
+  width: 12px;
+  flex-shrink: 0;
+}
+.sidebar-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text3);
+  text-transform: uppercase;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar-group-count {
+  font-size: 10px;
+  color: var(--text3);
+  background: var(--bg3);
+  border-radius: var(--radius-pill);
+  padding: 1px 6px;
+  min-width: 18px;
+  text-align: center;
+}
+.sidebar-group-label-ungrouped {
+  padding: 8px 8px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text3);
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sidebar-group-label-ungrouped::before,
+.sidebar-group-label-ungrouped::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* Group drag states */
+.sidebar-group.group-drag-over .sidebar-group-header {
+  background: var(--accent-subtle);
+  border-radius: var(--radius-sm);
+}
+.sidebar-group-drop-hint {
+  padding: 4px 8px 6px 28px;
+  font-size: 11px;
+  color: var(--text3);
+  font-style: italic;
+}
+
+/* Group header dragging */
+.sidebar-group.group-dragging { opacity: 0.4; }
+.sidebar-group-header.group-header-drag-over {
+  border-top: 2px solid var(--accent);
+  margin-top: -2px;
+}
+
+/* Inline rename input for group labels */
+.sidebar-group-rename-input {
+  flex: 1;
+  background: var(--bg4);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 1px 4px;
+  outline: none;
+  min-width: 0;
+}
+
+/* Archived section */
+.sidebar-archived-section {}
+.project-item-archived {
+  opacity: 0.65;
+  cursor: default;
+}
+.sidebar-archived-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.sidebar-restore-btn {
+  background: transparent;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-sm);
+  color: var(--text2);
+  font-size: 10px;
+  padding: 2px 6px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.sidebar-restore-btn:hover { background: var(--bg4); color: var(--accent-h); }
+.sidebar-delete-btn {
+  background: transparent;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-sm);
+  color: var(--text3);
+  font-size: 10px;
+  padding: 2px 6px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.sidebar-delete-btn:hover { background: color-mix(in srgb, var(--red) 10%, transparent); color: var(--red); border-color: var(--red); }
+
+/* Trash section */
+.sidebar-trash-section {}
+.project-item-trash { cursor: default; opacity: 0.7; }
+.sidebar-trash-days {
+  font-size: 10px;
+  color: var(--text3);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Manage groups button */
+.sidebar-manage-groups-btn {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 4px 8px;
+  padding: 5px 8px;
+  background: transparent;
+  border: 1px dashed var(--border2);
+  border-radius: var(--radius-sm);
+  color: var(--text3);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+  text-align: left;
+}
+.sidebar-manage-groups-btn:hover { background: var(--bg3); color: var(--text2); border-color: var(--text3); }
+
+/* New group button — sits next to + New project */
+.new-group-btn {
+  margin: 0 0 0 4px;
+  padding: 8px 10px;
+  background: var(--bg3);
+  color: var(--text3);
+  border: 1px dashed var(--border2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.new-group-btn:hover { background: var(--bg4); color: var(--text2); border-color: var(--accent); }
+
+/* Buttons row: new project + new group */
+.sidebar-new-btns {
+  display: flex;
+  align-items: stretch;
+  margin: 10px 12px 6px;
+  gap: 0;
+}
+.sidebar-new-btns .new-project-btn {
+  flex: 1;
+  margin: 0;
+}
+.sidebar-new-btns .new-group-btn {
+  flex-shrink: 0;
+}
+
+/* ── Global tools row (Terminal / Vault / Files / Schedules / Settings) ── */
+.sidebar-tools {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin: 0 12px 8px;
+  padding: 4px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.sidebar-tool-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  background: transparent;
+  color: var(--text2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.sidebar-tool-btn:hover {
+  background: var(--bg4);
+  color: var(--text1);
+}
+.sidebar-tool-btn.active {
+  background: var(--bg4);
+  color: var(--text1);
+  border-color: var(--accent);
+}
+
+/* ── Context menu (right-click on desktop) ───────────────────── */
+.ctx-menu {
+  position: fixed;
+  z-index: 9999;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+  min-width: 168px;
+  padding: 4px 0;
+  user-select: none;
+}
+.ctx-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--transition);
+  white-space: nowrap;
+  position: relative;
+}
+.ctx-menu-item:hover { background: var(--bg4); }
+.ctx-menu-item.danger { color: var(--red); }
+.ctx-menu-item.danger:hover { background: color-mix(in srgb, var(--red) 8%, transparent); }
+.ctx-menu-item.disabled { opacity: 0.45; pointer-events: none; }
+.ctx-menu-separator {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+.ctx-menu-arrow {
+  margin-left: auto;
+  color: var(--text3);
+  font-size: 10px;
+}
+/* Submenu */
+.ctx-submenu {
+  position: absolute;
+  left: 100%;
+  top: -4px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+  min-width: 150px;
+  padding: 4px 0;
+  z-index: 10000;
+}
+/* Drop target insertion line */
+.project-item.sidebar-item-drop-before {
+  border-top: 2px solid var(--accent);
+  margin-top: -2px;
+}
+
+/* Ungrouped drop zone */
+.sidebar-ungrouped-drop-zone {
+  min-height: 8px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition);
+}
+.sidebar-ungrouped-drop-zone.drop-active {
+  background: var(--accent-subtle);
+  min-height: 32px;
+}
+
+/* ── Spec-031: Tree indentation for grouped children ─────────── */
+.sidebar-group-body {
+  margin-left: 9px;
+  padding-left: 9px;
+  border-left: 1px solid var(--border);
+  transition: border-color var(--transition);
+}
+.sidebar-group:hover .sidebar-group-body {
+  border-left-color: var(--border2);
+}
+
+/* ── Spec-031: Favorite star button ──────────────────────────── */
+.fav-star-btn {
+  background: transparent;
+  border: none;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  /* Use visibility so button always occupies its space (no layout shift) */
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity var(--transition), color var(--transition);
+  color: var(--text3);
+}
+.fav-star-btn.fav-star-active {
+  visibility: visible;
+  opacity: 1;
+  color: #f5a623; /* intentional amber/gold — semantic star color, not accent */
+}
+.project-item:hover .fav-star-btn {
+  visibility: visible;
+  opacity: 1;
+}

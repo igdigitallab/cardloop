@@ -1,0 +1,16 @@
+/* ── Root stylesheet — imports all partials in cascade order ── */
+/* Vite bundles these into a single CSS output — class names stay global */
+
+@import './styles/base.css';
+@import './styles/forms.css';
+@import './styles/layout.css';
+@import './styles/sidebar.css';
+@import './styles/tabbar.css';
+@import './styles/overview.css';
+@import './styles/board.css';
+@import './styles/chat.css';
+@import './styles/files.css';
+@import './styles/modal.css';
+@import './styles/timeline.css';
+@import './styles/vault.css';
+@import './styles/actionmenu.css';

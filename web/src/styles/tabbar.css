@@ -1,0 +1,814 @@
+/* ── Project Tab Bar (open projects as browser-style tabs) ─────── */
+.project-tabbar {
+  display: flex;
+  align-items: stretch;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  min-height: 36px;
+}
+
+/* ── Hamburger — hidden on desktop, shown on tablet/mobile ─── */
+.ptab-hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border);
+  color: var(--text2);
+  font-size: 18px;
+  line-height: 1;
+  /* min tap target */
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition), color var(--transition);
+}
+.ptab-hamburger:hover {
+  background: var(--bg3);
+  color: var(--text);
+}
+
+@media (max-width: 1024px) {
+  .ptab-hamburger {
+    display: flex;
+  }
+}
+
+/* On mobile project screen the hamburger shows a back chevron */
+@media (max-width: 768px) {
+  .ptab-hamburger.ptab-hamburger-back {
+    font-size: 22px;
+    font-weight: 300;
+    letter-spacing: -1px;
+  }
+}
+
+.ptab-list {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  min-width: 0;
+}
+
+.ptab-spacer { flex: 1; }
+
+/* "+" button in the tab strip — opens a new free chat (browser-style) */
+.ptab-new {
+  background: transparent;
+  border: none;
+  color: var(--text3);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  transition: background var(--transition), color var(--transition);
+  flex-shrink: 0;
+}
+.ptab-new:hover {
+  background: var(--bg3);
+  color: var(--accent-h);
+}
+
+/* Global file browser button in the right side of the tabbar */
+.ptab-folder-btn {
+  background: transparent; border: none; cursor: pointer;
+  color: var(--text3); font-size: 16px; padding: 0 10px;
+  display: flex; align-items: center; min-height: 36px; flex-shrink: 0;
+  transition: color var(--transition), background var(--transition);
+  border-left: 1px solid var(--border);
+}
+.ptab-folder-btn:hover { color: var(--accent-h); background: var(--bg3); }
+.ptab-folder-btn.active { color: var(--accent-h); }
+
+/* Special tab for the global file browser */
+.ptab-global-files { font-style: normal; }
+
+/* Root hint label in the file browser */
+.files-root-hint { color: var(--text3); font-size: 11px; font-family: var(--mono); margin-left: 4px; }
+
+/* Usage Badge — right corner of the tab strip */
+.usage-badge-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border-left: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.usage-badge {
+  background: transparent;
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  text-decoration: none;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.usage-badge:hover { background: var(--bg3); color: var(--text); }
+.usage-badge.usage-green  { color: var(--green);  border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.usage-badge.usage-yellow { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 40%, transparent); }
+.usage-badge.usage-red    { color: var(--red);    border-color: color-mix(in srgb, var(--red) 40%, transparent); }
+.usage-badge.usage-dim    { color: var(--text3); }
+.usage-icon { font-size: 12px; }
+.usage-sep { opacity: 0.4; }
+
+.usage-dropdown {
+  position: absolute;
+  right: 8px;
+  top: calc(100% + 4px);
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-lg);
+  padding: 6px;
+  min-width: 240px;
+  z-index: 100;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.usage-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+}
+.usage-row.usage-green  { color: var(--green); }
+.usage-row.usage-yellow { color: var(--yellow); }
+.usage-row.usage-red    { color: var(--red); }
+.usage-row.usage-dim    { color: var(--text3); }
+.usage-row-label  { font-weight: 500; }
+.usage-row-pct    { font-family: var(--mono); }
+.usage-row-reset  { opacity: 0.65; font-size: 10px; }
+
+.ptab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  font-size: 13px;
+  color: var(--text2);
+  cursor: grab;
+  border-right: 1px solid var(--border);
+  background: var(--bg2);
+  white-space: nowrap;
+  transition: background var(--transition), color var(--transition), opacity var(--transition);
+  user-select: none;
+  position: relative;
+  max-width: 220px;
+  min-height: 36px;
+}
+.ptab:hover { background: var(--bg3); color: var(--text); }
+
+/* Drag-and-drop: dragged tab appears semi-transparent with grab cursor */
+.ptab[data-drag-active] {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+/* Drop indicator: 2px accent border on the side where the item will land */
+.ptab[data-drag-over="before"] {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.ptab[data-drag-over="after"] {
+  box-shadow: inset -2px 0 0 var(--accent);
+}
+/* Preserve active tab's bottom underline when also showing a drop indicator */
+.ptab.active[data-drag-over="before"] {
+  box-shadow: inset 2px 0 0 var(--accent), inset 0 -2px 0 var(--accent);
+}
+.ptab.active[data-drag-over="after"] {
+  box-shadow: inset -2px 0 0 var(--accent), inset 0 -2px 0 var(--accent);
+}
+.ptab.ptab-free.active[data-drag-over="before"] {
+  box-shadow: inset 2px 0 0 var(--accent), inset 0 -2px 0 var(--accent-h);
+}
+.ptab.ptab-free.active[data-drag-over="after"] {
+  box-shadow: inset -2px 0 0 var(--accent), inset 0 -2px 0 var(--accent-h);
+}
+.ptab.active {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 500;
+  /* Achromatic underline active indicator — no heavy fill */
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.ptab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+.ptab-unread {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: var(--radius-pill);
+  min-width: 14px;
+  text-align: center;
+}
+
+/* Reply-ready dot: agent finished a run while this tab was not active (ops:b2a081) */
+.ptab-reply-ready {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+}
+
+/* Working dot: agent turn currently in flight — pulsing amber dot (ops:b2a081) */
+.ptab-working {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--yellow);
+  flex-shrink: 0;
+  animation: ptab-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes ptab-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.75); }
+}
+
+/* Mobile dropdown: working dot variant */
+.ptab-menu-dot-working {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--yellow);
+  flex-shrink: 0;
+  animation: ptab-pulse 1.2s ease-in-out infinite;
+}
+
+.ptab-close {
+  background: transparent;
+  border: none;
+  color: var(--text3);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+  opacity: 0;
+  transition: background var(--transition), color var(--transition), opacity var(--transition);
+}
+.ptab:hover .ptab-close { opacity: 1; }
+.ptab.active .ptab-close { opacity: 0.45; }
+.ptab.active:hover .ptab-close { opacity: 1; }
+.ptab-close:hover { background: var(--bg4); color: var(--red); }
+
+/* Free chats — lighter underline on the active indicator */
+.ptab.ptab-free.active { box-shadow: inset 0 -2px 0 var(--accent-h); }
+
+/* Inline rename input for tab labels */
+.ptab-rename-input {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  outline: none;
+  min-width: 100px;
+  max-width: 200px;
+}
+
+/* Drag grip — two horizontal lines. Hidden on desktop (whole tab is draggable there);
+   on touch it is the ONLY way to start a reorder (plain swipe scrolls the strip). */
+.ptab-drag-handle {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 0 2px;
+  margin-left: 2px;
+  cursor: grab;
+  touch-action: none; /* let the grip drag without the strip scrolling */
+}
+.ptab-drag-handle i {
+  display: block;
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--text3);
+}
+.ptab-drag-handle:active { cursor: grabbing; }
+
+/* ── Project Header ────────────────────────────────────────── */
+.project-header {
+  padding: 20px 24px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.project-header-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.project-header-icon {
+  width: 36px;
+  height: 36px;
+  background: var(--bg4);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.project-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.4px;
+  line-height: 1.2;
+}
+
+.project-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text2);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 7px;
+}
+
+.meta-chip code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+
+.git-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+
+.git-branch {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent-h);
+}
+
+.git-dirty { color: var(--yellow); font-size: 11px; }
+.git-unpushed { color: var(--text2); font-size: 11px; }
+
+/* GitHub repo visibility icon: lock = private / globe = public (icon only, text in title) */
+.git-vis { font-size: 12px; line-height: 1; cursor: default; opacity: 0.85; }
+.git-vis:hover { opacity: 1; }
+
+/* Prominent git sync status dot before branch name */
+.git-sync-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.git-sync-dot.green  { background: var(--green); }
+.git-sync-dot.yellow { background: var(--yellow); }
+.git-sync-dot.gray   { background: var(--text3); }
+
+.git-sync-btn {
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  color: var(--accent-h);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  margin-left: 6px;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+}
+.git-sync-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+.git-sync-btn:disabled { opacity: 0.6; cursor: wait; }
+.git-sync-btn.busy { color: var(--text2); }
+
+.git-sync-msg {
+  font-size: 11px;
+  margin-left: 6px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-sync-msg.ok  { color: var(--green); }
+.git-sync-msg.err { color: var(--red); }
+
+/* ── Tabs ──────────────────────────────────────────────────── */
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 24px;
+  margin-top: 4px;
+}
+
+.tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text2);
+  cursor: pointer;
+  transition: color var(--transition);
+  margin-bottom: -1px;
+  white-space: nowrap;
+}
+
+.tab-btn:hover:not(:disabled) { color: var(--text); }
+.tab-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab-btn:disabled { opacity: 0.4; cursor: default; }
+
+.tab-soon {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--bg4);
+  border: 1px solid var(--border2);
+  color: var(--text3);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+
+/* ── Tab Content ───────────────────────────────────────────── */
+.tab-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+/* ── Rename controls ─────────────────────────────────────────── */
+.rename-edit-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  opacity: 0.5;
+  line-height: 1;
+  transition: opacity var(--transition);
+}
+.rename-edit-btn:hover { opacity: 1; }
+
+.rename-input {
+  background: var(--bg3);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-family: var(--sans);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+
+.rename-confirm-btn, .rename-cancel-btn {
+  background: none;
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition), color var(--transition);
+  flex-shrink: 0;
+}
+.rename-confirm-btn:hover { background: var(--green); color: var(--accent-fg); border-color: var(--green); }
+.rename-cancel-btn:hover  { background: var(--bg4);  color: var(--red); border-color: var(--red); }
+
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE — TabBar + ProjectHeader + Tabs
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Tab list: horizontally scrollable on mobile ─────────────── */
+@media (max-width: 1024px) {
+  .ptab-list {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    /* hide scrollbar but keep functionality */
+    scrollbar-width: none;
+  }
+  .ptab-list::-webkit-scrollbar { display: none; }
+
+  /* Ensure project tabs have enough tap target height */
+  .ptab {
+    min-height: 44px;
+    /* On touch, whole tab must not imply draggable — only the grip handle does */
+    cursor: default;
+  }
+
+  .ptab-new {
+    min-height: 44px;
+  }
+
+  /* Reveal the grip handle on touch/tablet; hidden on desktop */
+  .ptab-drag-handle { display: flex; }
+}
+
+/* H (Chrome compression): compact project-tabbar strip on mobile.
+   Visual height ~38px; tap target preserved at ≥40px via padding.
+   Hamburger / back button keeps its 44px for primary navigation. */
+@media (max-width: 768px) {
+  .project-tabbar {
+    min-height: 38px;
+  }
+
+  /* Rate-limit moved OFF the project-tab row — it now lives in the composer control
+     bar (see .usage-badge-mobile). Hide the tab-bar instance on mobile only. */
+  .project-tabbar > .usage-badge-wrap {
+    display: none;
+  }
+
+  .ptab {
+    min-height: 38px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+
+  .ptab-hamburger {
+    min-height: 40px;
+    min-width: 40px;
+    padding: 0 10px;
+  }
+
+  .ptab-new {
+    min-height: 38px;
+  }
+
+  /* menu btn and folder btn already have their own 768px block below — override */
+  .ptab-menu-btn {
+    min-height: 38px !important;
+  }
+
+  .ptab-folder-btn {
+    min-height: 38px !important;
+  }
+}
+
+/* ── Project header: condense on mobile ─────────────────────── */
+@media (max-width: 640px) {
+  .project-header {
+    padding: 10px 12px 0;
+  }
+
+  .project-header-top {
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .project-header-icon {
+    width: 28px;
+    height: 28px;
+    font-size: 13px;
+  }
+
+  .project-title {
+    font-size: 15px;
+  }
+
+  .project-meta-row {
+    gap: 6px;
+  }
+
+  /* Hide the cwd chip on very small screens — too wide, just noise */
+  .meta-chip {
+    display: none;
+  }
+
+  /* Keep git status, health badge, incidents — they wrap */
+  .project-meta-row { flex-wrap: wrap; }
+
+  /* Tabs: scrollable, tighter padding */
+  .tabs {
+    padding: 0 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+
+  .tab-btn {
+    padding: 8px 9px;
+    font-size: 12px;
+    min-height: 44px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Tab content: tighter padding */
+  .tab-content {
+    padding: 12px;
+  }
+}
+
+/* ── Sync message: hide on very small to avoid overflow ─────── */
+@media (max-width: 480px) {
+  .git-sync-msg {
+    display: none;
+  }
+}
+
+/* D-03: Touch — always show close button on active tab (no hover on touch) */
+@media (hover: none) {
+  .ptab.active .ptab-close {
+    opacity: 1;
+  }
+}
+
+/* D-03: Touch — always show rename edit button (no hover on touch) */
+@media (hover: none) {
+  .rename-edit-btn {
+    opacity: 1;
+  }
+}
+
+/* D-12 / M-01: Folder buttons (Vault, Schedules, Files) are rarely used on phones
+   and crowd the project-tab list. Hide them on mobile; UsageBadge stays visible.
+   The freed space is absorbed by .ptab-list (flex: 1 already set on .ptab-spacer). */
+@media (max-width: 768px) {
+  .ptab-folder-btn {
+    display: none;
+  }
+}
+
+/* H2: Open-tabs dropdown menu — hidden on desktop, shown on mobile */
+.ptab-menu-wrap {
+  display: none;
+  position: relative;
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .ptab-menu-wrap {
+    display: flex;
+    align-items: stretch;
+  }
+
+  .ptab-menu-btn {
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--border);
+    color: var(--text2);
+    font-size: 13px;
+    font-weight: 600;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0 10px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    transition: background var(--transition), color var(--transition);
+    flex-shrink: 0;
+  }
+  .ptab-menu-btn:hover {
+    background: var(--bg3);
+    color: var(--text);
+  }
+
+  .ptab-menu-dropdown {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    background: var(--bg2);
+    border: 1px solid var(--border2);
+    border-radius: var(--radius-lg);
+    box-shadow: none;
+    z-index: 200;
+    min-width: 200px;
+    max-width: 280px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .ptab-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    min-height: 44px;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--transition), color var(--transition);
+    width: 100%;
+  }
+  .ptab-menu-item:last-child {
+    border-bottom: none;
+  }
+  .ptab-menu-item:hover {
+    background: var(--bg3);
+    color: var(--text);
+  }
+  .ptab-menu-item.active {
+    color: var(--text);
+    font-weight: 600;
+    background: var(--accent-subtle);
+  }
+
+  .ptab-menu-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ptab-menu-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .ptab-menu-dot-green {
+    background: var(--green);
+  }
+
+  .ptab-menu-badge {
+    font-size: 11px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+}
+
+/* ── Health badge (project header meta row) ──────────────────── */
+.health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid var(--border2);
+  background: var(--bg3);
+  color: var(--text2);
+  transition: background var(--transition), color var(--transition);
+}
+.health-badge:hover { background: var(--bg4); color: var(--text); }
+.health-badge.health-badge-green  { color: var(--green);  border-color: color-mix(in srgb, var(--green) 35%, transparent); }
+.health-badge.health-badge-yellow { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 35%, transparent); }
+.health-badge.health-badge-red    { color: var(--red);    border-color: color-mix(in srgb, var(--red) 35%, transparent); }

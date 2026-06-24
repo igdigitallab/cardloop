@@ -1,0 +1,46 @@
+# --- secrets and local config ---
+.env
+*.env
+!.env.example
+# bot self-memory (.claude-ops/memory) contains BOT_TOKEN/password — do NOT commit
+.claude-ops/
+
+# --- runtime state and data (chat IDs, sessions, logs, audit, timeline) ---
+data/
+*.log
+*.session
+*.session-journal
+
+# --- python ---
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# --- node / web build ---
+web/node_modules/
+web/dist/
+
+# --- worktrees (for agents) ---
+.worktrees/
+
+# --- os ---
+.DS_Store
+Thumbs.db
+.claude/
+claude-ops-bot.service
+
+# Test coverage artifacts
+.coverage
+htmlcov/
+.coverage.*
+coverage.xml
+
+# Internal design docs (Russian design history, not shipped)
+docs/internal/
+
+# Live board state (per-instance, not shipped; scaffolded from templates/*.tpl)
+TASKS.md
+DONE.md

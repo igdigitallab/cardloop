@@ -1,0 +1,29 @@
+# systemd unit template for Cardloop (claude-ops-bot).
+#
+# Easiest: run `make service` (renders this template for the current user,
+# installs it, then enables & starts it). Manual install:
+#   1. Substitute the username:
+#        sed 's/__USER__/YOUR_USERNAME/g' claude-ops-bot.service.template > /tmp/claude-ops-bot.service
+#   2. sudo cp /tmp/claude-ops-bot.service /etc/systemd/system/claude-ops-bot.service
+#   3. sudo systemctl daemon-reload && sudo systemctl enable --now claude-ops-bot
+
+[Unit]
+Description=Cardloop-Bot (Claude Code via Telegram, forum-topics per project)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=%h/claude-ops-bot
+Environment=HOME=%h
+Environment=PATH=%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/claude-ops-bot/.env
+# ANTHROPIC_API_KEY is intentionally unset — we use Claude subscription OAuth (~/.claude/.credentials.json)
+ExecStart=%h/claude-ops-bot/venv/bin/python -u %h/claude-ops-bot/bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
