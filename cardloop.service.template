@@ -2,8 +2,10 @@
 #
 # Easiest: run `make service` (renders this template for the current user,
 # installs it, then enables & starts it). Manual install:
-#   1. Substitute the username:
-#        sed 's/__USER__/YOUR_USERNAME/g' cardloop.service.template > /tmp/cardloop.service
+#   1. Substitute the username AND home dir (systemd's %h is unreliable for
+#      system units with User= — it resolves to /root, not the user's home):
+#        sed -e "s/__USER__/$(whoami)/g" -e "s#__HOME__#$HOME#g" \
+#            cardloop.service.template > /tmp/cardloop.service
 #   2. sudo cp /tmp/cardloop.service /etc/systemd/system/cardloop.service
 #   3. sudo systemctl daemon-reload && sudo systemctl enable --now cardloop
 
@@ -16,12 +18,12 @@ Wants=network-online.target
 Type=simple
 User=__USER__
 Group=__USER__
-WorkingDirectory=%h/cardloop
-Environment=HOME=%h
-Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=%h/cardloop/.env
+WorkingDirectory=__HOME__/cardloop
+Environment=HOME=__HOME__
+Environment=PATH=__HOME__/.local/bin:__HOME__/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=__HOME__/cardloop/.env
 # ANTHROPIC_API_KEY is intentionally unset — we use Claude subscription OAuth (~/.claude/.credentials.json)
-ExecStart=%h/cardloop/venv/bin/python -u %h/cardloop/bot.py
+ExecStart=__HOME__/cardloop/venv/bin/python -u __HOME__/cardloop/bot.py
 Restart=on-failure
 RestartSec=5
 

@@ -23,7 +23,7 @@ install-dev:    ## Install dev/test dependencies only
 	venv/bin/pip install -r requirements-dev.txt
 
 service:        ## Render + install the systemd unit, then enable & start it
-	@sed "s/__USER__/$$(whoami)/g" cardloop.service.template \
+	@sed -e "s/__USER__/$$(whoami)/g" -e "s#__HOME__#$$HOME#g" cardloop.service.template \
 		| sudo tee /etc/systemd/system/cardloop.service >/dev/null
 	sudo systemctl daemon-reload
 	sudo systemctl enable --now cardloop
