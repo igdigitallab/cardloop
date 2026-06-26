@@ -7,6 +7,25 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+## [v0.14.0] — 2026-06-26
+
+First public open-source release under IG Digital Lab. Web-only cockpit + kanban auto-run.
+
+### Added
+- **Ultracode mode (spec-058)** — per-chat ⚡ toggle: max thinking effort + sub-agent fan-out/verify for harder tasks.
+- **Specs-as-epics (spec-059)** — epic-lens Specs tab tracking card progress; auto-stamp spec status → shipped on close; a discoverable Save-to-board action.
+- **Second opinion (spec-060)** — optional `second_opinion` tool to consult another model family via the Antigravity `agy` CLI (auto-off when absent).
+- **Nested project folders (spec-061)** — path-based sidebar folders with persisted collapse and drag-into-folder.
+- **Daily update re-check (spec-062)** — the version badge auto-checks once a day and pulses an accent dot when a new version appears; self-update auto-reloads the page on success.
+
+### Changed
+- Cost usage ledger + retuned context thresholds + revived (opt-in) auto-rotation.
+- Mobile: one-line composer with the toolbar relocated onto the composer.
+
+### Fixed
+- Self-update reliability: `update.sh` / `restart-self.sh` no longer abort silently when `.env` omits `CARDLOOP_SERVICE`, and the "Updating…" badge no longer hangs (reloads on success / surfaces failures with a timeout).
+- Terminal: render modern TUIs (guard xterm's crashing DECRQM handler); honor OSC 52 clipboard copy; PTY→WebSocket backpressure.
+
 ### Removed
 - **Telegram channel (spec-040 complete).** Cardloop is now web-only: web cockpit (PWA) + kanban auto-run. Dropped python-telegram-bot, the PTB adapter in bot.py, and the BOT_TOKEN/GROUP_CHAT_ID/ALLOWED_USERS env vars. For the legacy Telegram-enabled version, use tag v0.13.x.
 
