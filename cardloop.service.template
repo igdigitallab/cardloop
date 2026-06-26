@@ -18,7 +18,7 @@ User=__USER__
 Group=__USER__
 WorkingDirectory=%h/cardloop
 Environment=HOME=%h
-Environment=PATH=%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=%h/cardloop/.env
 # ANTHROPIC_API_KEY is intentionally unset — we use Claude subscription OAuth (~/.claude/.credentials.json)
 ExecStart=%h/cardloop/venv/bin/python -u %h/cardloop/bot.py

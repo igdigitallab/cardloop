@@ -29,7 +29,8 @@ NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
 # (a later step) needs it too. Not fatal here so the build can still finish.
 if ! command -v claude >/dev/null; then
   warn "Claude Code CLI not found — install it before the first run:"
-  warn "    npm install -g @anthropic-ai/claude-code"
+  warn "    curl -fsSL https://claude.ai/install.sh | bash   (or: npm install -g @anthropic-ai/claude-code)"
+  warn "    then make sure its install dir (e.g. ~/.local/bin) is on your PATH"
 fi
 
 # ── 2. Python venv + dependencies ──────────────────────────────────────────
@@ -64,7 +65,8 @@ cat <<'EOF'
 
 Next:
   1. install the Claude Code CLI if you don't have it yet:
-       npm install -g @anthropic-ai/claude-code
+       curl -fsSL https://claude.ai/install.sh | bash   (or: npm install -g @anthropic-ai/claude-code)
+       then make sure its install dir (e.g. ~/.local/bin) is on your PATH
   2. claude login                  # one-time Claude subscription auth
   3. edit .env  →  set WEB_PASSWORD  (CHANGE_ME is rejected at startup)
   4. run it:

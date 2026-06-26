@@ -86,7 +86,7 @@ Three things make Cardloop different from the dozen other agent kanbans:
 
 > **Setup time: ~3 minutes** — clone, run `install.sh`, `claude login`, set a password.
 
-Prerequisites: **Python 3.11+**, **Node 20+**, and the **[Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview)** (`npm install -g @anthropic-ai/claude-code`) — the engine drives the native `claude` binary, so it's needed both for `claude login` and at runtime. Minimum setup is Claude subscription auth + a web password.
+Prerequisites: **Python 3.11+**, **Node 20+**, and the **[Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview)** — install with `curl -fsSL https://claude.ai/install.sh | bash` (or `npm install -g @anthropic-ai/claude-code`) and make sure its install dir (e.g. `~/.local/bin`) is on your `PATH`. The engine drives the native `claude` binary, so it's needed both for `claude login` and at runtime. Minimum setup is Claude subscription auth + a web password.
 
 ```bash
 # 1. Clone
@@ -96,11 +96,12 @@ git clone https://github.com/igdigitallab/cardloop.git && cd cardloop
 ./install.sh                  # or: make install
 
 # 3. Claude auth (subscription) — run once
-npm install -g @anthropic-ai/claude-code   # the claude CLI, if you don't have it
+curl -fsSL https://claude.ai/install.sh | bash   # the claude CLI, if you don't have it (or: npm i -g @anthropic-ai/claude-code)
+#   ↳ make sure its install dir (e.g. ~/.local/bin) is on your PATH
 claude login                  # stores ~/.claude/.credentials.json
 
 # 4. Set your password
-#    edit .env → WEB_PASSWORD=...   (WEB_COOKIE_SALT was auto-generated for you)
+#    edit .env → WEB_PASSWORD=...   (.env is a hidden dotfile; WEB_COOKIE_SALT was auto-generated for you)
 
 # 5. Run
 venv/bin/python bot.py        # Cockpit → http://localhost:8787
