@@ -25,6 +25,13 @@ command -v npm  >/dev/null || die "npm not found — comes with Node 20+"
 NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
 [ "$NODE_MAJOR" -ge 18 ] || warn "Node $NODE_MAJOR detected; 20+ recommended"
 
+# The engine drives the native `claude` binary at runtime, and `claude login`
+# (a later step) needs it too. Not fatal here so the build can still finish.
+if ! command -v claude >/dev/null; then
+  warn "Claude Code CLI not found — install it before the first run:"
+  warn "    npm install -g @anthropic-ai/claude-code"
+fi
+
 # ── 2. Python venv + dependencies ──────────────────────────────────────────
 log "Python virtualenv + dependencies"
 [ -d venv ] || python3 -m venv venv
@@ -56,9 +63,11 @@ cat <<'EOF'
 ✅ Install complete.
 
 Next:
-  1. claude login                  # one-time Claude subscription auth
-  2. edit .env  →  set WEB_PASSWORD
-  3. run it:
+  1. install the Claude Code CLI if you don't have it yet:
+       npm install -g @anthropic-ai/claude-code
+  2. claude login                  # one-time Claude subscription auth
+  3. edit .env  →  set WEB_PASSWORD  (CHANGE_ME is rejected at startup)
+  4. run it:
        venv/bin/python bot.py      # cockpit → http://localhost:8787
      or install as a service:
        make service                # renders + enables the systemd unit

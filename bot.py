@@ -155,13 +155,18 @@ async def _amain() -> None:
 
 
 def _check_web_password(password: str) -> None:
-    """Raise RuntimeError if the web password is empty or unset.
+    """Raise RuntimeError if the web password is empty, unset, or still the shipped placeholder.
 
     Factored out of main() so tests can call it directly without triggering sys.exit.
     """
     if not password:
         raise RuntimeError(
             "FATAL: WEB_PASSWORD must be set (refusing to start with blank password)"
+        )
+    if password.strip().upper() == "CHANGE_ME":
+        raise RuntimeError(
+            "FATAL: WEB_PASSWORD is still the placeholder 'CHANGE_ME' — "
+            "set a real password in .env before starting"
         )
 
 

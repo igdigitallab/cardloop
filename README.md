@@ -86,7 +86,7 @@ Three things make Cardloop different from the dozen other agent kanbans:
 
 > **Setup time: ~3 minutes** — clone, run `install.sh`, `claude login`, set a password.
 
-Prerequisites: **Python 3.11+** and **Node 20+**. Minimum setup is Claude subscription auth + a web password.
+Prerequisites: **Python 3.11+**, **Node 20+**, and the **[Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview)** (`npm install -g @anthropic-ai/claude-code`) — the engine drives the native `claude` binary, so it's needed both for `claude login` and at runtime. Minimum setup is Claude subscription auth + a web password.
 
 ```bash
 # 1. Clone
@@ -96,6 +96,7 @@ git clone https://github.com/igdigitallab/cardloop.git && cd cardloop
 ./install.sh                  # or: make install
 
 # 3. Claude auth (subscription) — run once
+npm install -g @anthropic-ai/claude-code   # the claude CLI, if you don't have it
 claude login                  # stores ~/.claude/.credentials.json
 
 # 4. Set your password

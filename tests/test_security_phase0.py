@@ -296,6 +296,14 @@ def test_nonempty_password_guard_passes():
     _check_web_password("some-secure-passphrase")  # must not raise
 
 
+def test_placeholder_password_guard_raises():
+    """_check_web_password rejects the shipped CHANGE_ME placeholder (any case)."""
+    from bot import _check_web_password
+    for placeholder in ("CHANGE_ME", "change_me", " CHANGE_ME "):
+        with pytest.raises(RuntimeError, match="WEB_PASSWORD"):
+            _check_web_password(placeholder)
+
+
 def test_nonempty_password_guard_does_not_sys_exit(monkeypatch):
     """The guard function never calls sys.exit — that is the caller's responsibility."""
     from bot import _check_web_password
