@@ -116,8 +116,37 @@ docker compose up --build     # cockpit-only — see docker-compose.yml
 
 **On macOS:** install the prerequisites with Homebrew — `brew install python node` — then the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview) via `curl -fsSL https://claude.ai/install.sh | bash`. `install.sh` and the cockpit run the same as on Linux. Two platform notes: `make service` is **Linux/systemd-only**, so on macOS run `venv/bin/python bot.py` in the foreground (or wrap it in a `launchd` plist / `tmux`); and `.env` is a hidden dotfile — reveal it in Finder with `⌘⇧.` or just edit it from the terminal.
 
-By default Cardloop listens on **localhost only**. To reach it from your phone, put it behind a reverse
-proxy (Cloudflare Tunnel, nginx, Caddy) pointing at `localhost:8787` — and read the [Security model](#security-model) first.
+### Access from anywhere (your own domain)
+
+By default Cardloop listens on **localhost only** — perfect on your own machine, but to use it from your
+phone or away from home you need to reach it over the network. Two common ways (read the
+[Security model](#security-model) first — you're exposing a full-auto agent, so keep `WEB_PASSWORD`
+strong and enable TOTP):
+
+- **Private, no public URL — [Tailscale](https://tailscale.com)** (simplest). Install it on the host and
+  on your phone/laptop; reach the cockpit at `http://<tailscale-ip>:8787`. Nothing is exposed to the
+  public internet. Great when it's just for you.
+
+- **Public HTTPS on your own domain — [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)**
+  (works behind CGNAT/NAT, no port-forwarding, free). Point a subdomain at the cockpit:
+
+  ```bash
+  cloudflared tunnel login                              # one-time, opens a browser
+  cloudflared tunnel create cardloop                    # creates the tunnel + credentials
+  cloudflared tunnel route dns cardloop cockpit.example.com
+  # ~/.cloudflared/config.yml:
+  #   tunnel: <tunnel-id>
+  #   credentials-file: /home/<user>/.cloudflared/<tunnel-id>.json
+  #   ingress:
+  #     - hostname: cockpit.example.com
+  #       service: http://localhost:8787
+  #     - service: http_status:404
+  cloudflared service install                           # run it as a background service
+  ```
+
+  Then set `TRUSTED_PROXIES=127.0.0.1` in `.env` so the login rate-limiter sees real client IPs, and
+  open `https://cockpit.example.com`. A public HTTPS origin is also what lets you
+  [install the PWA](#install-it-on-your-phone-pwa) on iOS.
 
 ### Updating
 
