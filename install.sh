@@ -45,7 +45,9 @@ if [ ! -f .env ]; then
   cp .env.example .env
   SALT=$(venv/bin/python -c 'import secrets; print(secrets.token_hex(32))')
   if grep -q '^WEB_COOKIE_SALT=' .env; then
-    sed -i "s|^WEB_COOKIE_SALT=.*|WEB_COOKIE_SALT=${SALT}|" .env
+    # portable in-place edit (BSD/macOS sed has no GNU `-i` semantics)
+    tmp=$(mktemp)
+    sed "s|^WEB_COOKIE_SALT=.*|WEB_COOKIE_SALT=${SALT}|" .env > "$tmp" && mv "$tmp" .env
   else
     printf '\nWEB_COOKIE_SALT=%s\n' "$SALT" >> .env
   fi

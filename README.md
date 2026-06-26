@@ -114,6 +114,8 @@ venv/bin/python bot.py        # Cockpit → http://localhost:8787
 docker compose up --build     # cockpit-only — see docker-compose.yml
 ```
 
+**On macOS:** install the prerequisites with Homebrew — `brew install python node` — then the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview) via `curl -fsSL https://claude.ai/install.sh | bash`. `install.sh` and the cockpit run the same as on Linux. Two platform notes: `make service` is **Linux/systemd-only**, so on macOS run `venv/bin/python bot.py` in the foreground (or wrap it in a `launchd` plist / `tmux`); and `.env` is a hidden dotfile — reveal it in Finder with `⌘⇧.` or just edit it from the terminal.
+
 By default Cardloop listens on **localhost only**. To reach it from your phone, put it behind a reverse
 proxy (Cloudflare Tunnel, nginx, Caddy) pointing at `localhost:8787` — and read the [Security model](#security-model) first.
 
