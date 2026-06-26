@@ -1,0 +1,31 @@
+Cardloop
+Copyright (c) 2026 Cardloop contributors
+
+This product is licensed under the terms in the LICENSE file at the root of
+this repository.
+
+This product is not affiliated with, endorsed by, or sponsored by Anthropic,
+PBC. "Claude" is a trademark of Anthropic, PBC. Cardloop wraps the official
+`claude` CLI, which you install separately under Anthropic's own terms.
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+This distribution bundles or builds upon the following third-party software.
+Their respective licenses are reproduced where required by the license terms.
+
+Apache License 2.0:
+  - TypeScript — Copyright (c) Microsoft Corporation
+  - ESLint and related tooling — Copyright (c) OpenJS Foundation and contributors
+  - Chevrotain parser (used by mermaid) — Copyright (c) SAP SE or an SAP affiliate
+
+SIL Open Font License 1.1 (OFL-1.1):
+  - Geist / Geist Mono fonts — Copyright (c) Vercel, Inc.
+
+ISC License:
+  - Lucide icons — Copyright (c) Lucide Contributors
+
+Other bundled frontend and backend dependencies are distributed under the MIT,
+BSD, ISC, or CC-BY-4.0 licenses, all of which are compatible with this
+project's license. See each package's metadata for the full text.

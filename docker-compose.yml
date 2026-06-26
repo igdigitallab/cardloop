@@ -1,0 +1,36 @@
+# Cardloop — cockpit-only (web UI, no Telegram).
+#
+# Quickstart:
+#   1. `claude login` on the HOST once (creates ~/.claude/.credentials.json)
+#   2. cp .env.example .env  &&  set WEB_PASSWORD + WEB_COOKIE_SALT
+#   3. docker compose up --build
+#   4. open http://localhost:8787
+#
+# Subscription auth works by mounting your host ~/.claude credentials read-only.
+# For API-key mode instead, set CLAUDE_AUTH_MODE=api_key + ANTHROPIC_API_KEY in .env
+# and you can drop the ~/.claude mount.
+services:
+  cockpit:
+    build: .
+    image: cardloop:latest
+    ports:
+      - "8787:8787"
+    env_file: .env
+    environment:
+      # Container must bind on all interfaces; restrict exposure via the published
+      # port / your reverse proxy, not WEB_HOST.
+      WEB_HOST: "0.0.0.0"
+      # The published port is plain HTTP; keep Secure cookies off unless you put
+      # an HTTPS proxy in front (then set WEB_COOKIE_SECURE=true + TRUSTED_PROXIES).
+      WEB_COOKIE_SECURE: "false"
+    volumes:
+      # Subscription credentials from the host (read-only). Container HOME is /root.
+      - ${HOME}/.claude:/root/.claude:ro
+      # Persist sessions / topics / runs / audit across recreates.
+      - ./data:/app/data
+      # Where the agent creates and works on projects.
+      - cardloop-projects:/root/projects
+    restart: unless-stopped
+
+volumes:
+  cardloop-projects:

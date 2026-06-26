@@ -1,0 +1,232 @@
+/* ── Login Screen ──────────────────────────────────────────── */
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  background: var(--bg);
+}
+
+.login-card {
+  width: 340px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 36px 32px;
+}
+
+.login-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+
+.login-logo-icon {
+  width: 32px;
+  height: 32px;
+  background: var(--accent);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: var(--accent-fg);
+}
+
+.login-logo-text {
+  font-size: 17px;
+  font-weight: 600;
+  font-family: var(--sans);
+  letter-spacing: -0.3px;
+}
+
+.login-card h2 {
+  font-size: 22px;
+  font-weight: 600;
+  font-family: var(--sans);
+  letter-spacing: -0.4px;
+  margin-bottom: 6px;
+}
+
+.login-sub {
+  color: var(--text2);
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+
+.login-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text3);
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--sans);
+  color: var(--text2);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.form-group input {
+  width: 100%;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: var(--mono);
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.form-group input:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+/* ── Base button ─────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--sans);
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  color: var(--text);
+  /* flat — no box-shadow */
+  box-shadow: none;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  outline: none;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg3);
+  border-color: var(--border2);
+}
+
+.btn:focus-visible {
+  box-shadow: var(--ring);
+  outline: none;
+}
+
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Primary button — solid accent fill ──────────────────────────────── */
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);   /* white in dark, black in light — via token */
+  border: 1px solid var(--accent);
+  width: 100%;
+  box-shadow: none;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-h);
+  border-color: var(--accent-h);
+}
+
+.btn-primary:focus-visible {
+  box-shadow: var(--ring);
+}
+
+/* ── Ghost button ────────────────────────────────────────────────────── */
+.btn-ghost {
+  background: transparent;
+  color: var(--text2);
+  border: 1px solid var(--border2);
+  box-shadow: none;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg3);
+  color: var(--text);
+}
+
+/* ── Secondary button ────────────────────────────────────────────────── */
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: var(--sans);
+  font-weight: 500;
+  padding: 6px 14px;
+  box-shadow: none;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.btn-secondary:hover { background: var(--bg3); border-color: var(--border2); }
+
+/* ── Error / validation msg ──────────────────────────────────────────── */
+.error-msg {
+  background: rgba(239,68,68,0.08);
+  border: 1px solid rgba(239,68,68,0.25);
+  color: var(--red);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+/* ── Doc / test-panel buttons ─────────────────────────────────────────── */
+.doc-btn {
+  font-size: 12px;
+  font-family: var(--sans);
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text2);
+  white-space: nowrap;
+  box-shadow: none;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.doc-btn:hover:not(:disabled) { background: var(--bg3); color: var(--text); border-color: var(--border2); }
+.doc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.doc-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.doc-btn.primary:hover:not(:disabled) { background: var(--accent-h); border-color: var(--accent-h); }
+.doc-btn.ghost { background: transparent; }
+
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE — Forms / Login
+   ══════════════════════════════════════════════════════════════ */
+
+@media (max-width: 640px) {
+  /* Login card: fluid width on small screens */
+  .login-card {
+    width: min(340px, calc(100vw - 32px));
+    padding: 24px 20px;
+  }
+
+  /* Inputs: font ≥16px to prevent iOS auto-zoom */
+  .form-group input {
+    font-size: 16px;
+  }
+
+  /* Toast container: full width at bottom */
+  .toast-container {
+    bottom: max(16px, env(safe-area-inset-bottom));
+    right: 12px;
+    left: 12px;
+    max-width: 100%;
+  }
+}

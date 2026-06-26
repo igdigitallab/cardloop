@@ -1,0 +1,18 @@
+import { api } from '../api'
+import { EditableMarkdown } from '../components/EditableMarkdown'
+
+interface Props {
+  projectId: string
+}
+
+export function ClaudeMdTab({ projectId }: Props) {
+  return (
+    <EditableMarkdown
+      projectId={projectId}
+      load={api.claudeMd}
+      save={api.saveClaudeMd}
+      spinnerLabel="Loading CLAUDE.md..."
+      emptyLabel="No CLAUDE.md for this project"
+    />
+  )
+}
