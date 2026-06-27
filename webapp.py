@@ -39,6 +39,15 @@ import secretstore as _secretstore
 # Spec-026 Phase 2: TOTP second factor
 import totp as _totp
 
+# spec-053 Phase B: Web Push (VAPID + pywebpush). Optional — degrades gracefully if absent.
+try:
+    from pywebpush import webpush as _webpush, WebPushException as _WebPushException
+    _PUSH_AVAILABLE = True
+except ImportError:
+    _PUSH_AVAILABLE = False
+    _webpush = None  # type: ignore[assignment]
+    _WebPushException = None  # type: ignore[assignment]
+
 
 # ─────────────────────────── named constants ───────────────────────────
 
@@ -84,6 +93,18 @@ CONTEXT_ROTATE_AT = int(os.environ.get("CONTEXT_ROTATE_AT", "280000"))
 # CONTEXT_ROTATION: master switch for auto-rotation (revived; spec-039 had removed the trigger,
 # spec-042 shipped the handoff producer this reuses). Default ON. Set CONTEXT_ROTATION=0 to disable.
 CONTEXT_ROTATION = os.environ.get("CONTEXT_ROTATION", "1") == "1"
+
+# ── spec-053 Phase B: Web Push state (initialized by _push_init) ──────────────────────────────
+# VAPID subject for push endpoint auth — configurable; default is a placeholder.
+# Set VAPID_SUBJECT=mailto:you@yourdomain.com in .env to identify your service.
+# Reference: https://datatracker.ietf.org/doc/html/rfc8292
+_VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:admin@cardloop.local")
+_PUSH_VAPID_FILE: "Path | None" = None       # DATA/push-vapid.json — set in _push_init
+_PUSH_SUBS_FILE: "Path | None" = None        # DATA/push-subscriptions.json — set in _push_init
+_PUSH_PRIV_KEY: "str | None" = None          # base64url raw P-256 private key (loaded on demand)
+_PUSH_PUB_KEY: "str | None" = None           # base64url uncompressed P-256 public key (87 chars)
+_PUSH_LOCK: "asyncio.Lock | None" = None     # guards subscription list reads/writes (created in _push_init)
+_PUSH_CTX: "dict | None" = None             # reference to the live ctx (set in _push_init)
 
 # Spec-029 item 3: structured card results via SDK output_format.
 # STRUCTURED_CARDS=1 enables requesting structured JSON output from card runs so the agent's
@@ -208,6 +229,174 @@ def _bus_unsubscribe_global(q: "asyncio.Queue[dict]") -> None:
     _bus_global.discard(q)
 
 
+# ─────────────────────────── Web Push — spec-053 Phase B ───────────────────────────
+#
+# Architecture:
+#   _push_init(ctx)  — called from start(); generates/loads VAPID keys, sets module globals.
+#   _load_push_subs / _save_push_subs — subscription list persistence (DATA/push-subscriptions.json).
+#   _push_notify_run_end(session_key, event) — fire-and-forget coroutine scheduled by _bus_publish.
+#
+# VAPID key format:
+#   private key: base64url(raw 32-byte big-endian P-256 scalar)  — what pywebpush expects
+#   public key:  base64url(uncompressed 65-byte P-256 point, X9.62)  — what the browser expects
+#
+# References:
+#   https://developers.google.com/web/fundamentals/push-notifications/web-push-protocol
+#   https://datatracker.ietf.org/doc/html/rfc8292  (VAPID)
+#   https://pypi.org/project/pywebpush/
+
+import base64 as _b64  # aliased to avoid name collision with outer scope
+
+
+def _push_init(ctx: dict) -> None:
+    """Initialize Web Push module state. Called once from start()."""
+    global _PUSH_VAPID_FILE, _PUSH_SUBS_FILE, _PUSH_CTX, _PUSH_LOCK
+    _PUSH_VAPID_FILE = ctx["DATA"] / "push-vapid.json"
+    _PUSH_SUBS_FILE = ctx["DATA"] / "push-subscriptions.json"
+    _PUSH_CTX = ctx
+    _PUSH_LOCK = asyncio.Lock()
+    # Generate VAPID keypair if not already present.
+    _push_ensure_vapid_keys()
+
+
+def _push_ensure_vapid_keys() -> None:
+    """Generates and persists a P-256 VAPID keypair if not already stored.
+    Populates _PUSH_PRIV_KEY and _PUSH_PUB_KEY module globals."""
+    global _PUSH_PRIV_KEY, _PUSH_PUB_KEY
+    if _PUSH_VAPID_FILE is None:
+        return
+    if _PUSH_PRIV_KEY and _PUSH_PUB_KEY:
+        return
+    # Try loading from disk first.
+    if _PUSH_VAPID_FILE.exists():
+        try:
+            data = json.loads(_PUSH_VAPID_FILE.read_text(encoding="utf-8"))
+            _PUSH_PRIV_KEY = data["private_key"]
+            _PUSH_PUB_KEY = data["public_key"]
+            return
+        except Exception:
+            pass  # corrupt file — regenerate below
+    # Generate a fresh P-256 keypair using cryptography (already in requirements).
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        public_key = private_key.public_key()
+        # Raw private scalar (32 bytes big-endian) → base64url, no padding.
+        priv_num = private_key.private_numbers().private_value
+        priv_bytes = priv_num.to_bytes(32, "big")
+        priv_b64 = _b64.urlsafe_b64encode(priv_bytes).rstrip(b"=").decode()
+        # Uncompressed P-256 public key (65 bytes) → base64url, no padding.
+        pub_raw = public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+        pub_b64 = _b64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode()
+        _PUSH_VAPID_FILE.write_text(
+            json.dumps({"private_key": priv_b64, "public_key": pub_b64}, indent=2),
+            encoding="utf-8",
+        )
+        _PUSH_PRIV_KEY = priv_b64
+        _PUSH_PUB_KEY = pub_b64
+    except Exception:
+        logging.exception("Web Push: failed to generate VAPID keypair")
+
+
+def _load_push_subs() -> list[dict]:
+    """Returns the stored push subscription list (may be empty)."""
+    if _PUSH_SUBS_FILE is None or not _PUSH_SUBS_FILE.exists():
+        return []
+    try:
+        data = json.loads(_PUSH_SUBS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_push_subs(subs: list[dict]) -> None:
+    """Persists the push subscription list atomically."""
+    if _PUSH_SUBS_FILE is None:
+        return
+    _PUSH_SUBS_FILE.write_text(
+        json.dumps(subs, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+async def _push_notify_run_end(session_key: str, event: dict) -> None:
+    """Fire-and-forget coroutine: send a Web Push notification to all stored subscribers.
+    Called via _spawn_bg so it never blocks _bus_publish.
+    Resolves the project name from session_key; skips silently if unresolvable."""
+    if not _PUSH_AVAILABLE or not _PUSH_CTX:
+        return
+    _push_ensure_vapid_keys()
+    if not _PUSH_PRIV_KEY or not _PUSH_PUB_KEY:
+        return
+
+    # Resolve project from session_key (scan all projects, O(n) but n is small).
+    project = None
+    try:
+        for p in _collect_projects(_PUSH_CTX):
+            if (p.get("session_key") or p.get("tg_thread", "")) == session_key:
+                project = p
+                break
+    except Exception:
+        pass
+    if project is None:
+        return
+
+    project_name = project.get("name", session_key)
+    project_id = project.get("id", session_key)
+    outcome = event.get("outcome", "ok")
+    is_ok = outcome == "ok"
+    payload = json.dumps({
+        "title": ("✅ " if is_ok else "❌ ") + project_name,
+        "body": "Run finished" if is_ok else "Run finished with an error",
+        "icon": "/icons/icon-192.png",
+        "tag": project_id,
+        "data": {"projectId": project_id, "url": "/"},
+    })
+
+    lock = _PUSH_LOCK
+    if lock is None:
+        return
+    async with lock:
+        subs = _load_push_subs()
+
+    if not subs:
+        return
+
+    # Send to each subscriber in a thread (pywebpush is blocking/requests-based).
+    removed_endpoints: list[str] = []
+    tasks = []
+    for sub in subs:
+        endpoint = sub.get("endpoint", "")
+        if not endpoint:
+            continue
+        tasks.append(_push_send_one(sub, payload, endpoint, removed_endpoints))
+    await asyncio.gather(*tasks)
+
+    if removed_endpoints:
+        async with lock:
+            updated = [s for s in _load_push_subs() if s.get("endpoint") not in removed_endpoints]
+            _save_push_subs(updated)
+
+
+async def _push_send_one(sub: dict, payload: str, endpoint: str, removed: list[str]) -> None:
+    """Send one Web Push message to a single subscription. Removes stale (410/404) subs."""
+    try:
+        await asyncio.to_thread(
+            _webpush,
+            subscription_info=sub,
+            data=payload,
+            vapid_private_key=_PUSH_PRIV_KEY,
+            vapid_claims={"sub": _VAPID_SUBJECT},
+        )
+    except Exception as exc:
+        # _WebPushException carries response status; remove gone subscriptions.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (404, 410):
+            removed.append(endpoint)
+        else:
+            logging.warning("Web Push: send failed for %s: %s", endpoint[:40], exc)
+
+
 def _bus_publish(session_key: str, event: dict, persist: bool = True) -> None:
     """Publishes an event to all subscriber queues. Full queue → drop (non-blocking).
 
@@ -240,6 +429,15 @@ def _bus_publish(session_key: str, event: dict, persist: bool = True) -> None:
     kind = event.get("kind")
     if kind == "run_end":
         _awaiting[session_key] = time.time()
+        # spec-053 Phase B: fire Web Push to subscribers (app may be closed).
+        # Guard with get_event_loop check — _bus_publish is occasionally called
+        # from synchronous test helpers without a running loop.
+        if _PUSH_AVAILABLE:
+            try:
+                asyncio.get_running_loop()
+                _spawn_bg(_push_notify_run_end(session_key, event))
+            except RuntimeError:
+                pass  # no running loop (tests / sync context) — skip push
     elif kind == "run_start":
         _awaiting.pop(session_key, None)
 
@@ -11325,6 +11523,54 @@ async def api_schedules_investigate(req: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+# ─────────────────────────── Web Push API — spec-053 Phase B ───────────────────────────
+
+
+async def api_push_vapid_public(req: web.Request) -> web.Response:
+    """GET /api/push/vapid-public — returns the VAPID public key for the browser to subscribe."""
+    _push_ensure_vapid_keys()
+    return web.json_response({"key": _PUSH_PUB_KEY or ""})
+
+
+async def api_push_subscribe(req: web.Request) -> web.Response:
+    """POST /api/push/subscribe — store a PushSubscription (deduplicated by endpoint)."""
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    endpoint = body.get("endpoint", "").strip()
+    if not endpoint:
+        return web.json_response({"error": "missing endpoint"}, status=400)
+    lock = _PUSH_LOCK
+    if lock is None:
+        return web.json_response({"error": "push not initialised"}, status=503)
+    async with lock:
+        subs = _load_push_subs()
+        # Deduplicate: replace any existing entry for this endpoint.
+        subs = [s for s in subs if s.get("endpoint") != endpoint]
+        subs.append(body)
+        _save_push_subs(subs)
+    return web.json_response({"ok": True})
+
+
+async def api_push_unsubscribe(req: web.Request) -> web.Response:
+    """POST /api/push/unsubscribe — remove a PushSubscription by endpoint."""
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    endpoint = body.get("endpoint", "").strip()
+    if not endpoint:
+        return web.json_response({"error": "missing endpoint"}, status=400)
+    lock = _PUSH_LOCK
+    if lock is None:
+        return web.json_response({"ok": True})
+    async with lock:
+        subs = [s for s in _load_push_subs() if s.get("endpoint") != endpoint]
+        _save_push_subs(subs)
+    return web.json_response({"ok": True})
+
+
 # ─────────────────────────── entry point ───────────────────────────
 
 async def start(ctx: dict) -> None:
@@ -11351,6 +11597,11 @@ async def start(ctx: dict) -> None:
         _schedules._schedules_init(ctx)
         # Spec-020: Deferred Runs — initialise file path
         _deferred_init(ctx)
+        # spec-053 Phase B: Web Push — VAPID keypair + subscription storage paths
+        try:
+            _push_init(ctx)
+        except Exception:
+            logging.exception("Web Push: init failed (push notifications unavailable)")
         # Spec-021: cwd-lock dict — prevents simultaneous runs in the same working directory
         ctx["cwd_locks"] = {}
         # Seed built-in default prompt templates (merge, never overwrite operator entries)
@@ -11548,6 +11799,11 @@ async def start(ctx: dict) -> None:
         app.router.add_post("/api/auth/totp/enroll", api_totp_enroll)
         app.router.add_post("/api/auth/totp/activate", api_totp_activate)
         app.router.add_delete("/api/auth/totp", api_totp_disable)
+
+        # spec-053 Phase B: Web Push — VAPID public key + subscription management
+        app.router.add_get("/api/push/vapid-public", api_push_vapid_public)
+        app.router.add_post("/api/push/subscribe", api_push_subscribe)
+        app.router.add_post("/api/push/unsubscribe", api_push_unsubscribe)
 
         # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)

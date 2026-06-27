@@ -17,6 +17,9 @@ APScheduler==3.11.2
 # Encrypted secret store (Fernet) + auth crypto.
 cryptography>=48
 
+# Web Push (VAPID) — spec-053 Phase B browser push notifications.
+pywebpush>=2.3
+
 # .env loading.
 python-dotenv>=1.2
 

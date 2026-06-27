@@ -72,7 +72,19 @@ self.addEventListener('push', (event: PushEvent) => {
     renotify: Boolean(payload.tag ?? payload.data?.projectId),
   } as NotificationOptions
 
-  event.waitUntil(self.registration.showNotification(title, options))
+  // spec-053 Phase B dedup: if the app is open in any window, the in-page local
+  // notification (useNotifications.notifyRunEnd) already handles the alert.
+  // Suppress the SW push notification to avoid a double notification.
+  event.waitUntil(
+    (async () => {
+      const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+      if (clients.length > 0) {
+        // At least one window is open — local notification handles it; skip SW notification.
+        return
+      }
+      await self.registration.showNotification(title, options)
+    })()
+  )
 })
 
 self.addEventListener('notificationclick', (event: NotificationEvent) => {

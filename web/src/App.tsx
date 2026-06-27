@@ -236,6 +236,20 @@ export default function App() {
   // notifyRunEndRef is updated whenever the hook's internal enabled/permission state changes
   useEffect(() => { notifyRunEndRef.current = notifyRunEnd }, [notifyRunEnd])
 
+  // spec-053 Phase B: listen for SW → page postMessages from notificationclick.
+  // The SW sends {type:'notification-navigate', projectId} when the user taps a push notification
+  // and there is already an open window (instead of opening a new one).
+  useEffect(() => {
+    if (!navigator.serviceWorker) return
+    const handler = (ev: MessageEvent) => {
+      if (ev.data?.type === 'notification-navigate' && ev.data.projectId) {
+        handleSelectRef.current(ev.data.projectId)
+      }
+    }
+    navigator.serviceWorker.addEventListener('message', handler)
+    return () => { navigator.serviceWorker.removeEventListener('message', handler) }
+  }, [])
+
   // Persist openIds + activeId + split state
   useEffect(() => {
     try { localStorage.setItem(LS_OPEN, JSON.stringify(openIds)) } catch {}
