@@ -1315,17 +1315,33 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       const boardRows = (liveRes.board_events ?? []).map(boardEventToMsg)
       seenBoardEventKeysRef.current = new Set((liveRes.board_events ?? []).map(boardEventKey))
 
+      // The SDK flushes the in-flight user turn to the transcript at run start, so a
+      // mid-run hydrate (page reload, project re-activation, or a mobile orientation
+      // flip that remounts ChatTab across the 768px narrow/split boundary) finds the
+      // prompt ALREADY in session history. Injecting makeUserMsg(prompt) on top then
+      // double-renders the user bubble. Suppress the injected bubble when history
+      // already ends with this exact prompt; still inject it otherwise (e.g. a queued
+      // send the SDK hasn't flushed, or a missed run_start). Compared trimmed — history
+      // strips SDK service blocks.
+      const histMsgs = histToMessages(histRes.messages)
+      const livePrompt = (liveRes.prompt || '').trim()
+      const promptInHistory =
+        livePrompt.length > 0 &&
+        histMsgs.length > 0 &&
+        histMsgs[histMsgs.length - 1].role === 'user' &&
+        histMsgs[histMsgs.length - 1].text.trim() === livePrompt
+
       if (liveRes.running && liveRes.events.length > 0) {
         // ── Spec-035 L4: hydrate transcript from live buffer ──────────────────
         // Replay buffered events on top of session history to reconstruct the
         // in-flight turn. History is appended first; then the live events play.
-        const histMsgs = histToMessages(histRes.messages)
         // Open a streaming assistant message for the ongoing turn. Use the turn's
         // real prompt (queue-visibility fix) so a missed run_start doesn't leave a
         // '…' placeholder; fall back to '…' only when the server didn't carry it.
-        const liveUserMsg = makeUserMsg(liveRes.prompt || '…')
         const liveAssistantMsg = makeAssistantMsg()
-        let liveMsgs: ChatMessage[] = [...histMsgs, liveUserMsg, liveAssistantMsg]
+        let liveMsgs: ChatMessage[] = promptInHistory
+          ? [...histMsgs, liveAssistantMsg]
+          : [...histMsgs, makeUserMsg(liveRes.prompt || '…'), liveAssistantMsg]
         const liveSubagents: SubagentEntry[] = []
         for (const ev of liveRes.events) {
           const etype = ev['type'] as string | undefined
@@ -1363,16 +1379,19 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         // user bubble + an open assistant message (queue-visibility fix) — a queued
         // message draining here would otherwise show NO user message at all.
         const startMs = liveRes.started_at != null ? liveRes.started_at * 1000 : Date.now()
-        const base = histToMessages(histRes.messages)
-        setMessages(liveRes.prompt
-          ? [...base, makeUserMsg(liveRes.prompt), makeAssistantMsg(), ...boardRows]
-          : [...base, ...boardRows])
+        // Open an assistant message so a draining queued message renders its output.
+        // User bubble: from history if already flushed, else inject (see promptInHistory).
+        setMessages(promptInHistory
+          ? [...histMsgs, makeAssistantMsg(), ...boardRows]
+          : liveRes.prompt
+            ? [...histMsgs, makeUserMsg(liveRes.prompt), makeAssistantMsg(), ...boardRows]
+            : [...histMsgs, ...boardRows])
         setServerStartedAt(startMs)
         busActiveRef.current = true
         setRun({ startedAt: startMs, lastEventAt: Date.now(), currentTool: null, source: 'card' })
         seedCursor(liveRes.cursor)
       } else {
-        setMessages([...histToMessages(histRes.messages), ...boardRows])
+        setMessages([...histMsgs, ...boardRows])
       }
       // Clear any stale error banner left over from a prior aborted stream so
       // the operator sees the recovered content, not an old error.
