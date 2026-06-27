@@ -289,6 +289,7 @@ export const en = {
 
   // ── Message queue ──────────────────────────────────────────────
   'chat.queue_panel_label': 'Queued messages',
+  'chat.defer_panel_label': 'Scheduled',
   'chat.queue_edit_btn': 'Edit',
   'chat.queue_delete_btn': 'Delete',
   'chat.queue_save_btn': 'Save',

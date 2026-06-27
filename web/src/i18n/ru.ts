@@ -280,6 +280,7 @@ export const ru = {
 
   // ── Message queue ──────────────────────────────────────────────
   'chat.queue_panel_label': 'Очередь сообщений',
+  'chat.defer_panel_label': 'Запланировано',
   'chat.queue_edit_btn': 'Изм.',
   'chat.queue_delete_btn': 'Удалить',
   'chat.queue_save_btn': 'Сохранить',

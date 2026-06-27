@@ -9388,6 +9388,14 @@ async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_ha
     finally:
         # Always release the sentinel so subsequent turns are not blocked
         ctx["running"].pop(session_key, None)
+        # Card 38159b: a message the operator typed DURING the restart/handoff was queued
+        # (the run-lock was held for the whole haiku summary). Deliver it to the fresh
+        # session now instead of waiting for the 3s backstop loop. Guarded so a drain
+        # failure can never break rotation teardown.
+        try:
+            await _chat_queue_drain_one(ctx, session_key)
+        except Exception as _cqd_exc:
+            print(f"[rotate] chat queue drain error for {session_key}: {_cqd_exc!r}")
 
 
 async def _maybe_auto_rotate(ctx: dict, project: dict, session_key: str, ctx_tokens: int,

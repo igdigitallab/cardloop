@@ -1738,9 +1738,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     const effectiveText = text || (readyFiles.length > 0 ? t['chat.look_at_files'] : '')
     if (!effectiveText) return
 
-    // Spec-041 A1: enqueue whenever a turn is active — either a direct stream
-    // OR a bus/SSE/poll-adopted run — so the message isn't lost to a "busy" 409.
-    if ((streaming || busActiveRef.current) && overrideText === undefined) {
+    // Card f3e7fb: enqueue ONLY while THIS client is actively streaming a direct /chat
+    // turn (reliable local truth). Do NOT gate on busActiveRef — it goes stale (missed
+    // run_end on a dropped SSE / a card run that ended / an orientation remount), and a
+    // stale-true ref silently shunts a message meant for an IDLE agent into the queue,
+    // where it only wakes via the 3s backstop (feels dead) and renders out of order.
+    // The SERVER is the single authority on "busy": a genuinely active run returns a
+    // {type:"queued"} event and the handler below retracts the optimistic bubbles.
+    // Card 38159b: also enqueue while a session restart/handoff is in progress — the
+    // backend holds the run-lock for the whole haiku summary, so the operator can keep
+    // typing and the message auto-delivers to the fresh session once rotation completes.
+    if ((streaming || rotating) && overrideText === undefined) {
       const filePaths = readyFiles.map(a => `attached file: ${a.path}`)
       const fullText = filePaths.length > 0 ? `${effectiveText}\n\n${filePaths.join('\n')}` : effectiveText
       setInput('')
@@ -1766,7 +1774,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // Sending a message is an intentional action — re-pin to bottom regardless of scroll position.
     pinnedRef.current = true
     setShowNewMsgPill(false)
-    setMessages(prev => [...prev, userMsg, assistantMsg])
+    // Finalize any stale open streaming bubble (a missed run_end can leave a '…' bubble)
+    // so the new turn appends cleanly at the bottom, not around the leftover. No-op when
+    // the last message isn't an open assistant bubble.
+    setMessages(prev => [...finalizeStreaming(prev), userMsg, assistantMsg])
 
     const ac = new AbortController()
     abortRef.current = ac
@@ -1927,7 +1938,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         setTimeout(() => setCompactToast(false), 4000)
       }
     }
-  }, [input, projectId, streaming, onProjectsReload, attachments, thinkMode, ultracode])
+  }, [input, projectId, streaming, rotating, onProjectsReload, attachments, thinkMode, ultracode])
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -2825,12 +2836,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           )
         })()}
         {/* Server-backed message queue panel — visible when messages are queued while agent runs.
-            Survives page reload via GET /api/projects/{id}/chat/queue hydration on mount. */}
-        {queueItems.length > 0 && (
+            Survives page reload via GET /api/projects/{id}/chat/queue hydration on mount.
+            Card 87e7cd: deferred (after-reset / scheduled) runs are surfaced in the SAME strip
+            as queued messages, instead of hiding behind a small clock+count chip. */}
+        {(queueItems.length > 0 || pendingDeferred.length > 0) && (
           <div className="chat-queue-panel">
+            {queueItems.length > 0 && (
             <span className="chat-queue-header">
               ⏭ {queueItems.length} <span className="chat-queue-header-label">{t['chat.queue_panel_label']}</span>
             </span>
+            )}
             {queueItems.map((item, idx) => (
               <div key={item.id} className="chat-queue-row">
                 <span className="chat-queue-idx">{idx + 1}.</span>
@@ -2888,6 +2903,44 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 )}
               </div>
             ))}
+            {pendingDeferred.length > 0 && (
+              <span className="chat-queue-header">
+                ⏳ {pendingDeferred.length} <span className="chat-queue-header-label">{t['chat.defer_panel_label']}</span>
+              </span>
+            )}
+            {(pendingDeferred as Array<Record<string, unknown>>).map(rec => {
+              const id = String(rec['id'])
+              const fireOnReset = Boolean(rec['fire_on_reset'])
+              const fireAt = rec['fire_at'] ? String(rec['fire_at']) : null
+              const prompt = String(rec['prompt'] ?? '')
+              return (
+                <div key={id} className="chat-queue-row">
+                  <span
+                    className="chat-queue-idx"
+                    title={fireOnReset ? t['chat.defer_mode_reset'] : (fireAt ? new Date(fireAt).toLocaleString() : t['chat.defer_mode_time'])}
+                  >{fireOnReset ? '↺' : '🕐'}</span>
+                  <span className="chat-queue-text" aria-label={t['chat.defer_pending_chip_title']}>
+                    {prompt}
+                  </span>
+                  <button
+                    className="chat-queue-icon-btn"
+                    aria-label={t['chat.defer_edit']}
+                    title={t['chat.defer_edit']}
+                    onClick={() => setShowPendingDeferred(true)}
+                  ><Pencil size={13} /></button>
+                  <button
+                    className="chat-queue-icon-btn chat-queue-icon-delete"
+                    aria-label={t['chat.defer_pending_cancel']}
+                    title={t['chat.defer_pending_cancel']}
+                    onClick={() => {
+                      api.deferredDelete(id)
+                        .then(() => setPendingDeferred(prev => (prev as Array<Record<string, unknown>>).filter(r => String(r['id']) !== id)))
+                        .catch(() => {/* already gone */})
+                    }}
+                  ><Trash2 size={13} /></button>
+                </div>
+              )
+            })}
           </div>
         )}
         {/* spec-051: rate-limit resume prompt — Yes/No + remember, above the composer. */}
@@ -2926,12 +2979,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             ref={textareaRef}
             className="chat-textarea"
             placeholder={rotating
-              ? (rotatingKind === 'handoff' ? 'Compressing session…' : 'Starting new session…')
+              ? 'Type a message — it will send when the new session is ready'
               : streaming
               ? t['chat.input_placeholder_busy']
               : isTouchDevice ? t['chat.input_placeholder_touch'] : t['chat.input_placeholder']}
             value={input}
-            disabled={rotating}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
@@ -3014,17 +3066,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 >{deferAfterResetBusy ? '…' : <Clock size={15} />}</button>
               </div>
             )}
-            {/* Pending deferred runs chip — opens management modal */}
-            {pendingDeferred.length > 0 && (
-              <button
-                className="btn btn-secondary btn-sm"
-                title={t['chat.defer_pending_chip_title']}
-                style={{ fontSize: 11, padding: '2px 6px', opacity: 0.85 }}
-                onClick={() => setShowPendingDeferred(s => !s)}
-              >
-                <Clock size={13} /> {pendingDeferred.length}
-              </button>
-            )}
+            {/* Card 87e7cd: pending deferred runs now surface in the queue strip above the
+                composer (unified with queued messages), not behind a small clock+count chip. */}
             {/* Mobile session-state cluster: context icon + rate-limit + model + think.
                 On desktop these live in the top session bar (see !isMobile gates). */}
             {isMobile && (
@@ -3096,14 +3139,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   >{t['chat.queue']}</button>
                 )
               }
-              // Idle → Send.
+              // Idle → Send. Card 38159b: during a restart/handoff, stay enabled and label
+              // it "Queue" — the message is held server-side and auto-delivers to the fresh
+              // session once rotation completes.
               return (
                 <button
                   className="btn-primary chat-send-btn"
-                  disabled={rotating || !hasContent}
+                  disabled={!hasContent}
                   onClick={() => sendMessage()}
-                  title={t['chat.send_title']}
-                >{t['chat.send']}</button>
+                  title={rotating ? t['chat.queue_title'] : t['chat.send_title']}
+                >{rotating ? t['chat.queue'] : t['chat.send']}</button>
               )
             })()}
           </div>
