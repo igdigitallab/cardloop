@@ -6,6 +6,7 @@ import { EditableMarkdown } from '../components/EditableMarkdown'
 import { MODELS } from '../lib/models'
 import { t } from '../i18n'
 import { useNotifications } from '../hooks/useNotifications'
+import { useModules } from '../hooks/useModules'
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -33,6 +34,7 @@ export function GlobalSettingsTab() {
   const [msg, setMsg] = useState('')
   const [saving, setSaving] = useState(false)
   const { permission, enabled, setEnabled, requestPermission } = useNotifications()
+  const { modules, isEnabled: isModEnabled, setEnabled: setModEnabled } = useModules()
 
   useEffect(() => {
     let cancelled = false
@@ -149,6 +151,36 @@ export function GlobalSettingsTab() {
             </label>
           )}
         </Row>
+      </section>
+
+      {/* Spec-065: module/extension registry */}
+      <section>
+        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>{t['extensions.section_title']}</h3>
+        <p style={{ margin: '0 0 6px', fontSize: 12, color: 'var(--text3)' }}>
+          {t['extensions.section_hint']}
+        </p>
+        {modules.length === 0 ? (
+          <p style={{ fontSize: 12, color: 'var(--text3)', paddingTop: 8 }}>
+            {t['extensions.empty']}
+          </p>
+        ) : (
+          modules.map(mod => (
+            <Row
+              key={mod.id}
+              title={mod.name}
+              hint={mod.description}
+            >
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={isModEnabled(mod.id)}
+                  onChange={ev => { void setModEnabled(mod.id, ev.target.checked) }}
+                />
+                {isModEnabled(mod.id) ? t['extensions.toggle_on'] : t['extensions.toggle_off']}
+              </label>
+            </Row>
+          ))
+        )}
       </section>
 
       {/* Card 931573: global (home) agent-rules CLAUDE.md — view + edit on the server. */}

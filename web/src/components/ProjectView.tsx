@@ -15,6 +15,7 @@ import { TimelineTab } from '../tabs/TimelineTab'
 import { SettingsTab } from '../tabs/SettingsTab'
 import { SpecsTab } from '../tabs/SpecsTab'
 import { t } from '../i18n'
+import { useModules } from '../hooks/useModules'
 
 interface Tab {
   id: TabId
@@ -244,6 +245,8 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   // spec-052 Phase 4a: a card the user chose to "Discuss" on the board → handed to the chat.
   const [discussCard, setDiscussCard] = useState<{ cardId: string; title: string } | null>(null)
   const git = project.health.git
+  // Spec-065: module gate — github badge rendered only when the github module is enabled
+  const { isEnabled: isModEnabled } = useModules()
 
   // Sidebar "⚙ Settings" request → switch to the Settings tab when it targets this project.
   // Keyed on nonce so a repeat request for the already-open project re-fires.
@@ -722,7 +725,8 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                   count={incidentsCount}
                   onNavigate={() => setActiveTab('board')}
                 />
-                {git && (
+                {/* Spec-065: git badge gated on the 'github' module (default ON) */}
+                {git && isModEnabled('github') && (
                   <span className="git-status">
                     <span className={`git-sync-dot ${gitDotClass}`} title={gitDotTitle} />
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none"

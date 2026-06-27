@@ -686,4 +686,15 @@ export const api = {
 
   epicSpecContent: (id: string, name: string) =>
     apiFetch<{ name: string; content: string }>(`/api/projects/${id}/epic-specs/${encodeURIComponent(name)}`),
+
+  // Spec-065: module/extension registry
+  listModules: () =>
+    apiFetch<{ modules: import('./types').Module[] }>('/api/modules'),
+
+  setModule: (id: string, enabled: boolean) =>
+    apiFetch<{ ok: boolean; module: import('./types').Module }>(`/api/modules/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }),
 }

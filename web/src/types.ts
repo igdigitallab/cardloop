@@ -604,3 +604,13 @@ export interface VersionInfo {
   reason: string | null
   update_status: { state: string; detail: string; ts: number } | null
 }
+
+// ─── Spec-065: module/extension registry ──────────────────────────────────────
+export interface Module {
+  id: string
+  name: string
+  description: string
+  version: string
+  provides: string[]
+  enabled: boolean
+}

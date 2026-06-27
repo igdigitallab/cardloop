@@ -16,6 +16,7 @@ import { useToast, ToastContainer } from './components/Toast'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
 import { useTheme } from './hooks/useTheme'
 import { useNotifications } from './hooks/useNotifications'
+import { ModulesProvider } from './hooks/useModules'
 
 const GLOBAL_FILES_ID = '__global__'
 const SCHEDULES_ID = '__schedules__'
@@ -836,6 +837,7 @@ export default function App() {
   const hasOpen = openProjects.length > 0
 
   return (
+    <ModulesProvider>
     <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''} mobile-on-${mobileScreen}`}>
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
       {/* Backdrop for mobile drawer — tap to close */}
@@ -1064,5 +1066,6 @@ export default function App() {
         )}
       </div>
     </div>
+    </ModulesProvider>
   )
 }

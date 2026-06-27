@@ -649,6 +649,13 @@ export const ru = {
   // Scroll-to-bottom pill (shown when user has scrolled up while messages arrive)
   'chat.scroll_to_bottom': '↓ Новые сообщения',
 
+  // ── Spec-065: Extensions panel ────────────────────────────────────────────────
+  'extensions.section_title': '🧩 Расширения',
+  'extensions.section_hint': 'Включайте и отключайте дополнительные модули. Изменения вступают в силу немедленно.',
+  'extensions.empty': 'Нет доступных расширений.',
+  'extensions.toggle_on': 'Вкл',
+  'extensions.toggle_off': 'Выкл',
+
   // ── Browser notifications (notifications A) ──────────────────────────────────
   'notify.title_ok': '✅ {projectName}',
   'notify.title_fail': '❌ {projectName}',

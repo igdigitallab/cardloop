@@ -33,6 +33,9 @@ from aiohttp import web
 # Spec-019: Schedules registry module
 import schedules as _schedules
 
+# spec-065 Phase A: module / extension registry
+import modules as _modules
+
 # Spec-026 Phase 3: built-in encrypted secret store
 import secretstore as _secretstore
 
@@ -11629,6 +11632,39 @@ async def api_push_unsubscribe(req: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+# ─────────────────────────── Module registry API — spec-065 Phase A ──────────
+
+
+async def api_modules_list(req: web.Request) -> web.Response:
+    """GET /api/modules — list all built-in modules with their enabled state."""
+    return web.json_response({"modules": _modules.list_modules()})
+
+
+async def api_modules_set(req: web.Request) -> web.Response:
+    """POST /api/modules/{id} — enable or disable a module.
+
+    Body: {"enabled": bool}
+    200: {"ok": true, "module": {<module dict>}}
+    400: body missing / wrong type
+    404: unknown module id
+    """
+    module_id = req.match_info["id"]
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict) or "enabled" not in body:
+        return web.json_response({"error": "body must be {\"enabled\": bool}"}, status=400)
+    enabled_raw = body["enabled"]
+    if not isinstance(enabled_raw, bool):
+        return web.json_response({"error": "\"enabled\" must be a boolean"}, status=400)
+    try:
+        updated = _modules.set_enabled(module_id, enabled_raw)
+    except KeyError:
+        return web.json_response({"error": "unknown module"}, status=404)
+    return web.json_response({"ok": True, "module": updated})
+
+
 # ─────────────────────────── entry point ───────────────────────────
 
 async def start(ctx: dict) -> None:
@@ -11865,6 +11901,10 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/push/vapid-public", api_push_vapid_public)
         app.router.add_post("/api/push/subscribe", api_push_subscribe)
         app.router.add_post("/api/push/unsubscribe", api_push_unsubscribe)
+
+        # spec-065 Phase A: module / extension registry
+        app.router.add_get("/api/modules", api_modules_list)
+        app.router.add_post("/api/modules/{id}", api_modules_set)
 
         # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
