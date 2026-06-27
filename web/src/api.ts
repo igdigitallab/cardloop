@@ -61,6 +61,18 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
+  // Card 931573: global (home) agent-rules CLAUDE.md — view + edit. The id arg is ignored
+  // (kept so the EditableMarkdown load/save signatures are satisfied unchanged).
+  globalClaudeMd: (_id: string) =>
+    apiFetch<import('./types').ClaudeMd>(`/api/global/claude-md`),
+
+  saveGlobalClaudeMd: (_id: string, content: string) =>
+    apiFetch<import('./types').ClaudeMd>(`/api/global/claude-md`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    }),
+
   projectLogs: (id: string) =>
     apiFetch<import('./types').ProjectLogs>(`/api/projects/${id}/logs`),
 

@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { api } from '../api'
 import { GlobalSettings, GlobalSettingsEffective } from '../types'
 import { Spinner } from '../components/Spinner'
+import { EditableMarkdown } from '../components/EditableMarkdown'
 import { MODELS } from '../lib/models'
 import { t } from '../i18n'
 import { useNotifications } from '../hooks/useNotifications'
@@ -148,6 +149,25 @@ export function GlobalSettingsTab() {
             </label>
           )}
         </Row>
+      </section>
+
+      {/* Card 931573: global (home) agent-rules CLAUDE.md — view + edit on the server. */}
+      <section>
+        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>📋 Main CLAUDE.md</h3>
+        <p style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--text3)' }}>
+          The global agent rules on the server (<code>$HOME/CLAUDE.md</code>) — routing &amp;
+          cross-project conventions the agent reads for every project. Double-click or ✎ to edit,
+          Ctrl+Enter to save.
+        </p>
+        <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, maxHeight: '60vh', overflow: 'auto' }}>
+          <EditableMarkdown
+            projectId=""
+            load={api.globalClaudeMd}
+            save={api.saveGlobalClaudeMd}
+            spinnerLabel="Loading CLAUDE.md…"
+            emptyLabel="No global CLAUDE.md yet"
+          />
+        </div>
       </section>
     </div>
   )

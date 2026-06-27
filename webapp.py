@@ -2678,6 +2678,52 @@ async def api_project_claude_md_write(req: web.Request) -> web.Response:
     return await _write_doc(req, lambda cwd: cwd / "CLAUDE.md")
 
 
+def _global_claude_md_path() -> Path:
+    """Resolve the operator's GLOBAL agent-rules CLAUDE.md (card 931573).
+
+    Default: $HOME/CLAUDE.md — read by the agent as a parent-dir memory for every project
+    living under $HOME. Override with the GLOBAL_CLAUDE_MD env var for non-standard layouts
+    (e.g. ~/.claude/CLAUDE.md). $HOME-relative — no hardcoded path (OSS-safe)."""
+    override = os.environ.get("GLOBAL_CLAUDE_MD", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "CLAUDE.md"
+
+
+async def api_global_claude_md(req: web.Request) -> web.Response:
+    """GET /api/global/claude-md — read the global (home) agent-rules CLAUDE.md."""
+    path = _global_claude_md_path()
+    try:
+        if path.exists():
+            content = path.read_text(encoding="utf-8")
+            exists = True
+        else:
+            content = ""
+            exists = False
+    except Exception as e:
+        content = f"[read error: {e}]"
+        exists = False
+    return web.json_response({"path": str(path), "content": content, "exists": exists})
+
+
+async def api_global_claude_md_write(req: web.Request) -> web.Response:
+    """POST /api/global/claude-md — overwrite the global (home) agent-rules CLAUDE.md."""
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    content = body.get("content")
+    if not isinstance(content, str):
+        return web.json_response({"error": "content must be a string"}, status=400)
+    path = _global_claude_md_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        return web.json_response({"error": f"write error: {e}"}, status=500)
+    return web.json_response({"path": str(path), "content": content, "exists": True})
+
+
 async def api_project_readme_write(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/readme — overwrite existing README (or create README.md)."""
     def _pick(cwd: Path) -> Path:
@@ -11669,6 +11715,9 @@ async def start(ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/favorite", api_project_favorite)
         app.router.add_get("/api/projects/{id}/claude-md", api_project_claude_md)
         app.router.add_post("/api/projects/{id}/claude-md", api_project_claude_md_write)
+        # Card 931573: global (home) agent-rules CLAUDE.md — view + edit from the cockpit.
+        app.router.add_get("/api/global/claude-md", api_global_claude_md)
+        app.router.add_post("/api/global/claude-md", api_global_claude_md_write)
         app.router.add_get("/api/projects/{id}/readme", api_project_readme)
         app.router.add_post("/api/projects/{id}/readme", api_project_readme_write)
         app.router.add_get("/api/projects/{id}/specs", api_project_specs)
