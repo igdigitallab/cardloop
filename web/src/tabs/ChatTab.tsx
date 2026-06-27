@@ -1541,6 +1541,34 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
     const now = Date.now()
 
+    // Chat-path runs publish RAW engine events to the bus (type-keyed, with seq:
+    // text_delta/text/tool), unlike card runs which publish translated kind-keyed
+    // events. Without handling these, a chat turn observed via the bus — e.g. after a
+    // remount that drops the direct /chat SSE (mobile orientation flip), or from a
+    // second tab/device — renders nothing live: its text events fall through the
+    // kind-chain below and the bubble freezes until run_end. Mirror the direct stream's
+    // reconciliation so a re-adopted chat turn keeps streaming token-by-token.
+    // (spec-063 will collapse the two event vocabularies into one resumable stream.)
+    if (!evt.kind) {
+      if (!busActiveRef.current) return
+      const rec = evt as unknown as { type?: string; text?: string; [k: string]: unknown }
+      if (rec.type === 'text_delta') {
+        setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
+        setMessages(prev => appendDelta(prev, rec.text ?? ''))
+      } else if (rec.type === 'text') {
+        setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
+        setMessages(prev => reconcileFinalText(prev, rec.text ?? ''))
+      } else if (rec.type === 'tool') {
+        const { type: _t, seq: _s, ...toolFields } = rec
+        const tool = toolFields as unknown as ChatToolCall
+        setRun(r => r ? { ...r, lastEventAt: now, currentTool: tool } : r)
+        setMessages(prev => appendChunk(prev, { kind: 'tool', tool }))
+      }
+      // type-keyed result/error/rate_limit/subagent/preset are ignored here — the
+      // kind-keyed run_end + the /live poll drive lifecycle; hydrate covers sub-agents.
+      return
+    }
+
     if (evt.kind === 'run_start') {
       const prefix = evt.source === 'card' ? '🗂 card: ' : evt.source === 'tg' ? '📱 TG: ' : ''
       const userMsg = makeUserMsg(prefix + evt.prompt)
