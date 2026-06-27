@@ -4516,17 +4516,19 @@ async def _run_card(
                 etype = event["type"]
                 if etype == "text":
                     answer_parts.append(event["text"])
-                    _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": card_id})
+                    _ev = {"kind": "text", "text": event["text"], "run_id": card_id}
+                    _live_ev = _live_turn_append(session_key, _ev)
+                    _bus_publish(session_key, _live_ev, persist=True)
                 elif etype == "text_delta":
-                    pass  # card runner: ignore streaming deltas — answer built from finalized {type:"text"} blocks
+                    # spec-063 Phase B: stream deltas live + buffer for reconnect replay
+                    _live_ev = _live_turn_append(session_key, {"type": "text_delta", "text": event["text"]})
+                    _bus_publish(session_key, _live_ev, persist=False)
                 elif etype == "tool":
                     inp = event.get("input") or {}
                     tool_data = _format_tool(event.get("name", "?"), inp if isinstance(inp, dict) else {})
-                    _bus_publish(session_key, {
-                        "kind": "tool",
-                        "run_id": card_id,
-                        "tool": tool_data,
-                    })
+                    _ev = {"kind": "tool", "run_id": card_id, "tool": tool_data}
+                    _live_ev = _live_turn_append(session_key, _ev)
+                    _bus_publish(session_key, _live_ev, persist=True)
                 elif etype == "result":
                     _card_last_result_event = event  # Phase D: capture for auto-resume
                     # Spec-021 Part 2: do NOT write card session_id back to ctx["sessions"].
@@ -4540,12 +4542,15 @@ async def _run_card(
                             _card_structured_output = _raw_so
                         elif _raw_so is not None:
                             print(f"[_run_card] structured_output malformed for {card_id}: {_raw_so!r} — falling back to prose")
+                    _live_turn_append(session_key, event)
                 elif etype == "error":
                     raise event["exc"]
 
             ok = True
+            _live_turn_finish(session_key, "done")
 
         except Exception as e:
+            _live_turn_finish(session_key, "error")
             exc_info = f"{type(e).__name__}: {e}\n\n{_tb.format_exc()}"
 
         # Worktree: auto-commit + diff from branch; legacy: diff from cwd
@@ -5958,17 +5963,29 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
             etype = event["type"]
             if etype == "text":
                 answer_parts.append(event["text"])
-                _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": record["id"]})
+                _ev = {"kind": "text", "text": event["text"], "run_id": record["id"]}
+                _live_ev = _live_turn_append(session_key, _ev)
+                _bus_publish(session_key, _live_ev, persist=True)
             elif etype == "text_delta":
-                pass  # deferred runner: ignore streaming deltas — answer built from finalized {type:"text"} blocks
+                # spec-063 Phase B: stream deltas live + buffer for reconnect replay
+                _live_ev = _live_turn_append(session_key, {"type": "text_delta", "text": event["text"]})
+                _bus_publish(session_key, _live_ev, persist=False)
+            elif etype == "tool":
+                inp = event.get("input") or {}
+                tool_data = _format_tool(event.get("name", "?"), inp if isinstance(inp, dict) else {})
+                _ev = {"kind": "tool", "run_id": record["id"], "tool": tool_data}
+                _live_ev = _live_turn_append(session_key, _ev)
+                _bus_publish(session_key, _live_ev, persist=True)
             elif etype == "result":
                 _deferred_last_result_event = event  # Phase D: capture for auto-resume
                 if event.get("session_id"):
                     ctx["sessions"][session_key] = event["session_id"]
                     ctx["save_sessions"]()
+                _live_turn_append(session_key, event)
             elif etype == "error":
                 raise event["exc"]
 
+        _live_turn_finish(session_key, "done")
         _bus_publish(session_key, {"kind": "run_end", "outcome": "ok", "run_id": record["id"]})
 
         result_text = "\n".join(answer_parts).strip()
@@ -5996,6 +6013,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
         )
 
     except Exception as e:
+        _live_turn_finish(session_key, "error")
         _bus_publish(session_key, {"kind": "run_end", "outcome": "fail", "run_id": record["id"]})
         if rec:
             rec["status"] = "failed"
