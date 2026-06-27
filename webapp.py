@@ -10309,7 +10309,11 @@ async def api_terminal_ws(req: web.Request) -> web.WebSocketResponse:
     import struct as _struct
     import termios as _termios
 
-    ws = web.WebSocketResponse()
+    # Card 9976b6: heartbeat keeps the connection alive through idle periods. Without it, a
+    # long no-output stretch (e.g. agy/antigravity "thinking" for >~100s) lets the Cloudflare
+    # tunnel / reverse proxy drop the idle WebSocket — the loop below ends, `finally` kills the
+    # PTY child, and the running session dies. Server pings every 30s (browsers auto-pong).
+    ws = web.WebSocketResponse(heartbeat=30.0)
     await ws.prepare(req)
 
     master_fd, slave_fd = _pty.openpty()
