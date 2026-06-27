@@ -3020,6 +3020,11 @@ _LOG_NOISE_SUBSTRINGS = (
     "exit code 143",                # SDK subprocess killed by SIGTERM on service restart — expected, not a bug
     "command failed with exit code -",  # SDK message-reader subprocess killed by a signal (-15 SIGTERM / -9 SIGKILL)
                                         # during a self-restart or aborted turn — a teardown artifact, not a product bug
+    "exception was never retrieved",    # asyncio's "Task/Future exception was never retrieved" header line —
+                                        # the bare header has no exit code, so the "143"/"exit code -" filters miss it.
+                                        # The real exception (if any) is logged on the following lines and caught by
+                                        # the traceback scanner independently; on a self-restart it is the exit-143
+                                        # companion. Filtering the header alone is safe and stops a false incident per restart.
 )
 
 

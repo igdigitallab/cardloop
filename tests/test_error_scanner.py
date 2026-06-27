@@ -109,6 +109,28 @@ def test_skip_restart_sigterm_teardown_noise():
     assert _parse_log_errors("ERROR: subprocess exit code 143 on shutdown") == []
 
 
+def test_skip_asyncio_never_retrieved_on_restart():
+    """A self-restart SIGTERMs the SDK subprocess; asyncio then logs a bare
+    'Task exception was never retrieved' ERROR header on its own line — the
+    'exit code 143' sits on the *following* lines, so the exit-code filters miss
+    the header. It must still be filtered (the real ProcessError is exit-143
+    teardown noise). Regression: this created a false Failed card on every
+    restart/self-update."""
+    # The exact shape journald emitted on the restart that surfaced this.
+    log = (
+        "2026-06-27 16:13:51,865 ERROR asyncio Task exception was never retrieved\n"
+        "future: <Task finished name='Task-181400' coro=<<async_generator_athrow without __name__>()> "
+        "exception=ProcessError('Command failed with exit code 143 (exit code: 143)')>\n"
+        "Traceback (most recent call last):\n"
+        "  File '/app/subprocess_cli.py', line 715, in _read_messages_impl\n"
+        "    raise self._exit_error\n"
+        "claude_agent_sdk._errors.ProcessError: Command failed with exit code 143 (exit code: 143)\n"
+    )
+    assert _parse_log_errors(log) == []
+    # The bare header line alone is also noise (companion always logged separately).
+    assert _parse_log_errors("ERROR Future exception was never retrieved") == []
+
+
 def test_real_nonsignal_failure_still_reported():
     """A genuine non-signal failure (exit code 1) must still surface."""
     errors = _parse_log_errors("ERROR: build Command failed with exit code 1")
