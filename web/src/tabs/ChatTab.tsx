@@ -895,6 +895,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // The effective chat id: activeChatId from server (null until loaded = render nothing special)
   const effectiveChatId = activeChatId ?? ''
 
+  // Track the active chat's session_id via a ref so hydrateFromServer can pass it
+  // to sessionHistory without stale-closure issues (ref is always fresh at call time).
+  // This allows the frontend to fetch the correct transcript independently of ctx["sessions"].
+  const activeSessionIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    const chat = chats.find(c => c.id === effectiveChatId)
+    activeSessionIdRef.current = chat?.session_id ?? null
+  }, [chats, effectiveChatId])
+
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [pendingHandoff, setPendingHandoff] = useState<string | null>(null)
   const [contextTokens, setContextTokens] = useState<number | null>(null)
@@ -1290,8 +1299,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // Callers supply isCancelled() so each call site manages its own cancellation token.
   // This is intentionally a one-shot fetch — no persistent connection added.
   const hydrateFromServer = useCallback((isCancelled: () => boolean) => {
+    // Pass the active chat's session_id so we always read from the correct transcript,
+    // even when ctx["sessions"] lags (e.g. right after a service restart). The ref is
+    // always fresh at call time — no stale closure risk.
+    const sessionId = activeSessionIdRef.current ?? undefined
     Promise.all([
-      api.sessionHistory(projectId),
+      api.sessionHistory(projectId, sessionId),
       api.chatQueue(projectId).catch(() => ({ items: [] as Array<{ id: string; text: string; created_at: number }> })),
       // Spec-035 L3: /live replaces /running — returns running state + turn history + started_at
       api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, prompt: '', cursor: 0, events: [] as Array<Record<string, unknown>>, board_events: [], pending_handoff: null as string | null })),
@@ -1691,6 +1704,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     setWarnDismissedAtTokens(null)
     setLastCacheHitPct(null)
     setLastFreshTokens(null)
+    // Session change means the backend already updated ctx["sessions"]; omit the
+    // session_id param so we always read the freshly-activated session from the server.
     api.sessionHistory(projectId)
       .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens != null ? res.context_tokens : null); if (res.context_window != null && res.context_window > 0) setContextWindow(res.context_window); if (res.context_warn_at != null && res.context_warn_at > 0) setContextWarnAt(res.context_warn_at); if (res.context_rotate_at != null && res.context_rotate_at > 0) setContextRotateAt(res.context_rotate_at) })
       .catch(() => setMessages([]))
@@ -1845,6 +1860,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             }
             if (typeof evtAny.fresh_tokens === 'number') {
               setLastFreshTokens(evtAny.fresh_tokens as number)
+            }
+            // Spec-037: persist the SDK-assigned session_id into the chats state so that
+            // subsequent hydrateFromServer calls can pass it directly to sessionHistory.
+            // Without this, a fresh tab (session_id: null in chats state) would keep
+            // passing null even after the first run assigned a real session_id — forcing
+            // the server to fall back to ctx["sessions"] on every page reload.
+            const newSid = typeof evtAny.session_id === 'string' ? evtAny.session_id : null
+            if (newSid && effectiveChatId) {
+              setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, session_id: newSid } : c))
+              activeSessionIdRef.current = newSid
             }
           }
           // Spec-039: "rotation" SSE event is no longer emitted by the backend (auto-rotation

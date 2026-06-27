@@ -408,3 +408,38 @@ def test_save_chats_atomic(fake_ctx):
     tmp = fake_ctx["DATA"] / "chats.json.tmp"
     assert p.exists()
     assert not tmp.exists()  # tmp should be gone after atomic replace
+
+
+# ─────────────────────────── startup desync repair ────────────────────────────
+
+
+async def test_get_chats_repairs_sessions_desync(aiohttp_client, chats_app, fake_ctx):
+    """GET /chats syncs ctx["sessions"] from the active chat's session_id.
+
+    Scenario: sessions.json was NOT updated after a run (save_sessions failed),
+    so ctx["sessions"] holds a stale value while chats.json has the correct
+    session_id. The first GET /chats after a service restart must repair the cache.
+    """
+    client = await aiohttp_client(chats_app)
+    h = _auth(fake_ctx)
+
+    # Seed chats.json manually: Main has session_id "real-session-abc"
+    chat_id = "aa1122"
+    chats_data = {
+        "myproject": {
+            "active": chat_id,
+            "chats": [{"id": chat_id, "name": "Main", "session_id": "real-session-abc", "created_at": 0}],
+        }
+    }
+    _save_chats(fake_ctx, chats_data)
+
+    # Simulate stale ctx["sessions"] (e.g. sessions.json had old value from before the run)
+    fake_ctx["sessions"]["1001:42"] = "stale-session-xyz"
+
+    # GET /chats should repair ctx["sessions"] to match chats.json's active chat
+    resp = await client.get("/api/projects/myproject/chats", headers=h)
+    assert resp.status == 200
+    assert fake_ctx["sessions"]["1001:42"] == "real-session-abc", (
+        "GET /chats must sync ctx['sessions'] from the active chat's session_id "
+        f"to repair startup desync, got: {fake_ctx['sessions'].get('1001:42')!r}"
+    )

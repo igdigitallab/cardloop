@@ -8056,6 +8056,12 @@ async def api_project_chats_list(req: web.Request) -> web.Response:
     async with _chats_lock():
         chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
         entry = chats_data[project["id"]]
+        # Repair startup desync: ctx["sessions"] is loaded from sessions.json on boot
+        # but may lag chats.json if save_sessions failed mid-write or was never called
+        # for a chat that only wrote back to chats.json. Mirror the active chat's
+        # session_id so the first sessionHistory call on page load always lands on
+        # the correct transcript regardless of service restart ordering.
+        _mirror_active_chat_to_sessions(ctx, project["id"], session_key, chats_data)
     return web.json_response({"active": entry["active"], "chats": entry["chats"]})
 
 
