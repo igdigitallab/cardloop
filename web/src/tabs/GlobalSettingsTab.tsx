@@ -4,6 +4,7 @@ import { GlobalSettings, GlobalSettingsEffective } from '../types'
 import { Spinner } from '../components/Spinner'
 import { MODELS } from '../lib/models'
 import { t } from '../i18n'
+import { useNotifications } from '../hooks/useNotifications'
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -30,6 +31,7 @@ export function GlobalSettingsTab() {
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
   const [saving, setSaving] = useState(false)
+  const { permission, enabled, setEnabled, requestPermission } = useNotifications()
 
   useEffect(() => {
     let cancelled = false
@@ -114,6 +116,38 @@ export function GlobalSettingsTab() {
           </button>
           {msg && <span style={{ fontSize: 12, color: 'var(--text2)' }}>{msg}</span>}
         </div>
+      </section>
+
+      {/* Browser notifications section */}
+      <section>
+        <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>🔔 Notifications</h3>
+        <p style={{ margin: '0 0 6px', fontSize: 12, color: 'var(--text3)' }}>
+          Local browser notifications (no server required).
+        </p>
+
+        <Row title={t['notify.settings_label']} hint={t['notify.settings_hint']}>
+          {permission === 'unsupported' ? (
+            <span style={{ fontSize: 12, color: 'var(--text3)' }}>Not supported in this browser</span>
+          ) : permission === 'denied' ? (
+            <span style={{ fontSize: 12, color: 'var(--text3)' }}>{t['notify.blocked_hint']}</span>
+          ) : (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={async (ev) => {
+                  if (ev.target.checked) {
+                    await requestPermission()
+                    setEnabled(true)
+                  } else {
+                    setEnabled(false)
+                  }
+                }}
+              />
+              {enabled ? 'On' : 'Off'}
+            </label>
+          )}
+        </Row>
       </section>
     </div>
   )

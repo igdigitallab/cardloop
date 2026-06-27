@@ -15,6 +15,7 @@ import { GlobalSettingsTab } from './tabs/GlobalSettingsTab'
 import { useToast, ToastContainer } from './components/Toast'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
 import { useTheme } from './hooks/useTheme'
+import { useNotifications } from './hooks/useNotifications'
 
 const GLOBAL_FILES_ID = '__global__'
 const SCHEDULES_ID = '__schedules__'
@@ -99,6 +100,8 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(() => readString(LS_ACTIVE))
   const [sidebarOrder, setSidebarOrder] = useState<string[]>(() => readSidebarOrder())
   const { unreadBySession, incrementUnread, clearUnreadForSession, resetUnread } = useUnreadTracker()
+  // Browser notifications: opt-in desktop alerts for background run completions (notifications A)
+  const { notifyRunEnd } = useNotifications()
   // Reply-ready: project IDs where the agent finished a run while the tab was not active
   const [replyReadyIds, setReplyReadyIds] = useState<Set<string>>(() => new Set())
   // ops:b2a081 — project IDs where an agent turn is currently in flight (working indicator)
@@ -136,6 +139,11 @@ export default function App() {
   // localStorage serves as an instant cache (no flash); server syncs on top.
   const uiHydratedRef = useRef(false)
   const uiSaveTimer = useRef<number | null>(null)
+  // Stable ref for handleSelect — allows connectActivityStream (defined before handleSelect)
+  // to call the most current version without being re-subscribed on every render. Same pattern as activeIdRef.
+  const handleSelectRef = useRef<(id: string) => void>(() => { /* initialized after handleSelect is defined */ })
+  // Stable ref for notifyRunEnd — avoids adding the hook result to connectActivityStream deps.
+  const notifyRunEndRef = useRef(notifyRunEnd)
 
   const checkAuth = useCallback(async () => {
     try {
@@ -225,6 +233,8 @@ export default function App() {
   // Keep refs up-to-date (needed by SSE handler without re-subscription)
   useEffect(() => { activeIdRef.current = activeId }, [activeId])
   useEffect(() => { projectsRef.current = projects }, [projects])
+  // notifyRunEndRef is updated whenever the hook's internal enabled/permission state changes
+  useEffect(() => { notifyRunEndRef.current = notifyRunEnd }, [notifyRunEnd])
 
   // Persist openIds + activeId + split state
   useEffect(() => {
@@ -378,8 +388,24 @@ export default function App() {
         if (!proj) return
         // Clear working indicator
         setRunningIds(prev => { if (!prev.has(proj.id)) return prev; const n = new Set(prev); n.delete(proj.id); return n })
-        // Mark project as attention-needed when its tab is not currently active
-        if (proj.id !== activeIdRef.current) {
+        // Notify + attention cue when the project is not currently the active visible tab.
+        // Notifications are project-level because all chats of a project share one session_key
+        // on the bus — per-chat gating isn't distinguishable here (refine later if chats get distinct keys).
+        const isBackground = document.visibilityState !== 'visible' || proj.id !== activeIdRef.current
+        if (isBackground) {
+          // Desktop/mobile notification (opt-in, gated by useNotifications internals)
+          const outcome = (payload as { outcome?: string }).outcome ?? 'ok'
+          notifyRunEndRef.current({
+            projectId: proj.id,
+            projectName: proj.name,
+            outcome,
+            onClick: () => handleSelectRef.current(proj.id),
+          })
+          // Attention cue: set title while the page is in the background; restore on next focus.
+          if (document.visibilityState !== 'visible') {
+            document.title = '● Cardloop'
+          }
+          // Mark project as attention-needed
           setReplyReadyIds(prev => {
             const next = new Set(prev)
             next.add(proj.id)
@@ -461,6 +487,19 @@ export default function App() {
     }
   }, [authState, loadProjects])
 
+  // Attention cue: restore document title when the page becomes visible again.
+  // Set to '● Cardloop' by the run_end SSE handler when a background run finishes.
+  useEffect(() => {
+    const originalTitle = document.title
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && document.title === '● Cardloop') {
+        document.title = originalTitle === '● Cardloop' ? 'Cardloop' : originalTitle
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, []) // runs once — document.title at mount is the original title
+
   const clearUnread = useCallback((id: string) => {
     const proj = projectsRef.current.find(p => p.id === id)
     const sk = proj?.session_key ?? null
@@ -486,6 +525,9 @@ export default function App() {
     setDrawerOpen(false)
     setMobileScreen('project')
   }, [clearUnread])
+  // Keep handleSelectRef current so the SSE handler (connectActivityStream) can call it
+  // without being re-subscribed on every render (same pattern as activeIdRef).
+  handleSelectRef.current = handleSelect
 
   // Sidebar context-menu "⚙ Settings": select the project + ask its ProjectView to
   // switch to the Settings tab. ProjectView watches settingsRequest.nonce.

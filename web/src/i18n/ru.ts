@@ -647,6 +647,15 @@ export const ru = {
   'chat.wall_reset_btn': 'Сбросить сессию',
   // Scroll-to-bottom pill (shown when user has scrolled up while messages arrive)
   'chat.scroll_to_bottom': '↓ Новые сообщения',
+
+  // ── Browser notifications (notifications A) ──────────────────────────────────
+  'notify.title_ok': '✅ {projectName}',
+  'notify.title_fail': '❌ {projectName}',
+  'notify.body_ok': 'Агент завершил задачу успешно.',
+  'notify.body_fail': 'Агент завершил задачу с ошибкой.',
+  'notify.settings_label': 'Уведомления браузера',
+  'notify.settings_hint': 'Показывать десктопное уведомление, когда задача завершается в фоне.',
+  'notify.blocked_hint': 'Заблокировано в настройках браузера — разрешите уведомления для этого сайта.',
 } as const
 
 export type TKey = keyof typeof ru

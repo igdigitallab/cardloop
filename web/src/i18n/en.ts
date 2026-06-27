@@ -656,6 +656,15 @@ export const en = {
   'chat.wall_reset_btn': 'Reset session',
   // Scroll-to-bottom pill (shown when user has scrolled up while messages arrive)
   'chat.scroll_to_bottom': '↓ New messages',
+
+  // ── Browser notifications (notifications A) ──────────────────────────────────
+  'notify.title_ok': '✅ {projectName}',
+  'notify.title_fail': '❌ {projectName}',
+  'notify.body_ok': 'Agent run finished successfully.',
+  'notify.body_fail': 'Agent run finished with an error.',
+  'notify.settings_label': 'Browser notifications',
+  'notify.settings_hint': 'Show a desktop notification when a run finishes in the background.',
+  'notify.blocked_hint': 'Blocked in browser settings — allow notifications for this site to enable.',
 } as const
 
 export type TKey = keyof typeof en
