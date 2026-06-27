@@ -70,6 +70,9 @@ Three things make Cardloop different from the dozen other agent kanbans:
 - **Mobile-first installable PWA** — home-screen install, offline-aware SSE reconnect, touch-optimized,
   achromatic dark UI, plus a bidirectional WebSocket PTY terminal (`@xterm/xterm`) with OSC 52 clipboard
   so you can copy an OAuth login link on mobile.
+- **Run-finished notifications** — a browser notification when a run completes, with click-to-jump to the
+  project. In-app when the tab is open, **Web Push when the app is fully closed** (messenger-style), with
+  smart de-dup so you never get both. Opt-in. See [docs/notifications.md](docs/notifications.md).
 - **One subscription, no API key** — the engine drives the official `claude` CLI against your OAuth token.
 - **Multi-project cockpit** — explicit projects, each with its own cwd, model, persistent session, and board.
 - **One transport-agnostic engine** — `run_engine()` feeds every channel against the same session and board.
@@ -170,6 +173,11 @@ The cockpit is a Progressive Web App — install it to your home screen and it b
    reconnect-on-wake — built for running agents while you're away from your desk.
 
 Desktop browsers support **Install app** too, for a standalone window.
+
+**Turn on notifications:** Global Settings → 🔔 Notifications. You'll get a browser notification when a
+run finishes (click it to jump to the project) — in-app when open, and **Web Push when the app is fully
+closed** (installed PWA + HTTPS required; on iOS, push needs the installed PWA). Full guide:
+[docs/notifications.md](docs/notifications.md).
 
 <!-- SCREENSHOT: docs/pwa-install.png — the browser "Install app" prompt -->
 
@@ -335,6 +343,7 @@ manual steps → [CONTRIBUTING.md](CONTRIBUTING.md).
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Code map: where to find what, flow diagram |
 | [CLAUDE.md](CLAUDE.md) | Working rules and gotchas for agents |
 | [docs/API.md](docs/API.md) | HTTP API reference |
+| [docs/notifications.md](docs/notifications.md) | Run-finished notifications (in-app + Web Push) — setup & troubleshooting |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, tests, lint, commit style |
 | `TASKS.md` | Live board (kanban) — backlog and current tasks |
 
