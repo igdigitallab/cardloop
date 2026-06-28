@@ -56,6 +56,16 @@ function buttonName(button: number): 'left' | 'right' | 'middle' {
   return 'left'
 }
 
+/**
+ * What to show in the URL bar. The branded start page is a long
+ * `data:text/html;base64,…` URL (and a reset session sits on `about:blank`) —
+ * showing either is confusing noise, so render an empty bar (placeholder) instead.
+ */
+function displayUrl(url: string): string {
+  if (!url || url === 'about:blank' || url.startsWith('data:') || url.startsWith('about:')) return ''
+  return url
+}
+
 export function BrowserTab({ projectId }: Props) {
   const wsRef = useRef<WebSocket | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
@@ -110,9 +120,9 @@ export function BrowserTab({ projectId }: Props) {
             setConnState('ready')
             if (typeof msg.backend === 'string') setBackend(msg.backend)
           } else if (msg.type === 'nav') {
-            const url = (msg.url as string) ?? ''
-            setUrlValue(url)
-            setUrlInput(url)
+            const shown = displayUrl((msg.url as string) ?? '')
+            setUrlValue(shown)
+            setUrlInput(shown)
           } else if (msg.type === 'error') {
             setErrorMsg((msg.message as string) ?? 'Unknown error')
             setConnState('error')
@@ -152,6 +162,32 @@ export function BrowserTab({ projectId }: Props) {
         URL.revokeObjectURL(lastObjUrlRef.current)
         lastObjUrlRef.current = null
       }
+    }
+  }, [connect])
+
+  // Reconnect when the app returns to the foreground. On a phone, turning the
+  // screen off suspends the page → the browser WS drops (idle proxy + the pane's
+  // own watchdog), leaving a dead/blank pane on wake. Re-open it when the tab
+  // becomes visible / the network resumes — the server re-primes the last frame
+  // (or a fresh start page) so the browser comes back instead of staying broken.
+  const connStateRef = useRef(connState)
+  useEffect(() => { connStateRef.current = connState }, [connState])
+  useEffect(() => {
+    const maybeReconnect = () => {
+      if (document.visibilityState !== 'visible') return
+      if (connStateRef.current === 'error') return // server refused (e.g. module off) — don't loop
+      const ws = wsRef.current
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        connect()
+      }
+    }
+    document.addEventListener('visibilitychange', maybeReconnect)
+    window.addEventListener('online', maybeReconnect)
+    window.addEventListener('focus', maybeReconnect)
+    return () => {
+      document.removeEventListener('visibilitychange', maybeReconnect)
+      window.removeEventListener('online', maybeReconnect)
+      window.removeEventListener('focus', maybeReconnect)
     }
   }, [connect])
 

@@ -40,8 +40,8 @@ const BASE_TABS: Tab[] = [
 // localStorage keys
 const LS_WIDTH    = 'cops.chatWidth'
 const LS_COLLAPSED = 'cops.chatCollapsed'
-// spec-066/mobile-split: split on/off is per-project (see mtabKey/msplitKey); the
-// divider ratio below is a per-device pref shared across projects.
+// spec-066/mobile: the Browser tab stacks browser+chat; the divider ratio is a
+// per-device pref shared across projects (the inner-tab memory is per-project, see mtabKey).
 const LS_MSPLIT_PCT = 'cops.mobileBrowserPct'
 
 const CHAT_MIN_PCT = 20
@@ -74,15 +74,11 @@ function readLSBool(key: string, fallback: boolean): boolean {
   }
 }
 
-// Per-project mobile view memory: which inner tab / split-mode a project was last on,
-// so reopening it (or relaunching the PWA) restores the spot instead of resetting to Chat.
+// Per-project mobile view memory: which inner tab a project was last on, so reopening
+// it (or relaunching the PWA) restores the spot instead of resetting to Chat.
 const mtabKey = (pid: string) => `cops.mtab.${pid}`
-const msplitKey = (pid: string) => `cops.msplit.${pid}`
 function readMobileTab(pid: string): string | null {
   try { return localStorage.getItem(mtabKey(pid)) || null } catch { return null }
-}
-function readMobileSplit(pid: string): boolean {
-  try { return localStorage.getItem(msplitKey(pid)) === 'true' } catch { return false }
 }
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$/
@@ -401,21 +397,17 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     try { localStorage.setItem(LS_COLLAPSED, String(collapsed)) } catch {}
   }, [collapsed])
 
-  // ── Mobile split (browser + chat stacked) — per-project opt-in ──────────────
-  // mobileSplit is remembered PER PROJECT (each project keeps its own view); the
+  // ── Mobile browser view: the Browser tab stacks browser (top) + chat (bottom) ──
+  // No separate "Split" toggle — opening the Browser tab IS the split view. The
   // divider ratio is a per-device pref shared across projects.
-  const [mobileSplit, setMobileSplit] = useState<boolean>(() => readMobileSplit(project.id))
   const [mobileBrowserPct, setMobileBrowserPct] = useState<number>(() => readLS(LS_MSPLIT_PCT, MSPLIT_DEFAULT_PCT))
-  // Persist the per-project mobile view (inner tab + split) so reopening restores it.
+  // Persist the per-project mobile view so reopening restores the last inner tab.
   useEffect(() => {
     try {
       if (mobileInnerTab) localStorage.setItem(mtabKey(project.id), mobileInnerTab)
       else localStorage.removeItem(mtabKey(project.id))
     } catch {}
   }, [mobileInnerTab, project.id])
-  useEffect(() => {
-    try { localStorage.setItem(msplitKey(project.id), String(mobileSplit)) } catch {}
-  }, [mobileSplit, project.id])
   useEffect(() => {
     try { localStorage.setItem(LS_MSPLIT_PCT, String(mobileBrowserPct)) } catch {}
   }, [mobileBrowserPct])
@@ -689,58 +681,25 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
               affordance (the .chat-feed scroll handler). Other tabs (Board/CLAUDE.md/Logs/…) scroll
               their own container with no reveal path, so a collapsed nav would strand the user with
               no way back to Chat. Always keep the nav expanded off the Chat tab. */}
-          <nav className={`mobile-inner-tabs${navCollapsed && mobileInnerTab === null && !mobileSplit ? ' collapsed' : ''}`} aria-label={t['tab.sections_aria']}>
+          <nav className={`mobile-inner-tabs${navCollapsed && mobileInnerTab === null ? ' collapsed' : ''}`} aria-label={t['tab.sections_aria']}>
             <button
-              className={`mobile-inner-tab-btn ${mobileInnerTab === null && !mobileSplit ? 'active' : ''}`}
-              onClick={() => { setMobileSplit(false); setMobileInnerTab(null) }}
+              className={`mobile-inner-tab-btn ${mobileInnerTab === null ? 'active' : ''}`}
+              onClick={() => setMobileInnerTab(null)}
             >
               💬 Chat
             </button>
-            {/* Split toggle: next to Chat + pinned (sticky) so it stays reachable on any
-                tab, including Browser. Stacks Browser + Chat (opt-in, browser module only). */}
-            {browserEnabled && (
-              <button
-                className={`mobile-inner-tab-btn mobile-split-toggle ${mobileSplit ? 'active' : ''}`}
-                onClick={() => setMobileSplit(s => !s)}
-                title={mobileSplit ? t['split.mobile_exit'] : t['split.mobile_enter']}
-                aria-pressed={mobileSplit}
-              >
-                {mobileSplit ? '⊟' : '⊞'} {t['split.mobile_label']}
-              </button>
-            )}
             {visibleTabs.map(tab => (
               <button
                 key={tab.id}
-                className={`mobile-inner-tab-btn ${mobileInnerTab === tab.id && !mobileSplit ? 'active' : ''}`}
-                onClick={() => { setMobileSplit(false); setMobileInnerTab(tab.id) }}
+                className={`mobile-inner-tab-btn ${mobileInnerTab === tab.id ? 'active' : ''}`}
+                onClick={() => setMobileInnerTab(tab.id)}
               >
                 {tab.label}
               </button>
             ))}
           </nav>
-          {/* spec-066/mobile-split: stack Browser (top) + Chat (bottom) when opted in. */}
-          {mobileSplit && browserEnabled ? (
-            <div className="mobile-split-stack" ref={stackRef}>
-              <div className="mobile-split-browser" style={{ height: `${mobileBrowserPct}%` }}>
-                <ErrorBoundary label="Browser"><BrowserTab projectId={project.id} /></ErrorBoundary>
-              </div>
-              <div
-                className="mobile-split-divider"
-                role="separator"
-                aria-orientation="horizontal"
-                aria-label={t['split.mobile_resize']}
-                onPointerDown={onVDividerStart}
-              >
-                <span className="mobile-split-grip" />
-              </div>
-              <div className="mobile-split-chat">
-                <ErrorBoundary label="Chat">
-                  <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} chromeCollapsed onOpenCard={() => { setMobileSplit(false); setMobileInnerTab('board') }} discussCard={discussCard} onDiscussConsumed={() => setDiscussCard(null)} models={models} />
-                </ErrorBoundary>
-              </div>
-            </div>
-          ) : (
-          /* Content area: chat or inner tab — swipe handler on Chat tab only */
+          {/* Content area: chat / Browser-tab (browser stacked with chat) / other tab.
+              The swipe handler only acts on the Chat tab (it early-returns elsewhere). */}
           <div
             className={`mobile-project-content${swipeAnim ? ` swipe-anim-${swipeAnim}` : ''}`}
             ref={contentRef}
@@ -752,6 +711,28 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
               <ErrorBoundary label="Chat">
                 <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} chromeCollapsed={navCollapsed} onOpenCard={() => setMobileInnerTab('board')} discussCard={discussCard} onDiscussConsumed={() => setDiscussCard(null)} models={models} />
               </ErrorBoundary>
+            ) : mobileInnerTab === 'browser' && browserEnabled ? (
+              /* The Browser tab IS the split view on mobile: browser on top, chat below,
+                 with a draggable divider. No separate Split toggle. */
+              <div className="mobile-split-stack" ref={stackRef}>
+                <div className="mobile-split-browser" style={{ height: `${mobileBrowserPct}%` }}>
+                  <ErrorBoundary label="Browser"><BrowserTab projectId={project.id} /></ErrorBoundary>
+                </div>
+                <div
+                  className="mobile-split-divider"
+                  role="separator"
+                  aria-orientation="horizontal"
+                  aria-label={t['split.mobile_resize']}
+                  onPointerDown={onVDividerStart}
+                >
+                  <span className="mobile-split-grip" />
+                </div>
+                <div className="mobile-split-chat">
+                  <ErrorBoundary label="Chat">
+                    <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} chromeCollapsed onOpenCard={() => setMobileInnerTab('board')} discussCard={discussCard} onDiscussConsumed={() => setDiscussCard(null)} models={models} />
+                  </ErrorBoundary>
+                </div>
+              </div>
             ) : (
               <div className="tab-content">
                 {mobileInnerTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
@@ -762,11 +743,9 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                 {mobileInnerTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} /></ErrorBoundary>}
                 {mobileInnerTab === 'specs'     && <ErrorBoundary label="Specs"><SpecsTab projectId={project.id} /></ErrorBoundary>}
-                {mobileInnerTab === 'browser'   && browserEnabled && <ErrorBoundary label="Browser"><BrowserTab projectId={project.id} /></ErrorBoundary>}
               </div>
             )}
           </div>
-          )}
           <HealthRunEndRefresher refresh={refreshHealth} />
         </div>
       </ProjectActivityProvider>

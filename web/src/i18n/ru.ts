@@ -168,9 +168,6 @@ export const ru = {
   'split.expand_chat': 'Развернуть чат',
   'split.collapse_chat': 'Свернуть чат',
   'split.drag_to_resize': 'Перетащить для изменения размера',
-  'split.mobile_label': 'Сплит',
-  'split.mobile_enter': 'Показать браузер и чат вместе',
-  'split.mobile_exit': 'Вернуться к одному виду',
   'split.mobile_resize': 'Потяните, чтобы изменить размер браузер / чат',
 
   // ── Overview tab ─────────────────────────────────────────────

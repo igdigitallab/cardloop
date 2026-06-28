@@ -551,21 +551,6 @@
     background: var(--text3);
     opacity: 0.6;
   }
-  .mobile-split-toggle {
-    font-weight: 600;
-    /* Pin next to Chat at the left edge so the Split control stays reachable no
-       matter how far the tab strip is scrolled (e.g. while on the Browser tab). */
-    position: sticky;
-    left: 0;
-    z-index: 2;
-    background: var(--bg2);
-    padding-right: 12px;
-    border-right: 1px solid var(--border);
-  }
-  .mobile-split-toggle.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
-  }
 }
 
 /* D4: hide Split button on mobile — split view requires two panes */
