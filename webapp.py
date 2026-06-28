@@ -19,6 +19,7 @@ import secrets
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import traceback as _tb
 import unicodedata
@@ -39,6 +40,8 @@ import modules as _modules
 
 # spec-065 Phase B: live browser pane (lazy — playwright imported only on first use)
 import browser_pane as _browser_pane
+# spec-066: pluggable browser backends (builtin / cloakbrowser / external-cdp + Manager)
+import browser_backends as _backends
 
 # Spec-026 Phase 3: built-in encrypted secret store
 import secretstore as _secretstore
@@ -11650,31 +11653,146 @@ async def api_modules_list(req: web.Request) -> web.Response:
 
 
 async def api_modules_set(req: web.Request) -> web.Response:
-    """POST /api/modules/{id} — enable or disable a module.
+    """POST /api/modules/{id} — enable/disable a module and/or update its config.
 
-    Body: {"enabled": bool}
+    Body: {"enabled"?: bool, "config"?: object}  (at least one required)
     200: {"ok": true, "module": {<module dict>}}
     400: body missing / wrong type
     404: unknown module id
+
+    spec-066: ``config`` carries the browser backend selection ({backend, cdp_url,
+    manager_url, default_profile, per_project_profile, agent_actions}). Secrets are
+    NOT accepted here — the Cloak Manager token goes to the encrypted safe.
     """
     module_id = req.match_info["id"]
     try:
         body = await req.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
-    if not isinstance(body, dict) or "enabled" not in body:
-        return web.json_response({"error": "body must be {\"enabled\": bool}"}, status=400)
-    enabled_raw = body["enabled"]
-    if not isinstance(enabled_raw, bool):
+    if not isinstance(body, dict) or ("enabled" not in body and "config" not in body):
+        return web.json_response({"error": "body must include \"enabled\" and/or \"config\""}, status=400)
+
+    enabled_raw = body.get("enabled")
+    if "enabled" in body and not isinstance(enabled_raw, bool):
         return web.json_response({"error": "\"enabled\" must be a boolean"}, status=400)
+    config_raw = body.get("config")
+    if "config" in body and not isinstance(config_raw, dict):
+        return web.json_response({"error": "\"config\" must be an object"}, status=400)
+
     try:
-        updated = _modules.set_enabled(module_id, enabled_raw)
+        updated = None
+        if "enabled" in body:
+            updated = _modules.set_enabled(module_id, enabled_raw)
+        if "config" in body:
+            updated = _modules.set_config(module_id, config_raw)
     except KeyError:
         return web.json_response({"error": "unknown module"}, status=404)
-    # Free the browser when its module is turned off (frees ~0.5-1 GB).
-    if module_id == "browser" and not enabled_raw:
+    except TypeError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    # Free the browser when its module is turned off (frees ~0.5-1 GB), and rebuild
+    # the session on the next connect whenever the browser backend config changes
+    # (a different backend / profile must not reuse a stale handle).
+    if module_id == "browser" and (("enabled" in body and not enabled_raw) or "config" in body):
         _spawn_bg(_browser_pane.close_all())
     return web.json_response({"ok": True, "module": updated})
+
+
+# ─────────────────────────── Browser backends — spec-066 ────────────────────
+
+_CLOAK_INSTALL_LOG = "cloak-install.log"
+
+
+async def api_browser_backends(req: web.Request) -> web.Response:
+    """GET /api/browser/backends — backend availability + current selection.
+
+    Drives the Extensions → Browser UI: which tiers are usable (builtin always,
+    cloakbrowser if installed, external-cdp always selectable), the Cloak Manager
+    status, and the persisted config. Never raises — degrades to builtin-only.
+    """
+    try:
+        data = _backends.availability()
+    except Exception as e:
+        data = {"error": str(e), "tiers": {"builtin": {"available": True}}}
+    # Tail of the last install run, if any (one-click cloakbrowser install).
+    log = req.app["ctx"]["DATA"] / _CLOAK_INSTALL_LOG
+    if log.exists():
+        with contextlib.suppress(Exception):
+            data["install_log"] = log.read_text(encoding="utf-8", errors="replace")[-2000:]
+    return web.json_response(data)
+
+
+async def api_browser_install_cloak(req: web.Request) -> web.Response:
+    """POST /api/browser/install-cloak — install the free CloakBrowser tier (detached).
+
+    Runs ``pip install cloakbrowser`` + the free Chromium binary download in a
+    detached process, logging to data/cloak-install.log. The UI polls
+    GET /api/browser/backends for the result. Manual fallback is documented.
+    """
+    log_path = req.app["ctx"]["DATA"] / _CLOAK_INSTALL_LOG
+    py = sys.executable or "python3"
+    # pip install, then the package's binary installer (free Chromium 146, no key).
+    cmd = (
+        f"{shlex.quote(py)} -m pip install -U cloakbrowser "
+        f"&& {shlex.quote(py)} -m cloakbrowser install"
+    )
+    try:
+        with open(log_path, "w", encoding="utf-8") as logf:
+            subprocess.Popen(
+                ["bash", "-lc", cmd],
+                stdout=logf, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except Exception as e:
+        return web.json_response({"error": f"failed to start install: {e}"}, status=500)
+    return web.json_response({"ok": True, "started": True})
+
+
+async def api_browser_manager_token(req: web.Request) -> web.Response:
+    """POST /api/browser/manager-token {token} — store the Cloak Manager token in the safe.
+
+    The token NEVER lands in modules.json / tracked code (spec-066 OSS invariant).
+    An empty token deletes it.
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    token = (body.get("token") if isinstance(body, dict) else "") or ""
+    try:
+        if token:
+            _secretstore.set(_backends.MANAGER_TOKEN_KEY, token, category="cloak", notes="Cloak Manager auth")
+        else:
+            _secretstore.delete(_backends.MANAGER_TOKEN_KEY)
+    except Exception as e:
+        return web.json_response({"error": f"safe write failed: {e}"}, status=500)
+    return web.json_response({"ok": True, "token_set": bool(token)})
+
+
+async def api_browser_profiles(req: web.Request) -> web.Response:
+    """GET /api/browser/profiles — list Cloak Manager profiles (empty if unconfigured)."""
+    try:
+        profiles = await _backends.list_profiles()
+    except _backends.BackendError as e:
+        return web.json_response({"error": str(e), "profiles": []}, status=502)
+    except Exception as e:
+        return web.json_response({"error": str(e), "profiles": []}, status=500)
+    return web.json_response({"profiles": profiles})
+
+
+async def api_browser_profile_action(req: web.Request) -> web.Response:
+    """POST /api/browser/profiles/{id}/{action} — launch | stop a Manager profile."""
+    pid = req.match_info["id"]
+    action = req.match_info["action"]
+    if action not in ("launch", "stop"):
+        return web.json_response({"error": "action must be launch|stop"}, status=400)
+    try:
+        fn = _backends.launch_profile if action == "launch" else _backends.stop_profile
+        result = await fn(pid)
+    except _backends.BackendError as e:
+        return web.json_response({"error": str(e)}, status=502)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"ok": True, "result": result})
 
 
 # ─────────────────────────── Browser pane WS — spec-065 Phase B ──────────────
@@ -11973,6 +12091,13 @@ async def start(ctx: dict) -> None:
         # spec-065 Phase A: module / extension registry
         app.router.add_get("/api/modules", api_modules_list)
         app.router.add_post("/api/modules/{id}", api_modules_set)
+
+        # spec-066: pluggable browser backends + Cloak Manager
+        app.router.add_get("/api/browser/backends", api_browser_backends)
+        app.router.add_post("/api/browser/install-cloak", api_browser_install_cloak)
+        app.router.add_post("/api/browser/manager-token", api_browser_manager_token)
+        app.router.add_get("/api/browser/profiles", api_browser_profiles)
+        app.router.add_post("/api/browser/profiles/{id}/{action}", api_browser_profile_action)
 
         # spec-065 Phase B: live browser pane (WebSocket screencast)
         app.router.add_get("/api/browser/ws", api_browser_ws)

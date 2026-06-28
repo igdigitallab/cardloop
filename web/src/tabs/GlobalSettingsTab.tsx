@@ -7,6 +7,7 @@ import { MODELS } from '../lib/models'
 import { t } from '../i18n'
 import { useNotifications } from '../hooks/useNotifications'
 import { useModules } from '../hooks/useModules'
+import { BrowserBackendSettings } from '../components/BrowserBackendSettings'
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -165,20 +166,23 @@ export function GlobalSettingsTab() {
           </p>
         ) : (
           modules.map(mod => (
-            <Row
-              key={mod.id}
-              title={mod.name}
-              hint={mod.description}
-            >
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
-                <input
-                  type="checkbox"
-                  checked={isModEnabled(mod.id)}
-                  onChange={ev => { void setModEnabled(mod.id, ev.target.checked) }}
-                />
-                {isModEnabled(mod.id) ? t['extensions.toggle_on'] : t['extensions.toggle_off']}
-              </label>
-            </Row>
+            <div key={mod.id}>
+              <Row
+                title={mod.name}
+                hint={mod.description}
+              >
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+                  <input
+                    type="checkbox"
+                    checked={isModEnabled(mod.id)}
+                    onChange={ev => { void setModEnabled(mod.id, ev.target.checked) }}
+                  />
+                  {isModEnabled(mod.id) ? t['extensions.toggle_on'] : t['extensions.toggle_off']}
+                </label>
+              </Row>
+              {/* spec-066: browser backend config, shown when the browser module is on. */}
+              {mod.id === 'browser' && isModEnabled('browser') && <BrowserBackendSettings />}
+            </div>
           ))
         )}
       </section>

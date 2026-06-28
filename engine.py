@@ -1441,7 +1441,13 @@ async def run_engine(  # type: ignore[return]
     _mcp_servers = dict(_ANTIGRAVITY_MCP or {})
     try:
         if _modules.is_enabled("browser"):
-            _mcp_servers.update(_browser_tools.build_browser_server(cwd))
+            # spec-066: gate mutating browser tools by the per-cwd agent_actions setting.
+            try:
+                import browser_backends as _browser_backends
+                _agent_actions = _browser_backends.agent_actions(cwd)
+            except Exception:
+                _agent_actions = "read"
+            _mcp_servers.update(_browser_tools.build_browser_server(cwd, _agent_actions))
     except Exception as _browser_mcp_exc:
         print(f"[browser] MCP wiring skipped: {_browser_mcp_exc!r}")
     opts = ClaudeAgentOptions(

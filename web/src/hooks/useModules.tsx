@@ -18,6 +18,7 @@ interface ModulesValue {
   loading: boolean
   isEnabled: (id: string) => boolean
   setEnabled: (id: string, on: boolean) => Promise<void>
+  setConfig: (id: string, config: Record<string, unknown>) => Promise<Module>
   reload: () => Promise<void>
 }
 
@@ -72,10 +73,18 @@ export function ModulesProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  // spec-066: persist a module's config block and reconcile with the server answer.
+  const setConfig = useCallback(async (id: string, config: Record<string, unknown>) => {
+    const res = await api.setModuleConfig(id, config)
+    setModules(prev => prev.map(m => m.id === id ? res.module : m))
+    mapRef.current.set(id, res.module.enabled)
+    return res.module
+  }, [])
+
   const reload = useCallback(() => doLoad(), [doLoad])
 
   return (
-    <ModulesContext.Provider value={{ modules, loading, isEnabled, setEnabled, reload }}>
+    <ModulesContext.Provider value={{ modules, loading, isEnabled, setEnabled, setConfig, reload }}>
       {children}
     </ModulesContext.Provider>
   )

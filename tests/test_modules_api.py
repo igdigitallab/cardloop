@@ -224,3 +224,65 @@ async def test_post_module_401_without_auth(aiohttp_client, app):
     client = await aiohttp_client(app)
     r = await client.post("/api/modules/github", json={"enabled": True})
     assert r.status == 401
+
+
+# ---------------------------------------------------------------------------
+# spec-066: POST /api/modules/{id} with config + GET reflects it
+# ---------------------------------------------------------------------------
+
+async def test_get_modules_includes_config(aiohttp_client, app, app_ctx):
+    client = await aiohttp_client(app)
+    r = await client.get("/api/modules", headers=_auth(app_ctx))
+    body = await r.json()
+    browser = next(m for m in body["modules"] if m["id"] == "browser")
+    assert browser["config"]["backend"] == "builtin"
+
+
+async def test_post_module_config_persists(aiohttp_client, app, app_ctx):
+    client = await aiohttp_client(app)
+    r = await client.post(
+        "/api/modules/browser",
+        json={"config": {"backend": "cloakbrowser", "agent_actions": "full"}},
+        headers=_auth(app_ctx),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["module"]["config"]["backend"] == "cloakbrowser"
+    assert body["module"]["config"]["agent_actions"] == "full"
+    # GET reflects the persisted config.
+    r2 = await client.get("/api/modules", headers=_auth(app_ctx))
+    browser = next(m for m in (await r2.json())["modules"] if m["id"] == "browser")
+    assert browser["config"]["backend"] == "cloakbrowser"
+
+
+async def test_post_module_config_drops_unknown_keys(aiohttp_client, app, app_ctx):
+    """A secret smuggled in config must never be persisted (it belongs in the safe)."""
+    client = await aiohttp_client(app)
+    r = await client.post(
+        "/api/modules/browser",
+        json={"config": {"backend": "external-cdp", "manager_token": "SECRET"}},
+        headers=_auth(app_ctx),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert "manager_token" not in body["module"]["config"]
+
+
+async def test_post_module_config_non_object_400(aiohttp_client, app, app_ctx):
+    client = await aiohttp_client(app)
+    r = await client.post(
+        "/api/modules/browser",
+        json={"config": "not-an-object"},
+        headers=_auth(app_ctx),
+    )
+    assert r.status == 400
+
+
+async def test_post_module_neither_enabled_nor_config_400(aiohttp_client, app, app_ctx):
+    client = await aiohttp_client(app)
+    r = await client.post(
+        "/api/modules/browser",
+        json={"foo": "bar"},
+        headers=_auth(app_ctx),
+    )
+    assert r.status == 400

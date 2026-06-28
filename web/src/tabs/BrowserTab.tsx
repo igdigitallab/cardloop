@@ -69,6 +69,8 @@ export function BrowserTab({ projectId }: Props) {
   // Current page URL/title received from the server
   const [urlValue, setUrlValue] = useState<string>('')
   const [urlInput, setUrlInput] = useState<string>('')
+  // spec-066: which backend acquired the live session (builtin / cloakbrowser / external-cdp)
+  const [backend, setBackend] = useState<string>('')
 
   // ── WebSocket lifecycle ──────────────────────────────────────────────────────
   const connect = useCallback(() => {
@@ -106,6 +108,7 @@ export function BrowserTab({ projectId }: Props) {
           const msg = JSON.parse(e.data) as Record<string, unknown>
           if (msg.type === 'ready') {
             setConnState('ready')
+            if (typeof msg.backend === 'string') setBackend(msg.backend)
           } else if (msg.type === 'nav') {
             const url = (msg.url as string) ?? ''
             setUrlValue(url)
@@ -354,6 +357,20 @@ export function BrowserTab({ projectId }: Props) {
           }}
           title={connState}
         />
+        {/* spec-066: stealth / external backend badge (built-in is the silent default) */}
+        {backend && backend !== 'builtin' && (
+          <span
+            title={`Backend: ${backend}`}
+            style={{
+              flexShrink: 0, fontSize: 10, fontWeight: 600, letterSpacing: 0.3,
+              padding: '2px 6px', borderRadius: 5, textTransform: 'uppercase',
+              color: 'var(--text2, #aaa)', border: '1px solid var(--border, #333)',
+              background: 'var(--bg, #0d0d0d)',
+            }}
+          >
+            {backend === 'cloakbrowser' ? '🛡 stealth' : '🔌 cdp'}
+          </span>
+        )}
         <input
           type="url"
           value={urlInput}

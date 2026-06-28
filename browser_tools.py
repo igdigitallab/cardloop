@@ -30,12 +30,26 @@ _TYPE_SCHEMA = {
 _SNAPSHOT_SCHEMA = {"type": "object", "properties": {}}
 
 
-def build_browser_server(cwd: str) -> dict:
-    """Return {"browser": <sdk-mcp-server>} bound to `cwd`, or {} if unavailable."""
+def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
+    """Return {"browser": <sdk-mcp-server>} bound to `cwd`, or {} if unavailable.
+
+    spec-066 safety gate: ``agent_actions`` ∈ {"read", "full"}. Read tools
+    (navigate, snapshot) are always allowed; mutating tools (click, type — they can
+    submit/post as the operator's logged-in identity on a stealth profile) are
+    refused with a note when ``agent_actions != "full"``. The operator flips this in
+    Extensions → Browser; the default ("read") never silently acts as the operator.
+    """
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
     except Exception:
         return {}
+
+    _can_mutate = agent_actions == "full"
+    _GATE_MSG = (
+        "⚠️ Refused: mutating browser actions are disabled (agent_actions=read). "
+        "The operator can enable them in Extensions → Browser (agent actions: full), "
+        "or perform this click/type themselves in the pane."
+    )
 
     @tool(
         "browser_navigate",
@@ -54,6 +68,8 @@ def build_browser_server(cwd: str) -> dict:
 
     @tool("browser_click", "Click an element in the live browser by CSS selector.", _CLICK_SCHEMA)
     async def browser_click(args: dict) -> dict:
+        if not _can_mutate:
+            return {"content": [{"type": "text", "text": _GATE_MSG}]}
         try:
             sess = await _browser_pane.get_or_create(cwd)
             await sess.click(str(args.get("selector") or ""))
@@ -63,6 +79,8 @@ def build_browser_server(cwd: str) -> dict:
 
     @tool("browser_type", "Type text in the live browser (optionally into a field given by CSS selector).", _TYPE_SCHEMA)
     async def browser_type(args: dict) -> dict:
+        if not _can_mutate:
+            return {"content": [{"type": "text", "text": _GATE_MSG}]}
         try:
             sess = await _browser_pane.get_or_create(cwd)
             await sess.type_text(str(args.get("text") or ""), args.get("selector") or None)

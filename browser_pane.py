@@ -24,6 +24,8 @@ import contextlib
 import time
 from typing import Any
 
+import browser_backends as _backends
+
 # Frame / viewport geometry — the frontend maps pointer coordinates into this
 # exact space, so it MUST match the client contract (BrowserTab.tsx).
 VIEWPORT = {"width": 1280, "height": 720}
@@ -63,6 +65,8 @@ class BrowserSession:
         self._ctx: Any = None
         self._page: Any = None
         self._cdp: Any = None
+        self._owns_browser = True   # False for connected/external backends — disconnect, don't kill
+        self.backend = "builtin"    # spec-066: which backend acquired this session (for the pane header)
         self._started = False
         self._closed = False
         self._start_lock = asyncio.Lock()
@@ -77,20 +81,22 @@ class BrowserSession:
         async with self._start_lock:
             if self._started:
                 return
+            # spec-066: the browser handle is acquired via the pluggable backend
+            # (builtin / cloakbrowser / external-cdp). Everything below — screencast,
+            # input, agent tools — is backend-agnostic CDP.
             try:
-                from playwright.async_api import async_playwright
-            except Exception as e:  # pragma: no cover - import guard
-                raise BrowserUnavailable(
-                    "Playwright is not installed. Run: venv/bin/pip install playwright "
-                    "&& venv/bin/playwright install chromium"
-                ) from e
+                acq = await _backends.acquire(self.key, VIEWPORT)
+            except _backends.BackendError as e:
+                raise BrowserUnavailable(str(e)) from e
+            except Exception as e:  # pragma: no cover - defensive
+                raise BrowserUnavailable(f"Browser backend failed: {e}") from e
             try:
-                self._pw = await async_playwright().start()
-                self._browser = await self._pw.chromium.launch(
-                    headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
-                )
-                self._ctx = await self._browser.new_context(viewport=VIEWPORT)
-                self._page = await self._ctx.new_page()
+                self._pw = acq.pw
+                self._browser = acq.browser
+                self._ctx = acq.context
+                self._page = acq.page
+                self._owns_browser = acq.owns_browser
+                self.backend = acq.backend
                 self._cdp = await self._ctx.new_cdp_session(self._page)
                 self._cdp.on("Page.screencastFrame", self._on_frame)
                 self._page.on("framenavigated", self._on_navigated)
@@ -99,18 +105,19 @@ class BrowserSession:
                 # frozen/dead pane that reads as "Chrome Error".
                 self._page.on("crash", self._on_crash)
                 self._browser.on("disconnected", self._on_disconnected)
-                await self._page.goto(_START_URL)
+                # An external/connected browser keeps its own (possibly logged-in) page;
+                # only push the branded start page when we launched a fresh one ourselves.
+                if self._owns_browser:
+                    await self._page.goto(_START_URL)
                 await self._cdp.send("Page.startScreencast", {
                     "format": "jpeg", "quality": 55,
                     "maxWidth": VIEWPORT["width"], "maxHeight": VIEWPORT["height"],
                     "everyNthFrame": 1,
                 })
-            except BrowserUnavailable:
-                raise
             except Exception as e:
                 with contextlib.suppress(Exception):
                     await self._teardown()
-                raise BrowserUnavailable(f"Chromium failed to launch: {e}") from e
+                raise BrowserUnavailable(f"Browser session failed to initialise: {e}") from e
             self._started = True
             self._touch()
             self._watchdog = asyncio.create_task(self._idle_watch())
@@ -119,9 +126,15 @@ class BrowserSession:
         self._last_activity = time.monotonic()
 
     async def _teardown(self) -> None:
-        for obj, meth in ((self._cdp, None), (self._ctx, "close"),
-                          (self._browser, "close"), (self._pw, "stop")):
-            if obj is None or meth is None:
+        # An external/connected browser (Cloak Manager profile, remote CDP) must NOT
+        # be closed — that would kill the operator's persistent, logged-in session.
+        # We only disconnect (pw.stop) and leave its context/pages intact.
+        if self._owns_browser:
+            steps = ((self._ctx, "close"), (self._browser, "close"), (self._pw, "stop"))
+        else:
+            steps = ((self._pw, "stop"),)
+        for obj, meth in steps:
+            if obj is None:
                 continue
             with contextlib.suppress(Exception):
                 await getattr(obj, meth)()
@@ -233,7 +246,7 @@ class BrowserSession:
         self._subs.add(ws)
         self._touch()
         with contextlib.suppress(Exception):
-            await ws.send_json({"type": "ready", "width": VIEWPORT["width"], "height": VIEWPORT["height"]})
+            await ws.send_json({"type": "ready", "width": VIEWPORT["width"], "height": VIEWPORT["height"], "backend": self.backend})
             await ws.send_json({"type": "nav", "url": self._page.url, "title": await self._page.title()})
         # Prime the new subscriber with the current page so a static page renders
         # immediately instead of a blank "stream not ready" pane.

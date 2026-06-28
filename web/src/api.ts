@@ -697,4 +697,32 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
     }),
+
+  // spec-066: persist a module's config block (e.g. the browser backend selection).
+  setModuleConfig: (id: string, config: Record<string, unknown>) =>
+    apiFetch<{ ok: boolean; module: import('./types').Module }>(`/api/modules/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config }),
+    }),
+
+  // spec-066: pluggable browser backends + Cloak Manager.
+  browserBackends: () =>
+    apiFetch<import('./types').BrowserBackends>('/api/browser/backends'),
+
+  installCloak: () =>
+    apiFetch<{ ok: boolean; started: boolean }>('/api/browser/install-cloak', { method: 'POST' }),
+
+  setManagerToken: (token: string) =>
+    apiFetch<{ ok: boolean; token_set: boolean }>('/api/browser/manager-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    }),
+
+  browserProfiles: () =>
+    apiFetch<{ profiles: import('./types').CloakProfile[]; error?: string }>('/api/browser/profiles'),
+
+  browserProfileAction: (id: string, action: 'launch' | 'stop') =>
+    apiFetch<{ ok: boolean }>(`/api/browser/profiles/${encodeURIComponent(id)}/${action}`, { method: 'POST' }),
 }

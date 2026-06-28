@@ -613,4 +613,47 @@ export interface Module {
   version: string
   provides: string[]
   enabled: boolean
+  // spec-066: per-module config (the browser module carries the backend selection).
+  config?: Record<string, unknown>
+}
+
+// ─── Spec-066: pluggable browser backends ─────────────────────────────────────
+export interface BrowserConfig {
+  backend: 'builtin' | 'cloakbrowser' | 'external-cdp'
+  cdp_url: string
+  manager_url: string
+  default_profile: string
+  per_project_profile: Record<string, string>
+  agent_actions: 'read' | 'full'
+  proxy?: string
+  geoip?: boolean
+  humanize?: boolean
+  timezone?: string
+  locale?: string
+}
+
+export interface CloakProfile {
+  id: string
+  name: string
+  status: string
+}
+
+// GET /api/browser/backends response.
+export interface BrowserBackends {
+  current?: { backend: string; agent_actions: string }
+  tiers: {
+    builtin: { available: boolean }
+    cloakbrowser: { installed: boolean; binary_ready: boolean; version: string | null }
+    'external-cdp': { available: boolean }
+  }
+  manager: { configured: boolean; url: string | null; token_set: boolean }
+  config: {
+    backend: string
+    cdp_url: string
+    manager_url: string
+    default_profile: string
+    agent_actions: string
+  }
+  install_log?: string
+  error?: string
 }

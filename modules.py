@@ -38,6 +38,22 @@ _BUILTIN_MODULES: list[dict[str, Any]] = [
         "version": "1.0.0",
         "provides": ["pane", "tools"],
         "default_enabled": False,
+        # spec-066: pluggable backend config. backend ∈ builtin|cloakbrowser|external-cdp.
+        # Secrets (Cloak Manager token) never live here — they go to the encrypted safe.
+        "default_config": {
+            "backend": "builtin",
+            "cdp_url": "",
+            "manager_url": "",
+            "default_profile": "",
+            "per_project_profile": {},
+            "agent_actions": "read",
+            # Tier B stealth knobs (passed through to cloakbrowser.launch_async).
+            "proxy": "",
+            "geoip": False,
+            "humanize": False,
+            "timezone": "",
+            "locale": "",
+        },
     },
 ]
 
@@ -106,13 +122,26 @@ def _save_overrides(overrides: dict[str, dict[str, Any]]) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def list_modules() -> list[dict[str, Any]]:
-    """Return all built-in modules with their effective ``enabled`` state.
+def _effective_config(module_id: str, persisted: dict[str, Any]) -> dict[str, Any]:
+    """Merge a module's ``default_config`` with any persisted ``config`` override.
 
-    Merges the persisted overrides (if any) with each module's
-    ``default_enabled`` value.  The returned dicts do NOT include
-    ``default_enabled`` — only the fields in the pinned API contract:
-    ``{id, name, description, version, provides, enabled}``.
+    Shallow merge (top-level keys): defaults provide the full shape, the override
+    wins per key. Modules with no ``default_config`` return ``{}``.
+    """
+    builtin = _BUILTIN_BY_ID.get(module_id, {})
+    base = dict(builtin.get("default_config") or {})
+    stored = persisted.get("config")
+    if isinstance(stored, dict):
+        base.update(stored)
+    return base
+
+
+def list_modules() -> list[dict[str, Any]]:
+    """Return all built-in modules with their effective ``enabled`` state + ``config``.
+
+    Merges the persisted overrides (if any) with each module's ``default_enabled``
+    and ``default_config``.  Returned shape (pinned API contract):
+    ``{id, name, description, version, provides, enabled, config}``.
     """
     overrides = _load_overrides()
     result: list[dict[str, Any]] = []
@@ -128,6 +157,7 @@ def list_modules() -> list[dict[str, Any]]:
                 "version": m["version"],
                 "provides": list(m["provides"]),
                 "enabled": bool(enabled),
+                "config": _effective_config(mid, persisted),
             }
         )
     return result
@@ -168,4 +198,54 @@ def set_enabled(module_id: str, enabled: bool) -> dict[str, Any]:
         "version": builtin["version"],
         "provides": list(builtin["provides"]),
         "enabled": bool(enabled),
+        "config": _effective_config(module_id, overrides.get(module_id, {})),
+    }
+
+
+def get_config(module_id: str) -> dict[str, Any]:
+    """Return the effective config (defaults merged with the persisted override).
+
+    Returns ``{}`` for a module with no ``default_config``.  Raises ``KeyError``
+    for an unknown module id.
+    """
+    if module_id not in _BUILTIN_BY_ID:
+        raise KeyError(f"Unknown module id: {module_id!r}")
+    overrides = _load_overrides()
+    return _effective_config(module_id, overrides.get(module_id, {}))
+
+
+def set_config(module_id: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Persist a module's ``config`` block (atomic) and return the updated module dict.
+
+    Only keys present in the module's ``default_config`` are accepted — unknown keys
+    are dropped so callers cannot smuggle arbitrary data (or secrets) into the file.
+    Secrets must go to the encrypted safe, never here.  Raises ``KeyError`` for an
+    unknown module id; ``TypeError`` if ``config`` is not a dict.
+    """
+    builtin = _BUILTIN_BY_ID.get(module_id)
+    if builtin is None:
+        raise KeyError(f"Unknown module id: {module_id!r}")
+    if not isinstance(config, dict):
+        raise TypeError("config must be a dict")
+    allowed = set((builtin.get("default_config") or {}).keys())
+    clean = {k: v for k, v in config.items() if k in allowed}
+
+    overrides = _load_overrides()
+    entry = overrides.setdefault(module_id, {})
+    # Merge (not replace) so a partial update from the UI (e.g. just {"backend"})
+    # does not silently reset the other fields to their defaults.
+    existing = entry.get("config")
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged.update(clean)
+    entry["config"] = merged
+    _save_overrides(overrides)
+
+    return {
+        "id": module_id,
+        "name": builtin["name"],
+        "description": builtin["description"],
+        "version": builtin["version"],
+        "provides": list(builtin["provides"]),
+        "enabled": is_enabled(module_id),
+        "config": _effective_config(module_id, overrides.get(module_id, {})),
     }
