@@ -40,8 +40,8 @@ const BASE_TABS: Tab[] = [
 // localStorage keys
 const LS_WIDTH    = 'cops.chatWidth'
 const LS_COLLAPSED = 'cops.chatCollapsed'
-// spec-066/mobile-split: per-device opt-in to see browser + chat stacked on mobile.
-const LS_MSPLIT = 'cops.mobileSplit'
+// spec-066/mobile-split: split on/off is per-project (see mtabKey/msplitKey); the
+// divider ratio below is a per-device pref shared across projects.
 const LS_MSPLIT_PCT = 'cops.mobileBrowserPct'
 
 const CHAT_MIN_PCT = 20
@@ -72,6 +72,17 @@ function readLSBool(key: string, fallback: boolean): boolean {
   } catch {
     return fallback
   }
+}
+
+// Per-project mobile view memory: which inner tab / split-mode a project was last on,
+// so reopening it (or relaunching the PWA) restores the spot instead of resetting to Chat.
+const mtabKey = (pid: string) => `cops.mtab.${pid}`
+const msplitKey = (pid: string) => `cops.msplit.${pid}`
+function readMobileTab(pid: string): string | null {
+  try { return localStorage.getItem(mtabKey(pid)) || null } catch { return null }
+}
+function readMobileSplit(pid: string): boolean {
+  try { return localStorage.getItem(msplitKey(pid)) === 'true' } catch { return false }
 }
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$/
@@ -250,8 +261,9 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
 
 export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject, settingsRequest, models }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
-  // Mobile inner tab: null = show chat (default), TabId = show that inner tab
-  const [mobileInnerTab, setMobileInnerTab] = useState<TabId | null>(null)
+  // Mobile inner tab: null = show chat (default), TabId = show that inner tab.
+  // Restored from localStorage per project so reopening lands where you left off.
+  const [mobileInnerTab, setMobileInnerTab] = useState<TabId | null>(() => readMobileTab(project.id) as TabId | null)
   // spec-052 Phase 4a: a card the user chose to "Discuss" on the board → handed to the chat.
   const [discussCard, setDiscussCard] = useState<{ cardId: string; title: string } | null>(null)
   const git = project.health.git
@@ -389,12 +401,21 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     try { localStorage.setItem(LS_COLLAPSED, String(collapsed)) } catch {}
   }, [collapsed])
 
-  // ── Mobile split (browser + chat stacked) — per-device opt-in ───────────────
-  const [mobileSplit, setMobileSplit] = useState<boolean>(() => readLSBool(LS_MSPLIT, false))
+  // ── Mobile split (browser + chat stacked) — per-project opt-in ──────────────
+  // mobileSplit is remembered PER PROJECT (each project keeps its own view); the
+  // divider ratio is a per-device pref shared across projects.
+  const [mobileSplit, setMobileSplit] = useState<boolean>(() => readMobileSplit(project.id))
   const [mobileBrowserPct, setMobileBrowserPct] = useState<number>(() => readLS(LS_MSPLIT_PCT, MSPLIT_DEFAULT_PCT))
+  // Persist the per-project mobile view (inner tab + split) so reopening restores it.
   useEffect(() => {
-    try { localStorage.setItem(LS_MSPLIT, String(mobileSplit)) } catch {}
-  }, [mobileSplit])
+    try {
+      if (mobileInnerTab) localStorage.setItem(mtabKey(project.id), mobileInnerTab)
+      else localStorage.removeItem(mtabKey(project.id))
+    } catch {}
+  }, [mobileInnerTab, project.id])
+  useEffect(() => {
+    try { localStorage.setItem(msplitKey(project.id), String(mobileSplit)) } catch {}
+  }, [mobileSplit, project.id])
   useEffect(() => {
     try { localStorage.setItem(LS_MSPLIT_PCT, String(mobileBrowserPct)) } catch {}
   }, [mobileBrowserPct])
@@ -675,16 +696,8 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
             >
               💬 Chat
             </button>
-            {visibleTabs.map(tab => (
-              <button
-                key={tab.id}
-                className={`mobile-inner-tab-btn ${mobileInnerTab === tab.id && !mobileSplit ? 'active' : ''}`}
-                onClick={() => { setMobileSplit(false); setMobileInnerTab(tab.id) }}
-              >
-                {tab.label}
-              </button>
-            ))}
-            {/* Split toggle: stack Browser + Chat together (opt-in, browser module only) */}
+            {/* Split toggle: next to Chat + pinned (sticky) so it stays reachable on any
+                tab, including Browser. Stacks Browser + Chat (opt-in, browser module only). */}
             {browserEnabled && (
               <button
                 className={`mobile-inner-tab-btn mobile-split-toggle ${mobileSplit ? 'active' : ''}`}
@@ -695,6 +708,15 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                 {mobileSplit ? '⊟' : '⊞'} {t['split.mobile_label']}
               </button>
             )}
+            {visibleTabs.map(tab => (
+              <button
+                key={tab.id}
+                className={`mobile-inner-tab-btn ${mobileInnerTab === tab.id && !mobileSplit ? 'active' : ''}`}
+                onClick={() => { setMobileSplit(false); setMobileInnerTab(tab.id) }}
+              >
+                {tab.label}
+              </button>
+            ))}
           </nav>
           {/* spec-066/mobile-split: stack Browser (top) + Chat (bottom) when opted in. */}
           {mobileSplit && browserEnabled ? (
