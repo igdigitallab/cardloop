@@ -10,11 +10,17 @@ export interface ProjectHealth {
   git: GitHealth | null
 }
 
+export interface ProjectCapability {
+  key: string
+  label: string
+  on: boolean
+  hint: string
+}
 export interface ProjectStructureHealth {
-  items: { key: string; label: string; ok: boolean; hint: string | null; optional?: boolean }[]
-  score: number
-  total: number
-  color: 'green' | 'yellow' | 'red'
+  archetype: string
+  capabilities: ProjectCapability[]
+  security_warn: boolean
+  security_hint: string | null
 }
 
 export interface Project {

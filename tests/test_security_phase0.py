@@ -44,9 +44,41 @@ def test_validate_diag_cmd_accepts_safe(cmd):
     "tail -f x && curl evil",         # &&
     "tail -f x > /etc/cron.d/y",      # redirect
     "sudo journalctl -u x",           # sudo not allowed
+    "./wrapper.sh app",               # relative wrapper script — never trusted
 ])
 def test_validate_diag_cmd_rejects_dangerous(cmd):
     assert _validate_diag_cmd(cmd) is False
+
+
+@pytest.mark.parametrize("cmd", [
+    "tail -n 300 /tmp/x.log 2>/dev/null",   # benign stderr→null stripped, tail allowed
+    "journalctl -u x --no-pager 2>&1",      # benign stderr→stdout merge stripped
+])
+def test_validate_diag_cmd_strips_benign_stderr_redirect(cmd):
+    assert _validate_diag_cmd(cmd) is True
+
+
+def test_validate_diag_cmd_keeps_rejecting_stdout_redirect():
+    # Only the trailing stderr forms are stripped; a stdout redirect to a file
+    # must still be rejected by the metachar guard.
+    assert _validate_diag_cmd("tail -f x > /tmp/out") is False
+    assert _validate_diag_cmd("tail -f x 1>/tmp/out") is False
+
+
+def test_validate_diag_cmd_trusted_script_dir(tmp_path, monkeypatch):
+    import webapp
+    script = tmp_path / "coolify-logs.sh"
+    script.write_text("#!/bin/sh\necho hi\n")
+    # Without the env → rejected (OSS-safe default).
+    monkeypatch.delenv("DIAG_CMD_ALLOW_DIRS", raising=False)
+    assert webapp._validate_diag_cmd(f"{script} myapp") is False
+    # With the trusted dir → accepted.
+    monkeypatch.setenv("DIAG_CMD_ALLOW_DIRS", str(tmp_path))
+    assert webapp._validate_diag_cmd(f"{script} myapp") is True
+    # A non-existent path under the trusted dir → still rejected.
+    assert webapp._validate_diag_cmd(f"{tmp_path}/nope.sh") is False
+    # `..` traversal cannot escape the trusted dir.
+    assert webapp._validate_diag_cmd(f"{tmp_path}/../etc-evil.sh") is False
 
 
 # ─────────────────────────── _client_ip ───────────────────────────

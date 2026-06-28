@@ -554,19 +554,14 @@ def health_app(project_ctx):
 
 
 async def test_health_route_returns_expected_shape(aiohttp_client, health_app, project_ctx):
-    """GET /api/projects/{id}/health → {items, score, total, color}."""
+    """GET /api/projects/{id}/health → {archetype, capabilities, security_warn, security_hint}."""
     client = await aiohttp_client(health_app)
     resp = await client.get("/api/projects/myproj/health", headers=_auth(project_ctx))
     assert resp.status == 200
     data = await resp.json()
-    assert "items" in data, "response must contain 'items'"
-    assert "score" in data, "response must contain 'score'"
-    assert "total" in data, "response must contain 'total'"
-    assert "color" in data, "response must contain 'color'"
-    assert data["color"] in ("green", "yellow", "red")
-    assert isinstance(data["items"], list)
-    assert isinstance(data["score"], int)
-    assert isinstance(data["total"], int)
+    assert "archetype" in data, "response must contain 'archetype'"
+    assert isinstance(data["capabilities"], list), "capabilities must be a list"
+    assert isinstance(data["security_warn"], bool), "security_warn must be a bool"
 
 
 async def test_health_route_404_on_unknown_project(aiohttp_client, health_app, project_ctx):
@@ -577,44 +572,42 @@ async def test_health_route_404_on_unknown_project(aiohttp_client, health_app, p
 
 
 async def test_health_route_capability_items_present(aiohttp_client, health_app, project_ctx):
-    """Capability items cap_log_cmd, cap_error_handler, cap_test_cmd are present in items."""
+    """Capability items logs, tests, secrets are present for default (software) archetype."""
     client = await aiohttp_client(health_app)
     resp = await client.get("/api/projects/myproj/health", headers=_auth(project_ctx))
     data = await resp.json()
-    keys = {item["key"] for item in data["items"]}
-    assert "cap_log_cmd" in keys, "cap_log_cmd must be in items"
-    assert "cap_error_handler" in keys, "cap_error_handler must be in items"
-    assert "cap_test_cmd" in keys, "cap_test_cmd must be in items"
+    keys = {item["key"] for item in data["capabilities"]}
+    assert "logs" in keys, "logs capability must be present"
+    assert "tests" in keys, "tests capability must be present for software archetype"
+    assert "secrets" in keys, "secrets capability must be present for software archetype"
 
 
-async def test_health_route_cap_test_cmd_is_optional(aiohttp_client, health_app, project_ctx):
-    """cap_test_cmd must have optional=True (does not affect score)."""
+async def test_health_route_logs_capability_has_on_field(aiohttp_client, health_app, project_ctx):
+    """logs capability must have an 'on' boolean field."""
     client = await aiohttp_client(health_app)
     resp = await client.get("/api/projects/myproj/health", headers=_auth(project_ctx))
     data = await resp.json()
-    cap_test = next((i for i in data["items"] if i["key"] == "cap_test_cmd"), None)
-    assert cap_test is not None, "cap_test_cmd not found"
-    assert cap_test.get("optional") is True, "cap_test_cmd must have optional=True"
+    cap_logs = next((i for i in data["capabilities"] if i["key"] == "logs"), None)
+    assert cap_logs is not None, "logs capability not found"
+    assert isinstance(cap_logs.get("on"), bool), "logs.on must be a bool"
 
 
-async def test_health_route_cap_log_cmd_not_optional(aiohttp_client, health_app, project_ctx):
-    """cap_log_cmd must NOT have optional=True (affects score). Phase 1 contract."""
+async def test_health_route_logs_off_when_no_log_cmd(aiohttp_client, health_app, project_ctx):
+    """logs capability is off when log_cmd is not set (default project_ctx)."""
     client = await aiohttp_client(health_app)
     resp = await client.get("/api/projects/myproj/health", headers=_auth(project_ctx))
     data = await resp.json()
-    cap_log = next((i for i in data["items"] if i["key"] == "cap_log_cmd"), None)
-    assert cap_log is not None
-    assert not cap_log.get("optional"), "cap_log_cmd must NOT be optional"
+    cap_logs = next((i for i in data["capabilities"] if i["key"] == "logs"), None)
+    assert cap_logs is not None
+    assert cap_logs["on"] is False, "logs must be off when log_cmd is unset"
 
 
-async def test_health_route_cap_error_handler_not_optional(aiohttp_client, health_app, project_ctx):
-    """cap_error_handler must NOT have optional=True. Phase 2 contract."""
+async def test_health_route_security_warn_is_bool(aiohttp_client, health_app, project_ctx):
+    """security_warn must always be a bool."""
     client = await aiohttp_client(health_app)
     resp = await client.get("/api/projects/myproj/health", headers=_auth(project_ctx))
     data = await resp.json()
-    cap_eh = next((i for i in data["items"] if i["key"] == "cap_error_handler"), None)
-    assert cap_eh is not None
-    assert not cap_eh.get("optional"), "cap_error_handler must NOT be optional"
+    assert isinstance(data["security_warn"], bool)
 
 
 async def test_health_route_requires_auth(aiohttp_client, health_app):
@@ -624,34 +617,53 @@ async def test_health_route_requires_auth(aiohttp_client, health_app):
     assert resp.status == 401
 
 
-async def test_health_full_project_is_green(aiohttp_client, health_app, project_ctx):
-    """Project with CLAUDE.md / TASKS.md / README.md / .gitignore(.env) / .git
-    + cockpit-rules + log_cmd + error-handler → score==total, color=='green'."""
+async def test_health_all_capabilities_on(aiohttp_client, health_app, project_ctx):
+    """Project with log_cmd + test_cmd set and .git/.gitignore(with .env) → all capabilities on,
+    security_warn=False."""
     pdir = project_ctx["_pdir"]
 
-    # CLAUDE.md — with the cockpit rules section AND an error-handler declaration
-    (pdir / "CLAUDE.md").write_text(
-        "# My project\n## Cockpit Rules\nRules here\n"
-        "\n## ClaudeOps conformance\nerror handler: app.exception_handler registered\n",
-        encoding="utf-8",
-    )
-    tasks_text = "# Tasks\nCard format: ok\n## Backlog\n## In Progress\n## Review\n## Failed\n"
-    (pdir / "TASKS.md").write_text(tasks_text, encoding="utf-8")
-    (pdir / "README.md").write_text("# Readme\n", encoding="utf-8")
     (pdir / ".gitignore").write_text(".env\n", encoding="utf-8")
     (pdir / ".git").mkdir()
 
-    # Set log_cmd in topics (cap_log_cmd)
     project_ctx["topics"]["0:1"]["log_cmd"] = "echo hello"
+    project_ctx["topics"]["0:1"]["test_cmd"] = "pytest"
 
     client = await aiohttp_client(health_app)
     resp = await client.get("/api/projects/myproj/health", headers=_auth(project_ctx))
     data = await resp.json()
-    assert data["score"] == data["total"], (
-        f"score must equal total, score={data['score']}, total={data['total']}, "
-        f"items={[(i['key'], i['ok']) for i in data['items']]}"
+    assert data["security_warn"] is False, "security_warn must be False when .env is gitignored"
+    all_on = all(cap["on"] for cap in data["capabilities"])
+    assert all_on, (
+        f"all capabilities must be on, got: {[(c['key'], c['on']) for c in data['capabilities']]}"
     )
-    assert data["color"] == "green", f"color must be green, got {data['color']!r}"
+
+
+async def test_health_content_archetype_only_logs(aiohttp_client, health_app, project_ctx):
+    """Content archetype: only 'logs' capability present (no tests/secrets)."""
+    project_ctx["topics"]["0:1"]["type"] = "content"
+    client = await aiohttp_client(health_app)
+    resp = await client.get("/api/projects/myproj/health", headers=_auth(project_ctx))
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["archetype"] == "content"
+    keys = {cap["key"] for cap in data["capabilities"]}
+    assert "logs" in keys, "logs must be present for content archetype"
+    assert "tests" not in keys, "tests must NOT be present for content archetype"
+    assert "secrets" not in keys, "secrets must NOT be present for content archetype"
+
+
+async def test_health_software_archetype_has_all_capabilities(aiohttp_client, health_app, project_ctx):
+    """Software archetype (default): logs + tests + secrets all present."""
+    client = await aiohttp_client(health_app)
+    resp = await client.get("/api/projects/myproj/health", headers=_auth(project_ctx))
+    assert resp.status == 200
+    data = await resp.json()
+    # default project has no 'type' set → falls back to 'software'
+    assert data["archetype"] == "software"
+    keys = {cap["key"] for cap in data["capabilities"]}
+    assert "logs" in keys
+    assert "tests" in keys
+    assert "secrets" in keys
 
 
 # ══════════════════════════════════════════════════════════════════════════════

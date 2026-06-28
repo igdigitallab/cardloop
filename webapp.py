@@ -1468,6 +1468,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "agents_config": b.get("agents_config") or {},
             "group": raw_group if raw_group in valid_groups else None,
             "favorite": pid in fav_set,
+            "type": b.get("type"),
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -3200,16 +3201,65 @@ _DIAG_CMD_ALLOWED = {
     "journalctl", "docker", "tail", "head", "cat", "grep",
     "pytest", "python", "python3", "npm", "make", "cargo", "go",
 }
+# Trailing stderr redirects that the runner already does itself (stderr=STDOUT).
+# Operators routinely append these to log_cmd; under our exec-not-shell runner
+# they are redundant and would otherwise be parsed as a literal argument. Only
+# the stderr forms are stripped — never a stdout redirect (that IS the log).
+_BENIGN_STDERR_REDIRECTS = ("2>/dev/null", "2>&1")
+
+
+def _strip_benign_redirect(cmd: str) -> str:
+    """Drop a trailing `2>/dev/null` / `2>&1` from a diagnostic command.
+    A stdout redirect or redirect-to-file is left intact (and thus still
+    rejected by the metachar guard)."""
+    s = cmd.rstrip()
+    for r in _BENIGN_STDERR_REDIRECTS:
+        if s.endswith(r):
+            return s[: -len(r)].rstrip()
+    return s
+
+
+def _diag_allow_dirs() -> list[str]:
+    """Operator-opt-in trusted directories for diagnostic wrapper scripts
+    (`DIAG_CMD_ALLOW_DIRS`, colon-separated absolute paths). Default empty → the
+    built-in tool allowlist is the only path (OSS-safe lockdown)."""
+    raw = os.environ.get("DIAG_CMD_ALLOW_DIRS", "").strip()
+    return [p.strip() for p in raw.split(":") if p.strip()]
+
+
+def _is_trusted_diag_script(token: str) -> bool:
+    """True if `token` is an absolute path to an existing regular file located
+    under one of the operator's DIAG_CMD_ALLOW_DIRS directories (symlinks
+    resolved, so `..` traversal cannot escape the trusted dir)."""
+    allow_dirs = _diag_allow_dirs()
+    if not allow_dirs or not os.path.isabs(token):
+        return False
+    try:
+        real = os.path.realpath(token)
+        if not os.path.isfile(real):
+            return False
+        for d in allow_dirs:
+            dreal = os.path.realpath(d)
+            if os.path.commonpath([real, dreal]) == dreal:
+                return True
+    except (ValueError, OSError):
+        return False
+    return False
 
 
 def _validate_diag_cmd(cmd: str) -> bool:
     """True if `cmd` is a safe diagnostic command (log_cmd / test_cmd).
 
-    Empty → True (unset). Otherwise: no shell metacharacters, and the first
-    token's basename must be a known-safe tool (e.g. `journalctl -u <unit>`,
-    `docker logs <name>`, `tail -f <file>`, `venv/bin/python -m pytest`).
+    Empty → True (unset). Otherwise: a trailing benign stderr redirect is
+    stripped, no shell metacharacters may remain, and the first token must
+    either be a known-safe tool by basename (e.g. `journalctl -u <unit>`,
+    `tail -f <file>`, `venv/bin/python -m pytest`) OR an operator-trusted
+    wrapper script under `DIAG_CMD_ALLOW_DIRS`.
     """
     if not cmd or not cmd.strip():
+        return True
+    cmd = _strip_benign_redirect(cmd)
+    if not cmd:
         return True
     if any(ch in cmd for ch in _DIAG_CMD_FORBIDDEN):
         return False
@@ -3219,7 +3269,9 @@ def _validate_diag_cmd(cmd: str) -> bool:
         return False
     if not parts:
         return False
-    return os.path.basename(parts[0]) in _DIAG_CMD_ALLOWED
+    if os.path.basename(parts[0]) in _DIAG_CMD_ALLOWED:
+        return True
+    return _is_trusted_diag_script(parts[0])
 
 
 async def _run_log_cmd(log_cmd: str, timeout: float = 10.0, raise_on_timeout: bool = False) -> str:
@@ -3233,6 +3285,7 @@ async def _run_log_cmd(log_cmd: str, timeout: float = 10.0, raise_on_timeout: bo
     if not _validate_diag_cmd(log_cmd):
         _log.warning("log_cmd rejected by allowlist (not executed): %r", log_cmd)
         return ""
+    log_cmd = _strip_benign_redirect(log_cmd)
     try:
         proc = await asyncio.create_subprocess_exec(
             *shlex.split(log_cmd),
@@ -11335,7 +11388,7 @@ def _detect_error_handler(cwd: Path, claude_md_text: str) -> bool:
 
 
 async def api_project_health(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/health — quick project structure check without an agent."""
+    """GET /api/projects/{id}/health — connected capabilities and security check."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -11343,98 +11396,70 @@ async def api_project_health(req: web.Request) -> web.Response:
         return web.json_response({"error": "project not found"}, status=404)
 
     cwd = Path(project["cwd"])
+    archetype: str = project.get("type") or "software"
+    is_software_ops = archetype in ("software", "ops")
 
-    def _check(key: str, label: str, condition: bool, hint: str | None, optional: bool = False) -> dict:
-        return {"key": key, "label": label, "ok": condition, "hint": hint if not condition else None, "optional": optional}
+    capabilities: list[dict] = []
 
-    items: list[dict] = []
+    # Capability: logs — always included
+    capabilities.append({
+        "key": "logs",
+        "label": "Logs & incidents",
+        "on": bool(project.get("log_cmd")),
+        "hint": "Set log_cmd in project settings so the cockpit streams logs and catches runtime errors.",
+    })
 
-    # 1. CLAUDE.md exists
-    claude_md = cwd / "CLAUDE.md"
-    has_claude_md = claude_md.is_file()
-    items.append(_check("claude_md", "CLAUDE.md", has_claude_md, "Create CLAUDE.md with a project description"))
+    # Capability: tests — software/ops only
+    if is_software_ops:
+        capabilities.append({
+            "key": "tests",
+            "label": "Quality gate",
+            "on": bool(project.get("test_cmd")),
+            "hint": "Set test_cmd to enable the Run tests button and the quality gate.",
+        })
 
-    # 2. CLAUDE.md contains the "Cockpit rules" section
-    cockpit_rules = False
-    claude_md_text = ""
-    if has_claude_md:
+    # Capability: secrets — software/ops only
+    exposed = False
+    if is_software_ops:
+        git_repo = _git_enabled(project) and (cwd / ".git").exists()
+
+        env_present = False
         try:
-            claude_md_text = claude_md.read_text(encoding="utf-8", errors="replace")
-            cockpit_rules = "Cockpit Rules" in claude_md_text
+            env_present = any(
+                f.is_file() and (f.name == ".env" or f.name.startswith(".env."))
+                for f in cwd.iterdir()
+            )
+        except OSError:
+            pass
+
+        gitignore_covers = False
+        try:
+            gi = cwd / ".gitignore"
+            if gi.is_file():
+                gitignore_covers = ".env" in gi.read_text(encoding="utf-8", errors="replace")
         except Exception:
             pass
-    items.append(_check(
-        "claude_md_cockpit_rules", "Cockpit rules section",
-        cockpit_rules, "Run audit or ✏️ update manually",
-    ))
 
-    # 3. TASKS.md exists with preamble
-    tasks_md = cwd / "TASKS.md"
-    has_tasks = False
-    if tasks_md.is_file():
-        try:
-            tasks_content = tasks_md.read_text(encoding="utf-8", errors="replace")
-            # Presence of any ops-marker OR the "Card format" preamble marker is enough
-            has_tasks = "<!--ops:" in tasks_content or "Card format" in tasks_content
-        except Exception:
-            pass
-    items.append(_check("tasks_md", "TASKS.md with preamble", has_tasks, "Create TASKS.md with column format"))
+        exposed = git_repo and env_present and not gitignore_covers
+        capabilities.append({
+            "key": "secrets",
+            "label": "Secrets safe",
+            "on": not exposed,
+            "hint": "Add .env to .gitignore so secrets are never committed.",
+        })
 
-    # 4. README.md exists (any case)
-    has_readme = any((cwd / name).is_file() for name in _README_CANDIDATES)
-    items.append(_check("readme", "README.md", has_readme, "Run audit"))
+    security_warn = is_software_ops and exposed
+    security_hint = (
+        "A .env file exists but is not covered by .gitignore — secrets may be committed to git."
+        if security_warn else None
+    )
 
-    # 5. .gitignore exists and contains .env
-    gitignore = cwd / ".gitignore"
-    has_gitignore_env = False
-    if gitignore.is_file():
-        try:
-            has_gitignore_env = ".env" in gitignore.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-    items.append(_check("gitignore", ".gitignore with .env", has_gitignore_env, "Add .env to .gitignore"))
-
-    # 6. git init (.git folder exists) — if git is disabled by setting, don't require it
-    if not _git_enabled(project):
-        items.append(_check("git_init", "git (disabled in settings)", True, None))
-    else:
-        has_git = (cwd / ".git").exists()
-        items.append(_check("git_init", "git init", has_git, "Run git init in the project folder"))
-
-    # ── Capability checks ──────────────────────────────────────────────────────
-    # cap_log_cmd: cockpit receives logs and runtime errors only if log_cmd is set
-    items.append(_check(
-        "cap_log_cmd", "log_cmd set (logs to cockpit)",
-        bool(project.get("log_cmd")),
-        "Set log_cmd — otherwise the cockpit won't see logs and runtime errors",
-    ))
-    # cap_error_handler: global error handler in code or declared in CLAUDE.md
-    items.append(_check(
-        "cap_error_handler", "Global error handler",
-        _detect_error_handler(cwd, claude_md_text),
-        "Add a global error handler to the service/bot (writes errors to log) "
-        "OR declare it in CLAUDE.md (## Cardloop conformance)",
-    ))
-    # cap_test_cmd: optional — does not affect score
-    items.append(_check(
-        "cap_test_cmd", "test_cmd set (opt., via button)",
-        bool(project.get("test_cmd")),
-        "Opt.: set test_cmd for the 'Run tests' button and quality gate",
-        optional=True,
-    ))
-
-    score = sum(1 for i in items if i["ok"] and not i.get("optional"))
-    total = sum(1 for i in items if not i.get("optional"))
-    if total == 0:
-        color = "green"
-    elif score == total:
-        color = "green"
-    elif score >= total / 2:
-        color = "yellow"
-    else:
-        color = "red"
-
-    return web.json_response({"items": items, "score": score, "total": total, "color": color})
+    return web.json_response({
+        "archetype": archetype,
+        "capabilities": capabilities,
+        "security_warn": security_warn,
+        "security_hint": security_hint,
+    })
 
 
 async def api_project_audit(req: web.Request) -> web.Response:

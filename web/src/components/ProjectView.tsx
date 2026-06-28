@@ -798,14 +798,13 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                 <span className="meta-chip">
                   <code>{project.cwd}</code>
                 </span>
-                {structHealth && (
+                {structHealth?.security_warn && (
                   <button
-                    className={`health-badge health-badge-${structHealth.color}`}
+                    className="health-badge health-badge-red"
                     onClick={() => setActiveTab('settings')}
-                    title={structHealth.items.find(i => !i.ok)?.label ?? t['project.health_all_ok']}
+                    title={structHealth.security_hint ?? ''}
                   >
-                    <span className={`git-sync-dot ${structHealth.color === 'red' ? 'yellow' : structHealth.color}`} />
-                    health {structHealth.score}/{structHealth.total}
+                    <span className="git-sync-dot red" /> .env exposed
                   </button>
                 )}
                 {/* Incidents chip — shown when project has active incidents */}
