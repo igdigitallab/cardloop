@@ -155,8 +155,13 @@ def test_agent_actions_helper():
 # ───────────────────────────── availability ──────────────────────────────────
 
 
-def test_cloak_status_absent():
-    """cloakbrowser is not a hard dependency — absence is reported, not raised."""
+def test_cloak_status_absent(monkeypatch):
+    """cloakbrowser is not a hard dependency — absence is reported, not raised.
+
+    Force the absent path via monkeypatch so the assertion holds whether or not the
+    package happens to be installed in the test environment (it is, on instances that
+    ran spec-066's `pip install cloakbrowser`)."""
+    monkeypatch.setattr(_backends, "_cloak_module", lambda: None)
     st = _backends.cloak_status()
     assert st["installed"] is False
     assert st["binary_ready"] is False

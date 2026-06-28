@@ -208,6 +208,26 @@ ULTRACODE_PROMPT = (
     "conversational turns."
 )
 
+
+# spec-066: appended to system_prompt when the browser module is on, so the agent knows the
+# live cockpit pane IS "the browser". Without this, asked to "open/launch the browser", an agent
+# tends to spawn an external/headless browser (Playwright, Selenium) the operator can't see.
+def _browser_prompt(backend: str, agent_actions: str) -> str:
+    gate = (
+        "You may navigate, read, click and type."
+        if agent_actions == "full"
+        else "Read-only mode: browser_navigate and browser_snapshot work; browser_click and "
+        "browser_type are refused until the operator enables full actions in Extensions → Browser."
+    )
+    return (
+        f"A live browser pane is active (the 'browser' module, backend: {backend}). When asked to "
+        "open, launch, show or use 'the browser', or to open a URL or web page, drive THIS pane with "
+        "the mcp__browser__ tools (browser_navigate, browser_snapshot, browser_click, browser_type) — "
+        "the operator watches it live in the cockpit. Do NOT spawn an external or headless browser "
+        f"(Playwright, Selenium, a subprocess) for this. {gate}"
+    )
+
+
 # Maximum TaskProgressMessage events forwarded to SSE per task (prevents flood on long runs).
 MAX_SUBAGENT_PROGRESS = int(os.getenv("MAX_SUBAGENT_PROGRESS", "10"))
 
@@ -1444,10 +1464,17 @@ async def run_engine(  # type: ignore[return]
             # spec-066: gate mutating browser tools by the per-cwd agent_actions setting.
             try:
                 import browser_backends as _browser_backends
-                _agent_actions = _browser_backends.agent_actions(cwd)
+                _bspec = _browser_backends.resolve(cwd)
+                _agent_actions = _bspec.get("agent_actions", "read")
+                _browser_backend = _bspec.get("backend", "builtin")
             except Exception:
-                _agent_actions = "read"
+                _agent_actions, _browser_backend = "read", "builtin"
             _mcp_servers.update(_browser_tools.build_browser_server(cwd, _agent_actions))
+            # Tell the agent the live pane IS "the browser" (don't spawn an external one).
+            _existing_append = system_prompt.get("append") or ""
+            _sep = "\n" if _existing_append else ""
+            system_prompt = dict(system_prompt)
+            system_prompt["append"] = _existing_append + _sep + _browser_prompt(_browser_backend, _agent_actions)
     except Exception as _browser_mcp_exc:
         print(f"[browser] MCP wiring skipped: {_browser_mcp_exc!r}")
     opts = ClaudeAgentOptions(

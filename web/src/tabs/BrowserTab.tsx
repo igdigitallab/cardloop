@@ -23,6 +23,17 @@ const FRAME_H = 720
 // Throttle mouse-move events to ~30 per second
 const MOUSE_MOVE_INTERVAL_MS = 33
 
+// Touch: movement (in client px) beyond this turns a tap into a scroll gesture.
+const TAP_SLOP = 8
+// Chromium fires compatibility mouse events shortly AFTER touchend; the mouse
+// handlers ignore anything within this window of a touch so they don't steal
+// keyboard focus from the hidden input or double the click.
+const TOUCH_GUARD_MS = 700
+// Hidden-input padding for the mobile soft keyboard. The capture input always
+// holds this 1-char pad so a Backspace ALWAYS has something to delete and thus
+// reliably fires an `input` event (empty inputs swallow Backspace on Android).
+const KBD_PAD = ' '
+
 interface Props {
   projectId: string
 }
@@ -72,6 +83,17 @@ export function BrowserTab({ projectId }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const lastObjUrlRef = useRef<string | null>(null)
   const lastMouseMoveRef = useRef<number>(0)
+  // Mobile co-control: hidden input that captures the soft keyboard, plus
+  // touch-gesture state (tap vs scroll).
+  const hiddenInputRef = useRef<HTMLInputElement | null>(null)
+  const touchStartRef = useRef<{ x: number; y: number; cx: number; cy: number } | null>(null)
+  const lastTouchRef = useRef<{ cx: number; cy: number } | null>(null)
+  const touchMovedRef = useRef<boolean>(false)
+  // Timestamp of the last touch. Chromium synthesizes compatibility mouse events
+  // (mousedown/up/click) shortly AFTER touchend — they would steal focus back to
+  // the container (killing the soft keyboard) and double the click. Mouse handlers
+  // ignore anything within this window of a touch.
+  const lastTouchTimeRef = useRef<number>(0)
 
   const [connState, setConnState] = useState<ConnState>('connecting')
   const [errorMsg, setErrorMsg] = useState<string>('')
@@ -207,6 +229,7 @@ export function BrowserTab({ projectId }: Props) {
   const onMouseMove = useCallback(
     (e: React.MouseEvent) => {
       const now = Date.now()
+      if (now - lastTouchTimeRef.current < TOUCH_GUARD_MS) return // synthetic from touch
       if (now - lastMouseMoveRef.current < MOUSE_MOVE_INTERVAL_MS) return
       lastMouseMoveRef.current = now
       const rect = getImgRect()
@@ -219,8 +242,12 @@ export function BrowserTab({ projectId }: Props) {
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      if (Date.now() - lastTouchTimeRef.current < TOUCH_GUARD_MS) return // synthetic from touch
       const rect = getImgRect()
       if (!rect) return
+      // Give the pane keyboard focus on click so the operator can type immediately
+      // afterwards (the container, tabIndex=0, owns the desktop key handlers).
+      containerRef.current?.focus()
       const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
       send({ t: 'mouse', action: 'down', x, y, button: buttonName(e.button) })
     },
@@ -229,6 +256,7 @@ export function BrowserTab({ projectId }: Props) {
 
   const onMouseUp = useCallback(
     (e: React.MouseEvent) => {
+      if (Date.now() - lastTouchTimeRef.current < TOUCH_GUARD_MS) return // synthetic from touch
       const rect = getImgRect()
       if (!rect) return
       const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
@@ -240,6 +268,110 @@ export function BrowserTab({ projectId }: Props) {
   const onContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
   }, [])
+
+  // ── Touch handlers (mobile co-control) ───────────────────────────────────────
+  // A tap becomes a left click; dragging past TAP_SLOP becomes a wheel scroll.
+  // The <img> sets touch-action:none so the page itself never steals the gesture.
+  const onTouchStart = useCallback(
+    (e: React.TouchEvent) => {
+      lastTouchTimeRef.current = Date.now()
+      const tc = e.touches[0]
+      const rect = getImgRect()
+      if (!tc || !rect) return
+      const { x, y } = toFrameCoords(tc.clientX, tc.clientY, rect)
+      touchStartRef.current = { x, y, cx: tc.clientX, cy: tc.clientY }
+      lastTouchRef.current = { cx: tc.clientX, cy: tc.clientY }
+      touchMovedRef.current = false
+    },
+    [getImgRect],
+  )
+
+  const onTouchMove = useCallback(
+    (e: React.TouchEvent) => {
+      lastTouchTimeRef.current = Date.now()
+      const tc = e.touches[0]
+      const rect = getImgRect()
+      const start = touchStartRef.current
+      const last = lastTouchRef.current
+      if (!tc || !rect || !start || !last) return
+      if (!touchMovedRef.current && Math.hypot(tc.clientX - start.cx, tc.clientY - start.cy) > TAP_SLOP) {
+        touchMovedRef.current = true
+      }
+      if (touchMovedRef.current) {
+        const { x, y } = toFrameCoords(tc.clientX, tc.clientY, rect)
+        // Scale the finger delta into frame space; natural-scroll sign (finger up → page down).
+        const dx = (last.cx - tc.clientX) * (FRAME_W / rect.width)
+        const dy = (last.cy - tc.clientY) * (FRAME_H / rect.height)
+        send({ t: 'wheel', x, y, dx, dy })
+      }
+      lastTouchRef.current = { cx: tc.clientX, cy: tc.clientY }
+    },
+    [getImgRect, send],
+  )
+
+  const onTouchEnd = useCallback((e: React.TouchEvent) => {
+    lastTouchTimeRef.current = Date.now()
+    // Suppress the compatibility mouse events (mousedown/up/click) Chromium would
+    // synthesize next: their NATIVE default would move focus to the container div,
+    // stealing it from the hidden input and preventing the soft keyboard. touchend
+    // is non-passive in React, so preventDefault() is honoured here.
+    e.preventDefault()
+    const start = touchStartRef.current
+    touchStartRef.current = null
+    lastTouchRef.current = null
+    if (!start || touchMovedRef.current) return
+    // A tap → left click at the touch-down point, then raise the soft keyboard so
+    // the operator can type into whatever field the click just focused.
+    const { x, y } = start
+    send({ t: 'mouse', action: 'move', x, y })
+    send({ t: 'mouse', action: 'down', x, y, button: 'left' })
+    send({ t: 'mouse', action: 'up', x, y, button: 'left' })
+    hiddenInputRef.current?.focus()
+  }, [send])
+
+  // ── Hidden-input soft keyboard (mobile) ──────────────────────────────────────
+  // Tapping the pane focuses this off-screen input → the OS keyboard appears. We
+  // diff its value against KBD_PAD on every `input` event and forward the delta as
+  // char/Backspace key events (robust across Android keyboards that don't emit
+  // usable keydown). Special keys (Enter/Tab/arrows) come through keydown.
+  const resetHidden = useCallback(() => {
+    const el = hiddenInputRef.current
+    if (!el) return
+    el.value = KBD_PAD
+    try {
+      el.setSelectionRange(KBD_PAD.length, KBD_PAD.length)
+    } catch {
+      /* setSelectionRange throws on some input types — harmless */
+    }
+  }, [])
+
+  const onHiddenInput = useCallback(
+    (e: React.FormEvent<HTMLInputElement>) => {
+      const val = e.currentTarget.value
+      if (val.length > KBD_PAD.length) {
+        for (const ch of val.slice(KBD_PAD.length)) send({ t: 'key', action: 'char', text: ch })
+      } else if (val.length < KBD_PAD.length) {
+        for (let i = val.length; i < KBD_PAD.length; i++) {
+          send({ t: 'key', action: 'down', key: 'Backspace', text: '' })
+          send({ t: 'key', action: 'up', key: 'Backspace', text: '' })
+        }
+      }
+      resetHidden()
+    },
+    [send, resetHidden],
+  )
+
+  const onHiddenKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      const k = e.key
+      if (k === 'Enter' || k === 'Tab' || k === 'ArrowUp' || k === 'ArrowDown' || k === 'ArrowLeft' || k === 'ArrowRight') {
+        send({ t: 'key', action: 'down', key: k, text: k === 'Enter' ? '\r' : '' })
+        send({ t: 'key', action: 'up', key: k, text: '' })
+        e.preventDefault()
+      }
+    },
+    [send],
+  )
 
   // ── Wheel handler ────────────────────────────────────────────────────────────
   const onWheel = useCallback(
@@ -488,6 +620,9 @@ export function BrowserTab({ projectId }: Props) {
             onMouseMove={onMouseMove}
             onMouseDown={onMouseDown}
             onMouseUp={onMouseUp}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
             style={{
               // Fill the pane while preserving aspect ratio
               maxWidth: '100%',
@@ -496,11 +631,42 @@ export function BrowserTab({ projectId }: Props) {
               display: 'block',
               userSelect: 'none',
               WebkitUserSelect: 'none',
+              // Own the touch gesture so the page never scrolls/zooms it away
+              touchAction: 'none',
               // Prevent the image from consuming focus (the container div does)
               pointerEvents: connState === 'ready' ? 'auto' : 'none',
             }}
           />
         )}
+        {/* Off-screen capture for the mobile soft keyboard (focused on tap). */}
+        <input
+          ref={hiddenInputRef}
+          defaultValue={KBD_PAD}
+          onInput={onHiddenInput}
+          onKeyDown={onHiddenKeyDown}
+          onFocus={resetHidden}
+          autoCapitalize="none"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
+          aria-hidden="true"
+          tabIndex={-1}
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            opacity: 0,
+            border: 'none',
+            padding: 0,
+            margin: 0,
+            // iOS zooms the viewport when focusing inputs with font-size < 16px
+            fontSize: 16,
+            // Never intercept taps — it's focused programmatically from onTouchEnd
+            pointerEvents: 'none',
+          }}
+        />
         {renderOverlay()}
       </div>
     </div>
