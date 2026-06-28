@@ -169,6 +169,10 @@ export const en = {
   'split.expand_chat': 'Expand chat',
   'split.collapse_chat': 'Collapse chat',
   'split.drag_to_resize': 'Drag to resize',
+  'split.mobile_label': 'Split',
+  'split.mobile_enter': 'Show browser + chat together',
+  'split.mobile_exit': 'Back to single view',
+  'split.mobile_resize': 'Drag to resize browser / chat',
 
   // ── Overview tab ─────────────────────────────────────────────
   'overview.initializing': 'Initializing',

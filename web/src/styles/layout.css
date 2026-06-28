@@ -508,6 +508,53 @@
     overflow-y: auto;
     flex: 1;
   }
+
+  /* spec-066/mobile-split: Browser (top) + Chat (bottom) stacked, draggable divider */
+  .mobile-split-stack {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .mobile-split-browser {
+    flex-shrink: 0;
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+    border-bottom: 1px solid var(--border);
+  }
+  .mobile-split-chat {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .mobile-split-divider {
+    flex-shrink: 0;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg2);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    cursor: row-resize;
+    touch-action: none;           /* drag the divider without scrolling the page */
+    user-select: none;
+  }
+  .mobile-split-grip {
+    width: 40px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--text3);
+    opacity: 0.6;
+  }
+  .mobile-split-toggle {
+    margin-left: 4px;
+    font-weight: 600;
+  }
 }
 
 /* D4: hide Split button on mobile — split view requires two panes */

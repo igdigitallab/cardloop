@@ -40,10 +40,18 @@ const BASE_TABS: Tab[] = [
 // localStorage keys
 const LS_WIDTH    = 'cops.chatWidth'
 const LS_COLLAPSED = 'cops.chatCollapsed'
+// spec-066/mobile-split: per-device opt-in to see browser + chat stacked on mobile.
+const LS_MSPLIT = 'cops.mobileSplit'
+const LS_MSPLIT_PCT = 'cops.mobileBrowserPct'
 
 const CHAT_MIN_PCT = 20
 const CHAT_MAX_PCT = 70
 const CHAT_DEFAULT_PCT = 45
+
+// Mobile split: the browser (top) pane height as a % of the stacked area.
+const MSPLIT_MIN_PCT = 25
+const MSPLIT_MAX_PCT = 72
+const MSPLIT_DEFAULT_PCT = 42
 
 function readLS(key: string, fallback: number): number {
   try {
@@ -381,6 +389,42 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     try { localStorage.setItem(LS_COLLAPSED, String(collapsed)) } catch {}
   }, [collapsed])
 
+  // ── Mobile split (browser + chat stacked) — per-device opt-in ───────────────
+  const [mobileSplit, setMobileSplit] = useState<boolean>(() => readLSBool(LS_MSPLIT, false))
+  const [mobileBrowserPct, setMobileBrowserPct] = useState<number>(() => readLS(LS_MSPLIT_PCT, MSPLIT_DEFAULT_PCT))
+  useEffect(() => {
+    try { localStorage.setItem(LS_MSPLIT, String(mobileSplit)) } catch {}
+  }, [mobileSplit])
+  useEffect(() => {
+    try { localStorage.setItem(LS_MSPLIT_PCT, String(mobileBrowserPct)) } catch {}
+  }, [mobileBrowserPct])
+
+  // Vertical divider drag (pointer events → works for touch + mouse). Resizes the
+  // top (browser) pane as a % of the stacked area; document-level listeners so the
+  // drag survives the pointer leaving the thin handle.
+  const stackRef = useRef<HTMLDivElement>(null)
+  const onVDividerStart = useCallback((e: React.PointerEvent) => {
+    e.preventDefault()
+    const el = stackRef.current
+    if (!el) return
+    function onMove(ev: PointerEvent) {
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      if (rect.height === 0) return
+      let pct = ((ev.clientY - rect.top) / rect.height) * 100
+      pct = Math.max(MSPLIT_MIN_PCT, Math.min(MSPLIT_MAX_PCT, pct))
+      setMobileBrowserPct(pct)
+    }
+    function onUp() {
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+      document.body.style.userSelect = ''
+    }
+    document.body.style.userSelect = 'none'
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
+  }, [])
+
   // ── Drag logic ────────────────────────────────────────────────────────────
   const containerRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
@@ -624,24 +668,57 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
               affordance (the .chat-feed scroll handler). Other tabs (Board/CLAUDE.md/Logs/…) scroll
               their own container with no reveal path, so a collapsed nav would strand the user with
               no way back to Chat. Always keep the nav expanded off the Chat tab. */}
-          <nav className={`mobile-inner-tabs${navCollapsed && mobileInnerTab === null ? ' collapsed' : ''}`} aria-label={t['tab.sections_aria']}>
+          <nav className={`mobile-inner-tabs${navCollapsed && mobileInnerTab === null && !mobileSplit ? ' collapsed' : ''}`} aria-label={t['tab.sections_aria']}>
             <button
-              className={`mobile-inner-tab-btn ${mobileInnerTab === null ? 'active' : ''}`}
-              onClick={() => setMobileInnerTab(null)}
+              className={`mobile-inner-tab-btn ${mobileInnerTab === null && !mobileSplit ? 'active' : ''}`}
+              onClick={() => { setMobileSplit(false); setMobileInnerTab(null) }}
             >
               💬 Chat
             </button>
             {visibleTabs.map(tab => (
               <button
                 key={tab.id}
-                className={`mobile-inner-tab-btn ${mobileInnerTab === tab.id ? 'active' : ''}`}
-                onClick={() => setMobileInnerTab(tab.id)}
+                className={`mobile-inner-tab-btn ${mobileInnerTab === tab.id && !mobileSplit ? 'active' : ''}`}
+                onClick={() => { setMobileSplit(false); setMobileInnerTab(tab.id) }}
               >
                 {tab.label}
               </button>
             ))}
+            {/* Split toggle: stack Browser + Chat together (opt-in, browser module only) */}
+            {browserEnabled && (
+              <button
+                className={`mobile-inner-tab-btn mobile-split-toggle ${mobileSplit ? 'active' : ''}`}
+                onClick={() => setMobileSplit(s => !s)}
+                title={mobileSplit ? t['split.mobile_exit'] : t['split.mobile_enter']}
+                aria-pressed={mobileSplit}
+              >
+                {mobileSplit ? '⊟' : '⊞'} {t['split.mobile_label']}
+              </button>
+            )}
           </nav>
-          {/* Content area: chat or inner tab — swipe handler on Chat tab only */}
+          {/* spec-066/mobile-split: stack Browser (top) + Chat (bottom) when opted in. */}
+          {mobileSplit && browserEnabled ? (
+            <div className="mobile-split-stack" ref={stackRef}>
+              <div className="mobile-split-browser" style={{ height: `${mobileBrowserPct}%` }}>
+                <ErrorBoundary label="Browser"><BrowserTab projectId={project.id} /></ErrorBoundary>
+              </div>
+              <div
+                className="mobile-split-divider"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label={t['split.mobile_resize']}
+                onPointerDown={onVDividerStart}
+              >
+                <span className="mobile-split-grip" />
+              </div>
+              <div className="mobile-split-chat">
+                <ErrorBoundary label="Chat">
+                  <ChatTab project={project} onProjectsReload={onProjectsReload} isActive={isActive} chromeCollapsed onOpenCard={() => { setMobileSplit(false); setMobileInnerTab('board') }} discussCard={discussCard} onDiscussConsumed={() => setDiscussCard(null)} models={models} />
+                </ErrorBoundary>
+              </div>
+            </div>
+          ) : (
+          /* Content area: chat or inner tab — swipe handler on Chat tab only */
           <div
             className={`mobile-project-content${swipeAnim ? ` swipe-anim-${swipeAnim}` : ''}`}
             ref={contentRef}
@@ -667,6 +744,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
               </div>
             )}
           </div>
+          )}
           <HealthRunEndRefresher refresh={refreshHealth} />
         </div>
       </ProjectActivityProvider>
