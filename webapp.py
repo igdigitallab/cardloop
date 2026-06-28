@@ -7853,6 +7853,24 @@ def _ensure_chat_entry(ctx: dict, project_id: str, session_key: str) -> dict:
     return chats_data
 
 
+def _active_chat_session_id(ctx: dict, project_id: str) -> "str | None":
+    """Session id of the active chat from chats.json (spec-037 source of truth), or None.
+
+    Read-only (no lock, no seeding). The in-memory ctx['sessions'] mirror is only refreshed
+    on a chat run and is NOT persisted immediately, so a restart between a run and the next
+    can leave sessions.json stale while chats.json stays correct. Readers (session-history)
+    must therefore prefer chats.json and fall back to the legacy mirror."""
+    try:
+        entry = _load_chats(ctx).get(project_id)
+        if not entry:
+            return None
+        active = entry.get("active")
+        chat = next((c for c in entry.get("chats", []) if c.get("id") == active), None)
+        return (chat or {}).get("session_id") or None
+    except Exception:
+        return None
+
+
 # ─── Chats CRUD endpoints ────────────────────────────────────────────────────
 
 
@@ -7962,8 +7980,16 @@ async def api_project_chats_delete(req: web.Request) -> web.Response:
 # ─────────────────────────── C2: project sessions ───────────────────────────
 
 def _sdk_sessions_dir(cwd: str) -> Path:
-    """SDK folder with .jsonl sessions for the given cwd."""
-    return Path.home() / ".claude" / "projects" / cwd.replace("/", "-")
+    """SDK folder with .jsonl sessions for the given cwd.
+
+    The Claude SDK/CLI encodes the cwd into the folder name by replacing EVERY
+    non-alphanumeric char with '-' (so '/home/igor/line_vpn_bot' → '-home-igor-line-vpn-bot':
+    underscores and dots also become dashes). A '/'-only replace silently misses the real
+    folder for any path containing '_' or '.', so the transcript appears empty and chat
+    history "disappears" on reload. Verified empirically: this rule matches every existing
+    transcript folder for the operator's projects.
+    """
+    return Path.home() / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
 def _migrate_cwd_keyed_state(old_cwd: str, new_cwd: str, ctx: dict) -> list[str]:
@@ -8450,7 +8476,14 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    sid = req.rel_url.query.get("session_id", "") or ctx["sessions"].get((project.get("session_key") or project.get("tg_thread", "")))
+    # Resolve the session to read: explicit ?session_id wins; otherwise prefer the active
+    # chat from chats.json (spec-037 source of truth), then the legacy ctx["sessions"] mirror.
+    # Reading legacy-only returned EMPTY history for any project whose mirror was stale (a run
+    # then a restart) even though chats.json + the transcript were intact — history "vanished".
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    sid = (req.rel_url.query.get("session_id", "")
+           or _active_chat_session_id(ctx, project["id"])
+           or ctx["sessions"].get(session_key))
     if not sid:
         # Spec-043 C: explicit context_tokens:0 so the frontend can distinguish
         # "fresh session (known zero)" from "no data yet (null/missing)".
@@ -8854,6 +8887,19 @@ async def api_project_chat(req: web.Request) -> web.Response:
                      "X-Accel-Buffering": "no"},
         )
         await resp.prepare(req)
+        # Dedup double-submits: a mobile OptionPicker re-arms after a ChatTab remount
+        # (screen lock/unlock), so a second tap re-POSTs the SAME prompt while the turn is
+        # still busy. Enqueuing that identical copy drains into a phantom second turn after
+        # the run/restart. Drop it if it matches the in-flight prompt or an already-queued
+        # item; still emit {type:queued} so the client retracts its optimistic bubbles.
+        _running_prompt = (_live_turns.get(session_key) or {}).get("prompt", "")
+        _is_dup = prompt == _running_prompt or any(
+            it.get("text") == prompt for it in _chat_queue_get(session_key)
+        )
+        if _is_dup:
+            payload = json.dumps({"type": "queued", "duplicate": True}, ensure_ascii=False)
+            await resp.write(f"data: {payload}\n\n".encode())
+            return resp
         item = _chat_queue_enqueue(session_key, prompt)
         if item is None:
             payload = json.dumps({"type": "error", "error": "queue full"}, ensure_ascii=False)
@@ -9878,7 +9924,11 @@ async def api_project_session_context(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
-    sid = req.rel_url.query.get("session_id", "") or ctx["sessions"].get((project.get("session_key") or project.get("tg_thread", "")))
+    # Same resolution as session-history: active chat (chats.json) → legacy mirror.
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    sid = (req.rel_url.query.get("session_id", "")
+           or _active_chat_session_id(ctx, project["id"])
+           or ctx["sessions"].get(session_key))
     if not sid:
         return web.json_response({"read": [], "edited": [], "commands": [], "session_id": None})
 

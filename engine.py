@@ -251,6 +251,19 @@ DEFAULT_NUDGE = (
     "in the chat UI; otherwise reply normally."
 )
 
+# spec-038: appended to system_prompt when the cockpit media plumbing is active (COPS_MEDIA_DIR
+# set — true for cockpit chat + card runs). The whole inline-image mechanism (cockpit-img helper,
+# /media route, lightbox) shipped, but the agent was never TOLD it exists — so agents fall back to
+# Telegram or paste a raw path/link (neither renders in the chat). This is the missing wire.
+IMAGES_PROMPT = (
+    f"To show {OPERATOR_NAME} an image, screenshot or video INSIDE the cockpit chat, run the helper "
+    "`cockpit-img <path> [caption]` and paste the single `![…](…)` line it prints verbatim into your "
+    "reply — the cockpit renders it inline (tap to zoom full-screen). For an image the operator "
+    "already uploaded (it appears in the conversation as an `attached file: <path>` line), you may "
+    "instead echo that exact `attached file: <path>` line on its own line. Do NOT deliver images via "
+    "Telegram or by pasting a bare filesystem path or URL — those do not render here."
+)
+
 # AskUserQuestion = interactive prompt (no reply in TG -> agent hangs or decides on its own).
 DISALLOWED_TOOLS = ["AskUserQuestion"]
 
@@ -1477,6 +1490,13 @@ async def run_engine(  # type: ignore[return]
             system_prompt["append"] = _existing_append + _sep + _browser_prompt(_browser_backend, _agent_actions)
     except Exception as _browser_mcp_exc:
         print(f"[browser] MCP wiring skipped: {_browser_mcp_exc!r}")
+    # spec-038: tell the agent how to surface an image inline. Gate on the media env actually being
+    # present (cockpit chat + card runs set it) so the hint only appears when the plumbing is live.
+    if (env or {}).get("COPS_MEDIA_DIR"):
+        _img_append = system_prompt.get("append") or ""
+        _img_sep = "\n" if _img_append else ""
+        system_prompt = dict(system_prompt)
+        system_prompt["append"] = _img_append + _img_sep + IMAGES_PROMPT
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,

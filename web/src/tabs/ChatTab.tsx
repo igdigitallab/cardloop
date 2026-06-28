@@ -2518,10 +2518,29 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             msg.role === 'assistant' && msg.text && !msg.streaming
               ? parseOptionsBlock(msg.text)
               : null
-          // User uploads: split "attached file:" lines out of the prose and render them
-          // as inline image/video previews (reconstructed from the transcript on reload).
-          const userAttach =
-            msg.role === 'user' && msg.text ? parseAttachedFiles(msg.text, projectId) : null
+          // Durable "already answered" signal for the picker: if a later user message matches
+          // one of the options, this block was already chosen. Recovers the inert state across a
+          // ChatTab remount (mobile screen lock/unlock), which would otherwise re-arm the picker
+          // and let a second tap double-submit (ghost queued turn).
+          const answeredOptValue: string | null = parsedOpts
+            ? (() => {
+                const vals = new Set(parsedOpts.options.map(o => o.value.trim()))
+                for (let j = idx + 1; j < messages.length; j++) {
+                  const mj = messages[j]
+                  if (mj.role === 'user' && vals.has((mj.text || '').trim())) return (mj.text || '').trim()
+                }
+                return null
+              })()
+            : null
+          // Inline file previews: split "attached file:" lines out of the prose and render them
+          // as image/video thumbnails (reconstructed from the transcript on reload). The composer
+          // emits these for operator uploads; an agent may also echo an `attached file:` line to
+          // reference an already-uploaded image (spec-038). Assistant text is only parsed once
+          // streaming settles, so a half-streamed line isn't split mid-token.
+          const attach =
+            msg.text && (msg.role === 'user' || (msg.role === 'assistant' && !msg.streaming))
+              ? parseAttachedFiles(msg.text, projectId)
+              : null
 
           return (
             <div key={msg.id}>
@@ -2565,17 +2584,18 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                       options={parsedOpts.options}
                       isActive={isLastAssistant && !run}
                       onSelect={(value) => sendMessage(value)}
+                      answeredValue={answeredOptValue}
                     />
                   </>
-                ) : userAttach && userAttach.files.length > 0 ? (
+                ) : attach && attach.files.length > 0 ? (
                   <>
-                    {userAttach.body && (
+                    {attach.body && (
                       <div className="chat-msg-body markdown-wrap">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{userAttach.body}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{attach.body}</ReactMarkdown>
                       </div>
                     )}
                     <div className="chat-msg-attachments">
-                      {userAttach.files.map((f, i) => (
+                      {attach.files.map((f, i) => (
                         f.kind === 'file'
                           ? <span key={i} className="chat-att-file" title={f.name}>📎 {f.name}</span>
                           : <ChatImage key={i} src={f.url} alt={f.name} />

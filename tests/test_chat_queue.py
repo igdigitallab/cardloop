@@ -232,3 +232,66 @@ async def test_chat_busy_returns_queued_sse(aiohttp_client, fake_ctx, chat_app):
     # Message is now in the server-side queue
     queue = _webapp._chat_queue_get(session_key)
     assert any(i["id"] == item["id"] for i in queue)
+
+
+# ─────────────────── POST /chat busy → duplicate dropped (dedup) ───────────────
+# A mobile OptionPicker re-arms after a ChatTab remount (screen lock/unlock), so a
+# second tap re-POSTs the SAME prompt while the turn is still busy. The server must
+# drop that identical copy instead of enqueuing a phantom that drains into a ghost turn.
+
+
+@pytest.mark.asyncio
+async def test_chat_busy_duplicate_of_queued_dropped(aiohttp_client, fake_ctx, chat_app):
+    """Re-POST of a prompt already in the queue → {duplicate:true}, not a second copy."""
+    session_key = "1001:42"
+    fake_ctx["running"][session_key] = True
+    _webapp._chat_queue_init(fake_ctx)
+    while _webapp._chat_queue_pop(session_key):
+        pass
+    _webapp._chat_queue_enqueue(session_key, "dup me")
+    try:
+        client = await aiohttp_client(chat_app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "dup me"},
+            headers=_auth_headers(fake_ctx),
+        )
+        assert resp.status == 200
+        events = await _read_sse_events(resp)
+        queued = [e for e in events if e.get("type") == "queued"]
+        assert len(queued) == 1, f"expected one queued frame, got: {events}"
+        assert queued[0].get("duplicate") is True
+        assert "item" not in queued[0]
+        # The queue still holds exactly ONE copy — no phantom added.
+        copies = [i for i in _webapp._chat_queue_get(session_key) if i["text"] == "dup me"]
+        assert len(copies) == 1, f"duplicate was enqueued: {copies}"
+    finally:
+        while _webapp._chat_queue_pop(session_key):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_chat_busy_duplicate_of_running_prompt_dropped(aiohttp_client, fake_ctx, chat_app):
+    """Re-POST of the IN-FLIGHT turn's prompt → dropped (the exact incident shape)."""
+    session_key = "1001:42"
+    fake_ctx["running"][session_key] = True
+    _webapp._chat_queue_init(fake_ctx)
+    while _webapp._chat_queue_pop(session_key):
+        pass
+    _webapp._live_turns[session_key] = {"prompt": "run me", "events": []}
+    try:
+        client = await aiohttp_client(chat_app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "run me"},
+            headers=_auth_headers(fake_ctx),
+        )
+        events = await _read_sse_events(resp)
+        queued = [e for e in events if e.get("type") == "queued"]
+        assert len(queued) == 1 and queued[0].get("duplicate") is True
+        # Nothing was enqueued for the in-flight prompt.
+        assert [i for i in _webapp._chat_queue_get(session_key) if i["text"] == "run me"] == []
+    finally:
+        _webapp._live_turns.pop(session_key, None)
+        while _webapp._chat_queue_pop(session_key):
+            pass

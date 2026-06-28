@@ -74,30 +74,43 @@ interface OptionPickerProps {
   isActive: boolean
   /** Called with the chosen option's value when the user picks one. */
   onSelect: (value: string) => void
+  /** A previously-chosen option value, recovered from chat history. Local `selectedIndex`
+   *  is component state that resets on a ChatTab remount (mobile screen lock/unlock), which
+   *  re-arms an already-answered picker — a second tap then double-submits. This durable
+   *  signal (the answer is a real user message in history) keeps the picker inert. */
+  answeredValue?: string | null
 }
 
-export function OptionPicker({ options, isActive, onSelect }: OptionPickerProps) {
+export function OptionPicker({ options, isActive, onSelect, answeredValue }: OptionPickerProps) {
   const [highlighted, setHighlighted] = useState<number>(0)
   // Once selected, the picker becomes inert — renders as a static confirmed choice.
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
+  // Effective selection: local click OR a history-recovered answer (survives remount).
+  const externalIdx = answeredValue != null
+    ? options.findIndex(o => o.value.trim() === answeredValue.trim())
+    : -1
+  const effectiveSelected = selectedIndex !== null
+    ? selectedIndex
+    : (externalIdx >= 0 ? externalIdx : null)
+
   // Auto-focus the container when this picker is the active one (last message, no run).
   // This lets arrow keys work immediately without an explicit click.
   useEffect(() => {
-    if (isActive && selectedIndex === null) {
+    if (isActive && effectiveSelected === null) {
       containerRef.current?.focus()
     }
-  }, [isActive, selectedIndex])
+  }, [isActive, effectiveSelected])
 
   function pick(idx: number) {
-    if (!isActive || selectedIndex !== null) return
+    if (!isActive || effectiveSelected !== null) return
     setSelectedIndex(idx)
     onSelect(options[idx].value)
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
-    if (!isActive || selectedIndex !== null) return
+    if (!isActive || effectiveSelected !== null) return
     // Do not handle if the textarea is focused (guard: event bubbles up only from here)
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -118,7 +131,7 @@ export function OptionPicker({ options, isActive, onSelect }: OptionPickerProps)
     }
   }
 
-  const isDisabled = !isActive || selectedIndex !== null
+  const isDisabled = !isActive || effectiveSelected !== null
 
   return (
     <div
@@ -127,12 +140,12 @@ export function OptionPicker({ options, isActive, onSelect }: OptionPickerProps)
       role="listbox"
       aria-label={t['chat.option_picker_label']}
       aria-disabled={isDisabled}
-      tabIndex={isActive && selectedIndex === null ? 0 : -1}
+      tabIndex={isActive && effectiveSelected === null ? 0 : -1}
       onKeyDown={handleKeyDown}
     >
       {options.map((opt, idx) => {
         const isHighlighted = !isDisabled && highlighted === idx
-        const isSelected = selectedIndex === idx
+        const isSelected = effectiveSelected === idx
         return (
           <div
             key={idx}
@@ -157,7 +170,7 @@ export function OptionPicker({ options, isActive, onSelect }: OptionPickerProps)
           </div>
         )
       })}
-      {isActive && selectedIndex === null && (
+      {isActive && effectiveSelected === null && (
         <div className="option-picker__hint" aria-hidden="true">
           {t['chat.option_picker_hint']}
         </div>
