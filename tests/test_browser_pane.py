@@ -80,3 +80,81 @@ def test_registry_dedup_and_close(monkeypatch):
         assert "PROJ" not in browser_pane._SESSIONS
 
     asyncio.run(go())
+
+
+# ── late-subscriber frame replay (the "blank pane on a static page" fix) ──────
+
+import base64 as _b64
+
+
+class _FakeWS:
+    def __init__(self):
+        self.sent_json = []
+        self.sent_bytes = []
+
+    async def send_json(self, obj):
+        self.sent_json.append(obj)
+
+    async def send_bytes(self, b):
+        self.sent_bytes.append(b)
+
+
+class _FakeCDPScreenshot:
+    async def send(self, method, params=None):
+        if method == "Page.captureScreenshot":
+            return {"data": _b64.b64encode(b"CAPTURED").decode()}
+        return {}
+
+
+def test_on_frame_caches_last_frame_without_subscribers():
+    # The screencast emits frames even with nobody watching; they must be cached
+    # so the next subscriber to join a now-static page is primed immediately.
+    s = BrowserSession("k")
+    s._on_frame({"data": _b64.b64encode(b"JPEGDATA").decode(), "sessionId": None})
+    assert s._last_frame == b"JPEGDATA"
+
+
+def test_prime_replays_cached_frame_to_late_subscriber():
+    async def go():
+        s = BrowserSession("k")
+        s._last_frame = b"FRAME"
+        ws = _FakeWS()
+        await s._prime(ws)
+        assert ws.sent_bytes == [b"FRAME"], "late subscriber must receive the current frame"
+    asyncio.run(go())
+
+
+def test_prime_captures_when_no_cached_frame():
+    async def go():
+        s = BrowserSession("k")
+        s._cdp = _FakeCDPScreenshot()
+        ws = _FakeWS()
+        await s._prime(ws)
+        assert ws.sent_bytes == [b"CAPTURED"]
+        assert s._last_frame == b"CAPTURED", "captured frame should also be cached"
+    asyncio.run(go())
+
+
+def test_disconnected_retires_session_for_rebuild():
+    async def go():
+        s = BrowserSession("k")
+        s._started = True
+        browser_pane._SESSIONS["k"] = s
+        s._on_disconnected(None)
+        assert s._closed is True
+        assert s._is_alive() is False, "a disconnected browser is not alive"
+        await asyncio.sleep(0)  # let the scheduled close_session run
+        assert "k" not in browser_pane._SESSIONS
+    asyncio.run(go())
+
+
+def test_close_session_identity_guard():
+    async def go():
+        s_old = BrowserSession("k")
+        s_new = BrowserSession("k")
+        browser_pane._SESSIONS["k"] = s_new
+        # A dying old session must not evict the fresh replacement under the key.
+        await browser_pane.close_session("k", s_old)
+        assert browser_pane._SESSIONS.get("k") is s_new
+        browser_pane._SESSIONS.pop("k", None)
+    asyncio.run(go())

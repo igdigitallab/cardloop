@@ -30,6 +30,19 @@ VIEWPORT = {"width": 1280, "height": 720}
 _IDLE_GRACE = 120.0          # close the browser this long after the last activity with no subscribers
 _WATCH_INTERVAL = 15.0       # idle-watchdog tick
 
+# Branded start page — shown instead of a bare white about:blank so a freshly
+# opened pane reads as "ready, type a URL" rather than blank/broken. Encoded as a
+# base64 data URL so Chromium renders it (and thus emits a screencast frame).
+_START_HTML = (
+    "<!doctype html><html><head><meta charset='utf-8'></head>"
+    "<body style=\"margin:0;height:100vh;display:flex;align-items:center;"
+    "justify-content:center;background:#0d0d0d;color:#6e7681;"
+    "font-family:system-ui,-apple-system,Segoe UI,sans-serif\">"
+    "<div style='text-align:center'><div style='font-size:34px;margin-bottom:10px'>&#127760;</div>"
+    "<div style='font-size:14px'>Type a URL above to start browsing</div></div></body></html>"
+)
+_START_URL = "data:text/html;base64," + base64.b64encode(_START_HTML.encode("utf-8")).decode("ascii")
+
 # Registry: cwd -> BrowserSession. Shared by the WS handler (webapp) and the
 # agent MCP tools (browser_tools) so both drive the same browser.
 _SESSIONS: "dict[str, BrowserSession]" = {}
@@ -55,6 +68,7 @@ class BrowserSession:
         self._start_lock = asyncio.Lock()
         self._subs: "set[Any]" = set()       # subscriber WebSocketResponse objects
         self._busy: "set[Any]" = set()       # subscribers with an in-flight send (frame-drop gate)
+        self._last_frame: "bytes | None" = None  # most recent JPEG — replayed to late subscribers
         self._last_activity = time.monotonic()
         self._watchdog: "asyncio.Task | None" = None
 
@@ -80,7 +94,12 @@ class BrowserSession:
                 self._cdp = await self._ctx.new_cdp_session(self._page)
                 self._cdp.on("Page.screencastFrame", self._on_frame)
                 self._page.on("framenavigated", self._on_navigated)
-                await self._page.goto("about:blank")
+                # Renderer crash (often OOM under the service memory cap) and full
+                # browser death (process killed) — recover instead of serving a
+                # frozen/dead pane that reads as "Chrome Error".
+                self._page.on("crash", self._on_crash)
+                self._browser.on("disconnected", self._on_disconnected)
+                await self._page.goto(_START_URL)
                 await self._cdp.send("Page.startScreencast", {
                     "format": "jpeg", "quality": 55,
                     "maxWidth": VIEWPORT["width"], "maxHeight": VIEWPORT["height"],
@@ -120,17 +139,54 @@ class BrowserSession:
         await self._teardown()
         self._started = False
 
+    def _is_alive(self) -> bool:
+        """True if the session can still serve frames (or has not started yet).
+
+        Death is signalled either by the ``disconnected`` event (sets ``_closed``)
+        or, as a race-safety net, by a present browser reporting not-connected.
+        """
+        if self._closed:
+            return False
+        if not self._started or self._browser is None:
+            return True  # not started / pre-browser — start() will (re)build it
+        try:
+            return self._browser.is_connected()
+        except Exception:
+            return False
+
+    def _on_crash(self, _page: Any) -> None:
+        """Renderer crashed (commonly OOM). Tell the pane; the browser process
+        may survive, so a reload/navigate can recover."""
+        asyncio.create_task(self.broadcast_json({
+            "type": "error",
+            "message": "The page crashed (likely out of memory). Reconnect or navigate to retry.",
+        }))
+
+    def _on_disconnected(self, _browser: Any) -> None:
+        """Browser process died (OOM-killed / crashed). Retire this session so the
+        next get_or_create() builds a fresh one instead of reusing a dead handle."""
+        self._closed = True
+        self._started = False
+        self._last_frame = None
+        asyncio.create_task(close_session(self.key, self))
+
     # ── screencast → subscribers ─────────────────────────────────────────────
     def _on_frame(self, params: dict) -> None:
         sid = params.get("sessionId")
         if self._cdp is not None and sid is not None:
             asyncio.create_task(self._ack(sid))
         data = params.get("data")
-        if not data or not self._subs:
+        if not data:
             return
         try:
             raw = base64.b64decode(data)
         except Exception:
+            return
+        # Cache the latest frame even when nobody is watching: the screencast only
+        # emits on CHANGE, so a subscriber that joins a static page would otherwise
+        # never receive a frame (the "Browser stream not yet ready" blank pane).
+        self._last_frame = raw
+        if not self._subs:
             return
         for ws in list(self._subs):
             if ws in self._busy:
@@ -179,6 +235,34 @@ class BrowserSession:
         with contextlib.suppress(Exception):
             await ws.send_json({"type": "ready", "width": VIEWPORT["width"], "height": VIEWPORT["height"]})
             await ws.send_json({"type": "nav", "url": self._page.url, "title": await self._page.title()})
+        # Prime the new subscriber with the current page so a static page renders
+        # immediately instead of a blank "stream not ready" pane.
+        await self._prime(ws)
+
+    async def _prime(self, ws: Any) -> None:
+        """Send the current page state to a freshly-joined subscriber.
+
+        Replays the cached frame if there is one; otherwise forces a one-off
+        screenshot (covers a static start page that has not changed since the
+        screencast began).
+        """
+        frame = self._last_frame
+        if frame is None:
+            frame = await self._capture_frame()
+            if frame is not None:
+                self._last_frame = frame
+        if frame:
+            self._busy.add(ws)
+            await self._send_frame(ws, frame)
+
+    async def _capture_frame(self) -> "bytes | None":
+        if self._cdp is None:
+            return None
+        try:
+            res = await self._cdp.send("Page.captureScreenshot", {"format": "jpeg", "quality": 55})
+            return base64.b64decode(res["data"])
+        except Exception:
+            return None
 
     def remove_subscriber(self, ws: Any) -> None:
         self._subs.discard(ws)
@@ -293,26 +377,37 @@ class BrowserSession:
                     break
         except asyncio.CancelledError:
             return
-        await close_session(self.key)
+        await close_session(self.key, self)
 
 
 # ── registry ────────────────────────────────────────────────────────────────
 async def get_or_create(key: str) -> BrowserSession:
-    """Return the live session for `key` (a project cwd), creating it if needed."""
+    """Return the live session for `key` (a project cwd), creating it if needed.
+
+    A session whose browser has died (crash/OOM/disconnect) is treated as absent
+    and rebuilt — otherwise a dead handle would serve a frozen "Chrome Error" pane.
+    """
     async with _REGISTRY_LOCK:
         sess = _SESSIONS.get(key)
-        if sess is None or sess._closed:
+        if sess is None or not sess._is_alive():
             sess = BrowserSession(key)
             _SESSIONS[key] = sess
     await sess.start()
     return sess
 
 
-async def close_session(key: str) -> None:
+async def close_session(key: str, sess: "BrowserSession | None" = None) -> None:
+    """Close and deregister a session. When `sess` is given, only act if it is
+    still the registered session for `key` (identity guard) — prevents a dying
+    session's watchdog from evicting a fresh replacement that reused the key."""
     async with _REGISTRY_LOCK:
-        sess = _SESSIONS.pop(key, None)
-    if sess is not None:
-        await sess.close()
+        cur = _SESSIONS.get(key)
+        if sess is not None and cur is not sess:
+            return
+        _SESSIONS.pop(key, None)
+    target = sess if sess is not None else cur
+    if target is not None:
+        await target.close()
 
 
 async def close_all() -> None:
