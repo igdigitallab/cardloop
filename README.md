@@ -73,6 +73,12 @@ Three things make Cardloop different from the dozen other agent kanbans:
 - **Run-finished notifications** — a browser notification when a run completes, with click-to-jump to the
   project. In-app when the tab is open, **Web Push when the app is fully closed** (messenger-style), with
   smart de-dup so you never get both. Opt-in. See [docs/notifications.md](docs/notifications.md).
+- **Live agent-driven browser pane** — a real browser embedded in the cockpit that the agent drives and
+  you watch live, and **co-drive** (click/scroll/type alongside the agent, on desktop *and* mobile — type a
+  login from your phone). Three pluggable backends: built-in Chromium (default, no stealth), a one-click
+  **free CloakBrowser** stealth tier (anti-detect, MIT), or **external CDP / Cloak Manager** persistent
+  *logged-in* profiles the agent reuses. Read-only by default; a gate decides when it may click/type.
+  Opt-in. See [docs/browser.md](docs/browser.md).
 - **One subscription, no API key** — the engine drives the official `claude` CLI against your OAuth token.
 - **Multi-project cockpit** — explicit projects, each with its own cwd, model, persistent session, and board.
 - **One transport-agnostic engine** — `run_engine()` feeds every channel against the same session and board.
@@ -344,6 +350,7 @@ manual steps → [CONTRIBUTING.md](CONTRIBUTING.md).
 | [CLAUDE.md](CLAUDE.md) | Working rules and gotchas for agents |
 | [docs/API.md](docs/API.md) | HTTP API reference |
 | [docs/notifications.md](docs/notifications.md) | Run-finished notifications (in-app + Web Push) — setup & troubleshooting |
+| [docs/browser.md](docs/browser.md) | Live browser pane — backends (built-in / CloakBrowser / Cloak Manager), co-control, safety gate |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, tests, lint, commit style |
 | `TASKS.md` | Live board (kanban) — backlog and current tasks |
 
