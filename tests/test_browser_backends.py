@@ -26,11 +26,11 @@ def _use_tmp_data(tmp_path: Path):
 def isolated(tmp_path):
     _use_tmp_data(tmp_path)
     # Clear backend-affecting env so a host value can't leak into assertions.
-    for k in ("CLOAK_MANAGER_URL", "CLOAK_CDP_URL"):
+    for k in ("CLOAK_MANAGER_URL", "CLOAK_CDP_URL", "CLOAK_MANAGER_CDP_BASE"):
         os.environ.pop(k, None)
     yield
     os.environ.pop("_CARDLOOP_DATA_DIR", None)
-    for k in ("CLOAK_MANAGER_URL", "CLOAK_CDP_URL"):
+    for k in ("CLOAK_MANAGER_URL", "CLOAK_CDP_URL", "CLOAK_MANAGER_CDP_BASE"):
         os.environ.pop(k, None)
 
 
@@ -198,3 +198,36 @@ def test_manager_base_from_env():
 async def test_list_profiles_empty_when_unconfigured():
     """No Manager URL → no profiles, no network call, no raise."""
     assert await _backends.list_profiles() == []
+
+
+def test_manager_cdp_base_override_and_fallback():
+    """CDP base falls back to the REST base, but CLOAK_MANAGER_CDP_BASE overrides it
+    (so raw CDP can target a directly-reachable host while REST stays behind a CDN)."""
+    _mod.set_config("browser", {"manager_url": "https://cloak.example.com"})
+    assert _backends.manager_cdp_base() == "https://cloak.example.com"  # fallback
+    os.environ["CLOAK_MANAGER_CDP_BASE"] = "http://10.0.0.5:8080/"
+    assert _backends.manager_cdp_base() == "http://10.0.0.5:8080"  # override, slash stripped
+
+
+async def test_profile_cdp_url_absolutizes_relative(monkeypatch):
+    """The Manager returns a relative '/api/profiles/<id>/cdp' — profile_cdp_url must
+    prefix it with the CDP host so Playwright gets an absolute endpoint."""
+    _mod.set_config("browser", {"manager_url": "https://cloak.example.com"})
+    os.environ["CLOAK_MANAGER_CDP_BASE"] = "http://10.0.0.5:8080"
+
+    async def fake_req(method, path):
+        return {"cdp_url": "/api/profiles/abc/cdp"} if path.endswith("/cdp") else {}
+    monkeypatch.setattr(_backends, "_manager_request", fake_req)
+
+    assert await _backends.profile_cdp_url("abc") == "http://10.0.0.5:8080/api/profiles/abc/cdp"
+
+
+async def test_profile_cdp_url_keeps_absolute(monkeypatch):
+    """An already-absolute CDP URL from the Manager is returned untouched."""
+    _mod.set_config("browser", {"manager_url": "https://cloak.example.com"})
+
+    async def fake_req(method, path):
+        return {"cdp_url": "ws://host:9222/devtools/browser/xyz"} if path.endswith("/cdp") else {}
+    monkeypatch.setattr(_backends, "_manager_request", fake_req)
+
+    assert await _backends.profile_cdp_url("abc") == "ws://host:9222/devtools/browser/xyz"

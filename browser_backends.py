@@ -185,9 +185,16 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
     cdp_url = cfg.get("cdp_url") or ""
     profile = cfg.get("profile") or ""
     label = "External CDP"
+    headers: dict[str, str] = {}
     if profile and not cdp_url:
         cdp_url = await profile_cdp_url(profile)
         label = f"Cloak Manager · {profile}"
+        # The Manager's CDP endpoint is auth-gated (Bearer) and WAF-fronted (rejects a
+        # non-browser UA) — connect_over_cdp must carry both, like the REST client.
+        headers["User-Agent"] = _MANAGER_UA
+        tok = manager_token()
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
     if not cdp_url:
         raise BackendError(
             "external-cdp backend selected but no cdp_url or Cloak Manager profile is configured."
@@ -195,7 +202,7 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
     from playwright.async_api import async_playwright
     pw = await async_playwright().start()
     try:
-        browser = await pw.chromium.connect_over_cdp(cdp_url)
+        browser = await pw.chromium.connect_over_cdp(cdp_url, headers=headers or None)
     except Exception as e:
         with contextlib.suppress(Exception):
             await pw.stop()
@@ -264,6 +271,15 @@ def manager_base() -> "str | None":
     return url.rstrip("/") or None
 
 
+def manager_cdp_base() -> "str | None":
+    """Base host for ``connect_over_cdp``. The Manager's REST API can sit behind a
+    CDN/WAF (fine for JSON), but raw CDP websockets need a directly-reachable host —
+    ``CLOAK_MANAGER_CDP_BASE`` overrides it (e.g. an internal LAN/Docker address).
+    Falls back to the REST base when unset."""
+    url = (os.environ.get("CLOAK_MANAGER_CDP_BASE") or "").strip()
+    return url.rstrip("/") or manager_base()
+
+
 def manager_token() -> "str | None":
     """The Manager auth token from the encrypted safe (never from modules.json)."""
     if _secretstore is None:
@@ -328,15 +344,25 @@ async def stop_profile(profile_id: str) -> dict:
 
 
 async def profile_cdp_url(profile_id: str) -> str:
-    """Ensure a profile is launched and return its live CDP URL for connect_over_cdp."""
+    """Ensure a profile is launched and return its absolute CDP URL for connect_over_cdp.
+
+    The Manager returns a *relative* path (``/api/profiles/<id>/cdp``); we prefix it with
+    the CDP host (``manager_cdp_base()``) so Playwright gets an absolute endpoint."""
     with contextlib.suppress(BackendError):
         await launch_profile(profile_id)
     data = await _manager_request("GET", f"/api/profiles/{profile_id}/cdp")
+    url = ""
     if isinstance(data, dict):
         url = data.get("cdp_url") or data.get("url") or data.get("webSocketDebuggerUrl") or ""
-        if url:
-            return str(url)
-    raise BackendError(f"Cloak Manager returned no CDP URL for profile {profile_id!r}.")
+    if not url:
+        raise BackendError(f"Cloak Manager returned no CDP URL for profile {profile_id!r}.")
+    url = str(url)
+    if url.startswith("/"):
+        base = manager_cdp_base()
+        if not base:
+            raise BackendError("Cloak Manager CDP base is not configured (set CLOAK_MANAGER_CDP_BASE or manager_url).")
+        url = base + url
+    return url
 
 
 # ───────────────────────────── availability summary ──────────────────────────
