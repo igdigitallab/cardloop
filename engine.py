@@ -38,6 +38,8 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import HookContext, PostToolUseHookInput, PreCompactHookInput
 from second_opinion import build_antigravity_server
+import modules as _modules                # spec-065: module enable/disable registry
+import browser_tools as _browser_tools    # spec-065: agent browser tools (built per-run)
 from board import (
     board_summary,
     _load_board,
@@ -1433,6 +1435,15 @@ async def run_engine(  # type: ignore[return]
     _eff_effort = "max" if ultracode else (effort if effort is not None else _DEFAULT_EFFORT)
 
     print(f"[session] resume {session_key} sid={resume_session_id or 'NEW'}")
+    # spec-065 Phase C: expose live-browser tools only when the browser module is on.
+    # Built per-run with this run's cwd bound, so the agent drives the SAME browser the
+    # operator watches in the cockpit pane (browser_pane keys sessions by cwd).
+    _mcp_servers = dict(_ANTIGRAVITY_MCP or {})
+    try:
+        if _modules.is_enabled("browser"):
+            _mcp_servers.update(_browser_tools.build_browser_server(cwd))
+    except Exception as _browser_mcp_exc:
+        print(f"[browser] MCP wiring skipped: {_browser_mcp_exc!r}")
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,
@@ -1443,7 +1454,7 @@ async def run_engine(  # type: ignore[return]
         disallowed_tools=DISALLOWED_TOOLS,
         system_prompt=system_prompt,
         env=env or {},
-        mcp_servers=_ANTIGRAVITY_MCP or {},
+        mcp_servers=_mcp_servers,
         agents=effective_agents,
         effort=_eff_effort,  # type: ignore[arg-type]
         hooks={

@@ -118,7 +118,16 @@ export const en = {
   'tab.timeline': '🕒 Activity',
   'tab.settings': '⚙️ Settings',
   'tab.specs': 'Specs',
+  'tab.browser': '🌐 Browser',
   'tab.sections_aria': 'Project sections',
+
+  // ── Browser tab (spec-065 Phase B) ──────────────────────────────────
+  'browser.connecting': 'Connecting to browser stream…',
+  'browser.disconnected': 'Disconnected — reconnecting…',
+  'browser.error': 'Browser error: {msg}',
+  'browser.url_placeholder': 'https://example.com',
+  'browser.go': 'Go',
+  'browser.not_ready': 'Browser stream not yet ready.',
 
   // ── Timeline tab (Spec 008) ───────────────────────────────────────
   'timeline.loading': 'Loading event feed...',

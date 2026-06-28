@@ -14,6 +14,7 @@ import { MemoryTab } from '../tabs/MemoryTab'
 import { TimelineTab } from '../tabs/TimelineTab'
 import { SettingsTab } from '../tabs/SettingsTab'
 import { SpecsTab } from '../tabs/SpecsTab'
+import { BrowserTab } from '../tabs/BrowserTab'
 import { t } from '../i18n'
 import { useModules } from '../hooks/useModules'
 
@@ -23,8 +24,9 @@ interface Tab {
   disabled?: boolean
 }
 
-// secrets tab removed (merged into Settings); overview tab removed (merged into Settings); 8 tabs remain
-const TABS: Tab[] = [
+// secrets tab removed (merged into Settings); overview tab removed (merged into Settings); 8 base tabs.
+// The 'browser' tab is added dynamically inside the component when the browser module is enabled.
+const BASE_TABS: Tab[] = [
   { id: 'claude-md', label: t['tab.claude_md'] },
   { id: 'logs',      label: t['tab.logs'] },
   { id: 'board',     label: t['tab.board'] },
@@ -245,8 +247,14 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   // spec-052 Phase 4a: a card the user chose to "Discuss" on the board → handed to the chat.
   const [discussCard, setDiscussCard] = useState<{ cardId: string; title: string } | null>(null)
   const git = project.health.git
-  // Spec-065: module gate — github badge rendered only when the github module is enabled
+  // Spec-065: module gate — github badge rendered only when the github module is enabled;
+  // browser tab added to the tab list when the browser module is enabled.
   const { isEnabled: isModEnabled } = useModules()
+  const browserEnabled = isModEnabled('browser')
+  // Build the visible tab list: base tabs + browser tab when the module is on
+  const visibleTabs: Tab[] = browserEnabled
+    ? [...BASE_TABS, { id: 'browser' as const, label: t['tab.browser'] }]
+    : BASE_TABS
 
   // Sidebar "⚙ Settings" request → switch to the Settings tab when it targets this project.
   // Keyed on nonce so a repeat request for the already-open project re-fires.
@@ -623,7 +631,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
             >
               💬 Chat
             </button>
-            {TABS.map(tab => (
+            {visibleTabs.map(tab => (
               <button
                 key={tab.id}
                 className={`mobile-inner-tab-btn ${mobileInnerTab === tab.id ? 'active' : ''}`}
@@ -655,6 +663,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                 {mobileInnerTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} /></ErrorBoundary>}
                 {mobileInnerTab === 'specs'     && <ErrorBoundary label="Specs"><SpecsTab projectId={project.id} /></ErrorBoundary>}
+                {mobileInnerTab === 'browser'   && browserEnabled && <ErrorBoundary label="Browser"><BrowserTab projectId={project.id} /></ErrorBoundary>}
               </div>
             )}
           </div>
@@ -780,7 +789,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
           </div>
 
           <nav className="tabs" role="tablist" aria-label={t['tab.sections_aria']}>
-            {TABS.map(tab => (
+            {visibleTabs.map(tab => (
               <button
                 key={tab.id}
                 role="tab"
@@ -805,6 +814,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
           {activeTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} /></ErrorBoundary>}
           {activeTab === 'specs'     && <ErrorBoundary label="Specs"><SpecsTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'browser'   && browserEnabled && <ErrorBoundary label="Browser"><BrowserTab projectId={project.id} /></ErrorBoundary>}
         </div>
       </div>
 

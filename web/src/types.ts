@@ -164,7 +164,7 @@ export interface FileContent {
   error?: string
 }
 
-export type TabId = 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings' | 'specs'
+export type TabId = 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings' | 'specs' | 'browser'
 
 // ─── Epic-lens: Spec list (GET /api/projects/{id}/epic-specs) ─────────────────
 

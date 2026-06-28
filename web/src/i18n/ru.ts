@@ -117,7 +117,16 @@ export const ru = {
   'tab.timeline': '🕒 Активность',
   'tab.settings': '⚙️ Настройки',
   'tab.specs': 'Specs',
+  'tab.browser': '🌐 Браузер',
   'tab.sections_aria': 'Разделы проекта',
+
+  // ── Browser tab (spec-065 Phase B) ──────────────────────────────────
+  'browser.connecting': 'Подключение к потоку браузера…',
+  'browser.disconnected': 'Соединение потеряно — переподключение…',
+  'browser.error': 'Ошибка браузера: {msg}',
+  'browser.url_placeholder': 'https://example.com',
+  'browser.go': 'Перейти',
+  'browser.not_ready': 'Поток браузера ещё не готов.',
 
   // ── Timeline tab (Spec 008) ───────────────────────────────────────
   'timeline.loading': 'Загрузка ленты событий...',

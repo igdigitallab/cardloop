@@ -7,6 +7,7 @@ Does NOT import bot.py directly (re-import would create a second instance).
 """
 
 import asyncio
+import contextlib
 import glob
 import hashlib
 import json
@@ -35,6 +36,9 @@ import schedules as _schedules
 
 # spec-065 Phase A: module / extension registry
 import modules as _modules
+
+# spec-065 Phase B: live browser pane (lazy — playwright imported only on first use)
+import browser_pane as _browser_pane
 
 # Spec-026 Phase 3: built-in encrypted secret store
 import secretstore as _secretstore
@@ -11667,7 +11671,66 @@ async def api_modules_set(req: web.Request) -> web.Response:
         updated = _modules.set_enabled(module_id, enabled_raw)
     except KeyError:
         return web.json_response({"error": "unknown module"}, status=404)
+    # Free the browser when its module is turned off (frees ~0.5-1 GB).
+    if module_id == "browser" and not enabled_raw:
+        _spawn_bg(_browser_pane.close_all())
     return web.json_response({"ok": True, "module": updated})
+
+
+# ─────────────────────────── Browser pane WS — spec-065 Phase B ──────────────
+
+
+async def api_browser_ws(req: web.Request) -> web.WebSocketResponse:
+    """GET /api/browser/ws?project=<id> — live browser screencast over WebSocket.
+
+    Server→client: binary = one JPEG frame (1280x720); text = JSON control
+    ({type:ready|nav|error}). Client→server: JSON input ({t:mouse|wheel|key|navigate}).
+    Heartbeat keeps the connection alive through idle (same lesson as the PTY WS,
+    card 9976b6) — Chromium "thinking"/static pages emit no frames for long stretches.
+    """
+    ws = web.WebSocketResponse(heartbeat=30.0)
+    await ws.prepare(req)
+
+    if not _modules.is_enabled("browser"):
+        await ws.send_json({"type": "error", "message": "Browser module is disabled. Enable it in Settings → Extensions."})
+        await ws.close()
+        return ws
+
+    ctx = req.app["ctx"]
+    pid = req.query.get("project", "")
+    project = _find_project_by_id_any(ctx, pid)
+    if not project:
+        await ws.send_json({"type": "error", "message": "Unknown project."})
+        await ws.close()
+        return ws
+    key = project["cwd"]
+
+    try:
+        session = await _browser_pane.get_or_create(key)
+    except _browser_pane.BrowserUnavailable as e:
+        await ws.send_json({"type": "error", "message": str(e)})
+        await ws.close()
+        return ws
+    except Exception as e:
+        await ws.send_json({"type": "error", "message": f"Browser failed to start: {e}"})
+        await ws.close()
+        return ws
+
+    await session.add_subscriber(ws)
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    await session.handle_input(data)
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                break
+    finally:
+        session.remove_subscriber(ws)
+    return ws
 
 
 # ─────────────────────────── entry point ───────────────────────────
@@ -11911,6 +11974,9 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/modules", api_modules_list)
         app.router.add_post("/api/modules/{id}", api_modules_set)
 
+        # spec-065 Phase B: live browser pane (WebSocket screencast)
+        app.router.add_get("/api/browser/ws", api_browser_ws)
+
         # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
 
@@ -11960,6 +12026,10 @@ async def stop() -> None:
     Does NOT call systemctl / kill / os._exit — cgroup gotcha (GOTCHAS.md).
     """
     global _runner
+
+    # spec-065: close any live browser sessions (frees Chromium ~0.5-1 GB).
+    with contextlib.suppress(Exception):
+        await _browser_pane.close_all()
 
     # 1. Cancel all 5 always-on startup background loops and wait for them to exit.
     if _STARTUP_BG_TASKS:
