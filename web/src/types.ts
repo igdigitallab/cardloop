@@ -217,6 +217,21 @@ export interface ProjectSettings {
   agents_config: AgentsConfig
   /** spec-051: resume policy after a rate-limit. ask (default) / always / never. */
   auto_resume_mode: 'ask' | 'always' | 'never'
+  /** spec-067: per-project autopilot mode. off (default) / propose / auto. */
+  autopilot?: 'off' | 'propose' | 'auto'
+}
+
+// ─── spec-067: Autopilot ──────────────────────────────────────────────────────
+
+export interface AutopilotStatus {
+  global_enabled: boolean
+  paused: boolean
+  daily_cap: number
+  tokens_today: number
+  active_runs: number
+  max_concurrent: number
+  rl_reserve: number
+  per_project: Record<string, 'off' | 'propose' | 'auto'>
 }
 
 export interface GlobalSettingsEffective {

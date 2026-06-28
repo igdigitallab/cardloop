@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { api } from '../api'
-import { GlobalSettings, GlobalSettingsEffective } from '../types'
+import { GlobalSettings, GlobalSettingsEffective, AutopilotStatus } from '../types'
 import { Spinner } from '../components/Spinner'
 import { EditableMarkdown } from '../components/EditableMarkdown'
 import { MODELS } from '../lib/models'
@@ -34,17 +34,41 @@ export function GlobalSettingsTab() {
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
   const [saving, setSaving] = useState(false)
+  const [apStatus, setApStatus] = useState<AutopilotStatus | null>(null)
+  const [apWorking, setApWorking] = useState(false)
   const { permission, enabled, setEnabled, requestPermission } = useNotifications()
   const { modules, isEnabled: isModEnabled, setEnabled: setModEnabled } = useModules()
 
   useEffect(() => {
     let cancelled = false
     setLoading(true); setError(''); setMsg('')
-    api.settings()
-      .then(g => { if (!cancelled) { setGlob(g); setLoading(false) } })
+    Promise.all([api.settings(), api.autopilotStatus().catch(() => null)])
+      .then(([g, ap]) => {
+        if (!cancelled) { setGlob(g); if (ap) setApStatus(ap); setLoading(false) }
+      })
       .catch(e => { if (!cancelled) { setError(errMsg(e)); setLoading(false) } })
     return () => { cancelled = true }
   }, [])
+
+  async function toggleGlobalAutopilot() {
+    if (!apStatus || apWorking) return
+    setApWorking(true)
+    try {
+      const r = await api.setAutopilotGlobal(!apStatus.global_enabled)
+      setApStatus(r)
+    } catch { /* silently fail */ }
+    finally { setApWorking(false) }
+  }
+
+  async function toggleAutopilotPause() {
+    if (!apStatus || apWorking) return
+    setApWorking(true)
+    try {
+      const r = apStatus.paused ? await api.autopilotResume() : await api.autopilotPause()
+      setApStatus(r)
+    } catch { /* silently fail */ }
+    finally { setApWorking(false) }
+  }
 
   async function save() {
     if (!glob) return
@@ -121,6 +145,68 @@ export function GlobalSettingsTab() {
           {msg && <span style={{ fontSize: 12, color: 'var(--text2)' }}>{msg}</span>}
         </div>
       </section>
+
+      {/* ── Autopilot master control (spec-067) ── */}
+      {apStatus !== null && (
+        <section>
+          <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>Autopilot</h3>
+          <p style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--text3)' }}>
+            Global master switch. Per-project modes are configured in each project's Settings tab.
+          </p>
+
+          <div style={{
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius)',
+            padding: '10px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}>
+            {/* Status line */}
+            <div style={{ fontSize: 12, color: 'var(--text2)' }}>
+              {!apStatus.global_enabled
+                ? 'Disabled — per-project settings are inactive.'
+                : apStatus.paused
+                  ? `Enabled · paused · ${apStatus.active_runs} run${apStatus.active_runs === 1 ? '' : 's'} active`
+                  : `Enabled · not paused · ${apStatus.active_runs} run${apStatus.active_runs === 1 ? '' : 's'} active`
+              }
+            </div>
+
+            {/* Controls row */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              {/* Master on/off */}
+              <div className="theme-toggle" aria-label="Global autopilot" style={{ opacity: apWorking ? 0.6 : 1 }}>
+                <button
+                  className={`theme-toggle-btn${!apStatus.global_enabled ? ' active' : ''}`}
+                  onClick={() => { if (!apWorking) void toggleGlobalAutopilot() }}
+                  disabled={apWorking}
+                >
+                  Disabled
+                </button>
+                <button
+                  className={`theme-toggle-btn${apStatus.global_enabled ? ' active' : ''}`}
+                  onClick={() => { if (!apWorking) void toggleGlobalAutopilot() }}
+                  disabled={apWorking}
+                >
+                  Enabled
+                </button>
+              </div>
+
+              {/* Pause / resume — only shown when globally enabled */}
+              {apStatus.global_enabled && (
+                <button
+                  className="btn-secondary"
+                  style={{ fontSize: 12, padding: '4px 10px', opacity: apWorking ? 0.6 : 1 }}
+                  onClick={() => { if (!apWorking) void toggleAutopilotPause() }}
+                  disabled={apWorking}
+                >
+                  {apStatus.paused ? 'Resume' : 'Pause'}
+                </button>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Browser notifications section */}
       <section>

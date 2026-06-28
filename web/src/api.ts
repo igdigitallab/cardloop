@@ -503,6 +503,34 @@ export const api = {
       }
     ),
 
+  // spec-067: Autopilot — per-project mode
+  setAutopilotMode: (id: string, mode: 'off' | 'propose' | 'auto') =>
+    apiFetch<{ mode: 'off' | 'propose' | 'auto' }>(
+      `/api/projects/${id}/autopilot`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      }
+    ),
+
+  // spec-067: Autopilot — global status + controls
+  autopilotStatus: () =>
+    apiFetch<import('./types').AutopilotStatus>('/api/autopilot/status'),
+
+  setAutopilotGlobal: (enabled: boolean) =>
+    apiFetch<import('./types').AutopilotStatus>('/api/autopilot/global', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }),
+
+  autopilotPause: () =>
+    apiFetch<import('./types').AutopilotStatus>('/api/autopilot/pause', { method: 'POST' }),
+
+  autopilotResume: () =>
+    apiFetch<import('./types').AutopilotStatus>('/api/autopilot/resume', { method: 'POST' }),
+
   // Cross-device UI layout (open tabs/active/sidebar/split) — server source of truth
   uiState: () =>
     apiFetch<{ state: Record<string, unknown> }>('/api/ui-state'),

@@ -49,6 +49,9 @@ import secretstore as _secretstore
 # Spec-026 Phase 2: TOTP second factor
 import totp as _totp
 
+# spec-067 Phase 0: autopilot inert foundation (pure helpers + state I/O; no background loop)
+import autopilot as _autopilot
+
 # spec-053 Phase B: Web Push (VAPID + pywebpush). Optional — degrades gracefully if absent.
 try:
     from pywebpush import webpush as _webpush, WebPushException as _WebPushException
@@ -1469,6 +1472,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "group": raw_group if raw_group in valid_groups else None,
             "favorite": pid in fav_set,
             "type": b.get("type"),
+            "autopilot": _autopilot.get_project_mode(b),
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -4061,7 +4065,7 @@ def _git_enabled(project: dict) -> bool:
 
 # ─────────────────────── API: settings (global + per-project) ───────────────────────
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot")
 
 # spec-051: per-project policy for resuming a run interrupted by a rate-limit.
 #   ask    — show an in-chat Yes/No prompt (default; visible, not silent)
@@ -4165,6 +4169,7 @@ def _project_settings_view(project: dict) -> dict:
         "test_cmd": project.get("test_cmd") or "",
         "agents_config": project.get("agents_config") or {},
         "auto_resume_mode": _resume_mode_for(project),
+        "autopilot": _autopilot.get_project_mode(project),
     }
 
 
@@ -4212,6 +4217,15 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
                 return web.json_response({"error": f"auto_resume_mode: must be one of {list(_AUTO_RESUME_MODES)}"}, status=400)
             # "ask" is the default → store as reset (None) to keep topics.json lean
             updates[k] = sv if sv != "ask" else None
+        elif k == "autopilot":
+            sv = str(v).strip().lower()
+            if not _autopilot.valid_mode(sv):
+                return web.json_response(
+                    {"error": f"autopilot: must be one of {list(_autopilot.MODES)}"},
+                    status=400,
+                )
+            # "off" is the default → store as reset (None) to keep topics.json lean
+            updates[k] = sv if sv != _autopilot.DEFAULT_MODE else None
         elif k == "agents_config":
             if not isinstance(v, dict):
                 return web.json_response({"error": "agents_config: expected object"}, status=400)
@@ -4265,6 +4279,111 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
 
     project = _find_project_by_id(ctx, req.match_info["id"]) or project
     return web.json_response({"ok": True, "topics_updated": changed, "settings": _project_settings_view(project)})
+
+
+# ─────────────────────── API: autopilot (spec-067 Phase 0 — inert) ───────────────────────
+#
+# All endpoints are INERT: they read/write the autopilot_state.json and topics.json
+# autopilot-mode field, but NO background loop is started and NO card is ever run
+# automatically.  Phase 1 will add the orchestrator loop on top of these primitives.
+
+
+def _autopilot_status(ctx: dict) -> dict:
+    """Build the GET /api/autopilot/status response body."""
+    data_dir = ctx["DATA"]
+    state = _autopilot.load_state(data_dir)
+    projects = _collect_projects(ctx)
+    per_project = {
+        p["id"]: _autopilot.get_project_mode(p)
+        for p in projects
+        if not p.get("is_free")
+    }
+    return {
+        "global_enabled": bool(state.get("global_enabled")),
+        "paused": bool(state.get("paused")),
+        "daily_cap": _autopilot.DAILY_TOKEN_CAP,
+        "tokens_today": int(state.get("tokens_today", 0)),
+        "active_runs": int(state.get("active_runs", 0)),
+        "max_concurrent": _autopilot.MAX_CONCURRENT,
+        "rl_reserve": _autopilot.RL_RESERVE,
+        "per_project": per_project,
+    }
+
+
+async def api_autopilot_set_project_mode(req: web.Request) -> web.Response:
+    """PUT /api/projects/{id}/autopilot  {mode: "off"|"propose"|"auto"}
+    Validate, persist to topics.json, return {mode: ...}.
+    """
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "expected object"}, status=400)
+    mode = str(body.get("mode", "")).strip().lower()
+    if not _autopilot.valid_mode(mode):
+        return web.json_response(
+            {"error": f"mode must be one of: {list(_autopilot.MODES)}"},
+            status=400,
+        )
+    # Persist to ALL topics entries with this cwd (same pattern as settings POST)
+    cwd = project["cwd"]
+    for b in ctx["topics"].values():
+        if b.get("cwd") == cwd:
+            if mode == _autopilot.DEFAULT_MODE:
+                b.pop("autopilot", None)  # keep topics.json lean
+            else:
+                b["autopilot"] = mode
+    save_fn = ctx.get("save_topics")
+    if callable(save_fn):
+        save_fn()
+    return web.json_response({"mode": mode})
+
+
+async def api_autopilot_status(req: web.Request) -> web.Response:
+    """GET /api/autopilot/status — global autopilot state + per-project modes."""
+    ctx = req.app["ctx"]
+    return web.json_response(_autopilot_status(ctx))
+
+
+async def api_autopilot_global(req: web.Request) -> web.Response:
+    """POST /api/autopilot/global  {enabled: bool} — flip global_enabled flag."""
+    ctx = req.app["ctx"]
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+        return web.json_response({"error": "expected {enabled: bool}"}, status=400)
+    data_dir = ctx["DATA"]
+    state = _autopilot.load_state(data_dir)
+    state["global_enabled"] = body["enabled"]
+    _autopilot.save_state(data_dir, state)
+    return web.json_response(_autopilot_status(ctx))
+
+
+async def api_autopilot_pause(req: web.Request) -> web.Response:
+    """POST /api/autopilot/pause — set paused=True."""
+    ctx = req.app["ctx"]
+    data_dir = ctx["DATA"]
+    state = _autopilot.load_state(data_dir)
+    state["paused"] = True
+    _autopilot.save_state(data_dir, state)
+    return web.json_response(_autopilot_status(ctx))
+
+
+async def api_autopilot_resume(req: web.Request) -> web.Response:
+    """POST /api/autopilot/resume — set paused=False."""
+    ctx = req.app["ctx"]
+    data_dir = ctx["DATA"]
+    state = _autopilot.load_state(data_dir)
+    state["paused"] = False
+    _autopilot.save_state(data_dir, state)
+    return web.json_response(_autopilot_status(ctx))
 
 
 async def _notify_new_incidents(ctx: dict, project: dict, n_added: int) -> None:
@@ -12176,6 +12295,13 @@ async def start(ctx: dict) -> None:
 
         # spec-065 Phase B: live browser pane (WebSocket screencast)
         app.router.add_get("/api/browser/ws", api_browser_ws)
+
+        # spec-067 Phase 0: autopilot (inert — state/mode only; no background loop)
+        app.router.add_put("/api/projects/{id}/autopilot", api_autopilot_set_project_mode)
+        app.router.add_get("/api/autopilot/status", api_autopilot_status)
+        app.router.add_post("/api/autopilot/global", api_autopilot_global)
+        app.router.add_post("/api/autopilot/pause", api_autopilot_pause)
+        app.router.add_post("/api/autopilot/resume", api_autopilot_resume)
 
         # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)

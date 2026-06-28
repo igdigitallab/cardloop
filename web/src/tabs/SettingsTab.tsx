@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { api } from '../api'
-import { Project, ProjectSettings, GlobalSettings, GlobalSettingsEffective, AgentsConfig, ProjectStructureHealth } from '../types'
+import { Project, ProjectSettings, GlobalSettings, GlobalSettingsEffective, AgentsConfig, ProjectStructureHealth, AutopilotStatus } from '../types'
 import { Spinner } from '../components/Spinner'
 import { SecretsTab } from './SecretsTab'
 import { MODELS } from '../lib/models'
@@ -73,15 +73,41 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models 
   const [archiving, setArchiving] = useState(false)
   const [archiveMsg, setArchiveMsg] = useState('')
   const [confirmArchiveLocal, setConfirmArchiveLocal] = useState(false)
+  const [autopilotStatus, setAutopilotStatus] = useState<AutopilotStatus | null>(null)
+  const [autopilotMode, setAutopilotMode] = useState<'off' | 'propose' | 'auto'>('off')
+  const [autopilotSaving, setAutopilotSaving] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     setLoading(true); setError(''); setProj(null); setProjMsg(''); setGlobMsg('')
-    Promise.all([api.projectSettings(projectId), api.settings()])
-      .then(([p, g]) => { if (!cancelled) { setProj(p); setGlob(g); setLoading(false) } })
+    Promise.all([api.projectSettings(projectId), api.settings(), api.autopilotStatus().catch(() => null)])
+      .then(([p, g, ap]) => {
+        if (!cancelled) {
+          setProj(p); setGlob(g); setLoading(false)
+          if (ap) {
+            setAutopilotStatus(ap)
+            setAutopilotMode(ap.per_project[projectId] ?? p.autopilot ?? 'off')
+          } else {
+            setAutopilotMode(p.autopilot ?? 'off')
+          }
+        }
+      })
       .catch(e => { if (!cancelled) { setError(errMsg(e)); setLoading(false) } })
     return () => { cancelled = true }
   }, [projectId])
+
+  async function saveAutopilotMode(mode: 'off' | 'propose' | 'auto') {
+    const prev = autopilotMode
+    setAutopilotMode(mode)
+    setAutopilotSaving(true)
+    try {
+      await api.setAutopilotMode(projectId, mode)
+    } catch {
+      setAutopilotMode(prev)
+    } finally {
+      setAutopilotSaving(false)
+    }
+  }
 
   async function saveProj() {
     if (!proj) return
@@ -285,6 +311,31 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models 
             onChange={ev => setProj({ ...proj, agents_config: { ...proj.agents_config, conductor_prompt: ev.target.checked } })}
             aria-label="Conductor prompt"
           />
+        </Row>
+
+        <Row
+          title="Autopilot"
+          hint="Off = never runs. Propose = asks before each action. Auto = safe fixes land in a PR for you to merge."
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+            <div className="theme-toggle" aria-label="Autopilot mode" style={{ opacity: autopilotSaving ? 0.6 : 1 }}>
+              {(['off', 'propose', 'auto'] as const).map(m => (
+                <button
+                  key={m}
+                  className={`theme-toggle-btn${autopilotMode === m ? ' active' : ''}`}
+                  onClick={() => { if (!autopilotSaving) void saveAutopilotMode(m) }}
+                  disabled={autopilotSaving}
+                >
+                  {m.charAt(0).toUpperCase() + m.slice(1)}
+                </button>
+              ))}
+            </div>
+            {autopilotStatus && !autopilotStatus.global_enabled && (
+              <span style={{ fontSize: 11, color: 'var(--text3)', textAlign: 'right', maxWidth: 220 }}>
+                Takes effect when Autopilot is enabled globally.
+              </span>
+            )}
+          </div>
         </Row>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
