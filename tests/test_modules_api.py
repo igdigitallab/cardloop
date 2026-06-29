@@ -85,7 +85,7 @@ async def test_get_modules_200(aiohttp_client, app, app_ctx):
     assert "modules" in body
     modules = body["modules"]
     assert isinstance(modules, list)
-    assert len(modules) == 2
+    assert len(modules) == 3
 
 
 async def test_get_modules_shape(aiohttp_client, app, app_ctx):
@@ -107,6 +107,7 @@ async def test_get_modules_defaults(aiohttp_client, app, app_ctx):
     by_id = {m["id"]: m for m in body["modules"]}
     assert by_id["github"]["enabled"] is True
     assert by_id["browser"]["enabled"] is False
+    assert by_id["autopilot"]["enabled"] is False
 
 
 async def test_get_modules_401_without_auth(aiohttp_client, app):

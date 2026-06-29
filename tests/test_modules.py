@@ -52,11 +52,17 @@ import modules as _mod  # noqa: E402 (after sys.path insert)
 # list_modules()
 # ---------------------------------------------------------------------------
 
-def test_list_modules_returns_two_builtins():
+def test_list_modules_returns_builtins():
     result = _mod.list_modules()
-    assert len(result) == 2
+    assert len(result) == 3
     ids = {m["id"] for m in result}
-    assert ids == {"github", "browser"}
+    assert ids == {"github", "browser", "autopilot"}
+
+
+def test_autopilot_default_disabled():
+    """Autopilot is opt-in: off by default (spec-068 kill-switch)."""
+    mods = {m["id"]: m for m in _mod.list_modules()}
+    assert mods["autopilot"]["enabled"] is False
 
 
 def test_list_modules_shape_no_default_enabled():

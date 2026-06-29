@@ -55,6 +55,17 @@ _BUILTIN_MODULES: list[dict[str, Any]] = [
             "locale": "",
         },
     },
+    {
+        "id": "autopilot",
+        "name": "Autopilot",
+        "description": (
+            "Per-project self-driving loop (spec-067): senses signals, plans via the "
+            "Director, and gates work behind your approval. Opt-in; off by default."
+        ),
+        "version": "0.1.0",
+        "provides": ["loop", "panel"],
+        "default_enabled": False,
+    },
 ]
 
 # Lookup by id for O(1) access.

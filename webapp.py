@@ -12717,17 +12717,18 @@ async def start(ctx: dict) -> None:
         # spec-065 Phase B: live browser pane (WebSocket screencast)
         app.router.add_get("/api/browser/ws", api_browser_ws)
 
-        # spec-067 Phase 0: autopilot (state/mode + Phase 2 shadow loop)
-        app.router.add_put("/api/projects/{id}/autopilot", api_autopilot_set_project_mode)
-        app.router.add_get("/api/autopilot/status", api_autopilot_status)
-        app.router.add_post("/api/autopilot/global", api_autopilot_global)
-        app.router.add_post("/api/autopilot/pause", api_autopilot_pause)
-        app.router.add_post("/api/autopilot/resume", api_autopilot_resume)
-        # Phase 2: shadow-mode manual trigger + decision log
-        app.router.add_post("/api/autopilot/tick", api_autopilot_tick)
-        app.router.add_get("/api/autopilot/decisions", api_autopilot_decisions)
-        # Phase 3: director plan-only run
-        app.router.add_post("/api/autopilot/director/{id}", api_autopilot_director)
+        # spec-067 autopilot — spec-068: the whole feature is gated by the `autopilot`
+        # module kill-switch. Disabled (default) → routes never register (404), loop never
+        # spawns. This is the soft-disable seam before the full features/autopilot/ extraction.
+        if _modules.is_enabled("autopilot"):
+            app.router.add_put("/api/projects/{id}/autopilot", api_autopilot_set_project_mode)
+            app.router.add_get("/api/autopilot/status", api_autopilot_status)
+            app.router.add_post("/api/autopilot/global", api_autopilot_global)
+            app.router.add_post("/api/autopilot/pause", api_autopilot_pause)
+            app.router.add_post("/api/autopilot/resume", api_autopilot_resume)
+            app.router.add_post("/api/autopilot/tick", api_autopilot_tick)
+            app.router.add_get("/api/autopilot/decisions", api_autopilot_decisions)
+            app.router.add_post("/api/autopilot/director/{id}", api_autopilot_director)
 
         # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
@@ -12764,9 +12765,10 @@ async def start(ctx: dict) -> None:
         # Spec-025: Trash purge janitor
         _STARTUP_BG_TASKS.append(_spawn_bg(_janitor_trash_purge_loop(ctx)))
         print(f"[webapp] janitor trash purge loop started (interval 3600s, retention {TRASH_RETENTION_DAYS}d)")
-        # spec-067 Phase 2: autopilot shadow loop (observe-only; never executes)
-        _STARTUP_BG_TASKS.append(_spawn_bg(_autopilot_loop(ctx)))
-        print(f"[webapp] autopilot shadow loop started (interval {os.environ.get('AUTOPILOT_TICK_SEC', '300')}s)")
+        # spec-067 autopilot shadow loop — spec-068: gated by the `autopilot` module kill-switch.
+        if _modules.is_enabled("autopilot"):
+            _STARTUP_BG_TASKS.append(_spawn_bg(_autopilot_loop(ctx)))
+            print(f"[webapp] autopilot shadow loop started (interval {os.environ.get('AUTOPILOT_TICK_SEC', '300')}s)")
     except Exception as e:
         print(f"[webapp] ERROR during startup: {e}")
 
