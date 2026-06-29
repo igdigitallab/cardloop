@@ -139,6 +139,28 @@ def test_resolve_per_project_profile_overrides_default():
     assert _backends.resolve("/proj/b")["profile"] == "global-prof"
 
 
+def test_resolve_per_project_profile_overrides_global_local_backend():
+    """A mapped profile makes that ONE project browse as a Manager profile over
+    external-cdp even though the global backend is a local one (cloakbrowser);
+    unmapped projects keep the global backend."""
+    _mod.set_config("browser", {
+        "backend": "cloakbrowser",
+        "per_project_profile": {"/proj/grants": "grants-id"},
+    })
+    a = _backends.resolve("/proj/grants")
+    assert a["backend"] == "external-cdp"
+    assert a["profile"] == "grants-id"
+    assert a["cdp_url"] == ""   # empty so _acquire_external resolves via the Manager
+    assert _backends.resolve("/proj/other")["backend"] == "cloakbrowser"
+
+
+def test_resolve_external_cdp_without_target_falls_back_to_builtin():
+    """external-cdp selected globally but no static url and no profile for this cwd →
+    degrade to builtin instead of raising, so the pane still works."""
+    _mod.set_config("browser", {"backend": "external-cdp"})
+    assert _backends.resolve("/x")["backend"] == "builtin"
+
+
 def test_resolve_cloak_knobs_passthrough():
     _mod.set_config("browser", {"backend": "cloakbrowser", "proxy": "http://p:8080", "humanize": True})
     r = _backends.resolve("/x")

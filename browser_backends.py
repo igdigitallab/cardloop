@@ -88,22 +88,45 @@ def _browser_config() -> dict:
 def resolve(cwd: str) -> dict:
     """Resolve the effective backend spec for a project ``cwd``.
 
-    Reads ``modules.json`` → ``browser.config`` and normalises it. An unknown or
-    missing backend falls back to ``builtin`` so the pane always works.
+    Precedence:
+
+    1. **Per-project Manager profile** — if ``per_project_profile[cwd]`` is set, the
+       project browses *as* that profile over ``external-cdp``, regardless of the
+       global backend. This is how one project (e.g. a grants workspace) uses a
+       logged-in Cloak Manager profile while every other project stays on the default
+       local browser — the operator watches the SAME profile the Manager shows.
+    2. **Global backend** — ``builtin`` / ``cloakbrowser`` / ``external-cdp`` from
+       ``modules.json`` → ``browser.config``; an unknown/missing value → ``builtin``.
+
+    Graceful fallback: ``external-cdp`` with neither a static ``cdp_url`` nor a profile
+    to connect to for *this* project degrades to ``builtin`` so the pane keeps working
+    instead of raising.
     """
     cfg = _browser_config()
     backend = cfg.get("backend") or "builtin"
     if backend not in VALID_BACKENDS:
         backend = "builtin"
-    out: dict[str, Any] = {
-        "backend": backend,
-        "agent_actions": cfg.get("agent_actions") if cfg.get("agent_actions") in VALID_AGENT_ACTIONS else "read",
-    }
+    agent = cfg.get("agent_actions") if cfg.get("agent_actions") in VALID_AGENT_ACTIONS else "read"
+
+    # (1) Per-project profile override — wins over the global backend so a single
+    # project can browse as a logged-in Manager profile while others don't. cdp_url
+    # MUST stay empty here so _acquire_external resolves the profile via the Manager
+    # (a static cdp_url would otherwise take precedence over the profile).
+    per = cfg.get("per_project_profile") or {}
+    mapped = per.get(cwd) if isinstance(per, dict) else None
+    if mapped:
+        return {"backend": "external-cdp", "agent_actions": agent, "cdp_url": "", "profile": str(mapped)}
+
+    out: dict[str, Any] = {"backend": backend, "agent_actions": agent}
     if backend == "external-cdp":
-        out["cdp_url"] = cfg.get("cdp_url") or os.environ.get("CLOAK_CDP_URL") or ""
-        per = cfg.get("per_project_profile") or {}
-        out["profile"] = (per.get(cwd) if isinstance(per, dict) else None) or cfg.get("default_profile") or ""
-    if backend == "cloakbrowser":
+        cdp_url = cfg.get("cdp_url") or os.environ.get("CLOAK_CDP_URL") or ""
+        profile = cfg.get("default_profile") or ""
+        if not cdp_url and not profile:
+            out["backend"] = "builtin"   # nothing to connect to → don't break the pane
+            return out
+        out["cdp_url"] = cdp_url
+        out["profile"] = profile
+    elif backend == "cloakbrowser":
         for k in _CLOAK_KNOBS:
             if cfg.get(k) not in (None, ""):
                 out[k] = cfg[k]
