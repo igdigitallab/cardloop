@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, type ReactNode } from 'react'
 import { api } from '../api'
-import { GlobalSettings, GlobalSettingsEffective, AutopilotStatus, AutopilotDecision } from '../types'
+import { GlobalSettings, GlobalSettingsEffective, AutopilotStatus, AutopilotDecision, DirectorResult } from '../types'
 import { Spinner } from '../components/Spinner'
 import { EditableMarkdown } from '../components/EditableMarkdown'
 import { MODELS } from '../lib/models'
@@ -62,6 +62,8 @@ export function GlobalSettingsTab() {
   const [decisions, setDecisions] = useState<AutopilotDecision[]>([])
   const [tickWorking, setTickWorking] = useState(false)
   const [tickNote, setTickNote] = useState('')
+  const [directorResults, setDirectorResults] = useState<Record<string, DirectorResult>>({})
+  const [directorWorking, setDirectorWorking] = useState<Record<string, boolean>>({})
   const { permission, enabled, setEnabled, requestPermission } = useNotifications()
   const { modules, isEnabled: isModEnabled, setEnabled: setModEnabled } = useModules()
 
@@ -114,6 +116,22 @@ export function GlobalSettingsTab() {
       }
     } catch { loadDecisions() }
     finally { setTickWorking(false) }
+  }
+
+  async function runDirector(projectId: string) {
+    if (directorWorking[projectId]) return
+    setDirectorWorking(prev => ({ ...prev, [projectId]: true }))
+    try {
+      const result = await api.autopilotRunDirector(projectId)
+      setDirectorResults(prev => ({ ...prev, [projectId]: result }))
+    } catch {
+      setDirectorResults(prev => ({
+        ...prev,
+        [projectId]: { ok: false, reason: 'Request failed', assessment: '', priority: 'P4', focus: '', proposed_cards: [], question_for_operator: null, cards_created: 0, notebook_note: '' },
+      }))
+    } finally {
+      setDirectorWorking(prev => ({ ...prev, [projectId]: false }))
+    }
   }
 
   async function save() {
@@ -347,6 +365,144 @@ export function GlobalSettingsTab() {
           </div>
         </section>
       )}
+
+      {/* ── Director sub-panel (spec-067) ── */}
+      {apStatus !== null && (() => {
+        const enabledProjects = Object.entries(apStatus.per_project)
+          .filter(([, mode]) => mode === 'propose' || mode === 'auto')
+        return (
+          <section>
+            <h3 style={{ margin: '0 0 2px', fontSize: 15 }}>Director</h3>
+            <p style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--text3)' }}>
+              The director reads the project and proposes a plan. It writes planning cards and asks you one question — it does not change code.
+            </p>
+
+            <div style={{
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius)',
+              padding: '10px 14px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+            }}>
+              {enabledProjects.length === 0 ? (
+                <p style={{ fontSize: 12, color: 'var(--text3)', margin: 0 }}>
+                  No projects have Autopilot enabled. Set a project to Propose or Auto first.
+                </p>
+              ) : (
+                enabledProjects.map(([projectId]) => {
+                  const result = directorResults[projectId]
+                  const working = !!directorWorking[projectId]
+                  const ps = result ? (PRIORITY_STYLE[result.priority] ?? PRIORITY_STYLE.P4) : null
+                  return (
+                    <div key={projectId} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {/* Project row */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {projectId}
+                        </span>
+                        <button
+                          className="btn-secondary"
+                          style={{ fontSize: 12, padding: '4px 12px', flexShrink: 0, opacity: working ? 0.6 : 1 }}
+                          onClick={() => { void runDirector(projectId) }}
+                          disabled={working}
+                        >
+                          {working ? 'Thinking…' : 'Run director'}
+                        </button>
+                      </div>
+
+                      {/* Result card */}
+                      {result && (
+                        <div style={{
+                          border: '1px solid var(--border)',
+                          borderRadius: 'var(--radius)',
+                          padding: '10px 12px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                          background: 'var(--surface1, var(--surface))',
+                        }}>
+                          {!result.ok ? (
+                            <p style={{ fontSize: 12, color: 'var(--text3)', margin: 0 }}>
+                              {result.reason ?? 'Director returned an error.'}
+                            </p>
+                          ) : (
+                            <>
+                              {/* Priority pill + focus */}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                {ps && (
+                                  <span style={{
+                                    fontSize: 10,
+                                    fontWeight: 600,
+                                    padding: '1px 5px',
+                                    borderRadius: 4,
+                                    background: ps.bg,
+                                    color: ps.color,
+                                    flexShrink: 0,
+                                  }}>
+                                    {result.priority}
+                                  </span>
+                                )}
+                                {result.focus && (
+                                  <span style={{ fontSize: 12, color: 'var(--text2)', fontStyle: 'italic', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {result.focus}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Assessment */}
+                              {result.assessment && (
+                                <div>
+                                  <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Assessment</span>
+                                  <p style={{ fontSize: 12, color: 'var(--text2)', margin: '2px 0 0', lineHeight: 1.5 }}>{result.assessment}</p>
+                                </div>
+                              )}
+
+                              {/* Proposed cards */}
+                              {result.proposed_cards.length > 0 && (
+                                <div>
+                                  <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Proposed cards</span>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
+                                    {result.proposed_cards.map((card, idx) => (
+                                      <div key={idx} style={{ fontSize: 12, lineHeight: 1.5 }}>
+                                        <span style={{ fontWeight: 600, color: 'var(--text1, var(--text))' }}>{card.title}</span>
+                                        {card.why && (
+                                          <span style={{ color: 'var(--text3)', marginLeft: 6 }}>{card.why}</span>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <p style={{ fontSize: 12, color: 'var(--text3)', margin: '6px 0 0' }}>
+                                    {result.cards_created} card{result.cards_created === 1 ? '' : 's'} added to the backlog.
+                                  </p>
+                                </div>
+                              )}
+
+                              {/* Question for operator */}
+                              {result.question_for_operator && (
+                                <div style={{
+                                  border: '1px solid var(--border)',
+                                  borderRadius: 'var(--radius)',
+                                  padding: '8px 12px',
+                                  fontSize: 13,
+                                  color: 'var(--text2)',
+                                  lineHeight: 1.5,
+                                }}>
+                                  {'❓ '}{result.question_for_operator}
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </section>
+        )
+      })()}
 
       {/* Browser notifications section */}
       <section>

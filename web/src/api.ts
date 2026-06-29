@@ -542,6 +542,21 @@ export const api = {
       .then(r => r.ok ? r.json() : { ran: false, active: false, decisions: [] })
       .then((d: { ran: boolean; active: boolean; decisions: import('./types').AutopilotDecision[] }) => d),
 
+  // spec-067: Director — reads project state and proposes a plan (planning cards only, no code changes)
+  autopilotRunDirector: async (projectId: string): Promise<import('./types').DirectorResult> => {
+    try {
+      return await apiFetch<import('./types').DirectorResult>(
+        `/api/autopilot/director/${encodeURIComponent(projectId)}`,
+        { method: 'POST' }
+      )
+    } catch (e: unknown) {
+      if (e instanceof Error && (e as Error & { status?: number }).status === 404) {
+        return { ok: false, reason: 'Endpoint not available yet', assessment: '', priority: 'P4', focus: '', proposed_cards: [], question_for_operator: null, cards_created: 0, notebook_note: '' }
+      }
+      throw e
+    }
+  },
+
   // Cross-device UI layout (open tabs/active/sidebar/split) — server source of truth
   uiState: () =>
     apiFetch<{ state: Record<string, unknown> }>('/api/ui-state'),

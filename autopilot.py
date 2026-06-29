@@ -439,3 +439,122 @@ def detect_loop(trajectory: list[dict], project_id: str,
         return "retry_saturation"
 
     return None
+
+
+# ─────────────────────────── Director helpers (Phase 3) ───────────────────────────
+#
+# These are PURE or FILE-IO-ONLY helpers for the Autopilot DIRECTOR v1.
+# The director is a plan-only reasoning agent: it reads project state, produces a
+# structured plan (proposed cards + a notebook note + a question for the operator),
+# and never edits code, runs tests, or starts worker agents.
+
+DIRECTOR_PROMPT = '''You are the autonomous DIRECTOR of the software project "{project_name}". Your job is to REPLACE the human operator\'s day-to-day shepherding of this project: decide what it should do next, plan it, and keep it moving — so the operator only approves a direction with a yes/no.
+
+THIS IS PLAN-ONLY MODE. You do NOT edit code, run tests, or run worker agents. You read the situation and produce a plan plus ONE question for the operator. A separate, approved phase executes the work.
+
+You are given the project\'s current board, the latest automated test signal, and YOUR OWN NOTEBOOK from previous wakes (your memory — use it for continuity).
+
+Choose the single most valuable next focus, by priority:
+  P1 — fix a real failing test / bug (ONLY if the test signal shows a genuine failure)
+  P3 — advance the existing backlog (the most valuable open card)
+  P4 — propose concrete improvements (ONLY grounded in real signals: the code, tests, TODOs, the notebook — never vague "make it nicer")
+  P5 — nothing actionable right now
+
+Then produce: a 1-3 sentence assessment; up to 3 concrete proposed cards (each a small, verifiable unit of work, in dependency order — these are the tasks YOU issue); ONE short yes/no question that would unblock you (or null if none); and a brief note to your future self. Be concise and high-signal — a senior director, not a generator of busywork. Never propose a card that duplicates an existing open card.'''
+
+DIRECTOR_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "assessment": {"type": "string"},
+        "priority": {"type": "string", "enum": ["P1", "P3", "P4", "P5"]},
+        "focus": {"type": "string"},
+        "proposed_cards": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "why": {"type": "string"},
+                },
+                "required": ["title", "why"],
+            },
+        },
+        "question_for_operator": {"type": ["string", "null"]},
+        "notebook_note": {"type": "string"},
+    },
+    "required": [
+        "assessment", "priority", "focus", "proposed_cards",
+        "question_for_operator", "notebook_note",
+    ],
+}
+
+
+# The director runs PLAN-ONLY. These tools are hard-blocked at the engine level
+# (not merely discouraged by the prompt) so a director turn physically cannot edit
+# code, write files, or run shell commands. It keeps read tools + structured output.
+DIRECTOR_DISALLOWED_TOOLS: list = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]
+
+
+def director_model() -> str:
+    """Return the model to use for director runs.
+
+    Reads AUTOPILOT_DIRECTOR_MODEL from the environment; defaults to "sonnet".
+    Never hardcodes a specific model name.
+    """
+    return os.environ.get("AUTOPILOT_DIRECTOR_MODEL", "sonnet")
+
+
+def read_notebook(data_dir: "str | Path", project_id: str) -> str:
+    """Read the director notebook for *project_id*.
+
+    Returns the notebook content as a string, or "" if the file does not exist.
+    The notebook lives at <data_dir>/autopilot/<project_id>-notebook.md.
+    """
+    p = Path(data_dir) / "autopilot" / f"{project_id}-notebook.md"
+    try:
+        return p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except Exception:
+        return ""
+
+
+def append_notebook(data_dir: "str | Path", project_id: str, note: str, ts: float) -> None:
+    """Append a dated note to the director notebook for *project_id*.
+
+    Creates the autopilot directory and the notebook file if they do not exist.
+    Each note is appended as:
+        ## <ISO-8601 timestamp>
+        <note text>
+
+    Ignores write errors (non-critical observer primitive).
+    """
+    from datetime import datetime, timezone as _tz
+    iso = datetime.fromtimestamp(ts, tz=_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    nb_dir = Path(data_dir) / "autopilot"
+    try:
+        nb_dir.mkdir(parents=True, exist_ok=True)
+        p = nb_dir / f"{project_id}-notebook.md"
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n## {iso}\n{note}\n")
+    except Exception:
+        pass
+
+
+def build_director_input(
+    project_name: str,
+    board_summary: str,
+    test_summary: str,
+    notebook: str,
+) -> str:
+    """Format the user-turn text the director reasoning agent reads.
+
+    Pure function — no I/O.  Returns a Markdown digest with three sections:
+    "## Board", "## Test signal", and "## Your notebook".
+    """
+    nb_section = notebook.strip() if notebook.strip() else "(no notebook entries yet)"
+    return (
+        f"## Board\n{board_summary}\n\n"
+        f"## Test signal\n{test_summary}\n\n"
+        f"## Your notebook\n{nb_section}"
+    )

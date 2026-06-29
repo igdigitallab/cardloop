@@ -648,6 +648,19 @@ export interface Module {
   config?: Record<string, unknown>
 }
 
+// ─── spec-067: Director ───────────────────────────────────────────────────────
+export interface DirectorResult {
+  ok: boolean
+  reason?: string
+  assessment: string
+  priority: 'P1' | 'P3' | 'P4' | 'P5'
+  focus: string
+  proposed_cards: { title: string; why: string }[]
+  question_for_operator: string | null
+  cards_created: number
+  notebook_note: string
+}
+
 // ─── Spec-066: pluggable browser backends ─────────────────────────────────────
 export interface BrowserConfig {
   backend: 'builtin' | 'cloakbrowser' | 'external-cdp'

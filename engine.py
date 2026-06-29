@@ -1367,6 +1367,7 @@ async def run_engine(  # type: ignore[return]
     effort: "str | None" = None,
     ultracode: bool = False,
     entrypoint: str = "chat",
+    disallowed_tools_extra: "list | None" = None,
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
@@ -1504,7 +1505,7 @@ async def run_engine(  # type: ignore[return]
         cwd=cwd,
         setting_sources=["user", "project", "local"],
         resume=resume_session_id,
-        disallowed_tools=DISALLOWED_TOOLS,
+        disallowed_tools=list(DISALLOWED_TOOLS) + list(disallowed_tools_extra or []),
         system_prompt=system_prompt,
         env=env or {},
         mcp_servers=_mcp_servers,
