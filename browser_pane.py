@@ -29,6 +29,13 @@ import browser_backends as _backends
 # Frame / viewport geometry — the frontend maps pointer coordinates into this
 # exact space, so it MUST match the client contract (BrowserTab.tsx).
 VIEWPORT = {"width": 1280, "height": 720}
+# The page RENDERS at VIEWPORT, but the screencast is downscaled to STREAM before JPEG
+# encoding. Per-frame bytes on the operator's connection (cockpit WS → proxy → device)
+# are the dominant lag source — worst on mobile and remote (Cloak Manager) profiles.
+# 960×540 q45 is ~3× lighter than native 1280×720 q55 while staying readable for forms.
+# STREAM is 16:9 like VIEWPORT, so the displayed frame maps 1:1 to pointer coordinates —
+# the downscale never affects clicks (input is dispatched in VIEWPORT space, not pixels).
+STREAM = {"width": 960, "height": 540, "quality": 45}
 _IDLE_GRACE = 120.0          # close the browser this long after the last activity with no subscribers
 _WATCH_INTERVAL = 15.0       # idle-watchdog tick
 
@@ -110,8 +117,8 @@ class BrowserSession:
                 if self._owns_browser:
                     await self._page.goto(_START_URL)
                 await self._cdp.send("Page.startScreencast", {
-                    "format": "jpeg", "quality": 55,
-                    "maxWidth": VIEWPORT["width"], "maxHeight": VIEWPORT["height"],
+                    "format": "jpeg", "quality": STREAM["quality"],
+                    "maxWidth": STREAM["width"], "maxHeight": STREAM["height"],
                     "everyNthFrame": 1,
                 })
             except Exception as e:
@@ -272,7 +279,7 @@ class BrowserSession:
         if self._cdp is None:
             return None
         try:
-            res = await self._cdp.send("Page.captureScreenshot", {"format": "jpeg", "quality": 55})
+            res = await self._cdp.send("Page.captureScreenshot", {"format": "jpeg", "quality": STREAM["quality"]})
             return base64.b64decode(res["data"])
         except Exception:
             return None
