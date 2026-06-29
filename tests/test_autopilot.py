@@ -31,9 +31,10 @@ import pytest
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-import autopilot
+from features.autopilot import logic as autopilot
 import webapp as _webapp
 from webapp import _derive_token
+from features.autopilot import routes as _ap_routes
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -559,12 +560,12 @@ def ap_app(ap_ctx):
     app = web.Application(middlewares=[_webapp.auth_middleware])
     app["ctx"] = ap_ctx
 
-    # Autopilot endpoints
-    app.router.add_put("/api/projects/{id}/autopilot", _webapp.api_autopilot_set_project_mode)
-    app.router.add_get("/api/autopilot/status", _webapp.api_autopilot_status)
-    app.router.add_post("/api/autopilot/global", _webapp.api_autopilot_global)
-    app.router.add_post("/api/autopilot/pause", _webapp.api_autopilot_pause)
-    app.router.add_post("/api/autopilot/resume", _webapp.api_autopilot_resume)
+    # Autopilot endpoints (now in features.autopilot.routes)
+    app.router.add_put("/api/projects/{id}/autopilot", _ap_routes.api_autopilot_set_project_mode)
+    app.router.add_get("/api/autopilot/status", _ap_routes.api_autopilot_status)
+    app.router.add_post("/api/autopilot/global", _ap_routes.api_autopilot_global)
+    app.router.add_post("/api/autopilot/pause", _ap_routes.api_autopilot_pause)
+    app.router.add_post("/api/autopilot/resume", _ap_routes.api_autopilot_resume)
     # Settings (to verify autopilot field appears)
     app.router.add_get("/api/projects/{id}/settings", _webapp.api_project_settings_get)
     app.router.add_post("/api/projects/{id}/settings", _webapp.api_project_settings_post)
@@ -700,7 +701,7 @@ async def test_autopilot_global_disable(aiohttp_client, ap_app, ap_ctx):
 
 async def client_put_global(app, ctx, enabled: bool):
     """Helper: set global_enabled without pytest aiohttp_client fixture."""
-    import autopilot as _ap
+    from features.autopilot import logic as _ap
     state = _ap.load_state(ctx["DATA"])
     state["global_enabled"] = enabled
     _ap.save_state(ctx["DATA"], state)

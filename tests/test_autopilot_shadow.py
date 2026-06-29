@@ -30,9 +30,11 @@ import pytest
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-import autopilot
+from features.autopilot import logic as autopilot
 import webapp as _webapp
 from webapp import _derive_token
+from features.autopilot import loop as _ap_loop
+from features.autopilot import routes as _ap_routes
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -248,7 +250,7 @@ async def test_tick_once_global_disabled_returns_empty(tick_tmp):
     ctx = _make_tick_ctx(data_dir, proj_dir, enabled=False)
     _set_state(data_dir, enabled=False)
 
-    result = await _webapp._autopilot_tick_once(ctx)
+    result = await _ap_loop._autopilot_tick_once(ctx)
     assert result == []
 
 
@@ -258,7 +260,7 @@ async def test_tick_once_global_disabled_appends_nothing(tick_tmp):
     ctx = _make_tick_ctx(data_dir, proj_dir, enabled=False)
     _set_state(data_dir, enabled=False)
 
-    await _webapp._autopilot_tick_once(ctx)
+    await _ap_loop._autopilot_tick_once(ctx)
     records = autopilot.read_trajectory(data_dir)
     assert records == []
 
@@ -269,7 +271,7 @@ async def test_tick_once_paused_returns_empty(tick_tmp):
     ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True)
     _set_state(data_dir, enabled=True, paused=True)
 
-    result = await _webapp._autopilot_tick_once(ctx)
+    result = await _ap_loop._autopilot_tick_once(ctx)
     assert result == []
 
 
@@ -297,10 +299,10 @@ async def test_tick_once_active_failing_tests_returns_p1(tick_tmp):
         execution_guard_called.append("_start_card_run")
         raise AssertionError("_start_card_run must not be called in shadow mode")
 
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)), \
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)), \
          patch.object(_webapp, "run_engine", new=_forbidden_run_engine, create=True), \
          patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run, create=True):
-        result = await _webapp._autopilot_tick_once(ctx)
+        result = await _ap_loop._autopilot_tick_once(ctx)
 
     assert len(result) == 1
     intent = result[0]
@@ -336,8 +338,8 @@ async def test_tick_blocks_execution_on_non_git_tree(tick_tmp):
     data_dir, proj_dir = tick_tmp  # proj_dir is NOT a git repo
     ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="propose")
     _set_state(data_dir, enabled=True)
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=_FAIL_GATE)):
-        result = await _webapp._autopilot_tick_once(ctx)
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=_FAIL_GATE)):
+        result = await _ap_loop._autopilot_tick_once(ctx)
     assert len(result) == 1
     intent = result[0]
     assert intent["action"] == "fix_failing_tests"
@@ -353,8 +355,8 @@ async def test_tick_blocks_execution_on_dirty_git_tree(tick_tmp):
     (proj_dir / "dirty.txt").write_text("uncommitted\n")
     ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="propose")
     _set_state(data_dir, enabled=True)
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=_FAIL_GATE)):
-        result = await _webapp._autopilot_tick_once(ctx)
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=_FAIL_GATE)):
+        result = await _ap_loop._autopilot_tick_once(ctx)
     assert result[0]["isolatable"] is False
     assert result[0]["blocked"] == "dirty_tree_no_isolation"
 
@@ -366,8 +368,8 @@ async def test_tick_allows_execution_on_clean_git_tree(tick_tmp):
     _git_init_commit(proj_dir)
     ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="propose")
     _set_state(data_dir, enabled=True)
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=_FAIL_GATE)):
-        result = await _webapp._autopilot_tick_once(ctx)
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=_FAIL_GATE)):
+        result = await _ap_loop._autopilot_tick_once(ctx)
     intent = result[0]
     assert intent["action"] == "fix_failing_tests"
     assert intent["isolatable"] is True
@@ -382,8 +384,8 @@ async def test_tick_non_execution_intent_is_not_isolation_checked(tick_tmp):
     _set_state(data_dir, enabled=True)
     passing_gate = {"verdict": "safe", "tests": {"cmd": "pytest", "output": "ok",
                     "detected": True, "ok": True, "exit_code": 0, "timed_out": False}, "lint": None}
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=passing_gate)):
-        result = await _webapp._autopilot_tick_once(ctx)
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=passing_gate)):
+        result = await _ap_loop._autopilot_tick_once(ctx)
     intent = result[0]
     assert intent["action"] == "scout"
     assert "isolatable" not in intent
@@ -399,8 +401,8 @@ async def test_tick_once_active_failing_appends_to_trajectory(tick_tmp):
 
     fake_gate = {"verdict": "risky", "tests": {"cmd": "pytest", "output": "fail", "detected": True, "ok": False, "exit_code": 1, "timed_out": False}, "lint": None}
 
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
-        await _webapp._autopilot_tick_once(ctx)
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
+        await _ap_loop._autopilot_tick_once(ctx)
 
     records = autopilot.read_trajectory(data_dir)
     assert len(records) == 1
@@ -418,8 +420,8 @@ async def test_tick_once_run_engine_not_present_in_ctx(tick_tmp):
 
     fake_gate = {"verdict": "safe", "tests": {"cmd": "pytest", "output": "passed", "detected": True, "ok": True, "exit_code": 0, "timed_out": False}, "lint": None}
 
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
-        result = await _webapp._autopilot_tick_once(ctx)
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
+        result = await _ap_loop._autopilot_tick_once(ctx)
 
     # Should return an intent (scout or no-backlog) without crashing
     assert isinstance(result, list)
@@ -432,8 +434,8 @@ async def test_tick_once_mode_off_skips_project(tick_tmp):
     ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="off")
     _set_state(data_dir, enabled=True)
 
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(side_effect=AssertionError("should not be called"))):
-        result = await _webapp._autopilot_tick_once(ctx)
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(side_effect=AssertionError("should not be called"))):
+        result = await _ap_loop._autopilot_tick_once(ctx)
 
     assert result == []
 
@@ -458,9 +460,9 @@ async def test_tick_once_free_chat_skipped(tick_tmp):
         "type": "software",
     }
 
-    with patch.object(_webapp, "_collect_projects", return_value=[fake_free_project]), \
-         patch.object(_webapp, "_run_quality_gate", new=AsyncMock(side_effect=AssertionError("should not be called"))):
-        result = await _webapp._autopilot_tick_once(ctx)
+    with patch.object(_ap_loop, "_collect_projects", return_value=[fake_free_project]), \
+         patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(side_effect=AssertionError("should not be called"))):
+        result = await _ap_loop._autopilot_tick_once(ctx)
 
     assert result == []
 
@@ -511,8 +513,8 @@ def shadow_app(shadow_ctx):
     app = web.Application(middlewares=[_webapp.auth_middleware])
     app["ctx"] = shadow_ctx
 
-    app.router.add_post("/api/autopilot/tick", _webapp.api_autopilot_tick)
-    app.router.add_get("/api/autopilot/decisions", _webapp.api_autopilot_decisions)
+    app.router.add_post("/api/autopilot/tick", _ap_routes.api_autopilot_tick)
+    app.router.add_get("/api/autopilot/decisions", _ap_routes.api_autopilot_decisions)
     app.router.add_post("/api/login", _webapp.api_login)
 
     return app
@@ -527,7 +529,7 @@ def _auth_h(ctx):
 
 async def test_tick_endpoint_returns_ran_true(aiohttp_client, shadow_app, shadow_ctx):
     fake_gate = {"verdict": "unknown", "tests": {"detected": False, "ok": False, "cmd": None, "exit_code": None, "output": "", "timed_out": False}, "lint": None}
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
         client = await aiohttp_client(shadow_app)
         resp = await client.post("/api/autopilot/tick", headers=_auth_h(shadow_ctx))
     assert resp.status == 200
@@ -541,7 +543,7 @@ async def test_tick_endpoint_returns_ran_true(aiohttp_client, shadow_app, shadow
 async def test_tick_endpoint_active_false_when_not_enabled(aiohttp_client, shadow_app, shadow_ctx):
     # global_enabled is False by default (no state file)
     fake_gate = {"verdict": "unknown", "tests": {"detected": False, "ok": False, "cmd": None, "exit_code": None, "output": "", "timed_out": False}, "lint": None}
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
         client = await aiohttp_client(shadow_app)
         resp = await client.post("/api/autopilot/tick", headers=_auth_h(shadow_ctx))
     data = await resp.json()
@@ -553,7 +555,7 @@ async def test_tick_endpoint_decisions_populated_when_active(aiohttp_client, sha
     # Enable globally
     _set_state(shadow_ctx["DATA"], enabled=True)
     fake_gate = {"verdict": "risky", "tests": {"cmd": "pytest", "output": "fail", "detected": True, "ok": False, "exit_code": 1, "timed_out": False}, "lint": None}
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
         client = await aiohttp_client(shadow_app)
         resp = await client.post("/api/autopilot/tick", headers=_auth_h(shadow_ctx))
     data = await resp.json()
@@ -586,11 +588,11 @@ async def test_decisions_endpoint_returns_most_recent_first(aiohttp_client, shad
     fake_gate_pass = {"verdict": "safe", "tests": {"cmd": "pytest", "output": "pass", "detected": True, "ok": True, "exit_code": 0, "timed_out": False}, "lint": None}
 
     # Tick 1: failing
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=fake_gate_fail)):
-        await _webapp._autopilot_tick_once(shadow_ctx)
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=fake_gate_fail)):
+        await _ap_loop._autopilot_tick_once(shadow_ctx)
     # Tick 2: passing, no backlog
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=fake_gate_pass)):
-        await _webapp._autopilot_tick_once(shadow_ctx)
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=fake_gate_pass)):
+        await _ap_loop._autopilot_tick_once(shadow_ctx)
 
     client = await aiohttp_client(shadow_app)
     resp = await client.get("/api/autopilot/decisions", headers=_auth_h(shadow_ctx))
@@ -605,9 +607,9 @@ async def test_decisions_endpoint_limit_param(aiohttp_client, shadow_app, shadow
     """?limit=1 returns at most 1 record."""
     _set_state(shadow_ctx["DATA"], enabled=True)
     fake_gate = {"verdict": "risky", "tests": {"cmd": "pytest", "output": "fail", "detected": True, "ok": False, "exit_code": 1, "timed_out": False}, "lint": None}
-    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
-        await _webapp._autopilot_tick_once(shadow_ctx)
-        await _webapp._autopilot_tick_once(shadow_ctx)
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=fake_gate)):
+        await _ap_loop._autopilot_tick_once(shadow_ctx)
+        await _ap_loop._autopilot_tick_once(shadow_ctx)
 
     client = await aiohttp_client(shadow_app)
     resp = await client.get("/api/autopilot/decisions?limit=1", headers=_auth_h(shadow_ctx))
@@ -630,7 +632,7 @@ async def test_test_signal_configured_failing(tmp_path):
     """A configured, allowlisted test_cmd that FAILS → (True, 'failed…')."""
     (tmp_path / "test_x.py").write_text("def test_fail():\n    assert 1 == 2\n")
     proj = {"cwd": str(tmp_path), "test_cmd": "python3 -m pytest -q test_x.py"}
-    failing, summary = await _webapp._autopilot_test_signal(proj)
+    failing, summary = await _ap_loop._autopilot_test_signal(proj)
     assert failing is True
     assert "failed" in summary
 
@@ -640,7 +642,7 @@ async def test_test_signal_configured_passing(tmp_path):
     """A configured, allowlisted test_cmd that PASSES → (False, 'passed…')."""
     (tmp_path / "test_x.py").write_text("def test_ok():\n    assert 1 == 1\n")
     proj = {"cwd": str(tmp_path), "test_cmd": "python3 -m pytest -q test_x.py"}
-    failing, summary = await _webapp._autopilot_test_signal(proj)
+    failing, summary = await _ap_loop._autopilot_test_signal(proj)
     assert failing is False
     assert "passed" in summary
 
@@ -649,6 +651,6 @@ async def test_test_signal_configured_passing(tmp_path):
 async def test_test_signal_not_allowlisted_is_none():
     """A non-allowlisted test_cmd is refused (None) — never executed."""
     proj = {"cwd": "/tmp", "test_cmd": "rm -rf /"}
-    failing, summary = await _webapp._autopilot_test_signal(proj)
+    failing, summary = await _ap_loop._autopilot_test_signal(proj)
     assert failing is None
     assert "allowlist" in summary

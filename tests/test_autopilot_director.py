@@ -38,9 +38,11 @@ import pytest
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-import autopilot
+from features.autopilot import logic as autopilot
 import webapp as _webapp
 from webapp import _derive_token
+from features.autopilot import director as _ap_director
+from features.autopilot import routes as _ap_routes
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -280,7 +282,7 @@ async def test_run_director_guard_master_inactive(tmp_path):
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
     ):
-        result = await _webapp._run_director(ctx, project)
+        result = await _ap_director._run_director(ctx, project)
     assert result["ok"] is False
     assert result["reason"] == "autopilot_inactive"
 
@@ -296,7 +298,7 @@ async def test_run_director_guard_project_off(tmp_path):
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
     ):
-        result = await _webapp._run_director(ctx, project)
+        result = await _ap_director._run_director(ctx, project)
     assert result["ok"] is False
     assert result["reason"] == "project_not_enabled"
 
@@ -313,7 +315,7 @@ async def test_run_director_guard_rate_limit(tmp_path):
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
     ):
-        result = await _webapp._run_director(ctx, project)
+        result = await _ap_director._run_director(ctx, project)
     assert result["ok"] is False
     assert result["reason"] == "rate_limit_headroom"
 
@@ -331,7 +333,7 @@ async def test_run_director_guard_busy(tmp_path):
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
     ):
-        result = await _webapp._run_director(ctx, project)
+        result = await _ap_director._run_director(ctx, project)
     assert result["ok"] is False
     assert result["reason"] == "busy"
     # Make sure the pre-occupied key is untouched
@@ -354,9 +356,9 @@ async def test_run_director_happy_path_creates_cards(tmp_path):
     with (
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
-        patch.object(_webapp, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "tests passed"))),
+        patch.object(_ap_director, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "tests passed"))),
     ):
-        result = await _webapp._run_director(ctx, project)
+        result = await _ap_director._run_director(ctx, project)
 
     assert result["ok"] is True
     assert result["cards_created"] == 2  # two proposed cards
@@ -379,9 +381,9 @@ async def test_run_director_happy_path_cards_in_backlog(tmp_path):
     with (
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
-        patch.object(_webapp, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "tests passed"))),
+        patch.object(_ap_director, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "tests passed"))),
     ):
-        await _webapp._run_director(ctx, project)
+        await _ap_director._run_director(ctx, project)
 
     from board import _load_board
     _, _, cols = _load_board(project["cwd"])
@@ -403,9 +405,9 @@ async def test_run_director_happy_path_notebook_written(tmp_path):
     with (
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
-        patch.object(_webapp, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "tests passed"))),
+        patch.object(_ap_director, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "tests passed"))),
     ):
-        await _webapp._run_director(ctx, project)
+        await _ap_director._run_director(ctx, project)
 
     content = autopilot.read_notebook(ctx["DATA"], project["id"])
     assert structured["notebook_note"] in content
@@ -425,9 +427,9 @@ async def test_run_director_happy_path_trajectory_appended(tmp_path):
     with (
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
-        patch.object(_webapp, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "tests passed"))),
+        patch.object(_ap_director, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "tests passed"))),
     ):
-        await _webapp._run_director(ctx, project)
+        await _ap_director._run_director(ctx, project)
 
     records = autopilot.read_trajectory(ctx["DATA"])
     director_records = [r for r in records if r.get("action") == "director_plan"]
@@ -450,9 +452,9 @@ async def test_run_director_running_lock_released_on_success(tmp_path):
     with (
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
-        patch.object(_webapp, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "ok"))),
+        patch.object(_ap_director, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "ok"))),
     ):
-        await _webapp._run_director(ctx, project)
+        await _ap_director._run_director(ctx, project)
 
     director_key = f"director:{project['session_key']}"
     assert director_key not in ctx["running"]
@@ -478,18 +480,18 @@ async def test_run_director_dedup_no_duplicate_cards(tmp_path):
     with (
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
-        patch.object(_webapp, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "ok"))) as _p,
+        patch.object(_ap_director, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "ok"))) as _p,
     ):
-        r1 = await _webapp._run_director(ctx, project)
+        r1 = await _ap_director._run_director(ctx, project)
     assert r1["cards_created"] == 2
 
     ctx["run_engine"] = mock_run_engine  # factory is reusable
     with (
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
-        patch.object(_webapp, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "ok"))) as _p2,
+        patch.object(_ap_director, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "ok"))) as _p2,
     ):
-        r2 = await _webapp._run_director(ctx, project)
+        r2 = await _ap_director._run_director(ctx, project)
     assert r2["cards_created"] == 0  # all titles already exist
 
 
@@ -510,9 +512,9 @@ async def test_run_director_mode_auto_allowed(tmp_path):
     with (
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
-        patch.object(_webapp, "_autopilot_test_signal", new=AsyncMock(return_value=(None, "unknown"))),
+        patch.object(_ap_director, "_autopilot_test_signal", new=AsyncMock(return_value=(None, "unknown"))),
     ):
-        result = await _webapp._run_director(ctx, project)
+        result = await _ap_director._run_director(ctx, project)
 
     assert result["ok"] is True
 
@@ -532,9 +534,9 @@ async def test_run_director_engine_error_releases_lock(tmp_path):
     with (
         patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run),
         patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue),
-        patch.object(_webapp, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "ok"))),
+        patch.object(_ap_director, "_autopilot_test_signal", new=AsyncMock(return_value=(False, "ok"))),
     ):
-        result = await _webapp._run_director(ctx, project)
+        result = await _ap_director._run_director(ctx, project)
 
     assert result["ok"] is False
     director_key = f"director:{project['session_key']}"
@@ -588,7 +590,7 @@ def director_app(director_ctx):
     app = web.Application(middlewares=[_webapp.auth_middleware])
     app["ctx"] = director_ctx
 
-    app.router.add_post("/api/autopilot/director/{id}", _webapp.api_autopilot_director)
+    app.router.add_post("/api/autopilot/director/{id}", _ap_routes.api_autopilot_director)
     app.router.add_post("/api/login", _webapp.api_login)
 
     return app
@@ -631,7 +633,7 @@ async def test_director_endpoint_returns_run_director_result(aiohttp_client, dir
         "notebook_note": "Noted.",
         "cards_created": 1,
     }
-    with patch.object(_webapp, "_run_director", new=AsyncMock(return_value=fake_result)):
+    with patch.object(_ap_routes, "_run_director", new=AsyncMock(return_value=fake_result)):
         client = await aiohttp_client(director_app)
         resp = await client.post("/api/autopilot/director/ep-proj",
                                  headers=_auth_h(director_ctx))
@@ -645,7 +647,7 @@ async def test_director_endpoint_returns_run_director_result(aiohttp_client, dir
 @pytest.mark.asyncio
 async def test_director_endpoint_propagates_error_reason(aiohttp_client, director_app, director_ctx):
     fake_result = {"ok": False, "reason": "autopilot_inactive"}
-    with patch.object(_webapp, "_run_director", new=AsyncMock(return_value=fake_result)):
+    with patch.object(_ap_routes, "_run_director", new=AsyncMock(return_value=fake_result)):
         client = await aiohttp_client(director_app)
         resp = await client.post("/api/autopilot/director/ep-proj",
                                  headers=_auth_h(director_ctx))
@@ -683,9 +685,9 @@ async def test_director_is_engine_blocked_from_mutating_tools(tmp_path):
     project = _project_from_ctx(ctx)
     with patch.object(_webapp, "_start_card_run", new=_forbidden_start_card_run), \
          patch.object(_webapp, "_drain_queue", new=_forbidden_drain_queue), \
-         patch.object(_webapp, "_autopilot_test_signal",
+         patch.object(_ap_director, "_autopilot_test_signal",
                       new=AsyncMock(return_value=(True, "tests failed"))):
-        await _webapp._run_director(ctx, project)
+        await _ap_director._run_director(ctx, project)
 
     extra = captured.get("disallowed_tools_extra") or []
     for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"):
