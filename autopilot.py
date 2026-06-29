@@ -329,6 +329,56 @@ def detect_self_inflicted(cwd: str, since_ts: float, files: list) -> dict | None
         return None
 
 
+def decide_intent(project: dict, signals: dict) -> dict:
+    """Pure decision function for shadow mode.  No I/O.
+
+    Given a *project* dict (must have id/name/type/autopilot keys) and a
+    *signals* dict with keys:
+      - "tests_failing": bool | None  (True=failing, False=passing, None=unknown)
+      - "test_summary": str           (human-readable summary from the gate)
+      - "backlog_cards": int          (number of cards in backlog column, 0 on error)
+
+    Returns ONE intent dict with:
+      action, priority, rationale, project (id or name), mode.
+
+    Priority ladder:
+      P1  fix_failing_tests  — tests are failing (software archetype only)
+      P3  run_backlog_card   — backlog has cards (any archetype)
+      P4  scout              — tests pass, no backlog (any archetype)
+      P5  none               — no test signal and no backlog
+    """
+    mode = get_project_mode(project)
+    project_id = project.get("id") or project.get("name") or ""
+    archetype = str(project.get("type") or "software").lower()
+    is_software = archetype == "software"
+
+    tests_failing: "bool | None" = signals.get("tests_failing")
+    test_summary: str = str(signals.get("test_summary") or "")
+    backlog_n: int = int(signals.get("backlog_cards") or 0)
+
+    base = {"project": project_id, "mode": mode}
+
+    # P1 — fix failing tests (software only)
+    if is_software and tests_failing is True:
+        return {**base, "action": "fix_failing_tests", "priority": "P1",
+                "rationale": test_summary or "tests are failing"}
+
+    # P3 — run a backlog card
+    if backlog_n > 0:
+        label = "1 runnable backlog card" if backlog_n == 1 else f"{backlog_n} runnable backlog cards"
+        return {**base, "action": "run_backlog_card", "priority": "P3",
+                "rationale": label}
+
+    # P5 — no test signal, no backlog → nothing to do
+    if tests_failing is None:
+        return {**base, "action": "none", "priority": "P5",
+                "rationale": "no test signal, no backlog"}
+
+    # P4 — tests pass, no backlog → scout for improvement cards (deferred)
+    return {**base, "action": "scout", "priority": "P4",
+            "rationale": "idle — would propose improvement cards (deferred)"}
+
+
 def detect_loop(trajectory: list[dict], project_id: str,
                 window_sec: int = 172800) -> str | None:
     """Scan *trajectory* for loop signals within *window_sec* (default 48 h).

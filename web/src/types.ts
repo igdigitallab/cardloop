@@ -223,6 +223,16 @@ export interface ProjectSettings {
 
 // ─── spec-067: Autopilot ──────────────────────────────────────────────────────
 
+export interface AutopilotDecision {
+  ts: number
+  project: string
+  action: string
+  priority: 'P1' | 'P3' | 'P4' | 'P5'
+  rationale: string
+  mode: 'propose' | 'auto'
+  shadow: true
+}
+
 export interface AutopilotStatus {
   global_enabled: boolean
   paused: boolean

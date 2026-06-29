@@ -1,6 +1,6 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, useCallback, type ReactNode } from 'react'
 import { api } from '../api'
-import { GlobalSettings, GlobalSettingsEffective, AutopilotStatus } from '../types'
+import { GlobalSettings, GlobalSettingsEffective, AutopilotStatus, AutopilotDecision } from '../types'
 import { Spinner } from '../components/Spinner'
 import { EditableMarkdown } from '../components/EditableMarkdown'
 import { MODELS } from '../lib/models'
@@ -11,6 +11,29 @@ import { BrowserBackendSettings } from '../components/BrowserBackendSettings'
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
+}
+
+function relTime(ts: number): string {
+  const s = Math.floor(Date.now() / 1000 - ts)
+  if (s < 60) return s + 's ago'
+  if (s < 3600) return Math.floor(s / 60) + 'm ago'
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago'
+  return Math.floor(s / 86400) + 'd ago'
+}
+
+function formatAction(action: string): string {
+  if (action === 'fix_failing_tests') return 'Would fix failing tests'
+  if (action === 'run_backlog_card') return 'Would run a backlog card'
+  if (action === 'scout') return 'Would propose improvement cards'
+  if (action === 'none') return 'Nothing to do'
+  return 'Would ' + action.replace(/_/g, ' ')
+}
+
+const PRIORITY_STYLE: Record<string, { bg: string; color: string }> = {
+  P1: { bg: 'var(--red-subtle, #fef2f2)', color: 'var(--red, #b91c1c)' },
+  P3: { bg: 'var(--surface2, #f3f4f6)', color: 'var(--text2, #374151)' },
+  P4: { bg: 'var(--surface2, #f3f4f6)', color: 'var(--text3, #6b7280)' },
+  P5: { bg: 'var(--surface2, #f3f4f6)', color: 'var(--text3, #6b7280)' },
 }
 
 function Row({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
@@ -36,8 +59,15 @@ export function GlobalSettingsTab() {
   const [saving, setSaving] = useState(false)
   const [apStatus, setApStatus] = useState<AutopilotStatus | null>(null)
   const [apWorking, setApWorking] = useState(false)
+  const [decisions, setDecisions] = useState<AutopilotDecision[]>([])
+  const [tickWorking, setTickWorking] = useState(false)
+  const [tickNote, setTickNote] = useState('')
   const { permission, enabled, setEnabled, requestPermission } = useNotifications()
   const { modules, isEnabled: isModEnabled, setEnabled: setModEnabled } = useModules()
+
+  const loadDecisions = useCallback(() => {
+    void api.autopilotDecisions(20).then(setDecisions).catch(() => setDecisions([]))
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -47,8 +77,9 @@ export function GlobalSettingsTab() {
         if (!cancelled) { setGlob(g); if (ap) setApStatus(ap); setLoading(false) }
       })
       .catch(e => { if (!cancelled) { setError(errMsg(e)); setLoading(false) } })
+    loadDecisions()
     return () => { cancelled = true }
-  }, [])
+  }, [loadDecisions])
 
   async function toggleGlobalAutopilot() {
     if (!apStatus || apWorking) return
@@ -68,6 +99,21 @@ export function GlobalSettingsTab() {
       setApStatus(r)
     } catch { /* silently fail */ }
     finally { setApWorking(false) }
+  }
+
+  async function runTick() {
+    if (tickWorking) return
+    setTickWorking(true)
+    setTickNote('')
+    try {
+      const result = await api.autopilotTick()
+      if (result.decisions?.length) setDecisions(result.decisions)
+      else loadDecisions()
+      if (!result.active) {
+        setTickNote('Autopilot master is OFF — enable it above to let the shadow loop decide.')
+      }
+    } catch { loadDecisions() }
+    finally { setTickWorking(false) }
   }
 
   async function save() {
@@ -202,6 +248,100 @@ export function GlobalSettingsTab() {
                 >
                   {apStatus.paused ? 'Resume' : 'Pause'}
                 </button>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ── Autopilot shadow decisions (spec-067) ── */}
+      {apStatus !== null && (
+        <section>
+          <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>What Autopilot would do</h3>
+          <p style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--text3)' }}>
+            Shadow mode logs what the agent would do. It runs nothing.
+          </p>
+
+          <div style={{
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius)',
+            padding: '10px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}>
+            {/* Tick button row */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <button
+                className="btn-secondary"
+                style={{ fontSize: 12, padding: '4px 12px', opacity: tickWorking ? 0.6 : 1 }}
+                onClick={() => { void runTick() }}
+                disabled={tickWorking}
+              >
+                {tickWorking ? 'Running…' : 'Run a shadow tick now'}
+              </button>
+              {tickNote && (
+                <span style={{ fontSize: 12, color: 'var(--text3)' }}>{tickNote}</span>
+              )}
+            </div>
+
+            {/* Decision list */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {decisions.length === 0 ? (
+                <p style={{ fontSize: 12, color: 'var(--text3)', margin: 0 }}>
+                  No decisions yet — enable the master switch and run a tick.
+                </p>
+              ) : (
+                decisions.map((d, i) => {
+                  const ps = PRIORITY_STYLE[d.priority] ?? PRIORITY_STYLE.P4
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius)',
+                        padding: '7px 10px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 3,
+                      }}
+                    >
+                      {/* Line 1: priority pill + project + timestamp */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span style={{
+                          fontSize: 10,
+                          fontWeight: 600,
+                          padding: '1px 5px',
+                          borderRadius: 4,
+                          background: ps.bg,
+                          color: ps.color,
+                          flexShrink: 0,
+                        }}>
+                          {d.priority}
+                        </span>
+                        <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{d.project}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text3)', marginLeft: 'auto' }}>{relTime(d.ts)}</span>
+                      </div>
+                      {/* Line 2: action */}
+                      <div style={{ fontSize: 12, color: 'var(--text2)' }}>{formatAction(d.action)}</div>
+                      {/* Line 3: rationale */}
+                      {d.rationale && (
+                        <div
+                          title={d.rationale}
+                          style={{
+                            fontSize: 11,
+                            color: 'var(--text3)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {d.rationale}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })
               )}
             </div>
           </div>

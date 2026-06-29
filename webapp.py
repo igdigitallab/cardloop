@@ -4386,6 +4386,163 @@ async def api_autopilot_resume(req: web.Request) -> web.Response:
     return web.json_response(_autopilot_status(ctx))
 
 
+# ─────────────────────── Autopilot Phase 2: shadow loop ───────────────────────
+#
+# SHADOW MODE INVARIANT: this loop NEVER calls run_engine, _run_card,
+# _start_card_run, _drain_queue, _queue_enqueue, or any function that
+# mutates repos, spends model tokens, or starts agent execution.
+# It ONLY: reads the board (read-only), runs project tests via
+# _run_quality_gate (read-only subprocess), decides an intent via
+# _autopilot.decide_intent (pure), and appends the decision to the
+# trajectory log.  ZERO execution.
+
+
+async def _autopilot_test_signal(project: dict) -> "tuple[bool | None, str]":
+    """Shadow test signal (READ-ONLY): is this project's test suite failing?
+
+    Prefers the operator-configured ``test_cmd`` (authoritative + allowlist-validated);
+    falls back to auto-detection via ``_run_quality_gate`` when none is configured.
+    Returns ``(tests_failing, summary)``: True = failing, False = passing,
+    None = no/unsafe/unknown signal. Runs the tests only — mutates nothing.
+    """
+    cwd = project.get("cwd") or ""
+    cmd_str = (project.get("test_cmd") or "").strip()
+    if cmd_str:
+        if not _validate_diag_cmd(cmd_str):
+            return None, "configured test_cmd is not allowlisted"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *shlex.split(cmd_str), cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=os.environ.copy(),
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+            rc = proc.returncode or 0
+            tail = out.decode(errors="replace").strip()[-300:]
+            if rc == 0:
+                return False, f"tests passed ({cmd_str})"
+            return True, f"tests failed ({cmd_str}): {tail}"
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return None, f"tests timed out ({cmd_str})"
+        except Exception as exc:
+            return None, f"test run error: {exc}"
+    # Fallback: auto-detect via the quality gate (read-only).
+    try:
+        gate = await asyncio.wait_for(_run_quality_gate(cwd), timeout=120)
+        verdict = gate.get("verdict", "unknown")
+        info = gate.get("tests") or {}
+        if verdict == "safe":
+            return False, f"tests passed ({info.get('cmd')})"
+        if verdict == "risky":
+            return True, f"tests failed ({info.get('cmd')}): {(info.get('output') or '')[:300]}"
+        return None, "no test command configured or detected"
+    except Exception as exc:
+        return None, f"test gate error: {exc}"
+
+
+async def _autopilot_tick_once(ctx: dict) -> list[dict]:
+    """Run one shadow-mode autopilot tick.  Returns list of intent dicts decided.
+
+    READ-ONLY.  Never calls run_engine or any card-execution path.
+    """
+    data_dir = ctx["DATA"]
+    today = __import__("datetime").date.today().isoformat()
+    state = _autopilot.load_state(data_dir)
+    _autopilot.rollover_day(state, today)
+
+    if not _autopilot.is_active(state):
+        return []
+
+    projects = _collect_projects(ctx)
+    decisions: list[dict] = []
+
+    for project in projects:
+        if project.get("is_free"):
+            continue
+        if _autopilot.get_project_mode(project) not in ("propose", "auto"):
+            continue
+
+        cwd = project.get("cwd") or ""
+
+        # ── gather signals (READ-ONLY) ──────────────────────────────────────
+
+        # 1. Test signal (READ-ONLY): prefer the operator-configured test_cmd
+        #    (authoritative), fall back to auto-detection. Runs tests only —
+        #    never mutates the repo.
+        tests_failing, test_summary = await _autopilot_test_signal(project)
+
+        # 2. Count backlog cards (read-only board read)
+        backlog_n = 0
+        try:
+            _, _, cols = _load_board(cwd)
+            backlog_n = len(cols.get("backlog") or [])
+        except Exception:
+            backlog_n = 0
+
+        signals = {
+            "tests_failing": tests_failing,
+            "test_summary": test_summary,
+            "backlog_cards": backlog_n,
+        }
+
+        # ── decide (pure) ───────────────────────────────────────────────────
+        intent = _autopilot.decide_intent(project, signals)
+
+        # ── stamp and log (no execution) ────────────────────────────────────
+        import time as _time
+        intent["ts"] = _time.time()
+        intent["shadow"] = True
+        intent["fingerprint"] = _autopilot.fingerprint(
+            intent["action"], [], test_summary
+        )
+
+        _autopilot.append_trajectory(data_dir, intent)
+        decisions.append(intent)
+
+    return decisions
+
+
+async def _autopilot_loop(ctx: dict) -> None:
+    """Background shadow loop — decides intent per project, logs it, executes nothing."""
+    await asyncio.sleep(20)  # startup grace period
+    while True:
+        try:
+            await _autopilot_tick_once(ctx)
+        except Exception as exc:
+            print(f"[autopilot] shadow tick error: {exc}")
+        await asyncio.sleep(int(os.environ.get("AUTOPILOT_TICK_SEC", "300")))
+
+
+async def api_autopilot_tick(req: web.Request) -> web.Response:
+    """POST /api/autopilot/tick — run one shadow tick immediately (manual trigger)."""
+    ctx = req.app["ctx"]
+    data_dir = ctx["DATA"]
+    state = _autopilot.load_state(data_dir)
+    decisions = await _autopilot_tick_once(ctx)
+    return web.json_response({
+        "ran": True,
+        "active": _autopilot.is_active(state),
+        "decisions": decisions,
+    })
+
+
+async def api_autopilot_decisions(req: web.Request) -> web.Response:
+    """GET /api/autopilot/decisions?limit=N — most-recent shadow decisions, newest first."""
+    ctx = req.app["ctx"]
+    try:
+        limit = int(req.rel_url.query.get("limit", "20"))
+    except (ValueError, TypeError):
+        limit = 20
+    limit = max(1, min(limit, 500))
+    records = _autopilot.read_trajectory(ctx["DATA"], limit=limit)
+    return web.json_response({"decisions": list(reversed(records))})
+
+
 async def _notify_new_incidents(ctx: dict, project: dict, n_added: int) -> None:
     """TG ping "crashed": on new incident detection, if notify_on_error is enabled.
     Lists up to 3 incidents from Failed. Non-critical."""
@@ -12296,12 +12453,15 @@ async def start(ctx: dict) -> None:
         # spec-065 Phase B: live browser pane (WebSocket screencast)
         app.router.add_get("/api/browser/ws", api_browser_ws)
 
-        # spec-067 Phase 0: autopilot (inert — state/mode only; no background loop)
+        # spec-067 Phase 0: autopilot (state/mode + Phase 2 shadow loop)
         app.router.add_put("/api/projects/{id}/autopilot", api_autopilot_set_project_mode)
         app.router.add_get("/api/autopilot/status", api_autopilot_status)
         app.router.add_post("/api/autopilot/global", api_autopilot_global)
         app.router.add_post("/api/autopilot/pause", api_autopilot_pause)
         app.router.add_post("/api/autopilot/resume", api_autopilot_resume)
+        # Phase 2: shadow-mode manual trigger + decision log
+        app.router.add_post("/api/autopilot/tick", api_autopilot_tick)
+        app.router.add_get("/api/autopilot/decisions", api_autopilot_decisions)
 
         # Static files — everything else (SPA)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
@@ -12338,6 +12498,9 @@ async def start(ctx: dict) -> None:
         # Spec-025: Trash purge janitor
         _STARTUP_BG_TASKS.append(_spawn_bg(_janitor_trash_purge_loop(ctx)))
         print(f"[webapp] janitor trash purge loop started (interval 3600s, retention {TRASH_RETENTION_DAYS}d)")
+        # spec-067 Phase 2: autopilot shadow loop (observe-only; never executes)
+        _STARTUP_BG_TASKS.append(_spawn_bg(_autopilot_loop(ctx)))
+        print(f"[webapp] autopilot shadow loop started (interval {os.environ.get('AUTOPILOT_TICK_SEC', '300')}s)")
     except Exception as e:
         print(f"[webapp] ERROR during startup: {e}")
 

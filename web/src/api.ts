@@ -531,6 +531,17 @@ export const api = {
   autopilotResume: () =>
     apiFetch<import('./types').AutopilotStatus>('/api/autopilot/resume', { method: 'POST' }),
 
+  // spec-067: shadow tick + decision log
+  autopilotDecisions: (limit = 20) =>
+    fetch(`/api/autopilot/decisions?limit=${limit}`, { credentials: 'include' })
+      .then(r => r.ok ? r.json() : { decisions: [] })
+      .then((d: { decisions?: import('./types').AutopilotDecision[] }) => d.decisions ?? []),
+
+  autopilotTick: () =>
+    fetch('/api/autopilot/tick', { method: 'POST', credentials: 'include' })
+      .then(r => r.ok ? r.json() : { ran: false, active: false, decisions: [] })
+      .then((d: { ran: boolean; active: boolean; decisions: import('./types').AutopilotDecision[] }) => d),
+
   // Cross-device UI layout (open tabs/active/sidebar/split) — server source of truth
   uiState: () =>
     apiFetch<{ state: Record<string, unknown> }>('/api/ui-state'),
