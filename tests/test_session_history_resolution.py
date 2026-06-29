@@ -3,7 +3,7 @@ Regression tests for "chat history disappears" — two independent root causes:
 
 1. `_sdk_sessions_dir` encoded the cwd with '/'-only → '-', but the Claude SDK replaces
    EVERY non-alphanumeric char (so '_' and '.' too). Any project whose path contained '_'
-   (e.g. /home/igor/line_vpn_bot) resolved to a non-existent transcript folder → empty history.
+   (e.g. /home/user/my_project) resolved to a non-existent transcript folder → empty history.
 
 2. session-history resolved the session id from the legacy ctx["sessions"] mirror only. That
    mirror is refreshed on a chat run but not persisted immediately, so a restart between runs
@@ -21,8 +21,8 @@ import webapp as _webapp
 
 def test_sdk_sessions_dir_encodes_all_nonalnum():
     """Underscores and dots in the cwd become dashes, matching the SDK's folder naming."""
-    d = _webapp._sdk_sessions_dir("/home/user/line_vpn_bot")
-    assert d.name == "-home-user-line-vpn-bot", d.name
+    d = _webapp._sdk_sessions_dir("/home/user/my_vpn_app")
+    assert d.name == "-home-user-my-vpn-app", d.name
     # Dots too (e.g. a domain-named project dir).
     d2 = _webapp._sdk_sessions_dir("/home/user/foo.bar_baz")
     assert d2.name == "-home-user-foo-bar-baz", d2.name

@@ -8065,7 +8065,7 @@ def _sdk_sessions_dir(cwd: str) -> Path:
     """SDK folder with .jsonl sessions for the given cwd.
 
     The Claude SDK/CLI encodes the cwd into the folder name by replacing EVERY
-    non-alphanumeric char with '-' (so '/home/igor/line_vpn_bot' → '-home-igor-line-vpn-bot':
+    non-alphanumeric char with '-' (so '/home/user/my_project' → '-home-user-my-project':
     underscores and dots also become dashes). A '/'-only replace silently misses the real
     folder for any path containing '_' or '.', so the transcript appears empty and chat
     history "disappears" on reload. Verified empirically: this rule matches every existing
