@@ -110,6 +110,42 @@ async def test_mode_detector_legacy_dirty_tree(tmp_git):
     assert mode == "legacy"
 
 
+# ─── invariant #1 (spec-067 v3): allow_legacy=False → 'blocked', never in-place ───
+# The unattended autopilot path must HARD-ABORT rather than silently edit a tree it
+# cannot cleanly isolate. Interactive/manual cards keep the legacy fallback (default).
+
+async def test_mode_detector_blocked_dirty_tree_no_legacy(tmp_git):
+    """allow_legacy=False + dirty tree → blocked (autopilot must not edit in-place)."""
+    (tmp_git / "dirty.txt").write_text("uncommitted change\n")
+    mode = await _card_run_mode(str(tmp_git), allow_legacy=False)
+    assert mode == "blocked"
+
+
+async def test_mode_detector_blocked_no_git_no_legacy(tmp_no_git):
+    """allow_legacy=False + non-git dir → blocked (cannot isolate without git)."""
+    mode = await _card_run_mode(str(tmp_no_git), allow_legacy=False)
+    assert mode == "blocked"
+
+
+async def test_mode_detector_blocked_git_disabled_no_legacy(tmp_git):
+    """allow_legacy=False + git disabled by project setting → blocked (git never touched)."""
+    mode = await _card_run_mode(str(tmp_git), git_enabled=False, allow_legacy=False)
+    assert mode == "blocked"
+
+
+async def test_mode_detector_clean_git_no_legacy_still_worktree(tmp_git):
+    """allow_legacy=False + clean git tree → worktree (isolation IS possible)."""
+    mode = await _card_run_mode(str(tmp_git), allow_legacy=False)
+    assert mode == "worktree"
+
+
+async def test_mode_detector_default_unchanged_dirty_still_legacy(tmp_git):
+    """Regression: the default (allow_legacy=True) is UNCHANGED — dirty tree → legacy."""
+    (tmp_git / "dirty.txt").write_text("uncommitted change\n")
+    mode = await _card_run_mode(str(tmp_git))  # no allow_legacy → defaults True
+    assert mode == "legacy"
+
+
 # ─────────────────────────── worktree setup ───────────────────────────
 
 async def test_worktree_setup_creates_worktree(tmp_git):

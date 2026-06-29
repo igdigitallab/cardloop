@@ -4493,6 +4493,19 @@ async def _autopilot_tick_once(ctx: dict) -> list[dict]:
         # ── decide (pure) ───────────────────────────────────────────────────
         intent = _autopilot.decide_intent(project, signals)
 
+        # ── spec-067 v3 invariant #1: HARD-ABORT on a tree we cannot cleanly isolate ──
+        #    An execution-class intent (one that would mutate code) is NEVER run in-place on a
+        #    dirty / non-git tree. Recorded here in shadow so it's visible in the trajectory;
+        #    the future auto-execute path reads `blocked` and routes to the human inbox instead
+        #    of editing. This is the safety brick built BEFORE any execution capability exists.
+        if intent.get("action") in ("fix_failing_tests", "run_backlog_card"):
+            iso_mode = await _card_run_mode(
+                cwd, git_enabled=_git_enabled(project), allow_legacy=False
+            )
+            intent["isolatable"] = iso_mode != "blocked"
+            if iso_mode == "blocked":
+                intent["blocked"] = "dirty_tree_no_isolation"
+
         # ── stamp and log (no execution) ────────────────────────────────────
         import time as _time
         intent["ts"] = _time.time()
@@ -4929,19 +4942,24 @@ async def _git_diff_card(cwd: str) -> tuple[str, str]:
 
 # ─────────────────────────── C2: worktree helpers ───────────────────────────
 
-async def _card_run_mode(cwd: str, git_enabled: bool = True) -> str:
-    """Determines card run mode: 'worktree' or 'legacy'.
-    worktree = git enabled AND git repo AND clean working tree. Otherwise — legacy (run in cwd).
-    git_enabled=False (project setting) → always legacy, git not touched at all."""
+async def _card_run_mode(cwd: str, git_enabled: bool = True, allow_legacy: bool = True) -> str:
+    """Determines card run mode: 'worktree', 'legacy', or 'blocked'.
+    worktree = git enabled AND git repo AND clean working tree.
+    Otherwise → 'legacy' (run in cwd) for interactive/manual cards (allow_legacy, the default),
+    or 'blocked' when allow_legacy=False — the unattended autopilot path REFUSES to mutate a tree
+    it cannot cleanly isolate (spec-067 v3 invariant #1: no silent in-place edits on a dirty /
+    non-git tree, which could irreversibly mix the loop's output with the operator's work).
+    git_enabled=False (project setting) → legacy/blocked, git not touched at all."""
+    fallback = "legacy" if allow_legacy else "blocked"
     if not git_enabled:
-        return "legacy"
+        return fallback
     info = await _git_info(cwd)
     if info is None:
-        return "legacy"
+        return fallback
     # git status --porcelain: empty output = clean working tree
     status = await _git_cmd(cwd, "status", "--porcelain")
     if status is None or status.strip():
-        return "legacy"
+        return fallback
     return "worktree"
 
 

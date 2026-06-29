@@ -313,6 +313,83 @@ async def test_tick_once_active_failing_tests_returns_p1(tick_tmp):
     assert execution_guard_called == []
 
 
+# ── invariant #1 (spec-067 v3): execution-class intents blocked on a non-isolatable tree ──
+
+def _git_init_commit(path: Path) -> None:
+    """Turn *path* into a git repo with one baseline commit (clean tree)."""
+    import subprocess
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=str(path), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(path), check=True, capture_output=True)
+    (path / "README.md").write_text("# t\n")
+    subprocess.run(["git", "add", "."], cwd=str(path), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=str(path), check=True, capture_output=True)
+
+
+_FAIL_GATE = {"verdict": "risky", "tests": {"cmd": "pytest", "output": "1 failed",
+              "detected": True, "ok": False, "exit_code": 1, "timed_out": False}, "lint": None}
+
+
+@pytest.mark.asyncio
+async def test_tick_blocks_execution_on_non_git_tree(tick_tmp):
+    """Non-git project + failing tests → P1 intent flagged blocked=dirty_tree_no_isolation."""
+    data_dir, proj_dir = tick_tmp  # proj_dir is NOT a git repo
+    ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="propose")
+    _set_state(data_dir, enabled=True)
+    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=_FAIL_GATE)):
+        result = await _webapp._autopilot_tick_once(ctx)
+    assert len(result) == 1
+    intent = result[0]
+    assert intent["action"] == "fix_failing_tests"
+    assert intent["isolatable"] is False
+    assert intent["blocked"] == "dirty_tree_no_isolation"
+
+
+@pytest.mark.asyncio
+async def test_tick_blocks_execution_on_dirty_git_tree(tick_tmp):
+    """Dirty git tree + failing tests → P1 intent blocked (cannot cleanly isolate)."""
+    data_dir, proj_dir = tick_tmp
+    _git_init_commit(proj_dir)
+    (proj_dir / "dirty.txt").write_text("uncommitted\n")
+    ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="propose")
+    _set_state(data_dir, enabled=True)
+    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=_FAIL_GATE)):
+        result = await _webapp._autopilot_tick_once(ctx)
+    assert result[0]["isolatable"] is False
+    assert result[0]["blocked"] == "dirty_tree_no_isolation"
+
+
+@pytest.mark.asyncio
+async def test_tick_allows_execution_on_clean_git_tree(tick_tmp):
+    """Clean git tree + failing tests → P1 intent isolatable, NOT blocked."""
+    data_dir, proj_dir = tick_tmp
+    _git_init_commit(proj_dir)
+    ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="propose")
+    _set_state(data_dir, enabled=True)
+    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=_FAIL_GATE)):
+        result = await _webapp._autopilot_tick_once(ctx)
+    intent = result[0]
+    assert intent["action"] == "fix_failing_tests"
+    assert intent["isolatable"] is True
+    assert "blocked" not in intent
+
+
+@pytest.mark.asyncio
+async def test_tick_non_execution_intent_is_not_isolation_checked(tick_tmp):
+    """A P4 scout (passing tests, no backlog) is NOT execution-class → no isolatable/blocked keys."""
+    data_dir, proj_dir = tick_tmp  # non-git, but irrelevant for a non-execution intent
+    ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="propose")
+    _set_state(data_dir, enabled=True)
+    passing_gate = {"verdict": "safe", "tests": {"cmd": "pytest", "output": "ok",
+                    "detected": True, "ok": True, "exit_code": 0, "timed_out": False}, "lint": None}
+    with patch.object(_webapp, "_run_quality_gate", new=AsyncMock(return_value=passing_gate)):
+        result = await _webapp._autopilot_tick_once(ctx)
+    intent = result[0]
+    assert intent["action"] == "scout"
+    assert "isolatable" not in intent
+    assert "blocked" not in intent
+
+
 @pytest.mark.asyncio
 async def test_tick_once_active_failing_appends_to_trajectory(tick_tmp):
     """Intent is written to the trajectory log."""
