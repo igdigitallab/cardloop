@@ -5947,6 +5947,96 @@ async def api_usage_ledger(req: web.Request) -> web.Response:
     })
 
 
+# ─────────────────────────── Usage analytics (transcript scan) ───────────────────────────
+#
+# GET  /api/usage/dashboard?days=30&models=a,b → aggregated cost/usage over ALL ~/.claude
+#       transcripts (CLI + Cardloop + sub-agents, retroactively), via usage_scanner's SQLite index.
+# POST /api/usage/scan                          → force an incremental re-scan now.
+#
+# Complements /api/usage (live quota %) and /api/usage/ledger (Cardloop-tagged live turns): this
+# is the COMPLETE historical picture, and the DB retains history even after Claude Code prunes old
+# transcripts (cleanupPeriodDays). Scans are debounced + run off-loop; a cold scan (~30-40s over a
+# big backlog) runs in the BACKGROUND and the endpoint serves whatever's already indexed, flagging
+# `scanning` so the client re-polls. Zero always-on cost — scanning is request-triggered only.
+
+_usage_scan_state: dict = {"ts": 0.0, "running": False, "last": None}
+_usage_scan_lock: asyncio.Lock | None = None  # lazy — created inside the running loop
+_USAGE_SCAN_DEBOUNCE = float(os.getenv("USAGE_SCAN_DEBOUNCE_SEC", "30"))
+
+
+def _get_usage_scan_lock() -> asyncio.Lock:
+    global _usage_scan_lock
+    if _usage_scan_lock is None:
+        _usage_scan_lock = asyncio.Lock()
+    return _usage_scan_lock
+
+
+def _usage_db_path(ctx) -> Path:
+    return ctx["DATA"] / "usage.db"
+
+
+async def _run_usage_scan(ctx) -> dict:
+    """Run an incremental transcript scan off the event loop (sync sqlite/file IO)."""
+    import usage_scanner
+    db_path = _usage_db_path(ctx)
+    loop = asyncio.get_running_loop()
+    state = _usage_scan_state
+    state["running"] = True
+    try:
+        res = await loop.run_in_executor(None, lambda: usage_scanner.scan(db_path=db_path))
+        state["last"] = res
+        return res
+    finally:
+        state["running"] = False
+        state["ts"] = time.time()
+
+
+async def _maybe_scan_usage(ctx) -> None:
+    """Debounced fire-and-forget scan: kick one off if the index is stale and none is running."""
+    state = _usage_scan_state
+    if state["running"] or (time.time() - state["ts"]) < _USAGE_SCAN_DEBOUNCE:
+        return
+    async with _get_usage_scan_lock():
+        if state["running"] or (time.time() - state["ts"]) < _USAGE_SCAN_DEBOUNCE:
+            return
+        state["running"] = True  # claim synchronously so a forced scan can't double-fire
+        task = asyncio.create_task(_run_usage_scan(ctx))
+        _BG_TASKS.add(task)
+        task.add_done_callback(_BG_TASKS.discard)
+
+
+async def api_usage_dashboard(req: web.Request) -> web.Response:
+    ctx = req.app["ctx"]
+    import usage_scanner
+    raw_days = req.query.get("days", "30")
+    if raw_days in ("all", "0", ""):
+        days = None
+    else:
+        try:
+            days = max(1, int(raw_days))
+        except (TypeError, ValueError):
+            days = 30
+    models_param = req.query.get("models", "").strip()
+    models = [m for m in (s.strip() for s in models_param.split(",")) if m] if models_param else None
+
+    db_path = _usage_db_path(ctx)
+    await _maybe_scan_usage(ctx)  # background refresh; never blocks the response
+
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(
+        None, lambda: usage_scanner.dashboard_data(db_path=db_path, days=days, models=models))
+    data["scanning"] = _usage_scan_state["running"]
+    return web.json_response(data)
+
+
+async def api_usage_scan(req: web.Request) -> web.Response:
+    """Force an immediate (awaited) incremental scan and return its stats."""
+    ctx = req.app["ctx"]
+    async with _get_usage_scan_lock():
+        res = await _run_usage_scan(ctx)
+    return web.json_response({"ok": True, "scan": res})
+
+
 # ───────────────────────────── Model registry (live) ─────────────────────────────
 #
 # GET /api/models  → { "source": "live"|"static", "models": [{"value":<alias>,"label":<display>}] }
@@ -12115,6 +12205,9 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/usage", api_usage)
         # Cost ledger aggregates — Cardloop vs card/deferred + ultracode share + heavy-session tail
         app.router.add_get("/api/usage/ledger", api_usage_ledger)
+        # Usage analytics — full historical cost/usage over ALL ~/.claude transcripts (CLI + Cardloop + sub-agents)
+        app.router.add_get("/api/usage/dashboard", api_usage_dashboard)
+        app.router.add_post("/api/usage/scan", api_usage_scan)
         app.router.add_get("/api/models", api_models)
         # Prompt templates (global, data/prompts.json)
         app.router.add_get("/api/prompts", api_prompts_list)
