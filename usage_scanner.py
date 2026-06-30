@@ -167,9 +167,9 @@ def extract_agent_dispatch(record: dict) -> dict | None:
     if not isinstance(tur, dict):
         return None
     agent_id = tur.get("agentId")
-    agent_type = tur.get("agentType")
-    if not agent_id or not agent_type:
+    if not agent_id:
         return None
+    agent_type = tur.get("agentType") or "task"
     return {
         "agent_id": agent_id,
         "agent_type": agent_type,

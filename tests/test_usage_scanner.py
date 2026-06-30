@@ -127,6 +127,16 @@ def test_dispatch_extraction():
     assert d["tool_use_count"] == 7
     # a plain user record (no toolUseResult) → None
     assert usage_scanner.extract_agent_dispatch({"type": "user"}) is None
+    # agentType=None → row still inserted, agent_type falls back to "task"
+    no_type_rec = json.loads(json.dumps({
+        "type": "user", "sessionId": "S2", "timestamp": "2026-06-20T11:00:00Z",
+        "toolUseResult": {"agentId": "ag-2", "agentType": None, "status": "completed",
+                          "totalTokens": 500, "totalDurationMs": 1000, "totalToolUseCount": 3},
+    }))
+    d2 = usage_scanner.extract_agent_dispatch(no_type_rec)
+    assert d2 is not None
+    assert d2["agent_id"] == "ag-2"
+    assert d2["agent_type"] == "task"
 
 
 # ──────────────────────────── scan + incremental ────────────────────────────
