@@ -1024,6 +1024,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const [syncingCard, setSyncingCard] = useState<string | null>(null)
   // Which kind of reset is in progress — drives the progress indicator text.
   const [rotatingKind, setRotatingKind] = useState<'handoff' | 'blank' | null>(null)
+  // Bumped whenever the session is reset/rotated so the SessionSelector refetches its list and
+  // relabels (its button otherwise keeps showing the now-closed session until the dropdown is opened).
+  const [sessionReloadKey, setSessionReloadKey] = useState(0)
   // spec-042: unified reset-confirm modal (replaces direct no-confirm handleRotate calls)
   const [resetModalOpen, setResetModalOpen] = useState(false)
   // Spec-039: toast shown when native auto-compact fires (kind:"compact" bus event)
@@ -1685,6 +1688,33 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setContextWarnFromBackend(false)
       setWarnDismissedAtTokens(null)
 
+    } else if (evt.kind === 'session_rotated') {
+      // Reset completed server-side (emitted for BOTH manual /reset and auto-rotate).
+      // Always refresh the session selector so its button stops showing the now-closed session.
+      setSessionReloadKey(k => k + 1)
+      // For a MANUAL reset, also re-sync the chat view to the fresh (empty) session. The
+      // in-component handleRotate continuation that normally does this is LOST if the chat
+      // remounted or the page reloaded during the up-to-a-minute haiku handoff (mobile screen
+      // lock, orientation flip, refresh) — this bus event is then the only recovery path, and
+      // without it the old transcript stays on screen and the chat never switches to the new
+      // session. (Auto-rotate is post-turn: the auto_rotated branch above resets the counter and
+      // the completed transcript intentionally stays.) Null the stale session id first so the
+      // hydrate reads the new session, not the old transcript; hydrate fills the handoff card
+      // from /live and correctly reconstructs a queued message that drained into the new session.
+      // Idempotent with handleRotate on the normal (non-remount) path.
+      if (evt.trigger !== 'auto') {
+        activeSessionIdRef.current = null
+        if (effectiveChatId) setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, session_id: null } : c))
+        setContextTokens(null)
+        setPrevContextTokens(null)
+        setContextWarnFromBackend(false)
+        setWarnDismissedAtTokens(null)
+        setLastCacheHitPct(null)
+        setLastFreshTokens(null)
+        let cancelled = false
+        hydrateFromServer(() => cancelled)
+      }
+
     } else if (evt.kind === 'rate_limit_prompt') {
       // spec-051: limit hit, project policy is "ask" → surface the Yes/No prompt.
       setResumePrompt({ deferredId: evt.deferred_id, resetsAt: evt.resets_at_display || '' })
@@ -2098,6 +2128,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         // sees the prior conversation and the carried-over summary appears "lost".
         activeSessionIdRef.current = null
         setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, session_id: null } : c))
+        // Relabel the session selector immediately (don't wait for the session_rotated bus event).
+        setSessionReloadKey(k => k + 1)
         // Spec-043 C: drive the counter from the backend so the displayed value reflects
         // the actual (now-empty) new session rather than a client-side assumption.
         // One-shot fire-and-forget; rotCancelled is a local flag captured by the closure
@@ -2280,6 +2312,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             projectId={projectId}
             onSessionChange={handleSessionChange}
             onRequestReset={() => setResetModalOpen(true)}
+            reloadSignal={sessionReloadKey}
           />
         </div>
         {/* Right group: context health + cache badge + model + think + collapse.

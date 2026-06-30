@@ -23,6 +23,12 @@ interface Props {
    * where reset is not applicable).
    */
   onRequestReset?: () => void
+  /**
+   * Bumped by the parent whenever the session is reset/rotated. Adding it to the load effect's
+   * deps forces a refetch so the button stops showing the now-closed session (the list otherwise
+   * only refreshes on mount or when the dropdown is opened).
+   */
+  reloadSignal?: number
 }
 
 /** Format ISO datetime as absolute clock string for session labels. */
@@ -68,7 +74,7 @@ function fmtCtx(n: number): string {
 /** Anchor width used when clamping the dropdown to avoid right-edge overflow. */
 const DROPDOWN_ANCHOR_WIDTH = 360
 
-export function SessionSelector({ projectId, onSessionChange, onRequestReset }: Props) {
+export function SessionSelector({ projectId, onSessionChange, onRequestReset, reloadSignal }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -99,7 +105,7 @@ export function SessionSelector({ projectId, onSessionChange, onRequestReset }: 
     loadSessions()
     setOpen(false)
     setError('')
-  }, [projectId, loadSessions])
+  }, [projectId, loadSessions, reloadSignal])
 
   // Compute anchored position from the toggle button rect.
   // Returns null on mobile so CSS bottom-sheet takes over.

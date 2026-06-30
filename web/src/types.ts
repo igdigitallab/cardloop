@@ -592,6 +592,19 @@ export interface ActivityEventAutoRotated {
   handoff: boolean
 }
 
+// Emitted by _rotate_session_core after the session is reset — for BOTH a manual /reset and an
+// auto-rotate (trigger distinguishes them). The chat uses it to recover the fresh-session view
+// when the in-component reset continuation was lost (remount/refresh during the haiku handoff).
+export interface ActivityEventSessionRotated {
+  kind: 'session_rotated'
+  source: string
+  trigger: string
+  /** null/absent for a manual reset; the context size + cap for an auto-rotate. */
+  context_tokens?: number
+  threshold?: number
+  handoff: boolean
+}
+
 // spec-051: rate-limit hit mid-run; project policy is "ask" → prompt operator
 // to auto-resume when the window resets. Resolved via api.deferredConfirm.
 export interface ActivityEventRateLimitPrompt {
@@ -629,6 +642,7 @@ export type ActivityEvent =
   | ActivityEventRateLimitPrompt
   | ActivityEventBoard
   | ActivityEventAutoRotated
+  | ActivityEventSessionRotated
 
 export interface VersionInfo {
   current: string
