@@ -72,14 +72,21 @@ self.addEventListener('push', (event: PushEvent) => {
     renotify: Boolean(payload.tag ?? payload.data?.projectId),
   } as NotificationOptions
 
-  // spec-053 Phase B dedup: if the app is open in any window, the in-page local
-  // notification (useNotifications.notifyRunEnd) already handles the alert.
-  // Suppress the SW push notification to avoid a double notification.
+  // spec-053 Phase B dedup: if the app is VISIBLE in any window, the in-page local
+  // notification (useNotifications.notifyRunEnd) already handles the alert, so suppress
+  // the SW push to avoid a double notification.
+  //
+  // ⚠️ Must check visibilityState, NOT just clients.length. On Android, an installed PWA
+  // that is merely backgrounded (home button / switched apps, not killed) still reports a
+  // window client — so `clients.length > 0` suppressed EVERY background push, which is the
+  // whole point of push. A backgrounded client cannot fire the in-page Notification, so we
+  // must show the SW notification unless a client is actually visible (foreground).
   event.waitUntil(
     (async () => {
       const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-      if (clients.length > 0) {
-        // At least one window is open — local notification handles it; skip SW notification.
+      const hasVisibleClient = clients.some(c => (c as WindowClient).visibilityState === 'visible')
+      if (hasVisibleClient) {
+        // A foreground window handles the alert locally — skip the SW notification.
         return
       }
       await self.registration.showNotification(title, options)

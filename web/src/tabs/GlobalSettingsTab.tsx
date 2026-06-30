@@ -508,7 +508,9 @@ export function GlobalSettingsTab() {
       <section>
         <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>🔔 Notifications</h3>
         <p style={{ margin: '0 0 6px', fontSize: 12, color: 'var(--text3)' }}>
-          Local browser notifications (no server required).
+          Get notified when an agent run finishes — in the foreground, and in the background via
+          Web Push once enabled. On a phone, install Cardloop to your home screen first, then turn
+          this on and tap “Allow” when prompted.
         </p>
 
         <Row title={t['notify.settings_label']} hint={t['notify.settings_hint']}>
