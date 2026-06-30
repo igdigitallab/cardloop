@@ -484,6 +484,7 @@ export interface ActivityEventRunStart {
   source: 'card' | string
   prompt: string
   run_id: string
+  chat_id?: string
 }
 
 export interface ActivityEventText {
@@ -502,6 +503,7 @@ export interface ActivityEventRunEnd {
   kind: 'run_end'
   outcome: 'ok' | 'fail'
   run_id: string
+  chat_id?: string
 }
 
 // ─── Spec-035 L4: sub-agent bus event ────────────────────────────────────────
@@ -544,6 +546,9 @@ export interface LiveTurnSnapshot {
   board_events?: ActivityEventBoard[]
   /** Pending handoff summary from the previous session (if any). */
   pending_handoff?: string | null
+  /** The chat_id this live turn belongs to — consumers should compare with their
+   *  own effectiveChatId to avoid adopting a foreign chat's in-flight turn. */
+  chat_id?: string | null
 }
 
 // ─── Spec-039: native auto-compact notification ────────────────────────────────

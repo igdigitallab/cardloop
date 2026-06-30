@@ -5561,6 +5561,7 @@ async def api_project_live(req: web.Request) -> web.Response:
             "events": events_list,
             "board_events": board_events,
             "pending_handoff": pending_handoff,
+            "chat_id": turn.get("chat_id"),
         })
     except (TypeError, ValueError):
         # Secondary defence: if an event payload is still not JSON-safe despite the
@@ -9178,17 +9179,22 @@ async def api_project_chat(req: web.Request) -> web.Response:
 
     # Reserve slot SYNCHRONOUSLY before first await
     ctx["running"][session_key] = True
-    # Spec-035: start live turn buffer for this session
-    _live_turn_create(session_key, model, prompt)
+    # Spec-035: start live turn buffer for this session.
+    # Store the requesting chat_id in the turn so /live consumers can verify ownership.
+    _live_turn_obj = _live_turn_create(session_key, model, prompt)
+    if _req_chat_id:
+        _live_turn_obj["chat_id"] = _req_chat_id
     # Generate a short run id so the bus run_start/run_end pair is correlated.
     _chat_run_id = _uuid.uuid4().hex[:6]
     # Publish run_start to the activity bus so other tabs (and recovery after stream drop)
     # can reconstruct the in-flight turn without requiring a hard refresh.
+    # chat_id is injected so peer chat tabs in the same project can filter out foreign runs.
     _bus_publish(session_key, {
         "kind": "run_start",
         "source": "chat",
         "prompt": prompt,
         "run_id": _chat_run_id,
+        **({"chat_id": _req_chat_id} if _req_chat_id else {}),
     }, persist=True)
 
     resp = web.StreamResponse(
@@ -9330,7 +9336,10 @@ async def api_project_chat(req: web.Request) -> web.Response:
             else:
                 _buffered_event = event
             _live_ev = _live_turn_append(session_key, _buffered_event)
-            _bus_publish(session_key, _live_ev, persist=False)
+            # Inject chat_id into bus events so peer chat tabs in the same project
+            # can filter out events that belong to a different chat's run.
+            _bus_ev = {**_live_ev, "chat_id": _active_chat_id_for_run} if _active_chat_id_for_run else _live_ev
+            _bus_publish(session_key, _bus_ev, persist=False)
             if etype == "text_delta":
                 # Spec-029 §1: forward incremental text delta to the cockpit over SSE.
                 # The existing {type:"text"} block (finalized AssistantMessage TextBlock) still
@@ -9485,6 +9494,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             "source": "chat",
             "outcome": "ok" if _chat_run_ok else "fail",
             "run_id": _chat_run_id,
+            **({"chat_id": _active_chat_id_for_run} if _active_chat_id_for_run else {}),
         }, persist=True)
         # Spec-041 A3: snappy delivery — drain next queued chat item immediately on lock release.
         # Wrap in try/except so a drain failure never breaks the response teardown.

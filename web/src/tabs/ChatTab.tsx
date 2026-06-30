@@ -1321,7 +1321,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       api.sessionHistory(projectId, sessionId),
       api.chatQueue(projectId).catch(() => ({ items: [] as Array<{ id: string; text: string; created_at: number }> })),
       // Spec-035 L3: /live replaces /running — returns running state + turn history + started_at
-      api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, prompt: '', cursor: 0, events: [] as Array<Record<string, unknown>>, board_events: [], pending_handoff: null as string | null })),
+      api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, prompt: '', cursor: 0, events: [] as Array<Record<string, unknown>>, board_events: [], pending_handoff: null as string | null, chat_id: null as string | null })),
     ]).then(([histRes, queueRes, liveRes]) => {
       if (isCancelled()) return
       setQueueItems(queueRes.items)
@@ -1358,7 +1358,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         histMsgs[histMsgs.length - 1].role === 'user' &&
         histMsgs[histMsgs.length - 1].text.trim() === livePrompt
 
-      if (liveRes.running && liveRes.events.length > 0) {
+      // Multichat isolation: if the live buffer belongs to a different chat in this
+      // project, don't adopt it — treat it as "not running for us". When chat_id is
+      // absent (old server, card/TG run) fall through to normal logic (no regression).
+      const liveIsOurs = !liveRes.chat_id || !effectiveChatId || liveRes.chat_id === effectiveChatId
+      if (liveIsOurs && liveRes.running && liveRes.events.length > 0) {
         // ── Spec-035 L4: hydrate transcript from live buffer ──────────────────
         // Replay buffered events on top of session history to reconstruct the
         // in-flight turn. History is appended first; then the live events play.
@@ -1401,7 +1405,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         // Seed the SSE cursor so the activity-stream subscription starts from where
         // the snapshot left off — no gap, no duplicates.
         seedCursor(liveRes.cursor)
-      } else if (liveRes.running) {
+      } else if (liveIsOurs && liveRes.running) {
         // Running but no buffered events yet (turn just started). Still show the
         // user bubble + an open assistant message (queue-visibility fix) — a queued
         // message draining here would otherwise show NO user message at all.
@@ -1561,6 +1565,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
   // Subscribe to project activity bus (card/TG runs)
   useProjectActivity(evt => {
+    // Multichat isolation: if the event carries a chat_id and it does not match this
+    // tab's active chat, discard it. board_event is project-scoped and must pass through.
+    // monitor events are also project-scoped. Events without chat_id (card/TG runs, old
+    // server versions) are kept as before — no regression on single-chat projects.
+    const evtChatId = (evt as unknown as Record<string, unknown>).chat_id as string | undefined
+    if (evtChatId && effectiveChatId && evtChatId !== effectiveChatId && evt.kind !== 'board_event' && evt.kind !== 'monitor') return
+
     // spec-052 Phase 7: board strips are independent of the live /chat text stream —
     // a run answering must not swallow board notifications. All other bus events stay
     // gated (the POST stream is the authority for text/tool/run lifecycle on this tab).
