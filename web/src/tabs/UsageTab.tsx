@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { api, UsageDashboard } from '../api'
+import { api, UsageDashboard, UsageLimits, UsageLedger } from '../api'
+import { fmtReset, pickClass, fmtPct, LIMIT_LABELS } from '../components/usageFormat'
 
 // Full historical cost/usage dashboard over ALL ~/.claude transcripts (CLI +
 // Cardloop + sub-agents), indexed by usage_scanner.py. Hand-rolled CSS/SVG-free
@@ -89,8 +90,87 @@ function DailyChart({ rows }: { rows: UsageDashboard['by_day'] }) {
   )
 }
 
+// ── live subscription limits panel (card 3a) ─────────────────────────────────
+function LiveLimitsPanel({ data }: { data: UsageLimits }) {
+  const now = data.now
+  const keys = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'overage']
+  const rows = keys.map(k => ({ k, d: data.limits[k] })).filter(x => x.d)
+  if (!rows.length) return <div className="usage-empty">No live limit data available yet.</div>
+  return (
+    <div className="usage-live-limits">
+      {rows.map(({ k, d }) => (
+        <div key={k} className={`usage-limit-row ${pickClass(d)}`}>
+          <span className="usage-limit-label">{LIMIT_LABELS[k]}</span>
+          <span className="usage-limit-pct">{fmtPct(d.utilization) || d.status}</span>
+          <div className="usage-limit-bar">
+            <div className="usage-limit-fill" style={{ width: `${Math.round((d.utilization ?? 0) * 100)}%` }} />
+          </div>
+          <span className="usage-limit-reset">resets {fmtReset(d.resets_at, now)}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ── 24-hour UTC cost chart (card 3b) ─────────────────────────────────────────
+function HourChart({ rows }: { rows: { hour: number; turns: number; cost: number; input: number; output: number }[] }) {
+  if (!rows.length) return <div className="usage-empty">No hourly data in this range.</div>
+  const max = Math.max(1, ...rows.map(r => r.cost))
+  return (
+    <>
+      <div className="usage-daily usage-hourly">
+        {rows.map(r => {
+          const h = (r.cost / max) * 100
+          return (
+            <div
+              key={r.hour}
+              className={`usage-col${r.cost <= 0 ? ' empty' : ''}`}
+              style={{ height: `${Math.max(r.cost > 0 ? 3 : 1, h)}%` }}
+              title={`Hour ${r.hour}:00 UTC\n${fmtCost(r.cost)} · ${r.turns} turns\nout ${fmtTok(r.output)} · in ${fmtTok(r.input)}`}
+            />
+          )
+        })}
+      </div>
+      <div className="usage-daily-x"><span>0h UTC</span><span>23h UTC</span></div>
+      <div className="usage-note" style={{ marginTop: '4px' }}>Times in UTC — Anthropic throttle windows reset on UTC hour boundaries.</div>
+    </>
+  )
+}
+
+// ── Cardloop vs CLI ledger panel (card 3c) ────────────────────────────────────
+function LedgerPanel({ data }: { data: UsageLedger }) {
+  const ep = data.by_entrypoint
+  const epRows = Object.entries(ep).sort((a, b) => b[1].cost_usd - a[1].cost_usd)
+  const maxCost = Math.max(1, ...epRows.map(([, v]) => v.cost_usd))
+  const uc = data.ultracode
+  return (
+    <div className="usage-barlist">
+      {epRows.map(([key, val]) => (
+        <div className="usage-barrow" key={key} title={`${val.turns} turns · ${fmtTok(val.fresh_tokens)} fresh + ${fmtTok(val.cache_read_tokens)} cache`}>
+          <span className="bl">{key}</span>
+          <div className="usage-bartrack">
+            <div className="usage-barfill" style={{ width: `${Math.max(2, (val.cost_usd / maxCost) * 100)}%` }} />
+          </div>
+          <span className="bv"><b>{fmtCost(val.cost_usd)}</b> · {fmtNum(val.turns)} turns</span>
+        </div>
+      ))}
+      {uc.turns > 0 && (
+        <div className="usage-barrow usage-barrow-accent" title="Turns with ultracode (max-effort) enabled">
+          <span className="bl">ultracode</span>
+          <div className="usage-bartrack">
+            <div className="usage-barfill" style={{ width: `${Math.max(2, (uc.cost_usd / maxCost) * 100)}%` }} />
+          </div>
+          <span className="bv"><b>{fmtCost(uc.cost_usd)}</b> · {fmtNum(uc.turns)} turns</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function UsageTab() {
   const [data, setData] = useState<UsageDashboard | null>(null)
+  const [liveLimits, setLiveLimits] = useState<UsageLimits | null>(null)
+  const [ledger, setLedger] = useState<UsageLedger | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [days, setDays] = useState<number | 'all'>(30)
@@ -105,8 +185,14 @@ export function UsageTab() {
     if (showSpinner) setLoading(true)
     try {
       const sel = models && models.size ? [...models] : undefined
-      const res = await api.usageDashboard(days, sel)
+      const [res, limits, ldg] = await Promise.all([
+        api.usageDashboard(days, sel),
+        api.usage().catch(() => null),
+        api.usageLedger(days).catch(() => null),
+      ])
       setData(res)
+      if (limits) setLiveLimits(limits)
+      if (ldg) setLedger(ldg)
       setError(null)
       // While a background scan is running, re-poll until it settles.
       if (res.scanning) {
@@ -150,6 +236,18 @@ export function UsageTab() {
     })
   }, [])
 
+  const handleExport = useCallback(async () => {
+    try {
+      const sel = models && models.size ? [...models] : undefined
+      const blob = await api.usageExport(days, sel)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = `usage-export-${String(days)}d.csv`
+      document.body.appendChild(a); a.click()
+      document.body.removeChild(a); URL.revokeObjectURL(url)
+    } catch { /* silently ignore — server errors visible via the dashboard */ }
+  }, [days, models])
+
   const ov = data?.overview
   const allModels = data?.all_models ?? []
   const modelLabel = !models || models.size === allModels.length
@@ -192,6 +290,9 @@ export function UsageTab() {
         </div>
         <span className="usage-spacer" />
         {data?.scanning && <span className="usage-scanning">indexing…</span>}
+        <button className="usage-btn" onClick={handleExport} title="Download usage CSV (by project + branch)">
+          ⬇ CSV
+        </button>
         <button className="usage-btn" onClick={handleRescan} disabled={rescanning} title="Re-scan transcripts for new turns">
           {rescanning ? '…' : '↻ Rescan'}
         </button>
@@ -237,6 +338,17 @@ export function UsageTab() {
             </div>
           </div>
 
+          {/* ── Live subscription limits (card 3a) ── */}
+          {liveLimits && (
+            <div className="usage-card">
+              <div className="usage-card-head">
+                <span className="usage-card-title">Live subscription limits</span>
+                <span className="usage-note">current window utilization</span>
+              </div>
+              <LiveLimitsPanel data={liveLimits} />
+            </div>
+          )}
+
           {/* ── Daily cost ── */}
           <div className="usage-card">
             <div className="usage-card-head">
@@ -244,6 +356,30 @@ export function UsageTab() {
             </div>
             <DailyChart rows={data.by_day} />
           </div>
+
+          {/* ── Peak-hour view (card 3b) ── */}
+          {data.by_hour && data.by_hour.length > 0 && (
+            <div className="usage-card">
+              <div className="usage-card-head">
+                <span className="usage-card-title">Cost by hour of day (UTC)</span>
+              </div>
+              <HourChart rows={data.by_hour} />
+            </div>
+          )}
+
+          {/* ── Cardloop vs CLI (card 3c) ── */}
+          {ledger && Object.keys(ledger.by_entrypoint).length > 0 && (
+            <div className="usage-card">
+              <div className="usage-card-head">
+                <span className="usage-card-title">Cardloop vs CLI</span>
+                <span className="usage-note">Cardloop-originated turns only</span>
+              </div>
+              <LedgerPanel data={ledger} />
+              <div className="usage-note" style={{ marginTop: '6px' }}>
+                Cardloop-originated turns only, since the cost ledger was introduced (not retroactive).
+              </div>
+            </div>
+          )}
 
           {/* ── By model ── */}
           <div className="usage-card">
@@ -270,28 +406,49 @@ export function UsageTab() {
             }))} />
           </div>
 
-          {/* ── By project ── */}
+          {/* ── By project (card 3d — with branch when available) ── */}
           <div className="usage-card">
             <div className="usage-card-head"><span className="usage-card-title">Cost by project</span></div>
             <div className="usage-table-wrap">
-              <table className="usage-table">
-                <thead><tr>
-                  <th>Project</th><th className="num">Sessions</th><th className="num">Turns</th>
-                  <th className="num">Output</th><th className="num">Cost</th>
-                </tr></thead>
-                <tbody>
-                  {data.by_project.slice(0, 25).map((p, i) => (
-                    <tr key={i}>
-                      <td className="strong">{p.project}</td>
-                      <td className="num">{fmtNum(p.sessions)}</td>
-                      <td className="num">{fmtNum(p.turns)}</td>
-                      <td className="num">{fmtTok(p.output)}</td>
-                      <td className="num usage-cost">{fmtCost(p.cost)}</td>
-                    </tr>
-                  ))}
-                  {!data.by_project.length && <tr><td colSpan={5} className="usage-empty">No data in this range.</td></tr>}
-                </tbody>
-              </table>
+              {data.by_project_branch && data.by_project_branch.length > 0 ? (
+                <table className="usage-table">
+                  <thead><tr>
+                    <th>Project</th><th>Branch</th><th className="num">Sessions</th>
+                    <th className="num">Turns</th><th className="num">Output</th><th className="num">Cost</th>
+                  </tr></thead>
+                  <tbody>
+                    {data.by_project_branch.slice(0, 30).map((p, i) => (
+                      <tr key={i}>
+                        <td className="strong">{p.project}</td>
+                        <td><span className="usage-tag">{p.branch || '—'}</span></td>
+                        <td className="num">{fmtNum(p.sessions)}</td>
+                        <td className="num">{fmtNum(p.turns)}</td>
+                        <td className="num">{fmtTok(p.output)}</td>
+                        <td className="num usage-cost">{fmtCost(p.cost)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <table className="usage-table">
+                  <thead><tr>
+                    <th>Project</th><th className="num">Sessions</th><th className="num">Turns</th>
+                    <th className="num">Output</th><th className="num">Cost</th>
+                  </tr></thead>
+                  <tbody>
+                    {data.by_project.slice(0, 25).map((p, i) => (
+                      <tr key={i}>
+                        <td className="strong">{p.project}</td>
+                        <td className="num">{fmtNum(p.sessions)}</td>
+                        <td className="num">{fmtNum(p.turns)}</td>
+                        <td className="num">{fmtTok(p.output)}</td>
+                        <td className="num usage-cost">{fmtCost(p.cost)}</td>
+                      </tr>
+                    ))}
+                    {!data.by_project.length && <tr><td colSpan={5} className="usage-empty">No data in this range.</td></tr>}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
 

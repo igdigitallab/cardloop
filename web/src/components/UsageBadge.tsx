@@ -1,37 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
-
-interface RawLimit {
-  status: string
-  resets_at: number | null
-  utilization: number | null
-  ts: number
-}
+import { fmtReset, pickClass, fmtPct, LIMIT_LABELS, type RawLimit } from './usageFormat'
 
 interface UsageData {
   limits: Record<string, RawLimit>
   now: number
-}
-
-/** Formats "in 2h 15m" or "12m". */
-function fmtReset(resetsAt: number | null, now: number): string {
-  if (!resetsAt) return '—'
-  const delta = resetsAt - now
-  if (delta <= 0) return 'soon'
-  const h = Math.floor(delta / 3600)
-  const m = Math.floor((delta % 3600) / 60)
-  return h > 0 ? `${h}h ${m}m` : `${m}m`
-}
-
-/** Color by utilization: <50% green, 50–80% yellow, ≥80% red. */
-function pickClass(d: RawLimit | undefined): string {
-  if (!d) return 'usage-dim'
-  if (d.status === 'rejected') return 'usage-red'
-  if (d.status === 'allowed_warning') return 'usage-yellow'
-  const u = d.utilization ?? 0
-  if (u >= 0.8) return 'usage-red'
-  if (u >= 0.5) return 'usage-yellow'
-  return 'usage-green'
 }
 
 const USAGE_URL = 'https://claude.ai/settings/usage'
@@ -41,11 +14,6 @@ const USAGE_URL = 'https://claude.ai/settings/usage'
 function openUsage(e: React.MouseEvent) {
   e.preventDefault()
   window.open(USAGE_URL, '_blank', 'noopener,noreferrer')
-}
-
-function fmtPct(u: number | null): string {
-  if (u == null) return ''
-  return `${Math.round(u * 100)}%`
 }
 
 export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onOpen?: () => void } = {}) {
@@ -168,13 +136,7 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
           {['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'overage'].map(k => {
             const d = data.limits[k]
             if (!d) return null
-            const label = ({
-              five_hour: '5-hour window',
-              seven_day: 'Week (all)',
-              seven_day_opus: 'Week Opus',
-              seven_day_sonnet: 'Week Sonnet',
-              overage: 'Overage',
-            } as Record<string, string>)[k]
+            const label = LIMIT_LABELS[k]
             return (
               <div key={k} className={`usage-row ${pickClass(d)}`}>
                 <span className="usage-row-label">{label}</span>

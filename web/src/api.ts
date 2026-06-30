@@ -18,11 +18,33 @@ export interface UsageDashboard {
   by_day: { day: string; input: number; output: number; cache_read: number; cache_creation: number; turns: number; cost: number }[]
   by_model: UsageModelRow[]
   by_project: { project: string; sessions: number; turns: number; input: number; output: number; cost: number }[]
+  by_project_branch?: { project: string; branch: string; sessions: number; turns: number; input: number; output: number; cost: number }[]
+  by_hour?: { hour: number; turns: number; cost: number; input: number; output: number }[]
   subagents: { agent_type: string; input: number; output: number; cache_read: number; cache_creation: number; dispatches: number; turns: number; cost: number }[]
   recent_sessions: { session_id: string; project: string; branch: string; last: string; duration_min: number; model: string; turns: number; input: number; output: number; cost: number }[]
   all_models: string[]
   pricing_as_of: string
   generated_at: string
+}
+
+export interface UsageLimitRow {
+  status: string; resets_at: number | null; utilization: number | null; ts: number
+}
+export interface UsageLimits {
+  limits: Record<string, UsageLimitRow>
+  now: number
+}
+
+export interface UsageLedgerEntry {
+  turns: number; fresh_tokens: number; cache_read_tokens: number; cost_usd: number
+}
+export interface UsageLedger {
+  days: number; now: number
+  total: UsageLedgerEntry
+  by_entrypoint: Record<string, UsageLedgerEntry>
+  by_day: Record<string, UsageLedgerEntry>
+  ultracode: UsageLedgerEntry
+  top_sessions: Array<{ session_key: string; turns: number; fresh_tokens: number; cache_read_tokens: number; cost_usd: number; max_context_tokens: number; project: string | null; entrypoint: string }>
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -380,11 +402,7 @@ export const api = {
     apiFetch<{ ok: boolean }>(`/api/free/${id}`, { method: 'DELETE' }),
 
   // Claude Code subscription limits (rate_limits SDK, updated passively)
-  usage: () =>
-    apiFetch<{
-      limits: Record<string, { status: string; resets_at: number | null; utilization: number | null; ts: number }>
-      now: number
-    }>('/api/usage'),
+  usage: () => apiFetch<UsageLimits>('/api/usage'),
 
   // Usage analytics — full historical cost/usage over ALL ~/.claude transcripts
   // (CLI + Cardloop + sub-agents). days='all' for all-time; models = filter subset.
@@ -395,10 +413,25 @@ export const api = {
     return apiFetch<UsageDashboard>(`/api/usage/dashboard?${p.toString()}`)
   },
 
+  // Cardloop-originated cost ledger: by entrypoint (chat/card/deferred) + ultracode flag.
+  usageLedger: (days: number | 'all' = 7) =>
+    apiFetch<UsageLedger>(`/api/usage/ledger?days=${days === 'all' ? 9999 : days}`),
+
   // Force an immediate incremental transcript re-scan.
   usageScan: () =>
     apiFetch<{ ok: boolean; scan: { new: number; updated: number; skipped: number; turns: number; sessions: number } }>(
       '/api/usage/scan', { method: 'POST' }),
+
+  // Export usage as CSV (by project + branch).
+  usageExport: (days: number | 'all' = 30, models?: string[]): Promise<Blob> => {
+    const p = new URLSearchParams()
+    p.set('days', String(days))
+    if (models && models.length) p.set('models', models.join(','))
+    return fetch(`/api/usage/export.csv?${p.toString()}`, OPTS).then(r => {
+      if (!r.ok) throw new Error('export failed')
+      return r.blob()
+    })
+  },
 
   // Change project model (fable/opus/sonnet/haiku) — takes effect on the next request
   setModel: (id: string, model: 'fable' | 'opus' | 'sonnet' | 'haiku') =>
