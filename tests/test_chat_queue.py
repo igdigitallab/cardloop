@@ -166,6 +166,70 @@ async def test_drain_one_empty_queue_returns_false(fake_ctx):
     assert result is False
 
 
+@pytest.mark.asyncio
+async def test_drain_one_seeds_live_turn_synchronously(fake_ctx):
+    """Regression: a message queued during a session rotate must not vanish.
+
+    _chat_queue_drain_one reserves ctx['running'] synchronously, then spawns the executor
+    asynchronously. The executor used to be the first place the live-turn buffer was created —
+    leaving a window where /live reports {running:true, prompt:""}. A client that hydrates in
+    that window (handleRotate's post-rotate hydrateFromServer) renders an EMPTY turn and clobbers
+    the operator's queued message. The fix seeds the buffer WITH the prompt synchronously in
+    drain_one, in lockstep with the running flag. This test asserts that — with the executor
+    stubbed out so it can never run — the buffer is already populated.
+    """
+    session_key = "1001:42"
+    _webapp._live_turns.pop(session_key, None)
+    _webapp._chat_queue_enqueue(session_key, "drain me after rotate")
+
+    def no_run_spawn(coro):
+        coro.close()  # never run the executor; avoid "coroutine was never awaited"
+        return None
+
+    try:
+        with patch.object(_webapp, "_spawn_bg", side_effect=no_run_spawn):
+            result = await _webapp._chat_queue_drain_one(fake_ctx, session_key)
+        assert result is True
+        # Lock reserved synchronously.
+        assert fake_ctx["running"].get(session_key) is True
+        # Live-turn buffer seeded synchronously WITH the prompt — makes /live authoritative
+        # the instant the lock flips, so the post-rotate hydrate reconstructs the user bubble.
+        turn = _webapp._live_turns.get(session_key)
+        assert turn is not None, "live turn must be seeded synchronously in drain_one"
+        assert turn["prompt"] == "drain me after rotate"
+        assert turn["status"] == "running"
+    finally:
+        _webapp._live_turns.pop(session_key, None)
+        fake_ctx["running"].pop(session_key, None)
+
+
+@pytest.mark.asyncio
+async def test_redrain_soon_delivers_late_landing_item(fake_ctx):
+    """_chat_queue_redrain_soon re-drains after its delay.
+
+    Covers the operator's message landing (fire-and-forget chatQueueAdd) just AFTER the rotate's
+    lock-release drain already ran against an empty queue — it must deliver via the short re-check
+    rather than only via the 3s backstop.
+    """
+    session_key = "1001:42"
+    _webapp._live_turns.pop(session_key, None)
+    _webapp._chat_queue_enqueue(session_key, "late message")
+
+    def no_run_spawn(coro):
+        coro.close()
+        return None
+
+    try:
+        with patch.object(_webapp, "_spawn_bg", side_effect=no_run_spawn):
+            await _webapp._chat_queue_redrain_soon(fake_ctx, session_key, delay=0.01)
+        # The re-drain popped the item and reserved the lock (executor stubbed).
+        assert _webapp._chat_queue_get(session_key) == []
+        assert fake_ctx["running"].get(session_key) is True
+    finally:
+        _webapp._live_turns.pop(session_key, None)
+        fake_ctx["running"].pop(session_key, None)
+
+
 # ─────────────────────────── POST /chat busy → queued SSE ─────────────────────
 
 

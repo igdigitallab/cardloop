@@ -8893,7 +8893,11 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # Spec-035 + queue-visibility fix: track this drained turn in the live buffer
         # WITH its prompt, so a client that missed the bus run_start (snappy drain
         # racing a still-finishing stream) reconstructs the user bubble on hydration.
-        _live_turn_create(session_key, model, prompt)
+        # _chat_queue_drain_one already seeds this synchronously when it reserves the lock
+        # (so /live is authoritative the instant running flips); only create here if it
+        # is somehow missing, to avoid resetting the buffer drain_one just populated.
+        if _live_turns.get(session_key) is None:
+            _live_turn_create(session_key, model, prompt)
         _bus_publish(session_key, {
             "kind": "run_start",
             "source": "chat",
@@ -8957,8 +8961,32 @@ async def _chat_queue_drain_one(ctx: dict, session_key: str) -> bool:
         return False
     # Reserve lock synchronously before the first await.
     ctx["running"][session_key] = True
+    # Populate the live-turn buffer SYNCHRONOUSLY, in lockstep with the running flag, BEFORE
+    # spawning the executor. Otherwise there is a window where running=True but _live_turns has
+    # no entry yet (the executor populates it only after the event loop schedules it). A client
+    # that hydrates inside that window — notably handleRotate's post-rotate hydrateFromServer —
+    # sees /live as {running:true, prompt:""} and renders an EMPTY turn, clobbering the operator's
+    # queued message. Seeding the prompt here makes /live authoritative the instant the lock flips.
+    _topic = (ctx.get("topics") or {}).get(session_key) or {}
+    _qmodel = (_topic.get("model") if isinstance(_topic, dict) else None) or ctx.get("DEFAULT_MODEL", "sonnet")
+    _live_turn_create(session_key, _qmodel, item.get("text", ""))
     _spawn_bg(_chat_queue_execute(ctx, session_key, item))
     return True
+
+
+async def _chat_queue_redrain_soon(ctx: dict, session_key: str, delay: float = 0.4) -> None:
+    """Re-attempt a chat-queue drain after a short delay.
+
+    A message the operator typed during a rotate/handoff is enqueued by a fire-and-forget client
+    POST (ChatTab sendMessage → chatQueueAdd) whose request can land just AFTER the rotate's
+    lock-release drain already ran against an empty queue. Rather than wait for the 3s backstop
+    loop (which feels dead), re-check shortly so the message delivers in ~0.4s. Best-effort.
+    """
+    try:
+        await asyncio.sleep(delay)
+        await _chat_queue_drain_one(ctx, session_key)
+    except Exception as _exc:
+        print(f"[chat_queue] soft re-drain error for {session_key}: {_exc!r}")
 
 
 async def _chat_queue_drain_loop(ctx: dict) -> None:
@@ -9677,10 +9705,17 @@ async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_ha
         # (the run-lock was held for the whole haiku summary). Deliver it to the fresh
         # session now instead of waiting for the 3s backstop loop. Guarded so a drain
         # failure can never break rotation teardown.
+        _drained = False
         try:
-            await _chat_queue_drain_one(ctx, session_key)
+            _drained = await _chat_queue_drain_one(ctx, session_key)
         except Exception as _cqd_exc:
             print(f"[rotate] chat queue drain error for {session_key}: {_cqd_exc!r}")
+        # The client fires chatQueueAdd fire-and-forget, so the operator's message can still be
+        # in flight and land just after the drain above ran against an empty queue. If nothing
+        # drained, re-check in ~0.4s so it delivers promptly rather than waiting for the 3s
+        # backstop (which made the queued message feel like it vanished). Spawned, never awaited.
+        if not _drained:
+            _spawn_bg(_chat_queue_redrain_soon(ctx, session_key))
 
 
 async def _maybe_auto_rotate(ctx: dict, project: dict, session_key: str, ctx_tokens: int,
