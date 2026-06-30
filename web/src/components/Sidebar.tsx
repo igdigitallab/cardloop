@@ -39,6 +39,8 @@ interface Props {
   terminalActive?: boolean
   onOpenVault?: () => void
   vaultActive?: boolean
+  onOpenUsage?: () => void
+  usageActive?: boolean
   onOpenGlobalFiles?: () => void
   globalFilesActive?: boolean
   onOpenSchedules?: () => void
@@ -90,6 +92,7 @@ export function Sidebar({
   onProjectsReload, onOpenProjectSettings,
   theme, onThemeChange,
   onOpenTerminal, terminalActive, onOpenVault, vaultActive,
+  onOpenUsage, usageActive,
   onOpenGlobalFiles, globalFilesActive, onOpenSchedules, schedulesActive,
   onOpenSettingsGlobal, settingsGlobalActive,
 }: Props) {
@@ -1102,6 +1105,8 @@ export function Sidebar({
                 onClick={onOpenTerminal} title="Terminal" aria-label="Terminal">⌨</button>
         <button className={`sidebar-tool-btn${vaultActive ? ' active' : ''}`}
                 onClick={onOpenVault} title="Vault" aria-label="Vault">🔐</button>
+        <button className={`sidebar-tool-btn${usageActive ? ' active' : ''}`}
+                onClick={onOpenUsage} title="Usage & cost" aria-label="Usage">📊</button>
         <button className={`sidebar-tool-btn${globalFilesActive ? ' active' : ''}`}
                 onClick={onOpenGlobalFiles} title="Server files (~)" aria-label="Server files">📁</button>
         <button className={`sidebar-tool-btn${schedulesActive ? ' active' : ''}`}

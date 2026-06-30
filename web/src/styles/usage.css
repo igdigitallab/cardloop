@@ -1,0 +1,111 @@
+/* ── Usage / Cost dashboard (transcript-scan analytics) ──────────────────────
+   Hand-rolled charts (no charting lib) to stay zero-bundle-weight + on-brand
+   with the achromatic Graphite & Chalk system. Token series use the only
+   semantic colours in the palette (green = cheap cache-read lane, yellow =
+   premium cache-write) so the bars read as cost, not decoration. */
+
+.usage-container {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* ── Header / filter bar ── */
+.usage-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.usage-head h2 { font-size: 17px; font-weight: 650; color: var(--text); margin-right: 4px; }
+.usage-head .usage-spacer { flex: 1; }
+.usage-meta { color: var(--text3); font-size: 11px; font-family: var(--mono); white-space: nowrap; }
+.usage-scanning { color: var(--yellow); font-size: 11px; display: inline-flex; align-items: center; gap: 5px; }
+.usage-scanning::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--yellow); animation: usage-pulse 1.1s ease-in-out infinite; }
+@keyframes usage-pulse { 0%,100% { opacity: 0.35 } 50% { opacity: 1 } }
+
+.usage-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.usage-seg button { padding: 4px 10px; background: transparent; border: none; border-right: 1px solid var(--border); color: var(--text2); font-size: 12px; cursor: pointer; transition: var(--transition); }
+.usage-seg button:last-child { border-right: none; }
+.usage-seg button:hover { background: var(--bg3); color: var(--text); }
+.usage-seg button.active { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+
+.usage-btn { padding: 4px 11px; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text2); font-size: 12px; cursor: pointer; transition: var(--transition); }
+.usage-btn:hover { color: var(--text); border-color: var(--border2); }
+.usage-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Model filter dropdown ── */
+.usage-modelsel { position: relative; }
+.usage-modelsel-panel {
+  position: absolute; top: calc(100% + 5px); right: 0; z-index: 40;
+  min-width: 220px; max-height: 320px; overflow-y: auto;
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius);
+  padding: 7px;
+}
+.usage-modelsel-actions { display: flex; gap: 6px; padding-bottom: 7px; margin-bottom: 5px; border-bottom: 1px solid var(--border); }
+.usage-modelsel-row { display: flex; align-items: center; gap: 8px; padding: 6px 7px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; color: var(--text2); user-select: none; }
+.usage-modelsel-row:hover { background: var(--bg3); color: var(--text); }
+.usage-modelsel-row.on { color: var(--text); }
+.usage-modelsel-box { width: 14px; height: 14px; border: 1px solid var(--border2); border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: transparent; flex-shrink: 0; }
+.usage-modelsel-row.on .usage-modelsel-box { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+
+/* ── Stat cards ── */
+.usage-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.usage-stat { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
+.usage-stat .lbl { color: var(--text3); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+.usage-stat .val { font-size: 21px; font-weight: 700; color: var(--text); font-family: var(--mono); line-height: 1.1; }
+.usage-stat .sub { color: var(--text3); font-size: 11px; margin-top: 4px; }
+.usage-stat.accent .val { color: var(--text); }
+
+/* ── Card (chart / table wrapper) ── */
+.usage-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.usage-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.usage-card-title { font-size: 12px; font-weight: 650; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em; }
+.usage-legend { display: flex; gap: 12px; flex-wrap: wrap; }
+.usage-legend span { font-size: 11px; color: var(--text3); display: inline-flex; align-items: center; gap: 5px; }
+.usage-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+
+/* ── Daily cost chart (CSS columns — fully responsive, no charting lib).
+   One bar per day = notional cost. Cost (not raw tokens) because cache_read
+   dwarfs everything ~100:1, so a token stack would be ~99% one colour; cost
+   weights output ×50 / cache_read ×0.1 and reads as actual spend. */
+.usage-daily { display: flex; align-items: flex-end; gap: 3px; height: 180px; }
+.usage-col { flex: 1 1 0; min-width: 2px; align-self: flex-end; background: var(--text2); border-radius: 2px 2px 0 0; transition: background 0.12s; }
+.usage-col:hover { background: var(--text); }
+.usage-col.empty { background: var(--bg4); }
+.usage-daily-x { display: flex; justify-content: space-between; margin-top: 7px; color: var(--text3); font-size: 9px; font-family: var(--mono); }
+
+/* ── Horizontal bar list (by-model / sub-agents) ── */
+.usage-barlist { display: flex; flex-direction: column; gap: 9px; }
+.usage-barrow { display: grid; grid-template-columns: 130px 1fr auto; align-items: center; gap: 10px; }
+.usage-barrow .bl { font-size: 12px; color: var(--text); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.usage-bartrack { height: 18px; background: var(--bg3); border-radius: var(--radius-sm); overflow: hidden; }
+.usage-barfill { height: 100%; background: var(--text2); border-radius: var(--radius-sm); min-width: 2px; transition: width 0.3s ease; }
+.usage-barrow .bv { font-size: 12px; color: var(--text2); font-family: var(--mono); white-space: nowrap; text-align: right; }
+.usage-barrow .bv b { color: var(--text); font-weight: 600; }
+
+/* ── Tables ── */
+.usage-table-wrap { overflow-x: auto; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.usage-table th { text-align: left; padding: 7px 10px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text3); border-bottom: 1px solid var(--border); white-space: nowrap; }
+.usage-table th.num, .usage-table td.num { text-align: right; font-family: var(--mono); }
+.usage-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text2); white-space: nowrap; }
+.usage-table tr:last-child td { border-bottom: none; }
+.usage-table tr:hover td { background: var(--bg3); }
+.usage-table td.strong { color: var(--text); }
+.usage-cost { color: var(--green); font-family: var(--mono); }
+.usage-tag { display: inline-block; padding: 1px 7px; border-radius: var(--radius-sm); font-size: 10.5px; background: var(--bg4); color: var(--text2); font-family: var(--mono); }
+
+.usage-empty { color: var(--text3); font-size: 13px; text-align: center; padding: 40px 0; }
+.usage-note { color: var(--text3); font-size: 11px; line-height: 1.6; }
+.usage-note b { color: var(--text2); }
+
+@media (max-width: 560px) {
+  .usage-container { padding: 12px; gap: 14px; }
+  .usage-barrow { grid-template-columns: 96px 1fr auto; gap: 7px; }
+  .usage-barrow .bl { font-size: 11px; }
+}

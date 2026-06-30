@@ -48,7 +48,7 @@ function fmtPct(u: number | null): string {
   return `${Math.round(u * 100)}%`
 }
 
-export function UsageBadge({ compact = false }: { compact?: boolean } = {}) {
+export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onOpen?: () => void } = {}) {
   const [data, setData] = useState<UsageData | null>(null)
   const [hover, setHover] = useState(false)
   // compact (mobile): tap toggles the full breakdown instead of opening an external link.
@@ -138,8 +138,8 @@ export function UsageBadge({ compact = false }: { compact?: boolean } = {}) {
           href={USAGE_URL}
           target="_blank"
           rel="noopener noreferrer"
-          onClick={openUsage}
-          title="Claude Code subscription limits (click — claude.ai/settings/usage)"
+          onClick={(e) => { if (onOpen) { e.preventDefault(); onOpen() } else { openUsage(e) } }}
+          title={onOpen ? 'Usage & cost dashboard (hover for live limits)' : 'Claude Code subscription limits (click — claude.ai/settings/usage)'}
         >
           <span className="usage-icon">{icon}</span>
           {pct && <span>{pct}</span>}
@@ -168,17 +168,24 @@ export function UsageBadge({ compact = false }: { compact?: boolean } = {}) {
               </div>
             )
           })}
-          {compact && (
-            <a
+          {onOpen && (
+            <button
               className="usage-dropdown-link"
-              href={USAGE_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={openUsage}
+              style={{ background: 'none', border: 'none', width: '100%', textAlign: 'left', cursor: 'pointer', font: 'inherit' }}
+              onClick={() => { setExpanded(false); setHover(false); onOpen() }}
             >
-              Open on claude.ai →
-            </a>
+              📊 Open dashboard
+            </button>
           )}
+          <a
+            className="usage-dropdown-link"
+            href={USAGE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={openUsage}
+          >
+            Open on claude.ai ↗
+          </a>
         </div>
       )}
     </div>

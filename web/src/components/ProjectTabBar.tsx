@@ -29,6 +29,10 @@ interface Props {
   vaultActive: boolean
   onOpenVault: () => void
   onCloseVault: () => void
+  usageOpen: boolean
+  usageActive: boolean
+  onOpenUsage: () => void
+  onCloseUsage: () => void
   terminalOpen: boolean
   terminalActive: boolean
   onOpenTerminal: () => void
@@ -159,6 +163,7 @@ export function ProjectTabBar({
   globalFilesOpen, globalFilesActive, onOpenGlobalFiles, onCloseGlobalFiles,
   schedulesOpen, schedulesActive, onOpenSchedules, onCloseSchedules,
   vaultOpen, vaultActive, onOpenVault, onCloseVault,
+  usageOpen, usageActive, onOpenUsage, onCloseUsage,
   terminalOpen, terminalActive, onOpenTerminal, onCloseTerminal,
   settingsGlobalOpen, settingsGlobalActive, onOpenSettingsGlobal, onCloseSettingsGlobal,
   onToggleDrawer, mobileScreen, onGoToProjectList,
@@ -368,6 +373,23 @@ export function ProjectTabBar({
             )}
           </div>
         )}
+        {/* Usage dashboard special tab */}
+        {usageOpen && (
+          <div
+            className={`ptab ptab-global-files ${usageActive ? 'active' : ''}`}
+            onClick={onOpenUsage}
+            title="Usage & cost"
+          >
+            <span className="ptab-name">📊 Usage</span>
+            {usageActive && (
+              <button
+                className="ptab-close"
+                onClick={e => { e.stopPropagation(); onCloseUsage() }}
+                title="Close"
+              >✕</button>
+            )}
+          </div>
+        )}
         {/* Terminal special tab */}
         {terminalOpen && (
           <div
@@ -414,7 +436,7 @@ export function ProjectTabBar({
       {/* Global tool launchers (Terminal / Vault / Schedules / Files / Settings)
           now live in the sidebar tools row — see Sidebar.tsx. Kept off the top bar
           to declutter it and to give the launchers mobile parity (sidebar = drawer). */}
-      <UsageBadge />
+      <UsageBadge onOpen={onOpenUsage} />
     </div>
   )
 }

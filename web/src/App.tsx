@@ -10,6 +10,7 @@ import { Spinner } from './components/Spinner'
 import { GlobalFilesTab } from './tabs/GlobalFilesTab'
 import { SchedulesTab } from './tabs/SchedulesTab'
 import { VaultTab } from './tabs/VaultTab'
+import { UsageTab } from './tabs/UsageTab'
 import { TerminalTab } from './tabs/TerminalTab'
 import { GlobalSettingsTab } from './tabs/GlobalSettingsTab'
 import { useToast, ToastContainer } from './components/Toast'
@@ -23,6 +24,7 @@ const SCHEDULES_ID = '__schedules__'
 const VAULT_ID = '__vault__'
 const TERMINAL_ID = '__terminal__'
 const SETTINGS_ID = '__settings__'
+const USAGE_ID = '__usage__'
 
 type AuthState = 'loading' | 'unauthed' | 'authed'
 
@@ -124,6 +126,8 @@ export default function App() {
   const [schedulesOpen, setSchedulesOpen] = useState<boolean>(false)
   // Vault tab (global)
   const [vaultOpen, setVaultOpen] = useState<boolean>(false)
+  // Usage & cost tab (global)
+  const [usageOpen, setUsageOpen] = useState<boolean>(false)
   // Terminal tab (global)
   const [terminalOpen, setTerminalOpen] = useState<boolean>(false)
   // Global settings tab (global)
@@ -333,7 +337,7 @@ export default function App() {
       const next = prev.filter(id => valid.has(id))
       return next.length === prev.length ? prev : next
     })
-    setActiveId(prev => prev === GLOBAL_FILES_ID || prev === SCHEDULES_ID || prev === VAULT_ID || prev === TERMINAL_ID || prev === SETTINGS_ID || (prev && valid.has(prev)) ? prev : null)
+    setActiveId(prev => prev === GLOBAL_FILES_ID || prev === SCHEDULES_ID || prev === VAULT_ID || prev === TERMINAL_ID || prev === SETTINGS_ID || prev === USAGE_ID || (prev && valid.has(prev)) ? prev : null)
     setSplitPairs(prev => {
       const next: Record<string, string> = {}
       let changed = false
@@ -592,6 +596,18 @@ export default function App() {
   const handleCloseVault = useCallback(() => {
     setVaultOpen(false)
     setActiveId(prev => prev === VAULT_ID ? (openIds[0] || null) : prev)
+  }, [openIds])
+
+  const handleOpenUsage = useCallback(() => {
+    setUsageOpen(true)
+    setActiveId(USAGE_ID)
+    setDrawerOpen(false)
+    setMobileScreen('project')
+  }, [])
+
+  const handleCloseUsage = useCallback(() => {
+    setUsageOpen(false)
+    setActiveId(prev => prev === USAGE_ID ? (openIds[0] || null) : prev)
   }, [openIds])
 
   const handleOpenTerminal = useCallback(() => {
@@ -872,6 +888,8 @@ export default function App() {
         terminalActive={activeId === TERMINAL_ID}
         onOpenVault={handleOpenVault}
         vaultActive={activeId === VAULT_ID}
+        onOpenUsage={handleOpenUsage}
+        usageActive={activeId === USAGE_ID}
         onOpenGlobalFiles={handleOpenGlobalFiles}
         globalFilesActive={activeId === GLOBAL_FILES_ID}
         onOpenSchedules={handleOpenSchedules}
@@ -904,6 +922,10 @@ export default function App() {
           vaultActive={activeId === VAULT_ID}
           onOpenVault={handleOpenVault}
           onCloseVault={handleCloseVault}
+          usageOpen={usageOpen}
+          usageActive={activeId === USAGE_ID}
+          onOpenUsage={handleOpenUsage}
+          onCloseUsage={handleCloseUsage}
           terminalOpen={terminalOpen}
           terminalActive={activeId === TERMINAL_ID}
           onOpenTerminal={handleOpenTerminal}
@@ -958,6 +980,21 @@ export default function App() {
             }}
           >
             <VaultTab />
+          </div>
+        )}
+
+        {/* Usage & cost tab — global, always mounted when open */}
+        {usageOpen && (
+          <div
+            className="main-content"
+            style={{
+              display: activeId === USAGE_ID ? 'flex' : 'none',
+              flexDirection: 'column',
+              padding: 0,
+              overflow: 'hidden',
+            }}
+          >
+            <UsageTab />
           </div>
         )}
 
@@ -1034,7 +1071,7 @@ export default function App() {
         })}
 
         {/* Welcome — only when no open projects and not in the global file browser, schedules, or vault */}
-        {!hasOpen && activeId !== GLOBAL_FILES_ID && activeId !== SCHEDULES_ID && activeId !== VAULT_ID && activeId !== TERMINAL_ID && (
+        {!hasOpen && activeId !== GLOBAL_FILES_ID && activeId !== SCHEDULES_ID && activeId !== VAULT_ID && activeId !== TERMINAL_ID && activeId !== USAGE_ID && (
           <div className="main-content">
             <div className="welcome">
               <div className="welcome-icon">⚡</div>

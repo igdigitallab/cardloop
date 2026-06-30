@@ -1,5 +1,30 @@
 const OPTS: RequestInit = { credentials: 'include' }
 
+// Usage analytics payload (GET /api/usage/dashboard) — full historical cost/usage
+// indexed from ALL ~/.claude transcripts by usage_scanner.py.
+export interface UsageModelRow {
+  model: string; input: number; output: number
+  cache_read: number; cache_creation: number; turns: number; cost: number
+}
+export interface UsageDashboard {
+  ready: boolean
+  error?: string
+  scanning?: boolean
+  days: number | null
+  overview: {
+    input: number; output: number; cache_read: number; cache_creation: number
+    turns: number; cost: number; sessions: number; subagent_turns: number; subagent_cost: number
+  }
+  by_day: { day: string; input: number; output: number; cache_read: number; cache_creation: number; turns: number; cost: number }[]
+  by_model: UsageModelRow[]
+  by_project: { project: string; sessions: number; turns: number; input: number; output: number; cost: number }[]
+  subagents: { agent_type: string; input: number; output: number; cache_read: number; cache_creation: number; dispatches: number; turns: number; cost: number }[]
+  recent_sessions: { session_id: string; project: string; branch: string; last: string; duration_min: number; model: string; turns: number; input: number; output: number; cost: number }[]
+  all_models: string[]
+  pricing_as_of: string
+  generated_at: string
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { ...OPTS, ...init })
   if (!res.ok) {
@@ -360,6 +385,20 @@ export const api = {
       limits: Record<string, { status: string; resets_at: number | null; utilization: number | null; ts: number }>
       now: number
     }>('/api/usage'),
+
+  // Usage analytics — full historical cost/usage over ALL ~/.claude transcripts
+  // (CLI + Cardloop + sub-agents). days='all' for all-time; models = filter subset.
+  usageDashboard: (days: number | 'all' = 30, models?: string[]) => {
+    const p = new URLSearchParams()
+    p.set('days', String(days))
+    if (models && models.length) p.set('models', models.join(','))
+    return apiFetch<UsageDashboard>(`/api/usage/dashboard?${p.toString()}`)
+  },
+
+  // Force an immediate incremental transcript re-scan.
+  usageScan: () =>
+    apiFetch<{ ok: boolean; scan: { new: number; updated: number; skipped: number; turns: number; sessions: number } }>(
+      '/api/usage/scan', { method: 'POST' }),
 
   // Change project model (fable/opus/sonnet/haiku) — takes effect on the next request
   setModel: (id: string, model: 'fable' | 'opus' | 'sonnet' | 'haiku') =>
