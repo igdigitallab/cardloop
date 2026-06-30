@@ -8,11 +8,13 @@ Does NOT import bot.py directly (re-import would create a second instance).
 
 import asyncio
 import contextlib
+import csv
 import glob
 import hashlib
 import json
 import logging
 import ipaddress
+import io
 import os
 import re
 import secrets
@@ -6035,6 +6037,56 @@ async def api_usage_scan(req: web.Request) -> web.Response:
     async with _get_usage_scan_lock():
         res = await _run_usage_scan(ctx)
     return web.json_response({"ok": True, "scan": res})
+
+
+async def api_usage_export(req: web.Request) -> web.Response:
+    """GET /api/usage/export.csv?days=N&models=...
+    Returns usage by (project, branch) as a CSV download.
+    Also includes a by-day summary appended after a blank separator row.
+    """
+    ctx = req.app["ctx"]
+    import usage_scanner
+    raw_days = req.query.get("days", "30")
+    if raw_days in ("all", "0", ""):
+        days = None
+    else:
+        try:
+            days = max(1, int(raw_days))
+        except (TypeError, ValueError):
+            days = 30
+    models_param = req.query.get("models", "").strip()
+    models = [m for m in (s.strip() for s in models_param.split(",")) if m] if models_param else None
+
+    db_path = _usage_db_path(ctx)
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(
+        None, lambda: usage_scanner.dashboard_data(db_path=db_path, days=days, models=models))
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    # Section 1: by project + branch
+    writer.writerow(["project", "branch", "sessions", "turns", "input_tokens",
+                     "output_tokens", "notional_cost_usd"])
+    for row in data.get("by_project_branch", []):
+        writer.writerow([row["project"], row["branch"], row["sessions"],
+                         row["turns"], row["input"], row["output"], row["cost"]])
+
+    # Separator
+    writer.writerow([])
+
+    # Section 2: by day
+    writer.writerow(["date", "turns", "input_tokens", "output_tokens", "notional_cost_usd"])
+    for row in data.get("by_day", []):
+        writer.writerow([row["day"], row["turns"], row["input"], row["output"], row["cost"]])
+
+    content = buf.getvalue().encode("utf-8")
+    label = f"{days}d" if days else "all"
+    return web.Response(
+        body=content,
+        content_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="usage-export-{label}.csv"'},
+    )
 
 
 # ───────────────────────────── Model registry (live) ─────────────────────────────
@@ -12259,6 +12311,7 @@ async def start(ctx: dict) -> None:
         # Usage analytics — full historical cost/usage over ALL ~/.claude transcripts (CLI + Cardloop + sub-agents)
         app.router.add_get("/api/usage/dashboard", api_usage_dashboard)
         app.router.add_post("/api/usage/scan", api_usage_scan)
+        app.router.add_get("/api/usage/export.csv", api_usage_export)
         app.router.add_get("/api/models", api_models)
         # Prompt templates (global, data/prompts.json)
         app.router.add_get("/api/prompts", api_prompts_list)

@@ -247,3 +247,54 @@ def test_dashboard_no_db(tmp_path):
     d = usage_scanner.dashboard_data(db_path=tmp_path / "missing.db", days=30)
     assert d.get("ready") is False
     assert d.get("error") == "no_data"
+
+
+def test_dashboard_by_hour_shape(tmp_path):
+    """by_hour always has exactly 24 slots (zero-filled) and counts are correct."""
+    proj = tmp_path / "projects" / "demo"
+    proj.mkdir(parents=True)
+    db = tmp_path / "usage.db"
+    # Place two turns at different UTC hours
+    _write_jsonl(proj / "s.jsonl", [
+        _assistant("S1", "m1", ts="2026-06-20T02:00:00Z", out=100),
+        _assistant("S1", "m2", ts="2026-06-20T14:00:00Z", out=200),
+    ])
+    usage_scanner.scan(projects_dir=tmp_path / "projects", db_path=db)
+    d = usage_scanner.dashboard_data(db_path=db, days=None)
+    assert "by_hour" in d
+    by_hour = d["by_hour"]
+    assert len(by_hour) == 24
+    assert all("hour" in r and "turns" in r and "cost" in r for r in by_hour)
+    hours = {r["hour"]: r for r in by_hour}
+    assert hours[2]["turns"] == 1
+    assert hours[2]["output"] == 100
+    assert hours[14]["turns"] == 1
+    assert hours[14]["output"] == 200
+    # All other hours zero-filled
+    assert hours[0]["turns"] == 0 and hours[0]["cost"] == 0.0
+
+
+def test_dashboard_by_project_branch(tmp_path):
+    """by_project_branch splits usage by (project, branch) pair."""
+    proj = tmp_path / "projects" / "myapp"
+    proj.mkdir(parents=True)
+    db = tmp_path / "usage.db"
+    # Two sessions on different branches in the same project
+    lines = [
+        _assistant("S1", "m1", ts="2026-06-20T10:00:00Z", out=100),
+        _assistant("S2", "m2", ts="2026-06-20T11:00:00Z", out=200),
+    ]
+    # Patch gitBranch in each record manually
+    import json as _json
+    r1 = _json.loads(lines[0]); r1["gitBranch"] = "main"; lines[0] = _json.dumps(r1)
+    r2 = _json.loads(lines[1]); r2["gitBranch"] = "feature"; lines[1] = _json.dumps(r2)
+    _write_jsonl(proj / "s.jsonl", lines)
+    usage_scanner.scan(projects_dir=tmp_path / "projects", db_path=db)
+    d = usage_scanner.dashboard_data(db_path=db, days=None)
+    assert "by_project_branch" in d
+    pb = d["by_project_branch"]
+    branches = {r["branch"]: r for r in pb}
+    assert "main" in branches
+    assert "feature" in branches
+    assert branches["main"]["output"] == 100
+    assert branches["feature"]["output"] == 200

@@ -573,6 +573,28 @@ def dashboard_data(db_path: Path | str = DEFAULT_DB_PATH,
     by_day = [{"day": d, **{k: (round(v, 4) if k == "cost" else v) for k, v in b.items()}}
               for d, b in sorted(by_day_raw.items())]
 
+    # ── by hour (UTC, 0–23, peak-hour view) ──────────────────────────────────
+    hour_raw: dict[int, dict] = {h: {"input": 0, "output": 0, "cache_read": 0,
+                                      "cache_creation": 0, "turns": 0, "cost": 0.0}
+                                  for h in range(24)}
+    for r in conn.execute(f"""
+        SELECT CAST(substr(t.timestamp,12,2) AS INT) hour,
+               COALESCE(NULLIF(t.model,''),'unknown') model,
+               SUM(t.input_tokens) input, SUM(t.output_tokens) output,
+               SUM(t.cache_read_tokens) cache_read, SUM(t.cache_creation_tokens) cache_creation,
+               COUNT(*) turns
+        FROM turns t {where}
+        GROUP BY CAST(substr(t.timestamp,12,2) AS INT), COALESCE(NULLIF(t.model,''),'unknown')
+        ORDER BY hour""", args):
+        h = r["hour"] or 0
+        if 0 <= h < 24:
+            b = hour_raw[h]
+            for k in ("input", "output", "cache_read", "cache_creation", "turns"):
+                b[k] += r[k] or 0
+            b["cost"] += cost(r)
+    by_hour = [{"hour": h, **{k: (round(v, 4) if k == "cost" else v) for k, v in b.items()}}
+               for h, b in sorted(hour_raw.items())]
+
     # ── by project (JOIN sessions for friendly name) ─────────────────────────
     by_project = []
     for r in conn.execute(f"""
@@ -594,6 +616,28 @@ def dashboard_data(db_path: Path | str = DEFAULT_DB_PATH,
         p["sessions"] = max(p["sessions"], r["sessions"]); p["cost"] += r["cost"]
     by_project = sorted(({**p, "cost": round(p["cost"], 4)} for p in proj_agg.values()),
                         key=lambda x: x["cost"], reverse=True)
+
+    # ── by project + branch (card 3d — for CSV export and branch-level table) ─
+    pb_agg: dict[tuple, dict] = {}
+    for r in conn.execute(f"""
+        SELECT COALESCE(s.project_name,'unknown') project,
+               COALESCE(s.git_branch,'') branch,
+               COALESCE(NULLIF(t.model,''),'unknown') model,
+               SUM(t.input_tokens) input, SUM(t.output_tokens) output,
+               SUM(t.cache_read_tokens) cache_read, SUM(t.cache_creation_tokens) cache_creation,
+               COUNT(*) turns, COUNT(DISTINCT t.session_id) sessions
+        FROM turns t LEFT JOIN sessions s ON t.session_id = s.session_id
+        {where}
+        GROUP BY COALESCE(s.project_name,'unknown'), COALESCE(s.git_branch,''),
+                 COALESCE(NULLIF(t.model,''),'unknown')""", args):
+        key = (r["project"], r["branch"])
+        p = pb_agg.setdefault(key, {"project": r["project"], "branch": r["branch"],
+                                     "sessions": 0, "turns": 0, "input": 0, "output": 0, "cost": 0.0})
+        p["turns"] += r["turns"]; p["input"] += r["input"]; p["output"] += r["output"]
+        p["sessions"] = max(p["sessions"], r["sessions"]); p["cost"] += cost(r)
+    by_project_branch = sorted(
+        ({**p, "cost": round(p["cost"], 4)} for p in pb_agg.values()),
+        key=lambda x: x["cost"], reverse=True)
 
     # ── sub-agent tokens by type ─────────────────────────────────────────────
     subagent_by_type: dict[str, dict] = {}
@@ -662,8 +706,10 @@ def dashboard_data(db_path: Path | str = DEFAULT_DB_PATH,
                      "sessions": distinct_sessions,
                      "subagent_turns": sub_turns, "subagent_cost": round(sub_cost, 4)},
         "by_day": by_day,
+        "by_hour": by_hour,
         "by_model": by_model,
         "by_project": by_project,
+        "by_project_branch": by_project_branch,
         "subagents": subagents,
         "recent_sessions": recent,
         "all_models": all_models,
