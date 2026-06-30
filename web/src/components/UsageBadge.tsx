@@ -168,15 +168,20 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
               </div>
             )
           })}
-          {onOpen && (
-            <button
-              className="usage-dropdown-link"
-              style={{ background: 'none', border: 'none', width: '100%', textAlign: 'left', cursor: 'pointer', font: 'inherit' }}
-              onClick={() => { setExpanded(false); setHover(false); onOpen() }}
-            >
-              📊 Open dashboard
-            </button>
-          )}
+          {/* Always offered: the desktop tab-bar badge passes onOpen directly; the
+              mobile composer badge (compact, no handler in deep ChatTab) falls back
+              to a window event App listens for. Either way the dropdown opens the tab. */}
+          <button
+            className="usage-dropdown-link"
+            style={{ background: 'none', border: 'none', width: '100%', textAlign: 'left', cursor: 'pointer', font: 'inherit' }}
+            onClick={() => {
+              setExpanded(false); setHover(false)
+              if (onOpen) onOpen()
+              else window.dispatchEvent(new CustomEvent('cops:open-usage'))
+            }}
+          >
+            📊 Open dashboard
+          </button>
           <a
             className="usage-dropdown-link"
             href={USAGE_URL}

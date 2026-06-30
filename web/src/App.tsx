@@ -610,6 +610,14 @@ export default function App() {
     setActiveId(prev => prev === USAGE_ID ? (openIds[0] || null) : prev)
   }, [openIds])
 
+  // The mobile composer's compact UsageBadge lives deep in ChatTab with no direct
+  // handler — it asks to open the global Usage tab via this window event.
+  useEffect(() => {
+    const open = () => handleOpenUsage()
+    window.addEventListener('cops:open-usage', open)
+    return () => window.removeEventListener('cops:open-usage', open)
+  }, [handleOpenUsage])
+
   const handleOpenTerminal = useCallback(() => {
     setTerminalOpen(true)
     setActiveId(TERMINAL_ID)
