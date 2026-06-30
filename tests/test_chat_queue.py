@@ -359,3 +359,123 @@ async def test_chat_busy_duplicate_of_running_prompt_dropped(aiohttp_client, fak
         _webapp._live_turns.pop(session_key, None)
         while _webapp._chat_queue_pop(session_key):
             pass
+
+
+# ─────────────────── Multichat: per-chat_id routing of drained runs ────────────
+# Two chats in one project share the project-level running lock + live buffer + bus.
+# A queued message must carry the chat_id of the tab it was typed in, so that when it
+# drains its run_start/text/run_end events and the /live buffer are stamped with that
+# chat_id — otherwise the drained run broadcasts to EVERY chat tab in the project
+# (peer tabs filter on chat_id; a missing chat_id passes their filter = duplicate bubble).
+
+
+def test_enqueue_without_chat_id_omits_field():
+    """Backward-compat: no chat_id passed → item has no chat_id key, so events carry none
+    and the peer-tab filter is a no-op (single-chat projects see no regression)."""
+    session_key = "1001:42"
+    item = _webapp._chat_queue_enqueue(session_key, "plain")
+    assert item is not None
+    assert "chat_id" not in item
+
+
+def test_enqueue_with_chat_id_records_field():
+    """_chat_queue_enqueue stores the chat_id on the item when provided."""
+    session_key = "1001:42"
+    item = _webapp._chat_queue_enqueue(session_key, "for a chat", chat_id="a1b2c3")
+    assert item is not None
+    assert item.get("chat_id") == "a1b2c3"
+
+
+@pytest.mark.asyncio
+async def test_drain_one_stamps_chat_id_on_live_turn(fake_ctx):
+    """A queued item carrying chat_id stamps the live-turn buffer, so /live reports the
+    owning chat_id and peer tabs (hydrate + poll) don't adopt the run as their own."""
+    session_key = "1001:42"
+    _webapp._live_turns.pop(session_key, None)
+    _webapp._chat_queue_enqueue(session_key, "msg for chat B", chat_id="a1b2c3")
+
+    def no_run_spawn(coro):
+        coro.close()  # never run the executor
+        return None
+
+    try:
+        with patch.object(_webapp, "_spawn_bg", side_effect=no_run_spawn):
+            result = await _webapp._chat_queue_drain_one(fake_ctx, session_key)
+        assert result is True
+        turn = _webapp._live_turns.get(session_key)
+        assert turn is not None
+        assert turn.get("chat_id") == "a1b2c3", f"live turn missing chat_id: {turn}"
+    finally:
+        _webapp._live_turns.pop(session_key, None)
+        fake_ctx["running"].pop(session_key, None)
+
+
+@pytest.mark.asyncio
+async def test_drained_run_bus_events_carry_chat_id(fake_ctx):
+    """run_start / text / run_end from a drained queue item all carry the originating
+    chat_id, so peer chat tabs in the same project filter them out (no duplicate bubbles)."""
+    session_key = "1001:42"
+    _webapp._live_turns.pop(session_key, None)
+    item = _webapp._chat_queue_enqueue(session_key, "hello", chat_id="a1b2c3")
+    assert item is not None and item["chat_id"] == "a1b2c3"
+
+    bus_q = _webapp._bus_subscribe(session_key)
+
+    async def mock_run_engine(**kwargs):
+        yield {"type": "text", "text": "answer"}
+        yield {"type": "result", "session_id": "sess-x"}
+
+    fake_ctx["run_engine"] = mock_run_engine
+
+    def fake_spawn_bg(coro):
+        return asyncio.ensure_future(coro)
+
+    try:
+        with patch.object(_webapp, "_spawn_bg", side_effect=fake_spawn_bg), \
+             patch.object(_webapp, "_secrets_read", return_value={}), \
+             patch.object(_webapp, "_build_agents_kwargs", return_value={}):
+            assert await _webapp._chat_queue_drain_one(fake_ctx, session_key) is True
+            await asyncio.sleep(0.05)
+
+        bus_events = []
+        while not bus_q.empty():
+            bus_events.append(bus_q.get_nowait())
+
+        for kind in ("run_start", "text", "run_end"):
+            evs = [e for e in bus_events if e.get("kind") == kind]
+            assert evs, f"{kind} not published: {bus_events}"
+            for e in evs:
+                assert e.get("chat_id") == "a1b2c3", f"{kind} missing chat_id: {e}"
+    finally:
+        _webapp._bus_unsubscribe(session_key, bus_q)
+        _webapp._live_turns.pop(session_key, None)
+        fake_ctx["running"].pop(session_key, None)
+
+
+@pytest.mark.asyncio
+async def test_chat_busy_enqueues_with_chat_id(aiohttp_client, fake_ctx, chat_app):
+    """POST /chat while busy WITH a chat_id in the body → the queued item records that
+    chat_id (so the later drained run routes back to that tab only)."""
+    session_key = "1001:42"
+    fake_ctx["running"][session_key] = True
+    _webapp._chat_queue_init(fake_ctx)
+    while _webapp._chat_queue_pop(session_key):
+        pass
+    try:
+        client = await aiohttp_client(chat_app)
+        resp = await client.post(
+            "/api/projects/myproject/chat",
+            json={"prompt": "queue me", "chat_id": "a1b2c3"},
+            headers=_auth_headers(fake_ctx),
+        )
+        assert resp.status == 200
+        events = await _read_sse_events(resp)
+        queued = [e for e in events if e.get("type") == "queued"]
+        assert len(queued) == 1, f"expected queued frame, got: {events}"
+        item = queued[0]["item"]
+        assert item.get("chat_id") == "a1b2c3"
+        q = _webapp._chat_queue_get(session_key)
+        assert any(i["id"] == item["id"] and i.get("chat_id") == "a1b2c3" for i in q)
+    finally:
+        while _webapp._chat_queue_pop(session_key):
+            pass

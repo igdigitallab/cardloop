@@ -1535,7 +1535,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       try {
         const res = await api.projectLive(projectId)
         if (cancelled) return
-        if (res.running) {
+        // Multichat: only react to a run that belongs to THIS chat tab. A peer chat in the
+        // same project shares the project-level running lock, so /live reports running=true
+        // for the peer's run too — without this guard we'd flip busActiveRef on for a foreign
+        // run (no SSE stream attached), then finalize/clobber our own messages when it ends.
+        // chat_id absent (card/TG/old server) → treat as ours (no single-chat regression).
+        const liveIsOurs = !res.chat_id || !effectiveChatId || res.chat_id === effectiveChatId
+        if (res.running && liveIsOurs) {
           if (!busActiveRef.current) {
             busActiveRef.current = true
             // Spec-035: use server started_at to avoid re-stamping the timer on each poll
@@ -1561,7 +1567,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     sync()
     const id = setInterval(sync, 5000)
     return () => { cancelled = true; clearInterval(id) }
-  }, [isActive, projectId])
+  }, [isActive, projectId, effectiveChatId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Subscribe to project activity bus (card/TG runs)
   useProjectActivity(evt => {
@@ -1794,7 +1800,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setInput('')
       setAttachments([])
       // Enqueue server-side so the message survives a page reload.
-      api.chatQueueAdd(projectId, fullText)
+      api.chatQueueAdd(projectId, fullText, effectiveChatId || undefined)
         .then(res => setQueueItems(prev => [...prev, res.item]))
         .catch(() => {/* queue full or network — silently drop */})
       return
@@ -2084,6 +2090,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           ? 'New session — prior context will be handed off'
           : t['chat.reset_done']
         setRotateToast(toastMsg)
+        // The backend just cleared the active chat's session_id in chats.json. Mirror it in
+        // client state AND update the ref SYNCHRONOUSLY so the hydrate below reads the now-empty
+        // session — not the stale OLD session_id still sitting in `chats`. Hydrating with the old
+        // id reloads the previous transcript, which makes `messages` non-empty and suppresses the
+        // handoff summary card (it renders only when messages.length === 0). The operator then
+        // sees the prior conversation and the carried-over summary appears "lost".
+        activeSessionIdRef.current = null
+        setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, session_id: null } : c))
         // Spec-043 C: drive the counter from the backend so the displayed value reflects
         // the actual (now-empty) new session rather than a client-side assumption.
         // One-shot fire-and-forget; rotCancelled is a local flag captured by the closure

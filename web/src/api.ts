@@ -315,13 +315,14 @@ export const api = {
     apiFetch<{ items: Array<{ id: string; text: string; created_at: number }> }>(
       `/api/projects/${id}/chat/queue`
     ),
-  chatQueueAdd: (id: string, text: string) =>
+  chatQueueAdd: (id: string, text: string, chatId?: string) =>
     apiFetch<{ item: { id: string; text: string; created_at: number } }>(
       `/api/projects/${id}/chat/queue`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        // Multichat: carry the originating chat_id so the drained run routes back to this tab.
+        body: JSON.stringify({ text, ...(chatId ? { chat_id: chatId } : {}) }),
       }
     ),
   chatQueueEdit: (id: string, msgId: string, text: string) =>

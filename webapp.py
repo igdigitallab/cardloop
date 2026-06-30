@@ -5592,6 +5592,7 @@ async def api_project_live(req: web.Request) -> web.Response:
             "events": safe_events,
             "board_events": board_events,
             "pending_handoff": pending_handoff,
+            "chat_id": turn.get("chat_id"),
         })
 
 
@@ -8801,13 +8802,20 @@ def _chat_queue_flush() -> None:
         pass
 
 
-def _chat_queue_enqueue(session_key: str, text: str) -> "dict | None":
+def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = None) -> "dict | None":
     """Append a message to the chat queue for session_key.
-    Returns the new item dict, or None if the queue is full."""
+    Returns the new item dict, or None if the queue is full.
+
+    Multichat: chat_id records which chat tab the message was typed in, so when the
+    item is later drained its run events (run_start/text/run_end) and the /live buffer
+    can be stamped with that chat_id — otherwise the drained run broadcasts to every
+    chat tab in the project (peer tabs filter on chat_id; without it nothing filters)."""
     lst = _CHAT_QUEUE.setdefault(session_key, [])
     if len(lst) >= _CHAT_QUEUE_MAX:
         return None
     item: dict = {"id": str(_uuid_mod.uuid4()), "text": text, "created_at": time.time()}
+    if chat_id:
+        item["chat_id"] = chat_id
     lst.append(item)
     _chat_queue_flush()
     return item
@@ -8878,8 +8886,12 @@ async def api_chat_queue_add(req: web.Request) -> web.Response:
     text = (body.get("text") or "").strip()
     if not text:
         return web.json_response({"error": "empty text"}, status=400)
+    # Multichat: carry the originating chat_id so the drained run routes to the right tab.
+    _q_chat_id = (body.get("chat_id") or "").strip() or None
+    if _q_chat_id and not _valid_chat_id(_q_chat_id):
+        return web.json_response({"error": "invalid chat_id"}, status=400)
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
-    item = _chat_queue_enqueue(session_key, text)
+    item = _chat_queue_enqueue(session_key, text, _q_chat_id)
     if item is None:
         return web.json_response({"error": "queue full"}, status=429)
     return web.json_response({"item": item}, status=201)
@@ -8933,6 +8945,9 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
     reserve the lock itself — only releases it in finally.
     """
     run_id = _uuid.uuid4().hex[:6]
+    # Multichat: route this queued run's bus events + live buffer to its origin chat tab.
+    _q_chat_id = item.get("chat_id")
+    _cid = {"chat_id": _q_chat_id} if _q_chat_id else {}
     outcome = "fail"
     try:
         topics = ctx["topics"]
@@ -8960,12 +8975,15 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # (so /live is authoritative the instant running flips); only create here if it
         # is somehow missing, to avoid resetting the buffer drain_one just populated.
         if _live_turns.get(session_key) is None:
-            _live_turn_create(session_key, model, prompt)
+            _lt = _live_turn_create(session_key, model, prompt)
+            if _q_chat_id:
+                _lt["chat_id"] = _q_chat_id
         _bus_publish(session_key, {
             "kind": "run_start",
             "source": "chat",
             "prompt": prompt,
             "run_id": run_id,
+            **_cid,
         })
 
         resume_session_id = ctx["sessions"].get(session_key)
@@ -8984,7 +9002,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         ):
             etype = event["type"]
             if etype == "text":
-                _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": run_id})
+                _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": run_id, **_cid})
             elif etype == "result":
                 if event.get("session_id"):
                     ctx["sessions"][session_key] = event["session_id"]
@@ -8993,11 +9011,11 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 raise event["exc"]
 
         outcome = "ok"
-        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "ok", "run_id": run_id})
+        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "ok", "run_id": run_id, **_cid})
 
     except Exception as e:
         print(f"[chat_queue] execute error for {session_key} item {item['id']}: {e}")
-        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id})
+        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id, **_cid})
 
     finally:
         ctx["running"].pop(session_key, None)
@@ -9032,7 +9050,12 @@ async def _chat_queue_drain_one(ctx: dict, session_key: str) -> bool:
     # queued message. Seeding the prompt here makes /live authoritative the instant the lock flips.
     _topic = (ctx.get("topics") or {}).get(session_key) or {}
     _qmodel = (_topic.get("model") if isinstance(_topic, dict) else None) or ctx.get("DEFAULT_MODEL", "sonnet")
-    _live_turn_create(session_key, _qmodel, item.get("text", ""))
+    _lt = _live_turn_create(session_key, _qmodel, item.get("text", ""))
+    # Multichat: stamp the live buffer so /live reports the owning chat_id and peer tabs
+    # (hydrate + periodic poll) don't adopt this run as their own.
+    _drain_chat_id = item.get("chat_id")
+    if _drain_chat_id:
+        _lt["chat_id"] = _drain_chat_id
     _spawn_bg(_chat_queue_execute(ctx, session_key, item))
     return True
 
@@ -9169,7 +9192,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
             payload = json.dumps({"type": "queued", "duplicate": True}, ensure_ascii=False)
             await resp.write(f"data: {payload}\n\n".encode())
             return resp
-        item = _chat_queue_enqueue(session_key, prompt)
+        # Multichat: stamp the originating chat_id so the drained run routes back to
+        # this tab only (not every chat in the project).
+        item = _chat_queue_enqueue(session_key, prompt, _req_chat_id)
         if item is None:
             payload = json.dumps({"type": "error", "error": "queue full"}, ensure_ascii=False)
         else:
