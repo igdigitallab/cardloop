@@ -72,6 +72,15 @@ class BrowserSession:
         self._ctx: Any = None
         self._page: Any = None
         self._cdp: Any = None
+        # spec-065 tabs: a session holds MANY pages; _page/_cdp are always the ACTIVE
+        # tab's, so every existing single-page path (input, navigate, screencast, prime)
+        # is unchanged. _tabs maps a stable string id → Playwright Page; _active_id is the
+        # shown tab. New pages (agent window.open / target=_blank / operator "+") are
+        # adopted automatically and foregrounded.
+        self._tabs: "dict[str, Any]" = {}
+        self._active_id: "str | None" = None
+        self._tab_seq = 0
+        self._switch_lock = asyncio.Lock()
         self._owns_browser = True   # False for connected/external backends — disconnect, don't kill
         self.backend = "builtin"    # spec-066: which backend acquired this session (for the pane header)
         self._started = False
@@ -101,26 +110,25 @@ class BrowserSession:
                 self._pw = acq.pw
                 self._browser = acq.browser
                 self._ctx = acq.context
-                self._page = acq.page
                 self._owns_browser = acq.owns_browser
                 self.backend = acq.backend
-                self._cdp = await self._ctx.new_cdp_session(self._page)
-                self._cdp.on("Page.screencastFrame", self._on_frame)
-                self._page.on("framenavigated", self._on_navigated)
-                # Renderer crash (often OOM under the service memory cap) and full
-                # browser death (process killed) — recover instead of serving a
-                # frozen/dead pane that reads as "Chrome Error".
-                self._page.on("crash", self._on_crash)
+                # Browser death (process killed / OOM) — recover instead of a frozen pane.
                 self._browser.on("disconnected", self._on_disconnected)
+                # Adopt every page the context already has (a logged-in external profile
+                # may arrive with several tabs) and watch for pages opened later.
+                for p in list(self._ctx.pages):
+                    self._adopt_page(p)
+                active = acq.page
+                self._adopt_page(active)
                 # An external/connected browser keeps its own (possibly logged-in) page;
                 # only push the branded start page when we launched a fresh one ourselves.
                 if self._owns_browser:
-                    await self._page.goto(_START_URL)
-                await self._cdp.send("Page.startScreencast", {
-                    "format": "jpeg", "quality": STREAM["quality"],
-                    "maxWidth": STREAM["width"], "maxHeight": STREAM["height"],
-                    "everyNthFrame": 1,
-                })
+                    with contextlib.suppress(Exception):
+                        await active.goto(_START_URL)
+                self._ctx.on("page", self._on_new_page)
+                # Bind the active tab: creates its CDP session, wires the screencast +
+                # crash/nav listeners, and starts streaming. (No subscribers yet → no prime.)
+                await self._bind_active(active, prime=False)
             except Exception as e:
                 with contextlib.suppress(Exception):
                     await self._teardown()
@@ -146,6 +154,8 @@ class BrowserSession:
             with contextlib.suppress(Exception):
                 await getattr(obj, meth)()
         self._pw = self._browser = self._ctx = self._page = self._cdp = None
+        self._tabs.clear()
+        self._active_id = None
 
     async def close(self) -> None:
         if self._closed:
@@ -189,6 +199,144 @@ class BrowserSession:
         self._started = False
         self._last_frame = None
         asyncio.create_task(close_session(self.key, self))
+
+    # ── tabs ─────────────────────────────────────────────────────────────────
+    def _adopt_page(self, page: Any) -> str:
+        """Track a page under a stable string id (idempotent) and watch for its close."""
+        for tid, p in self._tabs.items():
+            if p is page:
+                return tid
+        self._tab_seq += 1
+        tid = f"t{self._tab_seq}"
+        self._tabs[tid] = page
+        with contextlib.suppress(Exception):
+            page.on("close", lambda _p=None, _tid=tid: self._on_tab_closed(_tid))
+        return tid
+
+    def _id_of(self, page: Any) -> "str | None":
+        return next((tid for tid, p in self._tabs.items() if p is page), None)
+
+    async def _bind_active(self, page: Any, *, prime: bool = True) -> None:
+        """Make `page` the active tab: move the CDP screencast + nav/crash listeners onto
+        it. The previous active tab's screencast is stopped and its CDP detached (only ONE
+        tab streams at a time → minimal memory/bandwidth). `prime` pushes a fresh frame +
+        nav + tab list to current subscribers (skip at startup when there are none)."""
+        if page is self._page and self._cdp is not None:
+            if prime:
+                await self._broadcast_nav()
+                await self._reprime_subs()
+            return
+        async with self._switch_lock:
+            old = self._page
+            if self._cdp is not None:
+                with contextlib.suppress(Exception):
+                    await self._cdp.send("Page.stopScreencast")
+                with contextlib.suppress(Exception):
+                    await self._cdp.detach()
+                self._cdp = None
+            if old is not None and old is not page:
+                with contextlib.suppress(Exception):
+                    old.remove_listener("framenavigated", self._on_navigated)
+                with contextlib.suppress(Exception):
+                    old.remove_listener("crash", self._on_crash)
+            self._page = page
+            self._active_id = self._id_of(page)
+            self._last_frame = None   # the cached frame belonged to the old tab
+            self._cdp = await self._ctx.new_cdp_session(page)
+            self._cdp.on("Page.screencastFrame", self._on_frame)
+            page.on("framenavigated", self._on_navigated)
+            page.on("crash", self._on_crash)
+            await self._cdp.send("Page.startScreencast", {
+                "format": "jpeg", "quality": STREAM["quality"],
+                "maxWidth": STREAM["width"], "maxHeight": STREAM["height"],
+                "everyNthFrame": 1,
+            })
+        if prime:
+            await self._broadcast_nav()
+            await self._reprime_subs()
+
+    def _on_new_page(self, page: Any) -> None:
+        asyncio.create_task(self._handle_new_page(page))
+
+    async def _handle_new_page(self, page: Any) -> None:
+        self._adopt_page(page)
+        # Foreground the new tab — mirror a real browser opening target=_blank / window.open,
+        # so the operator follows the agent into the page it just spawned.
+        with contextlib.suppress(Exception):
+            await self._bind_active(page)
+
+    def _on_tab_closed(self, tid: str) -> None:
+        asyncio.create_task(self._handle_tab_closed(tid))
+
+    async def _handle_tab_closed(self, tid: str) -> None:
+        self._tabs.pop(tid, None)
+        if self._active_id == tid:
+            remaining = list(self._tabs.values())
+            if remaining:
+                await self._bind_active(remaining[-1])
+            else:
+                self._active_id = self._page = self._cdp = None
+        await self._broadcast_tabs()
+
+    async def activate_tab(self, tid: str) -> None:
+        page = self._tabs.get(tid)
+        if page is not None and tid != self._active_id:
+            await self._bind_active(page)
+
+    async def new_tab(self, url: str = "") -> None:
+        await self.start()
+        if self._ctx is None:
+            return
+        page = await self._ctx.new_page()    # also fires _on_new_page (adopt + foreground)
+        self._adopt_page(page)               # idempotent — guarantee it's tracked now
+        await self._bind_active(page)
+        if url:
+            await self.navigate(url)
+        elif self._owns_browser:
+            with contextlib.suppress(Exception):
+                await page.goto(_START_URL)
+            await self._broadcast_nav()
+        await self._broadcast_tabs()
+
+    async def close_tab(self, tid: str) -> None:
+        if len(self._tabs) <= 1:
+            return   # always keep at least one tab
+        page = self._tabs.get(tid)
+        if page is None:
+            return
+        with contextlib.suppress(Exception):
+            await page.close()   # fires _on_tab_closed → switch active + broadcast
+
+    async def _tabs_payload(self) -> dict:
+        tabs: "list[dict]" = []
+        for tid, page in list(self._tabs.items()):
+            try:
+                url = page.url
+            except Exception:
+                continue
+            try:
+                title = await page.title()
+            except Exception:
+                title = ""
+            tabs.append({"id": tid, "url": url, "title": title or url, "active": tid == self._active_id})
+        return {"type": "tabs", "tabs": tabs, "activeId": self._active_id}
+
+    async def _broadcast_tabs(self) -> None:
+        with contextlib.suppress(Exception):
+            await self.broadcast_json(await self._tabs_payload())
+
+    async def _reprime_subs(self) -> None:
+        """Capture one frame of the active tab and push it to all subscribers, so a tab
+        switch updates the view immediately instead of waiting for the next page change."""
+        frame = await self._capture_frame()
+        if not frame:
+            return
+        self._last_frame = frame
+        for ws in list(self._subs):
+            if ws in self._busy:
+                continue
+            self._busy.add(ws)
+            asyncio.create_task(self._send_frame(ws, frame))
 
     # ── screencast → subscribers ─────────────────────────────────────────────
     def _on_frame(self, params: dict) -> None:
@@ -241,6 +389,8 @@ class BrowserSession:
             url = self._page.url
             title = await self._page.title()
             await self.broadcast_json({"type": "nav", "url": url, "title": title})
+        # The active tab's title/url just changed — refresh the strip too.
+        await self._broadcast_tabs()
 
     async def broadcast_json(self, obj: dict) -> None:
         for ws in list(self._subs):
@@ -255,6 +405,7 @@ class BrowserSession:
         with contextlib.suppress(Exception):
             await ws.send_json({"type": "ready", "width": VIEWPORT["width"], "height": VIEWPORT["height"], "backend": self.backend})
             await ws.send_json({"type": "nav", "url": self._page.url, "title": await self._page.title()})
+            await ws.send_json(await self._tabs_payload())
         # Prime the new subscriber with the current page so a static page renders
         # immediately instead of a blank "stream not ready" pane.
         await self._prime(ws)
@@ -292,9 +443,22 @@ class BrowserSession:
     # ── input (from the pane) ────────────────────────────────────────────────
     async def handle_input(self, msg: dict) -> None:
         self._touch()
+        t = msg.get("t")
+        # Tab controls act on the context (not the active page's CDP), so they run before
+        # the _cdp guard — they must work even between tab switches.
+        if t in ("tab.activate", "tab.new", "tab.close"):
+            try:
+                if t == "tab.activate":
+                    await self.activate_tab(str(msg.get("id") or ""))
+                elif t == "tab.new":
+                    await self.new_tab(str(msg.get("url") or ""))
+                else:
+                    await self.close_tab(str(msg.get("id") or ""))
+            except Exception:
+                pass
+            return
         if self._cdp is None:
             return
-        t = msg.get("t")
         try:
             if t == "mouse":
                 await self._mouse(msg)

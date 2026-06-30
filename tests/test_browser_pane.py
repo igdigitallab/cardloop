@@ -158,3 +158,123 @@ def test_close_session_identity_guard():
         assert browser_pane._SESSIONS.get("k") is s_new
         browser_pane._SESSIONS.pop("k", None)
     asyncio.run(go())
+
+
+# ── tabs (multi-page) ─────────────────────────────────────────────────────────
+
+
+class _FakePage:
+    """Minimal Playwright Page stand-in for tab-logic tests (no real Chromium)."""
+    def __init__(self, url="about:blank", title="T"):
+        self._url = url
+        self._title = title
+        self.closed = False
+        self._handlers: dict = {}
+
+    @property
+    def url(self):
+        return self._url
+
+    async def title(self):
+        return self._title
+
+    def on(self, event, fn):
+        self._handlers.setdefault(event, []).append(fn)
+
+    def remove_listener(self, event, fn):
+        if fn in self._handlers.get(event, []):
+            self._handlers[event].remove(fn)
+
+    async def close(self):
+        self.closed = True
+        for fn in list(self._handlers.get("close", [])):
+            fn(self)
+
+
+def test_adopt_page_assigns_sequential_ids_and_is_idempotent():
+    s = BrowserSession("k")
+    p1, p2 = _FakePage(), _FakePage()
+    a = s._adopt_page(p1)
+    b = s._adopt_page(p2)
+    assert (a, b) == ("t1", "t2")
+    assert s._adopt_page(p1) == "t1", "re-adopting the same page returns its existing id"
+    assert s._id_of(p2) == "t2"
+    assert len(s._tabs) == 2
+
+
+def test_tabs_payload_shape_and_active_flag():
+    async def go():
+        s = BrowserSession("k")
+        p1, p2 = _FakePage(url="https://a.test", title="A"), _FakePage(url="https://b.test", title="B")
+        s._adopt_page(p1); s._adopt_page(p2)
+        s._active_id = "t2"
+        payload = await s._tabs_payload()
+        assert payload["type"] == "tabs" and payload["activeId"] == "t2"
+        by_id = {t["id"]: t for t in payload["tabs"]}
+        assert by_id["t1"] == {"id": "t1", "url": "https://a.test", "title": "A", "active": False}
+        assert by_id["t2"]["active"] is True
+    asyncio.run(go())
+
+
+def test_tabs_payload_falls_back_to_url_when_titleless():
+    async def go():
+        s = BrowserSession("k")
+        s._adopt_page(_FakePage(url="https://x.test", title=""))
+        s._active_id = "t1"
+        assert (await s._tabs_payload())["tabs"][0]["title"] == "https://x.test"
+    asyncio.run(go())
+
+
+def test_closing_active_tab_switches_to_remaining(monkeypatch):
+    async def go():
+        s = BrowserSession("k")
+        p1, p2 = _FakePage(), _FakePage()
+        s._adopt_page(p1); s._adopt_page(p2)
+        s._active_id = "t1"
+        # Avoid real CDP: stub the active-tab binding to just record the new active id.
+        async def fake_bind(page, *, prime=True):
+            s._active_id = s._id_of(page)
+        monkeypatch.setattr(s, "_bind_active", fake_bind)
+        await s._handle_tab_closed("t1")
+        assert "t1" not in s._tabs
+        assert s._active_id == "t2", "closing the active tab activates a remaining one"
+    asyncio.run(go())
+
+
+def test_close_tab_refuses_to_close_the_last_tab():
+    async def go():
+        s = BrowserSession("k")
+        p1 = _FakePage()
+        s._adopt_page(p1)
+        await s.close_tab("t1")
+        assert p1.closed is False and "t1" in s._tabs, "the only tab must stay open"
+    asyncio.run(go())
+
+
+def test_close_tab_closes_page_when_more_than_one(monkeypatch):
+    async def go():
+        s = BrowserSession("k")
+        p1, p2 = _FakePage(), _FakePage()
+        s._adopt_page(p1); s._adopt_page(p2)
+        s._active_id = "t1"
+        async def fake_bind(page, *, prime=True):
+            s._active_id = s._id_of(page)
+        monkeypatch.setattr(s, "_bind_active", fake_bind)
+        await s.close_tab("t1")        # closes p1 → fires its close handler → _handle_tab_closed
+        await asyncio.sleep(0)         # let the scheduled _handle_tab_closed run
+        assert p1.closed is True
+        assert "t1" not in s._tabs and s._active_id == "t2"
+    asyncio.run(go())
+
+
+def test_handle_input_routes_tab_controls_without_cdp(monkeypatch):
+    async def go():
+        s = BrowserSession("k")
+        s._cdp = None  # tab controls must work even with no active CDP session
+        seen = {}
+        async def fake_activate(tid):
+            seen["activate"] = tid
+        monkeypatch.setattr(s, "activate_tab", fake_activate)
+        await s.handle_input({"t": "tab.activate", "id": "t3"})
+        assert seen.get("activate") == "t3"
+    asyncio.run(go())

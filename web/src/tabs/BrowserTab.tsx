@@ -40,6 +40,8 @@ interface Props {
 
 type ConnState = 'connecting' | 'ready' | 'disconnected' | 'error'
 
+interface BrowserTabInfo { id: string; title: string; url: string; active: boolean }
+
 /**
  * Clamp a value to [min, max].
  */
@@ -103,6 +105,9 @@ export function BrowserTab({ projectId }: Props) {
   const [urlInput, setUrlInput] = useState<string>('')
   // spec-066: which backend acquired the live session (builtin / cloakbrowser / external-cdp)
   const [backend, setBackend] = useState<string>('')
+  // Multi-tab strip state
+  const [tabs, setTabs] = useState<BrowserTabInfo[]>([])
+  const [activeId, setActiveId] = useState<string>('')
 
   // ── WebSocket lifecycle ──────────────────────────────────────────────────────
   const connect = useCallback(() => {
@@ -148,6 +153,9 @@ export function BrowserTab({ projectId }: Props) {
           } else if (msg.type === 'error') {
             setErrorMsg((msg.message as string) ?? 'Unknown error')
             setConnState('error')
+          } else if (msg.type === 'tabs') {
+            setTabs(Array.isArray(msg.tabs) ? (msg.tabs as BrowserTabInfo[]) : [])
+            setActiveId(typeof msg.activeId === 'string' ? msg.activeId : '')
           }
         } catch {
           // Malformed JSON — ignore
@@ -497,6 +505,100 @@ export function BrowserTab({ projectId }: Props) {
         overflow: 'hidden',
       }}
     >
+      {/* Tab strip — only shown when ready and at least one tab exists */}
+      {connState === 'ready' && tabs.length >= 1 && (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            overflowX: 'auto',
+            flexShrink: 0,
+            gap: 4,
+            padding: '0 4px',
+            height: 30,
+            borderBottom: '1px solid var(--border, #1e1e1e)',
+            background: 'var(--bg2, #111)',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {tabs.map(tab => {
+            const isActive = tab.active || tab.id === activeId
+            return (
+              <div
+                key={tab.id}
+                onClick={() => send({ t: 'tab.activate', id: tab.id })}
+                title={tab.url || tab.title || 'New tab'}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  maxWidth: 120,
+                  fontSize: 12,
+                  borderRadius: 5,
+                  padding: '3px 8px',
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                  color: isActive ? 'var(--text, #d4d4d4)' : 'var(--text-dim, #6e7681)',
+                  background: isActive ? 'var(--bg, #0d0d0d)' : 'transparent',
+                  borderTop: isActive ? '2px solid var(--accent)' : '2px solid transparent',
+                  userSelect: 'none',
+                }}
+              >
+                <span
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    maxWidth: tabs.length > 1 ? 96 : 108,
+                  }}
+                >
+                  {tab.title || tab.url || 'New tab'}
+                </span>
+                {tabs.length > 1 && (
+                  <span
+                    onClick={e => { e.stopPropagation(); send({ t: 'tab.close', id: tab.id }) }}
+                    title="Close tab"
+                    style={{
+                      marginLeft: 6,
+                      color: 'var(--text-dim, #6e7681)',
+                      lineHeight: 1,
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={e => { (e.currentTarget as HTMLSpanElement).style.color = 'var(--text, #d4d4d4)' }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLSpanElement).style.color = 'var(--text-dim, #6e7681)' }}
+                  >
+                    ×
+                  </span>
+                )}
+              </div>
+            )
+          })}
+          {/* New-tab button */}
+          <div
+            onClick={() => send({ t: 'tab.new' })}
+            title="New tab"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 14,
+              borderRadius: 5,
+              padding: '2px 8px',
+              cursor: 'pointer',
+              flexShrink: 0,
+              color: 'var(--text-dim, #6e7681)',
+              background: 'transparent',
+              borderTop: '2px solid transparent',
+              userSelect: 'none',
+            }}
+            onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.color = 'var(--text, #d4d4d4)' }}
+            onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.color = 'var(--text-dim, #6e7681)' }}
+          >
+            +
+          </div>
+        </div>
+      )}
+
       {/* URL bar */}
       <div
         style={{
