@@ -1516,8 +1516,11 @@ async def run_engine(  # type: ignore[return]
         env = dict(env or {})
         _tools_dir = str(Path(__file__).resolve().parent / "tools")
         _cur_path = env.get("PATH") or os.environ.get("PATH", "")
-        if _tools_dir not in _cur_path.split(os.pathsep):
-            env["PATH"] = (_tools_dir + os.pathsep + _cur_path) if _cur_path else _tools_dir
+        # Always put tools/ FIRST, de-duping any existing entry. The old "skip if already
+        # present" guard left a stale hand-copied helper winning when tools/ was on PATH but
+        # not first — defeating the shadow-the-stale-copy intent (and making it env-fragile).
+        _path_parts = [p for p in _cur_path.split(os.pathsep) if p and p != _tools_dir]
+        env["PATH"] = os.pathsep.join([_tools_dir, *_path_parts])
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,
