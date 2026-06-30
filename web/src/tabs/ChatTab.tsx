@@ -1830,14 +1830,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             if (typeof evtAny.context_rotate_at === 'number' && (evtAny.context_rotate_at as number) > 0) {
               setContextRotateAt(evtAny.context_rotate_at as number)
             }
-            // Thread context_warn from backend: if true, mark the banner as active and clear any
-            // previous dismiss (a fresh backend signal means the operator should see it again).
-            if ((evtAny as Record<string, unknown>).context_warn === true) {
-              setContextWarnFromBackend(true)
-              setWarnDismissedAtTokens(null)
-            } else {
-              setContextWarnFromBackend(false)
-            }
+            // Thread context_warn from backend → drive the banner's active flag. Do NOT wipe a
+            // user dismissal here: the backend re-sends context_warn=true every turn while above
+            // the threshold, which used to re-show the banner each turn (the ✕ felt broken). The
+            // token-growth / escalation re-arm in the banner's own dismiss gate decides when a
+            // dismissed banner should come back.
+            setContextWarnFromBackend((evtAny as Record<string, unknown>).context_warn === true)
             // Spec-022: reset cache freshness countdown on every completed turn
             setLastTurnEndMs(now)
             // Spec-043 C: update cache-hit % and fresh tokens from the SSE result so the
@@ -2801,8 +2799,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           // Trigger: backend flag OR token-count fallback
           const shouldWarn = contextWarnFromBackend || isInWarnZone || isEscalated
           if (!shouldWarn) return null
-          // Dismiss gate: once dismissed, suppress unless we've escalated into the ≥190K zone
-          if (warnDismissedAtTokens !== null && !isEscalated) return null
+          // Dismiss gate: the ✕ works in BOTH zones (the old gate ignored it once escalated,
+          // so at high token counts the cross "did nothing"). Stay hidden until the context
+          // climbs materially past where it was dismissed (re-warn if it keeps growing) or
+          // first crosses into the escalated red tier after being dismissed in amber.
+          if (warnDismissedAtTokens !== null) {
+            const grewMaterially = warnTokens >= warnDismissedAtTokens + 20_000
+            const newlyEscalated = isEscalated && warnDismissedAtTokens < ESCALATE_THRESHOLD
+            if (!grewMaterially && !newlyEscalated) return null
+          }
           const nK = Math.round(warnTokens / 1000)
           const bannerColor = isEscalated
             ? 'var(--red)'
