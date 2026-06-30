@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# cockpit-file — push an arbitrary downloadable FILE into the cockpit chat (card 2efd6a).
+#
+# Usage:  cockpit-file <path-to-file>
+#
+# Companion to cockpit-img (which renders images/video inline). This one hands the
+# operator ANY file (pdf, zip, csv, docx, json, audio, …) as a download card they can
+# save to their computer or phone. It copies the file into $COPS_MEDIA_DIR and prints
+# one line to stdout:
+#   attached file: /api/projects/<COPS_PROJECT_ID>/media/<filename>
+#
+# The agent includes that line verbatim in its reply; the cockpit renders it as a
+# download card (the /media/ route serves the file with Content-Disposition: attachment).
+#
+# Env vars (set automatically by the cockpit project agent launcher):
+#   COPS_MEDIA_DIR    — absolute path to data/chat-media/<project_id>/
+#   COPS_PROJECT_ID   — project id used to build the /api/projects/... URL
+#
+# Any format.  Size cap: 100 MB.
+set -euo pipefail
+
+# ── help ──────────────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || -z "${1:-}" ]]; then
+  cat <<'EOF'
+cockpit-file — push an arbitrary downloadable file into the cockpit chat.
+
+Usage:  cockpit-file <path-to-file>
+
+Prints one line:  attached file: /api/projects/<id>/media/<filename>
+Include that line verbatim in your reply; the cockpit renders a download card
+the operator can save to their computer or phone.
+
+Any format.  Max size: 100 MB.
+Env (set by cockpit launcher): COPS_MEDIA_DIR, COPS_PROJECT_ID
+EOF
+  exit 0
+fi
+
+# ── validate args ──────────────────────────────────────────────────────────────
+FILE="${1:-}"
+[[ -f "$FILE" ]] || { echo "cockpit-file: file not found: $FILE" >&2; exit 1; }
+
+# ── require env ─────────────────────────────────────────────────────────────────
+: "${COPS_MEDIA_DIR:?cockpit-file: COPS_MEDIA_DIR is not set — run from a cockpit project agent context}"
+: "${COPS_PROJECT_ID:?cockpit-file: COPS_PROJECT_ID is not set — run from a cockpit project agent context}"
+
+# ── size cap (100 MB) ────────────────────────────────────────────────────────────
+MAX_BYTES=$((100 * 1024 * 1024))
+FILE_BYTES=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null || echo 0)
+if [[ "$FILE_BYTES" -gt "$MAX_BYTES" ]]; then
+  echo "cockpit-file: file too large ($(( FILE_BYTES / 1024 / 1024 )) MB > 100 MB limit)" >&2
+  exit 1
+fi
+
+# ── build dest filename: <unix_ts>_<sanitized_basename>[.<ext>] ─────────────────
+TS=$(date +%s)
+BASENAME=$(basename "$FILE")
+# Detect an extension only when the basename actually contains a dot.
+if [[ "$BASENAME" == *.* ]]; then
+  EXT_LC="${BASENAME##*.}"
+  EXT_LC="${EXT_LC,,}"
+  NAME_NO_EXT="${BASENAME%.*}"
+else
+  EXT_LC=""
+  NAME_NO_EXT="$BASENAME"
+fi
+# Sanitize: keep alphanumeric + dash + dot + underscore, collapse runs of _
+SAFE_NAME=$(printf '%s' "$NAME_NO_EXT" | tr -cs '[:alnum:]._-' '_' | sed 's/__*/_/g; s/^_//; s/_$//')
+[[ -z "$SAFE_NAME" ]] && SAFE_NAME="file"
+if [[ -n "$EXT_LC" ]]; then
+  EXT_SAFE=$(printf '%s' "$EXT_LC" | tr -cd '[:alnum:]')
+  DEST_FILENAME="${TS}_${SAFE_NAME}.${EXT_SAFE}"
+else
+  DEST_FILENAME="${TS}_${SAFE_NAME}"
+fi
+
+# ── ensure media dir exists and copy ─────────────────────────────────────────────
+mkdir -p "$COPS_MEDIA_DIR"
+cp "$FILE" "$COPS_MEDIA_DIR/$DEST_FILENAME"
+
+# ── emit the attached-file line to stdout ────────────────────────────────────────
+printf 'attached file: /api/projects/%s/media/%s\n' "$COPS_PROJECT_ID" "$DEST_FILENAME"

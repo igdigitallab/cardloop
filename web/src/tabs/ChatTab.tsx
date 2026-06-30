@@ -476,9 +476,23 @@ function parseAttachedFiles(text: string, projectId: string): { body: string; fi
   for (const line of text.split('\n')) {
     const m = /^attached file:\s*(.+\S)\s*$/.exec(line)
     if (m) {
-      const base = m[1].split(/[/\\]/).pop() || m[1]
-      const kind = _isVideoSrc(base) ? 'video' : _IMG_EXT_RE.test(base) ? 'image' : 'file'
-      files.push({ url: `/api/projects/${encodeURIComponent(projectId)}/upload/${encodeURIComponent(base)}`, name: base, kind })
+      const raw = m[1]
+      // Two marker shapes share this line:
+      //  • a ready URL path — agent file-drop (cockpit-file / cockpit-img) prints
+      //    "/api/projects/<id>/media/<f>"; use it verbatim.
+      //  • an absolute fs path — operator uploads append the local path; its basename maps
+      //    to the /upload/ serve route (reads DATA/inbox by filename; project id gates auth).
+      const isUrlPath = raw.startsWith('/') || /^https?:\/\//i.test(raw)
+      const seg = raw.split(/[/\\?#]/).filter(Boolean).pop() || raw
+      let name = seg
+      try { name = decodeURIComponent(seg) } catch { /* keep raw segment */ }
+      // Stored media files are prefixed "<unix_ts>_" for uniqueness — hide it in the label.
+      const display = name.replace(/^\d{9,}_/, '')
+      const url = isUrlPath
+        ? raw
+        : `/api/projects/${encodeURIComponent(projectId)}/upload/${encodeURIComponent(seg)}`
+      const kind = _isVideoSrc(name) ? 'video' : _IMG_EXT_RE.test(name) ? 'image' : 'file'
+      files.push({ url, name: display, kind })
     } else {
       bodyLines.push(line)
     }
@@ -2620,7 +2634,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                     <div className="chat-msg-attachments">
                       {attach.files.map((f, i) => (
                         f.kind === 'file'
-                          ? <span key={i} className="chat-att-file" title={f.name}>📎 {f.name}</span>
+                          ? <a key={i} className="chat-att-file chat-att-download" href={f.url}
+                               download={f.name} target="_blank" rel="noopener noreferrer"
+                               title={`Download ${f.name}`}>
+                              <span aria-hidden="true">📎</span>
+                              <span className="chat-att-name">{f.name}</span>
+                              <span className="chat-att-dl" aria-hidden="true">⤓</span>
+                            </a>
                           : <ChatImage key={i} src={f.url} alt={f.name} />
                       ))}
                     </div>

@@ -1764,7 +1764,7 @@
 .chat-msg-attachments .chat-msg-video {
   max-height: 180px;
 }
-/* Non-media upload (e.g. PDF) — a static chip, since the serve route is image/video only */
+/* Non-media file (e.g. PDF/zip) dropped by the agent or uploaded — a download chip. */
 .chat-att-file {
   display: inline-flex;
   align-items: center;
@@ -1779,6 +1779,27 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Card 2efd6a: agent-dropped arbitrary file → a clickable download card. */
+.chat-att-download {
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.12s, border-color 0.12s;
+}
+.chat-att-download:hover {
+  background: var(--bg3, var(--bg2));
+  border-color: var(--text3, var(--border));
+  color: var(--text);
+}
+.chat-att-download .chat-att-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-att-download .chat-att-dl {
+  opacity: 0.6;
+  font-size: 13px;
 }
 
 /* Full-screen lightbox overlay */

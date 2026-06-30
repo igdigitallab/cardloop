@@ -6998,8 +6998,12 @@ async def api_project_media(req: web.Request) -> web.Response:
 
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     content_type = _MEDIA_CONTENT_TYPES.get(ext)
+    # spec-038: images/video render inline (known type → no attachment header). Card 2efd6a:
+    # ANY other file the agent drops via cockpit-file is served as a download — octet-stream +
+    # Content-Disposition: attachment — so the browser saves it to the computer / phone.
+    inline_media = content_type is not None
     if content_type is None:
-        return web.json_response({"error": "unsupported media type"}, status=415)
+        content_type = "application/octet-stream"
 
     DATA: Path = ctx["DATA"]
     media_dir = DATA / "chat-media" / project["id"]
@@ -7017,7 +7021,13 @@ async def api_project_media(req: web.Request) -> web.Response:
     if not target.exists():
         return web.json_response({"error": "file not found"}, status=404)
 
-    return web.FileResponse(target, headers={"Content-Type": content_type})
+    _headers = {"Content-Type": content_type}
+    if not inline_media:
+        # filename already passed the traversal guard (no / \ ..); strip quotes/newlines
+        # defensively before placing it in the header.
+        _safe = filename.replace('"', "").replace("\r", "").replace("\n", "")
+        _headers["Content-Disposition"] = f'attachment; filename="{_safe}"'
+    return web.FileResponse(target, headers=_headers)
 
 
 async def api_project_git_sync(req: web.Request) -> web.Response:

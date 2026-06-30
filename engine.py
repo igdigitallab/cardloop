@@ -264,6 +264,17 @@ IMAGES_PROMPT = (
     "Telegram or by pasting a bare filesystem path or URL — those do not render here."
 )
 
+# Companion to IMAGES_PROMPT (same COPS_MEDIA_DIR gating): surface an arbitrary downloadable
+# file (pdf, zip, csv, …) inline in the cockpit chat. cockpit-file copies the file into the
+# chat-media dir and prints one "attached file: <url>" line the client renders as a download card.
+FILES_PROMPT = (
+    f"To send {OPERATOR_NAME} a downloadable FILE of any format (pdf, zip, csv, docx, json, "
+    "audio, …) INSIDE the cockpit chat, run the helper `cockpit-file <path>` and paste the single "
+    "`attached file: …` line it prints verbatim into your reply — the cockpit renders it as a "
+    "download card the operator can save to their computer or phone. Use this for any file you "
+    "want to hand over, instead of Telegram or pasting a bare filesystem path."
+)
+
 # AskUserQuestion = interactive prompt (no reply in TG -> agent hangs or decides on its own).
 DISALLOWED_TOOLS = ["AskUserQuestion"]
 
@@ -1497,7 +1508,16 @@ async def run_engine(  # type: ignore[return]
         _img_append = system_prompt.get("append") or ""
         _img_sep = "\n" if _img_append else ""
         system_prompt = dict(system_prompt)
-        system_prompt["append"] = _img_append + _img_sep + IMAGES_PROMPT
+        system_prompt["append"] = _img_append + _img_sep + IMAGES_PROMPT + "\n" + FILES_PROMPT
+        # Make the cockpit media helpers (cockpit-img, cockpit-file) reachable from the agent's
+        # shell without a manual install step: prepend the repo's tools/ dir to PATH. Placing it
+        # first also shadows any stale hand-copied helper elsewhere on PATH. Copy env first so we
+        # never mutate the caller's secrets dict.
+        env = dict(env or {})
+        _tools_dir = str(Path(__file__).resolve().parent / "tools")
+        _cur_path = env.get("PATH") or os.environ.get("PATH", "")
+        if _tools_dir not in _cur_path.split(os.pathsep):
+            env["PATH"] = (_tools_dir + os.pathsep + _cur_path) if _cur_path else _tools_dir
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,

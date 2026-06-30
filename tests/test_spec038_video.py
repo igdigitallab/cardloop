@@ -156,22 +156,43 @@ async def test_media_route_rejects_traversal_for_video(
     )
 
 
-# ─────────────────────────── route: unsupported extension → 415 ──────────────
+# ──────────── route: arbitrary file → octet-stream download (card 2efd6a) ─────
 
 
-async def test_media_route_rejects_unknown_video_extension(
+async def test_media_route_serves_arbitrary_file_as_download(
     aiohttp_client, media_app, media_ctx
 ):
-    """An unlisted extension (e.g. .avi) must return 415."""
-    filename = "1000000000_clip.avi"
-    _place_file(media_ctx, filename)
+    """An extension not in the inline-media map (pdf/zip/avi/…) is now served as a download:
+    HTTP 200, Content-Type application/octet-stream, Content-Disposition: attachment.
+    (Replaces the old 415 behaviour — agents drop arbitrary files via cockpit-file.)"""
+    for filename in ("1000000000_report.pdf", "1000000000_bundle.zip", "1000000000_clip.avi"):
+        _place_file(media_ctx, filename, content=b"fake-bytes")
+        client = await aiohttp_client(media_app)
+        resp = await client.get(
+            f"/api/projects/vidproj/media/{filename}",
+            headers=_auth(media_ctx),
+        )
+        assert resp.status == 200, f"Expected 200 for {filename}, got {resp.status}"
+        assert resp.headers.get("Content-Type") == "application/octet-stream"
+        cd = resp.headers.get("Content-Disposition", "")
+        assert cd.startswith("attachment;"), f"Expected attachment disposition, got {cd!r}"
+        assert filename in cd
 
+
+async def test_media_route_image_stays_inline_no_attachment(
+    aiohttp_client, media_app, media_ctx
+):
+    """A known image type must still be served inline (no attachment disposition)."""
+    filename = "1000000000_shot.png"
+    _place_file(media_ctx, filename, content=b"\x89PNG\r\n")
     client = await aiohttp_client(media_app)
     resp = await client.get(
         f"/api/projects/vidproj/media/{filename}",
         headers=_auth(media_ctx),
     )
-    assert resp.status == 415, f"Expected 415 for .avi, got {resp.status}"
+    assert resp.status == 200
+    assert resp.headers.get("Content-Type") == "image/png"
+    assert "Content-Disposition" not in resp.headers
 
 
 # ─────────────────────────── route: unknown project → 404 ────────────────────
@@ -234,3 +255,51 @@ def test_cockpit_img_rejects_unsupported_extension(tmp_path):
     rc, _out, err = _run_cockpit_img(tmp_path, "clip.avi", "bad")
     assert rc == 1, f"Expected exit 1 for .avi, got {rc}"
     assert "unsupported" in err.lower()
+
+
+# ─────────────────────────── cockpit-file helper (card 2efd6a) ───────────────
+
+
+def _run_cockpit_file(tmp_path: Path, filename: str) -> tuple[int, str, str]:
+    """Run the cockpit-file shell script and return (returncode, stdout, stderr)."""
+    import subprocess
+    script = ROOT / "tools" / "cockpit-file"
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(exist_ok=True)
+    env = {
+        **os.environ,
+        "COPS_MEDIA_DIR": str(media_dir),
+        "COPS_PROJECT_ID": "vidproj",
+    }
+    src = tmp_path / filename
+    src.write_bytes(b"\x00" * 100)
+    result = subprocess.run(
+        [str(script), str(src)],
+        capture_output=True, text=True, env=env,
+    )
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+
+@pytest.mark.parametrize("filename", ["report.pdf", "bundle.zip", "data.csv", "notes.docx", "clip.avi"])
+def test_cockpit_file_accepts_arbitrary_extension(tmp_path, filename):
+    """cockpit-file must accept ANY extension and print one 'attached file:' URL line."""
+    rc, out, err = _run_cockpit_file(tmp_path, filename)
+    assert rc == 0, f"cockpit-file exited {rc} for {filename}: {err}"
+    assert out.startswith("attached file: /api/projects/vidproj/media/"), f"Unexpected output: {out!r}"
+
+
+def test_cockpit_file_accepts_no_extension(tmp_path):
+    """A file with no extension (e.g. 'Makefile') is still handed over as a download."""
+    rc, out, err = _run_cockpit_file(tmp_path, "Makefile")
+    assert rc == 0, f"cockpit-file exited {rc}: {err}"
+    assert out.startswith("attached file: /api/projects/vidproj/media/")
+
+
+def test_cockpit_file_copies_into_media_dir(tmp_path):
+    """The file must land in COPS_MEDIA_DIR with a <ts>_ prefixed name matching the printed URL."""
+    rc, out, _err = _run_cockpit_file(tmp_path, "report.pdf")
+    assert rc == 0
+    media_dir = tmp_path / "media"
+    copied = list(media_dir.glob("*_report.pdf"))
+    assert len(copied) == 1, f"expected one copied file, got {list(media_dir.iterdir())}"
+    assert copied[0].name in out

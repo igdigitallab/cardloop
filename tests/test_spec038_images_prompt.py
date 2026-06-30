@@ -93,3 +93,54 @@ async def test_images_prompt_absent_without_media_env(tmp_path):
     assert engine.IMAGES_PROMPT not in _append_text(opts), (
         f"IMAGES_PROMPT must NOT appear without COPS_MEDIA_DIR: {_append_text(opts)!r}"
     )
+
+
+# ─────────────────────── card 2efd6a: arbitrary-file drop (FILES_PROMPT) ──────
+
+
+def test_files_prompt_constant_present():
+    """FILES_PROMPT exists and names the helper + steers away from Telegram."""
+    assert hasattr(engine, "FILES_PROMPT")
+    low = engine.FILES_PROMPT.lower()
+    assert "cockpit-file" in low
+    assert "attached file" in low
+    assert "download" in low
+
+
+@pytest.mark.asyncio
+async def test_files_prompt_injected_when_media_env_present(tmp_path):
+    """COPS_MEDIA_DIR in env → FILES_PROMPT appended alongside IMAGES_PROMPT."""
+    opts = await _drain_run_engine(tmp_path, env={"COPS_MEDIA_DIR": str(tmp_path)})
+    assert opts is not None
+    assert engine.FILES_PROMPT in _append_text(opts), (
+        f"FILES_PROMPT not appended despite COPS_MEDIA_DIR: {_append_text(opts)!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_files_prompt_absent_without_media_env(tmp_path):
+    """No COPS_MEDIA_DIR → no file-drop hint either."""
+    opts = await _drain_run_engine(tmp_path, env={})
+    assert opts is not None
+    assert engine.FILES_PROMPT not in _append_text(opts)
+
+
+@pytest.mark.asyncio
+async def test_tools_dir_prepended_to_path_when_media_env(tmp_path):
+    """The repo tools/ dir is prepended to the agent PATH when media is live, so cockpit-img /
+    cockpit-file resolve without a manual install (and shadow any stale hand-copied helper)."""
+    opts = await _drain_run_engine(tmp_path, env={"COPS_MEDIA_DIR": str(tmp_path)})
+    assert opts is not None
+    tools_dir = str((ROOT / "tools").resolve())
+    path_val = (opts.env or {}).get("PATH", "")
+    assert path_val.split(":")[0] == tools_dir, (
+        f"tools/ dir must be first on PATH, got {path_val!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_path_not_touched_without_media_env(tmp_path):
+    """No COPS_MEDIA_DIR → run_engine must not inject a PATH override."""
+    opts = await _drain_run_engine(tmp_path, env={})
+    assert opts is not None
+    assert "PATH" not in (opts.env or {})
