@@ -225,8 +225,17 @@
   font-weight: 500;
 }
 .composer-meta .usage-badge-wrap { border-left: none; padding: 0; }
-/* Compact (mobile) rate-limit breakdown opens UPWARD — the chip sits at screen bottom. */
-.usage-compact .usage-dropdown { top: auto; bottom: calc(100% + 6px); right: 0; }
+/* Compact (mobile) rate-limit breakdown opens UPWARD — the chip sits at screen bottom.
+   Anchor LEFT (the chip lives on the left of the composer) + clamp to the viewport so
+   the panel never spills off the left edge. */
+.usage-compact .usage-dropdown {
+  top: auto;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: auto;
+  min-width: 0;
+  max-width: calc(100vw - 20px);
+}
 .usage-dropdown-link {
   margin-top: 4px;
   padding: 5px 6px 2px;

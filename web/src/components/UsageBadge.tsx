@@ -150,6 +150,21 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
 
       {showDropdown && (
         <div className="usage-dropdown">
+          {/* Headline action: our own usage & cost dashboard — now the badge's primary
+              destination (replaces the old claude.ai link). The desktop tab-bar badge
+              passes onOpen directly; the mobile composer badge (deep in ChatTab, no
+              handler) falls back to a window event App listens for. */}
+          <button
+            className="usage-dropdown-cta"
+            onClick={() => {
+              setExpanded(false); setHover(false)
+              if (onOpen) onOpen()
+              else window.dispatchEvent(new CustomEvent('cops:open-usage'))
+            }}
+          >
+            <span>📊 Usage &amp; cost</span>
+            <span className="usage-dropdown-cta-arrow">→</span>
+          </button>
           {['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'overage'].map(k => {
             const d = data.limits[k]
             if (!d) return null
@@ -168,28 +183,14 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
               </div>
             )
           })}
-          {/* Always offered: the desktop tab-bar badge passes onOpen directly; the
-              mobile composer badge (compact, no handler in deep ChatTab) falls back
-              to a window event App listens for. Either way the dropdown opens the tab. */}
-          <button
-            className="usage-dropdown-link"
-            style={{ background: 'none', border: 'none', width: '100%', textAlign: 'left', cursor: 'pointer', font: 'inherit' }}
-            onClick={() => {
-              setExpanded(false); setHover(false)
-              if (onOpen) onOpen()
-              else window.dispatchEvent(new CustomEvent('cops:open-usage'))
-            }}
-          >
-            📊 Open dashboard
-          </button>
           <a
-            className="usage-dropdown-link"
+            className="usage-dropdown-claude"
             href={USAGE_URL}
             target="_blank"
             rel="noopener noreferrer"
             onClick={openUsage}
           >
-            Open on claude.ai ↗
+            Limits on claude.ai ↗
           </a>
         </div>
       )}
