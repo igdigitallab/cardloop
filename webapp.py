@@ -6102,7 +6102,7 @@ _MODELS_URL = "https://api.anthropic.com/v1/models?limit=50"
 # Alias → static fallback label. Order is load-bearing (matches web/src/lib/models.ts).
 _MODEL_FAMILIES: list[tuple[str, str]] = [
     ("fable", "Fable 5"),
-    ("sonnet", "Sonnet 4.6"),
+    ("sonnet", "Sonnet 5"),
     ("opus", "Opus 4.8"),
     ("haiku", "Haiku 4.5"),
 ]
