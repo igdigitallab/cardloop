@@ -9,7 +9,7 @@ a PWA and steer your projects from the couch.
 
 <div align="center">
 
-![Cardloop demo — chat + kanban, a live agent-driven browser, usage analytics, and the same cockpit on mobile](docs/demo.gif)
+![Cardloop — drop a card, and the agent writes, diffs, and commits the code live](docs/demo.gif)
 
 </div>
 
@@ -47,7 +47,11 @@ Three things make Cardloop different from the dozen other agent kanbans:
    Progress runs the engine in an isolated **git worktree**, attaches the diff, and lands the card in
    Review behind a **Check / Apply / Discard** gate — your working copy is never touched until you merge.
 
+### A 12-second tour — board, a live agent-driven browser, usage analytics, and the same cockpit on your phone
+
 <div align="center">
+
+![Cardloop feature tour — chat + kanban, a live agent-driven browser, usage & cost analytics, and mobile](docs/tour.gif)
 
 ![The Cardloop cockpit — a kanban board beside a live agent chat](docs/cockpit.png)
 
