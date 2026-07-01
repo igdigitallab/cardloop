@@ -6,6 +6,12 @@ export interface UsageModelRow {
   model: string; input: number; output: number
   cache_read: number; cache_creation: number; turns: number; cost: number
 }
+// Token/cost bucket for a delegation role (main orchestrator or sub-agent worker).
+export interface DelegationRoleBucket {
+  turns: number; input: number; output: number
+  cache_read: number; cache_creation: number; cost: number
+}
+
 export interface UsageDashboard {
   ready: boolean
   error?: string
@@ -25,6 +31,21 @@ export interface UsageDashboard {
   all_models: string[]
   pricing_as_of: string
   generated_at: string
+  // spec-delegation-metrics additions
+  delegation?: {
+    main: DelegationRoleBucket
+    sub: DelegationRoleBucket
+    by_role_model: { role: 'main' | 'sub'; model: string; turns: number; input: number; output: number; cost: number }[]
+    ratio_cost: number   // 0..1 fraction of total cost that went to sub-agents
+    ratio_turns: number  // 0..1 fraction of total turns that ran in sub-agents
+  }
+  delegation_by_day?: { day: string; main_cost: number; sub_cost: number; main_turns: number; sub_turns: number }[]
+  subagent_health?: {
+    dispatches: number; completed: number; other: number
+    failure_rate_pct: number; avg_tool_uses: number; avg_duration_ms: number
+    by_status: { status: string; count: number }[]
+  }
+  top_tools?: { tool: string; turns: number }[]
 }
 
 export interface UsageLimitRow {
@@ -38,6 +59,10 @@ export interface UsageLimits {
 export interface UsageLedgerEntry {
   turns: number; fresh_tokens: number; cache_read_tokens: number; cost_usd: number
 }
+// Ledger ultracode bucket with avg cost per orchestrator turn.
+export interface UltracodeDetailBucket extends UsageLedgerEntry {
+  avg_cost_per_turn: number
+}
 export interface UsageLedger {
   days: number; now: number
   total: UsageLedgerEntry
@@ -45,6 +70,13 @@ export interface UsageLedger {
   by_day: Record<string, UsageLedgerEntry>
   ultracode: UsageLedgerEntry
   top_sessions: Array<{ session_key: string; turns: number; fresh_tokens: number; cache_read_tokens: number; cost_usd: number; max_context_tokens: number; project: string | null; entrypoint: string }>
+  // spec-delegation-metrics additions (source: Cardloop-initiated main turns · not retroactive)
+  ultracode_detail?: {
+    on: UltracodeDetailBucket   // ultracode=true runs
+    off: UltracodeDetailBucket  // ultracode=false runs
+    by_model: { model: string; turns: number; cost_usd: number }[]  // WHERE ultracode=true, by model
+  }
+  by_effort?: { effort: string; turns: number; fresh_tokens: number; cost_usd: number }[]
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {

@@ -698,6 +698,143 @@ def dashboard_data(db_path: Path | str = DEFAULT_DB_PATH,
     distinct_sessions = conn.execute(
         f"SELECT COUNT(DISTINCT t.session_id) c FROM turns t {where}", args).fetchone()["c"]
 
+    # ── delegation split: main vs sub-agent, by role+model ───────────────────
+    # Source: turns.is_subagent (0=main/orchestrator, 1=sub-agent worker).
+    # Token counts from turns; cost via usage_pricing — never from agents.total_tokens
+    # (SDK aggregate would double-count).
+
+    def _role_bucket() -> dict:
+        return {"turns": 0, "input": 0, "output": 0,
+                "cache_read": 0, "cache_creation": 0, "cost": 0.0}
+
+    deleg_main = _role_bucket()
+    deleg_sub  = _role_bucket()
+
+    by_role_model: list[dict] = []
+    for r in conn.execute(f"""
+        SELECT t.is_subagent,
+               COALESCE(NULLIF(t.model,''),'unknown') model,
+               SUM(t.input_tokens)          input,
+               SUM(t.output_tokens)         output,
+               SUM(t.cache_read_tokens)     cache_read,
+               SUM(t.cache_creation_tokens) cache_creation,
+               COUNT(*)                     turns
+        FROM turns t {where}
+        GROUP BY t.is_subagent, COALESCE(NULLIF(t.model,''),'unknown')
+        ORDER BY (SUM(t.input_tokens)+SUM(t.output_tokens)) DESC""", args):
+        role = "sub" if r["is_subagent"] else "main"
+        c = round(cost(r), 6)
+        bucket = deleg_sub if role == "sub" else deleg_main
+        for k in ("turns", "input", "output", "cache_read", "cache_creation"):
+            bucket[k] += r[k] or 0
+        bucket["cost"] += c
+        by_role_model.append({
+            "role": role, "model": r["model"],
+            "turns": r["turns"] or 0,
+            "input": r["input"] or 0,
+            "output": r["output"] or 0,
+            "cost": c,
+        })
+    # Sort by_role_model by cost descending (spec: "order by cost desc")
+    by_role_model.sort(key=lambda x: x["cost"], reverse=True)
+
+    total_deleg_cost  = deleg_main["cost"] + deleg_sub["cost"]
+    total_deleg_turns = deleg_main["turns"] + deleg_sub["turns"]
+    ratio_cost  = (deleg_sub["cost"]  / total_deleg_cost)  if total_deleg_cost  else 0.0
+    ratio_turns = (deleg_sub["turns"] / total_deleg_turns) if total_deleg_turns else 0.0
+
+    # Round stored cost to 4dp after accumulation (match the rest of the payload).
+    for b in (deleg_main, deleg_sub):
+        b["cost"] = round(b["cost"], 4)
+
+    delegation = {
+        "main":          deleg_main,
+        "sub":           deleg_sub,
+        "by_role_model": by_role_model,
+        "ratio_cost":    round(ratio_cost, 6),
+        "ratio_turns":   round(ratio_turns, 6),
+    }
+
+    # ── delegation by day (trend: stacked main vs sub cost per day) ──────────
+    # Respects the same day_clause + model_clause as the other aggregations.
+    deleg_day_raw: dict[str, dict] = {}
+    for r in conn.execute(f"""
+        SELECT substr(t.timestamp,1,10)      day,
+               t.is_subagent,
+               COALESCE(NULLIF(t.model,''),'unknown') model,
+               SUM(t.input_tokens)          input,
+               SUM(t.output_tokens)         output,
+               SUM(t.cache_read_tokens)     cache_read,
+               SUM(t.cache_creation_tokens) cache_creation,
+               COUNT(*)                     turns
+        FROM turns t {where}
+        GROUP BY substr(t.timestamp,1,10), t.is_subagent,
+                 COALESCE(NULLIF(t.model,''),'unknown')
+        ORDER BY day""", args):
+        day = r["day"]
+        if day not in deleg_day_raw:
+            deleg_day_raw[day] = {
+                "day": day,
+                "main_cost": 0.0, "sub_cost": 0.0,
+                "main_turns": 0,  "sub_turns": 0,
+            }
+        c = cost(r)
+        if r["is_subagent"]:
+            deleg_day_raw[day]["sub_cost"]  += c
+            deleg_day_raw[day]["sub_turns"] += r["turns"] or 0
+        else:
+            deleg_day_raw[day]["main_cost"]  += c
+            deleg_day_raw[day]["main_turns"] += r["turns"] or 0
+    delegation_by_day = [
+        {**v, "main_cost": round(v["main_cost"], 4), "sub_cost": round(v["sub_cost"], 4)}
+        for v in sorted(deleg_day_raw.values(), key=lambda x: x["day"])
+    ]
+
+    # ── sub-agent health (from agents table, date-windowed by completed_at) ──
+    # Use agents table ONLY for health stats — NOT for token/cost attribution.
+    # Date window: agents whose completed_at falls in the same day range used above.
+    agent_day_clause = (" AND substr(a.completed_at,1,10) >= ?" if start_day else "")
+    agent_args = ([start_day] if start_day else [])
+    health_row = conn.execute(f"""
+        SELECT COUNT(*)                                            dispatches,
+               SUM(CASE WHEN a.status='completed' THEN 1 ELSE 0 END) completed,
+               AVG(CASE WHEN a.tool_use_count IS NOT NULL THEN a.tool_use_count END) avg_tool_uses,
+               AVG(CASE WHEN a.total_duration_ms IS NOT NULL THEN a.total_duration_ms END) avg_duration_ms
+        FROM agents a WHERE 1=1{agent_day_clause}""", agent_args).fetchone()
+    health_statuses = [
+        {"status": r["status"] or "unknown", "count": r["cnt"]}
+        for r in conn.execute(f"""
+            SELECT COALESCE(a.status,'unknown') status, COUNT(*) cnt
+            FROM agents a WHERE 1=1{agent_day_clause}
+            GROUP BY COALESCE(a.status,'unknown')
+            ORDER BY cnt DESC""", agent_args)
+    ]
+    dispatches  = int(health_row["dispatches"] or 0)
+    completed   = int(health_row["completed"]  or 0)
+    other       = dispatches - completed
+    failure_rate = (other / dispatches * 100.0) if dispatches else 0.0
+    subagent_health = {
+        "dispatches":      dispatches,
+        "completed":       completed,
+        "other":           other,
+        "failure_rate_pct": round(failure_rate, 2),
+        "avg_tool_uses":   round(health_row["avg_tool_uses"] or 0.0, 2),
+        "avg_duration_ms": round(health_row["avg_duration_ms"] or 0.0, 1),
+        "by_status":       health_statuses,
+    }
+
+    # ── top tools (non-null tool_name, top 10 by turn count) ─────────────────
+    # `where` already starts with "WHERE 1=1", so append AND to narrow further.
+    top_tools = [
+        {"tool": r["tool_name"], "turns": r["cnt"]}
+        for r in conn.execute(f"""
+            SELECT t.tool_name, COUNT(*) cnt
+            FROM turns t {where} AND t.tool_name IS NOT NULL
+            GROUP BY t.tool_name
+            ORDER BY cnt DESC
+            LIMIT 10""", args)
+    ]
+
     conn.close()
     return {
         "ready": True,
@@ -715,6 +852,11 @@ def dashboard_data(db_path: Path | str = DEFAULT_DB_PATH,
         "all_models": all_models,
         "pricing_as_of": usage_pricing.PRICING_AS_OF,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        # ── spec-delegation-metrics additions ────────────────────────────────
+        "delegation":        delegation,
+        "delegation_by_day": delegation_by_day,
+        "subagent_health":   subagent_health,
+        "top_tools":         top_tools,
     }
 
 

@@ -5920,6 +5920,12 @@ async def api_usage_ledger(req: web.Request) -> web.Response:
     sessions_agg: dict[str, dict] = {}
     total = _blank()
 
+    # spec-delegation-metrics: ultracode detail + by-effort breakdowns
+    _uc_on  = _blank()
+    _uc_off = _blank()
+    _uc_by_model: dict[str, dict] = {}
+    _by_effort: dict[str, dict] = {}
+
     for r in rows:
         _add(total, r)
         ep = str(r.get("entrypoint") or "chat")
@@ -5933,6 +5939,43 @@ async def api_usage_ledger(req: web.Request) -> web.Response:
                                           "project": r.get("project"), "entrypoint": ep})
         _add(s, r)
         s["max_context_tokens"] = max(s["max_context_tokens"], int(r.get("context_tokens") or 0))
+
+        # ultracode_detail buckets
+        if r.get("ultracode"):
+            _add(_uc_on, r)
+            mdl = str(r.get("model") or "unknown")
+            _add(_uc_by_model.setdefault(mdl, {"model": mdl, **_blank()}), r)
+        else:
+            _add(_uc_off, r)
+
+        # by_effort buckets
+        eff = str(r.get("effort") or "unknown")
+        _add(_by_effort.setdefault(eff, {"effort": eff, **_blank()}), r)
+
+    # avg_cost_per_turn helper: 0 when turns==0 (avoid ZeroDivision)
+    def _avg_cost(b: dict) -> float:
+        return round(b["cost_usd"] / b["turns"], 6) if b["turns"] else 0.0
+
+    # ultracode_detail.by_model sorted by cost desc
+    uc_by_model_list = sorted(
+        ({"model": k, "turns": v["turns"], "cost_usd": round(v["cost_usd"], 6)}
+         for k, v in _uc_by_model.items()),
+        key=lambda x: x["cost_usd"], reverse=True,
+    )
+
+    ultracode_detail = {
+        "on": {**_uc_on, "avg_cost_per_turn": _avg_cost(_uc_on)},
+        "off": {**_uc_off, "avg_cost_per_turn": _avg_cost(_uc_off)},
+        "by_model": uc_by_model_list,
+    }
+
+    # by_effort sorted by cost desc
+    by_effort = sorted(
+        ({"effort": v["effort"], "turns": v["turns"],
+          "fresh_tokens": v["fresh_tokens"], "cost_usd": round(v["cost_usd"], 6)}
+         for v in _by_effort.values()),
+        key=lambda x: x["cost_usd"], reverse=True,
+    )
 
     # Heaviest sessions by peak context — the "tail" the audit flagged (the 490K monster).
     top_sessions = sorted(
@@ -5948,6 +5991,9 @@ async def api_usage_ledger(req: web.Request) -> web.Response:
         "by_day": dict(sorted(by_day.items())),
         "ultracode": ultracode,
         "top_sessions": top_sessions,
+        # spec-delegation-metrics additions
+        "ultracode_detail": ultracode_detail,
+        "by_effort": by_effort,
     })
 
 

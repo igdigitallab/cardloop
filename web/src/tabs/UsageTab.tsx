@@ -137,6 +137,88 @@ function HourChart({ rows }: { rows: { hour: number; turns: number; cost: number
   )
 }
 
+// ── Delegation stacked daily chart ──────────────────────────────────────────
+// Renders main_cost + sub_cost as two stacked segments per day column.
+// Segment heights are proportional to their cost within the max total day.
+interface DelegationDayRow { day: string; main_cost: number; sub_cost: number; main_turns: number; sub_turns: number }
+function DelegationTrendChart({ rows }: { rows: DelegationDayRow[] }) {
+  if (!rows.length) return <div className="usage-empty">No daily data in this range.</div>
+  const totals = rows.map(r => r.main_cost + r.sub_cost)
+  const max = Math.max(1, ...totals)
+  const first = rows[0].day.slice(5)
+  const last = rows[rows.length - 1].day.slice(5)
+  return (
+    <>
+      <div className="usage-legend" style={{ marginBottom: '8px' }}>
+        <span><i style={{ background: 'var(--text)' }} /> main (orchestrator)</span>
+        <span><i style={{ background: 'var(--text3)' }} /> sub-agents (workers)</span>
+      </div>
+      <div className="usage-daily">
+        {rows.map((r) => {
+          const total = r.main_cost + r.sub_cost
+          const mainH = total > 0 ? (r.main_cost / max) * 100 : 0
+          const subH = total > 0 ? (r.sub_cost / max) * 100 : 0
+          const totalH = mainH + subH
+          return (
+            <div
+              key={r.day}
+              className={`usage-col${total <= 0 ? ' empty' : ''}`}
+              style={{
+                height: `${Math.max(total > 0 ? 3 : 1, totalH)}%`,
+                background: total <= 0
+                  ? 'var(--bg4)'
+                  : `linear-gradient(to top, var(--text3) ${Math.round((subH / totalH) * 100)}%, var(--text) ${Math.round((subH / totalH) * 100)}%)`,
+              }}
+              title={`${r.day}\nMain: ${fmtCost(r.main_cost)} · ${r.main_turns} turns\nSub: ${fmtCost(r.sub_cost)} · ${r.sub_turns} turns`}
+            />
+          )
+        })}
+      </div>
+      <div className="usage-daily-x"><span>{first}</span><span>{last}</span></div>
+    </>
+  )
+}
+
+// ── Small bar for turns-only data (top_tools / by_effort) ───────────────────
+function TurnsBar({ rows }: { rows: { label: string; turns: number; sub?: string }[] }) {
+  const max = Math.max(1, ...rows.map(r => r.turns))
+  if (!rows.length) return <div className="usage-empty">No data yet.</div>
+  return (
+    <div className="usage-barlist">
+      {rows.map((r, i) => (
+        <div className="usage-barrow" key={i} title={r.sub ?? `${r.label}: ${r.turns} turns`}>
+          <span className="bl">{r.label}</span>
+          <div className="usage-bartrack">
+            <div className="usage-barfill" style={{ width: `${Math.max(2, (r.turns / max) * 100)}%` }} />
+          </div>
+          <span className="bv"><b>{fmtNum(r.turns)}</b> turns{r.sub ? ` · ${r.sub}` : ''}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ── Effort bar (cost + turns, from ledger.by_effort) ─────────────────────────
+interface ByEffortRow { effort: string; turns: number; fresh_tokens: number; cost_usd: number }
+function EffortBar({ rows }: { rows: ByEffortRow[] }) {
+  const max = Math.max(1, ...rows.map(r => r.cost_usd))
+  if (!rows.length) return <div className="usage-empty">No data yet.</div>
+  return (
+    <div className="usage-barlist">
+      {rows.map((r, i) => (
+        <div className="usage-barrow" key={i}
+          title={`${r.effort} — ${fmtNum(r.turns)} turns · ${fmtTok(r.fresh_tokens)} fresh tokens`}>
+          <span className="bl">{r.effort}</span>
+          <div className="usage-bartrack">
+            <div className="usage-barfill" style={{ width: `${Math.max(2, (r.cost_usd / max) * 100)}%` }} />
+          </div>
+          <span className="bv"><b>{fmtCost(r.cost_usd)}</b> · {fmtNum(r.turns)} turns</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── Cardloop vs CLI ledger panel (card 3c) ────────────────────────────────────
 function LedgerPanel({ data }: { data: UsageLedger }) {
   const ep = data.by_entrypoint
@@ -405,6 +487,246 @@ export function UsageTab() {
               sub: `${fmtNum(s.dispatches)} dispatches · ${fmtNum(s.turns)} turns`,
             }))} />
           </div>
+
+          {/* ── Delegation & Ultracode ───────────────────────────────────────────── */}
+          {/* Sourced from two independent backends; each panel carries its source label.
+              Guard all new fields with optional-chaining — the backend track adds them
+              in parallel; an older payload must not crash the tab. */}
+          {(() => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const d = data as any
+            const deleg = d?.delegation as {
+              main: { turns: number; input: number; output: number; cache_read: number; cache_creation: number; cost: number }
+              sub:  { turns: number; input: number; output: number; cache_read: number; cache_creation: number; cost: number }
+              by_role_model: { role: 'main' | 'sub'; model: string; turns: number; input: number; output: number; cost: number }[]
+              ratio_cost:  number
+              ratio_turns: number
+            } | undefined
+            const delegByDay = d?.delegation_by_day as DelegationDayRow[] | undefined
+            const health = d?.subagent_health as {
+              dispatches: number; completed: number; other: number
+              failure_rate_pct: number; avg_tool_uses: number; avg_duration_ms: number
+              by_status: { status: string; count: number }[]
+            } | undefined
+            const topTools = d?.top_tools as { tool: string; turns: number }[] | undefined
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const ldgAny = ledger as any
+            const ultDetail = ldgAny?.ultracode_detail as {
+              on:  { turns: number; fresh_tokens: number; cache_read_tokens: number; cost_usd: number; avg_cost_per_turn: number }
+              off: { turns: number; fresh_tokens: number; cache_read_tokens: number; cost_usd: number; avg_cost_per_turn: number }
+              by_model: { model: string; turns: number; cost_usd: number }[]
+            } | undefined
+            const byEffort = ldgAny?.by_effort as ByEffortRow[] | undefined
+
+            // Nothing to render if none of the new fields arrived yet.
+            if (!deleg && !delegByDay && !health && !topTools && !ultDetail && !byEffort) return null
+
+            const ratioTurnsPct = deleg ? Math.round(deleg.ratio_turns * 100) : 0
+            const ratioCostPct  = deleg ? Math.round(deleg.ratio_cost  * 100) : 0
+            const totalDelegCost = deleg ? deleg.main.cost + deleg.sub.cost : 0
+
+            return (
+              <>
+                {/* ── Section header ── */}
+                <div className="usage-card-head" style={{ marginBottom: 0 }}>
+                  <span className="usage-card-title" style={{ fontSize: '13px', textTransform: 'none', letterSpacing: 0, fontWeight: 700, color: 'var(--text)' }}>
+                    Delegation &amp; Ultracode
+                  </span>
+                </div>
+
+                {/* 1. Headline: delegation ratio */}
+                {deleg && (
+                  <div className="usage-card">
+                    <div className="usage-card-head">
+                      <span className="usage-card-title">Delegation overview</span>
+                      <span className="usage-note">all transcripts (Cardloop + CLI)</span>
+                    </div>
+                    <div className="usage-stats" style={{ marginBottom: '10px' }}>
+                      <div className="usage-stat accent">
+                        <div className="lbl">Sub-agent turns</div>
+                        <div className="val">{ratioTurnsPct}%</div>
+                        <div className="sub">{fmtNum(deleg.sub.turns)} of {fmtNum(deleg.main.turns + deleg.sub.turns)} total</div>
+                      </div>
+                      <div className="usage-stat">
+                        <div className="lbl">Sub-agent cost</div>
+                        <div className="val">{ratioCostPct}%</div>
+                        <div className="sub">{fmtCost(deleg.sub.cost)} of {fmtCost(totalDelegCost)}</div>
+                      </div>
+                      <div className="usage-stat">
+                        <div className="lbl">Orchestrator cost</div>
+                        <div className="val">{fmtCost(deleg.main.cost)}</div>
+                        <div className="sub">{fmtNum(deleg.main.turns)} turns</div>
+                      </div>
+                    </div>
+                    <div className="usage-note">
+                      Your main model plans and delegates; sub-agents (mostly Sonnet/Haiku) do the execution.
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. Orchestrator vs Workers: two-group bar split by model */}
+                {deleg && deleg.by_role_model && deleg.by_role_model.length > 0 && (
+                  <div className="usage-card">
+                    <div className="usage-card-head">
+                      <span className="usage-card-title">Orchestrator vs Workers — cost by model</span>
+                      <span className="usage-note">all transcripts (Cardloop + CLI)</span>
+                    </div>
+                    {/* Main (orchestrator) group */}
+                    {deleg.by_role_model.filter(r => r.role === 'main').length > 0 && (
+                      <>
+                        <div className="usage-note" style={{ marginBottom: '6px', fontWeight: 600, color: 'var(--text2)' }}>
+                          Orchestrator (main)
+                        </div>
+                        <BarList rows={deleg.by_role_model
+                          .filter(r => r.role === 'main')
+                          .map(r => ({
+                            label: shortModel(r.model),
+                            cost: r.cost,
+                            tokens: r.input + r.output,
+                            sub: `${fmtNum(r.turns)} turns`,
+                          }))}
+                        />
+                      </>
+                    )}
+                    {deleg.by_role_model.filter(r => r.role === 'sub').length > 0 && (
+                      <>
+                        <div className="usage-note" style={{ marginTop: '14px', marginBottom: '6px', fontWeight: 600, color: 'var(--text2)' }}>
+                          Workers (sub-agents)
+                        </div>
+                        <BarList rows={deleg.by_role_model
+                          .filter(r => r.role === 'sub')
+                          .map(r => ({
+                            label: shortModel(r.model),
+                            cost: r.cost,
+                            tokens: r.input + r.output,
+                            sub: `${fmtNum(r.turns)} turns`,
+                          }))}
+                        />
+                      </>
+                    )}
+                    <div className="usage-note" style={{ marginTop: '8px' }}>
+                      Opus thinks / Sonnet executes — the cost split reflects that contract.
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. Delegation trend: stacked daily chart */}
+                {delegByDay && delegByDay.length > 0 && (
+                  <div className="usage-card">
+                    <div className="usage-card-head">
+                      <span className="usage-card-title">Delegation trend (daily)</span>
+                      <span className="usage-note">all transcripts (Cardloop + CLI)</span>
+                    </div>
+                    <DelegationTrendChart rows={delegByDay} />
+                  </div>
+                )}
+
+                {/* 4. Ultracode card */}
+                {(ultDetail || byEffort) && (
+                  <div className="usage-card">
+                    <div className="usage-card-head">
+                      <span className="usage-card-title">Ultracode (⚡ max effort)</span>
+                      <span className="usage-note">Cardloop-only · not retroactive · orchestrator-side</span>
+                    </div>
+                    {ultDetail ? (
+                      <>
+                        <div className="usage-stats" style={{ marginBottom: '10px' }}>
+                          <div className="usage-stat">
+                            <div className="lbl">Runs with ultracode ON</div>
+                            <div className="val">{fmtNum(ultDetail.on.turns)}</div>
+                            <div className="sub">avg {fmtCost(ultDetail.on.avg_cost_per_turn ?? 0)}/turn</div>
+                          </div>
+                          <div className="usage-stat">
+                            <div className="lbl">Runs without ultracode</div>
+                            <div className="val">{fmtNum(ultDetail.off.turns)}</div>
+                            <div className="sub">avg {fmtCost(ultDetail.off.avg_cost_per_turn ?? 0)}/turn</div>
+                          </div>
+                          <div className="usage-stat accent">
+                            <div className="lbl">Orchestrator cost (ON)</div>
+                            <div className="val">{fmtCost(ultDetail.on.cost_usd)}</div>
+                            <div className="sub">{fmtTok(ultDetail.on.fresh_tokens + ultDetail.on.cache_read_tokens)} tok</div>
+                          </div>
+                        </div>
+                        {ultDetail.by_model && ultDetail.by_model.length > 0 && (
+                          <>
+                            <div className="usage-note" style={{ marginBottom: '6px' }}>By model (ultracode ON):</div>
+                            <BarList rows={ultDetail.by_model.map(r => ({
+                              label: shortModel(r.model),
+                              cost: r.cost_usd,
+                              tokens: 0,
+                              sub: `${fmtNum(r.turns)} turns`,
+                            }))} />
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      <div className="usage-empty" style={{ padding: '16px 0' }}>No ultracode detail yet.</div>
+                    )}
+
+                    {/* Cost by effort */}
+                    {byEffort && byEffort.length > 0 && (
+                      <>
+                        <div className="usage-note" style={{ marginTop: '14px', marginBottom: '6px', fontWeight: 600, color: 'var(--text2)' }}>
+                          Cost by effort level <span style={{ fontWeight: 400 }}>(note: max ≈ ultracode)</span>
+                        </div>
+                        <EffortBar rows={byEffort} />
+                      </>
+                    )}
+
+                    <div className="usage-note" style={{ marginTop: '10px' }}>
+                      <b>Orchestrator-side only</b> — ultracode fan-out spawns sub-agent workers whose cost
+                      appears in the Delegation split above, not here. Cardloop-originated turns only; not retroactive.
+                    </div>
+                  </div>
+                )}
+
+                {/* 5. Sub-agent health */}
+                {health && health.dispatches > 0 && (
+                  <div className="usage-card">
+                    <div className="usage-card-head">
+                      <span className="usage-card-title">Sub-agent health</span>
+                      <span className="usage-note">all transcripts (Cardloop + CLI)</span>
+                    </div>
+                    <div className="usage-stats">
+                      <div className="usage-stat">
+                        <div className="lbl">Dispatches</div>
+                        <div className="val">{fmtNum(health.dispatches)}</div>
+                        <div className="sub">{fmtNum(health.completed)} completed</div>
+                      </div>
+                      <div className="usage-stat" style={health.failure_rate_pct > 10 ? { borderColor: 'var(--red)' } : {}}>
+                        <div className="lbl">Failure rate</div>
+                        <div className="val" style={{ color: health.failure_rate_pct > 10 ? 'var(--red)' : undefined }}>
+                          {health.failure_rate_pct.toFixed(1)}%
+                        </div>
+                        <div className="sub">{fmtNum(health.other)} non-completed</div>
+                      </div>
+                      <div className="usage-stat">
+                        <div className="lbl">Avg tools/agent</div>
+                        <div className="val">{health.avg_tool_uses.toFixed(1)}</div>
+                        <div className="sub">tool uses per dispatch</div>
+                      </div>
+                      <div className="usage-stat">
+                        <div className="lbl">Avg duration</div>
+                        <div className="val">{health.avg_duration_ms > 0 ? `${(health.avg_duration_ms / 1000).toFixed(0)}s` : '—'}</div>
+                        <div className="sub">per dispatch</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 6. Top tools */}
+                {topTools && topTools.length > 0 && (
+                  <div className="usage-card">
+                    <div className="usage-card-head">
+                      <span className="usage-card-title">Top tools used</span>
+                      <span className="usage-note">all transcripts (Cardloop + CLI)</span>
+                    </div>
+                    <TurnsBar rows={topTools.slice(0, 10).map(r => ({ label: r.tool, turns: r.turns }))} />
+                  </div>
+                )}
+              </>
+            )
+          })()}
 
           {/* ── By project (card 3d — with branch when available) ── */}
           <div className="usage-card">
