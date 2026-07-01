@@ -7,13 +7,11 @@ Drop a card, and your home server ships the code, docs, or ops task autonomously
 existing **Claude subscription**, not per-token API calls. Install it to your phone's home screen as
 a PWA and steer your projects from the couch.
 
-<!-- HERO GIF: docs/demo.gif -->
-<!--
-  ▶ Record ~12s (700px, 15fps, ~3-4MB): board with cards → type a task → card auto-runs →
-    streaming agent output → cut to phone (PWA) showing the same run live → card lands in Review.
-  Host via GitHub CDN (drag into an issue comment, copy the user-images URL) or commit to docs/.
-  Then replace this comment with:  ![Cardloop demo](docs/demo.gif)
--->
+<div align="center">
+
+![Cardloop demo — chat + kanban, a live agent-driven browser, usage analytics, and the same cockpit on mobile](docs/demo.gif)
+
+</div>
 
 <div align="center">
 
@@ -49,8 +47,13 @@ Three things make Cardloop different from the dozen other agent kanbans:
    Progress runs the engine in an isolated **git worktree**, attaches the diff, and lands the card in
    Review behind a **Check / Apply / Discard** gate — your working copy is never touched until you merge.
 
-<!-- SCREENSHOT: docs/cockpit.png — the kanban board + live chat panel on desktop -->
-<!-- SCREENSHOT: docs/mobile.png — the PWA installed on a phone home screen + a card running live -->
+<div align="center">
+
+![The Cardloop cockpit — a kanban board beside a live agent chat](docs/cockpit.png)
+
+<img src="docs/mobile.png" width="300" alt="The same board on a phone — develop from anywhere" />
+
+</div>
 
 ---
 
