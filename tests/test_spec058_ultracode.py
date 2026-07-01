@@ -46,6 +46,7 @@ def _fake_client_capturing(captured: dict):
 async def _drain_run_engine(tmp_path, **kwargs):
     """Run run_engine with the SDK mocked out and return the captured ClaudeAgentOptions."""
     captured: dict = {}
+    model = kwargs.pop("model", "sonnet")
     with patch.object(engine, "ClaudeSDKClient", _fake_client_capturing(captured)), \
          patch.object(engine, "running", {}), \
          patch.object(engine, "audit", lambda *a: None):
@@ -54,7 +55,7 @@ async def _drain_run_engine(tmp_path, **kwargs):
             cwd=str(tmp_path),
             prompt="hi",
             session_key="c:t",
-            model="sonnet",
+            model=model,
             **kwargs,
         ):
             pass
@@ -67,12 +68,20 @@ def _append_text(opts) -> str:
 
 
 def test_ultracode_prompt_constant_present():
-    """ULTRACODE_PROMPT module constant exists and reads like an orchestration directive."""
+    """ULTRACODE_PROMPT is a hard orchestration CONTRACT (not a soft preference): it names the
+    Sonnet worker slots, states an explicit delegate/stay-solo posture, and asks for verification."""
     assert hasattr(engine, "ULTRACODE_PROMPT")
     low = engine.ULTRACODE_PROMPT.lower()
     assert "ultracode" in low
     assert "sub-agent" in low or "workflow" in low
     assert "verify" in low
+    # spec-058 hardening (2026-07): the directive must be a real delegation contract, because
+    # Opus 4.8 spawns few sub-agents by default and follows literal instructions — a soft invite
+    # left Opus doing everything itself.
+    assert "orchestrator" in low
+    assert "executor" in low and "researcher" in low   # names the actual Sonnet worker slots
+    assert "delegate" in low
+    assert "task tool" in low or "task call" in low     # the delegation primitive
 
 
 @pytest.mark.asyncio
@@ -112,3 +121,33 @@ async def test_ultracode_default_is_off(tmp_path):
     assert opts is not None
     assert engine.ULTRACODE_PROMPT not in _append_text(opts)
     assert opts.effort == "medium"
+
+
+@pytest.mark.asyncio
+async def test_ultracode_injects_for_opus_too(tmp_path):
+    """ultracode is model-agnostic: an opus project also gets the orchestration contract (this is
+    the exact case that was broken — Opus ran ultracode but did everything itself)."""
+    opts = await _drain_run_engine(tmp_path, model="opus", ultracode=True)
+    assert engine.ULTRACODE_PROMPT in _append_text(opts)
+    assert opts.effort == "max"
+
+
+@pytest.mark.asyncio
+async def test_ultracode_on_fable_does_not_also_inject_conductor(tmp_path):
+    """fable + ultracode → ULTRACODE_PROMPT is the sole orchestration contract; CONDUCTOR_PROMPT is
+    NOT also injected (its ≤3–5 concurrent cap would fight ultracode's parallel fan-out)."""
+    opts = await _drain_run_engine(tmp_path, model="fable", ultracode=True)
+    txt = _append_text(opts)
+    assert engine.ULTRACODE_PROMPT in txt
+    assert engine.CONDUCTOR_PROMPT not in txt, (
+        f"fable+ultracode must not also inject the conductor cap: {txt!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_conductor_still_injected_for_fable_without_ultracode(tmp_path):
+    """Regression guard: plain fable (no ultracode) still gets CONDUCTOR_PROMPT and NOT ULTRACODE."""
+    opts = await _drain_run_engine(tmp_path, model="fable")
+    txt = _append_text(opts)
+    assert engine.CONDUCTOR_PROMPT in txt
+    assert engine.ULTRACODE_PROMPT not in txt

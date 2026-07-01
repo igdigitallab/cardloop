@@ -186,7 +186,8 @@ def _build_agents_kwargs(agents_config: dict) -> dict:
     return kwargs
 
 
-# Conductor directive appended to system_prompt when model is fable.
+# Conductor directive appended to system_prompt when model is fable AND the run is not ultracode
+# (ultracode injects its own stronger ULTRACODE_PROMPT contract for every model — see below).
 # Kept as a module constant so it can be asserted in tests without instantiating run_engine.
 CONDUCTOR_PROMPT = (
     "You are an orchestrator. Delegate substantial execution to sub-agents via the Task tool — "
@@ -196,16 +197,30 @@ CONDUCTOR_PROMPT = (
     "Prefer ≤3–5 concurrent sub-agents; sequence tasks rather than parallelising unnecessarily."
 )
 
-# spec-058: Ultracode mode directive. Appended to system_prompt["append"] (same mechanism as
-# CONDUCTOR_PROMPT) when a chat run sets ultracode=True. Mode — not an effort level: it flips the
-# default disposition to fan-out + adversarial verification AND pins effort to max (forced in
-# run_engine). Kept as a module constant so it can be asserted in tests.
+# spec-058: Ultracode mode directive — a hard orchestration CONTRACT (not a soft preference).
+# Appended to system_prompt["append"] (same mechanism as CONDUCTOR_PROMPT) for ANY model when a
+# chat run sets ultracode=True, with effort pinned to max (forced in run_engine). It makes the main
+# model act as an orchestrator that delegates execution to the named Sonnet/Haiku sub-agents
+# (executor/researcher/quick) with explicit when-to-delegate triggers + parallel same-turn spawns —
+# because Opus 4.8 spawns few sub-agents by default and follows literal instructions, so a soft
+# invite is obeyed as optional. This is why the old "default to decomposing" wording left Opus
+# doing everything itself. Kept as a module constant so it can be asserted in tests.
 ULTRACODE_PROMPT = (
-    "You are in Ultracode mode. Default to decomposing the task and running parallel work — spawn "
-    "sub-agents (the Task tool) or author a Workflow — for any substantial task; favour "
-    "comprehensiveness over brevity. Adversarially verify findings before acting on them. Operate "
-    "at maximum effort; token cost is not the constraint. Stay solo only for trivial or purely "
-    "conversational turns."
+    "You are in Ultracode mode: act as an ORCHESTRATOR, not a solo coder. Plan the task, delegate "
+    "execution to sub-agents via the Task tool, review their results, and iterate. You have named "
+    "sub-agents: `executor` (Sonnet — writes files, runs commands), `researcher` (Sonnet — read-only "
+    "web / file / grep lookups), `quick` (Haiku — fast simple lookups). Prefer these named workers "
+    "for the actual work; reserve your own turns for decomposition, decisions, and synthesis.\n"
+    "DELEGATE (spawn a sub-agent) for: anything touching more than one file; any implementation, "
+    "refactor, or build/test/debug loop; independent searches, reads, or research sub-queries. When "
+    "subtasks are independent, emit MULTIPLE Task calls in the SAME turn so they run in parallel — do "
+    "not wait for one to finish before starting the next (aim for up to ~6 at once). For a large or "
+    "open-ended fan-out, author a Workflow instead. Give each sub-agent a self-contained brief.\n"
+    "Do NOT run long code sequences or multi-file edits yourself. Stay solo ONLY for a trivial change "
+    "you can finish in a single response, or a purely conversational or planning turn.\n"
+    "Adversarially verify before acting: have an independent sub-agent try to refute a finding, and "
+    "iterate until results converge. Operate at maximum effort; token cost is not the constraint; "
+    "favour comprehensiveness over brevity."
 )
 
 
@@ -1430,8 +1445,10 @@ async def run_engine(  # type: ignore[return]
 
     resolved_model = MODELS.get(model, model) if model else MODELS.get(DEFAULT_MODEL, DEFAULT_MODEL)
 
-    # Conductor directive: inject when using fable as orchestrator model (unless disabled per-project).
-    if not skip_conductor_prompt and resolved_model and resolved_model.startswith("fable"):
+    # Conductor directive: inject for fable as orchestrator model (unless disabled per-project) — but
+    # NOT when ultracode is on, since ULTRACODE_PROMPT (below) is a stronger, self-sufficient
+    # orchestration contract and the conductor's "≤3–5 concurrent" cap would fight ultracode fan-out.
+    if not skip_conductor_prompt and not ultracode and resolved_model and resolved_model.startswith("fable"):
         existing_append = system_prompt.get("append") or ""
         sep = "\n" if existing_append else ""
         system_prompt = dict(system_prompt)
