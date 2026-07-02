@@ -379,8 +379,11 @@ export interface ChatEventResult {
   cache_hit_pct?: number | null
   duration_ms?: number | null
   utilization?: number | null
-  /** Early-warning flag: backend sets true when context is in the ≈150K–175K zone. */
+  /** Early-warning flag: backend sets true on first upward crossing of CONTEXT_WARN_AT. */
   context_warn?: boolean
+  /** Absolute cost-management thresholds (two-tier): yellow banner, red banner. */
+  context_warn_at?: number
+  context_warn_red?: number
 }
 
 export interface ChatEventError {
@@ -429,8 +432,9 @@ export interface SessionHistoryResponse {
   session_id: string | null
   context_tokens?: number
   context_window?: number
-  /** Absolute cost-management thresholds (decoupled from the window): warn-banner + auto-rotate. */
+  /** Absolute cost-management thresholds (two-tier, decoupled from the window). */
   context_warn_at?: number
+  context_warn_red?: number
   context_rotate_at?: number
   /** Unix milliseconds of the last assistant turn (from transcript timestamp or file mtime). null if no assistant turn. */
   last_turn_at?: number | null

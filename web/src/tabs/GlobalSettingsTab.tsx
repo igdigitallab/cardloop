@@ -66,6 +66,24 @@ export function GlobalSettingsTab() {
   const [directorWorking, setDirectorWorking] = useState<Record<string, boolean>>({})
   const { permission, enabled, setEnabled, requestPermission } = useNotifications()
   const { modules, isEnabled: isModEnabled, setEnabled: setModEnabled } = useModules()
+  const [pushTestMsg, setPushTestMsg] = useState('')
+  const [pushTesting, setPushTesting] = useState(false)
+
+  async function sendPushTest() {
+    setPushTesting(true); setPushTestMsg('')
+    try {
+      const r = await api.pushTest()
+      setPushTestMsg(
+        r.sent > 0
+          ? `Sent to ${r.sent} device${r.sent === 1 ? '' : 's'} — you should see it now.`
+          : 'No device is subscribed yet. Turn the toggle on above and tap "Allow", then try again.',
+      )
+    } catch (e) {
+      setPushTestMsg(errMsg(e))
+    } finally {
+      setPushTesting(false)
+    }
+  }
 
   const loadDecisions = useCallback(() => {
     void api.autopilotDecisions(20).then(setDecisions).catch(() => setDecisions([]))
@@ -536,6 +554,21 @@ export function GlobalSettingsTab() {
             </label>
           )}
         </Row>
+        {permission === 'granted' && enabled && (
+          <div style={{ marginTop: 8 }}>
+            <button
+              className="btn-secondary"
+              style={{ fontSize: 13, minHeight: 36 }}
+              onClick={() => void sendPushTest()}
+              disabled={pushTesting}
+            >
+              {pushTesting ? 'Sending…' : 'Send test notification'}
+            </button>
+            {pushTestMsg && (
+              <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 6 }}>{pushTestMsg}</div>
+            )}
+          </div>
+        )}
       </section>
 
       {/* Spec-065: module/extension registry */}

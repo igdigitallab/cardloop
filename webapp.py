@@ -99,11 +99,16 @@ CONTEXT_WINDOW = int(os.environ.get("CONTEXT_WINDOW", "1000000"))
 # persistent session re-bills its WHOLE prompt as cache_read every turn; a healthy session sits
 # ~138K (median), but unreset ones balloon (measured: one hit 490K over 526 turns).  The old
 # defaults (85%/95% of the 1M window = 850K/950K) never fired in the real pain-zone, so they were
-# effectively dead.  We now fire in the zone that actually costs:
-#   CONTEXT_WARN_AT   — ambient "this is getting expensive" nudge (banner). Default 200K.
-#   CONTEXT_ROTATE_AT — auto-rotate-with-handoff trigger (caps the tail). Default 280K.
+# effectively dead.  Two-tier warning in the real cost zone:
+#   CONTEXT_WARN_YELLOW — yellow "getting expensive" banner.  Default 300K.
+#   CONTEXT_WARN_RED    — red "critical / reset now" banner.  Default 500K.
+#   CONTEXT_WARN_AT     — alias for CONTEXT_WARN_YELLOW (used by the banner; env-tunable).
+#   CONTEXT_ROTATE_AT   — auto-rotate-with-handoff trigger (caps the tail). Default 280K.
 # Both env-tunable — watch data/usage_ledger.jsonl and tune to where YOUR tail actually hurts.
-CONTEXT_WARN_AT = int(os.environ.get("CONTEXT_WARN_AT", "200000"))
+CONTEXT_WARN_YELLOW = int(os.environ.get("CONTEXT_WARN_YELLOW", "300000"))
+CONTEXT_WARN_RED    = int(os.environ.get("CONTEXT_WARN_RED",    "500000"))
+# CONTEXT_WARN_AT: canonical alias — the backend uses this one name throughout.
+CONTEXT_WARN_AT = int(os.environ.get("CONTEXT_WARN_AT", str(CONTEXT_WARN_YELLOW)))
 CONTEXT_ROTATE_AT = int(os.environ.get("CONTEXT_ROTATE_AT", "280000"))
 # CONTEXT_ROTATION: master switch for auto-rotation (revived; spec-039 had removed the trigger,
 # spec-042 shipped the handoff producer this reuses). Default ON. Set CONTEXT_ROTATION=0 to disable.
@@ -8791,6 +8796,7 @@ async def api_project_session_history(req: web.Request) -> web.Response:
         "context_tokens": context_tokens,
         "context_window": CONTEXT_WINDOW,
         "context_warn_at": CONTEXT_WARN_AT,
+        "context_warn_red": CONTEXT_WARN_RED,
         "context_rotate_at": CONTEXT_ROTATE_AT,
         "last_turn_at": last_turn_at_ms,
         "last_cache_hit_pct": last_cache_hit_pct,
@@ -9472,13 +9478,13 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     _w = (_cached.get("five_hour") or {})
                     _utilization = _w.get("utilization") if isinstance(_w, dict) else None
                 # Context early-warning: upward crossing of CONTEXT_WARN_AT (once per session).
-                # Only fires in the warn zone (>= CONTEXT_WARN_AT but < CONTEXT_ROTATE_AT).
+                # Only fires in the warn zone (>= CONTEXT_WARN_AT).
                 _ctx_warn = False
                 try:
                     _ctx_warned: "set | None" = ctx.get("context_warned")
                     if (
                         _ctx_warned is not None
-                        and CONTEXT_WARN_AT <= ctx_tokens < CONTEXT_ROTATE_AT
+                        and ctx_tokens >= CONTEXT_WARN_AT
                         and session_key not in _ctx_warned
                     ):
                         _ctx_warn = True
@@ -9489,9 +9495,10 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     "type": "result",
                     "context_tokens": ctx_tokens,
                     "context_window": CONTEXT_WINDOW,
-                    # Cost-management thresholds (absolute, decoupled from the window) so the
-                    # frontend banner fires in the real pain-zone, not at 85% of 1M.
+                    # Two-tier cost thresholds delivered to the frontend: yellow at 300K, red at 500K.
+                    # Decoupled from the 1M window — fire in the real re-bill pain-zone.
                     "context_warn_at": CONTEXT_WARN_AT,
+                    "context_warn_red": CONTEXT_WARN_RED,
                     "context_rotate_at": CONTEXT_ROTATE_AT,
                     "cache_read_tokens": event.get("cache_read_tokens"),
                     "fresh_tokens": event.get("fresh_tokens"),
@@ -12057,6 +12064,42 @@ async def api_push_unsubscribe(req: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def api_push_test(req: web.Request) -> web.Response:
+    """POST /api/push/test — send a test Web Push to all stored subscriptions so the
+    operator can verify the end-to-end chain from the Notifications settings.
+    Returns {ok, sent, total}; sent=0/total=0 means no device is subscribed yet."""
+    if not _PUSH_AVAILABLE:
+        return web.json_response({"error": "web push unavailable"}, status=503)
+    _push_ensure_vapid_keys()
+    if not _PUSH_PRIV_KEY or not _PUSH_PUB_KEY:
+        return web.json_response({"error": "VAPID keys unavailable"}, status=503)
+    lock = _PUSH_LOCK
+    if lock is None:
+        return web.json_response({"error": "push not initialised"}, status=503)
+    async with lock:
+        subs = _load_push_subs()
+    if not subs:
+        return web.json_response({"ok": False, "sent": 0, "total": 0})
+    payload = json.dumps({
+        "title": "🔔 Cardloop",
+        "body": "Test notification — push is working.",
+        "icon": "/icons/icon-192.png",
+        "tag": "cardloop-test",
+        "data": {"url": "/"},
+    })
+    removed_endpoints: list[str] = []
+    await asyncio.gather(*[
+        _push_send_one(sub, payload, sub.get("endpoint", ""), removed_endpoints)
+        for sub in subs if sub.get("endpoint")
+    ])
+    if removed_endpoints:
+        async with lock:
+            updated = [s for s in _load_push_subs() if s.get("endpoint") not in removed_endpoints]
+            _save_push_subs(updated)
+    sent = len(subs) - len(removed_endpoints)
+    return web.json_response({"ok": sent > 0, "sent": sent, "total": len(subs)})
+
+
 # ─────────────────────────── Module registry API — spec-065 Phase A ──────────
 
 
@@ -12506,6 +12549,7 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/push/vapid-public", api_push_vapid_public)
         app.router.add_post("/api/push/subscribe", api_push_subscribe)
         app.router.add_post("/api/push/unsubscribe", api_push_unsubscribe)
+        app.router.add_post("/api/push/test", api_push_test)
 
         # spec-065 Phase A: module / extension registry
         app.router.add_get("/api/modules", api_modules_list)

@@ -922,10 +922,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const [pendingHandoff, setPendingHandoff] = useState<string | null>(null)
   const [contextTokens, setContextTokens] = useState<number | null>(null)
   const [contextWindow, setContextWindow] = useState<number>(1_000_000)
-  // Absolute cost-management thresholds (delivered by the backend; defaults match webapp.py).
-  // The warn banner fires in this real pain-zone, NOT at 85% of the 1M window.
-  const [contextWarnAt, setContextWarnAt] = useState<number>(200_000)
-  const [contextRotateAt, setContextRotateAt] = useState<number>(280_000)
+  // Two-tier cost-management thresholds (delivered by the backend; defaults match webapp.py).
+  // CONTEXT_WARN_YELLOW = 300K (yellow banner), CONTEXT_WARN_RED = 500K (red banner).
+  // These are ABSOLUTE cost values, NOT fractions of the 1M window.
+  const CONTEXT_WARN_YELLOW_DEFAULT = 300_000
+  const CONTEXT_WARN_RED_DEFAULT    = 500_000
+  const [contextWarnAt, setContextWarnAt] = useState<number>(CONTEXT_WARN_YELLOW_DEFAULT)
+  const [contextWarnRed, setContextWarnRed] = useState<number>(CONTEXT_WARN_RED_DEFAULT)
+  // Rotate threshold (280K auto-rotate, opt-in) — tracked for the setter; not shown directly.
+  const [, setContextRotateAt] = useState<number>(280_000)
   // Narrow-viewport flag: on mobile the context/model/think cluster is rendered inside
   // the composer bar (.composer-meta); on desktop it stays in the top session bar.
   const [isMobile, setIsMobile] = useState<boolean>(
@@ -1331,6 +1336,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setContextTokens(histRes.context_tokens != null ? histRes.context_tokens : null)
       if (histRes.context_window != null && histRes.context_window > 0) setContextWindow(histRes.context_window)
       if (histRes.context_warn_at != null && histRes.context_warn_at > 0) setContextWarnAt(histRes.context_warn_at)
+      if (histRes.context_warn_red != null && histRes.context_warn_red > 0) setContextWarnRed(histRes.context_warn_red)
       if (histRes.context_rotate_at != null && histRes.context_rotate_at > 0) setContextRotateAt(histRes.context_rotate_at)
       // Spec-033: seed cache freshness anchor from the persisted transcript data
       if (histRes.last_turn_at != null) setLastTurnEndMs(histRes.last_turn_at)
@@ -1768,7 +1774,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // Session change means the backend already updated ctx["sessions"]; omit the
     // session_id param so we always read the freshly-activated session from the server.
     api.sessionHistory(projectId)
-      .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens != null ? res.context_tokens : null); if (res.context_window != null && res.context_window > 0) setContextWindow(res.context_window); if (res.context_warn_at != null && res.context_warn_at > 0) setContextWarnAt(res.context_warn_at); if (res.context_rotate_at != null && res.context_rotate_at > 0) setContextRotateAt(res.context_rotate_at) })
+      .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens != null ? res.context_tokens : null); if (res.context_window != null && res.context_window > 0) setContextWindow(res.context_window); if (res.context_warn_at != null && res.context_warn_at > 0) setContextWarnAt(res.context_warn_at); if (res.context_warn_red != null && res.context_warn_red > 0) setContextWarnRed(res.context_warn_red); if (res.context_rotate_at != null && res.context_rotate_at > 0) setContextRotateAt(res.context_rotate_at) })
       .catch(() => setMessages([]))
   }, [projectId])
 
@@ -1902,6 +1908,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             }
             if (typeof evtAny.context_warn_at === 'number' && (evtAny.context_warn_at as number) > 0) {
               setContextWarnAt(evtAny.context_warn_at as number)
+            }
+            if (typeof evtAny.context_warn_red === 'number' && (evtAny.context_warn_red as number) > 0) {
+              setContextWarnRed(evtAny.context_warn_red as number)
             }
             if (typeof evtAny.context_rotate_at === 'number' && (evtAny.context_rotate_at as number) > 0) {
               setContextRotateAt(evtAny.context_rotate_at as number)
@@ -2273,21 +2282,20 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         {/* Left group: single reset + session selector, grouped together. */}
         <div className="chat-session-left">
           {(() => {
-            // Reset button prominence mirrors the context fill: amber at 75% of
-            // the window, red at 90%. Computed here (not inside the health IIFE)
-            // so the single ↺ can sit at the far left, before the selector.
+            // Reset button prominence mirrors the two-tier cost warning:
+            // yellow at >= contextWarnAt (300K), red at >= contextWarnRed (500K).
+            // Uses absolute cost thresholds, NOT a fraction of the 1M window.
             const realTokens = contextTokens != null && contextTokens > 0
               ? contextTokens
               : estimateTokens(messages)
-            const warnAt = contextWindow * 0.75
-            const critAt = contextWindow * 0.90
-            const isProminent = realTokens >= warnAt
+            const isProminent = realTokens >= contextWarnAt
+            const isRed       = realTokens >= contextWarnRed
             const wrapBtnStyle: React.CSSProperties = isProminent
               ? {
                   fontSize: 13, lineHeight: 1, padding: '2px 7px', cursor: rotating ? 'wait' : 'pointer',
-                  background: 'var(--bg-card)', border: `1px solid ${realTokens >= critAt ? 'var(--red)' : 'var(--yellow)'}`,
+                  background: 'var(--bg-card)', border: `1px solid ${isRed ? 'var(--red)' : 'var(--yellow)'}`,
                   borderRadius: 4,
-                  color: realTokens >= critAt ? 'var(--red)' : 'var(--yellow)',
+                  color: isRed ? 'var(--red)' : 'var(--yellow)',
                   fontWeight: 600,
                 }
               : {
@@ -2324,12 +2332,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             const real = contextTokens != null && contextTokens > 0
             const tokens = real ? contextTokens! : estimateTokens(messages)
 
-            // Color scale relative to the real context window.
-            const warnAt = contextWindow * 0.75
-            const critAt = contextWindow * 0.90
+            // Token badge color uses the two-tier cost thresholds (absolute, not % of window).
             const tokenColor =
-              tokens >= critAt ? 'var(--red)' :
-              tokens >= warnAt ? 'var(--yellow)' :
+              tokens >= contextWarnRed ? 'var(--red)' :
+              tokens >= contextWarnAt  ? 'var(--yellow)' :
               'var(--text2)'
 
             const fillFrac = Math.min(tokens / contextWindow, 1)
@@ -2885,41 +2891,39 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             onClose={() => setShowSkills(false)}
           />
         )}
-        {/* Context early-warning banner — shown above the composer when context approaches limits.
-            The banner is ambient-only (dismissible); no popup/modal. Thresholds are ABSOLUTE
-            cost-management values from the backend (warn ≈200K, escalate ≈280K = auto-rotate), NOT
-            a fraction of the 1M window — they fire in the real re-bill pain-zone. */}
+        {/* Context early-warning banner — shown above the composer when context grows into the
+            real re-bill pain-zone. Two-tier thresholds (absolute, decoupled from the 1M window):
+            YELLOW at >= CONTEXT_WARN_YELLOW (default 300K), RED at >= CONTEXT_WARN_RED (500K).
+            The banner is persistent until dismissed; it re-arms if tokens keep climbing. */}
         {(() => {
           const warnTokens = contextTokens != null && contextTokens > 0
             ? contextTokens
             : estimateTokens(messages)
-          // Absolute cost thresholds from the backend: amber at warn-at, red at rotate-at (where
-          // auto-rotation kicks in). Decoupled from the window — see webapp.py CONTEXT_WARN_AT.
-          const WARN_THRESHOLD = contextWarnAt
-          const ESCALATE_THRESHOLD = contextRotateAt
-          const isEscalated = warnTokens >= ESCALATE_THRESHOLD
-          const isInWarnZone = warnTokens >= WARN_THRESHOLD && !isEscalated
-          // Trigger: backend flag OR token-count fallback
-          const shouldWarn = contextWarnFromBackend || isInWarnZone || isEscalated
+          // Two-tier absolute cost thresholds from the backend.
+          // contextWarnAt  = CONTEXT_WARN_YELLOW (yellow, default 300K)
+          // contextWarnRed = CONTEXT_WARN_RED    (red,    default 500K)
+          const YELLOW_THRESHOLD = contextWarnAt
+          const RED_THRESHOLD    = contextWarnRed
+          const isRed    = warnTokens >= RED_THRESHOLD
+          const isYellow = warnTokens >= YELLOW_THRESHOLD && !isRed
+          // Trigger: backend one-shot flag (first crossing) OR persistent token-count check.
+          const shouldWarn = contextWarnFromBackend || isYellow || isRed
           if (!shouldWarn) return null
-          // Dismiss gate: the ✕ works in BOTH zones (the old gate ignored it once escalated,
-          // so at high token counts the cross "did nothing"). Stay hidden until the context
-          // climbs materially past where it was dismissed (re-warn if it keeps growing) or
-          // first crosses into the escalated red tier after being dismissed in amber.
+          // Dismiss gate: the ✕ works in BOTH tiers. Re-arm when tokens climb materially or
+          // first cross from yellow into the red tier after being dismissed in yellow.
           if (warnDismissedAtTokens !== null) {
             const grewMaterially = warnTokens >= warnDismissedAtTokens + 20_000
-            const newlyEscalated = isEscalated && warnDismissedAtTokens < ESCALATE_THRESHOLD
-            if (!grewMaterially && !newlyEscalated) return null
+            const newlyRed = isRed && warnDismissedAtTokens < RED_THRESHOLD
+            if (!grewMaterially && !newlyRed) return null
           }
           const nK = Math.round(warnTokens / 1000)
-          const bannerColor = isEscalated
+          const bannerColor = isRed
             ? 'var(--red)'
             : 'var(--yellow)'
-          const bannerBg = isEscalated
+          const bannerBg = isRed
             ? 'rgba(239,68,68,0.08)'
             : 'rgba(234,179,8,0.08)'
-          // Spec-039: banner text no longer mentions auto-rotate. Uses i18n keys.
-          const bannerText = isEscalated
+          const bannerText = isRed
             ? t['chat.ctx_warn_critical'].replace('{nK}', String(nK))
             : t['chat.ctx_warn_approaching'].replace('{nK}', String(nK))
           return (
@@ -3203,8 +3207,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 {(() => {
                   const real = contextTokens != null && contextTokens > 0
                   const tokens = real ? contextTokens! : estimateTokens(messages)
-                  const fillFrac = Math.min(tokens / contextWindow, 1)
-                  const color = fillFrac >= 0.90 ? 'var(--red)' : fillFrac >= 0.75 ? 'var(--yellow)' : 'var(--green)'
+                  // Color uses two-tier cost thresholds (absolute, not % of window).
+                  const color = tokens >= contextWarnRed ? 'var(--red)' : tokens >= contextWarnAt ? 'var(--yellow)' : 'var(--green)'
                   const warm = run != null || (lastTurnEndMs != null && (Date.now() - lastTurnEndMs) < CACHE_TTL_MS)
                   return (
                     <span className="composer-meta-ctx-wrap">

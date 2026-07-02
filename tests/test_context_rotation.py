@@ -703,21 +703,22 @@ async def test_context_warn_absent_below_threshold(aiohttp_client, tmp_path, pro
     )
 
 
-async def test_context_warn_absent_at_or_above_rotate_at(aiohttp_client, tmp_path, project_dir):
-    """context_tokens at/above CONTEXT_ROTATE_AT → context_warn absent (above warn zone).
+async def test_context_warn_fires_regardless_of_rotate_at(aiohttp_client, tmp_path, project_dir):
+    """The two-tier cost warning is DECOUPLED from auto-rotate.
 
-    spec-039: auto-rotation removed; warn zone is CONTEXT_WARN_AT <= tokens < CONTEXT_ROTATE_AT,
-    so tokens >= CONTEXT_ROTATE_AT are outside the warn zone and context_warn stays absent.
+    context_warn fires on the first upward crossing of CONTEXT_WARN_AT (yellow, 300K by default)
+    even when tokens are also >= CONTEXT_ROTATE_AT. Auto-rotate is an opt-in, default-OFF feature;
+    the yellow/red cost warning must still surface. (Old coupling suppressed the warn above
+    rotate_at, which — with WARN_AT above a low rotate_at — would have hidden it entirely.)
     """
-    warn_at = 150000
-    rotate_at = 175000
+    warn_at = 300000
+    rotate_at = 280000  # rotate BELOW warn: the old coupling would have suppressed the warn
 
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "hello"}
-        yield {"type": "result", "session_id": "sess-over", "context_tokens": rotate_at + 1}
+        yield {"type": "result", "session_id": "sess-over", "context_tokens": warn_at + 1}
 
     ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
-    # spec-039: _notify_tg_context_warn removed; patch omitted.
     with patch.object(_webapp, "CONTEXT_ROTATE_AT", rotate_at), \
          patch.object(_webapp, "CONTEXT_WARN_AT", warn_at), \
          patch.object(_webapp, "_QUEUE", {}):
@@ -733,8 +734,8 @@ async def test_context_warn_absent_at_or_above_rotate_at(aiohttp_client, tmp_pat
 
     result_events = [e for e in events if e.get("type") == "result"]
     assert len(result_events) == 1
-    assert "context_warn" not in result_events[0], (
-        f"context_warn must be absent when tokens >= CONTEXT_ROTATE_AT (outside warn zone), got: {result_events[0]}"
+    assert result_events[0].get("context_warn") is True, (
+        f"context_warn must fire at the first crossing of CONTEXT_WARN_AT regardless of rotate_at, got: {result_events[0]}"
     )
 
 
@@ -850,13 +851,14 @@ def time_now():
 
 
 async def test_result_frame_carries_cost_thresholds(aiohttp_client, tmp_path, project_dir):
-    """The SSE result frame must deliver absolute warn/rotate thresholds to the frontend."""
+    """The SSE result frame must deliver two-tier warn thresholds + rotate threshold to the frontend."""
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "hi"}
         yield {"type": "result", "session_id": "sess-thr", "context_tokens": 50000}
 
     ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
-    with patch.object(_webapp, "CONTEXT_WARN_AT", 200000), \
+    with patch.object(_webapp, "CONTEXT_WARN_AT", 300000), \
+         patch.object(_webapp, "CONTEXT_WARN_RED", 500000), \
          patch.object(_webapp, "CONTEXT_ROTATE_AT", 280000), \
          patch.object(_webapp, "_QUEUE", {}):
         app = _make_app(ctx)
@@ -866,7 +868,8 @@ async def test_result_frame_carries_cost_thresholds(aiohttp_client, tmp_path, pr
         assert resp.status == 200
         events = await _read_sse(resp)
     result = [e for e in events if e.get("type") == "result"][0]
-    assert result["context_warn_at"] == 200000
+    assert result["context_warn_at"] == 300000
+    assert result["context_warn_red"] == 500000
     assert result["context_rotate_at"] == 280000
 
 

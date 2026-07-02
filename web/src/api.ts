@@ -538,6 +538,10 @@ export const api = {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }
     ),
 
+  /** Send a test Web Push to all subscribed devices → {ok, sent, total}. */
+  pushTest: () =>
+    apiFetch<{ ok: boolean; sent: number; total: number }>('/api/push/test', { method: 'POST' }),
+
   auditProject: (id: string) =>
     apiFetch<{ ok: boolean; card_id: string }>(`/api/projects/${id}/audit`, { method: 'POST' }),
 
