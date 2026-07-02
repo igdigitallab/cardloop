@@ -1,8 +1,12 @@
 /**
  * Rich terminal-style rendering of a single tool call.
+ * Renders file ops as: <verb> <file-type icon> <basename>
+ * matching a ChatGPT-style compact row aesthetic.
  */
 import { useState } from 'react'
+import { Search, Terminal, Wrench } from 'lucide-react'
 import { RichTool } from '../types'
+import { fileIcon, basename } from '../lib/fileIcons'
 
 export function ToolBlock({ tool }: { tool: RichTool }) {
   const [expanded, setExpanded] = useState(false)
@@ -10,9 +14,12 @@ export function ToolBlock({ tool }: { tool: RichTool }) {
   if (tool.kind === 'bash') {
     return (
       <div className="chat-tool-row chat-tool-bash">
-        <span className="chat-tool-icon">$</span>
+        <span className="chat-tool-icon chat-tool-lucide"><Terminal size={12} /></span>
         <div className="chat-tool-bash-body">
-          <pre className="chat-tool-cmd">{tool.cmd}</pre>
+          <div className="chat-tool-edit-line">
+            <span className="chat-tool-verb">Ran</span>
+            <pre className="chat-tool-cmd">{tool.cmd}</pre>
+          </div>
           {tool.desc && <span className="chat-tool-desc">{tool.desc}</span>}
         </div>
       </div>
@@ -22,17 +29,21 @@ export function ToolBlock({ tool }: { tool: RichTool }) {
   if (tool.kind === 'edit') {
     const hasOldNew = 'old' in tool && 'new' in tool
     const count = 'count' in tool ? tool.count : undefined
+    const cellType = 'cell_type' in tool ? tool.cell_type : undefined
+    const FileIcon = fileIcon(tool.file)
+    const name = basename(tool.file)
     return (
       <div className="chat-tool-row chat-tool-edit">
-        <span className="chat-tool-icon">✏</span>
+        <span className="chat-tool-icon chat-tool-lucide"><FileIcon size={12} /></span>
         <div className="chat-tool-edit-body">
           <div className="chat-tool-edit-line">
-            <span className="chat-tool-file">{tool.file}</span>
-            {count !== undefined && (
-              <span className="chat-tool-desc">{count} edit{count === 1 ? '' : 's'}</span>
+            <span className="chat-tool-verb">Edited</span>
+            <span className="chat-tool-file" title={tool.file}>{name}</span>
+            {count !== undefined && count > 1 && (
+              <span className="chat-tool-desc">×{count}</span>
             )}
-            {'cell_type' in tool && tool.cell_type && (
-              <span className="chat-tool-desc">cell: {tool.cell_type}</span>
+            {cellType && (
+              <span className="chat-tool-desc">{cellType}</span>
             )}
             {hasOldNew && (
               <button
@@ -57,12 +68,15 @@ export function ToolBlock({ tool }: { tool: RichTool }) {
   }
 
   if (tool.kind === 'write') {
+    const FileIcon = fileIcon(tool.file)
+    const name = basename(tool.file)
     return (
       <div className="chat-tool-row chat-tool-write">
-        <span className="chat-tool-icon">📝</span>
+        <span className="chat-tool-icon chat-tool-lucide"><FileIcon size={12} /></span>
         <div className="chat-tool-write-body">
           <div className="chat-tool-edit-line">
-            <span className="chat-tool-file">{tool.file}</span>
+            <span className="chat-tool-verb">Wrote</span>
+            <span className="chat-tool-file" title={tool.file}>{name}</span>
             {tool.preview && (
               <button
                 className="chat-tool-expand-btn chat-tool-expand-inline"
@@ -79,10 +93,13 @@ export function ToolBlock({ tool }: { tool: RichTool }) {
   }
 
   if (tool.kind === 'read') {
+    const FileIcon = fileIcon(tool.file)
+    const name = basename(tool.file)
     return (
       <div className="chat-tool-row chat-tool-read">
-        <span className="chat-tool-icon">📖</span>
-        <span className="chat-tool-file">{tool.file}</span>
+        <span className="chat-tool-icon chat-tool-lucide"><FileIcon size={12} /></span>
+        <span className="chat-tool-verb">Read</span>
+        <span className="chat-tool-file chat-tool-file-read" title={tool.file}>{name}</span>
       </div>
     )
   }
@@ -90,8 +107,8 @@ export function ToolBlock({ tool }: { tool: RichTool }) {
   if (tool.kind === 'search') {
     return (
       <div className="chat-tool-row chat-tool-search">
-        <span className="chat-tool-icon">🔍</span>
-        <span className="chat-tool-name">{tool.name}</span>
+        <span className="chat-tool-icon chat-tool-lucide"><Search size={12} /></span>
+        <span className="chat-tool-verb">Searched</span>
         <span className="chat-tool-pattern">{tool.pattern}</span>
         {tool.path && <span className="chat-tool-desc">{tool.path}</span>}
       </div>
@@ -101,8 +118,8 @@ export function ToolBlock({ tool }: { tool: RichTool }) {
   // other / fallback
   return (
     <div className="chat-tool-row chat-tool-other">
-      <span className="chat-tool-icon">⚙</span>
-      <span className="chat-tool-name">{tool.name}</span>
+      <span className="chat-tool-icon chat-tool-lucide"><Wrench size={12} /></span>
+      <span className="chat-tool-verb">{tool.name}</span>
       {tool.summary && <span className="chat-tool-input">{tool.summary}</span>}
     </div>
   )

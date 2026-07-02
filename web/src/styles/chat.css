@@ -821,6 +821,25 @@
 }
 
 .chat-tool-icon { color: var(--accent); font-style: normal; flex-shrink: 0; }
+/* Lucide icon wrapper — aligns SVG to text baseline */
+.chat-tool-lucide {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--text3);
+  opacity: 0.75;
+  /* nudge SVG down ~1px so it sits on the text baseline */
+  position: relative;
+  top: 1px;
+}
+/* Action verb: subtle label before the filename */
+.chat-tool-verb {
+  color: var(--text3);
+  font-size: 11px;
+  font-family: var(--mono);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 .chat-tool-name { font-weight: 600; color: var(--text2); flex-shrink: 0; }
 .chat-tool-input {
   color: var(--text3);
@@ -837,8 +856,9 @@
 }
 
 /* bash: full command in mono block */
-.chat-tool-bash { flex-direction: row; gap: 6px; }
+.chat-tool-bash { flex-direction: row; gap: 6px; align-items: flex-start; }
 .chat-tool-bash .chat-tool-icon { line-height: 1.5; color: var(--accent); font-weight: 700; }
+.chat-tool-bash .chat-tool-lucide { top: 2px; }
 .chat-tool-bash-body { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
 .chat-tool-cmd {
   font-family: var(--mono);
@@ -859,7 +879,18 @@
 .chat-tool-edit-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .chat-tool-edit-line .chat-tool-file { flex: 1; min-width: 0; }
 .chat-tool-expand-inline { margin-left: auto; flex-shrink: 0; }
-.chat-tool-file { font-family: var(--mono); font-size: 11px; color: var(--text2); word-break: break-all; }
+.chat-tool-file {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+/* Read is subtler — filename in text3 not text2 */
+.chat-tool-file-read { color: var(--text3); flex: unset; }
 .chat-tool-expand-btn {
   background: none; border: none; cursor: pointer;
   font-size: 10px; color: var(--accent); padding: 0; text-align: left; width: fit-content;
@@ -892,12 +923,11 @@
 }
 
 /* read */
-.chat-tool-read { flex-direction: row; gap: 6px; align-items: baseline; }
-.chat-tool-read .chat-tool-file { font-family: var(--mono); font-size: 11px; color: var(--text3); }
+.chat-tool-read { flex-direction: row; gap: 6px; align-items: center; }
 
 /* search */
-.chat-tool-search { flex-direction: row; gap: 6px; align-items: baseline; flex-wrap: wrap; }
-.chat-tool-pattern { font-family: var(--mono); font-size: 11px; color: var(--text2); }
+.chat-tool-search { flex-direction: row; gap: 6px; align-items: center; flex-wrap: wrap; }
+.chat-tool-pattern { font-family: var(--mono); font-size: 11px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Input area */
 .chat-input-area {
