@@ -43,6 +43,7 @@ interface PushPayload {
   data?: {
     url?: string
     projectId?: string
+    test?: boolean
     [key: string]: unknown
   }
 }
@@ -81,13 +82,19 @@ self.addEventListener('push', (event: PushEvent) => {
   // window client — so `clients.length > 0` suppressed EVERY background push, which is the
   // whole point of push. A backgrounded client cannot fire the in-page Notification, so we
   // must show the SW notification unless a client is actually visible (foreground).
+  // A test/forced push always shows, even in the foreground: the operator explicitly
+  // asked to verify delivery and there is no in-page local fallback for a test push.
+  const forceShow = Boolean(payload.data?.test)
+
   event.waitUntil(
     (async () => {
-      const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-      const hasVisibleClient = clients.some(c => (c as WindowClient).visibilityState === 'visible')
-      if (hasVisibleClient) {
-        // A foreground window handles the alert locally — skip the SW notification.
-        return
+      if (!forceShow) {
+        const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+        const hasVisibleClient = clients.some(c => (c as WindowClient).visibilityState === 'visible')
+        if (hasVisibleClient) {
+          // A foreground window handles the alert locally — skip the SW notification.
+          return
+        }
       }
       await self.registration.showNotification(title, options)
     })()

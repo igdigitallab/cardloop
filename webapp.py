@@ -12085,7 +12085,9 @@ async def api_push_test(req: web.Request) -> web.Response:
         "body": "Test notification — push is working.",
         "icon": "/icons/icon-192.png",
         "tag": "cardloop-test",
-        "data": {"url": "/"},
+        # test:true tells the service worker to show this even in the foreground
+        # (the visibility dedup would otherwise suppress a push while the app is open).
+        "data": {"url": "/", "test": True},
     })
     removed_endpoints: list[str] = []
     await asyncio.gather(*[
@@ -12097,6 +12099,7 @@ async def api_push_test(req: web.Request) -> web.Response:
             updated = [s for s in _load_push_subs() if s.get("endpoint") not in removed_endpoints]
             _save_push_subs(updated)
     sent = len(subs) - len(removed_endpoints)
+    logging.info("Web Push test: sent=%d total=%d removed=%d", sent, len(subs), len(removed_endpoints))
     return web.json_response({"ok": sent > 0, "sent": sent, "total": len(subs)})
 
 
