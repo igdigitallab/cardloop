@@ -611,6 +611,14 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
       const el = e.target as HTMLElement | null
       if (!el || !el.classList?.contains('chat-feed')) return
       const st = el.scrollTop
+      // Near-top: always reveal chrome immediately.
+      if (st < 48) { lastFeedScroll.current = st; scrollAccum.current = 0; applyCollapse(false); return }
+      // Bottom dead-zone: freeze collapse state when near the bottom. This is the only region
+      // where pin-to-bottom (scrollIntoView on each token) and viewport-resize height-clamps
+      // fight, causing oscillation. Collapsing chrome here is pointless (nothing below to read).
+      const BOTTOM_DEADZONE = 120  // ≈ two chrome rows (~100px) + margin
+      const distFromBottom = el.scrollHeight - st - el.clientHeight
+      if (distFromBottom < BOTTOM_DEADZONE) { lastFeedScroll.current = st; scrollAccum.current = 0; return }
       // Absorb the reflow churn that our own collapse/expand triggers.
       if (performance.now() < collapseLockUntil.current) {
         lastFeedScroll.current = st
@@ -619,7 +627,6 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
       }
       const dy = st - lastFeedScroll.current
       lastFeedScroll.current = st
-      if (st < 48) { scrollAccum.current = 0; applyCollapse(false); return }  // near top → show
       if (dy === 0) return
       // Reset the accumulator whenever the scroll direction reverses.
       if ((dy > 0) !== (scrollAccum.current >= 0)) scrollAccum.current = 0
