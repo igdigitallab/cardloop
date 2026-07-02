@@ -11562,6 +11562,41 @@ async def api_new_project(req: web.Request) -> web.Response:
     })
 
 
+async def api_project_label(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/label  {name: str}
+    Updates the human display name for every topics.json entry that shares the same cwd.
+    Never moves the folder, never changes the id or cwd."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+
+    name = (body.get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "name is required"}, status=400)
+    if len(name) > 80:
+        return web.json_response({"error": "name too long (max 80)"}, status=400)
+
+    # Update the display name for every topic entry that shares this project's cwd.
+    # Only the "project" field is touched — cwd, model, and all other fields are left alone.
+    cwd = project["cwd"]
+    for b in ctx["topics"].values():
+        if b.get("cwd") == cwd:
+            b["project"] = name
+
+    save_topics = ctx.get("save_topics")
+    if callable(save_topics):
+        save_topics()
+
+    return web.json_response({"ok": True, "id": pid, "name": name})
+
+
 async def api_project_rename(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/rename  {slug: str}
     Renames the project folder and updates all topics.json entries with the same cwd."""
@@ -12432,6 +12467,8 @@ async def start(ctx: dict) -> None:
         app.router.add_delete("/api/projects/{id}/secrets/{key}", api_project_secrets_delete)
         # Project folder rename (kebab-case slug)
         app.router.add_post("/api/projects/{id}/rename", api_project_rename)
+        # Project display-name relabel (any unicode, no folder move)
+        app.router.add_post("/api/projects/{id}/label", api_project_label)
         # Quick project structure check without an agent
         app.router.add_get("/api/projects/{id}/health", api_project_health)
         # Project audit: creates card + launches run_engine

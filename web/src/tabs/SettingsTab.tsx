@@ -40,6 +40,8 @@ interface Props {
   health: ProjectStructureHealth | null
   refreshHealth: () => void
   models?: { value: string; label: string }[]
+  /** Called after a successful project label rename so the sidebar + header refresh. */
+  onProjectsReload?: () => void
 }
 
 function errMsg(e: unknown): string {
@@ -59,7 +61,7 @@ function Row({ title, hint, children }: { title: string; hint?: string; children
   )
 }
 
-export function SettingsTab({ projectId, project, health, refreshHealth, models }: Props) {
+export function SettingsTab({ projectId, project, health, refreshHealth, models, onProjectsReload }: Props) {
   // Prefer the live model registry (GET /api/models); fall back to the bundled static list.
   const modelList = models?.length ? models : MODELS
   const [proj, setProj] = useState<ProjectSettings | null>(null)
@@ -76,6 +78,24 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models 
   const [autopilotStatus, setAutopilotStatus] = useState<AutopilotStatus | null>(null)
   const [autopilotMode, setAutopilotMode] = useState<'off' | 'propose' | 'auto'>('off')
   const [autopilotSaving, setAutopilotSaving] = useState(false)
+  const [nameDraft, setNameDraft] = useState(project.name)
+  const [savingName, setSavingName] = useState(false)
+  const [nameMsg, setNameMsg] = useState('')
+
+  async function saveName() {
+    const name = nameDraft.trim()
+    if (!name || name === project.name) return
+    setSavingName(true); setNameMsg('')
+    try {
+      await api.renameLabel(projectId, name)
+      setNameMsg('Saved')
+      onProjectsReload?.()
+    } catch (e) {
+      setNameMsg(errMsg(e))
+    } finally {
+      setSavingName(false)
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -160,6 +180,29 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models 
       <section>
         <h3 style={{ margin: '0 0 4px', fontSize: 15 }}>Project info</h3>
         <WelcomeBanner projectId={projectId} />
+
+        <div className="info-card" style={{ marginTop: 8 }}>
+          <div className="info-card-label">{t['settings.project_name_label']}</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
+            <input
+              className="rename-input"
+              style={{ flex: 1, minWidth: 0, fontSize: 14, padding: '8px 10px', minHeight: 40 }}
+              value={nameDraft}
+              maxLength={80}
+              onChange={e => { setNameDraft(e.target.value); setNameMsg('') }}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void saveName() } }}
+            />
+            <button
+              className="btn-primary"
+              style={{ minHeight: 40, width: 'auto', fontSize: 13 }}
+              disabled={savingName || !nameDraft.trim() || nameDraft.trim() === project.name}
+              onClick={() => void saveName()}
+            >
+              {savingName ? '…' : t['project.rename_label_save']}
+            </button>
+          </div>
+          {nameMsg && <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 4 }}>{nameMsg}</div>}
+        </div>
 
         <div className="overview-grid" style={{ marginTop: 8 }}>
           <div className="info-card">

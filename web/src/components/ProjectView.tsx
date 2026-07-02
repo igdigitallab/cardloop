@@ -81,12 +81,10 @@ function readMobileTab(pid: string): string | null {
   try { return localStorage.getItem(mtabKey(pid)) || null } catch { return null }
 }
 
-const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,40}[a-z0-9]$/
 
 interface Props {
   project: Project
   onProjectsReload: () => void
-  onRenameSuccess?: (oldId: string, newId: string) => void
   onSplitCreate?: () => void   // show ⊞ button (left free-chat only)
   onSplitClose?: () => void    // show ✕ Close button (right pane only)
   /** Passed to ChatTab for restoring running-state when switching back to the tab. */
@@ -255,7 +253,7 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
   )
 }
 
-export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject, settingsRequest, models }: Props) {
+export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject, settingsRequest, models }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
   // Mobile inner tab: null = show chat (default), TabId = show that inner tab.
   // Restored from localStorage per project so reopening lands where you left off.
@@ -282,14 +280,15 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsRequest?.nonce])
 
-  // ── Rename state ──────────────────────────────────────────────────────────
+  // ── Rename state (header inline edit — changes label only, id unchanged) ──
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState('')
   const [renameError, setRenameError] = useState('')
   const renameInputRef = useRef<HTMLInputElement>(null)
 
   function startRename() {
-    setRenameValue(project.id)
+    // Pre-fill with the current display name (label), NOT the slug/id
+    setRenameValue(project.name)
     setRenameError('')
     setRenaming(true)
   }
@@ -300,22 +299,20 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
   }
 
   async function commitRename() {
-    const slug = renameValue.trim()
-    if (!SLUG_RE.test(slug)) {
-      setRenameError(t['project.rename_error_format'])
-      return
-    }
-    if (slug === project.id) { cancelRename(); return }
+    const name = renameValue.trim()
+    if (!name) { setRenameError(t['project.rename_label_error_empty']); return }
+    if (name.length > 80) { setRenameError(t['project.rename_label_error_long']); return }
+    if (name === project.name) { cancelRename(); return }
     try {
-      const res = await api.renameProject(project.id, slug)
+      await api.renameLabel(project.id, name)
       setRenaming(false)
       setRenameError('')
+      // ID is unchanged — no onRenameSuccess rewiring needed
       onProjectsReload()
-      onRenameSuccess?.(project.id, res.new_id)
     } catch (e: unknown) {
       const status = (e as { status?: number }).status
       if (status === 409) {
-        setRenameError(t['project.rename_error_busy'])
+        setRenameError(t['project.rename_label_error_busy'])
       } else {
         setRenameError(e instanceof Error ? e.message : String(e))
       }
@@ -741,7 +738,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                 {mobileInnerTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'memory'    && <ErrorBoundary label="Memory"><MemoryTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
-                {mobileInnerTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} /></ErrorBoundary>}
+                {mobileInnerTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} onProjectsReload={onProjectsReload} /></ErrorBoundary>}
                 {mobileInnerTab === 'specs'     && <ErrorBoundary label="Specs"><SpecsTab projectId={project.id} /></ErrorBoundary>}
               </div>
             )}
@@ -776,7 +773,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
                         if (e.key === 'Enter') { e.preventDefault(); commitRename() }
                         if (e.key === 'Escape') cancelRename()
                       }}
-                      placeholder="new-slug"
+                      placeholder={t['project.rename_header_placeholder']}
                       style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.4px', flex: 1, minWidth: 0 }}
                     />
                     <button className="rename-confirm-btn" onClick={commitRename} title={t['project.rename_apply']}>✓</button>
@@ -890,7 +887,7 @@ export function ProjectView({ project, onProjectsReload, onRenameSuccess, onSpli
           {activeTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'memory'    && <ErrorBoundary label="Memory"><MemoryTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
-          {activeTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} /></ErrorBoundary>}
+          {activeTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} onProjectsReload={onProjectsReload} /></ErrorBoundary>}
           {activeTab === 'specs'     && <ErrorBoundary label="Specs"><SpecsTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'browser'   && browserEnabled && <ErrorBoundary label="Browser"><BrowserTab projectId={project.id} /></ErrorBoundary>}
         </div>

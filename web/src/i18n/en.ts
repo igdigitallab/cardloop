@@ -153,6 +153,25 @@ export const en = {
   'project.rename_cancel': 'Cancel',
   'project.rename_error_format': 'Lowercase a-z, 0-9, hyphen only; 2–42 characters; cannot start or end with a hyphen',
   'project.rename_error_busy': 'Project is busy — stop the agent first',
+  // Label rename (does NOT change project id/folder)
+  'project.rename_label_title': 'Rename project',
+  'project.rename_label_placeholder': 'Project name',
+  'project.rename_label_save': 'Save',
+  'project.rename_label_cancel': 'Cancel',
+  'project.rename_label_error_empty': 'Name cannot be empty',
+  'project.rename_label_error_long': 'Name too long (max 80 characters)',
+  'project.rename_label_error_busy': 'Project is busy — stop the agent first',
+  // Header inline rename placeholder (replaces old slug placeholder)
+  'project.rename_header_placeholder': 'Project name',
+  // Sidebar menu item
+  'sidebar.rename_project': 'Rename',
+  // Settings tab label for the editable name field
+  'settings.project_name_label': 'Project name',
+  // New project prompt dialog
+  'project.create_title': 'New project',
+  'project.create_placeholder': 'What do you want to work on? (e.g. a Next.js landing page, research competitors, plan a trip)',
+  'project.create_btn': 'Create',
+  'project.create_cancel': 'Cancel',
   'project.health_all_ok': 'All checks passed',
   'project.tab_disabled_hint': 'This feature will be available in upcoming phases',
 

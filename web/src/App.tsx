@@ -5,6 +5,7 @@ import { t } from './i18n'
 import { LoginScreen } from './components/LoginScreen'
 import { Sidebar } from './components/Sidebar'
 import { ProjectView } from './components/ProjectView'
+import { ProjectNameDialog } from './components/ProjectNameDialog'
 import { ProjectTabBar } from './components/ProjectTabBar'
 import { Spinner } from './components/Spinner'
 import { GlobalFilesTab } from './tabs/GlobalFilesTab'
@@ -717,12 +718,18 @@ export default function App() {
   // The sidebar "+ New project" button calls this with a MouseEvent (blank create) — guarded by typeof.
   const [newProjectBusy, setNewProjectBusy] = useState(false)
   const [intentDraft, setIntentDraft] = useState('')
-  const handleNewProject = useCallback(async (intent?: string) => {
+  // Create-project prompt (opened by the sidebar "+" and group menus) + rename-label dialog.
+  const [createOpen, setCreateOpen] = useState<{ group?: string } | null>(null)
+  const [renameTarget, setRenameTarget] = useState<Project | null>(null)
+  const handleNewProject = useCallback(async (intent?: string, group?: string) => {
     if (newProjectBusy) return
     const intentStr = typeof intent === 'string' ? intent.trim() : ''
     setNewProjectBusy(true)
     try {
       const res = await api.newProject(intentStr || undefined)
+      if (group) {
+        try { await api.setProjectGroup(res.id, group) } catch { /* group assignment is non-fatal */ }
+      }
       await loadProjects()
       setOpenIds(prev => prev.includes(res.id) ? prev : [...prev, res.id])
       setActiveId(res.id)
@@ -749,20 +756,7 @@ export default function App() {
     }
   }, [loadProjects, showToast])
 
-  // Rename project (slug) — updates active project + open tabs
-  const handleRenameSuccess = useCallback((oldId: string, newId: string) => {
-    loadProjects()
-    setOpenIds(prev => prev.map(id => id === oldId ? newId : id))
-    setActiveId(prev => prev === oldId ? newId : prev)
-    setSidebarOrder(prev => prev.map(id => id === oldId ? newId : id))
-    setSplitPairs(prev => {
-      const next: Record<string, string> = {}
-      for (const [k, v] of Object.entries(prev)) {
-        next[k === oldId ? newId : k] = v === oldId ? newId : v
-      }
-      return next
-    })
-  }, [loadProjects])
+  // (label rename keeps the project id stable — no id-rewrite handler needed)
 
   // Tab rename — supported for free chats only
   const handleRenameTab = useCallback(async (id: string, label: string) => {
@@ -882,7 +876,8 @@ export default function App() {
         collapsed={sidebarCollapsed}
         onToggleCollapse={toggleSidebar}
         onReorder={handleSidebarReorder}
-        onNewProject={handleNewProject}
+        onNewProject={(group?: string) => setCreateOpen({ group })}
+        onRenameProject={(p) => setRenameTarget(p)}
         newProjectBusy={newProjectBusy}
         drawerOpen={drawerOpen}
         onCloseDrawer={() => setDrawerOpen(false)}
@@ -905,6 +900,22 @@ export default function App() {
         onOpenSettingsGlobal={handleOpenSettings}
         settingsGlobalActive={activeId === SETTINGS_ID}
       />
+
+      {createOpen && (
+        <ProjectNameDialog
+          mode="create"
+          onSubmit={async (name) => { await handleNewProject(name || undefined, createOpen.group) }}
+          onClose={() => setCreateOpen(null)}
+        />
+      )}
+      {renameTarget && (
+        <ProjectNameDialog
+          mode="rename"
+          initialValue={renameTarget.name}
+          onSubmit={async (name) => { await api.renameLabel(renameTarget.id, name); await loadProjects() }}
+          onClose={() => setRenameTarget(null)}
+        />
+      )}
 
       <div className="main-area">
         <ProjectTabBar
@@ -1051,7 +1062,6 @@ export default function App() {
                 <ProjectView
                   project={p}
                   onProjectsReload={loadProjects}
-                  onRenameSuccess={handleRenameSuccess}
                   onSplitCreate={p.is_free && !splitId ? () => handleSplitCreate(p.id) : undefined}
                   isActive={isActive}
                   openProjectIds={openIds}

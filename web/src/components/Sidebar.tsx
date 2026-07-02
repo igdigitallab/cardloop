@@ -23,7 +23,8 @@ interface Props {
   collapsed: boolean
   onToggleCollapse: () => void
   onReorder: (ids: string[]) => void
-  onNewProject: () => void
+  /** Opens the new-project prompt dialog (caller shows the dialog, not blank-create). */
+  onNewProject: (group?: string) => void
   newProjectBusy: boolean
   drawerOpen?: boolean
   onCloseDrawer?: () => void
@@ -32,6 +33,8 @@ interface Props {
   onProjectsReload?: () => void
   /** Called when user right-clicks Open on a project — navigate to that project's settings tab */
   onOpenProjectSettings?: (id: string) => void
+  /** Opens the rename-label dialog for a project (fires from the sidebar menu item). */
+  onRenameProject?: (project: Project) => void
   theme?: ThemeValue
   onThemeChange?: (t: ThemeValue) => void
   // ── Global tool launchers (moved here from the top tab bar for mobile parity) ──
@@ -89,7 +92,7 @@ export function Sidebar({
   projects, selectedId, onSelect, onLogout, onDeleteFree, loading,
   unreadBySession, replyReadyIds, collapsed, onToggleCollapse, onReorder,
   onNewProject, newProjectBusy, drawerOpen, activeProjectId, onGoBack,
-  onProjectsReload, onOpenProjectSettings,
+  onProjectsReload, onOpenProjectSettings, onRenameProject,
   theme, onThemeChange,
   onOpenTerminal, terminalActive, onOpenVault, vaultActive,
   onOpenUsage, usageActive,
@@ -815,6 +818,7 @@ export function Sidebar({
         // Section A: primary actions
         items: [
           { label: 'Open', onClick: () => onSelect(pid) },
+          { label: t['sidebar.rename_project'], icon: '✏', onClick: () => onRenameProject?.(p) },
           ...(onOpenProjectSettings
             ? [{ label: 'Settings', icon: '⚙', onClick: () => onOpenProjectSettings(pid) }]
             : []),
@@ -875,7 +879,7 @@ export function Sidebar({
           {
             label: 'New project in group',
             icon: '+',
-            onClick: () => { onNewProject() },
+            onClick: () => { onNewProject(fullPath) },
           },
           {
             label: isCollapsed ? 'Expand' : 'Collapse',
@@ -1089,7 +1093,7 @@ export function Sidebar({
 
       {/* New project + New group row */}
       <div className="sidebar-new-btns">
-        <button className="new-project-btn" onClick={onNewProject} disabled={newProjectBusy} title={t['sidebar.new_project_hint']}>
+        <button className="new-project-btn" onClick={() => onNewProject()} disabled={newProjectBusy} title={t['sidebar.new_project_hint']}>
           {newProjectBusy ? '⏳ creating…' : `＋ ${t['sidebar.new_project']}`}
         </button>
         <button className="new-group-btn" onClick={doCreateGroup} title="New group">

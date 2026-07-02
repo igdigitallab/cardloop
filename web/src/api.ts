@@ -529,6 +529,15 @@ export const api = {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slug }) }
     ),
 
+  /** Change the human-readable display label only. ID and cwd are NOT changed.
+   *  POST /api/projects/{id}/label  {name: string} → {ok, id, name}
+   *  Errors: 400 (empty / >80 chars), 404 (not found). */
+  renameLabel: (id: string, name: string) =>
+    apiFetch<{ ok: boolean; id: string; name: string }>(
+      `/api/projects/${id}/label`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }
+    ),
+
   auditProject: (id: string) =>
     apiFetch<{ ok: boolean; card_id: string }>(`/api/projects/${id}/audit`, { method: 'POST' }),
 
