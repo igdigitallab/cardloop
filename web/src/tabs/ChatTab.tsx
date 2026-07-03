@@ -482,7 +482,11 @@ function parseAttachedFiles(text: string, projectId: string): { body: string; fi
       //    "/api/projects/<id>/media/<f>"; use it verbatim.
       //  • an absolute fs path — operator uploads append the local path; its basename maps
       //    to the /upload/ serve route (reads DATA/inbox by filename; project id gates auth).
-      const isUrlPath = raw.startsWith('/') || /^https?:\/\//i.test(raw)
+      // A servable URL is an /api/ route (agent file-drop prints /api/projects/<id>/media/<f>)
+      // or an http(s) URL. An operator upload appends an ABSOLUTE fs path (/home/.../data/inbox/…)
+      // which ALSO starts with '/', so we must match '/api/' — NOT a bare leading slash — otherwise
+      // the abs path is used verbatim as <img src> and 404s (the "broken image" bug).
+      const isUrlPath = raw.startsWith('/api/') || /^https?:\/\//i.test(raw)
       const seg = raw.split(/[/\\?#]/).filter(Boolean).pop() || raw
       let name = seg
       try { name = decodeURIComponent(seg) } catch { /* keep raw segment */ }
