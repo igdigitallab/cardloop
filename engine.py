@@ -78,8 +78,9 @@ _QUICK_MODEL = os.getenv("QUICK_MODEL", "haiku")
 # "medium" reduces rate-limit burn (thinking weighs ~5× in the window) vs the
 # SDK default of "high". Gate behind env so operators can escalate without a
 # code change. Valid values: low | medium | high | xhigh | max.
-# Note: on Fable 5 thinking always runs high regardless; effort is silently
-# ignored or coerced by the CLI for subscription models — no SDK error is raised.
+# --effort is honored on Fable 5 (low..xhigh|max; official default high).
+# A launch-window pin briefly overrode it in June 2026; do not re-add
+# 'effort is ignored on fable' assumptions.
 _DEFAULT_EFFORT: str = os.getenv("DEFAULT_EFFORT", "high")
 
 DEFAULT_AGENTS: dict = {
@@ -894,14 +895,30 @@ def _make_pre_compact_hook(project_name: str, session_key: str):
 # These helpers are only active when PERSISTENT_CLIENT=1.
 # With the flag OFF they are never called and the behaviour is byte-identical to pre-028.
 
-def _compute_fingerprint(opts: "ClaudeAgentOptions") -> str:
+def _compute_fingerprint(
+    opts: "ClaudeAgentOptions",
+    *,
+    stable_append_hash: str = "",
+    effort: str = "",
+) -> str:
     """Hash the subset of opts fields that are immutable once a ClaudeSDKClient is connected.
 
-    A fingerprint mismatch (e.g. /model switch, different system_prompt preset) means we must
-    evict the live entry and reconnect rather than reusing the old subprocess.
+    A fingerprint mismatch (e.g. /model switch, different system_prompt preset, effort change,
+    or stable-append change such as ultracode/conductor/browser toggle) means we must evict the
+    live entry and reconnect rather than reusing the old subprocess.
+
+    Fields explicitly included:
+    - cwd, model, permission_mode, setting_sources, disallowed_tools: hard session identity
+    - system_prompt type/preset: preset selection
+    - stable_append_hash: SHA-256 of the STABLE append pieces (conductor/ultracode/browser/images/
+      files/board-PROTOCOL-header — everything except the volatile per-turn board-card snapshot).
+      Callers compute this from stable_append_pieces and pass it in so that toggling ultracode,
+      conductor, or browser forces a reconnect, while a mere board-card content change does not.
+    - effort: thinking level (low/medium/high/xhigh/max). Changing it forces a reconnect because
+      the subprocess honours effort at launch.
 
     Fields deliberately excluded: resume (session_id), env (per-turn TG_CHAT_ID etc.),
-    agents roster (can't change the subprocess mid-session anyway), effort.
+    agents roster (can't change the subprocess mid-session anyway), volatile board-card snapshot.
     """
     parts = [
         str(getattr(opts, "cwd", "")),
@@ -913,6 +930,10 @@ def _compute_fingerprint(opts: "ClaudeAgentOptions") -> str:
         # per-turn append text — we don't want every TG nudge update to force a reconnect.
         str((getattr(opts, "system_prompt", None) or {}).get("type", "")),
         str((getattr(opts, "system_prompt", None) or {}).get("preset", "")),
+        # FIX 2: include stable append content hash and effort level so toggling
+        # ultracode/conductor/browser or changing the think-mode ladder forces a fresh client.
+        stable_append_hash,
+        effort,
     ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
@@ -945,6 +966,8 @@ async def _get_or_create_live_client(
     opts: "ClaudeAgentOptions",
     *,
     ephemeral: bool,
+    stable_append_hash: str = "",
+    effort: str = "",
 ) -> "object | None":
     """Return a reusable connected ClaudeSDKClient for session_key, or None.
 
@@ -963,7 +986,7 @@ async def _get_or_create_live_client(
         return None
 
     registry: "dict[str, _LiveEntry]" = ctx.get("live_clients", _live_clients)
-    fingerprint = _compute_fingerprint(opts)
+    fingerprint = _compute_fingerprint(opts, stable_append_hash=stable_append_hash, effort=effort)
 
     existing = registry.get(session_key)
     if existing is not None:
@@ -1422,7 +1445,7 @@ async def run_engine(  # type: ignore[return]
         effort                — thinking effort override for this run. None (default) → uses
                                  _DEFAULT_EFFORT (env DEFAULT_EFFORT, default "medium"). Pass an
                                  explicit value ("low", "medium", "high") to override per-request.
-                                 Note: on Fable 5 effort is silently coerced by the CLI regardless.
+                                 Note: --effort is honored on Fable 5 (low..xhigh|max; official default high).
         ultracode             — spec-058: when True, append ULTRACODE_PROMPT to the system prompt
                                  (fan-out + adversarial-verify disposition) AND pin effort to "max"
                                  (overriding the effort arg). False (default) → no change.
@@ -1501,6 +1524,10 @@ async def run_engine(  # type: ignore[return]
     # Built per-run with this run's cwd bound, so the agent drives the SAME browser the
     # operator watches in the cockpit pane (browser_pane keys sessions by cwd).
     _mcp_servers = dict(_ANTIGRAVITY_MCP or {})
+    # FIX 2: initialise browser identity before the try-block so stable_append_hash can see them.
+    _agent_actions: str = "read"
+    _browser_backend: str = "builtin"
+    _browser_active: bool = False
     try:
         if _modules.is_enabled("browser"):
             # spec-066: gate mutating browser tools by the per-cwd agent_actions setting.
@@ -1511,6 +1538,7 @@ async def run_engine(  # type: ignore[return]
                 _browser_backend = _bspec.get("backend", "builtin")
             except Exception:
                 _agent_actions, _browser_backend = "read", "builtin"
+            _browser_active = True
             _mcp_servers.update(_browser_tools.build_browser_server(cwd, _agent_actions))
             # Tell the agent the live pane IS "the browser" (don't spawn an external one).
             _existing_append = system_prompt.get("append") or ""
@@ -1538,6 +1566,30 @@ async def run_engine(  # type: ignore[return]
         # not first — defeating the shadow-the-stale-copy intent (and making it env-fragile).
         _path_parts = [p for p in _cur_path.split(os.pathsep) if p and p != _tools_dir]
         env["PATH"] = os.pathsep.join([_tools_dir, *_path_parts])
+
+    # FIX 2: Build a hash of the STABLE append pieces so that toggling ultracode/conductor/browser
+    # or changing RESPONSE_LANGUAGE forces a live-client reconnect, while a mere board-card content
+    # change does NOT.  We explicitly enumerate stable signals rather than using the full
+    # system_prompt["append"] text (which already contains the volatile board-card snapshot).
+    # Stable = conductor on/off, ultracode on/off, browser prompt (varies by backend+actions),
+    # images/files on/off, and the base DEFAULT_NUDGE (captures RESPONSE_LANGUAGE changes).
+    # Volatile = the actual card-text snapshot inside _board_block — excluded deliberately.
+    _conductor_active = (
+        not skip_conductor_prompt and not ultracode
+        and bool(resolved_model and resolved_model.startswith("fable"))
+    )
+    _stable_append_pieces = [
+        DEFAULT_NUDGE,                                          # base nudge (captures RESPONSE_LANGUAGE)
+        CONDUCTOR_PROMPT if _conductor_active else "",          # conductor on/off
+        BOARD_PROTOCOL if _board_block else "",                 # board protocol header (card snapshot excluded)
+        ULTRACODE_PROMPT if ultracode else "",                  # ultracode on/off
+        _browser_prompt(_browser_backend, _agent_actions) if _browser_active else "",  # browser variant
+        IMAGES_PROMPT if (env or {}).get("COPS_MEDIA_DIR") else "",  # images on/off
+        FILES_PROMPT if (env or {}).get("COPS_MEDIA_DIR") else "",   # files on/off
+    ]
+    _stable_content = "|".join(_stable_append_pieces)
+    _stable_append_hash = hashlib.sha256(_stable_content.encode()).hexdigest()[:16]
+
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,
@@ -1582,6 +1634,7 @@ async def run_engine(  # type: ignore[return]
         """Read messages from `client` and yield engine events."""
         nonlocal last_ctx_tokens, last_usage, _turn_start_ms
         _turn_start_ms = __import__("time").monotonic() * 1000
+        served_model: "str | None" = None  # FIX 1: populated from SDK init SystemMessage
         await client.query(prompt)
         # Spec-043 C: track the max pt seen across all AssistantMessages in this turn
         # where a usage object is actually present (not None).  Using MAX rather than
@@ -1671,6 +1724,9 @@ async def run_engine(  # type: ignore[return]
                         "project": project_name,
                         "session_key": session_key,
                         "model": resolved_model,
+                        # FIX 1(d): record the actual served model id (may differ from requested
+                        # alias when fallback_model engaged — e.g. fable→opus degradation).
+                        "model_served": served_model,
                         "effort": _eff_effort,
                         "ultracode": ultracode,
                         "context_tokens": last_ctx_tokens,
@@ -1698,6 +1754,10 @@ async def run_engine(  # type: ignore[return]
                     # or when the CLI did not populate it). Consumers that set output_format should
                     # read this field; all other consumers ignore it (it is always present as None).
                     "structured_output": getattr(msg, "structured_output", None),
+                    # FIX 1(c): actual model id served by the SDK (None when init event absent).
+                    "model_served": served_model,
+                    # FIX 1(f): stop_reason from ResultMessage (available in SDK types.py).
+                    "stop_reason": getattr(msg, "stop_reason", None),
                 }
             elif isinstance(msg, SystemMessage):
                 if isinstance(msg, TaskStartedMessage):
@@ -1745,13 +1805,38 @@ async def run_engine(  # type: ignore[return]
                         "summary": msg.summary,
                         "last_tool_name": None,
                     }
+                elif msg.subtype == "init":
+                    # FIX 1(a): capture the actual model the SDK initialised with.
+                    # The init SystemMessage carries {"type":"system","subtype":"init","data":{...}}
+                    # where data["model"] is the full model id (e.g. "claude-fable-5").
+                    # Keep it silent (no yield) unless a family mismatch is detected below.
+                    _init_model = (msg.data or {}).get("model") if isinstance(msg.data, dict) else None
+                    if _init_model:
+                        served_model = str(_init_model)
+                    # FIX 1(b): emit model_info event ONCE if served family != requested alias.
+                    # Family match rule: requested alias substring present in served id.
+                    # "fable" in "claude-fable-5" → match; "opus" in "claude-opus-4-8" → match.
+                    if served_model and resolved_model:
+                        # Normalise: strip "claude-" prefix to get the family token (fable, opus, sonnet…)
+                        _req_alias = (resolved_model or "").replace("claude-", "").split("-")[0]
+                        _mismatch = _req_alias not in served_model.lower()
+                        if _mismatch:
+                            yield {
+                                "type": "model_info",
+                                "requested": resolved_model,
+                                "served": served_model,
+                                "fallback": True,
+                            }
                 # Other SystemMessage subtypes remain silent
 
     # ── Spec-028 Phase 2: live-client branch (flag-gated, ephemeral=False only) ──────────────────
     # When PERSISTENT_CLIENT=0 (default) _get_or_create_live_client returns None immediately and
     # we fall through to the pre-028 `async with` path — byte-identical behaviour.
     try:
-        live = await _get_or_create_live_client(ctx, session_key, opts, ephemeral=ephemeral)
+        live = await _get_or_create_live_client(
+            ctx, session_key, opts, ephemeral=ephemeral,
+            stable_append_hash=_stable_append_hash, effort=_eff_effort,
+        )
     except Exception as _lc_exc:
         # Live-client setup failure must never silently swallow the turn — degrade gracefully.
         print(f"[live-client] setup failed for {session_key} ({_lc_exc!r}), falling back to fresh client")

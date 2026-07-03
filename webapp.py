@@ -9252,7 +9252,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # Thinking ladder (effort). The UI sends one of: low | medium | high | xhigh | max.
     # The value is passed 1:1 to run_engine as the effort override (same string the SDK's
     # EffortLevel literal expects). Anything else / missing → no override, so the engine uses
-    # its own _DEFAULT_EFFORT env. Note: on Fable 5 effort is silently coerced by the CLI regardless.
+    # its own _DEFAULT_EFFORT env. Note: --effort is honored on Fable 5 (low..xhigh|max; official default high).
     _think_mode = (body.get("think_mode") or "").strip()
     _effort_override: "str | None" = (
         _think_mode if _think_mode in {"low", "medium", "high", "xhigh", "max"} else None
@@ -9595,6 +9595,15 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     "status": event.get("status"),
                     "summary": event.get("summary"),
                     "last_tool_name": event.get("last_tool_name"),
+                })
+            elif etype == "model_info":
+                # FIX 1(e): forward model_info (fallback alert) to the cockpit client via SSE.
+                # Reuses the existing _send path — no new endpoints needed.
+                await _send({
+                    "type": "model_info",
+                    "requested": event.get("requested"),
+                    "served": event.get("served"),
+                    "fallback": event.get("fallback", False),
                 })
             # other types — ignore
 
