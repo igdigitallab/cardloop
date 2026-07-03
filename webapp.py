@@ -9138,6 +9138,8 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             await _chat_queue_drain_one(ctx, session_key)
         except Exception as _drain_exc:
             print(f"[chat_queue] chain drain error for {session_key}: {_drain_exc}")
+        # spec-069 P2: a continuation turn that still has bg children running schedules the next one.
+        _maybe_schedule_bg_continuation(ctx, session_key, _resolved_chat_id, _project_id)
 
 
 async def _chat_queue_drain_one(ctx: dict, session_key: str) -> bool:
@@ -9206,6 +9208,81 @@ async def _chat_queue_drain_loop(ctx: dict) -> None:
         except Exception as e:
             print(f"[chat_queue_drain_loop] error: {e}")
         await asyncio.sleep(_QUEUE_DRAIN_INTERVAL_SEC)
+
+
+# ─────────────────── spec-069 Phase 2: auto-continue on pending background work ───────────────────
+# When the orchestrator's turn ends but it still has background children running (Workflow / bg
+# sub-agents / Monitor tasks), the SDK delivers their completion only to a LIVE receive loop — which
+# ended with the turn. So the orchestrator would hang until the operator manually nudges it (RC#2).
+#
+# This re-wakes the orchestrator automatically and SAFELY: it enqueues a synthetic continuation into
+# the existing chat queue, which the service-process drain loop dispatches as a normal turn (NO
+# concurrent receive on the live client — the queue path is fully tested). Flag-gated
+# (AUTO_CONTINUE_ON_BG, default off) and bounded by AUTO_CONTINUE_MAX per episode, so a genuinely
+# stuck task cannot loop forever. Worst case when enabled: a few bounded wasted turns — never a brick.
+
+_AUTO_CONTINUE_ON = os.getenv("AUTO_CONTINUE_ON_BG", "0").lower() in ("1", "true", "yes", "on")
+_AUTO_CONTINUE_GRACE_SEC = float(os.getenv("AUTO_CONTINUE_GRACE_SEC", "60"))
+_AUTO_CONTINUE_MAX = int(os.getenv("AUTO_CONTINUE_MAX", "5"))
+_bg_continue_count: "dict[str, int]" = {}  # session_key → continuations fired this episode
+
+_BG_CONTINUE_PROMPT = (
+    "[auto-continue] One or more background sub-tasks you started may have finished since your last "
+    "turn (their completion is not auto-delivered to you). Check their results now — read the run's "
+    "subagents/workflows/*/agent-*.jsonl transcripts or use your tools to collect the outputs — then "
+    "continue the work. If they are clearly still running, reply in one line that you are still "
+    "waiting, and stop."
+)
+
+
+def _has_running_bg(session_key: str) -> bool:
+    """True if the session has a background monitor still marked running.
+
+    Excludes raw bg-bash shells: their natural completion is a CLI-internal input injection the
+    engine cannot observe, so they linger as 'running' and would trigger false continuations."""
+    bucket = _monitors.get(session_key) or {}
+    return any(r.get("status") == "running" and r.get("kind") != "bash" for r in bucket.values())
+
+
+def _maybe_schedule_bg_continuation(ctx: dict, session_key: str, chat_id: "str | None",
+                                    project_id: "str | None") -> None:
+    """At turn end: if background children are still running, schedule ONE deferred continuation turn
+    to re-wake the orchestrator. Resets the episode budget once nothing is pending. Never raises."""
+    try:
+        if not _AUTO_CONTINUE_ON:
+            return
+        if not _has_running_bg(session_key):
+            _bg_continue_count.pop(session_key, None)   # episode over — children done
+            return
+        n = _bg_continue_count.get(session_key, 0)
+        if n >= _AUTO_CONTINUE_MAX:
+            print(f"[auto-continue] {session_key}: budget exhausted ({n}/{_AUTO_CONTINUE_MAX}) — not re-waking")
+            return
+        _bg_continue_count[session_key] = n + 1
+        _spawn_bg(_bg_continuation_after_grace(ctx, session_key, chat_id, project_id, n + 1))
+    except Exception as exc:
+        print(f"[auto-continue] schedule error for {session_key}: {exc!r}")
+
+
+async def _bg_continuation_after_grace(ctx: dict, session_key: str, chat_id: "str | None",
+                                       project_id: "str | None", attempt: int) -> None:
+    """Wait a grace period, then (if bg work is still pending) enqueue a continuation for the drain
+    loop to dispatch. Runs as a tracked service-process task so it survives the turn that spawned it."""
+    try:
+        await asyncio.sleep(_AUTO_CONTINUE_GRACE_SEC)
+        if not _AUTO_CONTINUE_ON or not _has_running_bg(session_key):
+            return
+        # Don't stack continuations: skip if one is already queued for this session.
+        if any(it.get("text") == _BG_CONTINUE_PROMPT for it in _chat_queue_get(session_key)):
+            return
+        item = _chat_queue_enqueue(session_key, _BG_CONTINUE_PROMPT, chat_id, project_id)
+        if item is None:
+            return
+        print(f"[auto-continue] {session_key}: enqueued continuation (attempt {attempt}/{_AUTO_CONTINUE_MAX})")
+        # Dispatch now if the session is idle; otherwise the 3 s backstop drain loop picks it up.
+        await _chat_queue_drain_one(ctx, session_key)
+    except Exception as exc:
+        print(f"[auto-continue] continuation error for {session_key}: {exc!r}")
 
 
 # ─────────────────────────── C1: SSE chat ───────────────────────────
@@ -9645,6 +9722,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
             "run_id": _chat_run_id,
             **({"chat_id": _active_chat_id_for_run} if _active_chat_id_for_run else {}),
         }, persist=True)
+        # spec-069 P2: re-wake the orchestrator if it left background children still running.
+        _maybe_schedule_bg_continuation(ctx, session_key, _active_chat_id_for_run or _req_chat_id, project["id"])
         # Spec-041 A3: snappy delivery — drain next queued chat item immediately on lock release.
         # Wrap in try/except so a drain failure never breaks the response teardown.
         try:
