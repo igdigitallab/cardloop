@@ -2303,18 +2303,22 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               : estimateTokens(messages)
             const isProminent = realTokens >= contextWarnAt
             const isRed       = realTokens >= contextWarnRed
+            // Bigger, labelled reset button (operator: "make it bigger & clearer, there's free space").
+            // Shows the full "↺ Reset session" text instead of a bare icon. Escalates to a yellow/red
+            // outline as context fills (>=300K / >=500K), same two-tier signal as before.
             const wrapBtnStyle: React.CSSProperties = isProminent
               ? {
-                  fontSize: 13, lineHeight: 1, padding: '2px 7px', cursor: rotating ? 'wait' : 'pointer',
+                  fontSize: 13, lineHeight: 1, padding: '7px 14px', cursor: rotating ? 'wait' : 'pointer',
                   background: 'var(--bg-card)', border: `1px solid ${isRed ? 'var(--red)' : 'var(--yellow)'}`,
-                  borderRadius: 4,
+                  borderRadius: 6, whiteSpace: 'nowrap',
                   color: isRed ? 'var(--red)' : 'var(--yellow)',
                   fontWeight: 600,
                 }
               : {
-                  fontSize: 13, lineHeight: 1, padding: '2px 7px', cursor: rotating ? 'wait' : 'pointer',
-                  background: 'transparent', border: '1px solid var(--border)',
-                  borderRadius: 4, color: 'var(--text2)',
+                  fontSize: 13, lineHeight: 1, padding: '7px 14px', cursor: rotating ? 'wait' : 'pointer',
+                  background: 'var(--bg-card)', border: '1px solid var(--border)',
+                  borderRadius: 6, whiteSpace: 'nowrap',
+                  color: 'var(--text)', fontWeight: 600,
                 }
             return (
               <button
@@ -2325,7 +2329,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 onClick={() => setResetModalOpen(true)}
                 aria-label={t['chat.reset_session_btn']}
               >
-                {rotating ? '…' : '↺'}
+                {rotating ? `… ${t['chat.reset_session_btn']}` : t['chat.reset_session_btn']}
               </button>
             )
           })()}
