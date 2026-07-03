@@ -484,8 +484,8 @@ export const ru = {
   'chat.think_mode_max': 'Макс',
   'chat.think_mode_default': 'Норм',
   'chat.think_mode_min': 'Мин',
-  'chat.think_mode_hint': 'Глубина думания на следующий ход (Макс / Норм / Мин). Не влияет на Fable 5 — там всегда максимум.',
-  'chat.think_mode_fable_hint': 'Глубина думания (не влияет на Fable 5 — там всегда максимум)',
+  'chat.think_mode_hint': 'Глубина думания на следующий ход (Макс / Норм / Мин). Работает на всех моделях, включая Fable 5.',
+  'chat.model_fallback': '⚠ Фолбэк модели: запрошен {requested}, отвечает {served}',
 
   // ── Ultracode mode (spec-058) ────────────────────────────────────
   'chat.ultracode_label': 'Ultracode',

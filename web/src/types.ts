@@ -406,6 +406,14 @@ export interface ChatEventQueued {
   item: { id: string; text: string; created_at: number }
 }
 
+/** Emitted when the served model family mismatches the requested alias (e.g. fable→opus degrade). */
+export interface ChatEventModelInfo {
+  type: 'model_info'
+  requested: string
+  served: string
+  fallback?: boolean
+}
+
 export type ChatSSEEvent =
   | ChatEventText
   | ChatEventTextDelta
@@ -415,6 +423,7 @@ export type ChatSSEEvent =
   | ChatEventDone
   | ChatEventRateLimit
   | ChatEventQueued
+  | ChatEventModelInfo
 
 // ─── Chat message (UI state) ───────────────────────────────────────────────
 
@@ -455,7 +464,7 @@ export interface TurnMetrics {
 
 export interface ChatMessage {
   id: string
-  role: 'user' | 'assistant' | 'board'
+  role: 'user' | 'assistant' | 'board' | 'model_fallback'
   /** Accumulated text content */
   text: string
   /** Tool calls that happened during this turn */
@@ -470,6 +479,8 @@ export interface ChatMessage {
   metrics?: TurnMetrics
   /** Spec-052: board event payload — present only when role === 'board' */
   board?: ActivityEventBoard
+  /** Model fallback payload — present only when role === 'model_fallback' */
+  modelFallback?: { requested: string; served: string }
 }
 
 // ─── Prompt templates ─────────────────────────────────────────────────────

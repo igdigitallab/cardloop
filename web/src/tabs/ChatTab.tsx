@@ -686,7 +686,6 @@ const ModelThinkButton = memo(function ModelThinkButton({
   // overflow clip and the stacking context entirely. The mobile "up" menu keeps
   // plain absolute positioning (the composer bar does not clip it).
   const [fixedPos, setFixedPos] = useState<{ top: number; right: number } | null>(null)
-  const isFable = model === 'fable' || model.startsWith('fable')
 
   useEffect(() => {
     if (!open) return
@@ -710,7 +709,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
   }, [open, menuPlacement])
 
   // spec-058: when ultracode is on, effort is pinned to max server-side — reflect that on the pill.
-  const tag = isFable ? '' : (ultracode ? 'max' : THINK_TAG[thinkValue])
+  const tag = ultracode ? 'max' : THINK_TAG[thinkValue]
   const isDown = menuPlacement === 'down'
   return (
     <div className="composer-modelthink" ref={ref}>
@@ -745,7 +744,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
           <div className="composer-modelthink-sec">{t['chat.think_mode_label']}</div>
           {THINK_MODES.map(m => {
             // Ultracode pins effort to max — grey out the manual ladder while it's on.
-            const inert = isFable || ultracode
+            const inert = ultracode
             return (
               <div
                 key={m.value}
@@ -2007,6 +2006,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 return finalizeStreaming(prev, evt.error)
               case 'rate_limit':
                 return prev
+              case 'model_info': {
+                // Backend emits this when the served model family mismatches the requested alias
+                // (e.g. silent fable→opus degrade). Render a slim system strip in the message flow.
+                if (!evt.fallback) return prev
+                const strip: ChatMessage = {
+                  id: nextId(), role: 'model_fallback', text: '', tools: [], streaming: false, ts: now,
+                  modelFallback: { requested: evt.requested, served: evt.served },
+                }
+                return [...prev, strip]
+              }
               default:
                 return prev
             }
@@ -2518,6 +2527,24 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         )}
 
         {messages.map((msg, idx) => {
+          // Model fallback strip — slim system row shown when backend silently degrades the model.
+          // Live-only (not replayed from history); disappears on reload.
+          if (msg.role === 'model_fallback' && msg.modelFallback) {
+            const mf = msg.modelFallback
+            const text = t['chat.model_fallback']
+              .replace('{requested}', mf.requested)
+              .replace('{served}', mf.served)
+            return (
+              <div key={msg.id} className="chat-board-event chat-board-event-warn">
+                <span className="chat-board-event-head">
+                  <span className="chat-board-event-icon" aria-hidden="true">⚠</span>
+                  <span className="chat-board-event-body">
+                    <span className="chat-board-event-title">{text}</span>
+                  </span>
+                </span>
+              </div>
+            )
+          }
           // Spec-052: board event pseudo-row — rendered as a slim accent strip, not a chat bubble.
           if (msg.role === 'board' && msg.board) {
             const bEvt = msg.board

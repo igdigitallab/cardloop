@@ -512,8 +512,8 @@ export const en = {
   'chat.think_mode_max': 'Max',
   'chat.think_mode_default': 'Default',
   'chat.think_mode_min': 'Min',
-  'chat.think_mode_hint': 'Thinking effort for the next turn (Max / Default / Min). Has no effect on Fable 5 — thinking always runs high.',
-  'chat.think_mode_fable_hint': 'Thinking effort (inert for Fable 5 — thinking always runs high regardless)',
+  'chat.think_mode_hint': 'Thinking effort for the next turn (Max / Default / Min). Works on all models including Fable 5.',
+  'chat.model_fallback': '⚠ Model fallback: requested {requested}, served by {served}',
 
   // ── Ultracode mode (spec-058) ────────────────────────────────────
   'chat.ultracode_label': 'Ultracode',
