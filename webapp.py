@@ -8854,7 +8854,7 @@ def _chat_queue_flush() -> None:
         pass
 
 
-def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = None) -> "dict | None":
+def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = None, project_id: "str | None" = None) -> "dict | None":
     """Append a message to the chat queue for session_key.
     Returns the new item dict, or None if the queue is full.
 
@@ -8868,6 +8868,10 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
     item: dict = {"id": str(_uuid_mod.uuid4()), "text": text, "created_at": time.time()}
     if chat_id:
         item["chat_id"] = chat_id
+    if project_id:
+        # Multichat: needed so the drained run resolves THIS chat's OWN session_id from
+        # chats.json (keyed by project_id) instead of the flat per-project session mirror.
+        item["project_id"] = project_id
     lst.append(item)
     _chat_queue_flush()
     return item
@@ -8943,7 +8947,7 @@ async def api_chat_queue_add(req: web.Request) -> web.Response:
     if _q_chat_id and not _valid_chat_id(_q_chat_id):
         return web.json_response({"error": "invalid chat_id"}, status=400)
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
-    item = _chat_queue_enqueue(session_key, text, _q_chat_id)
+    item = _chat_queue_enqueue(session_key, text, _q_chat_id, project["id"])
     if item is None:
         return web.json_response({"error": "queue full"}, status=429)
     return web.json_response({"item": item}, status=201)
@@ -8999,7 +9003,9 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
     run_id = _uuid.uuid4().hex[:6]
     # Multichat: route this queued run's bus events + live buffer to its origin chat tab.
     _q_chat_id = item.get("chat_id")
-    _cid = {"chat_id": _q_chat_id} if _q_chat_id else {}
+    _project_id = item.get("project_id")
+    _resolved_chat_id = _q_chat_id  # finalized (fallback to active chat) in the resolution block below
+    _cid: dict = {"chat_id": _q_chat_id} if _q_chat_id else {}
     outcome = "fail"
     try:
         topics = ctx["topics"]
@@ -9026,10 +9032,38 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # _chat_queue_drain_one already seeds this synchronously when it reserves the lock
         # (so /live is authoritative the instant running flips); only create here if it
         # is somehow missing, to avoid resetting the buffer drain_one just populated.
+        # ── Multichat session isolation (bugfix) ─────────────────────────────────
+        # Resolve THIS chat's OWN session_id from chats.json (spec-037), exactly like the
+        # direct POST /chat path. The old code read ctx["sessions"][session_key] — a flat
+        # per-project mirror that only ever holds the ACTIVE (main) chat's session — so a
+        # queued prompt typed in a background tab resumed the MAIN chat's Claude conversation
+        # and its output surfaced in the main tab. Reading per-chat keeps queued runs in their
+        # own session. Also finalize the owning chat_id (fallback to the active chat) so the
+        # run's events + /live buffer are always stamped and never broadcast to every tab.
+        resume_session_id = None
+        _resolved_entry = False
+        if _project_id:
+            try:
+                async with _chats_lock():
+                    _cd = _ensure_chat_entry(ctx, _project_id, session_key)
+                    _cp = _cd.get(_project_id, {})
+                    _tid = _q_chat_id or _cp.get("active")
+                    _tc = next((c for c in _cp.get("chats", []) if c["id"] == _tid), None)
+                    if _tc is not None:
+                        _resolved_chat_id = _tc["id"]
+                        resume_session_id = _tc.get("session_id") or None
+                        _resolved_entry = True
+            except Exception as _ce:
+                print(f"[chat_queue] chats resolve error for {session_key} (falling back): {_ce}")
+        if not _resolved_entry:
+            # Legacy item (no project_id) or chats.json unavailable: keep the old behavior.
+            resume_session_id = ctx["sessions"].get(session_key)
+        _cid = {"chat_id": _resolved_chat_id} if _resolved_chat_id else {}
+
         if _live_turns.get(session_key) is None:
             _lt = _live_turn_create(session_key, model, prompt)
-            if _q_chat_id:
-                _lt["chat_id"] = _q_chat_id
+            if _resolved_chat_id:
+                _lt["chat_id"] = _resolved_chat_id
         _bus_publish(session_key, {
             "kind": "run_start",
             "source": "chat",
@@ -9037,8 +9071,6 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             "run_id": run_id,
             **_cid,
         })
-
-        resume_session_id = ctx["sessions"].get(session_key)
 
         async for event in run_engine(
             project_name=project_name,
@@ -9056,9 +9088,39 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             if etype == "text":
                 _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": run_id, **_cid})
             elif etype == "result":
-                if event.get("session_id"):
-                    ctx["sessions"][session_key] = event["session_id"]
-                    ctx["save_sessions"]()
+                _sid = event.get("session_id")
+                if _sid:
+                    # Write the new session_id back to THIS chat's entry in chats.json (mirroring
+                    # the direct /chat path), not just the flat mirror — otherwise the queued
+                    # chat's own continuity is lost (its chats.json session_id stays null and the
+                    # next turn resumes nothing / the wrong session).
+                    _wrote_back = False
+                    if _project_id and _resolved_chat_id:
+                        try:
+                            async with _chats_lock():
+                                _wd = _load_chats(ctx)
+                                _wp = _wd.get(_project_id)
+                                if _wp:
+                                    _wc = next(
+                                        (c for c in _wp.get("chats", []) if c["id"] == _resolved_chat_id),
+                                        None,
+                                    )
+                                    if _wc is not None:
+                                        _wc["session_id"] = _sid
+                                        _save_chats(ctx, _wd)
+                                        _wrote_back = True
+                                        # Keep the flat mirror in sync only for the active chat.
+                                        if _wp.get("active") == _resolved_chat_id:
+                                            ctx["sessions"][session_key] = _sid
+                                            try:
+                                                ctx["save_sessions"]()
+                                            except Exception:
+                                                pass
+                        except Exception as _wbx:
+                            print(f"[chat_queue] session_id write-back error for {session_key}: {_wbx}")
+                    if not _wrote_back:
+                        ctx["sessions"][session_key] = _sid
+                        ctx["save_sessions"]()
             elif etype == "error":
                 raise event["exc"]
 
@@ -9246,7 +9308,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             return resp
         # Multichat: stamp the originating chat_id so the drained run routes back to
         # this tab only (not every chat in the project).
-        item = _chat_queue_enqueue(session_key, prompt, _req_chat_id)
+        item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"])
         if item is None:
             payload = json.dumps({"type": "error", "error": "queue full"}, ensure_ascii=False)
         else:

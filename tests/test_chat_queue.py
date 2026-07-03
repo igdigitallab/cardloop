@@ -479,3 +479,71 @@ async def test_chat_busy_enqueues_with_chat_id(aiohttp_client, fake_ctx, chat_ap
     finally:
         while _webapp._chat_queue_pop(session_key):
             pass
+
+
+@pytest.mark.asyncio
+async def test_drained_run_resumes_its_own_chat_session_not_the_mirror(fake_ctx):
+    """Regression (multichat session isolation): a prompt typed in a BACKGROUND chat tab and
+    queued (project busy) must resume THAT chat's own session_id from chats.json — NOT the flat
+    per-project mirror, which only ever holds the ACTIVE (main) chat's session. Before the fix the
+    drained run read ctx['sessions'][session_key] and so appended the operator's prompt to the MAIN
+    chat's Claude conversation, surfacing it in the main tab. This is the exact operator report."""
+    session_key = "1001:42"
+    project_id = "myproj"
+    _webapp._live_turns.pop(session_key, None)
+
+    # Two chats in ONE project: 'aaaaaa' is active/main (sess-main), 'bbbbbb' is a background tab (sess-bg).
+    _webapp._save_chats(fake_ctx, {
+        project_id: {
+            "active": "aaaaaa",
+            "chats": [
+                {"id": "aaaaaa", "name": "Main", "session_id": "sess-main"},
+                {"id": "bbbbbb", "name": "Side", "session_id": "sess-bg"},
+            ],
+        }
+    })
+    # The buggy precondition: the flat mirror points at the MAIN chat's session.
+    fake_ctx["sessions"][session_key] = "sess-main"
+
+    # A prompt queued from the BACKGROUND tab 'bbbbbb'.
+    item = _webapp._chat_queue_enqueue(
+        session_key, "work in my own chat", chat_id="bbbbbb", project_id=project_id
+    )
+    assert item is not None and item["chat_id"] == "bbbbbb" and item["project_id"] == project_id
+
+    captured: list = []
+
+    async def mock_run_engine(**kwargs):
+        captured.append(kwargs)
+        yield {"type": "result", "session_id": "sess-bg-new"}
+
+    fake_ctx["run_engine"] = mock_run_engine
+
+    def fake_spawn_bg(coro):
+        return asyncio.ensure_future(coro)
+
+    try:
+        with patch.object(_webapp, "_spawn_bg", side_effect=fake_spawn_bg), \
+             patch.object(_webapp, "_secrets_read", return_value={}), \
+             patch.object(_webapp, "_build_agents_kwargs", return_value={}):
+            assert await _webapp._chat_queue_drain_one(fake_ctx, session_key) is True
+            await asyncio.sleep(0.05)
+
+        # (1) THE FIX: the run resumed chat B's OWN session, not the main chat's mirror.
+        assert captured, "run_engine was not called"
+        assert captured[0]["resume_session_id"] == "sess-bg", (
+            f"queued run must resume chat B's own session, got {captured[0]['resume_session_id']!r}"
+        )
+
+        # (2) The new session_id was written back to chat B's entry in chats.json (own continuity).
+        chats = _webapp._load_chats(fake_ctx)[project_id]["chats"]
+        chat_b = next(c for c in chats if c["id"] == "bbbbbb")
+        assert chat_b["session_id"] == "sess-bg-new"
+
+        # (3) The active (main) chat's session AND the flat mirror are untouched (no contamination).
+        chat_a = next(c for c in chats if c["id"] == "aaaaaa")
+        assert chat_a["session_id"] == "sess-main"
+        assert fake_ctx["sessions"][session_key] == "sess-main"
+    finally:
+        _webapp._live_turns.pop(session_key, None)
+        fake_ctx["running"].pop(session_key, None)
