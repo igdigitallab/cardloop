@@ -720,10 +720,13 @@ def _monitor_tail(tr) -> str:
     return s
 
 
-def _monitor_delta(tool_name, tool_input, tool_response, agent_type):
+def _monitor_delta(tool_name, tool_input, tool_response, agent_type, tool_use_id=None):
     """Map a single tool result to a background-monitor delta, or None if irrelevant.
 
     Returned dict always carries "id"; first-seen deltas also carry kind/label/status.
+    spec-069 P3 (RC#3): task-type monitors (Workflow/Monitor) also carry tool_use_id — the stable
+    key shared with their completion TaskNotificationMessage (whose task_id is a DIFFERENT internal
+    id), so the monitor can be flipped terminal by tool_use_id instead of the mismatching task_id.
     Never raises — the caller is on the hot path."""
     try:
         ti = tool_input if isinstance(tool_input, dict) else {}
@@ -744,7 +747,7 @@ def _monitor_delta(tool_name, tool_input, tool_response, agent_type):
             label = ti.get("description") or ti.get("prompt") or ti.get("command") or "monitor"
             return {"id": str(tid), "kind": "monitor", "status": "running",
                     "label": str(label)[:200], "persistent": bool(_rget(tr, "persistent")),
-                    "agent": agent_type}
+                    "tool_use_id": tool_use_id, "agent": agent_type}
 
         if tool_name == "Workflow":
             tid = _rget(tr, "taskId")
@@ -752,7 +755,7 @@ def _monitor_delta(tool_name, tool_input, tool_response, agent_type):
                 return None
             return {"id": str(tid), "kind": "workflow", "status": "running",
                     "label": str(_rget(tr, "workflowName") or ti.get("name") or "workflow")[:200],
-                    "agent": agent_type}
+                    "tool_use_id": tool_use_id, "agent": agent_type}
 
         if tool_name == "BashOutput":
             bid = ti.get("bash_id") or _rget(tr, "backgroundTaskId")
@@ -809,7 +812,7 @@ def _make_post_tool_use_hook(project_name: str, session_key: str):
             # Background-task monitors (card b6f5cc): surface long-running shells / monitor tasks.
             try:
                 if _monitor_update_cb:
-                    delta = _monitor_delta(tool_name, tool_input, tool_response, agent_type)
+                    delta = _monitor_delta(tool_name, tool_input, tool_response, agent_type, tool_use_id)
                     if delta:
                         _monitor_update_cb(session_key, delta)
             except Exception:
@@ -1803,18 +1806,22 @@ async def run_engine(  # type: ignore[return]
                         "last_tool_name": getattr(msg, "last_tool_name", None),
                     }
                 elif isinstance(msg, TaskNotificationMessage):
-                    # Card b6f5cc: a task-completion notification whose task_id matches a tracked
-                    # background monitor (bg-bash / Monitor tool) flips it to a terminal status.
-                    # only_existing guard → a plain sub-agent task_id never spawns a phantom monitor.
+                    # Card b6f5cc: a task-completion notification flips a tracked background monitor
+                    # to a terminal status. spec-069 P3 (RC#3): a Workflow/Monitor task's monitor is
+                    # registered under the TOOL's taskId, but this notification's task_id is a DIFFERENT
+                    # internal id — so we also pass tool_use_id, the stable shared key, and _monitor_update
+                    # falls back to matching by it. only_existing guard → no phantom monitor is spawned.
                     try:
                         if _monitor_update_cb and msg.task_id:
                             # TaskNotificationStatus is Literal['completed','failed','stopped'].
                             _st = str(getattr(msg, "status", "") or "").lower()
                             _mst = {"completed": "done", "failed": "failed",
                                     "stopped": "stopped"}.get(_st)
-                            print(f"[monitor] task-notification id={msg.task_id} status={_st!r} → {_mst}")
+                            _tuid = getattr(msg, "tool_use_id", None)
+                            print(f"[monitor] task-notification id={msg.task_id} tool_use_id={_tuid} status={_st!r} → {_mst}")
                             if _mst:
-                                _monitor_update_cb(session_key, {"id": str(msg.task_id), "status": _mst},
+                                _monitor_update_cb(session_key,
+                                                   {"id": str(msg.task_id), "tool_use_id": _tuid, "status": _mst},
                                                    only_existing=True)
                     except Exception:
                         pass

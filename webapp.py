@@ -547,6 +547,13 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
             return
         bucket = _monitors.setdefault(session_key, {})
         rec = bucket.get(mid)
+        # spec-069 P3 (RC#3): a Workflow/Monitor task's completion notification carries a task_id
+        # that DIFFERS from the id the monitor was registered under (the tool's taskId). Fall back to
+        # matching by tool_use_id — the stable key shared between the tool result and the notification —
+        # so the monitor flips terminal instead of getting stuck "running" forever.
+        _tuid = delta.get("tool_use_id")
+        if rec is None and _tuid:
+            rec = next((r for r in bucket.values() if r.get("tool_use_id") == _tuid), None)
         if rec is None and only_existing:
             return
         now = time.time()
@@ -555,7 +562,7 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
                    "status": "running", "started": now, "tail": "", "agent": None}
             bucket[mid] = rec
         # Merge known fields (delta may be partial — e.g. a tail/status-only update).
-        for k in ("kind", "label", "status", "tail", "agent", "persistent"):
+        for k in ("kind", "label", "status", "tail", "agent", "persistent", "tool_use_id"):
             if delta.get(k) not in (None, ""):
                 rec[k] = delta[k]
         rec["ts"] = now
