@@ -886,6 +886,13 @@ const isTouchDevice: boolean =
   typeof window !== 'undefined' &&
   (window.matchMedia?.('(pointer: coarse)').matches || 'ontouchstart' in window)
 
+// Multichat UI is HIDDEN on the frontend (operator decision 2026-07-02). The BACKEND is left
+// fully intact — chats.json, per-chat sessions and /api/.../chats still work; each project simply
+// shows its single ACTIVE chat and the client keeps sending that chat_id. Flip to true to restore
+// the chat tab-bar (tabs / + new / rename / close). Kept as a one-line switch rather than deleting
+// the code so it is trivially reversible.
+const SHOW_MULTICHAT_UI: boolean = false
+
 export function ChatTab({ project, onProjectsReload, isActive, collapsed, onToggleCollapse, chromeCollapsed, onOpenCard, discussCard, onDiscussConsumed, models }: Props) {
   const projectId = project.id
 
@@ -2213,7 +2220,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           Layout: [tab…] [+]  [↺] [◉ session ▾]  ·(auto)·  [▬ ctx] [♨️ cache] [◆ model ▾] [🧠 think] [⟩]
           The ⟩ collapse button renders only when onToggleCollapse is provided (desktop-split). */}
       <div className={`chat-session-bar${isMobile && chromeCollapsed ? ' collapsed' : ''}`}>
-        {/* Left: chat tabs inline */}
+        {/* Left: chat tabs inline — HIDDEN via SHOW_MULTICHAT_UI (backend intact; single active chat only) */}
+        {SHOW_MULTICHAT_UI && (<>
         {chats.map(chat => {
           const isActive = chat.id === activeChatId
           const isRenaming = renamingChatId === chat.id
@@ -2283,6 +2291,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         )}
         {/* Separator between tabs and session controls */}
         {chats.length > 0 && <span className="chat-toolbar-sep" />}
+        </>)}
         {/* Left group: single reset + session selector, grouped together. */}
         <div className="chat-session-left">
           {(() => {
