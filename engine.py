@@ -1003,8 +1003,16 @@ async def _get_or_create_live_client(
             return existing.client
 
     # ── Enforce LIVE_CLIENT_MAX via LRU ──────────────────────────────────────────────────────────
+    # spec-069 P1 (RC#1): never LRU-evict a client whose turn is in-flight — that would SIGTERM a
+    # running orchestration mid-turn. Consider only idle entries; if every client is busy, allow a
+    # temporary overflow rather than kill a live turn (the next idle turn-end brings the count down).
+    _running_dict = ctx.get("running", running)
     while len(registry) >= LIVE_CLIENT_MAX:
-        oldest_key = min(registry, key=lambda k: registry[k].last_used)
+        idle_keys = [k for k in registry if k not in _running_dict]
+        if not idle_keys:
+            print(f"[live-client] registry at {LIVE_CLIENT_MAX} but all clients busy — deferring LRU evict")
+            break
+        oldest_key = min(idle_keys, key=lambda k: registry[k].last_used)
         print(f"[live-client] LRU evict {oldest_key} (registry full at {LIVE_CLIENT_MAX})")
         await _evict_live_client(oldest_key, ctx)
 
@@ -1025,16 +1033,30 @@ async def _get_or_create_live_client(
 
 
 def _schedule_idle_eviction(session_key: str, ctx: "dict | None") -> "asyncio.Task":
-    """Create (and return) an asyncio Task that evicts session_key after LIVE_CLIENT_TTL_SEC idle.
+    """Create (and return) an asyncio Task that evicts session_key after LIVE_CLIENT_TTL_SEC of
+    genuine idleness.
 
     The task is a module-level detached task — NOT tied to any turn coroutine — so it
     survives after the turn generator is exhausted.
+
+    spec-069 P1 (RC#1): the TTL measures IDLE time, never total turn duration. If the TTL lapses
+    while a turn for this session is still in-flight (session_key present in `running`), eviction is
+    DEFERRED — the countdown restarts and re-checks. This kills the old bug where a long
+    orchestration that legitimately ran past the TTL was SIGTERMed mid-turn and died silently.
     """
+    _running_dict = (ctx or {}).get("running", running)
+
     async def _idle_waiter():
         try:
-            await asyncio.sleep(LIVE_CLIENT_TTL_SEC)
-            print(f"[live-client] idle TTL expired for {session_key} — evicting")
-            await _evict_live_client(session_key, ctx)
+            while True:
+                await asyncio.sleep(LIVE_CLIENT_TTL_SEC)
+                if session_key in _running_dict:
+                    # A turn is still running — never evict a live client mid-turn.
+                    print(f"[live-client] TTL lapsed for {session_key} but a turn is in-flight — deferring eviction")
+                    continue
+                print(f"[live-client] idle TTL expired for {session_key} — evicting")
+                await _evict_live_client(session_key, ctx)
+                return
         except asyncio.CancelledError:
             pass  # Normal: cancelled when the entry is reused or manually evicted.
 
