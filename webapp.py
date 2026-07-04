@@ -558,6 +558,20 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
             return
         now = time.time()
         if rec is None:
+            # spec-069 643ecf: an agent sub-agent that died (see f9d60d) and was relaunched
+            # comes back under a NEW agentId → a fresh monitor id. Before creating the row,
+            # drop any TERMINAL agent monitor with the SAME label so one logical sub-agent
+            # shows as ONE row (the newest run) instead of a confusing DONE+FAILED pair.
+            # Broadcast removal so the panel drops the stale row too.
+            _lbl = delta.get("label")
+            if delta.get("kind") == "agent" and _lbl:
+                for _old_id, _old in list(bucket.items()):
+                    if (_old.get("kind") == "agent" and _old.get("label") == _lbl
+                            and _old.get("status") in ("failed", "done", "stopped")):
+                        bucket.pop(_old_id, None)
+                        _bus_publish(session_key,
+                                     {"kind": "monitor", "monitor": {"id": _old_id, "removed": True}},
+                                     persist=False)
             rec = {"id": mid, "kind": delta.get("kind", "task"), "label": delta.get("label", ""),
                    "status": "running", "started": now, "tail": "", "agent": None}
             bucket[mid] = rec
@@ -584,6 +598,25 @@ def _monitors_clear(session_key: str) -> None:
     _monitors_dismissed.pop(session_key, None)
 
 
+def _monitors_clear_terminal_agents(session_key: str) -> None:
+    """Drop terminal (done/failed/stopped) AGENT monitors and broadcast their removal.
+
+    spec-069 643ecf: called at the START of a new turn so completed sub-agents from a PRIOR
+    turn don't pile up in the panel (operator: "done/closed monitors keep showing"). Running
+    agent monitors are left alone (protected by f9d60d); non-agent monitors (bg-bash / Monitor
+    / Workflow) are untouched — those have their own dismissal lifecycle. Best-effort."""
+    bucket = _monitors.get(session_key)
+    if not bucket:
+        return
+    for _mid, _rec in list(bucket.items()):
+        if _rec.get("kind") == "agent" and _rec.get("status") in ("failed", "done", "stopped"):
+            bucket.pop(_mid, None)
+            _bus_publish(session_key, {"kind": "monitor", "monitor": {"id": _mid, "removed": True}},
+                         persist=False)
+    if not bucket:
+        _monitors.pop(session_key, None)
+
+
 def _monitor_dismiss(session_key: str, mid: str) -> bool:
     """Remove a single monitor and broadcast its removal. Returns True if it existed.
 
@@ -604,6 +637,25 @@ def _monitor_dismiss(session_key: str, mid: str) -> bool:
             _monitors.pop(session_key, None)
     _bus_publish(session_key, {"kind": "monitor", "monitor": {"id": mid, "removed": True}}, persist=False)
     return existed
+
+
+def _has_live_agent_monitors(session_key: str) -> bool:
+    """True if any background Agent sub-agent monitor for this session is still 'running'.
+
+    spec-069 f9d60d: engine's live-client eviction guards call this (wired via
+    _register_webapp_callbacks) so a client is never evicted/SIGTERMed while its background
+    sub-agents are still working — which was the root of the false 'failed' monitors and
+    lost sub-agent work. The monitor registry is the single place where sub-agent START
+    (engine PostToolUse hook) and FINISH (RC#3 transcript reconcile) both converge, so it is
+    the authoritative liveness signal. Pure/best-effort — never raises."""
+    try:
+        bucket = _monitors.get(session_key)
+        if not bucket:
+            return False
+        return any(r.get("kind") == "agent" and r.get("status") == "running"
+                   for r in bucket.values())
+    except Exception:
+        return False
 
 
 # spec-069 P3 (RC#3 transcript scan): status map for task-notification terminal values.
@@ -9661,6 +9713,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
 
     # Reserve slot SYNCHRONOUSLY before first await
     ctx["running"][session_key] = True
+    # spec-069 643ecf: clear COMPLETED sub-agent monitors left over from a prior turn so this
+    # turn's panel starts clean (any still-running sub-agents stay). Stops done/failed rows piling up.
+    _monitors_clear_terminal_agents(session_key)
     # Spec-035: start live turn buffer for this session.
     # Store the requesting chat_id in the turn so /live consumers can verify ownership.
     _live_turn_obj = _live_turn_create(session_key, model, prompt)

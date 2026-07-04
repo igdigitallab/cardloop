@@ -1002,6 +1002,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const busActiveRef = useRef<boolean>(false)
+  // Tracks the SERVER's running state (from /live poll), independent of busActiveRef.
+  // busActiveRef is "are WE rendering this turn"; this is "is a turn running server-side
+  // for this chat". Lets the poll detect a turn that ran+finished without us ever adopting
+  // it (missed run_start / RC#2 auto-continue) so we can pull its answer in. (card 3f7ada)
+  const wasServerRunningRef = useRef<boolean>(false)
   // Server-backed message queue: replaces the old client-only queueRef.
   // Survives page reload via GET /api/projects/{id}/chat/queue on mount.
   interface QueueItem { id: string; text: string; created_at: number }
@@ -1561,6 +1566,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         // chat_id absent (card/TG/old server) → treat as ours (no single-chat regression).
         const liveIsOurs = !res.chat_id || !effectiveChatId || res.chat_id === effectiveChatId
         if (res.running && liveIsOurs) {
+          wasServerRunningRef.current = true
           if (!busActiveRef.current) {
             busActiveRef.current = true
             // Spec-035: use server started_at to avoid re-stamping the timer on each poll
@@ -1578,7 +1584,18 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             setMessages(prev => finalizeStreaming(prev))
             // Spec-041 A2: drain queued message on poll-detected turn completion.
             drainQueue()
+            // A turn we were rendering just ended — pull canonical history so a further
+            // answer produced after our live buffer (RC#2 auto-continue's 2nd turn) is not
+            // dropped from the canvas. (cards 3f7ada / 033318)
+            hydrateFromServer(() => cancelled)
+          } else if (wasServerRunningRef.current) {
+            // A server turn ran that we never adopted (busActiveRef stayed false — missed
+            // run_start / auto-continue) and just finished. Without this its answer only
+            // appears on the next user action ("message shows up the moment I type").
+            // Pull it in now. (card 3f7ada)
+            hydrateFromServer(() => cancelled)
           }
+          wasServerRunningRef.current = false
         }
       } catch { /* non-critical */ }
     }
@@ -1676,13 +1693,23 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setSubagents(prev => applySubagentEvent(prev, sEvt))
 
     } else if (evt.kind === 'run_end') {
-      if (!busActiveRef.current) return
+      // NOTE: do NOT early-return when !busActiveRef. A run_end for a turn we never adopted
+      // (missed run_start, or RC#2 auto-continue's server-side 2nd turn) must still pull the
+      // finished answer into the canvas — otherwise it only appears on the next user action
+      // ("message shows up the moment I type"). run_end reaches here only when we're not
+      // POST-streaming (gated by the streamingRef check above) and only for our chat_id
+      // (gated at the top of this handler), so hydrating is safe. (cards 3f7ada / 033318)
+      const wasActive = busActiveRef.current
       busActiveRef.current = false
+      wasServerRunningRef.current = false
       setRun(null)
       setServerStartedAt(null)
       setSubagents([])
       seenSubagentKeysRef.current = new Set()
-      setMessages(prev => finalizeStreaming(prev))
+      if (wasActive) setMessages(prev => finalizeStreaming(prev))
+      // Pull canonical history so multi-turn (auto-continue) answers all render and nothing
+      // is left behind the live buffer. Idempotent one-shot fetch.
+      hydrateFromServer(() => false)
       // Spec-041 A2: drain queued message on bus-originated turn completion.
       drainQueue()
       // Compaction resolves when run ends (covers edge-case where no text/tool arrived).

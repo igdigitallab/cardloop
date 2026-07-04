@@ -611,14 +611,35 @@ def audit(project: str, kind: str, text: str):
 _timeline_append_cb = None
 _bus_publish_cb = None
 _monitor_update_cb = None
+# spec-069 f9d60d: webapp predicate — True if a background Agent sub-agent for a session_key
+# is still running. Eviction guards consult it so a live client is never SIGTERMed while its
+# sub-agents work (RC#1 protected only the main turn; background sub-agents outlive it).
+_has_live_subagents_cb = None
 
 
-def _register_webapp_callbacks(timeline_append, bus_publish, monitor_update=None):
+def _register_webapp_callbacks(timeline_append, bus_publish, monitor_update=None,
+                               has_live_subagents=None):
     """Inject webapp callbacks so engine.py can publish events without importing webapp."""
-    global _timeline_append_cb, _bus_publish_cb, _monitor_update_cb
+    global _timeline_append_cb, _bus_publish_cb, _monitor_update_cb, _has_live_subagents_cb
     _timeline_append_cb = timeline_append
     _bus_publish_cb = bus_publish
     _monitor_update_cb = monitor_update
+    _has_live_subagents_cb = has_live_subagents
+
+
+def _session_has_live_subagents(session_key: str) -> bool:
+    """True if a background sub-agent (Agent tool) for this session is still running.
+
+    spec-069 f9d60d: RC#1 stopped eviction from killing the MAIN turn, but background
+    sub-agents are subprocesses of the same live client and outlive the turn — when the
+    turn ends (session_key leaves `running`) the client became evict-eligible and a
+    disconnect() SIGTERMed the still-working sub-agents (exit 143, false 'failed' monitors,
+    lost work). Eviction guards call this to keep the client alive while sub-agents run.
+    Best-effort: any failure → False (never block eviction on a predicate error)."""
+    try:
+        return bool(_has_live_subagents_cb and _has_live_subagents_cb(session_key))
+    except Exception:
+        return False
 
 
 # ─────────────────────────── Spec-029 §2: PostToolUse hook ────────────────────────────────────
@@ -1012,12 +1033,19 @@ async def _get_or_create_live_client(
 
     existing = registry.get(session_key)
     if existing is not None:
-        if existing.fingerprint != fingerprint:
+        if existing.fingerprint != fingerprint and not _session_has_live_subagents(session_key):
             print(f"[live-client] fingerprint changed for {session_key} — evicting and reconnecting")
             await _evict_live_client(session_key, ctx)
             # Fall through to create a new entry.
         else:
             # Reuse: cancel the pending idle countdown and refresh the timestamp.
+            # spec-069 f9d60d: when the fingerprint changed but background sub-agents are
+            # still running, we deliberately REUSE the old client (deferring the option
+            # change) instead of evicting — disconnect() would SIGTERM those sub-agents
+            # mid-flight (exit 143). The new options take effect on the next turn, after
+            # the sub-agents finish.
+            if existing.fingerprint != fingerprint:
+                print(f"[live-client] fingerprint changed for {session_key} but sub-agents are live — reusing client, deferring option change")
             if existing.idle_task is not None and not existing.idle_task.done():
                 existing.idle_task.cancel()
             existing.last_used = time.monotonic()
@@ -1030,7 +1058,10 @@ async def _get_or_create_live_client(
     # temporary overflow rather than kill a live turn (the next idle turn-end brings the count down).
     _running_dict = ctx.get("running", running)
     while len(registry) >= LIVE_CLIENT_MAX:
-        idle_keys = [k for k in registry if k not in _running_dict]
+        # spec-069 P1 (RC#1) + f9d60d: a client is "busy" if its turn is in-flight OR it still
+        # has background sub-agents running — evicting either would SIGTERM live work.
+        idle_keys = [k for k in registry
+                     if k not in _running_dict and not _session_has_live_subagents(k)]
         if not idle_keys:
             print(f"[live-client] registry at {LIVE_CLIENT_MAX} but all clients busy — deferring LRU evict")
             break
@@ -1072,9 +1103,11 @@ def _schedule_idle_eviction(session_key: str, ctx: "dict | None") -> "asyncio.Ta
         try:
             while True:
                 await asyncio.sleep(LIVE_CLIENT_TTL_SEC)
-                if session_key in _running_dict:
-                    # A turn is still running — never evict a live client mid-turn.
-                    print(f"[live-client] TTL lapsed for {session_key} but a turn is in-flight — deferring eviction")
+                if session_key in _running_dict or _session_has_live_subagents(session_key):
+                    # A turn is still running, OR background sub-agents are still working —
+                    # never evict a live client while either holds live work. Evicting would
+                    # disconnect() → SIGTERM the sub-agent subprocesses. (RC#1 + f9d60d)
+                    print(f"[live-client] TTL lapsed for {session_key} but work is in-flight — deferring eviction")
                     continue
                 print(f"[live-client] idle TTL expired for {session_key} — evicting")
                 await _evict_live_client(session_key, ctx)
@@ -1950,7 +1983,8 @@ def _build_ctx(*, web_port: int = None, web_password: str = None) -> dict:
     web_port, web_password: passed in from bot.py (it already read + applied env).
     """
     import webapp as _webapp  # lazy — called only at startup after webapp is fully loaded
-    _register_webapp_callbacks(_webapp._timeline_append, _webapp._bus_publish, _webapp._monitor_update)
+    _register_webapp_callbacks(_webapp._timeline_append, _webapp._bus_publish, _webapp._monitor_update,
+                               _webapp._has_live_agent_monitors)
 
     _web_port = web_port if web_port is not None else int(os.getenv("WEB_PORT", "8787"))
     _web_password = web_password if web_password is not None else os.getenv("WEB_PASSWORD", "")
