@@ -752,9 +752,12 @@ def _agent_last_tool_tail(path: "Path") -> "str | None":
                 obj = json.loads(line)
             except Exception:
                 continue
-            # Agent transcripts are AssistantMessage / ToolResultMessage / etc.
-            # Tool calls live in message.content[] as {type: "tool_use", name: ..., input: ...}.
-            content = obj.get("content") or []
+            # Agent transcripts wrap the assistant turn: tool calls live in
+            # message.content[] as {type: "tool_use", name: ..., input: ...}.
+            # Fall back to a top-level content[] for any other shape.
+            _msg = obj.get("message")
+            content = ((_msg.get("content") if isinstance(_msg, dict) else None)
+                       or obj.get("content") or [])
             if not isinstance(content, list):
                 continue
             for block in content:

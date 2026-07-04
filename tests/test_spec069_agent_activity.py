@@ -179,12 +179,15 @@ def test_agent_monitor_registered_via_monitor_update():
 
 
 def _make_assistant_message(tool_uses: list[dict]) -> str:
-    """Build a JSON line representing an assistant message with tool_use blocks."""
+    """Build a JSON line matching the REAL agent transcript shape: the assistant turn is
+    wrapped, so tool_use blocks live under `message.content[]` (NOT a top-level content[]).
+    Regression guard for the smoke-caught bug where the extractor read the wrong level."""
     content = [
         {"type": "tool_use", "id": f"toolu_{i}", "name": tu["name"], "input": tu["input"]}
         for i, tu in enumerate(tool_uses)
     ]
-    return json.dumps({"type": "message", "role": "assistant", "content": content})
+    return json.dumps({"type": "assistant",
+                       "message": {"role": "assistant", "content": content}})
 
 
 def _write_agent_jsonl(path: Path, lines: list[str]) -> None:
