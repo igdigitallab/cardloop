@@ -1346,7 +1346,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // Spec-035 L3: /live replaces /running — returns running state + turn history + started_at
       api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, prompt: '', cursor: 0, events: [] as Array<Record<string, unknown>>, board_events: [], pending_handoff: null as string | null, chat_id: null as string | null })),
     ]).then(([histRes, queueRes, liveRes]) => {
-      if (isCancelled()) return
+      // Guard the ASYNC apply: if this client began POST-streaming a turn while the fetch was in
+      // flight, the POST stream is the authority. Applying a stale history/live snapshot now would
+      // replace the optimistic user+assistant bubbles and re-order the canvas — the just-sent
+      // message jumps ABOVE the previous answer. streamingRef is a live ref (not the closed-over
+      // value), so this reflects the state at apply time, closing the race. (message-order bug)
+      if (isCancelled() || streamingRef.current) return
       setQueueItems(queueRes.items)
       setContextTokens(histRes.context_tokens != null ? histRes.context_tokens : null)
       if (histRes.context_window != null && histRes.context_window > 0) setContextWindow(histRes.context_window)
