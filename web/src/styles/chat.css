@@ -1397,6 +1397,26 @@
   color: var(--text2);
   max-height: 160px; overflow: auto; white-space: pre-wrap; word-break: break-word;
 }
+/* spec-069 P3-B: agent monitor rows — always-visible inline live tail (per-tool progress) */
+.mon-row-agent { background: var(--bg2); }
+.mon-row-agent .mon-head { background: transparent; }
+.mon-row-agent .mon-head:hover { background: var(--bg); }
+/* Inline tail: single muted line, no pre-wrap, ellipsis at edge — updates in place ~2s */
+.mon-agent-tail {
+  padding: 0 10px 5px 30px; /* indent under the icon column */
+  font-family: var(--mono); font-size: 11px; line-height: 1.4;
+  color: var(--text3); font-style: italic;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Spinning bot icon while agent is running */
+@keyframes mon-agent-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.mon-agent-spin {
+  animation: mon-agent-spin 2s linear infinite;
+  color: var(--accent);
+}
 @media (pointer: coarse) {
   .mon-head, .mon-panel-head { min-height: 32px; }
 }
