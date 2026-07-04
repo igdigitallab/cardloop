@@ -705,6 +705,156 @@ def _reconcile_monitors_from_transcript(ctx: dict, session_key: str, project_id:
         pass  # best-effort — never propagate on the hot path
 
 
+# ─────────────────────── agent activity sweeper (spec-069 P3-B) ──────────────
+# Background sub-agents (Agent tool) write their tool calls into a per-agent
+# .jsonl under ~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl.
+# The sweeper tails each running agent monitor's transcript every 2 s and
+# updates the monitor's `tail` field with the last tool_use name + target so
+# the operator sees live per-step activity.
+# Completion is handled for free by RC#3 (_reconcile_monitors_from_transcript):
+# the <task-notification> block in the session transcript carries <task-id>==agentId
+# which exactly matches the monitor id registered in Part A above.
+
+_AGENT_SWEEP_INTERVAL_SEC = 2      # poll cadence
+_AGENT_TRANSCRIPT_TAIL_BYTES = 16384  # tail-read size for sub-agent transcript (~16 KB)
+_AGENT_TAIL_TARGET_MAX = 60        # max chars for the target fragment in the tail string
+
+
+def _agent_last_tool_tail(path: "Path") -> "str | None":
+    """Tail-read an agent's .jsonl transcript and return a short tail string for the last
+    tool_use block found, or None if the file is missing / has no tool_use yet.
+
+    Format: "↳ <tool_name> <target>" where target is the most informative input field,
+    truncated to _AGENT_TAIL_TARGET_MAX chars.  Pure — never raises."""
+    try:
+        if not path.exists():
+            return None
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            file_size = fh.tell()
+            if file_size == 0:
+                return None
+            read_start = max(0, file_size - _AGENT_TRANSCRIPT_TAIL_BYTES)
+            fh.seek(read_start)
+            raw = fh.read()
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if read_start > 0 and lines:
+            lines = lines[1:]  # drop potentially partial first line
+
+        last_name: "str | None" = None
+        last_target: "str | None" = None
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            # Agent transcripts are AssistantMessage / ToolResultMessage / etc.
+            # Tool calls live in message.content[] as {type: "tool_use", name: ..., input: ...}.
+            content = obj.get("content") or []
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_use":
+                    continue
+                name = str(block.get("name") or "")
+                inp = block.get("input") or {}
+                if not isinstance(inp, dict):
+                    inp = {}
+                target = (inp.get("file_path") or inp.get("command") or
+                          inp.get("pattern") or inp.get("description") or
+                          inp.get("prompt") or "")
+                target = str(target)
+                if len(target) > _AGENT_TAIL_TARGET_MAX:
+                    target = target[:_AGENT_TAIL_TARGET_MAX] + "…"
+                last_name = name
+                last_target = target
+
+        if not last_name:
+            return None
+        tail = f"↳ {last_name}"
+        if last_target:
+            tail = f"{tail} {last_target}"
+        return tail
+    except Exception:
+        return None
+
+
+async def _agent_activity_sweep_loop(ctx: dict) -> None:
+    """spec-069 P3-B: every _AGENT_SWEEP_INTERVAL_SEC, tail each running agent monitor's
+    transcript and push a tail update if anything new has happened.  Also calls
+    _reconcile_monitors_from_transcript once per session that has running agent monitors so
+    that completions flip to done without waiting for a panel-open.  Never raises."""
+    await asyncio.sleep(5)  # let the service settle before the first tick
+    while True:
+        try:
+            # Snapshot: {session_key: [list of running agent monitor records]}
+            sessions_with_agents: dict[str, list[dict]] = {}
+            for sk, bucket in list(_monitors.items()):
+                recs = [r for r in bucket.values()
+                        if r.get("kind") == "agent" and r.get("status") == "running"]
+                if recs:
+                    sessions_with_agents[sk] = recs
+
+            if sessions_with_agents:
+                # Resolve all projects once (O(n) but n is small).
+                projects = _collect_projects(ctx)
+                sk_to_project: dict[str, dict] = {}
+                for proj in projects:
+                    sk = proj.get("session_key") or proj.get("tg_thread", "")
+                    if sk:
+                        sk_to_project[sk] = proj
+
+                for session_key, agent_recs in sessions_with_agents.items():
+                    try:
+                        project = sk_to_project.get(session_key)
+                        if project is None:
+                            continue
+                        cwd = project.get("cwd") or ""
+                        project_id = project.get("id") or ""
+                        if not cwd:
+                            continue
+
+                        # Flip any completed agents via transcript scan (RC#3 re-use).
+                        _reconcile_monitors_from_transcript(ctx, session_key, project_id)
+
+                        sdk_dir = _sdk_sessions_dir(cwd)
+                        for rec in agent_recs:
+                            # Skip records that reconcile just flipped to terminal.
+                            if rec.get("status") != "running":
+                                continue
+                            agent_id = rec.get("id")
+                            if not agent_id:
+                                continue
+                            try:
+                                # Locate the agent transcript via glob (session_id varies).
+                                matches = list(sdk_dir.glob(
+                                    f"*/subagents/agent-{agent_id}.jsonl"))
+                                if not matches:
+                                    continue
+                                tail_str = _agent_last_tool_tail(matches[0])
+                                if tail_str is None:
+                                    continue
+                                # Only push when the tail actually changed (avoid bus spam).
+                                if tail_str == rec.get("tail"):
+                                    continue
+                                _monitor_update(session_key,
+                                                {"id": agent_id, "tail": tail_str},
+                                                only_existing=True)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        await asyncio.sleep(_AGENT_SWEEP_INTERVAL_SEC)
+
+
 # ─────────────────────────── live turn buffer (spec-035) ─────────────────────
 # In-memory ring buffer of events for the current (or last) agent turn.
 # Keyed by session_key. Retained for 300s after turn completion for reconnect replay.
@@ -12874,6 +13024,9 @@ async def start(ctx: dict) -> None:
         # Spec-025: Trash purge janitor
         _STARTUP_BG_TASKS.append(_spawn_bg(_janitor_trash_purge_loop(ctx)))
         print(f"[webapp] janitor trash purge loop started (interval 3600s, retention {TRASH_RETENTION_DAYS}d)")
+        # spec-069 P3-B: agent activity sweeper — tails sub-agent transcripts for live tail updates
+        _STARTUP_BG_TASKS.append(_spawn_bg(_agent_activity_sweep_loop(ctx)))
+        print(f"[webapp] agent activity sweeper started (interval {_AGENT_SWEEP_INTERVAL_SEC}s)")
         # spec-067 / spec-068: autopilot loop is now registered inside
         # _register_autopilot() above (features/autopilot/__init__.py).
     except Exception as e:

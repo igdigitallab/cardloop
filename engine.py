@@ -783,6 +783,18 @@ def _monitor_delta(tool_name, tool_input, tool_response, agent_type, tool_use_id
         if tool_name == "TaskStop":
             tid = ti.get("task_id") or ti.get("taskId")
             return {"id": str(tid), "status": "stopped"} if tid else None
+
+        if tool_name == "Agent":
+            # spec-069 P3-B: register a sub-agent monitor keyed by its agentId so that
+            # RC#3's _reconcile_monitors_from_transcript can flip it to done automatically
+            # when the <task-notification> for agentId arrives in the session transcript.
+            txt = _tool_response_to_str(tool_response)
+            m = re.search(r"agentId:\s*([A-Za-z0-9]+)", txt or "")
+            if not m:
+                return None
+            label = str(ti.get("description") or ti.get("subagent_type") or "agent")[:200]
+            return {"id": m.group(1), "kind": "agent", "status": "running",
+                    "label": label, "agent": agent_type}
     except Exception:
         return None
     return None
