@@ -606,6 +606,105 @@ def _monitor_dismiss(session_key: str, mid: str) -> bool:
     return existed
 
 
+# spec-069 P3 (RC#3 transcript scan): status map for task-notification terminal values.
+_TASK_NOTIFICATION_STATUS_MAP: dict[str, str] = {
+    "completed": "done",
+    "failed": "failed",
+    "stopped": "stopped",
+}
+
+# Substring filter — only parse lines that could carry a task-notification block.
+_TASK_NOTIFICATION_MARKER = "task-notification"
+
+# Tail-read size: transcript is ~500 KB; reading last 64 KB captures all recent completions.
+_TASK_NOTIFICATION_TAIL_BYTES = 65536
+
+# Regex compiled once: capture task-id and terminal status from XML block.
+_TASK_NOTIFICATION_RE = re.compile(
+    r"<task-id>([^<]+)</task-id>.*?<status>([^<]+)</status>",
+    re.DOTALL,
+)
+
+
+def _reconcile_monitors_from_transcript(ctx: dict, session_key: str, project_id: str) -> None:
+    """Scan the tail of the active session transcript for completed task-notification blocks
+    and flip any still-running monitors to their terminal status.
+
+    spec-069 P3 (RC#3): the SDK's TaskNotificationMessage carries an internal task_id that
+    never matches the monitor's registered id (the tool's taskId), so the prior tool_use_id
+    flip (RC#3) also turns out inert for Workflow completions. The reliable signal lives in
+    the session .jsonl as a <task-notification> XML block whose <task-id> EXACTLY equals the
+    monitor id. This helper tail-reads the last 64 KB of the transcript and calls
+    _monitor_update(..., only_existing=True) for every terminal task-id found — idempotent,
+    dismissed-aware, live-SSE-push via the existing _monitor_update path.
+
+    MUST be called AFTER _maybe_schedule_bg_continuation at turn-end sites so the
+    continuation decision uses the pre-reconcile running state (RC#2 non-regression).
+    Best-effort: never raises, silently returns on any resolution or I/O failure.
+    """
+    try:
+        # Resolve project → cwd.
+        project = _find_project_by_id(ctx, project_id)
+        if project is None:
+            return
+        cwd = project.get("cwd")
+        if not cwd:
+            return
+
+        # Resolve session_id: chats.json is the source of truth; fall back to the legacy mirror.
+        session_id = _active_chat_session_id(ctx, project_id)
+        if not session_id:
+            session_id = ctx.get("sessions", {}).get(session_key)
+        if not session_id:
+            return
+
+        jsonl_path = _sdk_sessions_dir(cwd) / f"{session_id}.jsonl"
+        if not jsonl_path.exists():
+            return
+
+        # Tail-read: last 64 KB only — efficient on a ~500 KB growing transcript.
+        with open(jsonl_path, "rb") as fh:
+            fh.seek(0, 2)
+            file_size = fh.tell()
+            read_start = max(0, file_size - _TASK_NOTIFICATION_TAIL_BYTES)
+            fh.seek(read_start)
+            raw = fh.read()
+
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if read_start > 0 and lines:
+            lines = lines[1:]  # drop potentially partial first line when we seeked mid-file
+
+        for line in lines:
+            if _TASK_NOTIFICATION_MARKER not in line:
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+
+            # Extract XML from the two possible locations (queue-operation content or
+            # attachment prompt — both carry identical XML per the spec).
+            xml: str = obj.get("content") or obj.get("attachment", {}).get("prompt") or ""
+            if not xml or _TASK_NOTIFICATION_MARKER not in xml:
+                continue
+
+            for task_id, raw_status in _TASK_NOTIFICATION_RE.findall(xml):
+                task_id = task_id.strip()
+                raw_status = raw_status.strip().lower()
+                mapped = _TASK_NOTIFICATION_STATUS_MAP.get(raw_status)
+                if not mapped or not task_id:
+                    continue
+                # only_existing=True: never create a phantom monitor for an unknown task_id.
+                _monitor_update(session_key, {"id": task_id, "status": mapped},
+                                only_existing=True)
+    except Exception:
+        pass  # best-effort — never propagate on the hot path
+
+
 # ─────────────────────────── live turn buffer (spec-035) ─────────────────────
 # In-memory ring buffer of events for the current (or last) agent turn.
 # Keyed by session_key. Retained for 300s after turn completion for reconnect replay.
@@ -5509,6 +5608,8 @@ async def api_project_monitors(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    # spec-069 P3 (RC#3): reconcile before snapshot so a cold (re)load shows the correct status.
+    _reconcile_monitors_from_transcript(ctx, session_key, project["id"])
     mons = list(_monitors.get(session_key, {}).values())
     mons.sort(key=lambda r: (r.get("status") != "running", -r.get("ts", 0)))
     return web.json_response({"monitors": mons})
@@ -9147,6 +9248,11 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             print(f"[chat_queue] chain drain error for {session_key}: {_drain_exc}")
         # spec-069 P2: a continuation turn that still has bg children running schedules the next one.
         _maybe_schedule_bg_continuation(ctx, session_key, _resolved_chat_id, _project_id)
+        # spec-069 P3 (RC#3): after the continuation decision, reconcile stuck monitors from
+        # the transcript so the cockpit panel reflects the real terminal state. Placed AFTER
+        # _maybe_schedule_bg_continuation to preserve the RC#2 non-regression invariant.
+        if _project_id:
+            _reconcile_monitors_from_transcript(ctx, session_key, _project_id)
 
 
 async def _chat_queue_drain_one(ctx: dict, session_key: str) -> bool:
@@ -9731,6 +9837,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
         }, persist=True)
         # spec-069 P2: re-wake the orchestrator if it left background children still running.
         _maybe_schedule_bg_continuation(ctx, session_key, _active_chat_id_for_run or _req_chat_id, project["id"])
+        # spec-069 P3 (RC#3): after the continuation decision, reconcile stuck monitors from
+        # the transcript. Placed AFTER _maybe_schedule_bg_continuation (RC#2 non-regression).
+        _reconcile_monitors_from_transcript(ctx, session_key, project["id"])
         # Spec-041 A3: snappy delivery — drain next queued chat item immediately on lock release.
         # Wrap in try/except so a drain failure never breaks the response teardown.
         try:
