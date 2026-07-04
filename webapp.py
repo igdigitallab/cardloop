@@ -663,6 +663,16 @@ _TASK_NOTIFICATION_STATUS_MAP: dict[str, str] = {
     "completed": "done",
     "failed": "failed",
     "stopped": "stopped",
+    # spec-069: ANY terminal status must clear the monitor, or it lingers 'running' forever →
+    # _has_running_bg stays True → RC#2 auto-continue re-fires every grace period (phantom turns,
+    # "info flickers in Live") and f9d60d keeps the client pinned on a zombie monitor. A SIGTERM'd
+    # sub-agent (exit 143, the f9d60d death class) reports 'killed', which was previously unmapped.
+    "killed": "stopped",
+    "cancelled": "stopped",
+    "canceled": "stopped",
+    "error": "failed",
+    "timeout": "failed",
+    "timed_out": "failed",
 }
 
 # Substring filter — only parse lines that could carry a task-notification block.

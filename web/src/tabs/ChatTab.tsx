@@ -1581,13 +1581,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             setServerStartedAt(null)
             setSubagents([])
             seenSubagentKeysRef.current = new Set()
+            // We rendered this turn live — finalize the open bubble. No hydrate here: it would
+            // race a follow-on turn's live events and flicker. A truly-missed turn is caught by
+            // the wasServerRunning branch below (busActiveRef never went true for it).
             setMessages(prev => finalizeStreaming(prev))
             // Spec-041 A2: drain queued message on poll-detected turn completion.
             drainQueue()
-            // A turn we were rendering just ended — pull canonical history so a further
-            // answer produced after our live buffer (RC#2 auto-continue's 2nd turn) is not
-            // dropped from the canvas. (cards 3f7ada / 033318)
-            hydrateFromServer(() => cancelled)
           } else if (wasServerRunningRef.current) {
             // A server turn ran that we never adopted (busActiveRef stayed false — missed
             // run_start / auto-continue) and just finished. Without this its answer only
@@ -1706,10 +1705,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setServerStartedAt(null)
       setSubagents([])
       seenSubagentKeysRef.current = new Set()
-      if (wasActive) setMessages(prev => finalizeStreaming(prev))
-      // Pull canonical history so multi-turn (auto-continue) answers all render and nothing
-      // is left behind the live buffer. Idempotent one-shot fetch.
-      hydrateFromServer(() => false)
+      if (wasActive) {
+        // We rendered this turn live via the bus — the live buffer already holds the full
+        // answer, so just finalize the open bubble. Do NOT hydrate here: a hydrate races the
+        // NEXT turn's live events (e.g. auto-continue) and makes content flicker in Live —
+        // it replaces the whole message array with a snapshot that omits just-arrived tokens.
+        setMessages(prev => finalizeStreaming(prev))
+      } else {
+        // A turn we never adopted (missed run_start / origin outside this tab) just ended —
+        // its answer is NOT in our buffer, so pull canonical history once to land it. (3f7ada)
+        hydrateFromServer(() => false)
+      }
       // Spec-041 A2: drain queued message on bus-originated turn completion.
       drainQueue()
       // Compaction resolves when run ends (covers edge-case where no text/tool arrived).

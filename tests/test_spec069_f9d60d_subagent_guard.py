@@ -194,3 +194,24 @@ def test_clear_terminal_agents(clean_monitors):
     assert "a_done" not in bucket, "terminal agent monitor not cleared"
     assert "a_run" in bucket, "running agent monitor wrongly cleared"
     assert "sh1" in bucket, "non-agent monitor wrongly cleared"
+
+
+def test_all_terminal_statuses_mapped():
+    """Every terminal task-notification status must map to a terminal monitor state. An unmapped
+    one (was: 'killed') leaves the monitor 'running' forever → _has_running_bg stays True →
+    RC#2 auto-continue re-fires every grace period (phantom turns / "flicker in Live")."""
+    for st in ("completed", "failed", "stopped", "killed", "cancelled",
+               "canceled", "error", "timeout", "timed_out"):
+        assert webapp._TASK_NOTIFICATION_STATUS_MAP.get(st) is not None, f"terminal status {st!r} unmapped"
+
+
+def test_killed_status_clears_monitor_and_stops_autocontinue(clean_monitors):
+    """Root cause of the 'flicker in Live' bug: a SIGTERM'd sub-agent reports status 'killed'.
+    Reconcile must clear its monitor so _has_running_bg goes False and auto-continue stops."""
+    sk = "proj:killed"
+    webapp._monitor_update(sk, {"id": "ag_killed", "kind": "agent", "label": "R", "status": "running"})
+    assert webapp._has_running_bg(sk) is True, "precondition: running agent counts as bg work"
+    # Apply the same mapping reconcile would for a 'killed' task-notification.
+    mapped = webapp._TASK_NOTIFICATION_STATUS_MAP["killed"]
+    webapp._monitor_update(sk, {"id": "ag_killed", "status": mapped}, only_existing=True)
+    assert webapp._has_running_bg(sk) is False, "killed monitor still counts as running → auto-continue loops"
