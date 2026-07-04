@@ -788,13 +788,20 @@ def _monitor_delta(tool_name, tool_input, tool_response, agent_type, tool_use_id
             # spec-069 P3-B: register a sub-agent monitor keyed by its agentId so that
             # RC#3's _reconcile_monitors_from_transcript can flip it to done automatically
             # when the <task-notification> for agentId arrives in the session transcript.
-            txt = _tool_response_to_str(tool_response)
-            m = re.search(r"agentId:\s*([A-Za-z0-9]+)", txt or "")
-            if not m:
+            # The hook's tool_response is a DICT — e.g. {'isAsync': True, 'status':
+            # 'async_launched', 'agentId': '<id>', 'description': '<task>', ...}. Read agentId
+            # straight from it; only fall back to a text-form regex if the dict lacks the key.
+            tr = tool_response
+            agent_id = _rget(tr, "agentId")
+            if not agent_id:
+                m = re.search(r"agentId:\s*([A-Za-z0-9]+)", _tool_response_to_str(tr) or "")
+                agent_id = m.group(1) if m else None
+            if not agent_id:
                 return None
-            label = str(ti.get("description") or ti.get("subagent_type") or "agent")[:200]
-            return {"id": m.group(1), "kind": "agent", "status": "running",
-                    "label": label, "agent": agent_type}
+            label = str(ti.get("description") or _rget(tr, "description") or
+                        ti.get("subagent_type") or "agent")[:200]
+            return {"id": str(agent_id), "kind": "agent", "status": "running",
+                    "label": label, "agent": ti.get("subagent_type")}
     except Exception:
         return None
     return None

@@ -108,6 +108,43 @@ def test_agent_delta_label_falls_back_to_literal_agent():
     assert d["label"] == "agent"
 
 
+def _agent_response_dict(agent_id: str, description: str = "") -> dict:
+    """The REAL runtime shape the PostToolUse hook receives for an Agent launch — a dict,
+    NOT the display text.  Regression guard for the smoke-caught bug: the first cut parsed
+    agentId with a regex on the text form, but prod delivers this dict so the regex silently
+    failed (dict repr is `'agentId': '<id>'`, no `agentId:` substring) → nothing registered."""
+    return {"isAsync": True, "status": "async_launched", "agentId": agent_id,
+            "description": description, "resolvedModel": "claude-haiku-4-5-20251001",
+            "prompt": "..."}
+
+
+def test_agent_delta_parses_dict_response():
+    """PROD shape: tool_response is a dict carrying agentId — must register (smoke-caught)."""
+    d = engine._monitor_delta(
+        "Agent",
+        {"description": "Probe", "subagent_type": "quick"},
+        _agent_response_dict("a8dad6dd0cb26f68a", "Probe"),
+        None,
+    )
+    assert d is not None, "dict-form Agent response must yield a delta"
+    assert d["id"] == "a8dad6dd0cb26f68a"
+    assert d["kind"] == "agent"
+    assert d["status"] == "running"
+    assert d["agent"] == "quick"   # from subagent_type, not the caller agent_type
+
+
+def test_agent_delta_dict_label_from_response_description():
+    """Label falls back to the response dict's description when input lacks one."""
+    d = engine._monitor_delta(
+        "Agent",
+        {"subagent_type": "executor"},
+        _agent_response_dict("aid9", "Implement feature X"),
+        None,
+    )
+    assert d is not None
+    assert d["label"] == "Implement feature X"
+
+
 def test_agent_delta_returns_none_when_no_agent_id():
     """Agent response without agentId: line → return None (don't register phantom)."""
     d = engine._monitor_delta(
