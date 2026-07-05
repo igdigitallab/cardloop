@@ -54,6 +54,9 @@ import totp as _totp
 # spec-067 Phase 0: autopilot inert foundation (pure helpers + state I/O; no background loop)
 import autopilot as _autopilot
 
+# spec-074: global search index (SQLite FTS5 over transcripts/timeline/boards)
+import search as _search
+
 # spec-053 Phase B: Web Push (VAPID + pywebpush). Optional — degrades gracefully if absent.
 try:
     from pywebpush import webpush as _webpush, WebPushException as _WebPushException
@@ -6546,6 +6549,128 @@ async def api_usage_export(req: web.Request) -> web.Response:
         content_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="usage-export-{label}.csv"'},
     )
+
+
+# ───────────────────────────── Global search (spec-074) ─────────────────────────────
+#
+# One search box over chat transcripts + timelines + kanban boards across every
+# project — the daily-use "second brain". Indexing/query logic lives in search.py
+# (pure stdlib, unit-testable in isolation); this section only resolves cwd -> the
+# concrete files to index, reusing the SAME helpers the rest of the cockpit already
+# uses for that (_sdk_sessions_dir / _timeline_slug_from_cwd / _tasks_path / _done_path)
+# so the index always points at exactly what the UI itself reads.
+
+_SEARCH_SCAN_INTERVAL_SEC = 300  # background incremental refresh cadence
+_SEARCH_DEBOUNCE_SEC = 20        # min gap between opportunistic scans kicked off by a query
+_search_lock: "asyncio.Lock | None" = None
+_search_scan_state = {"running": False, "ts": 0.0}
+
+
+def _get_search_lock() -> asyncio.Lock:
+    global _search_lock
+    if _search_lock is None:
+        _search_lock = asyncio.Lock()
+    return _search_lock
+
+
+def _search_db_path(ctx: dict) -> Path:
+    return _search.db_path_for(ctx["DATA"])
+
+
+def _build_search_sources(ctx: dict):
+    """Resolves every registered project (+ free chats) into the source descriptors
+    search.py's indexer expects. Boards are skipped for free chats — they all share
+    cwd=$HOME and have no project-specific TASKS.md/DONE.md of their own."""
+    projects = _collect_projects(ctx)
+    chat_sources: list = []
+    timeline_sources: list = []
+    board_sources: list = []
+    for p in projects:
+        cwd = p["cwd"]
+        pid = p["id"]
+        name = p["name"]
+        chat_sources.append({"project_id": pid, "project_name": name, "sdk_dir": _sdk_sessions_dir(cwd)})
+        tl_path = ctx["DATA"] / "timeline" / f"{_timeline_slug_from_cwd(cwd)}.jsonl"
+        timeline_sources.append({"project_id": pid, "project_name": name, "path": tl_path})
+        if not p.get("is_free"):
+            board_sources.append({"project_id": pid, "project_name": name, "path": _tasks_path(cwd)})
+            board_sources.append({"project_id": pid, "project_name": name, "path": _done_path(cwd)})
+    return chat_sources, timeline_sources, board_sources
+
+
+async def _search_scan_tick(ctx: dict) -> dict:
+    """Runs one incremental scan off the event loop. Serialised against a concurrent
+    reindex via _get_search_lock() — both are writers to the same sqlite file."""
+    chat_sources, timeline_sources, board_sources = _build_search_sources(ctx)
+    db_path = _search_db_path(ctx)
+    loop = asyncio.get_running_loop()
+    async with _get_search_lock():
+        _search_scan_state["running"] = True
+        try:
+            return await loop.run_in_executor(
+                None, _search.scan_all_at, db_path, chat_sources, timeline_sources, board_sources)
+        finally:
+            _search_scan_state["running"] = False
+            _search_scan_state["ts"] = time.time()
+
+
+async def _search_maybe_scan(ctx: dict) -> None:
+    """Debounced fire-and-forget scan so a query typed shortly after new activity
+    doesn't have to wait for the next 300s tick. Never blocks the search request."""
+    if _search_scan_state["running"] or (time.time() - _search_scan_state["ts"]) < _SEARCH_DEBOUNCE_SEC:
+        return
+    _spawn_bg(_search_scan_tick(ctx))
+
+
+async def _search_scan_loop(ctx: dict) -> None:
+    """Background: incremental search index refresh every _SEARCH_SCAN_INTERVAL_SEC."""
+    await asyncio.sleep(20)  # let the service settle before the first tick
+    while True:
+        try:
+            await _search_scan_tick(ctx)
+        except Exception:
+            logging.exception("[search] indexer tick failed")
+        await asyncio.sleep(_SEARCH_SCAN_INTERVAL_SEC)
+
+
+async def api_search(req: web.Request) -> web.Response:
+    """GET /api/search?q=...&limit=30[&project=id] — ranked (bm25 + recency) hits
+    across chat/timeline/board docs. Never 500s on a malformed query (search.py
+    escapes it into safe FTS5 syntax with a hard fallback besides)."""
+    ctx = req.app["ctx"]
+    q = req.query.get("q", "").strip()
+    if not q:
+        return web.json_response({"hits": []})
+    try:
+        limit = int(req.query.get("limit", "30"))
+    except (TypeError, ValueError):
+        limit = 30
+    project_id = req.query.get("project") or None
+
+    await _search_maybe_scan(ctx)  # opportunistic background refresh; not awaited by the caller
+
+    db_path = _search_db_path(ctx)
+    loop = asyncio.get_running_loop()
+    try:
+        hits = await loop.run_in_executor(None, _search.search_at, db_path, q, limit, project_id)
+    except Exception:
+        logging.exception("[search] query failed")
+        return web.json_response({"hits": [], "error": "search failed"})
+    return web.json_response({"hits": hits})
+
+
+async def api_search_reindex(req: web.Request) -> web.Response:
+    """POST /api/search/reindex — drops + rebuilds the whole index. Manual escape
+    hatch for 'the index looks stale/wrong' — normal operation relies on the
+    incremental background loop."""
+    ctx = req.app["ctx"]
+    chat_sources, timeline_sources, board_sources = _build_search_sources(ctx)
+    db_path = _search_db_path(ctx)
+    loop = asyncio.get_running_loop()
+    async with _get_search_lock():
+        stats = await loop.run_in_executor(
+            None, _search.full_reindex_at, db_path, chat_sources, timeline_sources, board_sources)
+    return web.json_response({"ok": True, **stats})
 
 
 # ───────────────────────────── Model registry (live) ─────────────────────────────
@@ -13200,6 +13325,9 @@ async def start(ctx: dict) -> None:
         app.router.add_post("/api/usage/scan", api_usage_scan)
         app.router.add_get("/api/usage/export.csv", api_usage_export)
         app.router.add_get("/api/models", api_models)
+        # Spec-074: global search (Cmd/Ctrl+K) over chat transcripts + timelines + boards
+        app.router.add_get("/api/search", api_search)
+        app.router.add_post("/api/search/reindex", api_search_reindex)
         # Prompt templates (global, data/prompts.json)
         app.router.add_get("/api/prompts", api_prompts_list)
         app.router.add_post("/api/prompts", api_prompt_create)
@@ -13336,6 +13464,9 @@ async def start(ctx: dict) -> None:
         # spec-069 P3-B: agent activity sweeper — tails sub-agent transcripts for live tail updates
         _STARTUP_BG_TASKS.append(_spawn_bg(_agent_activity_sweep_loop(ctx)))
         print(f"[webapp] agent activity sweeper started (interval {_AGENT_SWEEP_INTERVAL_SEC}s)")
+        # Spec-074: global search indexer — incremental refresh of data/search.db
+        _STARTUP_BG_TASKS.append(_spawn_bg(_search_scan_loop(ctx)))
+        print(f"[webapp] search indexer started (interval {_SEARCH_SCAN_INTERVAL_SEC}s)")
         # spec-067 / spec-068: autopilot loop is now registered inside
         # _register_autopilot() above (features/autopilot/__init__.py).
     except Exception as e:
