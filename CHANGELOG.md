@@ -7,6 +7,24 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+## [v0.15.0] — 2026-07-05
+
+Structural fix-pack for the spec-069-era regressions (chopped chat bubbles, replies invisible
+until the next send, agents starving between turns, monitors spinning over dead work). Full
+root-cause writeup: `docs/internal/diagnosis-2026-07-05-spec069-regressions.md` (spec-071).
+
+### Added
+- **Between-turns stream drain (spec-071)** — a per-client reader services the SDK stream while no turn is active: background sub-agents run at full speed between turns (they used to stall to ~1 tool round / 10 min against the SDK's bounded buffer), completion notifications flip monitors in real time, and the CLI's autonomous wake turns surface in the cockpit (`bg_turn_end` hydrate) instead of terminating the operator's next turn. `LIVE_CLIENT_DRAIN=0` to disable.
+- **Completion-driven auto-continue (spec-069 P2 v2)** — the wake fires from a monitor's running→terminal transition (debounced, names the finished children, suppressed while a turn runs) instead of the blind 60s×5 poll; the budget resets on every operator turn and on rotate (it used to exhaust on phantom wakes and stay dead forever).
+- **Chat-stream heartbeat + stall watchdog** — the POST /chat SSE pings every 20 s (the tunnel silently killed idle streams) and the client aborts+recovers after 75 s of silence, ending the "reply appears only when I send the next message" freeze.
+
+### Fixed
+- **Chopped mid-word chat bubbles** — background sub-agent messages (`parent_tool_use_id`) are filtered out of the main chat lane (they interleaved with the streamed answer and inflated context accounting).
+- **Zombie monitors** — terminal flips now also come from `TaskUpdatedMessage` (per SDK docs some terminal states arrive ONLY there) and from a superset status map (killed/cancelled were dropped); the sweeper flips stale agents (silent transcript) and reconciles card-session agents via their own parent transcript; reconcile tail window 64→256 KB.
+- **Eviction guard** — counts workflow/monitor kinds too (a TTL eviction killed a live Workflow mid-run); stuck "in-flight" pins are force-evicted after 4 h (a dead turn once pinned its client for 14 h).
+- **Queued/auto-continue turns** — full parity with direct chat turns: resolved secrets + media env, effort/ultracode threading (fingerprint mismatches used to SIGTERM live children), seq-tagged live-buffer events and proper turn finish (they were invisible to hydration).
+- **Cross-turn event replay** — live seq is session-monotonic, so the SSE reconnect cursor no longer silently skips shorter turns.
+
 ## [v0.14.0] — 2026-06-26
 
 First public open-source release under IG Digital Lab. Web-only cockpit + kanban auto-run.
