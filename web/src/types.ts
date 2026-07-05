@@ -749,3 +749,22 @@ export interface BrowserBackends {
   install_log?: string
   error?: string
 }
+
+// ─── Spec-074: global search (Cmd/Ctrl+K) ─────────────────────────────────────
+export interface SearchHit {
+  project_id: string
+  project_name: string
+  source: 'chat' | 'timeline' | 'board'
+  /** Epoch seconds */
+  ts: number
+  /** FTS5 snippet — matched terms wrapped in private-use control-char delimiters
+   *  (backend search.py: SNIPPET_OPEN/SNIPPET_CLOSE = \x01/\x02), NOT literal HTML.
+   *  Render via a splitter that emits a real <mark>, never dangerouslySetInnerHTML. */
+  snippet: string
+  ref: { session_id?: string }
+}
+
+export interface SearchResponse {
+  hits: SearchHit[]
+  error?: string
+}

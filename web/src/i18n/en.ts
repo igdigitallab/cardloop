@@ -702,6 +702,14 @@ export const en = {
   'notify.settings_label': 'Browser notifications',
   'notify.settings_hint': 'Show a desktop notification when a run finishes in the background.',
   'notify.blocked_hint': 'Blocked in browser settings — allow notifications for this site to enable.',
+
+  // ── Spec-074: Global search (Cmd/Ctrl+K) ──────────────────────────────────────
+  'search.placeholder': 'Search chats, boards, timelines…',
+  'search.empty_hint': 'Type to search across all projects',
+  'search.no_results': 'No results',
+  'search.source_chat': 'Chat',
+  'search.source_board': 'Board',
+  'search.source_timeline': 'Timeline',
 } as const
 
 export type TKey = keyof typeof en
