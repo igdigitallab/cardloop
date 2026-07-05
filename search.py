@@ -318,8 +318,26 @@ def index_timeline_file(conn: sqlite3.Connection, project_id: str, project_name:
 
 def _iter_card_lines(raw_text: str):
     """Yields (card_id, text) for every recognised card line, reusing board.py's own
-    regexes/marker-stripping so indexed text is byte-identical to what the board renders."""
-    for line in raw_text.splitlines():
+    regexes/marker-stripping so indexed text is byte-identical to what the board renders.
+
+    Gating mirrors board.py's _parse_tasks: a card line only counts inside a recognised
+    '## <Column>' section — otherwise a preamble bullet in TASKS.md (e.g. a plain '- note'
+    before the first section) would be misindexed as a card. DONE.md has no section
+    headers at all (it's a flat append-only archive — see board.py's own comment), so a
+    file with zero recognised headers is treated as one implicit section covering every line."""
+    lines = raw_text.splitlines()
+    has_sections = any(
+        ln.strip().startswith("##") and ln.strip().lstrip("#").strip().lower() in _board._LABEL_TO_COL
+        for ln in lines
+    )
+    in_section = not has_sections
+    for line in lines:
+        h = line.strip()
+        if h.startswith("##"):
+            in_section = h.lstrip("#").strip().lower() in _board._LABEL_TO_COL
+            continue
+        if not in_section:
+            continue
         m = _board._CARD_RE.match(line)
         rest = m.group(2) if m else None
         if rest is None:
