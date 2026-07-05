@@ -1911,6 +1911,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
     const ac = new AbortController()
     abortRef.current = ac
+    // Track whether the stream ended with a clean 'result'. If not (SSE dropped mid-turn:
+    // network / client eviction / server restart), the turn may have finished on the server
+    // in the background with its answer only in history — we recover it in finally. (chopped-reply bug)
+    let gotResult = false
 
     try {
       const res = await fetch(`/api/projects/${projectId}/chat`, {
@@ -1943,6 +1947,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             setRun(null)
           }
           if (evt.type === 'result') {
+            gotResult = true
             const evtAny = evt as unknown as Record<string, unknown>
             // Spec-043 C fix: update on any numeric context_tokens (including 0) so a fresh
             // session with 0 tokens clears the stale large value instead of letting it linger.
@@ -2075,10 +2080,23 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setMessages(prev => finalizeStreaming(prev, msg))
     } finally {
       setStreaming(false)
+      // Sync the ref NOW (the useEffect that mirrors `streaming` runs after render) so the
+      // recovery hydrate below is not blocked by our own streamingRef guard in hydrateFromServer.
+      streamingRef.current = false
       setRun(null)
       abortRef.current = null
       textareaRef.current?.focus()
       onProjectsReload()
+      // Recovery: if the stream never delivered a clean 'result', it was cut off (SSE drop /
+      // eviction / restart). The turn often completes on the server in the background, leaving
+      // our canvas on a truncated bubble that only "appears" (out of order) on the next send.
+      // Pull authoritative server state now — it reconstructs a still-running turn from /live,
+      // or replaces the buffer with canonical history if it already finished — so the full answer
+      // lands in the right place. The /live poll keeps catching up if the turn is still running.
+      // ac.signal.aborted distinguishes an INTENTIONAL abort (reset / session-change / unmount /
+      // remount cleanup) — where recovery is unwanted — from an EXTERNAL drop (network / eviction /
+      // restart), where it is exactly what's needed.
+      if (!gotResult && !ac.signal.aborted) hydrateFromServer(() => false)
       // Spec-041 A2: drain via shared helper (also called from bus/poll paths).
       drainQueue()
       // Ensure compaction indicator is cleared when the turn ends (covers error/abort paths).
