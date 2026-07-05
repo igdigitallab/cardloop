@@ -32,6 +32,7 @@ from claude_agent_sdk import (
     TaskNotificationMessage,
     TaskProgressMessage,
     TaskStartedMessage,
+    TaskUpdatedMessage,
     TextBlock,
     ToolUseBlock,
     query as _sdk_query,
@@ -524,6 +525,9 @@ class _LiveEntry:
     last_used: float            # time.monotonic() timestamp of the last turn start
     idle_task: object           # asyncio.Task for TTL-based eviction; None until scheduled
     session_key: str            # key in running / _live_clients
+    # spec-071: asyncio.Task consuming the SDK stream while no engine turn is active.
+    # None until started; paused (cancelled) for the duration of each turn.
+    drain_task: object = None
 
 
 _live_clients: "dict[str, _LiveEntry]" = {}  # session_key -> _LiveEntry
@@ -996,6 +1000,9 @@ async def _evict_live_client(session_key: str, ctx: "dict | None") -> None:
     # CancelledError in the caller, which is never what we want here.
     if entry.idle_task is not None and not entry.idle_task.done():
         entry.idle_task.cancel()
+    # spec-071: stop the between-turns drain before disconnecting the subprocess.
+    if entry.drain_task is not None and not entry.drain_task.done():
+        entry.drain_task.cancel()
     # Disconnect the subprocess.
     try:
         await asyncio.wait_for(entry.client.disconnect(), timeout=10)
@@ -1081,6 +1088,8 @@ async def _get_or_create_live_client(
     )
     registry[session_key] = entry
     entry.idle_task = _schedule_idle_eviction(session_key, ctx)
+    # spec-071: service the stream from the start — run_engine pauses it around the turn.
+    _start_drain(entry, ctx)
     print(f"[live-client] created entry for {session_key} (total: {len(registry)})")
     return client
 
@@ -1100,6 +1109,7 @@ def _schedule_idle_eviction(session_key: str, ctx: "dict | None") -> "asyncio.Ta
     _running_dict = (ctx or {}).get("running", running)
 
     async def _idle_waiter():
+        deferred_sec = 0
         try:
             while True:
                 await asyncio.sleep(LIVE_CLIENT_TTL_SEC)
@@ -1107,6 +1117,16 @@ def _schedule_idle_eviction(session_key: str, ctx: "dict | None") -> "asyncio.Ta
                     # A turn is still running, OR background sub-agents are still working —
                     # never evict a live client while either holds live work. Evicting would
                     # disconnect() → SIGTERM the sub-agent subprocesses. (RC#1 + f9d60d)
+                    # spec-071: but a pin that outlives any legitimate run is a stuck flag
+                    # (observed: a dead turn held 'in-flight' 14 h and pinned the client all
+                    # night). Past LIVE_CLIENT_MAX_PIN_SEC, presume stuck: clear the flag and
+                    # evict loudly instead of deferring forever.
+                    deferred_sec += LIVE_CLIENT_TTL_SEC
+                    if deferred_sec >= LIVE_CLIENT_MAX_PIN_SEC:
+                        print(f"[live-client] {session_key}: pinned {deferred_sec}s (> {LIVE_CLIENT_MAX_PIN_SEC}s cap) — presuming stuck, force-evicting")
+                        _running_dict.pop(session_key, None)
+                        await _evict_live_client(session_key, ctx)
+                        return
                     print(f"[live-client] TTL lapsed for {session_key} but work is in-flight — deferring eviction")
                     continue
                 print(f"[live-client] idle TTL expired for {session_key} — evicting")
@@ -1116,6 +1136,135 @@ def _schedule_idle_eviction(session_key: str, ctx: "dict | None") -> "asyncio.Ta
             pass  # Normal: cancelled when the entry is reused or manually evicted.
 
     return asyncio.ensure_future(_idle_waiter())
+
+
+# ─────────────────────────── spec-071: between-turns stream drain ─────────────────────────────
+#
+# The SDK's internal reader answers hook/control RPCs itself but pushes every regular message
+# into a BOUNDED buffer (anyio memory stream, max_buffer_size=100 in query.py). Between turns
+# nothing consumed that buffer: it filled, the reader blocked, the CLI's stdout pipe backed up
+# and the whole CLI stalled — background sub-agents degraded to ~1 tool round per ~10 minutes
+# and completion notifications were delivered only at the START of the next operator turn
+# ("answers appear the moment I send a message"; diagnosis 2026-07-05).
+#
+# The drain owns the stream while no engine turn is active:
+#   - keeps the pipe moving (sub-agents run at full speed between turns);
+#   - flips monitors on TaskNotificationMessage in real time — webapp._monitor_update turns the
+#     running→terminal transition into the event-driven auto-continue wake (spec-069 P2 v2);
+#   - surfaces autonomous CLI turns (the CLI natively re-wakes the model on task-notifications
+#     when the stream is serviced) via bg_text / bg_turn_end bus events so the cockpit hydrates.
+#
+# Single-consumer discipline: run_engine's live branch STOPS the drain before client.query()
+# and restarts it in its finally — exactly one reader pulls from the SDK buffer at any time.
+
+LIVE_CLIENT_DRAIN: bool = os.getenv("LIVE_CLIENT_DRAIN", "1") not in ("0", "false", "False")
+# Hard bound on how long a live client may stay pinned by an "in-flight" turn / sub-agent
+# monitors before it is presumed stuck and force-evicted (observed: a dead turn held the
+# in-flight flag for 14 h and pinned the client all night). Raise for legitimately longer
+# background work.
+LIVE_CLIENT_MAX_PIN_SEC: int = int(os.getenv("LIVE_CLIENT_MAX_PIN_SEC", str(4 * 3600)))
+
+# Terminal statuses a task-notification may carry → monitor status. Superset map shared by the
+# in-turn handler and the drain (the old in-turn map lacked killed/cancelled — flips were lost).
+_NOTIFICATION_STATUS_MAP: dict = {
+    "completed": "done", "failed": "failed", "stopped": "stopped",
+    "killed": "stopped", "cancelled": "stopped", "canceled": "stopped",
+    "error": "failed", "timeout": "failed", "timed_out": "failed",
+}
+
+
+def _notification_monitor_delta(msg) -> "dict | None":
+    """Map a TaskNotificationMessage OR TaskUpdatedMessage to a terminal monitor delta.
+
+    Per SDK docs, a background task's terminal state can arrive ONLY as a TaskUpdatedMessage
+    with a terminal patch.status (e.g. TaskStop reports status="killed" there and the matching
+    notification is sometimes suppressed) — consumers must clear on EITHER message. Never raises."""
+    try:
+        task_id = getattr(msg, "task_id", None)
+        if not task_id:
+            return None
+        status = getattr(msg, "status", None)
+        if not status and isinstance(getattr(msg, "patch", None), dict):
+            status = msg.patch.get("status")
+        mapped = _NOTIFICATION_STATUS_MAP.get(str(status or "").lower())
+        if not mapped:
+            return None
+        return {"id": str(task_id), "tool_use_id": getattr(msg, "tool_use_id", None),
+                "status": mapped}
+    except Exception:
+        return None
+
+
+async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
+    """Consume the live client's SDK stream until cancelled (see block comment above)."""
+    session_key = entry.session_key
+    client = entry.client
+    bg_text_parts: list = []
+    try:
+        async for msg in client.receive_messages():
+            if isinstance(msg, (TaskNotificationMessage, TaskUpdatedMessage)):
+                delta = _notification_monitor_delta(msg)
+                if delta and _monitor_update_cb:
+                    print(f"[live-drain] {session_key}: task-notification id={delta['id']} → {delta['status']}")
+                    try:
+                        _monitor_update_cb(session_key, delta, only_existing=True)
+                    except Exception:
+                        pass
+                continue
+            # Sub-agent traffic (parent_tool_use_id set) — never surfaced in the chat lane;
+            # the monitors panel is fed by the PostToolUse hook + transcript sweeper instead.
+            if getattr(msg, "parent_tool_use_id", None):
+                continue
+            if isinstance(msg, AssistantMessage):
+                for blk in msg.content:
+                    if isinstance(blk, TextBlock) and blk.text.strip():
+                        bg_text_parts.append(blk.text)
+            elif isinstance(msg, ResultMessage):
+                # An autonomous CLI turn (native task-notification wake) finished while no
+                # engine turn was active. The reply is already in the transcript; bg_turn_end
+                # nudges open cockpit tabs to hydrate history so it becomes visible now —
+                # not on the operator's next send.
+                text = "\n".join(bg_text_parts).strip()
+                bg_text_parts = []
+                print(f"[live-drain] {session_key}: autonomous turn finished ({len(text)} chars)")
+                if _bus_publish_cb:
+                    try:
+                        if text:
+                            _bus_publish_cb(session_key, {"kind": "bg_text", "text": text[:4000]})
+                        _bus_publish_cb(session_key, {"kind": "bg_turn_end"})
+                    except Exception:
+                        pass
+    except asyncio.CancelledError:
+        raise  # normal pause path (turn starting / eviction)
+    except Exception as exc:
+        print(f"[live-drain] {session_key}: reader stopped ({exc!r})")
+
+
+def _start_drain(entry: "_LiveEntry", ctx: "dict | None") -> None:
+    """Start (or restart) the between-turns drain for a live entry. Idempotent."""
+    if not LIVE_CLIENT_DRAIN:
+        return
+    if entry.drain_task is not None and not entry.drain_task.done():
+        return
+    entry.drain_task = asyncio.ensure_future(_drain_between_turns(entry, ctx))
+
+
+async def _stop_drain(entry: "_LiveEntry") -> None:
+    """Cancel the drain and wait for it to release the stream. Safe to call when absent.
+
+    anyio memory-stream receive is cancellation-safe (a cancelled receive never consumes an
+    item), so no message is lost across the pause/resume boundary."""
+    task = entry.drain_task
+    entry.drain_task = None
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
 
 
 # ─────────────────────────── Board context helpers (spec-034 L1) ─────────────────────────
@@ -1723,6 +1872,15 @@ async def run_engine(  # type: ignore[return]
         # carry forward the previous turn's stale value.
         _turn_max_pt: "int | None" = None  # None = no usage-bearing message seen yet this turn
         async for msg in client.receive_response():
+            # Background sub-agent traffic: the CLI forwards sub-agents' AssistantMessages
+            # (and their stream events) on the SAME stdout with parent_tool_use_id set.
+            # Without this guard their tool/text blocks interleave with the orchestrator's
+            # own text_delta stream — the chat canvas splits the answer MID-WORD at delta
+            # boundaries and their usage inflates _turn_max_pt. Sub-agent visibility is
+            # served separately (PostToolUse monitor hook + the P3-B transcript sweeper),
+            # so the main chat lane must carry orchestrator traffic only.
+            if getattr(msg, "parent_tool_use_id", None):
+                continue
             if isinstance(msg, AssistantMessage):
                 # usage of the last assistant message = full prompt of the current turn:
                 # input + cache_read + cache_creation == get_context_usage().totalTokens (verified)
@@ -1864,17 +2022,12 @@ async def run_engine(  # type: ignore[return]
                     # internal id — so we also pass tool_use_id, the stable shared key, and _monitor_update
                     # falls back to matching by it. only_existing guard → no phantom monitor is spawned.
                     try:
-                        if _monitor_update_cb and msg.task_id:
-                            # TaskNotificationStatus is Literal['completed','failed','stopped'].
-                            _st = str(getattr(msg, "status", "") or "").lower()
-                            _mst = {"completed": "done", "failed": "failed",
-                                    "stopped": "stopped"}.get(_st)
-                            _tuid = getattr(msg, "tool_use_id", None)
-                            print(f"[monitor] task-notification id={msg.task_id} tool_use_id={_tuid} status={_st!r} → {_mst}")
-                            if _mst:
-                                _monitor_update_cb(session_key,
-                                                   {"id": str(msg.task_id), "tool_use_id": _tuid, "status": _mst},
-                                                   only_existing=True)
+                        # spec-071: shared superset status map — the old inline map lacked
+                        # killed/cancelled, so those flips were silently lost in-turn.
+                        _nd = _notification_monitor_delta(msg)
+                        if _monitor_update_cb and _nd:
+                            print(f"[monitor] task-notification id={_nd['id']} tool_use_id={_nd.get('tool_use_id')} → {_nd['status']}")
+                            _monitor_update_cb(session_key, _nd, only_existing=True)
                     except Exception:
                         pass
                     yield {
@@ -1886,6 +2039,17 @@ async def run_engine(  # type: ignore[return]
                         "summary": msg.summary,
                         "last_tool_name": None,
                     }
+                elif isinstance(msg, TaskUpdatedMessage):
+                    # spec-071: a background task's terminal state can arrive ONLY here (per SDK
+                    # docs — e.g. TaskStop reports status="killed" with the notification
+                    # suppressed). Flip the monitor from this message too; no yield (UI noise).
+                    try:
+                        _nd = _notification_monitor_delta(msg)
+                        if _monitor_update_cb and _nd:
+                            print(f"[monitor] task-updated id={_nd['id']} → {_nd['status']}")
+                            _monitor_update_cb(session_key, _nd, only_existing=True)
+                    except Exception:
+                        pass
                 elif msg.subtype == "init":
                     # FIX 1(a): capture the actual model the SDK initialised with.
                     # The init SystemMessage carries {"type":"system","subtype":"init","data":{...}}
@@ -1930,6 +2094,12 @@ async def run_engine(  # type: ignore[return]
         # /stop command can interrupt mid-turn.  We MUST pop it in finally (the adapter's finally
         # also pops it, making this double-safe).
         # We do NOT call client.disconnect() — the live-client registry owns the lifecycle.
+        # spec-071: the engine turn is the sole stream consumer — pause the between-turns drain
+        # BEFORE query() so exactly one reader pulls from the SDK message buffer at a time.
+        _lc_registry: "dict[str, _LiveEntry]" = (ctx or {}).get("live_clients", _live_clients)
+        _lc_entry = _lc_registry.get(session_key)
+        if _lc_entry is not None and _lc_entry.client is live:
+            await _stop_drain(_lc_entry)
         _running[session_key] = live
         try:
             async for event in _process_messages(live):
@@ -1954,6 +2124,10 @@ async def run_engine(  # type: ignore[return]
             # The adapter (safe_run / api_project_chat finally) clears running[k] separately;
             # we do it here too as a safety net for ctx-isolated callers.
             _running.pop(session_key, None)
+            # spec-071: resume the between-turns drain (skip if the entry was evicted mid-turn).
+            _lc_entry = _lc_registry.get(session_key)
+            if _lc_entry is not None and _lc_entry.client is live:
+                _start_drain(_lc_entry, ctx)
     else:
         # ── Standard fresh-client path (pre-028 behaviour, unchanged) ────────────────────────────
         try:

@@ -575,11 +575,18 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
             rec = {"id": mid, "kind": delta.get("kind", "task"), "label": delta.get("label", ""),
                    "status": "running", "started": now, "tail": "", "agent": None}
             bucket[mid] = rec
+        _was_running = rec.get("status") == "running"
         # Merge known fields (delta may be partial — e.g. a tail/status-only update).
         for k in ("kind", "label", "status", "tail", "agent", "persistent", "tool_use_id"):
             if delta.get(k) not in (None, ""):
                 rec[k] = delta[k]
         rec["ts"] = now
+        # spec-069 P2 v2 (spec-071): the running→terminal transition IS the completion event.
+        # Every detection path (in-turn notification, the between-turns drain, the sweeper,
+        # the transcript reconcile) converges here — schedule the event-driven wake once.
+        if (_was_running and rec.get("status") in ("done", "failed", "stopped")
+                and rec.get("kind") != "bash"):
+            _schedule_completion_wake(session_key, dict(rec))
         # Trim: keep all running + most recent terminal entries.
         if len(bucket) > _MONITORS_MAX:
             terminal = sorted(
@@ -640,19 +647,25 @@ def _monitor_dismiss(session_key: str, mid: str) -> bool:
 
 
 def _has_live_agent_monitors(session_key: str) -> bool:
-    """True if any background Agent sub-agent monitor for this session is still 'running'.
+    """True if any background child monitor (agent / workflow / monitor kind) is still 'running'.
 
     spec-069 f9d60d: engine's live-client eviction guards call this (wired via
     _register_webapp_callbacks) so a client is never evicted/SIGTERMed while its background
-    sub-agents are still working — which was the root of the false 'failed' monitors and
-    lost sub-agent work. The monitor registry is the single place where sub-agent START
-    (engine PostToolUse hook) and FINISH (RC#3 transcript reconcile) both converge, so it is
-    the authoritative liveness signal. Pure/best-effort — never raises."""
+    children are still working — which was the root of the false 'failed' monitors and
+    lost sub-agent work. The monitor registry is the single place where child START
+    (engine PostToolUse hook) and FINISH (notification / drain / reconcile) converge, so it
+    is the authoritative liveness signal.
+
+    spec-071: counts workflow/monitor kinds too — the agent-only guard let a TTL eviction
+    SIGTERM a live Workflow mid-run (ig-digital-lab seo-research, 2026-07-05 00:09: 6/10
+    agents finished, 2/9 reports written, the rest died). Zombie pins are bounded by the
+    sweeper's staleness flips and engine.LIVE_CLIENT_MAX_PIN_SEC. Pure — never raises."""
     try:
         bucket = _monitors.get(session_key)
         if not bucket:
             return False
-        return any(r.get("kind") == "agent" and r.get("status") == "running"
+        return any(r.get("kind") in ("agent", "workflow", "monitor")
+                   and r.get("status") == "running"
                    for r in bucket.values())
     except Exception:
         return False
@@ -678,8 +691,10 @@ _TASK_NOTIFICATION_STATUS_MAP: dict[str, str] = {
 # Substring filter — only parse lines that could carry a task-notification block.
 _TASK_NOTIFICATION_MARKER = "task-notification"
 
-# Tail-read size: transcript is ~500 KB; reading last 64 KB captures all recent completions.
-_TASK_NOTIFICATION_TAIL_BYTES = 65536
+# Tail-read size. spec-071: raised 64 KB → 256 KB — one long busy turn pushed completion
+# lines >64 KB behind EOF and the reconcile could then NEVER see them (zombie monitors).
+# Real-time flips now come from the drain; this scan is the restart/backstop path.
+_TASK_NOTIFICATION_TAIL_BYTES = 262144
 
 # Regex compiled once: capture task-id and terminal status from XML block.
 _TASK_NOTIFICATION_RE = re.compile(
@@ -721,10 +736,21 @@ def _reconcile_monitors_from_transcript(ctx: dict, session_key: str, project_id:
             return
 
         jsonl_path = _sdk_sessions_dir(cwd) / f"{session_id}.jsonl"
+        _scan_transcript_for_notifications(session_key, jsonl_path)
+    except Exception:
+        pass  # best-effort — never propagate on the hot path
+
+
+def _scan_transcript_for_notifications(session_key: str, jsonl_path: "Path") -> None:
+    """Tail-scan one session transcript for <task-notification> blocks and flip the matching
+    monitors to their terminal status. Factored out of _reconcile_monitors_from_transcript so
+    the sweeper can also scan an agent's OWN parent transcript (spec-071 — card runs live in
+    isolated sessions the active-chat resolution never reaches). Never raises."""
+    try:
         if not jsonl_path.exists():
             return
 
-        # Tail-read: last 64 KB only — efficient on a ~500 KB growing transcript.
+        # Tail-read only — efficient on a growing transcript.
         with open(jsonl_path, "rb") as fh:
             fh.seek(0, 2)
             file_size = fh.tell()
@@ -780,6 +806,26 @@ def _reconcile_monitors_from_transcript(ctx: dict, session_key: str, project_id:
 _AGENT_SWEEP_INTERVAL_SEC = 2      # poll cadence
 _AGENT_TRANSCRIPT_TAIL_BYTES = 16384  # tail-read size for sub-agent transcript (~16 KB)
 _AGENT_TAIL_TARGET_MAX = 60        # max chars for the target fragment in the tail string
+# spec-071 staleness bounds: a 'running' agent monitor whose transcript is silent this long is
+# presumed dead and flipped (zombies used to spin forever, pinning the live client for hours).
+_MONITOR_STALE_SEC = int(os.getenv("MONITOR_STALE_SEC", "900"))
+# Grace before declaring a monitor whose transcript never appeared dead-on-arrival.
+_MONITOR_SPAWN_GRACE_SEC = int(os.getenv("MONITOR_SPAWN_GRACE_SEC", "300"))
+
+
+def _reconcile_agent_monitor_from_parent(session_key: str, agent_path: "Path") -> None:
+    """Flip an agent monitor using its OWN parent session transcript.
+
+    agent_path = <sdk_dir>/<parent_sid>/subagents/agent-<id>.jsonl; the completion
+    <task-notification> lands in <sdk_dir>/<parent_sid>.jsonl. Card runs execute in isolated
+    sessions that the active-chat resolution of _reconcile_monitors_from_transcript never
+    scans — this path-derived scan reaches them (the postiz zombie class). Never raises."""
+    try:
+        parent_sid = agent_path.parent.parent.name
+        parent_jsonl = agent_path.parent.parent.parent / f"{parent_sid}.jsonl"
+        _scan_transcript_for_notifications(session_key, parent_jsonl)
+    except Exception:
+        pass
 
 
 def _agent_last_tool_tail(path: "Path") -> "str | None":
@@ -901,8 +947,36 @@ async def _agent_activity_sweep_loop(ctx: dict) -> None:
                                 matches = list(sdk_dir.glob(
                                     f"*/subagents/agent-{agent_id}.jsonl"))
                                 if not matches:
+                                    # spec-071 staleness: no transcript well past launch means
+                                    # the agent never started or its CLI died with it.
+                                    _age = time.time() - (rec.get("started") or time.time())
+                                    if _age > _MONITOR_SPAWN_GRACE_SEC:
+                                        _monitor_update(
+                                            session_key,
+                                            {"id": agent_id, "status": "failed",
+                                             "tail": "(no transcript — agent never started or its client died)"},
+                                            only_existing=True)
                                     continue
-                                tail_str = _agent_last_tool_tail(matches[0])
+                                apath = matches[0]
+                                # spec-071: reconcile via the agent's OWN parent transcript —
+                                # reaches completions in isolated (card) sessions.
+                                _reconcile_agent_monitor_from_parent(session_key, apath)
+                                if rec.get("status") != "running":
+                                    continue  # the reconcile above just flipped it
+                                # spec-071 staleness: transcript silent too long → presumed dead;
+                                # flip so it stops pinning the live client / burning wakes.
+                                try:
+                                    _silent = time.time() - apath.stat().st_mtime
+                                except OSError:
+                                    _silent = 0
+                                if _silent > _MONITOR_STALE_SEC:
+                                    _monitor_update(
+                                        session_key,
+                                        {"id": agent_id, "status": "stopped",
+                                         "tail": f"(stale — no activity for {int(_silent // 60)} min)"},
+                                        only_existing=True)
+                                    continue
+                                tail_str = _agent_last_tool_tail(apath)
                                 if tail_str is None:
                                     continue
                                 # Only push when the tail actually changed (avoid bus spam).
@@ -928,6 +1002,12 @@ _live_turns: dict[str, dict] = {}
 
 _LIVE_TURN_MAXLEN = 2000  # ring buffer cap per session
 _LIVE_TURN_RETAIN_SEC = 300  # seconds to keep a completed turn in memory
+
+# spec-071: session-monotonic seq. Per-turn seq used to restart at 0 while the client's
+# reconnect cursor (?since=) only ever grows — after one long turn, the gap-replay silently
+# skipped EVERY event of any later shorter turn. The counter now survives turn boundaries
+# (and _live_turn_drop) for the process lifetime.
+_live_seq: dict[str, int] = {}
 
 # spec-052 Phase 7: board strips are otherwise ephemeral (live SSE only) and vanish on
 # reload / inactive tab / mid-stream. Keep a small per-session ring of recent actionable
@@ -963,7 +1043,9 @@ def _live_turn_create(session_key: str, model: str, prompt: str = "") -> dict:
         "model": model,
         "status": "running",
         "prompt": prompt or "",
-        "seq": 0,  # monotonic counter — next seq to assign
+        # spec-071: seq continues across turns (session-monotonic) so the client's
+        # grow-only reconnect cursor keeps working after long turns / between turns.
+        "seq": _live_seq.get(session_key, 0),
         "events": deque(maxlen=_LIVE_TURN_MAXLEN),
         "cost_usd": None,
     }
@@ -979,6 +1061,7 @@ def _live_turn_append(session_key: str, event: dict) -> dict:
         return event  # guard: no active turn (shouldn't happen in normal flow)
     seq = turn["seq"]
     turn["seq"] = seq + 1
+    _live_seq[session_key] = seq + 1  # spec-071: session-monotonic cursor floor
     tagged = {"seq": seq, **event}
     turn["events"].append(tagged)
     # Accumulate cost from result events if present
@@ -9177,14 +9260,20 @@ def _chat_queue_flush() -> None:
         pass
 
 
-def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = None, project_id: "str | None" = None) -> "dict | None":
+def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = None,
+                        project_id: "str | None" = None, effort: "str | None" = None,
+                        ultracode: "bool | None" = None) -> "dict | None":
     """Append a message to the chat queue for session_key.
     Returns the new item dict, or None if the queue is full.
 
     Multichat: chat_id records which chat tab the message was typed in, so when the
     item is later drained its run events (run_start/text/run_end) and the /live buffer
     can be stamped with that chat_id — otherwise the drained run broadcasts to every
-    chat tab in the project (peer tabs filter on chat_id; without it nothing filters)."""
+    chat tab in the project (peer tabs filter on chat_id; without it nothing filters).
+
+    spec-071: effort/ultracode carry the originating turn's per-turn options so the drained
+    run reproduces the live-client fingerprint (a bare run_engine call used to mismatch it
+    and evict+SIGTERM the client's still-working background sub-agents)."""
     lst = _CHAT_QUEUE.setdefault(session_key, [])
     if len(lst) >= _CHAT_QUEUE_MAX:
         return None
@@ -9195,6 +9284,10 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
         # Multichat: needed so the drained run resolves THIS chat's OWN session_id from
         # chats.json (keyed by project_id) instead of the flat per-project session mirror.
         item["project_id"] = project_id
+    if effort:
+        item["effort"] = effort
+    if ultracode is not None:
+        item["ultracode"] = bool(ultracode)
     lst.append(item)
     _chat_queue_flush()
     return item
@@ -9345,7 +9438,32 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         if run_engine is None:
             raise RuntimeError("run_engine not available in ctx")
 
-        project_secrets = _secrets_read(cwd)
+        # spec-071: an operator-typed message opens a new auto-continue episode.
+        if not prompt.startswith(_BG_CONTINUE_PREFIX):
+            _bg_continue_reset(session_key)
+
+        # spec-071 env parity with the direct POST /chat path: resolve secret: references and
+        # inject the cockpit media env (queued/auto-continue turns used to run degraded).
+        project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
+        if _project_id:
+            try:
+                _media_dir = ctx["DATA"] / "chat-media" / _project_id
+                _media_dir.mkdir(parents=True, exist_ok=True)
+                project_secrets = {**project_secrets,
+                                   "COPS_PROJECT_ID": _project_id,
+                                   "COPS_MEDIA_DIR": str(_media_dir)}
+            except Exception:
+                pass
+        # spec-071 fingerprint parity: reuse the item's (or the session's last) per-turn options.
+        # effort/ultracode are live-client fingerprint inputs — omitting them forced an
+        # evict+reconnect that SIGTERMed still-working background sub-agents.
+        _lto = _last_turn_options.get(session_key) or {}
+        _q_effort = item.get("effort") or _lto.get("effort")
+        if _q_effort not in ("low", "medium", "high", "xhigh", "max"):
+            _q_effort = None
+        _q_ultracode = item.get("ultracode")
+        if _q_ultracode is None:
+            _q_ultracode = bool(_lto.get("ultracode"))
         agents_config = topic.get("agents_config") or {}
         agents_kwargs = _build_agents_kwargs(ctx, agents_config)
 
@@ -9406,10 +9524,30 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             **agents_kwargs,
             ctx=ctx,
             ephemeral=False,
+            effort=_q_effort,
+            ultracode=bool(_q_ultracode),
         ):
             etype = event["type"]
+            # spec-071: full event parity with api_project_chat — buffer every event in the
+            # live-turn ring (formatted tools, coerced errors) and fan out seq-tagged events,
+            # so queued/auto-continue turns stream, hydrate and replay exactly like direct
+            # chat turns. (They used to publish only a coarse final text: mid-turn hydration
+            # rendered nothing and the answer was droppable — "reply invisible until next send".)
+            if etype == "tool":
+                _inp = event.get("input") or {}
+                _buffered_event = {"type": "tool",
+                                   **_format_tool(event["name"], _inp if isinstance(_inp, dict) else {})}
+            elif etype == "error":
+                _exc_obj = event.get("exc")
+                _buffered_event = {"type": "error",
+                                   "error": str(_exc_obj) if _exc_obj is not None else event.get("error", "unknown error")}
+            else:
+                _buffered_event = event
+            _live_ev = _live_turn_append(session_key, _buffered_event)
+            _bus_publish(session_key, ({**_live_ev, **_cid} if _cid else _live_ev), persist=False)
             if etype == "text":
-                _bus_publish(session_key, {"kind": "text", "text": event["text"], "run_id": run_id, **_cid})
+                # Preserve the timeline text row the old coarse publish used to persist.
+                _timeline_append(session_key, {"kind": "text", "text": event["text"], "run_id": run_id, **_cid})
             elif etype == "result":
                 _sid = event.get("session_id")
                 if _sid:
@@ -9448,10 +9586,13 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 raise event["exc"]
 
         outcome = "ok"
+        # spec-071 parity: close the live-turn ring so /live stops reporting a running turn.
+        _live_turn_finish(session_key, "done")
         _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "ok", "run_id": run_id, **_cid})
 
     except Exception as e:
         print(f"[chat_queue] execute error for {session_key} item {item['id']}: {e}")
+        _live_turn_finish(session_key, "error")
         _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id, **_cid})
 
     finally:
@@ -9538,29 +9679,32 @@ async def _chat_queue_drain_loop(ctx: dict) -> None:
         await asyncio.sleep(_QUEUE_DRAIN_INTERVAL_SEC)
 
 
-# ─────────────────── spec-069 Phase 2: auto-continue on pending background work ───────────────────
-# When the orchestrator's turn ends but it still has background children running (Workflow / bg
-# sub-agents / Monitor tasks), the SDK delivers their completion only to a LIVE receive loop — which
-# ended with the turn. So the orchestrator would hang until the operator manually nudges it (RC#2).
+# ──────────── spec-069 Phase 2 v2 (spec-071): completion-driven auto-continue ────────────
+# v1 was a blind poll: at turn end it fired a wake every ~60 s while ANY monitor looked
+# 'running', burned its 5-attempt budget on phantom turns (zombie monitors / still-working
+# children) and then went permanently deaf — the budget never reset, not even on rotate.
 #
-# This re-wakes the orchestrator automatically and SAFELY: it enqueues a synthetic continuation into
-# the existing chat queue, which the service-process drain loop dispatches as a normal turn (NO
-# concurrent receive on the live client — the queue path is fully tested). Flag-gated
-# (AUTO_CONTINUE_ON_BG, default off) and bounded by AUTO_CONTINUE_MAX per episode, so a genuinely
-# stuck task cannot loop forever. Worst case when enabled: a few bounded wasted turns — never a brick.
+# v2 is event-driven: the wake fires from _monitor_update's running→terminal transition —
+# the single point where all completion-detection paths converge (in-turn notification, the
+# spec-071 between-turns drain, the sweeper, the transcript reconcile). One debounced wake
+# collects a burst of completions; an active turn suppresses it (the model sees in-turn
+# notifications natively, and with the drain the CLI's own idle wake-ups work too — this is
+# the service-side backstop). The budget resets on every operator turn and on rotate.
 
 _AUTO_CONTINUE_ON = os.getenv("AUTO_CONTINUE_ON_BG", "0").lower() in ("1", "true", "yes", "on")
-_AUTO_CONTINUE_GRACE_SEC = float(os.getenv("AUTO_CONTINUE_GRACE_SEC", "60"))
-_AUTO_CONTINUE_MAX = int(os.getenv("AUTO_CONTINUE_MAX", "5"))
-_bg_continue_count: "dict[str, int]" = {}  # session_key → continuations fired this episode
+_AUTO_CONTINUE_DEBOUNCE_SEC = float(os.getenv("AUTO_CONTINUE_DEBOUNCE_SEC", "20"))
+_AUTO_CONTINUE_MAX = int(os.getenv("AUTO_CONTINUE_MAX", "3"))
+_bg_continue_count: "dict[str, int]" = {}  # session_key → wakes fired this episode
+_completion_wake_pending: "dict[str, list[dict]]" = {}  # session_key → terminal recs awaiting one wake
+_last_turn_options: "dict[str, dict]" = {}  # session_key → {effort, ultracode} of the last operator turn
+_WEBAPP_CTX: "dict | None" = None  # set in start() — lets registry-driven hooks reach ctx
 
-_BG_CONTINUE_PROMPT = (
-    "[auto-continue] One or more background sub-tasks you started may have finished since your last "
-    "turn (their completion is not auto-delivered to you). Check their results now — read the run's "
-    "subagents/workflows/*/agent-*.jsonl transcripts or use your tools to collect the outputs — then "
-    "continue the work. If they are clearly still running, reply in one line that you are still "
-    "waiting, and stop."
-)
+_BG_CONTINUE_PREFIX = "[auto-continue]"
+
+
+def _bg_continue_reset(session_key: str) -> None:
+    """New episode (operator turn / rotate): restore the wake budget."""
+    _bg_continue_count.pop(session_key, None)
 
 
 def _has_running_bg(session_key: str) -> bool:
@@ -9572,45 +9716,82 @@ def _has_running_bg(session_key: str) -> bool:
     return any(r.get("status") == "running" and r.get("kind") != "bash" for r in bucket.values())
 
 
-def _maybe_schedule_bg_continuation(ctx: dict, session_key: str, chat_id: "str | None",
-                                    project_id: "str | None") -> None:
-    """At turn end: if background children are still running, schedule ONE deferred continuation turn
-    to re-wake the orchestrator. Resets the episode budget once nothing is pending. Never raises."""
+def _schedule_completion_wake(session_key: str, rec: dict) -> None:
+    """Called from _monitor_update on a running→terminal transition. Opens (or joins) the
+    debounce window so a burst of completions produces exactly one wake. Never raises."""
     try:
-        if not _AUTO_CONTINUE_ON:
+        if not _AUTO_CONTINUE_ON or _WEBAPP_CTX is None:
             return
-        if not _has_running_bg(session_key):
-            _bg_continue_count.pop(session_key, None)   # episode over — children done
+        pend = _completion_wake_pending.get(session_key)
+        if pend is not None:
+            pend.append(rec)  # window already open — this completion rides along
+            return
+        _completion_wake_pending[session_key] = [rec]
+        _spawn_bg(_completion_wake_fire(_WEBAPP_CTX, session_key))
+    except Exception as exc:
+        print(f"[auto-continue] wake schedule error for {session_key}: {exc!r}")
+
+
+async def _completion_wake_fire(ctx: dict, session_key: str) -> None:
+    """After the debounce window: if the session is idle, enqueue ONE continuation turn that
+    names the finished children, using the operator's last per-turn options so the synthetic
+    turn matches the live-client fingerprint (a mismatch used to evict+SIGTERM the remaining
+    children mid-flight)."""
+    try:
+        await asyncio.sleep(_AUTO_CONTINUE_DEBOUNCE_SEC)
+        recs = _completion_wake_pending.pop(session_key, None) or []
+        if not _AUTO_CONTINUE_ON or not recs:
+            return
+        # An active turn sees completions natively (in-stream notification) — no wake needed.
+        if ctx["running"].get(session_key) is not None:
             return
         n = _bg_continue_count.get(session_key, 0)
         if n >= _AUTO_CONTINUE_MAX:
             print(f"[auto-continue] {session_key}: budget exhausted ({n}/{_AUTO_CONTINUE_MAX}) — not re-waking")
             return
-        _bg_continue_count[session_key] = n + 1
-        _spawn_bg(_bg_continuation_after_grace(ctx, session_key, chat_id, project_id, n + 1))
-    except Exception as exc:
-        print(f"[auto-continue] schedule error for {session_key}: {exc!r}")
-
-
-async def _bg_continuation_after_grace(ctx: dict, session_key: str, chat_id: "str | None",
-                                       project_id: "str | None", attempt: int) -> None:
-    """Wait a grace period, then (if bg work is still pending) enqueue a continuation for the drain
-    loop to dispatch. Runs as a tracked service-process task so it survives the turn that spawned it."""
-    try:
-        await asyncio.sleep(_AUTO_CONTINUE_GRACE_SEC)
-        if not _AUTO_CONTINUE_ON or not _has_running_bg(session_key):
+        # Don't stack: skip when a continuation is already queued for this session.
+        if any((it.get("text") or "").startswith(_BG_CONTINUE_PREFIX) for it in _chat_queue_get(session_key)):
             return
-        # Don't stack continuations: skip if one is already queued for this session.
-        if any(it.get("text") == _BG_CONTINUE_PROMPT for it in _chat_queue_get(session_key)):
-            return
-        item = _chat_queue_enqueue(session_key, _BG_CONTINUE_PROMPT, chat_id, project_id)
+        labels = ", ".join(
+            f"\"{str(r.get('label') or r.get('id') or '?')[:80]}\" → {r.get('status')}"
+            for r in recs[:5]
+        )
+        prompt = (
+            f"{_BG_CONTINUE_PREFIX} Background task(s) just finished: {labels}. "
+            "Collect their results now (TaskOutput / the run's transcripts / files they wrote) "
+            "and continue the work. If other background tasks are still running, say so in one "
+            "line and stop."
+        )
+        project_id = None
+        try:
+            for proj in _collect_projects(ctx):
+                if (proj.get("session_key") or proj.get("tg_thread", "")) == session_key:
+                    project_id = proj.get("id")
+                    break
+        except Exception:
+            pass  # best-effort — enqueue falls back to the legacy flat-session path
+        opts = _last_turn_options.get(session_key) or {}
+        item = _chat_queue_enqueue(session_key, prompt, None, project_id,
+                                   effort=opts.get("effort"), ultracode=opts.get("ultracode"))
         if item is None:
             return
-        print(f"[auto-continue] {session_key}: enqueued continuation (attempt {attempt}/{_AUTO_CONTINUE_MAX})")
-        # Dispatch now if the session is idle; otherwise the 3 s backstop drain loop picks it up.
+        _bg_continue_count[session_key] = n + 1
+        print(f"[auto-continue] {session_key}: completion wake enqueued (attempt {n + 1}/{_AUTO_CONTINUE_MAX})")
         await _chat_queue_drain_one(ctx, session_key)
     except Exception as exc:
-        print(f"[auto-continue] continuation error for {session_key}: {exc!r}")
+        print(f"[auto-continue] wake error for {session_key}: {exc!r}")
+
+
+def _maybe_schedule_bg_continuation(ctx: dict, session_key: str, chat_id: "str | None",
+                                    project_id: "str | None") -> None:
+    """Turn-end hook. v2: no blind wake here — completions drive the wake via
+    _schedule_completion_wake. This only closes the episode: a turn that ends with no
+    pending background work restores the budget. Never raises."""
+    try:
+        if not _has_running_bg(session_key):
+            _bg_continue_reset(session_key)
+    except Exception:
+        pass
 
 
 # ─────────────────────────── C1: SSE chat ───────────────────────────
@@ -9626,6 +9807,10 @@ async def _bg_continuation_after_grace(ctx: dict, session_key: str, chat_id: "st
 # Lock SHARED with TG and F1 cards (session_key = (project.get("session_key") or project.get("tg_thread", ""))).
 # Disconnect-resilient: if client closed the tab (ConnectionResetError on write),
 # the run_engine generator continues to completion, session_id is saved, lock is released.
+
+# spec-071: heartbeat cadence for the direct chat stream (see the pump loop in api_project_chat).
+_CHAT_SSE_PING_SEC = float(os.getenv("CHAT_SSE_PING_SEC", "20"))
+
 
 async def api_project_chat(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
@@ -9712,8 +9897,10 @@ async def api_project_chat(req: web.Request) -> web.Response:
             await resp.write(f"data: {payload}\n\n".encode())
             return resp
         # Multichat: stamp the originating chat_id so the drained run routes back to
-        # this tab only (not every chat in the project).
-        item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"])
+        # this tab only (not every chat in the project). spec-071: carry the per-turn
+        # options so the drained run matches the live-client fingerprint.
+        item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"],
+                                   effort=_effort_override, ultracode=_ultracode)
         if item is None:
             payload = json.dumps({"type": "error", "error": "queue full"}, ensure_ascii=False)
         else:
@@ -9723,6 +9910,11 @@ async def api_project_chat(req: web.Request) -> web.Response:
 
     # Reserve slot SYNCHRONOUSLY before first await
     ctx["running"][session_key] = True
+    # spec-071: an operator turn opens a new auto-continue episode and pins the per-turn
+    # options (effort/ultracode) that synthetic continuation turns must reproduce to keep
+    # the live-client fingerprint stable.
+    _bg_continue_reset(session_key)
+    _last_turn_options[session_key] = {"effort": _effort_override, "ultracode": _ultracode}
     # spec-069 643ecf: clear COMPLETED sub-agent monitors left over from a prior turn so this
     # turn's panel starts clean (any still-running sub-agents stay). Stops done/failed rows piling up.
     _monitors_clear_terminal_agents(session_key)
@@ -9770,6 +9962,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
             print(f"[api_project_chat] client disconnected ({type(exc).__name__}), task continues in background")
 
     _chat_last_result_event: "dict | None" = None  # Phase D: track for auto-resume
+    # spec-071: pending engine __anext__ pump task (heartbeat loop) — cancelled in finally so
+    # a handler cancellation (server shutdown) can't orphan the engine generator.
+    _next_task: "asyncio.Task | None" = None
     # spec-034 L2: accumulate agent reply text for board reconciler
     _chat_answer_parts: list = []
     # Tracks whether the run completed successfully (used for bus run_end outcome).
@@ -9845,7 +10040,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # ephemeral=False: chat sessions share state with the project (resumable, context-tracked).
         # effort: None when think_mode is absent/unknown (preserves _DEFAULT_EFFORT); otherwise the
         # exact ladder value low|medium|high|xhigh|max passed straight through to the SDK.
-        async for event in run_engine(
+        _engine_gen = run_engine(
             project_name=name,
             cwd=cwd,
             prompt=effective_prompt,
@@ -9858,7 +10053,32 @@ async def api_project_chat(req: web.Request) -> web.Response:
             ephemeral=False,
             effort=_effort_override,
             ultracode=_ultracode,
-        ):
+        )
+        # spec-071 heartbeat: unlike the activity-stream SSE (which pings every 25 s precisely
+        # because the Cloudflare tunnel kills idle streams), this direct chat stream wrote bytes
+        # only on engine events — a long silent tool/sub-agent stretch let the tunnel drop the
+        # socket without the browser ever noticing (reader.read() pended forever, the canvas
+        # froze, and the answer "appeared" only on the next send). Pump the generator via a
+        # task so quiet gaps emit `: ping` comment frames WITHOUT ever cancelling the engine.
+        _engine_iter = _engine_gen.__aiter__()
+        while True:
+            if _next_task is None:
+                _next_task = asyncio.ensure_future(_engine_iter.__anext__())
+            _done, _ = await asyncio.wait({_next_task}, timeout=_CHAT_SSE_PING_SEC)
+            if not _done:
+                # Engine still working silently — keep the stream (and the client watchdog) alive.
+                if not client_gone:
+                    try:
+                        await resp.write(b": ping\n\n")
+                    except (ConnectionResetError, ConnectionAbortedError, Exception):
+                        client_gone = True
+                        print("[api_project_chat] client disconnected (ping write), task continues in background")
+                continue
+            _t, _next_task = _next_task, None
+            try:
+                event = _t.result()
+            except StopAsyncIteration:
+                break
             etype = event.get("type")
             # Spec-035 + bug-A fix: buffer every event in the live turn ring.
             # For tool events, buffer the already-formatted rich event (same shape as the SSE
@@ -10040,6 +10260,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
         )
 
     finally:
+        # spec-071: never orphan a pending engine pump task (handler cancellation path).
+        if _next_task is not None and not _next_task.done():
+            _next_task.cancel()
         # Lock released UNCONDITIONALLY (even if the generator threw an exception)
         ctx["running"].pop(session_key, None)
         # Spec-035: ensure turn is finished (idempotent — no-op if already marked done)
@@ -10293,6 +10516,10 @@ async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_ha
         ctx["save_sessions"]()
         # Background-task monitors die with the session — drop them (card b6f5cc).
         _monitors_clear(session_key)
+        # spec-071: rotation opens a fresh episode — the wake budget must not survive it
+        # (v1 famously stayed "budget exhausted" across rotations, going permanently deaf).
+        _bg_continue_reset(session_key)
+        _completion_wake_pending.pop(session_key, None)
         # Buffered board strips belong to the old session — drop them so they don't
         # re-hydrate into the fresh chat (spec-052 Phase 7 follow-up).
         _board_events_clear(session_key)
@@ -12803,6 +13030,10 @@ async def start(ctx: dict) -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.WARNING,
                              format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # spec-071: registry-driven hooks (_schedule_completion_wake from _monitor_update) need ctx
+    # without threading it through every engine callback — expose it module-level.
+    global _WEBAPP_CTX
+    _WEBAPP_CTX = ctx
     port = ctx["port"]
     try:
         # Derive token once at startup (scrypt is slow — not per-request)

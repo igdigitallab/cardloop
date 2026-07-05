@@ -94,6 +94,7 @@ async def test_live_client_reused_across_turns(tmp_path):
     def _text_msg(text):
         msg = MagicMock(spec=AssistantMessage)
         msg.__class__ = AssistantMessage
+        msg.parent_tool_use_id = None  # spec-071: real default — engine filters parented messages
         blk = MagicMock(spec=TextBlock)
         blk.__class__ = TextBlock
         blk.text = text

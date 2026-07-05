@@ -41,6 +41,7 @@ def _make_assistant_message(usage, text="hello"):
     from claude_agent_sdk import AssistantMessage, TextBlock
     msg = MagicMock(spec=AssistantMessage)
     msg.__class__ = AssistantMessage
+    msg.parent_tool_use_id = None  # spec-071: real default — engine filters parented (sub-agent) messages
     msg.usage = usage
     blk = MagicMock(spec=TextBlock)
     blk.__class__ = TextBlock

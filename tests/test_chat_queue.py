@@ -128,11 +128,17 @@ async def test_drain_one_free_session_dispatches_item(fake_ctx):
     while not bus_q.empty():
         bus_events.append(bus_q.get_nowait())
 
-    kinds = [e["kind"] for e in bus_events]
+    kinds = [e.get("kind") for e in bus_events]
     assert "run_start" in kinds, f"run_start not published: {bus_events}"
     assert "run_end" in kinds, f"run_end not published: {bus_events}"
 
-    run_end = next(e for e in bus_events if e["kind"] == "run_end")
+    # spec-071 parity: engine events fan out seq-tagged and type-keyed, exactly like the
+    # direct chat path (they used to be a coarse kind:'text' publish).
+    text_events = [e for e in bus_events if e.get("type") == "text"]
+    assert text_events and text_events[0]["text"] == "I ran queued task"
+    assert "seq" in text_events[0], f"queue-path events must be seq-tagged: {text_events[0]}"
+
+    run_end = next(e for e in bus_events if e.get("kind") == "run_end")
     assert run_end["outcome"] == "ok"
 
     # Lock released after completion
@@ -441,11 +447,18 @@ async def test_drained_run_bus_events_carry_chat_id(fake_ctx):
         while not bus_q.empty():
             bus_events.append(bus_q.get_nowait())
 
-        for kind in ("run_start", "text", "run_end"):
+        # spec-071 parity: engine events are seq-tagged and type-keyed (like the direct chat
+        # path); run lifecycle stays kind-keyed. All of them must carry the owning chat_id.
+        for kind in ("run_start", "run_end"):
             evs = [e for e in bus_events if e.get("kind") == kind]
             assert evs, f"{kind} not published: {bus_events}"
             for e in evs:
                 assert e.get("chat_id") == "a1b2c3", f"{kind} missing chat_id: {e}"
+        text_evs = [e for e in bus_events if e.get("type") == "text"]
+        assert text_evs, f"text not published: {bus_events}"
+        for e in text_evs:
+            assert e.get("chat_id") == "a1b2c3", f"text missing chat_id: {e}"
+            assert "seq" in e, f"queue-path events must be seq-tagged: {e}"
     finally:
         _webapp._bus_unsubscribe(session_key, bus_q)
         _webapp._live_turns.pop(session_key, None)

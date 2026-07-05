@@ -51,6 +51,7 @@ def _make_assistant_msg_with_usage():
 
     msg = MagicMock(spec=AssistantMessage)
     msg.__class__ = AssistantMessage
+    msg.parent_tool_use_id = None  # spec-071: real default — engine filters parented (sub-agent) messages
     msg.content = []  # no text blocks needed for ledger test
     msg.usage = {
         "input_tokens": 10,

@@ -183,6 +183,7 @@ def _make_haiku_mock(json_response: str):
     fake_text_block.text = json_response
 
     fake_msg = MagicMock(spec=AssistantMessage)
+    fake_msg.parent_tool_use_id = None  # spec-071: real default — engine filters parented (sub-agent) messages
     fake_msg.content = [fake_text_block]
 
     # Must be an async generator function (uses `yield`), NOT `async def` + `return`.
