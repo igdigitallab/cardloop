@@ -9427,6 +9427,16 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         topics = ctx["topics"]
         topic = topics.get(session_key)
         if topic is None:
+            # spec-071: free chats are VIRTUAL projects (session_key == project id, not in
+            # topics.json). Queued and auto-continue turns for them were silently dropped
+            # here — resolve via the project registry instead.
+            _vproj = _find_project_by_id(ctx, _project_id or session_key)
+            if _vproj is not None and _vproj.get("cwd"):
+                topic = {"cwd": _vproj.get("cwd"),
+                         "project": _vproj.get("name") or _vproj.get("id"),
+                         "model": _vproj.get("model"),
+                         "agents_config": _vproj.get("agents_config") or {}}
+        if topic is None:
             print(f"[chat_queue] session_key {session_key!r} not in topics — dropping item {item['id']}")
             return
         cwd = topic.get("cwd") or ctx.get("DEFAULT_CWD") or str(Path.home())

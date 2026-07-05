@@ -254,3 +254,49 @@ def test_reconcile_agent_monitor_from_parent_flips_card_session_zombie(tmp_path)
         assert webapp._monitors[sk][agent_id]["status"] == "done"
     finally:
         webapp._monitors.pop(sk, None)
+
+
+# ─────────────────────────── free-chat queue resolution ─────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_chat_queue_execute_resolves_free_chat_via_virtual_project(monkeypatch, tmp_path):
+    """Free chats are virtual projects (session_key == id, absent from topics.json) — queued
+    and auto-continue turns for them used to be silently dropped ('not in topics')."""
+    sk = "free-deadbeef"
+    calls = []
+
+    async def fake_run_engine(**kwargs):
+        calls.append(kwargs)
+        yield {"type": "text", "text": "ok"}
+        yield {"type": "result", "session_id": "sid-free"}
+
+    ctx = {
+        "topics": {},  # free chat is NOT here — the old code dropped the item
+        "sessions": {},
+        "running": {sk: True},
+        "run_engine": fake_run_engine,
+        "save_sessions": lambda: None,
+        "DEFAULT_CWD": str(tmp_path),
+        "DEFAULT_MODEL": "sonnet",
+        "DATA": tmp_path,
+    }
+    monkeypatch.setattr(webapp, "_find_project_by_id",
+                        lambda c, pid: {"id": sk, "name": "Free chat", "cwd": str(tmp_path),
+                                        "model": "opus", "session_key": sk})
+    monkeypatch.setattr(webapp, "_secrets_read", lambda cwd: {})
+
+    async def fake_resolve(s):
+        return s
+
+    monkeypatch.setattr(webapp, "_resolve_secret_refs", fake_resolve)
+    monkeypatch.setattr(webapp, "_build_agents_kwargs", lambda c, a: {})
+    try:
+        await webapp._chat_queue_execute(ctx, sk, {"id": "i1", "text": "hello", "created_at": 0,
+                                                   "project_id": sk})
+        assert calls, "free-chat queued item must reach run_engine, not be dropped"
+        assert calls[0]["cwd"] == str(tmp_path)
+        assert calls[0]["model"] == "opus"
+        assert ctx["sessions"].get(sk) == "sid-free"
+    finally:
+        webapp._live_turns.pop(sk, None)
+        webapp._live_seq.pop(sk, None)
