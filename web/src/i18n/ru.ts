@@ -278,6 +278,8 @@ export const ru = {
   'chat.remove_file_aria': 'Убрать прикреплённый файл',
   'chat.status_writing': 'пишет ответ',
   'chat.status_card_running': 'карточка работает',
+  'chat.status_bg_running': 'фоновый ход',
+  'chat.bg_run_label': 'пока тебя не было',
   'chat.status_thinking': 'агент думает',
   'chat.stop_btn': '✕ стоп',
   'chat.stop': 'Стоп',

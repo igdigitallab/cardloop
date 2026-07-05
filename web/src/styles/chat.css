@@ -2196,3 +2196,17 @@
   .chat-board-event-btn { padding: 10px 12px; min-height: 44px; }
 }
 
+
+/* ─── spec-063: autonomous background runs (🌙 "while you were away") ─── */
+.chat-msg-bgrun .chat-msg-body {
+  border-left: 3px solid var(--accent, #7c6df2);
+  background: color-mix(in srgb, var(--accent, #7c6df2) 6%, transparent);
+  border-radius: 6px;
+  padding-left: 10px;
+}
+.chat-msg-bgrun-tag {
+  font-size: 11px;
+  color: var(--text2);
+  margin-bottom: 4px;
+  user-select: none;
+}

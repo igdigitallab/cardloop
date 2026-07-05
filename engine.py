@@ -619,16 +619,21 @@ _monitor_update_cb = None
 # is still running. Eviction guards consult it so a live client is never SIGTERMed while its
 # sub-agents work (RC#1 protected only the main turn; background sub-agents outlive it).
 _has_live_subagents_cb = None
+# spec-063 Stage 2a: webapp callback surfacing autonomous CLI turns (drain-observed) as
+# first-class background runs. Signature: (session_key, phase: 'start'|'text'|'end', text?).
+_bg_run_cb = None
 
 
 def _register_webapp_callbacks(timeline_append, bus_publish, monitor_update=None,
-                               has_live_subagents=None):
+                               has_live_subagents=None, bg_run_event=None):
     """Inject webapp callbacks so engine.py can publish events without importing webapp."""
-    global _timeline_append_cb, _bus_publish_cb, _monitor_update_cb, _has_live_subagents_cb
+    global _timeline_append_cb, _bus_publish_cb, _monitor_update_cb, _has_live_subagents_cb, \
+        _bg_run_cb
     _timeline_append_cb = timeline_append
     _bus_publish_cb = bus_publish
     _monitor_update_cb = monitor_update
     _has_live_subagents_cb = has_live_subagents
+    _bg_run_cb = bg_run_event
 
 
 def _session_has_live_subagents(session_key: str) -> bool:
@@ -1199,7 +1204,7 @@ async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
     """Consume the live client's SDK stream until cancelled (see block comment above)."""
     session_key = entry.session_key
     client = entry.client
-    bg_text_parts: list = []
+    bg_open = False  # an autonomous CLI turn is being surfaced as a background run
     try:
         async for msg in client.receive_messages():
             if isinstance(msg, (TaskNotificationMessage, TaskUpdatedMessage)):
@@ -1216,26 +1221,37 @@ async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
             if getattr(msg, "parent_tool_use_id", None):
                 continue
             if isinstance(msg, AssistantMessage):
-                for blk in msg.content:
-                    if isinstance(blk, TextBlock) and blk.text.strip():
-                        bg_text_parts.append(blk.text)
-            elif isinstance(msg, ResultMessage):
-                # An autonomous CLI turn (native task-notification wake) finished while no
-                # engine turn was active. The reply is already in the transcript; bg_turn_end
-                # nudges open cockpit tabs to hydrate history so it becomes visible now —
-                # not on the operator's next send.
-                text = "\n".join(bg_text_parts).strip()
-                bg_text_parts = []
-                print(f"[live-drain] {session_key}: autonomous turn finished ({len(text)} chars)")
-                if _bus_publish_cb:
+                # spec-063 Stage 2a: an autonomous CLI turn (native task-notification wake)
+                # is a first-class background run — streamed live via the webapp callback
+                # (kind:run_start source:'bg' → seq-tagged text → run_end + web push).
+                texts = [blk.text for blk in msg.content
+                         if isinstance(blk, TextBlock) and blk.text.strip()]
+                if texts and _bg_run_cb:
                     try:
-                        if text:
-                            _bus_publish_cb(session_key, {"kind": "bg_text", "text": text[:4000]})
-                        _bus_publish_cb(session_key, {"kind": "bg_turn_end"})
+                        if not bg_open:
+                            _bg_run_cb(session_key, "start")
+                            bg_open = True
+                        for _t in texts:
+                            _bg_run_cb(session_key, "text", _t)
                     except Exception:
                         pass
+            elif isinstance(msg, ResultMessage):
+                print(f"[live-drain] {session_key}: autonomous turn finished")
+                if bg_open and _bg_run_cb:
+                    try:
+                        _bg_run_cb(session_key, "end")
+                    except Exception:
+                        pass
+                bg_open = False
     except asyncio.CancelledError:
-        raise  # normal pause path (turn starting / eviction)
+        # Normal pause path (turn starting / eviction) — close a half-open background run
+        # so the cockpit strip doesn't dangle.
+        if bg_open and _bg_run_cb:
+            try:
+                _bg_run_cb(session_key, "end")
+            except Exception:
+                pass
+        raise
     except Exception as exc:
         print(f"[live-drain] {session_key}: reader stopped ({exc!r})")
 
@@ -2158,7 +2174,7 @@ def _build_ctx(*, web_port: int = None, web_password: str = None) -> dict:
     """
     import webapp as _webapp  # lazy — called only at startup after webapp is fully loaded
     _register_webapp_callbacks(_webapp._timeline_append, _webapp._bus_publish, _webapp._monitor_update,
-                               _webapp._has_live_agent_monitors)
+                               _webapp._has_live_agent_monitors, _webapp._bg_run_event)
 
     _web_port = web_port if web_port is not None else int(os.getenv("WEB_PORT", "8787"))
     _web_password = web_password if web_password is not None else os.getenv("WEB_PASSWORD", "")

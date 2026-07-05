@@ -306,6 +306,8 @@ export const en = {
   'chat.remove_file_aria': 'Remove attached file',
   'chat.status_writing': 'writing response',
   'chat.status_card_running': 'card running',
+  'chat.status_bg_running': 'background run',
+  'chat.bg_run_label': 'while you were away',
   'chat.status_thinking': 'agent thinking',
   'chat.stop_btn': '✕ stop',
   'chat.stop': 'Stop',

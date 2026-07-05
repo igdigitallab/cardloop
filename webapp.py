@@ -365,9 +365,18 @@ async def _push_notify_run_end(session_key: str, event: dict) -> None:
     project_id = project.get("id", session_key)
     outcome = event.get("outcome", "ok")
     is_ok = outcome == "ok"
+    # spec-063 Stage 2a: background (autonomous) runs push a distinct 🌙 notification with a
+    # preview of the reply — "this happened while you were away", deep-linked to the project.
+    if event.get("source") == "bg":
+        _preview = (event.get("preview") or "").strip()
+        title = "🌙 " + project_name
+        body = _preview[:140] if _preview else "Background run finished"
+    else:
+        title = ("✅ " if is_ok else "❌ ") + project_name
+        body = "Run finished" if is_ok else "Run finished with an error"
     payload = json.dumps({
-        "title": ("✅ " if is_ok else "❌ ") + project_name,
-        "body": "Run finished" if is_ok else "Run finished with an error",
+        "title": title,
+        "body": body,
         "icon": "/icons/icon-192.png",
         "tag": project_id,
         "data": {"projectId": project_id, "url": "/"},
@@ -595,6 +604,54 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
             for r in terminal[: len(bucket) - _MONITORS_MAX]:
                 bucket.pop(r["id"], None)
         _bus_publish(session_key, {"kind": "monitor", "monitor": rec}, persist=False)
+    except Exception:
+        pass
+
+
+# ─────────── spec-063 Stage 2a: autonomous background runs (drain-surfaced) ───────────
+# The engine drain observes autonomous CLI turns (native task-notification wake-ups) and
+# surfaces them here as first-class runs: a bg-marked live turn + kind:run_start/run_end
+# with source:'bg' + seq-tagged type:text events. run_end fires the existing web-push path.
+_bg_run_ids: "dict[str, str]" = {}        # session_key → active bg run_id
+_bg_run_buffered: "dict[str, bool]" = {}  # session_key → whether this bg run owns the live buffer
+_bg_run_preview: "dict[str, str]" = {}    # session_key → first text chunk (push preview)
+
+
+def _bg_run_event(session_key: str, phase: str, text: "str | None" = None) -> None:
+    """Engine-drain callback (sync, never raises): phase ∈ start|text|end."""
+    try:
+        if phase == "start":
+            run_id = _uuid.uuid4().hex[:6]
+            _bg_run_ids[session_key] = run_id
+            # Clobber guard: never steal the live buffer from an operator turn that is
+            # starting concurrently (running flag set / non-bg turn already open).
+            ctx = _WEBAPP_CTX
+            op_busy = bool(ctx and ctx.get("running", {}).get(session_key) is not None)
+            cur = _live_turns.get(session_key)
+            buffered = not (op_busy or (cur is not None and cur.get("status") == "running"
+                                        and not cur.get("bg")))
+            _bg_run_buffered[session_key] = buffered
+            _bg_run_preview.pop(session_key, None)
+            if buffered:
+                turn = _live_turn_create(session_key, "bg", "")
+                turn["bg"] = True
+            _bus_publish(session_key, {"kind": "run_start", "source": "bg",
+                                       "prompt": "", "run_id": run_id})
+        elif phase == "text" and text:
+            _bg_run_preview.setdefault(session_key, text)
+            if _bg_run_buffered.get(session_key):
+                _live_ev = _live_turn_append(session_key, {"type": "text", "text": text, "bg": True})
+                _bus_publish(session_key, _live_ev, persist=False)
+            else:
+                _bus_publish(session_key, {"type": "text", "text": text, "bg": True}, persist=False)
+            _timeline_append(session_key, {"kind": "text", "text": text, "bg": True})
+        elif phase == "end":
+            run_id = _bg_run_ids.pop(session_key, None) or ""
+            if _bg_run_buffered.pop(session_key, False):
+                _live_turn_finish(session_key, "done")
+            preview = _bg_run_preview.pop(session_key, "")
+            _bus_publish(session_key, {"kind": "run_end", "source": "bg", "outcome": "ok",
+                                       "run_id": run_id, "preview": preview[:200]})
     except Exception:
         pass
 

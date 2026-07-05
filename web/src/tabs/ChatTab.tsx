@@ -14,7 +14,6 @@ import {
   Chat,
   ChatMessage,
   ChatEventResult,
-  ChatEventTextDelta,
   ChatToolCall,
   HistoryMessage,
   Project,
@@ -278,7 +277,7 @@ interface RunIndicator {
   startedAt: number
   lastEventAt: number
   currentTool: RichTool | null
-  source: 'chat' | 'card'
+  source: 'chat' | 'card' | 'bg'
 }
 
 interface Attachment {
@@ -824,7 +823,8 @@ const RunStatusBar = memo(function RunStatusBar({
   } else if (silenceSec < 3 && elapsedSec > 1) {
     label = t['chat.status_writing']
   } else {
-    label = run.source === 'card' ? t['chat.status_card_running'] : t['chat.status_thinking']
+    label = run.source === 'bg' ? t['chat.status_bg_running']
+      : run.source === 'card' ? t['chat.status_card_running'] : t['chat.status_thinking']
   }
 
   const runningAgents = subagents.filter(s => s.status === 'running').length
@@ -1019,6 +1019,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const [queueEditId, setQueueEditId] = useState<string | null>(null)
   const [queueEditText, setQueueEditText] = useState<string>('')
   const streamingRef = useRef(false)
+  // spec-063 Stage 2a: highest seq already APPLIED to the canvas. The activity stream is the
+  // single render source for every turn (own sends included); this ref is the only dedup —
+  // an event with seq <= lastApplied was already rendered (hydrate replay seeds it).
+  const lastAppliedSeqRef = useRef<number>(-1)
   // Spec-041 A3: always-current projectId for use in async drain callbacks.
   const projectIdRef = useRef(projectId)
   projectIdRef.current = projectId
@@ -1439,6 +1443,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         // Seed the SSE cursor so the activity-stream subscription starts from where
         // the snapshot left off — no gap, no duplicates.
         seedCursor(liveRes.cursor)
+        lastAppliedSeqRef.current = Math.max(lastAppliedSeqRef.current, liveRes.cursor)
       } else if (liveIsOurs && liveRes.running) {
         // Running but no buffered events yet (turn just started). Still show the
         // user bubble + an open assistant message (queue-visibility fix) — a queued
@@ -1455,8 +1460,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         busActiveRef.current = true
         setRun({ startedAt: startMs, lastEventAt: Date.now(), currentTool: null, source: 'card' })
         seedCursor(liveRes.cursor)
+        lastAppliedSeqRef.current = Math.max(lastAppliedSeqRef.current, liveRes.cursor)
       } else {
         setMessages([...histMsgs, ...boardRows])
+        // Idle snapshot: future live events must still dedup against the replayed cursor.
+        lastAppliedSeqRef.current = Math.max(lastAppliedSeqRef.current, liveRes.cursor || 0)
       }
       // Clear any stale error banner left over from a prior aborted stream so
       // the operator sees the recovered content, not an old error.
@@ -1504,6 +1512,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     setQueueEditId(null)
     setQueueEditText('')
     busActiveRef.current = false
+    lastAppliedSeqRef.current = -1
     setContextTokens(null)
     setPrevContextTokens(null)
     setAttachments([])
@@ -1643,24 +1652,25 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     const evtChatId = (evt as unknown as Record<string, unknown>).chat_id as string | undefined
     if (evtChatId && effectiveChatId && evtChatId !== effectiveChatId && evt.kind !== 'board_event' && evt.kind !== 'monitor') return
 
-    // spec-052 Phase 7: board strips are independent of the live /chat text stream —
-    // a run answering must not swallow board notifications. All other bus events stay
-    // gated (the POST stream is the authority for text/tool/run lifecycle on this tab).
-    if (streamingRef.current && evt.kind !== 'board_event') return
+    // spec-063 Stage 2a: the activity stream is the SINGLE render source for every turn —
+    // own sends included (the direct POST body now carries only control frames: queued ack,
+    // error, result metadata). The only dedup needed is seq-based: hydrate replay seeds
+    // lastAppliedSeqRef, and anything at or below it is already on the canvas. Events
+    // without seq (run lifecycle, board, monitor) pass through — they are idempotent or
+    // carry their own dedup.
+    const evtSeq = (evt as unknown as Record<string, unknown>).seq
+    if (typeof evtSeq === 'number') {
+      if (evtSeq <= lastAppliedSeqRef.current) return
+      lastAppliedSeqRef.current = evtSeq
+    }
 
     const now = Date.now()
 
-    // Chat-path runs publish RAW engine events to the bus (type-keyed, with seq:
-    // text_delta/text/tool), unlike card runs which publish translated kind-keyed
-    // events. Without handling these, a chat turn observed via the bus — e.g. after a
-    // remount that drops the direct /chat SSE (mobile orientation flip), or from a
-    // second tab/device — renders nothing live: its text events fall through the
-    // kind-chain below and the bubble freezes until run_end. Mirror the direct stream's
-    // reconciliation so a re-adopted chat turn keeps streaming token-by-token.
-    // (spec-063 will collapse the two event vocabularies into one resumable stream.)
+    // Seq-tagged engine events (no `kind`): the shared content vocabulary for all run
+    // types (direct chat, queued/auto-continue, background runs; cards/deferred still mix
+    // in kind-keyed text/tool — handled below — until Stage 2b unifies the vocabulary).
     if (!evt.kind) {
-      if (!busActiveRef.current) return
-      const rec = evt as unknown as { type?: string; text?: string; [k: string]: unknown }
+      const rec = evt as unknown as { type?: string; text?: string; error?: string; [k: string]: unknown }
       if (rec.type === 'text_delta') {
         setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
         setMessages(prev => appendDelta(prev, rec.text ?? ''))
@@ -1672,19 +1682,55 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         const tool = toolFields as unknown as ChatToolCall
         setRun(r => r ? { ...r, lastEventAt: now, currentTool: tool } : r)
         setMessages(prev => appendChunk(prev, { kind: 'tool', tool }))
+      } else if (rec.type === 'subagent') {
+        // Sub-agent lane now feeds from the bus (the direct stream no longer renders).
+        const sEvt = toSubagentEvent(rec as Record<string, unknown>)
+        if (sEvt) setSubagents(prev => applySubagentEvent(prev, sEvt))
+      } else if (rec.type === 'result') {
+        // Metrics finalize the open bubble; kind:run_end handles the rest of the
+        // lifecycle (run bar reset, queue drain, completion reconcile).
+        setMessages(prev => finalizeStreamingWithMetrics(prev, rec as unknown as ChatEventResult, now))
+      } else if (rec.type === 'error') {
+        setMessages(prev => finalizeStreaming(prev, rec.error || 'unknown error'))
+      } else if (rec.type === 'model_info') {
+        const mi = rec as unknown as { requested: string; served: string; fallback?: boolean }
+        if (mi.fallback) {
+          const strip: ChatMessage = {
+            id: nextId(), role: 'model_fallback', text: '', tools: [], streaming: false, ts: now,
+            modelFallback: { requested: mi.requested, served: mi.served },
+          }
+          setMessages(prev => [...prev, strip])
+        }
       }
-      // type-keyed result/error/rate_limit/subagent/preset are ignored here — the
-      // kind-keyed run_end + the /live poll drive lifecycle; hydrate covers sub-agents.
+      // rate_limit / preset — no canvas effect.
+      // First assistant output clears the live compaction indicator.
+      if (isCompactingRef.current && (rec.type === 'text_delta' || rec.type === 'text' || rec.type === 'tool')) {
+        if (compactFallbackTimerRef.current !== null) { clearTimeout(compactFallbackTimerRef.current); compactFallbackTimerRef.current = null }
+        isCompactingRef.current = false
+        setIsCompacting(false)
+        setTimeout(() => setCompactToast(false), 4000)
+      }
       return
     }
 
     if (evt.kind === 'run_start') {
-      const prefix = evt.source === 'card' ? '🗂 card: ' : evt.source === 'tg' ? '📱 TG: ' : ''
-      const userMsg = makeUserMsg(prefix + evt.prompt)
-      const assistantMsg = makeAssistantMsg()
+      const isBg = evt.source === 'bg'
       busActiveRef.current = true
-      setMessages(prev => [...prev, userMsg, assistantMsg])
-      setRun({ startedAt: now, lastEventAt: now, currentTool: null, source: 'card' })
+      setMessages(prev => {
+        // spec-063 Stage 2a: own send — sendMessage already appended the optimistic
+        // user+assistant pair; the run_start mirrored back over the bus must not duplicate it.
+        const tail = prev.slice(-2)
+        const isOptimisticOwn = !isBg && tail.length === 2 && tail[0].role === 'user' &&
+          tail[0].text === evt.prompt && tail[1].role === 'assistant' && !!tail[1].streaming
+        if (isOptimisticOwn) return prev
+        // Foreign/background run: heal any dangling open bubble, then open the new turn.
+        const fin = finalizeStreaming(prev)
+        const assistantMsg: ChatMessage = { ...makeAssistantMsg(), ...(isBg ? { bgRun: true } : {}) }
+        if (isBg) return [...fin, assistantMsg]  // 🌙 background runs have no user prompt
+        const prefix = evt.source === 'card' ? '🗂 card: ' : evt.source === 'tg' ? '📱 TG: ' : ''
+        return [...fin, makeUserMsg(prefix + evt.prompt), assistantMsg]
+      })
+      setRun({ startedAt: now, lastEventAt: now, currentTool: null, source: isBg ? 'bg' : 'card' })
 
     } else if (evt.kind === 'text') {
       if (!busActiveRef.current) return
@@ -1756,12 +1802,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         setIsCompacting(false)
         setTimeout(() => setCompactToast(false), 4000)
       }
-
-    } else if (evt.kind === 'bg_turn_end') {
-      // spec-071: an autonomous CLI turn (background task-notification wake) finished while no
-      // engine turn was active — its reply is already in session history; pull it in now
-      // instead of on the operator's next send. bg_text (the preview) needs no handling.
-      if (!busActiveRef.current) hydrateFromServer(() => streamingRef.current || busActiveRef.current)
 
     } else if (evt.kind === 'auto_rotated') {
       // Session crossed the cost cap and was auto-rotated WITH a handoff. The session_id is
@@ -2072,39 +2112,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           }
 
           setMessages(prev => {
+            // spec-063 Stage 2a: the direct POST body is a CONTROL channel only — content
+            // (deltas/text/tools/subagents) and metrics finalization render exclusively from
+            // the seq-ordered activity stream. Touching the canvas from here would race the
+            // bus connection (two sockets, no ordering guarantee) and split bubbles: a
+            // direct 'done' finalizing while bus deltas are still in flight re-opens a new
+            // bubble mid-word — exactly the S1 fragmentation class.
             switch (evt.type) {
-              case 'text_delta':
-                // Spec-029 §1: accumulate streaming delta into the in-progress bubble.
-                // The finalized {type:"text"} block below is still the source of truth —
-                // reconcileFinalText will overwrite with the canonical text on arrival.
-                return appendDelta(prev, (evt as unknown as ChatEventTextDelta).text)
-              case 'text':
-                // Spec-029 §1: replace any accumulated delta text with the canonical final text.
-                // Falls back to appendChunk when no delta was accumulated (non-streaming sessions).
-                return reconcileFinalText(prev, evt.text)
-              case 'tool': {
-                const { type: _t, ...toolFields } = evt as unknown as Record<string, unknown>
-                return appendChunk(prev, { kind: 'tool', tool: toolFields as unknown as ChatToolCall })
-              }
-              case 'result':
-                // Spec-022: finalize with metrics from result event
-                return finalizeStreamingWithMetrics(prev, evt as unknown as ChatEventResult, now)
-              case 'done':
-                return finalizeStreaming(prev)
               case 'error':
+                // Terminal + needs immediate feedback; bus 'error' re-finalize is a no-op.
                 return finalizeStreaming(prev, evt.error)
-              case 'rate_limit':
-                return prev
-              case 'model_info': {
-                // Backend emits this when the served model family mismatches the requested alias
-                // (e.g. silent fable→opus degrade). Render a slim system strip in the message flow.
-                if (!evt.fallback) return prev
-                const strip: ChatMessage = {
-                  id: nextId(), role: 'model_fallback', text: '', tools: [], streaming: false, ts: now,
-                  modelFallback: { requested: evt.requested, served: evt.served },
-                }
-                return [...prev, strip]
-              }
               default:
                 return prev
             }
@@ -2805,7 +2822,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   <div style={{ flex: 1, height: 1, background: 'var(--border, #374151)' }} />
                 </div>
               )}
-              <div className={`chat-msg chat-msg-${msg.role}`}>
+              <div className={`chat-msg chat-msg-${msg.role}${msg.bgRun ? ' chat-msg-bgrun' : ''}`}>
+                {/* spec-063: autonomous background run — happened while the operator was away */}
+                {msg.bgRun && (
+                  <div className="chat-msg-bgrun-tag">🌙 {t['chat.bg_run_label']}</div>
+                )}
                 {/* Spec-022: timestamp on messages that have one (live-session only) */}
                 {msg.ts != null && (
                   <div style={{

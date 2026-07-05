@@ -471,6 +471,8 @@ export interface ChatMessage {
   tools: ChatToolCall[]
   /** True while the SSE stream is still active for this message */
   streaming: boolean
+  /** spec-063: message produced by an autonomous background run (drain-surfaced CLI turn). */
+  bgRun?: boolean
   /** Error message if the turn ended with an error */
   error?: string
   /** Unix timestamp (ms) when the message was created / result arrived */
@@ -646,18 +648,6 @@ export interface ActivityEventBoard {
   ts: number
 }
 
-/** spec-071: an autonomous CLI turn (native task-notification wake) produced text while no
- *  engine turn was active. The reply already lives in session history — treat as a hydrate
- *  nudge. bg_text carries a preview of the text; bg_turn_end marks the turn boundary. */
-export interface ActivityEventBgText {
-  kind: 'bg_text'
-  text: string
-}
-
-export interface ActivityEventBgTurnEnd {
-  kind: 'bg_turn_end'
-}
-
 export type ActivityEvent =
   | ActivityEventRunStart
   | ActivityEventText
@@ -670,8 +660,6 @@ export type ActivityEvent =
   | ActivityEventBoard
   | ActivityEventAutoRotated
   | ActivityEventSessionRotated
-  | ActivityEventBgText
-  | ActivityEventBgTurnEnd
 
 export interface VersionInfo {
   current: string

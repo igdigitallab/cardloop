@@ -89,10 +89,11 @@ class _FakeDrainClient:
 
 @pytest.mark.asyncio
 async def test_drain_flips_monitors_and_surfaces_autonomous_turn(monkeypatch):
-    flips, published = [], []
+    flips, bg_events = [], []
     monkeypatch.setattr(engine, "_monitor_update_cb",
                         lambda sk, d, only_existing=False: flips.append((sk, d)))
-    monkeypatch.setattr(engine, "_bus_publish_cb", lambda sk, e: published.append((sk, e)))
+    monkeypatch.setattr(engine, "_bg_run_cb",
+                        lambda sk, phase, text=None: bg_events.append((sk, phase, text)))
     msgs = [
         _notification("a1", "completed"),
         _updated("w1", "killed"),
@@ -111,9 +112,23 @@ async def test_drain_flips_monitors_and_surfaces_autonomous_turn(monkeypatch):
 
     assert ("s", {"id": "a1", "tool_use_id": None, "status": "done"}) in flips
     assert ("s", {"id": "w1", "tool_use_id": None, "status": "stopped"}) in flips
-    kinds = [e.get("kind") for _, e in published]
-    assert kinds == ["bg_text", "bg_turn_end"], "autonomous turn must surface, sub-agent noise must not"
-    assert published[0][1]["text"] == "background reply"
+    # spec-063 Stage 2a: autonomous turn = first-class background run; sub-agent noise excluded.
+    assert bg_events == [("s", "start", None), ("s", "text", "background reply"), ("s", "end", None)]
+
+
+@pytest.mark.asyncio
+async def test_drain_closes_halfopen_bg_run_on_cancel(monkeypatch):
+    """Pausing the drain mid-autonomous-turn must close the background run strip."""
+    bg_events = []
+    monkeypatch.setattr(engine, "_bg_run_cb",
+                        lambda sk, phase, text=None: bg_events.append(phase))
+    msgs = [AssistantMessage(content=[TextBlock(text="partial bg reply")], model="m")]
+    entry = engine._LiveEntry(client=_FakeDrainClient(msgs), fingerprint="f",
+                              last_used=0.0, idle_task=None, session_key="s")
+    engine._start_drain(entry, None)
+    await asyncio.sleep(0.05)
+    await engine._stop_drain(entry)  # cancels mid-turn (no ResultMessage arrived)
+    assert bg_events == ["start", "text", "end"], "cancel must close the half-open bg run"
 
 
 @pytest.mark.asyncio
