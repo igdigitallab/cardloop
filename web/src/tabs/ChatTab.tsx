@@ -291,6 +291,11 @@ interface Attachment {
   error?: string
 }
 
+// spec-071 stall watchdog: the backend pings the chat stream every ~20s, so this much silence
+// means the socket is dead (tunnel drop the browser never noticed — reader.read() would pend
+// forever and the canvas froze until the next send exposed it). Abort + recover instead.
+const CHAT_STREAM_STALL_MS = 75_000
+
 // Stream response segmentation: at the text↔tool boundary a NEW assistant message is opened.
 type StreamChunk =
   | { kind: 'text'; text: string }
@@ -1459,6 +1464,24 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     }).catch(() => { if (!isCancelled()) { setMessages([]); setError('') } })
   }, [projectId, effectiveChatId, seedCursor]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // spec-071: verify-then-hydrate after a live-rendered turn completes. The completion hydrate
+  // was removed (72043ee) to stop flicker, but dropped bus events / broken replay could leave
+  // the canvas missing the final text with NO recovery path. Debounce, then re-check /live:
+  // if a follow-on turn started (auto-continue), skip — its own lifecycle reconciles; if the
+  // session is genuinely idle, hydrate canonical history once (idempotent when nothing was missed).
+  const scheduleCompletionReconcile = useCallback(() => {
+    window.setTimeout(() => {
+      if (streamingRef.current || busActiveRef.current) return
+      api.projectLive(projectId)
+        .then(res => {
+          if (res.running || streamingRef.current || busActiveRef.current) return
+          hydrateFromServer(() => streamingRef.current || busActiveRef.current)
+        })
+        .catch(() => {/* non-critical */})
+    }, 1200)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- refs are stable
+  }, [projectId, hydrateFromServer])
+
   useEffect(() => {
     let cancelled = false
     abortRef.current?.abort()
@@ -1586,10 +1609,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             setServerStartedAt(null)
             setSubagents([])
             seenSubagentKeysRef.current = new Set()
-            // We rendered this turn live — finalize the open bubble. No hydrate here: it would
-            // race a follow-on turn's live events and flicker. A truly-missed turn is caught by
-            // the wasServerRunning branch below (busActiveRef never went true for it).
+            // We rendered this turn live — finalize the open bubble. No SYNCHRONOUS hydrate
+            // here (it would race a follow-on turn's live events and flicker); the debounced
+            // reconcile below re-checks /live and hydrates only if the session stayed idle —
+            // catching turns whose content events were partially dropped. (spec-071)
             setMessages(prev => finalizeStreaming(prev))
+            scheduleCompletionReconcile()
             // Spec-041 A2: drain queued message on poll-detected turn completion.
             drainQueue()
           } else if (wasServerRunningRef.current) {
@@ -1711,11 +1736,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setSubagents([])
       seenSubagentKeysRef.current = new Set()
       if (wasActive) {
-        // We rendered this turn live via the bus — the live buffer already holds the full
-        // answer, so just finalize the open bubble. Do NOT hydrate here: a hydrate races the
-        // NEXT turn's live events (e.g. auto-continue) and makes content flicker in Live —
-        // it replaces the whole message array with a snapshot that omits just-arrived tokens.
+        // We rendered this turn live via the bus — finalize the open bubble. No SYNCHRONOUS
+        // hydrate (it races the NEXT turn's live events and flickers); the debounced reconcile
+        // hydrates only if the session stays idle, so a turn whose content events were dropped
+        // still lands its final text. (spec-071)
         setMessages(prev => finalizeStreaming(prev))
+        scheduleCompletionReconcile()
       } else {
         // A turn we never adopted (missed run_start / origin outside this tab) just ended —
         // its answer is NOT in our buffer, so pull canonical history once to land it. (3f7ada)
@@ -1730,6 +1756,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         setIsCompacting(false)
         setTimeout(() => setCompactToast(false), 4000)
       }
+
+    } else if (evt.kind === 'bg_turn_end') {
+      // spec-071: an autonomous CLI turn (background task-notification wake) finished while no
+      // engine turn was active — its reply is already in session history; pull it in now
+      // instead of on the operator's next send. bg_text (the preview) needs no handling.
+      if (!busActiveRef.current) hydrateFromServer(() => streamingRef.current || busActiveRef.current)
 
     } else if (evt.kind === 'auto_rotated') {
       // Session crossed the cost cap and was auto-rotated WITH a handoff. The session_id is
@@ -1915,6 +1947,18 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // network / client eviction / server restart), the turn may have finished on the server
     // in the background with its answer only in history — we recover it in finally. (chopped-reply bug)
     let gotResult = false
+    // spec-071 stall watchdog: with server heartbeats every ~20s, prolonged byte-silence means
+    // the socket died without a FIN/RST (tunnel drop / mobile background kill). The hung fetch
+    // would otherwise never settle — streamingRef stays true and gates EVERY recovery path,
+    // freezing the canvas until the next send. Abort it ourselves and recover immediately.
+    let lastByteAt = Date.now()
+    let watchdogTripped = false
+    const watchdog = window.setInterval(() => {
+      if (Date.now() - lastByteAt > CHAT_STREAM_STALL_MS) {
+        watchdogTripped = true
+        ac.abort()
+      }
+    }, 15000)
 
     try {
       const res = await fetch(`/api/projects/${projectId}/chat`, {
@@ -1934,6 +1978,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       await readSseStream(
         res.body,
         (line) => {
+          // Any frame — including `: ping` heartbeats — proves the socket is alive. (spec-071)
+          lastByteAt = Date.now()
           const evt = parseSseLine(line)
           if (!evt) return
 
@@ -2073,12 +2119,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // Suppress intentional aborts regardless of how the browser names the error.
       // AbortError is the spec name; TypeError: "Failed to fetch" / "The user aborted a request"
       // can appear in Chrome/Firefox when the signal fires mid-stream.
-      if (err instanceof Error && err.name === 'AbortError') return
-      if (abortRef.current?.signal.aborted) return
-      const msg = err instanceof Error ? err.message : String(err)
-      setError(msg)
-      setMessages(prev => finalizeStreaming(prev, msg))
+      // spec-071: a watchdog abort is NOT intentional — fall through so finally recovers.
+      if (!watchdogTripped) {
+        if (err instanceof Error && err.name === 'AbortError') return
+        if (abortRef.current?.signal.aborted) return
+        const msg = err instanceof Error ? err.message : String(err)
+        setError(msg)
+        setMessages(prev => finalizeStreaming(prev, msg))
+      }
     } finally {
+      window.clearInterval(watchdog)
       setStreaming(false)
       // Sync the ref NOW (the useEffect that mirrors `streaming` runs after render) so the
       // recovery hydrate below is not blocked by our own streamingRef guard in hydrateFromServer.
@@ -2095,8 +2145,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // lands in the right place. The /live poll keeps catching up if the turn is still running.
       // ac.signal.aborted distinguishes an INTENTIONAL abort (reset / session-change / unmount /
       // remount cleanup) — where recovery is unwanted — from an EXTERNAL drop (network / eviction /
-      // restart), where it is exactly what's needed.
-      if (!gotResult && !ac.signal.aborted) hydrateFromServer(() => false)
+      // restart), where it is exactly what's needed. A watchdog abort counts as external. (spec-071)
+      if (!gotResult && (watchdogTripped || !ac.signal.aborted)) hydrateFromServer(() => false)
       // Spec-041 A2: drain via shared helper (also called from bus/poll paths).
       drainQueue()
       // Ensure compaction indicator is cleared when the turn ends (covers error/abort paths).
