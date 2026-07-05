@@ -74,3 +74,20 @@ Projects are registered in `data/registry.json` (gitignored) or auto-scanned fro
 `templates/reference/` — reference templates bundled with the project:
 - `project-baseline.md` · `audit-prompt.md` · `triage-prompt.md` · `refactor-prompt.md` · `spec.md` · `project.md`
 - Loaded at runtime by the cockpit's audit feature, so they must stay in English.
+
+## spec-071: persistent-client stream drain (concurrency)
+
+- **Exactly ONE consumer of `client.receive_messages()` at any time.** Between turns the
+  drain (`engine._drain_between_turns`) owns the stream; `run_engine`'s live branch stops it
+  before `client.query()` and restarts it in `finally`. NEVER add another reader (a second
+  `receive_response`/`receive_messages` steals messages from the active consumer).
+- Why the drain exists: the SDK's internal reader pushes messages into a BOUNDED buffer
+  (`max_buffer_size=100`); unconsumed between turns it fills → reader blocks → CLI stdout
+  pipe backs up → the CLI stalls (~1 tool round / 10 min for background sub-agents).
+- The chat heartbeat pump in `api_project_chat` must never cancel the engine generator's
+  `__anext__` mid-turn (that cancels the SDK receive) — pings are written while the pump
+  task is pending; the task is only cancelled in the handler's `finally`.
+- Terminal task states can arrive ONLY as `TaskUpdatedMessage.patch.status` (e.g. TaskStop →
+  "killed", notification suppressed) — always handle BOTH message types.
+- Test fakes: `MagicMock(spec=AssistantMessage)` MUST set `parent_tool_use_id = None`, or the
+  spec-071 chat-lane filter silently skips the fake (truthy Mock attribute).
