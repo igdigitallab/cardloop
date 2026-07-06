@@ -1583,26 +1583,23 @@
   }
 }
 
-/* ── Session dropdown bottom-sheet (matches computeStyle ≤768px breakpoint) ── */
+/* ── Session dropdown on mobile: anchored dropdown, NOT a bottom-sheet ──
+   The list drops down from the ◉ button via the inline style computed in
+   SessionSelector.computeStyle() (position:fixed, top/left/width anchored to the
+   button rect). We keep only a transparent full-screen tap-catcher so an outside
+   tap closes it reliably on touch — no dim, since this is a dropdown not a modal.
+   (Was a bottom-sheet pinned to bottom:0; a short 1-session list rendered as a
+   thin strip glued to the bottom edge, overlapping the composer — looked broken.) */
 @media (max-width: 768px) {
-  /* Dim backdrop behind the bottom-sheet; hidden on desktop via default display:none */
   .session-dropdown-backdrop {
     display: block;
+    background: transparent;
   }
-
-  /* Session dropdown: full-width bottom sheet */
   .session-dropdown {
-    position: fixed;
-    left: 8px;
-    right: 8px;
-    top: auto;
-    bottom: env(safe-area-inset-bottom, 0);
-    max-width: 100%;
+    /* width comes from the inline anchor; just make sure the base min-width:320
+       never forces horizontal overflow on very narrow phones */
     min-width: 0;
-    max-height: 50vh;
-    border-radius: var(--radius) var(--radius) 0 0;
-    /* Sit above the backdrop (z-index 498) */
-    z-index: 499;
+    max-width: calc(100vw - 16px);
   }
 }
 

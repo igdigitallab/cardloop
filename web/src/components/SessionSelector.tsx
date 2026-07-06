@@ -108,20 +108,28 @@ export function SessionSelector({ projectId, onSessionChange, onRequestReset, re
   }, [projectId, loadSessions, reloadSignal])
 
   // Compute anchored position from the toggle button rect.
-  // Returns null on mobile so CSS bottom-sheet takes over.
+  // Same behaviour on mobile and desktop: the list drops DOWN from the button
+  // (portaled to body, position:fixed). On mobile we clamp the width to the
+  // viewport so a narrow screen never overflows. (Previously mobile returned
+  // null and fell back to a bottom-sheet, which looked broken for short lists —
+  // a 1-session list became a thin strip glued to the bottom edge.)
   function computeStyle(): React.CSSProperties | null {
-    if (window.matchMedia('(max-width: 768px)').matches) return null
     const btn = btnRef.current
     if (!btn) return null
     const rect = btn.getBoundingClientRect()
+    const vw = window.innerWidth
+    const isMobile = vw <= 768
+    const width = isMobile ? Math.min(vw - 16, 440) : DROPDOWN_ANCHOR_WIDTH
     let left = rect.left
-    if (left + DROPDOWN_ANCHOR_WIDTH > window.innerWidth) {
-      left = window.innerWidth - DROPDOWN_ANCHOR_WIDTH - 8
-    }
+    if (left + width > vw) left = vw - width - 8
+    if (left < 8) left = 8
     return {
       position: 'fixed',
       top: rect.bottom + 4,
       left,
+      // Explicit width on mobile so the CSS bottom-sheet's left/right:8px can't
+      // fight the inline anchor; desktop keeps its min/max-width from CSS.
+      width: isMobile ? width : undefined,
       zIndex: 10001,
     }
   }
