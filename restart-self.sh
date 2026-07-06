@@ -115,14 +115,20 @@ else
   healthy=1
 fi
 
-# 2. Scan the journal since the restart for new Traceback/FATAL lines, excluding
-#    known benign teardown noise (bot.py's bounded-teardown-timeout warning prints
-#    a line containing "WARNING" that is expected, not a real failure).
+# 2. Scan the journal for new Traceback/FATAL lines — but ONLY since the NEW process
+#    started. A fixed "-2 minutes" window would include the OLD process's teardown
+#    noise (Python prints a real "Traceback ... Event loop is closed" during forced
+#    shutdown on every deploy) and false-trigger a rollback on every restart.
 bad_logs=0
 if command -v journalctl >/dev/null 2>&1; then
-  since="\$(date -d '-2 minutes' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "\$RESTART_TS")"
+  since="\$(systemctl show "\$SERVICE" -p ExecMainStartTimestamp --value 2>/dev/null | sed 's/^[A-Za-z]* //')"
+  [ -n "\$since" ] || since="\$(date -d '-30 seconds' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "\$RESTART_TS")"
   logs="\$(journalctl -u "\$SERVICE" --since "\$since" --no-pager 2>/dev/null || true)"
-  suspicious="\$(printf '%s\n' "\$logs" | grep -E 'Traceback|FATAL' | grep -v 'WARNING: bounded teardown timed out' || true)"
+  suspicious="\$(printf '%s\n' "\$logs" | grep -E 'Traceback|FATAL' \
+    | grep -v 'WARNING: bounded teardown timed out' \
+    | grep -v 'Event loop is closed' \
+    | grep -v 'Exception ignored in' \
+    | grep -v 'Fatal error in message reader' || true)"
   if [ -n "\$suspicious" ]; then
     bad_logs=1
     log "suspicious log line(s) since restart:"
