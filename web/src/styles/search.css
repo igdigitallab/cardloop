@@ -1,0 +1,79 @@
+/* ── Spec-074: Global search (Cmd/Ctrl+K) ─────────────────────────────────── */
+
+.search-overlay-modal {
+  width: min(640px, 92vw);
+  max-height: 70vh;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.search-overlay {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 70vh;
+}
+
+.search-overlay-input-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.search-overlay-icon { font-size: 15px; opacity: .7; }
+.search-overlay-input {
+  flex: 1; background: none; border: none; outline: none;
+  color: var(--text); font-size: 15px; font-family: inherit;
+}
+.search-overlay-input::placeholder { color: var(--text3); }
+.search-overlay-spinner {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid var(--border2); border-top-color: var(--accent);
+  animation: search-overlay-spin .7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes search-overlay-spin { to { transform: rotate(360deg); } }
+
+.search-overlay-results {
+  overflow-y: auto; flex: 1; padding: 6px;
+}
+.search-overlay-hint {
+  padding: 28px 16px; text-align: center; color: var(--text3); font-size: 13px;
+}
+.search-overlay-group { display: flex; flex-direction: column; margin-bottom: 4px; }
+.search-overlay-group-title {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--text3); padding: 8px 10px 4px;
+}
+.search-overlay-hit {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 10px; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: 13px; color: var(--text2);
+  line-height: 1.45;
+}
+.search-overlay-hit.selected,
+.search-overlay-hit:hover {
+  background: var(--bg3);
+  color: var(--text);
+}
+.search-overlay-hit-icon { flex-shrink: 0; margin-top: 1px; }
+.search-overlay-hit-snippet { flex: 1; min-width: 0; word-break: break-word; white-space: pre-wrap; }
+.search-overlay-hit-snippet mark {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* Mobile: full-screen sheet under 768px */
+@media (max-width: 768px) {
+  .search-overlay-modal {
+    width: 100%; max-width: 100%; height: 100%; max-height: 100%;
+    border-radius: 0;
+  }
+  .search-overlay { max-height: 100%; height: 100%; }
+  .search-overlay-input {
+    font-size: 16px; /* prevent iOS auto-zoom */
+  }
+}

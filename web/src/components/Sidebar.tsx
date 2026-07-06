@@ -50,6 +50,8 @@ interface Props {
   schedulesActive?: boolean
   onOpenSettingsGlobal?: () => void
   settingsGlobalActive?: boolean
+  /** Spec-074: opens the global search overlay (Cmd/Ctrl+K) */
+  onOpenSearch?: () => void
 }
 
 function unreadFor(p: Project, map: Record<string, number>): number {
@@ -97,7 +99,7 @@ export function Sidebar({
   onOpenTerminal, terminalActive, onOpenVault, vaultActive,
   onOpenUsage, usageActive,
   onOpenGlobalFiles, globalFilesActive, onOpenSchedules, schedulesActive,
-  onOpenSettingsGlobal, settingsGlobalActive,
+  onOpenSettingsGlobal, settingsGlobalActive, onOpenSearch,
 }: Props) {
   const { showToast } = useToast()
   const [search, setSearch] = useState('')
@@ -1105,6 +1107,8 @@ export function Sidebar({
           Moved here from the top tab bar so they are reachable on mobile
           (the sidebar is the off-canvas drawer on phones). */}
       <div className="sidebar-tools">
+        <button className="sidebar-tool-btn"
+                onClick={onOpenSearch} title="Search (Ctrl/Cmd+K)" aria-label="Search">🔍</button>
         <button className={`sidebar-tool-btn${terminalActive ? ' active' : ''}`}
                 onClick={onOpenTerminal} title="Terminal" aria-label="Terminal">⌨</button>
         <button className={`sidebar-tool-btn${vaultActive ? ' active' : ''}`}

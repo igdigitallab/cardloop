@@ -679,6 +679,14 @@ export const ru = {
   'notify.settings_label': 'Уведомления браузера',
   'notify.settings_hint': 'Показывать десктопное уведомление, когда задача завершается в фоне.',
   'notify.blocked_hint': 'Заблокировано в настройках браузера — разрешите уведомления для этого сайта.',
+
+  // ── Spec-074: Global search (Cmd/Ctrl+K) ──────────────────────────────────────
+  'search.placeholder': 'Поиск по чатам, доскам, таймлайну…',
+  'search.empty_hint': 'Начните вводить, чтобы искать по всем проектам',
+  'search.no_results': 'Ничего не найдено',
+  'search.source_chat': 'Чат',
+  'search.source_board': 'Доска',
+  'search.source_timeline': 'Таймлайн',
 } as const
 
 export type TKey = keyof typeof ru

@@ -905,4 +905,19 @@ export const api = {
 
   browserProfileAction: (id: string, action: 'launch' | 'stop') =>
     apiFetch<{ ok: boolean }>(`/api/browser/profiles/${encodeURIComponent(id)}/${action}`, { method: 'POST' }),
+
+  // Spec-074: global search (Cmd/Ctrl+K) over chat transcripts + timelines + boards.
+  search: (q: string, opts?: { limit?: number; project?: string }) => {
+    const p = new URLSearchParams()
+    p.set('q', q)
+    if (opts?.limit) p.set('limit', String(opts.limit))
+    if (opts?.project) p.set('project', opts.project)
+    return apiFetch<import('./types').SearchResponse>(`/api/search?${p.toString()}`)
+  },
+
+  // Manual full rebuild of the search index — normal operation relies on the
+  // background incremental loop; this is the 'index looks stale' escape hatch.
+  searchReindex: () =>
+    apiFetch<{ ok: boolean; chat_docs: number; timeline_docs: number; board_docs: number; files_scanned: number }>(
+      '/api/search/reindex', { method: 'POST' }),
 }
