@@ -115,15 +115,21 @@ else
   healthy=1
 fi
 
-# 2. Scan the journal for new Traceback/FATAL lines — but ONLY since the NEW process
-#    started. A fixed "-2 minutes" window would include the OLD process's teardown
-#    noise (Python prints a real "Traceback ... Event loop is closed" during forced
-#    shutdown on every deploy) and false-trigger a rollback on every restart.
+# 2. Scan the journal for new Traceback/FATAL lines — but ONLY from the NEW main
+#    process (filtered by MainPID). Time-window scans false-triggered twice: a fixed
+#    "-2 minutes" window and even an ExecMainStartTimestamp --since both catch the
+#    OLD process's forced-teardown Traceback landing in the same boundary second
+#    (observed live 2026-07-05 17:23:07). PID filtering excludes old-process noise
+#    structurally, regardless of timing.
 bad_logs=0
 if command -v journalctl >/dev/null 2>&1; then
+  main_pid="\$(systemctl show "\$SERVICE" -p MainPID --value 2>/dev/null || true)"
   since="\$(systemctl show "\$SERVICE" -p ExecMainStartTimestamp --value 2>/dev/null | sed 's/^[A-Za-z]* //')"
   [ -n "\$since" ] || since="\$(date -d '-30 seconds' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "\$RESTART_TS")"
   logs="\$(journalctl -u "\$SERVICE" --since "\$since" --no-pager 2>/dev/null || true)"
+  if [ -n "\$main_pid" ] && [ "\$main_pid" != "0" ]; then
+    logs="\$(printf '%s\n' "\$logs" | grep -F "[\$main_pid]" || true)"
+  fi
   suspicious="\$(printf '%s\n' "\$logs" | grep -E 'Traceback|FATAL' \
     | grep -v 'WARNING: bounded teardown timed out' \
     | grep -v 'Event loop is closed' \
@@ -156,15 +162,28 @@ log "canary FAILED (healthy=\$healthy bad_logs=\$bad_logs smoke_ok=\$smoke_ok) �
 # ─────────────────────────── One-shot rollback (never loops) ───────────────────
 cd "\$DIR" || { log "cannot cd to \$DIR — giving up, service left as-is"; rm -f "\$0"; exit 1; }
 
-prev_tag="\$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+# The canary runs as root (systemd-run) inside the operator's repo: git refuses
+# "dubious ownership" there (observed live: describe returned nothing and the
+# rollback was skipped), and a root git checkout / npm build would leave
+# root-owned files behind. Run every repo operation as the repo's owner.
+REPO_OWNER="\$(stat -c %U "\$DIR" 2>/dev/null || echo root)"
+as_owner() {
+  if [ "\$REPO_OWNER" != "root" ] && command -v runuser >/dev/null 2>&1; then
+    runuser -u "\$REPO_OWNER" -- "\$@"
+  else
+    "\$@"
+  fi
+}
+
+prev_tag="\$(as_owner git -C "\$DIR" describe --tags --abbrev=0 'HEAD^' 2>/dev/null || true)"
 if [ -z "\$prev_tag" ]; then
   log "no previous tag found (git describe --tags --abbrev=0 HEAD^) — cannot roll back; leaving service as-is"
   incident="INCIDENT: restart canary failed for \$SERVICE at \$RESTART_TS, and no previous git tag was found to roll back to. Service may be unhealthy — check manually (journalctl -u \$SERVICE)."
-elif git checkout "\$prev_tag" 2>&1 | while IFS= read -r l; do log "  git: \$l"; done; then
+elif as_owner git -C "\$DIR" checkout "\$prev_tag" 2>&1 | while IFS= read -r l; do log "  git: \$l"; done; then
   log "rolled back to \$prev_tag"
   rebuild_ok=1
   if [ -d web ] && command -v npm >/dev/null 2>&1; then
-    if ! (cd web && npm run build) >/tmp/cardloop-rollback-build.log 2>&1; then
+    if ! as_owner bash -c "cd '\$DIR/web' && npm run build" >/tmp/cardloop-rollback-build.log 2>&1; then
       rebuild_ok=0
       log "web rebuild FAILED after rollback — restarting old code WITHOUT a fresh dist (see /tmp/cardloop-rollback-build.log)"
     fi
