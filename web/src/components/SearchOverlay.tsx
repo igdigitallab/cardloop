@@ -20,8 +20,8 @@ const SOURCE_LABEL_KEY: Record<SearchHit['source'], 'search.source_chat' | 'sear
 // Backend snippet() delimiters (search.py: SNIPPET_OPEN/SNIPPET_CLOSE) — private-use
 // control chars, never literal HTML. Rendered as a real <mark> so nothing here ever
 // needs dangerouslySetInnerHTML, regardless of what a document's own text contains.
-const MARK_OPEN = ''
-const MARK_CLOSE = ''
+const MARK_OPEN = '\x01'
+const MARK_CLOSE = '\x02'
 
 function renderSnippet(raw: string) {
   if (!raw.includes(MARK_OPEN)) return raw

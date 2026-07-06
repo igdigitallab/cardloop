@@ -7,6 +7,7 @@ import { Sidebar } from './components/Sidebar'
 import { ProjectView } from './components/ProjectView'
 import { ProjectNameDialog } from './components/ProjectNameDialog'
 import { ProjectTabBar } from './components/ProjectTabBar'
+import { SearchOverlay } from './components/SearchOverlay'
 import { Spinner } from './components/Spinner'
 import { GlobalFilesTab } from './tabs/GlobalFilesTab'
 import { SchedulesTab } from './tabs/SchedulesTab'
@@ -133,6 +134,8 @@ export default function App() {
   const [terminalOpen, setTerminalOpen] = useState<boolean>(false)
   // Global settings tab (global)
   const [settingsGlobalOpen, setSettingsGlobalOpen] = useState<boolean>(false)
+  // Spec-074: global search overlay (Cmd/Ctrl+K) — transient, not a persisted tab
+  const [searchOpen, setSearchOpen] = useState<boolean>(false)
   // Live model registry (fetched once after auth). undefined until loaded → ChatTab
   // falls back to the bundled static MODELS so the picker renders instantly / offline.
   const [models, setModels] = useState<{ value: string; label: string }[] | undefined>(undefined)
@@ -818,6 +821,19 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
+  // Spec-074: global search — Cmd/Ctrl+K opens the overlay from anywhere in the app.
+  useEffect(() => {
+    if (authState !== 'authed') return
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setSearchOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [authState])
+
   async function handleLogout() {
     try { await api.logout() } catch { /* ignore */ }
     setProjects([])
@@ -899,7 +915,15 @@ export default function App() {
         schedulesActive={activeId === SCHEDULES_ID}
         onOpenSettingsGlobal={handleOpenSettings}
         settingsGlobalActive={activeId === SETTINGS_ID}
+        onOpenSearch={() => setSearchOpen(true)}
       />
+
+      {searchOpen && (
+        <SearchOverlay
+          onNavigate={handleSelect}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
 
       {createOpen && (
         <ProjectNameDialog
