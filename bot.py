@@ -85,10 +85,19 @@ from engine import (  # noqa: E402,F401  (deliberate: import after env load; re-
 
 def _build_ctx() -> dict:
     """Build the shared context dict passed to webapp.start()."""
-    return _engine_build_ctx(
+    ctx = _engine_build_ctx(
         web_port=WEB_PORT,
         web_password=WEB_PASSWORD,
     )
+    # spec-072: E2E smoke harness opt-in. Swaps ctx["run_engine"] for a scripted,
+    # network-free fake (e2e_fake_engine.py) so tests/e2e/ can drive a REAL cockpit
+    # subprocess deterministically — no SDK calls, no tokens. Never set in production;
+    # a fresh deployment's .env never sets this flag, so this is a no-op by default.
+    if os.environ.get("E2E_FAKE_ENGINE") == "1":
+        from e2e_fake_engine import run_engine as _e2e_run_engine
+        ctx["run_engine"] = _e2e_run_engine
+        print("[e2e] E2E_FAKE_ENGINE=1 — ctx['run_engine'] replaced by e2e_fake_engine.run_engine")
+    return ctx
 
 
 async def _amain() -> None:

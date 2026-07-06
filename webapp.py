@@ -2175,6 +2175,15 @@ def _find_vault_specs_dir(ctx: dict, project_name: str, cwd: str) -> Path | None
 # ─────────────────────────── API handlers ───────────────────────────
 
 async def api_health(req: web.Request) -> web.Response:
+    """GET /api/health (unauthenticated — see auth_middleware exempt list).
+
+    ?deep=1 (spec-072): adds a lightweight "running" count so restart-self.sh can
+    poll for idle (no in-flight turns) before restarting. Still safe to leave
+    unauthenticated — it only leaks a count, never keys or content."""
+    if req.query.get("deep") == "1":
+        ctx = req.app["ctx"]
+        running = ctx.get("running") or {}
+        return web.json_response({"ok": True, "running": len(running)})
     return web.json_response({"ok": True})
 
 
