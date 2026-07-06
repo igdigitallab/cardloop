@@ -42,6 +42,8 @@ More detail in ARCHITECTURE.md.
 - After editing `bot.py`/`webapp.py` — a service restart is mandatory.
 - After editing `web/` — rebuild: `cd web && npm run build`.
 - **Tests: `venv/bin/python -m pytest tests/`** (~1400, should be green). ⚠️ ONLY via the venv — it has `pytest-aiohttp` (requirements-dev.txt); the system `python` does NOT, so ~237 endpoint tests fall into a false `error`. Do not trust such a run and do NOT rewrite tests to fit it.
+- **E2E smoke suite (spec-072, `tests/e2e/`):** `venv/bin/python -m pytest tests/e2e -m e2e` — opt-in, excluded from the default run above (`pytest.ini: addopts = -m "not e2e"`). Boots a REAL cockpit subprocess (own tmp `data/`+`$HOME`, random port/password, `E2E_FAKE_ENGINE=1` → scripted `e2e_fake_engine.py`, no SDK/tokens) and drives it with headless Playwright (`playwright install chromium` once). Requires `web/dist` to exist (`cd web && npm run build`) — the harness fails with a clear message otherwise.
+- **Deploy canary (spec-072, `restart-self.sh`):** pre-restart wait-for-idle (`GET /api/health?deep=1`, unauthenticated, `{ok, running:N}`) up to 10 min; post-restart health/log/smoke canary runs inside the detached transient unit and rolls back to the previous git tag ONCE on failure (rebuilds `web/`, restarts again, writes a red incident to the journal + `data/inbox/`). `CANARY_DRY_RUN=1` generates the canary script without invoking `systemd-run` (for testing).
 
 ---
 

@@ -1,3 +1,9 @@
 pytest>=9.0
 pytest-asyncio>=0.24
 pytest-aiohttp>=1.0
+
+# E2E smoke suite (spec-072, tests/e2e/, opt-in via `-m e2e`) — real browser driving
+# a real cockpit subprocess + a scripted fake engine (e2e_fake_engine.py).
+# After installing: `venv/bin/python -m playwright install chromium` (one-time).
+playwright>=1.55
+pytest-playwright>=0.7
