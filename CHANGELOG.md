@@ -7,6 +7,23 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+## [v0.16.0] — 2026-07-05
+
+The "make the chat smarter" batch: one stream to rule the canvas, background runs as a
+first-class citizen, file undo, real diffs, global search, and a deploy safety net.
+
+### Added
+- **Global search Cmd/Ctrl+K (spec-074)** — FTS5 index over every project's chat transcripts, timelines and boards (RU+EN); grouped results with highlighted snippets, keyboard navigation, mobile sheet; incremental background indexing + on-demand reindex endpoint.
+- **File rewind (spec-073)** — SDK file checkpointing is on; every user message in history carries a ⏪ hover action that restores all agent-touched files to their pre-message state (chat history untouched; guarded against mid-turn and dead-client calls).
+- **Real inline diffs (spec-073)** — Edit tool rows expand into a line-level LCS diff with add/del coloring (server-side old/new payload raised to 2000 chars); Write previews raised to match.
+- **Background runs as first-class turns (spec-063 §bg)** — autonomous CLI wake-ups render live as 🌙 "while you were away" bubbles (tinted, streamed, replayable) and push a preview notification; no more answers silently waiting for your next visit.
+- **E2E smoke harness (spec-072)** — scripted fake engine (`E2E_FAKE_ENGINE=1`) + Playwright suite driving the real cockpit UI (streaming, tool rows, mid-run reload reattach, busy-path queue) against a throwaway instance; opt-in via `pytest tests/e2e -m e2e`.
+- **Deploy canary (spec-072)** — restart-self.sh now waits for idle before restarting (no more killed in-flight turns), then health-polls + journal-scans the new process and rolls back to the previous git tag ONCE on failure, leaving a loud incident marker.
+
+### Changed
+- **spec-063 Stage 2a** — the seq-ordered activity stream is the single render source for every turn (own sends included); the direct POST body is a control channel only. The four-writer canvas (direct SSE / bus / poll / hydrate) that bred duplicate-and-chopped-bubble bugs is gone; sub-agent lane and model-fallback strips now render live from the bus. Stage 2b (single vocabulary + dead-code deletion) remains.
+
+
 ## [v0.15.0] — 2026-07-05
 
 Structural fix-pack for the spec-069-era regressions (chopped chat bubbles, replies invisible
