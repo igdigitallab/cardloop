@@ -342,6 +342,14 @@ export const api = {
       method: 'POST',
     }),
 
+  // spec-073: rewind tracked files to the checkpoint at a user message (file undo).
+  rewindFiles: (id: string, messageUuid: string) =>
+    apiFetch<{ ok: boolean }>(`/api/projects/${id}/rewind`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message_uuid: messageUuid }),
+    }),
+
   // Chat message queue — server-side persist; survives page reload
   chatQueue: (id: string) =>
     apiFetch<{ items: Array<{ id: string; text: string; created_at: number }> }>(

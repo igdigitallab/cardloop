@@ -433,6 +433,8 @@ export interface HistoryMessage {
   role: 'user' | 'assistant'
   text: string
   tools: RichTool[]
+  /** spec-073: transcript uuid of a user message — the file-checkpoint anchor for rewind. */
+  uuid?: string | null
 }
 
 /** Response shape for GET /api/projects/{id}/session-history */
@@ -473,6 +475,8 @@ export interface ChatMessage {
   streaming: boolean
   /** spec-063: message produced by an autonomous background run (drain-surfaced CLI turn). */
   bgRun?: boolean
+  /** spec-073: transcript uuid (user messages from history) — enables the file-rewind action. */
+  uuid?: string
   /** Error message if the turn ended with an error */
   error?: string
   /** Unix timestamp (ms) when the message was created / result arrived */

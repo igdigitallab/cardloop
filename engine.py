@@ -587,6 +587,9 @@ PERSISTENT_CLIENT: bool = os.getenv("PERSISTENT_CLIENT", "0") == "1"
 LIVE_CLIENT_TTL_SEC: int = int(os.getenv("LIVE_CLIENT_TTL_SEC", "600"))
 # Max number of concurrent live clients held in the registry; LRU eviction beyond this.
 LIVE_CLIENT_MAX: int = int(os.getenv("LIVE_CLIENT_MAX", "10"))
+# spec-073: SDK file checkpointing — lets the cockpit rewind files to any user-message
+# checkpoint (POST /api/projects/{id}/rewind). Cheap (CLI shadows edited files only).
+FILE_CHECKPOINTS: bool = os.getenv("FILE_CHECKPOINTS", "1") not in ("0", "false", "False")
 _DESTRUCTIVE = ("git push", "push origin", "reset --hard", "rebase", "git clean", "--force",
                 "rm -rf", "rm -r ", "rm -f", "drop table", "drop database", "delete from",
                 "truncate", "coolify", "docker rm", "docker stop", "compose down",
@@ -1854,6 +1857,8 @@ async def run_engine(  # type: ignore[return]
         include_partial_messages=_stream_partial,
         # Spec-029 item 3: structured output for card runs. None → no change (chat/TG paths).
         output_format=output_format,
+        # spec-073: track file changes so rewind_files() can restore any checkpoint.
+        enable_file_checkpointing=FILE_CHECKPOINTS,
     )
 
     audit(project_name, "TASK", short(prompt, 300))

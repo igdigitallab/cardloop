@@ -1246,10 +1246,12 @@ def _format_tool(name: str, inp: dict) -> dict:
         if name == "Edit":
             old_str = inp.get("old_string", "")
             new_str = inp.get("new_string", "")
-            if isinstance(old_str, str) and len(old_str) > 400:
-                old_str = old_str[:400] + "…"
-            if isinstance(new_str, str) and len(new_str) > 400:
-                new_str = new_str[:400] + "…"
+            # spec-073: 2000 chars each — enough for a real inline diff view; the frontend
+            # renders a per-line unified diff from these.
+            if isinstance(old_str, str) and len(old_str) > 2000:
+                old_str = old_str[:2000] + "…"
+            if isinstance(new_str, str) and len(new_str) > 2000:
+                new_str = new_str[:2000] + "…"
             return {"name": name, "kind": "edit", "file": file_path, "old": old_str, "new": new_str}
         elif name == "MultiEdit":
             edits = inp.get("edits", [])
@@ -1262,8 +1264,8 @@ def _format_tool(name: str, inp: dict) -> dict:
     elif name == "Write":
         file_path = inp.get("file_path", "")
         content = inp.get("content", "")
-        if isinstance(content, str) and len(content) > 600:
-            preview = content[:600] + "…"
+        if isinstance(content, str) and len(content) > 2000:
+            preview = content[:2000] + "…"
         else:
             preview = content if isinstance(content, str) else ""
         return {"name": name, "kind": "write", "file": file_path, "preview": preview}
@@ -9115,7 +9117,9 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
                     if isinstance(c, str):
                         cleaned = _strip_service_blocks(c)
                         if cleaned:
-                            msgs.append({"role": "user", "text": cleaned, "tools": []})
+                            # spec-073: uuid = the file-checkpoint anchor for rewind_files.
+                            msgs.append({"role": "user", "text": cleaned, "tools": [],
+                                         "uuid": o.get("uuid")})
                     # content-list on user = tool_result → skip (not a human reply)
                 elif t == "assistant":
                     c = m.get("content")
@@ -10370,6 +10374,50 @@ async def api_project_chat(req: web.Request) -> web.Response:
 
 
 # ─────────────────────────── Stop endpoint (chat/stop) ───────────────────────
+
+async def api_project_rewind(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/rewind — body {"message_uuid": "..."}.
+
+    spec-073: rewind tracked FILES to their state at a user message (SDK rewind_files,
+    file checkpointing enabled engine-side). Chat history is untouched — this is a file
+    undo, not a conversation rewind. Guards: refuse mid-turn (the agent may be writing),
+    and require a live client (checkpoints belong to the connected CLI process; after an
+    idle eviction the checkpoint window is gone)."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    message_uuid = (body.get("message_uuid") or "").strip()
+    if not message_uuid:
+        return web.json_response({"error": "message_uuid required"}, status=400)
+
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    if ctx["running"].get(session_key) is not None:
+        return web.json_response(
+            {"error": "a turn is running — stop it before rewinding files"}, status=409)
+    entry = (ctx.get("live_clients") or {}).get(session_key)
+    if entry is None or getattr(entry, "client", None) is None:
+        return web.json_response(
+            {"error": "no live session client — file checkpoints are only available "
+                      "while the session client is alive (send a message, then rewind)"},
+            status=409)
+    try:
+        await asyncio.wait_for(entry.client.rewind_files(message_uuid), timeout=30)
+    except Exception as exc:
+        print(f"[rewind] {session_key}: rewind_files failed: {exc!r}")
+        return web.json_response({"error": f"rewind failed: {exc}"}, status=502)
+    print(f"[rewind] {session_key}: files rewound to checkpoint {message_uuid}")
+    _bus_publish(session_key, {"kind": "board_event", "event": "reconcile",
+                               "card_id": "rewind", "title": "Files rewound",
+                               "severity": "info",
+                               "summary": f"Files restored to checkpoint {message_uuid[:8]}…",
+                               "ts": time.time()}, persist=True)
+    return web.json_response({"ok": True})
+
 
 async def api_project_chat_stop(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/chat/stop — interrupts the current agent run.
@@ -13212,6 +13260,7 @@ async def start(ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
         # C1-stop: interrupt current agent run
         app.router.add_post("/api/projects/{id}/chat/stop", api_project_chat_stop)
+        app.router.add_post("/api/projects/{id}/rewind", api_project_rewind)
         # Chat message queue (server-side persist across reload; editable/deletable)
         app.router.add_get("/api/projects/{id}/chat/queue", api_chat_queue_list)
         app.router.add_post("/api/projects/{id}/chat/queue", api_chat_queue_add)

@@ -2210,3 +2210,16 @@
   margin-bottom: 4px;
   user-select: none;
 }
+
+/* ─── spec-073: line-level diff in Edit tool rows ─── */
+.chat-tool-diff-ln {
+  margin: 0;
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.chat-tool-diff-add { background: color-mix(in srgb, #22c55e 12%, transparent); color: var(--text1, inherit); }
+.chat-tool-diff-del { background: color-mix(in srgb, #ef4444 12%, transparent); color: var(--text1, inherit); }
+.chat-tool-diff-ctx { color: var(--text2); }

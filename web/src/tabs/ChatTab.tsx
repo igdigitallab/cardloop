@@ -555,6 +555,39 @@ function MsgCopyButton({ text }: { text: string }) {
   )
 }
 
+// ─── RewindButton (spec-073) ─────────────────────────────────────────────────
+// File undo: restores tracked files to their state BEFORE this user message ran
+// (SDK file checkpointing). Chat history is untouched. Requires a live session
+// client — the backend answers 409 with a human explanation otherwise.
+function RewindButton({ projectId, messageUuid }: { projectId: string; messageUuid: string }) {
+  const [state, setState] = useState<'idle' | 'busy' | 'ok' | 'err'>('idle')
+  const [errText, setErrText] = useState('')
+  const handleRewind = async () => {
+    if (state === 'busy') return
+    if (!window.confirm(t['chat.rewind_confirm'])) return
+    setState('busy')
+    try {
+      await api.rewindFiles(projectId, messageUuid)
+      setState('ok')
+      setTimeout(() => setState('idle'), 2500)
+    } catch (e) {
+      setErrText(e instanceof Error ? e.message : String(e))
+      setState('err')
+      setTimeout(() => setState('idle'), 5000)
+    }
+  }
+  return (
+    <button
+      className={`msg-act-btn${state === 'ok' ? ' msg-act-btn--ok' : ''}`}
+      onClick={handleRewind}
+      title={state === 'err' ? errText : state === 'ok' ? t['chat.rewind_done'] : t['chat.rewind_title']}
+      aria-label={t['chat.rewind_title']}
+    >
+      {state === 'ok' ? <IconCheck /> : state === 'err' ? '⚠' : '⏪'}
+    </button>
+  )
+}
+
 // ─── SaveToBoardButton (spec-052 Phase 4b) ───────────────────────────────────
 // Saves the current text selection (or the whole message) as a Backlog card.
 // The board emits its own board_event on create, which surfaces back in the chat.
@@ -1338,6 +1371,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   function histToMessages(items: HistoryMessage[]): ChatMessage[] {
     return items.map((m, i) => ({
       id: `hist-${i}`, role: m.role, text: m.text, tools: m.tools, streaming: false,
+      ...(m.uuid ? { uuid: m.uuid } : {}),
     }))
   }
 
@@ -2973,6 +3007,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                     <MsgCopyButton text={msg.text} />
                     {/* spec-052 Phase 4b: save selection / message as a Backlog card */}
                     <SaveToBoardButton projectId={project.id} text={msg.text} />
+                  </div>
+                )}
+                {/* spec-073: file undo — user messages loaded from history carry the
+                    checkpoint uuid; rewind restores files to before this message ran. */}
+                {msg.role === 'user' && msg.uuid && (
+                  <div className="msg-actions">
+                    <RewindButton projectId={project.id} messageUuid={msg.uuid} />
                   </div>
                 )}
               </div>
