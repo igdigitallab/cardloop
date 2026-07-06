@@ -39,11 +39,12 @@ def test_edit_basic():
 
 
 def test_edit_truncates_long_strings():
-    big = "A" * 1000
+    big = "A" * 3000
     out = _format_tool("Edit", {"file_path": "x", "old_string": big, "new_string": big})
-    assert len(out["old"]) == 401  # 400 + ellipsis '…'
+    # spec-073: 2000 + ellipsis '…' — big enough for a real inline diff view.
+    assert len(out["old"]) == 2001
     assert out["old"].endswith("…")
-    assert len(out["new"]) == 401
+    assert len(out["new"]) == 2001
     assert out["new"].endswith("…")
 
 
@@ -81,9 +82,9 @@ def test_write_short_content():
 
 
 def test_write_truncates_long_content():
-    big = "X" * 1000
+    big = "X" * 3000
     out = _format_tool("Write", {"file_path": "/tmp/y.txt", "content": big})
-    assert len(out["preview"]) == 601  # 600 + '…'
+    assert len(out["preview"]) == 2001  # spec-073: 2000 + '…'
     assert out["preview"].endswith("…")
 
 
