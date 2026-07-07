@@ -24,6 +24,7 @@ function kindIcon(evt: TimelineEvent): string {
     case 'run_end':   return evt.outcome === 'ok' ? '✅' : '❌'
     case 'tool':      return '🔧'
     case 'text':      return '💬'
+    case 'context_pack': return '🧠'
     case 'session_rotated':
     case 'auto_rotated': return '🔄'
     default:          return '•'
@@ -69,6 +70,10 @@ function eventDescription(evt: TimelineEvent): string {
         default:       return tool.name
       }
     }
+    case 'context_pack':
+      return evt.chars != null
+        ? `Context pack injected (${evt.chars.toLocaleString()} chars)`
+        : 'Context pack injected'
     case 'session_rotated':
     case 'auto_rotated':
       return rotationDescription(evt)

@@ -57,6 +57,9 @@ import autopilot as _autopilot
 # spec-074: global search index (SQLite FTS5 over transcripts/timeline/boards)
 import search as _search
 
+# spec-075: context pack — deterministic project-state injection on fresh sessions
+import context_pack as _context_pack
+
 # spec-053 Phase B: Web Push (VAPID + pywebpush). Optional — degrades gracefully if absent.
 try:
     from pywebpush import webpush as _webpush, WebPushException as _WebPushException
@@ -1946,6 +1949,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "favorite": pid in fav_set,
             "type": b.get("type"),
             "autopilot": _autopilot.get_project_mode(b),
+            # spec-075: per-project context-pack override (None = inherit global true)
+            "context_pack_enabled": b.get("context_pack_enabled"),
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -4369,6 +4374,9 @@ _SETTINGS_PATH: "Path | None" = None
 _SETTINGS_CACHE: dict = {}
 _SETTINGS_MTIME: float = 0.0
 
+# spec-075: last assembled context pack per session_key (for preview endpoint / Phase-B chip)
+_cp_last: dict = {}  # session_key → pack str
+
 # Key → (type, min, max) for POST validation. None bounds = no range check.
 _GLOBAL_SETTINGS_SPEC = {
     "scan_interval_sec": ("int", 30, 3600),
@@ -4387,6 +4395,8 @@ _GLOBAL_SETTINGS_SPEC = {
     # Card 43665f — model routing: default model used for board-card agent runs.
     # "" / absent → falls back to "sonnet". Does NOT affect chat runs.
     "board_card_model": ("model", None, None),
+    # spec-075: context pack — inject project memory/board/timeline on fresh sessions.
+    "context_pack_enabled": ("bool", None, None),
 }
 
 
@@ -4547,7 +4557,7 @@ def _git_enabled(project: dict) -> bool:
 
 # ─────────────────────── API: settings (global + per-project) ───────────────────────
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled")
 
 # spec-051: per-project policy for resuming a run interrupted by a rate-limit.
 #   ask    — show an in-chat Yes/No prompt (default; visible, not silent)
@@ -4642,6 +4652,14 @@ async def api_settings_post(req: web.Request) -> web.Response:
     return web.json_response({"ok": True, "stored": current})
 
 
+def _project_context_pack_enabled(project: dict) -> bool:
+    """Per-project context-pack override. None (absent) → inherit global default (True)."""
+    val = project.get("context_pack_enabled")
+    if val is None:
+        return True  # inherit global default
+    return bool(val)
+
+
 def _project_settings_view(project: dict) -> dict:
     return {
         "git_enabled": _git_enabled(project),
@@ -4652,6 +4670,8 @@ def _project_settings_view(project: dict) -> dict:
         "agents_config": project.get("agents_config") or {},
         "auto_resume_mode": _resume_mode_for(project),
         "autopilot": _autopilot.get_project_mode(project),
+        # spec-075: per-project context-pack override (None = inherit global)
+        "context_pack_enabled": project.get("context_pack_enabled"),
     }
 
 
@@ -4662,6 +4682,34 @@ async def api_project_settings_get(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     return web.json_response(_project_settings_view(project))
+
+
+async def api_project_context_pack(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/context-pack — preview the context pack that would be injected.
+
+    spec-075 §5: assembles the pack live (empty query) so the operator can see exactly
+    what gets injected at the start of a fresh session. Read-only, auth-gated.
+
+    Returns: {"enabled": bool, "chars": int, "pack": str}
+    """
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    enabled = (
+        _get_global_setting("context_pack_enabled", True)
+        and _project_context_pack_enabled(project)
+    )
+    cwd = project.get("cwd", "")
+    session_key = project.get("session_key", "")
+    pack: str | None = _context_pack.assemble(
+        cwd, session_key, "",
+        data_dir=str(ctx["DATA"]),
+        project_id=project.get("id"),
+    )
+    pack_str = pack if pack else ""
+    return web.json_response({"enabled": enabled, "chars": len(pack_str), "pack": pack_str})
 
 
 async def api_project_settings_post(req: web.Request) -> web.Response:
@@ -4684,7 +4732,7 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
     for k, v in body.items():
         if k not in _PROJECT_SETTING_FIELDS:
             return web.json_response({"error": f"unknown key: {k}"}, status=400)
-        if k in ("git_enabled", "notify_on_error"):
+        if k in ("git_enabled", "notify_on_error", "context_pack_enabled"):
             if not isinstance(v, bool):
                 return web.json_response({"error": f"{k}: expected bool"}, status=400)
             updates[k] = v
@@ -10242,6 +10290,25 @@ async def api_project_chat(req: web.Request) -> web.Response:
         except Exception as _inj_exc:
             print(f"[rotation] handoff injection failed (continuing without it): {_inj_exc}")
             effective_prompt = prompt
+        # spec-075 Phase A: inject context pack on first turn of a fresh session.
+        # Prepended BEFORE the handoff block (order: pack → handoff summary → user prompt).
+        # Gated: resume_sid is None AND global context_pack_enabled AND per-project override.
+        if resume_sid is None:
+            try:
+                if (_get_global_setting("context_pack_enabled", True)
+                        and _project_context_pack_enabled(project)):
+                    _pack = _context_pack.assemble(
+                        cwd, session_key, prompt,
+                        data_dir=str(ctx["DATA"]),
+                        project_id=project.get("id"),
+                    )
+                    if _pack:
+                        effective_prompt = _pack + "\n\n" + effective_prompt
+                        _timeline_append(session_key, {"type": "context_pack", "chars": len(_pack)})
+                        _cp_last[session_key] = _pack
+                        print(f"[context-pack] injected {len(_pack)} chars for {session_key}")
+            except Exception as _cp_exc:
+                print(f"[context-pack] skipped (continuing): {_cp_exc}")
         # ephemeral=False: chat sessions share state with the project (resumable, context-tracked).
         # effort: None when think_mode is absent/unknown (preserves _DEFAULT_EFFORT); otherwise the
         # exact ladder value low|medium|high|xhigh|max passed straight through to the SDK.
@@ -13336,6 +13403,8 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/monitors", api_project_monitors)
         app.router.add_delete("/api/projects/{id}/monitors/{mid}", api_project_monitor_dismiss)
         app.router.add_post("/api/projects/{id}/settings", api_project_settings_post)
+        # spec-075 §5: preview the context pack for a project (read-only)
+        app.router.add_get("/api/projects/{id}/context-pack", api_project_context_pack)
         # "+ New project" — creates untitled-<ts>/, adds to topics.json, spawns onboarding
         app.router.add_post("/api/projects/new", api_new_project)
         # Spec-023: Project Archive — static route MUST be before {id} routes

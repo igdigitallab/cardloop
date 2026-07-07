@@ -157,6 +157,7 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
         watchdog_stall_sec: ef.watchdog_stall_sec,
         watchdog_max_sec: ef.watchdog_max_sec,
         board_card_model: ef.board_card_model || '',
+        context_pack_enabled: ef.context_pack_enabled ?? true,
       })
       setGlobMsg(`Saved ✓ (${Object.keys(r.stored).length} override(s))`)
     } catch (e) { setGlobMsg('⚠ ' + errMsg(e)) }
@@ -283,6 +284,22 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
           <input type="checkbox" checked={proj.notify_on_error}
                  onChange={ev => setProj({ ...proj, notify_on_error: ev.target.checked })}
                  aria-label="Error notifications" />
+        </Row>
+
+        <Row title="Context pack"
+             hint="Inject project memory & board on fresh session start. Inherit = follow global setting.">
+          <select
+            value={proj.context_pack_enabled === true ? 'on' : proj.context_pack_enabled === false ? 'off' : 'inherit'}
+            onChange={ev => {
+              const v = ev.target.value
+              setProj({ ...proj, context_pack_enabled: v === 'on' ? true : v === 'off' ? false : null })
+            }}
+            aria-label="Context pack override"
+          >
+            <option value="inherit">Inherit global</option>
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </select>
         </Row>
 
         <Row title="After rate-limit"
@@ -429,6 +446,13 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
           <input type="number" min={60} max={14400} style={{ width: 90, padding: '4px 8px', fontSize: 13 }}
                  value={e.watchdog_max_sec}
                  onChange={ev => setE({ watchdog_max_sec: Number(ev.target.value) })} />
+        </Row>
+
+        <Row title="Context pack"
+             hint="Inject project memory, board & recent activity into the first message of a fresh session, so the agent doesn't start blank after a reset.">
+          <input type="checkbox" checked={e.context_pack_enabled ?? true}
+                 onChange={ev => setE({ context_pack_enabled: ev.target.checked })}
+                 aria-label="Context pack" />
         </Row>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>

@@ -219,6 +219,8 @@ export interface ProjectSettings {
   auto_resume_mode: 'ask' | 'always' | 'never'
   /** spec-067: per-project autopilot mode. off (default) / propose / auto. */
   autopilot?: 'off' | 'propose' | 'auto'
+  /** spec-075: per-project context pack override. null/undefined = inherit global. */
+  context_pack_enabled?: boolean | null
 }
 
 // ─── spec-067: Autopilot ──────────────────────────────────────────────────────
@@ -254,6 +256,8 @@ export interface GlobalSettingsEffective {
   board_reconcile_on_match?: 'done' | 'review'
   /** Card 43665f: default model for board-card agent runs. '' = use sonnet. */
   board_card_model?: string
+  /** spec-075: inject project memory/board/activity at session start. Default true. */
+  context_pack_enabled?: boolean
 }
 
 export interface GlobalSettings {
@@ -278,6 +282,8 @@ export interface TimelineEvent {
   tool?: import('./types').RichTool
   /** run_end: outcome */
   outcome?: 'ok' | 'fail'
+  /** context_pack: number of chars injected */
+  chars?: number
   /** session_rotated / auto_rotated: why the session was rotated + the context at the time */
   trigger?: 'auto' | 'manual' | string
   context_tokens?: number
