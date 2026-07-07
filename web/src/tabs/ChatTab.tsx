@@ -3349,29 +3349,29 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                     {/* Attach file */}
                     <button
                       className="composer-tools-menu-item"
-                      onMouseDown={e => { e.preventDefault(); setShowToolsMenu(false); fileInputRef.current?.click() }}
+                      onClick={() => { setShowToolsMenu(false); fileInputRef.current?.click() }}
                     ><Paperclip size={14} />{t['chat.tools_menu_attach']}</button>
                     {/* Prompts */}
                     <button
                       className={`composer-tools-menu-item${showPrompts ? ' active' : ''}`}
-                      onMouseDown={e => { e.preventDefault(); setShowToolsMenu(false); setShowPrompts(s => !s); setShowSkills(false) }}
+                      onClick={() => { (document.activeElement as HTMLElement | null)?.blur(); setShowToolsMenu(false); setShowPrompts(s => !s); setShowSkills(false) }}
                     ><ClipboardList size={14} />{t['chat.tools_menu_prompts']}</button>
                     {/* Skills */}
                     <button
                       className={`composer-tools-menu-item${showSkills ? ' active' : ''}`}
-                      onMouseDown={e => { e.preventDefault(); setShowToolsMenu(false); setShowSkills(s => !s); setShowPrompts(false) }}
+                      onClick={() => { (document.activeElement as HTMLElement | null)?.blur(); setShowToolsMenu(false); setShowSkills(s => !s); setShowPrompts(false) }}
                     ><Wrench size={14} />{t['chat.tools_menu_skills']}</button>
                     {/* Defer after reset */}
                     <button
                       className="composer-tools-menu-item"
                       disabled={!input.trim() || deferAfterResetBusy}
-                      onMouseDown={e => { e.preventDefault(); handleDeferAfterReset() }}
+                      onClick={() => { handleDeferAfterReset() }}
                     ><Clock size={14} />{t['chat.tools_menu_defer']}</button>
                     {/* Auto-rotate toggle (T3) */}
                     <div className="composer-tools-menu-sep" />
                     <button
                       className={`composer-tools-menu-item composer-tools-menu-toggle${autoRotate ? ' active' : ''}`}
-                      onMouseDown={e => { e.preventDefault(); handleAutoRotateChange(!autoRotate) }}
+                      onClick={() => { handleAutoRotateChange(!autoRotate) }}
                       title={t['chat.autorotate_hint']}
                     >
                       <span style={{ flex: '1 1 auto', textAlign: 'left' }}>{t['chat.autorotate_toggle']}</span>

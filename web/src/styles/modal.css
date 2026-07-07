@@ -150,7 +150,13 @@
     padding-bottom: env(safe-area-inset-bottom, 0);
   }
 
-  /* Prompt picker → bottom sheet */
+}
+
+/* Prompt/Skill picker → bottom sheet. Matches ChatTab's isMobile (≤768px), which
+   swaps the inline tool icons for the "+" menu; the picker must be a sheet across
+   that whole range, not just ≤640px — otherwise 641–768px keeps the desktop
+   absolute variant that renders off the composer. */
+@media (max-width: 768px) {
   .prompt-picker {
     position: fixed;
     bottom: 0;
