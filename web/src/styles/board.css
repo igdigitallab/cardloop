@@ -564,67 +564,6 @@
   color: var(--red);
 }
 
-/* ── spec-036 Phase 2a: board dashboard summary strip ─────────── */
-.board-dashboard {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 10px;
-  padding: 6px 10px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  min-height: 28px;
-}
-.board-dashboard-counts {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-}
-.board-dashboard-pill {
-  color: var(--text3);
-  white-space: nowrap;
-}
-.board-dashboard-pill strong {
-  color: var(--text2);
-  font-weight: 600;
-}
-.board-dashboard-pill-review strong {
-  color: var(--accent-h);
-}
-.board-dashboard-pill-failed strong {
-  color: var(--red);
-}
-.board-dashboard-running {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--yellow);
-  font-size: 11px;
-  overflow: hidden;
-  min-width: 0;
-}
-.board-dashboard-running-icon {
-  flex-shrink: 0;
-  animation: spin 2s linear infinite;
-  display: inline-block;
-}
-.board-dashboard-running-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-  flex: 1;
-}
-.board-dashboard-running-elapsed {
-  color: var(--text3);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
 /* ── Failed tray (Spec 032) ────────────────────────────────── */
 .board-failed-tray {
   margin-bottom: 14px;

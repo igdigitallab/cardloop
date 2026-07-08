@@ -40,6 +40,9 @@ const BASE_TABS: Tab[] = [
 // localStorage keys
 const LS_WIDTH    = 'cops.chatWidth'
 const LS_COLLAPSED = 'cops.chatCollapsed'
+// Full-screen chat: hide the left project pane so the chat fills the width
+// (mirror of LS_COLLAPSED, which hides the chat instead). Mutually exclusive.
+const LS_CHATMAX = 'cops.chatMax'
 // spec-066/mobile: the Browser tab stacks browser+chat; the divider ratio is a
 // per-device pref shared across projects (the inner-tab memory is per-project, see mtabKey).
 const LS_MSPLIT_PCT = 'cops.mobileBrowserPct'
@@ -375,6 +378,11 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
   const [collapsed, setCollapsed] = useState<boolean>(() =>
     readLSBool(LS_COLLAPSED, false)
   )
+  // Full-screen chat (left project pane hidden). Opposite of `collapsed`; the two
+  // never hold at once — entering either clears the other.
+  const [chatMax, setChatMax] = useState<boolean>(() =>
+    readLSBool(LS_CHATMAX, false)
+  )
   // Remember width before collapse so we can restore it
   const widthBeforeCollapse = useRef<number>(chatWidth)
 
@@ -393,6 +401,9 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
   useEffect(() => {
     try { localStorage.setItem(LS_COLLAPSED, String(collapsed)) } catch {}
   }, [collapsed])
+  useEffect(() => {
+    try { localStorage.setItem(LS_CHATMAX, String(chatMax)) } catch {}
+  }, [chatMax])
 
   // ── Mobile browser view: the Browser tab stacks browser (top) + chat (bottom) ──
   // No separate "Split" toggle — opening the Browser tab IS the split view. The
@@ -483,17 +494,31 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
     }
   }
 
+  // ── Full-screen chat / restore ────────────────────────────────────────────
+  // Hides the left project pane so the chat fills the whole width (like a free
+  // chat). Clears `collapsed` on the way in so the two states never conflict.
+  function toggleChatMax() {
+    setChatMax(prev => {
+      if (!prev) setCollapsed(false)
+      return !prev
+    })
+  }
+
   // ── Inline styles for panels ──────────────────────────────────────────────
   // On narrow screens use CSS classes only (no inline flex-basis override)
   const leftStyle: React.CSSProperties = narrow || collapsed
     ? {}
-    : { flex: `0 0 ${100 - chatWidth}%`, maxWidth: `${100 - chatWidth}%` }
+    : chatMax
+      ? { flex: '0 0 0', overflow: 'hidden', minWidth: 0, maxWidth: 0 }
+      : { flex: `0 0 ${100 - chatWidth}%`, maxWidth: `${100 - chatWidth}%` }
 
   const chatStyle: React.CSSProperties = narrow
     ? {}
     : collapsed
       ? { flex: '0 0 0', overflow: 'hidden', minWidth: 0 }
-      : { flex: `0 0 ${chatWidth}%`, maxWidth: `${chatWidth}%` }
+      : chatMax
+        ? { flex: '1 1 100%', maxWidth: '100%' }
+        : { flex: `0 0 ${chatWidth}%`, maxWidth: `${chatWidth}%` }
 
   // incidents count: project.incidents is defined in types.ts
   const incidentsCount = project.incidents ?? 0
@@ -900,8 +925,10 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
         </div>
       </div>
 
-      {/* DIVIDER — draggable handle (hidden on narrow screens and when collapsed) */}
-      {!narrow && (
+      {/* DIVIDER — draggable handle (hidden on narrow screens, when collapsed the
+          divider stays as the expand affordance, but in full-screen chat there is
+          no left pane so the divider is gone entirely). */}
+      {!narrow && !chatMax && (
         <div
           className={`project-split-divider${collapsed ? ' divider-collapsed' : ''}`}
           onMouseDown={onDividerMouseDown}
@@ -919,6 +946,8 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
             isActive={isActive}
             collapsed={collapsed}
             onToggleCollapse={toggleCollapse}
+            chatMax={chatMax}
+            onToggleChatMax={toggleChatMax}
             onOpenCard={() => setActiveTab('board')}
             discussCard={discussCard}
             onDiscussConsumed={() => setDiscussCard(null)}

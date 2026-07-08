@@ -106,78 +106,6 @@ function toolHintBoard(tool: RichTool): string {
   return ''
 }
 
-// ─── BoardDashboard — compact summary strip above the columns ─────────────────
-
-interface BoardDashboardProps {
-  board: Board
-  run: CardRunState | null
-}
-
-/**
- * Compact project dashboard: column counts + live run indicator.
- * The live elapsed timer is isolated in a child memo component.
- */
-const BoardDashboard = memo(function BoardDashboard({ board, run }: BoardDashboardProps) {
-  const backlogCount = board.columns.find(c => c.key === 'backlog')?.cards.length ?? 0
-  const reviewCount = board.columns.find(c => c.key === 'review')?.cards.length ?? 0
-  const failedCount = board.columns.find(c => c.key === 'failed')?.cards.length ?? 0
-
-  // Find the card text of the currently running card
-  let runCardText: string | null = null
-  if (run) {
-    for (const col of board.columns) {
-      const found = col.cards.find(c => c.id === run.cardId)
-      if (found) { runCardText = found.text; break }
-    }
-  }
-
-  return (
-    <div className="board-dashboard">
-      <span className="board-dashboard-counts">
-        {backlogCount > 0 && (
-          <span className="board-dashboard-pill">{t['board.dashboard_backlog']} <strong>{backlogCount}</strong></span>
-        )}
-        {reviewCount > 0 && (
-          <span className="board-dashboard-pill board-dashboard-pill-review">{t['board.dashboard_review']} <strong>{reviewCount}</strong></span>
-        )}
-        {failedCount > 0 && (
-          <span className="board-dashboard-pill board-dashboard-pill-failed">{t['board.dashboard_failed']} <strong>{failedCount}</strong></span>
-        )}
-      </span>
-      {run && (
-        <BoardDashboardRun run={run} cardText={runCardText} />
-      )}
-    </div>
-  )
-})
-
-interface BoardDashboardRunProps {
-  run: CardRunState
-  cardText: string | null
-}
-
-/** Isolated ticker for the running card summary in the dashboard. */
-const BoardDashboardRun = memo(function BoardDashboardRun({ run, cardText }: BoardDashboardRunProps) {
-  const [tick, setTick] = useState(Date.now())
-  useEffect(() => {
-    const id = setInterval(() => setTick(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [])
-
-  const elapsedSec = (tick - run.startedAt) / 1000
-  const label = cardText
-    ? (cardText.length > 60 ? cardText.slice(0, 60) + '…' : cardText)
-    : run.cardId
-
-  return (
-    <span className="board-dashboard-running">
-      <span className="board-dashboard-running-icon">⚙</span>
-      <span className="board-dashboard-running-label">{t['board.dashboard_running']}: {label}</span>
-      <span className="board-dashboard-running-elapsed">· {fmtDuration(elapsedSec)}</span>
-    </span>
-  )
-})
-
 interface Props {
   projectId: string
   /** When false (project tab hidden via display:none), suspend polling to avoid wasted fetches. */
@@ -1157,9 +1085,6 @@ export function BoardTab({ projectId, isActive = true, onDiscuss }: Props) {
       {!board?.exists && (
         <div className="board-hint board-hint-notexist">TASKS.md does not exist yet — will be created on the first task</div>
       )}
-
-      {/* spec-036 Phase 2a: project dashboard summary */}
-      {board && <BoardDashboard board={board} run={liveRun} />}
 
       <div className="board-columns">
         {visibleOrder.map(key => {

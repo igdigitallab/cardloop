@@ -167,6 +167,8 @@ export const ru = {
   'split.close_panel': 'Закрыть эту панель',
   'split.expand_chat': 'Развернуть чат',
   'split.collapse_chat': 'Свернуть чат',
+  'split.maximize_chat': 'Чат на весь экран (скрыть панель проекта)',
+  'split.restore_chat': 'Вернуть панель проекта',
   'split.drag_to_resize': 'Перетащить для изменения размера',
   'split.mobile_resize': 'Потяните, чтобы изменить размер браузер / чат',
 
@@ -221,10 +223,6 @@ export const ru = {
   'board.result_modal_title': 'Результат выполнения',
 
   // ── Board live activity (spec-036 Phase 2a) ──────────────────
-  'board.dashboard_backlog': 'Очередь',
-  'board.dashboard_review': 'Ревью',
-  'board.dashboard_failed': 'Ошибки',
-  'board.dashboard_running': 'работает',
   'board.card_live_tool': 'Инструмент',
   'board.card_live_elapsed': 'прошло',
   'board.card_live_silence_warn': 'тишина',

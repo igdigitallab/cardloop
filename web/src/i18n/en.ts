@@ -187,6 +187,8 @@ export const en = {
   'split.close_panel': 'Close this panel',
   'split.expand_chat': 'Expand chat',
   'split.collapse_chat': 'Collapse chat',
+  'split.maximize_chat': 'Full-screen chat (hide project panel)',
+  'split.restore_chat': 'Restore project panel',
   'split.drag_to_resize': 'Drag to resize',
   'split.mobile_resize': 'Drag to resize browser / chat',
 
@@ -249,10 +251,6 @@ export const en = {
   'board.result_modal_title': 'Run result',
 
   // ── Board live activity (spec-036 Phase 2a) ──────────────────
-  'board.dashboard_backlog': 'Backlog',
-  'board.dashboard_review': 'Review',
-  'board.dashboard_failed': 'Failed',
-  'board.dashboard_running': 'running',
   'board.card_live_tool': 'Tool',
   'board.card_live_elapsed': 'elapsed',
   'board.card_live_silence_warn': 'silence',

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Project, ProjectGroups } from '../types'
 import { api } from '../api'
-import { HealthDot } from './HealthDot'
+import { ProjectAvatar } from './ProjectAvatar'
 import { ConfirmModal } from './ConfirmModal'
 import { Modal, ModalHead } from './Modal'
 import { t } from '../i18n'
@@ -1018,10 +1018,7 @@ export function Sidebar({
         ].filter(Boolean).join(' ')}
         title={p.cwd}
       >
-        {p.is_free
-          ? <span className="free-icon">🏠</span>
-          : <HealthDot health={p.health} />
-        }
+        <ProjectAvatar name={p.name} health={p.health} isFree={p.is_free} />
         <span className="project-name">{p.name}</span>
         {(p.incidents ?? 0) > 0 && (
           <span className="incidents-badge" title={`${p.incidents} active incident(s) on the board`}>

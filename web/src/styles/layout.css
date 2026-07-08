@@ -180,6 +180,13 @@
   color: var(--text);
 }
 
+/* Full-screen chat button engaged (project pane hidden) */
+.chat-collapse-btn.active {
+  background: var(--bg4);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 /* ── Collapsed stub (vertical pill at right edge) ───────────── */
 .chat-collapsed-stub {
   width: 28px;

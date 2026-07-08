@@ -38,7 +38,7 @@ src/
     LoginScreen.tsx — login screen
     Sidebar.tsx     — project list
     ProjectView.tsx — header + project tabs
-    HealthDot.tsx   — health indicator
+    ProjectAvatar.tsx — sidebar row monogram tile + health pip
     Spinner.tsx     — loading spinner
   tabs/
     OverviewTab.tsx — project overview

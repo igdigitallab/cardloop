@@ -121,6 +121,10 @@ interface Props {
   collapsed?: boolean
   /** Desktop-split only: toggle function for collapsing/expanding the chat pane. Passed only from the desktop-split render site. */
   onToggleCollapse?: () => void
+  /** Desktop-split only: whether the chat pane is full-screen (left project pane hidden). */
+  chatMax?: boolean
+  /** Desktop-split only: toggle full-screen chat (hide/restore the project pane). */
+  onToggleChatMax?: () => void
   /** Mobile only: when true, collapse the top session bar (Row3) — driven by ProjectView's scroll detection. */
   chromeCollapsed?: boolean
   /** Spec-052: called when the user clicks [Open card] in a board event row. Switches the left pane to the board tab. */
@@ -930,7 +934,7 @@ const isTouchDevice: boolean =
 // the code so it is trivially reversible.
 const SHOW_MULTICHAT_UI: boolean = false
 
-export function ChatTab({ project, onProjectsReload, isActive, collapsed, onToggleCollapse, chromeCollapsed, onOpenCard, discussCard, onDiscussConsumed, models }: Props) {
+export function ChatTab({ project, onProjectsReload, isActive, collapsed, onToggleCollapse, chatMax, onToggleChatMax, chromeCollapsed, onOpenCard, discussCard, onDiscussConsumed, models }: Props) {
   const projectId = project.id
 
   // Card b6f5cc: background-task monitors (long-running shells / Monitor / Workflow tasks).
@@ -2709,8 +2713,21 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               onUltracodeChange={handleUltracodeChange}
             />
           )}
+          {/* Full-screen chat button — hides the left project pane (like a free chat).
+              Hidden while the chat is collapsed (nothing to maximize). */}
+          {onToggleChatMax && !collapsed && (
+            <button
+              className={`chat-collapse-btn${chatMax ? ' active' : ''}`}
+              onClick={onToggleChatMax}
+              title={chatMax ? t['split.restore_chat'] : t['split.maximize_chat']}
+              aria-label={chatMax ? t['split.restore_chat'] : t['split.maximize_chat']}
+              aria-pressed={chatMax}
+            >
+              {chatMax ? '⤡' : '⤢'}
+            </button>
+          )}
           {/* Collapse button — only when onToggleCollapse is provided (desktop-split site). */}
-          {onToggleCollapse && (
+          {onToggleCollapse && !chatMax && (
             <button
               className="chat-collapse-btn"
               onClick={onToggleCollapse}

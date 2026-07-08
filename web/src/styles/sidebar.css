@@ -208,11 +208,12 @@
 .project-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  /* spec-061: denser rows — 4px vertical on fine pointer / desktop default.
-     Content (name, dot, badges) is single-line so nothing is clipped.
-     The coarse-pointer rule below keeps the ≥32px touch target intact. */
-  padding: 4px 8px;
+  gap: 7px;
+  /* Monogram rail: 3px vertical on fine pointer / desktop. The 20px avatar tile
+     gives the row visual weight; the min-height (fine-pointer block below) keeps
+     the row from collapsing under the tile. The coarse-pointer rule below keeps
+     the ≥32px touch target intact. */
+  padding: 3px 6px;
   border-radius: var(--radius);
   cursor: pointer;
   transition: background var(--transition);
@@ -227,13 +228,13 @@
 .project-item.active {
   background: var(--accent-subtle);
   border-left: 2px solid var(--accent);
-  padding-left: 6px; /* compensate for border to avoid layout shift */
+  padding-left: 4px; /* base pad is now 6px, minus the 2px border to avoid shift */
 }
 .project-item.has-unread .project-name { color: var(--accent-h); font-weight: 500; }
 
-/* Free chats — same project-item, more compact + delete button */
+/* Free chats — same project-item, right-side delete button. The leading glyph is
+   now the shared .project-avatar (the 🏠 emoji is gone; free chats show "#"). */
 .project-item-free { padding-right: 4px; }
-.project-item-free .free-icon { font-size: 12px; flex-shrink: 0; }
 .free-delete-btn {
   background: transparent; border: none; color: var(--text3);
   font-size: 11px; cursor: pointer; padding: 2px 6px;
@@ -249,7 +250,7 @@
 .project-item.sidebar-item-dragging { opacity: 0.35; cursor: grabbing; }
 .project-item.sidebar-item-drag-over { border-top: 2px solid var(--accent); margin-top: -2px; }
 @media (pointer: fine) {
-  .project-item { cursor: grab; }
+  .project-item { cursor: grab; min-height: 26px; }
 }
 
 /* Touch: dense rows. Height is driven by the kebab + padding, not min-height,
@@ -323,16 +324,59 @@
   margin-left: auto;
 }
 
-.health-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+/* ── Monogram avatar tile (unified leading element) ─────────────── */
+/* Fixed 20px tile owns the leading slot, so every row's text left-edge aligns
+   pixel-for-pixel — real project (letter + health pip) or free chat ("#"). */
+.project-avatar {
+  position: relative;
   flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color var(--transition), background var(--transition);
+}
+.project-avatar-glyph {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text2);
+  transform: translateY(0.5px); /* optical centering of the mono glyph */
+}
+.project-avatar-free .project-avatar-glyph {
+  color: var(--text3); /* the "#" reads quieter than a letter monogram */
 }
 
-.health-dot.green  { background: var(--green); }
-.health-dot.yellow { background: var(--yellow); }
-.health-dot.gray   { background: var(--text3); }
+/* Corner health pip — presence-dot idiom. The ring is --bg2 (the .sidebar
+   surface) so the pip layers on top of the tile instead of blending in. */
+.project-avatar-pip {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--bg2);
+}
+.project-avatar-pip.green  { background: var(--green); }
+.project-avatar-pip.yellow { background: var(--yellow); }
+.project-avatar-pip.gray   { background: var(--text3); }
+
+/* Active row: brighten the tile so the leading element reflects selection. */
+.project-item.active .project-avatar {
+  border-color: var(--border2);
+  background: var(--bg4);
+}
+.project-item.active .project-avatar-glyph { color: var(--text); }
+.project-item.active .project-avatar-pip { box-shadow: 0 0 0 1.5px var(--accent-subtle); }
+
+/* Unread row: lift the monogram to primary ink, matching .project-name. */
+.project-item.has-unread .project-avatar-glyph { color: var(--text); }
 
 .project-name {
   font-size: 13px;
@@ -548,9 +592,9 @@
   align-items: center;
   /* spec-061: tight chevron + folder-icon + label cluster. */
   gap: 5px;
-  /* spec-061: denser header — 3px/2px on fine pointer / desktop default.
+  /* spec-061: denser header — 2px on fine pointer / desktop default.
      The coarse-pointer rule below restores a ≥32px touch target. */
-  padding: 3px 8px 2px;
+  padding: 2px 8px 2px;
   cursor: pointer;
   border-radius: var(--radius-sm);
   user-select: none;
