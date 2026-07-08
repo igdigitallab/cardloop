@@ -1,11 +1,13 @@
 """
-Tests for spec-058: Ultracode mode (max effort + sub-agent fan-out directive).
+Tests for spec-058 v2: Ultracode mode (native Claude Code ultracode via --settings).
 
 run_engine(ultracode=True) must:
-  - append ULTRACODE_PROMPT to system_prompt["append"], and
-  - pin ClaudeAgentOptions.effort to "max", overriding any effort arg.
+  - pass settings=ULTRACODE_SETTINGS ({"ultracode": true}) so the CLI activates its NATIVE
+    ultracode machinery (Workflow contract + standing opt-in reminders + internal xhigh pin),
+  - pass NO --effort (opts.effort is None) — a CLI effort flag would override the native pin,
+  - append the thin ULTRACODE_PROMPT complement to system_prompt["append"].
 
-run_engine(ultracode=False) (the default) must leave both untouched.
+run_engine(ultracode=False) (the default) must leave all three untouched.
 """
 import sys
 from pathlib import Path
@@ -67,47 +69,72 @@ def _append_text(opts) -> str:
     return sp.get("append", "") if isinstance(sp, dict) else str(sp)
 
 
-def test_ultracode_prompt_constant_present():
-    """ULTRACODE_PROMPT is a hard orchestration CONTRACT (not a soft preference): it names the
-    Sonnet worker slots, states an explicit delegate/stay-solo posture, and asks for verification."""
+def test_ultracode_settings_constant_is_native_switch():
+    """ULTRACODE_SETTINGS is the inline JSON the CLI --settings flag accepts; it must flip the
+    native `ultracode` settings key (the same switch as the interactive /effort ultracode).
+    Guard: do NOT 'simplify' this to an effort value — headless mode rejects --effort ultracode."""
+    import json
+    assert hasattr(engine, "ULTRACODE_SETTINGS")
+    parsed = json.loads(engine.ULTRACODE_SETTINGS)
+    assert parsed == {"ultracode": True}
+
+
+def test_ultracode_prompt_is_thin_complement():
+    """ULTRACODE_PROMPT complements (never restates) the native contract: it names the local
+    agent roster incl. the skeptic verifier, pushes Workflow-first orchestration with adversarial
+    verification, and pins the cockpit reporting rule (full synthesis in the final message)."""
     assert hasattr(engine, "ULTRACODE_PROMPT")
     low = engine.ULTRACODE_PROMPT.lower()
     assert "ultracode" in low
-    assert "sub-agent" in low or "workflow" in low
-    assert "verify" in low
-    # spec-058 hardening (2026-07): the directive must be a real delegation contract, because
-    # Opus 4.8 spawns few sub-agents by default and follows literal instructions — a soft invite
-    # left Opus doing everything itself.
-    assert "orchestrator" in low
-    assert "executor" in low and "researcher" in low   # names the actual Sonnet worker slots
-    assert "delegate" in low
-    assert "task tool" in low or "task call" in low     # the delegation primitive
+    assert "workflow" in low
+    assert "refute" in low or "verify" in low
+    assert "executor" in low and "researcher" in low and "skeptic" in low
+    assert "synthesis" in low
+    # Must NOT reintroduce the old prompt-side contract bits that fight the native one.
+    assert "~6 at once" not in low
+    assert "you are in ultracode mode" not in low
+
+
+def test_skeptic_agent_in_default_roster():
+    """spec-058 v2 adds a read-only adversarial `skeptic` agent for workflow verify stages."""
+    assert "skeptic" in engine.DEFAULT_AGENTS
+    sk = engine.DEFAULT_AGENTS["skeptic"]
+    assert "refute" in sk.prompt.lower()
+    assert "Write" in (sk.disallowedTools or [])
 
 
 @pytest.mark.asyncio
-async def test_ultracode_on_injects_directive_and_pins_max(tmp_path):
-    """ultracode=True → ULTRACODE_PROMPT appended AND effort forced to 'max'."""
+async def test_ultracode_on_activates_native_switch(tmp_path):
+    """ultracode=True → settings=ULTRACODE_SETTINGS, NO effort flag, complement appended."""
     opts = await _drain_run_engine(tmp_path, ultracode=True)
     assert opts is not None
+    assert opts.settings == engine.ULTRACODE_SETTINGS, (
+        f"native ultracode settings not passed: {opts.settings!r}"
+    )
+    assert opts.effort is None, (
+        f"ultracode must pass NO --effort (native pin wins), got {opts.effort!r}"
+    )
     assert engine.ULTRACODE_PROMPT in _append_text(opts), (
         f"ULTRACODE_PROMPT not found in system_prompt.append: {_append_text(opts)!r}"
     )
-    assert opts.effort == "max", f"effort must be pinned to max, got {opts.effort!r}"
 
 
 @pytest.mark.asyncio
-async def test_ultracode_overrides_explicit_effort(tmp_path):
-    """ultracode=True must override an explicit effort arg (e.g. 'low' → still 'max')."""
+async def test_ultracode_suppresses_explicit_effort(tmp_path):
+    """ultracode=True must suppress an explicit effort arg (e.g. 'low' → no --effort at all),
+    otherwise the CLI-side effort flag would override the native xhigh pin."""
     opts = await _drain_run_engine(tmp_path, ultracode=True, effort="low")
     assert opts is not None
-    assert opts.effort == "max", f"ultracode must override effort='low', got {opts.effort!r}"
+    assert opts.effort is None, f"effort arg must be suppressed under ultracode, got {opts.effort!r}"
+    assert opts.settings == engine.ULTRACODE_SETTINGS
 
 
 @pytest.mark.asyncio
 async def test_ultracode_off_is_noop(tmp_path):
-    """ultracode=False (default) → no directive, and effort honours the passed value."""
+    """ultracode=False (default) → no settings payload, no directive, effort honoured."""
     opts = await _drain_run_engine(tmp_path, ultracode=False, effort="high")
     assert opts is not None
+    assert opts.settings is None, f"settings must stay None when ultracode=False: {opts.settings!r}"
     assert engine.ULTRACODE_PROMPT not in _append_text(opts), (
         f"ULTRACODE_PROMPT must NOT be injected when ultracode=False: {_append_text(opts)!r}"
     )
@@ -119,23 +146,25 @@ async def test_ultracode_default_is_off(tmp_path):
     """Omitting ultracode entirely behaves like ultracode=False."""
     opts = await _drain_run_engine(tmp_path, effort="medium")
     assert opts is not None
+    assert opts.settings is None
     assert engine.ULTRACODE_PROMPT not in _append_text(opts)
     assert opts.effort == "medium"
 
 
 @pytest.mark.asyncio
-async def test_ultracode_injects_for_opus_too(tmp_path):
-    """ultracode is model-agnostic: an opus project also gets the orchestration contract (this is
-    the exact case that was broken — Opus ran ultracode but did everything itself)."""
+async def test_ultracode_activates_for_opus_too(tmp_path):
+    """ultracode is model-agnostic: an opus project gets the native switch too (verified live:
+    the Workflow tool is served to claude-opus-4-8 and executes under the settings flag)."""
     opts = await _drain_run_engine(tmp_path, model="opus", ultracode=True)
+    assert opts.settings == engine.ULTRACODE_SETTINGS
+    assert opts.effort is None
     assert engine.ULTRACODE_PROMPT in _append_text(opts)
-    assert opts.effort == "max"
 
 
 @pytest.mark.asyncio
 async def test_ultracode_on_fable_does_not_also_inject_conductor(tmp_path):
-    """fable + ultracode → ULTRACODE_PROMPT is the sole orchestration contract; CONDUCTOR_PROMPT is
-    NOT also injected (its ≤3–5 concurrent cap would fight ultracode's parallel fan-out)."""
+    """fable + ultracode → the native contract is the sole orchestration contract; CONDUCTOR_PROMPT
+    is NOT also injected (its ≤3–5 concurrent cap would fight ultracode's workflow fan-out)."""
     opts = await _drain_run_engine(tmp_path, model="fable", ultracode=True)
     txt = _append_text(opts)
     assert engine.ULTRACODE_PROMPT in txt
@@ -146,8 +175,9 @@ async def test_ultracode_on_fable_does_not_also_inject_conductor(tmp_path):
 
 @pytest.mark.asyncio
 async def test_conductor_still_injected_for_fable_without_ultracode(tmp_path):
-    """Regression guard: plain fable (no ultracode) still gets CONDUCTOR_PROMPT and NOT ULTRACODE."""
+    """Regression guard: plain fable (no ultracode) still gets CONDUCTOR_PROMPT, no ultracode bits."""
     opts = await _drain_run_engine(tmp_path, model="fable")
     txt = _append_text(opts)
     assert engine.CONDUCTOR_PROMPT in txt
     assert engine.ULTRACODE_PROMPT not in txt
+    assert opts.settings is None

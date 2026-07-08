@@ -10101,9 +10101,10 @@ async def api_project_chat(req: web.Request) -> web.Response:
         _think_mode if _think_mode in {"low", "medium", "high", "xhigh", "max"} else None
     )
 
-    # spec-058: Ultracode mode (per-chat toggle). When on, run_engine appends the fan-out/verify
-    # directive and pins effort to "max" (overriding _effort_override). Max-effort + sub-agent
-    # fan-out is expensive — the UI surfaces an explicit ⚡ badge so this is never silent.
+    # spec-058 v2: Ultracode mode (per-chat toggle). When on, run_engine activates the CLI's
+    # NATIVE ultracode machinery (settings {"ultracode": true} → Workflow contract + xhigh pin,
+    # _effort_override is ignored). Workflow fan-out is expensive — the UI surfaces an explicit
+    # ⚡ badge so this is never silent.
     _ultracode = bool(body.get("ultracode"))
 
     # Per-chat opt-in for the 280K cost auto-rotation (make it optional). Default OFF — the

@@ -523,7 +523,7 @@ export const en = {
   // ── Ultracode mode (spec-058) ────────────────────────────────────
   'chat.ultracode_label': 'Ultracode',
   'chat.ultracode_toggle': 'Ultracode mode',
-  'chat.ultracode_hint': 'Max effort + sub-agent fan-out: the agent decomposes the task, runs parallel sub-agents, and adversarially verifies before acting. Slower and more expensive — use for substantial work.',
+  'chat.ultracode_hint': 'Native Claude Code ultracode: the agent authors multi-agent Workflows for every substantive task — parallel pipelines, adversarial verification (skeptics try to refute findings), judge panels — at xhigh effort. Slower and more expensive; the best answer wins, not the cheapest.',
 
   // ── Auto-rotate toggle (spec-059 / T3) ──────────────────────────
   'chat.autorotate_label': 'Auto-rotate',

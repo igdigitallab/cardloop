@@ -7,6 +7,12 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Changed
+- **Ultracode goes native (spec-058 v2)** — the ⚡ toggle now flips the CLI's own ultracode switch (`--settings '{"ultracode": true}'`) instead of imitating it with a prompt: the CLI injects its standing opt-in reminders, exposes the Workflow tool's Ultracode contract (deterministic multi-agent pipelines, adversarial verification, judge panels, loop-until-dry) and pins effort to xhigh internally. Works on any model incl. Opus (verified live: Workflow tool served + a 2-agent workflow executed end-to-end on `claude-opus-4-8`). `run_engine` passes NO `--effort` under ultracode (a CLI effort flag would override the native pin); the old ULTRACODE_PROMPT contract shrank to a thin Cardloop complement (roster names + "final message carries the full synthesis"). The `--settings` payload joined the live-client fingerprint so toggling still reconnects.
+
+### Added
+- **`skeptic` sub-agent (spec-058 v2)** — read-only adversarial verifier in the default roster (Task tool + Workflow `agentType`): tries to REFUTE a claim with an evidence trail, defaults to REFUTED on inconclusive evidence — so ultracode verify stages don't rubber-stamp their own findings.
+
 ## [v0.16.0] — 2026-07-05
 
 The "make the chat smarter" batch: one stream to rule the canvas, background runs as a

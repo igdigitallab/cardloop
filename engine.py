@@ -125,6 +125,27 @@ DEFAULT_AGENTS: dict = {
         tools=["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"],
         maxTurns=20,
     ),
+    # spec-058 v2: adversarial verifier for ultracode workflows (Workflow opts.agentType or Task).
+    # A dedicated skeptic role keeps verification INDEPENDENT of whoever produced the finding —
+    # the same agent re-checking its own claim rubber-stamps it.
+    "skeptic": AgentDefinition(
+        description="Adversarial verifier. Tries to REFUTE a claim/finding with evidence. Read-only.",
+        prompt=(
+            "You are a skeptic sub-agent. Your job is to try to REFUTE the claim or finding in "
+            "the task brief — not to confirm it. Hunt for counter-evidence: read the actual code/"
+            "files, run read-only checks, look for the failure scenario not reproducing, missing "
+            "preconditions, or an alternative explanation. Do NOT write or edit files.\n"
+            "Verdict rules: default to REFUTED when the evidence is inconclusive; say CONFIRMED "
+            "only when you personally traced concrete evidence that the claim holds. Return: "
+            "verdict (CONFIRMED | REFUTED), the strongest counter-argument you found, and the "
+            "evidence trail (files/lines/commands)."
+        ),
+        model=_RESEARCHER_MODEL,
+        permissionMode="bypassPermissions",
+        disallowedTools=["Write", "Edit", "NotebookEdit"],
+        tools=["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"],
+        maxTurns=20,
+    ),
     "quick": AgentDefinition(
         description="Fast lookup and simple transform agent. Cheap, low-latency questions.",
         prompt=(
@@ -189,7 +210,7 @@ def _build_agents_kwargs(agents_config: dict) -> dict:
 
 
 # Conductor directive appended to system_prompt when model is fable AND the run is not ultracode
-# (ultracode injects its own stronger ULTRACODE_PROMPT contract for every model — see below).
+# (ultracode activates the CLI's native Workflow contract for every model — see below).
 # Kept as a module constant so it can be asserted in tests without instantiating run_engine.
 CONDUCTOR_PROMPT = (
     "You are an orchestrator. Delegate substantial execution to sub-agents via the Task tool — "
@@ -199,31 +220,38 @@ CONDUCTOR_PROMPT = (
     "Prefer ≤3–5 concurrent sub-agents; sequence tasks rather than parallelising unnecessarily."
 )
 
-# spec-058: Ultracode mode directive — a hard orchestration CONTRACT (not a soft preference).
-# Appended to system_prompt["append"] (same mechanism as CONDUCTOR_PROMPT) for ANY model when a
-# chat run sets ultracode=True, with effort pinned to max (forced in run_engine). It makes the main
-# model act as an orchestrator that delegates execution to the named Sonnet/Haiku sub-agents
-# (executor/researcher/quick) with explicit when-to-delegate triggers + parallel same-turn spawns —
-# because Opus 4.8 spawns few sub-agents by default and follows literal instructions, so a soft
-# invite is obeyed as optional. This is why the old "default to decomposing" wording left Opus
-# doing everything itself. Kept as a module constant so it can be asserted in tests.
+# spec-058 v2 (native): Ultracode now activates the CLI's NATIVE ultracode machinery via the
+# --settings flag (ULTRACODE_SETTINGS below). The CLI itself injects the standing opt-in
+# system-reminders ("Ultracode is on: … use the Workflow tool on every substantive task"),
+# exposes the Workflow tool's Ultracode contract + quality patterns (adversarial verify, judge
+# panels, loop-until-dry), and pins effort to "xhigh" internally. Verified empirically on
+# claude-opus-4-8 with the bundled CLI 2.1.191: the Workflow tool is in the session tool list
+# and a 2-agent workflow executes end-to-end under --settings '{"ultracode": true}'.
+# ULTRACODE_PROMPT is therefore no longer the orchestration contract — it is a thin Cardloop
+# COMPLEMENT to the native contract: names the local agent roster (usable as Workflow agentType
+# or Task subagents), and pins cockpit-specific reporting rules. It must never restate or fight
+# the native contract (no concurrency caps, no "prefer Task over Workflow").
 ULTRACODE_PROMPT = (
-    "You are in Ultracode mode: act as an ORCHESTRATOR, not a solo coder. Plan the task, delegate "
-    "execution to sub-agents via the Task tool, review their results, and iterate. You have named "
-    "sub-agents: `executor` (Sonnet — writes files, runs commands), `researcher` (Sonnet — read-only "
-    "web / file / grep lookups), `quick` (Haiku — fast simple lookups). Prefer these named workers "
-    "for the actual work; reserve your own turns for decomposition, decisions, and synthesis.\n"
-    "DELEGATE (spawn a sub-agent) for: anything touching more than one file; any implementation, "
-    "refactor, or build/test/debug loop; independent searches, reads, or research sub-queries. When "
-    "subtasks are independent, emit MULTIPLE Task calls in the SAME turn so they run in parallel — do "
-    "not wait for one to finish before starting the next (aim for up to ~6 at once). For a large or "
-    "open-ended fan-out, author a Workflow instead. Give each sub-agent a self-contained brief.\n"
-    "Do NOT run long code sequences or multi-file edits yourself. Stay solo ONLY for a trivial change "
-    "you can finish in a single response, or a purely conversational or planning turn.\n"
-    "Adversarially verify before acting: have an independent sub-agent try to refute a finding, and "
-    "iterate until results converge. Operate at maximum effort; token cost is not the constraint; "
-    "favour comprehensiveness over brevity."
+    "Ultracode is active natively (see the Workflow tool's Ultracode section). Cardloop complement:\n"
+    "- Prefer an authored Workflow over ad-hoc Task fan-out for anything multi-step: deterministic "
+    "pipelines with adversarial verification beat improvised delegation. Verify findings with "
+    "independent skeptics that try to REFUTE them before you act on them.\n"
+    "- Named agent types available to Workflow (opts.agentType) and the Task tool: `executor` "
+    "(Sonnet — writes files, runs commands), `researcher` (Sonnet — read-only research), `skeptic` "
+    "(Sonnet — adversarial verifier: tries to refute a claim), `quick` (Haiku — fast cheap lookups). "
+    "Pick per stage; the default workflow subagent is also fine.\n"
+    "- The operator watches the cockpit and cannot read workflow internals: your final message must "
+    "carry the complete synthesis (findings, decisions, evidence, next steps) — never a reference "
+    "to sub-agent output."
 )
+
+# spec-058 v2: inline JSON passed to the SDK's `settings` option (forwarded verbatim to the CLI
+# --settings flag, which accepts a path OR an inline JSON object). {"ultracode": true} is the
+# same switch the interactive CLI flips for /effort ultracode: it survives headless --print mode,
+# while `--effort ultracode` is rejected there ("Unknown --effort value") — do not "simplify"
+# this back to an effort value. The flag pins effort to xhigh internally, so run_engine passes
+# NO --effort when ultracode is on (a CLI effort flag would override the native pin).
+ULTRACODE_SETTINGS = '{"ultracode": true}'
 
 
 # spec-066: appended to system_prompt when the browser module is on, so the agent knows the
@@ -989,6 +1017,8 @@ def _compute_fingerprint(
         # ultracode/conductor/browser or changing the think-mode ladder forces a fresh client.
         stable_append_hash,
         effort,
+        # spec-058 v2: the --settings payload (native ultracode switch) is launch-immutable too.
+        str(getattr(opts, "settings", "") or ""),
     ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
@@ -1691,9 +1721,11 @@ async def run_engine(  # type: ignore[return]
                                  _DEFAULT_EFFORT (env DEFAULT_EFFORT, default "medium"). Pass an
                                  explicit value ("low", "medium", "high") to override per-request.
                                  Note: --effort is honored on Fable 5 (low..xhigh|max; official default high).
-        ultracode             — spec-058: when True, append ULTRACODE_PROMPT to the system prompt
-                                 (fan-out + adversarial-verify disposition) AND pin effort to "max"
-                                 (overriding the effort arg). False (default) → no change.
+        ultracode             — spec-058 v2: when True, activate the CLI's NATIVE ultracode
+                                 machinery (settings={"ultracode": true} → Workflow contract +
+                                 standing opt-in reminders + internal xhigh effort pin; the
+                                 effort arg is ignored) and append the thin ULTRACODE_PROMPT
+                                 complement. False (default) → no change.
         entrypoint            — cost-ledger attribution tag for the on-disk usage ledger:
                                  "chat" (interactive cockpit, default), "card" (kanban auto-run),
                                  "deferred" (post-reset deferred run). Recorded per turn; does not
@@ -1714,8 +1746,8 @@ async def run_engine(  # type: ignore[return]
     resolved_model = MODELS.get(model, model) if model else MODELS.get(DEFAULT_MODEL, DEFAULT_MODEL)
 
     # Conductor directive: inject for fable as orchestrator model (unless disabled per-project) — but
-    # NOT when ultracode is on, since ULTRACODE_PROMPT (below) is a stronger, self-sufficient
-    # orchestration contract and the conductor's "≤3–5 concurrent" cap would fight ultracode fan-out.
+    # NOT when ultracode is on, since the native ultracode contract (Workflow tool + reminders)
+    # takes over and the conductor's "≤3–5 concurrent" cap would fight ultracode fan-out.
     if not skip_conductor_prompt and not ultracode and resolved_model and resolved_model.startswith("fable"):
         existing_append = system_prompt.get("append") or ""
         sep = "\n" if existing_append else ""
@@ -1731,8 +1763,8 @@ async def run_engine(  # type: ignore[return]
         system_prompt = dict(system_prompt)
         system_prompt["append"] = existing_append + sep + _board_block
 
-    # spec-058: Ultracode mode — append the fan-out/verify directive (same mechanism as the
-    # conductor/board blocks). Effort is pinned to "max" below, regardless of the effort arg.
+    # spec-058 v2: Ultracode mode — append the thin Cardloop complement (same mechanism as the
+    # conductor/board blocks). The actual contract comes from the native settings flag below.
     if ultracode:
         existing_append = system_prompt.get("append") or ""
         sep = "\n" if existing_append else ""
@@ -1760,9 +1792,12 @@ async def run_engine(  # type: ignore[return]
     # of the finalized block via finalizeStreamingWithMetrics).
     _stream_partial = os.environ.get("STREAM_PARTIAL", "1") not in ("0", "false", "False")
 
-    # spec-058: ultracode pins effort to "max" (overrides the per-request effort arg).
-    # Captured once so the cost ledger records the SAME effort the SDK actually ran.
-    _eff_effort = "max" if ultracode else (effort if effort is not None else _DEFAULT_EFFORT)
+    # spec-058 v2: ultracode passes NO --effort — the native {"ultracode": true} settings flag
+    # pins effort to "xhigh" inside the CLI, and an explicit CLI effort flag would OVERRIDE that
+    # native pin (CLI flag wins over settings in the CLI's effort resolution). The ledger and the
+    # live-client fingerprint record the effective "xhigh" so toggling ultracode still evicts.
+    _sdk_effort = None if ultracode else (effort if effort is not None else _DEFAULT_EFFORT)
+    _eff_effort = "xhigh" if ultracode else (effort if effort is not None else _DEFAULT_EFFORT)
 
     print(f"[session] resume {session_key} sid={resume_session_id or 'NEW'}")
     # spec-065 Phase C: expose live-browser tools only when the browser module is on.
@@ -1847,7 +1882,10 @@ async def run_engine(  # type: ignore[return]
         env=env or {},
         mcp_servers=_mcp_servers,
         agents=effective_agents,
-        effort=_eff_effort,  # type: ignore[arg-type]
+        effort=_sdk_effort,  # type: ignore[arg-type]
+        # spec-058 v2: flip the CLI's native ultracode switch (Workflow contract + standing
+        # opt-in reminders + internal xhigh pin). None → no --settings flag, unchanged behaviour.
+        settings=ULTRACODE_SETTINGS if ultracode else None,
         hooks={
             "PostToolUse": [HookMatcher(hooks=[_post_tool_hook])],
             "PreCompact": [HookMatcher(hooks=[_pre_compact_hook])],
