@@ -907,11 +907,11 @@ async def test_auto_rotate_fires_above_cap(aiohttp_client, tmp_path, project_dir
     assert rotated[0]["context_tokens"] == 300000
 
 
-async def test_auto_rotate_default_off_when_not_opted_in(aiohttp_client, tmp_path, project_dir):
-    """Above the cap but the chat did NOT opt in (no auto_rotate) → session must NOT rotate (default OFF)."""
+async def test_auto_rotate_default_on_when_field_absent(aiohttp_client, tmp_path, project_dir):
+    """Above the cap with NO auto_rotate field in the body → rotation fires (default ON, opt-out)."""
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "hello"}
-        yield {"type": "result", "session_id": "sess-noopt", "context_tokens": 300000}
+        yield {"type": "result", "session_id": "sess-default", "context_tokens": 300000}
 
     ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
     bus_events: list = []
@@ -929,9 +929,67 @@ async def test_auto_rotate_default_off_when_not_opted_in(aiohttp_client, tmp_pat
         assert resp.status == 200
         await _read_sse(resp)
 
-    assert SESSION_KEY in ctx["sessions"], "session must NOT be cleared when the chat did not opt in"
+    assert SESSION_KEY not in ctx["sessions"], "default ON: session must rotate when the field is absent"
+    assert any(e.get("kind") == "auto_rotated" for e in bus_events), (
+        "an auto_rotated bus event must be published with the default-ON opt-out semantics"
+    )
+
+
+async def test_auto_rotate_explicit_opt_out(aiohttp_client, tmp_path, project_dir):
+    """Above the cap but the chat explicitly sent auto_rotate:false → session must NOT rotate."""
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "hello"}
+        yield {"type": "result", "session_id": "sess-noopt", "context_tokens": 300000}
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    bus_events: list = []
+    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", 280000), \
+         patch.object(_webapp, "_QUEUE", {}), \
+         patch.object(_webapp, "_build_handoff", AsyncMock(return_value="prior summary")), \
+         patch.object(_webapp, "_build_session_title", AsyncMock(return_value="Title")), \
+         patch.object(_webapp, "_bus_publish", side_effect=lambda sk, ev, **kw: bus_events.append(ev)):
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post("/api/projects/myproject/chat",
+                                 json={"prompt": "do big work", "auto_rotate": False},
+                                 headers=_auth_headers(ctx))
+        assert resp.status == 200
+        await _read_sse(resp)
+
+    assert SESSION_KEY in ctx["sessions"], "session must NOT be cleared when the chat opted out"
     assert not any(e.get("kind") == "auto_rotated" for e in bus_events), (
-        "no auto_rotated bus event when the chat did not opt in (default OFF)"
+        "no auto_rotated bus event when the chat explicitly opted out"
+    )
+
+
+async def test_auto_rotate_skips_under_live_bg_children(aiohttp_client, tmp_path, project_dir):
+    """Above the cap but background children are still running → rotation must be deferred
+    (rotating would clear monitors and SIGTERM live sub-agents — the f9d60d death class)."""
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "hello"}
+        yield {"type": "result", "session_id": "sess-busy-bg", "context_tokens": 300000}
+
+    ctx = _make_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    bus_events: list = []
+    with patch.object(_webapp, "CONTEXT_ROTATION", True), \
+         patch.object(_webapp, "CONTEXT_ROTATE_AT", 280000), \
+         patch.object(_webapp, "_QUEUE", {}), \
+         patch.object(_webapp, "_has_live_agent_monitors", return_value=True), \
+         patch.object(_webapp, "_build_handoff", AsyncMock(return_value="prior summary")), \
+         patch.object(_webapp, "_build_session_title", AsyncMock(return_value="Title")), \
+         patch.object(_webapp, "_bus_publish", side_effect=lambda sk, ev, **kw: bus_events.append(ev)):
+        app = _make_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post("/api/projects/myproject/chat",
+                                 json={"prompt": "do big work"},
+                                 headers=_auth_headers(ctx))
+        assert resp.status == 200
+        await _read_sse(resp)
+
+    assert SESSION_KEY in ctx["sessions"], "session must survive while bg children are running"
+    assert not any(e.get("kind") == "auto_rotated" for e in bus_events), (
+        "no auto_rotated bus event while background children are still running"
     )
 
 

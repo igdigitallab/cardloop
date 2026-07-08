@@ -9636,7 +9636,8 @@ def _chat_queue_flush() -> None:
 
 def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = None,
                         project_id: "str | None" = None, effort: "str | None" = None,
-                        ultracode: "bool | None" = None) -> "dict | None":
+                        ultracode: "bool | None" = None,
+                        auto_rotate: "bool | None" = None) -> "dict | None":
     """Append a message to the chat queue for session_key.
     Returns the new item dict, or None if the queue is full.
 
@@ -9662,6 +9663,10 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
         item["effort"] = effort
     if ultracode is not None:
         item["ultracode"] = bool(ultracode)
+    if auto_rotate is not None:
+        # Carry the originating turn's auto-rotate choice so the drained run applies the
+        # same post-turn cost rotation as the direct /chat path (absent → default ON).
+        item["auto_rotate"] = bool(auto_rotate)
     lst.append(item)
     _chat_queue_flush()
     return item
@@ -9797,6 +9802,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
     _resolved_chat_id = _q_chat_id  # finalized (fallback to active chat) in the resolution block below
     _cid: dict = {"chat_id": _q_chat_id} if _q_chat_id else {}
     outcome = "fail"
+    _q_final_ctx_tokens: "int | None" = None  # captured from the result event for post-turn auto-rotate
     try:
         topics = ctx["topics"]
         topic = topics.get(session_key)
@@ -9942,6 +9948,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 # spec-076 parity with the direct /chat path: persist enforcement progress.
                 await _goal_apply_event(ctx, _project_id, _resolved_chat_id, session_key, event)
             elif etype == "result":
+                _q_final_ctx_tokens = event.get("context_tokens") or None
                 _sid = event.get("session_id")
                 if _sid:
                     # Write the new session_id back to THIS chat's entry in chats.json (mirroring
@@ -9995,6 +10002,17 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             await _chat_queue_drain_one(ctx, session_key)
         except Exception as _drain_exc:
             print(f"[chat_queue] chain drain error for {session_key}: {_drain_exc}")
+        # Cost control parity with the direct /chat path: a drained turn that pushed context past
+        # the cap also auto-rotates (after the chain drain — skips as busy if another item took
+        # the slot; the bg-children guard inside _maybe_auto_rotate protects live sub-agents).
+        if outcome == "ok" and _q_final_ctx_tokens:
+            try:
+                _rot_proj = _find_project_by_id(ctx, _project_id or session_key)
+                if _rot_proj is not None:
+                    await _maybe_auto_rotate(ctx, _rot_proj, session_key, _q_final_ctx_tokens,
+                                             opt_in=item.get("auto_rotate", True))
+            except Exception as _ar_exc:
+                print(f"[chat_queue] post-turn auto-rotate error for {session_key}: {_ar_exc!r}")
         # spec-069 P2: a continuation turn that still has bg children running schedules the next one.
         _maybe_schedule_bg_continuation(ctx, session_key, _resolved_chat_id, _project_id)
         # spec-069 P3 (RC#3): after the continuation decision, reconcile stuck monitors from
@@ -10247,10 +10265,12 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # ⚡ badge so this is never silent.
     _ultracode = bool(body.get("ultracode"))
 
-    # Per-chat opt-in for the 280K cost auto-rotation (make it optional). Default OFF — the
-    # auto-rotate-with-handoff no longer fires unless THIS chat enabled it (composer "+" menu
-    # toggle, sent as auto_rotate). The global CONTEXT_ROTATION env remains a hard kill-switch.
-    _auto_rotate = bool(body.get("auto_rotate"))
+    # Per-chat opt-OUT for the 280K cost auto-rotation. Default ON — cost audit 2026-07-08:
+    # with the old opt-in default nobody enabled it, sessions ballooned to 470K and the
+    # >200K tail alone was 58% of a week's spend. A chat can still disable it via the
+    # composer "+" menu toggle (sent as auto_rotate:false). The global CONTEXT_ROTATION
+    # env remains a hard kill-switch.
+    _auto_rotate = bool(body.get("auto_rotate", True))
 
     # Spec-037: optional chat_id to target a specific chat tab (falls back to active chat).
     _req_chat_id: "str | None" = (body.get("chat_id") or "").strip() or None
@@ -10294,7 +10314,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # this tab only (not every chat in the project). spec-071: carry the per-turn
         # options so the drained run matches the live-client fingerprint.
         item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"],
-                                   effort=_effort_override, ultracode=_ultracode)
+                                   effort=_effort_override, ultracode=_ultracode,
+                                   auto_rotate=_auto_rotate)
         if item is None:
             payload = json.dumps({"type": "error", "error": "queue full"}, ensure_ascii=False)
         else:
@@ -11048,22 +11069,27 @@ async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_ha
 
 
 async def _maybe_auto_rotate(ctx: dict, project: dict, session_key: str, ctx_tokens: int,
-                             opt_in: bool = False) -> None:
+                             opt_in: bool = True) -> None:
     """Post-turn auto-rotation: when a session's context crosses CONTEXT_ROTATE_AT, rotate it WITH
     a handoff so the tail can't keep re-billing a bloated prompt every turn (the 490K monster the
-    audit found).  Gated by per-chat opt_in (default OFF) AND CONTEXT_ROTATION (global kill-switch,
-    default on).  Reuses _rotate_session_core
+    audit found).  Default ON per chat (opt_in=False disables — composer toggle); CONTEXT_ROTATION
+    stays the global kill-switch.  Reuses _rotate_session_core
     so it inherits the dual-layer safety.  Emits a bus event so the cockpit can toast the rotation.
 
     Called from api_project_chat's finally AFTER the running sentinel is released, so the core can
     re-acquire it.  Best-effort: never raises into the caller; skips silently if a new turn already
     grabbed the slot (busy) or if the handoff/clear path errors."""
     try:
-        # Per-chat opt-in (default OFF): the 280K auto-rotation only fires for a chat that
-        # explicitly enabled it (composer toggle). CONTEXT_ROTATION stays the global kill-switch.
         if not (CONTEXT_ROTATION and opt_in):
             return
         if not ctx_tokens or ctx_tokens < CONTEXT_ROTATE_AT:
+            return
+        # Never rotate under live background children: _rotate_session_core clears monitors and
+        # evicts the live client, which would SIGTERM a still-working Workflow/agent (the f9d60d
+        # death class). The post-turn hook fires again on the next turn, so rotation just waits
+        # for a quiet turn end.
+        if _has_live_agent_monitors(session_key):
+            print(f"[auto-rotate] skipped {session_key}: background children still running")
             return
         result = await _rotate_session_core(ctx, project, session_key, do_handoff=True,
                                             trigger="auto", context_tokens=ctx_tokens)

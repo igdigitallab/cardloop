@@ -1011,12 +1011,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     } catch { /* localStorage unavailable */ }
     return false
   })
-  // T3: Auto-rotate at 280K — per-chat toggle, default OFF, mirrors ultracode pattern.
+  // T3: Auto-rotate at 280K — per-chat toggle, default ON (cost audit 2026-07-08: opt-in
+  // meant nobody enabled it and sessions ballooned to 470K); '0' = explicitly disabled.
   const [autoRotate, setAutoRotate] = useState<boolean>(() => {
     try {
-      return localStorage.getItem(autoRotateStorageKey(projectId, effectiveChatId || undefined)) === '1'
+      return localStorage.getItem(autoRotateStorageKey(projectId, effectiveChatId || undefined)) !== '0'
     } catch { /* localStorage unavailable */ }
-    return false
+    return true
   })
   // spec-076: session goal of the ACTIVE chat. Server-side state (lives on the chat object in
   // chats.json, enforced by the CLI's native prompt-type Stop hook); the pinned bar renders it
@@ -1211,10 +1212,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // T3: re-load autoRotate from localStorage on project/chat switch (per-chat key)
   useEffect(() => {
     try {
-      setAutoRotate(localStorage.getItem(autoRotateStorageKey(projectId, effectiveChatId || undefined)) === '1')
+      setAutoRotate(localStorage.getItem(autoRotateStorageKey(projectId, effectiveChatId || undefined)) !== '0')
       return
     } catch { /* localStorage unavailable */ }
-    setAutoRotate(false)
+    setAutoRotate(true)
   }, [projectId, effectiveChatId])
 
   // T3: persist autoRotate toggle to localStorage (per-chat key)
@@ -2101,7 +2102,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         // Spec-037: pass active chat_id so the backend writes session_id to the right chat entry
-        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), ...(autoRotate ? { auto_rotate: true } : {}), ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
+        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), auto_rotate: autoRotate, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
         signal: ac.signal,
       })
 
