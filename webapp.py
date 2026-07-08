@@ -8917,6 +8917,137 @@ async def api_project_chats_delete(req: web.Request) -> web.Response:
     return web.json_response({"ok": True, "active": entry["active"]})
 
 
+# ─────────────────── spec-076: per-chat session goal (native /goal) ──────────────────
+#
+# The goal record lives ON the chat object in chats.json:
+#   {"condition": str, "status": "active"|"met"|"capped", "set_at": ts,
+#    "iterations": int, "last_reason": str|None, "met_at": ts?}
+# While status == "active", every turn of that chat runs with a prompt-type Stop hook
+# (the CLI's native /goal machinery, registered via --settings by run_engine): the turn
+# cannot end until an LLM evaluator judges the condition met against the transcript.
+# "met" auto-clears enforcement (mirrors the interactive /goal auto-clear); "capped" means
+# the CLI's consecutive-block cap overrode enforcement — we stop re-arming the hook so the
+# next turns don't burn blocked stops, but keep the record visible for the operator.
+
+_GOAL_MAX_LEN = 4000  # keep in sync with engine.GOAL_MAX_LEN (locked by a test)
+
+
+async def _chat_goal_set(ctx: dict, project_id: str, chat_id: str, session_key: str,
+                         record: "dict | None") -> "dict | None":
+    """Replace (or remove, when record is None) the chat's goal record. Returns the record."""
+    async with _chats_lock():
+        chats_data = _ensure_chat_entry(ctx, project_id, session_key)
+        entry = chats_data.get(project_id) or {}
+        chat = next((c for c in entry.get("chats", []) if c.get("id") == chat_id), None)
+        if chat is None:
+            return None
+        if record is None:
+            chat.pop("goal", None)
+        else:
+            chat["goal"] = record
+        _save_chats(ctx, chats_data)
+        return record
+
+
+async def _chat_goal_patch(ctx: dict, project_id: str, chat_id: str, session_key: str,
+                           patch: dict) -> "dict | None":
+    """Merge patch into the chat's existing goal record (no-op when the chat has no goal)."""
+    async with _chats_lock():
+        chats_data = _ensure_chat_entry(ctx, project_id, session_key)
+        entry = chats_data.get(project_id) or {}
+        chat = next((c for c in entry.get("chats", []) if c.get("id") == chat_id), None)
+        if chat is None or not isinstance(chat.get("goal"), dict):
+            return None
+        chat["goal"] = {**chat["goal"], **patch}
+        _save_chats(ctx, chats_data)
+        return chat["goal"]
+
+
+def _chat_active_goal(chat: "dict | None") -> "str | None":
+    """The condition to enforce this turn: the chat's goal condition iff status is 'active'."""
+    goal = (chat or {}).get("goal")
+    if isinstance(goal, dict) and goal.get("status") == "active":
+        cond = (goal.get("condition") or "").strip()
+        return cond or None
+    return None
+
+
+async def _goal_apply_event(ctx: dict, project_id: "str | None", chat_id: "str | None",
+                            session_key: str, event: dict) -> None:
+    """Persist a goal_status engine event into the chat's goal record.
+
+    Non-terminal blocks bump the iteration counter + last verdict; a terminal met flips
+    status to "met" (auto-clear); a terminal cap flips to "capped"; an errored terminal
+    keeps the goal active so the retry turn re-arms the hook. Never raises."""
+    if not project_id or not chat_id:
+        return
+    try:
+        if event.get("terminal"):
+            if event.get("met"):
+                patch = {"status": "met", "met_at": time.time(),
+                         "iterations": event.get("iterations", 0), "last_reason": None}
+            elif event.get("capped"):
+                patch = {"status": "capped", "iterations": event.get("iterations", 0)}
+            else:  # errored run — keep enforcing on the next turn
+                patch = {"iterations": event.get("iterations", 0)}
+        else:
+            patch = {"iterations": event.get("iteration", 0),
+                     "last_reason": (event.get("reason") or "")[:500] or None}
+        await _chat_goal_patch(ctx, project_id, chat_id, session_key, patch)
+        if event.get("terminal") and event.get("met"):
+            _timeline_append(session_key, {
+                "type": "goal_met",
+                "condition": (event.get("condition") or "")[:200],
+                "iterations": event.get("iterations", 0),
+            })
+    except Exception as exc:
+        print(f"[goal] apply event error for {session_key}: {exc!r}")
+
+
+async def api_project_chat_goal(req: web.Request) -> web.Response:
+    """PUT/DELETE /api/projects/{id}/chats/{chat_id}/goal — set or clear the session goal.
+
+    PUT {"condition": str} → {"goal": {...}} (fresh record, status "active").
+    DELETE → {"ok": true}. Takes effect on the NEXT turn of that chat (the settings string
+    is part of the live-client fingerprint, so the engine reconnects with/without the hook)."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    chat_id = req.match_info["chat_id"]
+    if not _valid_chat_id(chat_id):
+        return web.json_response({"error": "invalid chat_id"}, status=400)
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    if req.method == "DELETE":
+        await _chat_goal_set(ctx, project["id"], chat_id, session_key, None)
+        _bus_publish(session_key, {"kind": "goal_status", "status": "cleared",
+                                   "chat_id": chat_id}, persist=True)
+        return web.json_response({"ok": True})
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    condition = (body.get("condition") or "").strip()
+    if not condition:
+        return web.json_response({"error": "empty condition"}, status=400)
+    if len(condition) > _GOAL_MAX_LEN:
+        return web.json_response({"error": f"condition too long (max {_GOAL_MAX_LEN})"}, status=400)
+    record = {
+        "condition": condition,
+        "status": "active",
+        "set_at": time.time(),
+        "iterations": 0,
+        "last_reason": None,
+    }
+    stored = await _chat_goal_set(ctx, project["id"], chat_id, session_key, record)
+    if stored is None:
+        return web.json_response({"error": "chat not found"}, status=404)
+    _bus_publish(session_key, {"kind": "goal_status", "status": "set",
+                               "condition": condition, "chat_id": chat_id}, persist=True)
+    return web.json_response({"goal": stored})
+
+
 # ─────────────────────────── C2: project sessions ───────────────────────────
 
 def _sdk_sessions_dir(cwd: str) -> Path:
@@ -9736,6 +9867,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # run's events + /live buffer are always stamped and never broadcast to every tab.
         resume_session_id = None
         _resolved_entry = False
+        _q_goal: "str | None" = None  # spec-076: goal enforced for this drained turn
         if _project_id:
             try:
                 async with _chats_lock():
@@ -9746,6 +9878,10 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                     if _tc is not None:
                         _resolved_chat_id = _tc["id"]
                         resume_session_id = _tc.get("session_id") or None
+                        # spec-076: read the goal FRESH from the store (not from the queue
+                        # item) — the current record is the truth for this turn, and an
+                        # unchanged goal keeps the live-client fingerprint stable.
+                        _q_goal = _chat_active_goal(_tc)
                         _resolved_entry = True
             except Exception as _ce:
                 print(f"[chat_queue] chats resolve error for {session_key} (falling back): {_ce}")
@@ -9779,6 +9915,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             ephemeral=False,
             effort=_q_effort,
             ultracode=bool(_q_ultracode),
+            goal=_q_goal,
         ):
             etype = event["type"]
             # spec-071: full event parity with api_project_chat — buffer every event in the
@@ -9801,6 +9938,9 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             if etype == "text":
                 # Preserve the timeline text row the old coarse publish used to persist.
                 _timeline_append(session_key, {"kind": "text", "text": event["text"], "run_id": run_id, **_cid})
+            elif etype == "goal_status":
+                # spec-076 parity with the direct /chat path: persist enforcement progress.
+                await _goal_apply_event(ctx, _project_id, _resolved_chat_id, session_key, event)
             elif etype == "result":
                 _sid = event.get("session_id")
                 if _sid:
@@ -10227,6 +10367,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
     _chat_final_ctx_tokens: "int | None" = None
     # Spec-037: the resolved chat_id for this run (used to write session_id back)
     _active_chat_id_for_run: "str | None" = None
+    # spec-076: the goal condition enforced this turn (None when the chat has no active goal)
+    _goal_for_run: "str | None" = None
 
     try:
         # Spec-037: resolve session_id from the active chat (or explicitly requested chat).
@@ -10245,6 +10387,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 if _target_chat is not None:
                     _active_chat_id_for_run = _target_chat["id"]
                     _chat_resume_sid = _target_chat.get("session_id") or None
+                    _goal_for_run = _chat_active_goal(_target_chat)  # spec-076
                     # Keep ctx["sessions"] in sync (derived cache)
                     if _chat_resume_sid:
                         print(f"[session] chat-resume-write {session_key} sid={_chat_resume_sid}")
@@ -10326,6 +10469,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             ephemeral=False,
             effort=_effort_override,
             ultracode=_ultracode,
+            goal=_goal_for_run,
         )
         # spec-071 heartbeat: unlike the activity-stream SSE (which pings every 25 s precisely
         # because the Cloudflare tunnel kills idle streams), this direct chat stream wrote bytes
@@ -10394,6 +10538,13 @@ async def api_project_chat(req: web.Request) -> web.Response:
             elif etype == "tool":
                 # tool_data already computed above for buffering — reuse it
                 await _send({"type": "tool", **tool_data})
+            elif etype == "goal_status":
+                # spec-076: persist the enforcement progress into the chat's goal record
+                # (iterations / met auto-clear / capped) and forward to the direct stream.
+                # The bus fan-out already happened via the generic publish above.
+                await _goal_apply_event(ctx, project["id"], _active_chat_id_for_run,
+                                        session_key, event)
+                await _send(event)
             elif etype == "result":
                 _chat_last_result_event = event  # Phase D: capture for auto-resume
                 sid = event.get("session_id")
@@ -13532,6 +13683,9 @@ async def start(ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/chats", api_project_chats_create)
         app.router.add_route("PATCH", "/api/projects/{id}/chats/{chat_id}", api_project_chats_patch)
         app.router.add_delete("/api/projects/{id}/chats/{chat_id}", api_project_chats_delete)
+        # spec-076: per-chat session goal (native /goal Stop hook)
+        app.router.add_put("/api/projects/{id}/chats/{chat_id}/goal", api_project_chat_goal)
+        app.router.add_delete("/api/projects/{id}/chats/{chat_id}/goal", api_project_chat_goal)
         # File browser (read-only)
         app.router.add_get("/api/projects/{id}/files", api_project_files)
         app.router.add_get("/api/projects/{id}/file", api_project_file)

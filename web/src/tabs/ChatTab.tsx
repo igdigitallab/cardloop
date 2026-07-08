@@ -696,7 +696,7 @@ const THINK_TAG: Record<ThinkMode, string> = { low: 'low', medium: 'medium', hig
 
 const ModelThinkButton = memo(function ModelThinkButton({
   model, thinkValue, disabled, onModelChange, onThinkChange, menuPlacement = 'up', models,
-  ultracode, onUltracodeChange,
+  ultracode, onUltracodeChange, goalActive, onGoalOpen,
 }: {
   model: string
   thinkValue: ThinkMode
@@ -709,6 +709,9 @@ const ModelThinkButton = memo(function ModelThinkButton({
   /** spec-058: Ultracode mode — max effort + sub-agent fan-out. Per-chat toggle. */
   ultracode: boolean
   onUltracodeChange: (v: boolean) => void
+  /** spec-076: session goal — true when the active chat has an active goal. */
+  goalActive: boolean
+  onGoalOpen: () => void
 }) {
   // Prefer the live registry; fall back to the bundled static list (offline / fetch failure).
   const modelList = (models && models.length > 0) ? models : MODELS
@@ -808,6 +811,17 @@ const ModelThinkButton = memo(function ModelThinkButton({
             <span className="ultracode-state">{ultracode ? 'ON' : 'OFF'}</span>
           </div>
           <div className="composer-modelthink-note">{t['chat.ultracode_hint']}</div>
+          {/* spec-076: session goal — opens the pinned goal bar's inline editor. */}
+          <div
+            role="option"
+            aria-selected={goalActive}
+            className={`chat-think-option goal-row${goalActive ? ' selected' : ''}`}
+            title={t['chat.goal_hint']}
+            onMouseDown={e => { e.preventDefault(); setOpen(false); onGoalOpen() }}
+          >
+            <span>🎯 {t['chat.goal_label']}</span>
+            <span className="ultracode-state">{goalActive ? 'ON' : ''}</span>
+          </div>
         </div>
       )}
     </div>
@@ -1014,6 +1028,55 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     } catch { /* localStorage unavailable */ }
     return false
   })
+  // spec-076: session goal of the ACTIVE chat. Server-side state (lives on the chat object in
+  // chats.json, enforced by the CLI's native prompt-type Stop hook); the pinned bar renders it
+  // and goal_status bus events update it live. goalEditOpen/goalDraft drive the inline editor.
+  const activeGoal = chats.find(c => c.id === effectiveChatId)?.goal ?? null
+  const [goalEditOpen, setGoalEditOpen] = useState(false)
+  const [goalDraft, setGoalDraft] = useState('')
+
+  const saveGoal = () => {
+    const cond = goalDraft.trim()
+    if (!cond || !effectiveChatId) { setGoalEditOpen(false); return }
+    api.setChatGoal(projectId, effectiveChatId, cond).then(res => {
+      setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, goal: res.goal } : c))
+      setGoalEditOpen(false)
+    }).catch(e => setError(e instanceof Error ? e.message : String(e)))
+  }
+
+  const clearGoal = () => {
+    if (!effectiveChatId) return
+    api.clearChatGoal(projectId, effectiveChatId).then(() => {
+      setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, goal: null } : c))
+      setGoalEditOpen(false)
+    }).catch(e => setError(e instanceof Error ? e.message : String(e)))
+  }
+
+  // Applies a goal_status event (bus kind-event from the set/clear API, or a seq-tagged engine
+  // event during a run) to the owning chat's goal record in local state.
+  const applyGoalEvent = (evt: Record<string, unknown>) => {
+    const cid = (evt.chat_id as string | undefined) || effectiveChatId
+    if (!cid) return
+    const status = evt.status as string | undefined
+    setChats(prev => prev.map(c => {
+      if (c.id !== cid) return c
+      if (status === 'cleared') return { ...c, goal: null }
+      if (status === 'set') {
+        return {
+          ...c,
+          goal: { condition: String(evt.condition ?? ''), status: 'active' as const, iterations: 0, set_at: Date.now() / 1000 },
+        }
+      }
+      if (!c.goal) return c
+      const iters = (v: unknown) => Number(v ?? c.goal!.iterations ?? 0)
+      if (evt.terminal) {
+        if (evt.met) return { ...c, goal: { ...c.goal, status: 'met' as const, iterations: iters(evt.iterations), last_reason: null, met_at: Date.now() / 1000 } }
+        if (evt.capped) return { ...c, goal: { ...c.goal, status: 'capped' as const, iterations: iters(evt.iterations) } }
+        return { ...c, goal: { ...c.goal, iterations: iters(evt.iterations) } }
+      }
+      return { ...c, goal: { ...c.goal, iterations: iters(evt.iteration), last_reason: (evt.reason as string | undefined) ?? c.goal.last_reason } }
+    }))
+  }
   const [run, setRun] = useState<RunIndicator | null>(null)
   // Spec-035: server-authoritative turn start timestamp (epoch ms).
   // Set from /live started_at; null when not available (falls back to run.startedAt).
@@ -1726,6 +1789,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         setMessages(prev => finalizeStreamingWithMetrics(prev, rec as unknown as ChatEventResult, now))
       } else if (rec.type === 'error') {
         setMessages(prev => finalizeStreaming(prev, rec.error || 'unknown error'))
+      } else if (rec.type === 'goal_status') {
+        // spec-076: live enforcement progress (blocked stop attempts / terminal verdict).
+        applyGoalEvent(rec as Record<string, unknown>)
       } else if (rec.type === 'model_info') {
         const mi = rec as unknown as { requested: string; served: string; fallback?: boolean }
         if (mi.fallback) {
@@ -1896,6 +1962,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         isCompactingRef.current = false
         setCompactToast(false)
       }, 120_000)
+
+    } else if (evt.kind === 'goal_status') {
+      // spec-076: goal set/cleared via the API (kind-tagged, persist=True on the bus) —
+      // sync the local chats state so a second device/tab reflects it without reload.
+      applyGoalEvent(evt as unknown as Record<string, unknown>)
 
     } else if (evt.kind === 'board_event') {
       // Spec-052: board event — insert a slim pseudo-row in the chat stream.
@@ -2640,6 +2711,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               models={models}
               ultracode={ultracode}
               onUltracodeChange={handleUltracodeChange}
+              goalActive={activeGoal?.status === 'active'}
+              onGoalOpen={() => { setGoalDraft(activeGoal?.condition ?? ''); setGoalEditOpen(true) }}
             />
           )}
           {/* Collapse button — only when onToggleCollapse is provided (desktop-split site). */}
@@ -2656,6 +2729,52 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           )}
         </div>
       </div>
+
+      {/* spec-076: pinned session goal — one slim row; hidden entirely when no goal is set. */}
+      {(goalEditOpen || activeGoal) && (
+        <div className={`chat-goal-bar${activeGoal?.status === 'met' ? ' met' : ''}${activeGoal?.status === 'capped' ? ' capped' : ''}`}>
+          {goalEditOpen ? (
+            <>
+              <span className="chat-goal-icon" aria-hidden="true">🎯</span>
+              <input
+                className="chat-goal-input"
+                autoFocus
+                value={goalDraft}
+                maxLength={4000}
+                placeholder={t['chat.goal_placeholder']}
+                onChange={e => setGoalDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') { e.preventDefault(); saveGoal() }
+                  if (e.key === 'Escape') setGoalEditOpen(false)
+                }}
+              />
+              <button className="chat-goal-btn confirm" onClick={saveGoal} title={t['chat.goal_save']}>✓</button>
+              <button className="chat-goal-btn" onClick={() => setGoalEditOpen(false)} title={t['chat.goal_cancel']}>✕</button>
+            </>
+          ) : activeGoal ? (
+            <>
+              <span className="chat-goal-icon" aria-hidden="true">{activeGoal.status === 'met' ? '✅' : '🎯'}</span>
+              <span
+                className="chat-goal-text"
+                title={`${activeGoal.condition}${activeGoal.last_reason ? `\n\n${activeGoal.last_reason}` : ''}`}
+                onClick={() => { setGoalDraft(activeGoal.condition); setGoalEditOpen(true) }}
+              >
+                {activeGoal.condition}
+              </span>
+              <span className="chat-goal-status">
+                {activeGoal.status === 'met'
+                  ? t['chat.goal_met']
+                  : activeGoal.status === 'capped'
+                    ? t['chat.goal_capped']
+                    : (activeGoal.iterations ?? 0) > 0
+                      ? t['chat.goal_iteration'].replace('{n}', String(activeGoal.iterations))
+                      : t['chat.goal_active']}
+              </span>
+              <button className="chat-goal-btn" onClick={clearGoal} title={t['chat.goal_clear']}>✕</button>
+            </>
+          ) : null}
+        </div>
+      )}
 
       <div className="chat-feed" ref={feedRef} onScroll={handleFeedScroll} style={{ position: 'relative' }}>
         {rotating && (
@@ -3453,6 +3572,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   models={models}
                   ultracode={ultracode}
                   onUltracodeChange={handleUltracodeChange}
+                  goalActive={activeGoal?.status === 'active'}
+                  onGoalOpen={() => { setGoalDraft(activeGoal?.condition ?? ''); setGoalEditOpen(true) }}
                 />
               </div>
             )}

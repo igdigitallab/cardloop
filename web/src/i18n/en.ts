@@ -525,6 +525,18 @@ export const en = {
   'chat.ultracode_toggle': 'Ultracode mode',
   'chat.ultracode_hint': 'Native Claude Code ultracode: the agent authors multi-agent Workflows for every substantive task — parallel pipelines, adversarial verification (skeptics try to refute findings), judge panels — at xhigh effort. Slower and more expensive; the best answer wins, not the cheapest.',
 
+  // ── Session goal (spec-076) ─────────────────────────────────────
+  'chat.goal_label': 'Session goal',
+  'chat.goal_hint': 'Pin a goal for this chat: a native Stop hook keeps the agent working — every turn can only end once an evaluator judges the condition met against the transcript. Auto-clears when achieved.',
+  'chat.goal_placeholder': 'Goal condition (e.g. "all tests pass and the fix is deployed")…',
+  'chat.goal_save': 'Set goal (Enter)',
+  'chat.goal_cancel': 'Cancel (Esc)',
+  'chat.goal_clear': 'Clear goal',
+  'chat.goal_active': 'stop-hook',
+  'chat.goal_met': 'achieved ✓',
+  'chat.goal_capped': 'enforcement capped',
+  'chat.goal_iteration': 'not met · attempt {n}',
+
   // ── Auto-rotate toggle (spec-059 / T3) ──────────────────────────
   'chat.autorotate_label': 'Auto-rotate',
   'chat.autorotate_toggle': 'Auto-rotate at 280K',
