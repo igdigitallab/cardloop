@@ -696,7 +696,7 @@ const THINK_TAG: Record<ThinkMode, string> = { low: 'low', medium: 'medium', hig
 
 const ModelThinkButton = memo(function ModelThinkButton({
   model, thinkValue, disabled, onModelChange, onThinkChange, menuPlacement = 'up', models,
-  ultracode, onUltracodeChange, goalActive, onGoalOpen,
+  ultracode, onUltracodeChange,
 }: {
   model: string
   thinkValue: ThinkMode
@@ -709,9 +709,6 @@ const ModelThinkButton = memo(function ModelThinkButton({
   /** spec-058: Ultracode mode — max effort + sub-agent fan-out. Per-chat toggle. */
   ultracode: boolean
   onUltracodeChange: (v: boolean) => void
-  /** spec-076: session goal — true when the active chat has an active goal. */
-  goalActive: boolean
-  onGoalOpen: () => void
 }) {
   // Prefer the live registry; fall back to the bundled static list (offline / fetch failure).
   const modelList = (models && models.length > 0) ? models : MODELS
@@ -811,17 +808,6 @@ const ModelThinkButton = memo(function ModelThinkButton({
             <span className="ultracode-state">{ultracode ? 'ON' : 'OFF'}</span>
           </div>
           <div className="composer-modelthink-note">{t['chat.ultracode_hint']}</div>
-          {/* spec-076: session goal — opens the pinned goal bar's inline editor. */}
-          <div
-            role="option"
-            aria-selected={goalActive}
-            className={`chat-think-option goal-row${goalActive ? ' selected' : ''}`}
-            title={t['chat.goal_hint']}
-            onMouseDown={e => { e.preventDefault(); setOpen(false); onGoalOpen() }}
-          >
-            <span>🎯 {t['chat.goal_label']}</span>
-            <span className="ultracode-state">{goalActive ? 'ON' : ''}</span>
-          </div>
         </div>
       )}
     </div>
@@ -2576,6 +2562,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             onRequestReset={() => setResetModalOpen(true)}
             reloadSignal={sessionReloadKey}
           />
+          {/* spec-076: session goal — visible entry next to Reset session (operator request:
+              the model-pill menu row was too buried). Icon-only on mobile via CSS. */}
+          <button
+            className={`btn btn-sm chat-goal-entry${activeGoal?.status === 'active' ? ' goal-on' : ''}`}
+            title={activeGoal?.status === 'active' ? activeGoal.condition : t['chat.goal_hint']}
+            onClick={() => { setGoalDraft(activeGoal?.status === 'active' ? activeGoal.condition : ''); setGoalEditOpen(true) }}
+            aria-label={t['chat.goal_label']}
+          >
+            🎯<span className="chat-goal-entry-label"> {t['chat.goal_label']}</span>
+          </button>
         </div>
         {/* Right group: context health + cache badge + model + think + collapse.
             margin-left:auto (on .chat-session-right) pushes it to the right edge. */}
@@ -2711,8 +2707,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               models={models}
               ultracode={ultracode}
               onUltracodeChange={handleUltracodeChange}
-              goalActive={activeGoal?.status === 'active'}
-              onGoalOpen={() => { setGoalDraft(activeGoal?.condition ?? ''); setGoalEditOpen(true) }}
             />
           )}
           {/* Collapse button — only when onToggleCollapse is provided (desktop-split site). */}
@@ -3572,8 +3566,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   models={models}
                   ultracode={ultracode}
                   onUltracodeChange={handleUltracodeChange}
-                  goalActive={activeGoal?.status === 'active'}
-                  onGoalOpen={() => { setGoalDraft(activeGoal?.condition ?? ''); setGoalEditOpen(true) }}
                 />
               </div>
             )}

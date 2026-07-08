@@ -414,15 +414,29 @@
 .chat-think-option.ultracode-row.selected .ultracode-state {
   color: var(--accent);
 }
-/* spec-076: the goal row reuses the ultracode row layout (flex space-between). */
-.chat-think-option.goal-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+/* spec-076: 🎯 entry button — sits next to "↺ Reset session" in the session bar
+   (operator request: the model-pill menu row was too buried). Matches the reset
+   button's look; icon-only on mobile. */
+.chat-goal-entry {
+  font-size: 13px;
+  line-height: 1;
+  padding: 7px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 600;
+  cursor: pointer;
 }
-.chat-think-option.goal-row .ultracode-state { font-size: 10px; letter-spacing: 0.04em; color: var(--text3); }
-.chat-think-option.goal-row.selected .ultracode-state { color: var(--accent); }
+.chat-goal-entry.goal-on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+@media (max-width: 768px) {
+  .chat-goal-entry-label { display: none; }
+  .chat-goal-entry { padding: 7px 10px; }
+}
 
 /* ─── spec-076: pinned session-goal bar ─────────────────────────────────────
    One slim row between the session bar and the feed; hidden entirely when no
