@@ -3,9 +3,10 @@
 ### Run Claude agents on a kanban board — and watch them work from your phone.
 
 Cardloop is a **self-hosted, mobile-first cockpit** where every kanban card *is* a Claude agent run.
-Drop a card, and your home server ships the code, docs, or ops task autonomously — billed to your
-existing **Claude subscription**, not per-token API calls. Install it to your phone's home screen as
-a PWA and steer your projects from the couch.
+Drop a card, and your home server ships the code, docs, or ops task autonomously — powered by the
+**official Claude Code engine** with your own Anthropic account (API key, or your personal Claude
+login for individual use). Install it to your phone's home screen as a PWA and steer your projects
+from the couch.
 
 <div align="center">
 
@@ -40,9 +41,11 @@ Three things make Cardloop different from the dozen other agent kanbans:
 1. 📱 **Pocket DevOps — mobile-first PWA.** Not "responsive" — *installable*. Add it to your home screen
    and run agents from your phone: live SSE streaming, reconnect on wake, safe-area, pinch-zoom, plus an
    interactive PTY terminal. The phone is the primary surface, not an afterthought.
-2. 🤖 **Claude-first, subscription auth.** Runs on your existing Claude Max/Pro subscription via
-   `claude login` — **no API key, no per-token bill.** Zero marginal cost per card. (API-key mode is
-   there too, for teams.)
+2. 🤖 **Claude-native, no middleman.** Cardloop doesn't reimplement an agent — it drives the
+   **official Claude Code CLI / Agent SDK** on your own host, with your own Anthropic account:
+   a Claude Console **API key** (recommended, and required for teams/commercial use) or your
+   personal `claude login` for individual use — the same auth you'd use running Claude Code by hand.
+   No SaaS in the middle, no per-seat markup, nothing sent anywhere.
 3. 🗂️ **Cards that code — safely.** A card's task text *becomes* the agent prompt. Moving a card to In
    Progress runs the engine in an isolated **git worktree**, attaches the diff, and lands the card in
    Review behind a **Check / Apply / Discard** gate — your working copy is never touched until you merge.
@@ -86,7 +89,9 @@ Three things make Cardloop different from the dozen other agent kanbans:
   **free CloakBrowser** stealth tier (anti-detect, MIT), or **external CDP / Cloak Manager** persistent
   *logged-in* profiles the agent reuses. Read-only by default; a gate decides when it may click/type.
   Opt-in. See [docs/browser.md](docs/browser.md).
-- **One subscription, no API key** — the engine drives the official `claude` CLI against your OAuth token.
+- **Bring your own Claude** — the engine drives the official `claude` CLI under your own Anthropic
+  auth (`CLAUDE_AUTH_MODE`: API key, or personal subscription login for individual use). Cardloop
+  never extracts, stores, or transmits your tokens — the official binary handles auth itself.
 - **Multi-project cockpit** — explicit projects, each with its own cwd, model, persistent session, and board.
 - **One transport-agnostic engine** — `run_engine()` feeds every channel against the same session and board.
 - **CLI-style chat** — SSE stream, tool rendering (Bash / Edit / Read / Write with diffs), on-the-fly model
@@ -114,8 +119,10 @@ git clone https://github.com/igdigitallab/cardloop.git && cd cardloop
 # 2. Install (venv + deps + .env scaffold + frontend build) — idempotent
 ./install.sh                  # or: make install
 
-# 3. Authenticate your Claude subscription — run once
-claude login                  # stores ~/.claude/.credentials.json
+# 3. Authenticate — pick ONE (see "Authentication" below for the ToS guidance):
+claude login                  # personal use: your own Claude subscription, same as Claude Code itself
+#   — or —                    # teams / products / anything beyond personal use:
+#   .env → CLAUDE_AUTH_MODE=api_key + ANTHROPIC_API_KEY=sk-ant-...   (Claude Console)
 
 # 4. Set your password
 #    edit .env → WEB_PASSWORD=...   (.env is a hidden dotfile; WEB_COOKIE_SALT was auto-generated for you)
@@ -204,7 +211,7 @@ flowchart LR
     K[Kanban card]
     C --> E
     K --> E
-    E[run_engine&#40;&#41;<br/>async generator] --> SDK[Claude Agent SDK<br/>subscription auth]
+    E[run_engine&#40;&#41;<br/>async generator] --> SDK[Claude Agent SDK<br/>your Anthropic auth]
     SDK --> O[files / git / deploy]
     E -. reconciles .-> B[(TASKS.md<br/>board)]
     K --- B
@@ -236,15 +243,25 @@ Discard → you get a ping.** Move a card, and the agent picks it up.
 
 ---
 
-## Runs on your Claude subscription (no API key)
+## Authentication — bring your own Claude
 
-This is a feature, not a footnote. The engine reads `~/.claude/.credentials.json` (the OAuth token
-issued by `claude login`) and drives the official `claude` CLI — so a Cardloop instance costs
-**nothing per token** on top of your existing Claude Max/Pro subscription.
+Cardloop is orchestration software: it spawns and drives the **official `claude` binary** on your own
+host and never touches Anthropic's API or your OAuth tokens itself. Two supported modes
+(`CLAUDE_AUTH_MODE` in `.env`):
 
-`bot.py` deliberately removes `ANTHROPIC_API_KEY` from the environment at startup to force subscription
-auth; if it's set, the SDK silently switches to pay-per-token API billing. For multi-user or commercial
-deployments you **should** use an API key instead — see [Legal & Terms](#legal--terms) for the Anthropic ToS nuance.
+- **`api_key` — recommended, and required for anything beyond personal use.** Set
+  `ANTHROPIC_API_KEY` from [Claude Console](https://platform.claude.com/) (pay-as-you-go). This is
+  the mode Anthropic's [authentication policy](https://code.claude.com/docs/en/legal-and-compliance)
+  prescribes for developers and products, and the only permitted mode for teams, hosted, or
+  commercial deployments.
+- **`subscription` — personal, individual use only.** `claude login` once; the official CLI uses your
+  own Claude account exactly as if you ran Claude Code in a terminal. Anthropic's terms scope
+  subscription auth to *"ordinary, individual usage of Claude Code and the Agent SDK"* — one person,
+  their own account, their own machine. Do **not** use this mode to serve other users, share an
+  account, or run a hosted service; that violates Anthropic's Consumer Terms and risks your account.
+
+Either way there's no middleman: your Anthropic account, your host, zero markup. You are responsible
+for complying with the terms of your own plan — see [Legal & Terms](#legal--terms).
 
 ---
 
@@ -294,12 +311,12 @@ the personal cockpit you run at home and operate from your phone.
 | **Card = agent run** | ✅ task text becomes the prompt | ⚠️ manual trigger per task | ❌ dispatch layer over agents |
 | **Git isolation (worktrees)** | ✅ runs on an isolated branch + review gate | ❌ edits your workspace directly | ❌ needs your own git/CI setup |
 | **Resilient queue** | ✅ deferred auto-resume after rate limit | ❌ halts on rate limits | ❌ halts on rate limits |
-| **Claude subscription auth** | ✅ no per-token cost | ❌ API key | ❌ API key |
+| **No-middleman billing** | ✅ your Anthropic account, zero markup | ✅ | ❌ per-seat SaaS pricing |
 | **Always-on self-hosted service** | ✅ systemd / Docker / HTTPS | ❌ launch from terminal | ✅ |
 | **Multi-project structured cockpit** | ✅ explicit projects + sessions | ⚠️ per-repo | ✅ |
 
-Trade-offs, stated plainly: it's **Claude-only** by design (that's what makes subscription auth and
-deep integration possible), and `webapp.py` is a large monolith we're decomposing in the open. PRs welcome.
+Trade-offs, stated plainly: it's **Claude-only** by design (that's what makes the deep Claude Code
+integration possible), and `webapp.py` is a large monolith we're decomposing in the open. PRs welcome.
 
 ---
 
@@ -342,7 +359,8 @@ Set in `.env` (scaffolded by `install.sh`):
 | `WEB_COOKIE_SECURE` | Set `true` when not on `localhost` (HTTPS) |
 | `TRUSTED_PROXIES` | CSV of proxy IPs/CIDRs behind a reverse proxy |
 | `OPERATOR_NAME` / `RESPONSE_LANGUAGE` | Operator name and the agent's reply language |
-| `ANTHROPIC_API_KEY` | Only for API-key mode (multi-user/commercial); omit for subscription auth |
+| `CLAUDE_AUTH_MODE` | `api_key` (recommended; required for teams/commercial) or `subscription` (personal use) |
+| `ANTHROPIC_API_KEY` | Claude Console key — required when `CLAUDE_AUTH_MODE=api_key` |
 
 The project registry, sessions, and board state live under `data/` (gitignored). Full reference and
 manual steps → [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -387,16 +405,23 @@ PRs are welcome — this is an open project and the monolith is being decomposed
 open-source project and is not affiliated with, endorsed by, or sponsored by Anthropic. Cardloop invokes
 the official `claude` CLI; it does not reimplement, bundle, or modify Anthropic's software.
 
-**Anthropic Terms of Service.** Cardloop runs the official `claude` CLI and never touches the API or
-OAuth tokens directly.
+**Anthropic Terms of Service.** Cardloop runs the official `claude` CLI on your own host and never
+reads, extracts, or transmits your OAuth tokens or API keys itself — authentication is handled
+entirely by Anthropic's own binary. That said, *how you authenticate matters* under Anthropic's
+[authentication and credential-use policy](https://code.claude.com/docs/en/legal-and-compliance):
 
-- **Personal use** on your own Claude subscription is what the project targets. You are responsible for
-  complying with your own Anthropic subscription terms.
-- **Multi-user or commercial / hosted** deployments must use an Anthropic **API key**
-  (`ANTHROPIC_API_KEY`), not a subscription. Authenticating *other* users against *their* Claude
-  subscriptions through a hosted service is not permitted by Anthropic's Consumer Terms.
-- By default `bot.py` removes `ANTHROPIC_API_KEY` from the environment to force subscription (CLI) auth.
-  To run in API-key mode, set it in your environment before launch.
+- **API key (`CLAUDE_AUTH_MODE=api_key`) is the mode Anthropic prescribes for developers and
+  products**, and the only permitted mode for teams, hosted, multi-user, or commercial deployments.
+- **Subscription mode (`claude login`) is for personal, individual use only** — Anthropic scopes
+  consumer-plan auth to ordinary, individual usage of Claude Code and the Agent SDK by the account
+  owner. Never share an account, route other users through your plan, or offer Claude.ai login as a
+  service — Anthropic prohibits this and enforces it (typically by account action, without notice).
+- In subscription mode `bot.py` removes `ANTHROPIC_API_KEY` from the environment to prevent
+  accidental API billing; in `api_key` mode it is passed through to the SDK.
+
+Anthropic's policies evolve — check the
+[legal & compliance page](https://code.claude.com/docs/en/legal-and-compliance) for the current text.
+You are responsible for your own compliance.
 
 This project is provided "as is" under the [MIT License](./LICENSE); see also the [NOTICE](./NOTICE)
 file for third-party attributions.
