@@ -64,6 +64,10 @@ Rules that keep it lean:
 - **Merge, don't blind-delete.** A "progress" note often hides a real gotcha; read before removing,
   and repoint inbound `[[wiki-links]]`.
 - **Fix stale bodies.** A wrong memory is worse than none — it is loaded and believed.
+- ⚠️ **Never `sed -i` across the whole memory dir.** `sed -i` rewrites every file it opens, match or
+  not, so a bulk link-repoint stamps today's mtime on all of them and blinds the lint's
+  `stale_by_age` check. Edit only the files that actually contain the pattern (`grep -l … | xargs sed -i`),
+  or restore mtimes afterwards from a backup with `touch -r`.
 - `agents_config.memory = "project"` disables native auto-memory for a project, leaving the curated
   `./.claude-ops/memory/` as its only brain (spec-078 Phase 3a).
 
