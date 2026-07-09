@@ -2333,7 +2333,22 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // non-critical
     }
     abortRef.current?.abort()
+    // Tear the run state down HERE instead of leaning on sendMessage's finally: that finally
+    // only exists while this tab still owns the SSE stream. Once the stream drops (the server
+    // logs "client disconnected, task continues in background") the turn is adopted by the
+    // /live poll, `run` is set with source:'card', and the Stop button stays visible via
+    // `busy = !!run || streaming` — but aborting a dead controller clears nothing, so the
+    // indicator lingers until the next 5s poll.
     setStreaming(false)
+    // Sync the ref now; the useEffect mirroring `streaming` only runs after render, and the
+    // /live poll skips itself while streamingRef is true.
+    streamingRef.current = false
+    setRun(null)
+    setServerStartedAt(null)
+    setSubagents([])
+    seenSubagentKeysRef.current = new Set()
+    busActiveRef.current = false
+    setMessages(prev => finalizeStreaming(prev))
     // Clear server-side queue entries (fire-and-forget per item)
     setQueueItems(prev => {
       prev.forEach(item => api.chatQueueDelete(projectId, item.id).catch(() => {}))
