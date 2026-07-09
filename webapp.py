@@ -11326,7 +11326,14 @@ def _annotate_unknown_hashes(text: str, cwd: str) -> str:
     import re
     import subprocess
 
-    candidates = set(re.findall(r"\b[0-9a-f]{7,40}\b", text))
+    # Require BOTH a digit and an a-f letter. Plain [0-9a-f]{7,40} also matches unix timestamps
+    # (1783616753), big token counts (3145728) and hex-only English words ("defaced") — branding
+    # those "fabricated" would be worse than the disease. The cost is a real abbreviated hash that
+    # happens to be all digits (~4% of 7-char hashes) or all letters (~2%) slipping through
+    # unchecked; the narrative rarely cites a hash without one of each, and the digest is
+    # additionally grounded in GROUND TRUTH.
+    candidates = {h for h in re.findall(r"\b[0-9a-f]{7,40}\b", text)
+                  if re.search(r"\d", h) and re.search(r"[a-f]", h)}
     if not candidates:
         return text
 
@@ -11359,7 +11366,9 @@ def _handoff_narrative_ok(narrative: str) -> bool:
         return False
     if _HANDOFF_ECHO_MARKER in narrative:
         return False
-    return "## Where we stopped" in narrative
+    # Case-insensitive: a model that title-cases the header still wrote a real digest, and
+    # rejecting it would throw away a good summary for a cosmetic mismatch.
+    return "## where we stopped" in narrative.lower()
 
 
 async def _build_handoff(ctx: dict, session_key: str, cwd: str, session_id: "str | None") -> str:
@@ -11667,9 +11676,12 @@ async def _build_session_title(summary: str) -> str:
     if not summary or not summary.strip():
         return ""
     try:
-        handoff_model = os.environ.get("HANDOFF_MODEL", "haiku")
+        # Its own env var, not HANDOFF_MODEL: that name now means "the model that decides what is
+        # true", and it must not silently pick up a cheap default meant for cosmetics. A title is
+        # a label for an already-built ≤500-word digest — haiku carries no truth risk here.
+        title_model = os.environ.get("SESSION_TITLE_MODEL", "haiku")
         opts = _ClaudeAgentOptions(
-            model=handoff_model,
+            model=title_model,
             permission_mode="default",  # internal helper, no tools — no need to bypass
             cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
             allowed_tools=[],

@@ -70,6 +70,12 @@ def test_digest_without_required_header_is_rejected():
     assert _webapp._handoff_narrative_ok("Some prose with no headers at all.") is False
 
 
+@pytest.mark.parametrize("header", ["## Where we stopped", "## Where We Stopped", "## WHERE WE STOPPED"])
+def test_header_check_is_case_insensitive(header):
+    """A title-cased header is still a real digest — do not throw it away over cosmetics."""
+    assert _webapp._handoff_narrative_ok(f"{header}\nMid-refactor of engine.py.") is True
+
+
 def test_empty_narrative_is_rejected():
     assert _webapp._handoff_narrative_ok("") is False
     assert _webapp._handoff_narrative_ok("   \n ") is False
@@ -111,6 +117,19 @@ def test_hash_free_text_is_untouched(git_repo):
     repo, _ = git_repo
     text = "No hashes here, just prose about engine.py and webapp.py."
     assert _webapp._annotate_unknown_hashes(text, str(repo)) == text
+
+
+@pytest.mark.parametrize("text", [
+    "Session started at unix time 1783616753.",       # digits only — a timestamp
+    "Context grew to 3145728 tokens before rotation.",  # digits only — a token count
+    "The plan was defaced by a bad merge.",            # letters only — an English word
+    "Cache hit 99, fresh 287, duration 9495 ms.",      # short numbers
+])
+def test_hexish_prose_is_not_branded_a_fabrication(git_repo, text):
+    """`[0-9a-f]{7,40}` also matches timestamps, token counts and words like "defaced".
+    Branding those as fabricated commits is worse than the bug being guarded against."""
+    repo, _ = git_repo
+    assert "NO SUCH COMMIT" not in _webapp._annotate_unknown_hashes(text, str(repo))
 
 
 def test_non_git_dir_leaves_text_intact(tmp_path):
@@ -156,7 +175,23 @@ def test_prompt_forbids_inventing_hashes_and_continuing_the_transcript():
     assert "not committed is NOT done" in p or "not committed is not done" in p.lower()
 
 
-def test_default_handoff_model_is_not_haiku():
-    """haiku at effort=low drifted into continuing a long transcript; sonnet-5 is the default."""
-    import os
-    assert os.environ.get("HANDOFF_MODEL", "claude-sonnet-5") != "haiku"
+def test_digest_model_defaults_to_sonnet_in_source():
+    """haiku at effort=low drifted into continuing a long transcript; sonnet-5 is the default.
+
+    Assert the SOURCE default, not os.environ — reading the env with a sonnet-5 fallback would
+    pass even if the code had been reverted to haiku, which is exactly the regression to catch.
+    """
+    import inspect
+
+    src = inspect.getsource(_webapp._build_handoff_inner)
+    assert 'os.environ.get("HANDOFF_MODEL", "claude-sonnet-5")' in src
+
+
+def test_session_title_does_not_read_the_digest_model_var():
+    """HANDOFF_MODEL now means "the model that decides what is true". The cosmetic title model
+    must not share it — overriding one should not silently change the other."""
+    import inspect
+
+    src = inspect.getsource(_webapp._build_session_title)
+    assert 'os.environ.get("HANDOFF_MODEL"' not in src, "must not READ the digest model var"
+    assert 'os.environ.get("SESSION_TITLE_MODEL", "haiku")' in src
