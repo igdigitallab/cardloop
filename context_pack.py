@@ -407,6 +407,18 @@ def assemble(
 
     try:
         relevant_files = _relevant_memory(other_files, query)
+        # spec-078: only surface a memory file's FULL BODY when the query genuinely overlaps it.
+        # The naive top-k ranking pulled unrelated files (e.g. a tablet-remote-control memory for a
+        # "shut down the server" query). Require a real signal (>=2 distinct query words matched);
+        # otherwise rely on the memory INDEX (a pointer) + FTS recall for relevance.
+        _q_words = set(re.findall(r"\w+", query.lower())) if query else set()
+        if len(_q_words) < 2:
+            relevant_files = []
+        else:
+            def _has_signal(f: dict[str, str]) -> bool:
+                combined = (f.get("name", "") + " " + f.get("body", "")).lower()
+                return len(_q_words & set(re.findall(r"\w+", combined))) >= 2
+            relevant_files = [f for f in relevant_files if _has_signal(f)]
     except Exception:
         relevant_files = []
 
@@ -416,10 +428,10 @@ def assemble(
     except Exception:
         board_text = ""
 
-    try:
-        events = _read_timeline(data_dir, cwd, session_key)
-    except Exception:
-        events = []
+    # spec-078: the "Recent activity" section rendered raw timeline events as noise
+    # ("tool_result | Bash") that never helped the agent orient — dropped from the pack.
+    # (_read_timeline is kept for potential reuse but no longer feeds the pack.)
+    events: list[dict[str, Any]] = []
 
     try:
         git_text = _git_log(cwd)

@@ -10105,7 +10105,11 @@ async def _chat_queue_drain_loop(ctx: dict) -> None:
 
 _AUTO_CONTINUE_ON = os.getenv("AUTO_CONTINUE_ON_BG", "0").lower() in ("1", "true", "yes", "on")
 _AUTO_CONTINUE_DEBOUNCE_SEC = float(os.getenv("AUTO_CONTINUE_DEBOUNCE_SEC", "20"))
-_AUTO_CONTINUE_MAX = int(os.getenv("AUTO_CONTINUE_MAX", "3"))
+# spec-078: default lowered 3→1. A synthetic wake reuses the operator's (possibly xhigh)
+# effort for fingerprint stability (see _completion_wake_fire), so each one is a full-cost
+# turn — capping the worst case at ONE wake per episode is the fingerprint-safe way to bound
+# the #1 per-episode token multiplier. Override via AUTO_CONTINUE_MAX for chattier resumes.
+_AUTO_CONTINUE_MAX = int(os.getenv("AUTO_CONTINUE_MAX", "1"))
 _bg_continue_count: "dict[str, int]" = {}  # session_key → wakes fired this episode
 _completion_wake_pending: "dict[str, list[dict]]" = {}  # session_key → terminal recs awaiting one wake
 _last_turn_options: "dict[str, dict]" = {}  # session_key → {effort, ultracode} of the last operator turn
@@ -10182,6 +10186,11 @@ async def _completion_wake_fire(ctx: dict, session_key: str) -> None:
                     break
         except Exception:
             pass  # best-effort — enqueue falls back to the legacy flat-session path
+        # spec-071: the synthetic turn REUSES the operator's last effort/ultracode on purpose —
+        # a different effort would mismatch the live-client fingerprint (engine.py:_compute_fingerprint
+        # includes effort), evicting + rebuilding the persistent client (full floor re-paid) and
+        # risking a SIGTERM of still-running children. So we keep inheritance for fingerprint
+        # stability and bound the COST instead via AUTO_CONTINUE_MAX (spec-078: default lowered to 1).
         opts = _last_turn_options.get(session_key) or {}
         item = _chat_queue_enqueue(session_key, prompt, None, project_id,
                                    effort=opts.get("effort"), ultracode=opts.get("ultracode"))

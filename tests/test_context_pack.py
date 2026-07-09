@@ -198,8 +198,10 @@ def test_malformed_timeline_line_does_not_raise(tmp_path):
 
     result = CP.assemble(str(cwd), "test:1", "", data_dir=str(data_dir))
     assert result is not None
-    # The good event should be included
-    assert "run" in result
+    # spec-078: the "Recent activity" section was dropped (raw timeline events were noise),
+    # so timeline content no longer appears in the pack. The point of this test now is only
+    # that a malformed timeline line does NOT raise — the memory index still comes through.
+    assert "## Memory index" in result
 
 
 def test_missing_timeline_does_not_raise(tmp_path):
