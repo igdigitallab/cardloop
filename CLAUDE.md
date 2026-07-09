@@ -47,6 +47,26 @@ More detail in ARCHITECTURE.md.
 
 ---
 
+## Memory wiki (ingest / query / lint)
+
+Native auto-memory (`~/.claude/projects/<slug>/memory/`) is per-project — a project never loads
+another project's memory. What every session DOES load is `~/CLAUDE.md` plus that project's
+`MEMORY.md` index, verbatim. So the index is a **routing table, not a summary**: one line per
+article, hook under ~100 chars, detail in the article.
+
+Auto-memory only ingests — it appends and never prunes. The missing third operation is lint:
+`tools/memory-lint.py --dir <memory-dir>` (single) or `tools/memory-lint-all.sh` (every project,
+weekly cron, report at `~/logs/memory-lint.md`). It never deletes; curation stays with the operator.
+
+Rules that keep it lean:
+- **No ledgers.** Progress/status notes for shipped work are what git is for. Distill the decisions
+  and caveats into one durable article and delete the trackers (see `shipped-specs-durable-facts`).
+- **Merge, don't blind-delete.** A "progress" note often hides a real gotcha; read before removing,
+  and repoint inbound `[[wiki-links]]`.
+- **Fix stale bodies.** A wrong memory is worse than none — it is loaded and believed.
+- `agents_config.memory = "project"` disables native auto-memory for a project, leaving the curated
+  `./.claude-ops/memory/` as its only brain (spec-078 Phase 3a).
+
 ## Gotchas (don't step on these again)
 
 ### Auth & environment
