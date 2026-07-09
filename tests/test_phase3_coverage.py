@@ -349,6 +349,31 @@ async def test_session_history_with_jsonl(aiohttp_client, sessions_app, project_
     assert "Hello Claude" in data["messages"][0]["text"]
 
 
+def test_strip_service_blocks_removes_context_pack():
+    """spec-075: the injected <context-pack> must not leak into rendered chat history."""
+    raw = (
+        "<context-pack>\n"
+        "This project state was assembled at session start.\n"
+        "## Memory index\n- foo — bar\n"
+        "</context-pack>\n\n"
+        "shut down the home server please"
+    )
+    cleaned = _webapp._strip_service_blocks(raw)
+    assert "context-pack" not in cleaned
+    assert "Memory index" not in cleaned
+    assert cleaned == "shut down the home server please"
+
+
+def test_strip_service_blocks_context_pack_with_handoff_and_prompt():
+    """Pack + prior-session-summary both stripped, only the human prompt survives."""
+    raw = (
+        "<context-pack>\nstate here\n</context-pack>\n\n"
+        "<prior-session-summary>\nold work\n</prior-session-summary>\n\n"
+        "my real message"
+    )
+    assert _webapp._strip_service_blocks(raw) == "my real message"
+
+
 async def test_session_context_no_session(aiohttp_client, sessions_app, project_ctx):
     """GET /session-context with no active session → all fields empty, session_id=None."""
     client = await aiohttp_client(sessions_app)

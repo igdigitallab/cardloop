@@ -9389,7 +9389,7 @@ async def api_project_set_session(req: web.Request) -> web.Response:
 
 
 _SERVICE_BLOCK_RE = re.compile(
-    r"<(?P<tag>task-notification|prior-session-summary|system-reminder"
+    r"<(?P<tag>task-notification|prior-session-summary|context-pack|system-reminder"
     r"|command-name|command-message|command-args)"
     r"[^>]*>.*?</(?P=tag)>",
     re.DOTALL | re.IGNORECASE,
@@ -9400,7 +9400,8 @@ def _strip_service_blocks(text: str) -> str:
     """Remove SDK-injected service XML blocks from a user-turn string.
 
     Blocks stripped: <task-notification>, <prior-session-summary>,
-    <system-reminder>, <command-name>, <command-message>, <command-args>.
+    <context-pack> (spec-075), <system-reminder>, <command-name>,
+    <command-message>, <command-args>.
     Returns the cleaned text with surrounding whitespace removed.
     """
     return _SERVICE_BLOCK_RE.sub("", text).strip()
