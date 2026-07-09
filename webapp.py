@@ -168,8 +168,15 @@ _CARD_OUTPUT_SCHEMA: "dict" = {
     },
 }
 
-# Prompt sent to haiku to produce a handoff summary of the current session.
+# Prompt sent to the summarizer to produce a handoff summary of the current session.
 # Sections must appear in exactly this order (Where we stopped FIRST).
+#
+# The anti-fabrication rules are load-bearing, not decoration. A haiku run on 2026-07-09
+# was handed ~35k chars of dialog whose last turn had been interrupted mid-work; instead of
+# summarizing it, it CONTINUED the transcript — inventing the `git commit` calls the agent
+# was about to make, then reporting two commit hashes that never existed as "✅ shipped".
+# The next session would have inherited that as fact. Hence: ground the model in real git
+# state, forbid uncited hashes, and verify what comes back (_annotate_unknown_hashes).
 ROTATION_SUMMARY_PROMPT = (
     "Produce a dense handoff digest of this session, ≤500 words.\n"
     "Use these FIXED English section headers in exactly this order:\n\n"
@@ -182,7 +189,16 @@ ROTATION_SUMMARY_PROMPT = (
     "## Done this session\n"
     "(Completed work — brief bullet list.)\n\n"
     "Weight the end of the session most heavily. "
-    "Be specific about file paths, function names, and error messages where relevant."
+    "Be specific about file paths, function names, and error messages where relevant.\n\n"
+    "TRUTH RULES — the next session inherits this digest as fact:\n"
+    "- SUMMARIZE the transcript. Never continue it, never echo it, never write the tool calls "
+    "the agent was about to make. Nothing that is not already in the transcript happened.\n"
+    "- Cite a commit hash ONLY if it appears verbatim in the GROUND TRUTH block below. "
+    "Never invent, guess, or reconstruct a hash.\n"
+    "- Work that was written but not committed is NOT done. Say so explicitly.\n"
+    "- If the session was interrupted, the last intent is a PLAN, not an outcome.\n"
+    "- When unsure whether something completed, write that it is unverified. "
+    "An honest gap beats a confident fabrication."
 )
 
 # Strong references for long-lived background tasks created via asyncio.create_task.
@@ -11227,6 +11243,90 @@ _HANDOFF_MAX_CHUNKS = 8
 # Recency tail length (spec-056): last N chars of the rendered dialog treated as
 # the "recent" zone — analyzed in detail rather than compressed.
 _HANDOFF_TAIL_CHARS = 30_000
+# A digest asked for ≤500 words that comes back longer than this is not a digest —
+# it is the transcript echoed back. Reject it rather than store it as fact.
+_HANDOFF_MAX_NARRATIVE_CHARS = 8_000
+# Marker the renderer uses for tool calls; its presence in the OUTPUT means the model
+# replayed its input instead of summarizing.
+_HANDOFF_ECHO_MARKER = "[tool]: {"
+# Emitted into the transcript by the CLI when the operator hits Stop.
+_HANDOFF_INTERRUPT_MARKER = "[Request interrupted by user]"
+
+
+def _git_ground_truth(cwd: str) -> str:
+    """Real repo state to anchor the summarizer: what is actually committed, and what is not.
+
+    Without this the model has nothing to check itself against and will happily narrate
+    commits that never happened.  Returns "" for non-git dirs (best-effort, never raises).
+    """
+    import subprocess
+
+    def _run(args: list[str]) -> str:
+        try:
+            r = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=10)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    log = _run(["log", "--oneline", "-n", "15"])
+    if not log:
+        return ""
+    dirty = _run(["status", "--porcelain"])
+    parts = ["=== GROUND TRUTH (real repo state — the ONLY hashes you may cite) ===",
+             "Commits that exist (newest first):", log]
+    if dirty:
+        parts += ["",
+                  "UNCOMMITTED changes still in the working tree — this work is NOT committed:",
+                  dirty]
+    else:
+        parts += ["", "Working tree is clean (nothing uncommitted)."]
+    return "\n".join(parts)
+
+
+def _annotate_unknown_hashes(text: str, cwd: str) -> str:
+    """Flag every commit-like hash in `text` that does not resolve to a real commit.
+
+    Deterministic backstop: a smarter model lowers the odds of a fabricated hash, it does not
+    remove them.  git is the arbiter.  Unknown hashes are annotated rather than deleted so the
+    reader can see what the model claimed and that it was false.
+    """
+    import re
+    import subprocess
+
+    candidates = set(re.findall(r"\b[0-9a-f]{7,40}\b", text))
+    if not candidates:
+        return text
+
+    # No repo → nothing to verify against. Say nothing rather than brand a real hash a lie.
+    try:
+        probe = subprocess.run(["git", "-C", cwd, "rev-parse", "--git-dir"],
+                               capture_output=True, text=True, timeout=10)
+        if probe.returncode != 0:
+            return text
+    except Exception:
+        return text
+
+    for h in candidates:
+        try:
+            r = subprocess.run(["git", "-C", cwd, "rev-parse", "--verify", "--quiet", f"{h}^{{commit}}"],
+                               capture_output=True, text=True, timeout=10)
+            exists = r.returncode == 0
+        except Exception:
+            continue  # cannot verify → leave untouched rather than smear a real hash
+        if not exists:
+            text = re.sub(rf"\b{h}\b", f"{h} ⚠️(NO SUCH COMMIT — fabricated by the summarizer)", text)
+    return text
+
+
+def _handoff_narrative_ok(narrative: str) -> bool:
+    """Reject a narrative that echoed the transcript instead of digesting it."""
+    if not narrative or not narrative.strip():
+        return False
+    if len(narrative) > _HANDOFF_MAX_NARRATIVE_CHARS:
+        return False
+    if _HANDOFF_ECHO_MARKER in narrative:
+        return False
+    return "## Where we stopped" in narrative
 
 
 async def _build_handoff(ctx: dict, session_key: str, cwd: str, session_id: "str | None") -> str:
@@ -11329,7 +11429,11 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
         full_dialog = "\n".join(rendered_parts)
 
         if full_dialog:
-            handoff_model = os.environ.get("HANDOFF_MODEL", "haiku")
+            # Default is claude-sonnet-5, not haiku: this digest is inherited as fact by the next
+            # session, and haiku at effort=low drifts into continuing a long transcript rather than
+            # digesting it. A rotation happens once per ~280k-token session, so the extra cost is
+            # noise against what it protects. HANDOFF_MODEL still overrides.
+            handoff_model = os.environ.get("HANDOFF_MODEL", "claude-sonnet-5")
             opts = _ClaudeAgentOptions(
                 model=handoff_model,
                 permission_mode="default",  # internal helper, no tools — no need to bypass
@@ -11337,6 +11441,29 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
                 allowed_tools=[],
                 disallowed_tools=[],
                 effort="low",
+            )
+
+            # Anchor the model in reality, and tell it plainly when the session was cut short —
+            # an interrupted tail is exactly where a summarizer invents a tidy ending.
+            ground_truth = _git_ground_truth(cwd)
+            was_interrupted = _HANDOFF_INTERRUPT_MARKER in full_dialog
+            guard_parts = []
+            if ground_truth:
+                guard_parts.append(ground_truth)
+            if was_interrupted:
+                guard_parts.append(
+                    "=== THIS SESSION WAS INTERRUPTED BY THE OPERATOR ===\n"
+                    "The final turn was cut off mid-work. Anything the agent was about to do did "
+                    "NOT happen. Report the last intent as an unfinished plan, never as done."
+                )
+            guard_block = ("\n\n" + "\n\n".join(guard_parts) + "\n") if guard_parts else ""
+            # Repeat the contract AFTER the dialog: the instruction at the top of a 30k-char
+            # prompt is what a small model forgets first.
+            tail_reminder = (
+                "\n\n=== END OF TRANSCRIPT ===\n"
+                "Now write the digest. Required headers, ≤500 words, summarize only — do not "
+                "continue the transcript. Cite only hashes from GROUND TRUTH. Uncommitted work "
+                "is not done."
             )
 
             if len(full_dialog) <= _HANDOFF_CHUNK_CHARS:
@@ -11348,15 +11475,19 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
                     tail_zone = full_dialog[-_HANDOFF_TAIL_CHARS:]
                     single_pass_prompt = (
                         ROTATION_SUMMARY_PROMPT
+                        + guard_block
                         + "\n\n"
                         + "=== EARLIER (compress to one paragraph) ===\n"
                         + earlier_zone
                         + "\n\n=== RECENT TAIL (analyze in detail: current state, "
                         "what is in progress, the immediate next step, decisions just made) ===\n"
                         + tail_zone
+                        + tail_reminder
                     )
                 else:
-                    single_pass_prompt = ROTATION_SUMMARY_PROMPT + "\n\n" + full_dialog
+                    single_pass_prompt = (
+                        ROTATION_SUMMARY_PROMPT + guard_block + "\n\n" + full_dialog + tail_reminder
+                    )
                 narrative = await _haiku_summarize(single_pass_prompt, opts)
             else:
                 # Map-reduce for large transcripts (spec-056: last chunk gets higher budget).
@@ -11399,11 +11530,36 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
                     combined = "\n\n---\n".join(chunk_summaries)
                     final_prompt = (
                         ROTATION_SUMMARY_PROMPT
+                        + guard_block
                         + "\n\nThese are partial summaries — combine into one handoff. "
                         "Weight the final chunk (most recent) heaviest.\n\n"
                         + combined
+                        + tail_reminder
                     )
                     narrative = await _haiku_summarize(final_prompt, opts)
+
+            # A digest that echoed its input or dropped the required headers is worse than no
+            # digest: the deterministic facts below are always true, the narrative is not.
+            # Retry once against the tail only, then give up rather than store garbage as fact.
+            if narrative and not _handoff_narrative_ok(narrative):
+                print(f"[handoff] narrative rejected for {session_key} "
+                      f"({len(narrative)} chars, echo={_HANDOFF_ECHO_MARKER in narrative}) — retrying")
+                retry_prompt = (
+                    ROTATION_SUMMARY_PROMPT
+                    + guard_block
+                    + "\n\n=== RECENT TAIL ===\n"
+                    + full_dialog[-_HANDOFF_TAIL_CHARS:]
+                    + tail_reminder
+                )
+                narrative = await _haiku_summarize(retry_prompt, opts)
+                if not _handoff_narrative_ok(narrative):
+                    print(f"[handoff] narrative rejected again for {session_key} — "
+                          "storing deterministic facts only")
+                    narrative = ""
+
+            # git is the arbiter, not the model: flag any hash that does not resolve.
+            if narrative:
+                narrative = _annotate_unknown_hashes(narrative, cwd)
     except Exception as _narr_exc:
         print(f"[handoff] narrative generation failed (non-blocking): {_narr_exc!r}")
 
@@ -11413,6 +11569,25 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
         parts.append(narrative)
 
     fact_lines: list[str] = []
+
+    # Model-independent truths. These hold even when the narrative is rejected, and they are
+    # exactly the two facts a summarizer gets wrong: that the turn was cut off, and that the
+    # code it wrote never reached a commit.
+    try:
+        if any(_HANDOFF_INTERRUPT_MARKER in (e.get("text") or "") for e in history):
+            fact_lines.append(
+                "⚠️ SESSION WAS INTERRUPTED by the operator — the final turn did not finish. "
+                "Anything it was about to do did not happen."
+            )
+        import subprocess as _sp
+        _dirty = _sp.run(["git", "-C", cwd, "status", "--porcelain"],
+                         capture_output=True, text=True, timeout=10)
+        if _dirty.returncode == 0 and _dirty.stdout.strip():
+            fact_lines.append("⚠️ UNCOMMITTED work still in the working tree (NOT done):\n"
+                              + _dirty.stdout.strip())
+    except Exception as _fact_exc:
+        print(f"[handoff] deterministic state facts failed (non-blocking): {_fact_exc!r}")
+
     if edited_files:
         fact_lines.append("Files touched: " + ", ".join(edited_files[:30]))
     if commands:
