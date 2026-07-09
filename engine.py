@@ -167,6 +167,40 @@ DEFAULT_AGENTS: dict = {
 }
 
 
+# spec-078 Phase 2 — per-project brains. A global lean default for the SDK `skills` context
+# filter: SKILLS_DEFAULT_ALLOW="a,b,c" restricts EVERY project to that skill set unless the
+# project overrides via agents_config.skills. Unset → None → CLI default (all skills, no change).
+_SKILLS_DEFAULT_ALLOW_ENV = os.getenv("SKILLS_DEFAULT_ALLOW")
+_DEFAULT_SKILLS: "list[str] | str | None" = (
+    [s.strip() for s in _SKILLS_DEFAULT_ALLOW_ENV.split(",") if s.strip()]
+    if _SKILLS_DEFAULT_ALLOW_ENV else None
+)
+
+
+def _plugin_install_path(plugin_id: str) -> "str | None":
+    """Resolve a plugin id → its local install path from ~/.claude/plugins/installed_plugins.json.
+
+    Version-agnostic (reads the current installPath from disk, never hardcodes a version).
+    Accepts either the full registry key ("marketing-skills@marketingskills") or just the
+    name part ("marketing-skills"). Returns None if the plugin is not installed.
+    """
+    try:
+        data = json.loads(
+            (Path.home() / ".claude" / "plugins" / "installed_plugins.json").read_text(encoding="utf-8"))
+        plugins = data.get("plugins") or {}
+        entries = plugins.get(plugin_id)
+        if entries is None:  # match by the name part before "@"
+            for key, val in plugins.items():
+                if key.split("@", 1)[0] == plugin_id:
+                    entries = val
+                    break
+        if isinstance(entries, list) and entries:
+            return entries[0].get("installPath")
+    except Exception:
+        return None
+    return None
+
+
 def _build_agents_kwargs(agents_config: dict) -> dict:
     """Build keyword args for run_engine from a project's agents_config dict.
 
@@ -178,6 +212,10 @@ def _build_agents_kwargs(agents_config: dict) -> dict:
         researcher_model — model alias for the researcher agent
         quick_model      — model alias for the quick agent
         conductor_prompt — bool; False → pass skip_conductor_prompt=True to run_engine
+        skills           — spec-078: SDK skill context filter (list[str] | "all"); per-project
+                           lean/curated skill set so a project pulls only ITS relevant skills
+        plugins          — spec-078: list of plugin ids to load for this project only (opt-in),
+                           e.g. ["marketing-skills"] on the marketing project — nothing elsewhere
     """
     if not agents_config:
         return {}
@@ -211,6 +249,12 @@ def _build_agents_kwargs(agents_config: dict) -> dict:
 
     if "conductor_prompt" in agents_config:
         kwargs["skip_conductor_prompt"] = not agents_config["conductor_prompt"]
+
+    # spec-078: per-project skill filter + plugin opt-in (each project pulls only its own brains).
+    if "skills" in agents_config:
+        kwargs["project_skills"] = agents_config["skills"]
+    if "plugins" in agents_config:
+        kwargs["project_plugins"] = agents_config["plugins"]
 
     return kwargs
 
@@ -1052,6 +1096,10 @@ def _compute_fingerprint(
         str(getattr(opts, "permission_mode", "")),
         str(sorted(getattr(opts, "setting_sources", []) or [])),
         str(sorted(getattr(opts, "disallowed_tools", []) or [])),
+        # spec-078: per-project skill filter + opted-in plugins are launch-immutable (applied at
+        # initialize), so a change must evict the live client for the new skill set to load.
+        str(getattr(opts, "skills", None)),
+        str(sorted((p or {}).get("path", "") for p in (getattr(opts, "plugins", []) or []))),
         # Capture the stable identity of the system_prompt (preset type/name) without the
         # per-turn append text — we don't want every TG nudge update to force a reconnect.
         str((getattr(opts, "system_prompt", None) or {}).get("type", "")),
@@ -1736,6 +1784,8 @@ async def run_engine(  # type: ignore[return]
     goal: "str | None" = None,
     entrypoint: str = "chat",
     disallowed_tools_extra: "list | None" = None,
+    project_skills: "list[str] | str | None" = None,
+    project_plugins: "list[str] | None" = None,
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
@@ -1940,12 +1990,29 @@ async def run_engine(  # type: ignore[return]
     _stable_content = "|".join(_stable_append_pieces)
     _stable_append_hash = hashlib.sha256(_stable_content.encode()).hexdigest()[:16]
 
+    # spec-078 Phase 2: per-project brains. `skills` is the SDK context filter (None → CLI default =
+    # all skills; list → only those; "all" → every skill). Default to the global lean allowlist so a
+    # project pulls only ITS relevant skills. `plugins` opt-in loads a plugin for THIS project only
+    # (e.g. marketing-skills on the marketing project) without enabling it globally for others.
+    _effective_skills = project_skills if project_skills is not None else _DEFAULT_SKILLS
+    _project_plugin_cfgs: "list[dict]" = []
+    for _pid in (project_plugins or []):
+        _pp = _plugin_install_path(_pid)
+        if _pp:
+            _project_plugin_cfgs.append({"type": "local", "path": _pp})
+        else:
+            print(f"[skills] project plugin {_pid!r} not found in installed_plugins.json — skipped")
+
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,
         permission_mode="bypassPermissions",
         cwd=cwd,
         setting_sources=["user", "project", "local"],
+        # spec-078: per-project skill filter + opted-in plugins. setting_sources stays intact so the
+        # guard-self-lifecycle PreToolUse hook + permissions + env are fully preserved.
+        skills=_effective_skills,  # type: ignore[arg-type]
+        plugins=_project_plugin_cfgs,  # type: ignore[arg-type]
         resume=resume_session_id,
         disallowed_tools=list(DISALLOWED_TOOLS) + list(disallowed_tools_extra or []),
         system_prompt=system_prompt,

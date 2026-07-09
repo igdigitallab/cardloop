@@ -4776,6 +4776,22 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
                             status=400,
                         )
                     clean_cfg[cfg_key] = cfg_val
+                elif cfg_key == "skills":  # spec-078: per-project SDK skill filter
+                    if cfg_val != "all" and not (
+                        isinstance(cfg_val, list) and all(isinstance(x, str) for x in cfg_val)
+                    ):
+                        return web.json_response(
+                            {"error": "agents_config.skills: expected 'all' or a list of skill names"},
+                            status=400,
+                        )
+                    clean_cfg[cfg_key] = cfg_val
+                elif cfg_key == "plugins":  # spec-078: per-project plugin opt-in (list of ids)
+                    if not (isinstance(cfg_val, list) and all(isinstance(x, str) for x in cfg_val)):
+                        return web.json_response(
+                            {"error": "agents_config.plugins: expected a list of plugin ids"},
+                            status=400,
+                        )
+                    clean_cfg[cfg_key] = cfg_val
                 else:
                     return web.json_response(
                         {"error": f"agents_config: unknown key {cfg_key!r}"},
