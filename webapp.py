@@ -9929,6 +9929,18 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             resume_session_id = ctx["sessions"].get(session_key)
         _cid = {"chat_id": _resolved_chat_id} if _resolved_chat_id else {}
 
+        # A queued message (typed while busy) or an auto-continue wake can be the first turn of a
+        # fresh post-rotation session — it needs the handoff exactly as a direct chat turn does.
+        effective_prompt = prompt
+        try:
+            effective_prompt, _injected = _inject_pending_handoff(
+                ctx, session_key, prompt, resume_session_id)
+            if _injected:
+                print(f"[rotation] injected handoff into queued post-rotation turn for {session_key}")
+        except Exception as _q_inj_exc:
+            print(f"[rotation] handoff injection failed for queued turn (continuing): {_q_inj_exc}")
+            effective_prompt = prompt
+
         if _live_turns.get(session_key) is None:
             _lt = _live_turn_create(session_key, model, prompt)
             if _resolved_chat_id:
@@ -9944,7 +9956,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         async for event in run_engine(
             project_name=project_name,
             cwd=cwd,
-            prompt=prompt,
+            prompt=effective_prompt,
             session_key=session_key,
             model=model,
             resume_session_id=resume_session_id,
@@ -10478,22 +10490,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # Only fires when there is no existing session (post-rotation) and a pending handoff exists.
         effective_prompt = prompt
         try:
-            if resume_sid is None:
-                ph = ctx.get("pending_handoff") or {}
-                pending_summary = ph.pop(session_key, None)
-                if pending_summary is not None:
-                    # spec-042: persist the pop so a restart doesn't re-inject the same summary
-                    ctx.get("save_handoff", lambda: None)()
-                    effective_prompt = (
-                        "<prior-session-summary>\n"
-                        "The previous session was rotated to stay lean. Summary of where we left off below.\n"
-                        "Continue this work if the new message relates to it; ignore this block if starting "
-                        "something unrelated.\n\n"
-                        f"{pending_summary}\n"
-                        "</prior-session-summary>\n\n"
-                        f"{prompt}"
-                    )
-                    print(f"[rotation] injected handoff into first post-rotation turn for {session_key}")
+            effective_prompt, _injected = _inject_pending_handoff(ctx, session_key, prompt, resume_sid)
+            if _injected:
+                print(f"[rotation] injected handoff into first post-rotation turn for {session_key}")
         except Exception as _inj_exc:
             print(f"[rotation] handoff injection failed (continuing without it): {_inj_exc}")
             effective_prompt = prompt
@@ -11251,6 +11250,40 @@ _HANDOFF_MAX_NARRATIVE_CHARS = 8_000
 _HANDOFF_ECHO_MARKER = "[tool]: {"
 # Emitted into the transcript by the CLI when the operator hits Stop.
 _HANDOFF_INTERRUPT_MARKER = "[Request interrupted by user]"
+
+
+def _inject_pending_handoff(ctx: dict, session_key: str, prompt: str,
+                            resume_sid: "str | None") -> "tuple[str, bool]":
+    """Prepend the pending rotation handoff to the FIRST prompt of a fresh session.
+
+    Returns (effective_prompt, injected).  Pops and persists the summary so it can never be
+    injected twice.  A no-op when the session is being resumed or nothing is pending.
+
+    Every path that can open a fresh session after a rotation must call this.  api_project_chat
+    used to be the only one, so a turn started from the queue drain — a message typed while the
+    bot was busy, or an auto-continue wake — began post-rotation with no memory of the session
+    it replaced, and stranded the summary in pending_handoff forever (the next chat turn resumed
+    that new session, so `resume_sid is None` never came round again).  _run_card is deliberately
+    excluded: cards run ephemeral in their own session and would consume a summary meant for chat.
+    """
+    if resume_sid is not None:
+        return prompt, False
+    ph = ctx.get("pending_handoff") or {}
+    pending_summary = ph.pop(session_key, None)
+    if pending_summary is None:
+        return prompt, False
+    # spec-042: persist the pop so a restart doesn't re-inject the same summary
+    ctx.get("save_handoff", lambda: None)()
+    effective = (
+        "<prior-session-summary>\n"
+        "The previous session was rotated to stay lean. Summary of where we left off below.\n"
+        "Continue this work if the new message relates to it; ignore this block if starting "
+        "something unrelated.\n\n"
+        f"{pending_summary}\n"
+        "</prior-session-summary>\n\n"
+        f"{prompt}"
+    )
+    return effective, True
 
 
 def _git_ground_truth(cwd: str) -> str:
