@@ -85,4 +85,16 @@ done
   echo "loaded verbatim on every single bootstrap. Detail: \`tools/memory-lint.py --dir <dir>\`"
 } >> "$REPORT"
 
+# Version history: "the wiki is just a git repo of markdown files". Only */memory/**.md is tracked
+# (see the .gitignore there) — transcripts never are. A weekly snapshot means a bad ingest, or a
+# curation pass that went too far, is a `git diff` away instead of gone.
+WIKI_ROOT="$HOME/.claude/projects"
+if [ -d "$WIKI_ROOT/.git" ] && command -v git >/dev/null 2>&1; then
+  if [ -n "$(git -C "$WIKI_ROOT" status --porcelain 2>/dev/null)" ]; then
+    git -C "$WIKI_ROOT" add -A >/dev/null 2>&1
+    git -C "$WIKI_ROOT" commit -q -m "wiki: weekly snapshot $(date +%Y-%m-%d) — $total_flagged flagged" >/dev/null 2>&1 \
+      && echo "memory-lint: wiki snapshot committed"
+  fi
+fi
+
 echo "memory-lint: $total_flagged flagged across all wikis → $REPORT"

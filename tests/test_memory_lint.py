@@ -153,3 +153,41 @@ def test_index_budget_warns_before_entries_vanish(tmp_path):
 
     assert b["over_budget"] is True
     assert b["pct_of_cap"] >= 80
+
+
+# ── log.md: the method's second special file ──────────────────────────────────
+
+
+def test_missing_log_is_reported(tmp_path):
+    """Without a chronology neither agent nor operator can see how the wiki got here."""
+    d = tmp_path / "memory"
+    d.mkdir()
+    _write(d, "MEMORY.md", "- [A](a.md) — hook\n")
+    _write(d, "a.md", "---\nname: a\n---\nbody\n")
+
+    r = ml.lint(d, "MEMORY.md", repo=None, max_bytes=6000, stale_days=90, dup_threshold=0.6)
+    assert r["has_log"] is False
+
+
+def test_present_log_is_reported(tmp_path):
+    d = tmp_path / "memory"
+    d.mkdir()
+    _write(d, "MEMORY.md", "- [A](a.md) — hook\n")
+    _write(d, "a.md", "---\nname: a\n---\nbody\n")
+    _write(d, "log.md", "# Wiki log\n\n## [2026-07-09] init | bootstrapped\n")
+
+    r = ml.lint(d, "MEMORY.md", repo=None, max_bytes=6000, stale_days=90, dup_threshold=0.6)
+    assert r["has_log"] is True
+
+
+def test_log_is_not_an_article(tmp_path):
+    """log.md is the chronology, never linked and never loaded — it must not become a phantom orphan."""
+    d = tmp_path / "memory"
+    d.mkdir()
+    _write(d, "MEMORY.md", "- [A](a.md) — hook\n")
+    _write(d, "a.md", "---\nname: a\n---\nbody\n")
+    _write(d, "log.md", "# Wiki log\n\n## [2026-07-09] init | bootstrapped\n")
+
+    r = ml.lint(d, "MEMORY.md", repo=None, max_bytes=6000, stale_days=90, dup_threshold=0.6)
+    assert r["orphans"] == []
+    assert r["total_files"] == 1

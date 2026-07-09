@@ -188,7 +188,10 @@ def lint(dir_path: Path, index_name: str, *, repo: Path | None,
     index_path = dir_path / index_name
     linked, broken_external = _index_links(index_path)
 
-    files = sorted(p for p in dir_path.glob("*.md") if p.name != index_name)
+    # log.md is the wiki's chronology, not an article: it is never linked from the index and is
+    # never loaded at bootstrap. Counting it as a page makes it a permanent phantom orphan.
+    _NOT_ARTICLES = {index_name, "log.md"}
+    files = sorted(p for p in dir_path.glob("*.md") if p.name not in _NOT_ARTICLES)
     now = time.time()
     repo_index = _repo_basenames(repo) if repo else set()
 
@@ -240,6 +243,9 @@ def lint(dir_path: Path, index_name: str, *, repo: Path | None,
         "near_duplicates": dups,
         "oversized_entries": _oversized_entries(index_path, max_entry_chars),
         "index_budget": _index_budget(index_path),
+        # The method's second special file: an append-only chronology of ingests / lints / queries.
+        # Absent it, nobody (agent or operator) can see how the wiki got to its current state.
+        "has_log": (dir_path / "log.md").exists(),
     }
 
 
@@ -258,6 +264,8 @@ def _render(report: dict) -> str:
         warn = " ⚠️ **entries will be silently truncated**" if b["over_budget"] else ""
         L.append(f"- index budget: {b['lines']}/{b['max_lines']} lines · "
                  f"{b['bytes']}/{b['max_bytes']} bytes · **{b['pct_of_cap']}% of the CLI cap**{warn}")
+    if not report.get("has_log", True):
+        L.append("- ⚠️ no `log.md` — the wiki has no chronology (`tools/memory-wiki-init.sh <dir>`)")
     L.append("")
 
     def section(title: str, items: list[str]) -> None:
