@@ -67,13 +67,18 @@ Path(_OPS_SCRATCH_CWD).mkdir(parents=True, exist_ok=True)
 DEFAULT_CWD = os.getenv("DEFAULT_CWD", str(Path.home()))
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "fable")
 
-MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku", "fable": "fable"}  # CLI resolves aliases to latest
+MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku", "fable": "fable"}
+# ⚠️ Aliases are NOT always the latest generation. Bundled CLI 2.1.191 resolves
+# `opus`→opus-4-8 and `haiku`→haiku-4-5 (current), but `sonnet`→claude-sonnet-4-6
+# — Sonnet 5 is reachable only by its explicit id. Re-probe after model releases:
+#   claude_agent_sdk/_bundled/claude --model <alias> -p "Output only your exact model id."
 
 # ─────────────────────────── sub-agent roster ───────────────────────────
 # Default agents available to conductor sessions via the SDK Task tool.
 # Models are configurable via env; Phase C will add per-project overrides.
-_EXECUTOR_MODEL = os.getenv("EXECUTOR_MODEL", "sonnet")
-_RESEARCHER_MODEL = os.getenv("RESEARCHER_MODEL", "sonnet")
+# Explicit id, not the `sonnet` alias — the alias still resolves to Sonnet 4.6.
+_EXECUTOR_MODEL = os.getenv("EXECUTOR_MODEL", "claude-sonnet-5")
+_RESEARCHER_MODEL = os.getenv("RESEARCHER_MODEL", "claude-sonnet-5")
 _QUICK_MODEL = os.getenv("QUICK_MODEL", "haiku")
 
 # Effort level for the conductor/main session.
