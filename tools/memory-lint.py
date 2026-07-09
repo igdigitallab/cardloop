@@ -43,18 +43,32 @@ _LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+\.md)\)")   # [title](file.md)
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")          # [[slug]]
 
 
-def _index_links(index_path: Path) -> set[str]:
-    """Filenames referenced from the index (both [x](f.md) and [[slug]] forms)."""
+def _index_links(index_path: Path) -> tuple[set[str], list[str]]:
+    """Links from the index, split into (local_basenames, broken_external_targets).
+
+    A markdown link may point INSIDE the memory dir (`file.md`) or outside it
+    (`../../../repo/docs/START-HERE.md`). Comparing everything by basename against the
+    memory dir's own files — the old behaviour — reported every external link as dead.
+    Resolve external targets against the memory dir instead and report only the ones that
+    genuinely do not exist. (`iggo-llc` had three that were one `../` short of real files.)
+    """
     if not index_path.exists():
-        return set()
+        return set(), []
     text = index_path.read_text(encoding="utf-8", errors="replace")
-    links: set[str] = set()
+    local: set[str] = set()
+    broken_external: list[str] = []
+    base = index_path.parent
     for m in _LINK_RE.finditer(text):
-        links.add(os.path.basename(m.group(1)))
+        target = m.group(1)
+        if "/" in target:
+            if not (base / target).resolve().exists():
+                broken_external.append(target)
+        else:
+            local.add(os.path.basename(target))
     for m in _WIKILINK_RE.finditer(text):
         slug = m.group(1).strip()
-        links.add(slug if slug.endswith(".md") else f"{slug}.md")
-    return links
+        local.add(slug if slug.endswith(".md") else f"{slug}.md")
+    return local, sorted(set(broken_external))
 
 
 # ── per-file signals ─────────────────────────────────────────────────────────
@@ -126,10 +140,53 @@ def _stale_refs(body: str, repo: Path, repo_index: set[str]) -> list[str]:
 
 # ── main lint pass ───────────────────────────────────────────────────────────
 
+# The bundled CLI loads MEMORY.md verbatim on every bootstrap and hard-truncates it:
+# `lines after ${VK} will be truncated` with VK=200, plus a 25000-byte ceiling
+# (`wasLineTruncated` / `wasByteTruncated` in the binary). Past either limit, index entries
+# vanish from the model's context with NO signal to the operator. Warn well before that.
+CLI_INDEX_MAX_LINES = 200
+CLI_INDEX_MAX_BYTES = 25_000
+_BUDGET_WARN_AT = 0.80
+
+
+def _index_budget(index_path: Path) -> dict:
+    """How close the index is to the CLI's silent truncation ceiling."""
+    if not index_path.exists():
+        return {}
+    raw = index_path.read_bytes()
+    lines = raw.decode("utf-8", errors="replace").count("\n") + 1
+    b = len(raw)
+    line_pct = lines / CLI_INDEX_MAX_LINES
+    byte_pct = b / CLI_INDEX_MAX_BYTES
+    return {
+        "lines": lines, "max_lines": CLI_INDEX_MAX_LINES,
+        "bytes": b, "max_bytes": CLI_INDEX_MAX_BYTES,
+        "pct_of_cap": round(max(line_pct, byte_pct) * 100),
+        "over_budget": max(line_pct, byte_pct) >= _BUDGET_WARN_AT,
+    }
+
+
+def _oversized_entries(index_path: Path, max_chars: int) -> list[dict]:
+    """Index lines that are summaries, not pointers.
+
+    The single most expensive kind of rot, and the one nothing checked: the index is loaded
+    verbatim every bootstrap, so a 300-char "hook" is paid forever. The CLI's own memory prompt
+    asks for a one-line hook; the house rule is ~100 chars.
+    """
+    if not index_path.exists():
+        return []
+    out = []
+    for n, line in enumerate(index_path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if line.lstrip().startswith("- ") and len(line) > max_chars:
+            out.append({"line": n, "chars": len(line), "text": line[:60] + "…"})
+    return out
+
+
 def lint(dir_path: Path, index_name: str, *, repo: Path | None,
-         max_bytes: int, stale_days: int, dup_threshold: float) -> dict:
+         max_bytes: int, stale_days: int, dup_threshold: float,
+         max_entry_chars: int = 150) -> dict:
     index_path = dir_path / index_name
-    linked = _index_links(index_path)
+    linked, broken_external = _index_links(index_path)
 
     files = sorted(p for p in dir_path.glob("*.md") if p.name != index_name)
     now = time.time()
@@ -163,9 +220,9 @@ def lint(dir_path: Path, index_name: str, *, repo: Path | None,
                 dups.append({"a": entries[i]["name"], "b": entries[j]["name"],
                              "similarity": round(sim, 2)})
 
-    # dead index links (index points at a file that isn't there)
+    # dead index links: local names with no file here, plus external targets that don't resolve
     present = {p.name for p in files} | {index_name}
-    dead_links = sorted(l for l in linked if l not in present)
+    dead_links = sorted([l for l in linked if l not in present] + broken_external)
 
     for e in entries:
         e.pop("title_words", None)  # not serialisable / not needed downstream
@@ -181,6 +238,8 @@ def lint(dir_path: Path, index_name: str, *, repo: Path | None,
         "stale_by_age": [{"name": e["name"], "age_days": e["age_days"]} for e in entries if e["stale_age"]],
         "stale_refs": [{"name": e["name"], "missing": e["stale_refs"]} for e in entries if e["stale_refs"]],
         "near_duplicates": dups,
+        "oversized_entries": _oversized_entries(index_path, max_entry_chars),
+        "index_budget": _index_budget(index_path),
     }
 
 
@@ -191,8 +250,14 @@ def _render(report: dict) -> str:
     L.append(f"- files: **{report['total_files']}**  ·  index links: {report['index_links']}")
     n_issues = (len(report["orphans"]) + len(report["dead_index_links"])
                 + len(report["oversized"]) + len(report["stale_by_age"])
-                + len(report["stale_refs"]) + len(report["near_duplicates"]))
+                + len(report["stale_refs"]) + len(report["near_duplicates"])
+                + len(report["oversized_entries"]))
     L.append(f"- flagged: **{n_issues}** (nothing was deleted — curate manually)")
+    b = report.get("index_budget") or {}
+    if b:
+        warn = " ⚠️ **entries will be silently truncated**" if b["over_budget"] else ""
+        L.append(f"- index budget: {b['lines']}/{b['max_lines']} lines · "
+                 f"{b['bytes']}/{b['max_bytes']} bytes · **{b['pct_of_cap']}% of the CLI cap**{warn}")
     L.append("")
 
     def section(title: str, items: list[str]) -> None:
@@ -211,6 +276,8 @@ def _render(report: dict) -> str:
             [f"{s['name']} → {', '.join(s['missing'])}" for s in report["stale_refs"]])
     section("Near-duplicates — candidates to merge",
             [f"{d['a']} ≈ {d['b']} ({d['similarity']})" for d in report["near_duplicates"]])
+    section("Oversized index entries — summaries, not pointers (paid every bootstrap)",
+            [f"L{e['line']} — {e['chars']} chars — {e['text']}" for e in report["oversized_entries"]])
     return "\n".join(L)
 
 
@@ -222,6 +289,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--max-bytes", type=int, default=6000)
     ap.add_argument("--stale-days", type=int, default=90)
     ap.add_argument("--dup", type=float, default=0.6)
+    # The CLI's own memory prompt asks for a one-line hook; the house rule is ~100 chars.
+    # 150 is the forgiving default — anything past it is a summary living in the index.
+    ap.add_argument("--max-entry-chars", type=int, default=150)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -233,7 +303,7 @@ def main(argv: list[str]) -> int:
 
     report = lint(dir_path, args.index, repo=repo,
                   max_bytes=args.max_bytes, stale_days=args.stale_days,
-                  dup_threshold=args.dup)
+                  dup_threshold=args.dup, max_entry_chars=args.max_entry_chars)
     print(json.dumps(report, indent=2, ensure_ascii=False) if args.json else _render(report))
     return 0
 
