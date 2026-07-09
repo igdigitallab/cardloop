@@ -1734,6 +1734,11 @@ async def reconcile_board(
         system_prompt=_RECONCILE_SYSTEM,  # plain string — no tools, no preset
         allowed_tools=[],   # no tools — read-only classification pass
         disallowed_tools=[],
+        # An internal helper must never write to a project's memory wiki. allowed_tools=[] blocks
+        # Edit/Write, but the CLI's own memory-extraction pass uses internal tooling that the
+        # allowlist does not gate — and it inherits THIS model. On 2026-06-23 a haiku helper wrote
+        # four articles into two project wikis, one of them a pure ledger. Belt and braces.
+        env=_memory_env_overrides("project"),
         effort="low",
     )
 

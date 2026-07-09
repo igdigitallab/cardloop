@@ -115,3 +115,28 @@ def test_webapp_accepts_exactly_the_engine_modes():
     for mode in engine._MEMORY_MODES:
         assert f'"{mode}"' in src, f"webapp validator must accept engine mode {mode!r}"
     assert 'cfg_val not in ("auto", "project")' in src
+
+
+# ── internal helpers must never write a project's wiki ────────────────────────
+#
+# allowed_tools=[] blocks Edit/Write, but the CLI's own memory-extraction pass uses internal
+# tooling that the allowlist does not gate, and it INHERITS the helper's model. On 2026-06-23 a
+# haiku helper running from the ops-scratch cwd wrote four articles into two project wikis — one
+# of them a pure progress ledger. The env flag is the only thing that actually stops it.
+
+
+def test_reconcile_helper_disables_auto_memory():
+    import inspect
+
+    src = inspect.getsource(engine.reconcile_board)
+    assert '_memory_env_overrides("project")' in src or "CLAUDE_CODE_DISABLE_AUTO_MEMORY" in src
+
+
+def test_handoff_and_title_helpers_disable_auto_memory():
+    import inspect
+
+    import webapp as _webapp
+
+    for fn in (_webapp._build_handoff_inner, _webapp._build_session_title):
+        src = inspect.getsource(fn)
+        assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" in src, f"{fn.__name__} may write a project wiki"

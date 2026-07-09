@@ -11492,6 +11492,9 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
                 cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
                 allowed_tools=[],
                 disallowed_tools=[],
+                # Internal helpers must never touch a project's memory wiki. allowed_tools=[] blocks
+                # Edit/Write, but the CLI's own memory-extraction pass is not gated by that allowlist.
+                env={"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
                 effort="low",
             )
 
@@ -11696,6 +11699,7 @@ async def _build_session_title(summary: str) -> str:
             cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
             allowed_tools=[],
             disallowed_tools=[],
+            env={"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},  # never let a helper write the wiki
             effort="low",
         )
         truncated = summary[:1500]
