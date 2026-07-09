@@ -177,6 +177,36 @@ _DEFAULT_SKILLS: "list[str] | str | None" = (
 )
 
 
+# spec-078 Phase 3a — one canonical brain per project.
+#
+# Two memory systems overlap today. The CLI's native auto-memory
+# (~/.claude/projects/<slug>/memory/) only ever INGESTS: it appends what a session learned and
+# never prunes, so its MEMORY.md index — loaded verbatim on every bootstrap — rots and grows
+# (claude-ops-bot: 88 files, a 17 KB index ≈ 4.3k tokens per session, paid forever). The curated
+# ./.claude-ops/memory/ is the opposite: deliberate, linted (tools/memory-lint.py), and capped by
+# the cockpit's context pack before it ever reaches the prompt.
+#
+#   "auto"    — native auto-memory stays on (unchanged; the default, no surprises).
+#   "project" — native auto-memory OFF; ./.claude-ops/memory/ is the project's ONLY brain.
+#
+# Opt-in per project via agents_config.memory. The switch is the env var the CLI actually reads
+# (verified in the bundled binary: `process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY`); `--bare` would
+# also disable it but takes hooks, plugins and CLAUDE.md discovery down with it.
+_MEMORY_MODES = ("auto", "project")
+_DEFAULT_MEMORY_MODE = "auto"
+
+
+def _memory_env_overrides(mode: "str | None") -> dict:
+    """Env additions that put a project into the requested memory mode.
+
+    Unknown values degrade to "auto" rather than raise: a typo in agents_config must not take a
+    project's sessions down.  webapp validates the value at the API boundary.
+    """
+    if mode == "project":
+        return {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+    return {}
+
+
 def _plugin_install_path(plugin_id: str) -> "str | None":
     """Resolve a plugin id → its local install path from ~/.claude/plugins/installed_plugins.json.
 
@@ -255,6 +285,9 @@ def _build_agents_kwargs(agents_config: dict) -> dict:
         kwargs["project_skills"] = agents_config["skills"]
     if "plugins" in agents_config:
         kwargs["project_plugins"] = agents_config["plugins"]
+    # spec-078 Phase 3a: "project" → curated ./.claude-ops/memory/ is the project's only brain.
+    if "memory" in agents_config:
+        kwargs["project_memory"] = agents_config["memory"]
 
     return kwargs
 
@@ -1070,6 +1103,7 @@ def _compute_fingerprint(
     *,
     stable_append_hash: str = "",
     effort: str = "",
+    memory_mode: str = "",
 ) -> str:
     """Hash the subset of opts fields that are immutable once a ClaudeSDKClient is connected.
 
@@ -1108,6 +1142,11 @@ def _compute_fingerprint(
         # ultracode/conductor/browser or changing the think-mode ladder forces a fresh client.
         stable_append_hash,
         effort,
+        # spec-078 Phase 3a: the memory mode rides in `env`, which is deliberately EXCLUDED above
+        # (it carries per-turn noise like TG_CHAT_ID). Pass it in explicitly — the CLI reads
+        # CLAUDE_CODE_DISABLE_AUTO_MEMORY at launch, so flipping the mode must evict the live
+        # subprocess or the project keeps the old brain until the next idle eviction.
+        memory_mode,
         # spec-058 v2: the --settings payload (native ultracode switch) is launch-immutable too.
         str(getattr(opts, "settings", "") or ""),
     ]
@@ -1147,6 +1186,7 @@ async def _get_or_create_live_client(
     ephemeral: bool,
     stable_append_hash: str = "",
     effort: str = "",
+    memory_mode: str = "",
 ) -> "object | None":
     """Return a reusable connected ClaudeSDKClient for session_key, or None.
 
@@ -1165,7 +1205,8 @@ async def _get_or_create_live_client(
         return None
 
     registry: "dict[str, _LiveEntry]" = ctx.get("live_clients", _live_clients)
-    fingerprint = _compute_fingerprint(opts, stable_append_hash=stable_append_hash, effort=effort)
+    fingerprint = _compute_fingerprint(opts, stable_append_hash=stable_append_hash, effort=effort,
+                                       memory_mode=memory_mode)
 
     existing = registry.get(session_key)
     if existing is not None:
@@ -1786,6 +1827,7 @@ async def run_engine(  # type: ignore[return]
     disallowed_tools_extra: "list | None" = None,
     project_skills: "list[str] | str | None" = None,
     project_plugins: "list[str] | None" = None,
+    project_memory: "str | None" = None,
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
@@ -1995,6 +2037,15 @@ async def run_engine(  # type: ignore[return]
     # project pulls only ITS relevant skills. `plugins` opt-in loads a plugin for THIS project only
     # (e.g. marketing-skills on the marketing project) without enabling it globally for others.
     _effective_skills = project_skills if project_skills is not None else _DEFAULT_SKILLS
+
+    # spec-078 Phase 3a: one canonical brain. "project" turns the CLI's native auto-memory off so
+    # the curated ./.claude-ops/memory/ is all the project loads.
+    _memory_mode = project_memory or _DEFAULT_MEMORY_MODE
+    if _memory_mode not in _MEMORY_MODES:
+        print(f"[memory] unknown mode {_memory_mode!r} for {project_name} — falling back to 'auto'")
+        _memory_mode = _DEFAULT_MEMORY_MODE
+    _effective_env = {**(env or {}), **_memory_env_overrides(_memory_mode)}
+
     _project_plugin_cfgs: "list[dict]" = []
     for _pid in (project_plugins or []):
         _pp = _plugin_install_path(_pid)
@@ -2016,7 +2067,7 @@ async def run_engine(  # type: ignore[return]
         resume=resume_session_id,
         disallowed_tools=list(DISALLOWED_TOOLS) + list(disallowed_tools_extra or []),
         system_prompt=system_prompt,
-        env=env or {},
+        env=_effective_env,
         mcp_servers=_mcp_servers,
         agents=effective_agents,
         effort=_sdk_effort,  # type: ignore[arg-type]
@@ -2325,6 +2376,7 @@ async def run_engine(  # type: ignore[return]
         live = await _get_or_create_live_client(
             ctx, session_key, opts, ephemeral=ephemeral,
             stable_append_hash=_stable_append_hash, effort=_eff_effort,
+            memory_mode=_memory_mode,
         )
     except Exception as _lc_exc:
         # Live-client setup failure must never silently swallow the turn — degrade gracefully.

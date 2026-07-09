@@ -4808,6 +4808,16 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
                             status=400,
                         )
                     clean_cfg[cfg_key] = cfg_val
+                elif cfg_key == "memory":  # spec-078 Phase 3a: which brain the project loads
+                    # Literal, not `from engine import _MEMORY_MODES`: engine imports webapp, so a
+                    # module-level import back would cycle. test_spec078_per_project_memory pins
+                    # this tuple against engine._MEMORY_MODES so the two cannot drift.
+                    if cfg_val not in ("auto", "project"):
+                        return web.json_response(
+                            {"error": "agents_config.memory: expected 'auto' or 'project'"},
+                            status=400,
+                        )
+                    clean_cfg[cfg_key] = cfg_val
                 else:
                     return web.json_response(
                         {"error": f"agents_config: unknown key {cfg_key!r}"},
