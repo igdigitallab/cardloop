@@ -168,3 +168,40 @@ async def test_reconcile_no_board_event_without_session_key(tmp_path, monkeypatc
 
     assert captured == []
     assert "No-announce card" in (tmp_path / "TASKS.md").read_text(encoding="utf-8")
+
+
+# ─── on_match policy: the cheap model proposes, the operator closes ──────────
+#
+# The board reconciler runs on haiku (BOARD_RECONCILE_MODEL) after EVERY turn, and over 30 days
+# it moved 341 cards — auto-archiving them to `done` on all 42 projects. Deciding "is this work
+# finished?" is exactly where a cheap, low-effort model failed us before (a haiku digest declared
+# two commits shipped that never existed). With on_match="review" it still proposes the move; the
+# irreversible close stays with the operator.
+
+
+@pytest.mark.asyncio
+async def test_on_match_review_remaps_done_to_review(tmp_path):
+    (tmp_path / "TASKS.md").write_text(FIXTURE, encoding="utf-8")
+    cwd = str(tmp_path)
+
+    await engine._apply_reconcile_ops(cwd, "proj", [{"op": "move", "id": "inprog1", "to": "done"}],
+                                      on_match="review")
+
+    board = (tmp_path / "TASKS.md").read_text(encoding="utf-8")
+    review_block = board.split("## Review")[1].split("##")[0]
+    assert "inprog1" in review_block, "card must land in Review, not be archived"
+    assert not (tmp_path / "DONE.md").exists() or "inprog1" not in (tmp_path / "DONE.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_on_match_done_still_archives(tmp_path):
+    """The old behaviour must remain available — this is a policy switch, not a removal."""
+    (tmp_path / "TASKS.md").write_text(FIXTURE, encoding="utf-8")
+    cwd = str(tmp_path)
+
+    await engine._apply_reconcile_ops(cwd, "proj", [{"op": "move", "id": "inprog1", "to": "done"}],
+                                      on_match="done")
+
+    board = (tmp_path / "TASKS.md").read_text(encoding="utf-8")
+    review_block = board.split("## Review")[1].split("##")[0]
+    assert "inprog1" not in review_block
