@@ -50,6 +50,36 @@ def test_tool_render(logged_in_page):
     expect(page.locator(".chat-tool-cmd", has_text="echo e2e")).to_have_count(1)
 
 
+def test_multiblock_text_survives_tools(logged_in_page):
+    """Regression: three streamed text blocks separated by tool calls must ALL stay
+    on the live canvas. The bus tool event carries {type:"tool"} AND a tool-type
+    {kind:"bash"} (added by _format_tool); a dispatch gated on `!evt.kind` dropped it,
+    so the tool never split the bubble and each block's finalize REPLACED the prior one
+    ("sentence appears then vanishes; Ctrl+R restores it"). The fake engine holds the
+    turn open (long tail before `result`) so this asserts the LIVE canvas — no reload,
+    no post-turn hydrate correcting it from the transcript."""
+    page = logged_in_page
+    open_project(page, "e2e-multiblock")
+    send_chat(page, "e2e:multiblock")
+
+    # Wait for the LAST block to stream in — proves all three blocks have been emitted.
+    page.wait_for_selector(
+        ".chat-msg-assistant .chat-msg-body:has-text('BLOCK_THREE_gamma done.')",
+        timeout=15_000,
+    )
+
+    # All three blocks must be simultaneously present on the LIVE canvas (the turn is
+    # still running during the fake engine's silent tail — no reload has happened).
+    feed_text = page.locator(".chat-feed").inner_text()
+    assert "BLOCK_ONE_alpha done." in feed_text, "first block was clobbered (disappeared)"
+    assert "BLOCK_TWO_beta done." in feed_text, "second block was clobbered (disappeared)"
+    assert "BLOCK_THREE_gamma done." in feed_text
+
+    # The two tool calls between the blocks must render live (they are what splits the
+    # bubbles) — the exact events that used to be dropped.
+    expect(page.locator(".chat-tool-cmd")).to_have_count(2)
+
+
 def test_mid_run_reload_reattaches(logged_in_page):
     """e2e:slow — reloading mid-turn re-attaches to the still-running turn on the
     server (no frozen canvas) and the final answer lands after reload."""

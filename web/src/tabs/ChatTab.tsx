@@ -362,7 +362,9 @@ function appendDelta(messages: ChatMessage[], delta: string): ChatMessage[] {
 function reconcileFinalText(messages: ChatMessage[], finalText: string): ChatMessage[] {
   const last = messages[messages.length - 1]
   if (last && last.role === 'assistant' && last.streaming && last.tools.length === 0) {
-    // Replace accumulated delta text with the canonical final text — no double-render
+    // Replace accumulated delta text with the canonical final text — no double-render.
+    // (Tool calls split each text block into its own bubble — see the bus dispatch fix — so
+    // `last` only ever holds THIS block's deltas here; the replace is an exact no-op.)
     return [...messages.slice(0, -1), { ...last!, text: finalText }]
   }
   // No open text bubble (deltas never arrived, or last bubble has tools) — use normal append
@@ -1754,11 +1756,20 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
     const now = Date.now()
 
-    // Seq-tagged engine events (no `kind`): the shared content vocabulary for all run
-    // types (direct chat, queued/auto-continue, background runs; cards/deferred still mix
-    // in kind-keyed text/tool — handled below — until Stage 2b unifies the vocabulary).
-    if (!evt.kind) {
-      const rec = evt as unknown as { type?: string; text?: string; error?: string; [k: string]: unknown }
+    // Seq-tagged engine events: the shared content vocabulary for all run types (direct chat,
+    // queued/auto-continue, background runs; cards/deferred still mix in kind-keyed text/tool —
+    // handled below — until Stage 2b unifies the vocabulary). Discriminate by `type` FIRST.
+    // ⚠️ A tool content event carries BOTH {type:"tool"} AND a tool-type {kind:"bash"|"read"|…}
+    // (spread from _format_tool server-side). Gating this branch on `!evt.kind` alone made every
+    // live tool event fall through here (its kind isn't 'tool'/'run_start'/…) and get silently
+    // dropped — so the tool never split the streaming bubble, the next text block's deltas piled
+    // into the SAME bubble, and its {type:"text"} finalize REPLACED the whole bubble (dropping the
+    // previous block). That is the "sentence appears then vanishes; Ctrl+R restores it" bug: the
+    // transcript (read on reload) keeps every block, the live canvas lost them. Routing by `type`
+    // fixes it — lifecycle/card events (run_start/run_end/board_event, card kind:text/kind:tool)
+    // have a `kind` and NO `type`, so they still reach the kind branches unchanged.
+    const rec = evt as unknown as { type?: string; text?: string; error?: string; [k: string]: unknown }
+    if (rec.type || !evt.kind) {
       if (rec.type === 'text_delta') {
         setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
         setMessages(prev => appendDelta(prev, rec.text ?? ''))

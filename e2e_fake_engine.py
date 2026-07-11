@@ -140,6 +140,33 @@ async def run_engine(
         yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
         return
 
+    if "e2e:multiblock" in prompt:
+        # Regression for the "streamed sentence appears then vanishes; Ctrl+R restores it" bug:
+        # three text blocks SEPARATED BY TOOL CALLS. api_project_chat runs each {type:"tool"}
+        # through _format_tool, which adds a tool-type `kind` ("bash") to the bus event. If the
+        # client's bus dispatch is gated on `!evt.kind`, the tool is silently dropped live, so it
+        # never splits the streaming bubble — the next block's deltas pile into the SAME bubble and
+        # its {type:"text"} finalize REPLACES it, deleting the earlier block. A deliberately LONG
+        # gap before `result` keeps the turn "running" so the assertion observes the LIVE canvas
+        # (no post-turn hydrate correcting it from the transcript).
+        blocks = ["BLOCK_ONE_alpha done.", "BLOCK_TWO_beta done.", "BLOCK_THREE_gamma done."]
+        tool_calls = []
+        for i, blk in enumerate(blocks):
+            yield {"type": "text_delta", "text": blk[: len(blk) // 2]}
+            await asyncio.sleep(_DELTA_GAP_SEC)
+            yield {"type": "text_delta", "text": blk[len(blk) // 2:]}
+            yield {"type": "text", "text": blk}
+            if i < len(blocks) - 1:
+                tc = {"name": "Bash", "input": {"command": f"echo block{i}", "description": f"e2e split {i}"}}
+                tool_calls.append(tc)
+                yield {"type": "tool", **tc}
+                await asyncio.sleep(_DELTA_GAP_SEC)
+        # Long silent tail: the turn stays running while the test asserts all three blocks survive.
+        await asyncio.sleep(_SLOW_GAP_SEC)
+        _append_transcript(cwd, sid, prompt, "\n".join(blocks), tool_calls=tool_calls)
+        yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
+        return
+
     if "e2e:slow" in prompt:
         head = "starting slow scenario... "
         tail = "done after the long silence."
