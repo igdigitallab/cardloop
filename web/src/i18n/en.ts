@@ -538,7 +538,7 @@ export const en = {
   // ── Auto-rotate toggle (spec-059 / T3) ──────────────────────────
   'chat.autorotate_label': 'Auto-rotate',
   'chat.autorotate_toggle': 'Auto-rotate at 280K',
-  'chat.autorotate_hint': 'Caps cost: auto-compacts the session with a handoff once it passes 280K tokens. On by default — turn off only if this chat must keep its full context.',
+  'chat.autorotate_hint': 'Caps cost: auto-compacts the session with a handoff once it passes 280K tokens. Off by default — enable it per project when you want to bound spend. The choice is remembered per project.',
 
   // ── Composer "+" tools menu ──────────────────────────────────────
   'chat.tools_menu_aria': 'Open tools menu',

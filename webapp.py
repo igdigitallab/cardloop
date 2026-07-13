@@ -10065,7 +10065,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 _rot_proj = _find_project_by_id(ctx, _project_id or session_key)
                 if _rot_proj is not None:
                     await _maybe_auto_rotate(ctx, _rot_proj, session_key, _q_final_ctx_tokens,
-                                             opt_in=item.get("auto_rotate", True))
+                                             opt_in=item.get("auto_rotate", False))
             except Exception as _ar_exc:
                 print(f"[chat_queue] post-turn auto-rotate error for {session_key}: {_ar_exc!r}")
         # spec-069 P2: a continuation turn that still has bg children running schedules the next one.
@@ -10329,12 +10329,13 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # ⚡ badge so this is never silent.
     _ultracode = bool(body.get("ultracode"))
 
-    # Per-chat opt-OUT for the 280K cost auto-rotation. Default ON — cost audit 2026-07-08:
-    # with the old opt-in default nobody enabled it, sessions ballooned to 470K and the
-    # >200K tail alone was 58% of a week's spend. A chat can still disable it via the
-    # composer "+" menu toggle (sent as auto_rotate:false). The global CONTEXT_ROTATION
-    # env remains a hard kill-switch.
-    _auto_rotate = bool(body.get("auto_rotate", True))
+    # Per-chat/per-project opt-IN for the 280K cost auto-rotation. Default OFF — the operator
+    # found always-on auto-rotation disruptive (it silently reset live sessions mid-work). A
+    # project enables it per chat via the composer "+" menu toggle (sent as auto_rotate:true);
+    # the localStorage key is per-project when there is no active chat. The global CONTEXT_ROTATION
+    # env remains a hard kill-switch above this. (History: shipped opt-in, flipped to default-ON by
+    # a cost audit 2026-07-08, flipped back to opt-in 2026-07-13 on operator request.)
+    _auto_rotate = bool(body.get("auto_rotate", False))
 
     # Spec-037: optional chat_id to target a specific chat tab (falls back to active chat).
     _req_chat_id: "str | None" = (body.get("chat_id") or "").strip() or None
@@ -11120,11 +11121,11 @@ async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_ha
 
 
 async def _maybe_auto_rotate(ctx: dict, project: dict, session_key: str, ctx_tokens: int,
-                             opt_in: bool = True) -> None:
+                             opt_in: bool = False) -> None:
     """Post-turn auto-rotation: when a session's context crosses CONTEXT_ROTATE_AT, rotate it WITH
     a handoff so the tail can't keep re-billing a bloated prompt every turn (the 490K monster the
-    audit found).  Default ON per chat (opt_in=False disables — composer toggle); CONTEXT_ROTATION
-    stays the global kill-switch.  Reuses _rotate_session_core
+    audit found).  Default OFF per chat (opt_in=True enables — composer toggle, per-project);
+    CONTEXT_ROTATION stays the global kill-switch.  Reuses _rotate_session_core
     so it inherits the dual-layer safety.  Emits a bus event so the cockpit can toast the rotation.
 
     Called from api_project_chat's finally AFTER the running sentinel is released, so the core can

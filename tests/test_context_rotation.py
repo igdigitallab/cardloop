@@ -907,8 +907,10 @@ async def test_auto_rotate_fires_above_cap(aiohttp_client, tmp_path, project_dir
     assert rotated[0]["context_tokens"] == 300000
 
 
-async def test_auto_rotate_default_on_when_field_absent(aiohttp_client, tmp_path, project_dir):
-    """Above the cap with NO auto_rotate field in the body → rotation fires (default ON, opt-out)."""
+async def test_auto_rotate_default_off_when_field_absent(aiohttp_client, tmp_path, project_dir):
+    """Above the cap with NO auto_rotate field in the body → rotation does NOT fire (default OFF,
+    opt-in). Flipped 2026-07-13: the operator found always-on rotation disruptive; a project must
+    opt in per chat via the composer toggle (auto_rotate:true)."""
     async def fake_engine(**kwargs):
         yield {"type": "text", "text": "hello"}
         yield {"type": "result", "session_id": "sess-default", "context_tokens": 300000}
@@ -929,9 +931,9 @@ async def test_auto_rotate_default_on_when_field_absent(aiohttp_client, tmp_path
         assert resp.status == 200
         await _read_sse(resp)
 
-    assert SESSION_KEY not in ctx["sessions"], "default ON: session must rotate when the field is absent"
-    assert any(e.get("kind") == "auto_rotated" for e in bus_events), (
-        "an auto_rotated bus event must be published with the default-ON opt-out semantics"
+    assert SESSION_KEY in ctx["sessions"], "default OFF: session must NOT rotate when the field is absent"
+    assert not any(e.get("kind") == "auto_rotated" for e in bus_events), (
+        "no auto_rotated bus event when the chat did not opt in (default-OFF opt-in semantics)"
     )
 
 
@@ -981,8 +983,10 @@ async def test_auto_rotate_skips_under_live_bg_children(aiohttp_client, tmp_path
          patch.object(_webapp, "_bus_publish", side_effect=lambda sk, ev, **kw: bus_events.append(ev)):
         app = _make_app(ctx)
         client = await aiohttp_client(app)
+        # Opt in explicitly so the ONLY thing blocking rotation is the live-bg-children guard,
+        # not the default-OFF opt-in (which would make this test pass for the wrong reason).
         resp = await client.post("/api/projects/myproject/chat",
-                                 json={"prompt": "do big work"},
+                                 json={"prompt": "do big work", "auto_rotate": True},
                                  headers=_auth_headers(ctx))
         assert resp.status == 200
         await _read_sse(resp)

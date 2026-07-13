@@ -1013,13 +1013,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     } catch { /* localStorage unavailable */ }
     return false
   })
-  // T3: Auto-rotate at 280K — per-chat toggle, default ON (cost audit 2026-07-08: opt-in
-  // meant nobody enabled it and sessions ballooned to 470K); '0' = explicitly disabled.
+  // T3: Auto-rotate at 280K — per-chat/per-project toggle, default OFF (operator found always-on
+  // rotation disruptive, 2026-07-13); enable per project with '1'. Absent/'0' = off.
   const [autoRotate, setAutoRotate] = useState<boolean>(() => {
     try {
-      return localStorage.getItem(autoRotateStorageKey(projectId, effectiveChatId || undefined)) !== '0'
+      return localStorage.getItem(autoRotateStorageKey(projectId, effectiveChatId || undefined)) === '1'
     } catch { /* localStorage unavailable */ }
-    return true
+    return false
   })
   // spec-076: session goal of the ACTIVE chat. Server-side state (lives on the chat object in
   // chats.json, enforced by the CLI's native prompt-type Stop hook); the pinned bar renders it
@@ -1211,13 +1211,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     try { localStorage.setItem(ultracodeStorageKey(projectId, effectiveChatId || undefined), v ? '1' : '0') } catch { /* ignore */ }
   }, [projectId, effectiveChatId])
 
-  // T3: re-load autoRotate from localStorage on project/chat switch (per-chat key)
+  // T3: re-load autoRotate from localStorage on project/chat switch (per-project/per-chat key)
   useEffect(() => {
     try {
-      setAutoRotate(localStorage.getItem(autoRotateStorageKey(projectId, effectiveChatId || undefined)) !== '0')
+      setAutoRotate(localStorage.getItem(autoRotateStorageKey(projectId, effectiveChatId || undefined)) === '1')
       return
     } catch { /* localStorage unavailable */ }
-    setAutoRotate(true)
+    setAutoRotate(false)
   }, [projectId, effectiveChatId])
 
   // T3: persist autoRotate toggle to localStorage (per-chat key)
