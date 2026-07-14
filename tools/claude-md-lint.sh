@@ -72,19 +72,31 @@ Report, in this order, only what you can evidence:
 
 For each finding: the file, the exact claim, the evidence that refutes it, and the suggested action.
 Be specific and short. If a section has nothing, write "none".
-Do not modify any file. Your final message IS the report.
+Do not modify any file.
+
+OUTPUT CONTRACT — your final message IS the report, and nothing else is captured. It must be the
+full report itself: no preamble, no "compiling now", no status line. If you are running out of room
+or time, STOP READING and emit the report for what you have checked so far, marking the files you
+did not reach under a "NOT CHECKED" heading. A truncated report is useful; a status line is not.
 EOF
 
 echo "claude-md-lint: reading $(printf '%s' "$FILES" | wc -l) files …" >&2
-timeout 900 "$CLAUDE" -p "$PROMPT" \
+# 40+ files is a long read. At 900s the agent hit the wall mid-pass and its last message was a
+# status line ("compiling the report…") — which sailed out as a zero-exit "success" and would have
+# written that to the cron report every Monday. Hence both the wider budget and the floor below.
+timeout 1800 "$CLAUDE" -p "$PROMPT" \
   --model claude-sonnet-5 \
   --permission-mode bypassPermissions \
   --disallowed-tools "Write,Edit,NotebookEdit" \
   > "$REPORT" 2>/dev/null
 
-if [ -s "$REPORT" ]; then
-  echo "claude-md-lint: $(wc -l < "$REPORT") lines → $REPORT"
+# A report that fits in a few lines is not a report — it is a truncation, and silence about it reads
+# as "nothing found". Fail loudly instead.
+MIN_LINES=10
+lines="$(wc -l < "$REPORT" 2>/dev/null || echo 0)"
+if [ "$lines" -ge "$MIN_LINES" ]; then
+  echo "claude-md-lint: $lines lines → $REPORT"
 else
-  echo "claude-md-lint: empty report (model call failed) → $REPORT" >&2
+  echo "claude-md-lint: TRUNCATED report ($lines lines, expected ≥$MIN_LINES) — the pass did not finish. → $REPORT" >&2
   exit 1
 fi
