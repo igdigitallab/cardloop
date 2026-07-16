@@ -443,12 +443,15 @@ FILES_PROMPT = (
 # AskUserQuestion = interactive prompt (no reply in TG -> agent hangs or decides on its own).
 DISALLOWED_TOOLS = ["AskUserQuestion"]
 
-# spec-060: optional Antigravity "second opinion" MCP tool, built once at import.
-# None when SECOND_OPINION=0 or the agy binary is absent — then no tool is exposed and
-# the engine behaves exactly as before. Building it does NOT invoke agy.
+# spec-060: optional "second opinion" MCP tool, built once at import. Fronts two backends
+# — Antigravity (agy) and Azure AI Foundry (grok/deepseek/gpt5). None when SECOND_OPINION=0
+# or NO backend is available — then no tool is exposed and the engine behaves exactly as
+# before. Building it invokes nothing.
 _ANTIGRAVITY_MCP = build_antigravity_server()
 if _ANTIGRAVITY_MCP:
-    print("[second_opinion] Antigravity MCP tool enabled (agy detected)")
+    from second_opinion import _resolve_agy as _so_agy, _azure_configured as _so_azure
+    _backends = [b for b, on in (("agy", _so_agy()), ("azure", _so_azure())) if on]
+    print(f"[second_opinion] MCP tool enabled (backends: {', '.join(_backends) or 'none'})")
 
 # spec-034 L1: Board protocol block injected into system_prompt["append"] when TASKS.md exists.
 # Verbatim from spec — the cockpit owns the workflow rules, not per-project CLAUDE.md.

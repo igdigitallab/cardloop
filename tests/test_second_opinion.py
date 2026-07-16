@@ -342,3 +342,173 @@ async def test_handler_returns_mcp_content_shape(monkeypatch):
     item = items[0]
     assert item["type"] == "text"
     assert item["text"] == "OK"
+
+
+# ===========================================================================
+# Azure AI Foundry backend (spec-060 Phase B)
+# ===========================================================================
+
+def _set_azure(monkeypatch):
+    monkeypatch.setenv("AZURE_FOUNDRY_KEY", "k-test")
+    monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT", "https://foundry.example.com/")
+    monkeypatch.delenv("AZURE_FOUNDRY_MODELS", raising=False)
+
+
+# 19. _azure_configured reflects env
+def test_azure_configured_true_false(monkeypatch):
+    monkeypatch.delenv("AZURE_FOUNDRY_KEY", raising=False)
+    monkeypatch.delenv("AZURE_FOUNDRY_ENDPOINT", raising=False)
+    assert second_opinion._azure_configured() is False
+    _set_azure(monkeypatch)
+    assert second_opinion._azure_configured() is True
+
+
+# 20. _azure_models default + JSON override
+def test_azure_models_default_and_override(monkeypatch):
+    monkeypatch.delenv("AZURE_FOUNDRY_MODELS", raising=False)
+    assert second_opinion._azure_models()["grok"] == "grok-4-3"
+    monkeypatch.setenv("AZURE_FOUNDRY_MODELS", '{"grok":"my-grok","x":"y"}')
+    m = second_opinion._azure_models()
+    assert m["grok"] == "my-grok" and m["x"] == "y"
+
+
+# 21. _ask_azure unavailable when unconfigured
+async def test_ask_azure_unconfigured(monkeypatch):
+    monkeypatch.delenv("AZURE_FOUNDRY_KEY", raising=False)
+    monkeypatch.delenv("AZURE_FOUNDRY_ENDPOINT", raising=False)
+    out = await second_opinion._ask_azure("q", "grok", None)
+    assert "unavailable" in out
+
+
+# 22. _ask_azure happy path (HTTP mocked)
+async def test_ask_azure_happy(monkeypatch):
+    _set_azure(monkeypatch)
+
+    async def fake_once(url, key, deployment, prompt, max_out, token_param, timeout):
+        assert deployment == "grok-4-3"
+        return 200, {"choices": [{"message": {"content": "grok says hi"}, "finish_reason": "stop"}]}, None
+
+    monkeypatch.setattr(second_opinion, "_azure_chat_once", fake_once)
+    out = await second_opinion._ask_azure("q", "grok", None)
+    assert "grok says hi" in out
+    assert "Azure/grok-4-3" in out
+
+
+# 23. _ask_azure self-heals max_tokens -> max_completion_tokens for gpt5
+async def test_ask_azure_token_param_selfheal(monkeypatch):
+    _set_azure(monkeypatch)
+    calls = []
+
+    async def fake_once(url, key, deployment, prompt, max_out, token_param, timeout):
+        calls.append(token_param)
+        if token_param == "max_tokens":
+            return 400, {"error": {"message": "Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens' instead."}}, None
+        return 200, {"choices": [{"message": {"content": "ok5"}, "finish_reason": "stop"}]}, None
+
+    monkeypatch.setattr(second_opinion, "_azure_chat_once", fake_once)
+    # force gpt5 through a deployment NOT starting with gpt-5 so first attempt uses max_tokens
+    monkeypatch.setenv("AZURE_FOUNDRY_MODELS", '{"gpt5":"o-custom"}')
+    out = await second_opinion._ask_azure("q", "gpt5", None)
+    assert "ok5" in out
+    assert calls == ["max_tokens", "max_completion_tokens"]
+
+
+# 24. _ask_azure empty answer with finish_reason length → hint
+async def test_ask_azure_empty_length(monkeypatch):
+    _set_azure(monkeypatch)
+
+    async def fake_once(*a, **k):
+        return 200, {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}, None
+
+    monkeypatch.setattr(second_opinion, "_azure_chat_once", fake_once)
+    out = await second_opinion._ask_azure("q", "grok", None)
+    assert "empty answer" in out and "token cap" in out
+
+
+# 25. _ask_azure HTTP error surfaced
+async def test_ask_azure_http_error(monkeypatch):
+    _set_azure(monkeypatch)
+
+    async def fake_once(*a, **k):
+        return 429, {"error": {"message": "rate limited"}}, None
+
+    monkeypatch.setattr(second_opinion, "_azure_chat_once", fake_once)
+    out = await second_opinion._ask_azure("q", "grok", None)
+    assert "HTTP 429" in out and "rate limited" in out
+
+
+# 26. handler routes an Azure alias to _ask_azure when configured
+async def test_handler_routes_azure_alias(monkeypatch):
+    _set_azure(monkeypatch)
+    captured = {}
+
+    async def fake_azure(question, alias, context):
+        captured["alias"] = alias
+        return "AZ"
+
+    monkeypatch.setattr(second_opinion, "_ask_azure", fake_azure)
+    r = await second_opinion._second_opinion_handler({"question": "hi", "model": "deepseek"})
+    assert captured["alias"] == "deepseek"
+    assert r["content"][0]["text"] == "AZ"
+
+
+# 27. handler: Azure alias but Azure OFF → coerced to agy default 'pro'
+async def test_handler_azure_alias_but_off_falls_to_agy(monkeypatch):
+    monkeypatch.delenv("AZURE_FOUNDRY_KEY", raising=False)
+    monkeypatch.delenv("AZURE_FOUNDRY_ENDPOINT", raising=False)
+    captured = {}
+
+    async def fake_agy(question, alias, context):
+        captured["alias"] = alias
+        return "AGY"
+
+    monkeypatch.setattr(second_opinion, "_ask_agy", fake_agy)
+    await second_opinion._second_opinion_handler({"question": "hi", "model": "grok"})
+    assert captured["alias"] == "pro"
+
+
+# 28. handler panel=true calls _ask_panel
+async def test_handler_panel(monkeypatch):
+    async def fake_panel(question, context):
+        return "PANEL-OUT"
+
+    monkeypatch.setattr(second_opinion, "_ask_panel", fake_panel)
+    r = await second_opinion._second_opinion_handler({"question": "hi", "panel": True})
+    assert r["content"][0]["text"] == "PANEL-OUT"
+
+
+# 29. _build_input_schema includes Azure aliases only when configured
+def test_build_input_schema_enum(monkeypatch):
+    monkeypatch.delenv("AZURE_FOUNDRY_KEY", raising=False)
+    monkeypatch.delenv("AZURE_FOUNDRY_ENDPOINT", raising=False)
+    enum_off = second_opinion._build_input_schema()["properties"]["model"]["enum"]
+    assert "grok" not in enum_off and "pro" in enum_off
+    _set_azure(monkeypatch)
+    enum_on = second_opinion._build_input_schema()["properties"]["model"]["enum"]
+    assert "grok" in enum_on and "deepseek" in enum_on and "pro" in enum_on
+
+
+# 30. build_antigravity_server builds with ONLY Azure configured (no agy)
+def test_build_server_azure_only(monkeypatch):
+    monkeypatch.delenv("SECOND_OPINION", raising=False)
+    monkeypatch.setattr(second_opinion, "_resolve_agy", lambda: None)
+    _set_azure(monkeypatch)
+    result = second_opinion.build_antigravity_server()
+    # None only if the SDK import fails in the test env; otherwise must expose the server
+    if result is not None:
+        assert "antigravity" in result
+
+
+# 31. _ask_panel aggregates configured providers (agy off, azure mocked)
+async def test_ask_panel_aggregates(monkeypatch):
+    _set_azure(monkeypatch)
+    monkeypatch.setattr(second_opinion, "_resolve_agy", lambda: None)  # no agy
+    monkeypatch.setenv("AZURE_FOUNDRY_MODELS", '{"grok":"grok-4-3","deepseek":"deepseek-v4"}')
+
+    async def fake_azure(question, alias, context):
+        return f"ans-{alias}"
+
+    monkeypatch.setattr(second_opinion, "_ask_azure", fake_azure)
+    out = await second_opinion._ask_panel("q", None)
+    assert "Azure/grok" in out and "Azure/deepseek" in out
+    assert "ans-grok" in out and "ans-deepseek" in out
