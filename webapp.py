@@ -12948,6 +12948,18 @@ async def api_new_project(req: web.Request) -> web.Response:
         init_card = {"id": _new_card_id(), "text": "Initialise project"}
         cols["in_progress"].append(init_card)
         (cwd / "TASKS.md").write_text(_serialize_tasks(preamble, cols, display_name), encoding="utf-8")
+
+        # Engineering-skills wiring — board-mapped docs/agents/*.md (software/ops only, matching the
+        # ## Agent skills block baked into CLAUDE.md.tpl). Lets the mattpocock/skills engineering set
+        # (/to-tickets, /triage, /implement, /domain-modeling) target the Cardloop board instead of
+        # GitHub Issues, with no interactive per-project setup.
+        if project_type in ("software", "ops"):
+            agents_dir = cwd / "docs" / "agents"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            for _fn in ("issue-tracker.md", "domain.md", "triage-labels.md"):
+                (agents_dir / _fn).write_text(
+                    _render_template(f"agents/{_fn}", tpl_vars, here), encoding="utf-8",
+                )
     except Exception as e:
         # Rollback: delete folder if template writes failed
         shutil.rmtree(str(cwd), ignore_errors=True)

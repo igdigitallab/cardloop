@@ -260,6 +260,61 @@ async def test_new_project_software_has_gitignore(aiohttp_client, new_project_ap
     assert (cwd / ".gitignore").exists()
 
 
+# ─────────────── engineering-skills wiring (mattpocock/skills → board) ───────────
+
+def test_template_archetype_software_has_agent_skills():
+    """Rendered CLAUDE.md for software type carries the ## Agent skills block."""
+    here = ROOT
+    vars_ = {"name": "Test", "date": "2026-01-01", "slug": "test", "type": "software"}
+    result = _render_template_archetype("CLAUDE.md.tpl", vars_, here, "software")
+    assert "## Agent skills" in result
+    assert "docs/agents/issue-tracker.md" in result
+
+
+def test_template_archetype_content_no_agent_skills():
+    """Content type does NOT get the ## Agent skills block (software/ops only)."""
+    here = ROOT
+    vars_ = {"name": "Test", "date": "2026-01-01", "slug": "test", "type": "content"}
+    result = _render_template_archetype("CLAUDE.md.tpl", vars_, here, "content")
+    assert "## Agent skills" not in result
+
+
+async def test_new_project_software_writes_agents_docs(aiohttp_client, new_project_app, monkeypatch):
+    """Software type ships board-mapped docs/agents/*.md so mattpocock/skills target the board."""
+    app, ctx, tmp_path = new_project_app
+    monkeypatch.setattr(_webapp.Path, "home", staticmethod(lambda: tmp_path))
+
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/api/projects/new",
+        json={"intent": "build a python api service"},
+        headers=_auth_headers(ctx),
+    )
+    assert resp.status == 200
+    cwd = Path((await resp.json())["cwd"])
+    agents = cwd / "docs" / "agents"
+    for fn in ("issue-tracker.md", "domain.md", "triage-labels.md"):
+        assert (agents / fn).exists(), f"missing docs/agents/{fn}"
+    # Board-mapped, not GitHub Issues.
+    assert "Cardloop board" in (agents / "issue-tracker.md").read_text()
+
+
+async def test_new_project_content_no_agents_docs(aiohttp_client, new_project_app, monkeypatch):
+    """Content/personal projects don't get the engineering-skills wiring."""
+    app, ctx, tmp_path = new_project_app
+    monkeypatch.setattr(_webapp.Path, "home", staticmethod(lambda: tmp_path))
+
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/api/projects/new",
+        json={"intent": "write a blog post about machine learning", "type": "content"},
+        headers=_auth_headers(ctx),
+    )
+    assert resp.status == 200
+    cwd = Path((await resp.json())["cwd"])
+    assert not (cwd / "docs" / "agents").exists()
+
+
 async def test_new_project_no_tg_topic_created(aiohttp_client, new_project_app, monkeypatch):
     """Even if ptb_app mock exists, TG forum topic is NOT created (Phase D)."""
     app, ctx, tmp_path = new_project_app

@@ -71,6 +71,24 @@ Rules that keep it lean:
 - `agents_config.memory = "project"` disables native auto-memory for a project, leaving the curated
   `./.claude-ops/memory/` as its only brain (spec-078 Phase 3a).
 
+## Agent skills
+
+Engineering skills from `mattpocock/skills` (installed globally in `~/.claude/skills/`) read the
+files under `docs/agents/` to fit this repo's workflow — keep those files current if the workflow changes.
+
+### Issue tracker
+
+Issues are **Cardloop board cards** (`TASKS.md`), not GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five triage roles are a board vocabulary, not GitHub labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: architecture in `ARCHITECTURE.md`, decisions in `docs/internal/specs/`, traps in
+`GOTCHAS.md`. See `docs/agents/domain.md`.
+
 ## Gotchas (don't step on these again)
 
 ### Auth & environment

@@ -119,4 +119,23 @@ See `reference/cockpit-capabilities.md` for the full capabilities table.
 - notify_on_error: no
 - healthz/liveness (services): no
 - incident push: no
+
+---
+
+## Agent skills
+
+Engineering skills from `mattpocock/skills` (installed globally in `~/.claude/skills/`) read the
+files under `docs/agents/` to fit this project's workflow — keep those files current if the workflow changes.
+
+### Issue tracker
+
+Issues are **Cardloop board cards** (`TASKS.md`), not GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five triage roles are a board vocabulary, not GitHub labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: goal/rules in `CLAUDE.md`, decisions in `docs/specs/`. See `docs/agents/domain.md`.
 {{/if_software_ops}}
