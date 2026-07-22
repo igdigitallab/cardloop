@@ -252,6 +252,12 @@ function fmtStamp(ts: number): string {
   return `${dd}.${mm}.${d.getFullYear().toString().slice(2)} ${hhmm}`
 }
 
+/** Native (non-skill) slash-commands surfaced in the "/" palette. These are handled by the
+ *  cockpit, not the skills endpoint — /goal is intercepted in sendMessage (handleGoalCommand). */
+const NATIVE_SLASH_COMMANDS: Array<{ name: string; description: string; section: 'native' }> = [
+  { name: 'goal', description: 'Set a session goal — pinned on top, enforced until met. "/goal clear" drops it.', section: 'native' },
+]
+
 /** Format a turn duration from milliseconds. E.g. "38s", "2m 41s". Returns null when ms is null. */
 function fmtTurnDuration(ms: number | null | undefined): string | null {
   if (ms == null) return null
@@ -1061,6 +1067,34 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, goal: null } : c))
       setGoalEditOpen(false)
     }).catch(e => setError(e instanceof Error ? e.message : String(e)))
+  }
+
+  // spec-076: "/goal …" typed in chat routes into OUR goal system (pinned bar + Stop-hook
+  // enforcement) instead of Anthropic's native /goal, which lives only in CLI memory — invisible
+  // to the cockpit and unclearable from it. Returns true when the text WAS a goal command, so the
+  // caller (sendMessage) must NOT forward it to the engine (which would fire the native one).
+  //   /goal <condition>            → set + pin
+  //   /goal                        → open the pinned editor
+  //   /goal clear|off|stop|reset…  → clear
+  const GOAL_CLEAR_WORDS = new Set(['clear', 'off', 'stop', 'none', 'reset', 'remove', 'done'])
+  const handleGoalCommand = (text: string): boolean => {
+    const m = text.match(/^\/goal(?:\s+([\s\S]*))?$/i)
+    if (!m) return false
+    if (!effectiveChatId) return true // no chat to bind to — swallow so it never hits the engine
+    const arg = (m[1] || '').trim()
+    if (arg === '') {
+      setGoalDraft(activeGoal?.status === 'active' ? activeGoal.condition : '')
+      setGoalEditOpen(true)
+      return true
+    }
+    if (GOAL_CLEAR_WORDS.has(arg.toLowerCase())) {
+      clearGoal()
+      return true
+    }
+    api.setChatGoal(projectId, effectiveChatId, arg).then(res => {
+      setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, goal: res.goal } : c))
+    }).catch(e => setError(e instanceof Error ? e.message : String(e)))
+    return true
   }
 
   // Applies a goal_status event (bus kind-event from the set/clear API, or a seq-tagged engine
@@ -2069,6 +2103,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
   const sendMessage = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim()
+
+    // spec-076: "/goal …" is a cockpit command, not a chat turn — set/clear the pinned goal and
+    // stop here (no engine send, so the native /goal never fires). See handleGoalCommand.
+    if (handleGoalCommand(text)) {
+      if (overrideText === undefined) { setInput(''); setAttachments([]) }
+      return
+    }
+
     const readyFiles = overrideText === undefined ? attachments.filter(a => a.path) : []
     const effectiveText = text || (readyFiles.length > 0 ? t['chat.look_at_files'] : '')
     if (!effectiveText) return
@@ -2314,9 +2356,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // (i.e. the operator started typing args) or any other text closes it.
   const _slashMatch = input.match(/^\/([\w-]*)$/)
   const slashQuery = _slashMatch ? _slashMatch[1].toLowerCase() : null
+  // Native commands (e.g. /goal) show immediately; skills append once the endpoint resolves.
+  const slashCatalog: Array<{ name: string; description: string; section: 'native' | 'project' | 'global' }> =
+    [...NATIVE_SLASH_COMMANDS, ...(slashSkills || [])]
   const slashFiltered =
-    slashQuery !== null && slashSkills
-      ? slashSkills.filter(s => s.name.toLowerCase().includes(slashQuery)).slice(0, 8)
+    slashQuery !== null
+      ? slashCatalog.filter(s => s.name.toLowerCase().includes(slashQuery)).slice(0, 8)
       : []
   const slashOpen = slashQuery !== null && !slashDismissed && slashFiltered.length > 0
 
@@ -2670,16 +2715,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             onRequestReset={() => setResetModalOpen(true)}
             reloadSignal={sessionReloadKey}
           />
-          {/* spec-076: session goal — visible entry next to Reset session (operator request:
-              the model-pill menu row was too buried). Icon-only on mobile via CSS. */}
-          <button
-            className={`btn btn-sm chat-goal-entry${activeGoal?.status === 'active' ? ' goal-on' : ''}`}
-            title={activeGoal?.status === 'active' ? activeGoal.condition : t['chat.goal_hint']}
-            onClick={() => { setGoalDraft(activeGoal?.status === 'active' ? activeGoal.condition : ''); setGoalEditOpen(true) }}
-            aria-label={t['chat.goal_label']}
-          >
-            🎯<span className="chat-goal-entry-label"> {t['chat.goal_label']}</span>
-          </button>
+          {/* spec-076: the goal entry button was removed — the goal is now set by typing "/goal …"
+              in chat (handleGoalCommand), discoverable via the "/" palette. The pinned goal bar
+              below still shows/edits/clears an active goal (click it), and bare "/goal" opens it. */}
         </div>
         {/* Right group: context health + cache badge + model + think + collapse.
             margin-left:auto (on .chat-session-right) pushes it to the right edge. */}
