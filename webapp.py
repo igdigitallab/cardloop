@@ -9449,10 +9449,27 @@ def _strip_service_blocks(text: str) -> str:
     return _SERVICE_BLOCK_RE.sub("", text).strip()
 
 
+def _iso_to_ms(ts_raw: "str | None") -> "int | None":
+    """SDK transcript lines carry an ISO-8601 "timestamp"; convert to epoch ms (None if absent/bad)."""
+    if not ts_raw:
+        return None
+    try:
+        from datetime import datetime, timezone
+        s = str(ts_raw).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return None
+
+
 def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
-    """Parses an SDK session transcript → feed [{role, text, tools}].
+    """Parses an SDK session transcript → feed [{role, text, tools, ts}].
     user(str)=human reply; user(list)=tool_result, skip.
-    assistant(list)=text/tool_use blocks. Other types — noise."""
+    assistant(list)=text/tool_use blocks. Other types — noise.
+    `ts` = epoch ms from the line's ISO "timestamp" (None if absent) — the cockpit
+    renders it next to each message's copy/save actions (spec-022 parity for history)."""
     msgs: list[dict] = []
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as f:
@@ -9475,7 +9492,8 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
                         if cleaned:
                             # spec-073: uuid = the file-checkpoint anchor for rewind_files.
                             msgs.append({"role": "user", "text": cleaned, "tools": [],
-                                         "uuid": o.get("uuid")})
+                                         "uuid": o.get("uuid"),
+                                         "ts": _iso_to_ms(o.get("timestamp"))})
                     # content-list on user = tool_result → skip (not a human reply)
                 elif t == "assistant":
                     c = m.get("content")
@@ -9492,7 +9510,8 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
                             tool_name = b.get("name", "?")
                             tools.append(_format_tool(tool_name, inp if isinstance(inp, dict) else {}))
                     if text_parts or tools:
-                        msgs.append({"role": "assistant", "text": "\n".join(text_parts), "tools": tools})
+                        msgs.append({"role": "assistant", "text": "\n".join(text_parts), "tools": tools,
+                                     "ts": _iso_to_ms(o.get("timestamp"))})
     except Exception:
         pass
     return msgs[-limit:] if len(msgs) > limit else msgs

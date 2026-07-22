@@ -840,6 +840,75 @@
   padding: 0;
 }
 
+/* Meta row under a message: timestamp + the action row on ONE line, right-aligned.
+   The time is a sibling of .msg-actions (not a child) so it keeps full opacity while
+   the buttons stay hover-dimmed — opacity on the parent would cascade onto the text. */
+.msg-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 1px;
+}
+.msg-meta .msg-actions { margin-top: 0; }
+.msg-time {
+  font-size: 10px;
+  color: var(--text3, #888);
+  user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Inline "/" skill palette — autocomplete list floating above the composer. */
+.slash-menu {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 0 0 6px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  background: var(--bg-card, #1a1a1a);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  color: var(--text, #eee);
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+.slash-item.active,
+.slash-item:hover { background: var(--bg2, rgba(255, 255, 255, 0.06)); }
+.slash-item-name {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent, #6ea8fe);
+  flex-shrink: 0;
+}
+.slash-item-desc {
+  font-size: 11px;
+  color: var(--text3, #888);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.slash-item-tag {
+  font-size: 9px;
+  color: var(--text3, #888);
+  opacity: 0.7;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 /* Message-action row — small icon-only buttons (Copy / Save-to-board),
    revealed on hover of the message (Gemini / Perplexity style). */
 .msg-actions {

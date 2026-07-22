@@ -234,6 +234,24 @@ function fmtHHMM(ts: number): string {
   return `${h}:${m}`
 }
 
+/** Compact per-message stamp shown next to the copy/save actions.
+ *  Today → "HH:MM" (date is implicit); earlier this year → "DD.MM HH:MM";
+ *  earlier year → "DD.MM.YY HH:MM". Full locale date/time is on the hover title. */
+function fmtStamp(ts: number): string {
+  const d = new Date(ts)
+  const now = new Date()
+  const hhmm = fmtHHMM(ts)
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  if (sameDay) return hhmm
+  const dd = d.getDate().toString().padStart(2, '0')
+  const mm = (d.getMonth() + 1).toString().padStart(2, '0')
+  if (d.getFullYear() === now.getFullYear()) return `${dd}.${mm} ${hhmm}`
+  return `${dd}.${mm}.${d.getFullYear().toString().slice(2)} ${hhmm}`
+}
+
 /** Format a turn duration from milliseconds. E.g. "38s", "2m 41s". Returns null when ms is null. */
 function fmtTurnDuration(ms: number | null | undefined): string | null {
   if (ms == null) return null
@@ -1123,6 +1141,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showPrompts, setShowPrompts] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
+  // Inline "/" skill palette: type "/" in the composer to autocomplete a slash-command (skill).
+  // The message is sent verbatim; the SDK's bundled CLI expands "/name" itself (verified), so this
+  // needs no backend — it just makes the already-working slash-commands discoverable + typeable.
+  const [slashSkills, setSlashSkills] =
+    useState<Array<{ name: string; description: string; section: 'project' | 'global' }> | null>(null)
+  const [slashIdx, setSlashIdx] = useState(0)
+  const [slashDismissed, setSlashDismissed] = useState(false)
   const [deferToast, setDeferToast] = useState<string | null>(null)
   // One-click "after reset" button state
   const [deferAfterResetBusy, setDeferAfterResetBusy] = useState(false)
@@ -1428,6 +1453,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     return items.map((m, i) => ({
       id: `hist-${i}`, role: m.role, text: m.text, tools: m.tools, streaming: false,
       ...(m.uuid ? { uuid: m.uuid } : {}),
+      ...(m.ts != null ? { ts: m.ts } : {}),
     }))
   }
 
@@ -2283,7 +2309,58 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     }
   }, [input, projectId, streaming, rotating, onProjectsReload, attachments, thinkMode, ultracode])
 
+  // ── Inline "/" skill palette (derived state; the skill list is tiny, so recompute per render) ──
+  // Open only while the whole input is a single leading-slash token ("/", "/lo", "/loop") — a space
+  // (i.e. the operator started typing args) or any other text closes it.
+  const _slashMatch = input.match(/^\/([\w-]*)$/)
+  const slashQuery = _slashMatch ? _slashMatch[1].toLowerCase() : null
+  const slashFiltered =
+    slashQuery !== null && slashSkills
+      ? slashSkills.filter(s => s.name.toLowerCase().includes(slashQuery)).slice(0, 8)
+      : []
+  const slashOpen = slashQuery !== null && !slashDismissed && slashFiltered.length > 0
+
+  // Lazy-load the skill list the first time the operator types "/".
+  useEffect(() => {
+    if (slashQuery !== null && slashSkills === null) {
+      api.projectSkills(projectId)
+        .then(r => setSlashSkills([
+          ...r.project.map(s => ({ name: s.name, description: s.description, section: 'project' as const })),
+          ...r.global.map(s => ({ name: s.name, description: s.description, section: 'global' as const })),
+        ]))
+        .catch(() => setSlashSkills([]))
+    }
+  }, [slashQuery, slashSkills, projectId])
+
+  // Reset the highlight on every query change; clear the manual dismissal once we leave "/" context.
+  useEffect(() => { setSlashIdx(0) }, [slashQuery])
+  useEffect(() => { if (slashQuery === null) setSlashDismissed(false) }, [slashQuery])
+
+  function pickSlash(name: string) {
+    const next = `/${name} `
+    setInput(next)
+    setSlashDismissed(false)
+    setTimeout(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      ta.focus()
+      ta.setSelectionRange(next.length, next.length)
+    }, 0)
+  }
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // "/" palette navigation takes precedence over send / newline.
+    if (slashOpen) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIdx(i => (i + 1) % slashFiltered.length); return }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIdx(i => (i - 1 + slashFiltered.length) % slashFiltered.length); return }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        const pick = slashFiltered[slashIdx] || slashFiltered[0]
+        if (pick) pickSlash(pick.name)
+        return
+      }
+      if (e.key === 'Escape') { e.preventDefault(); setSlashDismissed(true); return }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
@@ -3018,16 +3095,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 {msg.bgRun && (
                   <div className="chat-msg-bgrun-tag">🌙 {t['chat.bg_run_label']}</div>
                 )}
-                {/* Spec-022: timestamp on messages that have one (live-session only) */}
-                {msg.ts != null && (
-                  <div style={{
-                    textAlign: 'right', fontSize: 10,
-                    color: 'var(--text2)',
-                    marginBottom: 2, userSelect: 'none',
-                  }}>
-                    {fmtHHMM(msg.ts)}
-                  </div>
-                )}
                 {msg.tools.length > 0 && (
                   <div className="chat-tools">
                     {msg.tools.map((t, i) => (
@@ -3158,19 +3225,34 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                     </div>
                   )
                 })()}
-                {/* Action icons: visible on hover for completed assistant messages */}
-                {msg.role === 'assistant' && !msg.streaming && msg.text && (
-                  <div className="msg-actions">
-                    <MsgCopyButton text={msg.text} />
-                    {/* spec-052 Phase 4b: save selection / message as a Backlog card */}
-                    <SaveToBoardButton projectId={project.id} text={msg.text} />
-                  </div>
-                )}
-                {/* spec-073: file undo — user messages loaded from history carry the
-                    checkpoint uuid; rewind restores files to before this message ran. */}
-                {msg.role === 'user' && msg.uuid && (
-                  <div className="msg-actions">
-                    <RewindButton projectId={project.id} messageUuid={msg.uuid} />
+                {/* Meta row: timestamp (always visible) sits inline with the message actions —
+                    copy/save on assistant turns, file-rewind on user turns (both hover-revealed).
+                    One row, so the time never adds an extra line (spec-022 parity for history). */}
+                {(msg.role === 'user' || msg.role === 'assistant') &&
+                 (msg.ts != null ||
+                  (msg.role === 'assistant' && !msg.streaming && msg.text) ||
+                  (msg.role === 'user' && msg.uuid)) && (
+                  <div className="msg-meta">
+                    {msg.ts != null && (
+                      <span className="msg-time" title={new Date(msg.ts).toLocaleString()}>
+                        {fmtStamp(msg.ts)}
+                      </span>
+                    )}
+                    {/* Action icons: visible on hover for completed assistant messages */}
+                    {msg.role === 'assistant' && !msg.streaming && msg.text && (
+                      <div className="msg-actions">
+                        <MsgCopyButton text={msg.text} />
+                        {/* spec-052 Phase 4b: save selection / message as a Backlog card */}
+                        <SaveToBoardButton projectId={project.id} text={msg.text} />
+                      </div>
+                    )}
+                    {/* spec-073: file undo — user messages loaded from history carry the
+                        checkpoint uuid; rewind restores files to before this message ran. */}
+                    {msg.role === 'user' && msg.uuid && (
+                      <div className="msg-actions">
+                        <RewindButton projectId={project.id} messageUuid={msg.uuid} />
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -3474,6 +3556,26 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             </div>
           )
         })()}
+        {/* Inline "/" skill palette — floats just above the composer while typing a slash-command.
+            onMouseDown+preventDefault keeps the textarea focused so the pick lands in the input. */}
+        {slashOpen && (
+          <div className="slash-menu">
+            {slashFiltered.map((s, i) => (
+              <button
+                key={`${s.section}:${s.name}`}
+                type="button"
+                className={`slash-item${i === slashIdx ? ' active' : ''}`}
+                onMouseEnter={() => setSlashIdx(i)}
+                onMouseDown={e => { e.preventDefault(); pickSlash(s.name) }}
+                title={s.description}
+              >
+                <span className="slash-item-name">/{s.name}</span>
+                <span className="slash-item-desc">{s.description}</span>
+                <span className="slash-item-tag">{s.section}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {/* Unified composer box: textarea on top, slim bottom bar with icons-left + Send-right */}
         <div className="chat-composer">
           <textarea

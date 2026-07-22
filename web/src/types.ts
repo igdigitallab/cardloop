@@ -452,6 +452,8 @@ export interface HistoryMessage {
   tools: RichTool[]
   /** spec-073: transcript uuid of a user message — the file-checkpoint anchor for rewind. */
   uuid?: string | null
+  /** epoch ms from the transcript line's ISO timestamp — rendered next to the copy/save actions. */
+  ts?: number | null
 }
 
 /** Response shape for GET /api/projects/{id}/session-history */
