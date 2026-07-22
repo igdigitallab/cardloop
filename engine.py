@@ -336,42 +336,14 @@ ULTRACODE_PROMPT = (
 # NO --effort when ultracode is on (a CLI effort flag would override the native pin).
 ULTRACODE_SETTINGS = '{"ultracode": true}'
 
-# spec-076: Goal mode — the CLI's NATIVE session-goal machinery, i.e. the same Stop hook the
-# interactive /goal command registers (sessionHooksRegistry.add("Stop", {type:"prompt", prompt})).
-# A settings-defined Stop hook of type "prompt" is LLM-evaluated against the turn transcript on
-# every stop attempt; while the condition is judged unmet the stop is BLOCKED and the verdict is
-# injected back as a synthetic user message ("Stop hook feedback:\n[<condition>]: <reason>"), so
-# the agent keeps working toward the goal. The CLI caps consecutive blocks (default 8, env
-# CLAUDE_CODE_STOP_HOOK_BLOCK_CAP) and then overrides + ends the turn. Verified empirically on
-# the bundled CLI 2.1.191 in headless --print mode (the hook blocked, fed back a reason, and the
-# agent completed the goal unprompted).
-GOAL_MAX_LEN = 4000  # mirrors the interactive /goal length cap in the CLI
+def _compose_settings(ultracode: bool) -> "str | None":
+    """Inline --settings JSON for this run: the native ultracode switch.
 
-# Prefix of the synthetic user message the CLI injects on every blocked stop attempt.
-_GOAL_FEEDBACK_PREFIX = "Stop hook feedback:"
-
-
-def _goal_block_cap() -> int:
-    """Consecutive Stop-hook block cap (CLI default 8; env CLAUDE_CODE_STOP_HOOK_BLOCK_CAP)."""
-    try:
-        return int(os.environ.get("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP") or 8)
-    except ValueError:
-        return 8
-
-
-def _compose_settings(ultracode: bool, goal: "str | None") -> "str | None":
-    """Inline --settings JSON for this run: native ultracode switch + goal Stop hook.
-
-    Returns None when neither feature is active — no --settings flag at all, byte-identical
-    to the pre-feature behaviour. Invariant: _compose_settings(True, None) == ULTRACODE_SETTINGS
-    (locked by a test), so the ultracode-only path is unchanged.
+    Returns None when ultracode is off — no --settings flag at all, byte-identical to the
+    pre-feature behaviour. Invariant: _compose_settings(True) == ULTRACODE_SETTINGS (locked
+    by a test), so the ultracode path is unchanged.
     """
-    payload: dict = {}
-    if ultracode:
-        payload["ultracode"] = True
-    if goal:
-        payload["hooks"] = {"Stop": [{"hooks": [{"type": "prompt", "prompt": goal}]}]}
-    return json.dumps(payload, ensure_ascii=False) if payload else None
+    return ULTRACODE_SETTINGS if ultracode else None
 
 
 # spec-066: appended to system_prompt when the browser module is on, so the agent knows the
@@ -1830,7 +1802,6 @@ async def run_engine(  # type: ignore[return]
     output_format: "dict | None" = None,
     effort: "str | None" = None,
     ultracode: bool = False,
-    goal: "str | None" = None,
     entrypoint: str = "chat",
     disallowed_tools_extra: "list | None" = None,
     project_skills: "list[str] | str | None" = None,
@@ -1870,14 +1841,6 @@ async def run_engine(  # type: ignore[return]
                                  standing opt-in reminders + internal xhigh effort pin; the
                                  effort arg is ignored) and append the thin ULTRACODE_PROMPT
                                  complement. False (default) → no change.
-        goal                  — spec-076: operator-set session goal condition. When set, a
-                                 prompt-type Stop hook with this condition is registered via
-                                 --settings (the CLI's native /goal machinery): the turn cannot
-                                 end until an LLM evaluator judges the condition met against the
-                                 transcript; each blocked attempt yields a {type:"goal_status",
-                                 met:False} event and a terminal goal_status is yielded with the
-                                 result. A goal-reminder block is also prepended to the prompt.
-                                 None (default) → no change.
         entrypoint            — cost-ledger attribution tag for the on-disk usage ledger:
                                  "chat" (interactive cockpit, default), "card" (kanban auto-run),
                                  "deferred" (post-reset deferred run). Recorded per turn; does not
@@ -1922,24 +1885,6 @@ async def run_engine(  # type: ignore[return]
         sep = "\n" if existing_append else ""
         system_prompt = dict(system_prompt)
         system_prompt["append"] = existing_append + sep + ULTRACODE_PROMPT
-
-    # spec-076: Goal mode — sanitize the condition and tell the agent about it up front.
-    # The enforcement itself is the settings-defined Stop hook (see _compose_settings below);
-    # this reminder only saves the first wasted stop attempt and keeps the goal in view.
-    # Prompt-level (not system_prompt) on purpose: the goal is per-turn-resolved state, and a
-    # system_prompt change would needlessly join the stable-append fingerprint (the settings
-    # string already carries the goal for eviction purposes).
-    if goal:
-        goal = goal.strip()[:GOAL_MAX_LEN] or None
-    if goal:
-        prompt = (
-            "<system-reminder>\n"
-            f"Session goal (operator-set): {goal}\n"
-            "A session-scoped Stop hook enforces it: the turn cannot end until this condition "
-            "is met (an evaluator checks the transcript on every stop attempt). Keep working "
-            "toward it and state plainly when it is met.\n"
-            "</system-reminder>\n\n"
-        ) + prompt
 
     # Sub-agent roster: use provided agents or fall back to the default roster.
     effective_agents = agents if agents is not None else DEFAULT_AGENTS
@@ -2079,9 +2024,9 @@ async def run_engine(  # type: ignore[return]
         mcp_servers=_mcp_servers,
         agents=effective_agents,
         effort=_sdk_effort,  # type: ignore[arg-type]
-        # spec-058 v2 + spec-076: native ultracode switch (Workflow contract + xhigh pin) and/or
-        # the goal Stop hook, composed into one inline --settings JSON. None → no flag at all.
-        settings=_compose_settings(ultracode, goal),
+        # spec-058 v2: native ultracode switch (Workflow contract + xhigh pin) as inline
+        # --settings JSON. None → no flag at all.
+        settings=_compose_settings(ultracode),
         hooks={
             "PostToolUse": [HookMatcher(hooks=[_post_tool_hook])],
             "PreCompact": [HookMatcher(hooks=[_pre_compact_hook])],
@@ -2126,8 +2071,6 @@ async def run_engine(  # type: ignore[return]
         # (skip) ensures a turn where the SDK omits usage entirely does NOT silently
         # carry forward the previous turn's stale value.
         _turn_max_pt: "int | None" = None  # None = no usage-bearing message seen yet this turn
-        # spec-076: count of Stop-hook blocks this turn (goal judged unmet → forced continuation).
-        _goal_blocks = 0
         async for msg in client.receive_response():
             # Background sub-agent traffic: the CLI forwards sub-agents' AssistantMessages
             # (and their stream events) on the SAME stdout with parent_tool_use_id set.
@@ -2186,34 +2129,6 @@ async def run_engine(  # type: ignore[return]
                     "resets_at": i.resets_at,
                     "utilization": i.utilization,
                 }
-            elif isinstance(msg, UserMessage) and goal:
-                # spec-076: a blocked stop attempt arrives as a synthetic user message
-                # "Stop hook feedback:\n[<condition>]: <reason>" (parent_tool_use_id is None,
-                # so it passes the sub-agent guard above). Ordinary in-turn user messages are
-                # tool results — the prefix check filters them out.
-                _fb_text = ""
-                _fb_content = getattr(msg, "content", None)
-                if isinstance(_fb_content, str):
-                    _fb_text = _fb_content
-                elif isinstance(_fb_content, list):
-                    for _fb_blk in _fb_content:
-                        _fb_t = getattr(_fb_blk, "text", None) if not isinstance(_fb_blk, dict) \
-                            else _fb_blk.get("text")
-                        if isinstance(_fb_t, str):
-                            _fb_text += _fb_t
-                if _fb_text.startswith(_GOAL_FEEDBACK_PREFIX):
-                    _goal_blocks += 1
-                    _fb_reason = _fb_text[len(_GOAL_FEEDBACK_PREFIX):].strip()
-                    _fb_marker = f"[{goal}]:"
-                    if _fb_reason.startswith(_fb_marker):
-                        _fb_reason = _fb_reason[len(_fb_marker):].strip()
-                    yield {
-                        "type": "goal_status",
-                        "met": False,
-                        "condition": goal,
-                        "iteration": _goal_blocks,
-                        "reason": short(_fb_reason, 500),
-                    }
             elif isinstance(msg, ResultMessage):
                 # Spec-043 C: commit the best (max) pt seen from AssistantMessages this turn.
                 # _turn_max_pt is None only when NO AssistantMessage had a usage object at all
@@ -2256,24 +2171,6 @@ async def run_engine(  # type: ignore[return]
                         "cost_usd": getattr(msg, "total_cost_usd", None),
                         "duration_ms": _dur,
                     })
-                if goal:
-                    # spec-076: a turn that ENDS while a goal Stop hook is active means the
-                    # evaluator judged the condition met — unless the run errored, or the
-                    # consecutive-block cap overrode enforcement (>= cap feedbacks seen is
-                    # ambiguous between "met on the next attempt" and "overridden"; report it
-                    # as capped/unmet so a false "achieved" never auto-clears a live goal).
-                    _goal_cap = _goal_block_cap()
-                    _goal_errored = bool(getattr(msg, "is_error", False))
-                    _goal_capped = _goal_cap > 0 and _goal_blocks >= _goal_cap
-                    yield {
-                        "type": "goal_status",
-                        "met": (not _goal_errored) and (not _goal_capped),
-                        "terminal": True,
-                        "condition": goal,
-                        "iterations": _goal_blocks,
-                        "capped": _goal_capped,
-                        "errored": _goal_errored,
-                    }
                 yield {
                     "type": "result",
                     "session_id": getattr(msg, "session_id", None),

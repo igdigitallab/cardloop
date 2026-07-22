@@ -284,23 +284,6 @@ export const api = {
       { method: 'DELETE' }
     ),
 
-  // spec-076: per-chat session goal (native /goal Stop hook)
-  setChatGoal: (id: string, chatId: string, condition: string) =>
-    apiFetch<{ goal: import('./types').ChatGoal }>(
-      `/api/projects/${id}/chats/${encodeURIComponent(chatId)}/goal`,
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ condition }),
-      }
-    ),
-
-  clearChatGoal: (id: string, chatId: string) =>
-    apiFetch<{ ok: boolean }>(
-      `/api/projects/${id}/chats/${encodeURIComponent(chatId)}/goal`,
-      { method: 'DELETE' }
-    ),
-
   // C2: session management
   sessions: (id: string) =>
     apiFetch<{ sessions: import('./types').SessionInfo[] }>(`/api/projects/${id}/sessions`),

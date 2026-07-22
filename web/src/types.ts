@@ -319,23 +319,12 @@ export interface ProjectMemory {
 
 // ─── Spec-037: Multi-chat per project ─────────────────────────────────────
 
-/** spec-076: per-chat session goal, enforced by the CLI's native prompt-type Stop hook. */
-export interface ChatGoal {
-  condition: string
-  status: 'active' | 'met' | 'capped'
-  set_at?: number
-  iterations?: number
-  last_reason?: string | null
-  met_at?: number
-}
-
 /** A single named chat thread within a project. */
 export interface Chat {
   id: string
   name: string
   session_id: string | null
   created_at: number
-  goal?: ChatGoal | null
 }
 
 export interface ChatsResponse {
@@ -671,16 +660,6 @@ export interface ActivityEventBoard {
   ts: number
 }
 
-// spec-076: goal lifecycle on the bus. kind-tagged events come from the set/clear API
-// ({status:'set'|'cleared'}); seq-tagged engine events during a run arrive kind-less
-// as {type:'goal_status', met, iteration/iterations, reason, terminal, capped}.
-export interface ActivityEventGoal {
-  kind: 'goal_status'
-  status?: 'set' | 'cleared'
-  condition?: string
-  chat_id?: string
-}
-
 export type ActivityEvent =
   | ActivityEventRunStart
   | ActivityEventText
@@ -693,7 +672,6 @@ export type ActivityEvent =
   | ActivityEventBoard
   | ActivityEventAutoRotated
   | ActivityEventSessionRotated
-  | ActivityEventGoal
 
 export interface VersionInfo {
   current: string

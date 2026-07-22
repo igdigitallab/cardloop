@@ -252,12 +252,6 @@ function fmtStamp(ts: number): string {
   return `${dd}.${mm}.${d.getFullYear().toString().slice(2)} ${hhmm}`
 }
 
-/** Native (non-skill) slash-commands surfaced in the "/" palette. These are handled by the
- *  cockpit, not the skills endpoint — /goal is intercepted in sendMessage (handleGoalCommand). */
-const NATIVE_SLASH_COMMANDS: Array<{ name: string; description: string; section: 'native' }> = [
-  { name: 'goal', description: 'Set a session goal — pinned on top, enforced until met. "/goal clear" drops it.', section: 'native' },
-]
-
 /** Format a turn duration from milliseconds. E.g. "38s", "2m 41s". Returns null when ms is null. */
 function fmtTurnDuration(ms: number | null | undefined): string | null {
   if (ms == null) return null
@@ -1045,83 +1039,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     } catch { /* localStorage unavailable */ }
     return false
   })
-  // spec-076: session goal of the ACTIVE chat. Server-side state (lives on the chat object in
-  // chats.json, enforced by the CLI's native prompt-type Stop hook); the pinned bar renders it
-  // and goal_status bus events update it live. goalEditOpen/goalDraft drive the inline editor.
-  const activeGoal = chats.find(c => c.id === effectiveChatId)?.goal ?? null
-  const [goalEditOpen, setGoalEditOpen] = useState(false)
-  const [goalDraft, setGoalDraft] = useState('')
-
-  const saveGoal = () => {
-    const cond = goalDraft.trim()
-    if (!cond || !effectiveChatId) { setGoalEditOpen(false); return }
-    api.setChatGoal(projectId, effectiveChatId, cond).then(res => {
-      setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, goal: res.goal } : c))
-      setGoalEditOpen(false)
-    }).catch(e => setError(e instanceof Error ? e.message : String(e)))
-  }
-
-  const clearGoal = () => {
-    if (!effectiveChatId) return
-    api.clearChatGoal(projectId, effectiveChatId).then(() => {
-      setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, goal: null } : c))
-      setGoalEditOpen(false)
-    }).catch(e => setError(e instanceof Error ? e.message : String(e)))
-  }
-
-  // spec-076: "/goal …" typed in chat routes into OUR goal system (pinned bar + Stop-hook
-  // enforcement) instead of Anthropic's native /goal, which lives only in CLI memory — invisible
-  // to the cockpit and unclearable from it. Returns true when the text WAS a goal command, so the
-  // caller (sendMessage) must NOT forward it to the engine (which would fire the native one).
-  //   /goal <condition>            → set + pin
-  //   /goal                        → open the pinned editor
-  //   /goal clear|off|stop|reset…  → clear
-  const GOAL_CLEAR_WORDS = new Set(['clear', 'off', 'stop', 'none', 'reset', 'remove', 'done'])
-  const handleGoalCommand = (text: string): boolean => {
-    const m = text.match(/^\/goal(?:\s+([\s\S]*))?$/i)
-    if (!m) return false
-    if (!effectiveChatId) return true // no chat to bind to — swallow so it never hits the engine
-    const arg = (m[1] || '').trim()
-    if (arg === '') {
-      setGoalDraft(activeGoal?.status === 'active' ? activeGoal.condition : '')
-      setGoalEditOpen(true)
-      return true
-    }
-    if (GOAL_CLEAR_WORDS.has(arg.toLowerCase())) {
-      clearGoal()
-      return true
-    }
-    api.setChatGoal(projectId, effectiveChatId, arg).then(res => {
-      setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, goal: res.goal } : c))
-    }).catch(e => setError(e instanceof Error ? e.message : String(e)))
-    return true
-  }
-
-  // Applies a goal_status event (bus kind-event from the set/clear API, or a seq-tagged engine
-  // event during a run) to the owning chat's goal record in local state.
-  const applyGoalEvent = (evt: Record<string, unknown>) => {
-    const cid = (evt.chat_id as string | undefined) || effectiveChatId
-    if (!cid) return
-    const status = evt.status as string | undefined
-    setChats(prev => prev.map(c => {
-      if (c.id !== cid) return c
-      if (status === 'cleared') return { ...c, goal: null }
-      if (status === 'set') {
-        return {
-          ...c,
-          goal: { condition: String(evt.condition ?? ''), status: 'active' as const, iterations: 0, set_at: Date.now() / 1000 },
-        }
-      }
-      if (!c.goal) return c
-      const iters = (v: unknown) => Number(v ?? c.goal!.iterations ?? 0)
-      if (evt.terminal) {
-        if (evt.met) return { ...c, goal: { ...c.goal, status: 'met' as const, iterations: iters(evt.iterations), last_reason: null, met_at: Date.now() / 1000 } }
-        if (evt.capped) return { ...c, goal: { ...c.goal, status: 'capped' as const, iterations: iters(evt.iterations) } }
-        return { ...c, goal: { ...c.goal, iterations: iters(evt.iterations) } }
-      }
-      return { ...c, goal: { ...c.goal, iterations: iters(evt.iteration), last_reason: (evt.reason as string | undefined) ?? c.goal.last_reason } }
-    }))
-  }
   const [run, setRun] = useState<RunIndicator | null>(null)
   // Spec-035: server-authoritative turn start timestamp (epoch ms).
   // Set from /live started_at; null when not available (falls back to run.startedAt).
@@ -1851,9 +1768,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         setMessages(prev => finalizeStreamingWithMetrics(prev, rec as unknown as ChatEventResult, now))
       } else if (rec.type === 'error') {
         setMessages(prev => finalizeStreaming(prev, rec.error || 'unknown error'))
-      } else if (rec.type === 'goal_status') {
-        // spec-076: live enforcement progress (blocked stop attempts / terminal verdict).
-        applyGoalEvent(rec as Record<string, unknown>)
       } else if (rec.type === 'model_info') {
         const mi = rec as unknown as { requested: string; served: string; fallback?: boolean }
         if (mi.fallback) {
@@ -2025,11 +1939,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         setCompactToast(false)
       }, 120_000)
 
-    } else if (evt.kind === 'goal_status') {
-      // spec-076: goal set/cleared via the API (kind-tagged, persist=True on the bus) —
-      // sync the local chats state so a second device/tab reflects it without reload.
-      applyGoalEvent(evt as unknown as Record<string, unknown>)
-
     } else if (evt.kind === 'board_event') {
       // Spec-052: board event — insert a slim pseudo-row in the chat stream.
       // Board strips are live-only (not replayed into chat on reload); the dedup
@@ -2103,13 +2012,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
   const sendMessage = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim()
-
-    // spec-076: "/goal …" is a cockpit command, not a chat turn — set/clear the pinned goal and
-    // stop here (no engine send, so the native /goal never fires). See handleGoalCommand.
-    if (handleGoalCommand(text)) {
-      if (overrideText === undefined) { setInput(''); setAttachments([]) }
-      return
-    }
 
     const readyFiles = overrideText === undefined ? attachments.filter(a => a.path) : []
     const effectiveText = text || (readyFiles.length > 0 ? t['chat.look_at_files'] : '')
@@ -2356,9 +2258,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // (i.e. the operator started typing args) or any other text closes it.
   const _slashMatch = input.match(/^\/([\w-]*)$/)
   const slashQuery = _slashMatch ? _slashMatch[1].toLowerCase() : null
-  // Native commands (e.g. /goal) show immediately; skills append once the endpoint resolves.
-  const slashCatalog: Array<{ name: string; description: string; section: 'native' | 'project' | 'global' }> =
-    [...NATIVE_SLASH_COMMANDS, ...(slashSkills || [])]
+  const slashCatalog: Array<{ name: string; description: string; section: 'project' | 'global' }> =
+    slashSkills || []
   const slashFiltered =
     slashQuery !== null
       ? slashCatalog.filter(s => s.name.toLowerCase().includes(slashQuery)).slice(0, 8)
@@ -2715,9 +2616,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             onRequestReset={() => setResetModalOpen(true)}
             reloadSignal={sessionReloadKey}
           />
-          {/* spec-076: the goal entry button was removed — the goal is now set by typing "/goal …"
-              in chat (handleGoalCommand), discoverable via the "/" palette. The pinned goal bar
-              below still shows/edits/clears an active goal (click it), and bare "/goal" opens it. */}
         </div>
         {/* Right group: context health + cache badge + model + think + collapse.
             margin-left:auto (on .chat-session-right) pushes it to the right edge. */}
@@ -2882,52 +2780,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           )}
         </div>
       </div>
-
-      {/* spec-076: pinned session goal — one slim row; hidden entirely when no goal is set. */}
-      {(goalEditOpen || activeGoal) && (
-        <div className={`chat-goal-bar${activeGoal?.status === 'met' ? ' met' : ''}${activeGoal?.status === 'capped' ? ' capped' : ''}`}>
-          {goalEditOpen ? (
-            <>
-              <span className="chat-goal-icon" aria-hidden="true">🎯</span>
-              <input
-                className="chat-goal-input"
-                autoFocus
-                value={goalDraft}
-                maxLength={4000}
-                placeholder={t['chat.goal_placeholder']}
-                onChange={e => setGoalDraft(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') { e.preventDefault(); saveGoal() }
-                  if (e.key === 'Escape') setGoalEditOpen(false)
-                }}
-              />
-              <button className="chat-goal-btn confirm" onClick={saveGoal} title={t['chat.goal_save']}>✓</button>
-              <button className="chat-goal-btn" onClick={() => setGoalEditOpen(false)} title={t['chat.goal_cancel']}>✕</button>
-            </>
-          ) : activeGoal ? (
-            <>
-              <span className="chat-goal-icon" aria-hidden="true">{activeGoal.status === 'met' ? '✅' : '🎯'}</span>
-              <span
-                className="chat-goal-text"
-                title={`${activeGoal.condition}${activeGoal.last_reason ? `\n\n${activeGoal.last_reason}` : ''}`}
-                onClick={() => { setGoalDraft(activeGoal.condition); setGoalEditOpen(true) }}
-              >
-                {activeGoal.condition}
-              </span>
-              <span className="chat-goal-status">
-                {activeGoal.status === 'met'
-                  ? t['chat.goal_met']
-                  : activeGoal.status === 'capped'
-                    ? t['chat.goal_capped']
-                    : (activeGoal.iterations ?? 0) > 0
-                      ? t['chat.goal_iteration'].replace('{n}', String(activeGoal.iterations))
-                      : t['chat.goal_active']}
-              </span>
-              <button className="chat-goal-btn" onClick={clearGoal} title={t['chat.goal_clear']}>✕</button>
-            </>
-          ) : null}
-        </div>
-      )}
 
       <div className="chat-feed" ref={feedRef} onScroll={handleFeedScroll} style={{ position: 'relative' }}>
         {rotating && (
