@@ -128,14 +128,25 @@ def test_build_antigravity_server_none_when_disabled(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 6. build_antigravity_server → None when _resolve_agy returns None
+# 6. build_antigravity_server → None only when NO backend is available
 # ---------------------------------------------------------------------------
 
-def test_build_antigravity_server_none_when_no_agy(monkeypatch):
+def test_build_antigravity_server_none_when_no_backend(monkeypatch):
+    """spec-060 Phase B: agy is no longer the only backend — Azure alone is enough.
+    The server is None only when BOTH backends are unavailable."""
     monkeypatch.delenv("SECOND_OPINION", raising=False)
     monkeypatch.setattr(second_opinion, "_resolve_agy", lambda: None)
+    monkeypatch.setattr(second_opinion, "_azure_configured", lambda: False)
+    assert second_opinion.build_antigravity_server() is None
+
+
+def test_build_antigravity_server_built_when_only_azure(monkeypatch):
+    """No agy, but Azure configured → the server must still be built (Azure fronts it)."""
+    monkeypatch.delenv("SECOND_OPINION", raising=False)
+    monkeypatch.setattr(second_opinion, "_resolve_agy", lambda: None)
+    monkeypatch.setattr(second_opinion, "_azure_configured", lambda: True)
     result = second_opinion.build_antigravity_server()
-    assert result is None
+    assert result is not None and "antigravity" in result
 
 
 # ---------------------------------------------------------------------------

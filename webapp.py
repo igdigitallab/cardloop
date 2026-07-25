@@ -6843,7 +6843,7 @@ _MODELS_URL = "https://api.anthropic.com/v1/models?limit=50"
 _MODEL_FAMILIES: list[tuple[str, str]] = [
     ("fable", "Fable 5"),
     ("sonnet", "Sonnet 5"),
-    ("opus", "Opus 4.8"),
+    ("opus", "Opus 5"),
     ("haiku", "Haiku 4.5"),
 ]
 _models_cache: dict = {"data": None, "ts": 0.0}

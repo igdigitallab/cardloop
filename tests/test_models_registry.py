@@ -48,7 +48,7 @@ def test_build_registry_static_fallback_when_none():
     assert reg["models"] == [
         {"value": "fable", "label": "Fable 5"},
         {"value": "sonnet", "label": "Sonnet 5"},
-        {"value": "opus", "label": "Opus 4.8"},
+        {"value": "opus", "label": "Opus 5"},
         {"value": "haiku", "label": "Haiku 4.5"},
     ]
 
@@ -90,3 +90,46 @@ async def test_api_models_static_fallback_path(monkeypatch):
     assert [m["value"] for m in body["models"]] == ["fable", "sonnet", "opus", "haiku"]
     assert all(m["label"] for m in body["models"])
     _reset_cache()
+
+
+# ── Static-label sync guard ──────────────────────────────────────────────────────────
+# The model list is duplicated across three static spots (memory
+# `model-labels-live-vs-static-fallback`). They must stay in lockstep, otherwise the
+# alias a user picks (backend) and the label they see (frontend) can silently drift.
+# This is the OFFLINE half of the "UI label must match reality" guard; the ONLINE half
+# (does the alias actually run that model?) lives in tests/test_model_aliases.py.
+
+import os
+import re
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _frontend_models():
+    """Parse web/src/lib/models.ts -> [(value, label), ...] in declaration order."""
+    src = open(os.path.join(_ROOT, "web", "src", "lib", "models.ts")).read()
+    body = src.split("export const MODELS", 1)[1].split("]", 1)[0]
+    return re.findall(r"value:\s*'([^']+)'\s*,\s*label:\s*'([^']+)'", body)
+
+
+def test_static_label_spots_stay_in_sync():
+    import engine as _engine
+
+    frontend = _frontend_models()
+    backend = list(_webapp._MODEL_FAMILIES)
+
+    # Frontend models.ts and webapp._MODEL_FAMILIES must be identical (aliases, labels, order).
+    assert frontend == backend, (
+        "web/src/lib/models.ts and webapp._MODEL_FAMILIES diverged — update both together.\n"
+        f"  frontend={frontend}\n  backend ={backend}"
+    )
+
+    aliases = [a for a, _ in backend]
+    # The engine's alias table (engine.MODELS) and the webapp allow-list (_ALLOWED_MODELS)
+    # must cover exactly the same aliases as the registry.
+    assert set(_engine.MODELS) == set(aliases), (
+        f"engine.MODELS keys {sorted(_engine.MODELS)} != registry aliases {sorted(aliases)}"
+    )
+    assert set(_webapp._ALLOWED_MODELS) == set(aliases), (
+        f"webapp._ALLOWED_MODELS {sorted(_webapp._ALLOWED_MODELS)} != registry aliases {sorted(aliases)}"
+    )
