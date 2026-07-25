@@ -90,6 +90,16 @@ _QUICK_MODEL = os.getenv("QUICK_MODEL", "haiku")
 # 'effort is ignored on fable' assumptions.
 _DEFAULT_EFFORT: str = os.getenv("DEFAULT_EFFORT", "high")
 
+# Effort the CLI pins internally when the native {"ultracode": true} settings flag is on.
+# NOT "max" — the bundled CLI's own strings say so verbatim ("Enable ultracode for the
+# session: xhigh effort plus standing dynamic-workflow orchestration", and `/effort` help:
+# "- ultracode: xhigh + dynamic workflow orchestration"). The gap is real, not cosmetic:
+# a same-prompt probe measured ~2.5k thinking tokens at xhigh vs ~12.5k at max.
+# The UI must display THIS value while ultracode is on — asserted by
+# test_ultracode_effort_label_matches_engine (see memory `opus5-alias-staleness-2026-07-24`
+# for why label-vs-reality drift gets its own guard).
+ULTRACODE_EFFORT: str = "xhigh"
+
 DEFAULT_AGENTS: dict = {
     "executor": AgentDefinition(
         description="General code and infra execution agent. Writes files, runs bash commands.",
@@ -1912,7 +1922,7 @@ async def run_engine(  # type: ignore[return]
     # native pin (CLI flag wins over settings in the CLI's effort resolution). The ledger and the
     # live-client fingerprint record the effective "xhigh" so toggling ultracode still evicts.
     _sdk_effort = None if ultracode else (effort if effort is not None else _DEFAULT_EFFORT)
-    _eff_effort = "xhigh" if ultracode else (effort if effort is not None else _DEFAULT_EFFORT)
+    _eff_effort = ULTRACODE_EFFORT if ultracode else (effort if effort is not None else _DEFAULT_EFFORT)
 
     print(f"[session] resume {session_key} sid={resume_session_id or 'NEW'}")
     # spec-065 Phase C: expose live-browser tools only when the browser module is on.

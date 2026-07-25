@@ -133,3 +133,24 @@ def test_static_label_spots_stay_in_sync():
     assert set(_webapp._ALLOWED_MODELS) == set(aliases), (
         f"webapp._ALLOWED_MODELS {sorted(_webapp._ALLOWED_MODELS)} != registry aliases {sorted(aliases)}"
     )
+
+
+def test_ultracode_effort_label_matches_engine():
+    """The composer pill must show the effort ultracode ACTUALLY runs at.
+
+    It used to hardcode 'max' while the CLI pins xhigh — a whole rung off (~2.5k vs ~12.5k
+    thinking tokens on the same prompt). Same label-vs-reality class as the Opus 5 alias bug.
+    """
+    import engine as _engine
+
+    src = open(os.path.join(_ROOT, "web", "src", "tabs", "ChatTab.tsx")).read()
+    m = re.search(r"const ULTRACODE_EFFORT = '([^']+)'", src)
+    assert m, "ChatTab.tsx no longer declares ULTRACODE_EFFORT — the pill label guard is broken"
+    assert m.group(1) == _engine.ULTRACODE_EFFORT, (
+        f"ChatTab pill shows '{m.group(1)}' but engine pins '{_engine.ULTRACODE_EFFORT}' "
+        "while ultracode is on — the UI would advertise an effort the run never uses."
+    )
+    # The pill must render that constant, not a literal that silently drifts from it.
+    assert "ultracode ? ULTRACODE_EFFORT" in src, (
+        "the ultracode pill no longer renders ULTRACODE_EFFORT — it can drift from engine again"
+    )

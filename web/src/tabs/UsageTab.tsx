@@ -237,7 +237,7 @@ function LedgerPanel({ data }: { data: UsageLedger }) {
         </div>
       ))}
       {uc.turns > 0 && (
-        <div className="usage-barrow usage-barrow-accent" title="Turns with ultracode (max-effort) enabled">
+        <div className="usage-barrow usage-barrow-accent" title="Turns with ultracode (xhigh-effort) enabled">
           <span className="bl">ultracode</span>
           <div className="usage-bartrack">
             <div className="usage-barfill" style={{ width: `${Math.max(2, (uc.cost_usd / maxCost) * 100)}%` }} />
@@ -625,7 +625,7 @@ export function UsageTab() {
                 {(ultDetail || byEffort) && (
                   <div className="usage-card">
                     <div className="usage-card-head">
-                      <span className="usage-card-title">Ultracode (⚡ max effort)</span>
+                      <span className="usage-card-title">Ultracode (⚡ xhigh effort)</span>
                       <span className="usage-note">Cardloop-only · not retroactive · orchestrator-side</span>
                     </div>
                     {ultDetail ? (
@@ -667,7 +667,7 @@ export function UsageTab() {
                     {byEffort && byEffort.length > 0 && (
                       <>
                         <div className="usage-note" style={{ marginTop: '14px', marginBottom: '6px', fontWeight: 600, color: 'var(--text2)' }}>
-                          Cost by effort level <span style={{ fontWeight: 400 }}>(note: max ≈ ultracode)</span>
+                          Cost by effort level <span style={{ fontWeight: 400 }}>(note: ultracode is recorded as xhigh)</span>
                         </div>
                         <EffortBar rows={byEffort} />
                       </>

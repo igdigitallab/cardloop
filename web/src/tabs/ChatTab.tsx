@@ -730,7 +730,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
   menuPlacement?: 'up' | 'down'
   /** Live model registry; falls back to the bundled static MODELS when absent. */
   models?: { value: string; label: string }[]
-  /** spec-058: Ultracode mode — max effort + sub-agent fan-out. Per-chat toggle. */
+  /** spec-058: Ultracode mode — xhigh effort + sub-agent fan-out. Per-chat toggle. */
   ultracode: boolean
   onUltracodeChange: (v: boolean) => void
 }) {
@@ -769,8 +769,11 @@ const ModelThinkButton = memo(function ModelThinkButton({
     if (r) setFixedPos({ top: r.bottom + 6, right: Math.max(0, window.innerWidth - r.right) })
   }, [open, menuPlacement])
 
-  // spec-058: when ultracode is on, effort is pinned to max server-side — reflect that on the pill.
-  const tag = ultracode ? 'max' : THINK_TAG[thinkValue]
+  // spec-058: when ultracode is on the CLI pins effort to xhigh (NOT max — its own /effort help
+  // says "ultracode: xhigh + dynamic workflow orchestration"). Must mirror engine.ULTRACODE_EFFORT,
+  // asserted by test_ultracode_effort_label_matches_engine.
+  const ULTRACODE_EFFORT = 'xhigh'
+  const tag = ultracode ? ULTRACODE_EFFORT : THINK_TAG[thinkValue]
   const isDown = menuPlacement === 'down'
   return (
     <div className="composer-modelthink" ref={ref}>
@@ -804,7 +807,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
           ))}
           <div className="composer-modelthink-sec">{t['chat.think_mode_label']}</div>
           {THINK_MODES.map(m => {
-            // Ultracode pins effort to max — grey out the manual ladder while it's on.
+            // Ultracode pins effort to xhigh — grey out the manual ladder while it's on.
             const inert = ultracode
             return (
               <div
@@ -819,7 +822,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
               </div>
             )
           })}
-          {/* spec-058: Ultracode mode toggle — max effort + sub-agent fan-out. */}
+          {/* spec-058: Ultracode mode toggle — xhigh effort + sub-agent fan-out. */}
           <div className="composer-modelthink-sec">{t['chat.ultracode_label']}</div>
           <div
             role="option"
