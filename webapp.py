@@ -6411,6 +6411,53 @@ async def _fetch_oauth_usage():
         return None
 
 
+def _slugify_model_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_") or "model"
+
+
+def _build_limits_dict(raw: dict) -> dict:
+    """Raw /api/oauth/usage payload → frontend {key: window} dict.
+
+    Besides the well-known top-level windows, the response also carries a `limits[]` array
+    with per-model weekly buckets (e.g. Fable has its own "weekly_scoped" allowance separate
+    from the "weekly_all" one that also backs `seven_day`). Those aren't exposed as their own
+    top-level keys, so pull them in generically by model display_name — any newly scoped model
+    then shows up with no code change.
+    """
+    limits: dict = {}
+    for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+        nv = _norm_window(raw.get(k))
+        if nv:
+            limits[k] = nv
+    now = time.time()
+    for entry in raw.get("limits") or []:
+        if not isinstance(entry, dict) or entry.get("kind") != "weekly_scoped":
+            continue
+        model_name = ((entry.get("scope") or {}).get("model") or {}).get("display_name")
+        if not model_name:
+            continue
+        key = f"seven_day_{_slugify_model_name(model_name)}"
+        if key in limits:
+            continue
+        pct = entry.get("percent")
+        limits[key] = {
+            "status": "allowed",
+            "resets_at": _iso_to_unix(entry.get("resets_at")),
+            "utilization": (pct / 100.0) if isinstance(pct, (int, float)) else None,
+            "ts": now,
+            "label": model_name,
+        }
+    eu = raw.get("extra_usage")
+    if isinstance(eu, dict) and eu.get("is_enabled") and eu.get("utilization") is not None:
+        limits["overage"] = {
+            "status": "allowed",
+            "resets_at": None,
+            "utilization": eu["utilization"] / 100.0,
+            "ts": now,
+        }
+    return limits
+
+
 async def api_usage(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     now = time.time()
@@ -6419,19 +6466,7 @@ async def api_usage(req: web.Request) -> web.Response:
         if cached is None or (now - _usage_cache["ts"]) > _USAGE_TTL:
             raw = await _fetch_oauth_usage()
             if raw is not None:
-                limits = {}
-                for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
-                    nv = _norm_window(raw.get(k))
-                    if nv:
-                        limits[k] = nv
-                eu = raw.get("extra_usage")
-                if isinstance(eu, dict) and eu.get("is_enabled") and eu.get("utilization") is not None:
-                    limits["overage"] = {
-                        "status": "allowed",
-                        "resets_at": None,
-                        "utilization": eu["utilization"] / 100.0,
-                        "ts": now,
-                    }
+                limits = _build_limits_dict(raw)
                 _usage_cache["data"] = limits
                 _usage_cache["ts"] = now
                 cached = limits
@@ -7106,11 +7141,7 @@ async def _get_cached_usage_data(ctx: dict) -> dict:
         if cached is None or (now - _usage_cache["ts"]) > _USAGE_TTL:
             raw = await _fetch_oauth_usage()
             if raw is not None:
-                limits: dict = {}
-                for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
-                    nv = _norm_window(raw.get(k))
-                    if nv:
-                        limits[k] = nv
+                limits = _build_limits_dict(raw)
                 _usage_cache["data"] = limits
                 _usage_cache["ts"] = now
                 cached = limits

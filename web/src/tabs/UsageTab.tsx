@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { api, UsageDashboard, UsageLimits, UsageLedger } from '../api'
-import { fmtReset, pickClass, fmtPct, LIMIT_LABELS } from '../components/usageFormat'
+import { fmtReset, pickClass, fmtPct, orderedLimitKeys, limitLabel } from '../components/usageFormat'
 
 // Full historical cost/usage dashboard over ALL ~/.claude transcripts (CLI +
 // Cardloop + sub-agents), indexed by usage_scanner.py. Hand-rolled CSS/SVG-free
@@ -93,14 +93,14 @@ function DailyChart({ rows }: { rows: UsageDashboard['by_day'] }) {
 // ── live subscription limits panel (card 3a) ─────────────────────────────────
 function LiveLimitsPanel({ data }: { data: UsageLimits }) {
   const now = data.now
-  const keys = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'overage']
+  const keys = orderedLimitKeys(data.limits)
   const rows = keys.map(k => ({ k, d: data.limits[k] })).filter(x => x.d)
   if (!rows.length) return <div className="usage-empty">No live limit data available yet.</div>
   return (
     <div className="usage-live-limits">
       {rows.map(({ k, d }) => (
         <div key={k} className={`usage-limit-row ${pickClass(d)}`}>
-          <span className="usage-limit-label">{LIMIT_LABELS[k]}</span>
+          <span className="usage-limit-label">{limitLabel(k, d)}</span>
           <span className="usage-limit-pct">{fmtPct(d.utilization) || d.status}</span>
           <div className="usage-limit-bar">
             <div className="usage-limit-fill" style={{ width: `${Math.round((d.utilization ?? 0) * 100)}%` }} />

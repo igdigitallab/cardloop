@@ -49,7 +49,7 @@ export interface UsageDashboard {
 }
 
 export interface UsageLimitRow {
-  status: string; resets_at: number | null; utilization: number | null; ts: number
+  status: string; resets_at: number | null; utilization: number | null; ts: number; label?: string
 }
 export interface UsageLimits {
   limits: Record<string, UsageLimitRow>

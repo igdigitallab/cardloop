@@ -21,7 +21,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 import webapp as _webapp
-from webapp import _derive_token, _usage_cache, _USAGE_TTL
+from webapp import _derive_token, _usage_cache, _USAGE_TTL, _build_limits_dict, _slugify_model_name
 
 
 # ─────────────────────────── helpers ─────────────────────────────────────────
@@ -361,3 +361,61 @@ async def test_sse_result_duration_ms_none_tolerated(aiohttp_client, tmp_path, p
     assert len(result_events) == 1
     # duration_ms key should be present (value may be None/null in JSON)
     assert "duration_ms" in result_events[0]
+
+
+# ─────────────────────────── per-model weekly buckets (Fable etc) ────────────────────────────
+# Trimmed real /api/oauth/usage payload (2026-07-24): "weekly_all" duplicates seven_day, but
+# "weekly_scoped" (scope.model.display_name="Fable") is a SEPARATE weekly allowance with its own
+# resets_at — not exposed as its own top-level key. _build_limits_dict must surface it generically
+# so any future scoped model (not just Fable) shows up with no code change.
+_RAW_OAUTH_USAGE_WITH_SCOPED_MODEL = {
+    "five_hour": {"utilization": 12.0, "resets_at": "2026-07-25T05:49:59+00:00"},
+    "seven_day": {"utilization": 94.0, "resets_at": "2026-07-27T20:59:59+00:00"},
+    "seven_day_opus": None,
+    "seven_day_sonnet": None,
+    "limits": [
+        {"kind": "session", "group": "session", "percent": 12,
+         "resets_at": "2026-07-25T05:49:59+00:00"},
+        {"kind": "weekly_all", "group": "weekly", "percent": 94,
+         "resets_at": "2026-07-27T20:59:59+00:00"},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 2,
+         "resets_at": "2026-07-27T21:00:00+00:00",
+         "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}},
+    ],
+    "extra_usage": {"is_enabled": False, "utilization": 0.0},
+}
+
+
+def test_build_limits_dict_surfaces_scoped_model_bucket():
+    """A weekly_scoped limits[] entry becomes its own seven_day_<slug> row."""
+    limits = _build_limits_dict(_RAW_OAUTH_USAGE_WITH_SCOPED_MODEL)
+    assert "seven_day_fable" in limits
+    fable = limits["seven_day_fable"]
+    assert fable["utilization"] == pytest.approx(0.02)
+    assert fable["label"] == "Fable"
+    assert fable["resets_at"] is not None
+
+
+def test_build_limits_dict_does_not_duplicate_weekly_all():
+    """weekly_all in limits[] is redundant with the top-level seven_day window."""
+    limits = _build_limits_dict(_RAW_OAUTH_USAGE_WITH_SCOPED_MODEL)
+    assert limits["seven_day"]["utilization"] == pytest.approx(0.94)
+    # Only the scoped bucket gets its own dynamic key; "weekly_all"/"session" don't leak in.
+    assert set(limits.keys()) == {"five_hour", "seven_day", "seven_day_fable"}
+
+
+def test_build_limits_dict_ignores_null_scope():
+    """A limits[] entry without scope.model.display_name is skipped, not crashed on."""
+    raw = {
+        "limits": [
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 5, "resets_at": None, "scope": {}},
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 5, "resets_at": None, "scope": None},
+        ],
+    }
+    assert _build_limits_dict(raw) == {}
+
+
+def test_slugify_model_name():
+    assert _slugify_model_name("Fable") == "fable"
+    assert _slugify_model_name("Fable 5") == "fable_5"
+    assert _slugify_model_name("  ") == "model"

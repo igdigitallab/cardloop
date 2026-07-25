@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
-import { fmtReset, pickClass, fmtPct, LIMIT_LABELS, type RawLimit } from './usageFormat'
+import { fmtReset, pickClass, fmtPct, orderedLimitKeys, limitLabel, type RawLimit } from './usageFormat'
 
 interface UsageData {
   limits: Record<string, RawLimit>
@@ -133,10 +133,10 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
             <span>📊 Usage &amp; cost</span>
             <span className="usage-dropdown-cta-arrow">→</span>
           </button>
-          {['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'overage'].map(k => {
+          {orderedLimitKeys(data.limits).map(k => {
             const d = data.limits[k]
             if (!d) return null
-            const label = LIMIT_LABELS[k]
+            const label = limitLabel(k, d)
             return (
               <div key={k} className={`usage-row ${pickClass(d)}`}>
                 <span className="usage-row-label">{label}</span>
