@@ -21,6 +21,12 @@ Exit codes:
 
 Run:  venv/bin/python tools/verify_model_aliases.py
 Cost: one 1-token completion per family, billed to the subscription (never the API).
+
+Daily cron mode: `--watch` does ONE read-only HTTPS GET and exits 0 with zero model calls
+unless Anthropic published a model id we have not seen before (state: data/model-release-seen.json).
+Only then does it run the probes above — i.e. it spends tokens exactly on the days alias
+resolution can actually have regressed. Exit 1 on mismatch, so a cron's healthchecks ping
+turns it into an alert.
 """
 from __future__ import annotations
 
@@ -124,7 +130,77 @@ def check() -> "tuple[int, list[tuple[str, str, str]]]":
     return (1 if mismatches else 0), mismatches
 
 
+def _state_path() -> str:
+    return os.path.join(_REPO_ROOT, "data", "model-release-seen.json")
+
+
+def _load_seen() -> "set[str]":
+    try:
+        with open(_state_path()) as f:
+            return set(json.load(f).get("ids") or [])
+    except Exception:
+        return set()
+
+
+def _save_seen(ids: "set[str]") -> None:
+    try:
+        os.makedirs(os.path.dirname(_state_path()), exist_ok=True)
+        with open(_state_path(), "w") as f:
+            json.dump({"ids": sorted(ids)}, f, indent=1)
+    except Exception as e:  # noqa: BLE001 — a cron must never die on a state-write hiccup
+        print(f"  warning: could not persist seen-state: {e}", file=sys.stderr)
+
+
+def watch() -> int:
+    """Cheap daily mode for cron: ONE read-only HTTPS GET, zero model calls on a normal day.
+
+    The expensive part (probing what each alias actually runs) only fires when Anthropic
+    publishes a model id we have never seen — which is exactly when alias resolution can
+    silently regress. Exit 1 on mismatch so the cron's healthchecks ping records a failure.
+    """
+    token = _oauth_token()
+    if not token:
+        print("SKIP: no OAuth token — cannot watch.")
+        return 2
+    live = fetch_newest_per_family(token)
+    if live is None:
+        print("SKIP: could not fetch /v1/models — cannot watch.")
+        return 2
+
+    current = {v["id"] for v in live.values()}
+    seen = _load_seen()
+    new = current - seen
+    if not new:
+        print(f"[watch] no new models (newest per family unchanged: {', '.join(sorted(current))})")
+        return 0
+
+    print(f"[watch] NEW model(s) published: {', '.join(sorted(new))} — probing alias resolution")
+    code, mismatches = check()
+    # Record what we have seen regardless of the verdict, so a standing mismatch alerts once
+    # per release rather than every single day (the report says what to do; nagging daily
+    # would train the operator to ignore it).
+    _save_seen(current | seen)
+    if code == 1:
+        lines = [f"   '{fam}': UI advertises {exp} but the alias runs {act}"
+                 for fam, exp, act in mismatches]
+        print("[watch] MISMATCH after a new release:")
+        print("\n".join(lines))
+        print("Fix: bump `claude-agent-sdk` in requirements.txt, recreate the venv, restart.")
+        try:  # surface it in the cockpit the same way the deploy canary does
+            inbox = os.path.join(_REPO_ROOT, "data", "inbox")
+            os.makedirs(inbox, exist_ok=True)
+            with open(os.path.join(inbox, "model-alias-mismatch.txt"), "w") as f:
+                f.write("🔴 Model alias mismatch after a new model release:\n"
+                        + "\n".join(lines)
+                        + "\nFix: bump claude-agent-sdk in requirements.txt, recreate venv, restart.\n")
+        except Exception:
+            pass
+    return code
+
+
 def main() -> int:
+    if "--watch" in sys.argv[1:]:
+        return watch()
     code, mismatches = check()
     if code == 1:
         print(f"\n[FAIL] {len(mismatches)} alias(es) run an OLDER model than the UI advertises:")
