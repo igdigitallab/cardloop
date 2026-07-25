@@ -4,11 +4,12 @@
 #
 # Install:  python -m venv venv && venv/bin/pip install -r requirements.txt
 
-# Claude Agent SDK — >=0.2.110 is REQUIRED: older SDKs silently downgrade the
-# "fable" model alias to opus without erroring. Keep this floor current after
-# model releases: the bundled CLI determines alias resolution, and a stale
-# bundle resolves aliases to previous-generation models.
-claude-agent-sdk>=0.2.110
+# Claude Agent SDK — >=0.2.127 is REQUIRED: older SDKs silently downgrade newer
+# model aliases without erroring. The bundled CLI determines alias resolution, so
+# the floor must track model releases: <0.2.127 bundles CLI 2.1.191, which resolves
+# "opus"->Opus 4.8 and "sonnet"->Sonnet 4.6 even though Opus 5 / Sonnet 5 exist.
+# 0.2.127 bundles CLI 2.1.219, the first to resolve "opus"->Opus 5 (released 2026-07-24).
+claude-agent-sdk>=0.2.127
 
 # aiohttp cockpit (web server + SSE).
 aiohttp==3.13.5
