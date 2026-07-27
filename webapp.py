@@ -13061,16 +13061,20 @@ _DETECT_EH_EXCLUDE_DIRS = {"venv", ".venv", "node_modules", ".git", "dist", "bui
 def _detect_error_handler(cwd: Path, claude_md_text: str) -> bool:
     """Fast (bounded) detector for the presence of a global error handler in the project.
 
-    (a) Self-declaration: ## Cardloop conformance + line 'error handler: <non-empty/no>'
+    (a) Self-declaration: one of the three accepted conformance headings + line
+        'error handler: <non-empty/no>'
     (b) Code heuristic: walk *.py (up to 60 files / 3 MB), look for substring markers.
     Returns True on first match. try/except → False on any error."""
     try:
         # (a) Self-declaration — ONLY in the conformance section (otherwise an
         # 'error handler:' line from any other section would give a false positive).
-        # Accept the current "## Cardloop conformance" heading and the legacy
-        # "## ClaudeOps conformance" (pre-rebrand instances) for backward compat.
+        # Accept the current "## Cardloop conformance" heading, the legacy
+        # "## ClaudeOps conformance" (pre-rebrand instances), and the onboarding
+        # template's "## Cardloop Integration Status" (templates/CLAUDE.md.tpl) —
+        # all three are self-declaration sections, just named differently.
         _conformance_heading = next(
-            (h for h in ("## Cardloop conformance", "## ClaudeOps conformance")
+            (h for h in ("## Cardloop conformance", "## ClaudeOps conformance",
+                          "## Cardloop Integration Status")
              if h in claude_md_text),
             None,
         )
@@ -13079,7 +13083,11 @@ def _detect_error_handler(cwd: Path, claude_md_text: str) -> bool:
             m = _DETECT_EH_CONFORMANCE_RE.search(section)
             if m:
                 val = m.group(1).strip().lower()
-                if val not in {"no", "none", "-", "—", ""}:
+                # "нет" (Russian "no") is functional legacy data, not UI text: some
+                # older project CLAUDE.md files self-declared in Russian before the
+                # English-only rule, and misreading it as a truthy value was a
+                # false-green health signal.
+                if val not in {"no", "none", "-", "—", "", "нет"}:
                     return True
 
         # (b) Code heuristic — bounded scan; os.walk prunes noisy directories,
