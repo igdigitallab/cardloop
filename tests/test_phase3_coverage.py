@@ -349,6 +349,30 @@ async def test_session_history_with_jsonl(aiohttp_client, sessions_app, project_
     assert "Hello Claude" in data["messages"][0]["text"]
 
 
+def test_session_history_skips_harness_meta_user_lines(tmp_path):
+    """isMeta=true on a user line = harness-authored, never the operator.
+
+    The CLI writes its own user-role lines: the image-downscale notice emitted after Read on a
+    tall PNG, "Continue from where you left off.", Stop-hook feedback. The feed used to render
+    each one as the operator's own bubble ("who uploaded that image?").
+    """
+    jsonl = tmp_path / "meta.jsonl"
+    jsonl.write_text("\n".join(json.dumps(o) for o in [
+        {"type": "user", "isMeta": True,
+         "message": {"role": "user", "content":
+                     "[Image: original 828x8240, displayed at 201x2000. "
+                     "Multiply coordinates by 4.12 to map to original image.]"}},
+        {"type": "user", "isMeta": True,
+         "message": {"role": "user", "content": "Continue from where you left off."}},
+        {"type": "user", "message": {"role": "user", "content": "why is the button dead"}},
+    ]) + "\n", encoding="utf-8")
+
+    msgs = _webapp._session_history(jsonl)
+    texts = [m["text"] for m in msgs]
+    assert texts == ["why is the button dead"], \
+        "only the operator's own line may reach the chat feed"
+
+
 def test_strip_service_blocks_removes_context_pack():
     """spec-075: the injected <context-pack> must not leak into rendered chat history."""
     raw = (

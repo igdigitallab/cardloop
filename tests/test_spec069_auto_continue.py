@@ -22,12 +22,14 @@ import webapp
 @pytest.fixture(autouse=True)
 def _clean_state():
     for d in (webapp._monitors, webapp._CHAT_QUEUE, webapp._bg_continue_count,
-              webapp._completion_wake_pending, webapp._last_turn_options):
+              webapp._completion_wake_pending, webapp._last_turn_options,
+              webapp._completion_wake_deferred_since):
         d.clear()
     webapp._WEBAPP_CTX = None
     yield
     for d in (webapp._monitors, webapp._CHAT_QUEUE, webapp._bg_continue_count,
-              webapp._completion_wake_pending, webapp._last_turn_options):
+              webapp._completion_wake_pending, webapp._last_turn_options,
+              webapp._completion_wake_deferred_since):
         d.clear()
     webapp._WEBAPP_CTX = None
 
@@ -138,14 +140,74 @@ async def test_fire_enqueues_one_continuation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fire_skips_when_session_running(monkeypatch):
-    """An active turn sees completions natively — no synthetic wake."""
+async def test_fire_defers_while_session_running(monkeypatch):
+    """A busy session DEFERS the wake — it must never drop it.
+
+    The old code returned here believing an active turn sees completions natively. It does
+    not: a completion landing mid-turn has its <task-notification> removed from the CLI input
+    queue un-delivered and only reaches the SDK stream as a monitor flip. Dropping the wake on
+    top of that is what made the orchestrator go silent forever.
+    """
     monkeypatch.setattr(webapp, "_AUTO_CONTINUE_ON", True)
     monkeypatch.setattr(webapp, "_AUTO_CONTINUE_DEBOUNCE_SEC", 0.0)
+    spawned = []
+    monkeypatch.setattr(webapp, "_spawn_bg", lambda coro: (spawned.append(coro), coro.close()))
     webapp._completion_wake_pending["s"] = [_terminal_rec()]
     await webapp._completion_wake_fire(_ctx(running={"s": True}), "s")
+    assert webapp._CHAT_QUEUE.get("s", []) == [], "must not wake into a live turn"
+    assert "s" not in webapp._bg_continue_count, "a deferral must not spend budget"
+    assert webapp._completion_wake_pending.get("s"), "pending recs must survive the deferral"
+    assert len(spawned) == 1, "must re-arm itself to re-check after the turn ends"
+
+
+@pytest.mark.asyncio
+async def test_fire_after_deferral_wakes_once_turn_is_idle(monkeypatch):
+    """The deferred batch fires as one wake naming every child, once the turn releases."""
+    monkeypatch.setattr(webapp, "_AUTO_CONTINUE_ON", True)
+    monkeypatch.setattr(webapp, "_AUTO_CONTINUE_DEBOUNCE_SEC", 0.0)
+    monkeypatch.setattr(webapp, "_chat_queue_drain_one", AsyncMock())
+    monkeypatch.setattr(webapp, "_spawn_bg", lambda coro: coro.close())
+    ctx = _ctx(running={"s": True})
+    webapp._completion_wake_pending["s"] = [_terminal_rec(mid="m1", label="verifier"),
+                                            _terminal_rec(mid="m2", label="screenshotter")]
+    await webapp._completion_wake_fire(ctx, "s")          # busy → deferred
     assert webapp._CHAT_QUEUE.get("s", []) == []
-    assert "s" not in webapp._bg_continue_count
+    ctx["running"].pop("s")                                # turn ends
+    await webapp._completion_wake_fire(ctx, "s")          # re-armed pass
+    q = webapp._CHAT_QUEUE.get("s", [])
+    assert len(q) == 1, "the whole deferred batch must ride ONE wake"
+    assert "verifier" in q[0]["text"] and "screenshotter" in q[0]["text"]
+    assert webapp._bg_continue_count["s"] == 1
+    assert "s" not in webapp._completion_wake_deferred_since, "deferral clock must reset on fire"
+
+
+@pytest.mark.asyncio
+async def test_fire_drops_wake_past_deferral_cap(monkeypatch):
+    """A wedged `running` flag must not leak an endless re-arm chain."""
+    monkeypatch.setattr(webapp, "_AUTO_CONTINUE_ON", True)
+    monkeypatch.setattr(webapp, "_AUTO_CONTINUE_DEBOUNCE_SEC", 0.0)
+    monkeypatch.setattr(webapp, "_AUTO_CONTINUE_DEFER_MAX_SEC", 0.0)
+    spawned = []
+    monkeypatch.setattr(webapp, "_spawn_bg", lambda coro: (spawned.append(coro), coro.close()))
+    webapp._completion_wake_deferred_since["s"] = 0.0      # deferring "since the epoch"
+    webapp._completion_wake_pending["s"] = [_terminal_rec()]
+    await webapp._completion_wake_fire(_ctx(running={"s": True}), "s")
+    assert spawned == [], "must stop re-arming past the cap"
+    assert "s" not in webapp._completion_wake_pending
+    assert "s" not in webapp._completion_wake_deferred_since
+
+
+@pytest.mark.asyncio
+async def test_fire_deferral_stops_when_pending_cleared(monkeypatch):
+    """A rotate clears pending mid-deferral — the chain must end, not spin."""
+    monkeypatch.setattr(webapp, "_AUTO_CONTINUE_ON", True)
+    monkeypatch.setattr(webapp, "_AUTO_CONTINUE_DEBOUNCE_SEC", 0.0)
+    spawned = []
+    monkeypatch.setattr(webapp, "_spawn_bg", lambda coro: (spawned.append(coro), coro.close()))
+    webapp._completion_wake_deferred_since["s"] = 1.0
+    await webapp._completion_wake_fire(_ctx(running={"s": True}), "s")   # nothing pending
+    assert spawned == []
+    assert "s" not in webapp._completion_wake_deferred_since
 
 
 @pytest.mark.asyncio

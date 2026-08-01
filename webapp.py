@@ -9386,6 +9386,18 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
                 if not isinstance(m, dict):
                     continue
                 if t == "user":
+                    # A user-role line carrying isMeta=true was written by the harness, not the
+                    # operator: the CLI's image-downscale notice ("[Image: original 828x8240,
+                    # displayed at 201x2000. Multiply coordinates by 4.12 ...]" after Read on a
+                    # tall PNG), "Continue from where you left off.", Stop-hook feedback,
+                    # <local-command-caveat>, malformed-tool-call notices, scheduler-injected
+                    # prompts. The feed rendered every one of them as the operator's own bubble
+                    # ("who uploaded that image?"). Structural check, no text matching: a scan of
+                    # 2412 transcripts found 112 isMeta user lines, all harness-generated, zero
+                    # typed by a human. Note that "[Request interrupted by user]" is NOT covered
+                    # here — it arrives as a content LIST and is already skipped below.
+                    if o.get("isMeta") is True:
+                        continue
                     c = m.get("content")
                     if isinstance(c, str):
                         cleaned = _strip_service_blocks(c)
@@ -10074,8 +10086,13 @@ _AUTO_CONTINUE_DEBOUNCE_SEC = float(os.getenv("AUTO_CONTINUE_DEBOUNCE_SEC", "20"
 # turn — capping the worst case at ONE wake per episode is the fingerprint-safe way to bound
 # the #1 per-episode token multiplier. Override via AUTO_CONTINUE_MAX for chattier resumes.
 _AUTO_CONTINUE_MAX = int(os.getenv("AUTO_CONTINUE_MAX", "1"))
+# Upper bound on how long a wake may stay deferred while a turn is in flight (see
+# _completion_wake_fire). Generous on purpose — a legitimate orchestration turn can run for
+# hours — but finite, so a wedged `running` flag can never leak an endless re-arm chain.
+_AUTO_CONTINUE_DEFER_MAX_SEC = float(os.getenv("AUTO_CONTINUE_DEFER_MAX_SEC", str(4 * 3600)))
 _bg_continue_count: "dict[str, int]" = {}  # session_key → wakes fired this episode
 _completion_wake_pending: "dict[str, list[dict]]" = {}  # session_key → terminal recs awaiting one wake
+_completion_wake_deferred_since: "dict[str, float]" = {}  # session_key → ts of the first deferral
 _last_turn_options: "dict[str, dict]" = {}  # session_key → {effort, ultracode} of the last operator turn
 _WEBAPP_CTX: "dict | None" = None  # set in start() — lets registry-driven hooks reach ctx
 
@@ -10085,6 +10102,24 @@ _BG_CONTINUE_PREFIX = "[auto-continue]"
 def _bg_continue_reset(session_key: str) -> None:
     """New episode (operator turn / rotate): restore the wake budget."""
     _bg_continue_count.pop(session_key, None)
+
+
+def _notify_wake_suppressed(session_key: str, labels: str, reason: str) -> None:
+    """Toast the operator when a completion could not re-wake the orchestrator.
+
+    Every suppression path used to be silent, so a finished background child that got no wake
+    was indistinguishable from one still running — the orchestrator just never came back and
+    the operator had no way to tell which. The results exist and only need a nudge; saying so
+    turns an invisible hang into a one-click continue. Best-effort, never raises."""
+    try:
+        _bus_publish("__notify__", {
+            "kind": "notification",
+            "level": "info",
+            "text": f"Background task(s) finished ({labels}) — not auto-continued: {reason}. "
+                    f"Send any message to collect the results.",
+        }, persist=False)
+    except Exception as exc:
+        print(f"[auto-continue] suppression notice failed for {session_key}: {exc!r}")
 
 
 def _has_running_bg(session_key: str) -> bool:
@@ -10116,26 +10151,66 @@ async def _completion_wake_fire(ctx: dict, session_key: str) -> None:
     """After the debounce window: if the session is idle, enqueue ONE continuation turn that
     names the finished children, using the operator's last per-turn options so the synthetic
     turn matches the live-client fingerprint (a mismatch used to evict+SIGTERM the remaining
-    children mid-flight)."""
+    children mid-flight).
+
+    A turn already in flight DEFERS the wake instead of dropping it — see the long comment on
+    the busy branch below."""
     try:
         await asyncio.sleep(_AUTO_CONTINUE_DEBOUNCE_SEC)
-        recs = _completion_wake_pending.pop(session_key, None) or []
-        if not _AUTO_CONTINUE_ON or not recs:
+        if not _AUTO_CONTINUE_ON or not _completion_wake_pending.get(session_key):
+            _completion_wake_pending.pop(session_key, None)
+            _completion_wake_deferred_since.pop(session_key, None)
             return
-        # An active turn sees completions natively (in-stream notification) — no wake needed.
         if ctx["running"].get(session_key) is not None:
+            # The old code returned here on the premise that "an active turn sees completions
+            # natively". Transcript evidence says otherwise: when a background child finishes
+            # mid-turn, the CLI enqueues its <task-notification> and then REMOVES it from the
+            # input queue un-delivered, surfacing it only as a TaskNotificationMessage on the
+            # SDK stream — which engine._process_messages turns into a monitor flip and a UI
+            # badge. The model is never told. Measured on one 7 h session: 27 of 29
+            # notifications were enqueued while a turn was in flight and all 27 were removed;
+            # the only 2 ever delivered had arrived while the session was idle. So the
+            # native path and the wake used to drop the SAME completions, which is exactly the
+            # "I launched an agent and it never came back" hang.
+            #
+            # Re-arm instead. Pending recs are kept (a later completion appends to the same
+            # list via _schedule_completion_wake, so the batch stays one wake), and this chain
+            # holds the only in-flight fire task — _schedule_completion_wake will not spawn a
+            # second one while the key is present.
+            since = _completion_wake_deferred_since.setdefault(session_key, time.time())
+            waited = time.time() - since
+            if waited > _AUTO_CONTINUE_DEFER_MAX_SEC:
+                print(f"[auto-continue] {session_key}: deferred {int(waited)}s while busy "
+                      f"(> {int(_AUTO_CONTINUE_DEFER_MAX_SEC)}s cap) — dropping the wake")
+                _dropped = _completion_wake_pending.pop(session_key, None) or []
+                _completion_wake_deferred_since.pop(session_key, None)
+                _notify_wake_suppressed(
+                    session_key,
+                    ", ".join(str(r.get("label") or r.get("id") or "?")[:80] for r in _dropped[:5]),
+                    f"the turn stayed busy for {int(waited // 60)} min")
+                return
+            _spawn_bg(_completion_wake_fire(ctx, session_key))
             return
-        n = _bg_continue_count.get(session_key, 0)
-        if n >= _AUTO_CONTINUE_MAX:
-            print(f"[auto-continue] {session_key}: budget exhausted ({n}/{_AUTO_CONTINUE_MAX}) — not re-waking")
-            return
-        # Don't stack: skip when a continuation is already queued for this session.
-        if any((it.get("text") or "").startswith(_BG_CONTINUE_PREFIX) for it in _chat_queue_get(session_key)):
+        _completion_wake_deferred_since.pop(session_key, None)
+        recs = _completion_wake_pending.pop(session_key, None) or []
+        if not recs:
             return
         labels = ", ".join(
             f"\"{str(r.get('label') or r.get('id') or '?')[:80]}\" → {r.get('status')}"
             for r in recs[:5]
         )
+        n = _bg_continue_count.get(session_key, 0)
+        if n >= _AUTO_CONTINUE_MAX:
+            print(f"[auto-continue] {session_key}: budget exhausted ({n}/{_AUTO_CONTINUE_MAX}) — not re-waking")
+            # Suppression used to be silent, which the operator experiences as the orchestrator
+            # simply never coming back. Surface it: the work IS done and waiting to be collected,
+            # it just needs one nudge. Raise AUTO_CONTINUE_MAX to trade tokens for fewer nudges.
+            _notify_wake_suppressed(session_key, labels,
+                                    f"auto-continue budget spent ({n}/{_AUTO_CONTINUE_MAX})")
+            return
+        # Don't stack: skip when a continuation is already queued for this session.
+        if any((it.get("text") or "").startswith(_BG_CONTINUE_PREFIX) for it in _chat_queue_get(session_key)):
+            return
         prompt = (
             f"{_BG_CONTINUE_PREFIX} Background task(s) just finished: {labels}. "
             "Collect their results now (TaskOutput / the run's transcripts / files they wrote) "
@@ -10960,6 +11035,7 @@ async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_ha
         # (v1 famously stayed "budget exhausted" across rotations, going permanently deaf).
         _bg_continue_reset(session_key)
         _completion_wake_pending.pop(session_key, None)
+        _completion_wake_deferred_since.pop(session_key, None)
         # Buffered board strips belong to the old session — drop them so they don't
         # re-hydrate into the fresh chat (spec-052 Phase 7 follow-up).
         _board_events_clear(session_key)
