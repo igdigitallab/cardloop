@@ -50,8 +50,8 @@ interface Props {
   schedulesActive?: boolean
   onOpenSettingsGlobal?: () => void
   settingsGlobalActive?: boolean
-  /** Spec-074: opens the global search overlay (Cmd/Ctrl+K) */
-  onOpenSearch?: () => void
+  /** Spec-074/079: opens the global search overlay, optionally pre-filled with a query. */
+  onOpenSearch?: (seed?: string) => void
 }
 
 function unreadFor(p: Project, map: Record<string, number>): number {
@@ -1088,6 +1088,17 @@ export function Sidebar({
           value={search}
           onChange={e => setSearch(e.target.value)}
         />
+        {/* spec-079: this box only filters project NAMES. When it is in use, offer the
+            global index (chats/boards/timelines) right here — that is where the operator
+            is already looking when a project name turns out not to be what they remember. */}
+        {search.trim() && onOpenSearch && (
+          <button
+            className="sidebar-search-everywhere"
+            onClick={() => onOpenSearch(search.trim())}
+          >
+            🔍 {t['search.search_everywhere']}: <b>{search.trim()}</b>
+          </button>
+        )}
       </div>
 
       {/* New project + New group row */}
@@ -1105,7 +1116,7 @@ export function Sidebar({
           (the sidebar is the off-canvas drawer on phones). */}
       <div className="sidebar-tools">
         <button className="sidebar-tool-btn"
-                onClick={onOpenSearch} title="Search (Ctrl/Cmd+K)" aria-label="Search">🔍</button>
+                onClick={() => onOpenSearch?.()} title="Search everywhere" aria-label="Search">🔍</button>
         <button className={`sidebar-tool-btn${terminalActive ? ' active' : ''}`}
                 onClick={onOpenTerminal} title="Terminal" aria-label="Terminal">⌨</button>
         <button className={`sidebar-tool-btn${vaultActive ? ' active' : ''}`}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Project, ProjectStructureHealth, TabId } from '../types'
+import { Project, ProjectStructureHealth, SearchNavTarget, TabId } from '../types'
 import { api } from '../api'
 import { ProjectActivityProvider, useOnRunEnd, useProjectActivity } from '../hooks/useProjectActivity'
 import { ErrorBoundary } from '../components/ErrorBoundary'
@@ -99,6 +99,8 @@ interface Props {
   /** Sidebar "⚙ Settings" request: when {id} matches this project, switch to the Settings tab.
    *  nonce changes on every request so repeats re-fire even for the already-open project. */
   settingsRequest?: { id: string; nonce: number } | null
+  /** spec-079: "open this search hit here" — switch tab, and focus a card when given. */
+  navRequest?: SearchNavTarget | null
   /** Live model registry from /api/models; undefined → ChatTab uses the static fallback. */
   models?: { value: string; label: string }[]
 }
@@ -256,7 +258,7 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
   )
 }
 
-export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject, settingsRequest, models }: Props) {
+export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject, settingsRequest, navRequest, models }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
   // Mobile inner tab: null = show chat (default), TabId = show that inner tab.
   // Restored from localStorage per project so reopening lands where you left off.
@@ -282,6 +284,17 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsRequest?.nonce])
+
+  // spec-079: search hit → open the right tab here. Same nonce-keyed shape as settings,
+  // plus a card id handed to BoardTab so the matched card is highlighted and scrolled to.
+  const [focusCard, setFocusCard] = useState<{ id: string; nonce: number } | null>(null)
+  useEffect(() => {
+    if (!navRequest || navRequest.id !== project.id) return
+    setActiveTab(navRequest.tab)
+    setMobileInnerTab(navRequest.tab)
+    if (navRequest.cardId) setFocusCard({ id: navRequest.cardId, nonce: navRequest.nonce })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navRequest?.nonce])
 
   // ── Rename state (header inline edit — changes label only, id unchanged) ──
   const [renaming, setRenaming] = useState(false)
@@ -766,7 +779,7 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
               <div className="tab-content">
                 {mobileInnerTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'logs'      && <ErrorBoundary label="Logs"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
-                {mobileInnerTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} onDiscuss={(c) => { setDiscussCard(c); setMobileInnerTab(null) }} /></ErrorBoundary>}
+                {mobileInnerTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} focusCard={focusCard} onDiscuss={(c) => { setDiscussCard(c); setMobileInnerTab(null) }} /></ErrorBoundary>}
                 {mobileInnerTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'memory'    && <ErrorBoundary label="Memory"><MemoryTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
@@ -915,7 +928,7 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
         <div className="tab-content">
           {activeTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'logs'      && <ErrorBoundary label="Logs"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
-          {activeTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} onDiscuss={setDiscussCard} /></ErrorBoundary>}
+          {activeTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} focusCard={focusCard} onDiscuss={setDiscussCard} /></ErrorBoundary>}
           {activeTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'memory'    && <ErrorBoundary label="Memory"><MemoryTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}

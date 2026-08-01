@@ -482,6 +482,16 @@
 .board-card-check { position: absolute; top: 6px; right: 6px; width: 14px; height: 14px; margin: 0; z-index: 2; cursor: pointer; accent-color: var(--accent); }
 .board-card-text { padding-right: 16px; }
 .board-card-selected { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* spec-079: a card arrived at from a search hit — a transient "here it is" pulse,
+   deliberately distinct from .board-card-selected, which is a persistent selection. */
+.board-card-focused {
+  animation: board-card-focus-pulse 1.1s ease-out 3;
+}
+@keyframes board-card-focus-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  35%      { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent); }
+}
 .board-card-queued-badge {
   font-size: 10px; font-weight: 700; color: var(--accent);
   background: var(--accent-subtle); border-radius: var(--radius-pill); padding: 1px 5px;

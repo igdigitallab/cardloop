@@ -32,6 +32,12 @@ import board as _board  # reuse card-line regex + ops-marker stripping — no re
 
 # ─────────────────────────── tunables ───────────────────────────
 
+# Bumping this drops + rebuilds the whole index on the next init_db(). That is the ONLY
+# supported way to change the docs schema: FTS5 has no ALTER TABLE ADD COLUMN, and a stale
+# index silently answers queries with the old shape (missing anchors → hits that look fine
+# but cannot be opened). One rebuild costs a single background scan pass.
+SCHEMA_VERSION = 2
+
 BODY_CHAR_CAP = 2000                   # ~2KB cap per indexed doc body (spec-074)
 MAX_FILE_BYTES = 50 * 1024 * 1024      # skip source files bigger than this
 RECENCY_WEIGHT = 1e-9                  # small nudge so newer docs edge out older ties in bm25 order
@@ -64,26 +70,52 @@ def get_db(db_path: "Path | str") -> sqlite3.Connection:
     return conn
 
 
+_CREATE_SQL = """
+    CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
+        project_id UNINDEXED,
+        project_name UNINDEXED,
+        source UNINDEXED,
+        ts UNINDEXED,
+        ref UNINDEXED,
+        ref2 UNINDEXED,
+        path UNINDEXED,
+        body,
+        tokenize="unicode61 remove_diacritics 2"
+    );
+    CREATE TABLE IF NOT EXISTS file_state (
+        path    TEXT PRIMARY KEY,
+        mtime   REAL,
+        size    INTEGER,
+        offset  INTEGER
+    );
+"""
+
+
 def init_db(conn: sqlite3.Connection) -> None:
-    """Idempotent — safe to call before every operation (search/scan/reindex)."""
-    conn.executescript("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
-            project_id UNINDEXED,
-            project_name UNINDEXED,
-            source UNINDEXED,
-            ts UNINDEXED,
-            ref UNINDEXED,
-            path UNINDEXED,
-            body,
-            tokenize="unicode61 remove_diacritics 2"
-        );
-        CREATE TABLE IF NOT EXISTS file_state (
-            path    TEXT PRIMARY KEY,
-            mtime   REAL,
-            size    INTEGER,
-            offset  INTEGER
-        );
-    """)
+    """Idempotent — safe to call before every operation (search/scan/reindex).
+
+    Also the migration gate: an index written by an older SCHEMA_VERSION is dropped and
+    rebuilt from scratch. Dropping file_state alongside docs is what makes the rebuild
+    actually happen — the indexer resumes from stored byte offsets, so leaving the state
+    behind would leave the fresh table permanently empty."""
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    have = None
+    if row is not None:
+        try:
+            have = int(row[0])
+        except (TypeError, ValueError):
+            have = None
+    docs_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs'").fetchone() is not None
+    if docs_exists and have != SCHEMA_VERSION:
+        conn.executescript("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS file_state;")
+    conn.executescript(_CREATE_SQL)
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (str(SCHEMA_VERSION),),
+    )
     conn.commit()
 
 
@@ -154,11 +186,14 @@ def _save_file_state(conn: sqlite3.Connection, path: str, mtime: float, size: in
 
 
 def _insert_doc(conn: sqlite3.Connection, project_id: str, project_name: str,
-                 source: str, ts: float, ref: str, path: str, body: str) -> None:
+                 source: str, ts: float, ref: str, path: str, body: str,
+                 ref2: str = "") -> None:
+    """`ref`/`ref2` are the deep-link anchors, interpreted per source:
+    chat → (session_id, message uuid) · board → (card_id, '') · timeline → ('', '')."""
     conn.execute(
-        "INSERT INTO docs (project_id, project_name, source, ts, ref, path, body) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (project_id, project_name, source, ts, ref, path, body[:BODY_CHAR_CAP]),
+        "INSERT INTO docs (project_id, project_name, source, ts, ref, ref2, path, body) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (project_id, project_name, source, ts, ref, ref2, path, body[:BODY_CHAR_CAP]),
     )
 
 
@@ -238,7 +273,13 @@ def _index_one_transcript(conn: sqlite3.Connection, project_id: str, project_nam
                 continue
             session_id = record.get("sessionId") or path.stem
             ts = _parse_iso_ts(record.get("timestamp"))
-            _insert_doc(conn, project_id, project_name, "chat", ts, session_id, key, text)
+            # The line's own uuid is the exact scroll anchor for the chat feed. It is stored
+            # for both roles even though the feed currently exposes uuid on user messages
+            # only — an assistant hit degrades to nearest-ts, and starts working for free the
+            # day the feed carries assistant uuids too.
+            uuid = record.get("uuid") or ""
+            _insert_doc(conn, project_id, project_name, "chat", ts, session_id, key, text,
+                        ref2=uuid if isinstance(uuid, str) else "")
             added += 1
 
     _save_file_state(conn, key, stat.st_mtime, stat.st_size, end_offset)
@@ -471,7 +512,7 @@ def search(conn: sqlite3.Connection, q: str, limit: int = DEFAULT_LIMIT,
         return []
 
     sql = (
-        "SELECT project_id, project_name, source, ts, ref, "
+        "SELECT project_id, project_name, source, ts, ref, ref2, "
         f"snippet(docs, -1, '{SNIPPET_OPEN}', '{SNIPPET_CLOSE}', '…', 12) AS snippet, "
         "bm25(docs) AS rank "
         "FROM docs WHERE docs MATCH ?"
@@ -500,9 +541,16 @@ def search(conn: sqlite3.Connection, q: str, limit: int = DEFAULT_LIMIT,
     hits = []
     for r in rows:
         source = r["source"]
+        # Deep-link anchors. Board card_id was indexed since spec-074 but never returned,
+        # so a board hit could not be opened — the omission, not the data, was the gap.
         ref_obj: dict = {}
-        if source == "chat" and r["ref"]:
-            ref_obj["session_id"] = r["ref"]
+        if source == "chat":
+            if r["ref"]:
+                ref_obj["session_id"] = r["ref"]
+            if r["ref2"]:
+                ref_obj["uuid"] = r["ref2"]
+        elif source == "board" and r["ref"]:
+            ref_obj["card_id"] = r["ref"]
         hits.append({
             "project_id": r["project_id"],
             "project_name": r["project_name"],

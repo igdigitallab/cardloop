@@ -66,13 +66,81 @@
   padding: 0 1px;
 }
 
+/* ── spec-079 ─────────────────────────────────────────────────────────────── */
+
+.search-overlay-hit-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.search-overlay-hit-meta {
+  display: flex; gap: 5px; font-size: 11px; color: var(--text3);
+}
+
+/* Sidebar: escape hatch from the project-name filter into the global index. */
+.sidebar-search-everywhere {
+  display: block; width: 100%; margin-top: 6px;
+  padding: 6px 8px; text-align: left;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text2); font-size: 12px; font-family: inherit;
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sidebar-search-everywhere:hover { color: var(--text); border-color: var(--border2); }
+
+/* Read-only transcript peek for a chat hit. */
+.session-peek-modal {
+  width: min(860px, 94vw); max-height: 84vh; padding: 0;
+  display: flex; flex-direction: column;
+}
+.session-peek { display: flex; flex-direction: column; min-height: 0; max-height: 84vh; }
+.session-peek-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.session-peek-title { display: flex; flex-direction: column; min-width: 0; }
+.session-peek-project { font-size: 14px; font-weight: 600; color: var(--text); }
+.session-peek-sub { font-size: 11px; color: var(--text3); }
+.session-peek-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.session-peek-open {
+  padding: 5px 10px; font-size: 12px; font-family: inherit; cursor: pointer;
+  background: var(--bg3); color: var(--text2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.session-peek-open:hover { color: var(--text); border-color: var(--border2); }
+.session-peek-close {
+  background: none; border: none; color: var(--text3);
+  font-size: 15px; cursor: pointer; padding: 2px 6px;
+}
+.session-peek-close:hover { color: var(--text); }
+
+.session-peek-body { overflow-y: auto; flex: 1; padding: 10px 14px 18px; }
+.session-peek-hint { padding: 28px 16px; text-align: center; color: var(--text3); font-size: 13px; }
+.session-peek-msg {
+  padding: 8px 10px; margin-bottom: 8px;
+  border-radius: var(--radius-sm); border: 1px solid transparent;
+  font-size: 13px; color: var(--text2); line-height: 1.5;
+}
+.session-peek-user { background: var(--bg3); }
+.session-peek-role {
+  display: flex; gap: 8px; align-items: baseline;
+  font-size: 11px; font-weight: 600; color: var(--text3);
+  text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px;
+}
+.session-peek-ts { font-weight: 400; text-transform: none; letter-spacing: 0; }
+.session-peek-text { word-break: break-word; }
+.session-peek-tools { font-size: 12px; color: var(--text3); font-style: italic; }
+/* The matched message — the whole reason this panel opened. */
+.session-peek-hit {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
 /* Mobile: full-screen sheet under 768px */
 @media (max-width: 768px) {
-  .search-overlay-modal {
+  .search-overlay-modal,
+  .session-peek-modal {
     width: 100%; max-width: 100%; height: 100%; max-height: 100%;
     border-radius: 0;
   }
   .search-overlay { max-height: 100%; height: 100%; }
+  .session-peek { max-height: 100%; height: 100%; }
   .search-overlay-input {
     font-size: 16px; /* prevent iOS auto-zoom */
   }

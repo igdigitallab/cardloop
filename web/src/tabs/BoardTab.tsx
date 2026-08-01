@@ -112,6 +112,9 @@ interface Props {
   isActive?: boolean
   /** spec-052 Phase 4a: open this card in the chat (bind the active-card banner + seed). */
   onDiscuss?: (card: { cardId: string; title: string }) => void
+  /** spec-079: a board search hit — highlight this card and scroll it into view.
+   *  nonce-keyed so picking the same card twice re-fires the scroll. */
+  focusCard?: { id: string; nonce: number } | null
 }
 
 // Columns shown in the board column row.
@@ -158,7 +161,7 @@ function writeFailedCollapsed(v: boolean) {
   try { localStorage.setItem(LS_FAILED_COLLAPSED, String(v)) } catch {}
 }
 
-export function BoardTab({ projectId, isActive = true, onDiscuss }: Props) {
+export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: Props) {
   const [board, setBoard] = useState<Board | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -175,6 +178,29 @@ export function BoardTab({ projectId, isActive = true, onDiscuss }: Props) {
 
   // Card 5e1c0a: spec modal state
   const [specModal, setSpecModal] = useState<{ cardId: string; content: string; loading: boolean; saving: boolean } | null>(null)
+
+  // spec-079: a board search hit lands here — highlight + scroll to the matched card.
+  // The board loads async and the tab may still be mounting when the request arrives, so
+  // the element is polled for a short while instead of being read once.
+  const [focusedCardId, setFocusedCardId] = useState<string | null>(null)
+  useEffect(() => {
+    if (!focusCard?.id) return
+    setFocusedCardId(focusCard.id)
+    let tries = 0
+    const iv = window.setInterval(() => {
+      const el = document.querySelector(`[data-card-id="${CSS.escape(focusCard.id)}"]`)
+      if (el) {
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        window.clearInterval(iv)
+      } else if (++tries > 20) {
+        window.clearInterval(iv)
+      }
+    }, 150)
+    // Drop the highlight afterwards so it reads as "here it is", not as a selection state.
+    const off = window.setTimeout(() => setFocusedCardId(null), 6000)
+    return () => { window.clearInterval(iv); window.clearTimeout(off) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusCard?.nonce])
 
   // Drag-and-drop
   const [dragCardId, setDragCardId] = useState<string | null>(null)
@@ -723,8 +749,10 @@ export function BoardTab({ projectId, isActive = true, onDiscuss }: Props) {
           isIncident ? 'board-card-incident' : '',
           isSel ? 'board-card-selected' : '',
           isQueued ? 'board-card-queued' : '',
+          focusedCardId === card.id ? 'board-card-focused' : '',
         ].filter(Boolean).join(' ')}
         key={card.id}
+        data-card-id={card.id}
         draggable={!isRunning}
         onDragStart={(e) => {
           setDragCardId(card.id)

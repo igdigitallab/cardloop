@@ -5,9 +5,23 @@ import { t } from '../i18n'
 import { Modal } from './Modal'
 
 interface Props {
-  /** Navigates to a project's chat tab — reuses App.tsx's existing project-switch handler. */
-  onNavigate: (projectId: string) => void
+  /** spec-079: hands the whole hit back — App routes by source (chat → transcript peek,
+   *  board → board tab + card focus, timeline → timeline tab). The overlay stays dumb. */
+  onPick: (hit: SearchHit) => void
   onClose: () => void
+  /** Pre-filled query, e.g. handed over from the sidebar's project filter. */
+  initialQuery?: string
+}
+
+/** Compact, locale-aware date for a hit row. Index ts is epoch SECONDS; 0 = unknown. */
+function hitDate(ts: number): string {
+  if (!ts) return ''
+  const d = new Date(ts * 1000)
+  const now = new Date()
+  const sameYear = d.getFullYear() === now.getFullYear()
+  return d.toLocaleDateString(undefined, sameYear
+    ? { day: 'numeric', month: 'short' }
+    : { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
 const SOURCE_ICON: Record<SearchHit['source'], string> = { chat: '💬', board: '📋', timeline: '🕓' }
@@ -50,8 +64,8 @@ interface Group {
   hits: SearchHit[]
 }
 
-export function SearchOverlay({ onNavigate, onClose }: Props) {
-  const [query, setQuery] = useState('')
+export function SearchOverlay({ onPick, onClose, initialQuery = '' }: Props) {
+  const [query, setQuery] = useState(initialQuery)
   const [hits, setHits] = useState<SearchHit[]>([])
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState(0)
@@ -108,7 +122,7 @@ export function SearchOverlay({ onNavigate, onClose }: Props) {
   }, [hits])
 
   function navigateTo(hit: SearchHit) {
-    onNavigate(hit.project_id)
+    onPick(hit)
     onClose()
   }
 
@@ -168,7 +182,13 @@ export function SearchOverlay({ onNavigate, onClose }: Props) {
                     <span className="search-overlay-hit-icon" title={t[SOURCE_LABEL_KEY[h.source]]}>
                       {SOURCE_ICON[h.source] ?? '•'}
                     </span>
-                    <span className="search-overlay-hit-snippet">{renderSnippet(h.snippet)}</span>
+                    <span className="search-overlay-hit-main">
+                      <span className="search-overlay-hit-snippet">{renderSnippet(h.snippet)}</span>
+                      <span className="search-overlay-hit-meta">
+                        <span>{t[SOURCE_LABEL_KEY[h.source]]}</span>
+                        {hitDate(h.ts) && <span>· {hitDate(h.ts)}</span>}
+                      </span>
+                    </span>
                   </div>
                 )
               })}

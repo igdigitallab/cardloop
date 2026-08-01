@@ -714,6 +714,15 @@ export const en = {
   'search.source_chat': 'Chat',
   'search.source_board': 'Board',
   'search.source_timeline': 'Timeline',
+  'search.open_hint': 'Enter to open',
+  'search.search_everywhere': 'Search everywhere',
+  'search.peek_subtitle': 'Found conversation — read-only',
+  'search.peek_open_project': 'Open project',
+  'search.peek_loading': 'Loading conversation…',
+  'search.peek_failed': 'Could not load this conversation',
+  'search.peek_empty': 'This conversation is empty',
+  'search.peek_you': 'You',
+  'search.peek_agent': 'Agent',
 } as const
 
 export type TKey = keyof typeof en

@@ -686,6 +686,15 @@ export const ru = {
   'search.source_chat': 'Чат',
   'search.source_board': 'Доска',
   'search.source_timeline': 'Таймлайн',
+  'search.open_hint': 'Enter — открыть',
+  'search.search_everywhere': 'Искать везде',
+  'search.peek_subtitle': 'Найденный разговор — только чтение',
+  'search.peek_open_project': 'Открыть проект',
+  'search.peek_loading': 'Загружаю разговор…',
+  'search.peek_failed': 'Не удалось загрузить разговор',
+  'search.peek_empty': 'Разговор пуст',
+  'search.peek_you': 'Вы',
+  'search.peek_agent': 'Агент',
 } as const
 
 export type TKey = keyof typeof ru

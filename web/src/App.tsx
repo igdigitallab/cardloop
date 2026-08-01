@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { api } from './api'
-import { Project } from './types'
+import { Project, SearchHit, SearchNavTarget, SessionPeekTarget } from './types'
 import { t } from './i18n'
 import { LoginScreen } from './components/LoginScreen'
 import { Sidebar } from './components/Sidebar'
@@ -8,6 +8,7 @@ import { ProjectView } from './components/ProjectView'
 import { ProjectNameDialog } from './components/ProjectNameDialog'
 import { ProjectTabBar } from './components/ProjectTabBar'
 import { SearchOverlay } from './components/SearchOverlay'
+import { SessionPeek } from './components/SessionPeek'
 import { Spinner } from './components/Spinner'
 import { GlobalFilesTab } from './tabs/GlobalFilesTab'
 import { SchedulesTab } from './tabs/SchedulesTab'
@@ -134,8 +135,14 @@ export default function App() {
   const [terminalOpen, setTerminalOpen] = useState<boolean>(false)
   // Global settings tab (global)
   const [settingsGlobalOpen, setSettingsGlobalOpen] = useState<boolean>(false)
-  // Spec-074: global search overlay (Cmd/Ctrl+K) — transient, not a persisted tab
+  // Spec-074: global search overlay — transient, not a persisted tab. `searchSeed` pre-fills
+  // the query when search is entered from the sidebar's project filter (spec-079).
   const [searchOpen, setSearchOpen] = useState<boolean>(false)
+  const [searchSeed, setSearchSeed] = useState<string>('')
+  // spec-079: a chat hit opens a read-only transcript peek; board/timeline hits become a
+  // nonce-keyed request that ProjectView turns into "switch tab (+ focus card)".
+  const [peekTarget, setPeekTarget] = useState<SessionPeekTarget | null>(null)
+  const [navRequest, setNavRequest] = useState<SearchNavTarget | null>(null)
   // Live model registry (fetched once after auth). undefined until loaded → ChatTab
   // falls back to the bundled static MODELS so the picker renders instantly / offline.
   const [models, setModels] = useState<{ value: string; label: string }[] | undefined>(undefined)
@@ -559,6 +566,31 @@ export default function App() {
     setSettingsRequest({ id, nonce: Date.now() })
   }, [handleSelect])
 
+  // spec-079: a search hit must OPEN the thing, not just switch project.
+  // chat → read-only transcript peek (never rebinds the live session); board/timeline →
+  // select the project and ask its ProjectView to switch tab, same nonce trick as settings.
+  const handleSearchPick = useCallback((hit: SearchHit) => {
+    if (hit.source === 'chat' && hit.ref.session_id) {
+      setPeekTarget({
+        projectId: hit.project_id,
+        projectName: hit.project_name,
+        sessionId: hit.ref.session_id,
+        uuid: hit.ref.uuid,
+        ts: hit.ts,
+      })
+      return
+    }
+    handleSelect(hit.project_id)
+    if (hit.source === 'board' || hit.source === 'timeline') {
+      setNavRequest({
+        id: hit.project_id,
+        tab: hit.source === 'board' ? 'board' : 'timeline',
+        cardId: hit.ref.card_id,
+        nonce: Date.now(),
+      })
+    }
+  }, [handleSelect])
+
   // Drag-and-drop sidebar order. IMPORTANT: hook must be above any early returns
   // (return <LoginScreen> etc.), otherwise Rules of Hooks are violated → black screen.
   // If after refresh activeId === GLOBAL_FILES_ID but flag was cleared — restore it
@@ -821,18 +853,9 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  // Spec-074: global search — Cmd/Ctrl+K opens the overlay from anywhere in the app.
-  useEffect(() => {
-    if (authState !== 'authed') return
-    function onKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault()
-        setSearchOpen(true)
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [authState])
+  // spec-079: search opens from the sidebar's 🔍 button (and the project filter's
+  // "search everywhere" row). The Cmd/Ctrl+K binding was removed on purpose — a hidden
+  // shortcut is not a discoverable entry point, and it collided with browser defaults.
 
   async function handleLogout() {
     try { await api.logout() } catch { /* ignore */ }
@@ -915,13 +938,22 @@ export default function App() {
         schedulesActive={activeId === SCHEDULES_ID}
         onOpenSettingsGlobal={handleOpenSettings}
         settingsGlobalActive={activeId === SETTINGS_ID}
-        onOpenSearch={() => setSearchOpen(true)}
+        onOpenSearch={(seed?: string) => { setSearchSeed(seed || ''); setSearchOpen(true) }}
       />
 
       {searchOpen && (
         <SearchOverlay
-          onNavigate={handleSelect}
-          onClose={() => setSearchOpen(false)}
+          onPick={handleSearchPick}
+          initialQuery={searchSeed}
+          onClose={() => { setSearchOpen(false); setSearchSeed('') }}
+        />
+      )}
+
+      {peekTarget && (
+        <SessionPeek
+          target={peekTarget}
+          onOpenProject={handleSelect}
+          onClose={() => setPeekTarget(null)}
         />
       )}
 
@@ -1091,6 +1123,7 @@ export default function App() {
                   openProjectIds={openIds}
                   onSwipeToProject={(id) => { handleTabActivate(id) }}
                   settingsRequest={settingsRequest}
+                  navRequest={navRequest}
                   models={models}
                 />
               </div>

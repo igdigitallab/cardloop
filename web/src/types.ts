@@ -761,7 +761,30 @@ export interface SearchHit {
    *  (backend search.py: SNIPPET_OPEN/SNIPPET_CLOSE = \x01/\x02), NOT literal HTML.
    *  Render via a splitter that emits a real <mark>, never dangerouslySetInnerHTML. */
   snippet: string
-  ref: { session_id?: string }
+  /** spec-079: deep-link anchors, interpreted per source. chat → session_id (+ uuid of the
+   *  matched message, present for user messages); board → card_id. Timeline has none. */
+  ref: { session_id?: string; uuid?: string; card_id?: string }
+}
+
+/** spec-079: a search hit resolved into "open this inside the project view".
+ *  Consumed by ProjectView via a nonce-keyed effect, mirroring `settingsRequest`. */
+export interface SearchNavTarget {
+  id: string
+  tab: TabId
+  cardId?: string
+  nonce: number
+}
+
+/** spec-079: a chat hit opens a read-only transcript peek instead of rebinding the live
+ *  chat — switching the active session is destructive (and 409s mid-run), and reading is
+ *  what the operator actually wants from a search result. */
+export interface SessionPeekTarget {
+  projectId: string
+  projectName: string
+  sessionId: string
+  uuid?: string
+  /** epoch seconds (search index unit) — converted to ms before hitting the API. */
+  ts?: number
 }
 
 export interface SearchResponse {

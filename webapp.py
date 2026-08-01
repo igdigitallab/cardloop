@@ -9374,7 +9374,9 @@ def _iso_to_ms(ts_raw: "str | None") -> "int | None":
         return None
 
 
-def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
+def _session_history(jsonl_path: Path, limit: int = 100,
+                     around_uuid: "str | None" = None,
+                     around_ts: "int | None" = None) -> list[dict]:
     """Parses an SDK session transcript → feed [{role, text, tools, ts}].
     user(str)=human reply; user(list)=tool_result, skip.
     assistant(list)=text/tool_use blocks. Other types — noise.
@@ -9444,7 +9446,42 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
                                      "ts": _iso_to_ms(o.get("timestamp"))})
     except Exception:
         pass
-    return msgs[-limit:] if len(msgs) > limit else msgs
+    return _window_history(msgs, limit, around_uuid, around_ts)
+
+
+def _window_history(msgs: list[dict], limit: int,
+                    around_uuid: "str | None" = None,
+                    around_ts: "int | None" = None) -> list[dict]:
+    """Selects which `limit` messages to return. Default is the tail (live feed).
+
+    With an anchor (spec-079: opening a search hit), the window is centred on the matched
+    message instead — without this the feed is hard-capped at the last 100 messages, so any
+    hit older than that is unreachable no matter how good the anchor is. `around_uuid` is
+    exact but only user messages carry a uuid, so an assistant hit falls back to the nearest
+    `around_ts` (epoch ms). An anchor that matches nothing degrades to the tail."""
+    if len(msgs) <= limit:
+        return msgs
+    idx = -1
+    if around_uuid:
+        for i, m in enumerate(msgs):
+            if m.get("uuid") == around_uuid:
+                idx = i
+                break
+    if idx < 0 and around_ts is not None:
+        best = None
+        for i, m in enumerate(msgs):
+            t = m.get("ts")
+            if t is None:
+                continue
+            d = abs(t - around_ts)
+            if best is None or d < best:
+                best, idx = d, i
+    if idx < 0:
+        return msgs[-limit:]
+    # Centre the window on the anchor, then clamp so it always holds exactly `limit`
+    # messages even when the anchor sits near either end of the transcript.
+    end = min(len(msgs), max(idx + limit // 2 + 1, limit))
+    return msgs[max(0, end - limit):end]
 
 
 def _session_context_tokens(jsonl_path: Path) -> int:
@@ -9561,9 +9598,17 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     if not jsonl.is_file():
         return web.json_response({"messages": [], "session_id": sid})
 
+    # spec-079: opening a search hit asks for the window around the matched message
+    # rather than the tail. Both anchors are optional and a miss degrades to the tail.
+    around_uuid = req.rel_url.query.get("around_uuid") or None
+    try:
+        around_ts = int(req.rel_url.query.get("around_ts") or 0) or None
+    except (TypeError, ValueError):
+        around_ts = None
+
     context_tokens, last_turn_at_ms, last_cache_hit_pct = _session_last_turn(jsonl)
     return web.json_response({
-        "messages": _session_history(jsonl),
+        "messages": _session_history(jsonl, around_uuid=around_uuid, around_ts=around_ts),
         "session_id": sid,
         "context_tokens": context_tokens,
         "context_window": CONTEXT_WINDOW,

@@ -325,10 +325,19 @@ export const api = {
       method: 'POST',
     }),
 
-  sessionHistory: (id: string, sessionId?: string) =>
-    apiFetch<import('./types').SessionHistoryResponse>(
-      `/api/projects/${id}/session-history${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`
-    ),
+  // `anchor` (spec-079) centres the returned window on a specific message instead of the
+  // tail — without it the feed is capped at the last 100 messages and an older search hit
+  // is unreachable. A miss on both anchors degrades to the tail, so it is always safe.
+  sessionHistory: (id: string, sessionId?: string, anchor?: { uuid?: string; ts?: number }) => {
+    const p = new URLSearchParams()
+    if (sessionId) p.set('session_id', sessionId)
+    if (anchor?.uuid) p.set('around_uuid', anchor.uuid)
+    if (anchor?.ts) p.set('around_ts', String(Math.round(anchor.ts)))
+    const qs = p.toString()
+    return apiFetch<import('./types').SessionHistoryResponse>(
+      `/api/projects/${id}/session-history${qs ? `?${qs}` : ''}`
+    )
+  },
 
   // C1-stop: interrupt the running agent on the server
   stopChat: (id: string) =>
