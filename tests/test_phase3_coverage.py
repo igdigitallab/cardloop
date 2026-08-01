@@ -373,6 +373,37 @@ def test_session_history_skips_harness_meta_user_lines(tmp_path):
         "only the operator's own line may reach the chat feed"
 
 
+def test_session_history_keeps_cross_agent_delivery(tmp_path):
+    """A teammate's report also carries isMeta — but it is content, not noise.
+
+    The SDK stamps isMeta on any injection that wakes the model with a new turn and cannot tell
+    "woken by service echo" from "woken by another agent's report". This feed is the only place
+    that report is ever visible (the drain never publishes the incoming text live), and the
+    rotation handoff digest reads through this same function — so dropping it lost the report
+    from the next session's inherited context too.
+    """
+    jsonl = tmp_path / "cross.jsonl"
+    jsonl.write_text("\n".join(json.dumps(o) for o in [
+        {"type": "user", "isMeta": True,
+         "message": {"role": "user", "content":
+                     "[Image: original 828x8240, displayed at 201x2000. "
+                     "Multiply coordinates by 4.12 to map to original image.]"}},
+        {"type": "user", "isMeta": True,
+         "message": {"role": "user", "content":
+                     'Another Claude session sent a message: '
+                     '<agent-message from="waitlist-auditor">\n## Audit report\nfindings here'}},
+        {"type": "user",
+         "message": {"role": "user", "content":
+                     'Another Claude session sent a message: '
+                     '<teammate-message teammate_id="deploy-agent">deploy done'}},
+    ]) + "\n", encoding="utf-8")
+
+    texts = [m["text"] for m in _webapp._session_history(jsonl)]
+    assert len(texts) == 2, "the downscale notice goes, both agent deliveries stay"
+    assert "waitlist-auditor" in texts[0] and "Audit report" in texts[0]
+    assert "deploy-agent" in texts[1]
+
+
 def test_strip_service_blocks_removes_context_pack():
     """spec-075: the injected <context-pack> must not leak into rendered chat history."""
     raw = (

@@ -9349,6 +9349,16 @@ def _strip_service_blocks(text: str) -> str:
     return _SERVICE_BLOCK_RE.sub("", text).strip()
 
 
+# A cross-session delivery ("Another Claude session sent a message: <agent-message from=...>")
+# is the ONE isMeta payload that must survive the harness-noise filter in _session_history: it
+# is the only place a teammate agent's verbatim report ever reaches the feed. The SDK stamps
+# isMeta on any injection that wakes the model with a new turn and does not distinguish "woken
+# by service echo" from "woken by another agent's content" — only the content does. Status pings
+# (<teammate-message ...>idle_notification) arrive WITHOUT isMeta and were never filtered;
+# matching them here too is deliberate, so a future flag change cannot silently eat them.
+_CROSS_AGENT_MSG_RE = re.compile(r"<(?:agent|teammate)-message\b", re.IGNORECASE)
+
+
 def _iso_to_ms(ts_raw: "str | None") -> "int | None":
     """SDK transcript lines carry an ISO-8601 "timestamp"; convert to epoch ms (None if absent/bad)."""
     if not ts_raw:
@@ -9396,9 +9406,17 @@ def _session_history(jsonl_path: Path, limit: int = 100) -> list[dict]:
                     # 2412 transcripts found 112 isMeta user lines, all harness-generated, zero
                     # typed by a human. Note that "[Request interrupted by user]" is NOT covered
                     # here — it arrives as a content LIST and is already skipped below.
-                    if o.get("isMeta") is True:
-                        continue
+                    #
+                    # ONE exception: a cross-session delivery from another agent also carries
+                    # isMeta (see _CROSS_AGENT_MSG_RE). That is real content — a teammate's
+                    # verbatim report — and this feed is the only place it is ever visible.
+                    # Dropping it also starved the rotation handoff digest, which runs through
+                    # this same function at limit=1000, so the loss compounded into the next
+                    # session's inherited context.
                     c = m.get("content")
+                    if o.get("isMeta") is True and not (
+                            isinstance(c, str) and _CROSS_AGENT_MSG_RE.search(c)):
+                        continue
                     if isinstance(c, str):
                         cleaned = _strip_service_blocks(c)
                         if cleaned:
