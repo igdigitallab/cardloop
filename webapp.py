@@ -6772,12 +6772,13 @@ def _search_db_path(ctx: dict) -> Path:
 
 def _build_search_sources(ctx: dict):
     """Resolves every registered project (+ free chats) into the source descriptors
-    search.py's indexer expects. Boards are skipped for free chats — they all share
-    cwd=$HOME and have no project-specific TASKS.md/DONE.md of their own."""
+    search.py's indexer expects. Boards and files are skipped for free chats — they all
+    share cwd=$HOME, so indexing "their" files would crawl the entire home directory."""
     projects = _collect_projects(ctx)
     chat_sources: list = []
     timeline_sources: list = []
     board_sources: list = []
+    file_sources: list = []
     for p in projects:
         cwd = p["cwd"]
         pid = p["id"]
@@ -6788,20 +6789,29 @@ def _build_search_sources(ctx: dict):
         if not p.get("is_free"):
             board_sources.append({"project_id": pid, "project_name": name, "path": _tasks_path(cwd)})
             board_sources.append({"project_id": pid, "project_name": name, "path": _done_path(cwd)})
-    return chat_sources, timeline_sources, board_sources
+            # spec-079 A3: the file browser's OWN exclusion rules are handed to the indexer,
+            # so the index can never surface a file the cockpit refuses to list or read
+            # (notably .env*, which _is_secret_name gates).
+            file_sources.append({
+                "project_id": pid, "project_name": name, "root": cwd,
+                "exclude_dirs": _FS_EXCLUDE_DIRS, "is_secret": _is_secret_name,
+                "index_code": True,
+            })
+    return chat_sources, timeline_sources, board_sources, file_sources
 
 
 async def _search_scan_tick(ctx: dict) -> dict:
     """Runs one incremental scan off the event loop. Serialised against a concurrent
     reindex via _get_search_lock() — both are writers to the same sqlite file."""
-    chat_sources, timeline_sources, board_sources = _build_search_sources(ctx)
+    chat_sources, timeline_sources, board_sources, file_sources = _build_search_sources(ctx)
     db_path = _search_db_path(ctx)
     loop = asyncio.get_running_loop()
     async with _get_search_lock():
         _search_scan_state["running"] = True
         try:
             return await loop.run_in_executor(
-                None, _search.scan_all_at, db_path, chat_sources, timeline_sources, board_sources)
+                None, _search.scan_all_at, db_path, chat_sources, timeline_sources,
+                board_sources, file_sources)
         finally:
             _search_scan_state["running"] = False
             _search_scan_state["ts"] = time.time()
@@ -6857,12 +6867,13 @@ async def api_search_reindex(req: web.Request) -> web.Response:
     hatch for 'the index looks stale/wrong' — normal operation relies on the
     incremental background loop."""
     ctx = req.app["ctx"]
-    chat_sources, timeline_sources, board_sources = _build_search_sources(ctx)
+    chat_sources, timeline_sources, board_sources, file_sources = _build_search_sources(ctx)
     db_path = _search_db_path(ctx)
     loop = asyncio.get_running_loop()
     async with _get_search_lock():
         stats = await loop.run_in_executor(
-            None, _search.full_reindex_at, db_path, chat_sources, timeline_sources, board_sources)
+            None, _search.full_reindex_at, db_path, chat_sources, timeline_sources,
+            board_sources, file_sources)
     return web.json_response({"ok": True, **stats})
 
 

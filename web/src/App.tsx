@@ -581,14 +581,14 @@ export default function App() {
       return
     }
     handleSelect(hit.project_id)
-    if (hit.source === 'board' || hit.source === 'timeline') {
-      setNavRequest({
-        id: hit.project_id,
-        tab: hit.source === 'board' ? 'board' : 'timeline',
-        cardId: hit.ref.card_id,
-        nonce: Date.now(),
-      })
-    }
+    const tab = hit.source === 'board' ? 'board' : hit.source === 'file' ? 'files' : 'timeline'
+    setNavRequest({
+      id: hit.project_id,
+      tab,
+      cardId: hit.ref.card_id,
+      filePath: hit.ref.path,
+      nonce: Date.now(),
+    })
   }, [handleSelect])
 
   // Drag-and-drop sidebar order. IMPORTANT: hook must be above any early returns

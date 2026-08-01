@@ -5,9 +5,11 @@ import { useOnRunEnd } from '../hooks/useProjectActivity'
 
 interface Props {
   projectId: string
+  /** spec-079: open this repo-relative path straight away (from a file search hit). */
+  openPath?: { path: string; nonce: number } | null
 }
 
-export function FilesTab({ projectId }: Props) {
+export function FilesTab({ projectId, openPath }: Props) {
   const fetchDir = useCallback((path: string) =>
     api.files(projectId, path), [projectId])
 
@@ -24,6 +26,7 @@ export function FilesTab({ projectId }: Props) {
       fetchFile={fetchFile}
       treeLabel="Project files"
       refreshRef={refreshRef}
+      openPath={openPath}
     />
   )
 }

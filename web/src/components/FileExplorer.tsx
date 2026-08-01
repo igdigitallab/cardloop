@@ -127,6 +127,9 @@ export interface FileExplorerProps {
    * Callers can then invoke it imperatively (e.g. on run_end).
    */
   refreshRef?: React.MutableRefObject<(() => Promise<void>) | null>
+  /** spec-079: open this repo-relative path (from a file search hit). nonce-keyed so
+   *  picking the same file twice re-opens it. Ancestors are expanded best-effort. */
+  openPath?: { path: string; nonce: number } | null
 }
 
 // ─── FileExplorer ─────────────────────────────────────────────────────────────
@@ -137,6 +140,7 @@ export function FileExplorer({
   onSave,
   treeLabel = 'Files',
   refreshRef,
+  openPath,
 }: FileExplorerProps) {
   const [rootNodes, setRootNodes] = useState<TreeNode[] | null>(null)
   const [rootLoading, setRootLoading] = useState(true)
@@ -286,6 +290,62 @@ export function FileExplorer({
       setFileLoading(false)
     })
   }
+
+  // ── Open a specific path (spec-079: file search hit) ──────────────────────
+
+  // The viewer is loaded directly rather than by simulating a tree click: the tree loads
+  // directories lazily, so the node for a nested hit usually does not exist yet. Expanding
+  // the ancestors is a separate best-effort pass — if it fails, the file is still shown.
+  useEffect(() => {
+    const target = openPath?.path
+    if (!target) return
+    let cancelled = false
+
+    setEditing(false)
+    setSaveError('')
+    setSelectedPath(target)
+    setFileContent(null)
+    setFileLoading(true)
+    fetchFile(target).then(d => {
+      if (cancelled) return
+      setFileContent(d)
+      setFileLoading(false)
+    }).catch(e => {
+      if (cancelled) return
+      setFileContent({ path: target, content: '', lang: '', size: 0,
+                       error: e instanceof Error ? e.message : String(e) })
+      setFileLoading(false)
+    })
+
+    ;(async () => {
+      const segments = target.split('/')
+      segments.pop()  // drop the filename — only directories are expanded
+      let prefix = ''
+      for (const seg of segments) {
+        prefix = prefix ? `${prefix}/${seg}` : seg
+        if (cancelled || !nodesRef.current) return
+        const node = findByPath(nodesRef.current, prefix)
+        if (!node) return  // parent not loaded (tree still booting) — give up quietly
+        if (node.children === undefined) {
+          try {
+            const d = await fetchDir(prefix)
+            if (cancelled || !nodesRef.current) return
+            mutateNode(nodesRef.current, prefix, n => {
+              n.loading = false
+              n.children = buildNodes(d.entries, prefix, n.depth + 1)
+              n.open = true
+            })
+          } catch { return }
+        } else {
+          mutateNode(nodesRef.current, prefix, n => { n.open = true })
+        }
+        forceUpdate()
+      }
+    })()
+
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openPath?.nonce])
 
   // ── Edit / save ───────────────────────────────────────────────────────────
 

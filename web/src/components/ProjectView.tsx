@@ -288,11 +288,13 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
   // spec-079: search hit → open the right tab here. Same nonce-keyed shape as settings,
   // plus a card id handed to BoardTab so the matched card is highlighted and scrolled to.
   const [focusCard, setFocusCard] = useState<{ id: string; nonce: number } | null>(null)
+  const [focusFile, setFocusFile] = useState<{ path: string; nonce: number } | null>(null)
   useEffect(() => {
     if (!navRequest || navRequest.id !== project.id) return
     setActiveTab(navRequest.tab)
     setMobileInnerTab(navRequest.tab)
     if (navRequest.cardId) setFocusCard({ id: navRequest.cardId, nonce: navRequest.nonce })
+    if (navRequest.filePath) setFocusFile({ path: navRequest.filePath, nonce: navRequest.nonce })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navRequest?.nonce])
 
@@ -780,7 +782,7 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
                 {mobileInnerTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'logs'      && <ErrorBoundary label="Logs"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
                 {mobileInnerTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} focusCard={focusCard} onDiscuss={(c) => { setDiscussCard(c); setMobileInnerTab(null) }} /></ErrorBoundary>}
-                {mobileInnerTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} /></ErrorBoundary>}
+                {mobileInnerTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} openPath={focusFile} /></ErrorBoundary>}
                 {mobileInnerTab === 'memory'    && <ErrorBoundary label="Memory"><MemoryTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} onProjectsReload={onProjectsReload} /></ErrorBoundary>}
@@ -929,7 +931,7 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
           {activeTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'logs'      && <ErrorBoundary label="Logs"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
           {activeTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} focusCard={focusCard} onDiscuss={setDiscussCard} /></ErrorBoundary>}
-          {activeTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} openPath={focusFile} /></ErrorBoundary>}
           {activeTab === 'memory'    && <ErrorBoundary label="Memory"><MemoryTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} onProjectsReload={onProjectsReload} /></ErrorBoundary>}

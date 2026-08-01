@@ -686,6 +686,7 @@ export const ru = {
   'search.source_chat': 'Чат',
   'search.source_board': 'Доска',
   'search.source_timeline': 'Таймлайн',
+  'search.source_file': 'Файл',
   'search.open_hint': 'Enter — открыть',
   'search.search_everywhere': 'Искать везде',
   'search.peek_subtitle': 'Найденный разговор — только чтение',

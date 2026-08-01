@@ -714,6 +714,7 @@ export const en = {
   'search.source_chat': 'Chat',
   'search.source_board': 'Board',
   'search.source_timeline': 'Timeline',
+  'search.source_file': 'File',
   'search.open_hint': 'Enter to open',
   'search.search_everywhere': 'Search everywhere',
   'search.peek_subtitle': 'Found conversation — read-only',

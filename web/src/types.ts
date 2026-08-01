@@ -754,7 +754,7 @@ export interface BrowserBackends {
 export interface SearchHit {
   project_id: string
   project_name: string
-  source: 'chat' | 'timeline' | 'board'
+  source: 'chat' | 'timeline' | 'board' | 'file'
   /** Epoch seconds */
   ts: number
   /** FTS5 snippet — matched terms wrapped in private-use control-char delimiters
@@ -763,7 +763,12 @@ export interface SearchHit {
   snippet: string
   /** spec-079: deep-link anchors, interpreted per source. chat → session_id (+ uuid of the
    *  matched message, present for user messages); board → card_id. Timeline has none. */
-  ref: { session_id?: string; uuid?: string; card_id?: string }
+  ref: {
+    session_id?: string; uuid?: string
+    card_id?: string
+    /** file hits: repo-relative path + 1-based line of the matched chunk. */
+    path?: string; line?: number; tier?: 'doc' | 'code'
+  }
 }
 
 /** spec-079: a search hit resolved into "open this inside the project view".
@@ -772,6 +777,7 @@ export interface SearchNavTarget {
   id: string
   tab: TabId
   cardId?: string
+  filePath?: string
   nonce: number
 }
 

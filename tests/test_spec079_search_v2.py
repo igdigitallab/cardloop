@@ -1,7 +1,8 @@
 """
-Tests for spec-079 phase C — making a search hit OPENABLE.
+Tests for spec-079 — making search hits OPENABLE (phase C) and indexing project
+FILES (phase A).
 
-Covers the three backend pieces the deep-link rests on:
+Phase C — the three backend pieces the deep-link rests on:
 - search.py schema versioning: an index written by an older SCHEMA_VERSION is dropped
   AND its file_state with it (otherwise the rebuild resumes from stored byte offsets
   and the fresh table stays permanently empty).
@@ -11,9 +12,17 @@ Covers the three backend pieces the deep-link rests on:
 - webapp._window_history: the feed is capped at `limit` messages, so a hit deeper than
   that is unreachable unless the window is centred on the match.
 
+Phase A — coverage and the traps that come with it:
+- chunking replaces truncation, so a long body's tail stays findable;
+- the file walker honours the file browser's OWN exclusion rules (secrets, node_modules)
+  so the index can never surface something the cockpit refuses to show;
+- deleted files are swept, and the sweep is scoped per project;
+- doc_rows, the side index that keeps delete-by-path off a full FTS scan.
+
 Every fixture is a synthetic tmp_path file; nothing here touches ~/.claude.
 """
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -219,3 +228,202 @@ class TestWindowHistory:
             m["ts"] = None
         out = _webapp._window_history(msgs, 6, around_ts=25_000)
         assert "m24" in [m["text"] for m in out]
+
+
+# ═══════════════════════════ chunking (A2) ═══════════════════════════
+
+class TestChunking:
+    def test_short_body_is_one_chunk(self):
+        assert list(S._chunks("hello world")) == [("hello world", 1)]
+
+    def test_empty_body_yields_nothing(self):
+        assert list(S._chunks("   \n  ")) == []
+
+    def test_long_body_is_split_not_truncated(self, conn, tmp_path):
+        """The regression this exists for: a long message used to be cut at BODY_CHAR_CAP,
+        making its tail permanently unfindable."""
+        tail = "zzunique_tail_marker"
+        body = ("lorem ipsum dolor sit amet " * 400) + tail
+        assert len(body) > S.BODY_CHAR_CAP
+        sdk = tmp_path / "sdk"
+        _write_jsonl(sdk / "s.jsonl", [
+            {"type": "user", "sessionId": "s", "uuid": "u",
+             "timestamp": "2026-07-01T10:00:00.000Z",
+             "message": {"role": "user", "content": body}},
+        ])
+        S.index_transcripts(conn, "p", "P", sdk)
+        assert conn_count(conn, "docs") > 1                 # split, not one truncated row
+        assert len(S.search(conn, "zzunique_tail_marker")) >= 1   # the tail is findable
+
+    def test_chunks_report_increasing_start_lines(self):
+        body = "\n".join(f"line {i} with some filler text to add width" for i in range(200))
+        lines = [ln for _, ln in S._chunks(body)]
+        assert len(lines) > 1
+        assert lines == sorted(lines)
+        assert lines[0] == 1
+
+
+# ═══════════════════════════ project files (A3) ═══════════════════════════
+
+_EXCLUDE = {".git", "node_modules", "venv", ".venv", "__pycache__", "dist"}
+
+
+def _is_secret(name: str) -> bool:
+    return name.startswith(".env") and name != ".env.example"
+
+
+def _mkproject(root: Path) -> None:
+    (root / "docs").mkdir(parents=True, exist_ok=True)
+    (root / ".claude-ops" / "memory").mkdir(parents=True, exist_ok=True)
+    (root / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
+    (root / ".git").mkdir(exist_ok=True)
+    (root / "CLAUDE.md").write_text("# Project rules\nDeploy via Coolify.\n", encoding="utf-8")
+    (root / "README.md").write_text("# Readme\nA billing exporter.\n", encoding="utf-8")
+    (root / "app.py").write_text("def handler():\n    return 'zebrafish'\n", encoding="utf-8")
+    (root / "docs" / "design.md").write_text("Пароли хранятся в сейфе.\n", encoding="utf-8")
+    (root / ".claude-ops" / "memory" / "note.md").write_text(
+        "Гвоздь программы: индексация.\n", encoding="utf-8")
+    # .env.yml is the case that actually exercises the is_secret gate: its extension IS in
+    # CODE_EXTS, so only the secret-name rule keeps it out. (A bare ".env" has no suffix at
+    # all and is already dropped by the extension filter.)
+    (root / ".env").write_text("SECRET_TOKEN=supersecret_zzz\n", encoding="utf-8")
+    (root / ".env.yml").write_text("token: supersecret_yml\n", encoding="utf-8")
+    (root / ".env.example").write_text("SECRET_TOKEN=placeholder_ok\n", encoding="utf-8")
+    (root / "node_modules" / "pkg" / "index.js").write_text("var junk = 'zebrafish'\n", encoding="utf-8")
+    (root / "logo.png").write_bytes(b"\x89PNG\x00\x00binary")
+
+
+class TestProjectFiles:
+    def test_indexes_prose_and_code(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        r = S.index_project_files(conn, "p", "P", tmp_path,
+                                  exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert r["docs"] > 0
+        paths = {h["ref"]["path"] for h in S.search(conn, "billing")}
+        assert "README.md" in paths
+        assert S.search(conn, "Coolify")[0]["ref"]["path"] == "CLAUDE.md"
+
+    def test_indexes_russian_prose_and_memory_articles(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        S.index_project_files(conn, "p", "P", tmp_path,
+                              exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert S.search(conn, "сейфе")[0]["ref"]["path"] == "docs/design.md"
+        # .claude-ops is a DOTTED dir and must survive the walk — it is curated prose
+        assert S.search(conn, "индексация")[0]["ref"]["path"] == ".claude-ops/memory/note.md"
+
+    def test_never_indexes_secrets(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        S.index_project_files(conn, "p", "P", tmp_path,
+                              exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert S.search(conn, "supersecret_zzz") == []
+        # The one that would otherwise slip through on its .yml extension:
+        assert S.search(conn, "supersecret_yml") == []
+
+    def test_excluded_dirs_are_pruned(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        S.index_project_files(conn, "p", "P", tmp_path,
+                              exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        paths = {h["ref"]["path"] for h in S.search(conn, "zebrafish")}
+        assert paths == {"app.py"}  # node_modules copy is not indexed
+
+    def test_binary_and_unknown_extensions_are_skipped(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        S.index_project_files(conn, "p", "P", tmp_path,
+                              exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert not any(h["ref"]["path"].endswith(".png") for h in S.search(conn, "PNG"))
+
+    def test_code_tier_is_skippable(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        S.index_project_files(conn, "p", "P", tmp_path, exclude_dirs=_EXCLUDE,
+                              is_secret=_is_secret, index_code=False)
+        assert S.search(conn, "zebrafish") == []
+        assert S.search(conn, "Coolify")  # prose still indexed
+
+    def test_tier_is_reported(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        S.index_project_files(conn, "p", "P", tmp_path,
+                              exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert S.search(conn, "Coolify")[0]["ref"]["tier"] == "doc"
+        assert S.search(conn, "zebrafish")[0]["ref"]["tier"] == "code"
+
+    def test_rescan_is_a_noop_when_nothing_changed(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        S.index_project_files(conn, "p", "P", tmp_path,
+                              exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        before = conn_count(conn, "docs")
+        r = S.index_project_files(conn, "p", "P", tmp_path,
+                                  exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert r["docs"] == 0
+        assert conn_count(conn, "docs") == before
+
+    def test_edited_file_is_reindexed_not_duplicated(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        S.index_project_files(conn, "p", "P", tmp_path,
+                              exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        (tmp_path / "README.md").write_text("# Readme\nNow about invoices.\n", encoding="utf-8")
+        os.utime(tmp_path / "README.md", (2_000_000_000, 2_000_000_000))
+        S.index_project_files(conn, "p", "P", tmp_path,
+                              exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert S.search(conn, "billing") == []          # old content gone
+        assert S.search(conn, "invoices")[0]["ref"]["path"] == "README.md"
+
+    def test_deleted_file_is_swept(self, conn, tmp_path):
+        """Without the sweep the index keeps answering with content that no longer exists."""
+        _mkproject(tmp_path)
+        S.index_project_files(conn, "p", "P", tmp_path,
+                              exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert S.search(conn, "Coolify")
+        (tmp_path / "CLAUDE.md").unlink()
+        r = S.index_project_files(conn, "p", "P", tmp_path,
+                                  exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert r["removed"] == 1
+        assert S.search(conn, "Coolify") == []
+
+    def test_sweep_is_scoped_to_the_project(self, conn, tmp_path):
+        """A project whose root vanished must never wipe another project's file docs."""
+        a, b = tmp_path / "a", tmp_path / "b"
+        _mkproject(a)
+        _mkproject(b)
+        S.index_project_files(conn, "pa", "A", a, exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        S.index_project_files(conn, "pb", "B", b, exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        for f in a.rglob("*.md"):
+            f.unlink()
+        S.index_project_files(conn, "pa", "A", a, exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert {h["project_id"] for h in S.search(conn, "Coolify")} == {"pb"}
+
+    def test_missing_root_is_a_noop(self, conn, tmp_path):
+        r = S.index_project_files(conn, "p", "P", tmp_path / "nope",
+                                  exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        assert r == {"files": 0, "docs": 0, "removed": 0, "code_skipped": False}
+
+    def test_scan_all_accepts_file_sources(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        stats = S.scan_all(conn, [], [], [], [{
+            "project_id": "p", "project_name": "P", "root": tmp_path,
+            "exclude_dirs": _EXCLUDE, "is_secret": _is_secret,
+        }])
+        assert stats["file_docs"] > 0
+        assert S.search(conn, "Coolify")
+
+
+class TestDocRowsIndex:
+    def test_delete_by_path_clears_both_tables(self, conn, tmp_path):
+        _mkproject(tmp_path)
+        S.index_project_files(conn, "p", "P", tmp_path,
+                              exclude_dirs=_EXCLUDE, is_secret=_is_secret)
+        target = str(tmp_path / "CLAUDE.md")
+        assert conn.execute("SELECT count(*) FROM doc_rows WHERE path=?", (target,)).fetchone()[0] > 0
+        S._delete_docs_for_path(conn, target)
+        assert conn.execute("SELECT count(*) FROM doc_rows WHERE path=?", (target,)).fetchone()[0] == 0
+        assert S.search(conn, "Coolify") == []
+
+    def test_side_index_tracks_every_source(self, conn, tmp_path):
+        """doc_rows must cover chat/board/timeline too — they all delete by path."""
+        sdk = tmp_path / "sdk"
+        _write_jsonl(sdk / "s.jsonl", [
+            {"type": "user", "sessionId": "s", "uuid": "u",
+             "timestamp": "2026-07-01T10:00:00.000Z",
+             "message": {"role": "user", "content": "anchovy"}},
+        ])
+        S.index_transcripts(conn, "p", "P", sdk)
+        assert conn_count(conn, "doc_rows") == conn_count(conn, "docs")

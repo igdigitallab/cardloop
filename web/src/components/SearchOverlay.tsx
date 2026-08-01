@@ -24,11 +24,13 @@ function hitDate(ts: number): string {
     : { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
-const SOURCE_ICON: Record<SearchHit['source'], string> = { chat: '💬', board: '📋', timeline: '🕓' }
-const SOURCE_LABEL_KEY: Record<SearchHit['source'], 'search.source_chat' | 'search.source_board' | 'search.source_timeline'> = {
+const SOURCE_ICON: Record<SearchHit['source'], string> = { chat: '💬', board: '📋', timeline: '🕓', file: '📄' }
+const SOURCE_LABEL_KEY: Record<SearchHit['source'],
+  'search.source_chat' | 'search.source_board' | 'search.source_timeline' | 'search.source_file'> = {
   chat: 'search.source_chat',
   board: 'search.source_board',
   timeline: 'search.source_timeline',
+  file: 'search.source_file',
 }
 
 // Backend snippet() delimiters (search.py: SNIPPET_OPEN/SNIPPET_CLOSE) — private-use
@@ -185,7 +187,9 @@ export function SearchOverlay({ onPick, onClose, initialQuery = '' }: Props) {
                     <span className="search-overlay-hit-main">
                       <span className="search-overlay-hit-snippet">{renderSnippet(h.snippet)}</span>
                       <span className="search-overlay-hit-meta">
-                        <span>{t[SOURCE_LABEL_KEY[h.source]]}</span>
+                        <span>{h.source === 'file' && h.ref.path
+                          ? `${h.ref.path}${h.ref.line ? `:${h.ref.line}` : ''}`
+                          : t[SOURCE_LABEL_KEY[h.source]]}</span>
                         {hitDate(h.ts) && <span>· {hitDate(h.ts)}</span>}
                       </span>
                     </span>
