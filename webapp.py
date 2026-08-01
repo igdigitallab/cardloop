@@ -10075,17 +10075,28 @@ async def _chat_queue_drain_loop(ctx: dict) -> None:
 # v2 is event-driven: the wake fires from _monitor_update's running→terminal transition —
 # the single point where all completion-detection paths converge (in-turn notification, the
 # spec-071 between-turns drain, the sweeper, the transcript reconcile). One debounced wake
-# collects a burst of completions; an active turn suppresses it (the model sees in-turn
-# notifications natively, and with the drain the CLI's own idle wake-ups work too — this is
-# the service-side backstop). The budget resets on every operator turn and on rotate.
+# collects a burst of completions; a busy session DEFERS its wake rather than dropping it
+# (the "active turns see completions natively" premise was measured false — see the busy
+# branch of _completion_wake_fire). The budget resets on every operator turn and on rotate.
 
 _AUTO_CONTINUE_ON = os.getenv("AUTO_CONTINUE_ON_BG", "0").lower() in ("1", "true", "yes", "on")
 _AUTO_CONTINUE_DEBOUNCE_SEC = float(os.getenv("AUTO_CONTINUE_DEBOUNCE_SEC", "20"))
-# spec-078: default lowered 3→1. A synthetic wake reuses the operator's (possibly xhigh)
-# effort for fingerprint stability (see _completion_wake_fire), so each one is a full-cost
-# turn — capping the worst case at ONE wake per episode is the fingerprint-safe way to bound
-# the #1 per-episode token multiplier. Override via AUTO_CONTINUE_MAX for chattier resumes.
-_AUTO_CONTINUE_MAX = int(os.getenv("AUTO_CONTINUE_MAX", "1"))
+# Circuit breaker, NOT a policy knob — do not tune this to control cost.
+#
+# spec-078 lowered it 3→1 to bound per-episode tokens, but a per-episode cap is the wrong
+# shape: it bounds WAVES, not runaway. Real orchestration is inherently multi-wave (launch
+# agents → audit what they produced → implement → test), and each wave legitimately needs its
+# own wake, so a cap of 1 silently killed every wave after the first — the "I launched agents
+# and it never came back" hang, one layer above the mid-turn drop.
+#
+# The mechanism is already self-limiting: a wake fires only from a running→terminal monitor
+# transition, and _monitor_update's `_was_running` gate makes that fire exactly ONCE per
+# child. No completion → no wake, so a barren wake loop cannot exist. What remains is the one
+# pathological shape worth breaking: a model that answers every wake by launching another
+# child, forever. This ceiling bounds that unattended blow-up and nothing else — it resets on
+# every operator turn, so an attended session effectively never reaches it, and hitting it now
+# toasts the operator (_notify_wake_suppressed) instead of failing silent.
+_AUTO_CONTINUE_MAX = int(os.getenv("AUTO_CONTINUE_MAX", "12"))
 # Upper bound on how long a wake may stay deferred while a turn is in flight (see
 # _completion_wake_fire). Generous on purpose — a legitimate orchestration turn can run for
 # hours — but finite, so a wedged `running` flag can never leak an endless re-arm chain.

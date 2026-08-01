@@ -211,6 +211,33 @@ async def test_fire_deferral_stops_when_pending_cleared(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_multi_wave_orchestration_keeps_waking(monkeypatch):
+    """Real orchestration is multi-wave: launch agents → audit them → implement → test.
+
+    Each wave's children finish in their own burst and each burst needs its own wake. The old
+    per-episode cap of 1 let wave 1 through and silently dropped every wave after it, which
+    reads to the operator as "it never came back" — the same hang as the mid-turn drop, one
+    layer up. The ceiling is a runaway circuit breaker now, not a per-episode wave budget.
+    """
+    monkeypatch.setattr(webapp, "_AUTO_CONTINUE_ON", True)
+    monkeypatch.setattr(webapp, "_AUTO_CONTINUE_DEBOUNCE_SEC", 0.0)
+    monkeypatch.setattr(webapp, "_chat_queue_drain_one", AsyncMock())
+    ctx = _ctx()
+
+    waves = ["researchers", "auditor", "implementer", "test-writer"]
+    for n, wave in enumerate(waves, start=1):
+        webapp._completion_wake_pending["s"] = [_terminal_rec(mid=f"m{n}", label=wave)]
+        await webapp._completion_wake_fire(ctx, "s")
+        q = webapp._CHAT_QUEUE.get("s", [])
+        assert len(q) == 1, f"wave {n} ({wave}) got no wake — the chain dies here"
+        assert wave in q[0]["text"]
+        # That continuation is drained (executed) before the next wave's children finish.
+        # The operator never types anything, so nothing resets the budget between waves.
+        webapp._CHAT_QUEUE.pop("s", None)
+    assert webapp._bg_continue_count["s"] == len(waves), "every wave must spend exactly one wake"
+
+
+@pytest.mark.asyncio
 async def test_fire_respects_budget_cap(monkeypatch):
     monkeypatch.setattr(webapp, "_AUTO_CONTINUE_ON", True)
     monkeypatch.setattr(webapp, "_AUTO_CONTINUE_DEBOUNCE_SEC", 0.0)
