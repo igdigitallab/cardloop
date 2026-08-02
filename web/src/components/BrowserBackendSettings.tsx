@@ -55,6 +55,9 @@ export function BrowserBackendSettings() {
   const [token, setToken] = useState('')
   const [profiles, setProfiles] = useState<CloakProfile[] | null>(null)
   const [profErr, setProfErr] = useState('')
+  // Real projects (free chats excluded — they all share cwd=$HOME, so a per-cwd mapping
+  // there would silently apply to every one of them at once).
+  const [projects, setProjects] = useState<{ id: string; name: string; cwd: string }[]>([])
   const pollRef = useRef<number | null>(null)
 
   const loadBackends = useCallback(async () => {
@@ -138,6 +141,32 @@ export function BrowserBackendSettings() {
     }
   }, [])
 
+  // Project list for the per-project override table.
+  useEffect(() => {
+    api.projects()
+      .then(r => setProjects((r.projects || [])
+        .filter(pr => !pr.is_free && pr.cwd)
+        .map(pr => ({ id: pr.id, name: pr.name, cwd: pr.cwd }))))
+      .catch(() => { /* non-critical — the table just stays hidden */ })
+  }, [])
+
+  /**
+   * Writes one project's override into per_project_profile (keyed by CWD).
+   *  - '__inherit__' removes the key entirely → the project follows default_profile
+   *  - '__none__' stores an empty string → an explicit opt-OUT that beats the default
+   *  - a profile id pins the project to that profile
+   * The whole map is sent because modules.set_config merges per top-level key, so a
+   * partial map would not delete a removed entry.
+   */
+  const setProjectProfile = useCallback(async (cwd: string, value: string) => {
+    const next: Record<string, string> = { ...cfg.per_project_profile }
+    if (value === '__inherit__') delete next[cwd]
+    else if (value === '__none__') next[cwd] = ''
+    else next[cwd] = value
+    await saveConfig({ per_project_profile: next })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg.per_project_profile])
+
   const profileAction = useCallback(async (id: string, action: 'launch' | 'stop') => {
     try {
       await api.browserProfileAction(id, action)
@@ -193,9 +222,8 @@ export function BrowserBackendSettings() {
         </div>
       )}
 
-      {/* External CDP config */}
+      {/* External CDP config — a STATIC endpoint only matters for this backend. */}
       {cfg.backend === 'external-cdp' && (
-        <>
           <div>
             <div style={label}>Static CDP URL <span style={{ fontWeight: 400, color: 'var(--text3)' }}>(optional)</span></div>
             <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
@@ -204,8 +232,12 @@ export function BrowserBackendSettings() {
             </div>
             <div style={hint}>Direct endpoint (Browserless / Steel / chrome --remote-debugging-port). Leave empty to use a Cloak Manager profile.</div>
           </div>
+      )}
 
-          {/* Cloak Manager */}
+      {/* Cloak Manager — deliberately NOT gated on the selected backend. A profile now
+          overrides whichever backend is chosen, so it must be reachable from CloakBrowser
+          and built-in too. Hiding it behind "External CDP" is exactly why a profile the
+          operator had already created could never be attached to a project. */}
           <div style={{ borderTop: '1px solid var(--border)', paddingTop: 10 }}>
             <div style={label}>Cloak Manager</div>
             <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
@@ -228,15 +260,48 @@ export function BrowserBackendSettings() {
               <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, fontSize: 12 }}>
                 <span style={{ width: 8, height: 8, borderRadius: '50%', background: /run|live|start/i.test(p.status) ? '#3fb950' : 'var(--text3)' }} />
                 <span style={{ flex: 1 }}>{p.name} <span style={{ color: 'var(--text3)' }}>({p.status})</span></span>
-                {cfg.default_profile === p.id && <span style={{ color: 'var(--accent)', fontSize: 11 }}>● in use</span>}
+                {cfg.default_profile === p.id && <span style={{ color: 'var(--accent)', fontSize: 11 }}>● default</span>}
                 <button style={btn} onClick={() => void profileAction(p.id, 'launch')}>Launch</button>
                 <button style={btn} onClick={() => void profileAction(p.id, 'stop')}>Stop</button>
-                <button style={{ ...btn, borderColor: 'var(--accent)' }} onClick={() => void saveConfig({ default_profile: p.id })}>Use</button>
+                <button style={{ ...btn, borderColor: 'var(--accent)' }}
+                        onClick={() => void saveConfig({ default_profile: p.id })}>Use for all</button>
               </div>
             ))}
+            {cfg.default_profile && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                <span style={hint}>Every project uses the default profile unless overridden below.</span>
+                <button style={btn} onClick={() => void saveConfig({ default_profile: '' })}>Clear default</button>
+              </div>
+            )}
+
+            {/* Per-project override. The map is keyed by project CWD (that is what
+                browser_backends.resolve receives), never by the display name. */}
+            {profiles && profiles.length > 0 && projects.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <div style={label}>Per project</div>
+                <div style={hint}>
+                  Projects sharing one profile share its logins &amp; cookies, but each gets its
+                  own tab — so they do not fight over the same page.
+                </div>
+                {projects.map(pr => (
+                  <div key={pr.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, fontSize: 12 }}>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pr.name}</span>
+                    <select
+                      style={{ ...input, flex: 'none', minWidth: 170 }}
+                      value={pr.cwd in cfg.per_project_profile ? (cfg.per_project_profile[pr.cwd] || '__none__') : '__inherit__'}
+                      onChange={e => void setProjectProfile(pr.cwd, e.target.value)}
+                    >
+                      <option value="__inherit__">
+                        {cfg.default_profile ? 'Inherit default' : 'Inherit (no profile)'}
+                      </option>
+                      <option value="__none__">No profile</option>
+                      {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        </>
-      )}
 
       {/* Agent action safety gate */}
       <div style={{ borderTop: '1px solid var(--border)', paddingTop: 10 }}>

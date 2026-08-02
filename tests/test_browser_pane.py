@@ -278,3 +278,99 @@ def test_handle_input_routes_tab_controls_without_cdp(monkeypatch):
         await s.handle_input({"t": "tab.activate", "id": "t3"})
         assert seen.get("activate") == "t3"
     asyncio.run(go())
+
+
+# ───────────── shared Manager profile: one tab per project (spec-079) ─────────────
+#
+# Several projects may now resolve to the SAME Cloak Manager profile. They share the
+# browser context (that is where the logins live) but must NOT share a tab: adopting
+# another project's page means one pane streams — and navigates away — another's.
+
+class _SharedFakePage:
+    def __init__(self, opener=None):
+        self._opener = opener
+        self.closed = False
+        self.handlers = {}
+
+    async def opener(self):
+        return self._opener
+
+    def on(self, event, cb):
+        self.handlers[event] = cb
+
+    async def close(self):
+        self.closed = True
+
+
+def _shared_session(pages) -> BrowserSession:
+    s = BrowserSession("k")
+    s._started = True
+    s._shared_ctx = True
+    s._tabs = dict(pages)
+    s._tab_seq = len(pages)
+    return s
+
+
+def test_shared_context_ignores_a_foreign_new_page():
+    """A tab opened by ANOTHER project in the same profile must be left alone."""
+    mine = _SharedFakePage()
+    s = _shared_session({"t1": mine})
+    foreign = _SharedFakePage(opener=None)          # no opener → not ours
+    asyncio.run(s._handle_new_page(foreign))
+    assert list(s._tabs.values()) == [mine]
+
+
+def test_shared_context_adopts_our_own_popup():
+    """An OAuth/login popup opened FROM our page is ours — losing it would break
+    exactly the Google sign-in flows a shared profile exists for."""
+    mine = _SharedFakePage()
+    s = _shared_session({"t1": mine})
+    s._bind_active = lambda *a, **k: _noop()
+    popup = _SharedFakePage(opener=mine)
+    asyncio.run(s._handle_new_page(popup))
+    assert popup in s._tabs.values()
+
+
+async def _noop():
+    return None
+
+
+def test_unshared_context_adopts_every_new_page():
+    """Unchanged behaviour when the browser is ours alone."""
+    s = BrowserSession("k")
+    s._started = True
+    s._bind_active = lambda *a, **k: _noop()
+    page = _SharedFakePage(opener=None)
+    asyncio.run(s._handle_new_page(page))
+    assert page in s._tabs.values()
+
+
+def test_teardown_closes_our_tab_but_not_a_borrowed_browser():
+    """We opened the tab inside someone else's browser, so we close it — otherwise a
+    shared profile grows a dead tab on every session restart. The browser and its
+    cookies must survive."""
+    page = _SharedFakePage()
+    browser = _SharedFakePage()   # stands in for a browser handle; .close would set closed
+    s = BrowserSession("k")
+    s._owns_browser = False
+    s._owns_page = True
+    s._page = page
+    s._browser = browser
+    s._ctx = _SharedFakePage()
+    s._pw = None
+    asyncio.run(s._teardown())
+    assert page.closed is True
+    assert browser.closed is False
+
+
+def test_teardown_leaves_a_page_we_did_not_open():
+    page = _SharedFakePage()
+    s = BrowserSession("k")
+    s._owns_browser = False
+    s._owns_page = False
+    s._page = page
+    s._browser = _SharedFakePage()
+    s._ctx = _SharedFakePage()
+    s._pw = None
+    asyncio.run(s._teardown())
+    assert page.closed is False

@@ -71,6 +71,13 @@ class Acquired:
     owns_browser: bool
     backend: str
     label: str = ""
+    # True when THIS session created the page inside a browser it does not own (a shared
+    # Manager profile). Such a page must be closed on teardown — nobody else will — while
+    # the browser and its cookies stay untouched.
+    owns_page: bool = False
+    # True when the underlying browser/context is shared with other projects, so page
+    # adoption must be scoped to our own tab (see browser_pane).
+    shared_context: bool = False
 
 
 # ───────────────────────────── config resolution ─────────────────────────────
@@ -108,24 +115,35 @@ def resolve(cwd: str) -> dict:
         backend = "builtin"
     agent = cfg.get("agent_actions") if cfg.get("agent_actions") in VALID_AGENT_ACTIONS else "read"
 
-    # (1) Per-project profile override — wins over the global backend so a single
-    # project can browse as a logged-in Manager profile while others don't. cdp_url
-    # MUST stay empty here so _acquire_external resolves the profile via the Manager
-    # (a static cdp_url would otherwise take precedence over the profile).
+    # (1) Manager profile — per-project mapping first, then the global default.
+    #
+    # `default_profile` used to be honoured ONLY when the global backend was already
+    # external-cdp, so setting it while on cloakbrowser/builtin was a silent no-op: the UI
+    # said "in use" and nothing changed. A configured profile now wins over the backend
+    # choice for every project, which is what "use this logged-in profile everywhere" means.
+    #
+    # An explicit EMPTY mapping is an opt-out: per_project_profile[cwd] = "" pins that one
+    # project back to the plain backend even when a default profile exists.
     per = cfg.get("per_project_profile") or {}
-    mapped = per.get(cwd) if isinstance(per, dict) else None
-    if mapped:
-        return {"backend": "external-cdp", "agent_actions": agent, "cdp_url": "", "profile": str(mapped)}
+    if not isinstance(per, dict):
+        per = {}
+    if cwd in per:
+        profile = str(per.get(cwd) or "")
+    else:
+        profile = str(cfg.get("default_profile") or "")
+    if profile:
+        # cdp_url MUST stay empty so _acquire_external resolves the profile via the Manager
+        # (a static cdp_url would otherwise take precedence over the profile).
+        return {"backend": "external-cdp", "agent_actions": agent, "cdp_url": "",
+                "profile": profile, "isolate_page": True}
 
     out: dict[str, Any] = {"backend": backend, "agent_actions": agent}
     if backend == "external-cdp":
         cdp_url = cfg.get("cdp_url") or os.environ.get("CLOAK_CDP_URL") or ""
-        profile = cfg.get("default_profile") or ""
-        if not cdp_url and not profile:
+        if not cdp_url:
             out["backend"] = "builtin"   # nothing to connect to → don't break the pane
             return out
         out["cdp_url"] = cdp_url
-        out["profile"] = profile
     elif backend == "cloakbrowser":
         for k in _CLOAK_KNOBS:
             if cfg.get(k) not in (None, ""):
@@ -230,14 +248,26 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
         with contextlib.suppress(Exception):
             await pw.stop()
         raise BackendError(f"connect_over_cdp({cdp_url!r}) failed: {e}") from e
-    # Reuse the connected browser's existing context/page when present (a persistent
-    # logged-in profile already has them); only create when the browser is bare.
+    # Reuse the connected browser's existing context (that is where the profile's cookies
+    # and logins live — sharing it is the whole point).
     context = browser.contexts[0] if browser.contexts else await browser.new_context(viewport=viewport)
-    page = context.pages[0] if context.pages else await context.new_page()
+
+    # The PAGE, however, is per project when the profile may be shared. Reusing
+    # context.pages[0] meant two projects on one profile drove the SAME tab: navigating in
+    # one moved the other's pane. One tab each keeps the shared identity (context) without
+    # the collision.
+    isolate = bool(cfg.get("isolate_page"))
+    owns_page = False
+    if isolate or not context.pages:
+        page = await context.new_page()
+        owns_page = True
+    else:
+        page = context.pages[0]
     with contextlib.suppress(Exception):
         await page.set_viewport_size(viewport)
     return Acquired(pw=pw, browser=browser, context=context, page=page,
-                    owns_browser=False, backend="external-cdp", label=label)
+                    owns_browser=False, backend="external-cdp", label=label,
+                    owns_page=owns_page, shared_context=isolate)
 
 
 # ───────────────────────────── tier A: builtin ───────────────────────────────
@@ -411,6 +441,9 @@ def availability() -> dict:
             "cdp_url": cfg.get("cdp_url") or "",
             "manager_url": cfg.get("manager_url") or "",
             "default_profile": cfg.get("default_profile") or "",
+            # Needed by the UI to render which project is pinned to which profile (and
+            # which is explicitly opted out — an empty string value).
+            "per_project_profile": cfg.get("per_project_profile") or {},
             "agent_actions": cfg.get("agent_actions") or "read",
         },
     }

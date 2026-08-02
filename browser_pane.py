@@ -82,6 +82,8 @@ class BrowserSession:
         self._tab_seq = 0
         self._switch_lock = asyncio.Lock()
         self._owns_browser = True   # False for connected/external backends — disconnect, don't kill
+        self._owns_page = False     # True when we created our own tab inside a shared profile
+        self._shared_ctx = False    # True when the context is shared with other projects
         self.backend = "builtin"    # spec-066: which backend acquired this session (for the pane header)
         self._started = False
         self._closed = False
@@ -111,13 +113,19 @@ class BrowserSession:
                 self._browser = acq.browser
                 self._ctx = acq.context
                 self._owns_browser = acq.owns_browser
+                self._owns_page = acq.owns_page
+                self._shared_ctx = acq.shared_context
                 self.backend = acq.backend
                 # Browser death (process killed / OOM) — recover instead of a frozen pane.
                 self._browser.on("disconnected", self._on_disconnected)
                 # Adopt every page the context already has (a logged-in external profile
                 # may arrive with several tabs) and watch for pages opened later.
-                for p in list(self._ctx.pages):
-                    self._adopt_page(p)
+                # NOT when the context is shared with other projects: those pre-existing
+                # tabs belong to THEM, and adopting them would let one project's pane
+                # stream — and navigate away — another project's page.
+                if not self._shared_ctx:
+                    for p in list(self._ctx.pages):
+                        self._adopt_page(p)
                 active = acq.page
                 self._adopt_page(active)
                 # An external/connected browser keeps its own (possibly logged-in) page;
@@ -147,7 +155,10 @@ class BrowserSession:
         if self._owns_browser:
             steps = ((self._ctx, "close"), (self._browser, "close"), (self._pw, "stop"))
         else:
-            steps = ((self._pw, "stop"),)
+            # We do own the tab we opened inside someone else's browser — close it, or a
+            # shared profile accumulates a dead tab on every session restart.
+            steps = ((self._page, "close"),) if self._owns_page else ()
+            steps = steps + ((self._pw, "stop"),)
         for obj, meth in steps:
             if obj is None:
                 continue
@@ -259,6 +270,15 @@ class BrowserSession:
         asyncio.create_task(self._handle_new_page(page))
 
     async def _handle_new_page(self, page: Any) -> None:
+        # In a shared profile context this fires for EVERY project's new tab. Adopt only
+        # pages opened from one of our own (OAuth/login popups, target=_blank) — otherwise
+        # this pane would hijack a tab that belongs to another project.
+        if self._shared_ctx:
+            opener = None
+            with contextlib.suppress(Exception):
+                opener = await page.opener()
+            if opener is None or self._id_of(opener) is None:
+                return
         self._adopt_page(page)
         # Foreground the new tab — mirror a real browser opening target=_blank / window.open,
         # so the operator follows the agent into the page it just spawned.

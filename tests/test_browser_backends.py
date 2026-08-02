@@ -253,3 +253,77 @@ async def test_profile_cdp_url_keeps_absolute(monkeypatch):
     monkeypatch.setattr(_backends, "_manager_request", fake_req)
 
     assert await _backends.profile_cdp_url("abc") == "ws://host:9222/devtools/browser/xyz"
+
+
+# ─────────────── spec-079/browser: shared profile across projects ───────────────
+#
+# Before this, `default_profile` was read ONLY inside the external-cdp branch, so
+# setting it while the global backend was cloakbrowser/builtin was a silent no-op:
+# the UI showed the profile as "in use" and every project still browsed anonymously.
+
+def test_default_profile_applies_under_a_local_backend():
+    """The 'use this logged-in profile everywhere' case."""
+    _mod.set_config("browser", {"backend": "cloakbrowser", "default_profile": "google-id"})
+    r = _backends.resolve("/proj/anything")
+    assert r["backend"] == "external-cdp"
+    assert r["profile"] == "google-id"
+    assert r["cdp_url"] == ""          # resolved via the Manager, not a static endpoint
+    assert r["isolate_page"] is True   # own tab per project — see below
+
+
+def test_default_profile_applies_under_builtin_backend():
+    _mod.set_config("browser", {"backend": "builtin", "default_profile": "google-id"})
+    assert _backends.resolve("/proj/x")["profile"] == "google-id"
+
+
+def test_per_project_profile_still_wins_over_the_default():
+    _mod.set_config("browser", {
+        "backend": "cloakbrowser",
+        "default_profile": "google-id",
+        "per_project_profile": {"/proj/grants": "grants-id"},
+    })
+    assert _backends.resolve("/proj/grants")["profile"] == "grants-id"
+    assert _backends.resolve("/proj/other")["profile"] == "google-id"
+
+
+def test_empty_mapping_is_an_explicit_opt_out():
+    """A project pinned to '' must fall back to the plain backend even though a default
+    profile exists — otherwise 'use everywhere' would be impossible to escape."""
+    _mod.set_config("browser", {
+        "backend": "cloakbrowser",
+        "default_profile": "google-id",
+        "per_project_profile": {"/proj/private": ""},
+    })
+    r = _backends.resolve("/proj/private")
+    assert r["backend"] == "cloakbrowser"
+    assert "profile" not in r
+    assert _backends.resolve("/proj/other")["profile"] == "google-id"
+
+
+def test_no_profile_configured_leaves_the_backend_alone():
+    _mod.set_config("browser", {"backend": "cloakbrowser"})
+    r = _backends.resolve("/proj/x")
+    assert r["backend"] == "cloakbrowser"
+    assert "isolate_page" not in r
+
+
+def test_static_cdp_url_is_not_page_isolated():
+    """Isolation is scoped to shared Manager profiles; a plain remote CDP endpoint keeps
+    its previous adopt-the-existing-page behaviour."""
+    _mod.set_config("browser", {"backend": "external-cdp", "cdp_url": "http://h:9222"})
+    r = _backends.resolve("/x")
+    assert "isolate_page" not in r
+
+
+def test_availability_exposes_per_project_map():
+    """The UI cannot render existing assignments without it."""
+    _mod.set_config("browser", {
+        "backend": "cloakbrowser",
+        "per_project_profile": {"/proj/a": "prof-a"},
+    })
+    assert _backends.availability()["config"]["per_project_profile"] == {"/proj/a": "prof-a"}
+
+
+def test_malformed_per_project_map_is_ignored():
+    _mod.set_config("browser", {"backend": "cloakbrowser", "per_project_profile": "nope"})
+    assert _backends.resolve("/proj/x")["backend"] == "cloakbrowser"
