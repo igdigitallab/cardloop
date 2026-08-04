@@ -706,6 +706,19 @@ def short(cmd: str, limit=90) -> str:
     return cmd if len(cmd) <= limit else cmd[:limit] + "…"
 
 
+def _buffer_overflow_hint(exc: BaseException) -> "str | None":
+    """Recognize the SDK reader's per-message buffer overflow and name the likely cause.
+
+    Returns an operator-actionable hint string, or None if the error is unrelated.
+    The raw SDK message already states the byte limit; this adds the "what to do about it".
+    """
+    if "exceeded maximum buffer size" in str(exc):
+        return (f"SDK message exceeded SDK_MAX_BUFFER_BYTES ({SDK_MAX_BUFFER_BYTES} bytes) — "
+                "likely inline media in a tool result; raise SDK_MAX_BUFFER_BYTES or avoid "
+                "reading large binary/base64 payloads inline")
+    return None
+
+
 # ─────────────────────────── audit + watchdog ───────────────────────────
 AUDIT_DIR = DATA / "audit"
 STALL_SECONDS = int(os.getenv("STALL_SECONDS", "300"))   # kept for settings UI; stall interrupt removed (spec-039)
@@ -720,6 +733,13 @@ PERSISTENT_CLIENT: bool = os.getenv("PERSISTENT_CLIENT", "0") == "1"
 LIVE_CLIENT_TTL_SEC: int = int(os.getenv("LIVE_CLIENT_TTL_SEC", "600"))
 # Max number of concurrent live clients held in the registry; LRU eviction beyond this.
 LIVE_CLIENT_MAX: int = int(os.getenv("LIVE_CLIENT_MAX", "10"))
+# Per-message JSON buffer cap for the SDK's stdout reader. The SDK default is 1 MiB
+# (subprocess_cli._DEFAULT_MAX_BUFFER_SIZE) — a single inline image or a large tool_result
+# routinely exceeds that, and the reader then kills the whole subprocess mid-turn
+# ("Fatal error in message reader: JSON message exceeded maximum buffer size").
+# The buffer is transient and bounded per in-flight message per client (worst case
+# LIVE_CLIENT_MAX × this value), so a generous cap is cheap.
+SDK_MAX_BUFFER_BYTES: int = int(os.getenv("SDK_MAX_BUFFER_BYTES", str(32 * 1024 * 1024)))
 # spec-073: SDK file checkpointing — lets the cockpit rewind files to any user-message
 # checkpoint (POST /api/projects/{id}/rewind). Cheap (CLI shadows edited files only).
 FILE_CHECKPOINTS: bool = os.getenv("FILE_CHECKPOINTS", "1") not in ("0", "false", "False")
@@ -1034,6 +1054,58 @@ def _make_post_tool_use_hook(project_name: str, session_key: str):
         return {}  # empty SyncHookJSONOutput — no model-visible side-effects
 
     return _post_tool_use_hook
+
+
+# ─────────────────────────── Root-fix A2: bundle-grep guard (PreToolUse) ───────────────────────
+# A wide-context grep (`.{0,500}TOKEN.{0,500}`) against a one-line minified bundle makes the
+# grep engine buffer the whole file per match — 3-6 GB RSS in seconds, enough to OOM-kill the
+# entire service cgroup (dmesg: a single CLI subprocess at 5.77/6.06 GB in 2 of 10 recorded
+# OOM kills). Deny the known-fatal shape and tell the model the safe alternative.
+_WIDE_CTX_RE = re.compile(r"\.\{\s*\d*\s*,\s*(\d{2,})\s*\}")
+_BUNDLE_PATH_RE = re.compile(r"node_modules|_bundled|\bdist/|\.min\.js|\bbundle", re.I)
+_GREP_TOOL_RE = re.compile(r"\b(grep|ugrep|ug|rg)\b")
+
+
+def _is_wide_bundle_grep(command: str) -> bool:
+    """True for a grep-family command with a wide `.{...,N}` context regex aimed at
+    bundle-ish paths (node_modules / _bundled / dist / minified). Pure, unit-testable."""
+    try:
+        if not _GREP_TOOL_RE.search(command):
+            return False
+        m = _WIDE_CTX_RE.search(command)
+        if not m or int(m.group(1)) < 50:
+            return False
+        return bool(_BUNDLE_PATH_RE.search(command))
+    except Exception:
+        return False
+
+
+async def _bundle_grep_guard_hook(
+    hook_input: dict,
+    tool_use_id: "str | None",
+    context: "HookContext",
+) -> dict:
+    """PreToolUse guard for Bash: deny the known OOM-fatal wide-context-grep-on-bundle shape.
+
+    Never raises; anything unexpected falls through to an empty (allow) output."""
+    try:
+        tool_input = hook_input.get("tool_input") if isinstance(hook_input, dict) else None
+        command = (tool_input or {}).get("command", "") if isinstance(tool_input, dict) else ""
+        if command and _is_wide_bundle_grep(command):
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        "Wide-context grep on a minified bundle buffers gigabytes per match "
+                        "and has OOM-killed this whole service before. Slice the file instead "
+                        "(python -c / head -c / dd) or grep without the .{N,M} context window."
+                    ),
+                }
+            }
+    except Exception:
+        pass
+    return {}
 
 
 # ─────────────────────────── Spec-039: PreCompact observe hook ─────────────────────────────────
@@ -1715,6 +1787,7 @@ async def reconcile_board(
     opts = ClaudeAgentOptions(
         model=reconcile_model,
         permission_mode="bypassPermissions",
+        max_buffer_size=SDK_MAX_BUFFER_BYTES,
         cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
         system_prompt=_RECONCILE_SYSTEM,  # plain string — no tools, no preset
         allowed_tools=[],   # no tools — read-only classification pass
@@ -2021,6 +2094,7 @@ async def run_engine(  # type: ignore[return]
         model=resolved_model,
         fallback_model=fallback,
         permission_mode="bypassPermissions",
+        max_buffer_size=SDK_MAX_BUFFER_BYTES,
         cwd=cwd,
         setting_sources=["user", "project", "local"],
         # spec-078: per-project skill filter + opted-in plugins. setting_sources stays intact so the
@@ -2038,6 +2112,7 @@ async def run_engine(  # type: ignore[return]
         # --settings JSON. None → no flag at all.
         settings=_compose_settings(ultracode),
         hooks={
+            "PreToolUse": [HookMatcher(matcher="Bash", hooks=[_bundle_grep_guard_hook])],
             "PostToolUse": [HookMatcher(hooks=[_post_tool_hook])],
             "PreCompact": [HookMatcher(hooks=[_pre_compact_hook])],
         },
@@ -2322,11 +2397,17 @@ async def run_engine(  # type: ignore[return]
                 print(f"[engine] subprocess terminated (143) — expected on interrupt/shutdown ({session_key})")
             else:
                 # Subprocess state is unknown after an error — evict so the next turn reconnects fresh.
+                _hint = _buffer_overflow_hint(exc)
+                if _hint:
+                    print(f"[engine] {_hint} ({session_key})")
                 print(f"[live-client] error during turn for {session_key} ({exc!r}) — evicting")
                 await _evict_live_client(session_key, ctx)
                 yield {"type": "error", "exc": exc}
         except Exception as exc:
             # Subprocess state is unknown after an error — evict so the next turn reconnects fresh.
+            _hint = _buffer_overflow_hint(exc)
+            if _hint:
+                print(f"[engine] {_hint} ({session_key})")
             print(f"[live-client] error during turn for {session_key} ({exc!r}) — evicting")
             await _evict_live_client(session_key, ctx)
             yield {"type": "error", "exc": exc}
@@ -2352,8 +2433,14 @@ async def run_engine(  # type: ignore[return]
                 # Log concisely and do not propagate; avoids asyncio "never retrieved" noise.
                 print(f"[engine] subprocess terminated (143) — expected on interrupt/shutdown ({session_key})")
             else:
+                _hint = _buffer_overflow_hint(exc)
+                if _hint:
+                    print(f"[engine] {_hint} ({session_key})")
                 yield {"type": "error", "exc": exc}
         except Exception as exc:
+            _hint = _buffer_overflow_hint(exc)
+            if _hint:
+                print(f"[engine] {_hint} ({session_key})")
             yield {"type": "error", "exc": exc}
 
 

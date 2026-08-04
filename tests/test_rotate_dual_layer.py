@@ -386,3 +386,81 @@ async def test_rotate_blank_clears_both_layers(aiohttp_client, tmp_path):
     )
     assert active is not None
     assert active.get("session_id") is None
+
+
+# ─────────────────────────── Root-fix R1: live-children guard ────────────────
+
+async def test_rotate_refuses_while_background_children_running(aiohttp_client, tmp_path):
+    """Manual "Wrap & reset" while agent/workflow monitors are still running must 409:
+    proceeding would wipe the monitors and evict the live client, silently SIGTERMing
+    every background child with no completion wake possible."""
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+    ctx = _make_ctx(tmp_path, project_dir)
+    session_key = "1001:42"
+    ctx["sessions"][session_key] = "sid-guard"
+    _seed_chats(ctx, "myproject", "chat006", "sid-guard")
+
+    _webapp._monitors[session_key] = {
+        "a1": {"id": "a1", "kind": "agent", "status": "running", "label": "worker"},
+    }
+    try:
+        app = _make_rotate_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/rotate", headers=_auth_headers(ctx))
+        assert resp.status == 409
+        data = await resp.json()
+        assert "background task(s) still running" in data["error"]
+        # Nothing was cleared
+        assert ctx["sessions"].get(session_key) == "sid-guard"
+    finally:
+        _webapp._monitors.pop(session_key, None)
+
+
+async def test_rotate_force_bypasses_children_guard(aiohttp_client, tmp_path):
+    """{force: true} is the deliberate operator override — rotate proceeds."""
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+    ctx = _make_ctx(tmp_path, project_dir)
+    session_key = "1001:42"
+    ctx["sessions"][session_key] = "sid-force"
+    _seed_chats(ctx, "myproject", "chat007", "sid-force")
+
+    _webapp._monitors[session_key] = {
+        "a1": {"id": "a1", "kind": "workflow", "status": "running", "label": "wf"},
+    }
+    try:
+        app = _make_rotate_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/rotate",
+            headers=_auth_headers(ctx), json={"force": True})
+        assert resp.status == 200
+        assert (await resp.json())["reset"] is True
+    finally:
+        _webapp._monitors.pop(session_key, None)
+
+
+async def test_rotate_ignores_terminal_monitors(aiohttp_client, tmp_path):
+    """Finished (done/failed/stopped) monitors and bash-kind monitors must not block."""
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+    ctx = _make_ctx(tmp_path, project_dir)
+    session_key = "1001:42"
+    ctx["sessions"][session_key] = "sid-term"
+    _seed_chats(ctx, "myproject", "chat008", "sid-term")
+
+    _webapp._monitors[session_key] = {
+        "a1": {"id": "a1", "kind": "agent", "status": "done", "label": "finished"},
+        "b1": {"id": "b1", "kind": "bash", "status": "running", "label": "tail -f"},
+    }
+    try:
+        app = _make_rotate_app(ctx)
+        client = await aiohttp_client(app)
+        resp = await client.post(
+            "/api/projects/myproject/rotate", headers=_auth_headers(ctx))
+        assert resp.status == 200
+        assert (await resp.json())["reset"] is True
+    finally:
+        _webapp._monitors.pop(session_key, None)

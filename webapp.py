@@ -975,6 +975,106 @@ def _agent_last_tool_tail(path: "Path") -> "str | None":
         return None
 
 
+# ── Root-fix A2: cgroup memory alert ─────────────────────────────────────────
+# One runaway process can OOM-kill the entire service cgroup — every live chat and all
+# background sub-agents die at once (observed 10× in 4 weeks; dmesg twice showed a single
+# CLI subprocess at 5.7-6.0 GB). This loop alerts BEFORE the kernel does, and names the
+# top-RSS offenders so the next incident is not blind.
+MEMORY_ALERT_PCT: int = int(os.getenv("MEMORY_ALERT_PCT", "80"))
+_MEMORY_ALERT_INTERVAL_SEC: int = int(os.getenv("MEMORY_ALERT_INTERVAL_SEC", "60"))
+_MEMORY_ALERT_COOLDOWN_SEC: int = int(os.getenv("MEMORY_ALERT_COOLDOWN_SEC", "1800"))
+_memory_alert_fired_at: float = 0.0
+
+
+def _cgroup_memory_path() -> "Path | None":
+    """Resolve this process's cgroup-v2 memory directory from /proc/self/cgroup.
+
+    Not hardcoded to system.slice/<unit> — the unit name is overridable and OSS deployments
+    may not use systemd at all. Returns None on non-cgroup-v2 environments (CI, WSL, macOS);
+    callers must treat that as "loop disabled". Never raises."""
+    try:
+        for ln in Path("/proc/self/cgroup").read_text().splitlines():
+            if ln.startswith("0::"):
+                rel = ln.split("::", 1)[1].strip()
+                base = Path("/sys/fs/cgroup") / rel.lstrip("/")
+                if (base / "memory.current").exists():
+                    return base
+        return None
+    except Exception:
+        return None
+
+
+def _memory_usage_pct(current: int, maximum: "int | None") -> "float | None":
+    """Pure percentage helper (unit-testable). None when the cgroup has no ceiling."""
+    if not maximum or maximum <= 0:
+        return None
+    return current * 100.0 / maximum
+
+
+def _memory_top_offenders(cg_path: Path, top_n: int = 3) -> "list[str]":
+    """Top-N RSS processes inside the cgroup as human-readable lines. Never raises."""
+    rows: "list[tuple[int, int, str]]" = []
+    try:
+        for pid_s in (cg_path / "cgroup.procs").read_text().split():
+            try:
+                status = Path(f"/proc/{pid_s}/status").read_text()
+                m = re.search(r"^VmRSS:\s+(\d+)\s+kB", status, re.M)
+                if not m:
+                    continue
+                cmdline = (Path(f"/proc/{pid_s}/cmdline").read_bytes()
+                           .replace(b"\0", b" ").decode(errors="replace").strip())
+                rows.append((int(m.group(1)), int(pid_s), cmdline[:160] or "?"))
+            except Exception:
+                continue
+        rows.sort(reverse=True)
+    except Exception:
+        pass
+    return [f"{kb // 1024} MB  pid {pid}  {cmd}" for kb, pid, cmd in rows[:top_n]]
+
+
+async def _memory_alert_loop(ctx: dict) -> None:
+    """Poll cgroup memory usage every _MEMORY_ALERT_INTERVAL_SEC; at >= MEMORY_ALERT_PCT
+    write a data/inbox/ alert naming the top-RSS offenders (cooldown-bounded) and log a
+    warning to the journal. Best-effort, never raises."""
+    global _memory_alert_fired_at
+    await asyncio.sleep(10)  # let the service settle before the first tick
+    cg = _cgroup_memory_path()
+    if cg is None:
+        print("[memory-alert] no cgroup v2 memory controller found — loop disabled")
+        return
+    print(f"[memory-alert] watching {cg} (threshold {MEMORY_ALERT_PCT}%, "
+          f"interval {_MEMORY_ALERT_INTERVAL_SEC}s)")
+    while True:
+        try:
+            current = int((cg / "memory.current").read_text().strip())
+            raw_max = (cg / "memory.max").read_text().strip()
+            maximum = None if raw_max == "max" else int(raw_max)
+            pct = _memory_usage_pct(current, maximum)
+            if (pct is not None and pct >= MEMORY_ALERT_PCT
+                    and (time.time() - _memory_alert_fired_at) >= _MEMORY_ALERT_COOLDOWN_SEC):
+                _memory_alert_fired_at = time.time()
+                offenders = _memory_top_offenders(cg)
+                report = "\n".join([
+                    f"Memory alert: service cgroup at {pct:.0f}% of its limit "
+                    f"({current // (1024 * 1024)} / {(maximum or 0) // (1024 * 1024)} MB).",
+                    "Top RSS processes:",
+                    *(offenders or ["(no per-PID data available)"]),
+                    "",
+                    "One runaway process can OOM-kill the whole service (all live chats + "
+                    "sub-agents die at once). Find and stop the offender, or raise MemoryMax.",
+                ])
+                logging.warning("[memory-alert] %s", report.replace("\n", " | "))
+                try:
+                    inbox = ctx["DATA"] / "inbox"
+                    inbox.mkdir(parents=True, exist_ok=True)
+                    (inbox / f"memory-alert-{int(time.time())}.txt").write_text(report)
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"[memory-alert] tick failed: {exc!r}")
+        await asyncio.sleep(_MEMORY_ALERT_INTERVAL_SEC)
+
+
 async def _agent_activity_sweep_loop(ctx: dict) -> None:
     """spec-069 P3-B: every _AGENT_SWEEP_INTERVAL_SEC, tail each running agent monitor's
     transcript and push a tail update if anything new has happened.  Also calls
@@ -10997,6 +11097,21 @@ async def api_project_rotate(req: web.Request) -> web.Response:
 
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
 
+    # Root-fix R1: a manual "Wrap & reset" while background children are still running would
+    # clear their monitors and evict the live client — silently SIGTERMing every child with no
+    # crash and no completion wake possible (monitors are wiped, not orphaned). The auto-rotate
+    # path has had this guard since spec-069; the manual button did not. {force: true} bypasses
+    # for a deliberate operator override.
+    if not bool(body.get("force")) and _has_live_agent_monitors(session_key):
+        n = sum(
+            1 for r in _monitors.get(session_key, {}).values()
+            if r.get("kind") in ("agent", "workflow", "monitor") and r.get("status") == "running"
+        )
+        return web.json_response(
+            {"error": f"{n} background task(s) still running — wait for them to finish or stop "
+                      "them first (pass force:true to reset anyway and abandon them)"},
+            status=409)
+
     result = await _rotate_session_core(ctx, project, session_key, do_handoff)
     if result.get("busy"):
         return web.json_response({"error": "project busy"}, status=409)
@@ -11321,6 +11436,10 @@ _HANDOFF_MAX_NARRATIVE_CHARS = 8_000
 _HANDOFF_ECHO_MARKER = "[tool]: {"
 # Emitted into the transcript by the CLI when the operator hits Stop.
 _HANDOFF_INTERRUPT_MARKER = "[Request interrupted by user]"
+# Per-message JSON buffer cap for the SDK reader, mirroring engine.SDK_MAX_BUFFER_BYTES.
+# Read from env directly rather than imported: engine imports webapp, so a top-level
+# `from engine import ...` here would be circular (same precedent as _MEMORY_MODES).
+_SDK_MAX_BUFFER_BYTES = int(os.getenv("SDK_MAX_BUFFER_BYTES", str(32 * 1024 * 1024)))
 
 
 def _inject_pending_handoff(ctx: dict, session_key: str, prompt: str,
@@ -11550,6 +11669,7 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
             opts = _ClaudeAgentOptions(
                 model=handoff_model,
                 permission_mode="default",  # internal helper, no tools — no need to bypass
+                max_buffer_size=_SDK_MAX_BUFFER_BYTES,
                 cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
                 allowed_tools=[],
                 disallowed_tools=[],
@@ -11757,6 +11877,7 @@ async def _build_session_title(summary: str) -> str:
         opts = _ClaudeAgentOptions(
             model=title_model,
             permission_mode="default",  # internal helper, no tools — no need to bypass
+            max_buffer_size=_SDK_MAX_BUFFER_BYTES,
             cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
             allowed_tools=[],
             disallowed_tools=[],
@@ -14170,6 +14291,9 @@ async def start(ctx: dict) -> None:
         # Spec-074: global search indexer — incremental refresh of data/search.db
         _STARTUP_BG_TASKS.append(_spawn_bg(_search_scan_loop(ctx)))
         print(f"[webapp] search indexer started (interval {_SEARCH_SCAN_INTERVAL_SEC}s)")
+        # Root-fix A2: cgroup memory alert — warns (with top-RSS offenders) before an OOM kill
+        _STARTUP_BG_TASKS.append(_spawn_bg(_memory_alert_loop(ctx)))
+        print(f"[webapp] memory alert loop started (threshold {MEMORY_ALERT_PCT}%)")
         # spec-067 / spec-068: autopilot loop is now registered inside
         # _register_autopilot() above (features/autopilot/__init__.py).
     except Exception as e:
