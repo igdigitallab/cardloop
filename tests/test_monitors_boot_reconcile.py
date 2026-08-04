@@ -165,6 +165,11 @@ async def test_agent_with_transcript_uses_reconcile_path(boot_env, tmp_path, mon
     assert rec["status"] == "done"           # real status, not a blind "failed"
     assert rec.get("crash_recovery") is True  # but still flagged as post-crash verdict
     assert fired == [sk]
+    # The wake batch snapshot must carry the flag too (it is copied at transition time,
+    # so the mark has to happen BEFORE the transcript-scan flip — regression for the
+    # ordering bug found in the live smoke).
+    pend = _webapp._completion_wake_pending.get(sk) or []
+    assert any(r.get("crash_recovery") for r in pend)
 
 
 async def test_no_state_file_is_noop(boot_env):

@@ -889,6 +889,12 @@ def _monitors_reconcile_on_boot(ctx: dict) -> None:
                 if not mid:
                     continue
                 try:
+                    # Mark BEFORE any flip: _monitor_update snapshots the record (dict(rec))
+                    # into the wake batch at transition time, so a flag set afterwards would
+                    # miss the wake prompt when the transcript-scan path does the flipping.
+                    reg_rec = _monitors.get(sk, {}).get(mid)
+                    if reg_rec is not None:
+                        reg_rec["crash_recovery"] = True
                     if rec.get("kind") == "agent" and sdk_dir is not None:
                         matches = list(sdk_dir.glob(f"*/subagents/agent-{mid}.jsonl"))
                         if matches:
