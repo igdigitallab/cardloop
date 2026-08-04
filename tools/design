@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# design — графический редактор Inkscape (design.coscore.us) из любого проекта.
+#
+# Редактор живёт контейнером на docker-core. Человек правит макет мышкой в
+# браузере, агент — этой командой из обычного терминала. Файл кладётся в
+# редактор и забирается обратно, конвертация идёт внутри контейнера, поэтому
+# на хосте не нужен ни Inkscape, ни шрифты.
+#
+# ВАЖНО: текст переживает PDF -> SVG только при --pdf-font-strategy=keep и
+# БЕЗ --pdf-poppler. Poppler-импортёр молча рендерит буквы в кривые.
+# Подробности и ограничения (CMYK нет) — ~/vault/03-Resources/Apps/design-editor.md
+set -euo pipefail
+
+URL="https://design.coscore.us"
+LOGIN="igor"
+WORK="/config/workspace"          # рабочая папка внутри контейнера, лежит в томе
+IMAGE_MATCH="linuxserver/inkscape"
+
+die() { echo "design: $*" >&2; exit 1; }
+
+container() {
+  local c
+  c=$(docker ps --filter "ancestor=lscr.io/${IMAGE_MATCH}:latest" --format '{{.Names}}' | head -1)
+  [ -z "$c" ] && c=$(docker ps --format '{{.Names}}\t{{.Image}}' | grep -i "$IMAGE_MATCH" | head -1 | cut -f1)
+  [ -z "$c" ] && die "контейнер редактора не найден среди запущенных (docker ps)"
+  echo "$c"
+}
+
+# Inkscape в headless-режиме сыплет предупреждениями GTK/Pango, которых в
+# контейнере без дисплея не избежать. Глушим только их, настоящие ошибки видны.
+ink() {
+  docker exec -u abc "$(container)" inkscape "$@" \
+    2> >(grep -vE "Failed to wrap object of type|No pages selected|^$" >&2)
+}
+
+ensure_work() { docker exec -u abc "$(container)" mkdir -p "$WORK"; }
+
+# Кладёт файл в рабочую папку редактора, печатает путь внутри контейнера.
+stage() {
+  local src=$1 name=${2:-}
+  [ -f "$src" ] || die "нет файла: $src"
+  [ -z "$name" ] && name=$(basename "$src")
+  ensure_work
+  docker cp "$src" "$(container):${WORK}/${name}"
+  docker exec -u root "$(container)" chown abc:abc "${WORK}/${name}"
+  echo "${WORK}/${name}"
+}
+
+unstage() {
+  local name=$1 dest=$2
+  docker cp "$(container):${WORK}/${name}" "$dest"
+}
+
+usage() {
+  cat <<EOF
+design — Inkscape на ${URL} из любого проекта
+
+  design open                        адрес и как зайти человеку
+  design ls                          что лежит в рабочей папке редактора
+  design push <файл> [имя]           положить файл в редактор (для правки мышкой)
+  design pull <имя> [куда]           забрать поправленный файл обратно
+  design pdf2svg <in.pdf> [out.svg]  PDF -> редактируемый SVG, текст остаётся текстом
+  design svg2pdf <in.svg> [out.pdf]  SVG -> печатный PDF, размер страницы сохраняется
+  design png <in> [out.png] [dpi]    растровый пруф, dpi по умолчанию 150
+  design size <файл>                 размер страницы в мм
+  design fonts [маска]               какие шрифты видит редактор
+
+Ограничение: CMYK Inkscape не умеет — только RGB. Для типографского CMYK нужен Scribus.
+EOF
+}
+
+cmd=${1:-}; shift || true
+case "$cmd" in
+  open)
+    echo "$URL"
+    echo "логин: $LOGIN"
+    echo "пароль: secret get design-editor-password"
+    echo "рабочая папка внутри редактора: $WORK"
+    ;;
+
+  ls)
+    ensure_work
+    docker exec -u abc "$(container)" ls -la "$WORK"
+    ;;
+
+  push)
+    [ $# -ge 1 ] || die "укажи файл"
+    p=$(stage "$1" "${2:-}")
+    echo "положено: $p"
+    echo "открой $URL и возьми файл из ${WORK}"
+    ;;
+
+  pull)
+    [ $# -ge 1 ] || die "укажи имя файла в редакторе (design ls)"
+    unstage "$1" "${2:-$(pwd)/$1}"
+    echo "забрано: ${2:-$(pwd)/$1}"
+    ;;
+
+  pdf2svg)
+    [ $# -ge 1 ] || die "укажи PDF"
+    out=${2:-${1%.*}.svg}
+    name=$(basename "$1")
+    stage "$1" >/dev/null
+    ink --pdf-font-strategy=keep "${WORK}/${name}" --export-filename="${WORK}/${name%.*}.svg" >/dev/null
+    unstage "${name%.*}.svg" "$out"
+    echo "$out — текстовых блоков: $(grep -c '<text' "$out" || true)"
+    ;;
+
+  svg2pdf)
+    [ $# -ge 1 ] || die "укажи SVG"
+    out=${2:-${1%.*}.pdf}
+    name=$(basename "$1")
+    stage "$1" >/dev/null
+    ink "${WORK}/${name}" --export-type=pdf --export-filename="${WORK}/${name%.*}.pdf" >/dev/null
+    unstage "${name%.*}.pdf" "$out"
+    echo "$out"
+    ;;
+
+  png)
+    [ $# -ge 1 ] || die "укажи файл"
+    out=${2:-${1%.*}.png}; dpi=${3:-150}
+    name=$(basename "$1")
+    stage "$1" >/dev/null
+    ink "${WORK}/${name}" --export-type=png --export-dpi="$dpi" \
+        --export-filename="${WORK}/${name%.*}.png" >/dev/null
+    unstage "${name%.*}.png" "$out"
+    echo "$out (${dpi} dpi)"
+    ;;
+
+  size)
+    [ $# -ge 1 ] || die "укажи файл"
+    name=$(basename "$1")
+    stage "$1" >/dev/null
+    w=$(ink --query-width "${WORK}/${name}" | tr -d '\r')
+    h=$(ink --query-height "${WORK}/${name}" | tr -d '\r')
+    python3 -c "
+w,h=$w,$h
+print(f'{w:.1f} x {h:.1f} px  =  {w*25.4/96:.1f} x {h*25.4/96:.1f} мм  =  {w/96:.2f} x {h/96:.2f} дюйма')"
+    ;;
+
+  fonts)
+    docker exec -u abc "$(container)" fc-list : family | sort -u | grep -i "${1:-}" | head -40
+    ;;
+
+  ""|-h|--help|help) usage ;;
+  *) die "неизвестная команда: $cmd (design --help)" ;;
+esac
