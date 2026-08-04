@@ -249,8 +249,6 @@ export interface AutopilotStatus {
 export interface GlobalSettingsEffective {
   scan_interval_sec: number
   default_model: string
-  watchdog_stall_sec: number
-  watchdog_max_sec: number
   // Board reconciler settings (Task A)
   board_reconcile_enabled?: boolean
   board_reconcile_on_match?: 'done' | 'review'

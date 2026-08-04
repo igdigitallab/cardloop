@@ -733,10 +733,12 @@ def _buffer_overflow_hint(exc: BaseException) -> "str | None":
     return None
 
 
-# ─────────────────────────── audit + watchdog ───────────────────────────
+# ─────────────────────────── audit ───────────────────────────
 AUDIT_DIR = DATA / "audit"
-STALL_SECONDS = int(os.getenv("STALL_SECONDS", "300"))   # kept for settings UI; stall interrupt removed (spec-039)
-MAX_SECONDS = int(os.getenv("MAX_SECONDS", "7200"))      # absolute turn ceiling (2 h) — spec-039
+# STALL_SECONDS / MAX_SECONDS removed (root-fix C): the stall interrupt was deleted in
+# spec-039 and the "absolute turn ceiling" never had an enforcement site — an unenforced
+# bound with a live settings slider is worse than none. The real bounds are
+# LIVE_CLIENT_MAX_PIN_SEC (persistent clients) and CARD_LINGER_MAX_SEC (card linger).
 
 # ── Spec-028: persistent (long-lived) client feature flag ─────────────────────────────────────
 # PERSISTENT_CLIENT=0 (default OFF) → behaviour is byte-identical to pre-028; all existing tests pass.
@@ -754,6 +756,24 @@ LIVE_CLIENT_MAX: int = int(os.getenv("LIVE_CLIENT_MAX", "10"))
 # The buffer is transient and bounded per in-flight message per client (worst case
 # LIVE_CLIENT_MAX × this value), so a generous cap is cheap.
 SDK_MAX_BUFFER_BYTES: int = int(os.getenv("SDK_MAX_BUFFER_BYTES", str(32 * 1024 * 1024)))
+# Root-fix A4: bounded post-turn linger for ephemeral (card) runs whose deferring background
+# tasks are still open when the turn's ResultMessage arrives — the `async with` exit would
+# otherwise disconnect and SIGTERM them mid-work. No-op when the CLI's native deferral
+# already resolved everything before the result (the set is empty by then).
+CARD_LINGER_MAX_SEC: int = int(os.getenv("CARD_LINGER_MAX_SEC", "300"))
+# Mirrors claude_agent_sdk._internal.query.DEFERRING_TASK_TYPES ("the set the CLI itself
+# holds a result back for"). Duplicated rather than imported from a private _internal
+# module; RE-VERIFY against the SDK on every claude-agent-sdk version bump.
+DEFERRING_TASK_TYPES = frozenset({"local_agent", "local_workflow"})
+# Root-fix C: observability for the SDK's silent drops. Unknown SystemMessage subtypes are
+# logged once per subtype per process (see _process_messages); SDK_DEBUG_UNKNOWN_MESSAGES=1
+# additionally surfaces the SDK's own logger.debug line for messages parse_message drops
+# entirely (e.g. Agent-Teams teammate/cross-session messages have no dataclass and return
+# None) — the current blind zone for teammate traffic.
+_UNKNOWN_SUBTYPES_SEEN: "set[str]" = set()
+if os.getenv("SDK_DEBUG_UNKNOWN_MESSAGES", "0") == "1":
+    import logging as _logging
+    _logging.getLogger("claude_agent_sdk").setLevel(_logging.DEBUG)
 # spec-073: SDK file checkpointing — lets the cockpit rewind files to any user-message
 # checkpoint (POST /api/projects/{id}/rewind). Cheap (CLI shadows edited files only).
 FILE_CHECKPOINTS: bool = os.getenv("FILE_CHECKPOINTS", "1") not in ("0", "false", "False")
@@ -2151,6 +2171,12 @@ async def run_engine(  # type: ignore[return]
     # Spec-022: track per-turn usage for cost visibility
     last_usage: dict = {}
     _turn_start_ms: float = 0.0  # wall-clock fallback when SDK duration_ms is absent
+    # Root-fix A4: ids of still-open background tasks of the types the CLI natively defers
+    # for (local_agent/local_workflow). The ephemeral (card) branch lingers on this set
+    # before disconnecting — a card's `async with` exit used to kill children the CLI had
+    # not finished waiting for. Mirrors the SDK's own tracking; populated in
+    # _process_messages, drained by terminal notifications.
+    _inflight_deferring: "set[str]" = set()
 
     # Shared inner generator: processes SDK messages and yields engine events.
     # Extracted so both the live-client branch and the `async with` branch share
@@ -2295,6 +2321,10 @@ async def run_engine(  # type: ignore[return]
                 }
             elif isinstance(msg, SystemMessage):
                 if isinstance(msg, TaskStartedMessage):
+                    # Root-fix A4: track deferring-type tasks so the ephemeral branch can
+                    # linger for them before disconnecting.
+                    if getattr(msg, "task_type", None) in DEFERRING_TASK_TYPES and msg.task_id:
+                        _inflight_deferring.add(msg.task_id)
                     yield {
                         "type": "subagent",
                         "subtype": "started",
@@ -2324,6 +2354,10 @@ async def run_engine(  # type: ignore[return]
                         # spec-071: shared superset status map — the old inline map lacked
                         # killed/cancelled, so those flips were silently lost in-turn.
                         _nd = _notification_monitor_delta(msg)
+                        if _nd:
+                            _inflight_deferring.discard(_nd["id"])  # root-fix A4
+                        if getattr(msg, "task_id", None):
+                            _inflight_deferring.discard(msg.task_id)
                         if _monitor_update_cb and _nd:
                             print(f"[monitor] task-notification id={_nd['id']} tool_use_id={_nd.get('tool_use_id')} → {_nd['status']}")
                             _monitor_update_cb(session_key, _nd, only_existing=True)
@@ -2344,6 +2378,10 @@ async def run_engine(  # type: ignore[return]
                     # suppressed). Flip the monitor from this message too; no yield (UI noise).
                     try:
                         _nd = _notification_monitor_delta(msg)
+                        if _nd:
+                            _inflight_deferring.discard(_nd["id"])  # root-fix A4
+                        if getattr(msg, "task_id", None):
+                            _inflight_deferring.discard(msg.task_id)
                         if _monitor_update_cb and _nd:
                             print(f"[monitor] task-updated id={_nd['id']} → {_nd['status']}")
                             _monitor_update_cb(session_key, _nd, only_existing=True)
@@ -2371,7 +2409,15 @@ async def run_engine(  # type: ignore[return]
                                 "served": served_model,
                                 "fallback": True,
                             }
-                # Other SystemMessage subtypes remain silent
+                else:
+                    # Other SystemMessage subtypes remain silent toward the UI, but a NEW
+                    # subtype from a newer CLI must not vanish from observability entirely —
+                    # log each distinct one once per process (root-fix C).
+                    _st = str(getattr(msg, "subtype", None) or "?")
+                    if _st not in _UNKNOWN_SUBTYPES_SEEN:
+                        _UNKNOWN_SUBTYPES_SEEN.add(_st)
+                        print(f"[engine] unhandled SystemMessage subtype {_st!r} observed "
+                              f"({session_key}) — logged once for observability")
 
     # ── Spec-028 Phase 2: live-client branch (flag-gated, ephemeral=False only) ──────────────────
     # When PERSISTENT_CLIENT=0 (default) _get_or_create_live_client returns None immediately and
@@ -2444,6 +2490,60 @@ async def run_engine(  # type: ignore[return]
                 _running[session_key] = client  # replace True-placeholder (for /stop)
                 async for event in _process_messages(client):
                     yield event
+                # Root-fix A4: an ephemeral (card) client whose deferring background tasks
+                # (local_agent / local_workflow) are still open at turn end must NOT let
+                # `__aexit__` disconnect yet — that SIGTERMs the children mid-work. Linger,
+                # keep flipping monitors from the still-open stream, bounded by
+                # CARD_LINGER_MAX_SEC. No-op when the set is already empty (the common case
+                # if the CLI's native deferral resolved everything before the result).
+                # NOTE: continuing to read after receive_response() relies on the SDK's
+                # receive channel not being closed by that early return — true for
+                # claude-agent-sdk 0.2.127; re-verify on SDK bumps.
+                if _inflight_deferring:
+                    _mono = __import__("time").monotonic
+                    _linger_deadline = _mono() + CARD_LINGER_MAX_SEC
+                    print(f"[engine] {session_key}: {len(_inflight_deferring)} deferring "
+                          f"background task(s) still open at turn end — lingering up to "
+                          f"{CARD_LINGER_MAX_SEC}s before disconnect")
+                    try:
+                        _stream = client.receive_messages()
+                        while _inflight_deferring:
+                            _remaining = _linger_deadline - _mono()
+                            if _remaining <= 0:
+                                break
+                            try:
+                                msg = await asyncio.wait_for(
+                                    _stream.__anext__(), timeout=min(_remaining, 30.0))
+                            except asyncio.TimeoutError:
+                                continue
+                            except StopAsyncIteration:
+                                break
+                            if isinstance(msg, (TaskNotificationMessage, TaskUpdatedMessage)):
+                                _nd = _notification_monitor_delta(msg)
+                                if _nd:
+                                    _inflight_deferring.discard(_nd["id"])
+                                    if _monitor_update_cb:
+                                        print(f"[linger] task {_nd['id']} → {_nd['status']}")
+                                        _monitor_update_cb(session_key, _nd, only_existing=True)
+                                if getattr(msg, "task_id", None):
+                                    _inflight_deferring.discard(msg.task_id)
+                    except Exception as _linger_exc:
+                        print(f"[engine] card linger aborted for {session_key}: {_linger_exc!r}")
+                    if _inflight_deferring:
+                        # Timed out with children still open: flip their monitors NOW so the
+                        # completion-wake machinery hears about it immediately instead of
+                        # waiting for the 15-minute staleness sweep.
+                        for _tid in list(_inflight_deferring):
+                            try:
+                                if _monitor_update_cb:
+                                    _monitor_update_cb(session_key, {
+                                        "id": _tid, "status": "failed",
+                                        "tail": "(card run ended before this background task "
+                                                "finished — it dies with the card's client)",
+                                    }, only_existing=True)
+                            except Exception:
+                                pass
+                        _inflight_deferring.clear()
         except ProcessError as exc:
             if exc.exit_code == 143:
                 # SIGTERM to the CLI subprocess — expected on interrupt/stop/service shutdown.

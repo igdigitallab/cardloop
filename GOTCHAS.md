@@ -52,10 +52,14 @@ Subsystem-level gotchas. Turn-1 safety guards (Auth, Restart/cgroup) live in CLA
 
 ---
 
-## Audit / watchdog / files
+## Audit / files
 
 - **Audit log:** `data/audit/audit-YYYY-MM.log` — per task: `TASK` (prompt), `BASH`/`BASH⚠️` (⚠️=irreversible), `EDIT/WRITE` (files), `DONE`.
-- **Watchdog:** no SDK events for `STALL_SECONDS` (300s) OR total > `MAX_SECONDS` (1800s) → `client.interrupt()` + "⚠️ auto-interrupted by watchdog".
+- **There is NO turn watchdog.** The stall interrupt was removed in spec-039 and the
+  `MAX_SECONDS` "task ceiling" never had an enforcement site (both were deleted, along with
+  their settings sliders, in the root-fix C cleanup). A stuck turn is bounded only by
+  `LIVE_CLIENT_MAX_PIN_SEC` (4h, persistent clients) and `CARD_LINGER_MAX_SEC` (card linger).
+  Do not assume a 5/30-minute watchdog will rescue a hung turn — it will not.
 - **File intake:** files uploaded via the cockpit are stored in `data/inbox/` (max 20 MB). The inbox grows — add cleanup if desired.
 
 ---

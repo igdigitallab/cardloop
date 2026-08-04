@@ -79,7 +79,7 @@ def test_validate_out_of_range():
 
 
 def test_validate_bad_type():
-    assert _webapp._validate_global_settings({"watchdog_stall_sec": "yes"})[1]
+    assert _webapp._validate_global_settings({"scan_interval_sec": "yes"})[1]
 
 
 def test_validate_model_normalizes_and_rejects():

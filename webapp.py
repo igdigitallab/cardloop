@@ -4756,7 +4756,8 @@ _GLOBAL_SETTINGS_SPEC = {
     "scan_interval_sec": ("int", 30, 3600),
     "default_model": ("model", None, None),          # "" → ctx default
     # watchdog_stall_sec removed — stall interrupt deleted (spec-039)
-    "watchdog_max_sec": ("int", 60, 14400),
+    # watchdog_max_sec removed (root-fix C) — it never had an enforcement site; the real
+    # bounds are engine.LIVE_CLIENT_MAX_PIN_SEC and engine.CARD_LINGER_MAX_SEC.
     # Spec-012 Ph3: global master flag for push endpoint. OFF by default —
     # operator must explicitly enable. Without this flag POST /incident → 404.
     "incident_push_enabled": ("bool", None, None),
@@ -4986,8 +4987,7 @@ async def api_settings_get(req: web.Request) -> web.Response:
     effective = {
         "scan_interval_sec": int(_get_global_setting("scan_interval_sec", _SCAN_INTERVAL_SEC)),
         "default_model": _get_global_setting("default_model", ctx.get("DEFAULT_MODEL", "sonnet")),
-        # watchdog_stall_sec removed (spec-039)
-        "watchdog_max_sec": int(_get_global_setting("watchdog_max_sec", int(os.environ.get("MAX_SECONDS", "7200")))),
+        # watchdog_stall_sec removed (spec-039); watchdog_max_sec removed (root-fix C)
         # Board reconciler settings (Task A); True/done are the defaults.
         "board_reconcile_enabled": _get_global_setting("board_reconcile_enabled", True),
         "board_reconcile_on_match": _get_global_setting("board_reconcile_on_match", "done"),

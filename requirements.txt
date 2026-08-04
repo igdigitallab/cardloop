@@ -9,7 +9,9 @@
 # the floor must track model releases: <0.2.127 bundles CLI 2.1.191, which resolves
 # "opus"->Opus 4.8 and "sonnet"->Sonnet 4.6 even though Opus 5 / Sonnet 5 exist.
 # 0.2.127 bundles CLI 2.1.219, the first to resolve "opus"->Opus 5 (released 2026-07-24).
-claude-agent-sdk>=0.2.127
+# 0.2.129 bundles CLI 2.1.221 (same as the operator's terminal CLI); no query.py delta vs
+# 0.2.127 — bumped for bundle parity per the model-alias gotcha.
+claude-agent-sdk>=0.2.129
 
 # aiohttp cockpit (web server + SSE).
 aiohttp==3.13.5

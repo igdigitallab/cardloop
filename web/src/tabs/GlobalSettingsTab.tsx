@@ -160,8 +160,6 @@ export function GlobalSettingsTab() {
       const r = await api.saveSettings({
         scan_interval_sec: ef.scan_interval_sec,
         default_model: ef.default_model || '',
-        watchdog_stall_sec: ef.watchdog_stall_sec,
-        watchdog_max_sec: ef.watchdog_max_sec,
         board_card_model: ef.board_card_model || '',
       })
       setMsg(`Saved ✓ (${Object.keys(r.stored).length} override(s))`)
@@ -208,17 +206,6 @@ export function GlobalSettingsTab() {
           </select>
         </Row>
 
-        <Row title="Watchdog: silence, sec" hint="No events longer than this → interrupt task. 30–7200">
-          <input type="number" min={30} max={7200} style={{ width: 90, padding: '4px 8px', fontSize: 13 }}
-                 value={e.watchdog_stall_sec}
-                 onChange={ev => setE({ watchdog_stall_sec: Number(ev.target.value) })} />
-        </Row>
-
-        <Row title="Watchdog: task ceiling, sec" hint="Total task time limit. 60–14400">
-          <input type="number" min={60} max={14400} style={{ width: 90, padding: '4px 8px', fontSize: 13 }}
-                 value={e.watchdog_max_sec}
-                 onChange={ev => setE({ watchdog_max_sec: Number(ev.target.value) })} />
-        </Row>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
           <button className="doc-btn primary" onClick={save} disabled={saving}>

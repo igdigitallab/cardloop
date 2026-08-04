@@ -66,7 +66,7 @@ from engine import (  # noqa: E402,F401  (deliberate: import after env load; re-
     CONDUCTOR_PROMPT, DEFAULT_NUDGE, DISALLOWED_TOOLS,
     BOARD_PROTOCOL, TOPICS_F, SESSIONS_F,
     OPERATOR_NAME, RESPONSE_LANGUAGE, _lang_directive,
-    AUDIT_DIR, STALL_SECONDS, MAX_SECONDS,
+    AUDIT_DIR,
     PERSISTENT_CLIENT, LIVE_CLIENT_TTL_SEC, LIVE_CLIENT_MAX,
     topics, sessions, costs, running, rate_limits, pending_handoff, context_warned,
     save_topics, save_sessions, save_handoff,
