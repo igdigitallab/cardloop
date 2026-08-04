@@ -706,6 +706,20 @@ def short(cmd: str, limit=90) -> str:
     return cmd if len(cmd) <= limit else cmd[:limit] + "…"
 
 
+def _record_turn_abort(session_key: str, reason: str, detail: str = "") -> None:
+    """Root-fix B2: write the TRUE abort cause to the timeline at the moment it happens.
+
+    The CLI stamps an ambiguous "[Request interrupted by user]" into the transcript on
+    forced terminations; downstream digest builders used to grep that string and blame the
+    operator for infra aborts. Cardloop always knows the real cause — record it. Never raises."""
+    try:
+        if _timeline_append_cb:
+            _timeline_append_cb(session_key, {"kind": "turn_aborted", "reason": reason,
+                                              "detail": detail[:300]})
+    except Exception:
+        pass
+
+
 def _buffer_overflow_hint(exc: BaseException) -> "str | None":
     """Recognize the SDK reader's per-message buffer overflow and name the likely cause.
 
@@ -2395,12 +2409,14 @@ async def run_engine(  # type: ignore[return]
                 # SIGTERM to the CLI subprocess — expected on interrupt/stop/service shutdown.
                 # Log concisely and do not propagate; avoids asyncio "never retrieved" noise.
                 print(f"[engine] subprocess terminated (143) — expected on interrupt/shutdown ({session_key})")
+                _record_turn_abort(session_key, "terminated", str(exc))
             else:
                 # Subprocess state is unknown after an error — evict so the next turn reconnects fresh.
                 _hint = _buffer_overflow_hint(exc)
                 if _hint:
                     print(f"[engine] {_hint} ({session_key})")
                 print(f"[live-client] error during turn for {session_key} ({exc!r}) — evicting")
+                _record_turn_abort(session_key, "buffer_overflow" if _hint else "sdk_error", str(exc))
                 await _evict_live_client(session_key, ctx)
                 yield {"type": "error", "exc": exc}
         except Exception as exc:
@@ -2409,6 +2425,7 @@ async def run_engine(  # type: ignore[return]
             if _hint:
                 print(f"[engine] {_hint} ({session_key})")
             print(f"[live-client] error during turn for {session_key} ({exc!r}) — evicting")
+            _record_turn_abort(session_key, "buffer_overflow" if _hint else "sdk_error", str(exc))
             await _evict_live_client(session_key, ctx)
             yield {"type": "error", "exc": exc}
         finally:
@@ -2432,15 +2449,18 @@ async def run_engine(  # type: ignore[return]
                 # SIGTERM to the CLI subprocess — expected on interrupt/stop/service shutdown.
                 # Log concisely and do not propagate; avoids asyncio "never retrieved" noise.
                 print(f"[engine] subprocess terminated (143) — expected on interrupt/shutdown ({session_key})")
+                _record_turn_abort(session_key, "terminated", str(exc))
             else:
                 _hint = _buffer_overflow_hint(exc)
                 if _hint:
                     print(f"[engine] {_hint} ({session_key})")
+                _record_turn_abort(session_key, "buffer_overflow" if _hint else "sdk_error", str(exc))
                 yield {"type": "error", "exc": exc}
         except Exception as exc:
             _hint = _buffer_overflow_hint(exc)
             if _hint:
                 print(f"[engine] {_hint} ({session_key})")
+            _record_turn_abort(session_key, "buffer_overflow" if _hint else "sdk_error", str(exc))
             yield {"type": "error", "exc": exc}
 
 

@@ -195,3 +195,77 @@ def test_session_title_does_not_read_the_digest_model_var():
     src = inspect.getsource(_webapp._build_session_title)
     assert 'os.environ.get("HANDOFF_MODEL"' not in src, "must not READ the digest model var"
     assert 'os.environ.get("SESSION_TITLE_MODEL", "haiku")' in src
+
+
+# ─────────────────────────── Root-fix B2: _classify_last_abort ────────────────
+# The CLI stamps "[Request interrupted by user]" on EVERY forced termination; Cardloop's
+# own timeline records the true cause. The classifier must prefer the latter.
+
+import json as _json
+import time as _time
+
+
+@pytest.fixture
+def timeline(tmp_path, monkeypatch):
+    tdir = tmp_path / "timeline"
+    tdir.mkdir()
+    monkeypatch.setattr(_webapp, "_TIMELINE_DATA_DIR", tdir)
+    monkeypatch.setattr(_webapp, "_TIMELINE_TOPICS", {}, raising=False)
+
+    def _write(session_key, records):
+        path = _webapp._timeline_path(session_key)
+        with open(path, "a", encoding="utf-8") as fh:
+            for rec in records:
+                fh.write(_json.dumps(rec) + "\n")
+
+    return _write
+
+
+def test_classify_none_without_records(timeline):
+    assert _webapp._classify_last_abort("s1") is None
+
+
+def test_classify_buffer_overflow_is_infra(timeline):
+    timeline("s1", [{"ts": _time.time(), "kind": "turn_aborted", "reason": "buffer_overflow"}])
+    got = _webapp._classify_last_abort("s1")
+    assert got == {"operator": False, "reason": "buffer_overflow"}
+
+
+def test_classify_terminated_alone_is_service_restart(timeline):
+    """SIGTERM (exit 143) without a nearby operator_stop = restart/shutdown, NOT the operator."""
+    timeline("s1", [{"ts": _time.time(), "kind": "turn_aborted", "reason": "terminated"}])
+    got = _webapp._classify_last_abort("s1")
+    assert got == {"operator": False, "reason": "service_restart"}
+
+
+def test_classify_terminated_paired_with_stop_is_operator(timeline):
+    """A genuine /stop produces operator_stop AND then the engine's terminated record —
+    the pair (within the window) must classify as an operator stop."""
+    now = _time.time()
+    timeline("s1", [
+        {"ts": now, "kind": "operator_stop"},
+        {"ts": now + 2, "kind": "turn_aborted", "reason": "terminated"},
+    ])
+    got = _webapp._classify_last_abort("s1")
+    assert got == {"operator": True, "reason": "operator_stop"}
+
+
+def test_classify_stale_stop_does_not_claim_later_restart(timeline):
+    """An operator stop hours ago must not claim a much later SIGTERM abort."""
+    now = _time.time()
+    timeline("s1", [
+        {"ts": now - 7200, "kind": "operator_stop"},
+        {"ts": now, "kind": "turn_aborted", "reason": "terminated"},
+    ])
+    got = _webapp._classify_last_abort("s1")
+    assert got == {"operator": False, "reason": "service_restart"}
+
+
+def test_classify_latest_abort_wins(timeline):
+    now = _time.time()
+    timeline("s1", [
+        {"ts": now - 60, "kind": "turn_aborted", "reason": "buffer_overflow"},
+        {"ts": now, "kind": "turn_aborted", "reason": "terminated"},
+    ])
+    got = _webapp._classify_last_abort("s1")
+    assert got["reason"] == "service_restart"

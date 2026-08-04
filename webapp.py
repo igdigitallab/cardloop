@@ -608,7 +608,10 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
             bucket[mid] = rec
         _was_running = rec.get("status") == "running"
         # Merge known fields (delta may be partial — e.g. a tail/status-only update).
-        for k in ("kind", "label", "status", "tail", "agent", "persistent", "tool_use_id"):
+        # crash_recovery marks a flip derived from post-restart reconciliation (root-fix B1)
+        # so the completion-wake prompt can say "verify, the service died mid-run".
+        for k in ("kind", "label", "status", "tail", "agent", "persistent", "tool_use_id",
+                  "crash_recovery"):
             if delta.get(k) not in (None, ""):
                 rec[k] = delta[k]
         rec["ts"] = now
@@ -626,6 +629,7 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
             for r in terminal[: len(bucket) - _MONITORS_MAX]:
                 bucket.pop(r["id"], None)
         _bus_publish(session_key, {"kind": "monitor", "monitor": rec}, persist=False)
+        _crash_state_mark_dirty()  # root-fix B1: registry must survive a process death
     except Exception:
         pass
 
@@ -682,6 +686,7 @@ def _monitors_clear(session_key: str) -> None:
     """Drop a session's monitors (called on rotate/reset — old shells die with the session)."""
     _monitors.pop(session_key, None)
     _monitors_dismissed.pop(session_key, None)
+    _crash_state_mark_dirty()
 
 
 def _monitors_clear_terminal_agents(session_key: str) -> None:
@@ -748,6 +753,177 @@ def _has_live_agent_monitors(session_key: str) -> bool:
                    for r in bucket.values())
     except Exception:
         return False
+
+
+def _live_agent_monitor_count() -> int:
+    """Any-session count of 'running' agent/workflow/monitor monitors — the deploy-gap
+    counterpart to _has_live_agent_monitors (per-session). Exposed via /api/health?deep=1
+    so restart-self.sh can wait for background children too, not just in-flight turns.
+    Never raises."""
+    try:
+        return sum(
+            1 for bucket in _monitors.values()
+            for r in bucket.values()
+            if r.get("kind") in ("agent", "workflow", "monitor") and r.get("status") == "running"
+        )
+    except Exception:
+        return 0
+
+
+# ── Root-fix B1: crash-recovery state ────────────────────────────────────────
+# The monitor registry and the completion-wake bookkeeping live in RAM only; an OOM kill or
+# restart erased them, so nothing ever reconciled the orphaned children and no wake fired —
+# the orchestrator stayed silent until the operator typed something. This block persists that
+# state (atomic tmp+os.replace snapshot, 2s-coalesced) and replays it at boot through the SAME
+# _monitor_update → _schedule_completion_wake machinery the live paths use.
+_CRASH_STATE_FILE: "Path | None" = None
+_CRASH_STATE_FLUSH_SEC = float(os.getenv("CRASH_STATE_FLUSH_SEC", "2"))
+_crash_state_dirty: bool = False
+
+
+def _crash_state_init(ctx: dict) -> None:
+    global _CRASH_STATE_FILE
+    _CRASH_STATE_FILE = ctx["DATA"] / "crash-recovery-state.json"
+
+
+def _crash_state_mark_dirty() -> None:
+    global _crash_state_dirty
+    _crash_state_dirty = True
+
+
+def _save_crash_state() -> None:
+    """Atomic snapshot (tmp + os.replace — a torn write during the very OOM kill this file
+    exists to survive would otherwise corrupt it). Never raises."""
+    if _CRASH_STATE_FILE is None:
+        return
+    try:
+        payload = {
+            "monitors": _monitors,
+            "wake_pending": _completion_wake_pending,
+            "last_turn_options": _last_turn_options,
+        }
+        tmp = Path(str(_CRASH_STATE_FILE) + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, default=str))
+        os.replace(str(tmp), str(_CRASH_STATE_FILE))
+    except Exception:
+        pass
+
+
+def _load_crash_state() -> dict:
+    if _CRASH_STATE_FILE is None or not _CRASH_STATE_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(_CRASH_STATE_FILE.read_text())
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+async def _crash_state_flush_loop(ctx: dict) -> None:
+    """Coalesced flush: _monitor_update stays sync and cheap on the hot drain path; a monitor
+    transition surviving only a ~2s-old snapshot after a crash is an acceptable trade."""
+    global _crash_state_dirty
+    while True:
+        try:
+            if _crash_state_dirty:
+                _crash_state_dirty = False
+                _save_crash_state()
+        except Exception:
+            pass
+        await asyncio.sleep(_CRASH_STATE_FLUSH_SEC)
+
+
+def _monitors_reconcile_on_boot(ctx: dict) -> None:
+    """Replay crash-recovery state from the PREVIOUS process life.
+
+    Every monitor still 'running' in the snapshot died with the process (its CLI subprocess
+    is gone). Load the records INTO _monitors first — _monitor_update(only_existing=True)
+    is a silent no-op otherwise — then flip each through the same transcript-reconcile the
+    live sweeper uses, falling back to a 'failed' flip. The running→terminal transition
+    inside _monitor_update re-arms _schedule_completion_wake exactly like a live completion,
+    so the orchestrator reports what happened WITHOUT an operator ping.
+
+    Restored pending wakes get an EXPLICIT _completion_wake_fire spawn: pre-populating
+    _completion_wake_pending makes _schedule_completion_wake take its "window already open"
+    append-branch, which never spawns the fire task. Never raises."""
+    try:
+        state = _load_crash_state()
+        if not state:
+            return
+        loaded_monitors = state.get("monitors") or {}
+        loaded_pending = state.get("wake_pending") or {}
+        loaded_opts = state.get("last_turn_options") or {}
+
+        for sk, opts in loaded_opts.items():
+            if isinstance(opts, dict):
+                _last_turn_options.setdefault(sk, opts)
+        # Restore pending wakes BEFORE the flips below so late flips ride along in the same
+        # batch instead of racing a second window open.
+        restored_wake_keys: list[str] = []
+        for sk, recs in loaded_pending.items():
+            if isinstance(recs, list) and recs:
+                _completion_wake_pending.setdefault(sk, list(recs))
+                restored_wake_keys.append(sk)
+
+        flipped = 0
+        for sk, bucket in loaded_monitors.items():
+            if not isinstance(bucket, dict):
+                continue
+            _monitors.setdefault(sk, {}).update(
+                {mid: dict(rec) for mid, rec in bucket.items() if isinstance(rec, dict)})
+            running = [r for r in _monitors[sk].values() if r.get("status") == "running"]
+            if not running:
+                continue
+            # Resolve the project once for transcript-based reconciliation.
+            project = None
+            try:
+                for proj in _collect_projects(ctx):
+                    if (proj.get("session_key") or proj.get("tg_thread", "")) == sk:
+                        project = proj
+                        break
+            except Exception:
+                project = None
+            sdk_dir = _sdk_sessions_dir(project["cwd"]) if project and project.get("cwd") else None
+            for rec in running:
+                mid = rec.get("id")
+                if not mid:
+                    continue
+                try:
+                    if rec.get("kind") == "agent" and sdk_dir is not None:
+                        matches = list(sdk_dir.glob(f"*/subagents/agent-{mid}.jsonl"))
+                        if matches:
+                            # Real terminal status from the parent transcript, if it made it
+                            # to disk before the crash.
+                            _reconcile_agent_monitor_from_parent(sk, matches[0])
+                    cur = _monitors.get(sk, {}).get(mid) or rec
+                    if cur.get("status") == "running":
+                        _monitor_update(sk, {
+                            "id": mid, "status": "failed",
+                            "tail": "(service restarted while this task was running — no "
+                                    "completion was recorded)",
+                            "crash_recovery": True,
+                        }, only_existing=True)
+                    else:
+                        # The transcript reconcile just flipped it — still a crash-recovery
+                        # verdict, not a live completion; mark it so the wake prompt says so.
+                        cur["crash_recovery"] = True
+                    flipped += 1
+                except Exception:
+                    continue
+        # Explicit spawn for restored pending wakes (see docstring). Sessions whose ONLY
+        # pending recs came from the flips above already got their fire task spawned
+        # naturally by _schedule_completion_wake.
+        for sk in restored_wake_keys:
+            try:
+                _spawn_bg(_completion_wake_fire(ctx, sk))
+            except Exception:
+                pass
+        if flipped or restored_wake_keys:
+            print(f"[crash-recovery] boot reconcile: {flipped} orphaned monitor(s) flipped, "
+                  f"{len(restored_wake_keys)} pending wake(s) restored")
+        _crash_state_mark_dirty()  # persist the post-reconcile view
+    except Exception as exc:
+        print(f"[crash-recovery] boot reconcile failed: {exc!r}")
 
 
 # spec-069 P3 (RC#3 transcript scan): status map for task-notification terminal values.
@@ -888,6 +1064,12 @@ _AGENT_TAIL_TARGET_MAX = 60        # max chars for the target fragment in the ta
 # spec-071 staleness bounds: a 'running' agent monitor whose transcript is silent this long is
 # presumed dead and flipped (zombies used to spin forever, pinning the live client for hours).
 _MONITOR_STALE_SEC = int(os.getenv("MONITOR_STALE_SEC", "900"))
+# Root-fix A3: workflow/monitor kinds have no per-agent transcript to mtime-check, so their
+# staleness is judged by monitor-update silence (rec["ts"]). A long-running Workflow can
+# legitimately go quiet for a while between agent waves — use a much longer window than the
+# agent-kind transcript check. Without ANY staleness for these kinds, one zombie record would
+# pin the live client forever and make every deploy wait out the full restart-self.sh cap.
+_MONITOR_STALE_WF_SEC = int(os.getenv("MONITOR_STALE_WF_SEC", "3600"))
 # Grace before declaring a monitor whose transcript never appeared dead-on-arrival.
 _MONITOR_SPAWN_GRACE_SEC = int(os.getenv("MONITOR_SPAWN_GRACE_SEC", "300"))
 
@@ -1168,6 +1350,26 @@ async def _agent_activity_sweep_loop(ctx: dict) -> None:
                                 pass
                     except Exception:
                         pass
+
+            # Root-fix A3: staleness for workflow/monitor kinds (agent kind is handled above
+            # via its transcript mtime). Judged by monitor-update silence: no delta from the
+            # drain / notifications / PostToolUse for _MONITOR_STALE_WF_SEC → presumed dead.
+            _now = time.time()
+            for sk, bucket in list(_monitors.items()):
+                for rec in list(bucket.values()):
+                    try:
+                        if (rec.get("kind") in ("workflow", "monitor")
+                                and rec.get("status") == "running"
+                                and _now - (rec.get("ts") or rec.get("started") or _now)
+                                > _MONITOR_STALE_WF_SEC):
+                            _monitor_update(
+                                sk,
+                                {"id": rec.get("id"), "status": "stopped",
+                                 "tail": f"(stale — no updates for "
+                                         f"{int((_now - (rec.get('ts') or _now)) // 60)} min)"},
+                                only_existing=True)
+                    except Exception:
+                        pass
         except Exception:
             pass
         await asyncio.sleep(_AGENT_SWEEP_INTERVAL_SEC)
@@ -1348,6 +1550,58 @@ def _timeline_append(session_key: str, event: dict) -> None:
             f.write(line)
     except Exception:
         pass  # never break a run
+
+
+def _classify_last_abort(session_key: str, tail_bytes: int = 65536) -> "dict | None":
+    """Root-fix B2: classify the most recent forced termination for this session.
+
+    Returns {"operator": bool, "reason": str} or None if no abort record exists.
+    Cardloop records the TRUE cause at the moment it happens: operator_stop at the one
+    interrupt() call site, turn_aborted(reason) at every disconnect-driven abort. Digest
+    builders should trust this over grepping the CLI's ambiguous "[Request interrupted by
+    user]" transcript marker. A SIGTERM abort ("terminated", exit 143) is ambiguous on its
+    own — operator stops AND service restarts both produce it — so it counts as an operator
+    stop only when an operator_stop record sits within _ABORT_PAIR_WINDOW_SEC of it.
+    Never raises."""
+    _ABORT_PAIR_WINDOW_SEC = 120
+    try:
+        path = _timeline_path(session_key)
+        if path is None or not path.exists():
+            return None
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - tail_bytes))
+            raw = fh.read().decode("utf-8", errors="replace")
+        last_stop_ts: "float | None" = None
+        last_abort: "dict | None" = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("kind") == "operator_stop":
+                last_stop_ts = rec.get("ts")
+            elif rec.get("kind") == "turn_aborted":
+                last_abort = rec
+        if last_abort is None:
+            if last_stop_ts is not None:
+                return {"operator": True, "reason": "operator_stop"}
+            return None
+        reason = str(last_abort.get("reason") or "unknown")
+        if reason == "terminated":
+            paired = (last_stop_ts is not None and last_abort.get("ts") is not None
+                      and abs(float(last_abort["ts"]) - float(last_stop_ts)) <= _ABORT_PAIR_WINDOW_SEC)
+            return {"operator": bool(paired),
+                    "reason": "operator_stop" if paired else "service_restart"}
+        return {"operator": False, "reason": reason}
+    except Exception:
+        return None
 
 
 # ─────────────────────────── tool formatter ───────────────────────────
@@ -2361,12 +2615,16 @@ async def api_health(req: web.Request) -> web.Response:
     """GET /api/health (unauthenticated — see auth_middleware exempt list).
 
     ?deep=1 (spec-072): adds a lightweight "running" count so restart-self.sh can
-    poll for idle (no in-flight turns) before restarting. Still safe to leave
-    unauthenticated — it only leaks a count, never keys or content."""
+    poll for idle (no in-flight turns) before restarting. Root-fix A3 adds "agents" —
+    the any-session count of running background agent/workflow/monitor children —
+    because a restart at running==0 used to SIGTERM live sub-agents whose parent turn
+    had already ended. Still safe to leave unauthenticated — it only leaks counts,
+    never keys or content."""
     if req.query.get("deep") == "1":
         ctx = req.app["ctx"]
         running = ctx.get("running") or {}
-        return web.json_response({"ok": True, "running": len(running)})
+        return web.json_response({"ok": True, "running": len(running),
+                                  "agents": _live_agent_monitor_count()})
     return web.json_response({"ok": True})
 
 
@@ -10325,8 +10583,10 @@ def _schedule_completion_wake(session_key: str, rec: dict) -> None:
         pend = _completion_wake_pending.get(session_key)
         if pend is not None:
             pend.append(rec)  # window already open — this completion rides along
+            _crash_state_mark_dirty()
             return
         _completion_wake_pending[session_key] = [rec]
+        _crash_state_mark_dirty()
         _spawn_bg(_completion_wake_fire(_WEBAPP_CTX, session_key))
     except Exception as exc:
         print(f"[auto-continue] wake schedule error for {session_key}: {exc!r}")
@@ -10345,6 +10605,7 @@ async def _completion_wake_fire(ctx: dict, session_key: str) -> None:
         if not _AUTO_CONTINUE_ON or not _completion_wake_pending.get(session_key):
             _completion_wake_pending.pop(session_key, None)
             _completion_wake_deferred_since.pop(session_key, None)
+            _crash_state_mark_dirty()
             return
         if ctx["running"].get(session_key) is not None:
             # The old code returned here on the premise that "an active turn sees completions
@@ -10369,6 +10630,7 @@ async def _completion_wake_fire(ctx: dict, session_key: str) -> None:
                       f"(> {int(_AUTO_CONTINUE_DEFER_MAX_SEC)}s cap) — dropping the wake")
                 _dropped = _completion_wake_pending.pop(session_key, None) or []
                 _completion_wake_deferred_since.pop(session_key, None)
+                _crash_state_mark_dirty()
                 _notify_wake_suppressed(
                     session_key,
                     ", ".join(str(r.get("label") or r.get("id") or "?")[:80] for r in _dropped[:5]),
@@ -10378,6 +10640,7 @@ async def _completion_wake_fire(ctx: dict, session_key: str) -> None:
             return
         _completion_wake_deferred_since.pop(session_key, None)
         recs = _completion_wake_pending.pop(session_key, None) or []
+        _crash_state_mark_dirty()
         if not recs:
             return
         labels = ", ".join(
@@ -10402,6 +10665,15 @@ async def _completion_wake_fire(ctx: dict, session_key: str) -> None:
             "and continue the work. If other background tasks are still running, say so in one "
             "line and stop."
         )
+        # Root-fix B1: a crash-recovery flip is a transcript-derived verdict, not a live
+        # completion — the model must verify, not confidently report second-hand state.
+        if any(r.get("crash_recovery") for r in recs):
+            prompt += (
+                " NOTE: the service restarted while these task(s) were running — the statuses "
+                "above come from post-restart transcript reconciliation, NOT from a live "
+                "completion. Verify what actually finished (transcripts, files on disk, git "
+                "log) before reporting, and relaunch whatever died mid-work."
+            )
         project_id = None
         try:
             for proj in _collect_projects(ctx):
@@ -10565,6 +10837,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # the live-client fingerprint stable.
     _bg_continue_reset(session_key)
     _last_turn_options[session_key] = {"effort": _effort_override, "ultracode": _ultracode}
+    _crash_state_mark_dirty()  # root-fix B1: options must survive a restart for wake parity
     # spec-069 643ecf: clear COMPLETED sub-agent monitors left over from a prior turn so this
     # turn's panel starts clean (any still-running sub-agents stay). Stops done/failed rows piling up.
     _monitors_clear_terminal_agents(session_key)
@@ -11022,6 +11295,11 @@ async def api_project_chat_stop(req: web.Request) -> web.Response:
             await client.interrupt()
         except Exception:
             pass
+        # Root-fix B2: this is the ONE place a genuine operator stop happens (interrupt();
+        # every other forced termination is a disconnect()). Record it so the handoff digest
+        # can tell "operator stopped this" from an infra abort instead of grepping the CLI's
+        # ambiguous "[Request interrupted by user]" transcript marker.
+        _timeline_append(session_key, {"kind": "operator_stop"})
         return web.json_response({"ok": True, "stopped": True})
 
     return web.json_response({"ok": True, "stopped": False})
@@ -11683,10 +11961,23 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
             # an interrupted tail is exactly where a summarizer invents a tidy ending.
             ground_truth = _git_ground_truth(cwd)
             was_interrupted = _HANDOFF_INTERRUPT_MARKER in full_dialog
+            # Root-fix B2: Cardloop's own timeline record beats the CLI's ambiguous transcript
+            # marker — an infra abort (buffer overflow / eviction / restart) must not be
+            # blamed on the operator. The "cut off, don't claim it's done" caution applies to
+            # BOTH causes; only the attribution changes.
+            _abort = _classify_last_abort(session_key)
+            _infra_abort = bool(_abort and not _abort.get("operator"))
             guard_parts = []
             if ground_truth:
                 guard_parts.append(ground_truth)
-            if was_interrupted:
+            if was_interrupted and _infra_abort:
+                guard_parts.append(
+                    "=== THIS SESSION WAS CUT SHORT BY AN INFRASTRUCTURE FAILURE/RESTART "
+                    f"(cause: {_abort.get('reason')}), NOT BY AN OPERATOR ACTION ===\n"
+                    "The final turn was cut off mid-work. Anything the agent was about to do did "
+                    "NOT happen. Report the last intent as an unfinished plan, never as done."
+                )
+            elif was_interrupted:
                 guard_parts.append(
                     "=== THIS SESSION WAS INTERRUPTED BY THE OPERATOR ===\n"
                     "The final turn was cut off mid-work. Anything the agent was about to do did "
@@ -11811,10 +12102,19 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
     # code it wrote never reached a commit.
     try:
         if any(_HANDOFF_INTERRUPT_MARKER in (e.get("text") or "") for e in history):
-            fact_lines.append(
-                "⚠️ SESSION WAS INTERRUPTED by the operator — the final turn did not finish. "
-                "Anything it was about to do did not happen."
-            )
+            # Root-fix B2: prefer Cardloop's own abort record over the ambiguous CLI marker.
+            _abort2 = _classify_last_abort(session_key)
+            if _abort2 and not _abort2.get("operator"):
+                fact_lines.append(
+                    "⚠️ SESSION WAS CUT SHORT by an infrastructure failure/restart "
+                    f"({_abort2.get('reason')}), not an operator action — the final turn did "
+                    "not finish. Anything it was about to do did not happen."
+                )
+            else:
+                fact_lines.append(
+                    "⚠️ SESSION WAS INTERRUPTED by the operator — the final turn did not finish. "
+                    "Anything it was about to do did not happen."
+                )
         import subprocess as _sp
         _dirty = _sp.run(["git", "-C", cwd, "status", "--porcelain"],
                          capture_output=True, text=True, timeout=10)
@@ -14007,6 +14307,8 @@ async def start(ctx: dict) -> None:
         _schedules._schedules_init(ctx)
         # Spec-020: Deferred Runs — initialise file path
         _deferred_init(ctx)
+        # Root-fix B1: crash-recovery snapshot (monitors + pending completion wakes)
+        _crash_state_init(ctx)
         # spec-053 Phase B: Web Push — VAPID keypair + subscription storage paths
         try:
             _push_init(ctx)
@@ -14294,6 +14596,12 @@ async def start(ctx: dict) -> None:
         # Root-fix A2: cgroup memory alert — warns (with top-RSS offenders) before an OOM kill
         _STARTUP_BG_TASKS.append(_spawn_bg(_memory_alert_loop(ctx)))
         print(f"[webapp] memory alert loop started (threshold {MEMORY_ALERT_PCT}%)")
+        # Root-fix B1: replay crash-recovery state from the previous process life — flips
+        # orphaned monitors and re-arms completion wakes so orchestrator sessions report what
+        # happened WITHOUT an operator ping. Then start the coalesced snapshot writer.
+        _monitors_reconcile_on_boot(ctx)
+        _STARTUP_BG_TASKS.append(_spawn_bg(_crash_state_flush_loop(ctx)))
+        print(f"[webapp] crash-recovery state persistence started (flush {_CRASH_STATE_FLUSH_SEC}s)")
         # spec-067 / spec-068: autopilot loop is now registered inside
         # _register_autopilot() above (features/autopilot/__init__.py).
     except Exception as e:

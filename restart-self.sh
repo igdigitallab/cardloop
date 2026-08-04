@@ -52,10 +52,17 @@ WEB_PORT="${WEB_PORT:-8787}"
 BASE_URL="http://127.0.0.1:${WEB_PORT}"
 
 # ─────────────────────────── Pre-restart: wait-for-idle ───────────────────────────
-WAIT_FOR_IDLE_MAX_SEC="${WAIT_FOR_IDLE_MAX_SEC:-600}"
+# Root-fix A3: wait for BOTH in-flight turns (running) AND background children (agents —
+# sub-agents/workflows whose parent turn already ended). A restart at running==0 used to
+# SIGTERM live sub-agents mid-work. The cap was raised 600→1800s because background
+# orchestrations legitimately run long; this stays a SOFT cap — "warn and proceed", never
+# a hard block (zombie monitors are additionally bounded by the sweeper's staleness flips).
+WAIT_FOR_IDLE_MAX_SEC="${WAIT_FOR_IDLE_MAX_SEC:-1800}"
 if command -v curl >/dev/null 2>&1; then
-  echo "Waiting for idle (no in-flight turns) before restarting ${SERVICE}, up to ${WAIT_FOR_IDLE_MAX_SEC}s..."
+  echo "Waiting for idle (no in-flight turns, no background agents) before restarting ${SERVICE}, up to ${WAIT_FOR_IDLE_MAX_SEC}s..."
   waited=0
+  running=""
+  agents=""
   while [ "$waited" -lt "$WAIT_FOR_IDLE_MAX_SEC" ]; do
     resp="$(curl -fsS --max-time 3 "${BASE_URL}/api/health?deep=1" 2>/dev/null || true)"
     if [ -z "$resp" ]; then
@@ -66,14 +73,19 @@ if command -v curl >/dev/null 2>&1; then
     # Python's json.dumps inserts a space after ':' by default ({"running": 1}) —
     # tolerate an optional space so this doesn't silently misparse as "idle".
     running="$(printf '%s' "$resp" | grep -oE '"running"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' || true)"
-    if [ -z "$running" ] || [ "$running" = "0" ]; then
+    agents="$(printf '%s' "$resp" | grep -oE '"agents"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' || true)"
+    if { [ -z "$running" ] || [ "$running" = "0" ]; } && { [ -z "$agents" ] || [ "$agents" = "0" ]; }; then
       break
     fi
     sleep 5
     waited=$((waited + 5))
   done
   if [ "$waited" -ge "$WAIT_FOR_IDLE_MAX_SEC" ]; then
-    echo "⚠️  WARNING: still busy after ${WAIT_FOR_IDLE_MAX_SEC}s wait — restarting anyway (in-flight turns will be aborted)."
+    if [ -n "$agents" ] && [ "$agents" != "0" ]; then
+      echo "⚠️  WARNING: ${agents} background agent(s) still running after ${WAIT_FOR_IDLE_MAX_SEC}s wait — restarting anyway (they will be ABORTED mid-work; the crash-recovery wake will report it)."
+    else
+      echo "⚠️  WARNING: still busy after ${WAIT_FOR_IDLE_MAX_SEC}s wait — restarting anyway (in-flight turns will be aborted)."
+    fi
   fi
 else
   echo "curl not found — skipping wait-for-idle (restarting immediately)."
