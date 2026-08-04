@@ -7,6 +7,40 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Fixed — root-fix: background sub-agents dying / orchestrator never reporting back
+Three-wave fix for the standing complaint "I launch background agents, they get killed
+mid-work, and the orchestrator never comes back until I ping it". Evidence-driven
+(journalctl since 07-05: 37 SDK buffer-overflow turn kills in 11 days, 10 whole-service
+OOM kills in 4 weeks, zero auto-continue activity after any crash):
+- **SDK reader buffer 1 MiB → 32 MiB** (`SDK_MAX_BUFFER_BYTES`, all four
+  `ClaudeAgentOptions` sites) — closes the `err-d54afa` "Fatal error in message reader"
+  class; buffer-overflow aborts now log an actionable hint naming the cause.
+- **Memory: cgroup alert loop** (`MEMORY_ALERT_PCT=80`, names top-3 RSS offenders in
+  `data/inbox/`) + PreToolUse guard denying the known OOM-fatal wide-context-grep-on-bundle
+  shape + `MemoryMax` 6G→10G (live `systemctl set-property`, host headroom checked).
+- **Crash-surviving completion wake (the core fix)** — `data/crash-recovery-state.json`
+  (atomic, 2s-coalesced) persists the monitor registry + pending wakes + last-turn options;
+  boot reconcile flips orphaned monitors (transcript-first, blind-failed fallback) through
+  the SAME `_monitor_update → _schedule_completion_wake` machinery, so after ANY restart or
+  OOM the orchestrator itself reports what happened — no operator ping needed. Crash flips
+  carry a "verify against disk" note so the model doesn't present reconciliation as fact.
+- **Deploys wait for background children** — `/api/health?deep=1` gained `agents` (any-session
+  running agent/workflow/monitor count); `restart-self.sh` waits for `running==0 AND
+  agents==0` (soft cap 600→1800s). Prerequisite: workflow/monitor kinds gained a staleness
+  flip (`MONITOR_STALE_WF_SEC=3600`) so a zombie can't tax every deploy.
+- **Manual "Wrap & reset" guard** — refuses (409) while background children are running
+  (`force:true` overrides); it used to silently SIGTERM them with no wake possible.
+- **Honest abort labels** — `operator_stop` / `turn_aborted(reason)` timeline records at the
+  actual call sites; the rotation-handoff digest now blames infrastructure for infra aborts
+  instead of trusting the CLI's ambiguous "[Request interrupted by user]" marker.
+- **Card linger** — ephemeral (card) runs wait up to `CARD_LINGER_MAX_SEC=300s` for still-open
+  deferring background tasks before disconnecting; on timeout the monitors flip failed
+  immediately so the wake fires without the 15-min staleness detour.
+- **Hygiene** — SDK 0.2.129 (bundled CLI 2.1.221 = terminal parity), once-per-subtype logging
+  of unknown SystemMessages + `SDK_DEBUG_UNKNOWN_MESSAGES=1` for the Agent-Teams blind zone,
+  dead `STALL_SECONDS`/`MAX_SECONDS` watchdog + its lying settings sliders removed, stale
+  GOTCHAS watchdog claim fixed.
+
 ### Changed
 - **The custom session-goal overlay (spec-076) was removed** — pinning a goal never started the work and its status never flipped to "done", so the whole cockpit layer was cut: the pinned bar, the `/goal` chat-interception, the `chats.json` goal record, the `run_engine(goal=…)` Stop-hook composed into `--settings`, and the `goal_status` events all deleted (`_compose_settings` now takes only `ultracode`). The CLI's OWN native `/goal` is untouched — typed text still passes through to the bundled CLI — but note it lives only in CLI session memory (the cockpit can't see or clear it; a stray native `/goal` needs a session reset to drop).
 - **Cost auto-rotation is now opt-OUT (default ON)** — the 2026-07-08 ledger audit found the opt-in default made the 280K auto-rotation effectively dead: no chat ever enabled it, sessions ballooned to 470K and turns above 200K context were 58% of a week's spend. The composer "+" toggle now DISABLES rotation for a chat instead of enabling it (absent field → ON; explicit `auto_rotate:false` → off; `CONTEXT_ROTATION=0` stays the global kill-switch). Queued/drained turns gained rotation parity (the flag rides the queue item like effort/ultracode), and rotation now defers while background children (agents/workflows/monitors) are still running — it fires on the next quiet turn end instead of SIGTERMing live sub-agents. Operator default effort dropped xhigh → high (CLI parity; xhigh/max stay one think-mode click away).
