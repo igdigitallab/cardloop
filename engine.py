@@ -1021,6 +1021,25 @@ def _rget(obj, key, default=None):
 
 _MONITOR_TAIL_MAX = 2000  # chars — keep the END of the output (it's a tail)
 
+# Status values the Agent tool's own tool_response reports when the call was synchronous
+# (run_in_background=False) and the agent had already finished by the time PostToolUse fires.
+# Same vocabulary as the SDK's TaskNotificationStatus / TaskUpdatedStatus (see
+# claude_agent_sdk.types) and webapp._TASK_NOTIFICATION_STATUS_MAP's terminal side — kept as a
+# separate small map here (engine.py and webapp.py intentionally don't import each other).
+# Anything else, notably 'async_launched' (a genuine backgrounded launch), falls through to
+# "running" — the caller must still wait for a later completion signal.
+_AGENT_TOOL_TERMINAL_STATUS_MAP: dict[str, str] = {
+    "completed": "done",
+    "failed": "failed",
+    "stopped": "stopped",
+    "killed": "stopped",
+    "cancelled": "stopped",
+    "canceled": "stopped",
+    "error": "failed",
+    "timeout": "failed",
+    "timed_out": "failed",
+}
+
 
 def _monitor_tail(tr) -> str:
     """Extract a clean, multi-line output tail from a tool_response for the monitor panel.
@@ -1127,7 +1146,18 @@ def _monitor_delta(tool_name, tool_input, tool_response, agent_type, tool_use_id
                 return None
             label = str(ti.get("description") or _rget(tr, "description") or
                         ti.get("subagent_type") or "agent")[:200]
-            return {"id": str(agent_id), "kind": "agent", "status": "running",
+            # An Agent call made with run_in_background=False can finish and deliver its
+            # FULL result inline, in this SAME PostToolUse event — the tool_response's own
+            # `status` is already terminal ('completed'/'failed'/...), not 'async_launched'.
+            # No <task-notification> is ever emitted for it afterwards (there is nothing left
+            # to defer), so forcing "running" here left the monitor stuck until the sweeper's
+            # 900s staleness fallback eventually guessed it dead and reported the wrong status.
+            # Map a terminal tool_response status straight through so same-turn completions
+            # flip immediately; an unrecognized value (notably 'async_launched', a genuine
+            # backgrounded launch) falls through to "running" as before.
+            raw_status = str(_rget(tr, "status") or "").strip().lower()
+            status = _AGENT_TOOL_TERMINAL_STATUS_MAP.get(raw_status, "running")
+            return {"id": str(agent_id), "kind": "agent", "status": status,
                     "label": label, "agent": ti.get("subagent_type")}
     except Exception:
         return None
