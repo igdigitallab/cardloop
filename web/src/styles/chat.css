@@ -683,6 +683,12 @@
   align-items: stretch;
 }
 
+/* Turn grouping: a contiguous run of assistant fragments (text ⇄ tool-call splits within
+   one agent turn) renders inside a single .chat-msg — a bit looser than the 2px used
+   for elements within one fragment, so paragraphs/tool-spoilers stay visually separate
+   without reopening the old per-fragment gap (see ChatTab.tsx turn-grouping renderer). */
+.chat-msg-group { gap: 5px; }
+
 /* text — plain stream, no background/border/padding */
 .chat-msg-body {
   background: none;

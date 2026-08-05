@@ -2685,6 +2685,190 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     setRenamingChatId(null)
   }
 
+  // Option picker: only the LAST assistant message in the transcript gets an interactive
+  // picker; older ones render as static (already-answered or stale). Hoisted out of the
+  // render loop below — it no longer needs recomputing once per fragment.
+  const lastAssistantIdx = messages.reduceRight(
+    (found, m, i) => (found === -1 && m.role === 'assistant' ? i : found),
+    -1,
+  )
+
+  /**
+   * Renders one message fragment's content: tool call(s), text/options/attachments, the
+   * error card, and the per-turn metrics footer (assistant only). `idx` is the fragment's
+   * own index in `messages` (needed for the option-picker "is this the live one" + the
+   * forward scan that detects an already-answered picker).
+   *
+   * Shared by the plain user-message path and the assistant turn-grouping renderer below:
+   * one agent turn can alternate prose/tool-calls into several adjacent ChatMessage
+   * fragments, which now render inside a single container with one meta-row instead of
+   * a separate bubble+meta per fragment (operator: unreadable when a turn splits often).
+   */
+  function renderFragmentContent(msg: ChatMessage, idx: number) {
+    const isLastAssistant = msg.role === 'assistant' && idx === lastAssistantIdx
+    const parsedOpts =
+      msg.role === 'assistant' && msg.text && !msg.streaming
+        ? parseOptionsBlock(msg.text)
+        : null
+    // Durable "already answered" signal for the picker: if a later user message matches
+    // one of the options, this block was already chosen (see OptionPicker usage above).
+    const answeredOptValue: string | null = parsedOpts
+      ? (() => {
+          const vals = new Set(parsedOpts.options.map(o => o.value.trim()))
+          for (let j = idx + 1; j < messages.length; j++) {
+            const mj = messages[j]
+            if (mj.role === 'user' && vals.has((mj.text || '').trim())) return (mj.text || '').trim()
+          }
+          return null
+        })()
+      : null
+    const attach =
+      msg.text && (msg.role === 'user' || (msg.role === 'assistant' && !msg.streaming))
+        ? parseAttachedFiles(msg.text, projectId)
+        : null
+
+    return (
+      <>
+        {msg.tools.length === 1 && (
+          <div className="chat-tools">
+            <ToolBlock tool={msg.tools[0]} />
+          </div>
+        )}
+        {msg.tools.length > 1 && (
+          <ToolGroup
+            tools={msg.tools}
+            expanded={expandedToolGroups.has(msg.id)}
+            onToggle={() => toggleToolGroup(msg.id)}
+            liveTool={msg.streaming ? msg.tools[msg.tools.length - 1] : null}
+          />
+        )}
+        {/* Option picker: when message ends with ```options block, split rendering */}
+        {parsedOpts ? (
+          <>
+            {parsedOpts.prefix && (
+              <div className="chat-msg-body markdown-wrap">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{parsedOpts.prefix}</ReactMarkdown>
+              </div>
+            )}
+            <OptionPicker
+              options={parsedOpts.options}
+              isActive={isLastAssistant && !run}
+              onSelect={(value) => sendMessage(value)}
+              answeredValue={answeredOptValue}
+            />
+          </>
+        ) : attach && attach.files.length > 0 ? (
+          <>
+            {attach.body && (
+              <div className="chat-msg-body markdown-wrap">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{attach.body}</ReactMarkdown>
+              </div>
+            )}
+            <div className="chat-msg-attachments">
+              {attach.files.map((f, i) => (
+                f.kind === 'file'
+                  ? <a key={i} className="chat-att-file chat-att-download" href={f.url}
+                       download={f.name} target="_blank" rel="noopener noreferrer"
+                       title={`Download ${f.name}`}>
+                      <span aria-hidden="true">📎</span>
+                      <span className="chat-att-name">{f.name}</span>
+                      <span className="chat-att-dl" aria-hidden="true">⤓</span>
+                    </a>
+                  : <ChatImage key={i} src={f.url} alt={f.name} />
+              ))}
+            </div>
+          </>
+        ) : msg.text ? (
+          <div className="chat-msg-body markdown-wrap">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{msg.text}</ReactMarkdown>
+          </div>
+        ) : null}
+        {msg.error && (() => {
+          // Spec-039: detect 200K context-wall errors and render a prominent card
+          // with a one-click reset button.
+          //
+          // Detection condition: the error string contains any of the Anthropic API
+          // error codes for context overflow. The CLI forwards the API error text
+          // as `str(exc)`, which includes the error_code and message:
+          //   - "prompt_too_long" — official API error code
+          //   - "prompt is too long" — human-readable message variant
+          //   - "context_length_exceeded" — alternative code seen on some models
+          // Secondary heuristic: context ≥ 195K at the time of error (catches cases
+          // where the exact string is different but the wall is clearly the cause).
+          const errLow = msg.error.toLowerCase()
+          const isWallError = (
+            errLow.includes('prompt_too_long') ||
+            errLow.includes('prompt is too long') ||
+            errLow.includes('context_length_exceeded') ||
+            (contextTokens != null && contextTokens >= contextWindow * 0.95)
+          )
+          if (isWallError) {
+            return (
+              <div style={{
+                marginTop: 8, padding: '10px 14px',
+                background: 'rgba(239,68,68,0.08)',
+                border: '1px solid var(--red)',
+                borderRadius: 6, fontSize: 13,
+                color: 'var(--red)',
+                display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+              }}>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  🧱 {t['chat.wall_error_msg']}
+                </span>
+                <button
+                  style={{
+                    fontSize: 12, padding: '3px 10px',
+                    cursor: rotating ? 'wait' : 'pointer',
+                    background: 'var(--bg-card)',
+                    border: '1px solid var(--red)',
+                    borderRadius: 4,
+                    color: 'var(--red)',
+                    fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0,
+                  }}
+                  disabled={rotating || streaming}
+                  onClick={() => setResetModalOpen(true)}
+                >
+                  {rotating ? '…' : t['chat.wall_reset_btn']}
+                </button>
+              </div>
+            )
+          }
+          return <div className="chat-msg-error">⚠ {msg.error}</div>
+        })()}
+        {/* Spec-022: per-turn metric footer on assistant messages */}
+        {msg.role === 'assistant' && msg.metrics && !msg.streaming && (() => {
+          const m = msg.metrics
+          const cacheEmoji = m.cache_hit_pct >= CACHE_WARM_PCT
+            ? '♨️'
+            : m.cache_hit_pct < CACHE_COLD_PCT
+            ? '🧊'
+            : ''
+          const durStr = fmtTurnDuration(m.duration_ms)
+          const ptK = m.prompt_tokens >= 1000
+            ? `${Math.round(m.prompt_tokens / 1000)}K`
+            : `${m.prompt_tokens}`
+          const parts: string[] = []
+          if (durStr) parts.push(`⏱ ${durStr}`)
+          parts.push(`${cacheEmoji ? cacheEmoji + ' ' : ''}cache ${m.cache_hit_pct}%`)
+          parts.push(`${ptK}`)
+          return (
+            <div
+              title="Facts from this turn's usage — cache-read is billed ~10%, fresh tokens at full price."
+              style={{
+                fontSize: 10, marginTop: 4,
+                color: 'var(--text2)',
+                userSelect: 'none', whiteSpace: 'nowrap', overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {parts.join(' · ')}
+            </div>
+          )
+        })()}
+      </>
+    )
+  }
+
   return (
     <div className="chat-wrap">
       {/* Spec-045: merged toolbar — chat tabs (left) + session controls + right cluster in ONE row.
@@ -3118,52 +3302,75 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             )
           }
 
-          const isEmpty = !msg.text && msg.tools.length === 0 && !msg.error
-          if (isEmpty && msg.role === 'assistant') return null
+          // Turn grouping: fold a contiguous run of assistant fragments (the text ⇄
+          // tool-call splits within one agent turn) into a SINGLE container with one
+          // meta-row at the end, instead of one bubble+meta per split. Only the first
+          // fragment of a run renders; the rest were already folded in below and bail
+          // out here. A user/board/model_fallback message always ends a run.
+          if (msg.role === 'assistant') {
+            const isRunStart = idx === 0 || messages[idx - 1].role !== 'assistant'
+            if (!isRunStart) return null
+            let end = idx
+            while (end + 1 < messages.length && messages[end + 1].role === 'assistant') end++
+            const groupMsgs = messages.slice(idx, end + 1)
+            // Drop fragments that would render nothing (mirrors the old single-message
+            // isEmpty skip) — but keep them for the bgRun/timestamp aggregation below.
+            const visible: { msg: ChatMessage; fidx: number }[] = []
+            groupMsgs.forEach((f, i) => {
+              if (f.text || f.tools.length > 0 || f.error) visible.push({ msg: f, fidx: idx + i })
+            })
+            if (visible.length === 0) return null
+            const anyBgRun = groupMsgs.some(f => f.bgRun)
+            const lastFrag = groupMsgs[groupMsgs.length - 1]
+            // Copy button copies every fragment's text, in order, tool-only fragments
+            // contribute nothing (their text is '').
+            const groupCopyText = groupMsgs.map(f => f.text).filter(Boolean).join('\n\n')
+            // Group timestamp = the last fragment that actually carries one (a trailing
+            // tool-only fragment may not have its own ts).
+            let groupTs: number | undefined
+            for (let j = groupMsgs.length - 1; j >= 0; j--) {
+              if (groupMsgs[j].ts != null) { groupTs = groupMsgs[j].ts; break }
+            }
+            return (
+              <div key={msg.id} className={`chat-msg chat-msg-assistant chat-msg-group${anyBgRun ? ' chat-msg-bgrun' : ''}`}>
+                {/* spec-063: autonomous background run — happened while the operator was away */}
+                {anyBgRun && (
+                  <div className="chat-msg-bgrun-tag">🌙 {t['chat.bg_run_label']}</div>
+                )}
+                {visible.map(({ msg: fmsg, fidx }) => (
+                  <React.Fragment key={fmsg.id}>{renderFragmentContent(fmsg, fidx)}</React.Fragment>
+                ))}
+                {/* One meta-row for the whole turn: timestamp of the last fragment +
+                    copy/save acting on the concatenated text of every fragment. */}
+                {(groupTs != null || (!lastFrag.streaming && groupCopyText)) && (
+                  <div className="msg-meta">
+                    {groupTs != null && (
+                      <span className="msg-time" title={new Date(groupTs).toLocaleString()}>
+                        {fmtStamp(groupTs)}
+                      </span>
+                    )}
+                    {!lastFrag.streaming && groupCopyText && (
+                      <div className="msg-actions">
+                        <MsgCopyButton text={groupCopyText} />
+                        {/* spec-052 Phase 4b: save selection / message as a Backlog card */}
+                        <SaveToBoardButton projectId={project.id} text={groupCopyText} />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          }
 
+          // From here on only role === 'user' remains (assistant/board/model_fallback
+          // all returned above).
           // Spec-022/033: cold-start divider — gap between prev assistant turn end and this user msg
           const prevMsg = idx > 0 ? messages[idx - 1] : null
           const showColdDivider = (
-            msg.role === 'user' &&
             msg.ts != null &&
             prevMsg?.ts != null &&
             (msg.ts - prevMsg.ts) > CACHE_TTL_MS
           )
-
-          // Option picker: parse ```options block from non-streaming assistant messages.
-          // Only the LAST assistant message gets an interactive picker; older ones are static.
-          const lastAssistantIdx = messages.reduceRight(
-            (found, m, i) => (found === -1 && m.role === 'assistant' ? i : found),
-            -1,
-          )
-          const isLastAssistant = msg.role === 'assistant' && idx === lastAssistantIdx
-          const parsedOpts =
-            msg.role === 'assistant' && msg.text && !msg.streaming
-              ? parseOptionsBlock(msg.text)
-              : null
-          // Durable "already answered" signal for the picker: if a later user message matches
-          // one of the options, this block was already chosen. Recovers the inert state across a
-          // ChatTab remount (mobile screen lock/unlock), which would otherwise re-arm the picker
-          // and let a second tap double-submit (ghost queued turn).
-          const answeredOptValue: string | null = parsedOpts
-            ? (() => {
-                const vals = new Set(parsedOpts.options.map(o => o.value.trim()))
-                for (let j = idx + 1; j < messages.length; j++) {
-                  const mj = messages[j]
-                  if (mj.role === 'user' && vals.has((mj.text || '').trim())) return (mj.text || '').trim()
-                }
-                return null
-              })()
-            : null
-          // Inline file previews: split "attached file:" lines out of the prose and render them
-          // as image/video thumbnails (reconstructed from the transcript on reload). The composer
-          // emits these for operator uploads; an agent may also echo an `attached file:` line to
-          // reference an already-uploaded image (spec-038). Assistant text is only parsed once
-          // streaming settles, so a half-streamed line isn't split mid-token.
-          const attach =
-            msg.text && (msg.role === 'user' || (msg.role === 'assistant' && !msg.streaming))
-              ? parseAttachedFiles(msg.text, projectId)
-              : null
 
           return (
             <div key={msg.id}>
@@ -3178,170 +3385,19 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 </div>
               )}
               <div className={`chat-msg chat-msg-${msg.role}${msg.bgRun ? ' chat-msg-bgrun' : ''}`}>
-                {/* spec-063: autonomous background run — happened while the operator was away */}
-                {msg.bgRun && (
-                  <div className="chat-msg-bgrun-tag">🌙 {t['chat.bg_run_label']}</div>
-                )}
-                {msg.tools.length === 1 && (
-                  <div className="chat-tools">
-                    <ToolBlock tool={msg.tools[0]} />
-                  </div>
-                )}
-                {msg.tools.length > 1 && (
-                  <ToolGroup
-                    tools={msg.tools}
-                    expanded={expandedToolGroups.has(msg.id)}
-                    onToggle={() => toggleToolGroup(msg.id)}
-                    liveTool={msg.streaming ? msg.tools[msg.tools.length - 1] : null}
-                  />
-                )}
-                {/* Option picker: when message ends with ```options block, split rendering */}
-                {parsedOpts ? (
-                  <>
-                    {parsedOpts.prefix && (
-                      <div className="chat-msg-body markdown-wrap">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{parsedOpts.prefix}</ReactMarkdown>
-                      </div>
-                    )}
-                    <OptionPicker
-                      options={parsedOpts.options}
-                      isActive={isLastAssistant && !run}
-                      onSelect={(value) => sendMessage(value)}
-                      answeredValue={answeredOptValue}
-                    />
-                  </>
-                ) : attach && attach.files.length > 0 ? (
-                  <>
-                    {attach.body && (
-                      <div className="chat-msg-body markdown-wrap">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{attach.body}</ReactMarkdown>
-                      </div>
-                    )}
-                    <div className="chat-msg-attachments">
-                      {attach.files.map((f, i) => (
-                        f.kind === 'file'
-                          ? <a key={i} className="chat-att-file chat-att-download" href={f.url}
-                               download={f.name} target="_blank" rel="noopener noreferrer"
-                               title={`Download ${f.name}`}>
-                              <span aria-hidden="true">📎</span>
-                              <span className="chat-att-name">{f.name}</span>
-                              <span className="chat-att-dl" aria-hidden="true">⤓</span>
-                            </a>
-                          : <ChatImage key={i} src={f.url} alt={f.name} />
-                      ))}
-                    </div>
-                  </>
-                ) : msg.text ? (
-                  <div className="chat-msg-body markdown-wrap">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{msg.text}</ReactMarkdown>
-                  </div>
-                ) : null}
-                {msg.error && (() => {
-                  // Spec-039: detect 200K context-wall errors and render a prominent card
-                  // with a one-click reset button.
-                  //
-                  // Detection condition: the error string contains any of the Anthropic API
-                  // error codes for context overflow. The CLI forwards the API error text
-                  // as `str(exc)`, which includes the error_code and message:
-                  //   - "prompt_too_long" — official API error code
-                  //   - "prompt is too long" — human-readable message variant
-                  //   - "context_length_exceeded" — alternative code seen on some models
-                  // Secondary heuristic: context ≥ 195K at the time of error (catches cases
-                  // where the exact string is different but the wall is clearly the cause).
-                  const errLow = msg.error.toLowerCase()
-                  const isWallError = (
-                    errLow.includes('prompt_too_long') ||
-                    errLow.includes('prompt is too long') ||
-                    errLow.includes('context_length_exceeded') ||
-                    (contextTokens != null && contextTokens >= contextWindow * 0.95)
-                  )
-                  if (isWallError) {
-                    return (
-                      <div style={{
-                        marginTop: 8, padding: '10px 14px',
-                        background: 'rgba(239,68,68,0.08)',
-                        border: '1px solid var(--red)',
-                        borderRadius: 6, fontSize: 13,
-                        color: 'var(--red)',
-                        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
-                      }}>
-                        <span style={{ flex: 1, minWidth: 0 }}>
-                          🧱 {t['chat.wall_error_msg']}
-                        </span>
-                        <button
-                          style={{
-                            fontSize: 12, padding: '3px 10px',
-                            cursor: rotating ? 'wait' : 'pointer',
-                            background: 'var(--bg-card)',
-                            border: '1px solid var(--red)',
-                            borderRadius: 4,
-                            color: 'var(--red)',
-                            fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0,
-                          }}
-                          disabled={rotating || streaming}
-                          onClick={() => setResetModalOpen(true)}
-                        >
-                          {rotating ? '…' : t['chat.wall_reset_btn']}
-                        </button>
-                      </div>
-                    )
-                  }
-                  return <div className="chat-msg-error">⚠ {msg.error}</div>
-                })()}
-                {/* Spec-022: per-turn metric footer on assistant messages */}
-                {msg.role === 'assistant' && msg.metrics && !msg.streaming && (() => {
-                  const m = msg.metrics
-                  const cacheEmoji = m.cache_hit_pct >= CACHE_WARM_PCT
-                    ? '♨️'
-                    : m.cache_hit_pct < CACHE_COLD_PCT
-                    ? '🧊'
-                    : ''
-                  const durStr = fmtTurnDuration(m.duration_ms)
-                  const ptK = m.prompt_tokens >= 1000
-                    ? `${Math.round(m.prompt_tokens / 1000)}K`
-                    : `${m.prompt_tokens}`
-                  const parts: string[] = []
-                  if (durStr) parts.push(`⏱ ${durStr}`)
-                  parts.push(`${cacheEmoji ? cacheEmoji + ' ' : ''}cache ${m.cache_hit_pct}%`)
-                  parts.push(`${ptK}`)
-                  return (
-                    <div
-                      title="Facts from this turn's usage — cache-read is billed ~10%, fresh tokens at full price."
-                      style={{
-                        fontSize: 10, marginTop: 4,
-                        color: 'var(--text2)',
-                        userSelect: 'none', whiteSpace: 'nowrap', overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                      }}
-                    >
-                      {parts.join(' · ')}
-                    </div>
-                  )
-                })()}
-                {/* Meta row: timestamp (always visible) sits inline with the message actions —
-                    copy/save on assistant turns, file-rewind on user turns (both hover-revealed).
-                    One row, so the time never adds an extra line (spec-022 parity for history). */}
-                {(msg.role === 'user' || msg.role === 'assistant') &&
-                 (msg.ts != null ||
-                  (msg.role === 'assistant' && !msg.streaming && msg.text) ||
-                  (msg.role === 'user' && msg.uuid)) && (
+                {renderFragmentContent(msg, idx)}
+                {/* Meta row: timestamp (always visible) sits inline with the file-rewind
+                    action (hover-revealed). One row, so the time never adds an extra line. */}
+                {(msg.ts != null || msg.uuid) && (
                   <div className="msg-meta">
                     {msg.ts != null && (
                       <span className="msg-time" title={new Date(msg.ts).toLocaleString()}>
                         {fmtStamp(msg.ts)}
                       </span>
                     )}
-                    {/* Action icons: visible on hover for completed assistant messages */}
-                    {msg.role === 'assistant' && !msg.streaming && msg.text && (
-                      <div className="msg-actions">
-                        <MsgCopyButton text={msg.text} />
-                        {/* spec-052 Phase 4b: save selection / message as a Backlog card */}
-                        <SaveToBoardButton projectId={project.id} text={msg.text} />
-                      </div>
-                    )}
                     {/* spec-073: file undo — user messages loaded from history carry the
                         checkpoint uuid; rewind restores files to before this message ran. */}
-                    {msg.role === 'user' && msg.uuid && (
+                    {msg.uuid && (
                       <div className="msg-actions">
                         <RewindButton projectId={project.id} messageUuid={msg.uuid} />
                       </div>
