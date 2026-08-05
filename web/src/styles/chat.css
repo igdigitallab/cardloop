@@ -268,7 +268,10 @@
   border-radius: var(--radius-md);
   padding: 4px;
   z-index: 50;
-  max-height: 50vh;
+  /* spec-080 QA: 50vh cut the menu at ~420px on a 390×844 phone — the Plan-mode section
+     fell below the fold with zero scroll affordance. Taller cap + a visible thin scrollbar. */
+  max-height: 68vh;
+  scrollbar-width: thin;
   overflow-y: auto;
 }
 /* Top-bar (desktop) placement: open downward instead of upward. */
@@ -400,18 +403,21 @@
   color: var(--accent);
   font-weight: 600;
 }
-.chat-think-option.ultracode-row {
+.chat-think-option.ultracode-row,
+.chat-think-option.plan-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
-.chat-think-option.ultracode-row .ultracode-state {
+.chat-think-option.ultracode-row .ultracode-state,
+.chat-think-option.plan-row .ultracode-state {
   font-size: 10px;
   letter-spacing: 0.04em;
   color: var(--text3);
 }
-.chat-think-option.ultracode-row.selected .ultracode-state {
+.chat-think-option.ultracode-row.selected .ultracode-state,
+.chat-think-option.plan-row.selected .ultracode-state {
   color: var(--accent);
 }
 .composer-modelthink-note {
@@ -918,6 +924,40 @@
   flex: 1;
   min-width: 0;
 }
+
+/* Tool-call spoiler: collapses >1 consecutive tool calls into one toggle row */
+.chat-tools-group { margin-bottom: 2px; }
+.chat-tools-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text3);
+  background: none;
+  border: none;
+  padding: 2px 0;
+  cursor: pointer;
+  text-align: left;
+}
+.chat-tools-group-toggle:hover { color: var(--text2); }
+.chat-tools-group-caret {
+  display: inline-flex;
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: transform 0.15s ease;
+}
+.chat-tools-group-toggle[aria-expanded="true"] .chat-tools-group-caret { transform: rotate(90deg); }
+.chat-tools-group-live {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.75;
+}
+.chat-tools-group .chat-tools { margin-top: 2px; }
 
 /* Rich tool variants */
 .chat-tool-row {

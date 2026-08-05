@@ -548,6 +548,9 @@ export const en = {
   'chat.tools_menu_skills': 'Skills',
   'chat.tools_menu_defer': 'Defer after reset',
 
+  // ── Tool-call spoiler: collapses >1 consecutive tool calls in one turn ──────
+  'chat.tools_group': '{n} tool calls',
+
   // ── Sub-agent lane (Spec-035) ────────────────────────────────────
   'chat.subagent_lane_label': 'sub-agents',
 

@@ -300,6 +300,47 @@ function toolHint(tool: RichTool): string {
   return ''
 }
 
+/**
+ * Collapses a run of >1 consecutive tool calls (one bubble's `tools` array) into a
+ * single toggle row — collapsed by default. A single tool call never goes through
+ * this component (the caller renders it as a plain ToolBlock instead).
+ * While the turn is still streaming, `liveTool` is the most recently appended call —
+ * shown inline in the header so live feedback survives the collapse; once the turn
+ * ends the header falls back to the plain count and stays collapsed.
+ */
+function ToolGroup({ tools, expanded, onToggle, liveTool }: {
+  tools: ChatToolCall[]
+  expanded: boolean
+  onToggle: () => void
+  liveTool: RichTool | null
+}) {
+  let liveLabel = ''
+  if (liveTool) {
+    const hint = toolHint(liveTool)
+    liveLabel = hint ? `${liveTool.name} · ${hint}` : liveTool.name
+  }
+  return (
+    <div className="chat-tools-group">
+      <button
+        type="button"
+        className="chat-tools-group-toggle"
+        onClick={onToggle}
+        aria-expanded={expanded}
+      >
+        <span className="chat-tools-group-caret" aria-hidden="true">›</span>
+        <Wrench size={12} className="chat-tool-lucide" />
+        <span>{t['chat.tools_group'].replace('{n}', String(tools.length))}</span>
+        {liveLabel && <span className="chat-tools-group-live">· ↳ {liveLabel}</span>}
+      </button>
+      {expanded && (
+        <div className="chat-tools">
+          {tools.map((tool, i) => <ToolBlock key={i} tool={tool} />)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 interface RunIndicator {
   startedAt: number
   lastEventAt: number
@@ -832,6 +873,21 @@ const ModelThinkButton = memo(function ModelThinkButton({
               </div>
             )
           })}
+          {/* spec-080: Plan mode toggle — read-only planning + approval gate. Placed ABOVE
+              ultracode: on a phone the menu scrolls, and the bottom section is the one that
+              falls below the fold (QA finding — the row was undiscoverable at 390×844). */}
+          <div className="composer-modelthink-sec">{t['chat.plan_label']}</div>
+          <div
+            role="option"
+            aria-selected={planMode}
+            className={`chat-think-option plan-row${planMode ? ' selected' : ''}`}
+            title={planLocked ? t['chat.plan_locked_hint'] : t['chat.plan_hint']}
+            style={planLocked ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
+            onMouseDown={e => { e.preventDefault(); if (planLocked) return; onPlanModeChange(!planMode) }}
+          >
+            <span>🗺 {t['chat.plan_toggle']}</span>
+            <span className="ultracode-state">{planMode ? 'ON' : 'OFF'}</span>
+          </div>
           {/* spec-058: Ultracode mode toggle — xhigh effort + sub-agent fan-out.
               spec-080 C4: mutually exclusive with plan mode (plan wins server-side) —
               grey it out while planning so the conflict is visible, not silent. */}
@@ -846,19 +902,6 @@ const ModelThinkButton = memo(function ModelThinkButton({
           >
             <span>⚡ {t['chat.ultracode_toggle']}</span>
             <span className="ultracode-state">{ultracode ? 'ON' : 'OFF'}</span>
-          </div>
-          {/* spec-080: Plan mode toggle — read-only planning + approval gate. */}
-          <div className="composer-modelthink-sec">{t['chat.plan_label']}</div>
-          <div
-            role="option"
-            aria-selected={planMode}
-            className={`chat-think-option plan-row${planMode ? ' selected' : ''}`}
-            title={planLocked ? t['chat.plan_locked_hint'] : t['chat.plan_hint']}
-            style={planLocked ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
-            onMouseDown={e => { e.preventDefault(); if (planLocked) return; onPlanModeChange(!planMode) }}
-          >
-            <span>🗺 {t['chat.plan_toggle']}</span>
-            <span className="ultracode-state">{planMode ? 'ON' : 'OFF'}</span>
           </div>
           <div className="composer-modelthink-note">
             {planMode ? t['chat.plan_hint'] : t['chat.ultracode_hint']}
@@ -1100,6 +1143,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const pinnedRef = useRef<boolean>(true)
   // showNewMsgPill: shows the "↓ New messages" button when unpinned and new content arrives.
   const [showNewMsgPill, setShowNewMsgPill] = useState<boolean>(false)
+  // Tool-call spoiler: ids of message bubbles the operator expanded (collapsed by default).
+  // Ephemeral UI state — not persisted, so it naturally resets on reload/chat switch.
+  const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set())
+  const toggleToolGroup = useCallback((id: string) => {
+    setExpandedToolGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const busActiveRef = useRef<boolean>(false)
@@ -1485,11 +1539,30 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // child components. This prevents the message list from re-rendering every second.
 
   function histToMessages(items: HistoryMessage[]): ChatMessage[] {
-    return items.map((m, i) => ({
-      id: `hist-${i}`, role: m.role, text: m.text, tools: m.tools, streaming: false,
-      ...(m.uuid ? { uuid: m.uuid } : {}),
-      ...(m.ts != null ? { ts: m.ts } : {}),
-    }))
+    const out: ChatMessage[] = []
+    items.forEach((m, i) => {
+      const msg: ChatMessage = {
+        id: `hist-${i}`, role: m.role, text: m.text, tools: m.tools, streaming: false,
+        ...(m.uuid ? { uuid: m.uuid } : {}),
+        ...(m.ts != null ? { ts: m.ts } : {}),
+      }
+      // The transcript logs one line per raw model turn, so a no-narration tool chain
+      // (call → result → call, with no text in between) becomes several adjacent
+      // assistant lines here. Live streaming already folds those into one bubble
+      // (appendChunk keeps appending to the open bubble while its text is empty) —
+      // mirror that same rule here so a reload doesn't fragment the identical chain
+      // into several single-tool bubbles the tool-group spoiler can't collapse.
+      // Requiring the previous bubble to already carry a tool (not just text) keeps
+      // this from swallowing an unrelated tool call that follows a narrated remark.
+      const prev = out[out.length - 1]
+      if (prev && prev.role === 'assistant' && msg.role === 'assistant' &&
+          msg.text === '' && msg.tools.length > 0 && prev.tools.length > 0) {
+        prev.tools = [...prev.tools, ...msg.tools]
+        return
+      }
+      out.push(msg)
+    })
+    return out
   }
 
   // Fetch /live + history and rebuild the in-flight turn (or restore the final answer).
@@ -1645,6 +1718,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     let cancelled = false
     abortRef.current?.abort()
     setMessages([])
+    // hist-N ids restart at 0 per chat, so a stale expanded id could otherwise match
+    // an unrelated bubble in the next chat — clear alongside the message list.
+    setExpandedToolGroups(new Set())
     // Restore any saved draft for this project+chat; fall back to empty string.
     try {
       const savedDraft = localStorage.getItem(draftStorageKey(projectId, effectiveChatId || undefined))
@@ -3106,12 +3182,18 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 {msg.bgRun && (
                   <div className="chat-msg-bgrun-tag">🌙 {t['chat.bg_run_label']}</div>
                 )}
-                {msg.tools.length > 0 && (
+                {msg.tools.length === 1 && (
                   <div className="chat-tools">
-                    {msg.tools.map((t, i) => (
-                      <ToolBlock key={i} tool={t} />
-                    ))}
+                    <ToolBlock tool={msg.tools[0]} />
                   </div>
+                )}
+                {msg.tools.length > 1 && (
+                  <ToolGroup
+                    tools={msg.tools}
+                    expanded={expandedToolGroups.has(msg.id)}
+                    onToggle={() => toggleToolGroup(msg.id)}
+                    liveTool={msg.streaming ? msg.tools[msg.tools.length - 1] : null}
+                  />
                 )}
                 {/* Option picker: when message ends with ```options block, split rendering */}
                 {parsedOpts ? (
