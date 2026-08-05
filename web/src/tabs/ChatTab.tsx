@@ -175,6 +175,11 @@ function autoRotateStorageKey(projectId: string, chatId?: string) {
   return chatId ? `cops.chat.autorotate.${projectId}:${chatId}` : `cops.chat.autorotate.${projectId}`
 }
 
+function planModeStorageKey(projectId: string, chatId?: string) {
+  // spec-080: per-chat plan-mode toggle; mirrors ultracodeStorageKey pattern.
+  return chatId ? `cops.chat.planmode.${projectId}:${chatId}` : `cops.chat.planmode.${projectId}`
+}
+
 function draftStorageKey(projectId: string, chatId?: string) {
   // Per-chat draft key; falls back to per-project when chatId is not yet known.
   return chatId ? `cops.chat.draft.${projectId}:${chatId}` : `cops.chat.draft.${projectId}`
@@ -720,7 +725,7 @@ const THINK_TAG: Record<ThinkMode, string> = { low: 'low', medium: 'medium', hig
 
 const ModelThinkButton = memo(function ModelThinkButton({
   model, thinkValue, disabled, onModelChange, onThinkChange, menuPlacement = 'up', models,
-  ultracode, onUltracodeChange,
+  ultracode, onUltracodeChange, planMode, onPlanModeChange, planLocked,
 }: {
   model: string
   thinkValue: ThinkMode
@@ -733,6 +738,11 @@ const ModelThinkButton = memo(function ModelThinkButton({
   /** spec-058: Ultracode mode — xhigh effort + sub-agent fan-out. Per-chat toggle. */
   ultracode: boolean
   onUltracodeChange: (v: boolean) => void
+  /** spec-080: Plan mode — read-only planning turn gated by an approval card. */
+  planMode: boolean
+  onPlanModeChange: (v: boolean) => void
+  /** True while a plan is awaiting a decision — flipping the toggle then has no effect. */
+  planLocked?: boolean
 }) {
   // Prefer the live registry; fall back to the bundled static list (offline / fetch failure).
   const modelList = (models && models.length > 0) ? models : MODELS
@@ -785,7 +795,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
         aria-expanded={open}
         onClick={() => { if (!disabled) setOpen(o => !o) }}
       >
-        {ultracode ? '⚡ ' : ''}{currentLabel}{tag ? ` · ${tag}` : ''}
+        {planMode ? '🗺 ' : ''}{ultracode ? '⚡ ' : ''}{currentLabel}{tag ? ` · ${tag}` : ''}
       </button>
       {open && (
         <div
@@ -822,19 +832,37 @@ const ModelThinkButton = memo(function ModelThinkButton({
               </div>
             )
           })}
-          {/* spec-058: Ultracode mode toggle — xhigh effort + sub-agent fan-out. */}
+          {/* spec-058: Ultracode mode toggle — xhigh effort + sub-agent fan-out.
+              spec-080 C4: mutually exclusive with plan mode (plan wins server-side) —
+              grey it out while planning so the conflict is visible, not silent. */}
           <div className="composer-modelthink-sec">{t['chat.ultracode_label']}</div>
           <div
             role="option"
             aria-selected={ultracode}
             className={`chat-think-option ultracode-row${ultracode ? ' selected' : ''}`}
-            title={t['chat.ultracode_hint']}
-            onMouseDown={e => { e.preventDefault(); onUltracodeChange(!ultracode) }}
+            title={planMode ? t['chat.plan_ultracode_conflict'] : t['chat.ultracode_hint']}
+            style={planMode ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
+            onMouseDown={e => { e.preventDefault(); if (planMode) return; onUltracodeChange(!ultracode) }}
           >
             <span>⚡ {t['chat.ultracode_toggle']}</span>
             <span className="ultracode-state">{ultracode ? 'ON' : 'OFF'}</span>
           </div>
-          <div className="composer-modelthink-note">{t['chat.ultracode_hint']}</div>
+          {/* spec-080: Plan mode toggle — read-only planning + approval gate. */}
+          <div className="composer-modelthink-sec">{t['chat.plan_label']}</div>
+          <div
+            role="option"
+            aria-selected={planMode}
+            className={`chat-think-option plan-row${planMode ? ' selected' : ''}`}
+            title={planLocked ? t['chat.plan_locked_hint'] : t['chat.plan_hint']}
+            style={planLocked ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
+            onMouseDown={e => { e.preventDefault(); if (planLocked) return; onPlanModeChange(!planMode) }}
+          >
+            <span>🗺 {t['chat.plan_toggle']}</span>
+            <span className="ultracode-state">{planMode ? 'ON' : 'OFF'}</span>
+          </div>
+          <div className="composer-modelthink-note">
+            {planMode ? t['chat.plan_hint'] : t['chat.ultracode_hint']}
+          </div>
         </div>
       )}
     </div>
@@ -1042,6 +1070,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     } catch { /* localStorage unavailable */ }
     return false
   })
+  // spec-080: Plan mode — per-chat toggle, persisted in localStorage (mirrors ultracode).
+  const [planMode, setPlanMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(planModeStorageKey(projectId, effectiveChatId || undefined)) === '1'
+    } catch { /* localStorage unavailable */ }
+    return false
+  })
   const [run, setRun] = useState<RunIndicator | null>(null)
   // Spec-035: server-authoritative turn start timestamp (epoch ms).
   // Set from /live started_at; null when not available (falls back to run.startedAt).
@@ -1134,6 +1169,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const [resumePrompt, setResumePrompt] = useState<{ deferredId: string; resetsAt: string } | null>(null)
   const [resumeRemember, setResumeRemember] = useState(false)
   const [resumeBusy, setResumeBusy] = useState(false)
+  // spec-080: pending plan-approval card (Approve/Reject + feedback). Null = none.
+  const [planPrompt, setPlanPrompt] = useState<{ planId: string; chatId: string | null;
+    planText: string; planFilePath?: string | null } | null>(null)
+  const [planFeedback, setPlanFeedback] = useState('')
+  const [planRejecting, setPlanRejecting] = useState(false)
+  const [planBusy, setPlanBusy] = useState(false)
   // Live compaction-in-progress indicator: true from compact event until first assistant output or run end.
   const [isCompacting, setIsCompacting] = useState(false)
   // Ref mirror so SSE/bus event closures can read the current value without stale closure issues.
@@ -1197,6 +1238,21 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       return
     } catch { /* localStorage unavailable */ }
     setAutoRotate(false)
+  }, [projectId, effectiveChatId])
+
+  // spec-080: re-load planMode from localStorage on project/chat switch (per-chat key)
+  useEffect(() => {
+    try {
+      setPlanMode(localStorage.getItem(planModeStorageKey(projectId, effectiveChatId || undefined)) === '1')
+      return
+    } catch { /* localStorage unavailable */ }
+    setPlanMode(false)
+  }, [projectId, effectiveChatId])
+
+  // spec-080: persist planMode toggle (per-chat key)
+  const handlePlanModeChange = useCallback((v: boolean) => {
+    setPlanMode(v)
+    try { localStorage.setItem(planModeStorageKey(projectId, effectiveChatId || undefined), v ? '1' : '0') } catch { /* ignore */ }
   }, [projectId, effectiveChatId])
 
   // T3: persist autoRotate toggle to localStorage (per-chat key)
@@ -1330,6 +1386,31 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   }, [project.session_key])
 
   useEffect(() => { refreshResumePrompt() }, [refreshResumePrompt])
+
+  // spec-080: reload-durability for the plan-approval card — the active chat's plan_id
+  // pointer (chats.json) survives reloads; re-fetch the record and re-pin the card.
+  const refreshPlanPrompt = useCallback(async () => {
+    try {
+      const data = await api.chats(projectId)
+      const chats = (data?.chats || []) as unknown as Array<Record<string, unknown>>
+      const activeId = effectiveChatId || (data?.active as string | undefined)
+      const mine = chats.find(c => c['id'] === activeId)
+      const planId = mine ? (mine['plan_id'] as string | undefined) : undefined
+      if (!planId) { setPlanPrompt(null); return }
+      const rec = await api.planGet(projectId, planId)
+      if (rec && rec.status === 'awaiting_approval') {
+        setPlanPrompt({ planId, chatId: (rec.chat_id as string | null) ?? null,
+                        planText: String(rec.plan_text || ''),
+                        planFilePath: (rec.plan_file_path as string | null) ?? null })
+      } else {
+        setPlanPrompt(null)
+      }
+    } catch {
+      // Non-fatal — the live bus event still drives the card.
+    }
+  }, [projectId, effectiveChatId])
+
+  useEffect(() => { refreshPlanPrompt() }, [refreshPlanPrompt])
 
   // Stick-to-bottom: auto-scroll only when the user is pinned (within SCROLL_PIN_THRESHOLD of bottom).
   // When unpinned (user scrolled up), new content does NOT jump the viewport — instead the pill
@@ -1925,6 +2006,35 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setResumePrompt({ deferredId: evt.deferred_id, resetsAt: evt.resets_at_display || '' })
       setResumeRemember(false)
 
+    } else if (evt.kind === 'plan_ready') {
+      // spec-080: a plan awaits approval. The bus preview is bounded — fetch the full
+      // record so the card shows the complete plan body.
+      {
+        const e = evt as unknown as { plan_id: string; chat_id?: string | null; plan_text_preview?: string }
+        if (!e.chat_id || !effectiveChatId || e.chat_id === effectiveChatId) {
+          setPlanPrompt({ planId: e.plan_id, chatId: e.chat_id ?? null,
+                          planText: e.plan_text_preview || '' })
+          setPlanRejecting(false)
+          setPlanFeedback('')
+          api.planGet(projectId, e.plan_id).then(rec => {
+            if (rec && rec.plan_text) {
+              setPlanPrompt(p => (p && p.planId === e.plan_id)
+                ? { ...p, planText: String(rec.plan_text), planFilePath: rec.plan_file_path ?? null }
+                : p)
+            }
+          }).catch(() => { /* preview already shown */ })
+        }
+      }
+
+    } else if (evt.kind === 'plan_decided') {
+      // spec-080: decision landed (this tab or a peer). Clear the card; on approve also
+      // auto-off the local toggle (client half of the server's plan_mode reset).
+      {
+        const e = evt as unknown as { plan_id: string; approved?: boolean }
+        setPlanPrompt(p => (p && p.planId === e.plan_id) ? null : p)
+        if (e.approved) handlePlanModeChange(false)
+      }
+
     } else if (evt.kind === 'compact') {
       // Spec-039: native CLI auto-compact fired — session is kept, context is smaller.
       // Show a persistent live indicator for the duration of compaction (can be 30–60s),
@@ -2086,7 +2196,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         // Spec-037: pass active chat_id so the backend writes session_id to the right chat entry
-        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), auto_rotate: autoRotate, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
+        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), ...(planMode ? { plan_mode: true } : {}), auto_rotate: autoRotate, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
         signal: ac.signal,
       })
 
@@ -2386,6 +2496,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     seenSubagentKeysRef.current = new Set()
     busActiveRef.current = false
     setMessages(prev => finalizeStreaming(prev))
+    // spec-080 C6: /stop cancels a parked plan approval server-side (CancelledError →
+    // resolve cancelled), but that lands as an async bus event — clear the card
+    // optimistically so the composer never shows a stale approval over an idle chat.
+    setPlanPrompt(null)
+    setPlanRejecting(false)
     // Clear server-side queue entries (fire-and-forget per item)
     setQueueItems(prev => {
       prev.forEach(item => api.chatQueueDelete(projectId, item.id).catch(() => {}))
@@ -2754,6 +2869,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               models={models}
               ultracode={ultracode}
               onUltracodeChange={handleUltracodeChange}
+              planMode={planMode}
+              onPlanModeChange={handlePlanModeChange}
+              planLocked={!!planPrompt}
             />
           )}
           {/* Full-screen chat button — hides the left project pane (like a free chat).
@@ -3449,6 +3567,64 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             </div>
           )
         })()}
+        {/* spec-080: plan-approval card — markdown plan body + Approve / Reject-with-feedback,
+            above the composer (same family as the rate-limit prompt; reload-durable via
+            refreshPlanPrompt's poll-on-mount of the chat's plan_id pointer). */}
+        {planPrompt && (() => {
+          const decide = async (decision: 'approve' | 'reject') => {
+            setPlanBusy(true)
+            try {
+              await api.planDecide(projectId, planPrompt.planId,
+                { decision, ...(decision === 'reject' && planFeedback.trim() ? { feedback: planFeedback.trim() } : {}) })
+              setPlanPrompt(null)
+              setPlanRejecting(false)
+              setPlanFeedback('')
+              if (decision === 'approve') handlePlanModeChange(false)
+            } catch { /* idempotent server-side; bus event reconciles */ }
+            finally { setPlanBusy(false) }
+          }
+          return (
+            <div role="alertdialog" aria-label={t['chat.plan_card_title']}
+                 style={{ margin: '0 0 8px', padding: '10px 12px', borderRadius: 8,
+                          border: '1px solid var(--accent, #7aa2f7)', background: 'var(--bg2)',
+                          display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>🗺 {t['chat.plan_card_title']}</div>
+              <div style={{ maxHeight: '38vh', overflowY: 'auto', fontSize: 13,
+                            border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px' }}>
+                {planPrompt.planText
+                  ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{planPrompt.planText}</ReactMarkdown>
+                  : <em>{t['chat.plan_card_empty']}{planPrompt.planFilePath ? ` (${planPrompt.planFilePath})` : ''}</em>}
+              </div>
+              {planRejecting && (
+                <textarea
+                  value={planFeedback}
+                  onChange={e => setPlanFeedback(e.target.value)}
+                  placeholder={t['chat.plan_feedback_placeholder']}
+                  rows={3}
+                  style={{ width: '100%', fontSize: 13, borderRadius: 6,
+                           border: '1px solid var(--border)', background: 'var(--bg)', padding: '6px 8px' }}
+                />
+              )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                {!planRejecting ? (
+                  <>
+                    <button className="btn btn-primary" disabled={planBusy}
+                            onClick={() => decide('approve')}>✓ {t['chat.plan_approve']}</button>
+                    <button className="btn" disabled={planBusy}
+                            onClick={() => setPlanRejecting(true)}>✗ {t['chat.plan_reject']}</button>
+                  </>
+                ) : (
+                  <>
+                    <button className="btn btn-danger" disabled={planBusy}
+                            onClick={() => decide('reject')}>{t['chat.plan_reject_send']}</button>
+                    <button className="btn" disabled={planBusy}
+                            onClick={() => { setPlanRejecting(false); setPlanFeedback('') }}>{t['chat.plan_reject_cancel']}</button>
+                  </>
+                )}
+              </div>
+            </div>
+          )
+        })()}
         {/* Inline "/" skill palette — floats just above the composer while typing a slash-command.
             onMouseDown+preventDefault keeps the textarea focused so the pick lands in the input. */}
         {slashOpen && (
@@ -3605,6 +3781,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   models={models}
                   ultracode={ultracode}
                   onUltracodeChange={handleUltracodeChange}
+                  planMode={planMode}
+                  onPlanModeChange={handlePlanModeChange}
+                  planLocked={!!planPrompt}
                 />
               </div>
             )}

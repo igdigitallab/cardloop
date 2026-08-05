@@ -404,6 +404,11 @@ async def _push_notify_run_end(session_key: str, event: dict) -> None:
         "data": {"projectId": project_id, "url": "/"},
     })
 
+    await _push_broadcast(payload)
+
+
+async def _push_broadcast(payload: str) -> None:
+    """Send a prepared Web Push payload to every stored subscriber (stale subs pruned)."""
     lock = _PUSH_LOCK
     if lock is None:
         return
@@ -427,6 +432,35 @@ async def _push_notify_run_end(session_key: str, event: dict) -> None:
         async with lock:
             updated = [s for s in _load_push_subs() if s.get("endpoint") not in removed_endpoints]
             _save_push_subs(updated)
+
+
+async def _push_notify_plan_ready(session_key: str, event: dict) -> None:
+    """spec-080: push when a plan awaits operator approval — a parked approval can otherwise
+    sit silently for hours (the SDK gate has no timeout; the pin cap is the only bound)."""
+    if not _PUSH_AVAILABLE or not _PUSH_CTX:
+        return
+    _push_ensure_vapid_keys()
+    if not _PUSH_PRIV_KEY or not _PUSH_PUB_KEY:
+        return
+    project = None
+    try:
+        for p in _collect_projects(_PUSH_CTX):
+            if (p.get("session_key") or p.get("tg_thread", "")) == session_key:
+                project = p
+                break
+    except Exception:
+        pass
+    if project is None:
+        return
+    preview = (event.get("plan_text_preview") or "").strip()
+    payload = json.dumps({
+        "title": "🗺 " + project.get("name", session_key),
+        "body": ("Plan awaiting your approval" + (": " + preview[:110] if preview else "")),
+        "icon": "/icons/icon-192.png",
+        "tag": project.get("id", session_key) + "-plan",
+        "data": {"projectId": project.get("id", session_key), "url": "/"},
+    })
+    await _push_broadcast(payload)
 
 
 async def _push_send_one(sub: dict, payload: str, endpoint: str, removed: list[str]) -> None:
@@ -489,6 +523,16 @@ def _bus_publish(session_key: str, event: dict, persist: bool = True) -> None:
                 _spawn_bg(_push_notify_run_end(session_key, event))
             except RuntimeError:
                 pass  # no running loop (tests / sync context) — skip push
+    elif kind == "plan_ready":
+        # spec-080: a plan awaiting approval must reach the operator even with the tab
+        # closed — the gate has no timeout and would otherwise stall silently for hours.
+        _awaiting[session_key] = time.time()
+        if _PUSH_AVAILABLE:
+            try:
+                asyncio.get_running_loop()
+                _spawn_bg(_push_notify_plan_ready(session_key, event))
+            except RuntimeError:
+                pass
     elif kind == "run_start":
         _awaiting.pop(session_key, None)
 
@@ -801,6 +845,7 @@ def _save_crash_state() -> None:
             "monitors": _monitors,
             "wake_pending": _completion_wake_pending,
             "last_turn_options": _last_turn_options,
+            "plan_pending": _plan_pending_by_session,  # spec-080: sk -> plan_id
         }
         tmp = Path(str(_CRASH_STATE_FILE) + ".tmp")
         tmp.write_text(json.dumps(payload, indent=2, default=str))
@@ -924,9 +969,33 @@ def _monitors_reconcile_on_boot(ctx: dict) -> None:
                 _spawn_bg(_completion_wake_fire(ctx, sk))
             except Exception:
                 pass
-        if flipped or restored_wake_keys:
+        # spec-080: a plan awaiting approval cannot survive a restart — the parked Future and
+        # the CLI subprocess died with the process. Flip the sidecar to 'orphaned', clear the
+        # chat pointer, and tell the operator loudly instead of leaving a zombie card.
+        orphaned_plans = 0
+        for sk, plan_id in (state.get("plan_pending") or {}).items():
+            try:
+                record = _read_plan_meta(plan_id)
+                if record is None or record.get("status") != "awaiting_approval":
+                    continue
+                record["status"] = "orphaned"
+                record["decided_at"] = time.time()
+                _plan_records[plan_id] = record
+                _write_plan_meta(record)
+                _spawn_bg(_set_chat_plan_pointer(ctx, sk, record.get("chat_id"), None))
+                _bus_publish(sk, {"kind": "plan_decided", "plan_id": plan_id,
+                                  "chat_id": record.get("chat_id"), "approved": False,
+                                  "status": "orphaned"})
+                _spawn_bg(_notify_operator(
+                    ctx, f"[WARN] A plan awaiting approval was lost in a service restart "
+                         f"(session {sk}). Re-run the plan turn and approve again."))
+                orphaned_plans += 1
+            except Exception:
+                continue
+        if flipped or restored_wake_keys or orphaned_plans:
             print(f"[crash-recovery] boot reconcile: {flipped} orphaned monitor(s) flipped, "
-                  f"{len(restored_wake_keys)} pending wake(s) restored")
+                  f"{len(restored_wake_keys)} pending wake(s) restored, "
+                  f"{orphaned_plans} orphaned plan(s)")
         _crash_state_mark_dirty()  # persist the post-reconcile view
     except Exception as exc:
         print(f"[crash-recovery] boot reconcile failed: {exc!r}")
@@ -2630,7 +2699,8 @@ async def api_health(req: web.Request) -> web.Response:
         ctx = req.app["ctx"]
         running = ctx.get("running") or {}
         return web.json_response({"ok": True, "running": len(running),
-                                  "agents": _live_agent_monitor_count()})
+                                  "agents": _live_agent_monitor_count(),
+                                  "plan_pending": len(_plan_pending_by_session)})
     return web.json_response({"ok": True})
 
 
@@ -5502,6 +5572,213 @@ def _read_run_meta(data_dir: Path, card_id: str) -> "dict | None":
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+# ─────────────────────────── spec-080: cockpit plan mode — pending-plan store ─────────────────
+# The approval gate's server half. engine's can_use_tool gate (real SDK path) and
+# e2e_fake_engine (ctx path) both call create_pending_plan()/resolve_plan() here, and the
+# HTTP decide endpoint resolves the same parked Future — one owner, three call sites.
+_PLANS_DIR: "Path | None" = None            # DATA/plans — set in _plans_init(ctx)
+_plan_records: "dict[str, dict]" = {}       # plan_id -> record (in-memory mirror of sidecars)
+_pending_plan_futures: "dict[str, asyncio.Future]" = {}
+_plan_pending_by_session: "dict[str, str]" = {}  # session_key -> plan_id (crash-persisted)
+_PLAN_PREVIEW_LIMIT = 1500                  # bus/timeline preview cap (full text in sidecar)
+_PLAN_ID_RE = re.compile(r"^[0-9a-f]{8}$")
+
+
+def _plans_init(ctx: dict) -> None:
+    global _PLANS_DIR
+    _PLANS_DIR = ctx["DATA"] / "plans"
+    try:
+        _PLANS_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _valid_plan_id(plan_id: str) -> bool:
+    return bool(isinstance(plan_id, str) and _PLAN_ID_RE.fullmatch(plan_id))
+
+
+def _write_plan_meta(record: dict) -> None:
+    """Atomic sidecar write (tmp + os.replace) — same pattern as the crash-recovery state."""
+    if _PLANS_DIR is None:
+        return
+    try:
+        p = _PLANS_DIR / f"{record['id']}.json"
+        tmp = Path(str(p) + ".tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2))
+        os.replace(str(tmp), str(p))
+    except Exception as exc:
+        print(f"[plan] sidecar write failed for {record.get('id')}: {exc!r}")
+
+
+def _read_plan_meta(plan_id: str) -> "dict | None":
+    if not _valid_plan_id(plan_id):
+        return None
+    rec = _plan_records.get(plan_id)
+    if rec is not None:
+        return rec
+    if _PLANS_DIR is None:
+        return None
+    try:
+        p = _PLANS_DIR / f"{plan_id}.json"
+        if not p.exists():
+            return None
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+
+async def _set_chat_plan_pointer(ctx: dict, session_key: str, chat_id: "str | None",
+                                 plan_id: "str | None") -> None:
+    """Set/clear the plan_id field on the chat entry (reload-durability pointer)."""
+    try:
+        project_id = None
+        for proj in _collect_projects(ctx):
+            if (proj.get("session_key") or proj.get("tg_thread", "")) == session_key:
+                project_id = proj.get("id")
+                break
+        if not project_id:
+            return
+        async with _chats_lock():
+            chats_data = _ensure_chat_entry(ctx, project_id, session_key)
+            entry = chats_data.get(project_id) or {}
+            target = chat_id or entry.get("active")
+            for chat in entry.get("chats", []):
+                if chat.get("id") == target:
+                    if plan_id:
+                        chat["plan_id"] = plan_id
+                    else:
+                        chat.pop("plan_id", None)
+                    _save_chats(ctx, chats_data)
+                    break
+    except Exception as exc:
+        print(f"[plan] chat pointer update failed for {session_key}: {exc!r}")
+
+
+def create_pending_plan(ctx: "dict | None", session_key: str, chat_id: "str | None",
+                        plan_text: str, plan_file_path: "str | None" = None):
+    """Park a plan for operator approval. Returns (plan_id, asyncio.Future).
+
+    The Future resolves with {"decision": "approve"|"reject"|"cancelled", "feedback": str}
+    via resolve_plan() (HTTP decide endpoint / pin-cap eviction / interrupt cleanup)."""
+    ctx = ctx or _WEBAPP_CTX or {}
+    plan_id = secrets.token_hex(4)
+    now = time.time()
+    record = {
+        "id": plan_id,
+        "session_key": session_key,
+        "chat_id": chat_id,
+        "created_at": now,
+        "plan_text": plan_text or "",
+        "plan_file_path": plan_file_path,
+        "status": "awaiting_approval",
+        "decided_at": None,
+        "feedback": None,
+    }
+    _plan_records[plan_id] = record
+    _write_plan_meta(record)
+    _plan_pending_by_session[session_key] = plan_id
+    fut: asyncio.Future = asyncio.get_event_loop().create_future()
+    _pending_plan_futures[plan_id] = fut
+    _crash_state_mark_dirty()
+    _spawn_bg(_set_chat_plan_pointer(ctx, session_key, chat_id, plan_id))
+    _bus_publish(session_key, {
+        "kind": "plan_ready",
+        "plan_id": plan_id,
+        "chat_id": chat_id,
+        # key deliberately NOT "text": full body lives in the sidecar; this preview is bounded
+        # here because the timeline's truncation guard only matches the literal "text" key.
+        "plan_text_preview": (plan_text or "")[:_PLAN_PREVIEW_LIMIT],
+    })
+    print(f"[plan] {session_key}: plan {plan_id} awaiting approval "
+          f"({len(plan_text or '')} chars, file={plan_file_path or '-'})")
+    return plan_id, fut
+
+
+def resolve_plan(ctx: "dict | None", plan_id: str, decision: str, feedback: str = "") -> bool:
+    """Resolve a pending plan. Idempotent: returns False when the id is unknown or already
+    decided (double-click / stale tab / late cancel after decide)."""
+    ctx = ctx or _WEBAPP_CTX or {}
+    record = _plan_records.get(plan_id) or _read_plan_meta(plan_id)
+    if record is None or record.get("status") != "awaiting_approval":
+        return False
+    record["status"] = "approved" if decision == "approve" else (
+        "rejected" if decision == "reject" else "cancelled")
+    record["decided_at"] = time.time()
+    record["feedback"] = feedback or None
+    _plan_records[plan_id] = record
+    _write_plan_meta(record)
+    session_key = record.get("session_key") or ""
+    if _plan_pending_by_session.get(session_key) == plan_id:
+        _plan_pending_by_session.pop(session_key, None)
+    _crash_state_mark_dirty()
+    # spec-080 C2: the approved plan executes in-turn; the NEXT turn must be a normal
+    # bypass turn. Server-side mirror of the client's toggle auto-off — without this an
+    # auto-continue wake could rebuild a plan-mode turn and park an ExitPlanMode nobody
+    # is watching for.
+    if decision == "approve":
+        opts = _last_turn_options.get(session_key)
+        if isinstance(opts, dict):
+            opts["plan_mode"] = False
+    fut = _pending_plan_futures.pop(plan_id, None)
+    if fut is not None and not fut.done():
+        fut.set_result({"decision": decision, "feedback": feedback or ""})
+    _spawn_bg(_set_chat_plan_pointer(ctx, session_key, record.get("chat_id"), None))
+    _bus_publish(session_key, {
+        "kind": "plan_decided",
+        "plan_id": plan_id,
+        "chat_id": record.get("chat_id"),
+        "approved": decision == "approve",
+        "status": record["status"],
+    })
+    print(f"[plan] {session_key}: plan {plan_id} → {record['status']}")
+    return True
+
+
+def _pending_plan_id(session_key: str) -> "str | None":
+    """Engine callback: the plan_id currently awaiting approval for this session, if any."""
+    return _plan_pending_by_session.get(session_key)
+
+
+async def api_plan_get(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/plan/{plan_id} — full plan record (card render + reload)."""
+    ctx = req.app["ctx"]
+    if _find_project_by_id(ctx, req.match_info["id"]) is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    plan_id = req.match_info["plan_id"]
+    record = _read_plan_meta(plan_id)
+    if record is None:
+        return web.json_response({"error": "plan not found"}, status=404)
+    return web.json_response(record)
+
+
+async def api_plan_decide(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/plan/{plan_id}/decide  {decision: approve|reject, feedback?}
+
+    Idempotent: a second decide (double-click / stale tab) returns {ok, noop: true}."""
+    ctx = req.app["ctx"]
+    if _find_project_by_id(ctx, req.match_info["id"]) is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    plan_id = req.match_info["plan_id"]
+    if not _valid_plan_id(plan_id):
+        return web.json_response({"error": "bad plan id"}, status=400)
+    try:
+        body = await req.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+    decision = (body.get("decision") or "").strip()
+    if decision not in ("approve", "reject"):
+        return web.json_response({"error": "decision must be approve|reject"}, status=400)
+    feedback = str(body.get("feedback") or "")[:4000]
+    if resolve_plan(ctx, plan_id, decision, feedback):
+        return web.json_response({"ok": True, "status": "approved" if decision == "approve"
+                                  else "rejected"})
+    record = _read_plan_meta(plan_id)
+    return web.json_response({"ok": True, "noop": True,
+                              "status": (record or {}).get("status", "unknown")})
 
 
 # ─────────────────────────── AppCtx TypedDict ───────────────────────────
@@ -10049,7 +10326,8 @@ def _chat_queue_flush() -> None:
 def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = None,
                         project_id: "str | None" = None, effort: "str | None" = None,
                         ultracode: "bool | None" = None,
-                        auto_rotate: "bool | None" = None) -> "dict | None":
+                        auto_rotate: "bool | None" = None,
+                        plan_mode: "bool | None" = None) -> "dict | None":
     """Append a message to the chat queue for session_key.
     Returns the new item dict, or None if the queue is full.
 
@@ -10079,6 +10357,10 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
         # Carry the originating turn's auto-rotate choice so the drained run applies the
         # same post-turn cost rotation as the direct /chat path (absent → default ON).
         item["auto_rotate"] = bool(auto_rotate)
+    if plan_mode:
+        # spec-080 C3: a queued plan-mode message MUST drain as a plan turn — dropping the
+        # flag here would silently execute it full-auto without the approval gate.
+        item["plan_mode"] = True
     lst.append(item)
     _chat_queue_flush()
     return item
@@ -10266,6 +10548,11 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         _q_ultracode = item.get("ultracode")
         if _q_ultracode is None:
             _q_ultracode = bool(_lto.get("ultracode"))
+        # spec-080 C3: plan_mode comes ONLY from the item itself — deliberately NOT inherited
+        # from _last_turn_options. Synthetic auto-continue wakes and stray queued messages
+        # must never silently re-enter plan mode (an unattended ExitPlanMode would park a
+        # card nobody is watching and burn the auto-continue budget).
+        _q_plan_mode = bool(item.get("plan_mode"))
         agents_config = topic.get("agents_config") or {}
         agents_kwargs = _build_agents_kwargs(ctx, agents_config)
 
@@ -10340,6 +10627,8 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             ephemeral=False,
             effort=_q_effort,
             ultracode=bool(_q_ultracode),
+            plan_mode=_q_plan_mode,
+            chat_id=_resolved_chat_id,
         ):
             etype = event["type"]
             # spec-071: full event parity with api_project_chat — buffer every event in the
@@ -10785,6 +11074,10 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # a cost audit 2026-07-08, flipped back to opt-in 2026-07-13 on operator request.)
     _auto_rotate = bool(body.get("auto_rotate", False))
 
+    # spec-080: cockpit plan mode (per-chat toggle). The turn connects in the CLI's native
+    # plan mode (read-only + plan workflow) and ExitPlanMode parks an Approve/Reject card.
+    _plan_mode = bool(body.get("plan_mode"))
+
     # Spec-037: optional chat_id to target a specific chat tab (falls back to active chat).
     _req_chat_id: "str | None" = (body.get("chat_id") or "").strip() or None
     if _req_chat_id and not _valid_chat_id(_req_chat_id):
@@ -10828,11 +11121,37 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # options so the drained run matches the live-client fingerprint.
         item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"],
                                    effort=_effort_override, ultracode=_ultracode,
-                                   auto_rotate=_auto_rotate)
+                                   auto_rotate=_auto_rotate, plan_mode=_plan_mode)
         if item is None:
             payload = json.dumps({"type": "error", "error": "queue full"}, ensure_ascii=False)
         else:
             payload = json.dumps({"type": "queued", "item": item}, ensure_ascii=False)
+        await resp.write(f"data: {payload}\n\n".encode())
+        return resp
+
+    # spec-080 C1: a plan turn needs a FRESH client connect (can_use_tool binds at connect
+    # time), but a live client pinned by still-running background children defers reconnect
+    # and would service the turn UNGATED in bypassPermissions. Queue the message instead —
+    # the queue drains automatically when the children finish and the client can reconnect.
+    if _plan_mode and _has_live_agent_monitors(session_key):
+        _n_children = sum(
+            1 for r in _monitors.get(session_key, {}).values()
+            if r.get("kind") in ("agent", "workflow", "monitor") and r.get("status") == "running")
+        resp = web.StreamResponse(
+            status=200,
+            headers={"Content-Type": "text/event-stream",
+                     "Cache-Control": "no-cache",
+                     "X-Accel-Buffering": "no"},
+        )
+        await resp.prepare(req)
+        item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"],
+                                   effort=_effort_override, ultracode=_ultracode,
+                                   auto_rotate=_auto_rotate, plan_mode=True)
+        payload = json.dumps({
+            "type": "queued",
+            "item": item,
+            "reason": f"plan turn queued until {_n_children} background task(s) finish",
+        }, ensure_ascii=False)
         await resp.write(f"data: {payload}\n\n".encode())
         return resp
 
@@ -10842,7 +11161,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # options (effort/ultracode) that synthetic continuation turns must reproduce to keep
     # the live-client fingerprint stable.
     _bg_continue_reset(session_key)
-    _last_turn_options[session_key] = {"effort": _effort_override, "ultracode": _ultracode}
+    _last_turn_options[session_key] = {"effort": _effort_override, "ultracode": _ultracode,
+                                       "plan_mode": _plan_mode}
     _crash_state_mark_dirty()  # root-fix B1: options must survive a restart for wake parity
     # spec-069 643ecf: clear COMPLETED sub-agent monitors left over from a prior turn so this
     # turn's panel starts clean (any still-running sub-agents stay). Stops done/failed rows piling up.
@@ -10988,6 +11308,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
             ephemeral=False,
             effort=_effort_override,
             ultracode=_ultracode,
+            plan_mode=_plan_mode,
+            chat_id=_active_chat_id_for_run,
         )
         # spec-071 heartbeat: unlike the activity-stream SSE (which pings every 25 s precisely
         # because the Cloudflare tunnel kills idle streams), this direct chat stream wrote bytes
@@ -11394,6 +11716,13 @@ async def api_project_rotate(req: web.Request) -> web.Response:
         return web.json_response(
             {"error": f"{n} background task(s) still running — wait for them to finish or stop "
                       "them first (pass force:true to reset anyway and abandon them)"},
+            status=409)
+    # spec-080: same guard for a plan awaiting approval — rotate would wipe the session under
+    # the parked decision (approve/reject it first, or force).
+    if not bool(body.get("force")) and _plan_pending_by_session.get(session_key):
+        return web.json_response(
+            {"error": "a plan is awaiting approval for this session — approve or reject it "
+                      "first (pass force:true to reset anyway)"},
             status=409)
 
     result = await _rotate_session_core(ctx, project, session_key, do_handoff)
@@ -14315,6 +14644,8 @@ async def start(ctx: dict) -> None:
         _deferred_init(ctx)
         # Root-fix B1: crash-recovery snapshot (monitors + pending completion wakes)
         _crash_state_init(ctx)
+        # spec-080: pending-plan sidecar directory (DATA/plans)
+        _plans_init(ctx)
         # spec-053 Phase B: Web Push — VAPID keypair + subscription storage paths
         try:
             _push_init(ctx)
@@ -14407,6 +14738,9 @@ async def start(ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/tasks/{card}/apply", api_card_apply)
         app.router.add_post("/api/projects/{id}/tasks/{card}/discard", api_card_discard)
         app.router.add_post("/api/projects/{id}/tasks/{card}/check", api_card_check)
+        # spec-080: plan-mode approval gate
+        app.router.add_get("/api/projects/{id}/plan/{plan_id}", api_plan_get)
+        app.router.add_post("/api/projects/{id}/plan/{plan_id}/decide", api_plan_decide)
         # C1: SSE chat for project
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
         # C1-stop: interrupt current agent run

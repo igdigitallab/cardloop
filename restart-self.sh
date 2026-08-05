@@ -74,14 +74,22 @@ if command -v curl >/dev/null 2>&1; then
     # tolerate an optional space so this doesn't silently misparse as "idle".
     running="$(printf '%s' "$resp" | grep -oE '"running"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' || true)"
     agents="$(printf '%s' "$resp" | grep -oE '"agents"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' || true)"
-    if { [ -z "$running" ] || [ "$running" = "0" ]; } && { [ -z "$agents" ] || [ "$agents" = "0" ]; }; then
+    plans="$(printf '%s' "$resp" | grep -oE '"plan_pending"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' || true)"
+    if [ -n "$plans" ] && [ "$plans" != "0" ] && [ "$waited" -eq 60 ]; then
+      # spec-080: a restart silently loses a pending plan decision (the parked approval dies
+      # with the process; boot flips it to 'orphaned'). Say so early, keep the same soft cap.
+      echo "⏸  ${plans} plan(s) awaiting operator approval — approve/reject in the cockpit, or this proceeds after the ${WAIT_FOR_IDLE_MAX_SEC}s cap and the decision is lost."
+    fi
+    if { [ -z "$running" ] || [ "$running" = "0" ]; } && { [ -z "$agents" ] || [ "$agents" = "0" ]; } && { [ -z "$plans" ] || [ "$plans" = "0" ]; }; then
       break
     fi
     sleep 5
     waited=$((waited + 5))
   done
   if [ "$waited" -ge "$WAIT_FOR_IDLE_MAX_SEC" ]; then
-    if [ -n "$agents" ] && [ "$agents" != "0" ]; then
+    if [ -n "$plans" ] && [ "$plans" != "0" ]; then
+      echo "⚠️  WARNING: ${plans} plan approval(s) still pending after ${WAIT_FOR_IDLE_MAX_SEC}s wait — restarting anyway (the pending decision is LOST; boot marks it orphaned and notifies)."
+    elif [ -n "$agents" ] && [ "$agents" != "0" ]; then
       echo "⚠️  WARNING: ${agents} background agent(s) still running after ${WAIT_FOR_IDLE_MAX_SEC}s wait — restarting anyway (they will be ABORTED mid-work; the crash-recovery wake will report it)."
     else
       echo "⚠️  WARNING: still busy after ${WAIT_FOR_IDLE_MAX_SEC}s wait — restarting anyway (in-flight turns will be aborted)."

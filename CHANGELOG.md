@@ -7,6 +7,22 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Added — Cockpit Plan Mode (spec-080)
+Terminal-grade plan mode in the chat: a per-chat "🗺 Plan mode" toggle runs the turn in the
+CLI's NATIVE `permission_mode="plan"` (hard read-only + the CLI's own 5-phase Explore/Plan
+workflow + plan file), and `ExitPlanMode` surfaces as an Approve/Reject card above the
+composer (markdown plan body, reject-with-feedback, Web Push, reload-durable via a
+`plan_id` pointer on the chat). Approve → the same turn executes (the `can_use_tool` gate
+rubber-stamps post-approval; a runtime flip INTO bypassPermissions is illegal and the
+plan+`--dangerously-skip-permissions` combo disables plan-blocking — both verified live,
+so no mode flip exists); Reject → the model revises in-turn and re-submits. Guards: plan
+turns are queued while background children pin the live client (an ungated reuse would
+silently run full-auto); ultracode is suppressed during plan turns (the Workflow tool IS
+callable inside plan mode — verified); rotate refuses while a plan is pending; deploys
+wait for `plan_pending==0`; a restart orphans the pending plan loudly (boot reconcile +
+operator notification); the 4h pin cap cancels a forgotten card cleanly. E2E-covered with
+zero SDK via the fake engine (`e2e:plan`).
+
 ### Fixed — root-fix: background sub-agents dying / orchestrator never reporting back
 Three-wave fix for the standing complaint "I launch background agents, they get killed
 mid-work, and the orchestrator never comes back until I ping it". Evidence-driven

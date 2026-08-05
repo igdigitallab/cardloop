@@ -737,6 +737,19 @@ export const api = {
   deferredUpdate: (id: string, body: Record<string, unknown>) =>
     apiFetch<Record<string, unknown>>(`/api/deferred/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
+  // spec-080: plan-mode approval gate
+  planGet: (projectId: string, planId: string) =>
+    apiFetch<{ id: string; status: string; plan_text: string; chat_id: string | null;
+               plan_file_path: string | null }>(
+      `/api/projects/${projectId}/plan/${encodeURIComponent(planId)}`),
+
+  planDecide: (projectId: string, planId: string,
+               body: { decision: 'approve' | 'reject'; feedback?: string }) =>
+    apiFetch<{ ok: boolean; status: string; noop?: boolean }>(
+      `/api/projects/${projectId}/plan/${encodeURIComponent(planId)}/decide`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    ),
+
   // Spec-023: Project Archive
   archiveProject: (id: string) =>
     apiFetch<{ archived: boolean }>(`/api/projects/${id}/archive`, { method: 'POST' }),

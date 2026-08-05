@@ -48,10 +48,11 @@ async def test_deep_reports_running_and_agents(aiohttp_client, monitors):
     assert data["agents"] == 4
 
 
-async def test_deep_zero_when_no_monitors(aiohttp_client, monitors):
+async def test_deep_zero_when_no_monitors(aiohttp_client, monitors, monkeypatch):
+    monkeypatch.setattr(_webapp, "_plan_pending_by_session", {})
     client = await aiohttp_client(_make_app({"running": {}}))
     data = await (await client.get("/api/health?deep=1")).json()
-    assert data == {"ok": True, "running": 0, "agents": 0}
+    assert data == {"ok": True, "running": 0, "agents": 0, "plan_pending": 0}
 
 
 async def test_shallow_unchanged(aiohttp_client, monitors):

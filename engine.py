@@ -24,6 +24,8 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookMatcher,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ProcessError,
     RateLimitEvent,
     ResultMessage,
@@ -423,7 +425,11 @@ FILES_PROMPT = (
 )
 
 # AskUserQuestion = interactive prompt (no reply in TG -> agent hangs or decides on its own).
-DISALLOWED_TOOLS = ["AskUserQuestion"]
+# EnterPlanMode = the model self-invoking plan mode mid-turn: a turn that did not START in
+# plan mode has no can_use_tool wired, so a later ExitPlanMode would hang unanswered. Plan
+# mode is operator-initiated only (spec-080). Live smoke showed the tool is absent from SDK
+# sessions anyway — this is a belt against future CLI versions exposing it.
+DISALLOWED_TOOLS = ["AskUserQuestion", "EnterPlanMode"]
 
 # spec-060: optional "second opinion" MCP tool, built once at import. Fronts two backends
 # — Antigravity (agy) and Azure AI Foundry (grok/deepseek/gpt5). None when SECOND_OPINION=0
@@ -815,15 +821,116 @@ _bg_run_cb = None
 
 
 def _register_webapp_callbacks(timeline_append, bus_publish, monitor_update=None,
-                               has_live_subagents=None, bg_run_event=None):
+                               has_live_subagents=None, bg_run_event=None,
+                               create_pending_plan=None, resolve_plan=None,
+                               pending_plan_id=None):
     """Inject webapp callbacks so engine.py can publish events without importing webapp."""
     global _timeline_append_cb, _bus_publish_cb, _monitor_update_cb, _has_live_subagents_cb, \
-        _bg_run_cb
+        _bg_run_cb, _create_pending_plan_cb, _resolve_plan_cb, _pending_plan_id_cb
     _timeline_append_cb = timeline_append
     _bus_publish_cb = bus_publish
     _monitor_update_cb = monitor_update
     _has_live_subagents_cb = has_live_subagents
     _bg_run_cb = bg_run_event
+    _create_pending_plan_cb = create_pending_plan
+    _resolve_plan_cb = resolve_plan
+    _pending_plan_id_cb = pending_plan_id
+
+
+# ─────────────────────────── spec-080: cockpit plan mode ──────────────────────────────────────
+# The plan-approval gate. A plan-mode turn connects with permission_mode="plan" (the CLI
+# hard-blocks mutations and injects its native 5-phase plan workflow) and wires can_use_tool.
+# ExitPlanMode arrives as a can_use_tool request; the webapp parks it as a pending plan card
+# (Approve/Reject in the cockpit) and this side awaits the decision Future.
+#
+# Post-approval there is NO permission-mode flip: set_permission_mode("bypassPermissions") is
+# illegal unless the CLI was launched with --dangerously-skip-permissions, and launching plan
+# WITH that flag disables plan-blocking entirely (both verified live, spec-080 Wave 0). After
+# an Approve the gate callback simply rubber-stamps every subsequent tool call of the turn
+# (verified working live). The NEXT turn reconnects into real bypassPermissions naturally via
+# the fingerprint mismatch — one cold start per approved plan, accepted.
+_create_pending_plan_cb = None   # webapp.create_pending_plan(ctx, sk, chat_id, text, path)
+_resolve_plan_cb = None          # webapp.resolve_plan(ctx, plan_id, decision, feedback)
+_pending_plan_id_cb = None       # webapp: session_key -> plan_id | None
+# Dispatcher state (NOT captured in closures — a reused live client services later turns with
+# the FIRST turn's closure, so per-turn data must be read from here at call time):
+_plan_turn_chat: "dict[str, str | None]" = {}   # session_key -> chat_id of the current plan turn
+_plan_gate_approved: "dict[str, bool]" = {}     # session_key -> True after Approve (turn-scoped)
+_plan_write_paths: "dict[str, str]" = {}        # session_key -> last observed ~/.claude/plans Write
+
+
+def _make_plan_gate_cb(session_key: str, ctx: "dict | None"):
+    """can_use_tool callback for plan-mode turns. Reads all per-turn state from module dicts
+    at CALL time (dispatcher pattern) so a stale closure on a reused client stays correct."""
+
+    async def _plan_gate_cb(tool_name, tool_input, tp_ctx):
+        try:
+            if _plan_gate_approved.get(session_key):
+                return PermissionResultAllow()
+            if tool_name != "ExitPlanMode":
+                # Plan mode: the CLI already hard-blocks mutating tools before this callback;
+                # whatever falls through (reads, ask-rule tools) is fine to allow.
+                return PermissionResultAllow()
+            _input = tool_input or {}
+            plan_text = _input.get("plan") or ""
+            plan_file = _input.get("planFilePath") or _plan_write_paths.get(session_key)
+            if not plan_text and plan_file:
+                try:
+                    plan_text = Path(plan_file).read_text()[:200_000]
+                except Exception:
+                    pass
+            if _create_pending_plan_cb is None:
+                # No cockpit wired (unit tests / standalone) — approve so the engine stays usable.
+                _plan_gate_approved[session_key] = True
+                return PermissionResultAllow()
+            plan_id, fut = _create_pending_plan_cb(
+                ctx, session_key, _plan_turn_chat.get(session_key), plan_text, plan_file)
+            print(f"[plan-gate] {session_key}: plan {plan_id} awaiting operator decision")
+            try:
+                decision = await fut
+            except asyncio.CancelledError:
+                # /stop or client teardown while awaiting — mark the record, re-raise.
+                try:
+                    if _resolve_plan_cb is not None:
+                        _resolve_plan_cb(None, plan_id, "cancelled",
+                                         "turn was interrupted while awaiting approval")
+                finally:
+                    raise
+            if (decision or {}).get("decision") == "approve":
+                _plan_gate_approved[session_key] = True
+                print(f"[plan-gate] {session_key}: plan {plan_id} APPROVED — executing in-turn")
+                return PermissionResultAllow()
+            feedback = (decision or {}).get("feedback") or ""
+            print(f"[plan-gate] {session_key}: plan {plan_id} REJECTED — model will revise")
+            return PermissionResultDeny(
+                message=feedback or "Plan needs revision — reconsider and call ExitPlanMode again.")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The gate must never wedge a turn on an internal error — deny with the reason so
+            # the model can surface it instead of hanging.
+            print(f"[plan-gate] {session_key}: gate error {exc!r} — denying ExitPlanMode")
+            return PermissionResultDeny(message=f"plan gate internal error: {exc}")
+
+    return _plan_gate_cb
+
+
+def _plan_client_fingerprint_ok(ctx: "dict | None", session_key: str, opts,
+                                stable_append_hash, effort, memory_mode) -> bool:
+    """spec-080 C1 safeguard: a live client pinned by running background children is REUSED on
+    fingerprint mismatch (deferred reconnect, spec-069 f9d60d) — but can_use_tool binds at
+    connect time, so a plan turn serviced by a reused bypass client would silently run
+    full-auto with no gate. Detect the deferred reuse and let the caller abort the turn."""
+    try:
+        registry = (ctx or {}).get("live_clients", _live_clients)
+        entry = registry.get(session_key)
+        if entry is None:
+            return True
+        want = _compute_fingerprint(opts, stable_append_hash=stable_append_hash,
+                                    effort=effort, memory_mode=memory_mode)
+        return entry.fingerprint == want
+    except Exception:
+        return True  # never block on safeguard errors; worst case is pre-fix behavior
 
 
 def _session_has_live_subagents(session_key: str) -> bool:
@@ -1056,6 +1163,17 @@ def _make_post_tool_use_hook(project_name: str, session_key: str):
                         _monitor_update_cb(session_key, delta)
             except Exception:
                 pass  # monitor tracking is best-effort — never break a turn
+
+            # spec-080 backstop: remember the last plan-file Write for this session so the
+            # ExitPlanMode gate can read the plan body even if input.plan/planFilePath come
+            # up empty (V2 file-based flow; sub-agent Writes are visible here too).
+            try:
+                if tool_name == "Write" and isinstance(tool_input, dict):
+                    _fp = str(tool_input.get("file_path") or "")
+                    if _fp.startswith(str(Path.home() / ".claude" / "plans")):
+                        _plan_write_paths[session_key] = _fp
+            except Exception:
+                pass
 
             # Determine ok/err: dict with "error" key, or exception-like object.
             is_err = False
@@ -1385,6 +1503,19 @@ def _schedule_idle_eviction(session_key: str, ctx: "dict | None") -> "asyncio.Ta
                     deferred_sec += LIVE_CLIENT_TTL_SEC
                     if deferred_sec >= LIVE_CLIENT_MAX_PIN_SEC:
                         print(f"[live-client] {session_key}: pinned {deferred_sec}s (> {LIVE_CLIENT_MAX_PIN_SEC}s cap) — presuming stuck, force-evicting")
+                        # spec-080: a plan approval parked past the pin cap dies with the
+                        # client — resolve it as cancelled so the record and the cockpit card
+                        # do not stay 'awaiting' forever (the callback's CancelledError path
+                        # also fires on disconnect; resolve first so the reason is specific).
+                        try:
+                            if _pending_plan_id_cb is not None and _resolve_plan_cb is not None:
+                                _ppid = _pending_plan_id_cb(session_key)
+                                if _ppid:
+                                    _resolve_plan_cb(None, _ppid, "cancelled",
+                                                     "session force-evicted after the "
+                                                     f"{LIVE_CLIENT_MAX_PIN_SEC}s pin cap — resubmit the plan turn")
+                        except Exception:
+                            pass
                         _running_dict.pop(session_key, None)
                         await _evict_live_client(session_key, ctx)
                         return
@@ -1919,6 +2050,8 @@ async def run_engine(  # type: ignore[return]
     output_format: "dict | None" = None,
     effort: "str | None" = None,
     ultracode: bool = False,
+    plan_mode: bool = False,
+    chat_id: "str | None" = None,
     entrypoint: str = "chat",
     disallowed_tools_extra: "list | None" = None,
     project_skills: "list[str] | str | None" = None,
@@ -1977,10 +2110,27 @@ async def run_engine(  # type: ignore[return]
 
     resolved_model = MODELS.get(model, model) if model else MODELS.get(DEFAULT_MODEL, DEFAULT_MODEL)
 
+    # spec-080 C4: plan mode and ultracode are mutually exclusive — the Workflow tool IS
+    # available inside plan mode (verified live) and would spawn executing agents mid-plan,
+    # and ULTRACODE_PROMPT names roster agents a plan turn does not carry. Plan wins.
+    if plan_mode and ultracode:
+        print(f"[plan-gate] {session_key}: ultracode suppressed for the plan-mode turn")
+        ultracode = False
+    if plan_mode:
+        # Dispatcher state for the gate callback (read at call time, never captured):
+        _plan_turn_chat[session_key] = chat_id
+        _plan_gate_approved.pop(session_key, None)
+        _plan_write_paths.pop(session_key, None)
+    else:
+        _plan_turn_chat.pop(session_key, None)
+        _plan_gate_approved.pop(session_key, None)
+
     # Conductor directive: inject for fable as orchestrator model (unless disabled per-project) — but
     # NOT when ultracode is on, since the native ultracode contract (Workflow tool + reminders)
     # takes over and the conductor's "≤3–5 concurrent" cap would fight ultracode fan-out.
-    if not skip_conductor_prompt and not ultracode and resolved_model and resolved_model.startswith("fable"):
+    # NOT in plan mode either: the CLI injects its own plan workflow (built-in Explore/Plan
+    # agent types), and the conductor names roster agents a plan turn does not carry.
+    if not skip_conductor_prompt and not ultracode and not plan_mode and resolved_model and resolved_model.startswith("fable"):
         existing_append = system_prompt.get("append") or ""
         sep = "\n" if existing_append else ""
         system_prompt = dict(system_prompt)
@@ -2004,7 +2154,10 @@ async def run_engine(  # type: ignore[return]
         system_prompt["append"] = existing_append + sep + ULTRACODE_PROMPT
 
     # Sub-agent roster: use provided agents or fall back to the default roster.
-    effective_agents = agents if agents is not None else DEFAULT_AGENTS
+    # Plan-mode turns drop the custom roster entirely: the CLI's built-in Explore/Plan agent
+    # types drive the plan workflow (verified live), and a custom AgentDefinition with
+    # permissionMode="bypassPermissions" could hand a child a way around plan-blocking.
+    effective_agents = None if plan_mode else (agents if agents is not None else DEFAULT_AGENTS)
 
     # Fallback model: if fable is unavailable at runtime, degrade to opus silently.
     fallback = "opus" if resolved_model and resolved_model.startswith("fable") else None
@@ -2127,7 +2280,13 @@ async def run_engine(  # type: ignore[return]
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,
-        permission_mode="bypassPermissions",
+        # spec-080: plan turns connect in the CLI's native plan mode (hard read-only + its own
+        # 5-phase workflow injection). permission_mode is part of the live-client fingerprint,
+        # so toggling plan on/off reconnects the client with correctly-bound options.
+        permission_mode="plan" if plan_mode else "bypassPermissions",
+        # can_use_tool only when plan gating is active — under bypassPermissions it would be
+        # shadowed anyway and the SDK emits CanUseToolShadowedWarning noise.
+        can_use_tool=_make_plan_gate_cb(session_key, ctx) if plan_mode else None,
         max_buffer_size=SDK_MAX_BUFFER_BYTES,
         cwd=cwd,
         setting_sources=["user", "project", "local"],
@@ -2433,6 +2592,21 @@ async def run_engine(  # type: ignore[return]
         print(f"[live-client] setup failed for {session_key} ({_lc_exc!r}), falling back to fresh client")
         live = None
 
+    # spec-080 C1: a client pinned by live background children is reused on fingerprint
+    # mismatch (deferred reconnect). For a PLAN turn that reuse is fatal-but-silent: the old
+    # client has no can_use_tool bound and the CLI subprocess is still in bypassPermissions —
+    # the turn would execute full-auto with no gate and no error. Abort loudly instead.
+    if plan_mode and live is not None and not _plan_client_fingerprint_ok(
+            ctx, session_key, opts, _stable_append_hash, _eff_effort, _memory_mode):
+        print(f"[plan-gate] {session_key}: live client pinned by running background tasks — "
+              "aborting plan turn instead of running ungated")
+        yield {"type": "error", "exc": RuntimeError(
+            "Plan mode could not activate: this session's client is pinned by still-running "
+            "background tasks and cannot be reconnected in plan mode. Wait for them to finish "
+            "(or stop them) and resend the message.")}
+        _running.pop(session_key, None)
+        return
+
     if live is not None:
         # ── Persistent-client path ────────────────────────────────────────────────────────────────
         # The client is already connected; we skip __aenter__ / __aexit__.
@@ -2576,7 +2750,10 @@ def _build_ctx(*, web_port: int = None, web_password: str = None) -> dict:
     """
     import webapp as _webapp  # lazy — called only at startup after webapp is fully loaded
     _register_webapp_callbacks(_webapp._timeline_append, _webapp._bus_publish, _webapp._monitor_update,
-                               _webapp._has_live_agent_monitors, _webapp._bg_run_event)
+                               _webapp._has_live_agent_monitors, _webapp._bg_run_event,
+                               create_pending_plan=_webapp.create_pending_plan,
+                               resolve_plan=_webapp.resolve_plan,
+                               pending_plan_id=_webapp._pending_plan_id)
 
     _web_port = web_port if web_port is not None else int(os.getenv("WEB_PORT", "8787"))
     _web_password = web_password if web_password is not None else os.getenv("WEB_PASSWORD", "")
@@ -2618,6 +2795,10 @@ def _build_ctx(*, web_port: int = None, web_password: str = None) -> dict:
         # spec-039: eviction callable exposed via ctx so webapp.py can evict live clients
         # without importing bot.py.  Signature: async (session_key: str, ctx: dict|None) -> None.
         "evict_live_client": _evict_live_client,
+        # spec-080: pending-plan store hooks exposed via ctx so e2e_fake_engine (which never
+        # touches engine.py's private callback registry) can drive the exact same store.
+        "create_pending_plan": _webapp.create_pending_plan,
+        "resolve_plan": _webapp.resolve_plan,
         # spec-034 L2: board reconciler callable (webapp.py must not import bot.py directly)
         "reconcile_board": reconcile_board,
     }

@@ -658,6 +658,22 @@ export interface ActivityEventBoard {
   ts: number
 }
 
+// spec-080: plan-mode approval gate — a plan awaits an operator decision / a decision landed.
+export interface ActivityEventPlanReady {
+  kind: 'plan_ready'
+  plan_id: string
+  chat_id?: string | null
+  plan_text_preview?: string
+}
+
+export interface ActivityEventPlanDecided {
+  kind: 'plan_decided'
+  plan_id: string
+  chat_id?: string | null
+  approved?: boolean
+  status?: string
+}
+
 export type ActivityEvent =
   | ActivityEventRunStart
   | ActivityEventText
@@ -670,6 +686,8 @@ export type ActivityEvent =
   | ActivityEventBoard
   | ActivityEventAutoRotated
   | ActivityEventSessionRotated
+  | ActivityEventPlanReady
+  | ActivityEventPlanDecided
 
 export interface VersionInfo {
   current: string

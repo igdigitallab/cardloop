@@ -494,6 +494,18 @@ export const ru = {
   'chat.ultracode_label': 'Ultracode',
   'chat.ultracode_toggle': 'Режим Ultracode',
   'chat.ultracode_hint': 'Нативный ultracode Claude Code: агент пишет мультиагентные Workflow под каждую серьёзную задачу — параллельные пайплайны, адверсариальная верификация (скептики опровергают находки), панели судей — на effort xhigh. Медленнее и дороже; побеждает лучший ответ, а не самый дешёвый.',
+  'chat.plan_label': 'Режим плана',
+  'chat.plan_toggle': 'Режим плана',
+  'chat.plan_hint': 'Нативный plan mode Claude Code: ход идёт read-only (разведчики, без правок), пишется план, и здесь появляется карточка Approve/Reject. Approve → тот же ход исполняет план; Reject с фидбэком → модель ревизит.',
+  'chat.plan_locked_hint': 'План ждёт вашего решения — сначала одобрите или отклоните его.',
+  'chat.plan_ultracode_conflict': 'Ultracode подавлен, пока включён режим плана (план-ход read-only; Workflow-развёртка исполняла бы).',
+  'chat.plan_card_title': 'План ждёт одобрения',
+  'chat.plan_card_empty': 'Текст плана не пойман — смотрите план-файл на диске',
+  'chat.plan_approve': 'Одобрить и исполнить',
+  'chat.plan_reject': 'Отклонить…',
+  'chat.plan_reject_send': 'Отправить фидбэк и отклонить',
+  'chat.plan_reject_cancel': 'Назад',
+  'chat.plan_feedback_placeholder': 'Что поменять в плане? (уйдёт модели)',
 
 
   // ── Auto-rotate toggle (spec-059 / T3) ──────────────────────────

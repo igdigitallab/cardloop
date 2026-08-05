@@ -116,6 +116,8 @@ async def run_engine(
     output_format: "dict | None" = None,
     effort: "str | None" = None,
     ultracode: bool = False,
+    plan_mode: bool = False,
+    chat_id: "str | None" = None,
     entrypoint: str = "chat",
     disallowed_tools_extra: "list | None" = None,
     **_ignored: Any,
@@ -185,6 +187,29 @@ async def run_engine(
             yield {"type": "text_delta", "text": part}
             await asyncio.sleep(_DELTA_GAP_SEC)
         full = "".join(parts)
+        yield {"type": "text", "text": full}
+        _append_transcript(cwd, sid, prompt, full)
+        yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
+        return
+
+    if "e2e:plan" in prompt:
+        # spec-080: full plan-approval flow with zero SDK — parks a REAL pending plan in the
+        # webapp store (via ctx, the same functions the real engine's gate uses), so the
+        # Playwright spec exercises the actual card render, decide POST, bus sync and
+        # chat resumption end to end.
+        create = (ctx or {}).get("create_pending_plan")
+        if create is None:
+            yield {"type": "error", "exc": RuntimeError("e2e:plan needs ctx.create_pending_plan")}
+            return
+        yield {"type": "text_delta", "text": "Planning (scripted)... "}
+        plan_id, fut = create(ctx, session_key, chat_id,
+                              "## Fake plan\n1. Do X\n2. Do Y")
+        decision = await fut
+        if (decision or {}).get("decision") == "approve":
+            full = "Approved — executing fake plan. PLAN_EXEC_DONE."
+        else:
+            fb = (decision or {}).get("feedback") or ""
+            full = f"Plan rejected: {fb}. Revising (fake). PLAN_REJECTED_ACK."
         yield {"type": "text", "text": full}
         _append_transcript(cwd, sid, prompt, full)
         yield {"type": "result", "session_id": sid, "cost_usd": 0.0}

@@ -522,6 +522,18 @@ export const en = {
   'chat.ultracode_label': 'Ultracode',
   'chat.ultracode_toggle': 'Ultracode mode',
   'chat.ultracode_hint': 'Native Claude Code ultracode: the agent authors multi-agent Workflows for every substantive task — parallel pipelines, adversarial verification (skeptics try to refute findings), judge panels — at xhigh effort. Slower and more expensive; the best answer wins, not the cheapest.',
+  'chat.plan_label': 'Plan mode',
+  'chat.plan_toggle': 'Plan mode',
+  'chat.plan_hint': 'Native Claude Code plan mode: the turn runs read-only (explore agents, no edits), writes a plan, and pins an Approve/Reject card here. Approve → the same turn executes the plan; Reject with feedback → the model revises.',
+  'chat.plan_locked_hint': 'A plan is awaiting your decision — approve or reject it first.',
+  'chat.plan_ultracode_conflict': 'Ultracode is suppressed while Plan mode is on (the plan turn is read-only; Workflow fan-out would execute).',
+  'chat.plan_card_title': 'Plan awaiting approval',
+  'chat.plan_card_empty': 'Plan text was not captured — see the plan file on disk',
+  'chat.plan_approve': 'Approve & execute',
+  'chat.plan_reject': 'Reject…',
+  'chat.plan_reject_send': 'Send feedback & reject',
+  'chat.plan_reject_cancel': 'Back',
+  'chat.plan_feedback_placeholder': 'What should change in the plan? (sent to the model)',
 
 
   // ── Auto-rotate toggle (spec-059 / T3) ──────────────────────────
