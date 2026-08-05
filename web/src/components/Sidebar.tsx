@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Project, ProjectGroups } from '../types'
+import { Project, ProjectGroups, SearchHit } from '../types'
 import { api } from '../api'
 import { ProjectAvatar } from './ProjectAvatar'
 import { ConfirmModal } from './ConfirmModal'
@@ -10,6 +10,7 @@ import { ThemeToggle } from './ThemeToggle'
 import { VersionBadge } from './VersionBadge'
 import { ThemeValue } from '../hooks/useTheme'
 import { ActionMenu, KebabButton, ActionMenuSection, ActionMenuItem } from './ActionMenu'
+import { SearchResults } from './SearchResults'
 
 interface Props {
   projects: Project[]
@@ -50,8 +51,8 @@ interface Props {
   schedulesActive?: boolean
   onOpenSettingsGlobal?: () => void
   settingsGlobalActive?: boolean
-  /** Spec-074/079: opens the global search overlay, optionally pre-filled with a query. */
-  onOpenSearch?: (seed?: string) => void
+  /** spec-079: a global search hit was tapped — App routes it (chat peek / board / file). */
+  onSearchPick?: (hit: SearchHit) => void
 }
 
 function unreadFor(p: Project, map: Record<string, number>): number {
@@ -99,10 +100,35 @@ export function Sidebar({
   onOpenTerminal, terminalActive, onOpenVault, vaultActive,
   onOpenUsage, usageActive,
   onOpenGlobalFiles, globalFilesActive, onOpenSchedules, schedulesActive,
-  onOpenSettingsGlobal, settingsGlobalActive, onOpenSearch,
+  onOpenSettingsGlobal, settingsGlobalActive, onSearchPick,
 }: Props) {
   const { showToast } = useToast()
   const [search, setSearch] = useState('')
+  // spec-079: this ONE field is the whole search. It filters project names instantly
+  // (local, zero latency) and, after a short debounce, also searches every chat, file,
+  // board and timeline. The operator works mostly from the mobile app, where there are
+  // no keyboard shortcuts and an icon inside a drawer is effectively invisible.
+  const [globalHits, setGlobalHits] = useState<SearchHit[]>([])
+  const [globalLoading, setGlobalLoading] = useState(false)
+  const searchReqRef = useRef(0)
+
+  useEffect(() => {
+    const q = search.trim()
+    if (q.length < 2 || !onSearchPick) {
+      setGlobalHits([])
+      setGlobalLoading(false)
+      return
+    }
+    setGlobalLoading(true)
+    const myReq = ++searchReqRef.current
+    const timer = window.setTimeout(() => {
+      api.search(q, { limit: 20 })
+        .then(res => { if (searchReqRef.current === myReq) setGlobalHits(res.hits || []) })
+        .catch(() => { if (searchReqRef.current === myReq) setGlobalHits([]) })
+        .finally(() => { if (searchReqRef.current === myReq) setGlobalLoading(false) })
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [search, onSearchPick])
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null)
   const [confirmArchive, setConfirmArchive] = useState<{ id: string; name: string } | null>(null)
 
@@ -1088,17 +1114,6 @@ export function Sidebar({
           value={search}
           onChange={e => setSearch(e.target.value)}
         />
-        {/* spec-079: this box only filters project NAMES. When it is in use, offer the
-            global index (chats/boards/timelines) right here — that is where the operator
-            is already looking when a project name turns out not to be what they remember. */}
-        {search.trim() && onOpenSearch && (
-          <button
-            className="sidebar-search-everywhere"
-            onClick={() => onOpenSearch(search.trim())}
-          >
-            🔍 {t['search.search_everywhere']}: <b>{search.trim()}</b>
-          </button>
-        )}
       </div>
 
       {/* New project + New group row */}
@@ -1115,8 +1130,6 @@ export function Sidebar({
           Moved here from the top tab bar so they are reachable on mobile
           (the sidebar is the off-canvas drawer on phones). */}
       <div className="sidebar-tools">
-        <button className="sidebar-tool-btn"
-                onClick={() => onOpenSearch?.()} title="Search everywhere" aria-label="Search">🔍</button>
         <button className={`sidebar-tool-btn${terminalActive ? ' active' : ''}`}
                 onClick={onOpenTerminal} title="Terminal" aria-label="Terminal">⌨</button>
         <button className={`sidebar-tool-btn${vaultActive ? ' active' : ''}`}
@@ -1156,10 +1169,26 @@ export function Sidebar({
             {/* Ungrouped section or search results */}
             {hasSearch ? (
               <>
-                {allFiltered.length === 0 ? (
+                {allFiltered.length > 0 && (
+                  <>
+                    <div className="sidebar-results-label">{t['search.in_projects']}</div>
+                    {allFiltered.map(renderProjectItem)}
+                  </>
+                )}
+                {/* Everything else the operator has ever written: chats, files, boards. */}
+                {onSearchPick && (
+                  <>
+                    <div className="sidebar-results-label">{t['search.in_everything']}</div>
+                    <SearchResults
+                      hits={globalHits}
+                      loading={globalLoading}
+                      query={search}
+                      onPick={onSearchPick}
+                    />
+                  </>
+                )}
+                {allFiltered.length === 0 && !globalHits.length && !globalLoading && (
                   <div className="projects-empty">{t['sidebar.no_results']}</div>
-                ) : (
-                  allFiltered.map(renderProjectItem)
                 )}
               </>
             ) : (

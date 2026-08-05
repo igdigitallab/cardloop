@@ -427,3 +427,123 @@ class TestDocRowsIndex:
         ])
         S.index_transcripts(conn, "p", "P", sdk)
         assert conn_count(conn, "doc_rows") == conn_count(conn, "docs")
+
+
+# ═══════════════════════ phase B: query filters + ranking ═══════════════════════
+
+class TestParseQuery:
+    def test_plain_terms_pass_through(self):
+        terms, f = S.parse_query("pricing for lawyers")
+        assert terms == "pricing for lawyers"
+        assert f["project"] is None and f["sources"] == []
+
+    def test_project_and_in_are_aliases(self):
+        assert S.parse_query("x project:alpha")[1]["project"] == "alpha"
+        assert S.parse_query("x in:alpha")[1]["project"] == "alpha"
+
+    def test_source_filter(self):
+        terms, f = S.parse_query("deploy source:board")
+        assert terms == "deploy" and f["sources"] == ["board"]
+
+    def test_unknown_source_stays_a_search_term(self):
+        """Better to match less than to reject the query."""
+        terms, _f = S.parse_query("source:banana")
+        assert "source:banana" in terms
+
+    def test_path_glob_becomes_sql_like(self):
+        assert S.parse_query("x path:*.md")[1]["path_like"] == ["%.md"]
+
+    def test_date_filters(self):
+        f = S.parse_query("x after:2026-06-01 before:2026-07-01")[1]
+        assert f["after"] is not None and f["before"] is not None
+        assert f["after"] < f["before"]
+
+    def test_malformed_date_stays_a_term(self):
+        terms, f = S.parse_query("after:yesterday")
+        assert "after:yesterday" in terms and f["after"] is None
+
+    def test_is_memory_targets_memory_articles(self):
+        _t, f = S.parse_query("browser is:memory")
+        assert f["sources"] == ["file"]
+        assert any(".claude-ops/memory/" in p for p in f["path_like"])
+
+    def test_filters_only_query_is_valid(self):
+        terms, f = S.parse_query("source:board")
+        assert terms == "" and f["sources"] == ["board"]
+
+
+class TestFiltersEndToEnd:
+    def _seed(self, conn, tmp_path):
+        tasks = tmp_path / "TASKS.md"
+        tasks.write_text("## Backlog\n- [ ] deploy the exporter <!--ops:c1-->\n", encoding="utf-8")
+        S.index_board_file(conn, "p1", "One", tasks)
+        root = tmp_path / "proj"
+        (root / "docs").mkdir(parents=True)
+        (root / "docs" / "deploy.md").write_text("how to deploy\n", encoding="utf-8")
+        (root / "app.py").write_text("# deploy helper\n", encoding="utf-8")
+        S.index_project_files(conn, "p2", "Two", root, exclude_dirs=set(),
+                              is_secret=lambda n: False)
+
+    def test_source_filter_narrows_results(self, conn, tmp_path):
+        self._seed(conn, tmp_path)
+        assert all(h["source"] == "board" for h in S.search(conn, "deploy source:board"))
+        assert all(h["source"] == "file" for h in S.search(conn, "deploy source:file"))
+
+    def test_project_filter_narrows_results(self, conn, tmp_path):
+        self._seed(conn, tmp_path)
+        assert {h["project_id"] for h in S.search(conn, "deploy project:p1")} == {"p1"}
+
+    def test_path_filter_narrows_results(self, conn, tmp_path):
+        self._seed(conn, tmp_path)
+        paths = {h["ref"]["path"] for h in S.search(conn, "deploy path:*.md")}
+        assert paths == {"docs/deploy.md"}
+
+    def test_filters_only_query_returns_that_source(self, conn, tmp_path):
+        self._seed(conn, tmp_path)
+        hits = S.search(conn, "source:board")
+        assert hits and all(h["source"] == "board" for h in hits)
+
+
+class TestRanking:
+    def test_filename_match_outranks_a_mere_mention(self, conn, tmp_path):
+        """The regression that made the feature feel broken: searching CLAUDE.md
+        returned chats *talking about* CLAUDE.md above the file itself."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "CLAUDE.md").write_text("# Rules\nDeploy via Coolify.\n", encoding="utf-8")
+        (root / "notes.md").write_text("remember to read CLAUDE.md " * 40, encoding="utf-8")
+        S.index_project_files(conn, "p", "P", root, exclude_dirs=set(),
+                              is_secret=lambda n: False)
+        top = S.search(conn, "CLAUDE.md")[0]
+        assert top["ref"]["path"] == "CLAUDE.md"
+
+    def test_prose_outranks_code_on_an_equal_match(self, conn, tmp_path):
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "guide.md").write_text("zebrafish handling guide\n", encoding="utf-8")
+        (root / "impl.py").write_text("# zebrafish handling guide\n", encoding="utf-8")
+        S.index_project_files(conn, "p", "P", root, exclude_dirs=set(),
+                              is_secret=lambda n: False)
+        assert S.search(conn, "zebrafish")[0]["ref"]["path"] == "guide.md"
+
+    def test_one_document_cannot_flood_the_results(self, conn, tmp_path):
+        """A 726-chunk session used to own the entire page."""
+        sdk = tmp_path / "sdk"
+        recs = [{"type": "user", "sessionId": "big", "uuid": f"u{i}",
+                 "timestamp": "2026-07-01T10:00:00.000Z",
+                 "message": {"role": "user", "content": f"flood marker {i} " * 30}}
+                for i in range(40)]
+        _write_jsonl(sdk / "big.jsonl", recs)
+        S.index_transcripts(conn, "p", "P", sdk)
+        hits = S.search(conn, "flood", limit=20)
+        from_big = [h for h in hits if h["ref"].get("session_id") == "big"]
+        assert len(from_big) <= S.PER_DOC_CAP
+
+    def test_recent_beats_stale_on_an_equal_match(self, conn, tmp_path):
+        import time as _t
+        now = _t.time()
+        for pid, ts in (("old", now - 400 * 86400), ("new", now - 1 * 86400)):
+            tl = tmp_path / f"{pid}.jsonl"
+            _write_jsonl(tl, [{"kind": "text", "ts": ts, "text": "quarterly planning notes"}])
+            S.index_timeline_file(conn, pid, pid, tl)
+        assert S.search(conn, "quarterly planning")[0]["project_id"] == "new"

@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -61,9 +62,25 @@ MAX_INDEX_FILE_BYTES = 1024 * 1024
 # Above this many candidate files in one project, the code tier is dropped and only prose is
 # indexed. Reported in the scan stats — never a silent truncation.
 MAX_PROJECT_FILES = 3000
-RECENCY_WEIGHT = 1e-9                  # small nudge so newer docs edge out older ties in bm25 order
+RECENCY_WEIGHT = 1e-9                  # legacy tie-breaker, superseded by _score()
 DEFAULT_LIMIT = 30
 MAX_LIMIT = 100
+
+# spec-079 B: ranking. bm25 is negative (more negative = better), so these are applied as
+# MULTIPLIERS — >1 promotes, <1 demotes.
+_SOURCE_WEIGHT = {
+    "board": 1.45,      # a card is a deliberate, curated statement of intent
+    "file_doc": 1.30,   # CLAUDE.md / README / specs / memory articles
+    "chat": 1.00,       # the baseline: lots of it, much of it thinking out loud
+    "timeline": 0.85,
+    "file_code": 0.75,  # supporting evidence, rarely the answer to "where did we discuss X"
+}
+TITLE_BOOST = 1.9              # the query matches the file's own name → almost certainly meant
+RECENCY_BOOST = 0.6            # at most +60% for something touched today
+RECENCY_HALFLIFE_DAYS = 90.0
+PER_DOC_CAP = 3                # max chunks shown from one session/file/card
+CANDIDATE_FACTOR = 12          # over-fetch multiplier before re-ranking + collapsing
+MAX_CANDIDATES = 600
 
 # Snippet delimiters: NOT literal '<mark>' — these are private-use control chars
 # (SOH/STX) chosen so they can never collide with real chat/board/timeline text.
@@ -699,6 +716,111 @@ def _build_match_expr(q: str) -> str:
     return " ".join(parts)
 
 
+_FILTER_RE = re.compile(r"^(project|in|source|path|after|before|is):(.+)$", re.IGNORECASE)
+_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+# Named doc classes so "is:memory" does not require the operator to remember paths.
+_IS_PATH_HINTS = {
+    "memory": ".claude-ops/memory/",
+    "spec": "spec",
+    "claudemd": "CLAUDE.md",
+    "readme": "README",
+}
+
+
+def _parse_date(v: str) -> "float | None":
+    m = _DATE_RE.match(v.strip())
+    if not m:
+        return None
+    try:
+        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).timestamp()
+    except ValueError:
+        return None
+
+
+def parse_query(q: str) -> tuple:
+    """Splits free-form input into (search terms, structured filters).
+
+    `project:x in:x source:chat path:*.md after:2026-06-01 before:… is:memory` become
+    SQL filters; everything else stays a search term. An unparseable value is left as a
+    plain term rather than rejected — a query must never fail, only match less."""
+    terms: list = []
+    filters: dict = {"sources": [], "path_like": [], "project": None,
+                     "after": None, "before": None}
+    for tok in _WS_RE.split((q or "").strip()):
+        if not tok:
+            continue
+        m = _FILTER_RE.match(tok)
+        if not m:
+            terms.append(tok)
+            continue
+        key, val = m.group(1).lower(), m.group(2).strip()
+        if not val:
+            continue
+        if key in ("project", "in"):
+            filters["project"] = val
+        elif key == "source":
+            # An unrecognised value must NOT be dropped: silently discarding it would
+            # widen the query to everything instead of narrowing it, which is the
+            # opposite of what the operator asked for.
+            if val.lower() in ("chat", "board", "timeline", "file"):
+                filters["sources"].append(val.lower())
+            else:
+                terms.append(tok)
+        elif key == "path":
+            filters["path_like"].append(val.replace("*", "%"))
+        elif key == "is":
+            hint = _IS_PATH_HINTS.get(val.lower())
+            if hint:
+                filters["sources"].append("file")
+                filters["path_like"].append(f"%{hint}%")
+            else:
+                terms.append(tok)
+        elif key in ("after", "before"):
+            ts = _parse_date(val)
+            if ts is None:
+                terms.append(tok)
+            else:
+                filters[key] = ts
+    return " ".join(terms), filters
+
+
+def _score(row, now: float) -> float:
+    """Final ranking score — LOWER is better, matching bm25's own convention.
+
+    bm25 alone answers "does this text contain the words", which is why searching for
+    `CLAUDE.md` surfaced chat messages *mentioning* it above the actual files. Three
+    corrections, all multiplicative on the (negative) bm25 value, so a bigger multiplier
+    means a better rank:
+      - title: an exact/prefix hit on a file's own path is what the operator meant;
+      - source: curated material (board, memory, prose) beats chat chatter beats code;
+      - recency: an exponential decay, because the old `ts * 1e-9` nudge was numerically
+        far too small to ever reorder anything.
+    """
+    base = row["rank"]                       # negative; more negative = stronger match
+    source, tier = row["source"], (row["tier"] or "")
+    mult = _SOURCE_WEIGHT.get(source, 1.0)
+    if source == "file":
+        mult = _SOURCE_WEIGHT["file_code"] if tier == "code" else _SOURCE_WEIGHT["file_doc"]
+        ref = (row["ref"] or "").lower()
+        if ref:
+            for term in row["_terms"]:
+                t = term.lower()
+                # The filename itself matching is a much stronger signal than a body hit.
+                if t and (t in ref.rsplit("/", 1)[-1]):
+                    mult *= TITLE_BOOST
+                    break
+    age_days = max(0.0, (now - (row["ts"] or 0.0)) / 86400.0) if row["ts"] else 3650.0
+    mult *= 1.0 + RECENCY_BOOST * (0.5 ** (age_days / RECENCY_HALFLIFE_DAYS))
+    return base * mult
+
+
+def _doc_key(row) -> tuple:
+    """Identity of the underlying document a chunk came from, for collapsing.
+    One long chat session held 726 index rows — without this it owns the whole page."""
+    return (row["project_id"], row["source"], row["ref"] or row["path"] or "")
+
+
 def search(conn: sqlite3.Connection, q: str, limit: int = DEFAULT_LIMIT,
            project_id: "str | None" = None) -> list:
     q = (q or "").strip()
@@ -710,22 +832,42 @@ def search(conn: sqlite3.Connection, q: str, limit: int = DEFAULT_LIMIT,
         limit = DEFAULT_LIMIT
     limit = max(1, min(limit, MAX_LIMIT))
 
-    match_expr = _build_match_expr(q)
-    if not match_expr:
-        return []
+    terms, filters = parse_query(q)
+    # A query that is ONLY filters (e.g. "source:board") still has to return something,
+    # so fall back to matching everything and let the filters do the narrowing.
+    match_expr = _build_match_expr(terms) if terms else ""
 
     sql = (
-        "SELECT project_id, project_name, source, ts, ref, ref2, line, tier, "
+        "SELECT project_id, project_name, source, ts, ref, ref2, line, tier, path, "
         f"snippet(docs, -1, '{SNIPPET_OPEN}', '{SNIPPET_CLOSE}', '…', 12) AS snippet, "
-        "bm25(docs) AS rank "
-        "FROM docs WHERE docs MATCH ?"
+        "bm25(docs) AS rank FROM docs WHERE "
     )
-    params: list = [match_expr]
-    if project_id:
-        sql += " AND project_id = ?"
-        params.append(project_id)
-    sql += f" ORDER BY (rank - (ts * {RECENCY_WEIGHT})) ASC LIMIT ?"
-    params.append(limit)
+    params: list = []
+    if match_expr:
+        sql += "docs MATCH ? "
+        params.append(match_expr)
+    else:
+        sql += "1=1 "
+    scope = project_id or filters["project"]
+    if scope:
+        sql += "AND project_id = ? "
+        params.append(scope)
+    if filters["sources"]:
+        sql += "AND source IN (%s) " % ",".join("?" * len(filters["sources"]))
+        params.extend(filters["sources"])
+    for like in filters["path_like"]:
+        sql += "AND ref LIKE ? "
+        params.append(like if "%" in like else f"%{like}%")
+    if filters["after"] is not None:
+        sql += "AND ts >= ? "
+        params.append(filters["after"])
+    if filters["before"] is not None:
+        sql += "AND ts <= ? "
+        params.append(filters["before"])
+    # Over-fetch: re-ranking and per-document collapsing both happen in Python, so the
+    # candidate pool has to be wider than the requested page.
+    sql += "ORDER BY rank ASC LIMIT ?"
+    params.append(min(MAX_CANDIDATES, limit * CANDIDATE_FACTOR))
 
     try:
         rows = conn.execute(sql, params).fetchall()
@@ -734,15 +876,38 @@ def search(conn: sqlite3.Connection, q: str, limit: int = DEFAULT_LIMIT,
         # safety net so a user query can NEVER 500 the endpoint. Degrades to a
         # single quoted phrase (loses per-token AND/prefix semantics, but always
         # syntactically valid FTS5).
+        if not match_expr:
+            return []
         try:
-            safe = q.replace('"', '""')
-            params[0] = f'"{safe}"'
+            params[0] = '"%s"' % terms.replace('"', '""')
             rows = conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
             return []
 
-    hits = []
+    now = time.time()
+    term_list = [t for t in _WS_RE.split(terms) if t]
+    scored = []
     for r in rows:
+        d = dict(r)
+        d["_terms"] = term_list
+        scored.append((_score(d, now), d))
+    scored.sort(key=lambda pair: pair[0])
+
+    # Collapse: at most PER_DOC_CAP chunks from any one session/file/card.
+    per_doc: dict = {}
+    kept: list = []
+    for _s, r in scored:
+        key = _doc_key(r)
+        n = per_doc.get(key, 0)
+        if n >= PER_DOC_CAP:
+            continue
+        per_doc[key] = n + 1
+        kept.append(r)
+        if len(kept) >= limit:
+            break
+
+    hits = []
+    for r in kept:
         source = r["source"]
         # Deep-link anchors. Board card_id was indexed since spec-074 but never returned,
         # so a board hit could not be opened — the omission, not the data, was the gap.

@@ -7,7 +7,6 @@ import { Sidebar } from './components/Sidebar'
 import { ProjectView } from './components/ProjectView'
 import { ProjectNameDialog } from './components/ProjectNameDialog'
 import { ProjectTabBar } from './components/ProjectTabBar'
-import { SearchOverlay } from './components/SearchOverlay'
 import { SessionPeek } from './components/SessionPeek'
 import { Spinner } from './components/Spinner'
 import { GlobalFilesTab } from './tabs/GlobalFilesTab'
@@ -135,10 +134,6 @@ export default function App() {
   const [terminalOpen, setTerminalOpen] = useState<boolean>(false)
   // Global settings tab (global)
   const [settingsGlobalOpen, setSettingsGlobalOpen] = useState<boolean>(false)
-  // Spec-074: global search overlay — transient, not a persisted tab. `searchSeed` pre-fills
-  // the query when search is entered from the sidebar's project filter (spec-079).
-  const [searchOpen, setSearchOpen] = useState<boolean>(false)
-  const [searchSeed, setSearchSeed] = useState<string>('')
   // spec-079: a chat hit opens a read-only transcript peek; board/timeline hits become a
   // nonce-keyed request that ProjectView turns into "switch tab (+ focus card)".
   const [peekTarget, setPeekTarget] = useState<SessionPeekTarget | null>(null)
@@ -853,9 +848,9 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  // spec-079: search opens from the sidebar's 🔍 button (and the project filter's
-  // "search everywhere" row). The Cmd/Ctrl+K binding was removed on purpose — a hidden
-  // shortcut is not a discoverable entry point, and it collided with browser defaults.
+  // spec-079: search lives in exactly ONE place — the sidebar's search field, which
+  // searches projects AND all content. No Cmd/Ctrl+K (the operator is on mobile, where
+  // shortcuts do not exist) and no second modal entry point behind an icon.
 
   async function handleLogout() {
     try { await api.logout() } catch { /* ignore */ }
@@ -938,16 +933,8 @@ export default function App() {
         schedulesActive={activeId === SCHEDULES_ID}
         onOpenSettingsGlobal={handleOpenSettings}
         settingsGlobalActive={activeId === SETTINGS_ID}
-        onOpenSearch={(seed?: string) => { setSearchSeed(seed || ''); setSearchOpen(true) }}
+        onSearchPick={handleSearchPick}
       />
-
-      {searchOpen && (
-        <SearchOverlay
-          onPick={handleSearchPick}
-          initialQuery={searchSeed}
-          onClose={() => { setSearchOpen(false); setSearchSeed('') }}
-        />
-      )}
 
       {peekTarget && (
         <SessionPeek
