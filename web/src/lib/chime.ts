@@ -1,9 +1,16 @@
 /**
  * chime — a short "your turn" sound played when an agent run finishes.
  *
- * Synthesised with the Web Audio API instead of shipping an audio file: a pair
- * of decaying notes (sine fundamental + quieter triangle partial so it still
- * carries on a phone speaker), no asset to fetch, no binary in the repo.
+ * Synthesised with the Web Audio API instead of shipping an audio file: an
+ * ascending three-note arpeggio, each note a sine fundamental plus a triangle
+ * partial, run through a compressor so it lands LOUD without clipping.
+ *
+ * Loudness note: perceived volume follows RMS, not peak. A bare sine that
+ * decays exponentially measures a healthy peak while carrying almost no energy
+ * — the first version of this file peaked at -6 dBFS yet was barely audible.
+ * Hence the sustain plateau in the envelope, the harmonics, and the makeup gain
+ * after compression. `tools/measure_chime.py` renders this exact code in a real
+ * browser and prints peak/RMS — re-run it after changing any constant here.
  *
  * Autoplay policy: a browser only lets an AudioContext produce sound after a
  * user gesture, and iOS re-suspends the context after the app is backgrounded.
@@ -23,6 +30,9 @@ const LS_KEY = 'cops.sound'
 /** Two run_end signals within this window produce one chime, not two.
  *  (The SSE bus and the chat stream both report the same turn ending.) */
 const THROTTLE_MS = 1500
+
+/** Makeup gain after the compressor — tuned so the render peaks just under 1.0. */
+const MAKEUP = 1.2
 
 let ctx: AudioContext | null = null
 let primed = false
@@ -63,39 +73,71 @@ export function primeAudio(): void {
   window.addEventListener('pointerdown', unlock, opts)
   window.addEventListener('keydown', unlock, opts)
   window.addEventListener('touchstart', unlock, opts)
-  ;(window as unknown as { __cardloopChime?: (k?: 'ok' | 'fail') => void }).__cardloopChime =
-    (k?: 'ok' | 'fail') => playChime(k ?? 'ok', { force: true })
+  const w = window as unknown as {
+    __cardloopChime?: (k?: 'ok' | 'fail') => void
+    __cardloopChimeRender?: (c: BaseAudioContext, k?: 'ok' | 'fail') => void
+  }
+  w.__cardloopChime = (k?: 'ok' | 'fail') => playChime(k ?? 'ok', { force: true })
+  // Offline-render hook: lets tools/measure_chime.py measure THIS code, not a copy.
+  w.__cardloopChimeRender = (c: BaseAudioContext, k?: 'ok' | 'fail') => schedule(c, k ?? 'ok', 0.02)
 }
 
-/** One decaying note: sine fundamental + a quieter triangle for presence. */
-function note(c: AudioContext, freq: number, startAt: number, dur: number, peak: number): void {
-  for (const [type, level] of [['sine', peak], ['triangle', peak * 0.25]] as const) {
+/** Master chain: everything sums into a compressor, then a makeup gain. */
+function bus(c: BaseAudioContext): AudioNode {
+  const comp = c.createDynamicsCompressor()
+  comp.threshold.value = -18
+  comp.knee.value = 12
+  comp.ratio.value = 10
+  comp.attack.value = 0.003
+  comp.release.value = 0.25
+  const makeup = c.createGain()
+  makeup.gain.value = MAKEUP
+  comp.connect(makeup).connect(c.destination)
+  return comp
+}
+
+/**
+ * One note. The envelope is attack → sustain plateau → body decay → tail:
+ * the plateau is what makes it read as a real chime rather than a faint tick.
+ */
+function note(
+  c: BaseAudioContext, out: AudioNode,
+  freq: number, at: number, dur: number, level: number,
+): void {
+  for (const [type, mul] of [['sine', 1], ['triangle', 0.45]] as const) {
     const osc = c.createOscillator()
     const gain = c.createGain()
+    const peak = level * mul
     osc.type = type
-    osc.frequency.setValueAtTime(freq, startAt)
+    osc.frequency.setValueAtTime(freq, at)
     // exponentialRamp cannot touch 0 — ramp between tiny non-zero values instead.
-    gain.gain.setValueAtTime(0.0001, startAt)
-    gain.gain.exponentialRampToValueAtTime(level, startAt + 0.008)
-    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + dur)
-    osc.connect(gain).connect(c.destination)
-    osc.start(startAt)
-    osc.stop(startAt + dur + 0.02)
+    gain.gain.setValueAtTime(0.0002, at)
+    gain.gain.exponentialRampToValueAtTime(peak, at + 0.006)
+    gain.gain.setValueAtTime(peak, at + 0.05)
+    gain.gain.exponentialRampToValueAtTime(peak * 0.6, at + dur * 0.4)
+    gain.gain.exponentialRampToValueAtTime(0.0006, at + dur)
+    osc.connect(gain).connect(out)
+    osc.start(at)
+    osc.stop(at + dur + 0.02)
   }
 }
 
-/** Schedule the two notes on a context that is known to be running. */
-function schedule(c: AudioContext, kind: 'ok' | 'fail'): void {
+/** Schedule the motif on any context (live or offline). Exported for measurement. */
+function schedule(c: BaseAudioContext, kind: 'ok' | 'fail', at?: number): void {
   try {
-    const t0 = c.currentTime + 0.02
+    const out = bus(c)
+    const t0 = at ?? c.currentTime + 0.02
     if (kind === 'ok') {
-      // Ascending A5 → E6 — reads as "message arrived".
-      note(c, 880, t0, 0.18, 0.42)
-      note(c, 1318.5, t0 + 0.1, 0.42, 0.38)
+      // Ascending C6–E6–G6 major triad, last note held — bright and unmistakable.
+      note(c, out, 1046.5, t0, 0.34, 0.5)
+      note(c, out, 1318.5, t0 + 0.11, 0.36, 0.5)
+      note(c, out, 1568.0, t0 + 0.22, 0.85, 0.55)
+      note(c, out, 2093.0, t0 + 0.22, 0.5, 0.16)  // octave sparkle on top
     } else {
-      // Same shape, descending — a softer "finished with an error".
-      note(c, 659.3, t0, 0.18, 0.4)
-      note(c, 440, t0 + 0.12, 0.5, 0.36)
+      // Same weight, descending E5–C5–A4 — reads as "finished, but badly".
+      note(c, out, 659.3, t0, 0.34, 0.5)
+      note(c, out, 523.3, t0 + 0.12, 0.36, 0.5)
+      note(c, out, 440.0, t0 + 0.24, 0.9, 0.55)
     }
   } catch {
     /* audio is a nicety — never break the caller */
