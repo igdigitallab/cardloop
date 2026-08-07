@@ -76,12 +76,28 @@ use the Manager URL.
 The pane is **not** a one-way screencast. The same browser session is driven by both the agent (via its
 tools) and you (mouse/keyboard in the pane):
 
-- **Desktop** — click to focus the pane, then click/scroll/type normally.
+- **Desktop** — click to focus the pane, then click/scroll/type normally. Editing keys
+  (Backspace, Delete, Tab, Esc, Home/End, arrows) and modifier shortcuts (Ctrl/⌘+A, Shift-select)
+  are forwarded with their real virtual key codes, so the remote page treats them as a physical
+  keyboard would.
 - **Mobile** — tap = click, swipe = scroll, and tapping a field raises the on-screen keyboard so you can
-  type logins/passwords from your phone.
+  type logins/passwords from your phone. A key row above the frame adds what a soft keyboard lacks:
+  `Esc ⇥ ⌫ Del ← → ↑ ↓ ⏎` and a 📋 paste button.
+- **Paste** — `Ctrl/⌘+V` (or 📋) pastes **your** clipboard into the remote page. It has to work this
+  way: the remote Chromium has its own, empty clipboard, so a forwarded Ctrl+V would paste nothing.
+  The text is inserted at the caret via `Input.insertText`.
+- **History** — `←` `→` `⟳` next to the URL bar; tabs are on the strip above it.
 
 This is the intended workflow for logged-in profiles: the agent navigates, and **you** handle the
 sensitive bits (passwords, captcha, 2FA) right there in the same live session.
+
+> **What persists.** Cookies and localStorage live in the *browser profile*, not in the pane — so with
+> a Cloak Manager profile (or any external CDP browser with a real user-data dir) a login you do in the
+> pane survives restarts and is reused by every project on that profile. The built-in and CloakBrowser
+> backends launch a **fresh, empty** browser each time — nothing persists there. Chromium's own password
+> manager ("Save password?") is browser chrome, not page content, so it never appears in the screencast:
+> what carries over is the **session**, not a saved password. Keep passwords in the vault (`secret set`)
+> and paste them in.
 
 ---
 

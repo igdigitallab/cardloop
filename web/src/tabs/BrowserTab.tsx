@@ -38,6 +38,20 @@ interface Props {
   projectId: string
 }
 
+const keyRowBtn: React.CSSProperties = {
+  flexShrink: 0,
+  minWidth: 34,
+  fontSize: 12,
+  lineHeight: 1,
+  padding: '6px 8px',
+  borderRadius: 5,
+  border: '1px solid var(--border, #2a2a2a)',
+  background: 'var(--bg, #0d0d0d)',
+  color: 'var(--text, #d4d4d4)',
+  cursor: 'pointer',
+  userSelect: 'none',
+}
+
 type ConnState = 'connecting' | 'ready' | 'disconnected' | 'error'
 
 interface BrowserTabInfo { id: string; title: string; url: string; active: boolean }
@@ -68,6 +82,35 @@ function buttonName(button: number): 'left' | 'right' | 'middle' {
   if (button === 2) return 'right'
   return 'left'
 }
+
+/**
+ * CDP modifier bitmask (alt=1, ctrl=2, meta=4, shift=8) — mirrored by
+ * browser_pane._key. Without it the remote page never sees Ctrl+A, Shift-select,
+ * or a capital typed with Shift held.
+ */
+function modsOf(e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): number {
+  return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0)
+}
+
+// Keys whose browser default would move/scroll the COCKPIT instead of reaching the pane.
+const SWALLOW_KEYS = new Set([
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Backspace', 'Delete',
+  'Home', 'End', 'PageUp', 'PageDown', ' ', 'Enter',
+])
+
+// The special-key row shown on touch devices: an on-screen keyboard has no Esc,
+// Tab or arrows, and long-pressing for them is not a thing.
+const KEY_ROW: { label: string; key: string; title: string }[] = [
+  { label: 'Esc', key: 'Escape', title: 'Escape' },
+  { label: '⇥', key: 'Tab', title: 'Tab' },
+  { label: '⌫', key: 'Backspace', title: 'Backspace' },
+  { label: 'Del', key: 'Delete', title: 'Delete' },
+  { label: '←', key: 'ArrowLeft', title: 'Left' },
+  { label: '→', key: 'ArrowRight', title: 'Right' },
+  { label: '↑', key: 'ArrowUp', title: 'Up' },
+  { label: '↓', key: 'ArrowDown', title: 'Down' },
+  { label: '⏎', key: 'Enter', title: 'Enter' },
+]
 
 /**
  * What to show in the URL bar. The branded start page is a long
@@ -108,6 +151,10 @@ export function BrowserTab({ projectId }: Props) {
   // Multi-tab strip state
   const [tabs, setTabs] = useState<BrowserTabInfo[]>([])
   const [activeId, setActiveId] = useState<string>('')
+  // Touch device → show the special-key row (Esc/Tab/arrows/paste)
+  const [isTouch] = useState<boolean>(
+    () => typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches,
+  )
 
   // ── WebSocket lifecycle ──────────────────────────────────────────────────────
   const connect = useCallback(() => {
@@ -372,9 +419,14 @@ export function BrowserTab({ projectId }: Props) {
   const onHiddenKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       const k = e.key
-      if (k === 'Enter' || k === 'Tab' || k === 'ArrowUp' || k === 'ArrowDown' || k === 'ArrowLeft' || k === 'ArrowRight') {
-        send({ t: 'key', action: 'down', key: k, text: k === 'Enter' ? '\r' : '' })
-        send({ t: 'key', action: 'up', key: k, text: '' })
+      // Printable keys (including Space) MUST fall through to the value diff above —
+      // intercepting them here would send a keystroke with no text and insert nothing.
+      // Backspace also comes through the diff (Android keyboards do not report it
+      // reliably as a keydown); everything else non-printable is forwarded here.
+      if (k.length > 1 && k !== 'Backspace' && (SWALLOW_KEYS.has(k) || k === 'Escape')) {
+        const mods = modsOf(e)
+        send({ t: 'key', action: 'down', key: k, text: k === 'Enter' ? '\r' : '', mods })
+        send({ t: 'key', action: 'up', key: k, text: '', mods })
         e.preventDefault()
       }
     },
@@ -394,18 +446,27 @@ export function BrowserTab({ projectId }: Props) {
   )
 
   // ── Keyboard handler ─────────────────────────────────────────────────────────
+  // Paste needs its own path: the remote Chromium has its own (empty) clipboard, so
+  // Ctrl+V forwarded as a keystroke pastes nothing. Read the operator's clipboard and
+  // ship the text — that is how a password lands in a remote login form.
+  const pasteClipboard = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (text) send({ t: 'paste', text })
+    } catch {
+      /* denied / unsupported — nothing sensible to do */
+    }
+  }, [send])
+
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+        e.preventDefault()
+        void pasteClipboard()
+        return
+      }
       // Prevent browser scroll/shortcuts for forwarded keys
-      if (
-        e.key === 'ArrowUp' ||
-        e.key === 'ArrowDown' ||
-        e.key === 'ArrowLeft' ||
-        e.key === 'ArrowRight' ||
-        e.key === 'Tab' ||
-        e.key === 'Backspace' ||
-        e.key === ' '
-      ) {
+      if (SWALLOW_KEYS.has(e.key) || ((e.ctrlKey || e.metaKey) && e.key.length === 1)) {
         e.preventDefault()
       }
       send({
@@ -413,14 +474,25 @@ export function BrowserTab({ projectId }: Props) {
         action: 'down',
         key: e.key,
         text: e.key.length === 1 ? e.key : '',
+        mods: modsOf(e),
+        repeat: e.repeat,
       })
     },
-    [send],
+    [send, pasteClipboard],
   )
 
   const onKeyUp = useCallback(
     (e: React.KeyboardEvent) => {
-      send({ t: 'key', action: 'up', key: e.key, text: '' })
+      send({ t: 'key', action: 'up', key: e.key, text: '', mods: modsOf(e) })
+    },
+    [send],
+  )
+
+  // One tap on the special-key row = a full down/up of that key.
+  const tapKey = useCallback(
+    (key: string) => {
+      send({ t: 'key', action: 'down', key, text: key === 'Enter' ? '\r' : '' })
+      send({ t: 'key', action: 'up', key, text: '' })
     },
     [send],
   )
@@ -627,6 +699,32 @@ export function BrowserTab({ projectId }: Props) {
           }}
           title={connState}
         />
+        {/* History controls — co-browsing without them means retyping URLs by hand */}
+        {([
+          { label: '←', act: 'back', title: 'Back' },
+          { label: '→', act: 'forward', title: 'Forward' },
+          { label: '⟳', act: 'reload', title: 'Reload' },
+        ] as const).map(b => (
+          <button
+            key={b.act}
+            onClick={() => send({ t: b.act })}
+            disabled={connState !== 'ready'}
+            title={b.title}
+            style={{
+              flexShrink: 0,
+              fontSize: 13,
+              lineHeight: 1,
+              padding: '4px 7px',
+              borderRadius: 5,
+              border: '1px solid var(--border, #2a2a2a)',
+              background: 'var(--bg, #0d0d0d)',
+              color: connState === 'ready' ? 'var(--text, #d4d4d4)' : 'var(--text-dim, #555)',
+              cursor: connState === 'ready' ? 'pointer' : 'not-allowed',
+            }}
+          >
+            {b.label}
+          </button>
+        ))}
         {/* spec-066: stealth / external backend badge (built-in is the silent default) */}
         {backend && backend !== 'builtin' && (
           <span
@@ -692,6 +790,45 @@ export function BrowserTab({ projectId }: Props) {
           </span>
         )}
       </div>
+
+      {/* Special-key row — a soft keyboard has no Esc/Tab/arrows, and pasting a
+          password needs the operator's clipboard, not the remote one. Touch only:
+          on desktop the physical keyboard already sends all of this. */}
+      {isTouch && connState === 'ready' && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: '4px 6px',
+            overflowX: 'auto',
+            flexShrink: 0,
+            borderBottom: '1px solid var(--border, #1e1e1e)',
+            background: 'var(--bg2, #111)',
+          }}
+        >
+          {KEY_ROW.map(k => (
+            <button
+              key={k.key}
+              title={k.title}
+              // Keep focus on the hidden input so the soft keyboard stays up
+              onPointerDown={e => e.preventDefault()}
+              onClick={() => { tapKey(k.key); hiddenInputRef.current?.focus() }}
+              style={keyRowBtn}
+            >
+              {k.label}
+            </button>
+          ))}
+          <button
+            title="Paste from clipboard"
+            onPointerDown={e => e.preventDefault()}
+            onClick={() => { void pasteClipboard(); hiddenInputRef.current?.focus() }}
+            style={{ ...keyRowBtn, marginLeft: 'auto' }}
+          >
+            📋
+          </button>
+        </div>
+      )}
 
       {/* Frame viewport */}
       <div

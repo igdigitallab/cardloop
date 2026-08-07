@@ -61,6 +61,78 @@ def test_key_down_carries_text():
     assert params["type"] == "keyDown" and params["key"] == "a" and params["text"] == "a"
 
 
+def test_non_printable_keys_carry_a_virtual_key_code():
+    """The bug that made the pane un-editable: Chromium derives the editing command
+    (delete a char, move the caret) from the virtual key code, NOT from `key`. Without
+    it Backspace/Delete/arrows fire a JS keydown and do nothing else."""
+    for key, vk in (("Backspace", 8), ("Delete", 46), ("ArrowLeft", 37), ("Enter", 13), ("Tab", 9)):
+        s = _session_with_fake_cdp()
+        asyncio.run(s.handle_input({"t": "key", "action": "down", "key": key, "text": ""}))
+        method, params = s._cdp.calls[-1]
+        assert method == "Input.dispatchKeyEvent"
+        assert params["windowsVirtualKeyCode"] == vk, key
+        assert params["nativeVirtualKeyCode"] == vk, key
+        assert params["code"] == key
+        # No stray text on a non-printable key
+        assert "text" not in params
+
+
+def test_printable_key_keeps_text_and_gains_a_key_code():
+    s = _session_with_fake_cdp()
+    asyncio.run(s.handle_input({"t": "key", "action": "down", "key": "b", "text": "b"}))
+    _, params = s._cdp.calls[-1]
+    assert params["type"] == "keyDown" and params["text"] == "b"
+    assert params["windowsVirtualKeyCode"] == ord("B") and params["code"] == "KeyB"
+
+
+def test_modifiers_are_forwarded_and_shortcuts_send_no_text():
+    """Ctrl+A must reach the page as a command, not insert the letter 'a'."""
+    s = _session_with_fake_cdp()
+    asyncio.run(s.handle_input({"t": "key", "action": "down", "key": "a", "text": "a", "mods": 2}))
+    _, params = s._cdp.calls[-1]
+    assert params["modifiers"] == 2
+    assert params["type"] == "rawKeyDown"
+    assert "text" not in params
+
+
+def test_shift_char_reports_unmodified_text():
+    s = _session_with_fake_cdp()
+    asyncio.run(s.handle_input({"t": "key", "action": "down", "key": "A", "text": "A", "mods": 8}))
+    _, params = s._cdp.calls[-1]
+    assert params["text"] == "A" and params["unmodifiedText"] == "a" and params["modifiers"] == 8
+
+
+def test_char_event_only_inserts_text():
+    s = _session_with_fake_cdp()
+    asyncio.run(s.handle_input({"t": "key", "action": "char", "text": "5"}))
+    assert s._cdp.calls[-1] == ("Input.dispatchKeyEvent", {"type": "char", "text": "5"})
+
+
+def test_paste_uses_insert_text():
+    """The remote Chromium has its own empty clipboard — Ctrl+V alone pastes nothing."""
+    s = _session_with_fake_cdp()
+    asyncio.run(s.handle_input({"t": "paste", "text": "P@ssw0rd"}))
+    assert s._cdp.calls[-1] == ("Input.insertText", {"text": "P@ssw0rd"})
+    s2 = _session_with_fake_cdp()
+    asyncio.run(s2.handle_input({"t": "paste", "text": ""}))
+    assert s2._cdp.calls == []
+
+
+def test_history_controls_drive_the_page():
+    calls = []
+
+    class _FakePage:
+        async def go_back(self, **kw): calls.append("back")
+        async def go_forward(self, **kw): calls.append("forward")
+        async def reload(self, **kw): calls.append("reload")
+
+    s = _session_with_fake_cdp()
+    s._page = _FakePage()
+    for act in ("back", "forward", "reload"):
+        asyncio.run(s.handle_input({"t": act}))
+    assert calls == ["back", "forward", "reload"]
+
+
 def test_unknown_input_is_noop():
     s = _session_with_fake_cdp()
     asyncio.run(s.handle_input({"t": "bogus"}))

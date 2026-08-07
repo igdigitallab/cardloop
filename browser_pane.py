@@ -39,6 +39,46 @@ STREAM = {"width": 960, "height": 540, "quality": 45}
 _IDLE_GRACE = 120.0          # close the browser this long after the last activity with no subscribers
 _WATCH_INTERVAL = 15.0       # idle-watchdog tick
 
+# ── keyboard: DOM key name → (Windows virtual key code, DOM code) ─────────────
+# Chromium derives an *editing command* (delete a char, move the caret, submit a
+# form) from the event's virtual key code — NOT from `key`. A dispatchKeyEvent
+# carrying only {"key": "Backspace"} fires a JS keydown and does nothing else, so
+# the pane looked like it "typed but could not erase". Everything below exists so
+# the non-printable keys actually act (verified against real Chromium).
+_VKEYS: "dict[str, tuple[int, str]]" = {
+    "Backspace": (8, "Backspace"), "Tab": (9, "Tab"), "Enter": (13, "Enter"),
+    "Shift": (16, "ShiftLeft"), "Control": (17, "ControlLeft"), "Alt": (18, "AltLeft"),
+    "CapsLock": (20, "CapsLock"), "Escape": (27, "Escape"), " ": (32, "Space"),
+    "PageUp": (33, "PageUp"), "PageDown": (34, "PageDown"),
+    "End": (35, "End"), "Home": (36, "Home"),
+    "ArrowLeft": (37, "ArrowLeft"), "ArrowUp": (38, "ArrowUp"),
+    "ArrowRight": (39, "ArrowRight"), "ArrowDown": (40, "ArrowDown"),
+    "Insert": (45, "Insert"), "Delete": (46, "Delete"),
+    "Meta": (91, "MetaLeft"), "ContextMenu": (93, "ContextMenu"),
+}
+for _i in range(1, 13):  # F1–F12
+    _VKEYS[f"F{_i}"] = (111 + _i, f"F{_i}")
+
+# Modifier bitmask shared with the client (BrowserTab.tsx): CDP's own encoding.
+_MOD_ALT, _MOD_CTRL, _MOD_META, _MOD_SHIFT = 1, 2, 4, 8
+
+
+def _key_info(key: str) -> "tuple[int, str]":
+    """(windowsVirtualKeyCode, code) for a DOM key name — (0, "") when unknown.
+
+    Punctuation is deliberately left unmapped: its virtual key code is keyboard-layout
+    specific, and printable keys insert through the event's `text` anyway.
+    """
+    if key in _VKEYS:
+        return _VKEYS[key]
+    if len(key) == 1:
+        ch = key.upper()
+        if "A" <= ch <= "Z":
+            return ord(ch), f"Key{ch}"
+        if "0" <= ch <= "9":
+            return ord(ch), f"Digit{ch}"
+    return 0, ""
+
 # Branded start page — shown instead of a bare white about:blank so a freshly
 # opened pane reads as "ready, type a URL" rather than blank/broken. Encoded as a
 # base64 data URL so Chromium renders it (and thus emits a screencast frame).
@@ -486,10 +526,27 @@ class BrowserSession:
                 await self._wheel(msg)
             elif t == "key":
                 await self._key(msg)
+            elif t == "paste":
+                await self._paste(msg)
             elif t == "navigate":
                 await self.navigate(str(msg.get("url") or ""))
+            elif t in ("back", "forward", "reload"):
+                await self._history(t)
         except Exception:
             pass
+
+    async def _history(self, what: str) -> None:
+        """Back / forward / reload for the active page (the pane's nav buttons)."""
+        page = self._page
+        if page is None:
+            return
+        if what == "back":
+            await page.go_back(wait_until="domcontentloaded")
+        elif what == "forward":
+            await page.go_forward(wait_until="domcontentloaded")
+        else:
+            await page.reload(wait_until="domcontentloaded")
+        await self._broadcast_nav()
 
     @staticmethod
     def _clamp(v: Any, hi: int) -> float:
@@ -525,16 +582,51 @@ class BrowserSession:
         cdp_type = {"down": "keyDown", "up": "keyUp", "char": "char"}.get(action)
         if not cdp_type:
             return
-        params: dict[str, Any] = {"type": cdp_type}
-        key = msg.get("key")
-        text = msg.get("text") or ""
+        text = str(msg.get("text") or "")
+        try:
+            mods = int(msg.get("mods") or 0) & 0xF
+        except Exception:
+            mods = 0
+
+        # A bare `char` event only inserts text (the mobile soft keyboard path).
+        if cdp_type == "char":
+            if text:
+                await self._cdp.send("Input.dispatchKeyEvent", {"type": "char", "text": text})
+            return
+
+        key = str(msg.get("key") or "")
+        vk, code = _key_info(key)
+        params: dict[str, Any] = {"type": cdp_type, "modifiers": mods}
         if key:
             params["key"] = key
-        if text:
-            params["text"] = text
-            if cdp_type == "keyDown":
-                params["type"] = "keyDown"
+        if code:
+            params["code"] = code
+        if vk:
+            params["windowsVirtualKeyCode"] = vk
+            params["nativeVirtualKeyCode"] = vk
+        if cdp_type == "keyDown":
+            if text and not (mods & (_MOD_CTRL | _MOD_META)):
+                # Printable: `text` is what actually inserts the character.
+                params["text"] = text
+                params["unmodifiedText"] = text.lower() if mods & _MOD_SHIFT else text
+            else:
+                # A shortcut (Ctrl/⌘ held) or a non-printable key must NOT carry text,
+                # or Chromium would insert a stray character alongside the command.
+                params["type"] = "rawKeyDown"
+            if msg.get("repeat"):
+                params["autoRepeat"] = True
         await self._cdp.send("Input.dispatchKeyEvent", params)
+
+    async def _paste(self, msg: dict) -> None:
+        """Insert operator-supplied text at the caret (Input.insertText).
+
+        Ctrl+V cannot work by itself: the remote Chromium has its own, empty clipboard.
+        The pane reads the operator's clipboard and ships the text here instead — this is
+        how a password manager entry gets into a login form.
+        """
+        text = str(msg.get("text") or "")
+        if text:
+            await self._cdp.send("Input.insertText", {"text": text})
 
     # ── high-level actions (used by agent MCP tools) ─────────────────────────
     async def navigate(self, url: str) -> None:
