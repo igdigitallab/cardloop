@@ -20,6 +20,7 @@ import { useUnreadTracker } from './hooks/useUnreadTracker'
 import { useTheme } from './hooks/useTheme'
 import { useNotifications } from './hooks/useNotifications'
 import { ModulesProvider } from './hooks/useModules'
+import { playChime, primeAudio } from './lib/chime'
 
 const GLOBAL_FILES_ID = '__global__'
 const SCHEDULES_ID = '__schedules__'
@@ -226,6 +227,9 @@ export default function App() {
     checkAuth()
   }, [checkAuth])
 
+  // Unlock the completion chime's AudioContext on the operator's first gesture.
+  useEffect(() => { primeAudio() }, [])
+
   useEffect(() => {
     if (authState === 'authed') {
       loadProjects()
@@ -413,6 +417,9 @@ export default function App() {
         if (!proj) return
         // Clear working indicator
         setRunningIds(prev => { if (!prev.has(proj.id)) return prev; const n = new Set(prev); n.delete(proj.id); return n })
+        // "Your turn" chime — plays whether or not the tab is visible (opt-out in
+        // Settings → Notifications; throttled + silent when audio never unlocked).
+        playChime(((payload as { outcome?: string }).outcome ?? 'ok') === 'ok' ? 'ok' : 'fail')
         // Notify + attention cue when the project is not currently the active visible tab.
         // Notifications are project-level because all chats of a project share one session_key
         // on the bus — per-chat gating isn't distinguishable here (refine later if chats get distinct keys).

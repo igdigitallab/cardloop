@@ -8,6 +8,7 @@ import { t } from '../i18n'
 import { useNotifications } from '../hooks/useNotifications'
 import { useModules } from '../hooks/useModules'
 import { BrowserBackendSettings } from '../components/BrowserBackendSettings'
+import { isSoundEnabled, setSoundEnabled, playChime } from '../lib/chime'
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -68,6 +69,7 @@ export function GlobalSettingsTab() {
   const { modules, isEnabled: isModEnabled, setEnabled: setModEnabled } = useModules()
   const [pushTestMsg, setPushTestMsg] = useState('')
   const [pushTesting, setPushTesting] = useState(false)
+  const [sound, setSound] = useState<boolean>(() => isSoundEnabled())
 
   async function sendPushTest() {
     setPushTesting(true); setPushTestMsg('')
@@ -517,6 +519,31 @@ export function GlobalSettingsTab() {
           Web Push once enabled. On a phone, install Cardloop to your home screen first, then turn
           this on and tap “Allow” when prompted.
         </p>
+
+        <Row title={t['notify.sound_label']} hint={t['notify.sound_hint']}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              className="btn-secondary"
+              style={{ fontSize: 12, minHeight: 30, padding: '0 10px' }}
+              onClick={() => playChime('ok', { force: true })}
+            >
+              {t['notify.sound_test']}
+            </button>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+              <input
+                type="checkbox"
+                checked={sound}
+                onChange={(ev) => {
+                  const v = ev.target.checked
+                  setSoundEnabled(v)
+                  setSound(v)
+                  if (v) playChime('ok', { force: true })
+                }}
+              />
+              {sound ? 'On' : 'Off'}
+            </label>
+          </span>
+        </Row>
 
         <Row title={t['notify.settings_label']} hint={t['notify.settings_hint']}>
           {permission === 'unsupported' ? (

@@ -721,6 +721,9 @@ export const en = {
   'notify.settings_label': 'Browser notifications',
   'notify.settings_hint': 'Show a desktop notification when a run finishes in the background.',
   'notify.blocked_hint': 'Blocked in browser settings — allow notifications for this site to enable.',
+  'notify.sound_label': 'Completion sound',
+  'notify.sound_hint': 'Play a short chime in this browser when a run finishes and the agent is waiting for you — whether or not the tab is visible.',
+  'notify.sound_test': 'Play',
 
   // ── Spec-074: Global search (Cmd/Ctrl+K) ──────────────────────────────────────
   'search.placeholder': 'Search chats, boards, timelines…',
