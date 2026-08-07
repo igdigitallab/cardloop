@@ -28,6 +28,7 @@ import { useMonitors } from '../hooks/useMonitors'
 import { MonitorsPanel } from '../components/MonitorsPanel'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
+import { playChime } from '../lib/chime'
 import { t } from '../i18n'
 import { Modal, ModalHead } from '../components/Modal'
 import { Paperclip, ClipboardList, Wrench, Clock, Square, Pencil, Trash2, File, Image, Flame, Snowflake, Plus } from 'lucide-react'
@@ -2420,6 +2421,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       abortRef.current = null
       textareaRef.current?.focus()
       onProjectsReload()
+      // "Your turn" chime. The App-level run_end handler also fires it (and covers
+      // runs this tab never streamed); the throttle in playChime collapses the two.
+      // Gated on gotResult so an intentional abort (stop / unmount) stays silent.
+      if (gotResult) playChime('ok')
       // Recovery: if the stream never delivered a clean 'result', it was cut off (SSE drop /
       // eviction / restart). The turn often completes on the server in the background, leaving
       // our canvas on a truncated bubble that only "appears" (out of order) on the next send.
