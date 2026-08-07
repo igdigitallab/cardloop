@@ -8,7 +8,10 @@ import { t } from '../i18n'
 import { useNotifications } from '../hooks/useNotifications'
 import { useModules } from '../hooks/useModules'
 import { BrowserBackendSettings } from '../components/BrowserBackendSettings'
-import { isSoundEnabled, setSoundEnabled, playChime } from '../lib/chime'
+import {
+  isSoundEnabled, setSoundEnabled, playChime,
+  PRESETS, getPresetId, setPresetId, getVolumePct, setVolumePct,
+} from '../lib/chime'
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -37,9 +40,9 @@ const PRIORITY_STYLE: Record<string, { bg: string; color: string }> = {
   P5: { bg: 'var(--surface2, #f3f4f6)', color: 'var(--text3, #6b7280)' },
 }
 
-function Row({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+function Row({ title, hint, children, className }: { title: string; hint?: string; children: ReactNode; className?: string }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, padding: '10px 0', borderTop: '1px solid var(--border)' }}>
+    <div className={className} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, padding: '10px 0', borderTop: '1px solid var(--border)' }}>
       <span>
         <b style={{ fontSize: 13 }}>{title}</b>
         {hint && <span style={{ display: 'block', fontSize: 11, color: 'var(--text3)', fontWeight: 400, marginTop: 2, maxWidth: 430 }}>{hint}</span>}
@@ -70,6 +73,8 @@ export function GlobalSettingsTab() {
   const [pushTestMsg, setPushTestMsg] = useState('')
   const [pushTesting, setPushTesting] = useState(false)
   const [sound, setSound] = useState<boolean>(() => isSoundEnabled())
+  const [preset, setPreset] = useState<string>(() => getPresetId())
+  const [volume, setVolume] = useState<number>(() => getVolumePct())
 
   async function sendPushTest() {
     setPushTesting(true); setPushTestMsg('')
@@ -520,12 +525,25 @@ export function GlobalSettingsTab() {
           this on and tap “Allow” when prompted.
         </p>
 
-        <Row title={t['notify.sound_label']} hint={t['notify.sound_hint']}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <Row title={t['notify.sound_label']} hint={t['notify.sound_hint']} className="settings-row-stack">
+          <span style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            {/* Picking a sound previews it immediately — that IS the audition. */}
+            <select
+              value={preset}
+              style={{ fontSize: 13, minHeight: 32, maxWidth: 200 }}
+              onChange={(ev) => {
+                const id = ev.target.value
+                setPresetId(id)
+                setPreset(id)
+                playChime('ok', { force: true, preset: id })
+              }}
+            >
+              {PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
             <button
               className="btn-secondary"
               style={{ fontSize: 12, minHeight: 30, padding: '0 10px' }}
-              onClick={() => playChime('ok', { force: true })}
+              onClick={() => playChime('ok', { force: true, preset })}
             >
               {t['notify.sound_test']}
             </button>
@@ -537,7 +555,7 @@ export function GlobalSettingsTab() {
                   const v = ev.target.checked
                   setSoundEnabled(v)
                   setSound(v)
-                  if (v) playChime('ok', { force: true })
+                  if (v) playChime('ok', { force: true, preset })
                 }}
               />
               {sound ? 'On' : 'Off'}
@@ -545,7 +563,29 @@ export function GlobalSettingsTab() {
           </span>
         </Row>
 
-        <Row title={t['notify.settings_label']} hint={t['notify.settings_hint']}>
+        <Row title={t['notify.sound_volume']} hint={t['notify.sound_volume_hint']} className="settings-row-stack">
+          <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <input
+              type="range"
+              min={10}
+              max={100}
+              step={5}
+              value={volume}
+              style={{ width: 140 }}
+              onChange={(ev) => {
+                const v = Number(ev.target.value)
+                setVolume(v)
+                setVolumePct(v)
+              }}
+              // Preview on release, not on every drag step — otherwise the chime stutters.
+              onPointerUp={() => playChime('ok', { force: true, preset })}
+              onKeyUp={() => playChime('ok', { force: true, preset })}
+            />
+            <span style={{ fontSize: 12, color: 'var(--text3)', width: 34, textAlign: 'right' }}>{volume}%</span>
+          </span>
+        </Row>
+
+        <Row title={t['notify.settings_label']} hint={t['notify.settings_hint']} className="settings-row-stack">
           {permission === 'unsupported' ? (
             <span style={{ fontSize: 12, color: 'var(--text3)' }}>Not supported in this browser</span>
           ) : permission === 'denied' ? (

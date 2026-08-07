@@ -7,7 +7,9 @@ peak while being inaudible in practice. This renders the SHIPPED chime code
 OfflineAudioContext in headless Chromium and prints peak / RMS / dBFS, so a
 tweak to the synthesis constants can be checked without guessing.
 
-Usage:  venv/bin/python tools/measure_chime.py [ok|fail]
+Usage:  venv/bin/python tools/measure_chime.py [ok|fail] [--all]
+        --all measures every preset in the catalog, so their `gain` trims can be
+        set to land on the same loudness instead of being guessed.
 Requires: a running cockpit (WEB_PORT from .env) and `playwright install chromium`.
 """
 import math
@@ -30,10 +32,10 @@ def env(name: str, default: str = "") -> str:
 
 
 RENDER = """
-async (kind) => {
+async ([kind, preset]) => {
   if (typeof window.__cardloopChimeRender !== 'function') return { error: 'hook missing (stale bundle?)' }
-  const oc = new OfflineAudioContext(1, 44100, 44100 * 2)
-  window.__cardloopChimeRender(oc, kind)
+  const oc = new OfflineAudioContext(1, 44100, 44100 * 3)
+  window.__cardloopChimeRender(oc, kind, preset)
   const buf = await oc.startRendering()
   const d = buf.getChannelData(0)
   let peak = 0, sum = 0, voiced = 0
@@ -52,7 +54,9 @@ def db(x: float) -> str:
 
 
 def main() -> int:
-    kind = sys.argv[1] if len(sys.argv) > 1 else "ok"
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    every = "--all" in sys.argv
+    kind = args[0] if args else "ok"
     port, password = env("WEB_PORT", "8787"), env("WEB_PASSWORD")
 
     with sync_playwright() as p:
@@ -66,18 +70,24 @@ def main() -> int:
             field.press("Enter")
             page.wait_for_timeout(3000)
 
-        res = page.evaluate(RENDER, kind)
+        presets = page.evaluate("() => window.__cardloopChimePresets || []") if every else [None]
+        results = {(pid or "current"): page.evaluate(RENDER, [kind, pid]) for pid in presets}
         browser.close()
 
-    if res.get("error"):
-        print(f"FAILED: {res['error']}")
+    failed = [k for k, v in results.items() if v.get("error")]
+    if failed:
+        print(f"FAILED: {results[failed[0]]['error']}")
         return 1
-    print(f"chime '{kind}':")
-    print(f"  peak     {res['peak']:.3f}  ({db(res['peak'])})")
-    print(f"  rms      {res['rms']:.3f}  ({db(res['rms'])})   <- perceived loudness")
-    print(f"  duration {res['seconds']:.2f}s")
-    if res["peak"] > 0.99:
-        print("  WARNING: clipping — lower MAKEUP in web/src/lib/chime.ts")
+
+    print(f"{'preset':<10} {'peak':>7} {'dBFS':>8} {'rms':>7} {'dBFS':>8} {'len':>6}")
+    clipping = False
+    for name, r in results.items():
+        clipping = clipping or r["peak"] > 0.99
+        print(f"{name:<10} {r['peak']:>7.3f} {db(r['peak']):>8} {r['rms']:>7.3f} "
+              f"{db(r['rms']):>8} {r['seconds']:>5.2f}s")
+    print("\nrms is what the ear hears; keep presets within ~2 dB of each other.")
+    if clipping:
+        print("WARNING: clipping — lower that preset's `gain` in web/src/lib/chime.ts")
     return 0
 
 

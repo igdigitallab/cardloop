@@ -210,6 +210,26 @@
    RESPONSIVE — Forms / Login
    ══════════════════════════════════════════════════════════════ */
 
+/* Settings row whose controls are too wide for a phone (select + button + toggle):
+   the default two-column Row starves the label to one word per line, so stack. */
+@media (max-width: 640px) {
+  .settings-row-stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .settings-row-stack > span:last-child {
+    padding-top: 0;
+    justify-content: flex-start;
+  }
+
+  .settings-row-stack select {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
 @media (max-width: 640px) {
   /* Login card: fluid width on small screens */
   .login-card {
