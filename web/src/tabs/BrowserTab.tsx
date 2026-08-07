@@ -290,7 +290,8 @@ export function BrowserTab({ projectId }: Props) {
       const rect = getImgRect()
       if (!rect) return
       const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
-      send({ t: 'mouse', action: 'move', x, y })
+      // `buttons` is what makes a move a DRAG (text selection) rather than a hover.
+      send({ t: 'mouse', action: 'move', x, y, buttons: e.buttons, mods: modsOf(e) })
     },
     [send, getImgRect],
   )
@@ -304,7 +305,11 @@ export function BrowserTab({ projectId }: Props) {
       // afterwards (the container, tabIndex=0, owns the desktop key handlers).
       containerRef.current?.focus()
       const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
-      send({ t: 'mouse', action: 'down', x, y, button: buttonName(e.button) })
+      // e.detail = the click count (2 = select word, 3 = select line, for Chromium).
+      send({
+        t: 'mouse', action: 'down', x, y, button: buttonName(e.button),
+        buttons: e.buttons, mods: modsOf(e), clickCount: e.detail || 1,
+      })
     },
     [send, getImgRect],
   )
@@ -315,7 +320,10 @@ export function BrowserTab({ projectId }: Props) {
       const rect = getImgRect()
       if (!rect) return
       const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
-      send({ t: 'mouse', action: 'up', x, y, button: buttonName(e.button) })
+      send({
+        t: 'mouse', action: 'up', x, y, button: buttonName(e.button),
+        buttons: e.buttons, mods: modsOf(e), clickCount: e.detail || 1,
+      })
     },
     [send, getImgRect],
   )

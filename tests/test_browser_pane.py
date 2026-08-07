@@ -34,15 +34,46 @@ def test_clamp_bounds_and_bad_input():
 def test_mouse_down_maps_to_pressed():
     s = _session_with_fake_cdp()
     asyncio.run(s.handle_input({"t": "mouse", "action": "down", "x": 100, "y": 50, "button": "left"}))
-    assert ("Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": 100.0, "y": 50.0, "button": "left", "clickCount": 1}) in s._cdp.calls
+    method, params = s._cdp.calls[-1]
+    assert method == "Input.dispatchMouseEvent"
+    assert params["type"] == "mousePressed" and params["x"] == 100.0 and params["y"] == 50.0
+    assert params["button"] == "left" and params["clickCount"] == 1
 
 
 def test_mouse_move_is_clamped():
     s = _session_with_fake_cdp()
     asyncio.run(s.handle_input({"t": "mouse", "action": "move", "x": 99999, "y": -3}))
-    assert ("Input.dispatchMouseEvent",
-            {"type": "mouseMoved", "x": float(VIEWPORT["width"]), "y": 0.0}) in s._cdp.calls
+    _, params = s._cdp.calls[-1]
+    assert params["type"] == "mouseMoved"
+    assert params["x"] == float(VIEWPORT["width"]) and params["y"] == 0.0
+
+
+def test_move_with_a_held_button_is_a_drag():
+    """Text selection: a move carrying buttons=1 must reach Chromium as a left-button
+    drag, not a hover — otherwise dragging across text selects nothing."""
+    s = _session_with_fake_cdp()
+    asyncio.run(s.handle_input({"t": "mouse", "action": "move", "x": 10, "y": 10, "buttons": 1}))
+    _, params = s._cdp.calls[-1]
+    assert params["buttons"] == 1 and params["button"] == "left"
+    # …and a plain hover stays a hover
+    asyncio.run(s.handle_input({"t": "mouse", "action": "move", "x": 10, "y": 10}))
+    _, hover = s._cdp.calls[-1]
+    assert hover["buttons"] == 0 and hover["button"] == "none"
+
+
+def test_click_count_and_modifiers_are_forwarded():
+    """clickCount 2/3 is how Chromium selects a word / a line; Shift+click extends
+    a selection — both need these fields."""
+    s = _session_with_fake_cdp()
+    asyncio.run(s.handle_input({"t": "mouse", "action": "down", "x": 5, "y": 5,
+                                "button": "left", "clickCount": 2, "mods": 8}))
+    _, params = s._cdp.calls[-1]
+    assert params["clickCount"] == 2 and params["modifiers"] == 8
+    # out-of-range click counts are clamped, junk falls back to a single click
+    asyncio.run(s.handle_input({"t": "mouse", "action": "down", "x": 5, "y": 5, "clickCount": 99}))
+    assert s._cdp.calls[-1][1]["clickCount"] == 3
+    asyncio.run(s.handle_input({"t": "mouse", "action": "down", "x": 5, "y": 5, "clickCount": "x"}))
+    assert s._cdp.calls[-1][1]["clickCount"] == 1
 
 
 def test_wheel_dispatch():

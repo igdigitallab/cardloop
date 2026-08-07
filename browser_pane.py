@@ -562,10 +562,25 @@ class BrowserSession:
         cdp_type = {"move": "mouseMoved", "down": "mousePressed", "up": "mouseReleased"}.get(action)
         if not cdp_type:
             return
-        params: dict[str, Any] = {"type": cdp_type, "x": x, "y": y}
+        try:
+            mods = int(msg.get("mods") or 0) & 0xF
+            buttons = int(msg.get("buttons") or 0) & 0x1F
+        except Exception:
+            mods, buttons = 0, 0
+        params: dict[str, Any] = {"type": cdp_type, "x": x, "y": y,
+                                  "modifiers": mods, "buttons": buttons}
         if action in ("down", "up"):
             params["button"] = msg.get("button", "left")
-            params["clickCount"] = 1
+            # Chromium turns clickCount 2/3 into select-word / select-line. Always
+            # sending 1 is why double-click never selected a word in the pane.
+            try:
+                params["clickCount"] = max(1, min(3, int(msg.get("clickCount") or 1)))
+            except Exception:
+                params["clickCount"] = 1
+        else:
+            # A move with a held button is a DRAG (text selection). Without `button`
+            # + `buttons` set, Chromium reads it as a plain hover and selects nothing.
+            params["button"] = "left" if buttons & 1 else ("right" if buttons & 2 else "none")
         await self._cdp.send("Input.dispatchMouseEvent", params)
 
     async def _wheel(self, msg: dict) -> None:
