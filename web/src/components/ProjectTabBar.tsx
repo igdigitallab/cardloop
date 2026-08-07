@@ -105,7 +105,8 @@ function TabItem({
   return (
     <div
       ref={activeRef}
-      className={`ptab ${isActive ? 'active' : ''} ${project.is_free ? 'ptab-free' : ''}`}
+      className={`ptab ${isActive ? 'active' : ''} ${project.is_free ? 'ptab-free' : ''}${
+        replyReady && !isActive ? ' ptab-awaiting' : ''}`}
       data-tab-id={project.id}
       data-drag-active={dragActive ? '' : undefined}
       data-drag-over={dragOver ?? undefined}

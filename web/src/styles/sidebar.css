@@ -322,6 +322,17 @@
   background: var(--green);
   flex-shrink: 0;
   margin-left: auto;
+  /* Same breathing rhythm as the awaiting tab, so both read as one signal. */
+  animation: reply-ready-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes reply-ready-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reply-ready-badge { animation: none; }
 }
 
 /* ── Monogram avatar tile (unified leading element) ─────────────── */

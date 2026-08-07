@@ -277,6 +277,45 @@
   flex-shrink: 0;
 }
 
+/* Awaiting the operator: the run finished on a tab that isn't the active one.
+   The 7px dot alone was easy to miss, so the whole tab breathes green until it
+   is opened (App.clearUnread drops the id from replyReadyIds on activate). */
+.ptab.ptab-awaiting {
+  color: var(--green);
+  animation: ptab-awaiting 1.6s ease-in-out infinite;
+}
+
+.ptab.ptab-awaiting:hover {
+  color: var(--green);
+}
+
+.ptab.ptab-awaiting .ptab-reply-ready {
+  animation: ptab-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes ptab-awaiting {
+  0%, 100% {
+    background: color-mix(in srgb, var(--green) 22%, var(--bg2));
+    box-shadow: inset 0 -2px 0 var(--green);
+  }
+  50% {
+    background: var(--bg2);
+    box-shadow: inset 0 -2px 0 transparent;
+  }
+}
+
+/* Steady tint instead of a blink for operators who ask for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .ptab.ptab-awaiting,
+  .ptab.ptab-awaiting .ptab-reply-ready {
+    animation: none;
+  }
+  .ptab.ptab-awaiting {
+    background: color-mix(in srgb, var(--green) 18%, var(--bg2));
+    box-shadow: inset 0 -2px 0 var(--green);
+  }
+}
+
 /* Working dot: agent turn currently in flight — pulsing amber dot (ops:b2a081) */
 .ptab-working {
   display: inline-block;
