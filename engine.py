@@ -2045,6 +2045,41 @@ async def reconcile_board(
     await _apply_reconcile_ops(cwd, name, ops, on_match=_on_match, session_key=session_key)
 
 
+# ─────────────────────────── Resume self-healing ───────────────────────────
+
+def _transcript_exists(cwd: str, session_id: str) -> bool:
+    """True when the CLI transcript backing `session_id` is still on disk.
+
+    Slug rule (every non-alphanumeric char → '-') mirrors webapp._sdk_sessions_dir; the two
+    must stay in sync — test_resume_selfheal.py asserts they agree.
+    """
+    if not cwd or not session_id:
+        return False
+    try:
+        slug = re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+        return (Path.home() / ".claude" / "projects" / slug / f"{session_id}.jsonl").exists()
+    except Exception:
+        # Never let a path/permission hiccup drop a resume that would have worked.
+        return True
+
+
+def _forget_dead_session(ctx: "dict | None", session_key: str, dead_sid: str) -> None:
+    """Drop a session_id whose transcript is gone from the layer-2 cache.
+
+    The chats.json entry keeps the dead id only until this turn's write-back replaces it
+    with the fresh session_id, so it is deliberately left alone here.
+    """
+    try:
+        sessions = (ctx or {}).get("sessions")
+        if isinstance(sessions, dict) and sessions.get(session_key) == dead_sid:
+            sessions.pop(session_key, None)
+            save = (ctx or {}).get("save_sessions")
+            if callable(save):
+                save()
+    except Exception as exc:
+        print(f"[session] could not clear dead sid for {session_key}: {exc!r}")
+
+
 # ─────────────────────────── ENGINE (async event generator) ───────────────────────────
 #
 # run_engine — independent event generator. Knows nothing about Telegram, aiohttp, or any transport.
@@ -2213,6 +2248,17 @@ async def run_engine(  # type: ignore[return]
     # live-client fingerprint record the effective "xhigh" so toggling ultracode still evicts.
     _sdk_effort = None if ultracode else (effort if effort is not None else _DEFAULT_EFFORT)
     _eff_effort = ULTRACODE_EFFORT if ultracode else (effort if effort is not None else _DEFAULT_EFFORT)
+
+    # A stored session_id whose transcript is gone (CLI retention cleanup, a wiped
+    # ~/.claude/projects/<slug>, a restored backup) makes the CLI exit 1 on --resume. The
+    # live-client fallback below rebuilds the SAME options, so it exits 1 again and the turn
+    # dies as `sdk_error` — every send in that chat vanishes with no visible error and the
+    # project looks "unbound from its chats". Verify the transcript first and start fresh
+    # when it is missing, dropping the dead id so nothing re-resumes it.
+    if resume_session_id and not _transcript_exists(cwd, resume_session_id):
+        print(f"[session] resume {session_key} sid={resume_session_id} — transcript missing, starting fresh")
+        _forget_dead_session(ctx, session_key, resume_session_id)
+        resume_session_id = None
 
     print(f"[session] resume {session_key} sid={resume_session_id or 'NEW'}")
     # spec-065 Phase C: expose live-browser tools only when the browser module is on.
