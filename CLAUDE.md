@@ -11,6 +11,7 @@ Design history & specs: `docs/internal/specs/` (gitignored).
 ## What goes where (quick map)
 
 - `bot.py` — web-only launcher: loads env/auth, builds ctx, starts the web cockpit. The engine lives in `engine.py` (async event generator `{tool|text|result|rate_limit|error}`, transport-independent). Consumers: `_run_card` and `api_project_chat` (webapp.py). `running[k]=True` is reserved SYNCHRONOUSLY before the first await.
+- `codex_engine.py` — the optional SECOND provider (`run_codex_engine`), same event schema as `engine.py` so consumers stay provider-agnostic. Off unless `CODEX_ENABLED=true`; the SDK import is lazy and auth is **subscription-only** (`type == "chatgpt"`) — an API key is refused, never silently billed. Continuity is a `codex_thread_id` per chat, parallel to Claude's `session_id`; a project/card picks its provider via `board_provider` / `provider`, default `claude`.
 - `webapp.py` — the aiohttp cockpit. It does **NOT** import `bot.py` — everything comes through `ctx` (a dict of references: topics/sessions/running/resolve_project/run_engine/DATA/…) passed in from `bot.py`.
 - `data/topics.json` — **LAYER 1**: binding `"chat:thread" → {project,cwd,model}`. Permanent; `/reset` does not touch it.
 - `data/sessions.json` — **LAYER 2**: `"chat:thread" → session_id`. Cleared only by `/reset`.
