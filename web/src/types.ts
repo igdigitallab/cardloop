@@ -48,6 +48,31 @@ export interface Project {
   running?: boolean
   /** ops:b2a081 — true when a turn just finished and the operator hasn't opened the tab yet. */
   awaiting?: boolean
+  provider?: Provider
+  board_provider?: Provider
+  codex_model?: string
+}
+
+export type Provider = 'claude' | 'codex'
+
+export interface AgentProviderModel {
+  value: string
+  label: string
+  default?: boolean
+  default_reasoning?: string | null
+  reasoning_levels: string[]
+}
+
+export interface AgentProviderInfo {
+  provider: Provider
+  enabled: boolean
+  available: boolean
+  authenticated: boolean
+  auth_type?: string | null
+  models: AgentProviderModel[]
+  reasoning_levels: string[]
+  capabilities: Record<string, boolean>
+  error?: string | null
 }
 
 // ─── Spec-024: Project Groups ────────────────────────────────────────────────
@@ -71,6 +96,7 @@ export interface TaskCard {
   description?: string | null
   /** Card 43665f: optional per-card model override (opus/sonnet/haiku/fable). */
   model?: string | null
+  provider?: Provider | null
   /** Card 5e1c0a: true when a spec sidecar (data/card-specs/<id>.md) exists. */
   has_spec?: boolean
 }
@@ -221,6 +247,8 @@ export interface ProjectSettings {
   autopilot?: 'off' | 'propose' | 'auto'
   /** spec-075: per-project context pack override. null/undefined = inherit global. */
   context_pack_enabled?: boolean | null
+  board_provider: Provider
+  codex_model: string
 }
 
 // ─── spec-067: Autopilot ──────────────────────────────────────────────────────
@@ -323,6 +351,9 @@ export interface Chat {
   name: string
   session_id: string | null
   created_at: number
+  provider: Provider
+  model: string | null
+  codex_thread_id: string | null
 }
 
 export interface ChatsResponse {
@@ -447,6 +478,8 @@ export interface HistoryMessage {
 export interface SessionHistoryResponse {
   messages: HistoryMessage[]
   session_id: string | null
+  provider?: Provider
+  codex_thread_id?: string | null
   context_tokens?: number
   context_window?: number
   /** Absolute cost-management thresholds (two-tier, decoupled from the window). */
@@ -784,7 +817,9 @@ export interface SearchHit {
     card_id?: string
     /** file hits: repo-relative path + 1-based line of the matched chunk. */
     path?: string; line?: number; tier?: 'doc' | 'code'
+    codex_thread_id?: string; provider?: Provider
   }
+  provider?: Provider
 }
 
 /** spec-079: a search hit resolved into "open this inside the project view".
@@ -804,6 +839,8 @@ export interface SessionPeekTarget {
   projectId: string
   projectName: string
   sessionId: string
+  codexThreadId?: string
+  provider?: Provider
   uuid?: string
   /** epoch seconds (search index unit) — converted to ms before hitting the API. */
   ts?: number

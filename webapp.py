@@ -56,6 +56,7 @@ import autopilot as _autopilot
 
 # spec-074: global search index (SQLite FTS5 over transcripts/timeline/boards)
 import search as _search
+import codex_engine as _codex
 
 # spec-075: context pack — deterministic project-state injection on fresh sessions
 import context_pack as _context_pack
@@ -2322,6 +2323,24 @@ def _save_free_chats(ctx: dict, data: dict) -> None:
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _save_free_chat_continuity(
+    ctx: dict, project_id: str | None, *, provider: str,
+    session_id: str | None = None, codex_thread_id: str | None = None,
+) -> None:
+    """Persist the provider-native continuity id for a virtual free chat."""
+    if not project_id or not project_id.startswith("free-"):
+        return
+    free = _load_free_chats(ctx)
+    record = free.get(project_id)
+    if not isinstance(record, dict):
+        return
+    if provider == "codex":
+        record["codex_thread_id"] = codex_thread_id
+    else:
+        record["session_id"] = session_id
+    _save_free_chats(ctx, free)
+
+
 _TOPICS_MTIME: "float | None" = None  # mtime of the last loaded version of topics.json
 
 
@@ -2396,6 +2415,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "autopilot": _autopilot.get_project_mode(b),
             # spec-075: per-project context-pack override (None = inherit global true)
             "context_pack_enabled": b.get("context_pack_enabled"),
+            "board_provider": "codex" if b.get("board_provider") == "codex" else "claude",
+            "codex_model": b.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -2414,6 +2435,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "is_free": True,
             "group": raw_free_group if raw_free_group in valid_groups else None,
             "favorite": fid in fav_set,
+            "provider": "codex" if b.get("provider") == "codex" else "claude",
+            "codex_model": b.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
         })
     return out
 
@@ -4999,6 +5022,15 @@ def _effective_card_model(card: dict) -> str:
     return "sonnet"
 
 
+def _effective_card_provider(card: dict, project: dict) -> str:
+    """Card override → project board default → Claude compatibility default."""
+    if card.get("provider") == "codex":
+        return "codex"
+    if card.get("provider") == "claude":
+        return "claude"
+    return "codex" if project.get("board_provider") == "codex" else "claude"
+
+
 def _git_enabled(project: dict) -> bool:
     """git_enabled per-project (topics.json). Default True (git enabled).
     False → cockpit does NOT use git: card runs are legacy, git-sync returns 409,
@@ -5008,7 +5040,7 @@ def _git_enabled(project: dict) -> bool:
 
 # ─────────────────────── API: settings (global + per-project) ───────────────────────
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", "codex_model")
 
 # spec-051: per-project policy for resuming a run interrupted by a rate-limit.
 #   ask    — show an in-chat Yes/No prompt (default; visible, not silent)
@@ -5122,6 +5154,8 @@ def _project_settings_view(project: dict) -> dict:
         "autopilot": _autopilot.get_project_mode(project),
         # spec-075: per-project context-pack override (None = inherit global)
         "context_pack_enabled": project.get("context_pack_enabled"),
+        "board_provider": "codex" if project.get("board_provider") == "codex" else "claude",
+        "codex_model": project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
     }
 
 
@@ -5190,6 +5224,16 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
             sv = str(v).strip().lower()
             if sv not in _ALLOWED_MODELS:
                 return web.json_response({"error": f"model: not in {sorted(_ALLOWED_MODELS)}"}, status=400)
+            updates[k] = sv
+        elif k == "board_provider":
+            sv = str(v).strip().lower()
+            if sv not in ("claude", "codex"):
+                return web.json_response({"error": "board_provider: must be claude or codex"}, status=400)
+            updates[k] = sv if sv != "claude" else None
+        elif k == "codex_model":
+            sv = str(v).strip()
+            if not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", sv):
+                return web.json_response({"error": "codex_model: invalid model id"}, status=400)
             updates[k] = sv
         elif k == "auto_resume_mode":
             sv = str(v).strip().lower()
@@ -5398,6 +5442,12 @@ async def api_create_task(req: web.Request) -> web.Response:
     description = body.get("description") or None
     if description is not None:
         description = str(description).strip() or None
+    provider = (body.get("provider") or "").strip().lower() or None
+    if provider not in (None, "claude", "codex"):
+        return web.json_response({"error": "provider: must be claude or codex"}, status=400)
+    card_model = (body.get("model") or "").strip() or None
+    if card_model and not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", card_model):
+        return web.json_response({"error": "model: invalid model id"}, status=400)
     cwd, name = project["cwd"], project["name"]
     async with _get_board_lock(cwd):
         _, preamble, cols = _load_board(cwd)
@@ -5406,6 +5456,10 @@ async def api_create_task(req: web.Request) -> web.Response:
         new_card: dict = {"id": _new_card_id(), "text": text}
         if description:
             new_card["description"] = description
+        if provider:
+            new_card["provider"] = provider
+        if card_model:
+            new_card["model"] = card_model
         cols[column].insert(0, new_card)
         _save_board(cwd, name, preamble, cols)
     return web.json_response(_board_payload_with_specs(cwd, ctx["DATA"]))
@@ -5657,7 +5711,9 @@ async def _set_chat_plan_pointer(ctx: dict, session_key: str, chat_id: "str | No
 
 
 def create_pending_plan(ctx: "dict | None", session_key: str, chat_id: "str | None",
-                        plan_text: str, plan_file_path: "str | None" = None):
+                        plan_text: str, plan_file_path: "str | None" = None,
+                        provider: str = "claude", codex_thread_id: "str | None" = None,
+                        model: "str | None" = None):
     """Park a plan for operator approval. Returns (plan_id, asyncio.Future).
 
     The Future resolves with {"decision": "approve"|"reject"|"cancelled", "feedback": str}
@@ -5675,6 +5731,9 @@ def create_pending_plan(ctx: "dict | None", session_key: str, chat_id: "str | No
         "status": "awaiting_approval",
         "decided_at": None,
         "feedback": None,
+        "provider": "codex" if provider == "codex" else "claude",
+        "codex_thread_id": codex_thread_id,
+        "model": model,
     }
     _plan_records[plan_id] = record
     _write_plan_meta(record)
@@ -5758,7 +5817,8 @@ async def api_plan_decide(req: web.Request) -> web.Response:
 
     Idempotent: a second decide (double-click / stale tab) returns {ok, noop: true}."""
     ctx = req.app["ctx"]
-    if _find_project_by_id(ctx, req.match_info["id"]) is None:
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     plan_id = req.match_info["plan_id"]
     if not _valid_plan_id(plan_id):
@@ -5773,7 +5833,30 @@ async def api_plan_decide(req: web.Request) -> web.Response:
     if decision not in ("approve", "reject"):
         return web.json_response({"error": "decision must be approve|reject"}, status=400)
     feedback = str(body.get("feedback") or "")[:4000]
+    record_before = _read_plan_meta(plan_id)
     if resolve_plan(ctx, plan_id, decision, feedback):
+        # Claude's native ExitPlanMode continues in-turn. Codex planning is a
+        # completed read-only turn, so approval/rejection intentionally starts a
+        # new turn with the correct sandbox through the existing durable queue.
+        if (record_before or {}).get("provider") == "codex":
+            session_key = record_before.get("session_key") or project.get("session_key", "")
+            chat_id = record_before.get("chat_id")
+            if decision == "approve":
+                followup = (
+                    "The operator approved the plan below. Implement it completely now using full access.\n\n"
+                    + (record_before.get("plan_text") or "")
+                )
+                plan_again = False
+            else:
+                followup = (
+                    "Revise the plan below in read-only planning mode using the operator feedback.\n\n"
+                    f"Feedback: {feedback or '(no details)'}\n\n"
+                    + (record_before.get("plan_text") or "")
+                )
+                plan_again = True
+            _chat_queue_enqueue(session_key, followup, chat_id, project["id"],
+                                plan_mode=plan_again)
+            _spawn_bg(_chat_queue_drain_one(ctx, session_key))
         return web.json_response({"ok": True, "status": "approved" if decision == "approve"
                                   else "rejected"})
     record = _read_plan_meta(plan_id)
@@ -5803,6 +5886,8 @@ class AppCtx(TypedDict, total=False):
     save_topics: object     # callable
     resolve_project: object  # callable
     run_engine: object      # async generator factory
+    run_codex_engine: object  # optional Codex async generator factory
+    codex_provider_info: object  # async provider registry factory
     MODELS: dict
     REGISTRY: dict
 
@@ -5837,6 +5922,8 @@ def _write_sidecar(
     base_branch: str | None = None,
     wt_path: str | None = None,
     has_changes: bool = False,
+    provider: str = "claude",
+    model: str | None = None,
 ) -> None:
     """Writes the card result sidecar to DATA/runs/<card_id>.md
     and machine-readable JSON to DATA/runs/<card_id>.json."""
@@ -5852,6 +5939,8 @@ def _write_sidecar(
             f"**Time:** {ts}",
             f"**Outcome:** {outcome}",
             f"**Mode:** {run_mode}",
+            f"**Provider:** {provider}",
+            f"**Model:** {model or '-'}",
             "",
             "## Task",
             "",
@@ -5880,6 +5969,8 @@ def _write_sidecar(
             "has_changes": has_changes,
             "applied": False,
             "discarded": False,
+            "provider": provider,
+            "model": model,
         }
         (runs_dir / f"{card_id}.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -5954,12 +6045,16 @@ async def _run_card(
 
     run_mode: 'worktree' | 'legacy'. wt_info: {wt_path, base_branch} or None.
     """
-    run_engine = ctx.get("run_engine")
+    provider = _effective_card_provider(card, project)
+    run_engine = (ctx.get("run_codex_engine") if provider == "codex" else ctx.get("run_engine"))
     cwd = project["cwd"]
     name = project["name"]
     # Card 43665f: model resolution — card override → board_card_model setting → sonnet.
     # Deliberately does NOT use the project model (that is for chat runs).
-    model = _effective_card_model(card)
+    if provider == "codex":
+        model = (card.get("model") or project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL)
+    else:
+        model = _effective_card_model(card)
     prompt = card["text"]
     # If description is present — append it to the agent prompt
     card_desc = card.get("description")
@@ -6019,6 +6114,7 @@ async def _run_card(
                 "source": "card",
                 "prompt": prompt,
                 "run_id": card_id,
+                "provider": provider,
             })
             # spec-052 Phase 2: surface card run start in the project chat
             _emit_board_event(
@@ -6053,20 +6149,29 @@ async def _run_card(
             # from the shared chat session (different cwd, synthetic session key).
             # Spec-029 item 3: request structured output only when STRUCTURED_CARDS=1.
             _card_output_fmt = _CARD_OUTPUT_SCHEMA if STRUCTURED_CARDS else None
-            async for event in run_engine(
-                project_name=name,
-                cwd=effective_cwd,
-                prompt=prompt,
-                session_key=session_key,
-                model=model,
-                resume_session_id=resume_sid,
-                env=project_secrets,
-                **agents_kwargs,
-                ctx=ctx,
-                ephemeral=True,
-                output_format=_card_output_fmt,
-                entrypoint="card",
-            ):
+            if provider == "codex":
+                _card_gen = run_engine(
+                    project_name=name, cwd=effective_cwd, prompt=prompt,
+                    session_key=session_key, model=model, resume_thread_id=None,
+                    ctx=ctx, ephemeral=True, effort=None, plan_mode=False,
+                    multi_agent=False, entrypoint="card",
+                )
+            else:
+                _card_gen = run_engine(
+                    project_name=name,
+                    cwd=effective_cwd,
+                    prompt=prompt,
+                    session_key=session_key,
+                    model=model,
+                    resume_session_id=resume_sid,
+                    env=project_secrets,
+                    **agents_kwargs,
+                    ctx=ctx,
+                    ephemeral=True,
+                    output_format=_card_output_fmt,
+                    entrypoint="card",
+                )
+            async for event in _card_gen:
                 etype = event["type"]
                 if etype == "text":
                     answer_parts.append(event["text"])
@@ -6148,6 +6253,8 @@ async def _run_card(
             base_branch=base_branch,
             wt_path=wt_path_val,
             has_changes=has_changes,
+            provider=provider,
+            model=model,
         )
 
         # move card (reload board — may have changed while agent was running)
@@ -6174,6 +6281,7 @@ async def _run_card(
             "kind": "run_end",
             "outcome": "ok" if ok else "fail",
             "run_id": card_id,
+            "provider": provider,
         })
         # spec-052 Phase 2: the run OUTCOME is surfaced as the card's move
         # (→ Review/Failed) board_event from _move_card_after_run — we deliberately
@@ -6533,13 +6641,20 @@ async def api_update_task(req: web.Request) -> web.Response:
     update_model = "model" in body
     card_model: str | None = None
     if update_model:
-        raw_model = (body.get("model") or "").strip().lower()
-        if raw_model and raw_model not in _ALLOWED_MODELS:
+        raw_model = (body.get("model") or "").strip()
+        if raw_model and not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", raw_model):
             return web.json_response(
-                {"error": f"model: must be one of {sorted(_ALLOWED_MODELS)} or empty to clear"},
+                {"error": "model: invalid model id or empty to clear"},
                 status=400,
             )
         card_model = raw_model or None  # "" → clear override
+    update_provider = "provider" in body
+    card_provider: str | None = None
+    if update_provider:
+        raw_provider = (body.get("provider") or "").strip().lower()
+        if raw_provider and raw_provider not in ("claude", "codex"):
+            return web.json_response({"error": "provider: must be claude, codex, or empty"}, status=400)
+        card_provider = raw_provider or None
     # spec-052 Phase 5: optional spec: epic link. Empty/absent = clear the link.
     update_spec = "spec" in body
     card_spec: str | None = None
@@ -6571,6 +6686,11 @@ async def api_update_task(req: web.Request) -> web.Response:
                             card["model"] = card_model
                         else:
                             card.pop("model", None)
+                    if update_provider:
+                        if card_provider:
+                            card["provider"] = card_provider
+                        else:
+                            card.pop("provider", None)
                     if update_spec:
                         if card.get("spec"):
                             _touched_specs.add(card["spec"])  # old link → refresh too
@@ -6755,13 +6875,16 @@ async def api_project_live(req: web.Request) -> web.Response:
             "model": None,
             "cost_usd": None,
             "prompt": "",
-            "cursor": 0,
+            # Cursor means "last event already included", not "next event id".
+            # A fresh session's first event is seq=0, so the empty snapshot must
+            # return -1 or clients will incorrectly dedupe that first delta.
+            "cursor": _live_seq.get(session_key, 0) - 1,
             "events": [],
             "board_events": board_events,
             "pending_handoff": pending_handoff,
         })
     events_list = list(turn["events"])
-    cursor = events_list[-1]["seq"] if events_list else turn["seq"]
+    cursor = events_list[-1]["seq"] if events_list else turn["seq"] - 1
     try:
         return web.json_response({
             "running": running,
@@ -6907,9 +7030,15 @@ async def api_free_create(req: web.Request) -> web.Response:
     except Exception:
         body = {}
     cwd = (body.get("cwd") or _FREE_DEFAULT_CWD).rstrip("/")
-    model = (body.get("model") or _effective_default_model(ctx)).strip().lower()
-    if model not in _ALLOWED_MODELS:
-        model = _effective_default_model(ctx)
+    provider = "codex" if body.get("provider") == "codex" else "claude"
+    if provider == "codex":
+        model = (body.get("model") or _codex.DEFAULT_CODEX_MODEL).strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", model):
+            return web.json_response({"error": "invalid Codex model"}, status=400)
+    else:
+        model = (body.get("model") or _effective_default_model(ctx)).strip().lower()
+        if model not in _ALLOWED_MODELS:
+            model = _effective_default_model(ctx)
 
     # Label — user-supplied or auto "Free HH:MM"
     label = (body.get("label") or "").strip()
@@ -6922,6 +7051,9 @@ async def api_free_create(req: web.Request) -> web.Response:
         "label": label,
         "cwd": cwd,
         "model": model,
+        "provider": provider,
+        "session_id": None,
+        "codex_thread_id": None,
         "created_at": time.time(),
     }
     _save_free_chats(ctx, free)
@@ -7324,6 +7456,34 @@ async def api_usage_dashboard(req: web.Request) -> web.Response:
     data = await loop.run_in_executor(
         None, lambda: usage_scanner.dashboard_data(db_path=db_path, days=days, models=models))
     data["scanning"] = _usage_scan_state["running"]
+    codex_rows = _codex.usage_rows(ctx["DATA"], days=days)
+    codex_by_model: dict[str, dict] = {}
+    for row in codex_rows:
+        model_name = row.get("model") or "unknown"
+        bucket = codex_by_model.setdefault(model_name, {
+            "model": model_name, "turns": 0, "input": 0, "output": 0,
+            "cached_input": 0, "reasoning_output": 0,
+        })
+        bucket["turns"] += 1
+        bucket["input"] += row.get("input_tokens", 0) or 0
+        bucket["output"] += row.get("output_tokens", 0) or 0
+        bucket["cached_input"] += row.get("cached_input_tokens", 0) or 0
+        bucket["reasoning_output"] += row.get("reasoning_output_tokens", 0) or 0
+    data["providers"] = {
+        "claude": {"turns": data.get("overview", {}).get("turns", 0),
+                   "cost": data.get("overview", {}).get("cost", 0),
+                   "subscription_cost_available": True},
+        "codex": {
+            "turns": len(codex_rows),
+            "input": sum(r.get("input_tokens", 0) or 0 for r in codex_rows),
+            "output": sum(r.get("output_tokens", 0) or 0 for r in codex_rows),
+            "cached_input": sum(r.get("cached_input_tokens", 0) or 0 for r in codex_rows),
+            "reasoning_output": sum(r.get("reasoning_output_tokens", 0) or 0 for r in codex_rows),
+            "by_model": sorted(codex_by_model.values(), key=lambda r: r["turns"], reverse=True),
+            "subscription_cost_available": False,
+            "cost": None,
+        },
+    }
     return web.json_response(data)
 
 
@@ -7500,6 +7660,24 @@ async def api_search(req: web.Request) -> web.Response:
     except Exception:
         logging.exception("[search] query failed")
         return web.json_response({"hits": [], "error": "search failed"})
+    if _codex.codex_enabled() and len(hits) < limit:
+        try:
+            projects_by_cwd = {p.get("cwd"): p for p in _collect_projects(ctx)}
+            for thread in await _codex.list_threads(limit=limit, search_term=q):
+                project = projects_by_cwd.get(thread.get("cwd"))
+                if project is None or (project_id and project.get("id") != project_id):
+                    continue
+                hits.append({
+                    "project_id": project["id"], "project_name": project["name"],
+                    "source": "chat", "provider": "codex",
+                    "ts": thread.get("recencyAt") or thread.get("updatedAt") or 0,
+                    "snippet": (thread.get("preview") or "")[:800],
+                    "ref": {"codex_thread_id": thread.get("id"), "provider": "codex"},
+                })
+                if len(hits) >= limit:
+                    break
+        except Exception:
+            logging.exception("[search] Codex thread query failed")
     return web.json_response({"hits": hits})
 
 
@@ -9477,6 +9655,11 @@ def _mirror_active_chat_to_sessions(ctx: dict, project_id: str, session_key: str
     chat = next((c for c in entry.get("chats", []) if c["id"] == active_id), None)
     if chat is None:
         return
+    # The legacy sessions cache belongs exclusively to Claude. Selecting or
+    # running a Codex chat must never erase/replace the last Claude session used
+    # by cards, old handlers, or a future rollback.
+    if _chat_provider(chat) != "claude":
+        return
     sid = chat.get("session_id")
     if sid:
         ctx["sessions"][session_key] = sid
@@ -9496,6 +9679,8 @@ def _ensure_chat_entry(ctx: dict, project_id: str, session_key: str) -> dict:
         return chats_data
     # Migration: seed "Main" from the existing live session_id (zero context loss).
     existing_sid = ctx["sessions"].get(session_key) or None
+    free_record = _load_free_chats(ctx).get(project_id, {}) if project_id.startswith("free-") else {}
+    seeded_provider = "codex" if free_record.get("provider") == "codex" else "claude"
     chat_id = _new_chat_id()
     chats_data[project_id] = {
         "active": chat_id,
@@ -9503,13 +9688,48 @@ def _ensure_chat_entry(ctx: dict, project_id: str, session_key: str) -> dict:
             {
                 "id": chat_id,
                 "name": "Main",
-                "session_id": existing_sid,
+                "provider": seeded_provider,
+                "model": free_record.get("model"),
+                "session_id": existing_sid if seeded_provider == "claude" else None,
+                "codex_thread_id": free_record.get("codex_thread_id") if seeded_provider == "codex" else None,
                 "created_at": time.time(),
             }
         ],
     }
     _save_chats(ctx, chats_data)
     return chats_data
+
+
+def _chat_provider(chat: "dict | None") -> str:
+    """Compatibility rule: absent/unknown provider is always Claude."""
+    return "codex" if isinstance(chat, dict) and chat.get("provider") == "codex" else "claude"
+
+
+def _chat_response(chat: dict) -> dict:
+    """Add provider fields to API output without rewriting legacy chats.json."""
+    return {
+        **chat,
+        "provider": _chat_provider(chat),
+        "model": chat.get("model"),
+        "codex_thread_id": chat.get("codex_thread_id"),
+    }
+
+
+def _effective_active_chat(entry: dict) -> "str | None":
+    """Hide disabled Codex selection in UI while preserving it on disk."""
+    active = entry.get("active")
+    if _codex.codex_enabled():
+        return active
+    active_chat = next((c for c in entry.get("chats", []) if c.get("id") == active), None)
+    if _chat_provider(active_chat) == "claude":
+        return active
+    claude_chats = [c for c in entry.get("chats", []) if _chat_provider(c) == "claude"]
+    return claude_chats[-1].get("id") if claude_chats else active
+
+
+def _find_chat(entry: dict, chat_id: "str | None" = None) -> "dict | None":
+    target = chat_id or _effective_active_chat(entry)
+    return next((c for c in entry.get("chats", []) if c.get("id") == target), None)
 
 
 def _active_chat_session_id(ctx: dict, project_id: str) -> "str | None":
@@ -9549,7 +9769,10 @@ async def api_project_chats_list(req: web.Request) -> web.Response:
         # session_id so the first sessionHistory call on page load always lands on
         # the correct transcript regardless of service restart ordering.
         _mirror_active_chat_to_sessions(ctx, project["id"], session_key, chats_data)
-    return web.json_response({"active": entry["active"], "chats": entry["chats"]})
+    return web.json_response({
+        "active": _effective_active_chat(entry),
+        "chats": [_chat_response(chat) for chat in entry["chats"]],
+    })
 
 
 async def api_project_chats_create(req: web.Request) -> web.Response:
@@ -9565,15 +9788,26 @@ async def api_project_chats_create(req: web.Request) -> web.Response:
     name = (body.get("name") or "").strip() or "Chat"
     if len(name) > 80:
         name = name[:80]
+    provider = "codex" if body.get("provider") == "codex" else "claude"
+    model = (body.get("model") or "").strip() or None
+    if provider == "claude" and model is not None and model not in _ALLOWED_MODELS:
+        return web.json_response({"error": "invalid Claude model"}, status=400)
+    if provider == "codex" and model is None:
+        model = _codex.DEFAULT_CODEX_MODEL
+    if provider == "codex" and not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", model or ""):
+        return web.json_response({"error": "invalid Codex model"}, status=400)
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
     async with _chats_lock():
         chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
         entry = chats_data[project["id"]]
         chat_id = _new_chat_id()
-        new_chat = {"id": chat_id, "name": name, "session_id": None, "created_at": time.time()}
+        new_chat = {
+            "id": chat_id, "name": name, "provider": provider, "model": model,
+            "session_id": None, "codex_thread_id": None, "created_at": time.time(),
+        }
         entry["chats"].append(new_chat)
         _save_chats(ctx, chats_data)
-    return web.json_response(new_chat, status=201)
+    return web.json_response(_chat_response(new_chat), status=201)
 
 
 async def api_project_chats_patch(req: web.Request) -> web.Response:
@@ -9592,6 +9826,11 @@ async def api_project_chats_patch(req: web.Request) -> web.Response:
         body = await req.json()
     except Exception:
         return web.json_response({"error": "bad request"}, status=400)
+    if "provider" in body:
+        return web.json_response(
+            {"error": "chat provider is immutable; create a new chat to switch providers"},
+            status=400,
+        )
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
     async with _chats_lock():
         chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
@@ -9609,7 +9848,7 @@ async def api_project_chats_patch(req: web.Request) -> web.Response:
             _mirror_active_chat_to_sessions(ctx, project["id"], session_key, chats_data)
         else:
             _save_chats(ctx, chats_data)
-    return web.json_response({"active": entry["active"], "chat": chat})
+    return web.json_response({"active": _effective_active_chat(entry), "chat": _chat_response(chat)})
 
 
 async def api_project_chats_delete(req: web.Request) -> web.Response:
@@ -9640,6 +9879,34 @@ async def api_project_chats_delete(req: web.Request) -> web.Response:
         if was_active:
             _mirror_active_chat_to_sessions(ctx, project["id"], session_key, chats_data)
     return web.json_response({"ok": True, "active": entry["active"]})
+
+
+async def api_agent_providers(req: web.Request) -> web.Response:
+    """GET /api/agent-providers — live provider/auth/model capabilities."""
+    ctx = req.app["ctx"]
+    codex_info_fn = ctx.get("codex_provider_info") or _codex.provider_info
+    codex_info = await codex_info_fn()
+    claude_models = [
+        {"value": value, "label": key.title(), "reasoning_levels": ["low", "medium", "high", "xhigh", "max"]}
+        for key, value in (ctx.get("MODELS") or {}).items()
+    ]
+    return web.json_response({
+        "default": "claude",
+        "providers": [
+            {
+                "provider": "claude", "enabled": True, "available": True,
+                "authenticated": True, "models": claude_models,
+                "reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
+                "capabilities": {
+                    "chat": True, "board": True, "history": True, "search": True,
+                    "usage": True, "plan_mode": True, "multi_agent": True,
+                    "skills": True, "plugins": True, "interrupt": True,
+                },
+                "error": None,
+            },
+            codex_info,
+        ],
+    })
 
 
 # ─────────────────────────── C2: project sessions ───────────────────────────
@@ -9827,6 +10094,25 @@ async def api_project_sessions(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
+    entry = _load_chats(ctx).get(project["id"], {})
+    active_chat = _find_chat(entry)
+    if _chat_provider(active_chat) == "codex":
+        try:
+            active_thread = (active_chat or {}).get("codex_thread_id")
+            rows = await _codex.list_threads(cwd=project["cwd"], limit=30)
+            sessions = [{
+                "session_id": row.get("id"), "codex_thread_id": row.get("id"),
+                "provider": "codex", "last_used": datetime.fromtimestamp(
+                    row.get("recencyAt") or row.get("updatedAt") or 0, tz=timezone.utc
+                ).isoformat(),
+                "preview": row.get("preview") or "", "is_active": row.get("id") == active_thread,
+                "label": row.get("name"), "message_count": len(row.get("turns") or []),
+                "context_tokens": None,
+            } for row in rows]
+            return web.json_response({"sessions": sessions, "provider": "codex"})
+        except Exception as exc:
+            return web.json_response({"sessions": [], "provider": "codex", "error": str(exc)})
+
     _sk = (project.get("session_key") or project.get("tg_thread", ""))
     active_sid = ctx["sessions"].get(_sk)
     sdk_dir = _sdk_sessions_dir(project["cwd"])
@@ -9915,6 +10201,9 @@ async def api_project_set_session(req: web.Request) -> web.Response:
         return web.json_response({"error": "bad request"}, status=400)
 
     action = body.get("action")
+    _session_entry = _load_chats(ctx).get(project["id"], {})
+    _session_chat = _find_chat(_session_entry)
+    _session_provider = _chat_provider(_session_chat)
 
     if action == "new":
         # Spec-037: reset the ACTIVE chat's session_id (not all sessions).
@@ -9929,10 +10218,14 @@ async def api_project_set_session(req: web.Request) -> web.Response:
                     None,
                 )
                 if _ss_active is not None:
-                    _ss_active["session_id"] = None
+                    if _session_provider == "codex":
+                        _ss_active["codex_thread_id"] = None
+                    else:
+                        _ss_active["session_id"] = None
                     _save_chats(ctx, _ss_data)
-        ctx["sessions"].pop(_sk, None)
-        ctx["save_sessions"]()
+        if _session_provider == "claude":
+            ctx["sessions"].pop(_sk, None)
+            ctx["save_sessions"]()
         # Clear context-warn state so a fresh session can warn again.
         try:
             _cw = ctx.get("context_warned")
@@ -9953,6 +10246,17 @@ async def api_project_set_session(req: web.Request) -> web.Response:
         session_id = body.get("session_id", "")
         if not session_id:
             return web.json_response({"error": "session_id required"}, status=400)
+        if _session_provider == "codex":
+            if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", session_id):
+                return web.json_response({"error": "invalid Codex thread id"}, status=400)
+            async with _chats_lock():
+                _sr_data = _load_chats(ctx)
+                _sr_proj = _sr_data.get(project["id"])
+                _sr_active = _find_chat(_sr_proj or {})
+                if _sr_active is not None:
+                    _sr_active["codex_thread_id"] = session_id
+                    _save_chats(ctx, _sr_data)
+            return web.json_response({"active": session_id, "provider": "codex"})
         # Sanitise: basename only (no / or ..) — against escaping to another .jsonl
         if session_id != Path(session_id).name or session_id in ("", ".", ".."):
             return web.json_response({"error": "invalid session_id"}, status=400)
@@ -10230,6 +10534,34 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
 
+    chats_entry = _load_chats(ctx).get(project["id"], {})
+    active_chat = _find_chat(chats_entry)
+    explicit_codex_thread = req.rel_url.query.get("codex_thread_id", "")
+    if explicit_codex_thread or _chat_provider(active_chat) == "codex":
+        thread_id = explicit_codex_thread or (active_chat or {}).get("codex_thread_id")
+        if not thread_id:
+            return web.json_response({
+                "messages": [], "session_id": None, "codex_thread_id": None,
+                "provider": "codex", "context_tokens": 0,
+            })
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", thread_id):
+            return web.json_response({"error": "invalid codex_thread_id"}, status=400)
+        try:
+            payload = await _codex.read_thread(thread_id)
+            messages = _codex.history_messages(payload)
+            thread = payload.get("thread") or {}
+            usage = thread.get("tokenUsage") or {}
+            total = usage.get("total") or {}
+            return web.json_response({
+                "messages": messages, "session_id": None,
+                "codex_thread_id": thread_id, "provider": "codex",
+                "context_tokens": total.get("totalTokens", 0),
+                "context_window": usage.get("modelContextWindow"),
+                "last_cache_hit_pct": None,
+            })
+        except Exception as exc:
+            return web.json_response({"error": f"Codex history unavailable: {exc}"}, status=502)
+
     # Resolve the session to read: explicit ?session_id wins; otherwise prefer the active
     # chat from chats.json (spec-037 source of truth), then the legacy ctx["sessions"] mirror.
     # Reading legacy-only returned EMPTY history for any project whose mirror was stale (a run
@@ -10495,6 +10827,8 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
     _project_id = item.get("project_id")
     _resolved_chat_id = _q_chat_id  # finalized (fallback to active chat) in the resolution block below
     _cid: dict = {"chat_id": _q_chat_id} if _q_chat_id else {}
+    provider = "claude"
+    resume_thread_id: "str | None" = None
     outcome = "fail"
     _q_final_ctx_tokens: "int | None" = None  # captured from the result event for post-turn auto-rotate
     try:
@@ -10543,7 +10877,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # evict+reconnect that SIGTERMed still-working background sub-agents.
         _lto = _last_turn_options.get(session_key) or {}
         _q_effort = item.get("effort") or _lto.get("effort")
-        if _q_effort not in ("low", "medium", "high", "xhigh", "max"):
+        if _q_effort not in ("low", "medium", "high", "xhigh", "max", "ultra"):
             _q_effort = None
         _q_ultracode = item.get("ultracode")
         if _q_ultracode is None:
@@ -10581,13 +10915,24 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                     _tc = next((c for c in _cp.get("chats", []) if c["id"] == _tid), None)
                     if _tc is not None:
                         _resolved_chat_id = _tc["id"]
-                        resume_session_id = _tc.get("session_id") or None
+                        provider = _chat_provider(_tc)
+                        if _tc.get("model"):
+                            model = _tc["model"]
+                        if provider == "codex":
+                            resume_thread_id = _tc.get("codex_thread_id") or None
+                        else:
+                            resume_session_id = _tc.get("session_id") or None
                         _resolved_entry = True
             except Exception as _ce:
                 print(f"[chat_queue] chats resolve error for {session_key} (falling back): {_ce}")
         if not _resolved_entry:
             # Legacy item (no project_id) or chats.json unavailable: keep the old behavior.
             resume_session_id = ctx["sessions"].get(session_key)
+        if provider == "claude" and _q_effort == "ultra":
+            _q_effort = None
+        run_engine = (ctx.get("run_codex_engine") if provider == "codex" else ctx.get("run_engine"))
+        if run_engine is None:
+            raise RuntimeError(f"{provider} engine not available in ctx")
         _cid = {"chat_id": _resolved_chat_id} if _resolved_chat_id else {}
 
         # A queued message (typed while busy) or an auto-continue wake can be the first turn of a
@@ -10604,6 +10949,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
 
         if _live_turns.get(session_key) is None:
             _lt = _live_turn_create(session_key, model, prompt)
+            _lt["provider"] = provider
             if _resolved_chat_id:
                 _lt["chat_id"] = _resolved_chat_id
         _bus_publish(session_key, {
@@ -10611,25 +10957,28 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             "source": "chat",
             "prompt": prompt,
             "run_id": run_id,
+            "provider": provider,
             **_cid,
         })
 
-        async for event in run_engine(
-            project_name=project_name,
-            cwd=cwd,
-            prompt=effective_prompt,
-            session_key=session_key,
-            model=model,
-            resume_session_id=resume_session_id,
-            env=project_secrets,
-            **agents_kwargs,
-            ctx=ctx,
-            ephemeral=False,
-            effort=_q_effort,
-            ultracode=bool(_q_ultracode),
-            plan_mode=_q_plan_mode,
-            chat_id=_resolved_chat_id,
-        ):
+        if provider == "codex":
+            _queue_gen = run_engine(
+                project_name=project_name, cwd=cwd, prompt=effective_prompt,
+                session_key=session_key, model=model, resume_thread_id=resume_thread_id,
+                ctx=ctx, ephemeral=False, effort=_q_effort,
+                multi_agent=bool(_q_ultracode), plan_mode=_q_plan_mode,
+                chat_id=_resolved_chat_id, entrypoint="chat",
+            )
+        else:
+            _queue_gen = run_engine(
+                project_name=project_name, cwd=cwd, prompt=effective_prompt,
+                session_key=session_key, model=model,
+                resume_session_id=resume_session_id, env=project_secrets,
+                **agents_kwargs, ctx=ctx, ephemeral=False, effort=_q_effort,
+                ultracode=bool(_q_ultracode), plan_mode=_q_plan_mode,
+                chat_id=_resolved_chat_id,
+            )
+        async for event in _queue_gen:
             etype = event["type"]
             # spec-071: full event parity with api_project_chat — buffer every event in the
             # live-turn ring (formatted tools, coerced errors) and fan out seq-tagged events,
@@ -10653,8 +11002,9 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 _timeline_append(session_key, {"kind": "text", "text": event["text"], "run_id": run_id, **_cid})
             elif etype == "result":
                 _q_final_ctx_tokens = event.get("context_tokens") or None
-                _sid = event.get("session_id")
-                if _sid:
+                _sid = event.get("session_id") if provider == "claude" else None
+                _thread_id = event.get("thread_id") if provider == "codex" else None
+                if _sid or _thread_id:
                     # Write the new session_id back to THIS chat's entry in chats.json (mirroring
                     # the direct /chat path), not just the flat mirror — otherwise the queued
                     # chat's own continuity is lost (its chats.json session_id stays null and the
@@ -10671,11 +11021,14 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                         None,
                                     )
                                     if _wc is not None:
-                                        _wc["session_id"] = _sid
+                                        if provider == "codex":
+                                            _wc["codex_thread_id"] = _thread_id
+                                        else:
+                                            _wc["session_id"] = _sid
                                         _save_chats(ctx, _wd)
                                         _wrote_back = True
                                         # Keep the flat mirror in sync only for the active chat.
-                                        if _wp.get("active") == _resolved_chat_id:
+                                        if provider == "claude" and _wp.get("active") == _resolved_chat_id:
                                             ctx["sessions"][session_key] = _sid
                                             try:
                                                 ctx["save_sessions"]()
@@ -10683,21 +11036,25 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                                 pass
                         except Exception as _wbx:
                             print(f"[chat_queue] session_id write-back error for {session_key}: {_wbx}")
-                    if not _wrote_back:
+                    if not _wrote_back and _sid:
                         ctx["sessions"][session_key] = _sid
                         ctx["save_sessions"]()
+                    _save_free_chat_continuity(
+                        ctx, _project_id, provider=provider,
+                        session_id=_sid, codex_thread_id=_thread_id,
+                    )
             elif etype == "error":
                 raise event["exc"]
 
         outcome = "ok"
         # spec-071 parity: close the live-turn ring so /live stops reporting a running turn.
         _live_turn_finish(session_key, "done")
-        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "ok", "run_id": run_id, **_cid})
+        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "ok", "run_id": run_id, "provider": provider, **_cid})
 
     except Exception as e:
         print(f"[chat_queue] execute error for {session_key} item {item['id']}: {e}")
         _live_turn_finish(session_key, "error")
-        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id, **_cid})
+        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id, "provider": locals().get("provider", "claude"), **_cid})
 
     finally:
         ctx["running"].pop(session_key, None)
@@ -10709,7 +11066,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # Cost control parity with the direct /chat path: a drained turn that pushed context past
         # the cap also auto-rotates (after the chain drain — skips as busy if another item took
         # the slot; the bg-children guard inside _maybe_auto_rotate protects live sub-agents).
-        if outcome == "ok" and _q_final_ctx_tokens:
+        if outcome == "ok" and locals().get("provider", "claude") == "claude" and _q_final_ctx_tokens:
             try:
                 _rot_proj = _find_project_by_id(ctx, _project_id or session_key)
                 if _rot_proj is not None:
@@ -11057,7 +11414,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # its own _DEFAULT_EFFORT env. Note: --effort is honored on Fable 5 (low..xhigh|max; official default high).
     _think_mode = (body.get("think_mode") or "").strip()
     _effort_override: "str | None" = (
-        _think_mode if _think_mode in {"low", "medium", "high", "xhigh", "max"} else None
+        _think_mode if _think_mode in {"low", "medium", "high", "xhigh", "max", "ultra"} else None
     )
 
     # spec-058 v2: Ultracode mode (per-chat toggle). When on, run_engine activates the CLI's
@@ -11092,6 +11449,25 @@ async def api_project_chat(req: web.Request) -> web.Response:
     name = project["name"]
     model = project.get("model", ctx.get("DEFAULT_MODEL", "sonnet"))
     session_key = (project.get("session_key") or project.get("tg_thread", ""))  # SHARED key with TG and F1
+
+    # Provider is pinned to the chat at creation. Legacy records omit it and
+    # therefore remain Claude. Resolve before reserving the shared run slot so
+    # every downstream event and model choice is provider-consistent.
+    _run_chat: "dict | None" = None
+    try:
+        _entry = _load_chats(ctx).get(project["id"], {})
+        _run_chat = _find_chat(_entry, _req_chat_id)
+    except Exception:
+        _run_chat = None
+    _provider_for_run = _chat_provider(_run_chat)
+    if _provider_for_run == "claude" and _effort_override == "ultra":
+        _effort_override = None
+    if _run_chat and _run_chat.get("model"):
+        model = _run_chat["model"]
+    elif _provider_for_run == "codex":
+        model = project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL
+    run_engine = (ctx.get("run_codex_engine") if _provider_for_run == "codex"
+                  else ctx.get("run_engine"))
 
     # Lock check (SYNCHRONOUSLY — before first await, against race)
     # Spec-041 A3: enqueue on busy instead of returning an error — backend drains it.
@@ -11170,6 +11546,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # Spec-035: start live turn buffer for this session.
     # Store the requesting chat_id in the turn so /live consumers can verify ownership.
     _live_turn_obj = _live_turn_create(session_key, model, prompt)
+    _live_turn_obj["provider"] = _provider_for_run
     if _req_chat_id:
         _live_turn_obj["chat_id"] = _req_chat_id
     # Generate a short run id so the bus run_start/run_end pair is correlated.
@@ -11182,6 +11559,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
         "source": "chat",
         "prompt": prompt,
         "run_id": _chat_run_id,
+        "provider": _provider_for_run,
         **({"chat_id": _req_chat_id} if _req_chat_id else {}),
     }, persist=True)
 
@@ -11228,6 +11606,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # Falls back to ctx["sessions"] so existing code paths are unaffected if chats.json
         # does not yet exist (migration seeds it on first access, but guard anyway).
         _chat_resume_sid: "str | None" = None
+        _codex_resume_thread_id: "str | None" = None
         try:
             async with _chats_lock():
                 _chat_entry = _ensure_chat_entry(ctx, project["id"], session_key)
@@ -11239,16 +11618,21 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 )
                 if _target_chat is not None:
                     _active_chat_id_for_run = _target_chat["id"]
-                    _chat_resume_sid = _target_chat.get("session_id") or None
-                    # Keep ctx["sessions"] in sync (derived cache)
-                    if _chat_resume_sid:
-                        print(f"[session] chat-resume-write {session_key} sid={_chat_resume_sid}")
-                        ctx["sessions"][session_key] = _chat_resume_sid
+                    if _provider_for_run == "codex":
+                        _codex_resume_thread_id = _target_chat.get("codex_thread_id") or None
                     else:
-                        ctx["sessions"].pop(session_key, None)
+                        _chat_resume_sid = _target_chat.get("session_id") or None
+                        # Keep ctx["sessions"] in sync only for Claude. Codex
+                        # selection must leave the legacy Claude cache untouched.
+                        if _chat_resume_sid:
+                            print(f"[session] chat-resume-write {session_key} sid={_chat_resume_sid}")
+                            ctx["sessions"][session_key] = _chat_resume_sid
+                        else:
+                            ctx["sessions"].pop(session_key, None)
         except Exception as _ce:
             print(f"[api_project_chat] chats resolve error (falling back): {_ce}")
-        resume_sid = _chat_resume_sid if _chat_resume_sid is not None else ctx["sessions"].get(session_key)
+        resume_sid = (_chat_resume_sid if _chat_resume_sid is not None
+                      else (ctx["sessions"].get(session_key) if _provider_for_run == "claude" else None))
         # Project secrets are injected into the agent's env (values only in-process, not in the API).
         # secret: references are resolved against the built-in store; TG vars are merged after (they win).
         project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
@@ -11295,22 +11679,34 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # ephemeral=False: chat sessions share state with the project (resumable, context-tracked).
         # effort: None when think_mode is absent/unknown (preserves _DEFAULT_EFFORT); otherwise the
         # exact ladder value low|medium|high|xhigh|max passed straight through to the SDK.
-        _engine_gen = run_engine(
-            project_name=name,
-            cwd=cwd,
-            prompt=effective_prompt,
-            session_key=session_key,
-            model=model,
-            resume_session_id=resume_sid,
-            env=project_secrets,
-            **agents_kwargs,
-            ctx=ctx,
-            ephemeral=False,
-            effort=_effort_override,
-            ultracode=_ultracode,
-            plan_mode=_plan_mode,
-            chat_id=_active_chat_id_for_run,
-        )
+        if run_engine is None:
+            raise RuntimeError(f"{_provider_for_run} engine unavailable")
+        if _provider_for_run == "codex":
+            _engine_gen = run_engine(
+                project_name=name, cwd=cwd, prompt=effective_prompt,
+                session_key=session_key, model=model,
+                resume_thread_id=_codex_resume_thread_id,
+                ctx=ctx, ephemeral=False, effort=_effort_override,
+                plan_mode=_plan_mode, multi_agent=_ultracode,
+                chat_id=_active_chat_id_for_run, entrypoint="chat",
+            )
+        else:
+            _engine_gen = run_engine(
+                project_name=name,
+                cwd=cwd,
+                prompt=effective_prompt,
+                session_key=session_key,
+                model=model,
+                resume_session_id=resume_sid,
+                env=project_secrets,
+                **agents_kwargs,
+                ctx=ctx,
+                ephemeral=False,
+                effort=_effort_override,
+                ultracode=_ultracode,
+                plan_mode=_plan_mode,
+                chat_id=_active_chat_id_for_run,
+            )
         # spec-071 heartbeat: unlike the activity-stream SSE (which pings every 25 s precisely
         # because the Cloudflare tunnel kills idle streams), this direct chat stream wrote bytes
         # only on engine events — a long silent tool/sub-agent stretch let the tunnel drop the
@@ -11380,8 +11776,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 await _send({"type": "tool", **tool_data})
             elif etype == "result":
                 _chat_last_result_event = event  # Phase D: capture for auto-resume
-                sid = event.get("session_id")
-                if sid:
+                sid = event.get("session_id") if _provider_for_run == "claude" else None
+                codex_thread_id = event.get("thread_id") if _provider_for_run == "codex" else None
+                if sid or codex_thread_id:
                     # Spec-037: write session_id back to the specific chat entry (atomic).
                     # Also mirrors to ctx["sessions"] as derived cache so TG/cards still work.
                     _wrote_back = False
@@ -11397,11 +11794,15 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                         None,
                                     )
                                     if _cb_chat is not None:
-                                        _cb_chat["session_id"] = sid
+                                        if _provider_for_run == "codex":
+                                            _cb_chat["codex_thread_id"] = codex_thread_id
+                                        else:
+                                            _cb_chat["session_id"] = sid
                                         _save_chats(ctx, _cb_data)
                                         _wrote_back = True
                                         # Mirror active chat → ctx["sessions"]
-                                        if _cb_proj.get("active") == _active_chat_id_for_run:
+                                        if (_provider_for_run == "claude"
+                                                and _cb_proj.get("active") == _active_chat_id_for_run):
                                             ctx["sessions"][session_key] = sid
                                             try:
                                                 ctx["save_sessions"]()
@@ -11409,11 +11810,16 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                                 pass
                         except Exception as _wb_exc:
                             print(f"[api_project_chat] session_id write-back error: {_wb_exc}")
-                    if not _wrote_back:
+                    if not _wrote_back and sid:
                         # Fallback: legacy flat-map path (no chats entry yet or error)
                         ctx["sessions"][session_key] = sid
                         ctx["save_sessions"]()
-                    _inherit_label_from_free_chat(ctx, session_key, sid)
+                    if sid:
+                        _inherit_label_from_free_chat(ctx, session_key, sid)
+                    _save_free_chat_continuity(
+                        ctx, project.get("id"), provider=_provider_for_run,
+                        session_id=sid, codex_thread_id=codex_thread_id,
+                    )
                 ctx_tokens = event.get("context_tokens", 0)
                 _chat_final_ctx_tokens = ctx_tokens  # captured for post-turn auto-rotate (finally)
                 # Spec-022: pass through per-turn cost visibility fields
@@ -11440,6 +11846,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     print(f"[context-warn] state check failed: {_cw_exc}")
                 await _send({
                     "type": "result",
+                    "provider": _provider_for_run,
+                    "session_id": sid,
+                    "codex_thread_id": codex_thread_id,
                     "context_tokens": ctx_tokens,
                     "context_window": CONTEXT_WINDOW,
                     # Two-tier cost thresholds delivered to the frontend: yellow at 300K, red at 500K.
@@ -11499,7 +11908,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
 
         # spec-034 L2: board reconciler — schedule as background task (never blocks the response).
         _reconcile_fn = ctx.get("reconcile_board")
-        if _reconcile_fn is not None:
+        if _provider_for_run == "claude" and _reconcile_fn is not None:
             _agent_reply = "\n".join(_chat_answer_parts).strip()
             asyncio.ensure_future(
                 _reconcile_fn(cwd=cwd, name=name, user_msg=prompt, agent_summary=_agent_reply,
@@ -11507,14 +11916,15 @@ async def api_project_chat(req: web.Request) -> web.Response:
             )
 
         # Phase D: auto-resume if killed by rate-limit (before lock release so session_key is valid)
-        _resume_sid_chat = ctx["sessions"].get(session_key)
-        await _maybe_auto_resume(
-            ctx=ctx,
-            session_key=session_key,
-            original_prompt=prompt,
-            last_result_event=_chat_last_result_event,
-            resume_session_id=_resume_sid_chat,
-        )
+        if _provider_for_run == "claude":
+            _resume_sid_chat = ctx["sessions"].get(session_key)
+            await _maybe_auto_resume(
+                ctx=ctx,
+                session_key=session_key,
+                original_prompt=prompt,
+                last_result_event=_chat_last_result_event,
+                resume_session_id=_resume_sid_chat,
+            )
 
     finally:
         # spec-071: never orphan a pending engine pump task (handler cancellation path).
@@ -11531,6 +11941,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             "source": "chat",
             "outcome": "ok" if _chat_run_ok else "fail",
             "run_id": _chat_run_id,
+            "provider": _provider_for_run,
             **({"chat_id": _active_chat_id_for_run} if _active_chat_id_for_run else {}),
         }, persist=True)
         # spec-069 P2: re-wake the orchestrator if it left background children still running.
@@ -11549,7 +11960,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # tail can't keep re-billing a bloated prompt every turn. Runs after the sentinel is released
         # (the core re-acquires it) and after the queue drain (skips as busy if a queued item took the
         # slot — rotate only when the conversation actually pauses). Guarded; never breaks teardown.
-        if _chat_run_ok and _chat_final_ctx_tokens is not None:
+        if (_provider_for_run == "claude" and _chat_run_ok
+                and _chat_final_ctx_tokens is not None):
             try:
                 await _maybe_auto_rotate(ctx, project, session_key, _chat_final_ctx_tokens,
                                          opt_in=_auto_rotate)
@@ -14791,6 +15203,7 @@ async def start(ctx: dict) -> None:
         app.router.add_post("/api/usage/scan", api_usage_scan)
         app.router.add_get("/api/usage/export.csv", api_usage_export)
         app.router.add_get("/api/models", api_models)
+        app.router.add_get("/api/agent-providers", api_agent_providers)
         # Spec-074: global search (Cmd/Ctrl+K) over chat transcripts + timelines + boards
         app.router.add_get("/api/search", api_search)
         app.router.add_post("/api/search/reindex", api_search_reindex)

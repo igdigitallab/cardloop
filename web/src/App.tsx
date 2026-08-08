@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { api } from './api'
-import { Project, SearchHit, SearchNavTarget, SessionPeekTarget } from './types'
+import { AgentProviderInfo, Project, Provider, SearchHit, SearchNavTarget, SessionPeekTarget } from './types'
 import { t } from './i18n'
 import { LoginScreen } from './components/LoginScreen'
 import { Sidebar } from './components/Sidebar'
@@ -21,6 +21,7 @@ import { useTheme } from './hooks/useTheme'
 import { useNotifications } from './hooks/useNotifications'
 import { ModulesProvider } from './hooks/useModules'
 import { playChime, primeAudio } from './lib/chime'
+import { Modal, ModalHead } from './components/Modal'
 
 const GLOBAL_FILES_ID = '__global__'
 const SCHEDULES_ID = '__schedules__'
@@ -454,7 +455,6 @@ export default function App() {
       if (proj) incrementUnread(sk)
     }
     es.onerror = () => { /* EventSource will reconnect automatically */ }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- incrementUnread + showToast are stable (useCallback); loadProjects/projectsRef/activeIdRef are stable refs
   }, [loadProjects, showToast, incrementUnread])
 
   // Initial SSE connection — (re)created when auth state changes.
@@ -470,7 +470,6 @@ export default function App() {
       esRef.current?.close()
       esRef.current = null
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- connectActivityStream is stable after auth
   }, [authState, connectActivityStream])
 
   // Mobile resume self-heal: iOS/Android kill the EventSource when the screen turns off.
@@ -495,7 +494,6 @@ export default function App() {
       document.removeEventListener('visibilitychange', onResume)
       window.removeEventListener('online', onResume)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- connectActivityStream/checkAuth/loadProjects are stable useCallbacks
   }, [authState, connectActivityStream, checkAuth, loadProjects])
 
   // Live git-status refresh: poll every 15s + on window/tab focus
@@ -572,11 +570,14 @@ export default function App() {
   // chat → read-only transcript peek (never rebinds the live session); board/timeline →
   // select the project and ask its ProjectView to switch tab, same nonce trick as settings.
   const handleSearchPick = useCallback((hit: SearchHit) => {
-    if (hit.source === 'chat' && hit.ref.session_id) {
+    const chatRef = hit.ref.session_id || hit.ref.codex_thread_id
+    if (hit.source === 'chat' && chatRef) {
       setPeekTarget({
         projectId: hit.project_id,
         projectName: hit.project_name,
-        sessionId: hit.ref.session_id,
+        sessionId: chatRef,
+        codexThreadId: hit.ref.codex_thread_id,
+        provider: hit.provider,
         uuid: hit.ref.uuid,
         ts: hit.ts,
       })
@@ -780,18 +781,33 @@ export default function App() {
   }, [loadProjects, newProjectBusy, showToast])
 
   // Create a new free chat (cwd=$HOME) and immediately open it as a tab
-  const handleNewFree = useCallback(async () => {
+  const [freeCreateOpen, setFreeCreateOpen] = useState(false)
+  const [freeProviders, setFreeProviders] = useState<AgentProviderInfo[]>([])
+  const [freeProvider, setFreeProvider] = useState<Provider>('claude')
+  const [freeModel, setFreeModel] = useState('')
+  const handleNewFree = useCallback(() => {
+    setFreeCreateOpen(true)
+    api.agentProviders().then(res => {
+      setFreeProviders(res.providers)
+      const claude = res.providers.find(p => p.provider === 'claude')
+      setFreeProvider('claude')
+      setFreeModel(claude?.models[0]?.value || 'fable')
+    }).catch(() => setFreeModel('fable'))
+  }, [])
+
+  const confirmNewFree = useCallback(async () => {
     try {
-      const res = await api.freeCreate()
+      const res = await api.freeCreate({ provider: freeProvider, model: freeModel })
       // Refresh project list and immediately open the new chat
       await loadProjects()
       setOpenIds(prev => prev.includes(res.id) ? prev : [...prev, res.id])
       setActiveId(res.id)
+      setFreeCreateOpen(false)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       showToast(`Could not create free chat: ${msg}`)
     }
-  }, [loadProjects, showToast])
+  }, [loadProjects, showToast, freeProvider, freeModel])
 
   // (label rename keeps the project id stable — no id-rewrite handler needed)
 
@@ -965,6 +981,29 @@ export default function App() {
           onSubmit={async (name) => { await api.renameLabel(renameTarget.id, name); await loadProjects() }}
           onClose={() => setRenameTarget(null)}
         />
+      )}
+      {freeCreateOpen && (
+        <Modal onClose={() => setFreeCreateOpen(false)}>
+          <ModalHead title="New free chat" onClose={() => setFreeCreateOpen(false)} />
+          <div className="run-modal-body" style={{ display: 'grid', gap: 14 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {(['claude', 'codex'] as Provider[]).map(provider => {
+                const info = freeProviders.find(p => p.provider === provider)
+                const disabled = provider === 'codex' && (!info?.enabled || !info.available)
+                return <button key={provider} className={`btn btn-sm ${freeProvider === provider ? 'btn-primary' : 'btn-secondary'}`}
+                  disabled={disabled} title={disabled ? info?.error || 'Codex unavailable' : ''}
+                  onClick={() => { setFreeProvider(provider); setFreeModel(info?.models.find(m => m.default)?.value || info?.models[0]?.value || '') }}>
+                  {provider === 'codex' ? 'Codex' : 'Claude Code'}
+                </button>
+              })}
+            </div>
+            <select className="input" value={freeModel} onChange={e => setFreeModel(e.target.value)}>
+              {(freeProviders.find(p => p.provider === freeProvider)?.models || []).map(model =>
+                <option key={model.value} value={model.value}>{model.label}</option>)}
+            </select>
+            <button className="btn-primary" disabled={!freeModel} onClick={confirmNewFree}>Create chat</button>
+          </div>
+        </Modal>
       )}
 
       <div className="main-area">

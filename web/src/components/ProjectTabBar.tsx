@@ -134,7 +134,12 @@ function TabItem({
           onBlur={commit}
         />
       ) : (
-        <span className="ptab-name">{project.name}</span>
+        <>
+          <span className="ptab-name">{project.name}</span>
+          {project.is_free && project.provider === 'codex' && (
+            <span style={{ fontSize: 9, opacity: .7, textTransform: 'uppercase' }}>Codex</span>
+          )}
+        </>
       )}
 
       {/* Single trailing slot: close on the active tab, otherwise ONE status indicator

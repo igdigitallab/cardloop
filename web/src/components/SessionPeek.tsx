@@ -40,7 +40,7 @@ export function SessionPeek({ target, onClose, onOpenProject }: Props) {
       uuid: target.uuid,
       // The index stores epoch SECONDS; the feed speaks epoch MILLISECONDS.
       ts: target.ts ? target.ts * 1000 : undefined,
-    })
+    }, target.codexThreadId)
       .then(res => {
         if (cancelled) return
         setMessages(res.messages || [])
@@ -48,7 +48,7 @@ export function SessionPeek({ target, onClose, onOpenProject }: Props) {
       .catch(() => { if (!cancelled) setFailed(true) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [target.projectId, target.sessionId, target.uuid, target.ts])
+  }, [target.projectId, target.sessionId, target.codexThreadId, target.uuid, target.ts])
 
   // Which rendered message is the hit? uuid is exact but only user messages carry one, so
   // an assistant hit resolves to the message with the closest timestamp.

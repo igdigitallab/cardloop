@@ -84,7 +84,8 @@ export function ActionMenu({ anchorRect, sections, onClose }: ActionMenuProps) {
           // Escape from drill goes back to root
           setDrill(null)
         } else {
-          handleClose()
+          setDrill(null)
+          onClose()
         }
       }
     }
@@ -97,7 +98,8 @@ export function ActionMenu({ anchorRect, sections, onClose }: ActionMenuProps) {
     if (bottomSheet) return
     function onMd(e: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        handleClose()
+        setDrill(null)
+        onClose()
       }
     }
     // Use setTimeout so the current click that opened the menu is not immediately

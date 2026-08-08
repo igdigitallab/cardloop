@@ -50,9 +50,10 @@ _MARKER_RE = re.compile(r"\s*<!--\s*ops:([\w-]+)(\s[^>]*)?\s*-->")
 # Description lines: '  > text' (2 spaces + '>') immediately following a card
 _DESC_LINE_RE = re.compile(r"^  > (.*)$")
 
-# Allowed per-card model overrides — mirrors _ALLOWED_MODELS in webapp.py.
-# Kept here to avoid a circular import; webapp.py validates against its own set.
+# Claude aliases plus safe provider-native model ids. API validation remains in
+# webapp.py; this layer only guarantees lossless markdown round-tripping.
 _ALLOWED_CARD_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku", "fable"})
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{2,100}$")
 
 
 # spec-052 Phase 5: a card may carry an optional spec: link (epic) — e.g. spec=049.
@@ -63,18 +64,23 @@ _SPEC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 
 def _parse_marker_meta(meta_str: str | None) -> dict:
     """Parse the optional key=val pairs from a marker's metadata string.
-    Returns a dict of recognised fields ('model', 'spec').
+    Returns a dict of recognised fields ('provider', 'model', 'spec').
     Unknown or malformed keys are silently ignored."""
     result: dict = {}
+    raw_model = ""
     if not meta_str:
         return result
     for part in meta_str.split():
         if "=" in part:
             k, _, v = part.partition("=")
-            if k == "model" and v in _ALLOWED_CARD_MODELS:
-                result["model"] = v
+            if k == "provider" and v in ("claude", "codex"):
+                result["provider"] = v
+            elif k == "model" and _MODEL_ID_RE.fullmatch(v):
+                raw_model = v
             elif k == "spec" and _SPEC_ID_RE.fullmatch(v):
                 result["spec"] = v
+    if raw_model and (raw_model in _ALLOWED_CARD_MODELS or result.get("provider") == "codex"):
+        result["model"] = raw_model
     return result
 
 
@@ -184,6 +190,8 @@ def _parse_tasks(text: str):
                 card: dict = {"id": cid, "text": cardtext}
                 if meta.get("model"):
                     card["model"] = meta["model"]
+                if meta.get("provider"):
+                    card["provider"] = meta["provider"]
                 if meta.get("spec"):
                     card["spec"] = meta["spec"]
                 cols[cur].append(card)
@@ -198,6 +206,8 @@ def _parse_tasks(text: str):
                     card = {"id": cid, "text": cardtext}
                     if meta.get("model"):
                         card["model"] = meta["model"]
+                    if meta.get("provider"):
+                        card["provider"] = meta["provider"]
                     if meta.get("spec"):
                         card["spec"] = meta["spec"]
                     cols[cur].append(card)
@@ -216,7 +226,10 @@ def _serialize_tasks(preamble: str, cols: dict, project_name: str) -> str:
         for card in cols[key]:
             # Append optional metadata to the ops marker when set (model, spec link).
             card_model = card.get("model") or ""
-            marker_meta = f" model={card_model}" if card_model in _ALLOWED_CARD_MODELS else ""
+            card_provider = card.get("provider") or ""
+            marker_meta = f" provider={card_provider}" if card_provider in ("claude", "codex") else ""
+            if card_model and _MODEL_ID_RE.fullmatch(card_model):
+                marker_meta += f" model={card_model}"
             card_spec = card.get("spec") or ""
             if card_spec and _SPEC_ID_RE.fullmatch(card_spec):
                 marker_meta += f" spec={card_spec}"

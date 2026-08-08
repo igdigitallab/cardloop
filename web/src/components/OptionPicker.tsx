@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- parser helpers intentionally share the renderer module */
 /**
  * OptionPicker — CLI-style choice picker rendered from an ```options fenced block.
  *

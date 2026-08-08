@@ -4,15 +4,15 @@
 
 Navigation guide for the codebase. Source of truth = the code; this file is the map. Changing behavior → find the right file and line here.
 
-> Cardloop — a browser IDE for managing projects via the Claude Agent SDK. Two input channels, one engine, full-auto.
+> Cardloop — a browser IDE for managing projects via Claude Code or Codex. Claude remains the default; provider choice is pinned per web chat/card run.
 > **Single process** (aiohttp): `bot.py` imports `webapp.py` and runs the cockpit in the same event loop. Shared `running` lock → no race condition between channels on the same cwd.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      SINGLE PYTHON PROCESS                       │
 │                                                                  │
-│  Cockpit (YOUR_DOMAIN) ─┬─► run_engine() ─► Claude SDK          │
-│  Kanban auto-run (card) ─┘   (async event generator)            │
+│  Cockpit / Kanban ─┬─► run_engine() ───────► Claude SDK         │
+│                    └─► run_codex_engine() ─► Codex SDK          │
 │                                                                  │
 │  Shared state: running{} · sessions{} · topics{} (via ctx)      │
 └─────────────────────────────────────────────────────────────────┘
@@ -20,19 +20,20 @@ Navigation guide for the codebase. Source of truth = the code; this file is the 
 
 ---
 
-## Core: `bot.py` + `engine.py`
+## Core: `bot.py` + provider engines
 
 `bot.py` — web-only launcher: loads env/auth, builds `ctx`, starts the cockpit.
 
 ### Engine (transport-independent core)
 - **`run_engine(...)` (engine.py)** — `async def -> AsyncGenerator[dict, None]`. Drives the Claude Agent SDK, yields events `{tool|text|result|rate_limit|error}`. **Transport-agnostic.** All channels are its consumers. Change agent logic → here.
+- **`run_codex_engine(...)` (codex_engine.py)** — isolated optional adapter for ChatGPT subscription-authenticated Codex threads. Handles discovery, start/resume/read/list, normalized events, usage, plan sandbox, native subagents, and interrupt. It is lazy-imported and gated by `CODEX_ENABLED`.
 - **Engine consumers:**
   - `_run_card(...)` in **webapp.py** — card auto-run.
   - `api_project_chat` in **webapp.py** — web chat (SSE consumer).
 
 ### Concurrency / state
 - **`running{key: bool}`** — per-`cwd` lock. Reserved SYNCHRONOUSLY before the first await, released in `finally`. Guards against two parallel processes on the same project.
-- **`sessions{key: session_id}`** (LAYER 2, `data/sessions.json`) — SDK sessions, cleared by `/reset`.
+- **`sessions{key: session_id}`** (LAYER 2, `data/sessions.json`) — Claude-only legacy cache, cleared by `/reset`. Codex thread IDs live only in provider-pinned chat/free-chat records.
 - **`topics{key: {project,cwd,model,log_cmd,...}}`** (LAYER 1, `data/topics.json`) — channel→project mapping, permanent.
 
 ### Project registry
@@ -64,8 +65,8 @@ aiohttp server. **Does NOT import `bot.py`** (would double the state!) — every
 | Chat/SSE | `api_project_chat`, `api_chat_stop`, `_sse_stream`, `api_activity_stream` | shared `_sse_stream` |
 | Files | `api_project_files`, `api_project_file`, `api_global_files`, `api_global_file` | shared `_read_file_content`; anti-traversal `_resolve_safe`/`_resolve_global_safe` |
 | Prompts | `api_prompts` (CRUD) | `data/prompts.json` |
-| Sessions | `api_sessions`, `api_session` (new/resume), `api_session_history`, `api_session_context` | shared across cockpit and board auto-runs |
-| Usage | `api_usage` | oauth endpoint, 60s cache |
+| Sessions | `api_project_sessions`, `api_project_set_session`, `api_project_session_history` | Routes by active provider: Claude transcripts or native Codex threads |
+| Usage | `api_usage`, `api_usage_dashboard` | Claude oauth limits plus provider-filtered Claude/Codex turn and token totals |
 | Project memory | `api_project_memory` (GET), `api_project_memory_write` (POST), `api_project_memory_delete` (DELETE) | Path: `<cwd>/.claude-ops/memory/` (new) + fallback to `~/.claude/projects/<cwd>/memory/` (legacy). Agent writes via normal Write. Helpers: `_project_memory_dir`, `_memory_read_all`, `_memory_write`, `_memory_delete`, `_memory_reindex`. Names validated by `_valid_memory_name` (slug-regex). |
 | **Project secrets** (Spec 007) | `api_project_secrets` (GET), `api_project_secrets_set` (POST), `api_project_secrets_delete` (DELETE) | Path: `<cwd>/.claude-ops/secrets/secrets.env` (chmod 600, gitignored). **Values are NEVER returned via API** — only key names. Helpers: `_project_secrets_path`, `_secrets_read`, `_secrets_write`, `_secrets_set`, `_secrets_delete`, `_secrets_ensure_gitignore`. Keys validated by `_SECRETS_KEY_RE = ^[A-Z_][A-Z0-9_]*$`. Limits: 8KB/value, 100 keys. |
 | **Timeline** (Spec 008) | `api_project_timeline` (GET) | Persistent event bus log. Helpers: `_timeline_init`, `_timeline_path`, `_timeline_append`, `_timeline_slug_from_cwd`, `_timeline_read_events`. Hook in `_bus_publish` — single write point. File: `data/timeline/<slug>.jsonl` (+ `.jsonl.1` backup). env field is never written. |

@@ -46,6 +46,14 @@ export interface UsageDashboard {
     by_status: { status: string; count: number }[]
   }
   top_tools?: { tool: string; turns: number }[]
+  providers?: {
+    claude: { turns: number; cost: number; subscription_cost_available: true }
+    codex: {
+      turns: number; input: number; output: number; cached_input: number
+      reasoning_output: number; cost: null; subscription_cost_available: false
+      by_model: { model: string; turns: number; input: number; output: number; cached_input: number; reasoning_output: number }[]
+    }
+  }
 }
 
 export interface UsageLimitRow {
@@ -100,6 +108,11 @@ export const api = {
   // falling back to bundled static labels (web/src/lib/models.ts) when unavailable.
   models: () =>
     apiFetch<{ source: 'live' | 'static'; models: { value: string; label: string }[] }>('/api/models'),
+
+  agentProviders: () =>
+    apiFetch<{ default: import('./types').Provider; providers: import('./types').AgentProviderInfo[] }>(
+      '/api/agent-providers'
+    ),
 
   login: (password: string, totp?: string) =>
     apiFetch<{ ok: boolean }>('/api/login', {
@@ -166,11 +179,13 @@ export const api = {
   tasks: (id: string) =>
     apiFetch<import('./types').Board>(`/api/projects/${id}/tasks`),
 
-  createTask: (id: string, text: string, column?: string, description?: string | null) =>
+  createTask: (id: string, text: string, column?: string, description?: string | null,
+               provider?: import('./types').Provider | null, model?: string | null) =>
     apiFetch<import('./types').Board>(`/api/projects/${id}/tasks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, column, ...(description != null ? { description } : {}) }),
+      body: JSON.stringify({ text, column, ...(description != null ? { description } : {}),
+        ...(provider ? { provider } : {}), ...(model ? { model } : {}) }),
     }),
 
   moveTask: (id: string, card: string, to: string) =>
@@ -192,6 +207,7 @@ export const api = {
     description?: string | null,
     /** Card 43665f: per-card model override. undefined = don't touch; '' = clear. */
     model?: string | null,
+    provider?: import('./types').Provider | null,
   ) =>
     apiFetch<import('./types').Board>(`/api/projects/${id}/tasks/${card}`, {
       method: 'PATCH',
@@ -200,6 +216,7 @@ export const api = {
         text,
         ...(description !== undefined ? { description } : {}),
         ...(model !== undefined ? { model } : {}),
+        ...(provider !== undefined ? { provider } : {}),
       }),
     }),
 
@@ -261,11 +278,11 @@ export const api = {
   chats: (id: string) =>
     apiFetch<import('./types').ChatsResponse>(`/api/projects/${id}/chats`),
 
-  createChat: (id: string, name?: string) =>
+  createChat: (id: string, options?: { name?: string; provider?: import('./types').Provider; model?: string }) =>
     apiFetch<import('./types').Chat>(`/api/projects/${id}/chats`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(name ? { name } : {}),
+      body: JSON.stringify(options ?? {}),
     }),
 
   patchChat: (id: string, chatId: string, patch: { name?: string; active?: boolean }) =>
@@ -328,11 +345,12 @@ export const api = {
   // `anchor` (spec-079) centres the returned window on a specific message instead of the
   // tail — without it the feed is capped at the last 100 messages and an older search hit
   // is unreachable. A miss on both anchors degrades to the tail, so it is always safe.
-  sessionHistory: (id: string, sessionId?: string, anchor?: { uuid?: string; ts?: number }) => {
+  sessionHistory: (id: string, sessionId?: string, anchor?: { uuid?: string; ts?: number }, codexThreadId?: string) => {
     const p = new URLSearchParams()
     if (sessionId) p.set('session_id', sessionId)
     if (anchor?.uuid) p.set('around_uuid', anchor.uuid)
     if (anchor?.ts) p.set('around_ts', String(Math.round(anchor.ts)))
+    if (codexThreadId) p.set('codex_thread_id', codexThreadId)
     const qs = p.toString()
     return apiFetch<import('./types').SessionHistoryResponse>(
       `/api/projects/${id}/session-history${qs ? `?${qs}` : ''}`
@@ -431,7 +449,7 @@ export const api = {
     }),
 
   // Free chats (not bound to a project)
-  freeCreate: (body?: { cwd?: string; model?: string; label?: string }) =>
+  freeCreate: (body?: { cwd?: string; model?: string; label?: string; provider?: import('./types').Provider }) =>
     apiFetch<{ id: string; label: string; cwd: string; model: string; created_at: number }>(
       '/api/free',
       {

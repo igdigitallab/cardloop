@@ -13,6 +13,13 @@
 # 0.2.127 — bumped for bundle parity per the model-alias gotcha.
 claude-agent-sdk>=0.2.129
 
+# Codex Python SDK (beta). Exact pin is deliberate: published builds carry a
+# matching pinned Codex app-server/CLI runtime, so the adapter and protocol
+# models cannot drift independently. The import remains lazy and Codex stays
+# disabled unless CODEX_ENABLED=true.
+openai-codex==0.144.4
+openai-codex-cli-bin==0.144.4
+
 # aiohttp cockpit (web server + SSE).
 aiohttp==3.13.5
 

@@ -57,6 +57,7 @@ WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")            # passphrase for co
 # engine.py reads env vars at module level; importing it before _load_env() would
 # cause env-dependent constants (DEFAULT_CWD, OPERATOR_NAME, …) to use defaults.
 import engine  # noqa: E402,F401  (after env load; re-exported for tests)
+import codex_engine  # noqa: E402  (isolated optional provider; SDK import stays lazy)
 # Re-exported from engine so `import bot; bot.X` keeps working for tests and any
 # external caller (webapp imports engine directly and does NOT import bot).
 from engine import (  # noqa: E402,F401  (deliberate: import after env load; re-exports)
@@ -97,6 +98,8 @@ def _build_ctx() -> dict:
         from e2e_fake_engine import run_engine as _e2e_run_engine
         ctx["run_engine"] = _e2e_run_engine
         print("[e2e] E2E_FAKE_ENGINE=1 — ctx['run_engine'] replaced by e2e_fake_engine.run_engine")
+    ctx["run_codex_engine"] = codex_engine.run_codex_engine
+    ctx["codex_provider_info"] = codex_engine.provider_info
     return ctx
 
 
@@ -130,6 +133,15 @@ async def _amain() -> None:
     _run_startup_migration()
 
     ctx = _build_ctx()
+    if codex_engine.codex_enabled():
+        # Auth/model discovery failures degrade only the optional provider. Claude
+        # startup and all legacy state remain available.
+        info = await codex_engine.provider_info(force=True)
+        ctx["codex_startup_info"] = info
+        if info.get("available"):
+            print(f"[codex] ready via {info.get('auth_type')} auth ({len(info.get('models', []))} models)")
+        else:
+            print(f"[codex] unavailable; Claude remains active: {info.get('error')}")
     await webapp.start(ctx)
     print("Cardloop started (web cockpit + kanban auto-run).")
 

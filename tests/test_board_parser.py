@@ -441,6 +441,20 @@ def test_parse_card_invalid_model_ignored():
     assert card.get("model") is None, "Invalid model value must be dropped"
 
 
+def test_codex_provider_model_metadata_round_trip():
+    text = """\
+## Backlog
+- [ ] Codex task <!--ops:bbb002 provider=codex model=gpt-5.6-sol-->
+"""
+    preamble, cols = _parse_tasks(text)
+    card = cols["backlog"][0]
+    assert card["provider"] == "codex"
+    assert card["model"] == "gpt-5.6-sol"
+    reparsed = _parse_tasks(_serialize_tasks(preamble, cols, "demo"))[1]["backlog"][0]
+    assert reparsed["provider"] == "codex"
+    assert reparsed["model"] == "gpt-5.6-sol"
+
+
 def test_serialize_card_with_model():
     """Cards with a valid model field emit model=<val> in the ops marker."""
     preamble = "# Tasks — proj"

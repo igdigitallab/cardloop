@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- hit helpers intentionally share the renderer module */
 /**
  * spec-079 — shared rendering for global search hits.
  *

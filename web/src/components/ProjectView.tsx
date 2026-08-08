@@ -676,7 +676,6 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
     }
     document.addEventListener('scroll', onScroll, true)
     return () => document.removeEventListener('scroll', onScroll, true)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [narrow])
 
   // Always reveal the chrome when switching section or project.
@@ -985,4 +984,3 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
     </ProjectActivityProvider>
   )
 }
-

@@ -256,6 +256,7 @@ export function UsageTab() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [days, setDays] = useState<number | 'all'>(30)
+  const [provider, setProvider] = useState<'all' | 'claude' | 'codex'>('all')
   // null = no filter (all models); otherwise the selected subset.
   const [models, setModels] = useState<Set<string> | null>(null)
   const [modelPanel, setModelPanel] = useState(false)
@@ -348,6 +349,13 @@ export function UsageTab() {
             </button>
           ))}
         </div>
+        <div className="usage-seg" aria-label="Provider filter">
+          {(['all', 'claude', 'codex'] as const).map(p => (
+            <button key={p} className={provider === p ? 'active' : ''} onClick={() => setProvider(p)}>
+              {p === 'all' ? 'All providers' : p === 'claude' ? 'Claude' : 'Codex'}
+            </button>
+          ))}
+        </div>
         <div className="usage-modelsel" ref={panelRef}>
           <button className="usage-btn" onClick={() => setModelPanel(o => !o)}>
             {modelLabel} ▾
@@ -383,13 +391,58 @@ export function UsageTab() {
       {loading && !data && <div className="usage-empty">Loading usage…</div>}
       {error && !data && <div className="usage-empty">Failed to load: {error}</div>}
 
-      {data && !data.ready && (
+      {data && !data.ready && provider !== 'codex' && (
         <div className="usage-empty">
           No usage indexed yet.{data.scanning ? ' Indexing transcripts — this can take ~30s on the first run…' : ''}
         </div>
       )}
 
-      {ov && data?.ready && (
+      {data?.providers?.codex && provider !== 'claude' && (
+        <div className="usage-card">
+          <div className="usage-card-head">
+            <span className="usage-card-title">Codex subscription usage</span>
+            <span className="usage-note">cost unavailable for subscription-authenticated turns</span>
+          </div>
+          <div className="usage-stats">
+            <div className="usage-stat accent">
+              <div className="lbl">Turns</div>
+              <div className="val">{fmtNum(data.providers.codex.turns)}</div>
+              <div className="sub">Codex threads</div>
+            </div>
+            <div className="usage-stat">
+              <div className="lbl">Output tokens</div>
+              <div className="val">{fmtTok(data.providers.codex.output)}</div>
+              <div className="sub">in {fmtTok(data.providers.codex.input)}</div>
+            </div>
+            <div className="usage-stat">
+              <div className="lbl">Cached input</div>
+              <div className="val">{fmtTok(data.providers.codex.cached_input)}</div>
+              <div className="sub">reasoning {fmtTok(data.providers.codex.reasoning_output)}</div>
+            </div>
+            <div className="usage-stat">
+              <div className="lbl">Cost</div>
+              <div className="val">—</div>
+              <div className="sub">ChatGPT subscription</div>
+            </div>
+          </div>
+          <div className="usage-table-wrap">
+            <table className="usage-table">
+              <thead><tr><th>Model</th><th className="num">Turns</th><th className="num">Input</th><th className="num">Output</th></tr></thead>
+              <tbody>
+                {data.providers.codex.by_model.map(row => (
+                  <tr key={row.model}>
+                    <td className="strong">{row.model}</td><td className="num">{fmtNum(row.turns)}</td>
+                    <td className="num">{fmtTok(row.input)}</td><td className="num">{fmtTok(row.output)}</td>
+                  </tr>
+                ))}
+                {!data.providers.codex.by_model.length && <tr><td colSpan={4} className="usage-empty">No Codex turns in this range.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {ov && data?.ready && provider !== 'codex' && (
         <>
           {/* ── Overview stat cards ── */}
           <div className="usage-stats">
@@ -493,7 +546,7 @@ export function UsageTab() {
               Guard all new fields with optional-chaining — the backend track adds them
               in parallel; an older payload must not crash the tab. */}
           {(() => {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
             const d = data as any
             const deleg = d?.delegation as {
               main: { turns: number; input: number; output: number; cache_read: number; cache_creation: number; cost: number }
@@ -509,7 +562,7 @@ export function UsageTab() {
               by_status: { status: string; count: number }[]
             } | undefined
             const topTools = d?.top_tools as { tool: string; turns: number }[] | undefined
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
             const ldgAny = ledger as any
             const ultDetail = ldgAny?.ultracode_detail as {
               on:  { turns: number; fresh_tokens: number; cache_read_tokens: number; cost_usd: number; avg_cost_per_turn: number }

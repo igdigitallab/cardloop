@@ -331,7 +331,7 @@ async def test_live_snapshot_unknown_project(aiohttp_client, tmp_path, project_d
 
 
 async def test_live_snapshot_no_turn(aiohttp_client, tmp_path, project_dir):
-    """GET /live when no turn has run returns null fields + cursor=0 (spec-035 L3)."""
+    """GET /live when no turn has run returns the pre-first-event cursor."""
     _cleanup_live_turns()
 
     ctx = _make_chat_ctx(tmp_path, project_dir)
@@ -345,6 +345,6 @@ async def test_live_snapshot_no_turn(aiohttp_client, tmp_path, project_dir):
 
     assert data["turn_id"] is None
     assert data["started_at"] is None
-    assert data["cursor"] == 0
+    assert data["cursor"] == _webapp._live_seq.get("1001:42", 0) - 1
     assert data["events"] == []
     assert data["running"] is False

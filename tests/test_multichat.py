@@ -78,6 +78,7 @@ def chats_app(fake_ctx):
     app.router.add_post("/api/projects/{id}/chats", _webapp.api_project_chats_create)
     app.router.add_route("PATCH", "/api/projects/{id}/chats/{chat_id}", _webapp.api_project_chats_patch)
     app.router.add_delete("/api/projects/{id}/chats/{chat_id}", _webapp.api_project_chats_delete)
+    app.router.add_get("/api/agent-providers", _webapp.api_agent_providers)
 
     return app
 
@@ -171,6 +172,21 @@ def test_mirror_clears_sessions_when_null(fake_ctx):
     assert "1001:42" not in fake_ctx["sessions"]
 
 
+def test_codex_active_chat_never_replaces_claude_session_cache(fake_ctx):
+    fake_ctx["sessions"]["1001:42"] = "claude-session-stays"
+    chats_data = {
+        "myproject": {
+            "active": "abcdef",
+            "chats": [{
+                "id": "abcdef", "name": "Codex", "provider": "codex",
+                "session_id": None, "codex_thread_id": "thread-12345678", "created_at": 0,
+            }],
+        }
+    }
+    _mirror_active_chat_to_sessions(fake_ctx, "myproject", "1001:42", chats_data)
+    assert fake_ctx["sessions"]["1001:42"] == "claude-session-stays"
+
+
 # ─────────────────────────── unit: load/save round-trip ──────────────────────
 
 
@@ -220,6 +236,23 @@ async def test_get_chats_preserves_existing_session(aiohttp_client, chats_app, f
     assert main["session_id"] == "my-live-session"
 
 
+async def test_legacy_chat_reads_as_claude_without_rewrite(aiohttp_client, chats_app, fake_ctx):
+    legacy = {
+        "myproject": {
+            "active": "abcdef",
+            "chats": [{"id": "abcdef", "name": "Old", "session_id": "sid-old", "created_at": 1}],
+        }
+    }
+    _save_chats(fake_ctx, legacy)
+    before = (fake_ctx["DATA"] / "chats.json").read_text()
+    client = await aiohttp_client(chats_app)
+    resp = await client.get("/api/projects/myproject/chats", headers=_auth(fake_ctx))
+    payload = await resp.json()
+    assert payload["chats"][0]["provider"] == "claude"
+    assert payload["chats"][0]["codex_thread_id"] is None
+    assert (fake_ctx["DATA"] / "chats.json").read_text() == before
+
+
 # ─────────────────────────── API: POST /chats ─────────────────────────────────
 
 
@@ -243,6 +276,53 @@ async def test_create_chat_default_name(aiohttp_client, chats_app, fake_ctx):
     assert resp.status == 201
     data = await resp.json()
     assert data["name"] == "Chat"
+
+
+async def test_create_codex_chat_has_provider_native_contract(aiohttp_client, chats_app, fake_ctx):
+    client = await aiohttp_client(chats_app)
+    resp = await client.post(
+        "/api/projects/myproject/chats",
+        json={"provider": "codex", "model": "gpt-5.6-sol"},
+        headers=_auth(fake_ctx),
+    )
+    assert resp.status == 201
+    data = await resp.json()
+    assert data["provider"] == "codex"
+    assert data["model"] == "gpt-5.6-sol"
+    assert data["session_id"] is None
+    assert data["codex_thread_id"] is None
+
+
+async def test_provider_registry_reports_codex_auth_models(aiohttp_client, chats_app, fake_ctx):
+    async def provider_info():
+        return {
+            "provider": "codex", "enabled": True, "available": True,
+            "authenticated": True, "auth_type": "chatgpt", "models": [
+                {"value": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "reasoning_levels": ["high"]}
+            ],
+            "reasoning_levels": ["high"], "capabilities": {"chat": True}, "error": None,
+        }
+
+    fake_ctx["codex_provider_info"] = provider_info
+    fake_ctx["MODELS"] = {"sonnet": "sonnet"}
+    client = await aiohttp_client(chats_app)
+    resp = await client.get("/api/agent-providers", headers=_auth(fake_ctx))
+    payload = await resp.json()
+    assert payload["default"] == "claude"
+    codex = next(p for p in payload["providers"] if p["provider"] == "codex")
+    assert codex["auth_type"] == "chatgpt"
+    assert codex["models"][0]["value"] == "gpt-5.6-sol"
+
+
+async def test_chat_provider_cannot_be_changed_in_place(aiohttp_client, chats_app, fake_ctx):
+    client = await aiohttp_client(chats_app)
+    created = await client.post("/api/projects/myproject/chats", json={}, headers=_auth(fake_ctx))
+    chat_id = (await created.json())["id"]
+    resp = await client.patch(
+        f"/api/projects/myproject/chats/{chat_id}",
+        json={"provider": "codex"}, headers=_auth(fake_ctx),
+    )
+    assert resp.status == 400
 
 
 # ─────────────────────────── API: PATCH /chats/{id} ──────────────────────────

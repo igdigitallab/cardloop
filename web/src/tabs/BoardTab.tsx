@@ -174,7 +174,7 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
   const [showArchive, setShowArchive] = useState(false)
   const [archive, setArchive] = useState<string | null>(null)
   // Full-task editor modal: double-click on any card → single multi-line textarea + model picker
-  const [taskEditModal, setTaskEditModal] = useState<{ id: string; text: string; model: string } | null>(null)
+  const [taskEditModal, setTaskEditModal] = useState<{ id: string; text: string; provider: '' | 'claude' | 'codex'; model: string } | null>(null)
 
   // Card 5e1c0a: spec modal state
   const [specModal, setSpecModal] = useState<{ cardId: string; content: string; loading: boolean; saving: boolean } | null>(null)
@@ -552,12 +552,12 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
   /** Save the task text + model override from the full-task editor modal and close it. */
   async function saveTaskEdit() {
     if (!taskEditModal) return
-    const { id, text, model } = taskEditModal
+    const { id, text, model, provider } = taskEditModal
     setTaskEditModal(null)
     const trimmed = text.trim()
     if (!trimmed) return
     // Pass model: '' means "clear override"; a non-empty value sets the override.
-    run(api.updateTask(projectId, id, trimmed, undefined, model))
+    run(api.updateTask(projectId, id, trimmed, undefined, model, provider || null))
   }
 
   function toggleArchive() {
@@ -787,7 +787,7 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
         <div
           className={`board-card-text${expandedCards.has(card.id) ? '' : ' clamped'}`}
           onClick={() => toggleExpand(card.id)}
-          onDoubleClick={() => !isRunning && setTaskEditModal({ id: card.id, text: card.text, model: card.model || '' })}
+          onDoubleClick={() => !isRunning && setTaskEditModal({ id: card.id, text: card.text, provider: card.provider || '', model: card.model || '' })}
           title={card.text}
         >
           {isIncident && <span className="card-incident-icon" title={t['board.incident_title']}>⚠ </span>}
@@ -799,6 +799,9 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
               title={t['board.card_model_badge_aria']}
               aria-label={t['board.card_model_badge_aria']}
             >{modelLabel(card.model)}</span>
+          )}
+          {card.provider && (
+            <span className="board-card-model-badge">{card.provider === 'codex' ? 'Codex' : 'Claude'}</span>
           )}
           {/* Card 5e1c0a: persistent spec indicator — visible without hover */}
           {card.has_spec && (
@@ -873,7 +876,7 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
     }
 
     const tools: ActionMenuSection['items'] = [
-      { label: t['board.menu_edit'], icon: '✏️', onClick: () => setTaskEditModal({ id: card.id, text: card.text, model: card.model || '' }) },
+      { label: t['board.menu_edit'], icon: '✏️', onClick: () => setTaskEditModal({ id: card.id, text: card.text, provider: card.provider || '', model: card.model || '' }) },
       { label: t['board.spec_btn'], icon: '📋', checked: card.has_spec, disabled: busy, onClick: () => openSpec(card.id) },
     ]
     if (canShowResult) {
@@ -1401,10 +1404,23 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
             />
             {/* Card 43665f: per-card model override — (Default) means use board_card_model / sonnet */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+              <label style={{ fontSize: 12, color: 'var(--text3)' }}>Provider</label>
+              <select value={taskEditModal.provider}
+                onChange={e => setTaskEditModal({ ...taskEditModal, provider: e.target.value as '' | 'claude' | 'codex', model: '' })}
+                style={{ fontSize: 12, padding: '2px 6px' }}>
+                <option value="">Project default</option>
+                <option value="claude">Claude Code</option>
+                <option value="codex">Codex</option>
+              </select>
               <label style={{ fontSize: 12, color: 'var(--text3)', flexShrink: 0 }}>
                 {t['board.card_model_label']}
               </label>
-              <select
+              {taskEditModal.provider === 'codex' ? <input
+                value={taskEditModal.model}
+                placeholder="Project Codex model"
+                onChange={e => setTaskEditModal({ ...taskEditModal, model: e.target.value })}
+                style={{ fontSize: 12, padding: '2px 6px', width: 150 }}
+              /> : <select
                 value={taskEditModal.model}
                 onChange={e => setTaskEditModal({ ...taskEditModal, model: e.target.value })}
                 style={{ fontSize: 12, padding: '2px 6px' }}
@@ -1413,7 +1429,7 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
                 {MODELS.map(m => (
                   <option key={m.value} value={m.value}>{m.label}</option>
                 ))}
-              </select>
+              </select>}
             </div>
           </div>
         </Modal>

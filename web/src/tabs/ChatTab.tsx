@@ -22,6 +22,8 @@ import {
   ActivityEventSubagent,
   ActivityEventCompact,
   ActivityEventBoard,
+  AgentProviderInfo,
+  Provider,
 } from '../types'
 import { useProjectActivity, useSeedCursor } from '../hooks/useProjectActivity'
 import { useMonitors } from '../hooks/useMonitors'
@@ -140,9 +142,9 @@ interface Props {
 
 type ModelKey = 'fable' | 'opus' | 'sonnet' | 'haiku'
 // Effort ladder — the value IS the effort string sent to the engine (as think_mode).
-type ThinkMode = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+type ThinkMode = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 
-const THINK_MODE_VALUES: ThinkMode[] = ['low', 'medium', 'high', 'xhigh', 'max']
+const THINK_MODE_VALUES: ThinkMode[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
 const DEFAULT_THINK_MODE: ThinkMode = 'xhigh'
 
 // Official SDK effort names verbatim — no renaming (matches Claude CLI / API effort levels).
@@ -152,6 +154,7 @@ const THINK_MODES: { value: ThinkMode; label: string }[] = [
   { value: 'high',   label: 'high'   },
   { value: 'xhigh',  label: 'xhigh'  },
   { value: 'max',    label: 'max'    },
+  { value: 'ultra',  label: 'ultra · automatic delegation' },
 ]
 
 /** Coerce any stored value (incl. legacy 'min'/'default'/'max'-as-H) to a valid ladder value. */
@@ -763,16 +766,16 @@ const CacheCountdownBadge = memo(function CacheCountdownBadge({
 // Combined pill: "<Model> · <H|M|L>" that opens ONE popover to pick both the model
 // and the thinking level. Used on BOTH mobile (composer bar, menu opens up) and
 // desktop (top bar, menu opens down via menuPlacement="down").
-const THINK_TAG: Record<ThinkMode, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' }
+const THINK_TAG: Record<ThinkMode, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max', ultra: 'ultra' }
 
 const ModelThinkButton = memo(function ModelThinkButton({
   model, thinkValue, disabled, onModelChange, onThinkChange, menuPlacement = 'up', models,
-  ultracode, onUltracodeChange, planMode, onPlanModeChange, planLocked,
+  ultracode, onUltracodeChange, planMode, onPlanModeChange, planLocked, provider = 'claude', reasoningLevels,
 }: {
   model: string
   thinkValue: ThinkMode
   disabled: boolean
-  onModelChange: (m: ModelKey) => void
+  onModelChange: (m: string) => void
   onThinkChange: (mode: ThinkMode) => void
   menuPlacement?: 'up' | 'down'
   /** Live model registry; falls back to the bundled static MODELS when absent. */
@@ -785,6 +788,8 @@ const ModelThinkButton = memo(function ModelThinkButton({
   onPlanModeChange: (v: boolean) => void
   /** True while a plan is awaiting a decision — flipping the toggle then has no effect. */
   planLocked?: boolean
+  provider?: Provider
+  reasoningLevels?: ThinkMode[]
 }) {
   // Prefer the live registry; fall back to the bundled static list (offline / fetch failure).
   const modelList = (models && models.length > 0) ? models : MODELS
@@ -845,20 +850,24 @@ const ModelThinkButton = memo(function ModelThinkButton({
           role="listbox"
           style={isDown && fixedPos ? { position: 'fixed', top: fixedPos.top, right: fixedPos.right, bottom: 'auto' } : undefined}
         >
-          <div className="composer-modelthink-sec">{t['chat.model_hint']}</div>
+          <div className="composer-modelthink-sec">
+            {provider === 'codex' ? 'Codex model (pinned to this chat)' : t['chat.model_hint']}
+          </div>
           {modelList.map(m => (
             <div
               key={m.value}
               role="option"
               aria-selected={m.value === model}
               className={`chat-think-option${m.value === model ? ' selected' : ''}`}
-              onMouseDown={e => { e.preventDefault(); onModelChange(m.value as ModelKey); setOpen(false) }}
+              onMouseDown={e => { e.preventDefault(); if (provider === 'claude') onModelChange(m.value); setOpen(false) }}
             >
               {m.label}
             </div>
           ))}
           <div className="composer-modelthink-sec">{t['chat.think_mode_label']}</div>
-          {THINK_MODES.map(m => {
+          {(provider === 'codex'
+            ? THINK_MODES.filter(m => !reasoningLevels || reasoningLevels.includes(m.value))
+            : THINK_MODES.filter(m => m.value !== 'ultra')).map(m => {
             // Ultracode pins effort to xhigh — grey out the manual ladder while it's on.
             const inert = ultracode
             return (
@@ -892,7 +901,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
           {/* spec-058: Ultracode mode toggle — xhigh effort + sub-agent fan-out.
               spec-080 C4: mutually exclusive with plan mode (plan wins server-side) —
               grey it out while planning so the conflict is visible, not silent. */}
-          <div className="composer-modelthink-sec">{t['chat.ultracode_label']}</div>
+          <div className="composer-modelthink-sec">{provider === 'codex' ? 'Codex multi-agent' : t['chat.ultracode_label']}</div>
           <div
             role="option"
             aria-selected={ultracode}
@@ -901,11 +910,13 @@ const ModelThinkButton = memo(function ModelThinkButton({
             style={planMode ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
             onMouseDown={e => { e.preventDefault(); if (planMode) return; onUltracodeChange(!ultracode) }}
           >
-            <span>⚡ {t['chat.ultracode_toggle']}</span>
+            <span>⚡ {provider === 'codex' ? 'Multi-agent mode' : t['chat.ultracode_toggle']}</span>
             <span className="ultracode-state">{ultracode ? 'ON' : 'OFF'}</span>
           </div>
           <div className="composer-modelthink-note">
-            {planMode ? t['chat.plan_hint'] : t['chat.ultracode_hint']}
+            {planMode ? t['chat.plan_hint'] : (provider === 'codex'
+              ? 'Native Codex subagents may split independent work and report lifecycle events here.'
+              : t['chat.ultracode_hint'])}
           </div>
         </div>
       )}
@@ -1027,7 +1038,7 @@ const isTouchDevice: boolean =
 // shows its single ACTIVE chat and the client keeps sending that chat_id. Flip to true to restore
 // the chat tab-bar (tabs / + new / rename / close). Kept as a one-line switch rather than deleting
 // the code so it is trivially reversible.
-const SHOW_MULTICHAT_UI: boolean = false
+const SHOW_MULTICHAT_UI: boolean = true
 
 export function ChatTab({ project, onProjectsReload, isActive, collapsed, onToggleCollapse, chatMax, onToggleChatMax, chromeCollapsed, onOpenCard, discussCard, onDiscussConsumed, models }: Props) {
   const projectId = project.id
@@ -1041,20 +1052,48 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // Rename-in-place: null when not renaming, chat id when editing
   const [renamingChatId, setRenamingChatId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  const [providerRegistry, setProviderRegistry] = useState<AgentProviderInfo[]>([])
+  const [newChatOpen, setNewChatOpen] = useState(false)
+  const [newChatProvider, setNewChatProvider] = useState<Provider>('claude')
+  const [newChatModel, setNewChatModel] = useState('')
+  const [chatsLoaded, setChatsLoaded] = useState(false)
+  const [hydratedChatId, setHydratedChatId] = useState<string | null>(null)
+
+  useEffect(() => {
+    api.agentProviders().then(res => setProviderRegistry(res.providers)).catch(() => {})
+  }, [])
 
   // Load chats on project change
   useEffect(() => {
     let cancelled = false
+    setChatsLoaded(false)
     api.chats(projectId).then(res => {
       if (cancelled) return
       setChats(res.chats)
       setActiveChatId(res.active)
-    }).catch(() => { /* non-critical — chat tabs unavailable */ })
+    }).catch(() => { /* non-critical — legacy chat remains available */ })
+      .finally(() => { if (!cancelled) setChatsLoaded(true) })
     return () => { cancelled = true }
   }, [projectId])
 
   // The effective chat id: activeChatId from server (null until loaded = render nothing special)
   const effectiveChatId = activeChatId ?? ''
+  const activeChat = chats.find(c => c.id === effectiveChatId)
+  const activeProvider: Provider = activeChat?.provider ?? 'claude'
+  const activeModel = activeChat?.model || project.model
+  const activeProviderModels = activeProvider === 'codex'
+    ? [{ value: activeModel, label: providerRegistry.find(p => p.provider === 'codex')
+        ?.models.find(m => m.value === activeModel)?.label || activeModel }]
+    : models
+  const activeReasoningLevels = activeProvider === 'codex'
+    ? providerRegistry.find(p => p.provider === 'codex')?.models
+        .find(m => m.value === activeModel)?.reasoning_levels as ThinkMode[] | undefined
+    : undefined
+  const activeDefaultReasoning = activeProvider === 'codex'
+    ? providerRegistry.find(p => p.provider === 'codex')?.models
+        .find(m => m.value === activeModel)?.default_reasoning as ThinkMode | undefined
+    : undefined
+  const composerReady = chatsLoaded && hydratedChatId === effectiveChatId
 
   // Track the active chat's session_id via a ref so hydrateFromServer can pass it
   // to sessionHistory without stale-closure issues (ref is always fresh at call time).
@@ -1099,6 +1138,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     } catch { /* localStorage unavailable */ }
     return DEFAULT_THINK_MODE
   })
+  useEffect(() => {
+    if (activeProvider !== 'codex' || !activeReasoningLevels?.length) return
+    if (!activeReasoningLevels.includes(thinkMode)) {
+      setThinkMode(activeDefaultReasoning && activeReasoningLevels.includes(activeDefaultReasoning)
+        ? activeDefaultReasoning
+        : activeReasoningLevels[0])
+    }
+  }, [activeProvider, activeReasoningLevels, activeDefaultReasoning, thinkMode])
   // spec-058: Ultracode mode — per-chat toggle, persisted in localStorage (mirrors thinkMode).
   const [ultracode, setUltracode] = useState<boolean>(() => {
     try {
@@ -1174,6 +1221,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // single render source for every turn (own sends included); this ref is the only dedup —
   // an event with seq <= lastApplied was already rendered (hydrate replay seeds it).
   const lastAppliedSeqRef = useRef<number>(-1)
+  // A reload can observe a completed transcript and a slightly older /live
+  // snapshot in the same Promise.all. In that case the transcript is canonical;
+  // ignore the stale turn's remaining bus frames until its run_end arrives.
+  const hydratedCompletedTurnRef = useRef<boolean>(false)
   // Spec-041 A3: always-current projectId for use in async drain callbacks.
   const projectIdRef = useRef(projectId)
   projectIdRef.current = projectId
@@ -1574,11 +1625,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // even when ctx["sessions"] lags (e.g. right after a service restart). The ref is
     // always fresh at call time — no stale closure risk.
     const sessionId = activeSessionIdRef.current ?? undefined
-    Promise.all([
+    return Promise.all([
       api.sessionHistory(projectId, sessionId),
       api.chatQueue(projectId).catch(() => ({ items: [] as Array<{ id: string; text: string; created_at: number }> })),
       // Spec-035 L3: /live replaces /running — returns running state + turn history + started_at
-      api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, prompt: '', cursor: 0, events: [] as Array<Record<string, unknown>>, board_events: [], pending_handoff: null as string | null, chat_id: null as string | null })),
+      api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, prompt: '', cursor: -1, events: [] as Array<Record<string, unknown>>, board_events: [], pending_handoff: null as string | null, chat_id: null as string | null })),
     ]).then(([histRes, queueRes, liveRes]) => {
       // Guard the ASYNC apply: if this client began POST-streaming a turn while the fetch was in
       // flight, the POST stream is the authority. Applying a stale history/live snapshot now would
@@ -1620,12 +1671,23 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         histMsgs.length > 0 &&
         histMsgs[histMsgs.length - 1].role === 'user' &&
         histMsgs[histMsgs.length - 1].text.trim() === livePrompt
+      const matchingUserIndex = livePrompt
+        ? histMsgs.findLastIndex(m => m.role === 'user' && m.text.trim() === livePrompt)
+        : -1
+      const liveAnswerInHistory = matchingUserIndex >= 0 &&
+        histMsgs.slice(matchingUserIndex + 1).some(m => m.role === 'assistant' && !m.streaming)
 
       // Multichat isolation: if the live buffer belongs to a different chat in this
       // project, don't adopt it — treat it as "not running for us". When chat_id is
       // absent (old server, card/TG run) fall through to normal logic (no regression).
       const liveIsOurs = !liveRes.chat_id || !effectiveChatId || liveRes.chat_id === effectiveChatId
-      if (liveIsOurs && liveRes.running && liveRes.events.length > 0) {
+      if (liveIsOurs && liveRes.running && liveAnswerInHistory) {
+        hydratedCompletedTurnRef.current = true
+        setMessages([...histMsgs, ...boardRows])
+        setRun(null)
+        seedCursor(liveRes.cursor)
+        lastAppliedSeqRef.current = Math.max(lastAppliedSeqRef.current, liveRes.cursor)
+      } else if (liveIsOurs && liveRes.running && liveRes.events.length > 0) {
         // ── Spec-035 L4: hydrate transcript from live buffer ──────────────────
         // Replay buffered events on top of session history to reconstruct the
         // in-flight turn. History is appended first; then the live events play.
@@ -1695,7 +1757,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // the operator sees the recovered content, not an old error.
       setError('')
     }).catch(() => { if (!isCancelled()) { setMessages([]); setError('') } })
-  }, [projectId, effectiveChatId, seedCursor]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [projectId, effectiveChatId, seedCursor])
 
   // spec-071: verify-then-hydrate after a live-rendered turn completes. The completion hydrate
   // was removed (72043ee) to stop flicker, but dropped bus events / broken replay could leave
@@ -1712,11 +1774,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         })
         .catch(() => {/* non-critical */})
     }, 1200)
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- refs are stable
+
   }, [projectId, hydrateFromServer])
 
   useEffect(() => {
     let cancelled = false
+    setHydratedChatId(null)
     abortRef.current?.abort()
     setMessages([])
     // hist-N ids restart at 0 per chat, so a stale expanded id could otherwise match
@@ -1740,6 +1803,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     setQueueEditId(null)
     setQueueEditText('')
     busActiveRef.current = false
+    hydratedCompletedTurnRef.current = false
     lastAppliedSeqRef.current = -1
     setContextTokens(null)
     setPrevContextTokens(null)
@@ -1753,11 +1817,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     pinnedRef.current = true
     setShowNewMsgPill(false)
 
-    hydrateFromServer(() => cancelled)
+    void hydrateFromServer(() => cancelled)
+      .finally(() => { if (!cancelled) setHydratedChatId(effectiveChatId) })
 
     return () => { cancelled = true }
   // Spec-037: re-hydrate when the active chat changes (activeChatId drives all chat state)
-  }, [projectId, effectiveChatId, seedCursor])
+  }, [projectId, effectiveChatId, seedCursor]) // eslint-disable-line react-hooks/exhaustive-deps -- hydration callback is intentionally stable through refs
 
   // spec-052 Phase 4a: consume a "Discuss this card" request from the board — seed the composer.
   useEffect(() => {
@@ -1810,7 +1875,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       document.removeEventListener('visibilitychange', onResume)
       window.removeEventListener('online', onResume)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- hydrateFromServer is stable (useCallback); streamingRef is a ref
+
   }, [isActive, hydrateFromServer])
 
   // Periodic poll of /live while tab is active (restores indicator after bus miss).
@@ -1908,6 +1973,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // have a `kind` and NO `type`, so they still reach the kind branches unchanged.
     const rec = evt as unknown as { type?: string; text?: string; error?: string; [k: string]: unknown }
     if (rec.type || !evt.kind) {
+      if (hydratedCompletedTurnRef.current && rec.type !== 'error') return
       if (rec.type === 'text_delta') {
         setRun(r => r ? { ...r, lastEventAt: now, currentTool: null } : r)
         setMessages(prev => appendDelta(prev, rec.text ?? ''))
@@ -1951,6 +2017,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     }
 
     if (evt.kind === 'run_start') {
+      hydratedCompletedTurnRef.current = false
       const isBg = evt.source === 'bg'
       busActiveRef.current = true
       setMessages(prev => {
@@ -2005,6 +2072,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       setSubagents(prev => applySubagentEvent(prev, sEvt))
 
     } else if (evt.kind === 'run_end') {
+      hydratedCompletedTurnRef.current = false
       // NOTE: do NOT early-return when !busActiveRef. A run_end for a turn we never adopted
       // (missed run_start, or RC#2 auto-continue's server-side 2nd turn) must still pull the
       // finished answer into the canvas — otherwise it only appears on the next user action
@@ -2201,6 +2269,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   }, [])
 
   const sendMessage = useCallback(async (overrideText?: string) => {
+    if (!composerReady) return
+    hydratedCompletedTurnRef.current = false
     const text = (overrideText ?? input).trim()
 
     const readyFiles = overrideText === undefined ? attachments.filter(a => a.path) : []
@@ -2273,7 +2343,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         // Spec-037: pass active chat_id so the backend writes session_id to the right chat entry
-        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), ...(planMode ? { plan_mode: true } : {}), auto_rotate: autoRotate, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
+        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), ...(planMode ? { plan_mode: true } : {}), auto_rotate: activeProvider === 'claude' ? autoRotate : false, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
         signal: ac.signal,
       })
 
@@ -2386,6 +2456,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             // direct 'done' finalizing while bus deltas are still in flight re-opens a new
             // bubble mid-word — exactly the S1 fragmentation class.
             switch (evt.type) {
+              case 'text': {
+                // Canonical-final safety net: the activity stream remains the primary
+                // render source, but a just-opened subscription can miss its first replay
+                // frame. The direct stream carries the same finalized text in order. Only
+                // repair an already-open pure-text bubble; never create/split bubbles here,
+                // so tool ordering and bus dedup semantics remain unchanged.
+                const last = prev[prev.length - 1]
+                return last?.role === 'assistant' && last.streaming && last.tools.length === 0
+                  ? reconcileFinalText(prev, evt.text)
+                  : prev
+              }
               case 'error':
                 // Terminal + needs immediate feedback; bus 'error' re-finalize is a no-op.
                 return finalizeStreaming(prev, evt.error)
@@ -2445,7 +2526,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         setTimeout(() => setCompactToast(false), 4000)
       }
     }
-  }, [input, projectId, streaming, rotating, onProjectsReload, attachments, thinkMode, ultracode])
+  }, [input, projectId, streaming, rotating, onProjectsReload, attachments, thinkMode, ultracode, planMode, autoRotate, effectiveChatId, activeProvider, composerReady]) // eslint-disable-line react-hooks/exhaustive-deps -- queue/hydration callbacks use live refs
 
   // ── Inline "/" skill palette (derived state; the skill list is tiny, so recompute per render) ──
   // Open only while the whole input is a single leading-slash token ("/", "/lo", "/loop") — a space
@@ -2630,7 +2711,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         // the actual (now-empty) new session rather than a client-side assumption.
         // One-shot fire-and-forget; rotCancelled is a local flag captured by the closure
         // (no cleanup needed — rotate is a singular non-repeating action per session).
-        // eslint-disable-next-line prefer-const
+
         let _rotCancelled = false
         hydrateFromServer(() => _rotCancelled)
       } else {
@@ -2661,13 +2742,24 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     } catch { /* non-critical */ }
   }
 
-  async function handleCreateChat() {
+  function handleCreateChat() {
+    const claude = providerRegistry.find(p => p.provider === 'claude')
+    setNewChatProvider('claude')
+    setNewChatModel(claude?.models[0]?.value || project.model)
+    setNewChatOpen(true)
+  }
+
+  async function confirmCreateChat() {
     try {
-      const newChat = await api.createChat(projectId)
+      const newChat = await api.createChat(projectId, {
+        provider: newChatProvider,
+        model: newChatModel || undefined,
+      })
       setChats(prev => [...prev, newChat])
       // Switch to newly created chat
       const res = await api.patchChat(projectId, newChat.id, { active: true })
       setActiveChatId(res.active)
+      setNewChatOpen(false)
     } catch { /* non-critical */ }
   }
 
@@ -2923,7 +3015,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   >{t['chat.tabs_rename_confirm']}</button>
                 </form>
               ) : (
-                <span className="chat-named-tab-label">{chat.name}</span>
+                <span className="chat-named-tab-label">
+                  {chat.name}
+                  <span style={{ marginLeft: 5, fontSize: 9, opacity: .7, textTransform: 'uppercase' }}>
+                    {chat.provider === 'codex' ? 'Codex' : 'Claude'}
+                  </span>
+                </span>
               )}
               {/* Close button only on the active tab */}
               {!isRenaming && isActive && (
@@ -3125,18 +3222,20 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               control in the composer bar). One popover to pick both; menu opens downward. */}
           {!isMobile && (
             <ModelThinkButton
-              model={project.model}
+              model={activeModel}
               thinkValue={thinkMode}
               disabled={changingModel || streaming}
-              onModelChange={handleModelChange}
+              onModelChange={m => { if (activeProvider === 'claude') handleModelChange(m as ModelKey) }}
               onThinkChange={handleThinkModeChange}
               menuPlacement="down"
-              models={models}
+              models={activeProviderModels}
               ultracode={ultracode}
               onUltracodeChange={handleUltracodeChange}
               planMode={planMode}
               onPlanModeChange={handlePlanModeChange}
               planLocked={!!planPrompt}
+              provider={activeProvider}
+              reasoningLevels={activeReasoningLevels}
             />
           )}
           {/* Full-screen chat button — hides the left project pane (like a free chat).
@@ -3916,17 +4015,19 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 })()}
                 <UsageBadge compact />
                 <ModelThinkButton
-                  model={project.model}
+                  model={activeModel}
                   thinkValue={thinkMode}
                   disabled={changingModel || streaming}
-                  onModelChange={handleModelChange}
+                  onModelChange={m => { if (activeProvider === 'claude') handleModelChange(m as ModelKey) }}
                   onThinkChange={handleThinkModeChange}
-                  models={models}
+                  models={activeProviderModels}
                   ultracode={ultracode}
                   onUltracodeChange={handleUltracodeChange}
                   planMode={planMode}
                   onPlanModeChange={handlePlanModeChange}
                   planLocked={!!planPrompt}
+                  provider={activeProvider}
+                  reasoningLevels={activeReasoningLevels}
                 />
               </div>
             )}
@@ -3963,7 +4064,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               return (
                 <button
                   className="btn-primary chat-send-btn"
-                  disabled={!hasContent}
+                  disabled={!hasContent || !composerReady}
                   onClick={() => sendMessage()}
                   title={rotating ? t['chat.queue_title'] : t['chat.send_title']}
                 >{rotating ? t['chat.queue'] : t['chat.send']}</button>
@@ -3972,6 +4073,46 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           </div>
         </div>
       </div>
+
+      {newChatOpen && (
+        <Modal onClose={() => setNewChatOpen(false)}>
+          <ModalHead title="New agent chat" onClose={() => setNewChatOpen(false)} />
+          <div className="run-modal-body" style={{ display: 'grid', gap: 14 }}>
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--text2)', marginBottom: 6 }}>Provider</div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {(['claude', 'codex'] as Provider[]).map(provider => {
+                  const info = providerRegistry.find(p => p.provider === provider)
+                  const disabled = provider === 'codex' && (!info?.enabled || !info.available)
+                  return (
+                    <button key={provider} className={`btn btn-sm ${newChatProvider === provider ? 'btn-primary' : 'btn-secondary'}`}
+                      disabled={disabled}
+                      title={disabled ? (info?.error || 'Codex unavailable') : `Create a provider-pinned ${provider} chat`}
+                      onClick={() => {
+                        setNewChatProvider(provider)
+                        setNewChatModel(info?.models.find(m => m.default)?.value || info?.models[0]?.value || '')
+                      }}>
+                      {provider === 'codex' ? 'Codex' : 'Claude Code'}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+            <label style={{ display: 'grid', gap: 6, fontSize: 12, color: 'var(--text2)' }}>
+              Model
+              <select className="input" value={newChatModel} onChange={e => setNewChatModel(e.target.value)}>
+                {(providerRegistry.find(p => p.provider === newChatProvider)?.models || []).map(model => (
+                  <option key={model.value} value={model.value}>{model.label}</option>
+                ))}
+              </select>
+            </label>
+            <div style={{ fontSize: 12, color: 'var(--text2)' }}>
+              The provider is pinned for the lifetime of this chat. Create another chat to switch engines.
+            </div>
+            <button className="btn-primary" onClick={confirmCreateChat} disabled={!newChatModel}>Create chat</button>
+          </div>
+        </Modal>
+      )}
 
       {/* Deferred Runs Management Modal */}
       {showPendingDeferred && (

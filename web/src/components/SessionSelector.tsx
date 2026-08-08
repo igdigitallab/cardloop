@@ -148,7 +148,6 @@ export function SessionSelector({ projectId, onSessionChange, onRequestReset, re
       window.removeEventListener('resize', update)
       window.removeEventListener('scroll', update, true)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
   // Outside-click: close only when the click is outside BOTH the selector wrapper

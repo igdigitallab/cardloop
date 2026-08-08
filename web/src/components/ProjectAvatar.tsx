@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- health helper and avatar are a single UI contract */
 import { ProjectHealth } from '../types'
 
 export function getHealthStatus(health?: ProjectHealth): 'green' | 'yellow' | 'gray' {

@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- shared markdown components are exported together */
 import React, { useEffect, useRef, useState } from 'react'
 import type { Components } from 'react-markdown'
 import { Lightbox } from './Lightbox'

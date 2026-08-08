@@ -57,10 +57,10 @@ Source of truth: `TASKS.md` in the project root. Sections `## Backlog / In Progr
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/api/projects/{id}/tasks` | Parse `TASKS.md` → return all cards grouped by column | Yes |
-| `POST` | `/api/projects/{id}/tasks` | Create new card in Backlog — `{"text":"..."}` | Yes |
+| `POST` | `/api/projects/{id}/tasks` | Create new card in Backlog — `{"text":"...","provider":"claude\|codex"?,"model":"..."?}` | Yes |
 | `GET` | `/api/projects/{id}/tasks/done` | Read archived cards from `DONE.md` | Yes |
 | `POST` | `/api/projects/{id}/tasks/{card}/move` | Move card to another column — `{"to":"Backlog\|In Progress\|Review\|Failed\|done"}`. Moving to **In Progress** auto-starts `run_engine`; moving to `done` archives to `DONE.md` | Yes |
-| `PATCH` | `/api/projects/{id}/tasks/{card}` | Edit card text in-place — `{"text":"..."}` | Yes |
+| `PATCH` | `/api/projects/{id}/tasks/{card}` | Edit card text and optional provider/model override. Run precedence: card provider → project `board_provider` → Claude | Yes |
 | `DELETE` | `/api/projects/{id}/tasks/{card}` | Delete card from `TASKS.md` | Yes |
 | `GET` | `/api/projects/{id}/tasks/{card}/run` | Get sidecar result of a card auto-run from `data/runs/<card>.md`. Also returns `meta` field (mode, has_changes, applied, discarded) from JSON sidecar | Yes |
 | `POST` | `/api/projects/{id}/tasks/{card}/apply` | **C2-gate**: merge worktree branch `card-<id>` into base branch via `git merge --no-ff`. Moves card Review→Done. 400 if legacy/no meta; 409 if merge conflict (abort is automatic, worktree stays). Requires worktree mode | Yes |
@@ -71,12 +71,21 @@ Source of truth: `TASKS.md` in the project root. Sections `## Backlog / In Progr
 
 ## Chat / SSE (Chat & Streaming)
 
+Chats are provider-pinned at creation. Missing `provider` in legacy records means `claude`.
+Claude continuity is stored in `session_id`; Codex continuity is stored separately in
+`codex_thread_id`. `CODEX_ENABLED=false` preserves Codex records but rejects Codex runs.
+
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `POST` | `/api/projects/{id}/chat` | Start agent task — returns `text/event-stream` SSE stream of `{type:"tool\|text\|result\|error", ...}`. Shared session + lock with board auto-runs. 409 if project is busy | Yes |
 | `POST` | `/api/projects/{id}/chat/stop` | Interrupt the current agent run (`client.interrupt()`). Note: server-side generator runs to completion; only client fetch is disconnected | Yes |
 | `GET` | `/api/projects/{id}/activity-stream` | SSE stream of board bus events for this project (`run_start / tool / text / run_end`), heartbeat 25s | Yes |
 | `GET` | `/api/activity-stream` | SSE stream of ALL projects' bus events (for unread indicators in sidebar) | Yes |
+| `GET` | `/api/agent-providers` | Provider availability, subscription auth status, discovered models, reasoning levels, and capabilities | Yes |
+| `GET` | `/api/projects/{id}/chats` | List provider-pinned chats, including `provider`, `model`, `session_id`, and `codex_thread_id` | Yes |
+| `POST` | `/api/projects/{id}/chats` | Create chat — optional `{"name":"...","provider":"claude\|codex","model":"..."}`; defaults to Claude | Yes |
+| `PATCH` | `/api/projects/{id}/chats/{chat_id}` | Rename or activate a chat. Provider changes are rejected; create a new chat instead | Yes |
+| `DELETE` | `/api/projects/{id}/chats/{chat_id}` | Delete a non-final chat; provider threads/sessions are not deleted | Yes |
 
 ---
 
@@ -116,16 +125,18 @@ Global prompt templates stored in `data/prompts.json` (not in git). Supports cat
 
 ---
 
-## Sessions
+## Sessions and Codex threads
 
-Claude SDK sessions (`~/.claude/projects/<cwd-encoded>/*.jsonl`). Session is shared across the cockpit and board auto-runs.
+Claude history is read from SDK transcripts under `~/.claude`. For an active Codex chat,
+the same endpoints use native Codex `thread_list`/`thread_read` data instead. The two identifiers
+and histories are never mixed.
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/api/projects/{id}/sessions` | List SDK sessions for project — `[{id, preview, ts}, ...]` | Yes |
 | `POST` | `/api/projects/{id}/sessions/{sid}/label` | Set human-readable label on a session | Yes |
 | `POST` | `/api/projects/{id}/session` | Switch active session — `{"action":"new\|resume", "session_id":"..."}`. 409 if project is busy | Yes |
-| `GET` | `/api/projects/{id}/session-history` | Full conversation history of the active session (from SDK `.jsonl` transcript) | Yes |
+| `GET` | `/api/projects/{id}/session-history` | Active provider history. Accepts `session_id` for Claude or `codex_thread_id` for Codex | Yes |
 | `GET` | `/api/projects/{id}/session-context` | Current session context summary (Feature A — context read) | Yes |
 
 ---
@@ -172,7 +183,7 @@ Event schema: `{ts, session_key, kind, source?, run_id?, prompt?, text?, tool?, 
 
 ## Settings (card f2ba02)
 
-Global — `data/settings.json` (mtime hot-reload, wired into runtime: scan interval, default model, watchdog). Per-project — fields in `topics.json` (`git_enabled`, `model`, `notify_on_error`, `log_cmd`, `test_cmd`). `git_enabled=false` → cockpit does not use git (legacy cards, git-sync returns 409, health does not require .git).
+Global — `data/settings.json` (mtime hot-reload, wired into runtime: scan interval, default model, watchdog). Per-project — fields in `topics.json` (`git_enabled`, `model`, `notify_on_error`, `log_cmd`, `test_cmd`, `board_provider`, `codex_model`). `git_enabled=false` → cockpit does not use git (legacy cards, git-sync returns 409, health does not require .git).
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
@@ -197,7 +208,7 @@ Free-form chats not tied to a project (`cwd=$HOME`). Shown in tab bar, hidden fr
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `POST` | `/api/free` | Create a new free chat — returns `{id, ...}` | Yes |
+| `POST` | `/api/free` | Create a free chat — optional `provider` and provider-native `model`; returns both continuity-id fields | Yes |
 | `POST` | `/api/free/{id}/rename` | Rename free chat — `{"name":"..."}` | Yes |
 | `DELETE` | `/api/free/{id}` | Delete free chat | Yes |
 

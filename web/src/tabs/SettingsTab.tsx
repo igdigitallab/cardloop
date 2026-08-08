@@ -300,6 +300,20 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
           </select>
         </Row>
 
+        <Row title="Board provider"
+             hint="Default engine for board cards. A card-level provider/model override wins. Claude remains the compatibility default.">
+          <select value={proj.board_provider}
+                  onChange={ev => setProj({ ...proj, board_provider: ev.target.value as ProjectSettings['board_provider'] })}>
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+          </select>
+        </Row>
+
+        <Row title="Codex board model" hint="Provider-native model id used when a board card resolves to Codex.">
+          <input value={proj.codex_model} onChange={ev => setProj({ ...proj, codex_model: ev.target.value })}
+                 style={{ width: 180 }} placeholder="gpt-5.6-sol" />
+        </Row>
+
         <Row title="After rate-limit"
              hint="When a run is interrupted by the Claude subscription limit: Ask — show a Yes/No prompt in chat; Always continue — auto-resume silently when the window resets; Never — do nothing.">
           <select value={proj.auto_resume_mode}

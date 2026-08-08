@@ -263,6 +263,49 @@ async def test_chat_saves_session_id(aiohttp_client, tmp_path, project_dir):
     )
 
 
+async def test_codex_chat_routes_thread_without_touching_claude_session(
+    aiohttp_client, tmp_path, project_dir
+):
+    codex_calls = []
+
+    async def claude_engine(**_kwargs):
+        raise AssertionError("Claude engine must not receive a Codex-pinned chat")
+        yield
+
+    async def fake_codex_engine(**kwargs):
+        codex_calls.append(kwargs)
+        yield {"type": "text", "text": "Codex reply"}
+        yield {"type": "result", "thread_id": "thread-new-12345678", "context_tokens": 17}
+
+    ctx = _make_chat_ctx(tmp_path, project_dir, run_engine=claude_engine)
+    ctx["run_codex_engine"] = fake_codex_engine
+    ctx["sessions"]["1001:42"] = "claude-session-stays"
+    _webapp._save_chats(ctx, {
+        "myproject": {
+            "active": "abcdef",
+            "chats": [{
+                "id": "abcdef", "name": "Codex", "provider": "codex",
+                "model": "gpt-5.6-sol", "session_id": None,
+                "codex_thread_id": "thread-old-12345678", "created_at": 1,
+            }],
+        }
+    })
+    client = await aiohttp_client(_make_app(ctx))
+    resp = await client.post(
+        "/api/projects/myproject/chat",
+        json={"prompt": "Continue", "chat_id": "abcdef", "think_mode": "ultra"},
+        headers=_auth_headers(ctx),
+    )
+    events = await _read_sse_events(resp)
+
+    assert codex_calls[0]["resume_thread_id"] == "thread-old-12345678"
+    assert codex_calls[0]["effort"] == "ultra"
+    assert ctx["sessions"]["1001:42"] == "claude-session-stays"
+    chat = _webapp._load_chats(ctx)["myproject"]["chats"][0]
+    assert chat["codex_thread_id"] == "thread-new-12345678"
+    assert any(e.get("type") == "result" and e.get("provider") == "codex" for e in events)
+
+
 # ─────────────────────────── concurrency lock ───────────────────────────
 
 
