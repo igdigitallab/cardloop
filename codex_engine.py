@@ -270,6 +270,97 @@ def _append_usage(data_dir: Path | None, *, thread_id: str, model: str, project_
         print(f"[codex] usage ledger write failed: {exc}")
 
 
+def _save_rate_limits(data_dir: Path | None, snapshot: dict) -> None:
+    """Persist the newest rate-limit snapshot so the badge survives a restart.
+
+    Codex only PUSHES limits (`account/rateLimits/updated`) during a turn — there is no
+    endpoint to ask. Between runs the last snapshot is all we have, so it goes to disk
+    with the time we heard it; the UI dims a stale one instead of presenting it as live.
+    """
+    if data_dir is None or not snapshot:
+        return
+    try:
+        path = data_dir / "codex_rate_limits.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"ts": time.time(), "snapshot": snapshot}, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:
+        print(f"[codex] rate-limit snapshot write failed: {exc}")
+
+
+def _window_label(window: dict, fallback: str) -> str:
+    mins = window.get("windowDurationMins")
+    if not isinstance(mins, int) or mins <= 0:
+        return fallback
+    if mins % 10080 == 0:
+        weeks = mins // 10080
+        return "Week" if weeks == 1 else f"{weeks} weeks"
+    if mins % 1440 == 0:
+        days = mins // 1440
+        return "Day" if days == 1 else f"{days} days"
+    if mins % 60 == 0:
+        return f"{mins // 60}-hour window"
+    return f"{mins}-minute window"
+
+
+def _norm_codex_window(window: dict | None, fallback_label: str, *, reached: bool) -> dict | None:
+    """One RateLimitWindow → the same row shape the Claude limits use."""
+    if not isinstance(window, dict):
+        return None
+    pct = window.get("usedPercent")
+    resets_at = window.get("resetsAt")
+    if isinstance(resets_at, (int, float)) and 0 < resets_at < 1_000_000_000:
+        # Defensive: a relative "seconds from now" would render as 1970 and read as "soon"
+        # forever. Anything below ~2001 cannot be an absolute unix timestamp.
+        resets_at = time.time() + resets_at
+    return {
+        "status": "rejected" if reached else "allowed",
+        "resets_at": int(resets_at) if isinstance(resets_at, (int, float)) else None,
+        "utilization": (pct / 100.0) if isinstance(pct, (int, float)) else None,
+        "label": _window_label(window, fallback_label),
+    }
+
+
+def rate_limits_for_ui(data_dir: Path | None) -> dict | None:
+    """Last known Codex limits in the frontend's row shape, or None if never seen.
+
+    `ts` is when the snapshot arrived, NOT when it was true — a window may have rolled
+    over since. The badge shows the age; it does not silently refresh a number nobody
+    reported.
+    """
+    if data_dir is None:
+        return None
+    try:
+        raw = json.loads((data_dir / "codex_rate_limits.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    snapshot = raw.get("snapshot") or {}
+    reached = bool(snapshot.get("rateLimitReachedType"))
+    limits: dict = {}
+    primary = _norm_codex_window(snapshot.get("primary"), "Primary window", reached=reached)
+    if primary:
+        limits["primary"] = primary
+    secondary = _norm_codex_window(snapshot.get("secondary"), "Secondary window", reached=reached)
+    if secondary:
+        limits["secondary"] = secondary
+    credits = snapshot.get("credits") or {}
+    if credits and not credits.get("unlimited") and not credits.get("hasCredits"):
+        # The failure Igor actually hit: auth fine, subscription fine, wallet empty.
+        limits["credits"] = {
+            "status": "rejected", "resets_at": None, "utilization": None,
+            "label": "Credits (empty)",
+        }
+    if not limits:
+        return None
+    return {
+        "ts": raw.get("ts"),
+        "plan_type": snapshot.get("planType"),
+        "limit_name": snapshot.get("limitName"),
+        "limits": limits,
+    }
+
+
 async def run_codex_engine(
     *, project_name: str, cwd: str, prompt: str, session_key: str, model: str | None = None,
     resume_thread_id: str | None = None, ctx: dict | None = None, ephemeral: bool = False,
@@ -324,6 +415,8 @@ async def run_codex_engine(
             for event in normalize_notification(notification):
                 if event["type"] == "text":
                     final_text = event.get("text", "")
+                elif event["type"] == "rate_limit" and event.get("snapshot"):
+                    _save_rate_limits((ctx or {}).get("DATA"), event["snapshot"])
                 yield event
             payload = notification.payload
             payload_kind = type(payload).__name__

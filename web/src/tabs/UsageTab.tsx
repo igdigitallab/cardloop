@@ -95,7 +95,12 @@ function LiveLimitsPanel({ data }: { data: UsageLimits }) {
   const now = data.now
   const keys = orderedLimitKeys(data.limits)
   const rows = keys.map(k => ({ k, d: data.limits[k] })).filter(x => x.d)
-  if (!rows.length) return <div className="usage-empty">No live limit data available yet.</div>
+  // Codex windows are labelled by provider: they live in their own payload block precisely
+  // because a bare "Week 71%" next to Claude's rows would read as a Claude number.
+  const codexRows = Object.entries(data.codex?.limits || {}).map(([k, d]) => ({ k, d }))
+  if (!rows.length && !codexRows.length) {
+    return <div className="usage-empty">No live limit data available yet.</div>
+  }
   return (
     <div className="usage-live-limits">
       {rows.map(({ k, d }) => (
@@ -106,6 +111,18 @@ function LiveLimitsPanel({ data }: { data: UsageLimits }) {
             <div className="usage-limit-fill" style={{ width: `${Math.round((d.utilization ?? 0) * 100)}%` }} />
           </div>
           <span className="usage-limit-reset">resets {fmtReset(d.resets_at, now)}</span>
+        </div>
+      ))}
+      {codexRows.map(({ k, d }) => (
+        <div key={`codex-${k}`} className={`usage-limit-row ${pickClass(d)}`}>
+          <span className="usage-limit-label">Codex · {limitLabel(k, d)}</span>
+          <span className="usage-limit-pct">{fmtPct(d.utilization) || d.status}</span>
+          <div className="usage-limit-bar">
+            <div className="usage-limit-fill" style={{ width: `${Math.round((d.utilization ?? 0) * 100)}%` }} />
+          </div>
+          <span className="usage-limit-reset">
+            {d.resets_at ? `resets ${fmtReset(d.resets_at, now)}` : '—'}
+          </span>
         </div>
       ))}
     </div>

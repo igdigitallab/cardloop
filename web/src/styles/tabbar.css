@@ -127,6 +127,22 @@
 .usage-badge.usage-dim    { color: var(--text3); }
 .usage-icon { font-size: 12px; }
 .usage-sep { opacity: 0.4; }
+/* Provider tag on the Codex pill — the two badges are otherwise identical, and an
+   unlabelled second percentage is worse than none. */
+.usage-badge-provider {
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+/* Snapshot provenance under the Codex rows (plan + how old the reading is). */
+.usage-badge-foot {
+  padding: 4px 8px 2px;
+  font-size: 10px;
+  color: var(--text3);
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
 
 .usage-dropdown {
   position: absolute;

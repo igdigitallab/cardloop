@@ -7246,7 +7246,11 @@ async def api_usage(req: web.Request) -> web.Response:
         # oauth unavailable (no token / 401 / network) → fallback to passive SDK snapshot
         if not cached:
             cached = ctx.get("rate_limits") or {}
-    return web.json_response({"limits": cached, "now": time.time()})
+    # Codex limits ride alongside rather than inside `limits` — every existing consumer of
+    # that dict (badge dropdown, Usage tab) treats each key as a Claude window, so merging
+    # them would silently relabel a Codex window as a Claude one.
+    codex_limits = _codex.rate_limits_for_ui(ctx.get("DATA")) if _codex.codex_enabled() else None
+    return web.json_response({"limits": cached, "codex": codex_limits, "now": time.time()})
 
 
 # GET /api/usage/ledger?days=7  → aggregates over the on-disk cost ledger (data/usage_ledger.jsonl).

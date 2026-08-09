@@ -59,8 +59,17 @@ export interface UsageDashboard {
 export interface UsageLimitRow {
   status: string; resets_at: number | null; utilization: number | null; ts: number; label?: string
 }
+// Codex reports limits only while a turn is running, so `ts` is when the snapshot
+// arrived — the badge dims an old one rather than passing it off as live.
+export interface CodexLimits {
+  ts: number | null
+  plan_type: string | null
+  limit_name: string | null
+  limits: Record<string, UsageLimitRow>
+}
 export interface UsageLimits {
   limits: Record<string, UsageLimitRow>
+  codex?: CodexLimits | null
   now: number
 }
 
