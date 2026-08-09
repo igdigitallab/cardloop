@@ -501,7 +501,7 @@ class BrowserSession:
         self._touch()
 
     # ── input (from the pane) ────────────────────────────────────────────────
-    async def handle_input(self, msg: dict) -> None:
+    async def handle_input(self, msg: dict, ws: Any = None) -> None:
         self._touch()
         t = msg.get("t")
         # Tab controls act on the context (not the active page's CDP), so they run before
@@ -528,6 +528,8 @@ class BrowserSession:
                 await self._key(msg)
             elif t == "paste":
                 await self._paste(msg)
+            elif t == "copy":
+                await self._copy(ws)
             elif t == "navigate":
                 await self.navigate(str(msg.get("url") or ""))
             elif t in ("back", "forward", "reload"):
@@ -642,6 +644,26 @@ class BrowserSession:
         text = str(msg.get("text") or "")
         if text:
             await self._cdp.send("Input.insertText", {"text": text})
+
+    async def _copy(self, ws: Any) -> None:
+        """Read the remote page's current text selection and hand it back to the
+        requesting pane, which writes it into the OPERATOR's clipboard.
+
+        A forwarded Ctrl+C would only copy inside the remote Chromium's own
+        (server-side, invisible) clipboard — never the operator's — so the
+        selection has to be pulled out explicitly and shipped to the client.
+        """
+        if ws is None:
+            return
+        text = ""
+        with contextlib.suppress(Exception):
+            res = await self._cdp.send("Runtime.evaluate", {
+                "expression": "window.getSelection().toString()",
+                "returnByValue": True,
+            })
+            text = res.get("result", {}).get("value") or ""
+        with contextlib.suppress(Exception):
+            await ws.send_json({"type": "clipboard", "text": text})
 
     # ── high-level actions (used by agent MCP tools) ─────────────────────────
     async def navigate(self, url: str) -> None:

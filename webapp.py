@@ -14979,7 +14979,7 @@ async def api_browser_ws(req: web.Request) -> web.WebSocketResponse:
     """GET /api/browser/ws?project=<id> — live browser screencast over WebSocket.
 
     Server→client: binary = one JPEG frame (1280x720); text = JSON control
-    ({type:ready|nav|error}). Client→server: JSON input ({t:mouse|wheel|key|navigate}).
+    ({type:ready|nav|error|clipboard}). Client→server: JSON input ({t:mouse|wheel|key|navigate|copy|paste}).
     Heartbeat keeps the connection alive through idle (same lesson as the PTY WS,
     card 9976b6) — Chromium "thinking"/static pages emit no frames for long stretches.
     """
@@ -15020,7 +15020,7 @@ async def api_browser_ws(req: web.Request) -> web.WebSocketResponse:
                 except Exception:
                     continue
                 if isinstance(data, dict):
-                    await session.handle_input(data)
+                    await session.handle_input(data, ws)
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 break
     finally:
