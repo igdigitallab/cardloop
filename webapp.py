@@ -2718,13 +2718,19 @@ async def api_health(req: web.Request) -> web.Response:
     because a restart at running==0 used to SIGTERM live sub-agents whose parent turn
     had already ended. Still safe to leave unauthenticated — it only leaks counts,
     never keys or content."""
+    # CORS-open (spec-053 Phase C2): the native app's first-run server-setup screen
+    # probes this from the bundled shell's own origin (e.g. https://localhost on
+    # Android), a different origin than the instance being probed. Safe to leave
+    # unrestricted — the payload is just non-sensitive counts, never keys/content.
+    headers = {"Access-Control-Allow-Origin": "*"}
     if req.query.get("deep") == "1":
         ctx = req.app["ctx"]
         running = ctx.get("running") or {}
         return web.json_response({"ok": True, "running": len(running),
                                   "agents": _live_agent_monitor_count(),
-                                  "plan_pending": len(_plan_pending_by_session)})
-    return web.json_response({"ok": True})
+                                  "plan_pending": len(_plan_pending_by_session)},
+                                  headers=headers)
+    return web.json_response({"ok": True}, headers=headers)
 
 
 # ─────────────────────────────────────────────────────────────────────────
