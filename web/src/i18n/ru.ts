@@ -28,6 +28,16 @@ export const ru = {
   'login.error_totp_invalid': 'Неверный код — попробуй ещё раз',
   'login.back_to_password': '← Назад',
 
+  // ── Native app / server setup ───────────────────────────────
+  'native.setup_title': 'Подключение к Cardloop',
+  'native.setup_subtitle': 'Введи адрес своего self-hosted инстанса',
+  'native.setup_url_label': 'Адрес сервера',
+  'native.setup_url_placeholder': 'https://cardloop.example.com',
+  'native.setup_connect': 'Подключиться',
+  'native.setup_connecting': 'Подключаюсь...',
+  'native.setup_error_invalid_url': 'Введи корректный https:// адрес',
+  'native.setup_error_unreachable': 'Не удалось достучаться до сервера — проверь адрес',
+
   // ── App / Welcome ────────────────────────────────────────────
   'app.connecting': 'Соединение...',
   'app.welcome_title': 'Над чем хотите поработать?',

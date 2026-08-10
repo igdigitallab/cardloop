@@ -27,6 +27,16 @@ export const en = {
   'login.error_totp_invalid': 'Invalid code — try again',
   'login.back_to_password': '← Back',
 
+  // ── Native app / server setup ───────────────────────────────
+  'native.setup_title': 'Connect to your Cardloop',
+  'native.setup_subtitle': 'Enter the URL of your self-hosted instance',
+  'native.setup_url_label': 'Server URL',
+  'native.setup_url_placeholder': 'https://cardloop.example.com',
+  'native.setup_connect': 'Connect',
+  'native.setup_connecting': 'Connecting...',
+  'native.setup_error_invalid_url': 'Enter a valid https:// URL',
+  'native.setup_error_unreachable': "Can't reach that server — check the URL and try again",
+
   // ── App / Welcome ────────────────────────────────────────────
   'app.connecting': 'Connecting...',
   'app.welcome_title': 'What do you want to work on?',
