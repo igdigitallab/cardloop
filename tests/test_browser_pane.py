@@ -149,6 +149,91 @@ def test_paste_uses_insert_text():
     assert s2._cdp.calls == []
 
 
+# ── agent type_text / snapshot: real keystrokes, not a bulk value-set ──────────
+# A split-digit code field (several maxlength=1 boxes with a JS keydown listener
+# that auto-advances focus) only reacts to genuine keydown events. Page.fill()
+# writes .value directly — fires oninput but no keydown, so the page's own JS never
+# advances focus. type_text must click (real focus) then dispatch real keystrokes.
+
+class _FakeKeyboard:
+    def __init__(self):
+        self.typed = []
+
+    async def type(self, text, delay=None):
+        self.typed.append(text)
+
+
+class _FakeInteractivePage:
+    def __init__(self):
+        self.url = "https://example.test"
+        self.clicks = []
+        self.keyboard = _FakeKeyboard()
+        self._eval_result = []
+
+    async def title(self):
+        return "T"
+
+    async def click(self, selector, timeout=None, click_count=1):
+        self.clicks.append((selector, click_count))
+
+    async def inner_text(self, selector, timeout=None):
+        return "body text"
+
+    async def evaluate(self, script):
+        return self._eval_result
+
+
+def _session_with_fake_page() -> "tuple[BrowserSession, _FakeInteractivePage]":
+    s = BrowserSession("k")
+    s._started = True
+    page = _FakeInteractivePage()
+    s._page = page
+    return s, page
+
+
+def test_type_text_with_selector_clicks_then_types_real_keystrokes():
+    s, page = _session_with_fake_page()
+    asyncio.run(s.type_text("581702", selector="#otp-0"))
+    # Triple-click selects any existing value (fill()'s replace semantics) before typing.
+    assert page.clicks == [("#otp-0", 3)]
+    assert page.keyboard.typed == ["581702"]
+
+
+def test_type_text_without_selector_just_types_focused_element():
+    s, page = _session_with_fake_page()
+    asyncio.run(s.type_text("hello"))
+    assert page.clicks == []
+    assert page.keyboard.typed == ["hello"]
+
+
+def test_snapshot_includes_formatted_interactive_elements():
+    s, page = _session_with_fake_page()
+    page._eval_result = [
+        {"tag": "input", "type": "tel", "id": "otp-0", "maxlength": "1", "visible": True},
+        {"tag": "button", "aria-label": "Next", "visible": True},
+    ]
+    snap = asyncio.run(s.snapshot())
+    assert '[0] input type="tel" id="otp-0" maxlength="1"' in snap["elements"]
+    assert '[1] button aria-label="Next"' in snap["elements"]
+
+
+def test_snapshot_elements_empty_when_evaluate_fails():
+    s, page = _session_with_fake_page()
+    async def _boom(script):
+        raise RuntimeError("no CDP")
+    page.evaluate = _boom
+    snap = asyncio.run(s.snapshot())
+    assert snap["elements"] == ""
+
+
+def test_format_interactive_elements_marks_hidden_and_text():
+    from browser_pane import _format_interactive_elements
+    out = _format_interactive_elements([
+        {"tag": "a", "href": "https://x.test", "text": "Sign in", "visible": False},
+    ])
+    assert out == '[0] a href="https://x.test" (hidden) — "Sign in"'
+
+
 def test_history_controls_drive_the_page():
     calls = []
 

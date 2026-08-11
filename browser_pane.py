@@ -79,6 +79,60 @@ def _key_info(key: str) -> "tuple[int, str]":
             return ord(ch), f"Digit{ch}"
     return 0, ""
 
+
+# ── agent snapshot: interactive elements ───────────────────────────────────────
+# browser_snapshot used to return page TEXT only — an agent aiming a CSS selector at
+# a form had nothing but that text to go on, and blind-guessed. That's exactly what
+# breaks on a split-digit code field (N unlabeled <input maxlength=1>) and an
+# icon-only submit button: there's no visible text to guess a selector from. This
+# collects id/name/class/placeholder/role/aria-label for every interactive element so
+# the agent can read them off instead of guessing.
+_INTERACTIVE_ELEMENTS_JS = """
+() => Array.from(document.querySelectorAll(
+    'input, button, select, textarea, a[href], [role="button"], [role="link"], [contenteditable="true"]'
+)).slice(0, 60).map(el => {
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    const out = { tag: el.tagName.toLowerCase() };
+    for (const attr of ['type', 'id', 'name', 'placeholder', 'maxlength', 'href', 'role', 'aria-label', 'title']) {
+        const v = el.getAttribute(attr);
+        if (v) out[attr] = v.length > 50 ? v.slice(0, 50) + '…' : v;
+    }
+    if (el.className && typeof el.className === 'string' && el.className.trim()) {
+        out['class'] = el.className.length > 50 ? el.className.slice(0, 50) + '…' : el.className;
+    }
+    const text = (el.innerText || el.value || '').trim();
+    if (text) out.text = text.length > 40 ? text.slice(0, 40) + '…' : text;
+    out.visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    return out;
+});
+"""
+
+
+def _format_interactive_elements(elements: "list[dict]") -> str:
+    """Render the JS collector's output as one line per element, e.g.:
+    ``[3] input type="tel" id="idTxtBx_SAOTCC_0" maxlength="1"`` — enough to build a
+    ``#id`` / ``[name="..."]`` selector without guessing.
+    """
+    lines: "list[str]" = []
+    for i, el in enumerate(elements):
+        if not isinstance(el, dict):
+            continue
+        bits = [el.get("tag") or "?"]
+        for k in ("type", "id", "name", "class", "placeholder", "maxlength", "role", "aria-label", "title", "href"):
+            v = el.get(k)
+            if v:
+                bits.append(f'{k}="{v}"')
+        if el.get("visible") is False:
+            bits.append("(hidden)")
+        line = f"[{i}] " + " ".join(bits)
+        text = el.get("text")
+        if text:
+            line += f' — "{text}"'
+        lines.append(line)
+    return "\n".join(lines)
+
+
 # Branded start page — shown instead of a bare white about:blank so a freshly
 # opened pane reads as "ready, type a URL" rather than blank/broken. Encoded as a
 # base64 data URL so Chromium renders it (and thus emits a screencast frame).
@@ -682,12 +736,28 @@ class BrowserSession:
         await self._page.click(selector, timeout=10000)
 
     async def type_text(self, text: str, selector: str | None = None) -> None:
+        """Type via REAL per-character keystrokes (page.keyboard.type), never a bulk
+        value-set. A split-digit code field (N separate maxlength=1 boxes with a JS
+        keydown listener that auto-advances focus — the common Microsoft/Google OTP
+        pattern) only reacts to genuine keydown events: Page.fill() writes .value
+        directly and fires oninput but no keydown, so the page's own JS never moves
+        focus and the whole string lands truncated in box one. Passing the FIRST
+        box's selector is enough — the page's auto-advance carries the rest of the
+        keystrokes to the next boxes on its own, the same way a real user typing does.
+        """
         await self.start()
         self._touch()
         if selector:
-            await self._page.fill(selector, text, timeout=10000)
-        else:
-            await self._page.keyboard.type(text)
+            # Triple-click = select-the-line (Chromium's clickCount 3), so typing
+            # REPLACES any existing value like fill() did, while still landing as
+            # real keystrokes.
+            await self._page.click(selector, timeout=10000, click_count=3)
+        # A small inter-key delay: many auto-advance handlers move focus to the next
+        # box asynchronously (setTimeout/rAF, not synchronously inside the keydown
+        # handler) — a zero-delay burst can outrun that and land two keystrokes on
+        # the same box before focus moves. It also reads as more human to anti-bot
+        # heuristics than an instantaneous paste-speed burst.
+        await self._page.keyboard.type(text, delay=25)
 
     async def snapshot(self, max_chars: int = 4000) -> dict:
         await self.start()
@@ -698,7 +768,15 @@ class BrowserSession:
             text = await self._page.inner_text("body", timeout=5000)
         except Exception:
             text = ""
-        return {"url": url, "title": title, "text": (text or "")[:max_chars]}
+        elements: "list[dict]" = []
+        with contextlib.suppress(Exception):
+            elements = await self._page.evaluate(_INTERACTIVE_ELEMENTS_JS)
+        return {
+            "url": url,
+            "title": title,
+            "text": (text or "")[:max_chars],
+            "elements": _format_interactive_elements(elements) if elements else "",
+        }
 
     # ── idle watchdog ────────────────────────────────────────────────────────
     async def _idle_watch(self) -> None:

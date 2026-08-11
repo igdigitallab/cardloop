@@ -23,7 +23,16 @@ _TYPE_SCHEMA = {
     "type": "object",
     "properties": {
         "text": {"type": "string", "description": "Text to type."},
-        "selector": {"type": "string", "description": "Optional CSS selector of a field to fill; omit to type into the focused element."},
+        "selector": {
+            "type": "string",
+            "description": (
+                "Optional CSS selector to click-then-type into; omit to type into the "
+                "already-focused element. Typing is real per-character keystrokes (not a "
+                "bulk value-set), so for a SPLIT code/OTP field (several 1-digit boxes "
+                "with auto-advance JS) pass the FIRST box's selector and the full code as "
+                "text — the page's own auto-advance carries the rest to the next boxes."
+            ),
+        },
     },
     "required": ["text"],
 }
@@ -88,12 +97,25 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_type failed: {e}"}]}
 
-    @tool("browser_snapshot", "Read the current page in the live browser: url, title, and visible text.", _SNAPSHOT_SCHEMA)
+    @tool(
+        "browser_snapshot",
+        "Read the current page in the live browser: url, title, interactive elements "
+        "(id/name/class/role — use these to build a selector instead of guessing), and visible text.",
+        _SNAPSHOT_SCHEMA,
+    )
     async def browser_snapshot(args: dict) -> dict:
         try:
             sess = await _browser_pane.get_or_create(cwd)
             snap = await sess.snapshot()
-            return {"content": [{"type": "text", "text": f"URL: {snap['url']}\nTitle: {snap['title']}\n\n{snap['text']}"}]}
+            body = f"URL: {snap['url']}\nTitle: {snap['title']}\n"
+            if snap.get("elements"):
+                body += (
+                    "\nInteractive elements (index — tag + attrs — visible text; "
+                    "build a selector from id/name/class, e.g. #id or [name=\"x\"]):\n"
+                    f"{snap['elements']}\n"
+                )
+            body += f"\n{snap['text']}"
+            return {"content": [{"type": "text", "text": body}]}
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_snapshot failed: {e}"}]}
 
