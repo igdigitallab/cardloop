@@ -173,6 +173,16 @@ class _FakeInteractivePage:
         # When set, every call below raises this instead of doing its normal thing —
         # used to simulate a broken CDP session (or a plain bad-selector timeout).
         self.fail_with: "Exception | None" = None
+        # None = any selector "matches" (existing tests' default expectation); a
+        # test exercising the iframe fallback sets this to a restricted set so the
+        # main-frame click genuinely fails and _click_anywhere has to fall through.
+        self.clickable_selectors: "set[str] | None" = None
+        # No iframes by default: a page IS its own only "frame" here, so the
+        # snapshot/_click_anywhere frame-scan loop skips it (frame == main_frame)
+        # and every existing test's behavior is unchanged. Tests that care about
+        # iframes replace this list with real _FakeFrame stand-ins.
+        self.main_frame = self
+        self.frames = [self]
 
     async def title(self):
         if self.fail_with:
@@ -182,6 +192,8 @@ class _FakeInteractivePage:
     async def click(self, selector, timeout=None, click_count=1):
         if self.fail_with:
             raise self.fail_with
+        if self.clickable_selectors is not None and selector not in self.clickable_selectors:
+            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
         self.clicks.append((selector, click_count))
 
     async def goto(self, url, wait_until=None):
@@ -194,6 +206,32 @@ class _FakeInteractivePage:
 
     async def evaluate(self, script):
         return self._eval_result
+
+
+class _FakeFrame:
+    """A stand-in for a Playwright Frame (an iframe) — same shape as
+    _FakeInteractivePage's relevant methods, tracked separately so tests can tell
+    a main-frame action from a fallen-back-to-iframe one."""
+
+    def __init__(self, url, elements=None, text="", clickable_selectors=None):
+        self.url = url
+        self._eval_result = elements or []
+        self._text = text
+        # Only these selectors succeed on .click() — everything else times out,
+        # like a real Frame.click() would for an element that isn't there.
+        self._clickable = set(clickable_selectors or [])
+        self.clicks = []
+
+    async def evaluate(self, script):
+        return self._eval_result
+
+    async def inner_text(self, selector, timeout=None):
+        return self._text
+
+    async def click(self, selector, timeout=None, click_count=1):
+        if selector not in self._clickable:
+            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
+        self.clicks.append((selector, click_count))
 
 
 def _session_with_fake_page() -> "tuple[BrowserSession, _FakeInteractivePage]":
@@ -237,6 +275,106 @@ def test_snapshot_elements_empty_when_evaluate_fails():
     page.evaluate = _boom
     snap = asyncio.run(s.snapshot())
     assert snap["elements"] == ""
+
+
+# ── iframes: a Google Sign-In button or a CAPTCHA checkbox is invisible to a ────
+# page-level inner_text()/evaluate() (they only ever look at the main document),
+# even though it's right there on screen and Playwright itself can reach it.
+
+def test_snapshot_includes_elements_and_text_from_an_iframe():
+    s, page = _session_with_fake_page()
+    google_frame = _FakeFrame(
+        "https://accounts.google.com/gsi/button",
+        elements=[{"tag": "div", "role": "button", "aria-label": "Sign in with Google", "visible": True}],
+        text="Sign in with Google",
+    )
+    page.frames = [page, google_frame]
+    snap = asyncio.run(s.snapshot())
+    assert "[iframe https://accounts.google.com/gsi/button]" in snap["elements"]
+    assert 'aria-label="Sign in with Google"' in snap["elements"]
+    assert "Sign in with Google" in snap["text"]
+
+
+def test_snapshot_skips_empty_and_blank_iframes():
+    s, page = _session_with_fake_page()
+    empty_frame = _FakeFrame("https://ads.example/frame", elements=[], text="")
+    blank_frame = _FakeFrame("about:blank", elements=[{"tag": "button", "visible": True}], text="")
+    page.frames = [page, empty_frame, blank_frame]
+    snap = asyncio.run(s.snapshot())
+    assert "ads.example" not in snap["elements"]
+    assert "about:blank" not in snap["elements"]
+
+
+def test_click_falls_back_to_an_iframe_when_the_main_frame_does_not_have_it():
+    async def go():
+        s, page = _session_with_fake_page()
+        recaptcha_frame = _FakeFrame(
+            "https://www.google.com/recaptcha/api2/anchor",
+            clickable_selectors={"#recaptcha-anchor"},
+        )
+        page.frames = [page, recaptcha_frame]
+        page.clickable_selectors = set()  # not on the main frame — force the fallback
+        await s.click("#recaptcha-anchor")
+        assert page.clicks == [], "must not have matched anything in the main frame"
+        assert recaptcha_frame.clicks == [("#recaptcha-anchor", 1)]
+    asyncio.run(go())
+
+
+def test_click_prefers_the_main_frame_when_present_there_too():
+    async def go():
+        s, page = _session_with_fake_page()
+        other_frame = _FakeFrame("https://x.test/iframe", clickable_selectors={"#btn"})
+        page.frames = [page, other_frame]
+        await s.click("#btn")
+        assert page.clicks == [("#btn", 1)]
+        assert other_frame.clicks == [], "the main frame already had it — no need to fall back"
+    asyncio.run(go())
+
+
+def test_click_raises_the_original_error_when_no_frame_has_the_selector():
+    async def go():
+        s, page = _session_with_fake_page()
+        other_frame = _FakeFrame("https://x.test/iframe", clickable_selectors={"#somewhere-else"})
+        page.frames = [page, other_frame]
+        page.clickable_selectors = set()
+        try:
+            await s.click("#nowhere")
+            assert False, "must re-raise"
+        except TimeoutError as e:
+            assert "#nowhere" in str(e)
+    asyncio.run(go())
+
+
+def test_click_does_not_fall_back_to_frames_on_a_dead_connection():
+    """A dead session should fail fast and retire — searching every iframe for a
+    selector that was never going to be found on a broken connection just wastes
+    time before the (correct) retirement kicks in."""
+    async def go():
+        s, page = _session_with_fake_page()
+        browser_pane._SESSIONS["k"] = s
+        other_frame = _FakeFrame("https://x.test/iframe", clickable_selectors={"#btn"})
+        page.frames = [page, other_frame]
+        page.fail_with = RuntimeError("Connection closed while reading from the driver")
+        try:
+            await s.click("#btn")
+            assert False, "must re-raise"
+        except RuntimeError:
+            pass
+        assert other_frame.clicks == [], "must not have tried the iframe at all"
+        assert s._closed is True
+    asyncio.run(go())
+
+
+def test_type_text_selector_also_falls_back_to_an_iframe():
+    async def go():
+        s, page = _session_with_fake_page()
+        otp_frame = _FakeFrame("https://login.example/otp", clickable_selectors={"#code-0"})
+        page.frames = [page, otp_frame]
+        page.clickable_selectors = set()
+        await s.type_text("581702", selector="#code-0")
+        assert otp_frame.clicks == [("#code-0", 3)]
+        assert page.keyboard.typed == ["581702"], "keyboard.type() is frame-agnostic — dispatched at the page level"
+    asyncio.run(go())
 
 
 # ── agent-tool self-healing: classify + auto-retire on a dead CDP session ──────

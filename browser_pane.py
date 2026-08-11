@@ -98,7 +98,8 @@ def _key_info(key: str) -> "tuple[int, str]":
 _INTERACTIVE_ELEMENTS_JS = """
 () => Array.from(document.querySelectorAll(
     'input, button, select, textarea, a[href], [role="button"], [role="link"], ' +
-    '[role="option"], [role="listbox"], [role="combobox"], [role="menuitem"], [contenteditable="true"]'
+    '[role="option"], [role="listbox"], [role="combobox"], [role="menuitem"], ' +
+    '[role="checkbox"], [role="radio"], [contenteditable="true"]'
 )).slice(0, 60).map(el => {
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
@@ -166,6 +167,24 @@ _DEAD_CONNECTION_MARKERS = (
 def looks_like_dead_connection(exc: Exception) -> bool:
     msg = str(exc).lower()
     return any(marker in msg for marker in _DEAD_CONNECTION_MARKERS)
+
+
+# ── iframes ─────────────────────────────────────────────────────────────────────
+# A Google Sign-In button, a reCAPTCHA/hCaptcha checkbox, an embedded payment
+# widget — all commonly render inside a same- OR cross-origin <iframe>. page-level
+# inner_text()/evaluate() only ever look at the MAIN document; content inside an
+# iframe is a genuinely separate document they never traverse — an element that is
+# right there on screen reads as "not on the page at all". Playwright talks to
+# every frame over CDP directly, which is NOT bound by the browser's own
+# same-origin policy the way the page's own JS would be — so this is fixable
+# without touching (or defeating) whatever anti-bot check the iframe itself runs.
+_MAX_SCANNED_FRAMES = 12    # snapshot: cheap read-only evaluate() calls
+_MAX_FALLBACK_FRAMES = 8    # click/type_text: each attempt auto-waits, keep it bounded
+
+
+def _snippet(s: str, n: int) -> str:
+    s = s or ""
+    return s if len(s) <= n else s[: n - 1] + "…"
 
 
 # Branded start page — shown instead of a bare white about:blank so a freshly
@@ -801,11 +820,36 @@ class BrowserSession:
             await self._retire_if_dead(e)
             raise
 
+    async def _click_anywhere(self, selector: str, *, click_count: int = 1) -> None:
+        """page.click() only ever searches the MAIN frame. A same- or cross-origin
+        iframe (a Google Sign-In button, a CAPTCHA checkbox, an embedded payment
+        widget) is invisible to it even though Playwright itself can reach it. Try
+        the main frame first — the common, fast case, at the original generous
+        timeout — and only on failure fall back to searching every other frame for
+        the same selector, at a shorter timeout each so a genuinely-missing element
+        still fails in bounded time.
+        """
+        try:
+            await self._page.click(selector, timeout=10000, click_count=click_count)
+            return
+        except Exception as first_err:
+            if looks_like_dead_connection(first_err):
+                raise
+            for frame in list(self._page.frames)[: _MAX_FALLBACK_FRAMES + 1]:
+                if frame == self._page.main_frame:
+                    continue
+                try:
+                    await frame.click(selector, timeout=3000, click_count=click_count)
+                    return
+                except Exception:
+                    continue
+            raise first_err
+
     async def click(self, selector: str) -> None:
         await self.start()
         self._touch()
         try:
-            await self._page.click(selector, timeout=10000)
+            await self._click_anywhere(selector)
         except Exception as e:
             await self._retire_if_dead(e)
             raise
@@ -826,17 +870,33 @@ class BrowserSession:
             if selector:
                 # Triple-click = select-the-line (Chromium's clickCount 3), so typing
                 # REPLACES any existing value like fill() did, while still landing as
-                # real keystrokes.
-                await self._page.click(selector, timeout=10000, click_count=3)
+                # real keystrokes. Same main-frame-then-iframe fallback as click().
+                await self._click_anywhere(selector, click_count=3)
             # A small inter-key delay: many auto-advance handlers move focus to the
             # next box asynchronously (setTimeout/rAF, not synchronously inside the
             # keydown handler) — a zero-delay burst can outrun that and land two
             # keystrokes on the same box before focus moves. It also reads as more
             # human to anti-bot heuristics than an instantaneous paste-speed burst.
+            # keyboard.type() dispatches at the CDP/OS level to whatever currently
+            # has focus, so it reaches an iframe field just as well as a main-frame
+            # one once the click above has focused it — no frame-awareness needed here.
             await self._page.keyboard.type(text, delay=25)
         except Exception as e:
             await self._retire_if_dead(e)
             raise
+
+    async def _scan_frame(self, frame: Any) -> "tuple[list[dict], str]":
+        """(elements, visible text) for one frame — same collector as the main
+        page, just run in that frame's own JS context via Playwright/CDP (which
+        reaches cross-origin iframes a page-level document.querySelectorAll never
+        could)."""
+        elements: "list[dict]" = []
+        with contextlib.suppress(Exception):
+            elements = await frame.evaluate(_INTERACTIVE_ELEMENTS_JS)
+        text = ""
+        with contextlib.suppress(Exception):
+            text = await frame.inner_text("body", timeout=2000)
+        return elements, (text or "").strip()
 
     async def snapshot(self, max_chars: int = 4000) -> dict:
         await self.start()
@@ -854,11 +914,38 @@ class BrowserSession:
         elements: "list[dict]" = []
         with contextlib.suppress(Exception):
             elements = await self._page.evaluate(_INTERACTIVE_ELEMENTS_JS)
+        sections: "list[str]" = [_format_interactive_elements(elements)] if elements else []
+
+        # Same-/cross-origin iframes: a Google Sign-In button or a CAPTCHA checkbox
+        # otherwise reads as "not on the page at all" even though it's right there
+        # on screen — see the module-level note above _MAX_SCANNED_FRAMES.
+        iframe_texts: "list[str]" = []
+        for frame in list(self._page.frames)[:_MAX_SCANNED_FRAMES]:
+            if frame == self._page.main_frame:
+                continue
+            try:
+                f_url = frame.url
+            except Exception:
+                continue
+            if not f_url or f_url == "about:blank":
+                continue
+            frame_els, frame_text = await self._scan_frame(frame)
+            if not frame_els and not frame_text:
+                continue
+            header = f"[iframe {_snippet(f_url, 80)}]"
+            if frame_els:
+                sections.append(header + "\n" + _format_interactive_elements(frame_els))
+            if frame_text:
+                iframe_texts.append(f"{header}\n{_snippet(frame_text, 500)}")
+
+        if iframe_texts:
+            text = (text or "") + "\n\n" + "\n\n".join(iframe_texts)
+
         return {
             "url": url,
             "title": title,
             "text": (text or "")[:max_chars],
-            "elements": _format_interactive_elements(elements) if elements else "",
+            "elements": "\n\n".join(sections),
         }
 
     def status(self) -> dict:
