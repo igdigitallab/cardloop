@@ -38,4 +38,9 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Android 13+ (API 33) gates ALL app notifications behind this runtime permission,
+         including those the WebView shows via the web Notification/Push APIs. MainActivity
+         requests it at startup — a bare WebView (unlike a TWA) never surfaces the OS prompt
+         on its own just because JS calls Notification.requestPermission(). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 </manifest>
