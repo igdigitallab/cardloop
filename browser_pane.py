@@ -87,14 +87,24 @@ def _key_info(key: str) -> "tuple[int, str]":
 # icon-only submit button: there's no visible text to guess a selector from. This
 # collects id/name/class/placeholder/role/aria-label for every interactive element so
 # the agent can read them off instead of guessing.
+#
+# The ARIA roles (option/listbox/combobox/menuitem) exist for one specific gap: a
+# typeahead/autocomplete widget (Fluent UI TagPicker, MUI Combobox, ...) renders its
+# suggestion popup as plain <div>/<li> with role="option" inside role="listbox" — not
+# an <input> or <button> — so without these the popup only showed up as loose text at
+# the bottom of the snapshot with no selector to click. aria-selected/aria-expanded
+# are collected alongside so the agent can tell which suggestion is highlighted and
+# whether the popup is even open, without a second round-trip.
 _INTERACTIVE_ELEMENTS_JS = """
 () => Array.from(document.querySelectorAll(
-    'input, button, select, textarea, a[href], [role="button"], [role="link"], [contenteditable="true"]'
+    'input, button, select, textarea, a[href], [role="button"], [role="link"], ' +
+    '[role="option"], [role="listbox"], [role="combobox"], [role="menuitem"], [contenteditable="true"]'
 )).slice(0, 60).map(el => {
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
     const out = { tag: el.tagName.toLowerCase() };
-    for (const attr of ['type', 'id', 'name', 'placeholder', 'maxlength', 'href', 'role', 'aria-label', 'title']) {
+    for (const attr of ['type', 'id', 'name', 'placeholder', 'maxlength', 'href', 'role',
+                         'aria-label', 'aria-selected', 'aria-expanded', 'title']) {
         const v = el.getAttribute(attr);
         if (v) out[attr] = v.length > 50 ? v.slice(0, 50) + '…' : v;
     }
@@ -119,7 +129,8 @@ def _format_interactive_elements(elements: "list[dict]") -> str:
         if not isinstance(el, dict):
             continue
         bits = [el.get("tag") or "?"]
-        for k in ("type", "id", "name", "class", "placeholder", "maxlength", "role", "aria-label", "title", "href"):
+        for k in ("type", "id", "name", "class", "placeholder", "maxlength", "role",
+                  "aria-label", "aria-selected", "aria-expanded", "title", "href"):
             v = el.get(k)
             if v:
                 bits.append(f'{k}="{v}"')
@@ -131,6 +142,30 @@ def _format_interactive_elements(elements: "list[dict]") -> str:
             line += f' — "{text}"'
         lines.append(line)
     return "\n".join(lines)
+
+
+# ── dead-connection classifier (agent tools + operator input share this) ──────
+# "Connection closed while reading from the driver" is Playwright's own message
+# when the LOCAL Node driver subprocess pipe has died — nothing to do with a bad
+# selector. The other markers cover the equivalent CDP-level phrasing (a detached
+# target, a closed browser/session). Deliberately narrow: a plain Playwright
+# TimeoutError ("waiting for selector ... exceeded") must NOT match here, or a
+# simple bad selector would retire and rebuild a perfectly healthy session for
+# nothing.
+_DEAD_CONNECTION_MARKERS = (
+    "connection closed",
+    "target closed",
+    "target page, context or browser has been closed",
+    "browser has been closed",
+    "session closed",
+    "websocket connection closed",
+    "browser has disconnected",
+)
+
+
+def looks_like_dead_connection(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _DEAD_CONNECTION_MARKERS)
 
 
 # Branded start page — shown instead of a bare white about:blank so a freshly
@@ -735,6 +770,23 @@ class BrowserSession:
             await ws.send_json({"type": "clipboard", "text": text})
 
     # ── high-level actions (used by agent MCP tools) ─────────────────────────
+    async def _retire_if_dead(self, exc: Exception) -> None:
+        """A failure from these agent-facing calls means one of two very different
+        things: a bad selector / an element that never showed up (a normal usage
+        error — retrying would just waste another 10s timeout), or the CDP
+        connection itself has died (a dead local Playwright driver pipe, a detached
+        target — retrying against the SAME session would fail identically forever,
+        which is exactly what made browser_navigate/browser_snapshot loop on
+        "Connection closed while reading from the driver" with no recovery). Only
+        the second case retires the session, so the next get_or_create() — and
+        browser_tools._run_with_retry's single retry — gets a fresh one instead of
+        the same corpse. Mirrors handle_input's self-healing for the operator's raw
+        input path.
+        """
+        if not self._closed and looks_like_dead_connection(exc):
+            with contextlib.suppress(Exception):
+                await close_session(self.key, self)
+
     async def navigate(self, url: str) -> None:
         await self.start()
         self._touch()
@@ -742,13 +794,21 @@ class BrowserSession:
             return
         if not url.startswith(("http://", "https://", "about:", "data:", "file:")):
             url = "https://" + url
-        await self._page.goto(url, wait_until="domcontentloaded")
-        await self._broadcast_nav()
+        try:
+            await self._page.goto(url, wait_until="domcontentloaded")
+            await self._broadcast_nav()
+        except Exception as e:
+            await self._retire_if_dead(e)
+            raise
 
     async def click(self, selector: str) -> None:
         await self.start()
         self._touch()
-        await self._page.click(selector, timeout=10000)
+        try:
+            await self._page.click(selector, timeout=10000)
+        except Exception as e:
+            await self._retire_if_dead(e)
+            raise
 
     async def type_text(self, text: str, selector: str | None = None) -> None:
         """Type via REAL per-character keystrokes (page.keyboard.type), never a bulk
@@ -762,23 +822,31 @@ class BrowserSession:
         """
         await self.start()
         self._touch()
-        if selector:
-            # Triple-click = select-the-line (Chromium's clickCount 3), so typing
-            # REPLACES any existing value like fill() did, while still landing as
-            # real keystrokes.
-            await self._page.click(selector, timeout=10000, click_count=3)
-        # A small inter-key delay: many auto-advance handlers move focus to the next
-        # box asynchronously (setTimeout/rAF, not synchronously inside the keydown
-        # handler) — a zero-delay burst can outrun that and land two keystrokes on
-        # the same box before focus moves. It also reads as more human to anti-bot
-        # heuristics than an instantaneous paste-speed burst.
-        await self._page.keyboard.type(text, delay=25)
+        try:
+            if selector:
+                # Triple-click = select-the-line (Chromium's clickCount 3), so typing
+                # REPLACES any existing value like fill() did, while still landing as
+                # real keystrokes.
+                await self._page.click(selector, timeout=10000, click_count=3)
+            # A small inter-key delay: many auto-advance handlers move focus to the
+            # next box asynchronously (setTimeout/rAF, not synchronously inside the
+            # keydown handler) — a zero-delay burst can outrun that and land two
+            # keystrokes on the same box before focus moves. It also reads as more
+            # human to anti-bot heuristics than an instantaneous paste-speed burst.
+            await self._page.keyboard.type(text, delay=25)
+        except Exception as e:
+            await self._retire_if_dead(e)
+            raise
 
     async def snapshot(self, max_chars: int = 4000) -> dict:
         await self.start()
         self._touch()
-        url = self._page.url
-        title = await self._page.title()
+        try:
+            url = self._page.url
+            title = await self._page.title()
+        except Exception as e:
+            await self._retire_if_dead(e)
+            raise
         try:
             text = await self._page.inner_text("body", timeout=5000)
         except Exception:
@@ -791,6 +859,20 @@ class BrowserSession:
             "title": title,
             "text": (text or "")[:max_chars],
             "elements": _format_interactive_elements(elements) if elements else "",
+        }
+
+    def status(self) -> dict:
+        """Session health for the agent's browser_status tool — lets it tell "the
+        connection died" apart from "my selector is wrong" instead of guessing from
+        repeated identical failures."""
+        return {
+            "backend": self.backend,
+            "started": self._started,
+            "closed": self._closed,
+            "alive": self._is_alive(),
+            "subscribers": len(self._subs),
+            "idle_seconds": round(time.monotonic() - self._last_activity, 1),
+            "url": (self._page.url if self._page is not None else None),
         }
 
     # ── idle watchdog ────────────────────────────────────────────────────────

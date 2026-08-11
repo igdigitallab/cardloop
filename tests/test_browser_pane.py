@@ -167,14 +167,27 @@ class _FakeInteractivePage:
     def __init__(self):
         self.url = "https://example.test"
         self.clicks = []
+        self.goto_calls = []
         self.keyboard = _FakeKeyboard()
         self._eval_result = []
+        # When set, every call below raises this instead of doing its normal thing —
+        # used to simulate a broken CDP session (or a plain bad-selector timeout).
+        self.fail_with: "Exception | None" = None
 
     async def title(self):
+        if self.fail_with:
+            raise self.fail_with
         return "T"
 
     async def click(self, selector, timeout=None, click_count=1):
+        if self.fail_with:
+            raise self.fail_with
         self.clicks.append((selector, click_count))
+
+    async def goto(self, url, wait_until=None):
+        if self.fail_with:
+            raise self.fail_with
+        self.goto_calls.append(url)
 
     async def inner_text(self, selector, timeout=None):
         return "body text"
@@ -224,6 +237,100 @@ def test_snapshot_elements_empty_when_evaluate_fails():
     page.evaluate = _boom
     snap = asyncio.run(s.snapshot())
     assert snap["elements"] == ""
+
+
+# ── agent-tool self-healing: classify + auto-retire on a dead CDP session ──────
+# 2026-08-11 follow-up: handle_input (the operator's raw input path) already
+# self-heals; navigate/click/type_text/snapshot (the agent's selector-based path)
+# did not, so browser_navigate/browser_snapshot kept re-hitting the same corpse and
+# failing identically ("Connection closed while reading from the driver") for the
+# rest of a run. These four must retire the session on a DEAD-CONNECTION failure
+# and re-raise, but stay silent (no retirement) on an ordinary usage error like a
+# bad selector — retiring for that would just discard a perfectly healthy session.
+
+def test_looks_like_dead_connection_matches_known_markers():
+    from browser_pane import looks_like_dead_connection
+    assert looks_like_dead_connection(RuntimeError("Connection closed while reading from the driver"))
+    assert looks_like_dead_connection(Exception("Target closed"))
+    assert looks_like_dead_connection(Exception("Target page, context or browser has been closed"))
+
+
+def test_looks_like_dead_connection_does_not_match_a_selector_timeout():
+    from browser_pane import looks_like_dead_connection
+    assert not looks_like_dead_connection(Exception('Timeout 10000ms exceeded waiting for selector "#nope"'))
+    assert not looks_like_dead_connection(Exception("element not found"))
+
+
+def test_navigate_retires_session_on_dead_connection_and_reraises():
+    async def go():
+        s, page = _session_with_fake_page()
+        browser_pane._SESSIONS["k"] = s
+        page.fail_with = RuntimeError("Connection closed while reading from the driver")
+        try:
+            await s.navigate("https://x.test")
+            assert False, "must re-raise"
+        except RuntimeError:
+            pass
+        assert s._closed is True
+        assert "k" not in browser_pane._SESSIONS
+    asyncio.run(go())
+
+
+def test_click_does_not_retire_session_on_a_plain_selector_timeout():
+    async def go():
+        s, page = _session_with_fake_page()
+        browser_pane._SESSIONS["k"] = s
+        page.fail_with = Exception('Timeout 10000ms exceeded waiting for selector "#nope"')
+        try:
+            await s.click("#nope")
+            assert False, "must re-raise"
+        except Exception:
+            pass
+        assert s._closed is False, "a bad selector is a usage error, not a dead session"
+        assert browser_pane._SESSIONS.get("k") is s
+        browser_pane._SESSIONS.pop("k", None)
+    asyncio.run(go())
+
+
+def test_type_text_retires_session_on_dead_connection():
+    async def go():
+        s, page = _session_with_fake_page()
+        browser_pane._SESSIONS["k"] = s
+        page.fail_with = RuntimeError("Target closed")
+        try:
+            await s.type_text("581702", selector="#otp-0")
+            assert False, "must re-raise"
+        except RuntimeError:
+            pass
+        assert s._closed is True
+        assert "k" not in browser_pane._SESSIONS
+    asyncio.run(go())
+
+
+def test_snapshot_retires_session_on_dead_connection():
+    async def go():
+        s, page = _session_with_fake_page()
+        browser_pane._SESSIONS["k"] = s
+        page.fail_with = RuntimeError("Browser has been closed")
+        try:
+            await s.snapshot()
+            assert False, "must re-raise"
+        except RuntimeError:
+            pass
+        assert s._closed is True
+        assert "k" not in browser_pane._SESSIONS
+    asyncio.run(go())
+
+
+def test_status_reports_backend_and_liveness():
+    s, page = _session_with_fake_page()
+    s.backend = "external-cdp"
+    st = s.status()
+    assert st["backend"] == "external-cdp"
+    assert st["started"] is True
+    assert st["closed"] is False
+    assert st["alive"] is True
+    assert st["url"] == "https://example.test"
 
 
 def test_format_interactive_elements_marks_hidden_and_text():

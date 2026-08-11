@@ -7,6 +7,8 @@ into the engine when the `browser` module is enabled (see engine.py).
 """
 from __future__ import annotations
 
+from typing import Any, Awaitable, Callable
+
 import browser_pane as _browser_pane
 
 _NAV_SCHEMA = {
@@ -37,16 +39,40 @@ _TYPE_SCHEMA = {
     "required": ["text"],
 }
 _SNAPSHOT_SCHEMA = {"type": "object", "properties": {}}
+_STATUS_SCHEMA = {"type": "object", "properties": {}}
+
+
+async def _run_with_retry(cwd: str, op: "Callable[[Any], Awaitable[Any]]") -> Any:
+    """Run ``op(session)`` against the live session for ``cwd``; if it fails because
+    the CDP connection itself died — not e.g. a bad selector timing out — the
+    session has already self-retired (BrowserSession._retire_if_dead), so getting a
+    fresh one and trying exactly once more is what a plain retry SHOULD do here.
+    Without this, browser_navigate/browser_snapshot kept re-hitting the same dead
+    session and failing identically ("Connection closed while reading from the
+    driver") for the rest of the run, with no way to recover short of a service
+    restart.
+    """
+    sess = await _browser_pane.get_or_create(cwd)
+    try:
+        return await op(sess)
+    except Exception as e:
+        if not _browser_pane.looks_like_dead_connection(e):
+            raise
+        fresh = await _browser_pane.get_or_create(cwd)
+        if fresh is sess:
+            raise  # didn't actually get a new session — retrying would just repeat
+        return await op(fresh)
 
 
 def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
     """Return {"browser": <sdk-mcp-server>} bound to `cwd`, or {} if unavailable.
 
     spec-066 safety gate: ``agent_actions`` ∈ {"read", "full"}. Read tools
-    (navigate, snapshot) are always allowed; mutating tools (click, type — they can
-    submit/post as the operator's logged-in identity on a stealth profile) are
-    refused with a note when ``agent_actions != "full"``. The operator flips this in
-    Extensions → Browser; the default ("read") never silently acts as the operator.
+    (navigate, snapshot, status) are always allowed; mutating tools (click, type —
+    they can submit/post as the operator's logged-in identity on a stealth profile)
+    are refused with a note when ``agent_actions != "full"``. The operator flips
+    this in Extensions → Browser; the default ("read") never silently acts as the
+    operator.
     """
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -68,9 +94,10 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
     )
     async def browser_navigate(args: dict) -> dict:
         try:
-            sess = await _browser_pane.get_or_create(cwd)
-            await sess.navigate(str(args.get("url") or ""))
-            snap = await sess.snapshot()
+            async def _op(sess):
+                await sess.navigate(str(args.get("url") or ""))
+                return await sess.snapshot()
+            snap = await _run_with_retry(cwd, _op)
             return {"content": [{"type": "text", "text": f"Navigated to {snap['url']} — {snap['title']}"}]}
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_navigate failed: {e}"}]}
@@ -80,8 +107,7 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         if not _can_mutate:
             return {"content": [{"type": "text", "text": _GATE_MSG}]}
         try:
-            sess = await _browser_pane.get_or_create(cwd)
-            await sess.click(str(args.get("selector") or ""))
+            await _run_with_retry(cwd, lambda sess: sess.click(str(args.get("selector") or "")))
             return {"content": [{"type": "text", "text": f"Clicked {args.get('selector')!r}"}]}
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_click failed: {e}"}]}
@@ -91,8 +117,9 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         if not _can_mutate:
             return {"content": [{"type": "text", "text": _GATE_MSG}]}
         try:
-            sess = await _browser_pane.get_or_create(cwd)
-            await sess.type_text(str(args.get("text") or ""), args.get("selector") or None)
+            await _run_with_retry(
+                cwd, lambda sess: sess.type_text(str(args.get("text") or ""), args.get("selector") or None)
+            )
             return {"content": [{"type": "text", "text": "Typed."}]}
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_type failed: {e}"}]}
@@ -105,8 +132,7 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
     )
     async def browser_snapshot(args: dict) -> dict:
         try:
-            sess = await _browser_pane.get_or_create(cwd)
-            snap = await sess.snapshot()
+            snap = await _run_with_retry(cwd, lambda sess: sess.snapshot())
             body = f"URL: {snap['url']}\nTitle: {snap['title']}\n"
             if snap.get("elements"):
                 body += (
@@ -119,8 +145,25 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_snapshot failed: {e}"}]}
 
+    @tool(
+        "browser_status",
+        "Check whether the live browser session is actually healthy (backend, alive, "
+        "idle time). Call this after a navigate/click/type/snapshot failure — or after "
+        "a couple of failures in a row — to tell 'the connection died, a retry already "
+        "rebuilt it' apart from 'my selector is wrong', instead of guessing.",
+        _STATUS_SCHEMA,
+    )
+    async def browser_status(args: dict) -> dict:
+        try:
+            sess = await _browser_pane.get_or_create(cwd)
+            st = sess.status()
+            lines = [f"{k}: {v}" for k, v in st.items()]
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"⚠️ browser_status failed: {e}"}]}
+
     server = create_sdk_mcp_server(
         name="browser", version="1.0.0",
-        tools=[browser_navigate, browser_click, browser_type, browser_snapshot],
+        tools=[browser_navigate, browser_click, browser_type, browser_snapshot, browser_status],
     )
     return {"browser": server}
