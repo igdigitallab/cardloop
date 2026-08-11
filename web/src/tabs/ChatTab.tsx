@@ -1367,20 +1367,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     try { localStorage.setItem(autoRotateStorageKey(projectId, effectiveChatId || undefined), v ? '1' : '0') } catch { /* ignore */ }
   }, [projectId, effectiveChatId])
 
-  // Persist the chat input draft to localStorage on every change so a stream abort,
-  // projects refresh, or accidental tab close doesn't wipe unsent text.
-  // Cleared on successful send (see sendMessage below).
-  useEffect(() => {
-    try {
-      const key = draftStorageKey(projectId, effectiveChatId || undefined)
-      if (input) {
-        localStorage.setItem(key, input)
-      } else {
-        localStorage.removeItem(key)
-      }
-    } catch { /* localStorage unavailable */ }
-  }, [input, projectId, effectiveChatId])
-
   // T2: auto-grow the composer textarea with content, capped at 6 rows (~150px).
   useEffect(() => {
     const ta = textareaRef.current
@@ -1823,6 +1809,27 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     return () => { cancelled = true }
   // Spec-037: re-hydrate when the active chat changes (activeChatId drives all chat state)
   }, [projectId, effectiveChatId, seedCursor]) // eslint-disable-line react-hooks/exhaustive-deps -- hydration callback is intentionally stable through refs
+
+  // Persist the chat input draft to localStorage on every change so a stream abort,
+  // projects refresh, or accidental tab close doesn't wipe unsent text.
+  // Cleared on successful send (see sendMessage below).
+  //
+  // ⚠️ Must run AFTER the mount/chat-switch effect above (source order = effect-fire order
+  // within one commit). A remount (e.g. portrait<->landscape crossing the mobile-narrow
+  // breakpoint swaps ProjectView's render branch, see [[orientation-flip-remounts-chattab]])
+  // starts `input` at '' again; if this effect fired FIRST it would see that stale '' and
+  // wipe the just-saved draft from localStorage before the restore effect above got a chance
+  // to read it back into state.
+  useEffect(() => {
+    try {
+      const key = draftStorageKey(projectId, effectiveChatId || undefined)
+      if (input) {
+        localStorage.setItem(key, input)
+      } else {
+        localStorage.removeItem(key)
+      }
+    } catch { /* localStorage unavailable */ }
+  }, [input, projectId, effectiveChatId])
 
   // spec-052 Phase 4a: consume a "Discuss this card" request from the board — seed the composer.
   useEffect(() => {
