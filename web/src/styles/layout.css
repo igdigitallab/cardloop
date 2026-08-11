@@ -2,6 +2,10 @@
 .app-layout {
   display: flex;
   height: 100%;
+  /* Native app (Capacitor, edge-to-edge): keep the tab bar / sidebar header
+     out from under the status bar. 0 on a normal browser tab — the browser's
+     own chrome already reserves that space there. */
+  padding-top: env(safe-area-inset-top, 0px);
 }
 
 /* ── Main Area (taborn project panels) ────────────────────── */
@@ -319,6 +323,8 @@
     /* Keep sidebar width from desktop var */
     width: var(--sidebar-w);
     min-width: var(--sidebar-w);
+    /* fixed + top:0 escapes .app-layout's own padding-top — redo it here */
+    padding-top: env(safe-area-inset-top, 0px);
   }
 
   .sidebar.drawer-open,
@@ -411,6 +417,8 @@
     width: 100vw !important;
     min-width: 100vw !important;
     z-index: 300;
+    /* fixed + inset:0 escapes .app-layout's own padding-top — redo it here */
+    padding-top: env(safe-area-inset-top, 0px);
   }
   .app-layout.mobile-on-list .main-area {
     display: none;
