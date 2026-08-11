@@ -234,6 +234,75 @@ def test_format_interactive_elements_marks_hidden_and_text():
     assert out == '[0] a href="https://x.test" (hidden) — "Sign in"'
 
 
+# ── a broken CDP session must not fail silently ─────────────────────────────────
+# 2026-08-11: after a service restart, get_or_create() discarded a dead session's
+# Python object without closing it — the local Playwright driver subprocess and its
+# CDP connection leaked instead of shutting down, and handle_input() swallowed every
+# resulting dispatch failure, so the pane kept showing its last cached frame forever:
+# alive-looking, deaf to every click. Both fixed below.
+
+class _BoomCDP:
+    """A CDP session whose every command fails, like a dead local driver pipe."""
+    async def send(self, method, params=None):
+        raise RuntimeError("Connection closed while reading from the driver")
+
+
+def test_handle_input_failure_notifies_subscribers_and_retires_session():
+    async def go():
+        s = BrowserSession("PROJ_BOOM")
+        s._started = True
+        s._cdp = _BoomCDP()
+        browser_pane._SESSIONS["PROJ_BOOM"] = s
+        ws = _FakeWS()
+        s._subs.add(ws)
+        await s.handle_input({"t": "mouse", "action": "down", "x": 1, "y": 1}, ws)
+        assert ws.sent_json and ws.sent_json[-1]["type"] == "error"
+        await asyncio.sleep(0)  # let the scheduled close_session run
+        assert s._closed is True
+        assert "PROJ_BOOM" not in browser_pane._SESSIONS
+    asyncio.run(go())
+
+
+def test_handle_input_failure_is_reported_only_once_per_session():
+    """A burst of failing messages (several queued mouse events on a dead session)
+    must not spam the client with repeated error broadcasts."""
+    async def go():
+        s = BrowserSession("PROJ_BOOM2")
+        s._started = True
+        s._cdp = _BoomCDP()
+        ws = _FakeWS()
+        s._subs.add(ws)
+        await s.handle_input({"t": "mouse", "action": "down", "x": 1, "y": 1}, ws)
+        s._closed = True  # simulate the scheduled close_session having already run
+        await s.handle_input({"t": "mouse", "action": "up", "x": 1, "y": 1}, ws)
+        assert len(ws.sent_json) == 1
+    asyncio.run(go())
+
+
+def test_get_or_create_closes_a_stale_session_before_replacing_it(monkeypatch):
+    closed = []
+
+    class _DeadSession(BrowserSession):
+        def _is_alive(self):
+            return False
+
+        async def close(self):
+            closed.append(self.key)
+
+    async def _noop_start(self):
+        self._started = True
+    monkeypatch.setattr(browser_pane.BrowserSession, "start", _noop_start)
+
+    async def go():
+        old = _DeadSession("PROJ_STALE")
+        browser_pane._SESSIONS["PROJ_STALE"] = old
+        new = await browser_pane.get_or_create("PROJ_STALE")
+        assert new is not old
+        assert closed == ["PROJ_STALE"], "the dead session's driver/CDP connection must be torn down, not just dereferenced"
+        await browser_pane.close_session("PROJ_STALE")
+    asyncio.run(go())
+
+
 def test_history_controls_drive_the_page():
     calls = []
 

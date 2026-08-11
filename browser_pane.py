@@ -588,8 +588,23 @@ class BrowserSession:
                 await self.navigate(str(msg.get("url") or ""))
             elif t in ("back", "forward", "reload"):
                 await self._history(t)
-        except Exception:
-            pass
+        except Exception as e:
+            # Every command here is a raw CDP call on an already-established session —
+            # unlike the agent's selector-based click()/type_text(), there is no
+            # "element not found"-style recoverable failure at this level. An exception
+            # here means the CDP session itself is broken (a dead local Playwright
+            # driver pipe, a detached target). Swallowing it silently used to leave the
+            # pane showing its last cached frame forever — looking alive, deaf to every
+            # click. Surface it (so the operator gets the Reconnect button already
+            # wired in the frontend) and retire the session so the next connect rebuilds
+            # cleanly instead of reusing the broken one.
+            if not self._closed:
+                with contextlib.suppress(Exception):
+                    await self.broadcast_json({
+                        "type": "error",
+                        "message": f"Browser session lost ({e}). Click Reconnect to rebuild it.",
+                    })
+                asyncio.create_task(close_session(self.key, self))
 
     async def _history(self, what: str) -> None:
         """Back / forward / reload for the active page (the pane's nav buttons)."""
@@ -797,12 +812,23 @@ async def get_or_create(key: str) -> BrowserSession:
 
     A session whose browser has died (crash/OOM/disconnect) is treated as absent
     and rebuilt — otherwise a dead handle would serve a frozen "Chrome Error" pane.
+    The dead session is explicitly closed before being replaced: discarding the
+    Python object alone does NOT stop its local Playwright driver subprocess or
+    its CDP connection, so every rebuild without this leaked one more orphaned
+    driver process — the actual cause behind a storm of "Connection closed while
+    reading from the driver" errors after a service restart.
     """
+    stale: "BrowserSession | None" = None
     async with _REGISTRY_LOCK:
         sess = _SESSIONS.get(key)
-        if sess is None or not sess._is_alive():
+        if sess is not None and not sess._is_alive():
+            stale, sess = sess, None
+        if sess is None:
             sess = BrowserSession(key)
             _SESSIONS[key] = sess
+    if stale is not None:
+        with contextlib.suppress(Exception):
+            await stale.close()
     await sess.start()
     return sess
 
