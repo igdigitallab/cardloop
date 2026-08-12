@@ -128,6 +128,9 @@ export function BrowserTab({ projectId }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const lastObjUrlRef = useRef<string | null>(null)
   const lastMouseMoveRef = useRef<number>(0)
+  // Coalesced wheel/touch-scroll deltas — see accumulateWheel below.
+  const wheelAccumRef = useRef<{ x: number; y: number; dx: number; dy: number } | null>(null)
+  const wheelFlushScheduledRef = useRef<boolean>(false)
   // Mobile co-control: hidden input that captures the soft keyboard, plus
   // touch-gesture state (tap vs scroll).
   const hiddenInputRef = useRef<HTMLInputElement | null>(null)
@@ -307,6 +310,42 @@ export function BrowserTab({ projectId }: Props) {
       ws.send(JSON.stringify(payload))
     }
   }, [])
+
+  // Coalesce a burst of wheel/touch-scroll deltas into ONE 'wheel' message per
+  // animation frame. Every raw wheel/touchmove event used to become its own WS
+  // round trip + server-side CDP dispatch, processed strictly in order — a fast
+  // trackpad flick or touch drag easily fires dozens of them within a couple
+  // hundred ms, and the visible scroll lags behind the real gesture by however
+  // long draining that backlog takes (worse the higher the ping — this is queuing
+  // delay on top of network latency, not just network latency). Summing deltas
+  // into one dispatch per frame keeps the same total scroll distance with a
+  // fraction of the round trips.
+  const flushWheel = useCallback(() => {
+    wheelFlushScheduledRef.current = false
+    const acc = wheelAccumRef.current
+    if (!acc) return
+    wheelAccumRef.current = null
+    send({ t: 'wheel', x: acc.x, y: acc.y, dx: acc.dx, dy: acc.dy })
+  }, [send])
+
+  const accumulateWheel = useCallback(
+    (x: number, y: number, dx: number, dy: number) => {
+      const acc = wheelAccumRef.current
+      if (acc) {
+        acc.dx += dx
+        acc.dy += dy
+        acc.x = x
+        acc.y = y
+      } else {
+        wheelAccumRef.current = { x, y, dx, dy }
+      }
+      if (!wheelFlushScheduledRef.current) {
+        wheelFlushScheduledRef.current = true
+        requestAnimationFrame(flushWheel)
+      }
+    },
+    [flushWheel],
+  )
 
   // ── Mouse event handlers ─────────────────────────────────────────────────────
   const getImgRect = useCallback((): DOMRect | null => {
@@ -516,11 +555,11 @@ export function BrowserTab({ projectId }: Props) {
         // Scale the finger delta into frame space; natural-scroll sign (finger up → page down).
         const dx = (last.cx - tc.clientX) * (FRAME_W / rect.width)
         const dy = (last.cy - tc.clientY) * (FRAME_H / rect.height)
-        send({ t: 'wheel', x, y, dx, dy })
+        accumulateWheel(x, y, dx, dy)
       }
       lastTouchRef.current = { cx: tc.clientX, cy: tc.clientY }
     },
-    [getImgRect, send, clearLongPress],
+    [getImgRect, accumulateWheel, clearLongPress],
   )
 
   const onTouchEnd = useCallback((e: React.TouchEvent) => {
@@ -602,9 +641,9 @@ export function BrowserTab({ projectId }: Props) {
       const rect = getImgRect()
       if (!rect) return
       const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
-      send({ t: 'wheel', x, y, dx: e.deltaX, dy: e.deltaY })
+      accumulateWheel(x, y, e.deltaX, e.deltaY)
     },
-    [send, getImgRect],
+    [accumulateWheel, getImgRect],
   )
 
   // ── Keyboard handler ─────────────────────────────────────────────────────────

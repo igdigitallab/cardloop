@@ -60,6 +60,22 @@ _UPLOAD_SCHEMA = {
     },
     "required": ["selector", "path"],
 }
+_SELECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "selector": {"type": "string", "description": "CSS selector of the <select> element."},
+        "value": {
+            "type": "string",
+            "description": (
+                "The option to choose — tried first as the <option>'s value attribute, "
+                "then as its visible label text if that doesn't match. Check the "
+                "snapshot's element list for a <select>'s available options and which "
+                "one is currently selected (marked with *)."
+            ),
+        },
+    },
+    "required": ["selector", "value"],
+}
 
 
 async def _run_with_retry(cwd: str, op: "Callable[[Any], Awaitable[Any]]") -> Any:
@@ -145,9 +161,31 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
             return {"content": [{"type": "text", "text": f"⚠️ browser_type failed: {e}"}]}
 
     @tool(
+        "browser_select",
+        "Choose an option in a native <select> dropdown. Clicking a <select> (or an "
+        "<option> inside it) pops OS/browser-native list UI that lives outside the page "
+        "and is invisible to browser_click — a required <select> silently stays unset "
+        "that way, which is why a form can look fully filled in a snapshot yet still "
+        "reject submit with a generic 'please fix the highlighted fields'. This sets the "
+        "value directly, no popup involved.",
+        _SELECT_SCHEMA,
+    )
+    async def browser_select(args: dict) -> dict:
+        if not _can_mutate:
+            return {"content": [{"type": "text", "text": _GATE_MSG}]}
+        try:
+            selector = str(args.get("selector") or "")
+            value = str(args.get("value") or "")
+            await _run_with_retry(cwd, lambda sess: sess.select_option(selector, value))
+            return {"content": [{"type": "text", "text": f"Selected {value!r} in {selector!r}"}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"⚠️ browser_select failed: {e}"}]}
+
+    @tool(
         "browser_snapshot",
         "Read the current page in the live browser: url, title, interactive elements "
-        "(id/name/class/role — use these to build a selector instead of guessing), and visible text.",
+        "(id/name/class/role, <select> options, invalid-field markers — use these to build "
+        "a selector or pick a value instead of guessing), and visible text.",
         _SNAPSHOT_SCHEMA,
     )
     async def browser_snapshot(args: dict) -> dict:
@@ -205,6 +243,9 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
 
     server = create_sdk_mcp_server(
         name="browser", version="1.0.0",
-        tools=[browser_navigate, browser_click, browser_type, browser_upload, browser_snapshot, browser_status],
+        tools=[
+            browser_navigate, browser_click, browser_type, browser_upload, browser_select,
+            browser_snapshot, browser_status,
+        ],
     )
     return {"browser": server}

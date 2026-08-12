@@ -116,6 +116,22 @@ _INTERACTIVE_ELEMENTS_JS = """
     const text = (el.innerText || el.value || '').trim();
     if (text) out.text = text.length > 40 ? text.slice(0, 40) + '…' : text;
     out.visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    // A field the browser itself has marked invalid (failed :invalid CSS
+    // validation, or aria-invalid) after a rejected submit — this is the "which
+    // field is highlighted" the plain-text snapshot alone can't answer.
+    try {
+        if (el.matches(':invalid') || el.getAttribute('aria-invalid') === 'true') out.invalid = true;
+    } catch (e) {}
+    // A <select>'s own value/options are NOT text content the innerText grab above
+    // would ever see — without this an agent has to guess an <option>'s value
+    // attribute blind, which is exactly why select_option() calls kept missing.
+    if (el.tagName === 'SELECT') {
+        out.selected = el.value;
+        out.options = Array.from(el.options).slice(0, 20).map(o => ({
+            value: o.value,
+            label: (o.label || o.textContent || '').trim().slice(0, 40),
+        }));
+    }
     return out;
 });
 """
@@ -136,12 +152,25 @@ def _format_interactive_elements(elements: "list[dict]") -> str:
             v = el.get(k)
             if v:
                 bits.append(f'{k}="{v}"')
+        if el.get("invalid"):
+            bits.append("⚠INVALID")
         if el.get("visible") is False:
             bits.append("(hidden)")
         line = f"[{i}] " + " ".join(bits)
         text = el.get("text")
         if text:
             line += f' — "{text}"'
+        opts = el.get("options")
+        if isinstance(opts, list) and opts:
+            selected = el.get("selected")
+            opt_strs = []
+            for o in opts:
+                if not isinstance(o, dict):
+                    continue
+                val, label = o.get("value", ""), o.get("label", "")
+                mark = "*" if val == selected else " "
+                opt_strs.append(f'{mark}{val}="{label}"' if label and label != val else f"{mark}{val}")
+            line += "\n    options: " + ", ".join(opt_strs)
         lines.append(line)
     return "\n".join(lines)
 
@@ -886,6 +915,49 @@ class BrowserSession:
             raise FileNotFoundError(f"No such file on this server: {path}")
         try:
             await self._upload_anywhere(selector, path)
+        except Exception as e:
+            await self._retire_if_dead(e)
+            raise
+
+    async def _select_anywhere(self, selector: str, value: str) -> None:
+        """Same main-frame-then-iframe fallback as _click_anywhere/_upload_anywhere.
+        Tries `value` as the <option>'s value attribute first, then as its visible
+        label — an agent reading the label off a snapshot ("Freelancer") won't
+        always know the underlying value attribute the page actually uses."""
+        async def _try(target) -> None:
+            try:
+                await target.select_option(selector, value=value, timeout=10000)
+            except Exception:
+                await target.select_option(selector, label=value, timeout=10000)
+        try:
+            await _try(self._page)
+            return
+        except Exception as first_err:
+            if looks_like_dead_connection(first_err):
+                raise
+            for frame in list(self._page.frames)[: _MAX_FALLBACK_FRAMES + 1]:
+                if frame == self._page.main_frame:
+                    continue
+                try:
+                    await _try(frame)
+                    return
+                except Exception:
+                    continue
+            raise first_err
+
+    async def select_option(self, selector: str, value: str) -> None:
+        """Choose an <option> in a native <select> directly via CDP
+        (Page.selectOption under Playwright's select_option()). Clicking a
+        <select> pops OS/browser-native list UI — outside the page, the exact
+        same class of problem as a file input's OS picker — so click()+click()
+        on an <option> either does nothing or silently misses, which is why a
+        required <select> reads as "filled" visually but the form still rejects
+        it on submit ("please fix the highlighted fields") with no visible cause.
+        """
+        await self.start()
+        self._touch()
+        try:
+            await self._select_anywhere(selector, value)
         except Exception as e:
             await self._retire_if_dead(e)
             raise

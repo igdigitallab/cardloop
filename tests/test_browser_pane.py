@@ -169,6 +169,7 @@ class _FakeInteractivePage:
         self.clicks = []
         self.goto_calls = []
         self.uploads = []
+        self.selects = []
         self.keyboard = _FakeKeyboard()
         self._eval_result = []
         # When set, every call below raises this instead of doing its normal thing —
@@ -176,8 +177,11 @@ class _FakeInteractivePage:
         self.fail_with: "Exception | None" = None
         # None = any selector "matches" (existing tests' default expectation); a
         # test exercising the iframe fallback sets this to a restricted set so the
-        # main-frame click/upload genuinely fails and the fallback has to kick in.
+        # main-frame click/upload/select genuinely fails and the fallback kicks in.
         self.clickable_selectors: "set[str] | None" = None
+        # False forces select_option(value=...) to always fail, so a test can
+        # exercise the value->label fallback without needing a real <option> list.
+        self.select_value_ok: bool = True
         # No iframes by default: a page IS its own only "frame" here, so the
         # snapshot/fallback frame-scan loop skips it (frame == main_frame) and
         # every existing test's behavior is unchanged. Tests that care about
@@ -203,6 +207,15 @@ class _FakeInteractivePage:
         if self.clickable_selectors is not None and selector not in self.clickable_selectors:
             raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
         self.uploads.append((selector, path))
+
+    async def select_option(self, selector, value=None, label=None, timeout=None):
+        if self.fail_with:
+            raise self.fail_with
+        if self.clickable_selectors is not None and selector not in self.clickable_selectors:
+            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
+        if value is not None and not self.select_value_ok:
+            raise Exception(f"No option matches value {value!r}")
+        self.selects.append((selector, value, label))
 
     async def goto(self, url, wait_until=None):
         if self.fail_with:
@@ -230,6 +243,7 @@ class _FakeFrame:
         self._clickable = set(clickable_selectors or [])
         self.clicks = []
         self.uploads = []
+        self.selects = []
 
     async def evaluate(self, script):
         return self._eval_result
@@ -241,6 +255,11 @@ class _FakeFrame:
         if selector not in self._clickable:
             raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
         self.uploads.append((selector, path))
+
+    async def select_option(self, selector, value=None, label=None, timeout=None):
+        if selector not in self._clickable:
+            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
+        self.selects.append((selector, value, label))
 
     async def click(self, selector, timeout=None, click_count=1):
         if selector not in self._clickable:
@@ -446,6 +465,69 @@ def test_upload_file_retires_session_on_dead_connection(tmp_path):
         assert s._closed is True
         assert "k" not in browser_pane._SESSIONS
     asyncio.run(go())
+
+
+# ── native <select>: clicking pops OS/browser-native list UI outside the page ──
+# (same class of problem as a file input's OS picker) — select_option() sets the
+# value directly via CDP instead.
+
+def test_select_option_uses_value_first():
+    async def go():
+        s, page = _session_with_fake_page()
+        await s.select_option("#employees", "freelancer")
+        assert page.selects == [("#employees", "freelancer", None)]
+    asyncio.run(go())
+
+
+def test_select_option_falls_back_to_label_when_value_does_not_match():
+    async def go():
+        s, page = _session_with_fake_page()
+        page.select_value_ok = False  # no <option> has this literal value attribute
+        await s.select_option("#employees", "Freelancer")
+        assert page.selects == [("#employees", None, "Freelancer")]
+    asyncio.run(go())
+
+
+def test_select_option_falls_back_to_an_iframe():
+    async def go():
+        s, page = _session_with_fake_page()
+        embed_frame = _FakeFrame("https://embed.example/form", clickable_selectors={"#rate"})
+        page.frames = [page, embed_frame]
+        page.clickable_selectors = set()  # not on the main frame — force the fallback
+        await s.select_option("#rate", "NA")
+        assert page.selects == []
+        assert embed_frame.selects == [("#rate", "NA", None)]
+    asyncio.run(go())
+
+
+def test_select_option_retires_session_on_dead_connection():
+    async def go():
+        s, page = _session_with_fake_page()
+        browser_pane._SESSIONS["k"] = s
+        page.fail_with = RuntimeError("Target closed")
+        try:
+            await s.select_option("#employees", "freelancer")
+            assert False, "must re-raise"
+        except RuntimeError:
+            pass
+        assert s._closed is True
+        assert "k" not in browser_pane._SESSIONS
+    asyncio.run(go())
+
+
+def test_format_interactive_elements_shows_select_options_and_invalid_marker():
+    from browser_pane import _format_interactive_elements
+    out = _format_interactive_elements([
+        {
+            "tag": "select", "id": "employees", "invalid": True,
+            "selected": "", "options": [
+                {"value": "", "label": "Select..."},
+                {"value": "freelancer", "label": "Freelancer"},
+            ],
+        },
+    ])
+    assert '[0] select id="employees" ⚠INVALID' in out
+    assert 'options: *="Select...",  freelancer="Freelancer"' in out
 
 
 # ── agent-tool self-healing: classify + auto-retire on a dead CDP session ──────
