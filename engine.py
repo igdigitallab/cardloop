@@ -363,17 +363,20 @@ def _compose_settings(ultracode: bool) -> "str | None":
 # tends to spawn an external/headless browser (Playwright, Selenium) the operator can't see.
 def _browser_prompt(backend: str, agent_actions: str) -> str:
     gate = (
-        "You may navigate, read, click and type."
+        "You may navigate, read, click, type and upload files."
         if agent_actions == "full"
-        else "Read-only mode: browser_navigate and browser_snapshot work; browser_click and "
-        "browser_type are refused until the operator enables full actions in Extensions → Browser."
+        else "Read-only mode: browser_navigate, browser_snapshot and browser_status work; "
+        "browser_click, browser_type and browser_upload are refused until the operator enables "
+        "full actions in Extensions → Browser."
     )
     return (
         f"A live browser pane is active (the 'browser' module, backend: {backend}). When asked to "
         "open, launch, show or use 'the browser', or to open a URL or web page, drive THIS pane with "
-        "the mcp__browser__ tools (browser_navigate, browser_snapshot, browser_click, browser_type) — "
-        "the operator watches it live in the cockpit. Do NOT spawn an external or headless browser "
-        f"(Playwright, Selenium, a subprocess) for this. {gate}"
+        "the mcp__browser__ tools (browser_navigate, browser_snapshot, browser_click, browser_type, "
+        "browser_upload, browser_status) — the operator watches it live in the cockpit. A file input "
+        "needs browser_upload, not browser_click/browser_type: clicking an upload button only opens "
+        "the OS's native file picker, which is invisible to this pane. Do NOT spawn an external or "
+        f"headless browser (Playwright, Selenium, a subprocess) for this. {gate}"
     )
 
 

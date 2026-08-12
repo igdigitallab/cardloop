@@ -168,6 +168,7 @@ class _FakeInteractivePage:
         self.url = "https://example.test"
         self.clicks = []
         self.goto_calls = []
+        self.uploads = []
         self.keyboard = _FakeKeyboard()
         self._eval_result = []
         # When set, every call below raises this instead of doing its normal thing —
@@ -175,11 +176,11 @@ class _FakeInteractivePage:
         self.fail_with: "Exception | None" = None
         # None = any selector "matches" (existing tests' default expectation); a
         # test exercising the iframe fallback sets this to a restricted set so the
-        # main-frame click genuinely fails and _click_anywhere has to fall through.
+        # main-frame click/upload genuinely fails and the fallback has to kick in.
         self.clickable_selectors: "set[str] | None" = None
         # No iframes by default: a page IS its own only "frame" here, so the
-        # snapshot/_click_anywhere frame-scan loop skips it (frame == main_frame)
-        # and every existing test's behavior is unchanged. Tests that care about
+        # snapshot/fallback frame-scan loop skips it (frame == main_frame) and
+        # every existing test's behavior is unchanged. Tests that care about
         # iframes replace this list with real _FakeFrame stand-ins.
         self.main_frame = self
         self.frames = [self]
@@ -195,6 +196,13 @@ class _FakeInteractivePage:
         if self.clickable_selectors is not None and selector not in self.clickable_selectors:
             raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
         self.clicks.append((selector, click_count))
+
+    async def set_input_files(self, selector, path, timeout=None):
+        if self.fail_with:
+            raise self.fail_with
+        if self.clickable_selectors is not None and selector not in self.clickable_selectors:
+            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
+        self.uploads.append((selector, path))
 
     async def goto(self, url, wait_until=None):
         if self.fail_with:
@@ -217,16 +225,22 @@ class _FakeFrame:
         self.url = url
         self._eval_result = elements or []
         self._text = text
-        # Only these selectors succeed on .click() — everything else times out,
-        # like a real Frame.click() would for an element that isn't there.
+        # Only these selectors succeed on .click()/.set_input_files() — everything
+        # else times out, like a real Frame would for an element that isn't there.
         self._clickable = set(clickable_selectors or [])
         self.clicks = []
+        self.uploads = []
 
     async def evaluate(self, script):
         return self._eval_result
 
     async def inner_text(self, selector, timeout=None):
         return self._text
+
+    async def set_input_files(self, selector, path, timeout=None):
+        if selector not in self._clickable:
+            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
+        self.uploads.append((selector, path))
 
     async def click(self, selector, timeout=None, click_count=1):
         if selector not in self._clickable:
@@ -374,6 +388,63 @@ def test_type_text_selector_also_falls_back_to_an_iframe():
         await s.type_text("581702", selector="#code-0")
         assert otp_frame.clicks == [("#code-0", 3)]
         assert page.keyboard.typed == ["581702"], "keyboard.type() is frame-agnostic — dispatched at the page level"
+    asyncio.run(go())
+
+
+# ── file upload: clicking an "Upload" button only opens the OS's native file ───
+# picker, which is invisible to click()/type() alike, and a file input refuses
+# programmatic/keyboard text entry. upload_file() must set the file directly.
+
+def test_upload_file_sets_files_on_the_main_frame(tmp_path):
+    async def go():
+        s, page = _session_with_fake_page()
+        f = tmp_path / "logo.png"
+        f.write_bytes(b"fake-png")
+        await s.upload_file("#logo-input", str(f))
+        assert page.uploads == [("#logo-input", str(f))]
+    asyncio.run(go())
+
+
+def test_upload_file_rejects_a_path_that_does_not_exist_on_this_server():
+    async def go():
+        s, page = _session_with_fake_page()
+        try:
+            await s.upload_file("#logo-input", "/nowhere/does-not-exist.png")
+            assert False, "must raise before ever touching the page"
+        except FileNotFoundError:
+            pass
+        assert page.uploads == [], "must not have attempted the CDP call at all"
+    asyncio.run(go())
+
+
+def test_upload_file_falls_back_to_an_iframe(tmp_path):
+    async def go():
+        s, page = _session_with_fake_page()
+        f = tmp_path / "logo.png"
+        f.write_bytes(b"fake-png")
+        embed_frame = _FakeFrame("https://uploads.example/embed", clickable_selectors={"#file"})
+        page.frames = [page, embed_frame]
+        page.clickable_selectors = set()  # not on the main frame — force the fallback
+        await s.upload_file("#file", str(f))
+        assert page.uploads == []
+        assert embed_frame.uploads == [("#file", str(f))]
+    asyncio.run(go())
+
+
+def test_upload_file_retires_session_on_dead_connection(tmp_path):
+    async def go():
+        s, page = _session_with_fake_page()
+        browser_pane._SESSIONS["k"] = s
+        f = tmp_path / "logo.png"
+        f.write_bytes(b"fake-png")
+        page.fail_with = RuntimeError("Connection closed while reading from the driver")
+        try:
+            await s.upload_file("#logo-input", str(f))
+            assert False, "must re-raise"
+        except RuntimeError:
+            pass
+        assert s._closed is True
+        assert "k" not in browser_pane._SESSIONS
     asyncio.run(go())
 
 

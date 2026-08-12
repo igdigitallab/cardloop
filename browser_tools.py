@@ -40,6 +40,26 @@ _TYPE_SCHEMA = {
 }
 _SNAPSHOT_SCHEMA = {"type": "object", "properties": {}}
 _STATUS_SCHEMA = {"type": "object", "properties": {}}
+_UPLOAD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "selector": {
+            "type": "string",
+            "description": (
+                "CSS selector of the <input type=\"file\"> ITSELF (check the snapshot's "
+                "element list — it's often visible:false, styled behind a button; that's "
+                "fine, this does not need the element to be visible or clickable). Not the "
+                "visible 'Upload' button — clicking that only opens the OS's native file "
+                "picker, which this tool bypasses entirely."
+            ),
+        },
+        "path": {
+            "type": "string",
+            "description": "Absolute path to the file on THIS server's filesystem (not the operator's machine).",
+        },
+    },
+    "required": ["selector", "path"],
+}
 
 
 async def _run_with_retry(cwd: str, op: "Callable[[Any], Awaitable[Any]]") -> Any:
@@ -146,6 +166,27 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
             return {"content": [{"type": "text", "text": f"⚠️ browser_snapshot failed: {e}"}]}
 
     @tool(
+        "browser_upload",
+        "Upload a local file into a <input type=\"file\"> in the live browser — the ONLY "
+        "way to fill a file input through this pane. Clicking an 'Upload'/'Choose file' "
+        "button opens the OS's native file picker, which is completely outside the page "
+        "and invisible to browser_click/browser_type; typing a path does nothing either "
+        "(browsers block programmatic text entry into file inputs). This sets the file "
+        "directly via CDP instead, bypassing that dialog.",
+        _UPLOAD_SCHEMA,
+    )
+    async def browser_upload(args: dict) -> dict:
+        if not _can_mutate:
+            return {"content": [{"type": "text", "text": _GATE_MSG}]}
+        try:
+            selector = str(args.get("selector") or "")
+            path = str(args.get("path") or "")
+            await _run_with_retry(cwd, lambda sess: sess.upload_file(selector, path))
+            return {"content": [{"type": "text", "text": f"Uploaded {path!r} into {selector!r}"}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"⚠️ browser_upload failed: {e}"}]}
+
+    @tool(
         "browser_status",
         "Check whether the live browser session is actually healthy (backend, alive, "
         "idle time). Call this after a navigate/click/type/snapshot failure — or after "
@@ -164,6 +205,6 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
 
     server = create_sdk_mcp_server(
         name="browser", version="1.0.0",
-        tools=[browser_navigate, browser_click, browser_type, browser_snapshot, browser_status],
+        tools=[browser_navigate, browser_click, browser_type, browser_upload, browser_snapshot, browser_status],
     )
     return {"browser": server}

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import os
 import time
 from typing import Any
 
@@ -844,6 +845,50 @@ class BrowserSession:
                 except Exception:
                     continue
             raise first_err
+
+    async def _upload_anywhere(self, selector: str, path: str) -> None:
+        """Same main-frame-then-iframe fallback as _click_anywhere, for
+        set_input_files. A file input inside a Google/Cloudflare-style embed lives
+        in an iframe just as often as a button does."""
+        try:
+            await self._page.set_input_files(selector, path, timeout=10000)
+            return
+        except Exception as first_err:
+            if looks_like_dead_connection(first_err):
+                raise
+            for frame in list(self._page.frames)[: _MAX_FALLBACK_FRAMES + 1]:
+                if frame == self._page.main_frame:
+                    continue
+                try:
+                    await frame.set_input_files(selector, path, timeout=3000)
+                    return
+                except Exception:
+                    continue
+            raise first_err
+
+    async def upload_file(self, selector: str, path: str) -> None:
+        """Set a file on a ``<input type="file">`` directly, via CDP
+        (Playwright's set_input_files → DOM.setFileInputFiles) — the ONLY way to
+        upload through this pane. Clicking an "Upload" button opens the OS's own
+        native file picker, which lives completely outside the page and is
+        invisible to click()/type() alike; typing a path into the input does
+        nothing either — browsers refuse programmatic/keyboard text entry into a
+        file input as a security measure. This bypasses that dialog entirely and
+        works even when the input is visually hidden behind a styled button (the
+        common pattern) — set_input_files never depends on the element being
+        visible or clickable. Verified to transfer real file bytes over
+        connect_over_cdp too (the external-cdp/Cloak Manager backend), not just a
+        path reference the remote browser would need shared storage to resolve.
+        """
+        await self.start()
+        self._touch()
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"No such file on this server: {path}")
+        try:
+            await self._upload_anywhere(selector, path)
+        except Exception as e:
+            await self._retire_if_dead(e)
+            raise
 
     async def click(self, selector: str) -> None:
         await self.start()
