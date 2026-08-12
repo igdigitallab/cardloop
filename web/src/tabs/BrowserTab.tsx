@@ -23,6 +23,17 @@ const FRAME_H = 720
 // Throttle mouse-move events to ~30 per second
 const MOUSE_MOVE_INTERVAL_MS = 33
 
+// Wheel/touch-scroll flush cadence. Measured on a real page (spec: browser pane
+// perf note 2026-08-11): the CDP screencast sends a full JPEG frame every time,
+// with no delta/video encoding — frame SIZE is ~constant (~65-70KB) regardless of
+// how little changed, so what we control is frame COUNT. Flushing coalesced wheel
+// deltas at 16ms (one per animation frame) vs 33ms, for the identical total scroll
+// distance: 13 frames/662KB/489ms settle vs 7 frames/358KB/260ms settle — 33ms
+// roughly halves both bandwidth and settle time with no perceptible smoothness
+// loss (the operator is watching a re-encoded remote stream either way, not the
+// local page — 30fps reads as smooth same as it does for any video call).
+const WHEEL_FLUSH_MS = 33
+
 // Touch: movement (in client px) beyond this turns a tap into a scroll gesture.
 const TAP_SLOP = 8
 // Chromium fires compatibility mouse events shortly AFTER touchend; the mouse
@@ -311,8 +322,8 @@ export function BrowserTab({ projectId }: Props) {
     }
   }, [])
 
-  // Coalesce a burst of wheel/touch-scroll deltas into ONE 'wheel' message per
-  // animation frame. Every raw wheel/touchmove event used to become its own WS
+  // Coalesce a burst of wheel/touch-scroll deltas into ONE 'wheel' message every
+  // WHEEL_FLUSH_MS. Every raw wheel/touchmove event used to become its own WS
   // round trip + server-side CDP dispatch, processed strictly in order — a fast
   // trackpad flick or touch drag easily fires dozens of them within a couple
   // hundred ms, and the visible scroll lags behind the real gesture by however
@@ -341,7 +352,7 @@ export function BrowserTab({ projectId }: Props) {
       }
       if (!wheelFlushScheduledRef.current) {
         wheelFlushScheduledRef.current = true
-        requestAnimationFrame(flushWheel)
+        window.setTimeout(flushWheel, WHEEL_FLUSH_MS)
       }
     },
     [flushWheel],
