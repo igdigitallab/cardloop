@@ -40,6 +40,43 @@ def test_mouse_down_maps_to_pressed():
     assert params["button"] == "left" and params["clickCount"] == 1
 
 
+def test_mouse_down_sends_a_click_ack_only_after_a_successful_dispatch():
+    """The operator's only signal that a click actually landed (vs. the pane just
+    looking alive while frozen) — must fire ONLY once the CDP dispatch above
+    genuinely succeeded, never optimistically."""
+    async def go():
+        s = _session_with_fake_cdp()
+        ws = _FakeWS()
+        await s.handle_input({"t": "mouse", "action": "down", "x": 100, "y": 50, "button": "left"}, ws)
+        assert ws.sent_json == [{"type": "click_ack", "x": 100, "y": 50}]
+    asyncio.run(go())
+
+
+def test_mouse_move_does_not_send_a_click_ack():
+    async def go():
+        s = _session_with_fake_cdp()
+        ws = _FakeWS()
+        await s.handle_input({"t": "mouse", "action": "move", "x": 10, "y": 10}, ws)
+        assert ws.sent_json == []
+    asyncio.run(go())
+
+
+def test_mouse_down_failure_sends_no_click_ack():
+    async def go():
+        s = _session_with_fake_cdp()
+
+        async def _boom(method, params=None):
+            raise RuntimeError("dispatch failed")
+        s._cdp.send = _boom
+        ws = _FakeWS()
+        s._subs.add(ws)
+        await s.handle_input({"t": "mouse", "action": "down", "x": 1, "y": 1}, ws)
+        # The existing session-lost error IS expected here (a different, already
+        # tested behavior) — but no click_ack must be mixed in among it.
+        assert {"type": "click_ack", "x": 1, "y": 1} not in ws.sent_json
+    asyncio.run(go())
+
+
 def test_mouse_move_is_clamped():
     s = _session_with_fake_cdp()
     asyncio.run(s.handle_input({"t": "mouse", "action": "move", "x": 99999, "y": -3}))

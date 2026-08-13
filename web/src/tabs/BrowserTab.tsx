@@ -193,6 +193,13 @@ export function BrowserTab({ projectId }: Props) {
   // past TAP_SLOP (touchMovedRef) same as the tap-vs-scroll gesture.
   const longPressTimerRef = useRef<number | null>(null)
   const longPressFiredRef = useRef<boolean>(false)
+  // Click-received confirmation ("did the browser actually get my click, or is the
+  // pane just frozen showing a stale frame?") — a brief ripple at the click point,
+  // triggered ONLY by the server's {type:'click_ack'} reply (see handleWsMessage),
+  // never optimistically on the local click itself. Several can be in flight for a
+  // quick double-click, hence an array keyed by id rather than a single ref.
+  const [clickRipples, setClickRipples] = useState<{ id: number; x: number; y: number }[]>([])
+  const rippleIdRef = useRef(0)
 
   // ── WebSocket lifecycle ──────────────────────────────────────────────────────
   // TWO connections, deliberately: /api/browser/ws streams JPEG frames (binary,
@@ -236,6 +243,21 @@ export function BrowserTab({ projectId }: Props) {
           const resolve = pendingCopyRef.current
           pendingCopyRef.current = null
           resolve?.(typeof msg.text === 'string' ? msg.text : '')
+        } else if (msg.type === 'click_ack') {
+          // The browser genuinely received and processed this click — show a
+          // ripple at the click point. Position is computed fresh from the CURRENT
+          // image rect (not cached), so it stays correct across resizes/rotation.
+          const imgRect = imgRef.current?.getBoundingClientRect()
+          const containerRect = containerRef.current?.getBoundingClientRect()
+          if (imgRect && containerRect && typeof msg.x === 'number' && typeof msg.y === 'number') {
+            const x = imgRect.left - containerRect.left + (msg.x / FRAME_W) * imgRect.width
+            const y = imgRect.top - containerRect.top + (msg.y / FRAME_H) * imgRect.height
+            const id = ++rippleIdRef.current
+            setClickRipples(prev => [...prev, { id, x, y }])
+            window.setTimeout(() => {
+              setClickRipples(prev => prev.filter(r => r.id !== id))
+            }, 500)
+          }
         }
       } catch {
         // Malformed JSON — ignore
@@ -991,7 +1013,9 @@ export function BrowserTab({ projectId }: Props) {
           flexShrink: 0,
         }}
       >
-        {/* Connection status dot */}
+        {/* Connection status dot — green=ready, yellow=connecting, RED=dead (either
+            socket down; disconnected/error used to render as a barely-visible gray,
+            which read as "maybe fine?" instead of a clear stop signal). */}
         <span
           style={{
             width: 8,
@@ -1003,7 +1027,7 @@ export function BrowserTab({ projectId }: Props) {
                 ? 'var(--green, #3fb950)'
                 : connState === 'connecting'
                   ? 'var(--yellow, #d29922)'
-                  : 'var(--text-dim, #555)',
+                  : 'var(--red, #f85149)',
           }}
           title={connState}
         />
@@ -1236,6 +1260,31 @@ export function BrowserTab({ projectId }: Props) {
             {copyToast}
           </div>
         )}
+        {/* Click-received confirmation ring — only ever rendered in response to the
+            server's {type:'click_ack'}, i.e. proof the browser actually got the
+            click, not a locally-optimistic animation. */}
+        {clickRipples.map(r => (
+          <span
+            key={r.id}
+            className="browser-pane-click-ripple"
+            style={{ position: 'absolute', left: r.x, top: r.y, zIndex: 23, pointerEvents: 'none' }}
+          />
+        ))}
+        <style>{`
+          .browser-pane-click-ripple {
+            display: block;
+            width: 10px;
+            height: 10px;
+            margin: -5px;
+            border-radius: 50%;
+            border: 2px solid var(--accent, #3fb950);
+            animation: browserPaneClickRipple 450ms ease-out forwards;
+          }
+          @keyframes browserPaneClickRipple {
+            0% { transform: scale(0.4); opacity: 0.9; }
+            100% { transform: scale(4); opacity: 0; }
+          }
+        `}</style>
       </div>
     </div>
   )

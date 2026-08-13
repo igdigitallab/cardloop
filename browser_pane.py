@@ -721,6 +721,16 @@ class BrowserSession:
         try:
             if t == "mouse":
                 await self._mouse(msg)
+                # Confirm a real click landed — sent only AFTER the CDP dispatch
+                # above actually succeeded, never optimistically on receipt. The
+                # operator has no other way to tell "the browser is live and just
+                # processed my click" from "the pane is frozen and my click went
+                # nowhere" — the pane can look identical either way until the next
+                # frame happens to change. Only 'down' acks (not every 'move'),
+                # matching the moment of an actual click/tap.
+                if msg.get("action") == "down" and ws is not None:
+                    with contextlib.suppress(Exception):
+                        await ws.send_json({"type": "click_ack", "x": msg.get("x"), "y": msg.get("y")})
             elif t == "wheel":
                 await self._wheel(msg)
             elif t == "key":
