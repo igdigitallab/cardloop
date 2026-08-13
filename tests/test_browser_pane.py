@@ -163,6 +163,37 @@ class _FakeKeyboard:
         self.typed.append(text)
 
 
+class _FakeLocator:
+    """A stand-in for a Playwright Locator — the strict-by-default API that
+    replaced page.click(selector)/page.select_option(selector)/... everywhere in
+    browser_pane.py precisely because the OLD page-level methods silently acted on
+    the first of several matches with no error. Resolution (match count, ambiguity)
+    is delegated back to the owning fake page/frame so both _FakeInteractivePage and
+    _FakeFrame can share one implementation."""
+
+    def __init__(self, owner, selector, nth=None):
+        self._owner = owner
+        self._selector = selector
+        self._nth = nth
+
+    def nth(self, index):
+        return _FakeLocator(self._owner, self._selector, index)
+
+    async def click(self, timeout=None, click_count=1):
+        await self._owner._resolve(self._selector, self._nth, timeout)
+        self._owner.clicks.append((self._selector, click_count))
+
+    async def set_input_files(self, path, timeout=None):
+        await self._owner._resolve(self._selector, self._nth, timeout)
+        self._owner.uploads.append((self._selector, path))
+
+    async def select_option(self, value=None, label=None, timeout=None):
+        await self._owner._resolve(self._selector, self._nth, timeout)
+        if value is not None and not self._owner.select_value_ok:
+            raise Exception(f"No option matches value {value!r}")
+        self._owner.selects.append((self._selector, value, label))
+
+
 class _FakeInteractivePage:
     def __init__(self):
         self.url = "https://example.test"
@@ -179,6 +210,9 @@ class _FakeInteractivePage:
         # test exercising the iframe fallback sets this to a restricted set so the
         # main-frame click/upload/select genuinely fails and the fallback kicks in.
         self.clickable_selectors: "set[str] | None" = None
+        # Selectors that must simulate MULTIPLE matches — Locator raises Playwright's
+        # own "strict mode violation" wording so browser_pane's classifier matches it.
+        self.ambiguous_selectors: "set[str]" = set()
         # False forces select_option(value=...) to always fail, so a test can
         # exercise the value->label fallback without needing a real <option> list.
         self.select_value_ok: bool = True
@@ -188,34 +222,23 @@ class _FakeInteractivePage:
         # iframes replace this list with real _FakeFrame stand-ins.
         self.main_frame = self
         self.frames = [self]
+        self.inner_text_value = "body text"
 
     async def title(self):
         if self.fail_with:
             raise self.fail_with
         return "T"
 
-    async def click(self, selector, timeout=None, click_count=1):
-        if self.fail_with:
-            raise self.fail_with
-        if self.clickable_selectors is not None and selector not in self.clickable_selectors:
-            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
-        self.clicks.append((selector, click_count))
+    def locator(self, selector):
+        return _FakeLocator(self, selector)
 
-    async def set_input_files(self, selector, path, timeout=None):
+    async def _resolve(self, selector, nth, timeout):
         if self.fail_with:
             raise self.fail_with
+        if selector in self.ambiguous_selectors and nth is None:
+            raise Exception(f'Locator.click: Error: strict mode violation: locator("{selector}") resolved to 2 elements')
         if self.clickable_selectors is not None and selector not in self.clickable_selectors:
-            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
-        self.uploads.append((selector, path))
-
-    async def select_option(self, selector, value=None, label=None, timeout=None):
-        if self.fail_with:
-            raise self.fail_with
-        if self.clickable_selectors is not None and selector not in self.clickable_selectors:
-            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
-        if value is not None and not self.select_value_ok:
-            raise Exception(f"No option matches value {value!r}")
-        self.selects.append((selector, value, label))
+            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for locator("{selector}")')
 
     async def goto(self, url, wait_until=None):
         if self.fail_with:
@@ -223,7 +246,7 @@ class _FakeInteractivePage:
         self.goto_calls.append(url)
 
     async def inner_text(self, selector, timeout=None):
-        return "body text"
+        return self.inner_text_value
 
     async def evaluate(self, script):
         return self._eval_result
@@ -241,6 +264,8 @@ class _FakeFrame:
         # Only these selectors succeed on .click()/.set_input_files() — everything
         # else times out, like a real Frame would for an element that isn't there.
         self._clickable = set(clickable_selectors or [])
+        self.ambiguous_selectors: "set[str]" = set()
+        self.select_value_ok = True
         self.clicks = []
         self.uploads = []
         self.selects = []
@@ -251,20 +276,14 @@ class _FakeFrame:
     async def inner_text(self, selector, timeout=None):
         return self._text
 
-    async def set_input_files(self, selector, path, timeout=None):
-        if selector not in self._clickable:
-            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
-        self.uploads.append((selector, path))
+    def locator(self, selector):
+        return _FakeLocator(self, selector)
 
-    async def select_option(self, selector, value=None, label=None, timeout=None):
+    async def _resolve(self, selector, nth, timeout):
+        if selector in self.ambiguous_selectors and nth is None:
+            raise Exception(f'Locator.click: Error: strict mode violation: locator("{selector}") resolved to 2 elements')
         if selector not in self._clickable:
-            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
-        self.selects.append((selector, value, label))
-
-    async def click(self, selector, timeout=None, click_count=1):
-        if selector not in self._clickable:
-            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for selector "{selector}"')
-        self.clicks.append((selector, click_count))
+            raise TimeoutError(f'Timeout {timeout}ms exceeded waiting for locator("{selector}")')
 
 
 def _session_with_fake_page() -> "tuple[BrowserSession, _FakeInteractivePage]":
@@ -308,6 +327,33 @@ def test_snapshot_elements_empty_when_evaluate_fails():
     page.evaluate = _boom
     snap = asyncio.run(s.snapshot())
     assert snap["elements"] == ""
+
+
+# ── text truncation: a clean boundary + an explicit notice, not a silent mid-word ──
+# cut (a 7-row transaction table read as "...FLC Enrol..." with no sign there was
+# more, costing three narrowing round trips to actually see the rest).
+
+def test_truncate_text_leaves_short_text_untouched():
+    from browser_pane import _truncate_text
+    assert _truncate_text("short", 4000) == "short"
+
+
+def test_truncate_text_cuts_at_a_word_boundary_and_notes_it():
+    from browser_pane import _truncate_text
+    text = "aaaa bbbb cccc dddd eeee"
+    out = _truncate_text(text, 12)
+    assert out.startswith("aaaa bbbb")
+    assert "cccc" not in out
+    assert "truncated: 9 of 24 chars shown" in out
+    assert "larger max_chars" in out
+
+
+def test_snapshot_passes_max_chars_through_to_truncation():
+    s, page = _session_with_fake_page()
+    page.inner_text_value = "word " * 2000
+    snap = asyncio.run(s.snapshot(max_chars=50))
+    assert len(snap["text"]) < 200  # truncated notice + ~50 chars, not the full 10000
+    assert "truncated" in snap["text"]
 
 
 # ── iframes: a Google Sign-In button or a CAPTCHA checkbox is invisible to a ────
@@ -375,6 +421,87 @@ def test_click_raises_the_original_error_when_no_frame_has_the_selector():
             assert False, "must re-raise"
         except TimeoutError as e:
             assert "#nowhere" in str(e)
+    asyncio.run(go())
+
+
+# ── ambiguous selectors: refuse, never silently act on the first match ─────────
+# Verified empirically against real Playwright: page.click(selector) silently picks
+# the first of several matches (this is how "a.ps-button:visible, button:visible"
+# once clicked "Exit" instead of the intended button and reset a wizard).
+# Locator.click()/select_option()/set_input_files() are strict by default and raise
+# a "strict mode violation" instead — browser_pane now uses those exclusively.
+
+def test_is_strict_mode_violation_matches_playwrights_own_wording():
+    from browser_pane import _is_strict_mode_violation
+    assert _is_strict_mode_violation(Exception('strict mode violation: locator(".x") resolved to 2 elements'))
+    assert not _is_strict_mode_violation(TimeoutError('Timeout 3000ms exceeded waiting for locator("#x")'))
+
+
+def test_click_refuses_an_ambiguous_selector_on_the_main_frame():
+    async def go():
+        s, page = _session_with_fake_page()
+        page.ambiguous_selectors = {".ps-button"}
+        try:
+            await s.click(".ps-button")
+            assert False, "must refuse instead of clicking the first match"
+        except Exception as e:
+            assert "strict mode violation" in str(e)
+        assert page.clicks == []
+    asyncio.run(go())
+
+
+def test_click_ambiguity_is_not_masked_by_the_iframe_fallback():
+    """An ambiguous selector in the main frame must error immediately — falling
+    back to an iframe could land on a coincidental, unrelated single match there,
+    which is arguably worse than just refusing."""
+    async def go():
+        s, page = _session_with_fake_page()
+        page.ambiguous_selectors = {".ps-button"}
+        other_frame = _FakeFrame("https://x.test/iframe", clickable_selectors={".ps-button"})
+        page.frames = [page, other_frame]
+        try:
+            await s.click(".ps-button")
+            assert False, "must refuse, not fall back"
+        except Exception as e:
+            assert "strict mode violation" in str(e)
+        assert other_frame.clicks == [], "must never have tried the iframe"
+    asyncio.run(go())
+
+
+def test_click_with_nth_disambiguates():
+    async def go():
+        s, page = _session_with_fake_page()
+        page.ambiguous_selectors = {".ps-button"}
+        await s.click(".ps-button", nth=1)
+        assert page.clicks == [(".ps-button", 1)]
+    asyncio.run(go())
+
+
+def test_select_option_refuses_an_ambiguous_selector():
+    async def go():
+        s, page = _session_with_fake_page()
+        page.ambiguous_selectors = {".dup-select"}
+        try:
+            await s.select_option(".dup-select", "NA")
+            assert False, "must refuse"
+        except Exception as e:
+            assert "strict mode violation" in str(e)
+        assert page.selects == []
+    asyncio.run(go())
+
+
+def test_upload_file_refuses_an_ambiguous_selector(tmp_path):
+    async def go():
+        s, page = _session_with_fake_page()
+        f = tmp_path / "logo.png"
+        f.write_bytes(b"x")
+        page.ambiguous_selectors = {".dup-file"}
+        try:
+            await s.upload_file(".dup-file", str(f))
+            assert False, "must refuse"
+        except Exception as e:
+            assert "strict mode violation" in str(e)
+        assert page.uploads == []
     asyncio.run(go())
 
 
@@ -624,12 +751,68 @@ def test_status_reports_backend_and_liveness():
     assert st["url"] == "https://example.test"
 
 
+# ── browser_screenshot: full resolution, not the live pane's downscaled feed ───
+
+class _FakeCDPCaptureRecording:
+    def __init__(self):
+        self.calls = []
+
+    async def send(self, method, params=None):
+        self.calls.append((method, params or {}))
+        if method == "Page.captureScreenshot":
+            import base64 as _b64_local
+            return {"data": _b64_local.b64encode(b"FULLRES-JPEG-BYTES").decode()}
+        return {}
+
+
+def test_screenshot_uses_full_quality_not_the_stream_downscale():
+    async def go():
+        s, page = _session_with_fake_page()
+        s._cdp = _FakeCDPCaptureRecording()
+        data = await s.screenshot()
+        assert data == b"FULLRES-JPEG-BYTES"
+        method, params = s._cdp.calls[-1]
+        assert method == "Page.captureScreenshot"
+        assert params["quality"] == 85, "must NOT reuse STREAM's low quality (45) used for the live pane"
+        assert "maxWidth" not in params, "no downscale — full VIEWPORT resolution"
+    asyncio.run(go())
+
+
+def test_screenshot_raises_without_an_active_cdp_session():
+    async def go():
+        s, page = _session_with_fake_page()
+        s._cdp = None
+        try:
+            await s.screenshot()
+            assert False, "must raise"
+        except RuntimeError as e:
+            assert "CDP" in str(e)
+    asyncio.run(go())
+
+
 def test_format_interactive_elements_marks_hidden_and_text():
     from browser_pane import _format_interactive_elements
     out = _format_interactive_elements([
         {"tag": "a", "href": "https://x.test", "text": "Sign in", "visible": False},
     ])
     assert out == '[0] a href="https://x.test" (hidden) — "Sign in"'
+
+
+def test_format_interactive_elements_shows_checked_state():
+    """Mirrors the <select> '*' marker — a checkbox toggled via its <label> (not
+    the input itself) had no visible confirmation anywhere short of a screenshot."""
+    from browser_pane import _format_interactive_elements
+    out = _format_interactive_elements([
+        {"tag": "input", "type": "checkbox", "id": "agree", "checked": True},
+        {"tag": "input", "type": "checkbox", "id": "newsletter", "checked": False},
+        {"tag": "div", "role": "checkbox", "id": "custom", "checked": "mixed"},
+        {"tag": "button", "id": "save"},  # no checked state at all — no prefix
+    ])
+    lines = out.split("\n")
+    assert lines[0] == '[0] [x] input type="checkbox" id="agree"'
+    assert lines[1] == '[1] [ ] input type="checkbox" id="newsletter"'
+    assert lines[2] == '[2] [mixed] div id="custom" role="checkbox"'
+    assert lines[3] == '[3] button id="save"'
 
 
 # ── a broken CDP session must not fail silently ─────────────────────────────────

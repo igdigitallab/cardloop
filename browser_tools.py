@@ -7,9 +7,35 @@ into the engine when the `browser` module is enabled (see engine.py).
 """
 from __future__ import annotations
 
+import base64
 from typing import Any, Awaitable, Callable
 
 import browser_pane as _browser_pane
+
+# Shared across every selector-taking tool below. The prior wording ("CSS selector")
+# undersold this and made agents needlessly conservative — the FULL Playwright
+# selector engine is supported: :has-text(...), :text-is(...), :visible, and
+# combinators like 'tr:has-text("ASTR") input[type="checkbox"]' all work, and several
+# of them already reach into iframes on their own (on top of that, browser_click/
+# browser_select/browser_upload also fall back to searching other frames automatically
+# if the main frame doesn't match). [id="..."] is always safe for building a selector
+# from an id shown in the snapshot; #id is NOT — it breaks on an id containing special
+# characters (seen on PeopleSoft: id="#ICYes" needs the selector [id="#ICYes"], since
+# #ICYes is parsed as id "" followed by a bogus "ICYes" ID selector).
+_SELECTOR_HELP = (
+    "Full Playwright selector syntax works here, not just plain CSS — :has-text(...), "
+    ":text-is(...), :visible, and combinators like 'tr:has-text(\"X\") input[type=\"checkbox\"]' "
+    "are all valid, and several reach into iframes without needing selector/click "
+    "fallback. Prefer [id=\"...\"] over #id when building a selector from an id — #id "
+    "breaks if the id contains special characters. If the selector matches MORE THAN "
+    "ONE element this is refused with a 'strict mode violation: N elements' error — it "
+    "never silently acts on the first match — pass nth to pick one, or narrow the "
+    "selector (e.g. add :has-text(...) or scope it to a containing row/section)."
+)
+_NTH_PROP = {
+    "type": "integer",
+    "description": "0-based index to pick when the selector matches more than one element (see the selector field).",
+}
 
 _NAV_SCHEMA = {
     "type": "object",
@@ -18,7 +44,10 @@ _NAV_SCHEMA = {
 }
 _CLICK_SCHEMA = {
     "type": "object",
-    "properties": {"selector": {"type": "string", "description": "CSS selector of the element to click."}},
+    "properties": {
+        "selector": {"type": "string", "description": f"Selector of the element to click. {_SELECTOR_HELP}"},
+        "nth": _NTH_PROP,
+    },
     "required": ["selector"],
 }
 _TYPE_SCHEMA = {
@@ -28,42 +57,60 @@ _TYPE_SCHEMA = {
         "selector": {
             "type": "string",
             "description": (
-                "Optional CSS selector to click-then-type into; omit to type into the "
+                "Optional selector to click-then-type into; omit to type into the "
                 "already-focused element. Typing is real per-character keystrokes (not a "
                 "bulk value-set), so for a SPLIT code/OTP field (several 1-digit boxes "
                 "with auto-advance JS) pass the FIRST box's selector and the full code as "
-                "text — the page's own auto-advance carries the rest to the next boxes."
+                "text — the page's own auto-advance carries the rest to the next boxes. "
+                f"If the field already has a value, this REPLACES it, it does not append. {_SELECTOR_HELP}"
             ),
         },
     },
     "required": ["text"],
 }
-_SNAPSHOT_SCHEMA = {"type": "object", "properties": {}}
+_SNAPSHOT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "max_chars": {
+            "type": "integer",
+            "description": (
+                "Max characters of visible page text to return (default 4000). Truncation "
+                "now cuts at a clean word boundary and says explicitly how much was cut — "
+                "if you see '...[truncated: N of M chars shown]', call this again with a "
+                "larger max_chars instead of narrowing the page/query and re-snapshotting "
+                "repeatedly."
+            ),
+        },
+    },
+}
 _STATUS_SCHEMA = {"type": "object", "properties": {}}
+_SCREENSHOT_SCHEMA = {"type": "object", "properties": {}}
 _UPLOAD_SCHEMA = {
     "type": "object",
     "properties": {
         "selector": {
             "type": "string",
             "description": (
-                "CSS selector of the <input type=\"file\"> ITSELF (check the snapshot's "
+                "Selector of the <input type=\"file\"> ITSELF (check the snapshot's "
                 "element list — it's often visible:false, styled behind a button; that's "
                 "fine, this does not need the element to be visible or clickable). Not the "
                 "visible 'Upload' button — clicking that only opens the OS's native file "
-                "picker, which this tool bypasses entirely."
+                f"picker, which this tool bypasses entirely. {_SELECTOR_HELP}"
             ),
         },
         "path": {
             "type": "string",
             "description": "Absolute path to the file on THIS server's filesystem (not the operator's machine).",
         },
+        "nth": _NTH_PROP,
     },
     "required": ["selector", "path"],
 }
 _SELECT_SCHEMA = {
     "type": "object",
     "properties": {
-        "selector": {"type": "string", "description": "CSS selector of the <select> element."},
+        "selector": {"type": "string", "description": f"Selector of the <select> element. {_SELECTOR_HELP}"},
+        "nth": _NTH_PROP,
         "value": {
             "type": "string",
             "description": (
@@ -76,6 +123,16 @@ _SELECT_SCHEMA = {
     },
     "required": ["selector", "value"],
 }
+
+
+def _nth_arg(args: dict) -> "int | None":
+    nth = args.get("nth")
+    if nth is None:
+        return None
+    try:
+        return int(nth)
+    except (TypeError, ValueError):
+        return None
 
 
 async def _run_with_retry(cwd: str, op: "Callable[[Any], Awaitable[Any]]") -> Any:
@@ -143,7 +200,7 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         if not _can_mutate:
             return {"content": [{"type": "text", "text": _GATE_MSG}]}
         try:
-            await _run_with_retry(cwd, lambda sess: sess.click(str(args.get("selector") or "")))
+            await _run_with_retry(cwd, lambda sess: sess.click(str(args.get("selector") or ""), _nth_arg(args)))
             return {"content": [{"type": "text", "text": f"Clicked {args.get('selector')!r}"}]}
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_click failed: {e}"}]}
@@ -176,7 +233,8 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         try:
             selector = str(args.get("selector") or "")
             value = str(args.get("value") or "")
-            await _run_with_retry(cwd, lambda sess: sess.select_option(selector, value))
+            nth = _nth_arg(args)
+            await _run_with_retry(cwd, lambda sess: sess.select_option(selector, value, nth))
             return {"content": [{"type": "text", "text": f"Selected {value!r} in {selector!r}"}]}
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_select failed: {e}"}]}
@@ -190,12 +248,17 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
     )
     async def browser_snapshot(args: dict) -> dict:
         try:
-            snap = await _run_with_retry(cwd, lambda sess: sess.snapshot())
+            max_chars = args.get("max_chars")
+            try:
+                max_chars = int(max_chars) if max_chars is not None else 4000
+            except (TypeError, ValueError):
+                max_chars = 4000
+            snap = await _run_with_retry(cwd, lambda sess: sess.snapshot(max_chars=max_chars))
             body = f"URL: {snap['url']}\nTitle: {snap['title']}\n"
             if snap.get("elements"):
                 body += (
                     "\nInteractive elements (index — tag + attrs — visible text; "
-                    "build a selector from id/name/class, e.g. #id or [name=\"x\"]):\n"
+                    "build a selector from id/name/class, e.g. [id=\"x\"] or [name=\"x\"]):\n"
                     f"{snap['elements']}\n"
                 )
             body += f"\n{snap['text']}"
@@ -219,7 +282,8 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         try:
             selector = str(args.get("selector") or "")
             path = str(args.get("path") or "")
-            await _run_with_retry(cwd, lambda sess: sess.upload_file(selector, path))
+            nth = _nth_arg(args)
+            await _run_with_retry(cwd, lambda sess: sess.upload_file(selector, path, nth))
             return {"content": [{"type": "text", "text": f"Uploaded {path!r} into {selector!r}"}]}
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_upload failed: {e}"}]}
@@ -241,11 +305,28 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_status failed: {e}"}]}
 
+    @tool(
+        "browser_screenshot",
+        "Get a real image of the live browser page at full resolution — not the "
+        "downscaled/low-quality feed used for the live pane. Use this when the text/DOM "
+        "snapshot is ambiguous, when the operator reports seeing something the snapshot "
+        "doesn't explain, or to visually confirm state (a checkbox, a dialog, a captcha) "
+        "before or after acting on it.",
+        _SCREENSHOT_SCHEMA,
+    )
+    async def browser_screenshot(args: dict) -> dict:
+        try:
+            data = await _run_with_retry(cwd, lambda sess: sess.screenshot())
+            b64 = base64.b64encode(data).decode("ascii")
+            return {"content": [{"type": "image", "data": b64, "mimeType": "image/jpeg"}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"⚠️ browser_screenshot failed: {e}"}]}
+
     server = create_sdk_mcp_server(
         name="browser", version="1.0.0",
         tools=[
             browser_navigate, browser_click, browser_type, browser_upload, browser_select,
-            browser_snapshot, browser_status,
+            browser_snapshot, browser_status, browser_screenshot,
         ],
     )
     return {"browser": server}

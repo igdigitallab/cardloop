@@ -96,51 +96,75 @@ def _key_info(key: str) -> "tuple[int, str]":
 # the bottom of the snapshot with no selector to click. aria-selected/aria-expanded
 # are collected alongside so the agent can tell which suggestion is highlighted and
 # whether the popup is even open, without a second round-trip.
+#
+# input[type=hidden] is EXCLUDED outright (never rendered, never interactable — an
+# enterprise app like PeopleSoft can stuff dozens of them, ICType/ICSID/SpMfuMax/...,
+# ahead of any real control in DOM order). Everything else still gets collected up to
+# a generous pool (400) and then SORTED visible-first before the final 60-item cap, so
+# an off-screen/collapsed element never crowds out a real, clickable one just by
+# happening to sit earlier in the document.
 _INTERACTIVE_ELEMENTS_JS = """
-() => Array.from(document.querySelectorAll(
-    'input, button, select, textarea, a[href], [role="button"], [role="link"], ' +
-    '[role="option"], [role="listbox"], [role="combobox"], [role="menuitem"], ' +
-    '[role="checkbox"], [role="radio"], [contenteditable="true"]'
-)).slice(0, 60).map(el => {
-    const rect = el.getBoundingClientRect();
-    const style = getComputedStyle(el);
-    const out = { tag: el.tagName.toLowerCase() };
-    for (const attr of ['type', 'id', 'name', 'placeholder', 'maxlength', 'href', 'role',
-                         'aria-label', 'aria-selected', 'aria-expanded', 'title']) {
-        const v = el.getAttribute(attr);
-        if (v) out[attr] = v.length > 50 ? v.slice(0, 50) + '…' : v;
-    }
-    if (el.className && typeof el.className === 'string' && el.className.trim()) {
-        out['class'] = el.className.length > 50 ? el.className.slice(0, 50) + '…' : el.className;
-    }
-    const text = (el.innerText || el.value || '').trim();
-    if (text) out.text = text.length > 40 ? text.slice(0, 40) + '…' : text;
-    out.visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-    // A field the browser itself has marked invalid (failed :invalid CSS
-    // validation, or aria-invalid) after a rejected submit — this is the "which
-    // field is highlighted" the plain-text snapshot alone can't answer.
-    try {
-        if (el.matches(':invalid') || el.getAttribute('aria-invalid') === 'true') out.invalid = true;
-    } catch (e) {}
-    // A <select>'s own value/options are NOT text content the innerText grab above
-    // would ever see — without this an agent has to guess an <option>'s value
-    // attribute blind, which is exactly why select_option() calls kept missing.
-    if (el.tagName === 'SELECT') {
-        out.selected = el.value;
-        out.options = Array.from(el.options).slice(0, 20).map(o => ({
-            value: o.value,
-            label: (o.label || o.textContent || '').trim().slice(0, 40),
-        }));
-    }
-    return out;
-});
+() => {
+    const all = Array.from(document.querySelectorAll(
+        'input:not([type="hidden"]), button, select, textarea, a[href], [role="button"], [role="link"], ' +
+        '[role="option"], [role="listbox"], [role="combobox"], [role="menuitem"], ' +
+        '[role="checkbox"], [role="radio"], [contenteditable="true"]'
+    )).slice(0, 400).map(el => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        const out = { tag: el.tagName.toLowerCase() };
+        for (const attr of ['type', 'id', 'name', 'placeholder', 'maxlength', 'href', 'role',
+                             'aria-label', 'aria-selected', 'aria-expanded', 'title']) {
+            const v = el.getAttribute(attr);
+            if (v) out[attr] = v.length > 50 ? v.slice(0, 50) + '…' : v;
+        }
+        if (el.className && typeof el.className === 'string' && el.className.trim()) {
+            out['class'] = el.className.length > 50 ? el.className.slice(0, 50) + '…' : el.className;
+        }
+        const text = (el.innerText || el.value || '').trim();
+        if (text) out.text = text.length > 40 ? text.slice(0, 40) + '…' : text;
+        out.visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        // A field the browser itself has marked invalid (failed :invalid CSS
+        // validation, or aria-invalid) after a rejected submit — this is the "which
+        // field is highlighted" the plain-text snapshot alone can't answer.
+        try {
+            if (el.matches(':invalid') || el.getAttribute('aria-invalid') === 'true') out.invalid = true;
+        } catch (e) {}
+        // A <select>'s own value/options are NOT text content the innerText grab above
+        // would ever see — without this an agent has to guess an <option>'s value
+        // attribute blind, which is exactly why select_option() calls kept missing.
+        if (el.tagName === 'SELECT') {
+            out.selected = el.value;
+            out.options = Array.from(el.options).slice(0, 20).map(o => ({
+                value: o.value,
+                label: (o.label || o.textContent || '').trim().slice(0, 40),
+            }));
+        }
+        // Checked state — mirrors the <select> marker above. Without this a
+        // checkbox toggled via its <label> (not the input itself) has no visible
+        // confirmation anywhere short of a screenshot; a real native checkbox/radio
+        // reports el.checked, a custom ARIA widget reports aria-checked instead.
+        if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+            out.checked = el.checked;
+        } else {
+            const role = el.getAttribute('role');
+            if (role === 'checkbox' || role === 'radio') {
+                const ac = el.getAttribute('aria-checked');
+                if (ac !== null) out.checked = ac === 'true' ? true : (ac === 'false' ? false : ac);
+            }
+        }
+        return out;
+    });
+    all.sort((a, b) => (b.visible === true) - (a.visible === true));
+    return all.slice(0, 60);
+}
 """
 
 
 def _format_interactive_elements(elements: "list[dict]") -> str:
     """Render the JS collector's output as one line per element, e.g.:
-    ``[3] input type="tel" id="idTxtBx_SAOTCC_0" maxlength="1"`` — enough to build a
-    ``#id`` / ``[name="..."]`` selector without guessing.
+    ``[3] [x] input type="checkbox" id="agree"`` — enough to build a
+    ``[id="..."]`` selector and read current state without guessing or a screenshot.
     """
     lines: "list[str]" = []
     for i, el in enumerate(elements):
@@ -156,7 +180,15 @@ def _format_interactive_elements(elements: "list[dict]") -> str:
             bits.append("⚠INVALID")
         if el.get("visible") is False:
             bits.append("(hidden)")
-        line = f"[{i}] " + " ".join(bits)
+        checked = el.get("checked")
+        prefix = ""
+        if checked is True:
+            prefix = "[x] "
+        elif checked is False:
+            prefix = "[ ] "
+        elif checked is not None:
+            prefix = f"[{checked}] "
+        line = f"[{i}] " + prefix + " ".join(bits)
         text = el.get("text")
         if text:
             line += f' — "{text}"'
@@ -199,6 +231,16 @@ def looks_like_dead_connection(exc: Exception) -> bool:
     return any(marker in msg for marker in _DEAD_CONNECTION_MARKERS)
 
 
+def _is_strict_mode_violation(exc: Exception) -> bool:
+    """True for Playwright's own "locator(...) resolved to N elements" error — the
+    Locator API's built-in ambiguity guard (verified empirically: Page.click() does
+    NOT have this guard and silently acts on the first match, which is why every
+    action method here uses .locator(selector).click()/... instead). This error
+    must propagate immediately rather than being swallowed by the iframe fallback
+    or the retry wrapper — the selector itself is the problem, not the connection."""
+    return "strict mode violation" in str(exc).lower()
+
+
 # ── iframes ─────────────────────────────────────────────────────────────────────
 # A Google Sign-In button, a reCAPTCHA/hCaptcha checkbox, an embedded payment
 # widget — all commonly render inside a same- OR cross-origin <iframe>. page-level
@@ -215,6 +257,25 @@ _MAX_FALLBACK_FRAMES = 8    # click/type_text: each attempt auto-waits, keep it 
 def _snippet(s: str, n: int) -> str:
     s = s or ""
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    """Cut at the last whitespace at/before max_chars instead of mid-word, and say
+    so explicitly. A hard [:max_chars] slice ending mid-word ("...FLC Enrol…") reads
+    as if the page just ends there — an agent has no way to tell "that's everything"
+    from "that's where I stopped looking" without an explicit notice, and had to
+    re-snapshot with a narrower query multiple times to read past it blind.
+    """
+    if len(text) <= max_chars:
+        return text
+    cut = max(text.rfind(" ", 0, max_chars), text.rfind("\n", 0, max_chars))
+    if cut < max_chars - 200:  # no reasonable boundary nearby — just hard-cut
+        cut = max_chars
+    shown = text[:cut].rstrip()
+    return (
+        f"{shown}\n…[truncated: {len(shown)} of {len(text)} chars shown — "
+        "call browser_snapshot again with a larger max_chars to see more]"
+    )
 
 
 # Branded start page — shown instead of a bare white about:blank so a freshly
@@ -850,7 +911,13 @@ class BrowserSession:
             await self._retire_if_dead(e)
             raise
 
-    async def _click_anywhere(self, selector: str, *, click_count: int = 1) -> None:
+    async def _click_one(self, target: Any, selector: str, click_count: int, nth: "int | None") -> None:
+        loc = target.locator(selector)
+        if nth is not None:
+            loc = loc.nth(nth)
+        await loc.click(timeout=10000 if target is self._page else 3000, click_count=click_count)
+
+    async def _click_anywhere(self, selector: str, *, click_count: int = 1, nth: "int | None" = None) -> None:
         """page.click() only ever searches the MAIN frame. A same- or cross-origin
         iframe (a Google Sign-In button, a CAPTCHA checkbox, an embedded payment
         widget) is invisible to it even though Playwright itself can reach it. Try
@@ -858,44 +925,66 @@ class BrowserSession:
         timeout — and only on failure fall back to searching every other frame for
         the same selector, at a shorter timeout each so a genuinely-missing element
         still fails in bounded time.
+
+        Uses Locator.click(), NOT the deprecated page.click(selector) convenience
+        method — the latter silently acts on the FIRST of several matches with no
+        error, which is exactly how a selector like "a.ps-button:visible,
+        button:visible" once clicked "Exit" instead of the intended button and reset
+        an in-progress wizard. Locator.click() is strict by default: it raises a
+        clear "strict mode violation: locator(...) resolved to N elements" instead.
+        That error is deliberately NOT swallowed by the iframe fallback below (an
+        ambiguous selector in one frame isn't fixed by trying a different frame,
+        and silently landing on an unrelated single match elsewhere would be worse
+        than just refusing) — pass `nth` to disambiguate once you know which one.
         """
         try:
-            await self._page.click(selector, timeout=10000, click_count=click_count)
+            await self._click_one(self._page, selector, click_count, nth)
             return
         except Exception as first_err:
-            if looks_like_dead_connection(first_err):
+            if looks_like_dead_connection(first_err) or _is_strict_mode_violation(first_err):
                 raise
             for frame in list(self._page.frames)[: _MAX_FALLBACK_FRAMES + 1]:
                 if frame == self._page.main_frame:
                     continue
                 try:
-                    await frame.click(selector, timeout=3000, click_count=click_count)
+                    await self._click_one(frame, selector, click_count, nth)
                     return
-                except Exception:
+                except Exception as e:
+                    if _is_strict_mode_violation(e):
+                        raise
                     continue
             raise first_err
 
-    async def _upload_anywhere(self, selector: str, path: str) -> None:
-        """Same main-frame-then-iframe fallback as _click_anywhere, for
-        set_input_files. A file input inside a Google/Cloudflare-style embed lives
-        in an iframe just as often as a button does."""
+    async def _upload_one(self, target: Any, selector: str, path: str, nth: "int | None") -> None:
+        loc = target.locator(selector)
+        if nth is not None:
+            loc = loc.nth(nth)
+        await loc.set_input_files(path, timeout=10000 if target is self._page else 3000)
+
+    async def _upload_anywhere(self, selector: str, path: str, nth: "int | None" = None) -> None:
+        """Same main-frame-then-iframe fallback and strict-mode short-circuit as
+        _click_anywhere. A file input inside a Google/Cloudflare-style embed lives
+        in an iframe just as often as a button does, and an ambiguous selector
+        here would upload into the WRONG field just as silently as a wrong click."""
         try:
-            await self._page.set_input_files(selector, path, timeout=10000)
+            await self._upload_one(self._page, selector, path, nth)
             return
         except Exception as first_err:
-            if looks_like_dead_connection(first_err):
+            if looks_like_dead_connection(first_err) or _is_strict_mode_violation(first_err):
                 raise
             for frame in list(self._page.frames)[: _MAX_FALLBACK_FRAMES + 1]:
                 if frame == self._page.main_frame:
                     continue
                 try:
-                    await frame.set_input_files(selector, path, timeout=3000)
+                    await self._upload_one(frame, selector, path, nth)
                     return
-                except Exception:
+                except Exception as e:
+                    if _is_strict_mode_violation(e):
+                        raise
                     continue
             raise first_err
 
-    async def upload_file(self, selector: str, path: str) -> None:
+    async def upload_file(self, selector: str, path: str, nth: "int | None" = None) -> None:
         """Set a file on a ``<input type="file">`` directly, via CDP
         (Playwright's set_input_files → DOM.setFileInputFiles) — the ONLY way to
         upload through this pane. Clicking an "Upload" button opens the OS's own
@@ -914,38 +1003,48 @@ class BrowserSession:
         if not os.path.isfile(path):
             raise FileNotFoundError(f"No such file on this server: {path}")
         try:
-            await self._upload_anywhere(selector, path)
+            await self._upload_anywhere(selector, path, nth)
         except Exception as e:
             await self._retire_if_dead(e)
             raise
 
-    async def _select_anywhere(self, selector: str, value: str) -> None:
-        """Same main-frame-then-iframe fallback as _click_anywhere/_upload_anywhere.
-        Tries `value` as the <option>'s value attribute first, then as its visible
-        label — an agent reading the label off a snapshot ("Freelancer") won't
-        always know the underlying value attribute the page actually uses."""
-        async def _try(target) -> None:
-            try:
-                await target.select_option(selector, value=value, timeout=10000)
-            except Exception:
-                await target.select_option(selector, label=value, timeout=10000)
+    async def _select_one(self, target: Any, selector: str, value: str, nth: "int | None") -> None:
+        loc = target.locator(selector)
+        if nth is not None:
+            loc = loc.nth(nth)
+        timeout = 10000 if target is self._page else 3000
         try:
-            await _try(self._page)
+            await loc.select_option(value=value, timeout=timeout)
+        except Exception as e:
+            if _is_strict_mode_violation(e):
+                raise
+            await loc.select_option(label=value, timeout=timeout)
+
+    async def _select_anywhere(self, selector: str, value: str, nth: "int | None" = None) -> None:
+        """Same main-frame-then-iframe fallback and strict-mode short-circuit as
+        _click_anywhere. Tries `value` as the <option>'s value attribute first,
+        then as its visible label — an agent reading the label off a snapshot
+        ("Freelancer") won't always know the underlying value attribute the page
+        actually uses."""
+        try:
+            await self._select_one(self._page, selector, value, nth)
             return
         except Exception as first_err:
-            if looks_like_dead_connection(first_err):
+            if looks_like_dead_connection(first_err) or _is_strict_mode_violation(first_err):
                 raise
             for frame in list(self._page.frames)[: _MAX_FALLBACK_FRAMES + 1]:
                 if frame == self._page.main_frame:
                     continue
                 try:
-                    await _try(frame)
+                    await self._select_one(frame, selector, value, nth)
                     return
-                except Exception:
+                except Exception as e:
+                    if _is_strict_mode_violation(e):
+                        raise
                     continue
             raise first_err
 
-    async def select_option(self, selector: str, value: str) -> None:
+    async def select_option(self, selector: str, value: str, nth: "int | None" = None) -> None:
         """Choose an <option> in a native <select> directly via CDP
         (Page.selectOption under Playwright's select_option()). Clicking a
         <select> pops OS/browser-native list UI — outside the page, the exact
@@ -957,16 +1056,16 @@ class BrowserSession:
         await self.start()
         self._touch()
         try:
-            await self._select_anywhere(selector, value)
+            await self._select_anywhere(selector, value, nth)
         except Exception as e:
             await self._retire_if_dead(e)
             raise
 
-    async def click(self, selector: str) -> None:
+    async def click(self, selector: str, nth: "int | None" = None) -> None:
         await self.start()
         self._touch()
         try:
-            await self._click_anywhere(selector)
+            await self._click_anywhere(selector, nth=nth)
         except Exception as e:
             await self._retire_if_dead(e)
             raise
@@ -1061,9 +1160,30 @@ class BrowserSession:
         return {
             "url": url,
             "title": title,
-            "text": (text or "")[:max_chars],
+            "text": _truncate_text(text or "", max_chars),
             "elements": "\n\n".join(sections),
         }
+
+    async def screenshot(self) -> bytes:
+        """Full-resolution capture for the agent's browser_screenshot tool — when
+        the text/DOM snapshot is ambiguous (or the operator reports seeing
+        something the snapshot doesn't explain), there was no way to actually look
+        at the page short of asking the operator. Deliberately NOT _capture_frame()
+        (that one exists for priming the live pane and uses STREAM's downscaled
+        960x540 q45 — fine for a video feed, useless for reading small text
+        precisely) — this captures at the full VIEWPORT resolution and a much
+        higher JPEG quality instead.
+        """
+        await self.start()
+        self._touch()
+        if self._cdp is None:
+            raise RuntimeError("No active CDP session for this browser tab.")
+        try:
+            res = await self._cdp.send("Page.captureScreenshot", {"format": "jpeg", "quality": 85})
+        except Exception as e:
+            await self._retire_if_dead(e)
+            raise
+        return base64.b64decode(res["data"])
 
     def status(self) -> dict:
         """Session health for the agent's browser_status tool — lets it tell "the
