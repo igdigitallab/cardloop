@@ -14981,39 +14981,45 @@ async def api_browser_profile_action(req: web.Request) -> web.Response:
 # ─────────────────────────── Browser pane WS — spec-065 Phase B ──────────────
 
 
+async def _resolve_browser_session(req: web.Request) -> "tuple[_browser_pane.BrowserSession | None, str]":
+    """Shared by both browser WS endpoints below: resolve ?project=<id> to its live
+    session. Returns (None, message) on any failure so each caller decides how to
+    surface it (the frame socket sends an {type:error} the pane can display; the
+    input-only socket has no UI of its own to show it in)."""
+    if not _modules.is_enabled("browser"):
+        return None, "Browser module is disabled. Enable it in Settings → Extensions."
+    ctx = req.app["ctx"]
+    pid = req.query.get("project", "")
+    project = _find_project_by_id_any(ctx, pid)
+    if not project:
+        return None, "Unknown project."
+    key = project["cwd"]
+    try:
+        session = await _browser_pane.get_or_create(key)
+    except _browser_pane.BrowserUnavailable as e:
+        return None, str(e)
+    except Exception as e:
+        return None, f"Browser failed to start: {e}"
+    return session, ""
+
+
 async def api_browser_ws(req: web.Request) -> web.WebSocketResponse:
     """GET /api/browser/ws?project=<id> — live browser screencast over WebSocket.
 
     Server→client: binary = one JPEG frame (1280x720); text = JSON control
-    ({type:ready|nav|error|clipboard}). Client→server: JSON input ({t:mouse|wheel|key|navigate|copy|paste}).
+    ({type:ready|nav|error|clipboard}). Client→server: JSON input ({t:mouse|wheel|key|navigate|copy|paste})
+    — though the pane's own frontend now sends input on the separate
+    /api/browser/input-ws below; this socket still accepts it too (e.g. for any
+    other future consumer), it just isn't where BrowserTab.tsx's clicks go.
     Heartbeat keeps the connection alive through idle (same lesson as the PTY WS,
     card 9976b6) — Chromium "thinking"/static pages emit no frames for long stretches.
     """
     ws = web.WebSocketResponse(heartbeat=30.0)
     await ws.prepare(req)
 
-    if not _modules.is_enabled("browser"):
-        await ws.send_json({"type": "error", "message": "Browser module is disabled. Enable it in Settings → Extensions."})
-        await ws.close()
-        return ws
-
-    ctx = req.app["ctx"]
-    pid = req.query.get("project", "")
-    project = _find_project_by_id_any(ctx, pid)
-    if not project:
-        await ws.send_json({"type": "error", "message": "Unknown project."})
-        await ws.close()
-        return ws
-    key = project["cwd"]
-
-    try:
-        session = await _browser_pane.get_or_create(key)
-    except _browser_pane.BrowserUnavailable as e:
-        await ws.send_json({"type": "error", "message": str(e)})
-        await ws.close()
-        return ws
-    except Exception as e:
-        await ws.send_json({"type": "error", "message": f"Browser failed to start: {e}"})
+    session, err = await _resolve_browser_session(req)
+    if session is None:
+        await ws.send_json({"type": "error", "message": err})
         await ws.close()
         return ws
 
@@ -15031,6 +15037,45 @@ async def api_browser_ws(req: web.Request) -> web.WebSocketResponse:
                 break
     finally:
         session.remove_subscriber(ws)
+    return ws
+
+
+async def api_browser_input_ws(req: web.Request) -> web.WebSocketResponse:
+    """GET /api/browser/input-ws?project=<id> — input-ONLY channel.
+
+    Split off from /api/browser/ws so a large in-flight JPEG frame there can never
+    head-of-line-block a click/keystroke behind it: a WebSocket is one ordered TCP
+    stream, so multiplexing both on the same connection means a small, latency-
+    critical input message can get stuck in the send queue behind a big frame
+    that's still being written out. Two connections remove that coupling entirely.
+
+    Deliberately NOT added as a frame subscriber (add_subscriber/remove_subscriber)
+    — it never receives frames or {type:ready|nav|tabs}, only feeds handle_input.
+    The one thing it DOES receive back is {type:'clipboard'}, the reply to a
+    {t:'copy'} request — handle_input._copy() replies on whichever ws sent the
+    request, which for the pane's own frontend is now always this socket.
+    """
+    ws = web.WebSocketResponse(heartbeat=30.0)
+    await ws.prepare(req)
+
+    session, _err = await _resolve_browser_session(req)
+    if session is None:
+        await ws.close()
+        return ws
+
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    await session.handle_input(data, ws)
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                break
+    finally:
+        pass
     return ws
 
 
@@ -15309,6 +15354,10 @@ async def start(ctx: dict) -> None:
 
         # spec-065 Phase B: live browser pane (WebSocket screencast)
         app.router.add_get("/api/browser/ws", api_browser_ws)
+        # Input-only channel, split off so a big in-flight frame on the socket
+        # above can never head-of-line-block a click/keystroke — see the
+        # api_browser_input_ws docstring.
+        app.router.add_get("/api/browser/input-ws", api_browser_input_ws)
 
         # spec-067 / spec-068: autopilot feature — registered via the feature package.
         # Deferred import: MUST stay inside this function body (IRON RULE — spec-068).

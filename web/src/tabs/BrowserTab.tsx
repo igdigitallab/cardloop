@@ -135,6 +135,10 @@ function displayUrl(url: string): string {
 
 export function BrowserTab({ projectId }: Props) {
   const wsRef = useRef<WebSocket | null>(null)
+  // Split off from wsRef so a big in-flight JPEG frame can never queue behind —
+  // or in front of — a latency-critical click/keystroke. See the "WebSocket
+  // lifecycle" section below for the full rationale.
+  const inputWsRef = useRef<WebSocket | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const lastObjUrlRef = useRef<string | null>(null)
@@ -191,78 +195,96 @@ export function BrowserTab({ projectId }: Props) {
   const longPressFiredRef = useRef<boolean>(false)
 
   // ── WebSocket lifecycle ──────────────────────────────────────────────────────
+  // TWO connections, deliberately: /api/browser/ws streams JPEG frames (binary,
+  // can be tens of KB each) + control events; /api/browser/input-ws carries ONLY
+  // mouse/key/wheel/paste/copy/navigate. A WebSocket is one ordered TCP stream —
+  // multiplexing input on the SAME connection as frames means a big frame still
+  // being sent can head-of-line-block a small, latency-critical click sitting
+  // right behind it. Splitting them removes that coupling: a click never waits
+  // behind a frame, and vice versa. Both sockets share the same message handler
+  // (below) since the server can reply to an input-socket request — the
+  // {type:'clipboard'} answer to a {t:'copy'} request comes back on WHICHEVER
+  // socket sent it, which is now always the input socket.
+  const handleWsMessage = useCallback((e: MessageEvent) => {
+    if (e.data instanceof Blob) {
+      // Binary message = JPEG frame (only ever arrives on the primary socket)
+      const newUrl = URL.createObjectURL(e.data)
+      setFrameSrc(newUrl)
+      // Revoke previous URL to avoid memory leaks
+      if (lastObjUrlRef.current) {
+        URL.revokeObjectURL(lastObjUrlRef.current)
+      }
+      lastObjUrlRef.current = newUrl
+    } else if (typeof e.data === 'string') {
+      // Text message = JSON control event
+      try {
+        const msg = JSON.parse(e.data) as Record<string, unknown>
+        if (msg.type === 'ready') {
+          setConnState('ready')
+          if (typeof msg.backend === 'string') setBackend(msg.backend)
+        } else if (msg.type === 'nav') {
+          const shown = displayUrl((msg.url as string) ?? '')
+          setUrlValue(shown)
+          setUrlInput(shown)
+        } else if (msg.type === 'error') {
+          setErrorMsg((msg.message as string) ?? 'Unknown error')
+          setConnState('error')
+        } else if (msg.type === 'tabs') {
+          setTabs(Array.isArray(msg.tabs) ? (msg.tabs as BrowserTabInfo[]) : [])
+          setActiveId(typeof msg.activeId === 'string' ? msg.activeId : '')
+        } else if (msg.type === 'clipboard') {
+          const resolve = pendingCopyRef.current
+          pendingCopyRef.current = null
+          resolve?.(typeof msg.text === 'string' ? msg.text : '')
+        }
+      } catch {
+        // Malformed JSON — ignore
+      }
+    }
+  }, [])
+
   const connect = useCallback(() => {
-    // Close any existing connection before opening a new one
+    // Close any existing connections before opening new ones
     if (wsRef.current) {
       wsRef.current.onclose = null
       wsRef.current.close()
       wsRef.current = null
+    }
+    if (inputWsRef.current) {
+      inputWsRef.current.onclose = null
+      inputWsRef.current.close()
+      inputWsRef.current = null
     }
 
     setConnState('connecting')
     setErrorMsg('')
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(
-      `${proto}//${location.host}/api/browser/ws?project=${encodeURIComponent(projectId)}`,
-    )
+    const qs = `project=${encodeURIComponent(projectId)}`
+    const ws = new WebSocket(`${proto}//${location.host}/api/browser/ws?${qs}`)
     // Accept binary frames as Blob (easier for createObjectURL)
     ws.binaryType = 'blob'
     wsRef.current = ws
-
-    ws.onmessage = (e: MessageEvent) => {
-      if (e.data instanceof Blob) {
-        // Binary message = JPEG frame
-        const newUrl = URL.createObjectURL(e.data)
-        setFrameSrc(newUrl)
-        // Revoke previous URL to avoid memory leaks
-        if (lastObjUrlRef.current) {
-          URL.revokeObjectURL(lastObjUrlRef.current)
-        }
-        lastObjUrlRef.current = newUrl
-      } else if (typeof e.data === 'string') {
-        // Text message = JSON control event
-        try {
-          const msg = JSON.parse(e.data) as Record<string, unknown>
-          if (msg.type === 'ready') {
-            setConnState('ready')
-            if (typeof msg.backend === 'string') setBackend(msg.backend)
-          } else if (msg.type === 'nav') {
-            const shown = displayUrl((msg.url as string) ?? '')
-            setUrlValue(shown)
-            setUrlInput(shown)
-          } else if (msg.type === 'error') {
-            setErrorMsg((msg.message as string) ?? 'Unknown error')
-            setConnState('error')
-          } else if (msg.type === 'tabs') {
-            setTabs(Array.isArray(msg.tabs) ? (msg.tabs as BrowserTabInfo[]) : [])
-            setActiveId(typeof msg.activeId === 'string' ? msg.activeId : '')
-          } else if (msg.type === 'clipboard') {
-            const resolve = pendingCopyRef.current
-            pendingCopyRef.current = null
-            resolve?.(typeof msg.text === 'string' ? msg.text : '')
-          }
-        } catch {
-          // Malformed JSON — ignore
-        }
-      }
-    }
-
+    ws.onmessage = handleWsMessage
     ws.onopen = () => {
       // State will be set to 'ready' when server sends {type:"ready"}
       // If the server doesn't send it, we stay in 'connecting' which is fine.
     }
+    ws.onclose = () => setConnState('disconnected')
+    ws.onerror = () => setConnState('disconnected')
 
-    ws.onclose = () => {
-      setConnState('disconnected')
-    }
+    const inputWs = new WebSocket(`${proto}//${location.host}/api/browser/input-ws?${qs}`)
+    inputWsRef.current = inputWs
+    inputWs.onmessage = handleWsMessage
+    // A dead input socket must be as visible as a dead frame socket — otherwise
+    // clicks silently stop working while the pane still LOOKS alive (frames keep
+    // arriving on the other connection), the exact "deaf but alive" failure mode
+    // already fixed once server-side for a single-socket dead session.
+    inputWs.onclose = () => setConnState('disconnected')
+    inputWs.onerror = () => setConnState('disconnected')
+  }, [projectId, handleWsMessage])
 
-    ws.onerror = () => {
-      setConnState('disconnected')
-    }
-  }, [projectId])
-
-  // Open WS on mount, clean up on unmount
+  // Open both WS on mount, clean up on unmount
   useEffect(() => {
     connect()
     return () => {
@@ -271,6 +293,12 @@ export function BrowserTab({ projectId }: Props) {
         ws.onclose = null // suppress state update on intentional close
         ws.close()
         wsRef.current = null
+      }
+      const inputWs = inputWsRef.current
+      if (inputWs) {
+        inputWs.onclose = null
+        inputWs.close()
+        inputWsRef.current = null
       }
       // Revoke the last object URL to avoid leaks
       if (lastObjUrlRef.current) {
@@ -296,11 +324,11 @@ export function BrowserTab({ projectId }: Props) {
   const connStateRef = useRef(connState)
   useEffect(() => { connStateRef.current = connState }, [connState])
   useEffect(() => {
+    const isDead = (s: WebSocket | null) => !s || s.readyState === WebSocket.CLOSED || s.readyState === WebSocket.CLOSING
     const maybeReconnect = () => {
       if (document.visibilityState !== 'visible') return
       if (connStateRef.current === 'error') return // server refused (e.g. module off) — don't loop
-      const ws = wsRef.current
-      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      if (isDead(wsRef.current) || isDead(inputWsRef.current)) {
         connect()
       }
     }
@@ -316,7 +344,7 @@ export function BrowserTab({ projectId }: Props) {
 
   // ── Send helpers ─────────────────────────────────────────────────────────────
   const send = useCallback((payload: object) => {
-    const ws = wsRef.current
+    const ws = inputWsRef.current
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(payload))
     }
