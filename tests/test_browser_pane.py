@@ -1230,6 +1230,7 @@ def test_teardown_closes_our_tab_but_not_a_borrowed_browser():
     s._owns_browser = False
     s._owns_page = True
     s._page = page
+    s._tabs = {"t1": page}
     s._browser = browser
     s._ctx = _SharedFakePage()
     s._pw = None
@@ -1244,8 +1245,33 @@ def test_teardown_leaves_a_page_we_did_not_open():
     s._owns_browser = False
     s._owns_page = False
     s._page = page
+    s._tabs = {"t1": page}
     s._browser = _SharedFakePage()
     s._ctx = _SharedFakePage()
     s._pw = None
     asyncio.run(s._teardown())
     assert page.closed is False
+
+
+def test_teardown_closes_every_tracked_tab_not_just_the_active_one():
+    """Found via a live incident: a shared Cloak Manager profile ('google')
+    accumulated 74 renderer processes / 4.4GB RSS over 6 days because teardown only
+    ever closed the currently-ACTIVE tab. A multi-tab session (agent-opened popups,
+    operator '+' tabs) leaked every other tab as a permanent zombie on every
+    restart/module-disable, eventually making the shared profile's CDP endpoint
+    intermittently unreachable for every project using it."""
+    async def go():
+        active, bg1, bg2 = _SharedFakePage(), _SharedFakePage(), _SharedFakePage()
+        s = BrowserSession("k")
+        s._owns_browser = False
+        s._owns_page = True
+        s._page = active
+        s._tabs = {"t1": active, "t2": bg1, "t3": bg2}
+        s._browser = _SharedFakePage()
+        s._ctx = _SharedFakePage()
+        s._pw = None
+        await s._teardown()
+        assert active.closed is True
+        assert bg1.closed is True, "a background tab must not leak just because it wasn't active"
+        assert bg2.closed is True
+    asyncio.run(go())

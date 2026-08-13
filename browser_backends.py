@@ -22,11 +22,14 @@ missing dependency or config degrades gracefully — it never crashes the cockpi
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
 
 import modules as _modules
+
+_log = logging.getLogger(__name__)
 
 try:  # the encrypted safe — optional at import time (tests may stub it)
     import secretstore as _secretstore
@@ -247,6 +250,11 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
     except Exception as e:
         with contextlib.suppress(Exception):
             await pw.stop()
+        # A dead trail here is exactly what turned a 74-renderer-process profile
+        # leak into a multi-minute mystery: the Manager's OWN container logs had
+        # "failed to reach Chrome CDP for <profile>", but nothing on our side ever
+        # recorded that we saw the SAME failure, at what time, for which profile.
+        _log.warning("external-cdp connect_over_cdp failed (profile=%s): %s", profile or "-", e)
         raise BackendError(f"connect_over_cdp({cdp_url!r}) failed: {e}") from e
     # Reuse the connected browser's existing context (that is where the profile's cookies
     # and logins live — sharing it is the whole point).
@@ -303,15 +311,27 @@ async def acquire(cwd: str, viewport: dict) -> Acquired:
     """Acquire a Playwright browser handle per the resolved backend for ``cwd``.
 
     Raises :class:`BackendError` on a misconfigured/unavailable backend; the caller
-    surfaces that to the pane and the builtin default keeps working.
+    surfaces that to the pane and the builtin default keeps working. Every attempt
+    (success or failure) is logged here — the single funnel point that has both
+    `cwd` and the resolved `backend`, so `journalctl -u <service>` gives a durable
+    timeline of "session for project X started on backend Y at time T" to correlate
+    against a later failure, instead of the only trail being on the OTHER side of a
+    connection (e.g. the Cloak Manager's own container logs).
     """
     cfg = resolve(cwd)
     backend = cfg["backend"]
-    if backend == "cloakbrowser":
-        return await _acquire_cloak(cfg, viewport)
-    if backend == "external-cdp":
-        return await _acquire_external(cfg, viewport)
-    return await _acquire_builtin(viewport)
+    try:
+        if backend == "cloakbrowser":
+            acq = await _acquire_cloak(cfg, viewport)
+        elif backend == "external-cdp":
+            acq = await _acquire_external(cfg, viewport)
+        else:
+            acq = await _acquire_builtin(viewport)
+    except BackendError as e:
+        _log.warning("browser backend acquire FAILED (cwd=%s backend=%s): %s", cwd, backend, e)
+        raise
+    _log.info("browser backend acquired (cwd=%s backend=%s label=%s)", cwd, backend, acq.label or acq.backend)
+    return acq
 
 
 # ───────────────────────────── Cloak Manager client ──────────────────────────

@@ -21,9 +21,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import logging
 import os
 import time
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 import browser_backends as _backends
 
@@ -394,10 +397,18 @@ class BrowserSession:
         if self._owns_browser:
             steps = ((self._ctx, "close"), (self._browser, "close"), (self._pw, "stop"))
         else:
-            # We do own the tab we opened inside someone else's browser — close it, or a
-            # shared profile accumulates a dead tab on every session restart.
-            steps = ((self._page, "close"),) if self._owns_page else ()
-            steps = steps + ((self._pw, "stop"),)
+            # We own EVERY tab tracked in self._tabs, not just the active self._page —
+            # _handle_new_page only ever adopts a page opened FROM one of our own
+            # (window.open/target=_blank; a shared-profile popup with a foreign opener
+            # is explicitly rejected there). Closing only the active tab here used to
+            # leak every OTHER open tab as a permanent zombie renderer process in the
+            # shared Cloak Manager profile on every teardown (restart, module
+            # disable, ...) — a live incident found profile d33e103d had accumulated
+            # 74 renderer processes / 4.4GB RSS over 6 days this way, eventually
+            # making its CDP endpoint intermittently unreachable (502s from the
+            # Manager) for every project sharing that profile.
+            close_steps = tuple((page, "close") for page in self._tabs.values()) if self._owns_page else ()
+            steps = close_steps + ((self._pw, "stop"),)
         for obj, meth in steps:
             if obj is None:
                 continue
@@ -445,6 +456,7 @@ class BrowserSession:
     def _on_disconnected(self, _browser: Any) -> None:
         """Browser process died (OOM-killed / crashed). Retire this session so the
         next get_or_create() builds a fresh one instead of reusing a dead handle."""
+        _log.warning("browser disconnected (cwd=%s backend=%s) — retiring session", self.key, self.backend)
         self._closed = True
         self._started = False
         self._last_frame = None
@@ -754,6 +766,10 @@ class BrowserSession:
             # wired in the frontend) and retire the session so the next connect rebuilds
             # cleanly instead of reusing the broken one.
             if not self._closed:
+                _log.warning(
+                    "browser input dispatch failed (cwd=%s backend=%s t=%s), retiring session: %s",
+                    self.key, self.backend, t, e,
+                )
                 with contextlib.suppress(Exception):
                     await self.broadcast_json({
                         "type": "error",
@@ -904,6 +920,7 @@ class BrowserSession:
         input path.
         """
         if not self._closed and looks_like_dead_connection(exc):
+            _log.warning("browser session retiring (cwd=%s backend=%s), dead connection: %s", self.key, self.backend, exc)
             with contextlib.suppress(Exception):
                 await close_session(self.key, self)
 
@@ -1243,6 +1260,7 @@ async def get_or_create(key: str) -> BrowserSession:
             sess = BrowserSession(key)
             _SESSIONS[key] = sess
     if stale is not None:
+        _log.info("browser session for %s was stale, closing before rebuild", key)
         with contextlib.suppress(Exception):
             await stale.close()
     await sess.start()
