@@ -9,6 +9,7 @@ bot.py re-exports all engine symbols for backward compatibility.
 webapp.py imports engine directly; it must NOT import bot.py.
 """
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -369,6 +370,22 @@ def _browser_prompt(backend: str, agent_actions: str) -> str:
         "browser_click, browser_type, browser_upload and browser_select are refused until the "
         "operator enables full actions in Extensions → Browser."
     )
+    # Only advertised when a solver key is actually configured — otherwise the agent
+    # burns a turn calling a tool that can only answer "no API key". A shipped
+    # mechanism the prompt never mentions is a mechanism agents never use (spec-038),
+    # so this hint is load-bearing, not decoration.
+    captcha = ""
+    with contextlib.suppress(Exception):
+        import captcha_solver as _cs
+        if _cs.configured() and agent_actions == "full":
+            captcha = (
+                " If a captcha blocks the page, use browser_solve_captcha — do NOT click the "
+                "checkbox or try to pick the 'select all fire hydrants' image tiles, and do not "
+                "ask the operator to do it. It handles reCAPTCHA, hCaptcha and Turnstile widgets "
+                "by injecting a solved token, so the image grid never has to be answered at all. "
+                "It costs money per call, so confirm a captcha is really there first, and check "
+                "the result afterwards rather than assuming the form went through."
+            )
     return (
         f"A live browser pane is active (the 'browser' module, backend: {backend}). When asked to "
         "open, launch, show or use 'the browser', or to open a URL or web page, drive THIS pane with "
@@ -380,6 +397,7 @@ def _browser_prompt(backend: str, agent_actions: str) -> str:
         "list UI outside the page — a required <select> can look filled in a snapshot yet still be "
         "unset, so a rejected form submit with no visible error is a strong hint to check for one. Do "
         f"NOT spawn an external or headless browser (Playwright, Selenium, a subprocess) for this. {gate}"
+        f"{captcha}"
     )
 
 

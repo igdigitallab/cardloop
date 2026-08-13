@@ -85,6 +85,25 @@ _SNAPSHOT_SCHEMA = {
 }
 _STATUS_SCHEMA = {"type": "object", "properties": {}}
 _SCREENSHOT_SCHEMA = {"type": "object", "properties": {}}
+_SOLVE_CAPTCHA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "image_selector": {
+            "type": "string",
+            "description": (
+                "ONLY for an old-style distorted-text image captcha: the selector of the "
+                "<img> holding it. The image is sent for OCR and the answer is returned as "
+                "text for you to enter with browser_type — nothing is filled in for you. "
+                "Leave this out for reCAPTCHA / hCaptcha / Turnstile (the normal case), "
+                f"which are detected and injected automatically. {_SELECTOR_HELP}"
+            ),
+        },
+        "budget_seconds": {
+            "type": "integer",
+            "description": "How long to wait for the solve before giving up (default 180).",
+        },
+    },
+}
 _UPLOAD_SCHEMA = {
     "type": "object",
     "properties": {
@@ -322,11 +341,74 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_screenshot failed: {e}"}]}
 
+    @tool(
+        "browser_solve_captcha",
+        "Get past a captcha blocking the live browser. Handles reCAPTCHA v2/v3, hCaptcha "
+        "and Cloudflare Turnstile widgets: it detects the widget, has it solved externally, "
+        "and injects the response token plus fires the site's callback. Do NOT try to click "
+        "the checkbox or pick the 'select all fire hydrants' tiles first — the image grid is "
+        "never touched, the token replaces the whole interaction, so call this as soon as you "
+        "see a captcha. Costs real money per call (~$0.001-0.003), so don't call it "
+        "speculatively — confirm a captcha is actually there (browser_snapshot or "
+        "browser_screenshot) first. Afterwards, verify: snapshot the page, and submit the "
+        "form yourself if it didn't auto-submit. A full-page Cloudflare 'Verify you are "
+        "human' interstitial is refused with an explanation — that one needs the operator.",
+        _SOLVE_CAPTCHA_SCHEMA,
+    )
+    async def browser_solve_captcha(args: dict) -> dict:
+        if not _can_mutate:
+            return {"content": [{"type": "text", "text": _GATE_MSG}]}
+        try:
+            import captcha_solver as _cs
+            if not _cs.configured():
+                return {"content": [{"type": "text", "text": (
+                    "⚠️ No 2captcha API key configured. Set TWOCAPTCHA_API_KEY in .env or "
+                    f"store it in the safe as '{_cs.API_KEY_SECRET}'."
+                )}]}
+            budget = args.get("budget_seconds")
+            try:
+                budget = float(budget) if budget is not None else 180.0
+            except (TypeError, ValueError):
+                budget = 180.0
+            selector = args.get("image_selector") or None
+            res = await _run_with_retry(
+                cwd, lambda sess: sess.solve_captcha(budget=budget, image_selector=selector)
+            )
+
+            if res.get("mode") == "image":
+                return {"content": [{"type": "text", "text": (
+                    f"Image captcha solved in {res['seconds']}s (cost ${res['cost']}).\n"
+                    f"Answer: {res['text']}\n"
+                    "Nothing was filled in — type this into the captcha field yourself with "
+                    "browser_type, then submit."
+                )}]}
+
+            lines = [
+                f"Solved a {res['kind']} captcha in {res['seconds']}s (cost ${res['cost']}).",
+                f"Token written to: {', '.join(res['fields']) if res['fields'] else 'NO field found'}",
+                f"Site callback fired: {', '.join(res['callbacks']) if res['callbacks'] else 'none found'}",
+            ]
+            if res.get("extra_widgets"):
+                lines.append(f"⚠️ {res['extra_widgets']} more captcha widget(s) on this page — rerun if needed.")
+            for note in res.get("notes") or []:
+                lines.append(f"note: {note}")
+            if not res["callbacks"]:
+                lines.append(
+                    "No callback fired, so the page may not know yet. Snapshot it: if the "
+                    "submit button is still disabled the token didn't take; if the form is "
+                    "now submittable, just submit it."
+                )
+            else:
+                lines.append("Verify with browser_snapshot, then submit the form if it didn't auto-submit.")
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"⚠️ browser_solve_captcha failed: {e}"}]}
+
     server = create_sdk_mcp_server(
         name="browser", version="1.0.0",
         tools=[
             browser_navigate, browser_click, browser_type, browser_upload, browser_select,
-            browser_snapshot, browser_status, browser_screenshot,
+            browser_snapshot, browser_status, browser_screenshot, browser_solve_captcha,
         ],
     )
     return {"browser": server}

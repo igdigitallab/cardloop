@@ -281,6 +281,137 @@ def _truncate_text(text: str, max_chars: int) -> str:
     )
 
 
+# ── captcha detection / token injection ────────────────────────────────────────
+# Two independent detection passes, because either one alone has a blind spot: the
+# widget <div data-sitekey> carries the richest info (sitekey + data-callback +
+# action) but some sites render the widget into a shadow root or remove the div
+# after load, while the <iframe> the vendor injects is always present but only
+# carries the sitekey. Running both and de-duplicating by (kind, sitekey) is what
+# makes this work on a form that was built either way.
+_DETECT_CAPTCHA_JS = """
+() => {
+  const found = [], seen = new Set();
+  const push = (kind, sitekey, extra) => {
+    if (!kind || !sitekey) return;
+    const id = kind + '|' + sitekey;
+    if (seen.has(id)) return;
+    seen.add(id);
+    found.push(Object.assign({ kind: kind, sitekey: sitekey }, extra || {}));
+  };
+
+  document.querySelectorAll('[data-sitekey]').forEach(el => {
+    const cls = String(el.className || '') + ' ' + String(el.id || '');
+    let kind = 'recaptcha_v2';
+    if (el.classList.contains('h-captcha') || /hcaptcha/i.test(cls)) kind = 'hcaptcha';
+    else if (el.classList.contains('cf-turnstile') || /turnstile/i.test(cls)) kind = 'turnstile';
+    push(kind, el.getAttribute('data-sitekey'), {
+      callback: el.getAttribute('data-callback') || null,
+      action: el.getAttribute('data-action') || null,
+      size: el.getAttribute('data-size') || null,
+      source: 'widget'
+    });
+  });
+
+  document.querySelectorAll('iframe[src]').forEach(f => {
+    const src = String(f.src || '');
+    let k = null;
+    try {
+      const u = new URL(src, location.href);
+      k = u.searchParams.get('k') || u.searchParams.get('sitekey');
+    } catch (e) {}
+    if (/google\\.com\\/recaptcha|recaptcha\\.net/.test(src)) push('recaptcha_v2', k, { source: 'iframe' });
+    else if (/hcaptcha\\.com/.test(src)) push('hcaptcha', k, { source: 'iframe' });
+    else if (/challenges\\.cloudflare\\.com/.test(src)) {
+      const m = src.match(/\\/(0x[A-Za-z0-9_-]{10,})\\//) || src.match(/\\/([0-9]x[A-Za-z0-9]{15,})\\//);
+      push('turnstile', k || (m ? m[1] : null), { source: 'iframe' });
+    }
+  });
+
+  return {
+    url: location.href,
+    // A full-page Cloudflare interstitial, NOT a widget in a form. Different task
+    // shape (needs action/cData/chlPageData) and the token is IP-bound — see the
+    // refusal in solve_captcha rather than paying for a token that cannot work.
+    challengePage: !!(window._cf_chl_opt || document.getElementById('cf-challenge-running')
+                      || document.getElementById('challenge-running')),
+    hasResponseField: !!document.querySelector(
+      '#g-recaptcha-response, [name="g-recaptcha-response"], [name="h-captcha-response"], [name="cf-turnstile-response"]'),
+    widgets: found
+  };
+}
+"""
+
+# Writing the token into the hidden response field is necessary but rarely
+# sufficient: most sites only learn the captcha passed when the widget's own
+# callback fires (that's what enables the submit button / posts the form). We set
+# the field, dispatch input+change so any framework binding notices, then hunt for
+# the callback three ways — data-callback attribute, reCAPTCHA's internal
+# ___grecaptcha_cfg client registry, and hCaptcha/Turnstile's global. Every step is
+# reported back so a failure says WHICH half worked instead of just "didn't work".
+_INJECT_TOKEN_JS = """
+([token, kind, callbackName]) => {
+  const report = { fields: [], callbacks: [], notes: [] };
+  const selectors = {
+    recaptcha_v2: ['#g-recaptcha-response', 'textarea[name="g-recaptcha-response"]', '[name="g-recaptcha-response"]'],
+    recaptcha_v3: ['#g-recaptcha-response', '[name="g-recaptcha-response"]'],
+    hcaptcha: ['[name="h-captcha-response"]', '[name="g-recaptcha-response"]', '#h-captcha-response'],
+    turnstile: ['[name="cf-turnstile-response"]', '#cf-chl-widget-response', '[name="cf_challenge_response"]']
+  };
+
+  (selectors[kind] || []).forEach(sel => {
+    document.querySelectorAll(sel).forEach(el => {
+      el.value = token;
+      if (el.style && el.style.display === 'none') el.removeAttribute('aria-hidden');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      report.fields.push(sel);
+    });
+  });
+
+  const fire = (fn, label) => {
+    if (typeof fn !== 'function') return false;
+    try { fn(token); report.callbacks.push(label); return true; }
+    catch (e) { report.notes.push(label + ' threw: ' + e.message); return false; }
+  };
+
+  if (callbackName) {
+    const parts = String(callbackName).split('.');
+    let fn = window;
+    for (const p of parts) { fn = fn ? fn[p] : null; }
+    if (!fire(fn, 'data-callback:' + callbackName)) {
+      report.notes.push('data-callback "' + callbackName + '" is not a reachable function');
+    }
+  }
+
+  // reCAPTCHA keeps every rendered client (and its callback) here. The shape is
+  // obfuscated and changes between releases, so walk it structurally: find any
+  // object holding a 'callback' function, rather than relying on key names.
+  if (kind === 'recaptcha_v2' || kind === 'recaptcha_v3') {
+    const cfg = window.___grecaptcha_cfg;
+    if (cfg && cfg.clients) {
+      const walk = (obj, depth) => {
+        if (!obj || depth > 4 || typeof obj !== 'object') return;
+        for (const k of Object.keys(obj)) {
+          let v;
+          try { v = obj[k]; } catch (e) { continue; }
+          if (k === 'callback' && typeof v === 'function') fire(v, 'grecaptcha.callback');
+          else if (v && typeof v === 'object') walk(v, depth + 1);
+        }
+      };
+      Object.keys(cfg.clients).forEach(id => walk(cfg.clients[id], 0));
+    } else {
+      report.notes.push('___grecaptcha_cfg.clients absent — widget may render in a shadow root');
+    }
+  }
+
+  if (report.callbacks.length === 0 && report.fields.length === 0) {
+    report.notes.push('no response field and no callback found — is the widget actually on this page?');
+  }
+  return report;
+}
+"""
+
+
 # Branded start page — shown instead of a bare white about:blank so a freshly
 # opened pane reads as "ready, type a URL" rather than blank/broken. Encoded as a
 # base64 data URL so Chromium renders it (and thus emits a screencast frame).
@@ -1211,6 +1342,118 @@ class BrowserSession:
             await self._retire_if_dead(e)
             raise
         return base64.b64decode(res["data"])
+
+    # ── captcha ──────────────────────────────────────────────────────────────
+    async def detect_captcha(self) -> dict:
+        """What captcha, if any, is on the current page. Read-only and free — no
+        API call, no balance spent. Scans the main document first, then iframes:
+        a widget hosted inside a same-origin wrapper frame is invisible to a
+        main-document-only scan (same blind spot snapshot/click already handle)."""
+        await self.start()
+        self._touch()
+        try:
+            info = await self._page.evaluate(_DETECT_CAPTCHA_JS)
+            if not info.get("widgets"):
+                for frame in list(self._page.frames)[:_MAX_SCANNED_FRAMES]:
+                    if frame == self._page.main_frame:
+                        continue
+                    with contextlib.suppress(Exception):
+                        sub = await frame.evaluate(_DETECT_CAPTCHA_JS)
+                        if sub.get("widgets"):
+                            info["widgets"] = sub["widgets"]
+                            info["foundInFrame"] = frame.url
+                            break
+            return info
+        except Exception as e:
+            await self._retire_if_dead(e)
+            raise
+
+    async def solve_captcha(self, budget: float = 180.0, image_selector: "str | None" = None) -> dict:
+        """Solve the captcha on the current page via 2captcha and hand the token to
+        the page. Returns a report dict; raises on anything that stops us.
+
+        Two distinct modes. With ``image_selector`` this is an OCR job: the element
+        is screenshotted and sent as ImageToTextTask, and the answer comes back as
+        TEXT for the agent to type — nothing is injected, because a distorted-text
+        captcha has no response field to inject into. Without it, this is a token
+        captcha (reCAPTCHA / hCaptcha / Turnstile): 2captcha solves it on their
+        side and we inject the resulting token, never touching the widget itself.
+        """
+        import captcha_solver as _cs
+
+        await self.start()
+        self._touch()
+
+        if image_selector:
+            loc = self._page.locator(image_selector)
+            try:
+                shot = await loc.screenshot(timeout=10000)
+            except Exception as e:
+                await self._retire_if_dead(e)
+                raise
+            solution = await _cs.solve(
+                _cs.build_task("image", self._page.url, "", {"body": base64.b64encode(shot).decode("ascii")}),
+                budget=budget,
+            )
+            return {
+                "mode": "image",
+                "text": _cs.token_of(solution),
+                "cost": solution.get("_cost"),
+                "seconds": solution.get("_seconds"),
+                "injected": False,
+            }
+
+        info = await self.detect_captcha()
+        if info.get("challengePage") and not info.get("widgets"):
+            raise RuntimeError(
+                "This is a full-page Cloudflare challenge ('Verify you are human'), not a "
+                "captcha widget in a form. It cannot be solved this way: it needs "
+                "action/cData/chlPageData scraped from the page's turnstile.render call, and "
+                "the token is bound to the solving IP — a proxyless token is rejected when "
+                "replayed from here. Ask the operator to pass it once by hand in the pane "
+                "(the session then persists in the browser profile)."
+            )
+        widgets = info.get("widgets") or []
+        if not widgets:
+            raise RuntimeError(
+                f"No captcha widget found on {info.get('url')}. Either the page has none, or "
+                "it hasn't rendered yet — wait a moment and retry, or call browser_screenshot "
+                "to look at the page."
+            )
+
+        w = widgets[0]
+        kind, sitekey = w.get("kind"), w.get("sitekey")
+        extra: dict = {}
+        if kind == "recaptcha_v2" and (w.get("size") or "").lower() == "invisible":
+            extra["isInvisible"] = True
+        if kind == "recaptcha_v3" and w.get("action"):
+            extra["pageAction"] = w["action"]
+
+        _log.info("solving captcha kind=%s sitekey=%s… on %s", kind, str(sitekey)[:12], info.get("url"))
+        solution = await _cs.solve(
+            _cs.build_task(kind, info.get("url") or self._page.url, sitekey, extra), budget=budget
+        )
+        token = _cs.token_of(solution)
+
+        try:
+            report = await self._page.evaluate(_INJECT_TOKEN_JS, [token, kind, w.get("callback")])
+        except Exception as e:
+            await self._retire_if_dead(e)
+            raise
+
+        return {
+            "mode": "token",
+            "kind": kind,
+            "sitekey": sitekey,
+            "url": info.get("url"),
+            "cost": solution.get("_cost"),
+            "seconds": solution.get("_seconds"),
+            "injected": bool(report.get("fields")),
+            "fields": report.get("fields") or [],
+            "callbacks": report.get("callbacks") or [],
+            "notes": report.get("notes") or [],
+            "extra_widgets": len(widgets) - 1,
+        }
 
     def status(self) -> dict:
         """Session health for the agent's browser_status tool — lets it tell "the

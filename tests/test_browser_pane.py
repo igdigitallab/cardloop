@@ -260,6 +260,12 @@ class _FakeInteractivePage:
         self.main_frame = self
         self.frames = [self]
         self.inner_text_value = "body text"
+        # Captcha tests need evaluate() to answer DIFFERENTLY per script (detect vs
+        # inject) and to see the argument passed alongside. When set to a callable
+        # (script, arg) -> result it takes over; unset keeps the old single-result
+        # behavior every other test relies on.
+        self.eval_router = None
+        self.eval_calls = []
 
     async def title(self):
         if self.fail_with:
@@ -285,7 +291,10 @@ class _FakeInteractivePage:
     async def inner_text(self, selector, timeout=None):
         return self.inner_text_value
 
-    async def evaluate(self, script):
+    async def evaluate(self, script, arg=None):
+        self.eval_calls.append((script, arg))
+        if self.eval_router is not None:
+            return self.eval_router(script, arg)
         return self._eval_result
 
 
@@ -307,7 +316,7 @@ class _FakeFrame:
         self.uploads = []
         self.selects = []
 
-    async def evaluate(self, script):
+    async def evaluate(self, script, arg=None):
         return self._eval_result
 
     async def inner_text(self, selector, timeout=None):
@@ -1275,3 +1284,180 @@ def test_teardown_closes_every_tracked_tab_not_just_the_active_one():
         assert bg1.closed is True, "a background tab must not leak just because it wasn't active"
         assert bg2.closed is True
     asyncio.run(go())
+
+
+# ── captcha: detection + token injection ───────────────────────────────────────
+# The network half (2captcha API) is covered in test_captcha_solver.py; these
+# tests pin the page-side contract: what we detect, what we refuse, and that the
+# token actually reaches the page instead of being solved and dropped on the floor.
+
+def _captcha_session(detect_result, inject_result=None):
+    """A session whose evaluate() answers the detect script and the inject script
+    differently — matched by content, since both are module-level JS constants."""
+    s, page = _session_with_fake_page()
+    calls = {"inject_arg": None}
+
+    def router(script, arg):
+        if "challengePage" in script:
+            return detect_result
+        calls["inject_arg"] = arg
+        return inject_result or {"fields": [], "callbacks": [], "notes": []}
+    page.eval_router = router
+    return s, page, calls
+
+
+def _stub_solver(monkeypatch, solution=None, capture=None):
+    import captcha_solver as cs
+
+    async def _solve(task, budget=180.0):
+        if capture is not None:
+            capture["task"] = task
+            capture["budget"] = budget
+        return solution or {"gRecaptchaResponse": "TOKEN123", "_cost": "0.003", "_seconds": 6.0}
+    monkeypatch.setattr(cs, "solve", _solve)
+    return cs
+
+
+def test_detect_finds_a_recaptcha_widget_div():
+    s, page, _ = _captcha_session({
+        "url": "https://x.test/login", "challengePage": False, "hasResponseField": True,
+        "widgets": [{"kind": "recaptcha_v2", "sitekey": "6Lc-KEY", "callback": "onSolved", "source": "widget"}],
+    })
+    info = asyncio.run(s.detect_captcha())
+    assert info["widgets"][0]["kind"] == "recaptcha_v2"
+    assert info["widgets"][0]["sitekey"] == "6Lc-KEY"
+
+
+def test_detect_is_free_and_makes_no_api_call(monkeypatch):
+    """Detection must never spend balance — it's the cheap 'is there even a captcha'
+    check an agent is told to run before paying for a solve."""
+    import captcha_solver as cs
+
+    async def _boom(*a, **k):
+        raise AssertionError("detect_captcha must not touch the 2captcha API")
+    monkeypatch.setattr(cs, "solve", _boom)
+    monkeypatch.setattr(cs, "_post", _boom)
+    s, page, _ = _captcha_session({"url": "https://x.test", "challengePage": False, "widgets": []})
+    assert asyncio.run(s.detect_captcha())["widgets"] == []
+
+
+def test_solve_injects_the_token_and_reports_the_field_and_callback(monkeypatch):
+    capture = {}
+    _stub_solver(monkeypatch, capture=capture)
+    s, page, calls = _captcha_session(
+        {"url": "https://x.test/login", "challengePage": False, "hasResponseField": True,
+         "widgets": [{"kind": "recaptcha_v2", "sitekey": "6Lc-KEY", "callback": "onSolved"}]},
+        inject_result={"fields": ["#g-recaptcha-response"], "callbacks": ["grecaptcha.callback"], "notes": []},
+    )
+    res = asyncio.run(s.solve_captcha())
+
+    assert capture["task"] == {
+        "type": "RecaptchaV2TaskProxyless",
+        "websiteURL": "https://x.test/login",
+        "websiteKey": "6Lc-KEY",
+    }
+    # The solved token must actually be handed to the page, with the widget's own
+    # data-callback name, or the site never learns the captcha passed.
+    assert calls["inject_arg"] == ["TOKEN123", "recaptcha_v2", "onSolved"]
+    assert res["injected"] is True
+    assert res["callbacks"] == ["grecaptcha.callback"]
+    assert res["cost"] == "0.003"
+
+
+def test_solve_marks_not_injected_when_no_response_field_was_found(monkeypatch):
+    """Paying for a token and finding nowhere to put it is a FAILURE the agent has
+    to see — reporting success here is what would make it submit a dead form."""
+    _stub_solver(monkeypatch)
+    s, page, _ = _captcha_session(
+        {"url": "https://x.test", "challengePage": False,
+         "widgets": [{"kind": "hcaptcha", "sitekey": "KEY"}]},
+        inject_result={"fields": [], "callbacks": [], "notes": ["no response field and no callback found"]},
+    )
+    res = asyncio.run(s.solve_captcha())
+    assert res["injected"] is False
+    assert res["callbacks"] == []
+    assert res["notes"]
+
+
+def test_invisible_recaptcha_sets_the_is_invisible_flag(monkeypatch):
+    capture = {}
+    _stub_solver(monkeypatch, capture=capture)
+    s, page, _ = _captcha_session({
+        "url": "https://x.test", "challengePage": False,
+        "widgets": [{"kind": "recaptcha_v2", "sitekey": "KEY", "size": "invisible"}],
+    })
+    asyncio.run(s.solve_captcha())
+    assert capture["task"]["isInvisible"] is True
+
+
+def test_recaptcha_v3_forwards_the_page_action(monkeypatch):
+    capture = {}
+    _stub_solver(monkeypatch, capture=capture)
+    s, page, _ = _captcha_session({
+        "url": "https://x.test", "challengePage": False,
+        "widgets": [{"kind": "recaptcha_v3", "sitekey": "KEY", "action": "login"}],
+    })
+    asyncio.run(s.solve_captcha())
+    assert capture["task"]["pageAction"] == "login"
+
+
+def test_full_page_cloudflare_challenge_is_refused_before_spending_money(monkeypatch):
+    """A full-page interstitial needs action/cData/chlPageData AND an IP-bound token,
+    so a proxyless solve is worthless here. Refuse BEFORE calling the API — a paid
+    token that cannot possibly be accepted is the worst of both outcomes."""
+    import captcha_solver as cs
+
+    async def _boom(*a, **k):
+        raise AssertionError("must not pay for a challenge-page token")
+    monkeypatch.setattr(cs, "solve", _boom)
+    s, page, _ = _captcha_session({"url": "https://x.test", "challengePage": True, "widgets": []})
+    try:
+        asyncio.run(s.solve_captcha())
+        assert False, "expected a refusal"
+    except RuntimeError as e:
+        assert "full-page Cloudflare challenge" in str(e)
+        assert "by hand" in str(e)
+
+
+def test_no_captcha_on_the_page_is_a_clear_error_not_a_silent_solve(monkeypatch):
+    import captcha_solver as cs
+
+    async def _boom(*a, **k):
+        raise AssertionError("nothing to solve — must not call the API")
+    monkeypatch.setattr(cs, "solve", _boom)
+    s, page, _ = _captcha_session({"url": "https://x.test/ok", "challengePage": False, "widgets": []})
+    try:
+        asyncio.run(s.solve_captcha())
+        assert False, "expected an error"
+    except RuntimeError as e:
+        assert "No captcha widget found" in str(e)
+
+
+def test_image_captcha_returns_text_and_injects_nothing(monkeypatch):
+    """A distorted-text captcha has no response field — the answer comes back as
+    text for the agent to type, and claiming it was 'injected' would be a lie."""
+    capture = {}
+    _stub_solver(monkeypatch, solution={"text": "3XZ9K", "_cost": "0.0005", "_seconds": 4.0}, capture=capture)
+    s, page, _ = _captcha_session({"url": "https://x.test", "challengePage": False, "widgets": []})
+
+    class _ShotLocator:
+        async def screenshot(self, timeout=None):
+            return b"\xff\xd8fake-jpeg"
+    page.locator = lambda sel: _ShotLocator()
+
+    res = asyncio.run(s.solve_captcha(image_selector="#captcha-img"))
+    assert res["mode"] == "image"
+    assert res["text"] == "3XZ9K"
+    assert res["injected"] is False
+    assert capture["task"]["type"] == "ImageToTextTask"
+    assert capture["task"]["body"]  # base64 of the element screenshot
+
+
+def test_solve_reports_extra_widgets_instead_of_pretending_the_page_is_clear(monkeypatch):
+    _stub_solver(monkeypatch)
+    s, page, _ = _captcha_session({
+        "url": "https://x.test", "challengePage": False,
+        "widgets": [{"kind": "recaptcha_v2", "sitekey": "A"}, {"kind": "hcaptcha", "sitekey": "B"}],
+    })
+    res = asyncio.run(s.solve_captcha())
+    assert res["extra_widgets"] == 1

@@ -117,6 +117,35 @@ The agent reaches the pane through MCP tools `browser_navigate`, `browser_snapsh
 
 ---
 
+## Captchas (optional)
+
+Set `TWOCAPTCHA_API_KEY` in `.env` (or store `twocaptcha_api_key` in the encrypted safe) and the agent
+gains **`browser_solve_captcha`**. Leave it unset and the tool reports "not configured" — the agent is
+never even told it exists, so it can't waste a turn on it.
+
+**The image grid is never answered.** For reCAPTCHA v2/v3, hCaptcha and Turnstile the widget is not
+touched at all: the captcha is solved externally, and the resulting **response token** is written into
+the page's hidden field and handed to the site's callback. "Select all fire hydrants" and the plain
+"I'm not a robot" checkbox are the *same* task type — the tiles never have to be clicked. Old-style
+distorted-text captchas are different: pass `image_selector` and the answer comes back as **text** for
+the agent to type, since there's no token field to inject into.
+
+Gated behind the same **Full** agent-actions switch as click/type — injecting a token can submit a form
+as your logged-in identity. Each call costs real money (~$0.001–0.003), so the tool is documented as
+"confirm a captcha is actually there first".
+
+> **What it will refuse.** A full-page Cloudflare interstitial ("Verify you are human", not a widget in
+> a form) is detected and declined with an explanation instead of being paid for. That flow needs
+> `action`/`cData`/`chlPageData` scraped out of the page's own `turnstile.render` call, and the token is
+> **bound to the solver's IP** — a token solved from someone else's address is rejected when replayed
+> from yours. Pass that one by hand in the pane; with a persistent profile the session then sticks.
+
+Note that solving captchas automatically is against the terms of service of many sites, and repeated
+anti-bot triggers get the whole *profile* flagged, not just one request. This is a tool for getting your
+own automation through your own accounts — treat the cost and the ban risk as real.
+
+---
+
 ## TL;DR
 
 - A fresh install gets the **built-in Chromium** (Playwright) — safe, no stealth, one install command.
@@ -124,3 +153,4 @@ The agent reaches the pane through MCP tools `browser_navigate`, `browser_snapsh
 - Want the agent to work inside your **already-logged-in** sessions? Run your own Cloak Manager (or any
   CDP browser) and point the cockpit at it — nothing is shared or hardcoded.
 - The agent is **read-only by default**; you decide when it may click and type.
+- Captchas: optional, off unless you add a 2captcha key. Widgets yes, full-page Cloudflare no.
