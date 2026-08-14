@@ -25,6 +25,7 @@ import contextlib
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import modules as _modules
@@ -463,10 +464,44 @@ async def profile_cdp_url(profile_id: str) -> str:
 # refcount the sessions attached to each, and stop one only after the LAST session
 # detaches and a grace period passes with nobody coming back. Stopping is safe for
 # logins: cookies live in the profile's on-disk user-data-dir, not in the process.
+#
+# Ownership must SURVIVE a cockpit restart. It is process state, but the thing it
+# describes — a running Chrome — outlives the process: restart the service and every
+# profile we had launched is still up, so on reconnect it looks "already running",
+# i.e. the operator's, and would never be stopped again. That is not hypothetical —
+# it is exactly what the first restart after this feature shipped did to profile
+# d33e103d. So the set is persisted and reloaded; an entry is dropped as soon as the
+# profile is actually stopped, so a stale file cannot make us adopt a profile the
+# operator later started by hand.
 _PROFILE_USERS: "dict[str, set[str]]" = {}       # profile id → session keys attached now
-_PROFILE_OURS: "set[str]" = set()                # profiles this process launched
+_PROFILE_OURS: "set[str]" = set()                # profiles WE launched (persisted below)
 _PROFILE_STOPPERS: "dict[str, Any]" = {}         # profile id → pending stop task
 _PROFILE_LOCK: "Any" = None                      # created lazily, needs a running loop
+_OWNED_PATH = Path(__file__).resolve().parent / "data" / "cloak-profiles-owned.json"
+_OWNED_LOADED = False
+
+
+def _load_owned() -> None:
+    """Reload the persisted ownership set once per process."""
+    global _OWNED_LOADED
+    if _OWNED_LOADED:
+        return
+    _OWNED_LOADED = True
+    with contextlib.suppress(Exception):
+        import json as _json
+        data = _json.loads(_OWNED_PATH.read_text())
+        if isinstance(data, list):
+            _PROFILE_OURS.update(str(p) for p in data if p)
+            if _PROFILE_OURS:
+                _log.info("reloaded %d cloak profile(s) we own across restart: %s",
+                          len(_PROFILE_OURS), ", ".join(sorted(_PROFILE_OURS)))
+
+
+def _save_owned() -> None:
+    with contextlib.suppress(Exception):
+        import json as _json
+        _OWNED_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _OWNED_PATH.write_text(_json.dumps(sorted(_PROFILE_OURS)))
 
 # Seconds a profile we launched may sit with zero attached sessions before being
 # stopped. 0 disables the whole mechanism (back to the old leave-it-running
@@ -530,6 +565,7 @@ async def _stop_when_idle(profile_id: str) -> None:
         if _PROFILE_USERS.get(profile_id):
             return  # someone attached while we slept
         _PROFILE_OURS.discard(profile_id)
+        _save_owned()
     try:
         await stop_profile(profile_id)
         _log.info("stopped idle cloak profile %s after %.0fs with no sessions",
@@ -541,6 +577,9 @@ async def _stop_when_idle(profile_id: str) -> None:
 async def _note_launch_ownership(profile_id: str) -> None:
     """Mark the profile as ours to stop IFF it was not already running. Called before
     we launch it; a profile the operator started stays theirs for its whole life."""
+    _load_owned()
+    if profile_id in _PROFILE_OURS:
+        return  # already ours from before a restart — do not re-evaluate as "running"
     running = False
     with contextlib.suppress(Exception):
         for p in await list_profiles():
@@ -550,6 +589,7 @@ async def _note_launch_ownership(profile_id: str) -> None:
     if not running:
         async with _profile_lock():
             _PROFILE_OURS.add(profile_id)
+            _save_owned()
 
 
 def profile_lifecycle_status() -> dict:

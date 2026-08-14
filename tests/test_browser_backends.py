@@ -338,7 +338,13 @@ def test_malformed_per_project_map_is_ignored():
 # contract that fixes it: whoever launched it stops it, and nothing else is touched.
 
 @pytest.fixture(autouse=True)
-def _clean_profile_registry():
+def _clean_profile_registry(tmp_path, monkeypatch):
+    # Point the ownership file at a tmp path for EVERY test in this module: without
+    # this, any test that claims ownership persists a fake profile id into the real
+    # data/cloak-profiles-owned.json and the running cockpit would later believe it
+    # owns a profile named "STOPPED".
+    monkeypatch.setattr(_backends, "_OWNED_PATH", tmp_path / "owned.json")
+    monkeypatch.setattr(_backends, "_OWNED_LOADED", True)
     _backends._PROFILE_USERS.clear()
     _backends._PROFILE_OURS.clear()
     for t in list(_backends._PROFILE_STOPPERS.values()):
@@ -348,6 +354,7 @@ def _clean_profile_registry():
     _backends._PROFILE_USERS.clear()
     _backends._PROFILE_OURS.clear()
     _backends._PROFILE_STOPPERS.clear()
+    _backends._OWNED_LOADED = False
 
 
 def _stopped_calls(monkeypatch):
@@ -476,3 +483,71 @@ def test_lifecycle_status_reports_what_we_hold_open():
         assert st["attached"] == {"P": ["/proj/a"]}
         assert st["stop_pending"] == []
     asyncio.run(go())
+
+
+# ── ownership must survive a cockpit restart ───────────────────────────────────
+# Found by verifying the fix above on the live Manager: after the first restart,
+# profile d33e103d showed launched_by_us=[] even though we HAD launched it. The
+# Chrome outlives the Python process, so on reconnect it reads as "already running"
+# — i.e. the operator's — and would never be stopped again. Every restart would
+# quietly launder one more profile into the never-stop category.
+
+def test_ownership_survives_a_restart_via_the_persisted_set(monkeypatch, tmp_path):
+    async def go():
+        path = tmp_path / "owned.json"
+        monkeypatch.setattr(_backends, "_OWNED_PATH", path)
+
+        async def _listing():
+            return [{"id": "P", "name": "p", "status": "stopped"}]
+        monkeypatch.setattr(_backends, "list_profiles", _listing)
+
+        # First run: profile was stopped, so we claim and persist it.
+        await _backends._note_launch_ownership("P")
+        assert "P" in _backends._PROFILE_OURS
+        assert path.exists()
+
+        # Simulate a restart: fresh in-memory state, the profile is now RUNNING
+        # (we left it up), and the listing would therefore call it the operator's.
+        _backends._PROFILE_OURS.clear()
+        _backends._OWNED_LOADED = False
+
+        async def _listing_running():
+            return [{"id": "P", "name": "p", "status": "running"}]
+        monkeypatch.setattr(_backends, "list_profiles", _listing_running)
+
+        await _backends._note_launch_ownership("P")
+        assert "P" in _backends._PROFILE_OURS, "restart laundered our profile into 'operator's'"
+    asyncio.run(go())
+
+
+def test_stopping_a_profile_drops_it_from_the_persisted_set(monkeypatch, tmp_path):
+    """Otherwise a stale file would let us adopt — and kill — a profile the operator
+    started by hand later on."""
+    calls = _stopped_calls(monkeypatch)
+    path = tmp_path / "owned.json"
+    monkeypatch.setattr(_backends, "_OWNED_PATH", path)
+    monkeypatch.setattr(_backends, "PROFILE_IDLE_STOP", 0.01)
+
+    async def go():
+        _backends._PROFILE_OURS.add("P")
+        _backends._save_owned()
+        await _backends.attach_profile("P", "/proj/a")
+        await _backends.release_profile("P", "/proj/a")
+        await asyncio.sleep(0.05)
+        assert calls == ["P"]
+        assert "P" not in _backends._PROFILE_OURS
+        import json
+        assert json.loads(path.read_text()) == []
+    asyncio.run(go())
+
+
+def test_a_corrupt_or_missing_ownership_file_is_survivable(monkeypatch, tmp_path):
+    path = tmp_path / "owned.json"
+    monkeypatch.setattr(_backends, "_OWNED_PATH", path)
+    _backends._OWNED_LOADED = False
+    _backends._load_owned()          # missing file
+    assert _backends._PROFILE_OURS == set()
+    path.write_text("{not json")
+    _backends._OWNED_LOADED = False
+    _backends._load_owned()          # garbage file
+    assert _backends._PROFILE_OURS == set()
