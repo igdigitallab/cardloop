@@ -81,6 +81,10 @@ class Acquired:
     # True when the underlying browser/context is shared with other projects, so page
     # adoption must be scoped to our own tab (see browser_pane).
     shared_context: bool = False
+    # Cloak Manager profile id backing this session, "" for every other backend. The
+    # session must hand this back on teardown (release_profile) or the profile stays
+    # running forever — see the profile-lifecycle block below.
+    profile: str = ""
 
 
 # ───────────────────────────── config resolution ─────────────────────────────
@@ -231,6 +235,9 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
     label = "External CDP"
     headers: dict[str, str] = {}
     if profile and not cdp_url:
+        # Decide ownership BEFORE launching: once it is up we can no longer tell
+        # "we started this" from "it was already the operator's".
+        await _note_launch_ownership(profile)
         cdp_url = await profile_cdp_url(profile)
         label = f"Cloak Manager · {profile}"
         # The Manager's CDP endpoint is auth-gated (Bearer) and WAF-fronted (rejects a
@@ -275,7 +282,7 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
         await page.set_viewport_size(viewport)
     return Acquired(pw=pw, browser=browser, context=context, page=page,
                     owns_browser=False, backend="external-cdp", label=label,
-                    owns_page=owns_page, shared_context=isolate)
+                    owns_page=owns_page, shared_context=isolate, profile=profile)
 
 
 # ───────────────────────────── tier A: builtin ───────────────────────────────
@@ -330,6 +337,9 @@ async def acquire(cwd: str, viewport: dict) -> Acquired:
     except BackendError as e:
         _log.warning("browser backend acquire FAILED (cwd=%s backend=%s): %s", cwd, backend, e)
         raise
+    # Refcount the Manager profile only after a SUCCESSFUL acquire — registering a
+    # failed attempt would pin a profile open with a session that never existed.
+    await attach_profile(acq.profile, cwd)
     _log.info("browser backend acquired (cwd=%s backend=%s label=%s)", cwd, backend, acq.label or acq.backend)
     return acq
 
@@ -436,6 +446,120 @@ async def profile_cdp_url(profile_id: str) -> str:
             raise BackendError("Cloak Manager CDP base is not configured (set CLOAK_MANAGER_CDP_BASE or manager_url).")
         url = base + url
     return url
+
+
+# ─────────────────────── Cloak Manager profile lifecycle ─────────────────────
+# We LAUNCH a Manager profile on demand (profile_cdp_url below) but used to never
+# stop one: teardown deliberately only disconnects, because killing a shared
+# logged-in browser out from under the operator would be worse than leaving it up.
+# The cost of "leave it up" turned out to be real, though — two profiles idled ~10
+# hours after their last use, 55 Chrome processes between them, and because the VM
+# has no GPU passthrough every one of them renders through swiftshader (software
+# GL) on the CPU. That pinned the host at 445% CPU / 67-73°C, load 9.8 on 6 vCPU,
+# swap full, fans audible across the room — for browsers nobody was looking at.
+#
+# So: whoever launched it, stops it. We track which profiles WE started (a profile
+# already running when we arrived belongs to the operator — never ours to kill),
+# refcount the sessions attached to each, and stop one only after the LAST session
+# detaches and a grace period passes with nobody coming back. Stopping is safe for
+# logins: cookies live in the profile's on-disk user-data-dir, not in the process.
+_PROFILE_USERS: "dict[str, set[str]]" = {}       # profile id → session keys attached now
+_PROFILE_OURS: "set[str]" = set()                # profiles this process launched
+_PROFILE_STOPPERS: "dict[str, Any]" = {}         # profile id → pending stop task
+_PROFILE_LOCK: "Any" = None                      # created lazily, needs a running loop
+
+# Seconds a profile we launched may sit with zero attached sessions before being
+# stopped. 0 disables the whole mechanism (back to the old leave-it-running
+# behaviour). Deliberately much longer than browser_pane's 120s session idle: a
+# cold profile start costs seconds, and an operator reading a page in the Manager's
+# own noVNC viewer looks exactly like "idle" from here.
+PROFILE_IDLE_STOP = float(os.environ.get("CLOAK_PROFILE_IDLE_STOP", "900"))
+
+
+def _profile_lock() -> Any:
+    global _PROFILE_LOCK
+    if _PROFILE_LOCK is None:
+        import asyncio
+        _PROFILE_LOCK = asyncio.Lock()
+    return _PROFILE_LOCK
+
+
+async def attach_profile(profile_id: str, session_key: str) -> None:
+    """Register that ``session_key`` is now using ``profile_id`` and cancel any
+    pending stop — a project reconnecting within the grace window must not have the
+    profile yanked out from under it a moment later."""
+    if not profile_id:
+        return
+    async with _profile_lock():
+        task = _PROFILE_STOPPERS.pop(profile_id, None)
+        if task is not None:
+            task.cancel()
+            _log.info("cloak profile %s reused before idle-stop fired, cancelling stop", profile_id)
+        _PROFILE_USERS.setdefault(profile_id, set()).add(session_key)
+
+
+async def release_profile(profile_id: str, session_key: str) -> None:
+    """``session_key`` is done with ``profile_id``. When it was the last user AND we
+    launched this profile, schedule the stop after the idle grace period."""
+    if not profile_id:
+        return
+    import asyncio
+    async with _profile_lock():
+        users = _PROFILE_USERS.get(profile_id)
+        if users is not None:
+            users.discard(session_key)
+            if not users:
+                _PROFILE_USERS.pop(profile_id, None)
+        if _PROFILE_USERS.get(profile_id):
+            return  # another project is still on this profile
+        if profile_id not in _PROFILE_OURS or PROFILE_IDLE_STOP <= 0:
+            return  # the operator's own running profile, or the feature is off
+        if profile_id in _PROFILE_STOPPERS:
+            return
+        _PROFILE_STOPPERS[profile_id] = asyncio.create_task(_stop_when_idle(profile_id))
+
+
+async def _stop_when_idle(profile_id: str) -> None:
+    import asyncio
+    try:
+        await asyncio.sleep(PROFILE_IDLE_STOP)
+    except asyncio.CancelledError:
+        return
+    async with _profile_lock():
+        _PROFILE_STOPPERS.pop(profile_id, None)
+        if _PROFILE_USERS.get(profile_id):
+            return  # someone attached while we slept
+        _PROFILE_OURS.discard(profile_id)
+    try:
+        await stop_profile(profile_id)
+        _log.info("stopped idle cloak profile %s after %.0fs with no sessions",
+                  profile_id, PROFILE_IDLE_STOP)
+    except Exception as e:
+        _log.warning("failed to stop idle cloak profile %s: %s", profile_id, e)
+
+
+async def _note_launch_ownership(profile_id: str) -> None:
+    """Mark the profile as ours to stop IFF it was not already running. Called before
+    we launch it; a profile the operator started stays theirs for its whole life."""
+    running = False
+    with contextlib.suppress(Exception):
+        for p in await list_profiles():
+            if p["id"] == profile_id:
+                running = p["status"].lower() in ("running", "started", "active")
+                break
+    if not running:
+        async with _profile_lock():
+            _PROFILE_OURS.add(profile_id)
+
+
+def profile_lifecycle_status() -> dict:
+    """Snapshot for diagnostics: which profiles we hold open and who is on them."""
+    return {
+        "idle_stop_seconds": PROFILE_IDLE_STOP,
+        "launched_by_us": sorted(_PROFILE_OURS),
+        "attached": {pid: sorted(keys) for pid, keys in _PROFILE_USERS.items()},
+        "stop_pending": sorted(_PROFILE_STOPPERS),
+    }
 
 
 # ───────────────────────────── availability summary ──────────────────────────

@@ -64,6 +64,18 @@ Point the pane at **any** browser speaking the Chrome DevTools Protocol. Two way
 > your own Manager (or use any CDP browser) and enter your endpoint in the UI. Your credentials go to the
 > encrypted secret vault, never to `modules.json` or git.
 
+**Profiles are stopped again when idle.** Cardloop launches a Manager profile on demand, so it also
+stops it: once the last project detaches and `CLOAK_PROFILE_IDLE_STOP` seconds pass (default 900) the
+profile is shut down. Cookies and logins live in the profile's on-disk user-data-dir, not in the running
+process, so nothing is lost — the next use starts it again with the session intact. A profile that was
+**already running** when Cardloop connected is treated as yours and is never stopped, no matter how long
+it idles. Set `CLOAK_PROFILE_IDLE_STOP=0` to disable this entirely.
+
+This matters more than it sounds on a VM without GPU passthrough: Chrome falls back to `swiftshader`
+(software GL on the CPU), so an idle-but-open profile is not free. Two forgotten profiles once held 55
+Chrome processes between them and pinned the host at 445% CPU / 70°C for ten hours. `GET
+/api/browser/profile-usage` shows what the cockpit currently holds open and which sessions are attached.
+
 **REST vs CDP host split.** If your Manager's REST API sits behind a CDN/WAF (fine for JSON) but raw CDP
 websockets need a directly-reachable address, set `CLOAK_MANAGER_CDP_BASE` in `.env` to the internal
 host (e.g. `http://10.0.0.5:8080`). REST keeps using the Manager URL; CDP uses this base. Unset → both

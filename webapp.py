@@ -14962,6 +14962,23 @@ async def api_browser_profiles(req: web.Request) -> web.Response:
     return web.json_response({"profiles": profiles})
 
 
+async def api_browser_profile_usage(req: web.Request) -> web.Response:
+    """GET /api/browser/profile-usage — which Manager profiles this cockpit is
+    holding open, and which sessions are on them.
+
+    Exists because the answer used to require ssh + `ps aux` on the VM: an idle
+    profile Cardloop had launched looked identical, from outside, to one the
+    operator opened deliberately — until the host's fans made it everyone's problem.
+    """
+    live = {}
+    for key, sess in _browser_pane._SESSIONS.items():
+        st = sess.status()
+        if st.get("profile"):
+            live[key] = {"profile": st["profile"], "idle_seconds": st["idle_seconds"],
+                         "subscribers": st["subscribers"], "alive": st["alive"]}
+    return web.json_response({"lifecycle": _backends.profile_lifecycle_status(), "sessions": live})
+
+
 async def api_browser_profile_action(req: web.Request) -> web.Response:
     """POST /api/browser/profiles/{id}/{action} — launch | stop a Manager profile."""
     pid = req.match_info["id"]
@@ -15350,6 +15367,7 @@ async def start(ctx: dict) -> None:
         app.router.add_post("/api/browser/install-cloak", api_browser_install_cloak)
         app.router.add_post("/api/browser/manager-token", api_browser_manager_token)
         app.router.add_get("/api/browser/profiles", api_browser_profiles)
+        app.router.add_get("/api/browser/profile-usage", api_browser_profile_usage)
         app.router.add_post("/api/browser/profiles/{id}/{action}", api_browser_profile_action)
 
         # spec-065 Phase B: live browser pane (WebSocket screencast)

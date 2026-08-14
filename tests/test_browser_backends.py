@@ -5,6 +5,7 @@ backend resolution (builtin / cloakbrowser / external-cdp), graceful degradation
 cloakbrowser is absent, the agent_actions safety gate, and the Cloak Manager config
 plumbing (URL from config/env, token from the safe — never modules.json).
 """
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -327,3 +328,151 @@ def test_availability_exposes_per_project_map():
 def test_malformed_per_project_map_is_ignored():
     _mod.set_config("browser", {"backend": "cloakbrowser", "per_project_profile": "nope"})
     assert _backends.resolve("/proj/x")["backend"] == "cloakbrowser"
+
+
+# ── Cloak Manager profile lifecycle ────────────────────────────────────────────
+# Regression cover for a live incident: two Manager profiles Cardloop had launched
+# sat idle ~10 hours with 55 Chrome processes between them, software-rendering
+# through swiftshader on a GPU-less VM — host at 445% CPU / 67-73°C, load 9.8 on 6
+# vCPU, swap full. We launched them and never stopped them. These pin down the
+# contract that fixes it: whoever launched it stops it, and nothing else is touched.
+
+@pytest.fixture(autouse=True)
+def _clean_profile_registry():
+    _backends._PROFILE_USERS.clear()
+    _backends._PROFILE_OURS.clear()
+    for t in list(_backends._PROFILE_STOPPERS.values()):
+        t.cancel()
+    _backends._PROFILE_STOPPERS.clear()
+    yield
+    _backends._PROFILE_USERS.clear()
+    _backends._PROFILE_OURS.clear()
+    _backends._PROFILE_STOPPERS.clear()
+
+
+def _stopped_calls(monkeypatch):
+    """Record stop_profile() calls instead of hitting the Manager."""
+    calls = []
+
+    async def _stop(pid):
+        calls.append(pid)
+        return {}
+    monkeypatch.setattr(_backends, "stop_profile", _stop)
+    return calls
+
+
+def test_idle_profile_we_launched_is_stopped_after_the_last_session_leaves(monkeypatch):
+    calls = _stopped_calls(monkeypatch)
+    monkeypatch.setattr(_backends, "PROFILE_IDLE_STOP", 0.01)
+
+    async def go():
+        _backends._PROFILE_OURS.add("P")
+        await _backends.attach_profile("P", "/proj/a")
+        await _backends.release_profile("P", "/proj/a")
+        task = _backends._PROFILE_STOPPERS.get("P")
+        assert task is not None, "the last release must schedule a stop"
+        await asyncio.sleep(0.05)
+        assert calls == ["P"]
+    asyncio.run(go())
+
+
+def test_a_profile_the_operator_started_is_never_stopped_by_us(monkeypatch):
+    """A profile already running when we arrived is the operator's — they may be
+    working in the Manager's own noVNC viewer, which looks exactly like idle here."""
+    calls = _stopped_calls(monkeypatch)
+    monkeypatch.setattr(_backends, "PROFILE_IDLE_STOP", 0.01)
+
+    async def go():
+        # NOT added to _PROFILE_OURS — it was already running
+        await _backends.attach_profile("P", "/proj/a")
+        await _backends.release_profile("P", "/proj/a")
+        await asyncio.sleep(0.05)
+        assert calls == []
+        assert "P" not in _backends._PROFILE_STOPPERS
+    asyncio.run(go())
+
+
+def test_a_profile_still_used_by_another_project_is_not_stopped(monkeypatch):
+    """default_profile is shared across every project without its own — one project
+    finishing must not kill the browser another one is actively driving."""
+    calls = _stopped_calls(monkeypatch)
+    monkeypatch.setattr(_backends, "PROFILE_IDLE_STOP", 0.01)
+
+    async def go():
+        _backends._PROFILE_OURS.add("P")
+        await _backends.attach_profile("P", "/proj/a")
+        await _backends.attach_profile("P", "/proj/b")
+        await _backends.release_profile("P", "/proj/a")
+        await asyncio.sleep(0.05)
+        assert calls == []
+        # …and only once the SECOND project leaves does it stop
+        await _backends.release_profile("P", "/proj/b")
+        await asyncio.sleep(0.05)
+        assert calls == ["P"]
+    asyncio.run(go())
+
+
+def test_reattaching_within_the_grace_window_cancels_the_stop(monkeypatch):
+    """A restart or a project switch reconnects seconds later — the profile must not
+    be pulled out from under the returning session."""
+    calls = _stopped_calls(monkeypatch)
+    monkeypatch.setattr(_backends, "PROFILE_IDLE_STOP", 0.2)
+
+    async def go():
+        _backends._PROFILE_OURS.add("P")
+        await _backends.attach_profile("P", "/proj/a")
+        await _backends.release_profile("P", "/proj/a")
+        assert "P" in _backends._PROFILE_STOPPERS
+        await _backends.attach_profile("P", "/proj/a")   # came back
+        assert "P" not in _backends._PROFILE_STOPPERS
+        await asyncio.sleep(0.3)
+        assert calls == []
+    asyncio.run(go())
+
+
+def test_idle_stop_can_be_disabled_entirely(monkeypatch):
+    calls = _stopped_calls(monkeypatch)
+    monkeypatch.setattr(_backends, "PROFILE_IDLE_STOP", 0)
+
+    async def go():
+        _backends._PROFILE_OURS.add("P")
+        await _backends.attach_profile("P", "/proj/a")
+        await _backends.release_profile("P", "/proj/a")
+        await asyncio.sleep(0.05)
+        assert calls == []
+    asyncio.run(go())
+
+
+def test_ownership_is_claimed_only_for_a_profile_that_was_not_running(monkeypatch):
+    async def go():
+        async def _listing():
+            return [{"id": "RUNNING", "name": "r", "status": "running"},
+                    {"id": "STOPPED", "name": "s", "status": "stopped"}]
+        monkeypatch.setattr(_backends, "list_profiles", _listing)
+
+        await _backends._note_launch_ownership("STOPPED")
+        assert "STOPPED" in _backends._PROFILE_OURS
+        await _backends._note_launch_ownership("RUNNING")
+        assert "RUNNING" not in _backends._PROFILE_OURS
+    asyncio.run(go())
+
+
+def test_release_of_an_unknown_or_empty_profile_is_a_no_op():
+    async def go():
+        await _backends.release_profile("", "/proj/a")     # non-Manager backend
+        await _backends.release_profile("ghost", "/proj/a")
+        assert _backends._PROFILE_STOPPERS == {}
+    asyncio.run(go())
+
+
+def test_lifecycle_status_reports_what_we_hold_open():
+    """Point 3 of the incident report: see the open profiles from outside, without
+    having to ssh in and read `ps aux` on the VM."""
+    async def go():
+        _backends._PROFILE_OURS.add("P")
+        await _backends.attach_profile("P", "/proj/a")
+        st = _backends.profile_lifecycle_status()
+        assert st["launched_by_us"] == ["P"]
+        assert st["attached"] == {"P": ["/proj/a"]}
+        assert st["stop_pending"] == []
+    asyncio.run(go())

@@ -1461,3 +1461,54 @@ def test_solve_reports_extra_widgets_instead_of_pretending_the_page_is_clear(mon
     })
     res = asyncio.run(s.solve_captcha())
     assert res["extra_widgets"] == 1
+
+
+def test_teardown_hands_the_manager_profile_back_so_it_can_be_stopped():
+    """The other half of the idle-profile fix: browser_backends can only refcount a
+    profile if the session actually releases it. Without this the profile stays
+    'attached' forever and the idle-stop never fires — which is exactly how two
+    profiles idled ~10h and cooked the host CPU."""
+    async def go():
+        released = []
+
+        async def _release(profile, key):
+            released.append((profile, key))
+        orig = browser_pane._backends.release_profile
+        browser_pane._backends.release_profile = _release
+        try:
+            page = _SharedFakePage()
+            s = BrowserSession("/proj/a")
+            s._owns_browser = False
+            s._owns_page = True
+            s._page = page
+            s._tabs = {"t1": page}
+            s._profile = "d33e103d"
+            s._pw = None
+            await s._teardown()
+            assert released == [("d33e103d", "/proj/a")]
+            # …and only once: a second teardown must not double-release
+            await s._teardown()
+            assert released == [("d33e103d", "/proj/a")]
+        finally:
+            browser_pane._backends.release_profile = orig
+    asyncio.run(go())
+
+
+def test_teardown_releases_nothing_for_a_non_manager_backend():
+    async def go():
+        released = []
+
+        async def _release(profile, key):
+            released.append(profile)
+        orig = browser_pane._backends.release_profile
+        browser_pane._backends.release_profile = _release
+        try:
+            s = BrowserSession("/proj/a")
+            s._owns_browser = True
+            s._profile = ""          # builtin / cloakbrowser
+            s._pw = None
+            await s._teardown()
+            assert released == []
+        finally:
+            browser_pane._backends.release_profile = orig
+    asyncio.run(go())

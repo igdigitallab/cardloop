@@ -457,6 +457,7 @@ class BrowserSession:
         self._owns_browser = True   # False for connected/external backends — disconnect, don't kill
         self._owns_page = False     # True when we created our own tab inside a shared profile
         self._shared_ctx = False    # True when the context is shared with other projects
+        self._profile = ""          # Cloak Manager profile id, handed back on teardown
         self.backend = "builtin"    # spec-066: which backend acquired this session (for the pane header)
         self._started = False
         self._closed = False
@@ -488,6 +489,7 @@ class BrowserSession:
                 self._owns_browser = acq.owns_browser
                 self._owns_page = acq.owns_page
                 self._shared_ctx = acq.shared_context
+                self._profile = acq.profile
                 self.backend = acq.backend
                 # Browser death (process killed / OOM) — recover instead of a frozen pane.
                 self._browser.on("disconnected", self._on_disconnected)
@@ -548,6 +550,14 @@ class BrowserSession:
         self._pw = self._browser = self._ctx = self._page = self._cdp = None
         self._tabs.clear()
         self._active_id = None
+        # Hand the Manager profile back LAST, once our tabs are actually closed. If we
+        # were its only user and we launched it, this starts the idle-stop countdown —
+        # without it the profile's Chrome (55 processes across two profiles, software
+        # -rendered on a GPU-less VM) simply ran until someone noticed the fans.
+        if self._profile:
+            profile, self._profile = self._profile, ""
+            with contextlib.suppress(Exception):
+                await _backends.release_profile(profile, self.key)
 
     async def close(self) -> None:
         if self._closed:
@@ -1461,6 +1471,7 @@ class BrowserSession:
         repeated identical failures."""
         return {
             "backend": self.backend,
+            "profile": self._profile or None,
             "started": self._started,
             "closed": self._closed,
             "alive": self._is_alive(),
