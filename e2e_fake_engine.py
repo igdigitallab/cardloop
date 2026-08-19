@@ -14,6 +14,9 @@ Script selection is a marker substring in the prompt (checked in order below):
   "e2e:slow"  -> two text_delta events separated by a long silent gap (tests
                  mid-run reload / re-attach; the gap is what the heartbeat pump in
                  webapp.py's chat stream is designed to survive)
+  "e2e:hold"  -> one delta, then the turn stays alive (running) for a long stretch
+                 (tests composer/run-indicator state while a turn is genuinely in
+                 flight — e.g. that Stop stays reachable)
   "e2e:text"  -> three text_delta chunks + a final text + result (tests plain
                  streaming: no duplicate/chopped bubbles)
   anything else -> one short text + result (default ack, e.g. queued busy-path sends)
@@ -51,6 +54,11 @@ from typing import Any, AsyncGenerator
 # Kept short by default so the local/CI suite stays fast; override via env if a
 # test needs a longer silent stretch (e.g. to exercise CHAT_SSE_PING_SEC pings).
 _SLOW_GAP_SEC = float(os.environ.get("E2E_SLOW_GAP_SEC", "3.0"))
+
+# How long the "e2e:hold" scenario keeps the turn RUNNING after its first delta.
+# Long enough for a Playwright test to reload mid-run, re-adopt the turn from /live
+# and then poke at the composer while the server is unambiguously still busy.
+_HOLD_SEC = float(os.environ.get("E2E_HOLD_SEC", "25.0"))
 
 # Per-chunk delay for the "typing" feel in "e2e:text"/"e2e:tool". Also gives the
 # busy-path scenario (two sends back-to-back) a real window where the session is
@@ -166,6 +174,18 @@ async def run_engine(
         # Long silent tail: the turn stays running while the test asserts all three blocks survive.
         await asyncio.sleep(_SLOW_GAP_SEC)
         _append_transcript(cwd, sid, prompt, "\n".join(blocks), tool_calls=tool_calls)
+        yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
+        return
+
+    if "e2e:hold" in prompt:
+        head = "holding the turn open... "
+        yield {"type": "text_delta", "text": head}
+        await asyncio.sleep(_HOLD_SEC)
+        tail = "hold released."
+        yield {"type": "text_delta", "text": tail}
+        full = head + tail
+        yield {"type": "text", "text": full}
+        _append_transcript(cwd, sid, prompt, full)
         yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
         return
 

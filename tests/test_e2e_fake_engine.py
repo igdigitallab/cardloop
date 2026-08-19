@@ -76,6 +76,21 @@ async def test_e2e_slow_scenario_has_a_gap():
     assert events[2]["text"] == "starting slow scenario... done after the long silence."
 
 
+async def test_e2e_hold_scenario_keeps_the_turn_running(monkeypatch):
+    """e2e:hold streams one delta up front, then holds the turn open. The Playwright
+    stop-button specs need that window; here we only assert the shape + that the wait
+    happens AFTER the first delta (a client must see the turn as alive, not silent)."""
+    import time
+    monkeypatch.setattr(e2e_fake_engine, "_HOLD_SEC", 0.4)
+    t0 = time.monotonic()
+    events = await _collect("e2e:hold")
+    elapsed = time.monotonic() - t0
+    types = [e["type"] for e in events]
+    assert types == ["text_delta", "text_delta", "text", "result"]
+    assert events[0]["text"].startswith("holding")
+    assert elapsed >= 0.4
+
+
 async def test_e2e_error_scenario():
     events = await _collect("e2e:error")
     assert len(events) == 1

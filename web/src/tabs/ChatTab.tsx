@@ -1974,18 +1974,27 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         const liveIsOurs = !res.chat_id || !effectiveChatId || res.chat_id === effectiveChatId
         if (res.running && liveIsOurs) {
           wasServerRunningRef.current = true
-          if (!busActiveRef.current) {
-            busActiveRef.current = true
-            // Spec-035: use server started_at to avoid re-stamping the timer on each poll
-            const startMs = res.started_at != null ? res.started_at * 1000 : Date.now()
-            setServerStartedAt(prev => prev ?? startMs)
-            setRun(r => r ?? { startedAt: startMs, lastEventAt: Date.now(), currentTool: null, source: 'card' })
-          }
+          // The run indicator (and with it the Stop button) tracks the SERVER, not our
+          // local "am I rendering this turn" flag. Restoring it INSIDE the !busActiveRef
+          // branch was a hole: several paths null `run` without clearing busActiveRef
+          // (the {type:"queued"} ack, sendMessage's finally), and while busActiveRef sat
+          // stale-true the poll refused to bring `run` back — the composer stayed on
+          // "Send" with no Stop for the rest of a run that was very much alive.
+          // Spec-035: use server started_at to avoid re-stamping the timer on each poll.
+          const startMs = res.started_at != null ? res.started_at * 1000 : Date.now()
+          setServerStartedAt(prev => prev ?? startMs)
+          setRun(r => r ?? { startedAt: startMs, lastEventAt: Date.now(), currentTool: null, source: 'card' })
+          busActiveRef.current = true
         } else {
+          // Symmetrically: the server says no run of ours is in flight, so the indicator
+          // goes away even if busActiveRef was already false (e.g. an optimistic `run`
+          // from a send that the backend then parked in the queue). Safe against our own
+          // in-flight turn: sync() bails out above while streamingRef is true, and
+          // sendMessage sets that ref synchronously before it POSTs.
+          setRun(null)
+          setServerStartedAt(null)
           if (busActiveRef.current) {
             busActiveRef.current = false
-            setRun(null)
-            setServerStartedAt(null)
             setSubagents([])
             seenSubagentKeysRef.current = new Set()
             // We rendered this turn live — finalize the open bubble. No SYNCHRONOUS hydrate
@@ -2403,6 +2412,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     if (overrideText === undefined) { setInput(''); setAttachments([]) }
     setError('')
     setStreaming(true)
+    // Sync the ref NOW — the useEffect that mirrors `streaming` only runs after render, and
+    // the /live poll (which bails out while this ref is true) would otherwise be free to fire
+    // in that window, see a server that has not taken the run lock yet, and clear the run we
+    // are about to start. Mirrors the same synchronous flip on the way down (see finally).
+    streamingRef.current = true
     const startTs = Date.now()
     setRun({ startedAt: startTs, lastEventAt: startTs, currentTool: null, source: 'chat' })
 
@@ -4202,28 +4216,34 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             {(() => {
               const busy = !!run || streaming
               const hasContent = input.trim().length > 0 || attachments.filter(a => a.path).length > 0
-              // ONE button, fixed position — never shifts. Running: typed text →
-              // Queue, empty → Stop. Idle → Send. (Clear the text to
-              // expose Stop while a run is active.)
-              if (busy && !hasContent) {
-                return (
+              // The PRIMARY button never shifts (pinned right by margin-left:auto):
+              // running + typed text → Queue, running + empty → Stop, idle → Send.
+              // INVARIANT: while a run is active, Stop is ALWAYS on screen. With text in
+              // the box it rides as a compact icon LEFT of Queue instead of replacing it.
+              // The old rule ("clear the input to expose Stop") left the operator with a
+              // running turn, a draft in the composer and no reachable way to interrupt —
+              // every send just piled into the queue. Covered by tests/e2e/test_stop_button.py.
+              if (busy) {
+                const stopBtn = (
                   <button
-                    className="chat-send-btn chat-send-btn-stop"
+                    className={`chat-send-btn chat-send-btn-stop${hasContent ? ' chat-send-btn-stop-icon' : ''}`}
                     disabled={rotating}
                     onClick={stopStream}
                     title={t['chat.stop_title']}
                     aria-label={t['chat.stop_aria']}
-                  ><Square size={14} /> {t['chat.stop']}</button>
+                  ><Square size={14} />{hasContent ? '' : ` ${t['chat.stop']}`}</button>
                 )
-              }
-              if (busy && hasContent) {
+                if (!hasContent) return stopBtn
                 return (
-                  <button
-                    className="btn-primary chat-send-btn"
-                    disabled={rotating}
-                    onClick={() => sendMessage()}
-                    title={t['chat.queue_title']}
-                  >{t['chat.queue']}</button>
+                  <>
+                    {stopBtn}
+                    <button
+                      className="btn-primary chat-send-btn"
+                      disabled={rotating}
+                      onClick={() => sendMessage()}
+                      title={t['chat.queue_title']}
+                    >{t['chat.queue']}</button>
+                  </>
                 )
               }
               // Idle → Send. Card 38159b: during a restart/handoff, stay enabled and label
