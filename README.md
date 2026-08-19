@@ -181,6 +181,20 @@ strong and enable TOTP):
 Pulls the latest version, reinstalls dependencies only if they changed, rebuilds the frontend, and
 restarts the systemd service if one is installed. Docker: `git pull && docker compose up --build -d`.
 
+### Troubleshooting
+
+Something broken, or filing a bug report? Run the built-in diagnostic first:
+
+```bash
+make doctor                       # or: venv/bin/python tools/doctor.py
+venv/bin/python tools/doctor.py --json   # machine-readable
+```
+
+In under 5 seconds it prints versions, auth state, config, systemd service health, runtime
+reachability, and data counts, ending with a ✗/⚠ verdict and a one-line remedy for each finding
+(exit code is non-zero when any ✗ is present). Read-only — it never restarts anything or touches
+your data — and secret values are always redacted. Paste its output into a GitHub issue.
+
 ---
 
 ## Install it on your phone (PWA)

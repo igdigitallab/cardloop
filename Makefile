@@ -1,4 +1,4 @@
-.PHONY: help install update build run test install-dev service
+.PHONY: help install update build run test install-dev service doctor
 
 help:           ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -21,6 +21,9 @@ test:           ## Run the test suite (must be via venv — pytest-aiohttp lives
 
 install-dev:    ## Install dev/test dependencies only
 	venv/bin/pip install -r requirements-dev.txt
+
+doctor:         ## Diagnose a broken (or healthy) cockpit in one command (< 5s, read-only)
+	venv/bin/python tools/doctor.py
 
 service:        ## Render + install the systemd unit, then enable & start it
 	@sed -e "s/__USER__/$$(whoami)/g" -e "s#__HOME__#$$HOME#g" cardloop.service.template \

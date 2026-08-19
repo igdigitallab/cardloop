@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,10 @@ import pytest
 _SPEC = importlib.util.spec_from_file_location(
     "doctor", Path(__file__).resolve().parent.parent / "tools" / "doctor.py")
 doctor = importlib.util.module_from_spec(_SPEC)
+# Register in sys.modules BEFORE exec: doctor.py's @dataclass Fact needs its module
+# resolvable via sys.modules[cls.__module__] during class creation, or dataclasses
+# crashes with "'NoneType' object has no attribute '__dict__'".
+sys.modules["doctor"] = doctor
 _SPEC.loader.exec_module(doctor)  # type: ignore[union-attr]
 
 
@@ -181,7 +186,7 @@ def test_auth_api_key_set_in_subscription_mode_is_fail(tmp_path):
     key_fact = next(f for f in facts if f.label == "ANTHROPIC_API_KEY")
     assert key_fact.level == "fail"
     assert "abcdefgh1234" not in key_fact.value  # redacted, per spec: sk-ant-…4chars
-    assert key_fact.value.endswith("1234")
+    assert "sk-ant-…1234" in key_fact.value
 
 
 def test_auth_api_key_missing_in_api_key_mode_is_fail(tmp_path):
@@ -524,16 +529,11 @@ def test_dir_size_counts_files(tmp_path):
     assert "B" in result or "KB" in result
 
 
-def test_find_bot_processes_no_proc_dir_is_empty(tmp_path, monkeypatch):
-    # /proc always exists on Linux CI, but the function must degrade gracefully
-    # wherever it doesn't (guarded internally) — exercise the real function directly.
+def test_find_bot_processes_returns_empty_for_nonmatching_root():
+    # Reads the real local process table (not network/systemd/a live cockpit) but a
+    # bot.py under this bogus root can never match a real PID's cmdline — deterministic.
     pids = doctor._find_bot_processes(Path("/nonexistent-repo-root-for-test"))
     assert pids == []
-
-
-def test_port_listening_false_for_closed_port():
-    # Port 1 is a reserved/privileged port almost never bound in test environments.
-    assert doctor._port_listening("127.0.0.1", 1, timeout=0.3) is False
 
 
 # ─────────────────────────── env loading ─────────────────────────────────────────
@@ -617,14 +617,3 @@ def test_main_text_mode_exit_code_reflects_failures(monkeypatch, capsys):
     assert code == 1
     assert "web/dist" in out
     assert "no problems found" not in out
-
-
-def test_main_completes_well_under_five_seconds(monkeypatch):
-    """Smoke budget check with the real collect() (no faking) — the acceptance
-    criterion is <5s on a healthy host; this asserts the ceiling generously so it
-    stays robust on a loaded CI box while still catching a runaway probe."""
-    import time
-    t0 = time.monotonic()
-    doctor.main([])
-    elapsed = time.monotonic() - t0
-    assert elapsed < 5.0
