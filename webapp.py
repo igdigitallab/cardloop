@@ -2449,6 +2449,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "context_pack_enabled": b.get("context_pack_enabled"),
             "board_provider": "codex" if b.get("board_provider") == "codex" else "claude",
             "codex_model": b.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
+            # spec-082 A: tools the ask-mode gate auto-approves in this project
+            "ask_always_allow": b.get("ask_always_allow") or [],
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -2465,6 +2467,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "model": b.get("model", ctx.get("DEFAULT_MODEL", "sonnet")),
             "session_key": fid,  # session_key for free = its own id (string with free- prefix)
             "is_free": True,
+            "ask_always_allow": b.get("ask_always_allow") or [],
             "group": raw_free_group if raw_free_group in valid_groups else None,
             "favorite": fid in fav_set,
             "provider": "codex" if b.get("provider") == "codex" else "claude",
@@ -5193,11 +5196,20 @@ def _ask_always_allow(project: dict) -> "list[str]":
 
 def _ask_always_allow_add(ctx: dict, project: dict, tool_name: str) -> "list[str]":
     """Persist tool_name into the project's always-allow list (topics.json under data/,
-    gitignored — same store and same write pattern as every other per-project setting)."""
+    gitignored — same store and same write pattern as every other per-project setting).
+    A free chat has no topics entry, so its list lives in the free-chat record instead."""
     current = _ask_always_allow(project)
-    if tool_name in current:
+    if not tool_name or tool_name in current:
         return current
     updated = sorted(set(current) | {tool_name})
+    project["ask_always_allow"] = updated       # keep the caller's view in sync
+    if project.get("is_free"):
+        free = _load_free_chats(ctx)
+        entry = free.get(project.get("id"))
+        if isinstance(entry, dict):
+            entry["ask_always_allow"] = updated
+            _save_free_chats(ctx, free)
+        return updated
     cwd = project.get("cwd")
     for b in ctx.get("topics", {}).values():
         if b.get("cwd") == cwd:
