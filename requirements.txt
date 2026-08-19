@@ -37,3 +37,7 @@ python-dotenv>=1.2
 
 # Structured concurrency primitives used by the SDK and engine.
 anyio>=4.13
+
+# Terminal QR codes for --tunnel / LAN onboarding (spec-082 B). Pure Python — ASCII/
+# Unicode rendering only, no Pillow dependency needed.
+qrcode>=8
