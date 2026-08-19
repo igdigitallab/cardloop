@@ -756,6 +756,26 @@ export const en = {
   'search.peek_empty': 'This conversation is empty',
   'search.peek_you': 'You',
   'search.peek_agent': 'Agent',
+
+  // ── spec-082 D: QuickKeys (mobile terminal key bar) ───────────────────────────
+  'quickkeys.esc': 'Esc',
+  'quickkeys.tab': 'Tab',
+  'quickkeys.ctrl': 'Ctrl',
+  'quickkeys.ctrl_c': 'Ctrl+C',
+  'quickkeys.bar_label': 'Terminal quick keys',
+  'quickkeys.aria_esc': 'Escape',
+  'quickkeys.aria_tab': 'Tab',
+  'quickkeys.aria_ctrl': 'Control — tap, then a letter key',
+  'quickkeys.aria_ctrl_armed': 'Control armed — next key sends its control code',
+  'quickkeys.aria_up': 'Arrow up',
+  'quickkeys.aria_down': 'Arrow down',
+  'quickkeys.aria_left': 'Arrow left',
+  'quickkeys.aria_right': 'Arrow right',
+  'quickkeys.aria_ctrl_c': 'Send Ctrl+C (interrupt)',
+  'quickkeys.aria_pipe': 'Pipe character',
+  'quickkeys.aria_tilde': 'Tilde character',
+  'quickkeys.aria_slash': 'Slash character',
+  'quickkeys.aria_dash': 'Dash character',
 } as const
 
 export type TKey = keyof typeof en

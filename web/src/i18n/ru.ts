@@ -725,6 +725,26 @@ export const ru = {
   'search.peek_empty': 'Разговор пуст',
   'search.peek_you': 'Вы',
   'search.peek_agent': 'Агент',
+
+  // ── spec-082 D: QuickKeys (mobile terminal key bar) ───────────────────────────
+  'quickkeys.esc': 'Esc',
+  'quickkeys.tab': 'Tab',
+  'quickkeys.ctrl': 'Ctrl',
+  'quickkeys.ctrl_c': 'Ctrl+C',
+  'quickkeys.bar_label': 'Быстрые клавиши терминала',
+  'quickkeys.aria_esc': 'Escape',
+  'quickkeys.aria_tab': 'Tab',
+  'quickkeys.aria_ctrl': 'Ctrl — нажмите, затем букву',
+  'quickkeys.aria_ctrl_armed': 'Ctrl активен — следующая клавиша отправит control-код',
+  'quickkeys.aria_up': 'Стрелка вверх',
+  'quickkeys.aria_down': 'Стрелка вниз',
+  'quickkeys.aria_left': 'Стрелка влево',
+  'quickkeys.aria_right': 'Стрелка вправо',
+  'quickkeys.aria_ctrl_c': 'Отправить Ctrl+C (прервать)',
+  'quickkeys.aria_pipe': 'Символ «|»',
+  'quickkeys.aria_tilde': 'Символ «~»',
+  'quickkeys.aria_slash': 'Символ «/»',
+  'quickkeys.aria_dash': 'Символ «-»',
 } as const
 
 export type TKey = keyof typeof ru

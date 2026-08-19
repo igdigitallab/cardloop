@@ -1,0 +1,55 @@
+/* spec-082 D — QuickKeys: mobile-only key bar pinned above the terminal's
+   on-screen keyboard (Esc/Tab/Ctrl/arrows/Ctrl+C/| ~ / -). Rendered only when
+   TerminalTab's JS `isMobile` flag is true (same ≤768px breakpoint used
+   elsewhere in the app — see mobile-toolbar-on-composer), so there is no
+   desktop CSS to gate here: the component simply never mounts on desktop. */
+
+.terminal-quickkeys {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)) 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none; /* Firefox */
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.terminal-quickkeys::-webkit-scrollbar {
+  display: none; /* Chrome/Safari */
+}
+
+.terminal-quickkey {
+  flex-shrink: 0;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--text);
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  white-space: nowrap;
+}
+.terminal-quickkey:active {
+  background: var(--bg4);
+}
+/* Sticky-Ctrl latched state — achromatic invert, same pattern as
+   .theme-toggle-btn.active elsewhere (no color accent). */
+.terminal-quickkey.armed {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
