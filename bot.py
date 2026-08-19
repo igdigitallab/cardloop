@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 import webapp          # web cockpit (webapp.py) — started alongside, state shared via ctx
+import tunnel          # spec-082 B: --tunnel / CARDLOOP_TUNNEL zero-config remote access + QR
 
 # ─────────────────────────── config ───────────────────────────
 HERE = Path(__file__).resolve().parent
@@ -103,12 +104,53 @@ def _build_ctx() -> dict:
     return ctx
 
 
-async def _amain() -> None:
+async def _maybe_start_tunnel(tunnel_enabled: bool) -> "str | None":
+    """spec-082 B: bring up a cloudflared quick tunnel + print its URL/QR, or — when
+    tunnelling is off/unavailable — print a QR for the LAN URL if WEB_HOST binds a
+    non-localhost interface. Returns the public tunnel URL, or None.
+
+    Factored out of _amain() so it's unit-testable without booting the whole cockpit.
+    Never raises and never blocks startup: any failure just leaves the cockpit
+    reachable on localhost only.
+    """
+    web_host = os.environ.get("WEB_HOST", "127.0.0.1")
+    tunnel_url = None
+    if tunnel_enabled:
+        try:
+            # Defense in depth: main() already refuses to start at all with a bad
+            # password, so this normally can't fail here — but a public tunnel must
+            # never come up if this check would, even if this helper is ever driven
+            # some other way than through main().
+            _check_web_password(WEB_PASSWORD)
+        except RuntimeError as e:
+            print(f"[tunnel] refusing to start the tunnel — {e}")
+        else:
+            tunnel_url = await tunnel.start_tunnel(WEB_PORT)
+            if tunnel_url:
+                print("=" * 72)
+                print(f"[tunnel] cockpit is reachable from the INTERNET at: {tunnel_url}")
+                print("[tunnel] protected only by WEB_PASSWORD (+ TOTP if enabled) — keep it strong.")
+                print("[tunnel] this hostname is ephemeral — it changes on every restart.")
+                print("=" * 72)
+                tunnel.print_qr(tunnel_url, label="[tunnel] scan to open on your phone:")
+    if not tunnel_url:
+        lan = tunnel.lan_url(web_host, WEB_PORT)
+        if lan:
+            print(f"[webapp] LAN URL: {lan}")
+            tunnel.print_qr(lan, label="[webapp] scan to open on your phone (same network):")
+    return tunnel_url
+
+
+async def _amain(*, tunnel_enabled: bool = False) -> None:
     """Async entry point — starts the web cockpit + engine on the asyncio loop.
 
     Loop ownership: a single asyncio loop drives aiohttp.  Systemd owns process
     termination — we never call os._exit or kill ourselves (cgroup gotcha: any
     such call inside the cgroup tears down the daemon mid-flight).
+
+    tunnel_enabled: spec-082 B. When set, brings up a cloudflared quick tunnel after
+    the cockpit starts and prints the public URL + a terminal QR code. Opt-in only —
+    see main()/_tunnel_requested(). Never blocks or aborts startup on failure.
     """
     # spec-039: stop event — SIGTERM/SIGINT handlers set this instead of raising;
     # the main coroutine awaits it, then performs graceful cleanup and returns.
@@ -145,10 +187,19 @@ async def _amain() -> None:
     await webapp.start(ctx)
     print("Cardloop started (web cockpit + kanban auto-run).")
 
+    # spec-082 B: zero-config remote access. Never aborts startup — a tunnel failure
+    # just means the cockpit stays reachable on localhost only.
+    await _maybe_start_tunnel(tunnel_enabled)
+
     # Idle until shutdown signal
     try:
         await _stop_event.wait()
     finally:
+        # spec-082 B: tear down the quick tunnel (if any) FIRST, before the session
+        # flush below — bounded internally (QuickTunnel.stop()), so this never delays
+        # shutdown, and it guarantees no orphan cloudflared process survives us.
+        await tunnel.stop_tunnel()
+
         # spec-039 graceful shutdown — two-phase:
         # Phase 1 (UNBOUNDED): flush sessions + evict live clients.  Must always
         #   run fully — losing session state on restart is worse than a slow stop.
@@ -191,9 +242,41 @@ def _check_web_password(password: str) -> None:
         )
 
 
+def _parse_args(argv=None):
+    """Parse Cardloop's own CLI flags.
+
+    argv=None reads sys.argv[1:] (the normal `python bot.py ...` case). Tests pass an
+    explicit list so pytest's own argv never leaks into this parser.
+    """
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="bot.py",
+        description="Cardloop — a self-hosted cockpit for driving the Claude Agent SDK full-auto.",
+    )
+    parser.add_argument(
+        "--tunnel", action="store_true",
+        help=(
+            "Expose the cockpit on a public https://*.trycloudflare.com URL via a "
+            "cloudflared quick tunnel and print a scannable QR code (equivalent to "
+            "CARDLOOP_TUNNEL=1). Opt-in: the tunnel is a public URL protected only by "
+            "WEB_PASSWORD (+ TOTP if enabled). Requires the cloudflared binary — falls "
+            "back to localhost-only with an install hint if it's missing."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def _tunnel_requested(args) -> bool:
+    """--tunnel (CLI, manual runs) OR CARDLOOP_TUNNEL=1 (env, for the systemd unit)."""
+    if args.tunnel:
+        return True
+    return os.environ.get("CARDLOOP_TUNNEL", "").strip().lower() in ("1", "true", "yes")
+
+
 def main():
+    args = _parse_args()
     _check_web_password(WEB_PASSWORD)
-    asyncio.run(_amain())
+    asyncio.run(_amain(tunnel_enabled=_tunnel_requested(args)))
 
 
 if __name__ == "__main__":

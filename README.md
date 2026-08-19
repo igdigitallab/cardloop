@@ -130,6 +130,9 @@ claude login                  # personal use: your own Claude subscription, same
 # 5. Run
 venv/bin/python bot.py        # Cockpit → http://localhost:8787
 #    or install as a background service:  make service
+
+# 5b. Reach it from your phone right now — no Cloudflare account, no DNS, no config
+venv/bin/python bot.py --tunnel   # prints a public https://*.trycloudflare.com URL + a QR code to scan
 ```
 
 **Prefer Docker?** `claude login` on the host, set `WEB_PASSWORD` + `WEB_COOKIE_SALT` in `.env`, then:
@@ -143,16 +146,27 @@ docker compose up --build     # cockpit-only — see docker-compose.yml
 ### Access from anywhere (your own domain)
 
 By default Cardloop listens on **localhost only** — perfect on your own machine, but to use it from your
-phone or away from home you need to reach it over the network. Two common ways (read the
+phone or away from home you need to reach it over the network. Three ways, fastest first (read the
 [Security model](#security-model) first — you're exposing a full-auto agent, so keep `WEB_PASSWORD`
 strong and enable TOTP):
 
-- **Private, no public URL — [Tailscale](https://tailscale.com)** (simplest). Install it on the host and
+- **Zero-config, try it now — `--tunnel`.** `venv/bin/python bot.py --tunnel` (or `CARDLOOP_TUNNEL=1` in
+  `.env` for the systemd service) starts a `cloudflared` quick tunnel and prints a public
+  `https://*.trycloudflare.com` URL plus a scannable QR code — no account, no config file, no DNS. The
+  hostname is **ephemeral**: it changes every time the tunnel restarts, so it's for trying Cardloop out
+  or a one-off remote session, not a link you bookmark. Needs the `cloudflared` binary on `PATH`
+  ([install](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/));
+  missing it just prints a hint and the cockpit keeps running on localhost. Tradeoffs vs. the two options
+  below → [docs/remote-access.md](docs/remote-access.md).
+
+- **Private, no public URL — [Tailscale](https://tailscale.com)** (simplest for a URL you keep). Install it on the host and
   on your phone/laptop; reach the cockpit at `http://<tailscale-ip>:8787`. Nothing is exposed to the
   public internet. Great when it's just for you.
 
-- **Public HTTPS on your own domain — [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)**
-  (works behind CGNAT/NAT, no port-forwarding, free). Point a subdomain at the cockpit:
+- **Public HTTPS on your own domain — [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+  (named tunnel)** (works behind CGNAT/NAT, no port-forwarding, free). This is the one you keep — a
+  stable hostname on your own domain, not the ephemeral one from `--tunnel` above. Point a subdomain at
+  the cockpit:
 
   ```bash
   cloudflared tunnel login                              # one-time, opens a browser
@@ -376,6 +390,7 @@ manual steps → [CONTRIBUTING.md](CONTRIBUTING.md).
 | [docs/API.md](docs/API.md) | HTTP API reference |
 | [docs/notifications.md](docs/notifications.md) | Run-finished notifications (in-app + Web Push) — setup & troubleshooting |
 | [docs/browser.md](docs/browser.md) | Live browser pane — backends (built-in / CloakBrowser / Cloak Manager), co-control, safety gate |
+| [docs/remote-access.md](docs/remote-access.md) | `--tunnel` quick tunnel vs. Tailscale vs. named Cloudflare Tunnel — which to use when |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, tests, lint, commit style |
 | `TASKS.md` | Live board (kanban) — backlog and current tasks |
 
