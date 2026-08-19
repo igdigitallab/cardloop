@@ -96,7 +96,7 @@ Three things make Cardloop different from the dozen other agent kanbans:
 - **One transport-agnostic engine** — `run_engine()` feeds every channel against the same session and board.
 - **CLI-style chat** — SSE stream, tool rendering (Bash / Edit / Read / Write with diffs), on-the-fly model
   switch, message queue, prompt library, real interrupt.
-- **Production-grade internals** — 1400+ tests, per-project secrets vault (`.claude-ops/secrets/secrets.env`,
+- **Production-grade internals** — 2400+ tests, per-project secrets vault (`.claude-ops/secrets/secrets.env`,
   chmod 600), C2 destructive-command gate, double path-traversal defence, single-operator auth (web
   password + optional TOTP 2FA).
 - **Always-on self-hosted service** — systemd or Docker, accessible over HTTPS / Cloudflare Tunnel.
@@ -421,7 +421,7 @@ Python 3.11 · aiohttp · Claude Agent SDK · React 18 · Vite · TypeScript · 
 PRs are welcome — this is an open project and the monolith is being decomposed in the open.
 
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, lint, and commit style.
-- Tests: `venv/bin/python -m pytest tests/` (1400+, should be green).
+- Tests: `venv/bin/python -m pytest tests/` (2400+, should be green).
 - All new code, comments, docs, and UI strings are **English-only**; the agent's reply language is
   configurable separately via `RESPONSE_LANGUAGE`.
 - Found a bug or have an idea? Open an issue. Found a vulnerability? Open a private security advisory.

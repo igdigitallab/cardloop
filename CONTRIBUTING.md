@@ -93,7 +93,7 @@ bot.py          — web-only launcher (loads env/auth, builds ctx, starts the co
 webapp.py       — aiohttp cockpit, 57 HTTP routes, event bus
 web/            — React + Vite SPA (build → web/dist/)
 templates/      — new-project starters (*.tpl) + vault reference copies (reference/)
-tests/          — pytest suite (1400+ tests; run via venv/bin/python -m pytest)
+tests/          — pytest suite (2400+ tests; run via venv/bin/python -m pytest)
 data/           — runtime state (gitignored: topics.json, sessions.json, audit/, runs/)
 docs/API.md     — HTTP API reference
 tools/doctor.py — one-command cockpit diagnosis (make doctor)
