@@ -545,6 +545,20 @@ export const en = {
   'chat.plan_reject_cancel': 'Back',
   'chat.plan_feedback_placeholder': 'What should change in the plan? (sent to the model)',
 
+  // ── Ask mode (spec-082 A) ────────────────────────────────────────
+  'chat.ask_label': 'Ask me',
+  'chat.ask_toggle': 'Ask me before each tool',
+  'chat.ask_hint': 'The agent asks before every action that changes something: each Bash command, edit or fetch pins an Allow / Always allow / Deny card here and pushes to your phone. Reads and searches run freely. Off by default; remembered per chat.',
+  'chat.ask_plan_conflict': 'Ask me is suppressed while Plan mode is on (a plan turn is already read-only and already gated).',
+  'chat.ask_codex_conflict': 'Ask me is a Claude-only gate — this chat runs on Codex.',
+  'chat.ask_card_title': 'awaiting your approval',
+  'chat.ask_allow': 'Allow once',
+  'chat.ask_allow_always': 'Always allow here',
+  'chat.ask_deny': 'Deny…',
+  'chat.ask_deny_send': 'Send reason & deny',
+  'chat.ask_deny_cancel': 'Back',
+  'chat.ask_feedback_placeholder': 'Why not? (sent to the model so it can adapt)',
+
 
   // ── Auto-rotate toggle (spec-059 / T3) ──────────────────────────
   'chat.autorotate_label': 'Auto-rotate',

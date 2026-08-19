@@ -777,6 +777,19 @@ export const api = {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     ),
 
+  // spec-082 A: ask-mode per-tool approval — same store as the plan gate, kind-agnostic route
+  decisionGet: (projectId: string, decisionId: string) =>
+    apiFetch<{ id: string; kind: string; status: string; tool_name?: string;
+               tool_preview?: string; chat_id: string | null }>(
+      `/api/projects/${projectId}/decision/${encodeURIComponent(decisionId)}`),
+
+  decisionDecide: (projectId: string, decisionId: string,
+                   body: { decision: 'allow' | 'allow_always' | 'deny'; feedback?: string }) =>
+    apiFetch<{ ok: boolean; status: string; noop?: boolean }>(
+      `/api/projects/${projectId}/decision/${encodeURIComponent(decisionId)}/decide`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    ),
+
   // Spec-023: Project Archive
   archiveProject: (id: string) =>
     apiFetch<{ archived: boolean }>(`/api/projects/${id}/archive`, { method: 'POST' }),

@@ -184,6 +184,11 @@ function planModeStorageKey(projectId: string, chatId?: string) {
   return chatId ? `cops.chat.planmode.${projectId}:${chatId}` : `cops.chat.planmode.${projectId}`
 }
 
+function askModeStorageKey(projectId: string, chatId?: string) {
+  // spec-082 A: per-chat ask-mode toggle; mirrors planModeStorageKey pattern.
+  return chatId ? `cops.chat.askmode.${projectId}:${chatId}` : `cops.chat.askmode.${projectId}`
+}
+
 function draftStorageKey(projectId: string, chatId?: string) {
   // Per-chat draft key; falls back to per-project when chatId is not yet known.
   return chatId ? `cops.chat.draft.${projectId}:${chatId}` : `cops.chat.draft.${projectId}`
@@ -770,7 +775,8 @@ const THINK_TAG: Record<ThinkMode, string> = { low: 'low', medium: 'medium', hig
 
 const ModelThinkButton = memo(function ModelThinkButton({
   model, thinkValue, disabled, onModelChange, onThinkChange, menuPlacement = 'up', models,
-  ultracode, onUltracodeChange, planMode, onPlanModeChange, planLocked, provider = 'claude', reasoningLevels,
+  ultracode, onUltracodeChange, planMode, onPlanModeChange, planLocked,
+  askMode, onAskModeChange, provider = 'claude', reasoningLevels,
 }: {
   model: string
   thinkValue: ThinkMode
@@ -788,6 +794,9 @@ const ModelThinkButton = memo(function ModelThinkButton({
   onPlanModeChange: (v: boolean) => void
   /** True while a plan is awaiting a decision — flipping the toggle then has no effect. */
   planLocked?: boolean
+  /** spec-082 A: Ask mode — every non-read-only tool call waits for an Allow/Deny card. */
+  askMode: boolean
+  onAskModeChange: (v: boolean) => void
   provider?: Provider
   reasoningLevels?: ThinkMode[]
 }) {
@@ -842,7 +851,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
         aria-expanded={open}
         onClick={() => { if (!disabled) setOpen(o => !o) }}
       >
-        {planMode ? '🗺 ' : ''}{ultracode ? '⚡ ' : ''}{currentLabel}{tag ? ` · ${tag}` : ''}
+        {planMode ? '🗺 ' : ''}{askMode && !planMode ? '🙋 ' : ''}{ultracode ? '⚡ ' : ''}{currentLabel}{tag ? ` · ${tag}` : ''}
       </button>
       {open && (
         <div
@@ -897,6 +906,26 @@ const ModelThinkButton = memo(function ModelThinkButton({
           >
             <span>🗺 {t['chat.plan_toggle']}</span>
             <span className="ultracode-state">{planMode ? 'ON' : 'OFF'}</span>
+          </div>
+          {/* spec-082 A: Ask mode — per-tool approval. Mutually exclusive with plan mode
+              (plan wins server-side), and Claude-only: the gate IS a can_use_tool callback. */}
+          <div className="composer-modelthink-sec">{t['chat.ask_label']}</div>
+          <div
+            role="option"
+            aria-selected={askMode}
+            className={`chat-think-option plan-row${askMode && !planMode ? ' selected' : ''}`}
+            title={planMode ? t['chat.ask_plan_conflict']
+                   : provider === 'codex' ? t['chat.ask_codex_conflict'] : t['chat.ask_hint']}
+            style={planMode || provider === 'codex'
+              ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
+            onMouseDown={e => {
+              e.preventDefault()
+              if (planMode || provider === 'codex') return
+              onAskModeChange(!askMode)
+            }}
+          >
+            <span>🙋 {t['chat.ask_toggle']}</span>
+            <span className="ultracode-state">{askMode && !planMode ? 'ON' : 'OFF'}</span>
           </div>
           {/* spec-058: Ultracode mode toggle — xhigh effort + sub-agent fan-out.
               spec-080 C4: mutually exclusive with plan mode (plan wins server-side) —
@@ -1168,6 +1197,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     } catch { /* localStorage unavailable */ }
     return false
   })
+  // spec-082 A: Ask mode — per-chat toggle, default OFF (board/card runs stay full-auto).
+  const [askMode, setAskMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(askModeStorageKey(projectId, effectiveChatId || undefined)) === '1'
+    } catch { /* localStorage unavailable */ }
+    return false
+  })
   const [run, setRun] = useState<RunIndicator | null>(null)
   // Spec-035: server-authoritative turn start timestamp (epoch ms).
   // Set from /live started_at; null when not available (falls back to run.startedAt).
@@ -1281,6 +1317,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const [planFeedback, setPlanFeedback] = useState('')
   const [planRejecting, setPlanRejecting] = useState(false)
   const [planBusy, setPlanBusy] = useState(false)
+  // spec-082 A: pending per-tool approval card (Allow / Always allow / Deny). Null = none.
+  const [toolPrompt, setToolPrompt] = useState<{ decisionId: string; chatId: string | null;
+    toolName: string; preview: string } | null>(null)
+  const [toolFeedback, setToolFeedback] = useState('')
+  const [toolDenying, setToolDenying] = useState(false)
+  const [toolBusy, setToolBusy] = useState(false)
   // Live compaction-in-progress indicator: true from compact event until first assistant output or run end.
   const [isCompacting, setIsCompacting] = useState(false)
   // Ref mirror so SSE/bus event closures can read the current value without stale closure issues.
@@ -1353,6 +1395,21 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       return
     } catch { /* localStorage unavailable */ }
     setPlanMode(false)
+  }, [projectId, effectiveChatId])
+
+  // spec-082 A: re-load askMode from localStorage on project/chat switch (per-chat key)
+  useEffect(() => {
+    try {
+      setAskMode(localStorage.getItem(askModeStorageKey(projectId, effectiveChatId || undefined)) === '1')
+      return
+    } catch { /* localStorage unavailable */ }
+    setAskMode(false)
+  }, [projectId, effectiveChatId])
+
+  // spec-082 A: persist askMode toggle (per-chat key)
+  const handleAskModeChange = useCallback((v: boolean) => {
+    setAskMode(v)
+    try { localStorage.setItem(askModeStorageKey(projectId, effectiveChatId || undefined), v ? '1' : '0') } catch { /* ignore */ }
   }, [projectId, effectiveChatId])
 
   // spec-080: persist planMode toggle (per-chat key)
@@ -1503,6 +1560,32 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   }, [projectId, effectiveChatId])
 
   useEffect(() => { refreshPlanPrompt() }, [refreshPlanPrompt])
+
+  // spec-082 A: same reload-durability for the per-tool approval card — the active chat's
+  // decision_id pointer (chats.json) survives reloads, so a phone that locked mid-decision
+  // comes back to the card instead of to a silently parked turn.
+  const refreshToolPrompt = useCallback(async () => {
+    try {
+      const data = await api.chats(projectId)
+      const chats = (data?.chats || []) as unknown as Array<Record<string, unknown>>
+      const activeId = effectiveChatId || (data?.active as string | undefined)
+      const mine = chats.find(c => c['id'] === activeId)
+      const decisionId = mine ? (mine['decision_id'] as string | undefined) : undefined
+      if (!decisionId) { setToolPrompt(null); return }
+      const rec = await api.decisionGet(projectId, decisionId)
+      if (rec && rec.status === 'awaiting_approval') {
+        setToolPrompt({ decisionId, chatId: (rec.chat_id as string | null) ?? null,
+                        toolName: String(rec.tool_name || 'Tool'),
+                        preview: String(rec.tool_preview || '') })
+      } else {
+        setToolPrompt(null)
+      }
+    } catch {
+      // Non-fatal — the live bus event still drives the card.
+    }
+  }, [projectId, effectiveChatId])
+
+  useEffect(() => { refreshToolPrompt() }, [refreshToolPrompt])
 
   // Stick-to-bottom: auto-scroll only when the user is pinned (within SCROLL_PIN_THRESHOLD of bottom).
   // When unpinned (user scrolled up), new content does NOT jump the viewport — instead the pill
@@ -2178,6 +2261,27 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         }
       }
 
+    } else if (evt.kind === 'tool_ready') {
+      // spec-082 A: one tool call awaits allow/deny. The bus event already carries the full
+      // (capped) preview — no follow-up fetch needed.
+      {
+        const e = evt as unknown as { decision_id: string; chat_id?: string | null;
+                                      tool_name: string; tool_preview?: string }
+        if (!e.chat_id || !effectiveChatId || e.chat_id === effectiveChatId) {
+          setToolPrompt({ decisionId: e.decision_id, chatId: e.chat_id ?? null,
+                          toolName: e.tool_name || 'Tool', preview: e.tool_preview || '' })
+          setToolDenying(false)
+          setToolFeedback('')
+        }
+      }
+
+    } else if (evt.kind === 'tool_decided') {
+      // Decision landed (this tab, a peer tab, or the gate's own timeout) — clear the card.
+      {
+        const e = evt as unknown as { decision_id: string }
+        setToolPrompt(p => (p && p.decisionId === e.decision_id) ? null : p)
+      }
+
     } else if (evt.kind === 'plan_decided') {
       // spec-080: decision landed (this tab or a peer). Clear the card; on approve also
       // auto-off the local toggle (client half of the server's plan_mode reset).
@@ -2350,7 +2454,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         // Spec-037: pass active chat_id so the backend writes session_id to the right chat entry
-        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), ...(planMode ? { plan_mode: true } : {}), auto_rotate: activeProvider === 'claude' ? autoRotate : false, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
+        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), ...(planMode ? { plan_mode: true } : {}), ...(askMode && !planMode ? { ask_mode: true } : {}), auto_rotate: activeProvider === 'claude' ? autoRotate : false, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
         signal: ac.signal,
       })
 
@@ -2533,7 +2637,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         setTimeout(() => setCompactToast(false), 4000)
       }
     }
-  }, [input, projectId, streaming, rotating, onProjectsReload, attachments, thinkMode, ultracode, planMode, autoRotate, effectiveChatId, activeProvider, composerReady]) // eslint-disable-line react-hooks/exhaustive-deps -- queue/hydration callbacks use live refs
+  }, [input, projectId, streaming, rotating, onProjectsReload, attachments, thinkMode, ultracode, planMode, askMode, autoRotate, effectiveChatId, activeProvider, composerReady]) // eslint-disable-line react-hooks/exhaustive-deps -- queue/hydration callbacks use live refs
 
   // ── Inline "/" skill palette (derived state; the skill list is tiny, so recompute per render) ──
   // Open only while the whole input is a single leading-slash token ("/", "/lo", "/loop") — a space
@@ -3241,6 +3345,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               planMode={planMode}
               onPlanModeChange={handlePlanModeChange}
               planLocked={!!planPrompt}
+              askMode={askMode}
+              onAskModeChange={handleAskModeChange}
               provider={activeProvider}
               reasoningLevels={activeReasoningLevels}
             />
@@ -3874,6 +3980,72 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             </div>
           )
         })()}
+        {/* spec-082 A: per-tool approval card — tool name + monospace preview + three
+            one-tap actions. Same family as the plan card, reload-durable via
+            refreshToolPrompt's poll-on-mount of the chat's decision_id pointer.
+            44px hit targets, no hover-only affordance: this is answered from a phone. */}
+        {toolPrompt && (() => {
+          const decide = async (decision: 'allow' | 'allow_always' | 'deny') => {
+            setToolBusy(true)
+            try {
+              await api.decisionDecide(projectId, toolPrompt.decisionId,
+                { decision, ...(decision === 'deny' && toolFeedback.trim() ? { feedback: toolFeedback.trim() } : {}) })
+              setToolPrompt(null)
+              setToolDenying(false)
+              setToolFeedback('')
+            } catch { /* idempotent server-side; bus event reconciles */ }
+            finally { setToolBusy(false) }
+          }
+          const btn = { minHeight: 44, paddingLeft: 14, paddingRight: 14 }
+          return (
+            <div role="alertdialog" aria-label={`${toolPrompt.toolName} ${t['chat.ask_card_title']}`}
+                 style={{ margin: '0 0 8px', padding: '10px 12px', borderRadius: 8,
+                          border: '1px solid var(--accent, #7aa2f7)', background: 'var(--bg2)',
+                          display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>
+                🙋 {toolPrompt.toolName} — {t['chat.ask_card_title']}
+              </div>
+              <pre style={{ margin: 0, maxHeight: '28vh', overflow: 'auto', fontSize: 12,
+                            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                            fontFamily: 'var(--mono, ui-monospace, SFMono-Regular, monospace)',
+                            border: '1px solid var(--border)', borderRadius: 6,
+                            padding: '8px 10px' }}>{toolPrompt.preview}</pre>
+              {toolDenying && (
+                <textarea
+                  value={toolFeedback}
+                  onChange={e => setToolFeedback(e.target.value)}
+                  placeholder={t['chat.ask_feedback_placeholder']}
+                  rows={2}
+                  style={{ width: '100%', fontSize: 13, borderRadius: 6,
+                           border: '1px solid var(--border)', background: 'var(--bg)', padding: '6px 8px' }}
+                />
+              )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                {!toolDenying ? (
+                  <>
+                    <button className="btn btn-primary" style={btn} disabled={toolBusy}
+                            onClick={() => decide('allow')}>✓ {t['chat.ask_allow']}</button>
+                    <button className="btn" style={btn} disabled={toolBusy}
+                            onClick={() => decide('allow_always')}>
+                      {t['chat.ask_allow_always']}
+                    </button>
+                    <button className="btn" style={btn} disabled={toolBusy}
+                            onClick={() => setToolDenying(true)}>✗ {t['chat.ask_deny']}</button>
+                  </>
+                ) : (
+                  <>
+                    <button className="btn btn-danger" style={btn} disabled={toolBusy}
+                            onClick={() => decide('deny')}>{t['chat.ask_deny_send']}</button>
+                    <button className="btn" style={btn} disabled={toolBusy}
+                            onClick={() => { setToolDenying(false); setToolFeedback('') }}>
+                      {t['chat.ask_deny_cancel']}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )
+        })()}
         {/* Inline "/" skill palette — floats just above the composer while typing a slash-command.
             onMouseDown+preventDefault keeps the textarea focused so the pick lands in the input. */}
         {slashOpen && (
@@ -4033,6 +4205,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   planMode={planMode}
                   onPlanModeChange={handlePlanModeChange}
                   planLocked={!!planPrompt}
+                  askMode={askMode}
+                  onAskModeChange={handleAskModeChange}
                   provider={activeProvider}
                   reasoningLevels={activeReasoningLevels}
                 />
