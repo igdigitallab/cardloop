@@ -435,9 +435,10 @@ async def _push_broadcast(payload: str) -> None:
             _save_push_subs(updated)
 
 
-async def _push_notify_plan_ready(session_key: str, event: dict) -> None:
-    """spec-080: push when a plan awaits operator approval — a parked approval can otherwise
-    sit silently for hours (the SDK gate has no timeout; the pin cap is the only bound)."""
+async def _push_notify_decision_ready(session_key: str, event: dict) -> None:
+    """spec-080 / spec-082 A: push when the agent is blocked on the operator — a plan awaiting
+    approval, or (ask mode) a single tool call awaiting allow/deny. Both are the same class of
+    event: without a push the turn sits parked until the gate's timeout with nobody watching."""
     if not _PUSH_AVAILABLE or not _PUSH_CTX:
         return
     _push_ensure_vapid_keys()
@@ -453,12 +454,22 @@ async def _push_notify_plan_ready(session_key: str, event: dict) -> None:
         pass
     if project is None:
         return
-    preview = (event.get("plan_text_preview") or "").strip()
+    if event.get("kind") == "tool_ready":
+        tool = str(event.get("tool_name") or "Tool")
+        first_line = str(event.get("tool_preview") or "").strip().splitlines()
+        title = f"🙋 {tool} — approve?"
+        body = (first_line[0][:110] if first_line else project.get("name", session_key))
+        tag = project.get("id", session_key) + "-decision"
+    else:
+        preview = (event.get("plan_text_preview") or "").strip()
+        title = "🗺 " + project.get("name", session_key)
+        body = "Plan awaiting your approval" + (": " + preview[:110] if preview else "")
+        tag = project.get("id", session_key) + "-plan"
     payload = json.dumps({
-        "title": "🗺 " + project.get("name", session_key),
-        "body": ("Plan awaiting your approval" + (": " + preview[:110] if preview else "")),
+        "title": title,
+        "body": body,
         "icon": "/icons/icon-192.png",
-        "tag": project.get("id", session_key) + "-plan",
+        "tag": tag,
         "data": {"projectId": project.get("id", session_key), "url": "/"},
     })
     await _push_broadcast(payload)
@@ -524,14 +535,14 @@ def _bus_publish(session_key: str, event: dict, persist: bool = True) -> None:
                 _spawn_bg(_push_notify_run_end(session_key, event))
             except RuntimeError:
                 pass  # no running loop (tests / sync context) — skip push
-    elif kind == "plan_ready":
-        # spec-080: a plan awaiting approval must reach the operator even with the tab
-        # closed — the gate has no timeout and would otherwise stall silently for hours.
+    elif kind in ("plan_ready", "tool_ready"):
+        # spec-080 / spec-082 A: an approval awaiting the operator must reach them even with
+        # the tab closed — the turn is parked until it is answered (or the ask gate times out).
         _awaiting[session_key] = time.time()
         if _PUSH_AVAILABLE:
             try:
                 asyncio.get_running_loop()
-                _spawn_bg(_push_notify_plan_ready(session_key, event))
+                _spawn_bg(_push_notify_decision_ready(session_key, event))
             except RuntimeError:
                 pass
     elif kind == "run_start":
@@ -847,6 +858,7 @@ def _save_crash_state() -> None:
             "wake_pending": _completion_wake_pending,
             "last_turn_options": _last_turn_options,
             "plan_pending": _plan_pending_by_session,  # spec-080: sk -> plan_id
+            "tool_pending": _tool_pending_by_session,  # spec-082 A: sk -> [decision_id]
         }
         tmp = Path(str(_CRASH_STATE_FILE) + ".tmp")
         tmp.write_text(json.dumps(payload, indent=2, default=str))
@@ -970,33 +982,53 @@ def _monitors_reconcile_on_boot(ctx: dict) -> None:
                 _spawn_bg(_completion_wake_fire(ctx, sk))
             except Exception:
                 pass
-        # spec-080: a plan awaiting approval cannot survive a restart — the parked Future and
-        # the CLI subprocess died with the process. Flip the sidecar to 'orphaned', clear the
-        # chat pointer, and tell the operator loudly instead of leaving a zombie card.
+        # spec-080 / spec-082 A: a decision awaiting approval cannot survive a restart — the
+        # parked Future and the CLI subprocess died with the process. Flip the sidecar to
+        # 'orphaned', clear the chat pointer, and tell the operator loudly instead of leaving
+        # a zombie card. Both kinds ride the same loop.
         orphaned_plans = 0
-        for sk, plan_id in (state.get("plan_pending") or {}).items():
+        _orphan_ids: "list[tuple[str, str]]" = [
+            (sk, pid) for sk, pid in (state.get("plan_pending") or {}).items()
+            if isinstance(pid, str)
+        ]
+        for sk, ids in (state.get("tool_pending") or {}).items():
+            if isinstance(ids, list):
+                _orphan_ids.extend((sk, did) for did in ids if isinstance(did, str))
+        for sk, plan_id in _orphan_ids:
             try:
                 record = _read_plan_meta(plan_id)
                 if record is None or record.get("status") != "awaiting_approval":
                     continue
+                is_tool = (record.get("kind") == "tool")
                 record["status"] = "orphaned"
                 record["decided_at"] = time.time()
                 _plan_records[plan_id] = record
                 _write_plan_meta(record)
-                _spawn_bg(_set_chat_plan_pointer(ctx, sk, record.get("chat_id"), None))
-                _bus_publish(sk, {"kind": "plan_decided", "plan_id": plan_id,
-                                  "chat_id": record.get("chat_id"), "approved": False,
-                                  "status": "orphaned"})
-                _spawn_bg(_notify_operator(
-                    ctx, f"[WARN] A plan awaiting approval was lost in a service restart "
-                         f"(session {sk}). Re-run the plan turn and approve again."))
+                _spawn_bg(_set_chat_plan_pointer(
+                    ctx, sk, record.get("chat_id"), None,
+                    field="decision_id" if is_tool else "plan_id"))
+                if is_tool:
+                    _bus_publish(sk, {"kind": "tool_decided", "decision_id": plan_id,
+                                      "chat_id": record.get("chat_id"),
+                                      "tool_name": record.get("tool_name"),
+                                      "allowed": False, "status": "orphaned"})
+                    _spawn_bg(_notify_operator(
+                        ctx, f"[WARN] A tool approval request ({record.get('tool_name')}) was "
+                             f"lost in a service restart (session {sk}). Resend the message."))
+                else:
+                    _bus_publish(sk, {"kind": "plan_decided", "plan_id": plan_id,
+                                      "chat_id": record.get("chat_id"), "approved": False,
+                                      "status": "orphaned"})
+                    _spawn_bg(_notify_operator(
+                        ctx, f"[WARN] A plan awaiting approval was lost in a service restart "
+                             f"(session {sk}). Re-run the plan turn and approve again."))
                 orphaned_plans += 1
             except Exception:
                 continue
         if flipped or restored_wake_keys or orphaned_plans:
             print(f"[crash-recovery] boot reconcile: {flipped} orphaned monitor(s) flipped, "
                   f"{len(restored_wake_keys)} pending wake(s) restored, "
-                  f"{orphaned_plans} orphaned plan(s)")
+                  f"{orphaned_plans} orphaned decision(s)")
         _crash_state_mark_dirty()  # persist the post-reconcile view
     except Exception as exc:
         print(f"[crash-recovery] boot reconcile failed: {exc!r}")
@@ -5046,7 +5078,7 @@ def _git_enabled(project: dict) -> bool:
 
 # ─────────────────────── API: settings (global + per-project) ───────────────────────
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", "codex_model")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", "codex_model", "ask_always_allow")
 
 # spec-051: per-project policy for resuming a run interrupted by a rate-limit.
 #   ask    — show an in-chat Yes/No prompt (default; visible, not silent)
@@ -5148,6 +5180,34 @@ def _project_context_pack_enabled(project: dict) -> bool:
     return bool(val)
 
 
+def _ask_always_allow(project: dict) -> "list[str]":
+    """spec-082 A: tool names the operator promised to auto-approve in THIS project.
+
+    Per project, never global — "always allow Bash" in a scratch repo must not silently
+    apply to the one holding production credentials."""
+    raw = project.get("ask_always_allow")
+    if not isinstance(raw, list):
+        return []
+    return [t for t in raw if isinstance(t, str) and t]
+
+
+def _ask_always_allow_add(ctx: dict, project: dict, tool_name: str) -> "list[str]":
+    """Persist tool_name into the project's always-allow list (topics.json under data/,
+    gitignored — same store and same write pattern as every other per-project setting)."""
+    current = _ask_always_allow(project)
+    if tool_name in current:
+        return current
+    updated = sorted(set(current) | {tool_name})
+    cwd = project.get("cwd")
+    for b in ctx.get("topics", {}).values():
+        if b.get("cwd") == cwd:
+            b["ask_always_allow"] = updated
+    save_topics = ctx.get("save_topics")
+    if callable(save_topics):
+        save_topics()
+    return updated
+
+
 def _project_settings_view(project: dict) -> dict:
     return {
         "git_enabled": _git_enabled(project),
@@ -5162,6 +5222,8 @@ def _project_settings_view(project: dict) -> dict:
         "context_pack_enabled": project.get("context_pack_enabled"),
         "board_provider": "codex" if project.get("board_provider") == "codex" else "claude",
         "codex_model": project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
+        # spec-082 A: tools auto-approved by the ask-mode gate in this project.
+        "ask_always_allow": _ask_always_allow(project),
     }
 
 
@@ -5241,6 +5303,18 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
             if not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", sv):
                 return web.json_response({"error": "codex_model: invalid model id"}, status=400)
             updates[k] = sv
+        elif k == "ask_always_allow":
+            # spec-082 A: the gate's always-allow list. Normally grown one entry at a time by
+            # the "Always allow <tool> here" button; exposed here so the operator can review
+            # and revoke it (empty list → key removed).
+            if not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+                return web.json_response(
+                    {"error": "ask_always_allow: expected a list of tool names"}, status=400)
+            clean_tools = sorted({x.strip() for x in v if x.strip()})
+            if any(not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", x) for x in clean_tools):
+                return web.json_response({"error": "ask_always_allow: invalid tool name"},
+                                         status=400)
+            updates[k] = clean_tools or None
         elif k == "auto_resume_mode":
             sv = str(v).strip().lower()
             if sv not in _AUTO_RESUME_MODES:
@@ -5634,16 +5708,30 @@ def _read_run_meta(data_dir: Path, card_id: str) -> "dict | None":
         return None
 
 
-# ─────────────────────────── spec-080: cockpit plan mode — pending-plan store ─────────────────
-# The approval gate's server half. engine's can_use_tool gate (real SDK path) and
-# e2e_fake_engine (ctx path) both call create_pending_plan()/resolve_plan() here, and the
-# HTTP decide endpoint resolves the same parked Future — one owner, three call sites.
-_PLANS_DIR: "Path | None" = None            # DATA/plans — set in _plans_init(ctx)
-_plan_records: "dict[str, dict]" = {}       # plan_id -> record (in-memory mirror of sidecars)
+# ──────── spec-080 / spec-082 A: pending-DECISION store (kind = "plan" | "tool") ──────────────
+# The approval gate's server half. engine's can_use_tool gates (real SDK path) and
+# e2e_fake_engine (ctx path) park a decision here, and the HTTP decide endpoint resolves the
+# same Future — one owner, several call sites. A plan is a decision with kind="plan"; an
+# ask-mode tool request is a decision with kind="tool". Same records, same sidecars, same
+# resolve path, same endpoints — only the payload and the vocabulary differ.
+_PLANS_DIR: "Path | None" = None            # DATA/plans — sidecars for BOTH kinds (historic name)
+_plan_records: "dict[str, dict]" = {}       # decision_id -> record (in-memory mirror of sidecars)
 _pending_plan_futures: "dict[str, asyncio.Future]" = {}
 _plan_pending_by_session: "dict[str, str]" = {}  # session_key -> plan_id (crash-persisted)
+# spec-082 A: tool decisions index as a LIST — one assistant message can carry several
+# tool_use blocks, so a session can legitimately hold more than one open gate at a time.
+_tool_pending_by_session: "dict[str, list[str]]" = {}
 _PLAN_PREVIEW_LIMIT = 1500                  # bus/timeline preview cap (full text in sidecar)
+_ASK_PREVIEW_LIMIT = 2000                   # spec-082 A: cap on a tool-input preview
 _PLAN_ID_RE = re.compile(r"^[0-9a-f]{8}$")
+# decision verb -> stored status. Unknown verbs fall back to "cancelled" (pre-existing
+# behaviour of resolve_plan, kept deliberately).
+_DECISION_STATUS = {
+    "approve": "approved", "reject": "rejected",          # plan vocabulary
+    "allow": "allowed", "allow_always": "allowed",        # tool vocabulary (spec-082 A)
+    "deny": "denied", "timeout": "timeout",
+    "cancelled": "cancelled",
+}
 
 
 def _plans_init(ctx: dict) -> None:
@@ -5689,15 +5777,27 @@ def _read_plan_meta(plan_id: str) -> "dict | None":
         return None
 
 
-async def _set_chat_plan_pointer(ctx: dict, session_key: str, chat_id: "str | None",
-                                 plan_id: "str | None") -> None:
-    """Set/clear the plan_id field on the chat entry (reload-durability pointer)."""
+def _project_for_session_key(ctx: dict, session_key: str) -> "dict | None":
+    """The project bound to a session_key, or None. Best-effort (never raises)."""
     try:
-        project_id = None
         for proj in _collect_projects(ctx):
             if (proj.get("session_key") or proj.get("tg_thread", "")) == session_key:
-                project_id = proj.get("id")
-                break
+                return proj
+    except Exception:
+        pass
+    return None
+
+
+async def _set_chat_plan_pointer(ctx: dict, session_key: str, chat_id: "str | None",
+                                 plan_id: "str | None", field: str = "plan_id") -> None:
+    """Set/clear the decision pointer on the chat entry (reload-durability pointer).
+
+    field="plan_id" for plans, "decision_id" for ask-mode tool requests (spec-082 A) — a
+    turn can never hold both, but the two cards fetch different endpoints so they keep
+    separate pointers."""
+    try:
+        proj = _project_for_session_key(ctx, session_key)
+        project_id = proj.get("id") if proj else None
         if not project_id:
             return
         async with _chats_lock():
@@ -5707,13 +5807,50 @@ async def _set_chat_plan_pointer(ctx: dict, session_key: str, chat_id: "str | No
             for chat in entry.get("chats", []):
                 if chat.get("id") == target:
                     if plan_id:
-                        chat["plan_id"] = plan_id
+                        chat[field] = plan_id
                     else:
-                        chat.pop("plan_id", None)
+                        chat.pop(field, None)
                     _save_chats(ctx, chats_data)
                     break
     except Exception as exc:
         print(f"[plan] chat pointer update failed for {session_key}: {exc!r}")
+
+
+def _park_decision(ctx: "dict | None", kind: str, session_key: str, chat_id: "str | None",
+                   fields: dict, bus_kind: str, id_key: str, bus_extra: dict,
+                   pointer_field: str):
+    """Shared half of every parked operator decision: id → record → sidecar → Future →
+    per-session index → chat pointer → bus event. Returns (decision_id, Future).
+
+    kind="plan" and kind="tool" differ only in payload, bus-event shape and index; keeping
+    ONE parker means the crash reconcile, the decide endpoint and the store stay single-owner."""
+    ctx = ctx or _WEBAPP_CTX or {}
+    decision_id = secrets.token_hex(4)
+    record = {
+        "id": decision_id,
+        "kind": kind,
+        "session_key": session_key,
+        "chat_id": chat_id,
+        "created_at": time.time(),
+        "status": "awaiting_approval",
+        "decided_at": None,
+        "feedback": None,
+        **fields,
+    }
+    _plan_records[decision_id] = record
+    _write_plan_meta(record)
+    if kind == "plan":
+        _plan_pending_by_session[session_key] = decision_id
+    else:
+        _tool_pending_by_session.setdefault(session_key, []).append(decision_id)
+    fut: asyncio.Future = asyncio.get_event_loop().create_future()
+    _pending_plan_futures[decision_id] = fut
+    _crash_state_mark_dirty()
+    _spawn_bg(_set_chat_plan_pointer(ctx, session_key, chat_id, decision_id,
+                                     field=pointer_field))
+    _bus_publish(session_key, {"kind": bus_kind, id_key: decision_id,
+                               "chat_id": chat_id, **bus_extra})
+    return decision_id, fut
 
 
 def create_pending_plan(ctx: "dict | None", session_key: str, chat_id: "str | None",
@@ -5723,60 +5860,72 @@ def create_pending_plan(ctx: "dict | None", session_key: str, chat_id: "str | No
     """Park a plan for operator approval. Returns (plan_id, asyncio.Future).
 
     The Future resolves with {"decision": "approve"|"reject"|"cancelled", "feedback": str}
-    via resolve_plan() (HTTP decide endpoint / pin-cap eviction / interrupt cleanup)."""
-    ctx = ctx or _WEBAPP_CTX or {}
-    plan_id = secrets.token_hex(4)
-    now = time.time()
-    record = {
-        "id": plan_id,
-        "session_key": session_key,
-        "chat_id": chat_id,
-        "created_at": now,
-        "plan_text": plan_text or "",
-        "plan_file_path": plan_file_path,
-        "status": "awaiting_approval",
-        "decided_at": None,
-        "feedback": None,
-        "provider": "codex" if provider == "codex" else "claude",
-        "codex_thread_id": codex_thread_id,
-        "model": model,
-    }
-    _plan_records[plan_id] = record
-    _write_plan_meta(record)
-    _plan_pending_by_session[session_key] = plan_id
-    fut: asyncio.Future = asyncio.get_event_loop().create_future()
-    _pending_plan_futures[plan_id] = fut
-    _crash_state_mark_dirty()
-    _spawn_bg(_set_chat_plan_pointer(ctx, session_key, chat_id, plan_id))
-    _bus_publish(session_key, {
-        "kind": "plan_ready",
-        "plan_id": plan_id,
-        "chat_id": chat_id,
+    via resolve_decision() (HTTP decide endpoint / pin-cap eviction / interrupt cleanup)."""
+    plan_id, fut = _park_decision(
+        ctx, "plan", session_key, chat_id,
+        fields={
+            "plan_text": plan_text or "",
+            "plan_file_path": plan_file_path,
+            "provider": "codex" if provider == "codex" else "claude",
+            "codex_thread_id": codex_thread_id,
+            "model": model,
+        },
+        bus_kind="plan_ready", id_key="plan_id",
         # key deliberately NOT "text": full body lives in the sidecar; this preview is bounded
         # here because the timeline's truncation guard only matches the literal "text" key.
-        "plan_text_preview": (plan_text or "")[:_PLAN_PREVIEW_LIMIT],
-    })
+        bus_extra={"plan_text_preview": (plan_text or "")[:_PLAN_PREVIEW_LIMIT]},
+        pointer_field="plan_id")
     print(f"[plan] {session_key}: plan {plan_id} awaiting approval "
           f"({len(plan_text or '')} chars, file={plan_file_path or '-'})")
     return plan_id, fut
 
 
-def resolve_plan(ctx: "dict | None", plan_id: str, decision: str, feedback: str = "") -> bool:
-    """Resolve a pending plan. Idempotent: returns False when the id is unknown or already
-    decided (double-click / stale tab / late cancel after decide)."""
+def create_pending_tool_decision(ctx: "dict | None", session_key: str, chat_id: "str | None",
+                                 tool_name: str, preview: str = ""):
+    """spec-082 A: park ONE tool call for operator approval (ask mode).
+
+    Returns (decision_id, Future), or (None, None) when the tool is on this project's
+    persisted always-allow list — the caller reads that as "allow silently". The list is
+    checked HERE, not in the engine: it is per-project config the engine cannot see."""
     ctx = ctx or _WEBAPP_CTX or {}
-    record = _plan_records.get(plan_id) or _read_plan_meta(plan_id)
+    tool_name = str(tool_name or "tool")
+    project = _project_for_session_key(ctx, session_key)
+    if project is not None and tool_name in _ask_always_allow(project):
+        print(f"[ask-gate] {session_key}: {tool_name} auto-allowed (always-allow list)")
+        return None, None
+    preview = str(preview or "")[:_ASK_PREVIEW_LIMIT]
+    decision_id, fut = _park_decision(
+        ctx, "tool", session_key, chat_id,
+        fields={"tool_name": tool_name, "tool_preview": preview},
+        bus_kind="tool_ready", id_key="decision_id",
+        bus_extra={"tool_name": tool_name, "tool_preview": preview},
+        pointer_field="decision_id")
+    print(f"[ask-gate] {session_key}: {tool_name} decision {decision_id} awaiting operator")
+    return decision_id, fut
+
+
+def resolve_decision(ctx: "dict | None", decision_id: str, decision: str,
+                     feedback: str = "") -> bool:
+    """Resolve a pending decision of either kind. Idempotent: returns False when the id is
+    unknown or already decided (double-click / stale tab / late cancel after decide)."""
+    ctx = ctx or _WEBAPP_CTX or {}
+    record = _plan_records.get(decision_id) or _read_plan_meta(decision_id)
     if record is None or record.get("status") != "awaiting_approval":
         return False
-    record["status"] = "approved" if decision == "approve" else (
-        "rejected" if decision == "reject" else "cancelled")
+    kind = record.get("kind") or "plan"
+    record["status"] = _DECISION_STATUS.get(decision, "cancelled")
     record["decided_at"] = time.time()
     record["feedback"] = feedback or None
-    _plan_records[plan_id] = record
+    _plan_records[decision_id] = record
     _write_plan_meta(record)
     session_key = record.get("session_key") or ""
-    if _plan_pending_by_session.get(session_key) == plan_id:
+    if _plan_pending_by_session.get(session_key) == decision_id:
         _plan_pending_by_session.pop(session_key, None)
+    _pending = _tool_pending_by_session.get(session_key)
+    if _pending and decision_id in _pending:
+        _pending.remove(decision_id)
+        if not _pending:
+            _tool_pending_by_session.pop(session_key, None)
     _crash_state_mark_dirty()
     # spec-080 C2: the approved plan executes in-turn; the NEXT turn must be a normal
     # bypass turn. Server-side mirror of the client's toggle auto-off — without this an
@@ -5786,19 +5935,37 @@ def resolve_plan(ctx: "dict | None", plan_id: str, decision: str, feedback: str 
         opts = _last_turn_options.get(session_key)
         if isinstance(opts, dict):
             opts["plan_mode"] = False
-    fut = _pending_plan_futures.pop(plan_id, None)
+    fut = _pending_plan_futures.pop(decision_id, None)
     if fut is not None and not fut.done():
         fut.set_result({"decision": decision, "feedback": feedback or ""})
-    _spawn_bg(_set_chat_plan_pointer(ctx, session_key, record.get("chat_id"), None))
+    _spawn_bg(_set_chat_plan_pointer(ctx, session_key, record.get("chat_id"), None,
+                                     field="plan_id" if kind == "plan" else "decision_id"))
+    if kind == "tool":
+        _bus_publish(session_key, {
+            "kind": "tool_decided",
+            "decision_id": decision_id,
+            "chat_id": record.get("chat_id"),
+            "tool_name": record.get("tool_name"),
+            "allowed": record["status"] == "allowed",
+            "status": record["status"],
+        })
+        print(f"[ask-gate] {session_key}: {record.get('tool_name')} "
+              f"{decision_id} → {record['status']}")
+        return True
     _bus_publish(session_key, {
         "kind": "plan_decided",
-        "plan_id": plan_id,
+        "plan_id": decision_id,
         "chat_id": record.get("chat_id"),
         "approved": decision == "approve",
         "status": record["status"],
     })
-    print(f"[plan] {session_key}: plan {plan_id} → {record['status']}")
+    print(f"[plan] {session_key}: plan {decision_id} → {record['status']}")
     return True
+
+
+def resolve_plan(ctx: "dict | None", plan_id: str, decision: str, feedback: str = "") -> bool:
+    """Back-compat entry point: a plan is a decision with kind="plan"."""
+    return resolve_decision(ctx, plan_id, decision, feedback)
 
 
 def _pending_plan_id(session_key: str) -> "str | None":
@@ -5806,13 +5973,19 @@ def _pending_plan_id(session_key: str) -> "str | None":
     return _plan_pending_by_session.get(session_key)
 
 
+def _decision_id_from(req: web.Request) -> str:
+    """Both route shapes hit the same handlers: /plan/{plan_id} (spec-080, still used by the
+    plan card and its tests) and /decision/{decision_id} (spec-082 A, kind-agnostic)."""
+    return req.match_info.get("plan_id") or req.match_info.get("decision_id") or ""
+
+
 async def api_plan_get(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/plan/{plan_id} — full plan record (card render + reload)."""
+    """GET /api/projects/{id}/plan/{plan_id} — full decision record (card render + reload).
+    Also serves GET /api/projects/{id}/decision/{decision_id}."""
     ctx = req.app["ctx"]
     if _find_project_by_id(ctx, req.match_info["id"]) is None:
         return web.json_response({"error": "project not found"}, status=404)
-    plan_id = req.match_info["plan_id"]
-    record = _read_plan_meta(plan_id)
+    record = _read_plan_meta(_decision_id_from(req))
     if record is None:
         return web.json_response({"error": "plan not found"}, status=404)
     return web.json_response(record)
@@ -5820,13 +5993,15 @@ async def api_plan_get(req: web.Request) -> web.Response:
 
 async def api_plan_decide(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/plan/{plan_id}/decide  {decision: approve|reject, feedback?}
+    Also serves POST /api/projects/{id}/decision/{decision_id}/decide, where a kind="tool"
+    record (spec-082 A) takes {decision: allow|allow_always|deny, feedback?} instead.
 
     Idempotent: a second decide (double-click / stale tab) returns {ok, noop: true}."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
-    plan_id = req.match_info["plan_id"]
+    plan_id = _decision_id_from(req)
     if not _valid_plan_id(plan_id):
         return web.json_response({"error": "bad plan id"}, status=400)
     try:
@@ -5836,6 +6011,10 @@ async def api_plan_decide(req: web.Request) -> web.Response:
     except Exception:
         body = {}
     decision = (body.get("decision") or "").strip()
+    record_kind = (_read_plan_meta(plan_id) or {}).get("kind")
+    if record_kind == "tool":
+        return await _decide_tool_request(ctx, project, plan_id, decision,
+                                          str(body.get("feedback") or "")[:4000])
     if decision not in ("approve", "reject"):
         return web.json_response({"error": "decision must be approve|reject"}, status=400)
     feedback = str(body.get("feedback") or "")[:4000]
@@ -5866,6 +6045,29 @@ async def api_plan_decide(req: web.Request) -> web.Response:
         return web.json_response({"ok": True, "status": "approved" if decision == "approve"
                                   else "rejected"})
     record = _read_plan_meta(plan_id)
+    return web.json_response({"ok": True, "noop": True,
+                              "status": (record or {}).get("status", "unknown")})
+
+
+async def _decide_tool_request(ctx: dict, project: dict, decision_id: str, decision: str,
+                               feedback: str) -> web.Response:
+    """spec-082 A: the kind="tool" half of api_plan_decide.
+
+    allow_always persists the tool into the project's always-allow list BEFORE resolving, so
+    a second call of the same tool later in the very same turn is not gated again."""
+    if decision not in ("allow", "allow_always", "deny"):
+        return web.json_response(
+            {"error": "decision must be allow|allow_always|deny"}, status=400)
+    record_before = _read_plan_meta(decision_id) or {}
+    if decision == "allow_always":
+        try:
+            _ask_always_allow_add(ctx, project, str(record_before.get("tool_name") or ""))
+        except Exception as exc:  # persistence must never block the turn from continuing
+            print(f"[ask-gate] always-allow persist failed for {project.get('id')}: {exc!r}")
+    if resolve_decision(ctx, decision_id, decision, feedback):
+        return web.json_response({"ok": True, "status": "allowed"
+                                  if decision != "deny" else "denied"})
+    record = _read_plan_meta(decision_id)
     return web.json_response({"ok": True, "noop": True,
                               "status": (record or {}).get("status", "unknown")})
 
@@ -10669,7 +10871,8 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
                         project_id: "str | None" = None, effort: "str | None" = None,
                         ultracode: "bool | None" = None,
                         auto_rotate: "bool | None" = None,
-                        plan_mode: "bool | None" = None) -> "dict | None":
+                        plan_mode: "bool | None" = None,
+                        ask_mode: "bool | None" = None) -> "dict | None":
     """Append a message to the chat queue for session_key.
     Returns the new item dict, or None if the queue is full.
 
@@ -10703,6 +10906,11 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
         # spec-080 C3: a queued plan-mode message MUST drain as a plan turn — dropping the
         # flag here would silently execute it full-auto without the approval gate.
         item["plan_mode"] = True
+    if ask_mode is not None:
+        # spec-082 A: same reasoning as plan_mode — but ask mode is ALSO inherited from the
+        # session's last turn on drain (see _chat_queue_drain), because ask is a standing
+        # posture ("don't touch anything without asking me"), not a one-shot planning turn.
+        item["ask_mode"] = bool(ask_mode)
     lst.append(item)
     _chat_queue_flush()
     return item
@@ -10897,6 +11105,14 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # must never silently re-enter plan mode (an unattended ExitPlanMode would park a
         # card nobody is watching and burn the auto-continue budget).
         _q_plan_mode = bool(item.get("plan_mode"))
+        # spec-082 A: ask mode DOES inherit from the session's last turn (unlike plan mode).
+        # Dropping it would run the drained/auto-continue turn under bypassPermissions — i.e.
+        # silently downgrade a security posture the operator explicitly switched on. A wake
+        # turn that nobody answers is bounded by the gate's own timeout, not by hanging.
+        _q_ask_mode = item.get("ask_mode")
+        if _q_ask_mode is None:
+            _q_ask_mode = bool(_lto.get("ask_mode"))
+        _q_ask_mode = bool(_q_ask_mode) and not _q_plan_mode
         agents_config = topic.get("agents_config") or {}
         agents_kwargs = _build_agents_kwargs(ctx, agents_config)
 
@@ -10986,7 +11202,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 resume_session_id=resume_session_id, env=project_secrets,
                 **agents_kwargs, ctx=ctx, ephemeral=False, effort=_q_effort,
                 ultracode=bool(_q_ultracode), plan_mode=_q_plan_mode,
-                chat_id=_resolved_chat_id,
+                ask_mode=_q_ask_mode, chat_id=_resolved_chat_id,
             )
         async for event in _queue_gen:
             etype = event["type"]
@@ -11445,6 +11661,10 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # plan mode (read-only + plan workflow) and ExitPlanMode parks an Approve/Reject card.
     _plan_mode = bool(body.get("plan_mode"))
 
+    # spec-082 A: ask mode (per-chat toggle, default OFF). Every non-read-only tool call parks
+    # an Allow / Always-allow / Deny card. Plan wins when both are set (engine mirrors this).
+    _ask_mode = bool(body.get("ask_mode")) and not _plan_mode
+
     # Spec-037: optional chat_id to target a specific chat tab (falls back to active chat).
     _req_chat_id: "str | None" = (body.get("chat_id") or "").strip() or None
     if _req_chat_id and not _valid_chat_id(_req_chat_id):
@@ -11470,6 +11690,11 @@ async def api_project_chat(req: web.Request) -> web.Response:
     except Exception:
         _run_chat = None
     _provider_for_run = _chat_provider(_run_chat)
+    # spec-082 A: the ask gate IS a Claude can_use_tool callback — Codex has no equivalent hook,
+    # so the toggle cannot apply there. The UI greys the row for Codex chats; this is the
+    # server-side backstop so a stale client can never believe a Codex turn was gated.
+    if _provider_for_run == "codex":
+        _ask_mode = False
     if _provider_for_run == "claude" and _effort_override == "ultra":
         _effort_override = None
     if _run_chat and _run_chat.get("model"):
@@ -11507,7 +11732,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # options so the drained run matches the live-client fingerprint.
         item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"],
                                    effort=_effort_override, ultracode=_ultracode,
-                                   auto_rotate=_auto_rotate, plan_mode=_plan_mode)
+                                   auto_rotate=_auto_rotate, plan_mode=_plan_mode,
+                                   ask_mode=_ask_mode)
         if item is None:
             payload = json.dumps({"type": "error", "error": "queue full"}, ensure_ascii=False)
         else:
@@ -11515,11 +11741,12 @@ async def api_project_chat(req: web.Request) -> web.Response:
         await resp.write(f"data: {payload}\n\n".encode())
         return resp
 
-    # spec-080 C1: a plan turn needs a FRESH client connect (can_use_tool binds at connect
-    # time), but a live client pinned by still-running background children defers reconnect
-    # and would service the turn UNGATED in bypassPermissions. Queue the message instead —
-    # the queue drains automatically when the children finish and the client can reconnect.
-    if _plan_mode and _has_live_agent_monitors(session_key):
+    # spec-080 C1 (spec-082 A: identical for ask turns): a gated turn needs a FRESH client
+    # connect (can_use_tool binds at connect time), but a live client pinned by still-running
+    # background children defers reconnect and would service the turn UNGATED in
+    # bypassPermissions. Queue the message instead — the queue drains automatically when the
+    # children finish and the client can reconnect.
+    if (_plan_mode or _ask_mode) and _has_live_agent_monitors(session_key):
         _n_children = sum(
             1 for r in _monitors.get(session_key, {}).values()
             if r.get("kind") in ("agent", "workflow", "monitor") and r.get("status") == "running")
@@ -11532,11 +11759,13 @@ async def api_project_chat(req: web.Request) -> web.Response:
         await resp.prepare(req)
         item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"],
                                    effort=_effort_override, ultracode=_ultracode,
-                                   auto_rotate=_auto_rotate, plan_mode=True)
+                                   auto_rotate=_auto_rotate, plan_mode=_plan_mode,
+                                   ask_mode=_ask_mode)
         payload = json.dumps({
             "type": "queued",
             "item": item,
-            "reason": f"plan turn queued until {_n_children} background task(s) finish",
+            "reason": f"{'plan' if _plan_mode else 'ask'} turn queued until "
+                      f"{_n_children} background task(s) finish",
         }, ensure_ascii=False)
         await resp.write(f"data: {payload}\n\n".encode())
         return resp
@@ -11548,7 +11777,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # the live-client fingerprint stable.
     _bg_continue_reset(session_key)
     _last_turn_options[session_key] = {"effort": _effort_override, "ultracode": _ultracode,
-                                       "plan_mode": _plan_mode}
+                                       "plan_mode": _plan_mode, "ask_mode": _ask_mode}
     _crash_state_mark_dirty()  # root-fix B1: options must survive a restart for wake parity
     # spec-069 643ecf: clear COMPLETED sub-agent monitors left over from a prior turn so this
     # turn's panel starts clean (any still-running sub-agents stay). Stops done/failed rows piling up.
@@ -11715,6 +11944,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 effort=_effort_override,
                 ultracode=_ultracode,
                 plan_mode=_plan_mode,
+                ask_mode=_ask_mode,
                 chat_id=_active_chat_id_for_run,
             )
         # spec-071 heartbeat: unlike the activity-stream SSE (which pings every 25 s precisely
@@ -15225,6 +15455,9 @@ async def start(ctx: dict) -> None:
         # spec-080: plan-mode approval gate
         app.router.add_get("/api/projects/{id}/plan/{plan_id}", api_plan_get)
         app.router.add_post("/api/projects/{id}/plan/{plan_id}/decide", api_plan_decide)
+        # spec-082 A: kind-agnostic aliases onto the same store (ask-mode tool requests)
+        app.router.add_get("/api/projects/{id}/decision/{decision_id}", api_plan_get)
+        app.router.add_post("/api/projects/{id}/decision/{decision_id}/decide", api_plan_decide)
         # C1: SSE chat for project
         app.router.add_post("/api/projects/{id}/chat", api_project_chat)
         # C1-stop: interrupt current agent run
