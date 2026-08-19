@@ -19,6 +19,11 @@ Subsystem-level gotchas. Turn-1 safety guards (Auth, Restart/cgroup) live in CLA
   files — those are invisible to the warning. `permission_mode` is part of the live-client
   fingerprint, so toggling a gate reconnects the client; a client PINNED by running background
   children is reused instead, which is why a gated turn aborts/queues in that case.
+  Verified live: under `"default"` the gate IS consulted for `Write` **even when the operator's
+  `~/.claude/settings.json` sets `permissions.defaultMode: "bypassPermissions"`** (the flag
+  outranks the settings file — no inline `--settings` needed), but it is NOT consulted for a
+  harmless `Bash(echo …)`: the CLI auto-approves commands it classifies as safe before the
+  callback. Ask mode therefore gates mutations, not literally every tool call.
 - **The "irreversible" detector — exact substrings.** Do NOT use `-f `/`rm `/`kill ` (they catch `tail -f`, `perform`, etc.). Only `rm -rf`/`rm -f`/`git push`/`--force` and the like.
 - **Anti-traversal.** `_resolve_safe` / `_resolve_global_safe` — resolve+startswith with a trailing slash. `.env*` → 403 (except `.env.example`). `.git/venv/node_modules/dist/__pycache__` are hidden + 403.
 - **card_id is validated** by `_valid_card_id`/`_CARD_ID_RE` (prevents path injection via card_id).

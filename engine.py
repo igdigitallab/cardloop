@@ -951,10 +951,16 @@ def _make_plan_gate_cb(session_key: str, ctx: "dict | None"):
 # permission_mode is part of the live-client fingerprint, so flipping the toggle reconnects
 # the client with the gate correctly bound — the same path plan mode uses.
 #
-# Note the residual surface: rules in the operator's own settings (setting_sources) can
-# auto-allow a tool before can_use_tool is consulted, and a sub-agent spawned by Task is not
-# individually surfaced here. Ask mode is a "don't touch my repo without asking" guard rail,
-# not a sandbox.
+# Verified live against the real SDK/CLI (not just unit tests):
+#   • Write under "default" → the gate IS consulted, even with the operator's own
+#     ~/.claude/settings.json setting {"permissions":{"defaultMode":"bypassPermissions"}} —
+#     the --permission-mode flag outranks the settings file, no inline --settings needed.
+#   • Bash `echo …` under "default" → the gate is NOT consulted: the CLI auto-approves
+#     commands it classifies as harmless BEFORE can_use_tool. So ask mode gates mutations,
+#     not literally every tool call — do not "fix" that by claiming full coverage in the UI.
+# Other residual surface: whole-tool `allow` rules in the operator's settings, and a sub-agent
+# spawned by Task whose own tool calls are not individually surfaced here. Ask mode is a
+# "don't change my repo without asking" guard rail, not a sandbox.
 _create_pending_tool_cb = None   # webapp.create_pending_tool_decision(ctx, sk, chat_id, tool, preview)
 _ask_turn_chat: "dict[str, str | None]" = {}   # session_key -> chat_id of the current ask turn
 

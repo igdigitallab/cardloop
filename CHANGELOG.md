@@ -18,7 +18,10 @@ auto-denies after `ASK_GATE_TIMEOUT_SEC` (default 900) with a model-readable mes
 turn can never hang forever. Off by default; board/card runs stay full-auto.
 ⚠️ The turn connects with `permission_mode="default"` — under `bypassPermissions` the SDK
 *shadows* `can_use_tool` (`CanUseToolShadowedWarning`) and every tool would run ungated with
-no error at all. Implementation reuses the spec-080 approval machinery: the pending-plan
+no error at all. Verified live end-to-end (allow → the write lands in the same turn; deny with
+feedback → the model adapts and the file is never created). Note the CLI auto-approves Bash
+commands it classifies as harmless (`echo …`) before the callback, so ask mode gates
+mutations, not literally every tool call. Implementation reuses the spec-080 approval machinery: the pending-plan
 store is now a pending-**decision** store keyed by kind (`plan` | `tool`) with kind-agnostic
 `/api/projects/{id}/decision/{id}[/decide]` routes; the shipped `/plan/...` routes still work.
 

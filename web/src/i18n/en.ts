@@ -548,7 +548,7 @@ export const en = {
   // ── Ask mode (spec-082 A) ────────────────────────────────────────
   'chat.ask_label': 'Ask me',
   'chat.ask_toggle': 'Ask me before each tool',
-  'chat.ask_hint': 'The agent asks before every action that changes something: each Bash command, edit or fetch pins an Allow / Always allow / Deny card here and pushes to your phone. Reads and searches run freely. Off by default; remembered per chat.',
+  'chat.ask_hint': 'The agent asks before it changes anything: a write, an edit or a command that could have effects pins an Allow / Always allow / Deny card here and pushes to your phone. Reads, searches and commands the CLI classifies as harmless run freely. Unanswered requests auto-deny after 15 minutes. Off by default; remembered per chat.',
   'chat.ask_plan_conflict': 'Ask me is suppressed while Plan mode is on (a plan turn is already read-only and already gated).',
   'chat.ask_codex_conflict': 'Ask me is a Claude-only gate — this chat runs on Codex.',
   'chat.ask_card_title': 'awaiting your approval',
