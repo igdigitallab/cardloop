@@ -3,6 +3,13 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
+import { t } from '../i18n'
+import {
+  QUICK_KEY_ORDER,
+  QUICK_KEY_SEQUENCES,
+  applyCtrlLatch,
+  type QuickKeyId,
+} from './quickKeys'
 
 interface Props {
   isActive: boolean
@@ -43,6 +50,40 @@ function findLastUrl(term: Terminal): string | null {
   return lastClaude || last
 }
 
+// Visible glyph and accessible name for each QuickKeys bar button. Arrows and
+// bare punctuation are shown as the literal character sent (not translated —
+// same reasoning as a physical keypad's "7" not needing localization); the
+// keyboard abbreviations and all aria-labels go through i18n.
+const QUICK_KEY_LABELS: Record<QuickKeyId, string> = {
+  esc: t['quickkeys.esc'],
+  tab: t['quickkeys.tab'],
+  ctrl: t['quickkeys.ctrl'],
+  up: '↑',
+  down: '↓',
+  left: '←',
+  right: '→',
+  'ctrl-c': t['quickkeys.ctrl_c'],
+  pipe: '|',
+  tilde: '~',
+  slash: '/',
+  dash: '-',
+}
+
+const QUICK_KEY_ARIA: Record<QuickKeyId, string> = {
+  esc: t['quickkeys.aria_esc'],
+  tab: t['quickkeys.aria_tab'],
+  ctrl: t['quickkeys.aria_ctrl'],
+  up: t['quickkeys.aria_up'],
+  down: t['quickkeys.aria_down'],
+  left: t['quickkeys.aria_left'],
+  right: t['quickkeys.aria_right'],
+  'ctrl-c': t['quickkeys.aria_ctrl_c'],
+  pipe: t['quickkeys.aria_pipe'],
+  tilde: t['quickkeys.aria_tilde'],
+  slash: t['quickkeys.aria_slash'],
+  dash: t['quickkeys.aria_dash'],
+}
+
 export function TerminalTab({ isActive }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -53,6 +94,57 @@ export function TerminalTab({ isActive }: Props) {
   // app intended, free of any visual line-wrapping.
   const lastClipboardRef = useRef<string | null>(null)
   const [copied, setCopied] = useState<'idle' | 'ok' | 'none'>('idle')
+
+  // ── QuickKeys (spec-082 D): mobile key bar for Esc/Tab/Ctrl/arrows/etc ──
+  // ctrlArmedRef is the source of truth read inside the WS-lifecycle effect's
+  // term.onData closure (captured once at mount); ctrlArmed (state) exists
+  // only to re-render the button's visible latched styling.
+  const ctrlArmedRef = useRef(false)
+  const [ctrlArmed, setCtrlArmed] = useState(false)
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 768px)').matches,
+  )
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return
+    const mq = window.matchMedia('(max-width: 768px)')
+    const onChange = () => setIsMobile(mq.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+
+  // Single write path onto the terminal's WebSocket — the same path
+  // term.onData already uses. QuickKeys buttons call this directly instead
+  // of going through xterm's key handling (they're synthetic taps, not real
+  // keystrokes), so there is still only one transport to the PTY.
+  const sendToTerminal = useCallback((data: string) => {
+    const ws = wsRef.current
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(new TextEncoder().encode(data))
+    }
+  }, [])
+
+  const handleQuickKey = useCallback(
+    (id: QuickKeyId) => {
+      if (id === 'ctrl') {
+        setCtrlArmed((prev) => {
+          const next = !prev
+          ctrlArmedRef.current = next
+          return next
+        })
+        return
+      }
+      // Any other key — including a second, unrelated quick-key tap — always
+      // releases a pending Ctrl latch, matching "de-latches after one key".
+      if (ctrlArmedRef.current) {
+        ctrlArmedRef.current = false
+        setCtrlArmed(false)
+      }
+      const seq = QUICK_KEY_SEQUENCES[id]
+      if (seq) sendToTerminal(seq)
+    },
+    [sendToTerminal],
+  )
 
   const sendResize = useCallback(() => {
     const fit = fitRef.current
@@ -202,11 +294,17 @@ export function TerminalTab({ isActive }: Props) {
       term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n')
     }
 
-    // Forward keyboard input to PTY
+    // Forward keyboard input to PTY. Routed through the sticky-Ctrl latch
+    // (spec-082 D QuickKeys) so a Ctrl bar tap followed by an ordinary
+    // keystroke — typed on the on-screen keyboard, which has no physical
+    // Ctrl key — is translated into its control byte.
     term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(new TextEncoder().encode(data))
+      const { output, nextArmed } = applyCtrlLatch(ctrlArmedRef.current, data)
+      if (ctrlArmedRef.current !== nextArmed) {
+        ctrlArmedRef.current = nextArmed
+        setCtrlArmed(nextArmed)
       }
+      sendToTerminal(output)
     })
 
     // Resize on container size change
@@ -229,7 +327,7 @@ export function TerminalTab({ isActive }: Props) {
       fitRef.current = null
       wsRef.current = null
     }
-  }, [])
+  }, [sendToTerminal])
 
   const copyLoginUrl = useCallback(async () => {
     const term = termRef.current
@@ -308,6 +406,32 @@ export function TerminalTab({ isActive }: Props) {
         ref={containerRef}
         style={{ flex: 1, overflow: 'hidden', padding: '4px 6px' }}
       />
+      {isMobile && (
+        <div className="terminal-quickkeys" role="toolbar" aria-label={t['quickkeys.bar_label']}>
+          {QUICK_KEY_ORDER.map((id) => {
+            const armed = id === 'ctrl' && ctrlArmed
+            return (
+              <button
+                key={id}
+                type="button"
+                className={`terminal-quickkey${armed ? ' armed' : ''}`}
+                aria-label={armed ? t['quickkeys.aria_ctrl_armed'] : QUICK_KEY_ARIA[id]}
+                aria-pressed={id === 'ctrl' ? ctrlArmed : undefined}
+                // onMouseDown + preventDefault (not onClick) so the tap never
+                // steals focus from the terminal — stealing focus would close
+                // the on-screen keyboard mid-session (see GOTCHAS: the mobile
+                // "+" menu focus trap).
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  handleQuickKey(id)
+                }}
+              >
+                {QUICK_KEY_LABELS[id]}
+              </button>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
