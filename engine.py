@@ -847,10 +847,11 @@ _bg_run_cb = None
 def _register_webapp_callbacks(timeline_append, bus_publish, monitor_update=None,
                                has_live_subagents=None, bg_run_event=None,
                                create_pending_plan=None, resolve_plan=None,
-                               pending_plan_id=None):
+                               pending_plan_id=None, create_pending_tool=None):
     """Inject webapp callbacks so engine.py can publish events without importing webapp."""
     global _timeline_append_cb, _bus_publish_cb, _monitor_update_cb, _has_live_subagents_cb, \
-        _bg_run_cb, _create_pending_plan_cb, _resolve_plan_cb, _pending_plan_id_cb
+        _bg_run_cb, _create_pending_plan_cb, _resolve_plan_cb, _pending_plan_id_cb, \
+        _create_pending_tool_cb
     _timeline_append_cb = timeline_append
     _bus_publish_cb = bus_publish
     _monitor_update_cb = monitor_update
@@ -859,6 +860,7 @@ def _register_webapp_callbacks(timeline_append, bus_publish, monitor_update=None
     _create_pending_plan_cb = create_pending_plan
     _resolve_plan_cb = resolve_plan
     _pending_plan_id_cb = pending_plan_id
+    _create_pending_tool_cb = create_pending_tool
 
 
 # ─────────────────────────── spec-080: cockpit plan mode ──────────────────────────────────────
@@ -939,12 +941,139 @@ def _make_plan_gate_cb(session_key: str, ctx: "dict | None"):
     return _plan_gate_cb
 
 
+# ─────────────────────────── spec-082 A: ask mode (per-tool approval) ─────────────────────────
+# A third turn mode next to normal / plan. The turn connects with permission_mode="default"
+# and a can_use_tool gate: every non-read-only tool call parks a decision in the cockpit and
+# the turn waits for the operator's Allow / Always-allow / Deny — answerable from a phone.
+#
+# ⚠️ "default", NOT "bypassPermissions": under bypass the SDK SHADOWS can_use_tool entirely
+# (it emits CanUseToolShadowedWarning) and every tool would run ungated with no error at all.
+# permission_mode is part of the live-client fingerprint, so flipping the toggle reconnects
+# the client with the gate correctly bound — the same path plan mode uses.
+#
+# Verified live against the real SDK/CLI (not just unit tests):
+#   • Write under "default" → the gate IS consulted, even with the operator's own
+#     ~/.claude/settings.json setting {"permissions":{"defaultMode":"bypassPermissions"}} —
+#     the --permission-mode flag outranks the settings file, no inline --settings needed.
+#   • Bash `echo …` under "default" → the gate is NOT consulted: the CLI auto-approves
+#     commands it classifies as harmless BEFORE can_use_tool. So ask mode gates mutations,
+#     not literally every tool call — do not "fix" that by claiming full coverage in the UI.
+# Other residual surface: whole-tool `allow` rules in the operator's settings, and a sub-agent
+# spawned by Task whose own tool calls are not individually surfaced here. Ask mode is a
+# "don't change my repo without asking" guard rail, not a sandbox.
+_create_pending_tool_cb = None   # webapp.create_pending_tool_decision(ctx, sk, chat_id, tool, preview)
+_ask_turn_chat: "dict[str, str | None]" = {}   # session_key -> chat_id of the current ask turn
+
+# Tools that cannot change anything: gating them turns every turn into a click marathon for
+# zero safety. ONE list, deliberately conservative — extend it here, not at the call site.
+ASK_GATE_READONLY_TOOLS = frozenset({
+    "Read", "Glob", "Grep", "NotebookRead", "TodoWrite", "Task",
+})
+# A parked decision must never hang a turn forever: auto-deny after this many seconds with a
+# model-readable message so the agent can adapt or stop instead of blocking on a dead operator.
+ASK_GATE_TIMEOUT_SEC = max(5, int(os.getenv("ASK_GATE_TIMEOUT_SEC", "900") or 900))
+_ASK_PREVIEW_CHARS = 2000        # hard cap on the preview handed to the cockpit
+# Best-effort scrub of obvious secret shapes before a tool preview leaves the process. Not a
+# guarantee — the operator still reads the command — but it keeps a pasted key out of a push
+# notification and out of the decision sidecar.
+_ASK_SECRET_RE = re.compile(
+    r"(sk-[A-Za-z0-9_\-]{12,}|ghp_[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{12,}"
+    r"|(?i:(?:password|passwd|secret|token|api[_-]?key|authorization)\s*[=:]\s*)\S+)")
+
+
+def _ask_scrub(text: str) -> str:
+    """Mask obvious secret shapes in a preview string."""
+    try:
+        return _ASK_SECRET_RE.sub(lambda m: m.group(0)[:12] + "…[redacted]", text)
+    except Exception:
+        return text
+
+
+def _ask_tool_preview(tool_name: str, tool_input: "dict | None") -> str:
+    """One short, redacted, truncated human preview of what the tool is about to do.
+
+    The operator decides from this string on a phone, so the first line must carry the
+    decision: the command for Bash, the path for a write, the URL for a fetch."""
+    inp = tool_input if isinstance(tool_input, dict) else {}
+    try:
+        if tool_name == "Bash":
+            body = str(inp.get("command") or "")
+            desc = str(inp.get("description") or "")
+            preview = body + (f"\n\n# {desc}" if desc else "")
+        elif tool_name in ("Write", "Edit", "NotebookEdit", "MultiEdit"):
+            path = str(inp.get("file_path") or inp.get("notebook_path") or "")
+            body = str(inp.get("new_string") or inp.get("content")
+                       or inp.get("new_source") or "")
+            preview = path + ("\n\n" + body if body else "")
+        elif tool_name in ("WebFetch", "WebSearch"):
+            preview = str(inp.get("url") or inp.get("query") or "")
+        else:
+            preview = json.dumps(inp, ensure_ascii=False, default=str)
+    except Exception:
+        preview = "<unpreviewable tool input>"
+    return _ask_scrub(preview)[:_ASK_PREVIEW_CHARS]
+
+
+def _make_ask_gate_cb(session_key: str, ctx: "dict | None"):
+    """can_use_tool callback for ask-mode turns. Same dispatcher pattern as the plan gate:
+    per-turn state is read from module dicts at CALL time, never captured, because a reused
+    live client services later turns with the FIRST turn's closure."""
+
+    async def _ask_gate_cb(tool_name, tool_input, tp_ctx):
+        decision_id = None
+        try:
+            if tool_name in ASK_GATE_READONLY_TOOLS:
+                return PermissionResultAllow()
+            if _create_pending_tool_cb is None:
+                # No cockpit wired (unit tests / standalone) — allow so the engine stays usable.
+                return PermissionResultAllow()
+            decision_id, fut = _create_pending_tool_cb(
+                ctx, session_key, _ask_turn_chat.get(session_key), tool_name,
+                _ask_tool_preview(tool_name, tool_input))
+            if fut is None:
+                return PermissionResultAllow()   # on the project's always-allow list
+            try:
+                decision = await asyncio.wait_for(fut, ASK_GATE_TIMEOUT_SEC)
+            except asyncio.TimeoutError:
+                msg = f"no operator response within {ASK_GATE_TIMEOUT_SEC}s — denied"
+                if _resolve_plan_cb is not None:
+                    _resolve_plan_cb(None, decision_id, "timeout", msg)
+                print(f"[ask-gate] {session_key}: {tool_name} {decision_id} timed out — denied")
+                return PermissionResultDeny(message=msg)
+            except asyncio.CancelledError:
+                # /stop or client teardown while awaiting — mark the record, re-raise.
+                try:
+                    if _resolve_plan_cb is not None:
+                        _resolve_plan_cb(None, decision_id, "cancelled",
+                                         "turn was interrupted while awaiting approval")
+                finally:
+                    raise
+            verdict = (decision or {}).get("decision")
+            if verdict in ("allow", "allow_always"):
+                return PermissionResultAllow()
+            feedback = (decision or {}).get("feedback") or ""
+            return PermissionResultDeny(
+                message=feedback or f"The operator denied {tool_name}. Do not retry it; "
+                                    "continue with what is allowed or explain what you need.")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The gate must never wedge a turn on an internal error — deny with the reason so
+            # the model can surface it instead of hanging.
+            print(f"[ask-gate] {session_key}: gate error {exc!r} — denying {tool_name}")
+            return PermissionResultDeny(message=f"ask gate internal error: {exc}")
+
+    return _ask_gate_cb
+
+
 def _plan_client_fingerprint_ok(ctx: "dict | None", session_key: str, opts,
                                 stable_append_hash, effort, memory_mode) -> bool:
-    """spec-080 C1 safeguard: a live client pinned by running background children is REUSED on
-    fingerprint mismatch (deferred reconnect, spec-069 f9d60d) — but can_use_tool binds at
-    connect time, so a plan turn serviced by a reused bypass client would silently run
-    full-auto with no gate. Detect the deferred reuse and let the caller abort the turn."""
+    """spec-080 C1 safeguard (spec-082 A reuses it for ask turns): a live client pinned by
+    running background children is REUSED on fingerprint mismatch (deferred reconnect,
+    spec-069 f9d60d) — but can_use_tool binds at connect time, so a gated turn serviced by a
+    reused bypass client would silently run full-auto with no gate. Detect the deferred reuse
+    and let the caller abort the turn."""
     try:
         registry = (ctx or {}).get("live_clients", _live_clients)
         entry = registry.get(session_key)
@@ -2140,6 +2269,7 @@ async def run_engine(  # type: ignore[return]
     effort: "str | None" = None,
     ultracode: bool = False,
     plan_mode: bool = False,
+    ask_mode: bool = False,
     chat_id: "str | None" = None,
     entrypoint: str = "chat",
     disallowed_tools_extra: "list | None" = None,
@@ -2180,6 +2310,10 @@ async def run_engine(  # type: ignore[return]
                                  standing opt-in reminders + internal xhigh effort pin; the
                                  effort arg is ignored) and append the thin ULTRACODE_PROMPT
                                  complement. False (default) → no change.
+        ask_mode              — spec-082 A: per-tool approval. The turn connects with
+                                 permission_mode="default" and a can_use_tool gate that parks
+                                 every non-read-only tool call as an operator decision in the
+                                 cockpit. Ignored when plan_mode is also set (plan wins).
         entrypoint            — cost-ledger attribution tag for the on-disk usage ledger:
                                  "chat" (interactive cockpit, default), "card" (kanban auto-run),
                                  "deferred" (post-reset deferred run). Recorded per turn; does not
@@ -2205,6 +2339,11 @@ async def run_engine(  # type: ignore[return]
     if plan_mode and ultracode:
         print(f"[plan-gate] {session_key}: ultracode suppressed for the plan-mode turn")
         ultracode = False
+    # spec-082 A: ask ⊕ plan are mutually exclusive and plan wins server-side — a plan turn is
+    # already read-only and already gated, so a second gate would only double the taps.
+    if plan_mode and ask_mode:
+        print(f"[ask-gate] {session_key}: ask mode suppressed — plan mode owns this turn")
+        ask_mode = False
     if plan_mode:
         # Dispatcher state for the gate callback (read at call time, never captured):
         _plan_turn_chat[session_key] = chat_id
@@ -2213,6 +2352,10 @@ async def run_engine(  # type: ignore[return]
     else:
         _plan_turn_chat.pop(session_key, None)
         _plan_gate_approved.pop(session_key, None)
+    if ask_mode:
+        _ask_turn_chat[session_key] = chat_id
+    else:
+        _ask_turn_chat.pop(session_key, None)
 
     # Conductor directive: inject for fable as orchestrator model (unless disabled per-project) — but
     # NOT when ultracode is on, since the native ultracode contract (Workflow tool + reminders)
@@ -2383,10 +2526,13 @@ async def run_engine(  # type: ignore[return]
         # spec-080: plan turns connect in the CLI's native plan mode (hard read-only + its own
         # 5-phase workflow injection). permission_mode is part of the live-client fingerprint,
         # so toggling plan on/off reconnects the client with correctly-bound options.
-        permission_mode="plan" if plan_mode else "bypassPermissions",
-        # can_use_tool only when plan gating is active — under bypassPermissions it would be
+        # spec-082 A: ask turns connect in "default" — NOT bypassPermissions, which SHADOWS
+        # can_use_tool (CanUseToolShadowedWarning) and would run every tool ungated.
+        permission_mode=("plan" if plan_mode else ("default" if ask_mode else "bypassPermissions")),
+        # can_use_tool only when a gate is active — under bypassPermissions it would be
         # shadowed anyway and the SDK emits CanUseToolShadowedWarning noise.
-        can_use_tool=_make_plan_gate_cb(session_key, ctx) if plan_mode else None,
+        can_use_tool=(_make_plan_gate_cb(session_key, ctx) if plan_mode
+                      else (_make_ask_gate_cb(session_key, ctx) if ask_mode else None)),
         max_buffer_size=SDK_MAX_BUFFER_BYTES,
         cwd=cwd,
         setting_sources=["user", "project", "local"],
@@ -2692,17 +2838,19 @@ async def run_engine(  # type: ignore[return]
         print(f"[live-client] setup failed for {session_key} ({_lc_exc!r}), falling back to fresh client")
         live = None
 
-    # spec-080 C1: a client pinned by live background children is reused on fingerprint
-    # mismatch (deferred reconnect). For a PLAN turn that reuse is fatal-but-silent: the old
-    # client has no can_use_tool bound and the CLI subprocess is still in bypassPermissions —
-    # the turn would execute full-auto with no gate and no error. Abort loudly instead.
-    if plan_mode and live is not None and not _plan_client_fingerprint_ok(
+    # spec-080 C1 (spec-082 A: same for ask turns): a client pinned by live background children
+    # is reused on fingerprint mismatch (deferred reconnect). For a GATED turn that reuse is
+    # fatal-but-silent: the old client has no can_use_tool bound and the CLI subprocess is still
+    # in bypassPermissions — the turn would execute full-auto with no gate and no error. Abort
+    # loudly instead.
+    if (plan_mode or ask_mode) and live is not None and not _plan_client_fingerprint_ok(
             ctx, session_key, opts, _stable_append_hash, _eff_effort, _memory_mode):
-        print(f"[plan-gate] {session_key}: live client pinned by running background tasks — "
-              "aborting plan turn instead of running ungated")
+        _mode_name = "Plan mode" if plan_mode else "Ask mode"
+        print(f"[{'plan' if plan_mode else 'ask'}-gate] {session_key}: live client pinned by "
+              f"running background tasks — aborting gated turn instead of running ungated")
         yield {"type": "error", "exc": RuntimeError(
-            "Plan mode could not activate: this session's client is pinned by still-running "
-            "background tasks and cannot be reconnected in plan mode. Wait for them to finish "
+            f"{_mode_name} could not activate: this session's client is pinned by still-running "
+            f"background tasks and cannot be reconnected. Wait for them to finish "
             "(or stop them) and resend the message.")}
         _running.pop(session_key, None)
         return
@@ -2852,8 +3000,9 @@ def _build_ctx(*, web_port: int = None, web_password: str = None) -> dict:
     _register_webapp_callbacks(_webapp._timeline_append, _webapp._bus_publish, _webapp._monitor_update,
                                _webapp._has_live_agent_monitors, _webapp._bg_run_event,
                                create_pending_plan=_webapp.create_pending_plan,
-                               resolve_plan=_webapp.resolve_plan,
-                               pending_plan_id=_webapp._pending_plan_id)
+                               resolve_plan=_webapp.resolve_decision,
+                               pending_plan_id=_webapp._pending_plan_id,
+                               create_pending_tool=_webapp.create_pending_tool_decision)
 
     _web_port = web_port if web_port is not None else int(os.getenv("WEB_PORT", "8787"))
     _web_password = web_password if web_password is not None else os.getenv("WEB_PASSWORD", "")

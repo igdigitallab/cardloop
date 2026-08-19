@@ -707,6 +707,24 @@ export interface ActivityEventPlanDecided {
   status?: string
 }
 
+// spec-082 A: ask mode — one tool call awaits an operator decision / a decision landed.
+export interface ActivityEventToolReady {
+  kind: 'tool_ready'
+  decision_id: string
+  chat_id?: string | null
+  tool_name: string
+  tool_preview?: string
+}
+
+export interface ActivityEventToolDecided {
+  kind: 'tool_decided'
+  decision_id: string
+  chat_id?: string | null
+  tool_name?: string
+  allowed?: boolean
+  status?: string
+}
+
 export type ActivityEvent =
   | ActivityEventRunStart
   | ActivityEventText
@@ -721,6 +739,8 @@ export type ActivityEvent =
   | ActivityEventSessionRotated
   | ActivityEventPlanReady
   | ActivityEventPlanDecided
+  | ActivityEventToolReady
+  | ActivityEventToolDecided
 
 export interface VersionInfo {
   current: string
