@@ -87,6 +87,16 @@ Claude continuity is stored in `session_id`; Codex continuity is stored separate
 | `PATCH` | `/api/projects/{id}/chats/{chat_id}` | Rename or activate a chat. Provider changes are rejected; create a new chat instead | Yes |
 | `DELETE` | `/api/projects/{id}/chats/{chat_id}` | Delete a non-final chat; provider threads/sessions are not deleted | Yes |
 
+### Approval gates
+
+A gated turn (plan mode, or ask mode's per-tool gate) parks a **decision** and waits for the
+operator. Both kinds live in one store; `/plan/...` and `/decision/...` hit the same handlers.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects/{id}/decision/{decision_id}` | Full decision record — `kind: "plan"\|"tool"`, `status`, and the payload (`plan_text` / `tool_name` + `tool_preview`). Alias: `/plan/{plan_id}` | Yes |
+| `POST` | `/api/projects/{id}/decision/{decision_id}/decide` | Decide. `kind="plan"` → `{"decision":"approve\|reject","feedback?":""}`; `kind="tool"` → `{"decision":"allow\|allow_always\|deny","feedback?":""}`. `allow_always` adds the tool to that project's `ask_always_allow`. Idempotent — a second decide returns `{ok, noop:true}`. Alias: `/plan/{plan_id}/decide` | Yes |
+
 ---
 
 ## Project Files

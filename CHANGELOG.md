@@ -7,6 +7,21 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Added — Ask mode: per-tool approval from the phone (spec-082 A)
+A third per-chat turn mode next to normal / plan: "🙋 Ask me". Every action that changes
+something — each Bash command, edit, fetch — pins an **Allow once / Always allow here /
+Deny** card above the composer and sends a Web Push naming the tool, so the turn is
+answerable from a phone in one tap; reads and searches (`Read`, `Glob`, `Grep`,
+`NotebookRead`, `TodoWrite`, `Task`) run freely. Deny takes feedback and hands it to the
+model, "Always allow" persists per project (never global), and an unanswered request
+auto-denies after `ASK_GATE_TIMEOUT_SEC` (default 900) with a model-readable message so a
+turn can never hang forever. Off by default; board/card runs stay full-auto.
+⚠️ The turn connects with `permission_mode="default"` — under `bypassPermissions` the SDK
+*shadows* `can_use_tool` (`CanUseToolShadowedWarning`) and every tool would run ungated with
+no error at all. Implementation reuses the spec-080 approval machinery: the pending-plan
+store is now a pending-**decision** store keyed by kind (`plan` | `tool`) with kind-agnostic
+`/api/projects/{id}/decision/{id}[/decide]` routes; the shipped `/plan/...` routes still work.
+
 ### Added — Cockpit Plan Mode (spec-080)
 Terminal-grade plan mode in the chat: a per-chat "🗺 Plan mode" toggle runs the turn in the
 CLI's NATIVE `permission_mode="plan"` (hard read-only + the CLI's own 5-phase Explore/Plan
