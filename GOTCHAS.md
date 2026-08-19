@@ -10,6 +10,15 @@ Subsystem-level gotchas. Turn-1 safety guards (Auth, Restart/cgroup) live in CLA
 - **Front-state hygiene.** Don't reset `activeId === '__global__'` in cleanup; a mounted tab uses `display:none`; `busActiveRef` is restored from `GET /api/projects/{id}/running` on ChatTab mount; the TASKS.md write is skipped if the file changed externally.
 
 ### Security
+- **`can_use_tool` is SHADOWED under `bypassPermissions`** (the SDK says so out loud:
+  `CanUseToolShadowedWarning`, `types._get_can_use_tool_shadowed_warning`). A gated turn — plan
+  mode or spec-082 ask mode — must connect with `permission_mode="plan"` / `"default"`, never
+  bypass, or the gate is never consulted and every tool runs full-auto **with no error**. Two
+  more shadow sources on `default`: a whole-tool entry in `allowed_tools` (including the bare
+  `Skill` the SDK appends when `skills="all"`), and allow rules in the operator's own settings
+  files — those are invisible to the warning. `permission_mode` is part of the live-client
+  fingerprint, so toggling a gate reconnects the client; a client PINNED by running background
+  children is reused instead, which is why a gated turn aborts/queues in that case.
 - **The "irreversible" detector — exact substrings.** Do NOT use `-f `/`rm `/`kill ` (they catch `tail -f`, `perform`, etc.). Only `rm -rf`/`rm -f`/`git push`/`--force` and the like.
 - **Anti-traversal.** `_resolve_safe` / `_resolve_global_safe` — resolve+startswith with a trailing slash. `.env*` → 403 (except `.env.example`). `.git/venv/node_modules/dist/__pycache__` are hidden + 403.
 - **card_id is validated** by `_valid_card_id`/`_CARD_ID_RE` (prevents path injection via card_id).

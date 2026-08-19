@@ -1536,14 +1536,27 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
   useEffect(() => { refreshResumePrompt() }, [refreshResumePrompt])
 
-  // spec-080: reload-durability for the plan-approval card — the active chat's plan_id
-  // pointer (chats.json) survives reloads; re-fetch the record and re-pin the card.
+  // spec-080 (+ spec-082 A): reload-durability for the approval cards — the active chat's
+  // plan_id / decision_id pointers (chats.json) survive reloads; re-fetch the record and
+  // re-pin the card. One /chats read serves both pointers.
   const refreshPlanPrompt = useCallback(async () => {
     try {
       const data = await api.chats(projectId)
       const chats = (data?.chats || []) as unknown as Array<Record<string, unknown>>
       const activeId = effectiveChatId || (data?.active as string | undefined)
       const mine = chats.find(c => c['id'] === activeId)
+      const decisionId = mine ? (mine['decision_id'] as string | undefined) : undefined
+      if (!decisionId) {
+        setToolPrompt(null)
+      } else {
+        api.decisionGet(projectId, decisionId).then(rec => {
+          setToolPrompt(rec && rec.status === 'awaiting_approval'
+            ? { decisionId, chatId: (rec.chat_id as string | null) ?? null,
+                toolName: String(rec.tool_name || 'Tool'),
+                preview: String(rec.tool_preview || '') }
+            : null)
+        }).catch(() => { /* live bus event still drives the card */ })
+      }
       const planId = mine ? (mine['plan_id'] as string | undefined) : undefined
       if (!planId) { setPlanPrompt(null); return }
       const rec = await api.planGet(projectId, planId)
@@ -1560,32 +1573,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   }, [projectId, effectiveChatId])
 
   useEffect(() => { refreshPlanPrompt() }, [refreshPlanPrompt])
-
-  // spec-082 A: same reload-durability for the per-tool approval card — the active chat's
-  // decision_id pointer (chats.json) survives reloads, so a phone that locked mid-decision
-  // comes back to the card instead of to a silently parked turn.
-  const refreshToolPrompt = useCallback(async () => {
-    try {
-      const data = await api.chats(projectId)
-      const chats = (data?.chats || []) as unknown as Array<Record<string, unknown>>
-      const activeId = effectiveChatId || (data?.active as string | undefined)
-      const mine = chats.find(c => c['id'] === activeId)
-      const decisionId = mine ? (mine['decision_id'] as string | undefined) : undefined
-      if (!decisionId) { setToolPrompt(null); return }
-      const rec = await api.decisionGet(projectId, decisionId)
-      if (rec && rec.status === 'awaiting_approval') {
-        setToolPrompt({ decisionId, chatId: (rec.chat_id as string | null) ?? null,
-                        toolName: String(rec.tool_name || 'Tool'),
-                        preview: String(rec.tool_preview || '') })
-      } else {
-        setToolPrompt(null)
-      }
-    } catch {
-      // Non-fatal — the live bus event still drives the card.
-    }
-  }, [projectId, effectiveChatId])
-
-  useEffect(() => { refreshToolPrompt() }, [refreshToolPrompt])
 
   // Stick-to-bottom: auto-scroll only when the user is pinned (within SCROLL_PIN_THRESHOLD of bottom).
   // When unpinned (user scrolled up), new content does NOT jump the viewport — instead the pill
