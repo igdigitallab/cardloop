@@ -41,6 +41,17 @@ venv/bin/python -m pytest -q
 make test
 ```
 
+## Troubleshooting
+
+```bash
+make doctor          # or: venv/bin/python tools/doctor.py
+```
+
+One-command diagnosis (< 5s, read-only, secrets always redacted): versions, auth, config, systemd
+service health, runtime reachability, data counts, then a ✗/⚠ verdict with a remedy per finding.
+Non-zero exit code when any ✗ is present. Run it before filing a bug report and paste its output
+into the issue.
+
 ## Frontend lint & format
 
 ```bash
@@ -85,6 +96,7 @@ templates/      — new-project starters (*.tpl) + vault reference copies (refer
 tests/          — pytest suite (1400+ tests; run via venv/bin/python -m pytest)
 data/           — runtime state (gitignored: topics.json, sessions.json, audit/, runs/)
 docs/API.md     — HTTP API reference
+tools/doctor.py — one-command cockpit diagnosis (make doctor)
 ```
 
 See ARCHITECTURE.md for a full code map with file:line references.
