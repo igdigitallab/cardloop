@@ -1,8 +1,9 @@
-import { useEffect, useRef, useCallback, useState } from 'react'
+import { useEffect, useRef, useCallback, useState, type ReactNode } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
+import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight } from 'lucide-react'
 import { t } from '../i18n'
 import {
   QUICK_KEY_ORDER,
@@ -50,18 +51,22 @@ function findLastUrl(term: Terminal): string | null {
   return lastClaude || last
 }
 
-// Visible glyph and accessible name for each QuickKeys bar button. Arrows and
-// bare punctuation are shown as the literal character sent (not translated —
-// same reasoning as a physical keypad's "7" not needing localization); the
-// keyboard abbreviations and all aria-labels go through i18n.
-const QUICK_KEY_LABELS: Record<QuickKeyId, string> = {
+// Visible glyph and accessible name for each QuickKeys bar button. Bare
+// punctuation is shown as the literal character sent (not translated — same
+// reasoning as a physical keypad's "7" not needing localization); the
+// keyboard abbreviations and all aria-labels go through i18n. Arrows are
+// lucide-react icons (already a project dependency, no new one added) rather
+// than Unicode glyphs — some platforms render ↑↓←→ through a color-emoji
+// fallback font that ignores the button's CSS `color`, breaking the
+// achromatic styling; an inline SVG with stroke="currentColor" cannot.
+const QUICK_KEY_LABELS: Record<QuickKeyId, ReactNode> = {
   esc: t['quickkeys.esc'],
   tab: t['quickkeys.tab'],
   ctrl: t['quickkeys.ctrl'],
-  up: '↑',
-  down: '↓',
-  left: '←',
-  right: '→',
+  up: <ArrowUp size={16} aria-hidden="true" />,
+  down: <ArrowDown size={16} aria-hidden="true" />,
+  left: <ArrowLeft size={16} aria-hidden="true" />,
+  right: <ArrowRight size={16} aria-hidden="true" />,
   'ctrl-c': t['quickkeys.ctrl_c'],
   pipe: '|',
   tilde: '~',
