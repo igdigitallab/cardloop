@@ -15278,8 +15278,11 @@ async def api_browser_ws(req: web.Request) -> web.WebSocketResponse:
 
     session, err = await _resolve_browser_session(req)
     if session is None:
-        await ws.send_json({"type": "error", "message": err})
-        await ws.close()
+        try:
+            await ws.send_json({"type": "error", "message": err})
+            await ws.close()
+        except (ConnectionResetError, ConnectionAbortedError):
+            pass  # client already gone (e.g. gave up during a slow backend acquire)
         return ws
 
     await session.add_subscriber(ws)
@@ -15319,7 +15322,10 @@ async def api_browser_input_ws(req: web.Request) -> web.WebSocketResponse:
 
     session, _err = await _resolve_browser_session(req)
     if session is None:
-        await ws.close()
+        try:
+            await ws.close()
+        except (ConnectionResetError, ConnectionAbortedError):
+            pass  # client already gone (e.g. gave up during a slow backend acquire)
         return ws
 
     try:
