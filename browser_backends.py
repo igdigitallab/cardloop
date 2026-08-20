@@ -49,6 +49,15 @@ _MANAGER_TIMEOUT = 20.0
 # modules.json / tracked code). Same encrypted store as spec-054 credentials.
 MANAGER_TOKEN_KEY = "cloak-manager-token"
 
+# Playwright's own connect_over_cdp default is 180s. That is not a wait, it is a
+# hang: three minutes per attempt, every session retrying, and the pane says
+# nothing. A connect to a healthy profile takes ~1s (measured), so anything past
+# a few seconds means something is wrong and the caller deserves to hear it.
+CDP_CONNECT_TIMEOUT = float(os.environ.get("CLOAK_CDP_CONNECT_TIMEOUT", "30"))
+# Per-target liveness probe before connecting (see _prune_dead_targets).
+CDP_PROBE_TIMEOUT = float(os.environ.get("CLOAK_CDP_PROBE_TIMEOUT", "4"))
+CDP_PRUNE_DEAD_TARGETS = (os.environ.get("CLOAK_CDP_PRUNE", "1") or "1").lower() not in ("0", "false", "no")
+
 # Stealth knobs passed straight through to cloakbrowser.launch_async (Tier B, Phase C).
 _CLOAK_KNOBS = ("proxy", "geoip", "humanize", "timezone", "locale")
 
@@ -230,6 +239,113 @@ async def _acquire_cloak(cfg: dict, viewport: dict) -> Acquired:
 # ───────────────────────────── tier C: external CDP ──────────────────────────
 
 
+async def _prune_dead_targets(cdp_url: str, headers: dict) -> int:
+    """Close pages whose renderer no longer answers CDP, BEFORE connecting.
+
+    ``connect_over_cdp`` attaches to EVERY target and waits for each one to
+    initialise, so a single wedged page takes the whole connection down with it:
+    the browser answers ``Browser.getVersion`` in 60ms while Playwright sits at
+    180s and times out. That is not hypothetical — one hung
+    ``americastire.com`` tab in the shared ``google`` profile made the browser
+    "not work" in every session at once for hours (its renderer: 2.9GB RSS, 203
+    minutes of CPU). A protocol trace showed 200 of 210 commands answered and
+    the 10 stragglers all on that one sessionId.
+
+    So we do what Playwright cannot: talk raw CDP first, ping each page, and
+    close the ones that do not answer within ``CDP_PROBE_TIMEOUT``. Live pages
+    are detached untouched — an operator's tab is never closed for being idle,
+    only for being dead. Returns how many were closed; any failure here is
+    swallowed by the caller, since a probe that cannot run must not block a
+    connect that might still work.
+    """
+    import asyncio
+    import json as _json
+
+    import aiohttp
+
+    closed = 0
+    timeout = aiohttp.ClientTimeout(total=CDP_PROBE_TIMEOUT * 4, sock_connect=CDP_PROBE_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers or None) as sess:
+        async with sess.ws_connect(cdp_url, max_msg_size=0) as ws:
+            next_id = 0
+
+            async def _call(method: str, params: dict | None = None, session_id: str = "") -> int:
+                nonlocal next_id
+                next_id += 1
+                msg: dict[str, Any] = {"id": next_id, "method": method}
+                if params:
+                    msg["params"] = params
+                if session_id:
+                    msg["sessionId"] = session_id
+                await ws.send_str(_json.dumps(msg))
+                return next_id
+
+            async def _collect(deadline: float, wanted: set) -> dict:
+                """Read until every id in ``wanted`` answered or the deadline passes."""
+                out: dict[int, dict] = {}
+                loop = asyncio.get_running_loop()
+                while wanted - set(out) and loop.time() < deadline:
+                    try:
+                        msg = await asyncio.wait_for(ws.receive(), timeout=max(0.05, deadline - loop.time()))
+                    except asyncio.TimeoutError:
+                        break
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type is not aiohttp.WSMsgType.TEXT:
+                        continue
+                    with contextlib.suppress(Exception):
+                        data = _json.loads(msg.data)
+                        if isinstance(data, dict) and data.get("id") in wanted:
+                            out[data["id"]] = data
+                return out
+
+            loop = asyncio.get_running_loop()
+            list_id = await _call("Target.getTargets")
+            got = await _collect(loop.time() + CDP_PROBE_TIMEOUT, {list_id})
+            infos = (got.get(list_id, {}).get("result", {}) or {}).get("targetInfos") or []
+            pages = [t for t in infos if t.get("type") == "page"]
+            if not pages:
+                return 0
+
+            # Attach to every page at once, then ping them all in parallel — a serial
+            # probe would cost CDP_PROBE_TIMEOUT per dead tab.
+            attach_ids = {}
+            for t in pages:
+                attach_ids[await _call("Target.attachToTarget",
+                                       {"targetId": t["targetId"], "flatten": True})] = t
+            attached = await _collect(loop.time() + CDP_PROBE_TIMEOUT, set(attach_ids))
+            sessions = {}
+            for mid, t in attach_ids.items():
+                sid = (attached.get(mid, {}).get("result", {}) or {}).get("sessionId")
+                if sid:
+                    sessions[sid] = t
+
+            ping_ids = {}
+            for sid, t in sessions.items():
+                ping_ids[await _call("Runtime.evaluate", {"expression": "1", "returnByValue": True},
+                                     session_id=sid)] = (sid, t)
+            answered = await _collect(loop.time() + CDP_PROBE_TIMEOUT, set(ping_ids))
+
+            for mid, (sid, t) in ping_ids.items():
+                if mid in answered:
+                    with contextlib.suppress(Exception):
+                        await _call("Target.detachFromTarget", {"sessionId": sid})
+                    continue
+                _log.warning(
+                    "closing wedged CDP target %s (%s) — no answer in %.0fs, it would hang connect_over_cdp",
+                    t.get("targetId"), (t.get("url") or "")[:120], CDP_PROBE_TIMEOUT,
+                )
+                with contextlib.suppress(Exception):
+                    await _call("Target.closeTarget", {"targetId": t["targetId"]})
+                    closed += 1
+            if closed:
+                # Give Chrome a moment to actually tear the target down, otherwise the
+                # connect that follows can still attach to a half-closed page.
+                await asyncio.sleep(0.3)
+    return closed
+
+
 async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
     cdp_url = cfg.get("cdp_url") or ""
     profile = cfg.get("profile") or ""
@@ -251,10 +367,22 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
         raise BackendError(
             "external-cdp backend selected but no cdp_url or Cloak Manager profile is configured."
         )
+    # Health-check the targets we are about to attach to. Never fatal: if the probe
+    # itself cannot run, the connect below may still succeed, and it owns the error.
+    if CDP_PRUNE_DEAD_TARGETS:
+        try:
+            closed = await _prune_dead_targets(cdp_url, headers)
+            if closed:
+                _log.info("pruned %d wedged target(s) before connecting (profile=%s)",
+                          closed, profile or "-")
+        except Exception as e:
+            _log.warning("CDP target health probe failed (profile=%s): %s", profile or "-", e)
+
     from playwright.async_api import async_playwright
     pw = await async_playwright().start()
     try:
-        browser = await pw.chromium.connect_over_cdp(cdp_url, headers=headers or None)
+        browser = await pw.chromium.connect_over_cdp(
+            cdp_url, headers=headers or None, timeout=CDP_CONNECT_TIMEOUT * 1000)
     except Exception as e:
         with contextlib.suppress(Exception):
             await pw.stop()
@@ -263,7 +391,14 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
         # "failed to reach Chrome CDP for <profile>", but nothing on our side ever
         # recorded that we saw the SAME failure, at what time, for which profile.
         _log.warning("external-cdp connect_over_cdp failed (profile=%s): %s", profile or "-", e)
-        raise BackendError(f"connect_over_cdp({cdp_url!r}) failed: {e}") from e
+        hint = ""
+        if profile and "Timeout" in str(e):
+            # The transport is almost never the problem here; a wedged page that
+            # survived the probe is. Say so, with the one action that fixes it.
+            hint = (f" The profile answered the socket but not the protocol — a page is "
+                    f"probably wedged. Restart profile {profile} in Cloak Manager "
+                    f"(logins survive, they live in the profile's on-disk user-data-dir).")
+        raise BackendError(f"connect_over_cdp({cdp_url!r}) failed: {e}{hint}") from e
     # Reuse the connected browser's existing context (that is where the profile's cookies
     # and logins live — sharing it is the whole point).
     context = browser.contexts[0] if browser.contexts else await browser.new_context(viewport=viewport)
@@ -337,6 +472,13 @@ async def acquire(cwd: str, viewport: dict) -> Acquired:
             acq = await _acquire_builtin(viewport)
     except BackendError as e:
         _log.warning("browser backend acquire FAILED (cwd=%s backend=%s): %s", cwd, backend, e)
+        # A failed acquire may still have LAUNCHED the profile (profile_cdp_url does,
+        # before connecting). Without this the profile is orphaned for good: nobody is
+        # attached, so release_profile is never called, so the idle-stop is never
+        # scheduled, and it renders through swiftshader until someone notices the fans.
+        # That is how the profile behind this fix stayed up for 14 hours.
+        with contextlib.suppress(Exception):
+            await schedule_stop_if_unused(str(cfg.get("profile") or ""))
         raise
     # Refcount the Manager profile only after a SUCCESSFUL acquire — registering a
     # failed attempt would pin a profile open with a session that never existed.
@@ -538,20 +680,38 @@ async def release_profile(profile_id: str, session_key: str) -> None:
     launched this profile, schedule the stop after the idle grace period."""
     if not profile_id:
         return
-    import asyncio
     async with _profile_lock():
         users = _PROFILE_USERS.get(profile_id)
         if users is not None:
             users.discard(session_key)
             if not users:
                 _PROFILE_USERS.pop(profile_id, None)
-        if _PROFILE_USERS.get(profile_id):
-            return  # another project is still on this profile
-        if profile_id not in _PROFILE_OURS or PROFILE_IDLE_STOP <= 0:
-            return  # the operator's own running profile, or the feature is off
-        if profile_id in _PROFILE_STOPPERS:
-            return
-        _PROFILE_STOPPERS[profile_id] = asyncio.create_task(_stop_when_idle(profile_id))
+        _schedule_stop_locked(profile_id)
+
+
+def _schedule_stop_locked(profile_id: str) -> None:
+    """Arm the idle-stop for a profile nobody is using. Caller holds ``_profile_lock``."""
+    import asyncio
+    if _PROFILE_USERS.get(profile_id):
+        return  # another project is still on this profile
+    if profile_id not in _PROFILE_OURS or PROFILE_IDLE_STOP <= 0:
+        return  # the operator's own running profile, or the feature is off
+    if profile_id in _PROFILE_STOPPERS:
+        return
+    _PROFILE_STOPPERS[profile_id] = asyncio.create_task(_stop_when_idle(profile_id))
+
+
+async def schedule_stop_if_unused(profile_id: str) -> None:
+    """Arm the idle-stop for a profile we launched that never became a session.
+
+    ``attach_profile`` deliberately runs only after a SUCCESSFUL acquire, so a launch
+    followed by a failed connect leaves a running profile with no user and no pending
+    stop — forever. This is the missing counterpart: same rules as ``release_profile``
+    (ours only, never the operator's), just without a session to release."""
+    if not profile_id:
+        return
+    async with _profile_lock():
+        _schedule_stop_locked(profile_id)
 
 
 async def _stop_when_idle(profile_id: str) -> None:

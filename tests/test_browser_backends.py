@@ -551,3 +551,157 @@ def test_a_corrupt_or_missing_ownership_file_is_survivable(monkeypatch, tmp_path
     _backends._OWNED_LOADED = False
     _backends._load_owned()          # garbage file
     assert _backends._PROFILE_OURS == set()
+
+
+# ─────────────────── wedged targets & orphaned launches (2026-08-20) ──────────
+# A single hung page in the shared `google` profile made the browser "not work" in
+# EVERY session for hours: connect_over_cdp attaches to every target and waits for
+# each, so one dead renderer times out the whole connect (180s, on repeat). Worse,
+# the failing path had launched the profile and could never stop it again — no
+# session was ever attached, so nothing scheduled the idle-stop. Both are covered
+# here: prune the dead target before connecting, and arm the stop even on failure.
+
+
+def test_a_failed_acquire_still_arms_the_idle_stop(monkeypatch):
+    calls = _stopped_calls(monkeypatch)
+    monkeypatch.setattr(_backends, "PROFILE_IDLE_STOP", 0.01)
+    monkeypatch.setattr(_backends, "resolve", lambda cwd: {
+        "backend": "external-cdp", "agent_actions": "read", "cdp_url": "", "profile": "P"})
+
+    async def _boom(cfg, viewport):
+        raise _backends.BackendError("connect_over_cdp(...) failed: Timeout 30000ms exceeded.")
+    monkeypatch.setattr(_backends, "_acquire_external", _boom)
+
+    async def go():
+        _backends._PROFILE_OURS.add("P")        # we launched it before connecting
+        with pytest.raises(_backends.BackendError):
+            await _backends.acquire("/proj/a", {"width": 1, "height": 1})
+        assert "P" in _backends._PROFILE_STOPPERS, "an orphaned launch must still be stoppable"
+        await asyncio.sleep(0.05)
+        assert calls == ["P"]
+    asyncio.run(go())
+
+
+def test_a_failed_acquire_never_stops_the_operators_profile(monkeypatch):
+    calls = _stopped_calls(monkeypatch)
+    monkeypatch.setattr(_backends, "PROFILE_IDLE_STOP", 0.01)
+    monkeypatch.setattr(_backends, "resolve", lambda cwd: {
+        "backend": "external-cdp", "agent_actions": "read", "cdp_url": "", "profile": "P"})
+
+    async def _boom(cfg, viewport):
+        raise _backends.BackendError("nope")
+    monkeypatch.setattr(_backends, "_acquire_external", _boom)
+
+    async def go():
+        # NOT in _PROFILE_OURS — it was already running when we arrived
+        with pytest.raises(_backends.BackendError):
+            await _backends.acquire("/proj/a", {"width": 1, "height": 1})
+        await asyncio.sleep(0.05)
+        assert calls == []
+    asyncio.run(go())
+
+
+def test_schedule_stop_if_unused_leaves_a_profile_in_use_alone(monkeypatch):
+    calls = _stopped_calls(monkeypatch)
+    monkeypatch.setattr(_backends, "PROFILE_IDLE_STOP", 0.01)
+
+    async def go():
+        _backends._PROFILE_OURS.add("P")
+        await _backends.attach_profile("P", "/proj/live")
+        await _backends.schedule_stop_if_unused("P")   # another project failed to connect
+        await asyncio.sleep(0.05)
+        assert calls == [], "a profile another project is driving must not be stopped"
+        await _backends.schedule_stop_if_unused("")    # empty id is a no-op
+    asyncio.run(go())
+
+
+async def _fake_cdp_server(dead_target_url: str):
+    """A minimal CDP endpoint: two pages, one of which never answers Runtime.evaluate.
+
+    Returns (url, closed) where ``closed`` collects the targetIds the client asked to
+    close — i.e. exactly what the health probe decided was dead."""
+    import json
+
+    from aiohttp import web
+
+    closed: list = []
+    targets = [
+        {"targetId": "LIVE", "type": "page", "url": "https://example.com/ok"},
+        {"targetId": "DEAD", "type": "page", "url": dead_target_url},
+        {"targetId": "WORKER", "type": "service_worker", "url": "https://example.com/sw.js"},
+    ]
+
+    async def handler(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        async for msg in ws:
+            req = json.loads(msg.data)
+            method, mid = req.get("method"), req.get("id")
+            if method == "Target.getTargets":
+                await ws.send_str(json.dumps({"id": mid, "result": {"targetInfos": targets}}))
+            elif method == "Target.attachToTarget":
+                tid = req["params"]["targetId"]
+                await ws.send_str(json.dumps({"id": mid, "result": {"sessionId": f"S-{tid}"}}))
+            elif method == "Runtime.evaluate":
+                if req.get("sessionId") == "S-DEAD":
+                    continue          # the wedged renderer: silence, forever
+                await ws.send_str(json.dumps({"id": mid, "result": {"result": {"value": 1}}}))
+            elif method == "Target.closeTarget":
+                closed.append(req["params"]["targetId"])
+                await ws.send_str(json.dumps({"id": mid, "result": {"success": True}}))
+            else:
+                await ws.send_str(json.dumps({"id": mid, "result": {}}))
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/cdp", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    return f"http://127.0.0.1:{port}/cdp", closed, runner
+
+
+async def test_the_probe_closes_only_the_wedged_page(monkeypatch):
+    monkeypatch.setattr(_backends, "CDP_PROBE_TIMEOUT", 0.4)
+    url, closed, runner = await _fake_cdp_server("https://www.americastire.com/schedule-appointment/date")
+    try:
+        assert await _backends._prune_dead_targets(url, {}) == 1
+        assert closed == ["DEAD"], "a live page (and a non-page target) must be left alone"
+    finally:
+        await runner.cleanup()
+
+
+async def test_the_probe_is_a_no_op_when_every_page_answers(monkeypatch):
+    monkeypatch.setattr(_backends, "CDP_PROBE_TIMEOUT", 0.4)
+    import json
+
+    from aiohttp import web
+
+    async def handler(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        async for msg in ws:
+            req = json.loads(msg.data)
+            mid, method = req.get("id"), req.get("method")
+            if method == "Target.getTargets":
+                await ws.send_str(json.dumps({"id": mid, "result": {"targetInfos": [
+                    {"targetId": "A", "type": "page", "url": "https://example.com/"}]}}))
+            elif method == "Target.attachToTarget":
+                await ws.send_str(json.dumps({"id": mid, "result": {"sessionId": "S-A"}}))
+            else:
+                await ws.send_str(json.dumps({"id": mid, "result": {}}))
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/cdp", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        port = runner.addresses[0][1]
+        assert await _backends._prune_dead_targets(f"http://127.0.0.1:{port}/cdp", {}) == 0
+    finally:
+        await runner.cleanup()
