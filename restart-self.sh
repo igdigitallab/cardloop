@@ -63,6 +63,7 @@ if command -v curl >/dev/null 2>&1; then
   waited=0
   running=""
   agents=""
+  plans=""
   while [ "$waited" -lt "$WAIT_FOR_IDLE_MAX_SEC" ]; do
     resp="$(curl -fsS --max-time 3 "${BASE_URL}/api/health?deep=1" 2>/dev/null || true)"
     if [ -z "$resp" ]; then
@@ -164,11 +165,23 @@ else
   log "journalctl not found — skipping log scan"
 fi
 
-# 3. Smoke-GET / and /api/health.
+# 3. Smoke-GET / and /api/health — with retries. A single-shot GET right after boot
+#    false-triggered a rollback (2026-08-21): the cockpit binds :8787 within ~3s but
+#    the event loop can be busy with post-listen init for 10-15s, so one curl with a
+#    5s cap times out while the service is perfectly healthy. Retry each endpoint up
+#    to 12x5s and log every failed attempt's curl exit code for the post-mortem.
 smoke_ok=1
 if command -v curl >/dev/null 2>&1; then
-  curl -fsS --max-time 5 "\${BASE_URL}/" >/dev/null 2>&1 || smoke_ok=0
-  curl -fsS --max-time 5 "\${BASE_URL}/api/health" >/dev/null 2>&1 || smoke_ok=0
+  for path in "/" "/api/health"; do
+    ok=0
+    for attempt in \$(seq 1 12); do
+      curl -fsS --max-time 5 "\${BASE_URL}\${path}" >/dev/null 2>&1 && { ok=1; break; }
+      rc=\$?
+      log "smoke GET \${path} attempt \${attempt}/12 failed (curl exit \${rc})"
+      sleep 5
+    done
+    [ "\$ok" = "1" ] || smoke_ok=0
+  done
 fi
 
 if [ "\$healthy" = "1" ] && [ "\$bad_logs" = "0" ] && [ "\$smoke_ok" = "1" ]; then
