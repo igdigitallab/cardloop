@@ -1,11 +1,78 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, type CodexLimits } from '../api'
+import { api, type CodexLimits, type AccountRow } from '../api'
 import { fmtReset, pickClass, fmtPct, orderedLimitKeys, limitLabel, type RawLimit } from './usageFormat'
 
 interface UsageData {
   limits: Record<string, RawLimit>
   codex?: CodexLimits | null
   now: number
+  account?: string
+  accounts?: AccountRow[] | null
+}
+
+/** Account switcher — rendered inside the limits dropdown, and only when a second
+ *  subscription exists. This is where the operator already looks to see how much is left,
+ *  so it is where the "move to the other one" action belongs.
+ *
+ *  An inactive account's percentage can be missing or aged: only a running CLI refreshes
+ *  that account's access token. Showing "—" is honest; inventing 0% would not be. */
+function AccountSwitcher({ accounts, now, onSwitched }: {
+  accounts: AccountRow[]
+  now: number
+  onSwitched: (msg: string) => void
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+
+  async function pick(a: AccountRow) {
+    if (a.active || busy) return
+    setBusy(a.id)
+    try {
+      const res = await api.accountActivate(a.id)
+      onSwitched(res.in_flight > 0
+        ? `New runs use ${a.label}. ${res.in_flight} run(s) already in flight stay on the old one.`
+        : `New runs use ${a.label}.`)
+    } catch (e) {
+      onSwitched(`Could not switch: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="usage-accounts">
+      <div className="usage-accounts-head">Subscription</div>
+      {accounts.map(a => {
+        const lead = a.limits?.five_hour ?? a.limits?.seven_day ?? null
+        const pct = lead ? fmtPct(lead.utilization) : ''
+        const aged = a.limits_ts != null && now - a.limits_ts > 900
+        return (
+          <button
+            key={a.id}
+            className={`usage-account-row${a.active ? ' is-active' : ''}${a.ok ? '' : ' is-broken'}`}
+            disabled={!a.ok || busy != null}
+            onClick={() => pick(a)}
+            title={a.ok
+              ? (a.email || a.label) + (a.shared_ok ? '' : ' — history is NOT shared with the main account')
+              : `Unusable: ${a.reason}`}
+          >
+            <span className="usage-account-mark">{a.active ? '●' : '○'}</span>
+            <span className="usage-account-label">
+              {a.label}
+              {a.plan && <span className="usage-account-plan"> {a.plan}</span>}
+            </span>
+            <span className={`usage-account-pct ${lead ? pickClass(lead) : 'usage-dim'}`}>
+              {busy === a.id ? '…' : (pct ? (aged ? `${pct}*` : pct) : '—')}
+            </span>
+          </button>
+        )
+      })}
+      {accounts.some(a => !a.ok) && (
+        <div className="usage-accounts-foot">
+          Greyed-out account needs a login: <code>tools/claude-acct login &lt;id&gt;</code>
+        </div>
+      )}
+    </div>
+  )
 }
 
 /** A Codex snapshot older than this is shown dimmed — it predates at least one short window. */
@@ -107,7 +174,9 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
   const [hover, setHover] = useState(false)
   // compact (mobile): tap toggles the full breakdown instead of opening an external link.
   const [expanded, setExpanded] = useState(false)
+  const [switchMsg, setSwitchMsg] = useState('')
   const wrapRef = useRef<HTMLDivElement>(null)
+  const reloadRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     if (!expanded) return
@@ -129,6 +198,7 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
       }
     }
     load()
+    reloadRef.current = load
     const id = setInterval(load, 30_000)
     const onFocus = () => load()
     window.addEventListener('focus', onFocus)
@@ -146,6 +216,18 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
   const now   = data.now
 
   const codex = data.codex?.limits ? data.codex : null
+  // Only shown once a second subscription is registered; a single-account install is unchanged.
+  const accounts = data.accounts && data.accounts.length > 1 ? data.accounts : null
+  const activeAcct = accounts?.find(a => a.active) ?? null
+  // Working on anything other than the main subscription must be visible at a glance —
+  // silently spending the wrong account's quota is the failure mode worth designing against.
+  const acctTag = activeAcct && !activeAcct.is_main ? activeAcct.label : ''
+
+  function handleSwitched(msg: string) {
+    setSwitchMsg(msg)
+    reloadRef.current()
+    setTimeout(() => setSwitchMsg(''), 6000)
+  }
 
   // Nothing from SDK yet — show placeholder
   if (!fiveH && !week) {
@@ -191,6 +273,7 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
         >
           <span className="usage-icon">{icon}</span>
           {pct && <span>{pct}</span>}
+          {acctTag && <span className="usage-acct-tag">{acctTag}</span>}
         </button>
       ) : (
         <a
@@ -205,6 +288,7 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
           {pct && <span>{pct}</span>}
           {pct && <span className="usage-sep">—</span>}
           <span>{fmtReset(primary.resets_at, now)}</span>
+          {acctTag && <span className="usage-acct-tag">{acctTag}</span>}
         </a>
       )}
 
@@ -237,6 +321,10 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
               </div>
             )
           })}
+          {accounts && (
+            <AccountSwitcher accounts={accounts} now={now} onSwitched={handleSwitched} />
+          )}
+          {switchMsg && <div className="usage-accounts-msg">{switchMsg}</div>}
           <a
             className="usage-dropdown-claude"
             href={USAGE_URL}

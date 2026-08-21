@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# claude-acct — run the Claude CLI against one of the cockpit's extra subscriptions.
+#
+# The cockpit switches accounts by pointing the CLI at a different CLAUDE_CONFIG_DIR.
+# Logging in is therefore the ordinary flow you already know — `claude`, then `/login` —
+# just with that env var set, so the new credentials land in the extra dir and ~/.claude
+# is never touched.
+#
+#   tools/claude-acct new    work            create ~/.claude-accounts/work + shared symlinks
+#   tools/claude-acct login  work            open the CLI there → type /login
+#   tools/claude-acct list                   show accounts + which one the cockpit uses
+#   tools/claude-acct check  work            verify credentials + shared dirs
+#   tools/claude-acct run    work -- <cmd>   run any command bound to that account
+#
+# Nothing here writes to ~/.claude. The only file that is NOT shared with the main account
+# is .credentials.json — that is the whole point.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY="$REPO/venv/bin/python"
+[ -x "$PY" ] || PY="python3"
+
+ROOT="${CLAUDE_ACCOUNTS_DIR:-$HOME/.claude-accounts}"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+acct_dir() { echo "$ROOT/$1"; }
+
+cmd_new() {
+  local id="${1:-}"; [ -n "$id" ] || die "usage: claude-acct new <id>"
+  [ "$id" = "main" ] && die "'main' is the built-in account — nothing to create"
+  "$PY" - "$id" <<'PY'
+import sys, os
+sys.path.insert(0, os.environ["CARDLOOP_REPO"])
+import accounts
+aid = sys.argv[1]
+cdir, linked = accounts.scaffold(aid)
+ok, reason = accounts.register(aid, aid, str(cdir))
+print(f"config dir : {cdir}")
+print(f"shared     : {', '.join(linked) if linked else '(already linked)'}")
+print(f"registered : {'yes' if ok else 'NO — ' + reason}")
+PY
+  echo
+  echo "Next: tools/claude-acct login $id   → then type /login inside the CLI"
+}
+
+cmd_login() {
+  local id="${1:-}"; [ -n "$id" ] || die "usage: claude-acct login <id>"
+  local dir; dir="$(acct_dir "$id")"
+  [ -d "$dir" ] || die "unknown account '$id' — run: tools/claude-acct new $id"
+  echo "Opening the Claude CLI on account '$id'."
+  echo "Config dir: $dir   (~/.claude is untouched)"
+  echo "Inside the CLI type:  /login   — then finish in the browser and paste the code back."
+  echo "When it says you are logged in, type /exit."
+  echo
+  CLAUDE_CONFIG_DIR="$dir" claude
+  echo
+  cmd_check "$id"
+}
+
+cmd_run() {
+  local id="${1:-}"; shift || true
+  [ -n "$id" ] || die "usage: claude-acct run <id> -- <command...>"
+  [ "${1:-}" = "--" ] && shift
+  local dir; dir="$(acct_dir "$id")"
+  [ -d "$dir" ] || die "unknown account '$id'"
+  [ $# -gt 0 ] || die "nothing to run"
+  CLAUDE_CONFIG_DIR="$dir" "$@"
+}
+
+cmd_list() {
+  "$PY" - <<'PY'
+import sys, os
+sys.path.insert(0, os.environ["CARDLOOP_REPO"])
+import accounts
+active = accounts.active_id()
+for a in accounts.list_accounts():
+    mark = "*" if a["id"] == active else " "
+    bits = [a["plan"] or "?", a["email"] or "no email on file"]
+    if not a["ok"]:
+        bits.append(f"UNUSABLE: {a['reason']}")
+    if not a["shared_ok"]:
+        bits.append("NOT SHARED: " + ",".join(a["shared_broken"]))
+    print(f"{mark} {a['id']:<12} {a['label']:<16} {' · '.join(bits)}")
+print("\n* = the account every new cockpit run uses")
+PY
+}
+
+cmd_check() {
+  local id="${1:-}"; [ -n "$id" ] || die "usage: claude-acct check <id>"
+  "$PY" - "$id" <<'PY'
+import sys, os
+sys.path.insert(0, os.environ["CARDLOOP_REPO"])
+import accounts, datetime
+info = accounts.inspect(sys.argv[1])
+print(f"account    : {info['id']} ({info['label']})")
+print(f"config dir : {info['config_dir']}")
+print(f"usable     : {'yes' if info['ok'] else 'NO — ' + info['reason']}")
+print(f"plan       : {info['plan'] or '—'}")
+print(f"email      : {info['email'] or '—'}")
+if info["expires_at"]:
+    print(f"token exp  : {datetime.datetime.fromtimestamp(info['expires_at'])}")
+if not info["shared_ok"]:
+    print(f"⚠ NOT shared with ~/.claude: {', '.join(info['shared_broken'])} "
+          f"— session resume and history will diverge on this account")
+PY
+}
+
+cmd_activate() {
+  local id="${1:-}"; [ -n "$id" ] || die "usage: claude-acct use <id>"
+  "$PY" - "$id" <<'PY'
+import sys, os
+sys.path.insert(0, os.environ["CARDLOOP_REPO"])
+import accounts
+ok, reason = accounts.set_active(sys.argv[1])
+print("switched" if ok else f"refused: {reason}")
+PY
+}
+
+export CARDLOOP_REPO="$REPO"
+
+case "${1:-}" in
+  new)      shift; cmd_new "$@" ;;
+  login)    shift; cmd_login "$@" ;;
+  run)      shift; cmd_run "$@" ;;
+  list|ls)  shift; cmd_list "$@" ;;
+  check)    shift; cmd_check "$@" ;;
+  use)      shift; cmd_activate "$@" ;;
+  *)
+    sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    exit 1 ;;
+esac

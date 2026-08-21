@@ -208,7 +208,23 @@ Global — `data/settings.json` (mtime hot-reload, wired into runtime: scan inte
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/api/usage` | Subscription usage — 5h and 7-day limits with utilisation 0–1 and `resets_at`. Source: `GET https://api.anthropic.com/api/oauth/usage` (cached 60s). Falls back to passive `RateLimitEvent` snapshot if oauth endpoint fails | Yes |
+| `GET` | `/api/usage` | Subscription usage — 5h and 7-day limits with utilisation 0–1 and `resets_at`. Source: `GET https://api.anthropic.com/api/oauth/usage` (cached 60s). Falls back to passive `RateLimitEvent` snapshot if oauth endpoint fails. Also returns `account` (active account id) and, once a second account is registered, `accounts[]` with each one's own limits (`null` when that account's token is stale) | Yes |
+
+---
+
+## Accounts (multiple subscriptions)
+
+An extra Claude subscription is a separate `CLAUDE_CONFIG_DIR` under `~/.claude-accounts/<id>/`
+holding only its own `.credentials.json`; `projects/`, `skills/`, `hooks/`, `settings.json` … are
+symlinked back to `~/.claude` so history and session resume stay shared. `main` is virtual and
+injects no env at all. Login happens in a terminal: `tools/claude-acct login <id>`.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/accounts` | All selectable accounts: `{id,label,is_main,active,ok,reason,email,plan,shared_ok,shared_broken}` + `active`, `accounts_root`, `login_hint` | Yes |
+| `POST` | `/api/accounts` | `{id,label?}` → scaffold `~/.claude-accounts/<id>` with shared symlinks and register it. Returns `linked[]` and `next_step` (the login command). Not usable until logged in | Yes |
+| `POST` | `/api/accounts/active` | `{id}` → every SUBSEQUENT run uses that subscription. `400` + reason if the account has no readable credentials. Response `in_flight` = runs still executing on the previous account | Yes |
+| `POST` | `/api/accounts/remove` | `{id}` → forget the account (files on disk are left untouched); active falls back to `main` | Yes |
 
 ---
 

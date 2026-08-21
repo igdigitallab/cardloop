@@ -44,6 +44,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import HookContext, PostToolUseHookInput, PreCompactHookInput
 from second_opinion import build_antigravity_server
 import modules as _modules                # spec-065: module enable/disable registry
+import accounts as _accounts              # multi-subscription switch (CLAUDE_CONFIG_DIR per run)
 import browser_tools as _browser_tools    # spec-065: agent browser tools (built per-run)
 from board import (
     board_summary,
@@ -1068,7 +1069,7 @@ def _make_ask_gate_cb(session_key: str, ctx: "dict | None"):
 
 
 def _plan_client_fingerprint_ok(ctx: "dict | None", session_key: str, opts,
-                                stable_append_hash, effort, memory_mode) -> bool:
+                                stable_append_hash, effort, memory_mode, account="") -> bool:
     """spec-080 C1 safeguard (spec-082 A reuses it for ask turns): a live client pinned by
     running background children is REUSED on fingerprint mismatch (deferred reconnect,
     spec-069 f9d60d) — but can_use_tool binds at connect time, so a gated turn serviced by a
@@ -1080,7 +1081,7 @@ def _plan_client_fingerprint_ok(ctx: "dict | None", session_key: str, opts,
         if entry is None:
             return True
         want = _compute_fingerprint(opts, stable_append_hash=stable_append_hash,
-                                    effort=effort, memory_mode=memory_mode)
+                                    effort=effort, memory_mode=memory_mode, account=account)
         return entry.fingerprint == want
     except Exception:
         return True  # never block on safeguard errors; worst case is pre-fix behavior
@@ -1496,6 +1497,7 @@ def _compute_fingerprint(
     stable_append_hash: str = "",
     effort: str = "",
     memory_mode: str = "",
+    account: str = "",
 ) -> str:
     """Hash the subset of opts fields that are immutable once a ClaudeSDKClient is connected.
 
@@ -1539,6 +1541,10 @@ def _compute_fingerprint(
         # CLAUDE_CODE_DISABLE_AUTO_MEMORY at launch, so flipping the mode must evict the live
         # subprocess or the project keeps the old brain until the next idle eviction.
         memory_mode,
+        # The subscription this run is bound to. It rides in `env` (CLAUDE_CONFIG_DIR), which is
+        # EXCLUDED above, and the CLI reads it at launch — so without this the operator could
+        # switch accounts and a live client would keep burning the OLD subscription with no sign.
+        account,
         # spec-058 v2: the --settings payload (native ultracode switch) is launch-immutable too.
         str(getattr(opts, "settings", "") or ""),
     ]
@@ -1579,6 +1585,7 @@ async def _get_or_create_live_client(
     stable_append_hash: str = "",
     effort: str = "",
     memory_mode: str = "",
+    account: str = "",
 ) -> "object | None":
     """Return a reusable connected ClaudeSDKClient for session_key, or None.
 
@@ -1598,7 +1605,7 @@ async def _get_or_create_live_client(
 
     registry: "dict[str, _LiveEntry]" = ctx.get("live_clients", _live_clients)
     fingerprint = _compute_fingerprint(opts, stable_append_hash=stable_append_hash, effort=effort,
-                                       memory_mode=memory_mode)
+                                       memory_mode=memory_mode, account=account)
 
     existing = registry.get(session_key)
     if existing is not None:
@@ -2510,7 +2517,18 @@ async def run_engine(  # type: ignore[return]
     if _memory_mode not in _MEMORY_MODES:
         print(f"[memory] unknown mode {_memory_mode!r} for {project_name} — falling back to 'auto'")
         _memory_mode = _DEFAULT_MEMORY_MODE
-    _effective_env = {**(env or {}), **_memory_env_overrides(_memory_mode)}
+    # Multi-subscription: the active account binds this run to a config dir (and therefore to a
+    # set of credentials). `main` yields {} — no CLAUDE_CONFIG_DIR at all, i.e. exactly the
+    # single-account behaviour. A registered-but-broken account degrades to main rather than
+    # taking the turn down; accounts.env_overrides() logs when it does.
+    _account_id = _accounts.active_id()
+    _account_env = _accounts.env_overrides(_account_id)
+    if not _account_env:
+        _account_id = _accounts.MAIN_ID
+    else:
+        print(f"[accounts] {session_key} runs on {_account_id} "
+              f"(CLAUDE_CONFIG_DIR={_account_env['CLAUDE_CONFIG_DIR']})")
+    _effective_env = {**(env or {}), **_memory_env_overrides(_memory_mode), **_account_env}
 
     _project_plugin_cfgs: "list[dict]" = []
     for _pid in (project_plugins or []):
@@ -2831,7 +2849,7 @@ async def run_engine(  # type: ignore[return]
         live = await _get_or_create_live_client(
             ctx, session_key, opts, ephemeral=ephemeral,
             stable_append_hash=_stable_append_hash, effort=_eff_effort,
-            memory_mode=_memory_mode,
+            memory_mode=_memory_mode, account=_account_id,
         )
     except Exception as _lc_exc:
         # Live-client setup failure must never silently swallow the turn — degrade gracefully.
@@ -2844,7 +2862,7 @@ async def run_engine(  # type: ignore[return]
     # in bypassPermissions — the turn would execute full-auto with no gate and no error. Abort
     # loudly instead.
     if (plan_mode or ask_mode) and live is not None and not _plan_client_fingerprint_ok(
-            ctx, session_key, opts, _stable_append_hash, _eff_effort, _memory_mode):
+            ctx, session_key, opts, _stable_append_hash, _eff_effort, _memory_mode, _account_id):
         _mode_name = "Plan mode" if plan_mode else "Ask mode"
         print(f"[{'plan' if plan_mode else 'ask'}-gate] {session_key}: live client pinned by "
               f"running background tasks — aborting gated turn instead of running ungated")

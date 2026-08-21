@@ -417,6 +417,46 @@ def probe_auth(env: dict, cred_path: "Path | None" = None) -> "list[Fact]":
         else:
             facts.append(Fact("ANTHROPIC_API_KEY", "not set (correct for subscription auth)"))
 
+    facts.extend(_probe_accounts())
+    return facts
+
+
+def _probe_accounts() -> "list[Fact]":
+    """Extra subscriptions (data/accounts.json). Silent on a single-account install.
+
+    Worth checking every time because the failure mode is invisible: an active account whose
+    config dir vanished degrades to `main`, and one whose `projects/` is not shared with
+    ~/.claude quietly builds a second, separate chat history.
+    """
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        import accounts as _accounts
+    except Exception:
+        return []
+    try:
+        rows = _accounts.list_accounts()
+    except Exception as exc:
+        return [Fact("Accounts", f"could not read accounts.json ({exc})", level="warn")]
+    if len(rows) < 2:
+        return []  # nothing registered — nothing to say
+
+    facts = [Fact("Accounts", f"{len(rows)} subscriptions, active = {_accounts.active_id()}")]
+    for row in rows:
+        if row["is_main"]:
+            continue
+        name = f"Account '{row['id']}'"
+        who = row["email"] or row["config_dir"]
+        if not row["ok"]:
+            facts.append(Fact(name, f"unusable — {row['reason']}", level="warn",
+                              remedy=f"tools/claude-acct login {row['id']}"))
+            continue
+        if not row["shared_ok"]:
+            facts.append(Fact(name, f"{who} — NOT sharing {', '.join(row['shared_broken'])} with ~/.claude",
+                              level="warn",
+                              remedy="session resume and chat history diverge on this account; "
+                                     f"re-link with: tools/claude-acct new {row['id']}"))
+        else:
+            facts.append(Fact(name, f"{who} ({row['plan'] or 'plan unknown'})"))
     return facts
 
 

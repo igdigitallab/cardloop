@@ -39,6 +39,8 @@ import schedules as _schedules
 
 # spec-065 Phase A: module / extension registry
 import modules as _modules
+# Multi-subscription switch: which credentials every new run uses.
+import accounts as _accounts
 
 # spec-065 Phase B: live browser pane (lazy — playwright imported only on first use)
 import browser_pane as _browser_pane
@@ -7345,9 +7347,16 @@ _OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CREDS_PATH = os.path.expanduser(
     os.environ.get("CLAUDE_CREDENTIALS_PATH", "") or "~/.claude/.credentials.json"
 )
-_usage_cache: dict = {"data": None, "ts": 0.0}
+_usage_cache: dict = {"data": None, "ts": 0.0, "account": _accounts.MAIN_ID}
 _usage_lock: asyncio.Lock | None = None  # lazy — created inside the running event loop
 _USAGE_TTL = 60.0
+
+# Limits for the accounts that are NOT active. Kept apart from _usage_cache so the primary
+# path (and its tests) stay untouched. A non-active account's accessToken is only refreshed
+# by the CLI while that account actually runs, so a stale/expired token yields None here —
+# hence "ts" is surfaced to the UI and the last known reading is kept rather than discarded.
+_usage_cache_others: dict[str, dict] = {}
+_USAGE_OTHERS_TTL = 300.0
 
 
 def _get_usage_lock() -> asyncio.Lock:
@@ -7358,9 +7367,10 @@ def _get_usage_lock() -> asyncio.Lock:
     return _usage_lock
 
 
-def _read_oauth_token() -> str | None:
+def _read_oauth_token(creds_path: "str | None" = None) -> str | None:
+    """Access token from a credentials file (default: the main account's). Never logged."""
     try:
-        with open(_CREDS_PATH) as f:
+        with open(creds_path or _CREDS_PATH) as f:
             return json.load(f)["claudeAiOauth"]["accessToken"]
     except Exception:
         return None
@@ -7388,8 +7398,8 @@ def _norm_window(d):
     }
 
 
-async def _fetch_oauth_usage():
-    token = _read_oauth_token()
+async def _fetch_oauth_usage(creds_path: "str | None" = None):
+    token = _read_oauth_token(creds_path)
     if not token:
         return None
     headers = {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"}
@@ -7451,13 +7461,40 @@ def _build_limits_dict(raw: dict) -> dict:
     return limits
 
 
+async def _other_account_limits(account_id: str) -> dict:
+    """Limits for a non-active account, cached for _USAGE_OTHERS_TTL.
+
+    Returns {"limits": {...}|None, "ts": float|None}. None limits means "could not read" —
+    almost always an expired accessToken, because only a running CLI refreshes it. The last
+    successful reading is kept so the UI can show an aged number instead of nothing.
+    """
+    prev = _usage_cache_others.get(account_id) or {}
+    now = time.time()
+    if prev.get("limits") is not None and (now - prev.get("ts", 0)) <= _USAGE_OTHERS_TTL:
+        return prev
+    if prev.get("limits") is None and (now - prev.get("checked", 0)) <= _USAGE_OTHERS_TTL:
+        return prev
+    raw = await _fetch_oauth_usage(_accounts.creds_path(account_id))
+    if raw is None:
+        entry = {"limits": prev.get("limits"), "ts": prev.get("ts"), "checked": now}
+    else:
+        entry = {"limits": _build_limits_dict(raw), "ts": now, "checked": now}
+    _usage_cache_others[account_id] = entry
+    return entry
+
+
 async def api_usage(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     now = time.time()
+    active = _accounts.active_id()
     async with _get_usage_lock():
+        # A switch must invalidate the cache — otherwise the badge would keep showing the
+        # previous subscription's percentages for up to a minute after the operator moved.
+        if _usage_cache.get("account") != active:
+            _usage_cache.update({"data": None, "ts": 0.0, "account": active})
         cached = _usage_cache["data"]
         if cached is None or (now - _usage_cache["ts"]) > _USAGE_TTL:
-            raw = await _fetch_oauth_usage()
+            raw = await _fetch_oauth_usage(_accounts.creds_path(active))
             if raw is not None:
                 limits = _build_limits_dict(raw)
                 _usage_cache["data"] = limits
@@ -7470,7 +7507,98 @@ async def api_usage(req: web.Request) -> web.Response:
     # that dict (badge dropdown, Usage tab) treats each key as a Claude window, so merging
     # them would silently relabel a Codex window as a Claude one.
     codex_limits = _codex.rate_limits_for_ui(ctx.get("DATA")) if _codex.codex_enabled() else None
-    return web.json_response({"limits": cached, "codex": codex_limits, "now": time.time()})
+
+    # Multi-subscription: only emit the accounts block when the operator actually registered a
+    # second one, so a single-account install sees the exact same payload it always did.
+    accounts_block = None
+    known = _accounts.list_accounts()
+    if len(known) > 1:
+        accounts_block = []
+        for info in known:
+            row = {k: info[k] for k in ("id", "label", "is_main", "active", "ok", "reason",
+                                        "email", "plan", "shared_ok", "shared_broken")}
+            if info["id"] == active:
+                row["limits"], row["limits_ts"] = cached, _usage_cache["ts"] or None
+            elif info["ok"]:
+                other = await _other_account_limits(info["id"])
+                row["limits"], row["limits_ts"] = other.get("limits"), other.get("ts")
+            else:
+                row["limits"], row["limits_ts"] = None, None
+            accounts_block.append(row)
+
+    return web.json_response({"limits": cached, "codex": codex_limits, "now": time.time(),
+                              "account": active, "accounts": accounts_block})
+
+
+# ── Multi-subscription accounts ────────────────────────────────────────────────────────────────
+# GET  /api/accounts           → every selectable account + which one new runs use
+# POST /api/accounts           → scaffold + register an extra config dir (login happens in a terminal)
+# POST /api/accounts/active    → switch every subsequent run to another subscription
+# POST /api/accounts/remove    → forget an account (its files on disk are left alone)
+
+async def api_accounts(req: web.Request) -> web.Response:
+    accounts = _accounts.list_accounts()
+    return web.json_response({
+        "active": _accounts.active_id(),
+        "accounts": accounts,
+        # The exact command to run in the cockpit terminal to log a fresh account in.
+        "login_hint": "tools/claude-acct login <id>",
+        "accounts_root": str(_accounts.accounts_root()),
+    })
+
+
+async def api_accounts_create(req: web.Request) -> web.Response:
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    aid = (body.get("id") or "").strip()
+    label = (body.get("label") or "").strip() or aid
+    if not aid:
+        return web.json_response({"error": "id is required"}, status=400)
+    if aid == _accounts.MAIN_ID:
+        return web.json_response({"error": f"'{_accounts.MAIN_ID}' is reserved"}, status=400)
+    try:
+        cdir, linked = _accounts.scaffold(aid)
+    except Exception as exc:
+        return web.json_response({"error": f"could not create config dir: {exc}"}, status=500)
+    ok, reason = _accounts.register(aid, label, str(cdir))
+    if not ok:
+        return web.json_response({"error": reason}, status=400)
+    return web.json_response({
+        "ok": True, "account": _accounts.inspect(aid), "linked": linked,
+        # Not logged in yet — the operator finishes in a terminal, exactly like a normal login.
+        "next_step": f"tools/claude-acct login {aid}",
+    })
+
+
+async def api_accounts_activate(req: web.Request) -> web.Response:
+    ctx = req.app["ctx"]
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    aid = (body.get("id") or "").strip()
+    ok, reason = _accounts.set_active(aid)
+    if not ok:
+        return web.json_response({"error": reason or "cannot activate"}, status=400)
+    # A live client is bound to its subscription at launch; the account is part of the
+    # fingerprint, so the next turn reconnects on its own. Runs already in flight keep the
+    # subscription they started on — say so instead of implying an instant switch.
+    in_flight = sum(1 for v in (ctx.get("running") or {}).values() if v)
+    return web.json_response({"ok": True, "active": aid, "in_flight": in_flight,
+                              "account": _accounts.inspect(aid)})
+
+
+async def api_accounts_remove(req: web.Request) -> web.Response:
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    ok, reason = _accounts.unregister((body.get("id") or "").strip())
+    if not ok:
+        return web.json_response({"error": reason}, status=400)
+    return web.json_response({"ok": True, "active": _accounts.active_id()})
 
 
 # GET /api/usage/ledger?days=7  → aggregates over the on-disk cost ledger (data/usage_ledger.jsonl).
@@ -15525,6 +15653,11 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/usage/dashboard", api_usage_dashboard)
         app.router.add_post("/api/usage/scan", api_usage_scan)
         app.router.add_get("/api/usage/export.csv", api_usage_export)
+        # Multi-subscription: list / add / switch / forget accounts
+        app.router.add_get("/api/accounts", api_accounts)
+        app.router.add_post("/api/accounts", api_accounts_create)
+        app.router.add_post("/api/accounts/active", api_accounts_activate)
+        app.router.add_post("/api/accounts/remove", api_accounts_remove)
         app.router.add_get("/api/models", api_models)
         app.router.add_get("/api/agent-providers", api_agent_providers)
         # Spec-074: global search (Cmd/Ctrl+K) over chat transcripts + timelines + boards

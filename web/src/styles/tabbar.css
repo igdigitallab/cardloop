@@ -199,6 +199,67 @@
 }
 .usage-dropdown-cta:hover { background: var(--bg3); border-color: var(--text3); }
 .usage-dropdown-cta-arrow { color: var(--text3); font-weight: 400; }
+/* Subscription switcher — only rendered when a second account is registered. Lives inside
+   the limits dropdown because that is where the operator already reads "how much is left". */
+.usage-accounts {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.usage-accounts-head {
+  padding: 0 8px 3px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+.usage-account-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text2);
+  font-family: var(--sans);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+.usage-account-row:hover:not(:disabled) { background: var(--bg3); }
+.usage-account-row.is-active { color: var(--text); border-color: var(--border2); background: var(--accent-subtle); }
+.usage-account-row.is-broken, .usage-account-row:disabled { color: var(--text3); cursor: default; }
+.usage-account-mark { font-size: 9px; opacity: 0.8; }
+.usage-account-label { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-account-plan { color: var(--text3); font-size: 10px; text-transform: uppercase; }
+.usage-account-pct { font-family: var(--mono); font-size: 11px; }
+.usage-accounts-foot, .usage-accounts-msg {
+  padding: 4px 8px 0;
+  font-size: 10px;
+  color: var(--text3);
+  line-height: 1.4;
+}
+.usage-accounts-foot code { font-family: var(--mono); font-size: 9px; }
+/* The badge itself carries the account name whenever it is NOT the main subscription. */
+.usage-acct-tag {
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* Demoted: the official limits page is now a small muted footnote. */
 .usage-dropdown-claude {
   display: block;

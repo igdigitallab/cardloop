@@ -71,6 +71,34 @@ export interface UsageLimits {
   limits: Record<string, UsageLimitRow>
   codex?: CodexLimits | null
   now: number
+  /** id of the subscription every new run uses. */
+  account?: string
+  /** Present only once a second subscription is registered — otherwise null. */
+  accounts?: AccountRow[] | null
+}
+
+/** One selectable Claude subscription. `limits` may be null for an inactive account whose
+ *  access token went stale — only a running CLI refreshes it. */
+export interface AccountRow {
+  id: string
+  label: string
+  is_main: boolean
+  active: boolean
+  ok: boolean
+  reason: string
+  email: string
+  plan: string
+  shared_ok: boolean
+  shared_broken: string[]
+  limits: Record<string, UsageLimitRow> | null
+  limits_ts: number | null
+}
+
+export interface AccountsPayload {
+  active: string
+  accounts: AccountRow[]
+  login_hint: string
+  accounts_root: string
 }
 
 export interface UsageLedgerEntry {
@@ -480,6 +508,18 @@ export const api = {
 
   // Claude Code subscription limits (rate_limits SDK, updated passively)
   usage: () => apiFetch<UsageLimits>('/api/usage'),
+
+  // Multi-subscription: list accounts, add one, switch which one new runs use.
+  accounts: () => apiFetch<AccountsPayload>('/api/accounts'),
+  accountAdd: (id: string, label?: string) =>
+    apiFetch<{ ok: boolean; linked: string[]; next_step: string }>(
+      '/api/accounts', { method: 'POST', body: JSON.stringify({ id, label }) }),
+  accountActivate: (id: string) =>
+    apiFetch<{ ok: boolean; active: string; in_flight: number }>(
+      '/api/accounts/active', { method: 'POST', body: JSON.stringify({ id }) }),
+  accountRemove: (id: string) =>
+    apiFetch<{ ok: boolean; active: string }>(
+      '/api/accounts/remove', { method: 'POST', body: JSON.stringify({ id }) }),
 
   // Usage analytics — full historical cost/usage over ALL ~/.claude transcripts
   // (CLI + Cardloop + sub-agents). days='all' for all-time; models = filter subset.
