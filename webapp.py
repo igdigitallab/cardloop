@@ -2453,6 +2453,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "codex_model": b.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
             # spec-082 A: tools the ask-mode gate auto-approves in this project
             "ask_always_allow": b.get("ask_always_allow") or [],
+            # Subscription pinned to this project (None = follow the global choice).
+            "account": b.get("account") or None,
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -2474,6 +2476,7 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "favorite": fid in fav_set,
             "provider": "codex" if b.get("provider") == "codex" else "claude",
             "codex_model": b.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
+            "account": b.get("account") or None,
         })
     return out
 
@@ -5083,7 +5086,7 @@ def _git_enabled(project: dict) -> bool:
 
 # ─────────────────────── API: settings (global + per-project) ───────────────────────
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", "codex_model", "ask_always_allow")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", "codex_model", "ask_always_allow", "account")
 
 # spec-051: per-project policy for resuming a run interrupted by a rate-limit.
 #   ask    — show an in-chat Yes/No prompt (default; visible, not silent)
@@ -5238,6 +5241,8 @@ def _project_settings_view(project: dict) -> dict:
         "codex_model": project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
         # spec-082 A: tools auto-approved by the ask-mode gate in this project.
         "ask_always_allow": _ask_always_allow(project),
+        # Subscription pinned to this project (None = follow the global choice).
+        "account": project.get("account") or None,
     }
 
 
@@ -5329,6 +5334,16 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
                 return web.json_response({"error": "ask_always_allow: invalid tool name"},
                                          status=400)
             updates[k] = clean_tools or None
+        elif k == "account":
+            # "" / null → follow the globally selected account (stored as a reset).
+            sv = ("" if v is None else str(v)).strip()
+            if not sv:
+                updates[k] = None
+            else:
+                ok, reason = _accounts.validate(sv)
+                if not ok:
+                    return web.json_response({"error": f"account: {reason}"}, status=400)
+                updates[k] = sv if sv != _accounts.MAIN_ID else _accounts.MAIN_ID
         elif k == "auto_resume_mode":
             sv = str(v).strip().lower()
             if sv not in _AUTO_RESUME_MODES:
@@ -6387,6 +6402,7 @@ async def _run_card(
                     model=model,
                     resume_session_id=resume_sid,
                     env=project_secrets,
+                    project_account=(project or {}).get("account"),
                     **agents_kwargs,
                     ctx=ctx,
                     ephemeral=True,
@@ -8393,6 +8409,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
             model=model,
             resume_session_id=resume_sid,
             env=project_secrets,
+            project_account=topic.get("account"),
             **agents_kwargs,
             ctx=ctx,
             ephemeral=False,
@@ -11340,6 +11357,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 project_name=project_name, cwd=cwd, prompt=effective_prompt,
                 session_key=session_key, model=model,
                 resume_session_id=resume_session_id, env=project_secrets,
+                project_account=topic.get("account"),
                 **agents_kwargs, ctx=ctx, ephemeral=False, effort=_q_effort,
                 ultracode=bool(_q_ultracode), plan_mode=_q_plan_mode,
                 ask_mode=_q_ask_mode, chat_id=_resolved_chat_id,
@@ -12078,6 +12096,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 model=model,
                 resume_session_id=resume_sid,
                 env=project_secrets,
+                project_account=(project or {}).get("account"),
                 **agents_kwargs,
                 ctx=ctx,
                 ephemeral=False,

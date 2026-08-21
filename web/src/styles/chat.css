@@ -428,6 +428,24 @@
   max-width: 220px;
 }
 
+/* Subscription pin: shown only when this project is pinned to a non-global Claude account. */
+.chat-acct-pill {
+  flex-shrink: 0;
+  align-self: center;
+  padding: 1px 6px;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
 /* Thin vertical separator between chat tabs and session controls in the merged row */
 .chat-toolbar-sep {
   width: 1px;

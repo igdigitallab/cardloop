@@ -3330,6 +3330,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               </span>
             )
           })()}
+          {/* A project pinned to a non-global subscription says so next to the model pill —
+              otherwise the only way to know which account this project spends is the
+              Settings tab, and spending the wrong one is invisible until the bill. */}
+          {project.account && (
+            <span className="chat-acct-pill" title={`This project runs on the "${project.account}" Claude subscription (Settings → Subscription)`}>
+              {project.account}
+            </span>
+          )}
           {/* Combined model + thinking pill — desktop top bar (mobile renders the same
               control in the composer bar). One popover to pick both; menu opens downward. */}
           {!isMobile && (

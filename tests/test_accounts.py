@@ -210,3 +210,37 @@ def test_account_changes_the_live_client_fingerprint():
     # Same account → stable (no spurious reconnect churn).
     assert base == engine._compute_fingerprint(_Opts(), stable_append_hash="h", effort="high",
                                                memory_mode="auto", account="main")
+
+
+# ── 6. per-project pinning ─────────────────────────────────────────────────────────────────
+
+def test_project_override_wins_over_global(acct):
+    cdir, _ = acct.scaffold("work")
+    acct.register("work", "Work", str(cdir))
+    _login(acct, "work")
+    # Global stays on main; the project is pinned to work.
+    assert acct.resolve("work") == "work"
+    assert acct.env_overrides(acct.resolve("work")) == {"CLAUDE_CONFIG_DIR": str(cdir)}
+    # No override → follow the global choice.
+    assert acct.resolve(None) == acct.MAIN_ID
+    assert acct.resolve("") == acct.MAIN_ID
+
+
+def test_project_can_pin_main_while_global_is_elsewhere(acct):
+    cdir, _ = acct.scaffold("work")
+    acct.register("work", "Work", str(cdir))
+    _login(acct, "work")
+    acct.set_active("work")
+    assert acct.resolve(None) == "work"          # everything else follows the global switch
+    assert acct.resolve("main") == "main"        # …but this project stays on main
+    assert acct.env_overrides(acct.resolve("main")) == {}
+
+
+def test_broken_project_override_degrades_to_global_not_to_a_dead_run(acct):
+    cdir, _ = acct.scaffold("work")
+    acct.register("work", "Work", str(cdir))
+    _login(acct, "work")
+    acct.set_active("work")
+    # The project points at an account that was never registered (renamed/removed).
+    assert acct.resolve("ghost") == "work"
+    assert acct.env_overrides(acct.resolve("ghost")) == {"CLAUDE_CONFIG_DIR": str(cdir)}

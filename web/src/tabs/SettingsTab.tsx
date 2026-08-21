@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { api } from '../api'
+import { api, type AccountRow } from '../api'
 import { Project, ProjectSettings, GlobalSettings, GlobalSettingsEffective, AgentsConfig, ProjectStructureHealth, AutopilotStatus } from '../types'
 import { Spinner } from '../components/Spinner'
 import { SecretsTab } from './SecretsTab'
@@ -65,6 +65,9 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
   // Prefer the live model registry (GET /api/models); fall back to the bundled static list.
   const modelList = models?.length ? models : MODELS
   const [proj, setProj] = useState<ProjectSettings | null>(null)
+  // Multiple Claude subscriptions. Empty/one → the row is hidden entirely.
+  const [accounts, setAccounts] = useState<AccountRow[]>([])
+  const [globalAccount, setGlobalAccount] = useState('')
   const [glob, setGlob] = useState<GlobalSettings | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -100,6 +103,9 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
   useEffect(() => {
     let cancelled = false
     setLoading(true); setError(''); setProj(null); setProjMsg(''); setGlobMsg('')
+    api.accounts()
+      .then(a => { if (!cancelled) { setAccounts(a.accounts); setGlobalAccount(a.active) } })
+      .catch(() => { /* single-account install — row stays hidden */ })
     Promise.all([api.projectSettings(projectId), api.settings(), api.autopilotStatus().catch(() => null)])
       .then(([p, g, ap]) => {
         if (!cancelled) {
@@ -299,6 +305,24 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
             <option value="off">Off</option>
           </select>
         </Row>
+
+        {accounts.length > 1 && !project.is_free && (
+          <Row title="Subscription"
+               hint="Which Claude account this project runs on. Inherit = whatever is selected globally in the limits badge. A pinned account applies to chat, board cards and deferred runs in this project.">
+            <select value={proj.account ?? ''}
+                    onChange={ev => setProj({ ...proj, account: ev.target.value || null })}
+                    aria-label="Subscription">
+              <option value="">
+                Inherit global ({accounts.find(a => a.id === globalAccount)?.label ?? globalAccount})
+              </option>
+              {accounts.map(a => (
+                <option key={a.id} value={a.id} disabled={!a.ok}>
+                  {a.label}{a.plan ? ` · ${a.plan}` : ''}{a.ok ? '' : ' — needs login'}
+                </option>
+              ))}
+            </select>
+          </Row>
+        )}
 
         <Row title="Board provider"
              hint="Default engine for board cards. A card-level provider/model override wins. Claude remains the compatibility default.">

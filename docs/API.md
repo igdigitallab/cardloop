@@ -226,6 +226,13 @@ injects no env at all. Login happens in a terminal: `tools/claude-acct login <id
 | `POST` | `/api/accounts/active` | `{id}` → every SUBSEQUENT run uses that subscription. `400` + reason if the account has no readable credentials. Response `in_flight` = runs still executing on the previous account | Yes |
 | `POST` | `/api/accounts/remove` | `{id}` → forget the account (files on disk are left untouched); active falls back to `main` | Yes |
 
+Per-project pinning rides on the ordinary project settings: `POST /api/projects/{id}/settings`
+with `{"account": "<id>"}` pins that project (chat, board cards and deferred runs) to one
+subscription; `""`/`null` clears it back to "inherit the global choice". An unknown or
+not-logged-in id is rejected with `400`. Resolution order at run time is
+project override → global active → `main`, and a broken override degrades instead of failing
+the run.
+
 ---
 
 ## Free Chats

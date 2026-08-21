@@ -140,6 +140,22 @@ def active_id() -> str:
     return aid
 
 
+def resolve(project_account: "str | None" = None) -> str:
+    """Which account a run should use: project override → global active → main.
+
+    A project may be pinned to one subscription while the rest of the cockpit uses another.
+    An override naming an account that is gone or not logged in does NOT fail the run — it
+    falls through to the global choice, and `inspect()` still shows the operator why.
+    """
+    if project_account:
+        ok, reason = _validate(project_account)
+        if ok:
+            return project_account
+        print(f"[accounts] project override {project_account!r} unusable ({reason}) — "
+              f"falling back to the global account")
+    return active_id()
+
+
 def env_overrides(account_id: "str | None" = None) -> dict[str, str]:
     """Env additions that bind a run to an account.
 
@@ -182,6 +198,11 @@ def _validate(account_id: str, state: "dict | None" = None) -> "tuple[bool, str]
     if not oauth.get("accessToken"):
         return False, "credentials have no accessToken"
     return True, ""
+
+
+def validate(account_id: str) -> "tuple[bool, str]":
+    """Public form of the usability check: (usable?, human-readable reason)."""
+    return _validate(account_id)
 
 
 def _links_ok(cdir: Path) -> "tuple[bool, list[str]]":
@@ -345,4 +366,5 @@ __all__ = [
     "MAIN_ID", "SHARED_LINKS", "accounts_root", "main_config_dir", "load_state",
     "config_dir", "creds_path", "active_id", "env_overrides", "inspect", "list_accounts",
     "set_active", "register", "unregister", "scaffold", "summary_for_prompt", "touched_at",
+    "resolve", "validate",
 ]

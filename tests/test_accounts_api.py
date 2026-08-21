@@ -192,3 +192,37 @@ async def test_accounts_requires_auth(aiohttp_client, app):
     client = await aiohttp_client(app)
     assert (await client.get("/api/accounts")).status in (401, 403)
     assert (await client.post("/api/accounts/active", json={"id": "work"})).status in (401, 403)
+
+
+# ── per-project pinning over HTTP ───────────────────────────────────────────────────────────
+
+async def test_project_settings_reject_unknown_account(aiohttp_client, tmp_path, acct_env, monkeypatch):
+    """Pinning a project to an account that cannot run must fail loudly, not silently."""
+    ctx = {
+        "topics": {"1:1": {"project": "proj", "cwd": str(tmp_path / "proj"), "model": "sonnet"}},
+        "sessions": {}, "running": {}, "password": "testpass",
+        "DATA": tmp_path / "data", "HERE": ROOT, "rate_limits": {},
+        "save_sessions": lambda: None, "save_topics": lambda: None,
+        "run_engine": None, "ptb_app": None,
+    }
+    (tmp_path / "proj").mkdir()
+    ctx["_auth_token"] = _derive_token("testpass")
+    application = web.Application(middlewares=[_webapp.auth_middleware])
+    application["ctx"] = ctx
+    application.router.add_get("/api/projects/{id}/settings", _webapp.api_project_settings_get)
+    application.router.add_post("/api/projects/{id}/settings", _webapp.api_project_settings_post)
+    client = await aiohttp_client(application)
+    hdr = {"Cookie": f"cops_auth={ctx['_auth_token']}"}
+
+    r = await client.post("/api/projects/proj/settings", json={"account": "ghost"}, headers=hdr)
+    assert r.status == 400 and "not registered" in (await r.json())["error"]
+
+    # main is always valid; storing it pins the project even if the global switch moves.
+    r = await client.post("/api/projects/proj/settings", json={"account": "main"}, headers=hdr)
+    assert r.status == 200 and (await r.json())["settings"]["account"] == "main"
+    assert ctx["topics"]["1:1"]["account"] == "main"
+
+    # Empty string clears the pin back to "inherit global".
+    r = await client.post("/api/projects/proj/settings", json={"account": ""}, headers=hdr)
+    assert r.status == 200 and (await r.json())["settings"]["account"] is None
+    assert "account" not in ctx["topics"]["1:1"]

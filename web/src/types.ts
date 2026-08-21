@@ -51,6 +51,8 @@ export interface Project {
   provider?: Provider
   board_provider?: Provider
   codex_model?: string
+  /** Claude subscription pinned to this project (null/undefined = follow the global choice). */
+  account?: string | null
 }
 
 export type Provider = 'claude' | 'codex'
@@ -249,6 +251,8 @@ export interface ProjectSettings {
   context_pack_enabled?: boolean | null
   board_provider: Provider
   codex_model: string
+  /** Subscription pinned to this project. null = inherit the globally selected account. */
+  account?: string | null
 }
 
 // ─── spec-067: Autopilot ──────────────────────────────────────────────────────

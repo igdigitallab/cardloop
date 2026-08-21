@@ -2283,6 +2283,7 @@ async def run_engine(  # type: ignore[return]
     project_skills: "list[str] | str | None" = None,
     project_plugins: "list[str] | None" = None,
     project_memory: "str | None" = None,
+    project_account: "str | None" = None,
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
@@ -2321,6 +2322,10 @@ async def run_engine(  # type: ignore[return]
                                  permission_mode="default" and a can_use_tool gate that parks
                                  every non-read-only tool call as an operator decision in the
                                  cockpit. Ignored when plan_mode is also set (plan wins).
+        project_account       — pin this project to one Claude subscription (an id from
+                                 accounts.py). None → the globally selected account. An
+                                 override that is gone or not logged in degrades to the global
+                                 one rather than failing the run.
         entrypoint            — cost-ledger attribution tag for the on-disk usage ledger:
                                  "chat" (interactive cockpit, default), "card" (kanban auto-run),
                                  "deferred" (post-reset deferred run). Recorded per turn; does not
@@ -2521,7 +2526,7 @@ async def run_engine(  # type: ignore[return]
     # set of credentials). `main` yields {} — no CLAUDE_CONFIG_DIR at all, i.e. exactly the
     # single-account behaviour. A registered-but-broken account degrades to main rather than
     # taking the turn down; accounts.env_overrides() logs when it does.
-    _account_id = _accounts.active_id()
+    _account_id = _accounts.resolve(project_account)
     _account_env = _accounts.env_overrides(_account_id)
     if not _account_env:
         _account_id = _accounts.MAIN_ID
