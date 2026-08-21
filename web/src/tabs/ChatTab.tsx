@@ -44,7 +44,12 @@ interface SubagentEntry {
   last_tool_name: string | null
   /** 'running' until a notification event arrives. */
   status: 'running' | 'completed' | 'failed'
+  /** spec-085 Phase 3: forwarded text blocks (live nested transcript peek), capped. */
+  transcript?: string[]
 }
+
+/** Client-side cap on kept sub-agent text blocks (server already caps per-turn volume). */
+const SUBAGENT_TRANSCRIPT_KEEP = 30
 
 /** Reduce a raw subagent bus/SSE event into a SubagentEntry state update. */
 function applySubagentEvent(
@@ -91,6 +96,23 @@ function applySubagentEvent(
     }
     return prev.map(e => e.task_id !== task_id ? e : { ...e, status: terminal })
   }
+  if (subtype === 'text' && evt.text) {
+    // spec-085 Phase 3: append a forwarded text block to the agent's live transcript peek.
+    if (!existing) {
+      // text before started (rare ordering) — create the row so nothing is lost
+      return [...prev, {
+        task_id,
+        description: description ?? '',
+        last_tool_name: null,
+        status: 'running',
+        transcript: [evt.text],
+      }]
+    }
+    return prev.map(e => e.task_id !== task_id ? e : {
+      ...e,
+      transcript: [...(e.transcript ?? []), evt.text!].slice(-SUBAGENT_TRANSCRIPT_KEEP),
+    })
+  }
   return prev
 }
 
@@ -111,6 +133,7 @@ function toSubagentEvent(raw: Record<string, unknown>): ActivityEventSubagent | 
     status: (raw['status'] as string | null) ?? null,
     summary: (raw['summary'] as string | null) ?? null,
     last_tool_name: (raw['last_tool_name'] as string | null) ?? null,
+    text: raw['text'] as string | undefined,
     seq: raw['seq'] as number | undefined,
   }
 }
@@ -977,6 +1000,8 @@ const RunStatusBar = memo(function RunStatusBar({
   // Own tick state — only this small component re-renders every second.
   const [tick, setTick] = useState<number>(Date.now())
   const [expanded, setExpanded] = useState(false)
+  // spec-085 Phase 3: which agent row's live transcript peek is open (task_id or null).
+  const [openAgent, setOpenAgent] = useState<string | null>(null)
 
   useEffect(() => {
     const id = setInterval(() => setTick(Date.now()), 1000)
@@ -1037,15 +1062,35 @@ const RunStatusBar = memo(function RunStatusBar({
       </div>
       {expanded && hasAgents && (
         <div className="chat-runbar-agents">
-          {subagents.map(sa => (
-            <div key={sa.task_id} className="chat-runbar-agent-row">
-              <span>{sa.status === 'completed' ? '✓' : sa.status === 'failed' ? '✗' : '⚙'}</span>
-              <span className="chat-runbar-agent-desc">{sa.description || sa.task_id}</span>
-              {sa.last_tool_name && sa.status === 'running' && (
-                <span className="chat-runbar-agent-tool">↳ {sa.last_tool_name}</span>
-              )}
-            </div>
-          ))}
+          {subagents.map(sa => {
+            const hasText = (sa.transcript?.length ?? 0) > 0
+            const open = openAgent === sa.task_id && hasText
+            return (
+              <div key={sa.task_id}>
+                <div
+                  className={`chat-runbar-agent-row${hasText ? ' has-transcript' : ''}`}
+                  onClick={() => { if (hasText) setOpenAgent(o => o === sa.task_id ? null : sa.task_id) }}
+                  role={hasText ? 'button' : undefined}
+                  aria-expanded={hasText ? open : undefined}
+                >
+                  <span>{sa.status === 'completed' ? '✓' : sa.status === 'failed' ? '✗' : '⚙'}</span>
+                  <span className="chat-runbar-agent-desc">{sa.description || sa.task_id}</span>
+                  {sa.last_tool_name && sa.status === 'running' && (
+                    <span className="chat-runbar-agent-tool">↳ {sa.last_tool_name}</span>
+                  )}
+                  {hasText && (
+                    <span className="chat-runbar-agent-peek" style={{ transform: open ? 'rotate(90deg)' : 'none' }}>›</span>
+                  )}
+                </div>
+                {/* spec-085 Phase 3: live nested-transcript peek — forwarded sub-agent text */}
+                {open && (
+                  <div className="chat-runbar-agent-transcript">
+                    {sa.transcript!.join('\n\n')}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
@@ -2160,9 +2205,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       if (!busActiveRef.current) return
       const sEvt = evt as ActivityEventSubagent
       // Dedupe: skip if this (task_id, subtype) combination was already processed via POST stream.
-      const dedupeKey = `${sEvt.task_id}:${sEvt.subtype}`
-      if (seenSubagentKeysRef.current.has(dedupeKey)) return
-      seenSubagentKeysRef.current.add(dedupeKey)
+      // spec-085 Phase 3: subtype "text" is a repeating stream, not a lifecycle edge — the
+      // (task_id, subtype) key would drop every block after the first, so it is exempt
+      // (seq-gating at the top of this handler already prevents replay duplicates).
+      if (sEvt.subtype !== 'text') {
+        const dedupeKey = `${sEvt.task_id}:${sEvt.subtype}`
+        if (seenSubagentKeysRef.current.has(dedupeKey)) return
+        seenSubagentKeysRef.current.add(dedupeKey)
+      }
       setSubagents(prev => applySubagentEvent(prev, sEvt))
 
     } else if (evt.kind === 'run_end') {

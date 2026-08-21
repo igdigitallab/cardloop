@@ -587,12 +587,14 @@ export interface ActivityEventSubagent {
   run_id: string | null
   // engine fields
   type?: string
-  subtype: 'started' | 'progress' | 'notification'
+  subtype: 'started' | 'progress' | 'notification' | 'text'
   task_id: string
   description: string | null
   status: string | null
   summary: string | null
   last_tool_name: string | null
+  /** spec-085 Phase 3: subtype "text" — a forwarded sub-agent text block (capped server-side). */
+  text?: string
   // seq from live turn buffer (optional — may be absent on older TG-sourced events)
   seq?: number
 }

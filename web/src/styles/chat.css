@@ -1218,6 +1218,21 @@
 .chat-runbar-agent-row { display: flex; align-items: center; gap: 6px; }
 .chat-runbar-agent-desc { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-runbar-agent-tool { color: var(--text3); font-style: italic; flex-shrink: 0; }
+/* spec-085 Phase 3: sub-agent live transcript peek (forwarded text blocks) */
+.chat-runbar-agent-row.has-transcript { cursor: pointer; }
+.chat-runbar-agent-row.has-transcript:hover .chat-runbar-agent-desc { color: var(--text1); }
+.chat-runbar-agent-peek { flex-shrink: 0; color: var(--text3); transition: transform 0.15s; }
+.chat-runbar-agent-transcript {
+  margin: 2px 0 6px 20px;
+  padding: 6px 8px;
+  max-height: 180px; overflow-y: auto;
+  font-size: 11px; line-height: 1.45;
+  white-space: pre-wrap; word-break: break-word;
+  color: var(--text2);
+  background: color-mix(in srgb, var(--text3) 8%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--text3) 35%, transparent);
+  border-radius: 4px;
+}
 @media (pointer: coarse) {
   .chat-runbar-chip { min-height: 30px; }
 }

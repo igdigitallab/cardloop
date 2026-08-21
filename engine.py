@@ -787,6 +787,45 @@ LIVE_CLIENT_MAX: int = int(os.getenv("LIVE_CLIENT_MAX", "10"))
 # The buffer is transient and bounded per in-flight message per client (worst case
 # LIVE_CLIENT_MAX × this value), so a generous cap is cheap.
 SDK_MAX_BUFFER_BYTES: int = int(os.getenv("SDK_MAX_BUFFER_BYTES", str(32 * 1024 * 1024)))
+
+# spec-085 Phase 3: sub-agent visibility. With the SDK's forward_subagent_text on, a
+# sub-agent's finalized TextBlocks arrive as AssistantMessages tagged with the spawning
+# Agent tool_use id — we surface them in the cockpit's subagent lane (subtype "text").
+# The caps bound a wide fan-out: the lane is a live peek, not a full nested transcript
+# (that still comes from the per-agent .jsonl on demand). FORWARD_SUBAGENT_TEXT=0 turns
+# both the SDK option and the forwarding off.
+FORWARD_SUBAGENT_TEXT: int = int(os.getenv("FORWARD_SUBAGENT_TEXT", "1"))
+SUBAGENT_TEXT_MAX_CHARS: int = 2000   # per forwarded block
+SUBAGENT_TEXT_MAX_BLOCKS: int = 50    # per sub-agent per turn
+
+
+def _subagent_text_events(msg, tool_to_task: dict, counts: dict) -> "list[dict]":
+    """spec-085 Phase 3: map a sub-agent AssistantMessage to subagent/text engine events.
+
+    `tool_to_task` maps a spawning Agent tool_use id → task_id (filled from
+    TaskStartedMessage.tool_use_id); text from an unmapped parent id is dropped (no row
+    to attach it to). `counts` tracks forwarded blocks per task for the per-turn cap.
+    Thinking blocks and stream deltas are never forwarded — finalized text only."""
+    if not FORWARD_SUBAGENT_TEXT or not isinstance(msg, AssistantMessage):
+        return []
+    task_id = tool_to_task.get(getattr(msg, "parent_tool_use_id", None))
+    if not task_id:
+        return []
+    out: "list[dict]" = []
+    for blk in msg.content:
+        if not (isinstance(blk, TextBlock) and blk.text.strip()):
+            continue
+        n = counts.get(task_id, 0)
+        if n >= SUBAGENT_TEXT_MAX_BLOCKS:
+            break
+        counts[task_id] = n + 1
+        out.append({
+            "type": "subagent", "subtype": "text", "task_id": task_id,
+            "description": None, "status": None, "summary": None,
+            "last_tool_name": None,
+            "text": blk.text.strip()[:SUBAGENT_TEXT_MAX_CHARS],
+        })
+    return out
 # Root-fix A4: bounded post-turn linger for ephemeral (card) runs whose deferring background
 # tasks are still open when the turn's ResultMessage arrives — the `async with` exit would
 # otherwise disconnect and SIGTERM them mid-work. No-op when the CLI's native deferral
@@ -2557,6 +2596,10 @@ async def run_engine(  # type: ignore[return]
         can_use_tool=(_make_plan_gate_cb(session_key, ctx) if plan_mode
                       else (_make_ask_gate_cb(session_key, ctx) if ask_mode else None)),
         max_buffer_size=SDK_MAX_BUFFER_BYTES,
+        # spec-085 Phase 3: sub-agent finalized text rides the stream (parent_tool_use_id
+        # tagged) and surfaces in the cockpit's subagent lane. Constant per process, so the
+        # live-client fingerprint stays stable.
+        forward_subagent_text=bool(FORWARD_SUBAGENT_TEXT),
         cwd=cwd,
         setting_sources=["user", "project", "local"],
         # spec-078: per-project skill filter + opted-in plugins. setting_sources stays intact so the
@@ -2624,15 +2667,20 @@ async def run_engine(  # type: ignore[return]
         # (skip) ensures a turn where the SDK omits usage entirely does NOT silently
         # carry forward the previous turn's stale value.
         _turn_max_pt: "int | None" = None  # None = no usage-bearing message seen yet this turn
+        # spec-085 Phase 3: per-turn sub-agent text forwarding state (see _subagent_text_events).
+        _sub_tool_to_task: dict = {}
+        _sub_text_counts: dict = {}
         async for msg in client.receive_response():
             # Background sub-agent traffic: the CLI forwards sub-agents' AssistantMessages
             # (and their stream events) on the SAME stdout with parent_tool_use_id set.
             # Without this guard their tool/text blocks interleave with the orchestrator's
             # own text_delta stream — the chat canvas splits the answer MID-WORD at delta
-            # boundaries and their usage inflates _turn_max_pt. Sub-agent visibility is
-            # served separately (PostToolUse monitor hook + the P3-B transcript sweeper),
-            # so the main chat lane must carry orchestrator traffic only.
+            # boundaries and their usage inflates _turn_max_pt. The chat lane stays
+            # orchestrator-only; the ONE exception (spec-085 Phase 3) is a sub-agent's
+            # finalized TextBlocks, surfaced as capped subagent/text lane events.
             if getattr(msg, "parent_tool_use_id", None):
+                for _sub_ev in _subagent_text_events(msg, _sub_tool_to_task, _sub_text_counts):
+                    yield _sub_ev
                 continue
             if isinstance(msg, AssistantMessage):
                 # usage of the last assistant message = full prompt of the current turn:
@@ -2753,6 +2801,10 @@ async def run_engine(  # type: ignore[return]
                     # linger for them before disconnecting.
                     if getattr(msg, "task_type", None) in DEFERRING_TASK_TYPES and msg.task_id:
                         _inflight_deferring.add(msg.task_id)
+                    # spec-085 Phase 3: remember the spawning tool_use id so forwarded
+                    # sub-agent text can be attached to this task's lane row.
+                    if getattr(msg, "tool_use_id", None):
+                        _sub_tool_to_task[msg.tool_use_id] = msg.task_id
                     yield {
                         "type": "subagent",
                         "subtype": "started",

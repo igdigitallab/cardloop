@@ -12361,6 +12361,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 await _send({"type": "rate_limit", "status": event.get("status", "")})
             elif etype == "subagent":
                 # Forward sub-agent lifecycle events as-is; cockpit UI display: Phase C.
+                # spec-085 Phase 3: subtype "text" additionally carries the sub-agent's
+                # forwarded text block — pass it through or the lane shows nothing.
                 await _send({
                     "type": "subagent",
                     "subtype": event.get("subtype"),
@@ -12369,6 +12371,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     "status": event.get("status"),
                     "summary": event.get("summary"),
                     "last_tool_name": event.get("last_tool_name"),
+                    **({"text": event["text"]} if event.get("text") else {}),
                 })
             elif etype == "model_info":
                 # FIX 1(e): forward model_info (fallback alert) to the cockpit client via SSE.
