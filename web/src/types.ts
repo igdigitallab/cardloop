@@ -445,6 +445,12 @@ export interface ChatEventQueued {
   item: { id: string; text: string; created_at: number }
 }
 
+/** spec-086: backend was busy and INJECTED the prompt into the running turn (CLI steering).
+ *  The user bubble renders from the activity-bus 'steer' event, not from this ack. */
+export interface ChatEventSteered {
+  type: 'steered'
+}
+
 /** Emitted when the served model family mismatches the requested alias (e.g. fable→opus degrade). */
 export interface ChatEventModelInfo {
   type: 'model_info'
@@ -462,6 +468,7 @@ export type ChatSSEEvent =
   | ChatEventDone
   | ChatEventRateLimit
   | ChatEventQueued
+  | ChatEventSteered
   | ChatEventModelInfo
 
 // ─── Chat message (UI state) ───────────────────────────────────────────────
@@ -729,8 +736,17 @@ export interface ActivityEventToolDecided {
   status?: string
 }
 
+/** spec-086: an operator message injected into the RUNNING turn (CLI steering). */
+export interface ActivityEventSteer {
+  kind: 'steer'
+  text: string
+  chat_id?: string
+  seq?: number
+}
+
 export type ActivityEvent =
   | ActivityEventRunStart
+  | ActivityEventSteer
   | ActivityEventText
   | ActivityEventTool
   | ActivityEventRunEnd

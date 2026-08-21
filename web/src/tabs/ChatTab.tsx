@@ -2122,6 +2122,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       })
       setRun({ startedAt: now, lastEventAt: now, currentTool: null, source: isBg ? 'bg' : 'card' })
 
+    } else if (evt.kind === 'steer') {
+      // spec-086: an operator message was injected into the running turn (CLI steering).
+      // Close any open streaming bubble and render the user bubble at its arrival point —
+      // the next text/tool chunk opens a fresh assistant bubble (appendChunk semantics).
+      // No busActiveRef gate: the operator's own injected message must never be hidden
+      // by a missed run_start.
+      if (evt.text) setMessages(prev => [...finalizeStreaming(prev), makeUserMsg(evt.text)])
+
     } else if (evt.kind === 'text') {
       if (!busActiveRef.current) return
       // Compaction ended — first text output means the turn resumed.
@@ -2399,9 +2407,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       const fullText = filePaths.length > 0 ? `${effectiveText}\n\n${filePaths.join('\n')}` : effectiveText
       setInput('')
       setAttachments([])
-      // Enqueue server-side so the message survives a page reload.
-      api.chatQueueAdd(projectId, fullText, effectiveChatId || undefined)
-        .then(res => setQueueItems(prev => [...prev, res.item]))
+      // spec-086: try steering — the server injects the message into the RUNNING turn
+      // (terminal Claude Code behaviour) and the bus 'steer' event renders the user
+      // bubble at its true in-turn position. Non-steerable turn (plan/ask gate, codex,
+      // rotation) → the server enqueues it instead, same as the old chatQueueAdd path.
+      api.chatSteer(projectId, fullText, effectiveChatId || undefined)
+        .then(res => { if (!res.steered && res.item) setQueueItems(prev => [...prev, res.item!]) })
         .catch(() => {/* queue full or network — silently drop */})
       return
     }
@@ -2539,6 +2550,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           // appended for this send, and refresh the queue display.  The backend drain loop
           // (or the lock-release drain) will deliver the message and emit run_start/run_end
           // on the activity bus so the tab re-renders the real turn.
+          // spec-086: the server injected this send into the RUNNING turn (steering).
+          // Retract the optimistic user+assistant pair — the bus 'steer' event renders
+          // the user bubble at its true in-turn position (single-writer canvas). Do NOT
+          // touch `run`: a foreign turn is still live and its bar must survive this ack.
+          if (evt.type === 'steered') {
+            setStreaming(false)
+            setMessages(prev => prev.slice(0, -2))
+            return
+          }
+
           if (evt.type === 'queued') {
             setStreaming(false)
             setRun(null)

@@ -115,6 +115,9 @@ CONTEXT_WINDOW = int(os.environ.get("CONTEXT_WINDOW", "1000000"))
 #   CONTEXT_ROTATE_AT   — auto-rotate-with-handoff trigger (caps the tail). Default 280K.
 # Both env-tunable — watch data/usage_ledger.jsonl and tune to where YOUR tail actually hurts.
 CONTEXT_WARN_YELLOW = int(os.environ.get("CONTEXT_WARN_YELLOW", "300000"))
+# spec-086: mid-turn steering — inject an operator message into the RUNNING turn's CLI stdin
+# (terminal Claude Code behaviour) instead of parking it in the chat queue until the turn ends.
+STEER_MID_TURN = int(os.environ.get("STEER_MID_TURN", "1"))
 CONTEXT_WARN_RED    = int(os.environ.get("CONTEXT_WARN_RED",    "500000"))
 # CONTEXT_WARN_AT: canonical alias — the backend uses this one name throughout.
 CONTEXT_WARN_AT = int(os.environ.get("CONTEXT_WARN_AT", str(CONTEXT_WARN_YELLOW)))
@@ -10984,6 +10987,7 @@ async def api_project_session_history(req: web.Request) -> web.Response:
 #   POST   /api/projects/{id}/chat/queue          → {"item": {...}}  (enqueue)
 #   PATCH  /api/projects/{id}/chat/queue/{msg_id} → {"item": {...}}  (edit)
 #   DELETE /api/projects/{id}/chat/queue/{msg_id} → {"ok": true}     (remove)
+#   POST   /api/projects/{id}/chat/steer          → {"steered": true} | {"steered": false, "item": {...}}  (spec-086)
 #
 # The existing chat endpoint (POST /chat) enqueues via _chat_queue_enqueue
 # instead of returning "busy" when a run is in progress.
@@ -11147,6 +11151,77 @@ async def api_chat_queue_add(req: web.Request) -> web.Response:
     if item is None:
         return web.json_response({"error": "queue full"}, status=429)
     return web.json_response({"item": item}, status=201)
+
+
+async def _try_steer_mid_turn(ctx, session_key: str, prompt: str, chat_id: "str | None") -> bool:
+    """spec-086: inject `prompt` into the in-flight turn (CLI steering). Returns True on inject.
+
+    The bundled CLI queues stdin user messages and weaves them into the running turn between
+    tool calls — the same behaviour as typing mid-turn in terminal Claude Code. Steer ONLY when
+    the in-flight turn runs on this session's LIVE client: ctx["running"] holds the client
+    object mid-turn (engine sets it for /stop), so an identity check against the live entry's
+    client excludes every non-steerable lane at once — the True placeholder (turn not started),
+    plan/ask gated turns (fresh client), the codex provider, and rotation locks.
+
+    chat_id guard: a project's chats share one session_key, so require the running turn to
+    belong to the same chat (or to none — TG/cockpit share sessions by design).
+
+    Boundary race is benign by design: if the turn ends before the CLI reads the line, the
+    message starts an autonomous turn that the between-turns drain surfaces as a background
+    run (spec-063 'bg' lane) — visible and in the transcript, never lost.
+    """
+    if not STEER_MID_TURN:
+        return False
+    run_client = ctx["running"].get(session_key)
+    entry = (ctx.get("live_clients") or {}).get(session_key)
+    if entry is None or run_client is None or run_client is not getattr(entry, "client", None):
+        return False
+    turn_chat = (_live_turns.get(session_key) or {}).get("chat_id")
+    if turn_chat and chat_id and turn_chat != chat_id:
+        return False
+    try:
+        await run_client.query(prompt)
+    except Exception as exc:
+        print(f"[steer] {session_key}: inject failed ({exc!r}) — falling back to queue")
+        return False
+    # Single-writer canvas (spec-063): publish the steered message as a seq-tagged bus event
+    # so every tab renders the user bubble at its true in-turn position. persist=True — a
+    # steer is a turn-level control event like run_start, worth a timeline record.
+    ev = _live_turn_append(session_key, {
+        "kind": "steer", "text": prompt,
+        **({"chat_id": chat_id} if chat_id else {}),
+    })
+    _bus_publish(session_key, ev, persist=True)
+    return True
+
+
+async def api_chat_steer(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/chat/steer — inject a message into the running turn (spec-086).
+
+    Falls back to the ordinary chat queue when the turn is not steerable (fresh-client turn,
+    codex lane, rotation, or the turn just ended), so the caller can always fire-and-forget:
+    response is {"steered": true} or {"steered": false, "item": {...}} (enqueued)."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    text = (body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "empty text"}, status=400)
+    _s_chat_id = (body.get("chat_id") or "").strip() or None
+    if _s_chat_id and not _valid_chat_id(_s_chat_id):
+        return web.json_response({"error": "invalid chat_id"}, status=400)
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    if await _try_steer_mid_turn(ctx, session_key, text, _s_chat_id):
+        return web.json_response({"steered": True})
+    item = _chat_queue_enqueue(session_key, text, _s_chat_id, project["id"])
+    if item is None:
+        return web.json_response({"error": "queue full"}, status=429)
+    return web.json_response({"steered": False, "item": item}, status=201)
 
 
 async def api_chat_queue_edit(req: web.Request) -> web.Response:
@@ -11883,6 +11958,12 @@ async def api_project_chat(req: web.Request) -> web.Response:
         )
         if _is_dup:
             payload = json.dumps({"type": "queued", "duplicate": True}, ensure_ascii=False)
+            await resp.write(f"data: {payload}\n\n".encode())
+            return resp
+        # spec-086: try steering first — inject into the running turn's CLI stdin instead of
+        # parking until turn end. Falls through to the queue on any non-steerable lane.
+        if await _try_steer_mid_turn(ctx, session_key, prompt, _req_chat_id):
+            payload = json.dumps({"type": "steered"}, ensure_ascii=False)
             await resp.write(f"data: {payload}\n\n".encode())
             return resp
         # Multichat: stamp the originating chat_id so the drained run routes back to
@@ -15631,6 +15712,7 @@ async def start(ctx: dict) -> None:
         # Chat message queue (server-side persist across reload; editable/deletable)
         app.router.add_get("/api/projects/{id}/chat/queue", api_chat_queue_list)
         app.router.add_post("/api/projects/{id}/chat/queue", api_chat_queue_add)
+        app.router.add_post("/api/projects/{id}/chat/steer", api_chat_steer)
         app.router.add_patch("/api/projects/{id}/chat/queue/{msg_id}", api_chat_queue_edit)
         app.router.add_delete("/api/projects/{id}/chat/queue/{msg_id}", api_chat_queue_delete)
         app.router.add_get("/api/projects/{id}/running", api_project_running)
