@@ -502,6 +502,14 @@ function finalizeStreamingWithMetrics(
   return messages
 }
 
+/**
+ * A live run with no bus event for this long means the stream is gone, not that the agent is
+ * quiet — the watchdog in useProjectActivity gives up after 40 s, so this backstop sits past
+ * that. A long tool call is genuinely silent, so the repair must stay cheap and idempotent:
+ * it replays the /live buffer onto session history, exactly what a reload does.
+ */
+const BUS_SILENCE_REPAIR_MS = 60_000
+
 let _msgCounter = 0
 function nextId() { return `msg-${++_msgCounter}` }
 
@@ -1306,6 +1314,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // snapshot in the same Promise.all. In that case the transcript is canonical;
   // ignore the stale turn's remaining bus frames until its run_end arrives.
   const hydratedCompletedTurnRef = useRef<boolean>(false)
+  // Last time ANY activity-bus event reached this tab. The /live poll reads it to notice a
+  // stream that died silently (see BUS_SILENCE_REPAIR_MS in sync()).
+  const lastBusEventAtRef = useRef<number>(Date.now())
   // Spec-041 A3: always-current projectId for use in async drain callbacks.
   const projectIdRef = useRef(projectId)
   projectIdRef.current = projectId
@@ -2043,6 +2054,19 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           setServerStartedAt(prev => prev ?? startMs)
           setRun(r => r ?? { startedAt: startMs, lastEventAt: Date.now(), currentTool: null, source: 'card' })
           busActiveRef.current = true
+          // Stream-death repair. This poll deliberately restores only the INDICATOR while a
+          // run is live — the activity stream is the render source, and hydrating over it
+          // would re-order the canvas. But when the stream dies silently (half-open socket
+          // after a network switch or a sleeping phone), that left the operator staring at a
+          // live Stop button with an empty, frozen chat until they reloaded the page. The
+          // stream now reconnects itself after 40 s of silence; this is the backstop for when
+          // even that fails (proxy blackholes the retry, offline window): past
+          // BUS_SILENCE_REPAIR_MS with no bus event at all, replay /live onto the canvas.
+          // Re-stamping the ref bounds it to one repair per silent window, not one per poll.
+          if (Date.now() - lastBusEventAtRef.current > BUS_SILENCE_REPAIR_MS) {
+            lastBusEventAtRef.current = Date.now()
+            hydrateFromServer(() => cancelled)
+          }
         } else {
           // Symmetrically: the server says no run of ours is in flight, so the indicator
           // goes away even if busActiveRef was already false (e.g. an optimistic `run`
@@ -2082,6 +2106,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
   // Subscribe to project activity bus (card/TG runs)
   useProjectActivity(evt => {
+    // Liveness stamp for the stream-death repair in the /live poll. Stamped before every
+    // filter below, so even an event this tab discards still proves the stream is alive.
+    lastBusEventAtRef.current = Date.now()
     // Multichat isolation: if the event carries a chat_id and it does not match this
     // tab's active chat, discard it. board_event is project-scoped and must pass through.
     // monitor events are also project-scoped. Events without chat_id (card/TG runs, old

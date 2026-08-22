@@ -25,6 +25,13 @@ interface BusValue {
 
 const BusContext = createContext<BusValue | null>(null)
 
+/**
+ * Reconnect the activity stream after this much silence. The server pings every 25 s, so
+ * anything past that is a dead connection rather than a quiet run — keep the two apart or
+ * a long tool call would be mistaken for a drop and thrash the stream.
+ */
+const STREAM_SILENCE_MS = 40_000
+
 interface ProviderProps {
   projectId: string
   /**
@@ -98,7 +105,27 @@ export function ProjectActivityProvider({ projectId, active = true, children }: 
           const decoder = new TextDecoder()
           let buf = ''
           while (alive) {
-            const { done, value } = await reader.read()
+            // The server pings this stream every 25 s (webapp.py _sse_stream), so silence
+            // past STREAM_SILENCE_MS means the socket is half-open: a mobile network switch
+            // or a phone that slept leaves reader.read() pending FOREVER with no error to
+            // catch, so the retry loop below never ran. Symptom the operator hit: the run
+            // bar keeps saying "busy" (the 5 s /live poll restores it) while nothing at all
+            // reaches the chat, and only a page reload brought the canvas back. Racing the
+            // read against a timer turns that silent death into an ordinary reconnect —
+            // ?since=<cursor> then replays exactly the events missed in the gap.
+            let silenceTimer: ReturnType<typeof setTimeout> | undefined
+            const readOrTimeout = await Promise.race([
+              reader.read(),
+              new Promise<'timeout'>(resolve => {
+                silenceTimer = setTimeout(() => resolve('timeout'), STREAM_SILENCE_MS)
+              }),
+            ])
+            if (silenceTimer !== undefined) clearTimeout(silenceTimer)
+            if (readOrTimeout === 'timeout') {
+              try { await reader.cancel() } catch { /* already dead — reconnect anyway */ }
+              break
+            }
+            const { done, value } = readOrTimeout
             if (done) break
             buf += decoder.decode(value, { stream: true })
             const lines = buf.split('\n')
