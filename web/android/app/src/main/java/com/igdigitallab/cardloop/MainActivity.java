@@ -1,6 +1,7 @@
 package com.igdigitallab.cardloop;
 
 import android.Manifest;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -9,15 +10,25 @@ import android.os.Message;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Toast;
+import androidx.activity.OnBackPressedCallback;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import com.getcapacitor.Bridge;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebChromeClient;
 import com.getcapacitor.BridgeWebViewClient;
+import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
     private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 1;
+    /** Back at the app boundary asks for confirmation inside this window instead of exiting. */
+    private static final long EXIT_CONFIRM_WINDOW_MS = 2500;
+
+    private long lastBackAt = 0L;
+    /** An intent that arrived before the cockpit finished loading, replayed on page ready. */
+    private String pendingIntentJs = null;
+    private boolean pageReady = false;
 
     // Android 13+ requires this runtime permission before the app (or its WebView, via the
     // web Notification/Push APIs) can post anything to the system tray. A bare WebView never
@@ -34,6 +45,94 @@ public class MainActivity extends BridgeActivity {
                     NOTIFICATION_PERMISSION_REQUEST_CODE);
         }
         wireExternalLinks();
+        wireBackNavigation();
+        routeIntent(getIntent());
+    }
+
+    /** A share or a launcher shortcut can arrive while the app is already running. */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        routeIntent(intent);
+    }
+
+    /**
+     * Back should walk out of the UI before it walks out of the app.
+     *
+     * Every dismissible layer in the cockpit (modal, lightbox, mobile drawer, the tab you came
+     * from) owns one history entry — see useBackDismiss — so `canGoBack()` is the single
+     * question worth asking: if the WebView has somewhere to go, Back belongs to the web app.
+     * Only at the true boundary do we leave, and then not on the first press: the operator's
+     * complaint was that one stray Back threw them out of a live session.
+     */
+    private void wireBackNavigation() {
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                Bridge bridge = getBridge();
+                WebView webView = bridge != null ? bridge.getWebView() : null;
+                if (webView != null && webView.canGoBack()) {
+                    webView.goBack();
+                    return;
+                }
+                long now = System.currentTimeMillis();
+                if (now - lastBackAt < EXIT_CONFIRM_WINDOW_MS) {
+                    finish();
+                    return;
+                }
+                lastBackAt = now;
+                Toast.makeText(MainActivity.this, "Press back again to leave Cardloop",
+                        Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    /**
+     * Hand a share or a launcher shortcut to the web app as a `cops:intent` event.
+     *
+     * This is the part a PWA cannot do: appear in the Android share sheet and in the
+     * long-press menu on the launcher icon. The payload is queued when it arrives before the
+     * cockpit is on screen (cold start from the share sheet is exactly that case) and replayed
+     * from onPageFinished.
+     */
+    private void routeIntent(Intent intent) {
+        if (intent == null) return;
+        String kind = null;
+        String value = null;
+
+        if (Intent.ACTION_SEND.equals(intent.getAction())) {
+            String text = intent.getStringExtra(Intent.EXTRA_TEXT);
+            String subject = intent.getStringExtra(Intent.EXTRA_SUBJECT);
+            if (text != null && !text.isEmpty()) {
+                kind = "share";
+                value = (subject != null && !subject.isEmpty() && !text.contains(subject))
+                        ? subject + "\n" + text
+                        : text;
+            }
+        } else if (intent.hasExtra("cops_shortcut")) {
+            kind = "shortcut";
+            value = intent.getStringExtra("cops_shortcut");
+        }
+        if (kind == null || value == null) return;
+
+        try {
+            JSONObject detail = new JSONObject();
+            detail.put("kind", kind);
+            detail.put("value", value);
+            String js = "window.dispatchEvent(new CustomEvent('cops:intent',{detail:"
+                    + detail.toString() + "}))";
+            if (pageReady) evaluate(js);
+            else pendingIntentJs = js;
+        } catch (Exception ignored) {
+            // A malformed share is not worth crashing the app over.
+        }
+    }
+
+    private void evaluate(String js) {
+        Bridge bridge = getBridge();
+        WebView webView = bridge != null ? bridge.getWebView() : null;
+        if (webView != null) webView.evaluateJavascript(js, null);
     }
 
     /**
@@ -72,6 +171,18 @@ public class MainActivity extends BridgeActivity {
     private class CardloopWebViewClient extends BridgeWebViewClient {
         CardloopWebViewClient(Bridge bridge) {
             super(bridge);
+        }
+
+        @Override
+        public void onPageFinished(WebView view, String url) {
+            super.onPageFinished(view, url);
+            pageReady = true;
+            if (pendingIntentJs != null) {
+                String js = pendingIntentJs;
+                pendingIntentJs = null;
+                // The listeners live in React components; give the tree a tick to mount.
+                view.postDelayed(() -> evaluate(js), 400);
+            }
         }
 
         @Override

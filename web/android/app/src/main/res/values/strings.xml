@@ -4,4 +4,8 @@
     <string name="title_activity_main">Cardloop</string>
     <string name="package_name">com.igdigitallab.cardloop</string>
     <string name="custom_url_scheme">com.igdigitallab.cardloop</string>
+    <string name="shortcut_new_chat_short">New chat</string>
+    <string name="shortcut_new_chat_long">Start a new free chat</string>
+    <string name="shortcut_terminal_short">Terminal</string>
+    <string name="shortcut_terminal_long">Open the server terminal</string>
 </resources>

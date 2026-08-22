@@ -1,4 +1,5 @@
 import { ReactNode, useEffect, useRef } from 'react'
+import { useBackDismiss } from '../hooks/useBackDismiss'
 
 interface ModalProps {
   /** Content of the modal body */
@@ -13,9 +14,12 @@ interface ModalProps {
  * Generic overlay modal.
  * - Click outside (overlay) → onClose
  * - Escape key → onClose
+ * - Android back gesture → onClose (every dialog in the app routes through here, so wiring
+ *   it once means Back never jumps straight out of the app with a dialog still open)
  */
 export function Modal({ children, onClose, className }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
+  useBackDismiss(true, onClose)
 
   // Close on Escape
   useEffect(() => {

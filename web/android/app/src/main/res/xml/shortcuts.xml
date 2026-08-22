@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the launcher icon. A PWA cannot offer these; the wrapper can. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <shortcut
+        android:shortcutId="new_chat"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_new_chat_short"
+        android:shortcutLongLabel="@string/shortcut_new_chat_long">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="com.igdigitallab.cardloop"
+            android:targetClass="com.igdigitallab.cardloop.MainActivity">
+            <extra android:name="cops_shortcut" android:value="new_chat" />
+        </intent>
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="terminal"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_terminal_short"
+        android:shortcutLongLabel="@string/shortcut_terminal_long">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="com.igdigitallab.cardloop"
+            android:targetClass="com.igdigitallab.cardloop.MainActivity">
+            <extra android:name="cops_shortcut" android:value="terminal" />
+        </intent>
+    </shortcut>
+
+</shortcuts>

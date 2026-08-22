@@ -1490,6 +1490,21 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   }, [input])
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
+  // Android share sheet → this composer. MainActivity forwards the shared text as a
+  // cops:intent event; only the ACTIVE tab takes it, so the text lands in the chat the
+  // operator is actually looking at rather than in every open project at once.
+  useEffect(() => {
+    if (!isActive) return
+    const onIntent = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { kind?: string; value?: string } | undefined
+      if (detail?.kind !== 'share' || !detail.value) return
+      const shared = detail.value
+      setInput(prev => (prev.trim() ? `${prev}\n${shared}` : shared))
+    }
+    window.addEventListener('cops:intent', onIntent)
+    return () => window.removeEventListener('cops:intent', onIntent)
+  }, [isActive])
+
   // Reload gate for useBuildWatch: a self-update must not swallow a turn the operator is
   // watching stream, nor a draft they have not sent. Only the ACTIVE tab writes the flag —
   // every open project mounts a ChatTab, and a hidden one reporting "idle" would clear the

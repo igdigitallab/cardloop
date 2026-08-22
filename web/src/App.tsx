@@ -19,6 +19,7 @@ import { useToast, ToastContainer } from './components/Toast'
 import { UpdatePill } from './components/UpdatePill'
 import { useBuildWatch } from './hooks/useBuildWatch'
 import { isAppBusy } from './lib/appBusy'
+import { useBackDismiss } from './hooks/useBackDismiss'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
 import { useTheme } from './hooks/useTheme'
 import { useNotifications } from './hooks/useNotifications'
@@ -887,6 +888,30 @@ export default function App() {
     setAuthState('unauthed')
   }
 
+  // Launcher shortcuts (long-press the app icon) arrive from MainActivity as a cops:intent
+  // event. Shared TEXT is handled in ChatTab instead — it belongs in the composer of whatever
+  // chat the operator is looking at, which App has no handle on.
+  useEffect(() => {
+    const onIntent = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { kind?: string; value?: string } | undefined
+      if (detail?.kind !== 'shortcut') return
+      if (detail.value === 'new_chat') setFreeCreateOpen(true)
+      else if (detail.value === 'terminal') handleOpenTerminal()
+    }
+    window.addEventListener('cops:intent', onIntent)
+    return () => window.removeEventListener('cops:intent', onIntent)
+  }, [handleOpenTerminal])
+
+  // Android back: close the mobile drawer before anything else.
+  useBackDismiss(drawerOpen, () => setDrawerOpen(false))
+
+  // Self-update onto a freshly deployed frontend. Held back (pill shown) while a turn
+  // streams or the composer holds a draft; applied automatically once the app goes idle.
+  const { updateReady, applyUpdate } = useBuildWatch(() => !isAppBusy())
+
+  // ⚠️ Everything above the early returns below: these are hooks, and the login/loading
+  // screens return before the main tree. Calling them after those returns changes the hook
+  // count between renders, which React refuses the moment the operator signs in.
   if (authState === 'loading') {
     return (
       <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}>
@@ -913,10 +938,6 @@ export default function App() {
     .filter((p): p is Project => !!p)
 
   const hasOpen = openProjects.length > 0
-
-  // Self-update onto a freshly deployed frontend. Held back (pill shown) while a turn
-  // streams or the composer holds a draft; applied automatically once the app goes idle.
-  const { updateReady, applyUpdate } = useBuildWatch(() => !isAppBusy())
 
   return (
     <ModulesProvider>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useBackDismiss } from '../hooks/useBackDismiss'
 import { Project, ProjectStructureHealth, SearchNavTarget, TabId } from '../types'
 import { api } from '../api'
 import { ProjectActivityProvider, useOnRunEnd, useProjectActivity } from '../hooks/useProjectActivity'
@@ -260,6 +261,26 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
 
 export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject, settingsRequest, navRequest, models }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>('board')
+
+  // Android back inside a project: return to the tab you came from before Back is allowed to
+  // reach the app boundary. One level only, and a back-driven switch is not itself recorded —
+  // otherwise Back would ping-pong between two tabs forever and never let go of the app.
+  const [tabBack, setTabBack] = useState<TabId | null>(null)
+  const lastTabRef = useRef<TabId>(activeTab)
+  const backSwitchRef = useRef(false)
+  useEffect(() => {
+    if (lastTabRef.current === activeTab) return
+    if (backSwitchRef.current) { backSwitchRef.current = false; setTabBack(null) }
+    else setTabBack(lastTabRef.current)
+    lastTabRef.current = activeTab
+  }, [activeTab])
+  // Hidden project tabs stay out of it: every open project mounts a ProjectView, and a
+  // background one claiming Back would dismiss something the operator cannot even see.
+  useBackDismiss(!!isActive && tabBack !== null, () => {
+    if (!tabBack) return
+    backSwitchRef.current = true
+    setActiveTab(tabBack)
+  })
   // Mobile inner tab: null = show chat (default), TabId = show that inner tab.
   // Restored from localStorage per project so reopening lands where you left off.
   const [mobileInnerTab, setMobileInnerTab] = useState<TabId | null>(() => readMobileTab(project.id) as TabId | null)

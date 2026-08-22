@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useBackDismiss } from '../hooks/useBackDismiss'
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -24,23 +25,13 @@ const MAX_SCALE = 8
 const clamp = (v: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, v))
 
 export function Lightbox({ src, alt = '', svg, video, onClose }: Props) {
+  // Back closes the viewer (shared with every other dismissible layer).
+  useBackDismiss(true, onClose)
+
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', handleKey)
-
-    // Hijack the device/browser Back button: opening pushes a history entry so
-    // Back closes the viewer instead of leaving the app. If closed via UI we
-    // pop that entry ourselves on cleanup.
-    let closedByBack = false
-    window.history.pushState({ copsLightbox: true }, '')
-    const onPop = () => { closedByBack = true; onClose() }
-    window.addEventListener('popstate', onPop)
-
-    return () => {
-      window.removeEventListener('keydown', handleKey)
-      window.removeEventListener('popstate', onPop)
-      if (!closedByBack) window.history.back()
-    }
+    return () => window.removeEventListener('keydown', handleKey)
   }, [onClose])
 
   const [scale, setScale] = useState(1)
