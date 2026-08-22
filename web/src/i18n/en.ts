@@ -488,6 +488,8 @@ export const en = {
 
   // ── Modal / Toast / Common UI ────────────────────────────────
   'modal.close_aria': 'Close',
+  'update.available': 'New version available',
+  'update.reload': 'Reload',
   'toast.close_aria': 'Close notification',
   'spinner.default': 'Loading...',
 

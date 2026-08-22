@@ -296,6 +296,20 @@ html, body, #root {
 }
 .toast-close:hover { color: var(--text); }
 
+/* ── New-build pill (useBuildWatch) ──────────────────────────────────── */
+.update-pill {
+  position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 10000;
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px 6px 12px; border-radius: 999px;
+  background: var(--bg3); border: 1px solid var(--accent);
+  font-size: 12px; color: var(--text); animation: toast-in 0.2s ease;
+}
+.update-pill-btn {
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: 999px;
+  color: var(--text); font-size: 12px; padding: 3px 10px; cursor: pointer;
+}
+.update-pill-btn:hover { border-color: var(--accent); }
+
 /* ── btn-danger ──────────────────────────────────────────────────────── */
 .btn-danger {
   padding: 6px 14px; border-radius: var(--radius); border: 1px solid var(--red);

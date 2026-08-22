@@ -460,6 +460,8 @@ export const ru = {
 
   // ── Modal / Toast / Common UI ────────────────────────────────
   'modal.close_aria': 'Закрыть',
+  'update.available': 'Доступна новая версия',
+  'update.reload': 'Обновить',
   'toast.close_aria': 'Закрыть уведомление',
   'spinner.default': 'Загрузка...',
 

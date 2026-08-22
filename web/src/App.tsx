@@ -16,6 +16,9 @@ import { UsageTab } from './tabs/UsageTab'
 import { TerminalTab } from './tabs/TerminalTab'
 import { GlobalSettingsTab } from './tabs/GlobalSettingsTab'
 import { useToast, ToastContainer } from './components/Toast'
+import { UpdatePill } from './components/UpdatePill'
+import { useBuildWatch } from './hooks/useBuildWatch'
+import { isAppBusy } from './lib/appBusy'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
 import { useTheme } from './hooks/useTheme'
 import { useNotifications } from './hooks/useNotifications'
@@ -911,10 +914,15 @@ export default function App() {
 
   const hasOpen = openProjects.length > 0
 
+  // Self-update onto a freshly deployed frontend. Held back (pill shown) while a turn
+  // streams or the composer holds a draft; applied automatically once the app goes idle.
+  const { updateReady, applyUpdate } = useBuildWatch(() => !isAppBusy())
+
   return (
     <ModulesProvider>
     <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''} mobile-on-${mobileScreen}`}>
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
+      {updateReady && <UpdatePill onApply={applyUpdate} />}
       {/* Backdrop for mobile drawer — tap to close */}
       <div
         className={`sidebar-backdrop${drawerOpen ? ' visible' : ''}`}

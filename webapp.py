@@ -1970,13 +1970,13 @@ async def error_middleware(request: web.Request, handler):
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    """Guards /api/* — passes /api/health and /api/login without a cookie.
+    """Guards /api/* — passes /api/health, /api/login and /api/build without a cookie.
     Spec-012 Ph3: also passes POST /api/projects/{id}/incident (it has its own
     token-auth in the body/header). Match is TIGHT via pre-compiled _INCIDENT_PATH_RE —
     endpoints without trailing id, /incident/evil, or GET will not be exempt."""
     path = request.path
     # Unprotected endpoints
-    if path in ("/api/health", "/api/login"):
+    if path in ("/api/health", "/api/login", "/api/build"):
         return await handler(request)
     # Spec-012 Ph3: push-incident — its own auth (token). POST only, exact path only.
     if request.method == "POST" and _INCIDENT_PATH_RE.match(path):
@@ -2751,6 +2751,35 @@ def _find_vault_specs_dir(ctx: dict, project_name: str, cwd: str) -> Path | None
 
 
 # ─────────────────────────── API handlers ───────────────────────────
+
+# Which frontend bundle this server currently serves. The cockpit is a long-lived PWA: an
+# open app keeps executing the JS it loaded hours ago, and workbox answers navigations from
+# its precache, so the FIRST reload after a deploy still returns the old index.html and only
+# the next one picks up the new build. An operator verifying a just-shipped frontend fix was
+# therefore testing yesterday's bundle — that cost a real hour on 2026-08-21. The client polls
+# this, compares it with the <script> tag it booted from, and updates itself.
+_BUILD_BUNDLE_RE = re.compile(r"assets/(index-[A-Za-z0-9_-]+\.js)")
+_build_cache: dict = {"mtime": None, "bundle": None}
+
+
+async def api_build(req: web.Request) -> web.Response:
+    """GET /api/build (unauthenticated) — {"bundle": "index-<hash>.js"} of the served build.
+
+    Unauthenticated on purpose: the filename is already public in index.html, and the check
+    must keep working on the login screen and from the native shell's own origin. Cached on
+    index.html's mtime, so the poll costs a stat() in the steady state."""
+    headers = {"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"}
+    index = req.app["ctx"]["HERE"] / "web" / "dist" / "index.html"
+    try:
+        mtime = index.stat().st_mtime
+    except OSError:
+        return web.json_response({"bundle": None}, headers=headers)  # not built yet
+    if _build_cache["mtime"] != mtime:
+        found = _BUILD_BUNDLE_RE.search(index.read_text(encoding="utf-8", errors="replace"))
+        _build_cache["mtime"] = mtime
+        _build_cache["bundle"] = found.group(1) if found else None
+    return web.json_response({"bundle": _build_cache["bundle"]}, headers=headers)
+
 
 async def api_health(req: web.Request) -> web.Response:
     """GET /api/health (unauthenticated — see auth_middleware exempt list).
@@ -15645,6 +15674,7 @@ async def start(ctx: dict) -> None:
 
         # API routes
         app.router.add_get("/api/health", api_health)
+        app.router.add_get("/api/build", api_build)
         app.router.add_get("/api/version", api_version)
         app.router.add_post("/api/update", api_update)
         app.router.add_post("/api/login", api_login)

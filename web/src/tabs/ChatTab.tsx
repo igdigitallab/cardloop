@@ -32,6 +32,7 @@ import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
 import { playChime } from '../lib/chime'
 import { t } from '../i18n'
+import { setAppBusy } from '../lib/appBusy'
 import { Modal, ModalHead } from '../components/Modal'
 import { Paperclip, ClipboardList, Wrench, Clock, Square, Pencil, Trash2, File, Image, Flame, Snowflake, Plus } from 'lucide-react'
 
@@ -1489,6 +1490,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   }, [input])
 
   useEffect(() => { streamingRef.current = streaming }, [streaming])
+  // Reload gate for useBuildWatch: a self-update must not swallow a turn the operator is
+  // watching stream, nor a draft they have not sent. Only the ACTIVE tab writes the flag —
+  // every open project mounts a ChatTab, and a hidden one reporting "idle" would clear the
+  // gate for the tab actually in front of the operator.
+  useEffect(() => {
+    if (!isActive) return
+    setAppBusy(streaming || run !== null || input.trim().length > 0)
+    return () => setAppBusy(false)
+  }, [isActive, streaming, run, input])
 
   const errorRef = useRef('')
   useEffect(() => { errorRef.current = error }, [error])
