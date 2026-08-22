@@ -1799,6 +1799,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         let liveMsgs: ChatMessage[] = promptInHistory
           ? [...histMsgs, liveAssistantMsg]
           : [...histMsgs, makeUserMsg(liveRes.prompt || '…'), liveAssistantMsg]
+        // spec-086: session-history already carries a steered message (queued_command
+        // attachment), so the buffer replay below must not render it a second time.
+        const histUserTexts = new Set(
+          histMsgs.filter(m => m.role === 'user').map(m => m.text.trim()))
         const liveSubagents: SubagentEntry[] = []
         for (const ev of liveRes.events) {
           const etype = ev['type'] as string | undefined
@@ -1815,6 +1819,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               const updated = applySubagentEvent(liveSubagents, sEvt)
               liveSubagents.length = 0
               liveSubagents.push(...updated)
+            }
+          } else if (ev['kind'] === 'steer') {
+            // spec-086: an operator message injected into THIS turn. The replay loop
+            // discriminated on `type` only, so the bubble the live bus had rendered
+            // disappeared on every hydrate (5 s poll, tab switch, reload) — the operator
+            // saw their own message flash and vanish. Skip when history already carries it.
+            const steerText = ((ev['text'] as string) ?? '').trim()
+            if (steerText && !histUserTexts.has(steerText)) {
+              liveMsgs = [...finalizeStreaming(liveMsgs), makeUserMsg(steerText)]
             }
           }
           // result/error/done would only appear if the turn already finished —

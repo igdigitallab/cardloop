@@ -1009,3 +1009,51 @@ async def test_global_file_write_no_path_param_400(aiohttp_client, global_file_a
     client = await aiohttp_client(global_file_app)
     resp = await client.post("/api/global/file", json={"content": "x"}, headers=_auth(base_ctx))
     assert resp.status == 400
+
+
+def test_session_history_surfaces_steered_message(tmp_path):
+    """spec-086: a mid-turn steered message must survive in the feed.
+
+    The CLI never writes an injected message as a user line — it records a queued_command
+    attachment at enqueue time and queue-operation bookkeeping around it. The feed skipped
+    every record without a "message" dict, so the operator's own injection vanished as soon
+    as the 300 s live buffer expired or the page reloaded. Real transcript shapes below.
+    """
+    jsonl = tmp_path / "steer.jsonl"
+    jsonl.write_text("\n".join(json.dumps(o) for o in [
+        {"type": "user", "message": {"role": "user", "content": "count to twenty"},
+         "timestamp": "2026-08-22T04:34:30.517Z"},
+        {"type": "queue-operation", "operation": "enqueue", "content": "stop counting"},
+        {"type": "attachment", "uuid": "att-1", "timestamp": "2026-08-22T04:35:58.585Z",
+         "attachment": {"type": "queued_command", "prompt": "stop counting",
+                        "commandMode": "prompt"}},
+        {"type": "queue-operation", "operation": "remove", "content": "stop counting"},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "stopped at 9"}]}},
+    ]) + "\n", encoding="utf-8")
+
+    msgs = _webapp._session_history(jsonl)
+    texts = [m["text"] for m in msgs]
+    assert texts == ["count to twenty", "stop counting", "stopped at 9"], \
+        "the steered message belongs in the feed, in transcript order"
+    steered = [m for m in msgs if m["text"] == "stop counting"][0]
+    assert steered["role"] == "user" and steered["steered"] is True
+    assert steered["ts"] is not None, "timestamp carries over for the feed's time label"
+
+
+def test_session_history_no_double_render_for_dequeued_message(tmp_path):
+    """A message the CLI dequeues immediately starts a fresh turn — one bubble, not two.
+
+    That path writes enqueue + dequeue + a real user line and NO queued_command attachment,
+    which is exactly what makes the attachment branch safe to render unconditionally.
+    """
+    jsonl = tmp_path / "dequeued.jsonl"
+    jsonl.write_text("\n".join(json.dumps(o) for o in [
+        {"type": "queue-operation", "operation": "enqueue", "content": "next task please"},
+        {"type": "queue-operation", "operation": "dequeue"},
+        {"type": "user", "message": {"role": "user", "content": "next task please"},
+         "timestamp": "2026-08-22T04:03:39.999Z"},
+    ]) + "\n", encoding="utf-8")
+
+    texts = [m["text"] for m in _webapp._session_history(jsonl)]
+    assert texts == ["next task please"], "exactly one bubble for a dequeued message"

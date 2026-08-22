@@ -10723,6 +10723,21 @@ def _session_history(jsonl_path: Path, limit: int = 100,
                     continue
                 t = o.get("type")
                 m = o.get("message")
+                # spec-086: a mid-turn steered message never lands as a user line — the CLI
+                # records it as a queued_command attachment at enqueue time (plus queue-operation
+                # bookkeeping). Without this branch the operator's OWN injected message vanishes
+                # from the feed the moment the live buffer expires (300 s) or the page reloads.
+                # No double-render risk: a message the CLI dequeues immediately (queue drained
+                # into a fresh turn) gets a real user line and never a queued_command attachment.
+                if t == "attachment":
+                    _att = o.get("attachment") or {}
+                    if _att.get("type") == "queued_command":
+                        _steered = (_att.get("prompt") or "").strip()
+                        if _steered:
+                            msgs.append({"role": "user", "text": _steered, "tools": [],
+                                         "uuid": o.get("uuid"), "steered": True,
+                                         "ts": _iso_to_ms(o.get("timestamp"))})
+                    continue
                 if not isinstance(m, dict):
                     continue
                 if t == "user":
