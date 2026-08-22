@@ -15140,6 +15140,37 @@ async def api_project_upgrade(req: web.Request) -> web.Response:
     return web.json_response({"ok": True, "card_id": card["id"], "started": True})
 
 
+
+# ─────────────────────── public downloads (no auth) ───────────────────────
+#
+# Everything else the cockpit serves sits behind the session cookie, which is right for a
+# private instance — but it also means a link to a file is useless anywhere the operator is
+# not logged in: a phone's default browser, a colleague, a fresh device. Handing over an APK
+# was the case that forced this: the download landed on a 401 page instead of the file.
+#
+# The exposure is deliberately narrow: only files the operator explicitly placed in
+# data/public are reachable, the name must be a plain filename (no traversal, no
+# subdirectories), and `tools/cockpit-share` mints names with a random suffix so a URL cannot
+# be guessed or enumerated. Deleting the file revokes the link.
+_PUBLIC_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
+
+
+async def public_download(req: web.Request) -> web.Response:
+    """GET /dl/{name} — hand over a file from data/public, unauthenticated."""
+    name = req.match_info["name"]
+    if not _PUBLIC_NAME_RE.match(name) or "/" in name or ".." in name:
+        return web.Response(status=404, text="not found")
+    root = (req.app["ctx"]["DATA"] / "public").resolve()
+    path = (root / name).resolve()
+    # resolve() first, compare after: a symlink planted in data/public must not become a
+    # read-anything hole just because its own name looks innocent.
+    if root not in path.parents or not path.is_file():
+        return web.Response(status=404, text="not found")
+    return web.FileResponse(path, headers={
+        "Content-Disposition": f'attachment; filename="{name}"',
+        "Cache-Control": "no-store",
+    })
+
 # ─────────────────────────── static files (SPA) ───────────────────────────
 
 PLACEHOLDER_HTML = (
@@ -15916,6 +15947,7 @@ async def start(ctx: dict) -> None:
         _register_autopilot(app, ctx)
 
         # Static files — everything else (SPA)
+        app.router.add_get("/dl/{name}", public_download)
         app.router.add_route("*", "/{path_info:.*}", spa_handler)
 
         # WEB_HOST: interface to bind on.

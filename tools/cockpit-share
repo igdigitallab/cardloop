@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Publish a file at a public, no-login URL and print the link.
+#
+# `cockpit-file` renders a download card inside the chat, which needs the session cookie —
+# perfect in the cockpit, useless in a phone's default browser or for anyone else. This copies
+# the file into data/public (served by GET /dl/<name>, unauthenticated) under a name carrying
+# a random suffix, so the link is unguessable but works anywhere.
+#
+# Revoke by deleting the file: rm data/public/<name>
+#
+# Usage: cockpit-share <path> [--name basename]
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="${1:-}"
+[[ -f "$SRC" ]] || { echo "usage: cockpit-share <path> [--name basename]" >&2; exit 1; }
+
+BASE="$(basename "$SRC")"
+if [[ "${2:-}" == "--name" && -n "${3:-}" ]]; then BASE="$3"; fi
+
+STEM="${BASE%.*}"
+EXT="${BASE##*.}"
+[[ "$EXT" == "$BASE" ]] && EXT=""      # no extension at all
+TOKEN="$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+NAME="${STEM}-${TOKEN}${EXT:+.$EXT}"
+
+DEST_DIR="$HERE/data/public"
+mkdir -p "$DEST_DIR"
+cp "$SRC" "$DEST_DIR/$NAME"
+chmod 644 "$DEST_DIR/$NAME"
+
+# PUBLIC_URL is the instance's own address; it lives in .env because it differs per install.
+BASE_URL="$(grep -E '^PUBLIC_URL=' "$HERE/.env" 2>/dev/null | cut -d= -f2- | sed 's:/*$::')"
+if [[ -n "$BASE_URL" ]]; then
+  echo "$BASE_URL/dl/$NAME"
+else
+  echo "/dl/$NAME"
+  echo "(set PUBLIC_URL in .env to get a full link)" >&2
+fi
