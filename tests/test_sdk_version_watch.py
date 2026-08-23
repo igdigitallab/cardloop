@@ -243,6 +243,26 @@ async def test_watch_announces_again_on_the_next_release(tmp_path, monkeypatch):
     assert "0.2.145" in notes[1]
 
 
+async def test_watch_retracts_the_alert_once_upgraded(tmp_path, monkeypatch):
+    """After the operator upgrades, the durable inbox copy must stop claiming an update."""
+    monkeypatch.setattr(_webapp, "_SDK_CHECK_ENABLED", True)
+    monkeypatch.setattr(_webapp, "_sdk_fetch_latest", _fake_pypi("0.2.144"))
+    monkeypatch.setattr(_webapp, "_spawn_bg", lambda coro: coro.close())
+    async def _capture(_ctx, _text):
+        pass
+    monkeypatch.setattr(_webapp, "_notify_operator", _capture)
+    ctx = _ctx(tmp_path)
+
+    monkeypatch.setattr(_webapp, "_sdk_installed_version", lambda: "0.2.143")
+    await _run_one_tick(monkeypatch, ctx)
+    alert = ctx["DATA"] / "inbox" / "sdk-update-available.txt"
+    assert alert.exists()
+
+    monkeypatch.setattr(_webapp, "_sdk_installed_version", lambda: "0.2.144")
+    await _run_one_tick(monkeypatch, ctx)
+    assert not alert.exists()
+
+
 async def test_watch_silent_when_up_to_date(tmp_path, monkeypatch):
     monkeypatch.setattr(_webapp, "_SDK_CHECK_ENABLED", True)
     monkeypatch.setattr(_webapp, "_sdk_installed_version", lambda: "0.2.144")

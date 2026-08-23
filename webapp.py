@@ -3051,6 +3051,11 @@ async def _sdk_watch_loop(ctx: dict) -> None:
         try:
             state = await _sdk_refresh(data)
             info = _sdk_info(state)
+            if not info["update_available"]:
+                # The upgrade happened (or the announcement was premature) — retract the
+                # durable copy, or it keeps claiming an update that is already applied.
+                with contextlib.suppress(Exception):
+                    (data / "inbox" / "sdk-update-available.txt").unlink(missing_ok=True)
             if info["update_available"] and state.get("notified") != info["latest"]:
                 state["notified"] = info["latest"]
                 _sdk_state_write(data, state)

@@ -11,7 +11,7 @@
 # 0.2.127 bundles CLI 2.1.219, the first to resolve "opus"->Opus 5 (released 2026-07-24).
 # 0.2.129 bundles CLI 2.1.221 (same as the operator's terminal CLI); no query.py delta vs
 # 0.2.127 — bumped for bundle parity per the model-alias gotcha.
-claude-agent-sdk>=0.2.143
+claude-agent-sdk>=0.2.144
 
 # Codex Python SDK (beta). Exact pin is deliberate: published builds carry a
 # matching pinned Codex app-server/CLI runtime, so the adapter and protocol
