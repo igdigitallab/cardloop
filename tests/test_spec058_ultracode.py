@@ -181,3 +181,30 @@ async def test_conductor_still_injected_for_fable_without_ultracode(tmp_path):
     assert engine.CONDUCTOR_PROMPT in txt
     assert engine.ULTRACODE_PROMPT not in txt
     assert opts.settings is None
+
+
+# ───────── crossSessionInbound: inbound peer messages are a setting, not a given ─────────
+#
+# The CLI gates inbound cross-session messages behind `crossSessionInbound` (values: accept /
+# hold / refuse — the bundled CLI's own strings; at "hold" it records the message for the
+# operator instead of handing it to the model). Cardloop never set it, which is why a delivery
+# from another session could only be discovered after the fact in the transcript.
+
+def test_inbound_policy_absent_by_default_keeps_settings_byte_identical(monkeypatch):
+    monkeypatch.setattr(engine, "CROSS_SESSION_INBOUND", "")
+    assert engine._compose_settings(False) is None, "no flag at all on a stock install"
+    assert engine._compose_settings(True) == engine.ULTRACODE_SETTINGS
+
+
+def test_inbound_policy_rides_the_same_settings_json(monkeypatch):
+    import json as _json
+    monkeypatch.setattr(engine, "CROSS_SESSION_INBOUND", "hold")
+    off = _json.loads(engine._compose_settings(False))
+    assert off == {"crossSessionInbound": "hold"}, "works without ultracode"
+    on = _json.loads(engine._compose_settings(True))
+    assert on == {"ultracode": True, "crossSessionInbound": "hold"}, "and alongside it"
+
+
+def test_only_the_cli_s_own_values_are_accepted():
+    """A typo must not reach the CLI as a setting — it would be silently ignored there."""
+    assert engine._CROSS_SESSION_INBOUND_VALUES == {"accept", "hold", "refuse"}

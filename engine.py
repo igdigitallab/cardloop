@@ -350,14 +350,42 @@ ULTRACODE_PROMPT = (
 # NO --effort when ultracode is on (a CLI effort flag would override the native pin).
 ULTRACODE_SETTINGS = '{"ultracode": true}'
 
-def _compose_settings(ultracode: bool) -> "str | None":
-    """Inline --settings JSON for this run: the native ultracode switch.
+# Inbound cross-session messages (another Claude Code session writing to this one). The CLI
+# gates them behind the `crossSessionInbound` setting, and Cardloop never set it — which is why
+# a delivery could only ever be discovered after the fact, in the transcript.
+#
+#   "hold"   — the CLI does NOT hand the message to the model; it records it for the operator.
+#              With peer_message surfacing (see _peer_message_event) that is the useful shape:
+#              the operator sees who wrote what, and no foreign message can steer a live run.
+#   "accept" — delivered to the model, i.e. another session can steer this one. Deliberate opt-in.
+#   "refuse" — rejected outright.
+#
+# Unset (the default) passes NOTHING, so a stock install keeps the CLI's own default and the
+# --settings flag stays absent unless ultracode is on.
+_CROSS_SESSION_INBOUND_VALUES = frozenset({"accept", "hold", "refuse"})
+CROSS_SESSION_INBOUND: str = (os.getenv("CROSS_SESSION_INBOUND", "").strip().lower()
+                              if os.getenv("CROSS_SESSION_INBOUND", "").strip().lower()
+                              in _CROSS_SESSION_INBOUND_VALUES else "")
 
-    Returns None when ultracode is off — no --settings flag at all, byte-identical to the
-    pre-feature behaviour. Invariant: _compose_settings(True) == ULTRACODE_SETTINGS (locked
-    by a test), so the ultracode path is unchanged.
+
+def _compose_settings(ultracode: bool) -> "str | None":
+    """Inline --settings JSON for this run: the native ultracode switch (+ inbound peer policy).
+
+    Returns None when nothing needs setting — no --settings flag at all, byte-identical to the
+    pre-feature behaviour. Invariant: with CROSS_SESSION_INBOUND unset,
+    _compose_settings(True) == ULTRACODE_SETTINGS (locked by a test), so the ultracode path is
+    unchanged for every existing install.
     """
-    return ULTRACODE_SETTINGS if ultracode else None
+    settings: dict = {}
+    if ultracode:
+        settings["ultracode"] = True
+    if CROSS_SESSION_INBOUND:
+        settings["crossSessionInbound"] = CROSS_SESSION_INBOUND
+    if not settings:
+        return None
+    if settings == {"ultracode": True}:
+        return ULTRACODE_SETTINGS   # exact string the ultracode tests pin
+    return json.dumps(settings)
 
 
 # spec-066: appended to system_prompt when the browser module is on, so the agent knows the
