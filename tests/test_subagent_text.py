@@ -138,3 +138,56 @@ def test_webapp_forwards_task_type_to_the_client():
     src = Path(_webapp.__file__).read_text(encoding="utf-8")
     assert '"task_type": event.get("task_type"),' in src, \
         "the SSE/bus payload must carry task_type or the lane cannot filter"
+
+
+# ─────────────── cross-session peer messages (live surfacing) ────────────────
+#
+# Another Claude Code session can write to this one; the CLI replays that as a user turn
+# carrying `origin`. The engine loop used to ignore UserMessage entirely, so the delivery was
+# invisible until the operator reloaded and the history feed matched the raw envelope.
+
+class _Origin(dict):
+    """MessageOrigin is a TypedDict — a plain dict at runtime."""
+
+
+class _UserMsg:
+    def __init__(self, content, origin=None):
+        self.content = content
+        self.origin = origin
+        self.parent_tool_use_id = None
+
+
+def test_peer_message_uses_the_decoded_body():
+    ev = _engine._peer_message_event(_UserMsg(
+        "Another Claude session sent a message: <agent-message from=\"auditor\">raw envelope",
+        _Origin(kind="peer", name="auditor", body="audit done, 3 findings", fromSession="sess-9"),
+    ))
+    assert ev is not None
+    assert ev["type"] == "peer_message" and ev["kind"] == "peer"
+    assert ev["text"] == "audit done, 3 findings", "the SDK's decoded body, not the envelope"
+    assert ev["sender"] == "auditor" and ev["from_session"] == "sess-9"
+
+
+def test_peer_message_falls_back_to_content_without_a_body():
+    ev = _engine._peer_message_event(_UserMsg("plain delivery", _Origin(kind="channel", server="slack")))
+    assert ev is not None and ev["text"] == "plain delivery" and ev["sender"] == "slack"
+
+
+def test_ordinary_traffic_never_produces_a_peer_message():
+    """Tool results carry no origin; the operator's own turn is 'human'."""
+    assert _engine._peer_message_event(_UserMsg("tool result", None)) is None
+    assert _engine._peer_message_event(_UserMsg("my prompt", _Origin(kind="human"))) is None
+    assert _engine._peer_message_event(_UserMsg("", _Origin(kind="peer"))) is None
+
+
+def test_noise_kinds_are_skipped_but_unknown_kinds_pass():
+    """The SDK says to treat unrecognized kinds as 'not human' — so the filter is a denylist."""
+    for noisy in ("auto-continuation", "task-notification", "observer-activity"):
+        assert _engine._peer_message_event(_UserMsg("x", _Origin(kind=noisy, body="x"))) is None
+    ev = _engine._peer_message_event(_UserMsg("x", _Origin(kind="some-future-kind", body="hello")))
+    assert ev is not None and ev["kind"] == "some-future-kind"
+
+
+def test_peer_message_text_is_capped():
+    ev = _engine._peer_message_event(_UserMsg("", _Origin(kind="peer", body="z" * 20000)))
+    assert ev is not None and len(ev["text"]) == _engine.PEER_MESSAGE_MAX_CHARS

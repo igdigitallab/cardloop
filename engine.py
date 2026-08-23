@@ -826,6 +826,59 @@ def _subagent_text_events(msg, tool_to_task: dict, counts: dict) -> "list[dict]"
             "text": blk.text.strip()[:SUBAGENT_TEXT_MAX_CHARS],
         })
     return out
+
+# ─────────────── cross-session (peer/channel) message surfacing ───────────────
+#
+# Another Claude Code session — or an in-process peer — can write to THIS session, and the CLI
+# replays that delivery as a user turn carrying `origin` (a TypedDict: kind, from, name,
+# fromSession, body, …). Tool-result echoes never carry origin, so this cannot fire on ordinary
+# traffic.
+#
+# Until now the message loop ignored UserMessage entirely: an incoming peer message was
+# invisible while the turn ran and only surfaced AFTER the fact, when the history feed matched
+# the raw envelope with a regex (webapp._CROSS_AGENT_MSG_RE). origin["body"] is the CLI's own
+# decoded body, byte-exact with what the model saw — the SDK explicitly says to render that
+# instead of re-parsing the envelope.
+#
+# The filter is a DENYLIST, not an allowlist: the SDK documents that newer CLIs may emit kinds
+# it does not list yet and that anything unrecognized should be treated as "not human".
+_PEER_ORIGIN_SKIP_KINDS = frozenset({
+    "human",                # the operator's own turn
+    "auto-continuation",    # the CLI continuing itself
+    "task-notification",    # background-task notifications: already their own lane
+    "observer-activity",    # activity pings, not a message
+})
+PEER_MESSAGE_MAX_CHARS: int = 8000
+
+
+def _peer_message_event(msg) -> "dict | None":
+    """Map a UserMessage carrying a non-human `origin` to a peer_message engine event."""
+    origin = getattr(msg, "origin", None)
+    if not isinstance(origin, dict):
+        return None
+    kind = origin.get("kind")
+    if not kind or kind in _PEER_ORIGIN_SKIP_KINDS:
+        return None
+    text = (origin.get("body") or "").strip()
+    if not text:
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            text = "\n".join(b.text for b in content
+                              if isinstance(b, TextBlock) and getattr(b, "text", "")).strip()
+    if not text:
+        return None
+    return {
+        "type": "peer_message",
+        "kind": kind,
+        # Sender-asserted per the SDK — fine for display and reply routing, never identity proof.
+        "sender": (origin.get("name") or origin.get("from") or origin.get("server")
+                   or "another session"),
+        "from_session": origin.get("fromSession"),
+        "text": text[:PEER_MESSAGE_MAX_CHARS],
+    }
+
 # Root-fix A4: bounded post-turn linger for ephemeral (card) runs whose deferring background
 # tasks are still open when the turn's ResultMessage arrives — the `async with` exit would
 # otherwise disconnect and SIGTERM them mid-work. No-op when the CLI's native deferral
@@ -2686,6 +2739,14 @@ async def run_engine(  # type: ignore[return]
             if getattr(msg, "parent_tool_use_id", None):
                 for _sub_ev in _subagent_text_events(msg, _sub_tool_to_task, _sub_text_counts):
                     yield _sub_ev
+                continue
+            if isinstance(msg, UserMessage):
+                # A delivery from another session/peer, surfaced live instead of only in history.
+                _peer_ev = _peer_message_event(msg)
+                if _peer_ev is not None:
+                    print(f"[peer] {session_key}: {_peer_ev['kind']} message from "
+                          f"{_peer_ev['sender']} ({len(_peer_ev['text'])} chars)")
+                    yield _peer_ev
                 continue
             if isinstance(msg, AssistantMessage):
                 # usage of the last assistant message = full prompt of the current turn:

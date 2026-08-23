@@ -12420,6 +12420,18 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     "task_type": event.get("task_type"),
                     **({"text": event["text"]} if event.get("text") else {}),
                 })
+            elif etype == "peer_message":
+                # A delivery from another Claude Code session (peer/channel/coordinator). Real
+                # content, so it rides the same seq-tagged single-writer path as text and is
+                # persisted: before this it reached the operator only after a reload, when the
+                # history feed matched the raw envelope with _CROSS_AGENT_MSG_RE.
+                await _send({
+                    "type": "peer_message",
+                    "kind": event.get("kind"),
+                    "sender": event.get("sender"),
+                    "from_session": event.get("from_session"),
+                    "text": event.get("text") or "",
+                })
             elif etype == "model_info":
                 # FIX 1(e): forward model_info (fallback alert) to the cockpit client via SSE.
                 # Reuses the existing _send path — no new endpoints needed.

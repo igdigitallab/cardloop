@@ -1875,6 +1875,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               liveSubagents.length = 0
               liveSubagents.push(...updated)
             }
+          } else if (etype === 'peer_message') {
+            const who = (ev['sender'] as string) || 'another session'
+            const body = (ev['text'] as string) || ''
+            if (body) liveMsgs = [...finalizeStreaming(liveMsgs), makeUserMsg(`↔ ${who} · ${body}`)]
           } else if (ev['kind'] === 'steer') {
             // spec-086: an operator message injected into THIS turn. The replay loop
             // discriminated on `type` only, so the bubble the live bus had rendered
@@ -2210,6 +2214,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         setMessages(prev => finalizeStreamingWithMetrics(prev, rec as unknown as ChatEventResult, now))
       } else if (rec.type === 'error') {
         setMessages(prev => finalizeStreaming(prev, rec.error || 'unknown error'))
+      } else if (rec.type === 'peer_message') {
+        // Another session wrote to this one. Close whatever bubble is open and render the
+        // delivery in place, so it reads as part of the conversation rather than appearing
+        // out of nowhere after a reload (which is all the history feed could ever do).
+        const who = (rec.sender as string) || 'another session'
+        const body = (rec.text as string) || ''
+        if (body) setMessages(prev => [...finalizeStreaming(prev), makeUserMsg(`↔ ${who} · ${body}`)])
       } else if (rec.type === 'model_info') {
         const mi = rec as unknown as { requested: string; served: string; fallback?: boolean }
         if (mi.fallback) {

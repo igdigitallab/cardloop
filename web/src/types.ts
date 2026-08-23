@@ -582,6 +582,20 @@ export interface ActivityEventRunEnd {
 //   - TG consumer (bot.py:1727): {kind:"subagent", run_id:null, type:"subagent", ...}
 //   - Chat path (webapp.py L1 publish): {seq:N, type:"subagent", ...} (no kind field)
 // We treat both: check kind==="subagent" OR type==="subagent".
+/** A delivery from ANOTHER Claude Code session (peer/channel/coordinator/observer).
+ *  The CLI classifies it via message `origin`; the engine surfaces it live instead of
+ *  leaving it to be discovered in the history feed after a reload. */
+export interface ChatEventPeerMessage {
+  type: 'peer_message'
+  /** origin kind: 'peer' | 'channel' | 'coordinator' | 'observer' | a newer CLI's own value. */
+  kind: string | null
+  /** Sender-asserted display name — for display and reply routing, never identity proof. */
+  sender: string | null
+  from_session?: string | null
+  text: string
+  seq?: number
+}
+
 export interface ActivityEventSubagent {
   kind: 'subagent'
   run_id: string | null
