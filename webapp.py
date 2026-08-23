@@ -12415,6 +12415,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     "status": event.get("status"),
                     "summary": event.get("summary"),
                     "last_tool_name": event.get("last_tool_name"),
+                    # spec-085 Phase 3 fix: the cockpit needs the task TYPE to tell an agent
+                    # from a tool execution the CLI also reports as a task.
+                    "task_type": event.get("task_type"),
                     **({"text": event["text"]} if event.get("text") else {}),
                 })
             elif etype == "model_info":

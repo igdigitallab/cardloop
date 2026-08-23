@@ -47,7 +47,13 @@ interface SubagentEntry {
   status: 'running' | 'completed' | 'failed'
   /** spec-085 Phase 3: forwarded text blocks (live nested transcript peek), capped. */
   transcript?: string[]
+  /** Latest progress line ("Running sleep 20 …"). Kept OUT of `description` on purpose. */
+  activity?: string
 }
+
+/** Task kinds the CLI uses for a real agent/workflow. Anything else it reports as a task
+ *  (a sub-agent's own Bash call, for instance) must not become a row in the lane. */
+const AGENT_TASK_TYPES = new Set(['local_agent', 'local_workflow'])
 
 /** Client-side cap on kept sub-agent text blocks (server already caps per-turn volume). */
 const SUBAGENT_TRANSCRIPT_KEEP = 30
@@ -59,8 +65,16 @@ function applySubagentEvent(
 ): SubagentEntry[] {
   const { task_id, subtype, description, status, last_tool_name } = evt
   const existing = prev.find(e => e.task_id === task_id)
+  // The CLI reports a sub-agent's own tool executions as tasks as well, with the command as
+  // their description. Rows used to be created from ANY event, so one running agent showed as
+  // three (the ⚙ chip read 2/3) titled "sleep 20 && echo slept-1". A row is opened only for a
+  // task the CLI typed as an agent/workflow — or, for servers too old to send task_type, for
+  // an explicit 'started' (the pre-fix behaviour, minus the phantom rows).
+  const isAgentTask = evt.task_type == null
+    ? subtype === 'started'
+    : AGENT_TASK_TYPES.has(evt.task_type)
   if (subtype === 'started') {
-    if (existing) return prev // idempotent
+    if (existing || !isAgentTask) return prev  // idempotent; tool-tasks get no row
     return [...prev, {
       task_id,
       description: description ?? '',
@@ -70,7 +84,7 @@ function applySubagentEvent(
   }
   if (subtype === 'progress') {
     if (!existing) {
-      // progress before started — create entry
+      if (!isAgentTask) return prev
       return [...prev, {
         task_id,
         description: description ?? '',
@@ -81,13 +95,16 @@ function applySubagentEvent(
     return prev.map(e => e.task_id !== task_id ? e : {
       ...e,
       last_tool_name: last_tool_name ?? e.last_tool_name,
-      // update description if provided (progress events carry it)
-      description: description ?? e.description,
+      // `description` is the agent's TASK and must survive: a progress event's description is
+      // the current activity ("Running sleep 20 && echo slept-2"), and writing it over the
+      // title erased the agent's identity the moment it touched a tool.
+      activity: description ?? e.activity,
     })
   }
   if (subtype === 'notification') {
     const terminal: SubagentEntry['status'] = status === 'completed' ? 'completed' : 'failed'
     if (!existing) {
+      if (!isAgentTask) return prev
       return [...prev, {
         task_id,
         description: description ?? '',
@@ -1083,7 +1100,9 @@ const RunStatusBar = memo(function RunStatusBar({
                   aria-expanded={hasText ? open : undefined}
                 >
                   <span>{sa.status === 'completed' ? '✓' : sa.status === 'failed' ? '✗' : '⚙'}</span>
-                  <span className="chat-runbar-agent-desc">{sa.description || sa.task_id}</span>
+                  <span className="chat-runbar-agent-desc" title={sa.activity ?? undefined}>
+                    {sa.description || sa.task_id}
+                  </span>
                   {sa.last_tool_name && sa.status === 'running' && (
                     <span className="chat-runbar-agent-tool">↳ {sa.last_tool_name}</span>
                   )}

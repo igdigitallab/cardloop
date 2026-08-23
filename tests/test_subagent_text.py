@@ -102,3 +102,39 @@ def test_options_wire_forward_subagent_text():
     """The main-turn ClaudeAgentOptions must carry forward_subagent_text=bool(flag)."""
     src = (ROOT / "engine.py").read_text()
     assert "forward_subagent_text=bool(FORWARD_SUBAGENT_TEXT)" in src
+
+
+# ─────────── task_type on the lane events (phantom-row fix, 2026-08-23) ───────────
+#
+# The CLI reports a sub-agent's OWN tool executions as tasks too, with the shell command as
+# their description. The cockpit had no way to tell those apart, so one running agent drew
+# three rows in the lane (the ⚙ chip read 2/3) titled "sleep 20 && echo slept-1" — observed
+# live in the browser. Progress and notification messages carry no task_type of their own, so
+# the engine learns it from the started message and stamps it on the rest.
+
+def test_started_event_carries_task_type():
+    """Only a started message knows the type — it must reach the client."""
+    import inspect
+    src = inspect.getsource(_engine.run_engine)
+    assert '"task_type": getattr(msg, "task_type", None),' in src, \
+        "started events must forward the CLI's task_type"
+
+
+def test_progress_and_notification_are_stamped_from_the_started_map():
+    """Progress/notification have no task_type field — they get it from the per-turn map."""
+    import inspect
+    src = inspect.getsource(_engine.run_engine)
+    assert src.count('"task_type": _sub_task_types.get(msg.task_id) or None,') == 2, \
+        "progress AND notification must be stamped from the task_id -> task_type map"
+    assert "_sub_task_types[msg.task_id] = getattr(msg, \"task_type\", None) or \"\"" in src, \
+        "the map must be filled from the started message"
+    assert "_sub_task_types: dict = {}" in src, \
+        "the map is per-turn state, declared inside the message loop"
+
+
+def test_webapp_forwards_task_type_to_the_client():
+    from pathlib import Path
+    import webapp as _webapp
+    src = Path(_webapp.__file__).read_text(encoding="utf-8")
+    assert '"task_type": event.get("task_type"),' in src, \
+        "the SSE/bus payload must carry task_type or the lane cannot filter"

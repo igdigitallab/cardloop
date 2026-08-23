@@ -2670,6 +2670,11 @@ async def run_engine(  # type: ignore[return]
         # spec-085 Phase 3: per-turn sub-agent text forwarding state (see _subagent_text_events).
         _sub_tool_to_task: dict = {}
         _sub_text_counts: dict = {}
+        # spec-085 Phase 3 fix: task_id -> task_type, learned from TaskStartedMessage. Progress
+        # and notification messages carry NO task_type of their own, and the CLI reports a
+        # sub-agent's own tool executions as tasks too — without this the cockpit could not tell
+        # "an agent" from "a bash call inside an agent" and drew a lane row for each.
+        _sub_task_types: dict = {}
         async for msg in client.receive_response():
             # Background sub-agent traffic: the CLI forwards sub-agents' AssistantMessages
             # (and their stream events) on the SAME stdout with parent_tool_use_id set.
@@ -2805,6 +2810,7 @@ async def run_engine(  # type: ignore[return]
                     # sub-agent text can be attached to this task's lane row.
                     if getattr(msg, "tool_use_id", None):
                         _sub_tool_to_task[msg.tool_use_id] = msg.task_id
+                    _sub_task_types[msg.task_id] = getattr(msg, "task_type", None) or ""
                     yield {
                         "type": "subagent",
                         "subtype": "started",
@@ -2813,6 +2819,7 @@ async def run_engine(  # type: ignore[return]
                         "status": None,
                         "summary": None,
                         "last_tool_name": None,
+                        "task_type": getattr(msg, "task_type", None),
                     }
                 elif isinstance(msg, TaskProgressMessage):
                     yield {
@@ -2823,6 +2830,7 @@ async def run_engine(  # type: ignore[return]
                         "status": None,
                         "summary": None,
                         "last_tool_name": getattr(msg, "last_tool_name", None),
+                        "task_type": _sub_task_types.get(msg.task_id) or None,
                     }
                 elif isinstance(msg, TaskNotificationMessage):
                     # Card b6f5cc: a task-completion notification flips a tracked background monitor
@@ -2851,6 +2859,7 @@ async def run_engine(  # type: ignore[return]
                         "status": msg.status,
                         "summary": msg.summary,
                         "last_tool_name": None,
+                        "task_type": _sub_task_types.get(msg.task_id) or None,
                     }
                 elif isinstance(msg, TaskUpdatedMessage):
                     # spec-071: a background task's terminal state can arrive ONLY here (per SDK

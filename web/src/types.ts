@@ -593,6 +593,9 @@ export interface ActivityEventSubagent {
   status: string | null
   summary: string | null
   last_tool_name: string | null
+  /** Task kind from the CLI ("local_agent" / "local_workflow" / …). The CLI reports a
+   *  sub-agent's own tool executions as tasks too, so the lane needs this to tell them apart. */
+  task_type?: string | null
   /** spec-085 Phase 3: subtype "text" — a forwarded sub-agent text block (capped server-side). */
   text?: string
   // seq from live turn buffer (optional — may be absent on older TG-sourced events)
