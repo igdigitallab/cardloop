@@ -280,6 +280,18 @@ def _load_dotenv_merged(repo_root: Path = REPO_ROOT) -> "tuple[dict, Path, bool]
 
 # ─────────────────────────── Versions ────────────────────────────────────────────
 
+def _sdk_latest_seen(repo_root: Path) -> "str | None":
+    """Newest claude-agent-sdk release the cockpit's daily SDK watch has seen on PyPI.
+
+    Doctor never hits the network itself (read-only, <5s), so it reads that cache.
+    Absent until the cockpit has run at least one check — then this stays silent."""
+    try:
+        state = json.loads((repo_root / "data" / "sdk-version.json").read_text(encoding="utf-8"))
+        return str(state.get("latest") or "").strip() or None
+    except Exception:
+        return None
+
+
 def probe_versions(repo_root: Path = REPO_ROOT, run=_run, installed_version=_installed_version) -> "list[Fact]":
     facts: "list[Fact]" = []
 
@@ -341,6 +353,19 @@ def probe_versions(repo_root: Path = REPO_ROOT, run=_run, installed_version=_ins
     else:
         note = f" (floor >={floor} OK)" if floor else ""
         facts.append(Fact("claude-agent-sdk", f"{sdk_version}{note}"))
+
+    # Meeting the floor is NOT the same as being current — the floor is our own number,
+    # and it only moves when someone bumps it by hand. Compare against what PyPI actually
+    # has (cached by the cockpit's SDK watch loop).
+    latest_seen = _sdk_latest_seen(repo_root)
+    if sdk_version and latest_seen and _parse_version(latest_seen) > _parse_version(sdk_version):
+        facts.append(Fact(
+            "claude-agent-sdk (PyPI)", f"{latest_seen} available (running {sdk_version})",
+            level="warn",
+            remedy=f"venv/bin/pip install -U 'claude-agent-sdk=={latest_seen}', restart, then run "
+                   "tools/verify_model_aliases.py — the bundled CLI decides alias resolution, so a "
+                   "stale SDK runs an older model with no error.",
+        ))
 
     codex_enabled = str(os.environ.get("CODEX_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
     if codex_enabled:

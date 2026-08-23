@@ -16,6 +16,17 @@ sys.path.insert(0, str(ROOT))
 # as _WEB_COOKIE_SECURE is read into a module-level bool at import time.
 os.environ.pop("WEB_COOKIE_SECURE", None)
 
+# Same class of leak: engine reads CROSS_SESSION_INBOUND into a module-level constant
+# at import time, and several suites assert the pre-feature invariant "options.settings
+# is None". An operator who set it in .env would turn those red on their machine only.
+# The three tests that exercise the feature monkeypatch the constant directly.
+os.environ.pop("CROSS_SESSION_INBOUND", None)
+
+# The SDK release watch is the one component that would reach the network from a test.
+# Force it off for the whole suite; the tests that exercise it flip _SDK_CHECK_ENABLED
+# back on and monkeypatch the fetch, so no test can ever actually call PyPI.
+os.environ["SDK_UPDATE_CHECK"] = "0"
+
 import pytest
 
 

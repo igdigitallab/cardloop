@@ -136,13 +136,15 @@ async def test_api_version_shape(aiohttp_client, tmp_path, monkeypatch):
     monkeypatch.setattr(_webapp.shutil, "which", lambda _: "/usr/bin/systemctl")
     # avoid background fetch in the test
     monkeypatch.setattr(_webapp, "_version_fetch_at", _webapp.time.time())
+    # ...and the SDK release watch, which would otherwise reach PyPI from a test
+    monkeypatch.setattr(_webapp, "_SDK_CHECK_ENABLED", False)
     ctx = _ctx(tmp_path)
     client = await aiohttp_client(_app(ctx))
     resp = await client.get("/api/version", headers=_auth(ctx))
     assert resp.status == 200
     data = await resp.json()
-    assert set(["current", "latest", "behind", "update_available",
-                "channel", "can_self_update", "reason", "update_status"]).issubset(data)
+    assert set(["current", "latest", "behind", "update_available", "channel",
+                "can_self_update", "reason", "update_status", "sdk"]).issubset(data)
 
 
 async def test_api_update_conflict_when_dirty(aiohttp_client, tmp_path, monkeypatch):

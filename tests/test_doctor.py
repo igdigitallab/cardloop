@@ -132,6 +132,36 @@ def test_versions_ok_sdk_meets_floor(tmp_path):
     assert sdk_fact.level == "ok"
 
 
+def test_versions_flags_sdk_behind_pypi_even_when_floor_is_met(tmp_path):
+    """Meeting requirements.txt's floor is OUR number, not Anthropic's — doctor must
+    still say something when the cockpit's cached PyPI answer is newer."""
+    (tmp_path / "requirements.txt").write_text("claude-agent-sdk>=0.2.129\n")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "sdk-version.json").write_text(json.dumps({"latest": "0.2.144"}))
+    run = _fake_run({("git",): (0, "v1.0.0", ""), ("node",): (0, "v20.0.0", "")})
+    facts = doctor.probe_versions(repo_root=tmp_path, run=run,
+                                   installed_version=lambda name: "0.2.129" if name == "claude-agent-sdk" else None)
+    assert next(f for f in facts if f.label == "claude-agent-sdk").level == "ok"
+    pypi = next(f for f in facts if f.label == "claude-agent-sdk (PyPI)")
+    assert pypi.level == "warn"
+    assert "0.2.144" in pypi.value and "0.2.144" in pypi.remedy
+
+
+def test_versions_no_pypi_fact_when_current_or_uncached(tmp_path):
+    """Silent in both quiet cases: cache says we're current, and no cache at all."""
+    (tmp_path / "requirements.txt").write_text("claude-agent-sdk>=0.2.129\n")
+    run = _fake_run({("git",): (0, "v1.0.0", ""), ("node",): (0, "v20.0.0", "")})
+    installed = lambda name: "0.2.144" if name == "claude-agent-sdk" else None
+
+    facts = doctor.probe_versions(repo_root=tmp_path, run=run, installed_version=installed)
+    assert not [f for f in facts if f.label == "claude-agent-sdk (PyPI)"]
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "sdk-version.json").write_text(json.dumps({"latest": "0.2.144"}))
+    facts = doctor.probe_versions(repo_root=tmp_path, run=run, installed_version=installed)
+    assert not [f for f in facts if f.label == "claude-agent-sdk (PyPI)"]
+
+
 def test_versions_sdk_not_importable_is_fail(tmp_path):
     (tmp_path / "requirements.txt").write_text("claude-agent-sdk>=0.2.129\n")
     run = _fake_run({})

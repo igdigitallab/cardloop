@@ -790,6 +790,17 @@ export interface VersionInfo {
   can_self_update: boolean
   reason: string | null
   update_status: { state: string; detail: string; ts: number } | null
+  /** Newest claude-agent-sdk on PyPI vs the one this venv runs. Optional: the
+   *  server always sends it, but `latest` stays null until the first check lands. */
+  sdk?: SdkVersionInfo
+}
+
+export interface SdkVersionInfo {
+  name: string
+  installed: string | null
+  latest: string | null
+  update_available: boolean
+  checked_at: number | null
 }
 
 // ─── Spec-065: module/extension registry ──────────────────────────────────────

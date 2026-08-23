@@ -971,3 +971,30 @@
   visibility: visible;
   opacity: 1;
 }
+
+/* SDK release row — sits under the version badge; passive, never a one-click action
+   (an SDK upgrade rebuilds the venv and needs an alias re-verify afterwards). */
+.version-sdk {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px 8px;
+  font-size: 11px;
+  color: var(--text3);
+}
+.version-sdk-msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.version-sdk-ver { color: var(--text2); }
+.version-sdk-ver--new { color: var(--text); font-weight: 600; }
+.version-sdk-copy {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text3);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.version-sdk-copy:hover { background: var(--bg3); color: var(--text2); }

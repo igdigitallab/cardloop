@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api'
-import type { VersionInfo } from '../types'
+import type { SdkVersionInfo, VersionInfo } from '../types'
 
 /**
  * Sidebar-footer version badge (spec-047 workstream A; daily-recheck spec-062).
@@ -15,6 +15,12 @@ import type { VersionInfo } from '../types'
  * not nag the operator. The manual "up to date" pill always forces a fresh
  * check, ungated. When an un-acknowledged update first appears, a small accent
  * dot pulses on the Update button — noticeable without a toast.
+ *
+ * Under the badge sits a second, independent row: a newer `claude-agent-sdk` on
+ * PyPI. It is deliberately NOT a button — upgrading the SDK means rebuilding the
+ * venv and re-running verify_model_aliases.py, so the row hands over the exact
+ * command instead of pretending it is one click. The daily background watch in
+ * webapp.py sends the push/toast; this row is the passive reminder.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -26,12 +32,18 @@ function targetSig(info: VersionInfo): string {
   return info.latest || `behind:${info.behind}`
 }
 
+/** The exact upgrade command — pinned to the version we are actually announcing. */
+function sdkUpgradeCmd(sdk: SdkVersionInfo): string {
+  return `venv/bin/pip install -U '${sdk.name}==${sdk.latest}'`
+}
+
 export function VersionBadge() {
   const [info, setInfo] = useState<VersionInfo | null>(null)
   const [checking, setChecking] = useState(false)
   const [updating, setUpdating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
+  const [sdkCopied, setSdkCopied] = useState(false)
   const startVerRef = useRef<string>('')   // version we were on when Update was clicked
 
   const load = useCallback(async (check?: boolean) => {
@@ -139,6 +151,18 @@ export function VersionBadge() {
     load(true)
   }
 
+  // Hands over the exact upgrade command. Copy can reject (insecure origin, denied
+  // permission) — swallow it; the command is visible in the title either way.
+  async function onCopySdkCmd() {
+    const sdk = info?.sdk
+    if (!sdk?.latest) return
+    try {
+      await navigator.clipboard.writeText(sdkUpgradeCmd(sdk))
+      setSdkCopied(true)
+      window.setTimeout(() => setSdkCopied(false), 1500)
+    } catch { /* clipboard unavailable — the title attribute still shows it */ }
+  }
+
   if (!info) return null
 
   if (updating) {
@@ -150,8 +174,10 @@ export function VersionBadge() {
   }
 
   const ver = info.current.replace(/^v/, '')
+  const sdk = info.sdk
 
   return (
+    <>
     <div className="version-badge">
       <span className="version-badge-name" title={`channel: ${info.channel}`}>
         Cardloop&nbsp;<span className="version-badge-ver">v{ver}</span>
@@ -183,5 +209,20 @@ export function VersionBadge() {
 
       {error && <span className="version-error" title={error}>update failed</span>}
     </div>
+
+    {sdk?.update_available && (
+      <div className="version-sdk" title={sdkUpgradeCmd(sdk)}>
+        <span className="version-sdk-msg">
+          SDK <span className="version-sdk-ver">{sdk.installed}</span>
+          {' → '}
+          <span className="version-sdk-ver version-sdk-ver--new">{sdk.latest}</span>
+        </span>
+        <button className="version-sdk-copy" onClick={onCopySdkCmd}
+          title={`Copy: ${sdkUpgradeCmd(sdk)}`}>
+          {sdkCopied ? 'copied' : 'copy cmd'}
+        </button>
+      </div>
+    )}
+    </>
   )
 }

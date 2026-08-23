@@ -2903,18 +2903,192 @@ async def _do_fetch(here: Path) -> None:
         )
 
 
+# ─── SDK release watch ────────────────────────────────────────────────────────
+#
+# doctor.py compares the installed SDK against requirements.txt's OWN floor, so it
+# reports "OK" while the venv sits many releases behind what Anthropic has actually
+# shipped. That gap is not cosmetic: the SDK's BUNDLED CLI decides what a bare model
+# alias resolves to, so a stale SDK silently runs an older model with is_error=False
+# (GOTCHAS: "claude-agent-sdk >= ... is required").
+#
+# So: ask PyPI what the newest release is, cache the answer, and surface it in the
+# version badge the operator already reads. Deliberately never auto-installs — an
+# upgrade means rebuilding the venv and re-running verify_model_aliases.py, which is
+# an operator decision, not a one-click one.
+
+_SDK_DIST = "claude-agent-sdk"
+_SDK_PYPI_URL = f"https://pypi.org/pypi/{_SDK_DIST}/json"
+_SDK_CHECK_TTL = 6 * 3600.0            # how long one PyPI answer stays fresh
+_SDK_WATCH_INTERVAL_SEC = 24 * 3600.0  # background re-check cadence
+# Opt-out: the ONLY outbound call this cockpit makes that isn't the operator's own
+# work, so an air-gapped or privacy-strict install must be able to turn it off.
+_SDK_CHECK_ENABLED = os.getenv("SDK_UPDATE_CHECK", "1").lower() not in ("0", "false", "no", "off")
+_sdk_check_lock = asyncio.Lock()
+
+
+def _sdk_state_path(data: Path) -> Path:
+    return data / "sdk-version.json"
+
+
+def _sdk_state_read(data: Path) -> dict:
+    """Cached PyPI answer: {latest, ts, notified}. Missing/corrupt file → {}."""
+    try:
+        state = json.loads(_sdk_state_path(data).read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
+    except Exception:
+        return {}
+
+
+def _sdk_state_write(data: Path, state: dict) -> None:
+    try:
+        data.mkdir(parents=True, exist_ok=True)
+        _sdk_state_path(data).write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[sdk-watch] could not persist state: {exc!r}")
+
+
+def _version_tuple(v: str) -> tuple:
+    """Comparable tuple for a plain X.Y.Z version. A non-numeric segment sorts as 0 —
+    enough for the SDK's numeric release line, and it never raises on junk input."""
+    parts = [int(seg) if seg.isdigit() else 0
+             for seg in re.split(r"[._-]", (v or "").strip().lstrip("vV"))]
+    return tuple(parts) or (0,)
+
+
+def _sdk_installed_version() -> "str | None":
+    try:
+        import importlib.metadata as _md
+        return _md.version(_SDK_DIST)
+    except Exception:
+        return None
+
+
+async def _sdk_fetch_latest() -> "str | None":
+    """One read-only GET to PyPI. `info.version` is what a plain `pip install -U`
+    would resolve to. Returns None on ANY failure — the badge must never depend on
+    the network being up."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.get(_SDK_PYPI_URL) as resp:
+                if resp.status != 200:
+                    return None
+                payload = await resp.json(content_type=None)
+        return (str(((payload or {}).get("info") or {}).get("version") or "").strip() or None)
+    except Exception:
+        return None
+
+
+async def _sdk_refresh(data: Path, force: bool = False) -> dict:
+    """Refresh the cached PyPI answer when it is stale (or forced); return the state.
+
+    A failed fetch still stamps `ts` — otherwise an offline box would fire a request
+    on every single page load. Worst case discovery is delayed by one TTL."""
+    if not _SDK_CHECK_ENABLED:
+        return _sdk_state_read(data)
+    async with _sdk_check_lock:
+        state = _sdk_state_read(data)
+        if not force and (time.time() - float(state.get("ts") or 0)) < _SDK_CHECK_TTL:
+            return state
+        latest = await _sdk_fetch_latest()
+        if latest is not None:
+            state["latest"] = latest
+        state["ts"] = time.time()
+        _sdk_state_write(data, state)
+        return state
+
+
+def _sdk_info(state: dict) -> dict:
+    """Shape handed to /api/version. `latest` is None until the first successful check."""
+    installed = _sdk_installed_version()
+    latest = state.get("latest") or None
+    return {
+        "name": _SDK_DIST,
+        "installed": installed,
+        "latest": latest,
+        "update_available": bool(
+            installed and latest and _version_tuple(latest) > _version_tuple(installed)),
+        "checked_at": float(state.get("ts") or 0) or None,
+    }
+
+
+def _sdk_upgrade_hint(info: dict) -> str:
+    return (f"{_SDK_DIST} {info['latest']} is out — this cockpit runs {info['installed']}. "
+            f"A stale SDK silently resolves model aliases to older models. Upgrade: "
+            f"venv/bin/pip install -U '{_SDK_DIST}=={info['latest']}', restart, then run "
+            f"tools/verify_model_aliases.py to confirm the aliases moved.")
+
+
+async def _push_notify_sdk_update(info: dict) -> None:
+    """Web Push for a new SDK release. Not tied to a session, so it broadcasts."""
+    if not _PUSH_AVAILABLE:
+        return
+    _push_ensure_vapid_keys()
+    if not _PUSH_PRIV_KEY or not _PUSH_PUB_KEY:
+        return
+    await _push_broadcast(json.dumps({
+        "title": f"\U0001F4E6 {_SDK_DIST} {info['latest']}",
+        "body": f"New release available - this cockpit runs {info['installed']}",
+        "icon": "/icons/icon-192.png",
+        "tag": "sdk-update",
+        "data": {"url": "/"},
+    }))
+
+
+async def _sdk_watch_loop(ctx: dict) -> None:
+    """Daily PyPI re-check; announces a newer SDK ONCE per version.
+
+    `notified` pins the version already announced, so this fires on the transition
+    and not every 24h until the operator upgrades — a daily nag just trains them to
+    ignore it (same reasoning as verify_model_aliases' seen-state)."""
+    if not _SDK_CHECK_ENABLED:
+        print("[sdk-watch] disabled (SDK_UPDATE_CHECK=0)")
+        return
+    data: Path = ctx["DATA"]
+    await asyncio.sleep(60)  # let the service settle; the badge covers the first minute
+    while True:
+        try:
+            state = await _sdk_refresh(data)
+            info = _sdk_info(state)
+            if info["update_available"] and state.get("notified") != info["latest"]:
+                state["notified"] = info["latest"]
+                _sdk_state_write(data, state)
+                hint = _sdk_upgrade_hint(info)
+                logging.warning("[sdk-watch] %s", hint)
+                await _notify_operator(ctx, "\U0001F4E6 " + hint)
+                _spawn_bg(_push_notify_sdk_update(info))
+                try:
+                    inbox = data / "inbox"
+                    inbox.mkdir(parents=True, exist_ok=True)
+                    (inbox / "sdk-update-available.txt").write_text(hint + "\n", encoding="utf-8")
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"[sdk-watch] tick failed: {exc!r}")
+        await asyncio.sleep(_SDK_WATCH_INTERVAL_SEC)
+
+
 async def api_version(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     here: Path = ctx.get("HERE") or Path(__file__).resolve().parent
-    if req.query.get("check") in ("1", "true", "yes"):
+    data: Path = ctx.get("DATA") or (here / "data")
+    forced = req.query.get("check") in ("1", "true", "yes")
+    if forced:
         # Explicit "Check for updates" — bypass the throttle and await the fetch.
         global _version_fetch_at
         _version_fetch_at = 0.0
         await _do_fetch(here)
-    elif time.time() - _version_fetch_at >= _VERSION_FETCH_TTL:
-        # Stale cache → refresh in the background; this request never blocks.
-        asyncio.create_task(_do_fetch(here))
-    return web.json_response(_version_info(here))
+        await _sdk_refresh(data, force=True)
+    else:
+        if time.time() - _version_fetch_at >= _VERSION_FETCH_TTL:
+            # Stale cache → refresh in the background; this request never blocks.
+            asyncio.create_task(_do_fetch(here))
+        # Self-throttled on its own TTL — a no-op while the cached answer is fresh.
+        asyncio.create_task(_sdk_refresh(data))
+    payload = _version_info(here)
+    payload["sdk"] = _sdk_info(_sdk_state_read(data))
+    return web.json_response(payload)
 
 
 async def api_update(req: web.Request) -> web.Response:
@@ -16006,6 +16180,9 @@ async def start(ctx: dict) -> None:
         # Root-fix A2: cgroup memory alert — warns (with top-RSS offenders) before an OOM kill
         _STARTUP_BG_TASKS.append(_spawn_bg(_memory_alert_loop(ctx)))
         print(f"[webapp] memory alert loop started (threshold {MEMORY_ALERT_PCT}%)")
+        # SDK release watch — a stale SDK resolves model aliases to older models silently
+        _STARTUP_BG_TASKS.append(_spawn_bg(_sdk_watch_loop(ctx)))
+        print(f"[webapp] SDK release watch started (interval {int(_SDK_WATCH_INTERVAL_SEC)}s)")
         # Root-fix B1: replay crash-recovery state from the previous process life — flips
         # orphaned monitors and re-arms completion wakes so orchestrator sessions report what
         # happened WITHOUT an operator ping. Then start the coalesced snapshot writer.
