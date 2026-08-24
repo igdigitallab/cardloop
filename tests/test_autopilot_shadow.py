@@ -20,6 +20,7 @@ Covers:
     - GET /api/autopilot/decisions?limit=N
 """
 
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -627,11 +628,18 @@ async def test_decisions_endpoint_requires_auth(aiohttp_client, shadow_app):
 # Unit tests — _autopilot_test_signal (configured test_cmd vs fallback)
 # ═══════════════════════════════════════════════════════════════════
 
+# The interpreter RUNNING these tests is the only one guaranteed to have pytest —
+# a bare `python3` is the system interpreter, which on a CI runner has no pytest at
+# all. That made the "passing" case below report a failure (module not found) and
+# turned CI red on every push while staying green on a dev box.
+_PYTEST_CMD = f"{shlex.quote(sys.executable)} -m pytest -q test_x.py"
+
+
 @pytest.mark.asyncio
 async def test_test_signal_configured_failing(tmp_path):
     """A configured, allowlisted test_cmd that FAILS → (True, 'failed…')."""
     (tmp_path / "test_x.py").write_text("def test_fail():\n    assert 1 == 2\n")
-    proj = {"cwd": str(tmp_path), "test_cmd": "python3 -m pytest -q test_x.py"}
+    proj = {"cwd": str(tmp_path), "test_cmd": _PYTEST_CMD}
     failing, summary = await _ap_loop._autopilot_test_signal(proj)
     assert failing is True
     assert "failed" in summary
@@ -641,7 +649,7 @@ async def test_test_signal_configured_failing(tmp_path):
 async def test_test_signal_configured_passing(tmp_path):
     """A configured, allowlisted test_cmd that PASSES → (False, 'passed…')."""
     (tmp_path / "test_x.py").write_text("def test_ok():\n    assert 1 == 1\n")
-    proj = {"cwd": str(tmp_path), "test_cmd": "python3 -m pytest -q test_x.py"}
+    proj = {"cwd": str(tmp_path), "test_cmd": _PYTEST_CMD}
     failing, summary = await _ap_loop._autopilot_test_signal(proj)
     assert failing is False
     assert "passed" in summary
