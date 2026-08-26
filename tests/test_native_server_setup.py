@@ -166,3 +166,31 @@ def test_login_verifies_the_session_actually_stuck():
     handover = src.index("onLogin()", login_at)
     assert login_at < me_at < handover, "the session check must sit between login and handover"
     assert "login.error_cookie_rejected" in src
+
+
+# ── browser pane: the frame must fill the pane, and coords must follow it ─────
+
+PANE = HERE / "web" / "src" / "tabs" / "BrowserTab.tsx"
+
+
+def test_frame_image_has_explicit_width_and_height():
+    """With only max-* constraints an <img> renders at its INTRINSIC size — the 960×540
+    of the JPEG stream — so on a larger pane the frame sat in a black border and could
+    not grow, at any zoom."""
+    src = PANE.read_text(encoding="utf-8")
+    # Anchor on the JSX element itself — the file also mentions "<img>" in prose above.
+    start = src.index("src={frameSrc}")
+    style = src[start:start + 1400]
+    assert "width: '100%'" in style and "height: '100%'" in style
+    assert "objectFit: 'contain'" in style
+
+
+def test_every_frame_coordinate_path_undoes_the_letterboxing():
+    """object-fit: contain means the element rect is NOT the picture. Any place that
+    maps between the two must go through paintedBox(), or clicks, ripples and touch
+    scrolling drift by exactly the size of the bars."""
+    src = PANE.read_text(encoding="utf-8")
+    assert src.count("paintedBox(") >= 4, "expected the helper plus its three callers"
+    # The old, wrong forms must not come back.
+    assert "(msg.x / FRAME_W) * imgRect.width" not in src
+    assert "(FRAME_W / rect.width)" not in src

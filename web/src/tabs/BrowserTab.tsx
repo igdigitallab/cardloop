@@ -83,14 +83,32 @@ function clamp(v: number, min: number, max: number): number {
 /**
  * Map a point from the displayed <img> element's client rect to the 1280×720
  * frame coordinate space.
+ *
+ * ⚠️ The element's rect is NOT the painted picture. The <img> stretches to fill the
+ * pane and `object-fit: contain` letterboxes the frame inside it, so on any pane whose
+ * shape differs from 16:9 there are bars on one axis. Dividing by the element's own
+ * width/height — which is what this did before the frame was allowed to scale up —
+ * shifts and stretches every coordinate by exactly the size of those bars, and clicks
+ * land next to what the operator aimed at. Recompute the painted box the same way
+ * `contain` does, and map against that.
  */
+function paintedBox(rect: DOMRect): { scale: number; offX: number; offY: number } {
+  const scale = Math.min(rect.width / FRAME_W, rect.height / FRAME_H)
+  return {
+    scale,
+    offX: (rect.width - FRAME_W * scale) / 2,
+    offY: (rect.height - FRAME_H * scale) / 2,
+  }
+}
+
 function toFrameCoords(
   clientX: number,
   clientY: number,
   rect: DOMRect,
 ): { x: number; y: number } {
-  const x = Math.round(clamp(((clientX - rect.left) / rect.width) * FRAME_W, 0, FRAME_W))
-  const y = Math.round(clamp(((clientY - rect.top) / rect.height) * FRAME_H, 0, FRAME_H))
+  const { scale, offX, offY } = paintedBox(rect)
+  const x = Math.round(clamp((clientX - rect.left - offX) / scale, 0, FRAME_W))
+  const y = Math.round(clamp((clientY - rect.top - offY) / scale, 0, FRAME_H))
   return { x, y }
 }
 
@@ -268,8 +286,11 @@ export function BrowserTab({ projectId }: Props) {
           const imgRect = imgRef.current?.getBoundingClientRect()
           const containerRect = containerRef.current?.getBoundingClientRect()
           if (imgRect && containerRect && typeof msg.x === 'number' && typeof msg.y === 'number') {
-            const x = imgRect.left - containerRect.left + (msg.x / FRAME_W) * imgRect.width
-            const y = imgRect.top - containerRect.top + (msg.y / FRAME_H) * imgRect.height
+            // Same letterbox offset toFrameCoords() removes, applied in reverse —
+            // otherwise the ripple drifts away from the click it is confirming.
+            const box = paintedBox(imgRect)
+            const x = imgRect.left - containerRect.left + box.offX + msg.x * box.scale
+            const y = imgRect.top - containerRect.top + box.offY + msg.y * box.scale
             const id = ++rippleIdRef.current
             setClickRipples(prev => [...prev, { id, x, y }])
             window.setTimeout(() => {
@@ -632,8 +653,12 @@ export function BrowserTab({ projectId }: Props) {
       if (touchMovedRef.current) {
         const { x, y } = toFrameCoords(tc.clientX, tc.clientY, rect)
         // Scale the finger delta into frame space; natural-scroll sign (finger up → page down).
-        const dx = (last.cx - tc.clientX) * (FRAME_W / rect.width)
-        const dy = (last.cy - tc.clientY) * (FRAME_H / rect.height)
+        // Divide by the PAINTED scale, not the element's own width: with letterboxing the
+        // element is larger than the picture, and using it would make the page scroll less
+        // than the finger travelled.
+        const { scale } = paintedBox(rect)
+        const dx = (last.cx - tc.clientX) / scale
+        const dy = (last.cy - tc.clientY) / scale
         accumulateWheel(x, y, dx, dy)
       }
       lastTouchRef.current = { cx: tc.clientX, cy: tc.clientY }
@@ -1264,9 +1289,13 @@ export function BrowserTab({ projectId }: Props) {
             onTouchMove={onTouchMove}
             onTouchEnd={onTouchEnd}
             style={{
-              // Fill the pane while preserving aspect ratio
-              maxWidth: '100%',
-              maxHeight: '100%',
+              // Fill the pane, preserving aspect ratio. width/height are REQUIRED: with
+              // only max-* constraints an <img> renders at its intrinsic size — the 960×540
+              // of the JPEG stream — so on any pane larger than that the frame sat in the
+              // middle of a black border and refused to grow, at any zoom level.
+              // toFrameCoords() undoes the object-fit letterboxing; keep them in step.
+              width: '100%',
+              height: '100%',
               objectFit: 'contain',
               display: 'block',
               userSelect: 'none',
