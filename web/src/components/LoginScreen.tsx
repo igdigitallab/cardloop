@@ -32,6 +32,17 @@ export function LoginScreen({ onLogin }: Props) {
     setError('')
     try {
       await api.login(password, totpMode ? totpCode.trim() : undefined)
+      // A 200 from /api/login only means the passphrase was right — it does NOT mean
+      // the browser kept the cookie. A Secure-flagged cookie over plain http is dropped
+      // silently, and the cockpit then opens "signed in" and completely empty, because
+      // every later call 401s and renders as "no projects". Confirm the session really
+      // exists before handing over, so that failure names itself.
+      const me = await api.me().catch(() => ({ authed: false }))
+      if (!me.authed) {
+        setError(t['login.error_cookie_rejected'])
+        setLoading(false)
+        return
+      }
       onLogin()
     } catch (err: unknown) {
       const apiErr = err as { status?: number; body?: { error?: string } }

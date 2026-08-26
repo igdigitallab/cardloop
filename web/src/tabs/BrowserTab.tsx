@@ -40,6 +40,12 @@ const TAP_SLOP = 8
 // handlers ignore anything within this window of a touch so they don't steal
 // keyboard focus from the hidden input or double the click.
 const TOUCH_GUARD_MS = 700
+// Two taps chain into a dblclick when they land within this window and this many
+// pixels of each other. Deliberately looser than a desktop double-click (500ms/24px
+// vs the usual ~300ms/2px): the round trip to a remote browser is long enough that an
+// operator naturally slows down, and a finger is far less precise than a mouse.
+const TAP_CHAIN_MS = 500
+const TAP_CHAIN_SLOP = 24
 // Hidden-input padding for the mobile soft keyboard. The capture input always
 // holds this 1-char pad so a Backspace ALWAYS has something to delete and thus
 // reliably fires an `input` event (empty inputs swallow Backspace on Android).
@@ -157,6 +163,12 @@ export function BrowserTab({ projectId }: Props) {
   // the container (killing the soft keyboard) and double the click. Mouse handlers
   // ignore anything within this window of a touch.
   const lastTouchTimeRef = useRef<number>(0)
+  // Consecutive-tap tracking, so a double-tap becomes a real dblclick. Chromium
+  // decides double/triple click from the clickCount we DISPATCH — it cannot infer it
+  // from two separate clickCount:1 clicks, and touchend calls preventDefault() so its
+  // own compatibility-event detection never runs either. Without this a double-tap
+  // was simply two single clicks and dblclick never fired on the remote page.
+  const tapChainRef = useRef<{ x: number; y: number; at: number; count: number } | null>(null)
 
   const [connState, setConnState] = useState<ConnState>('connecting')
   const [errorMsg, setErrorMsg] = useState<string>('')
@@ -646,9 +658,21 @@ export function BrowserTab({ projectId }: Props) {
     // A tap → left click at the touch-down point, then raise the soft keyboard so
     // the operator can type into whatever field the click just focused.
     const { x, y } = start
+    // Chain this tap onto the previous one when it lands close enough in time AND
+    // space — the same two conditions a desktop browser uses — so the second tap
+    // dispatches clickCount:2 and the page sees a genuine dblclick.
+    const now = Date.now()
+    const prev = tapChainRef.current
+    const chained =
+      prev !== null &&
+      now - prev.at <= TAP_CHAIN_MS &&
+      Math.abs(x - prev.x) <= TAP_CHAIN_SLOP &&
+      Math.abs(y - prev.y) <= TAP_CHAIN_SLOP
+    const clickCount = chained ? Math.min(prev.count + 1, 3) : 1
+    tapChainRef.current = { x, y, at: now, count: clickCount }
     send({ t: 'mouse', action: 'move', x, y })
-    send({ t: 'mouse', action: 'down', x, y, button: 'left' })
-    send({ t: 'mouse', action: 'up', x, y, button: 'left' })
+    send({ t: 'mouse', action: 'down', x, y, button: 'left', clickCount })
+    send({ t: 'mouse', action: 'up', x, y, button: 'left', clickCount })
     hiddenInputRef.current?.focus()
   }, [send, clearLongPress])
 

@@ -26,6 +26,7 @@ export const ru = {
   'login.submit': 'Войти',
   'login.error_wrong_password': 'Неверная парольная фраза',
   'login.error_totp_invalid': 'Неверный код — попробуй ещё раз',
+  'login.error_cookie_rejected': 'Вход прошёл, но браузер не сохранил cookie сессии. Обычно это значит, что кокпит открыт по http://, а cookie помечена Secure — открой по https или поставь на сервере WEB_COOKIE_SECURE=auto.',
   'login.back_to_password': '← Назад',
 
   // ── Native app / server setup ───────────────────────────────

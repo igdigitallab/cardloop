@@ -10,10 +10,11 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 # The aiohttp test client talks plain HTTP, so a Secure-flagged auth cookie set
-# by api_login is never echoed back → every authenticated request 401s. Drop the
-# flag for tests (CI does not set it either) so suites are deterministic
-# regardless of the operator's .env. Must run before webapp is imported anywhere,
-# as _WEB_COOKIE_SECURE is read into a module-level bool at import time.
+# by api_login is never echoed back → every authenticated request 401s. Unset the
+# override for tests (CI does not set it either) so the cookie follows the request
+# scheme and suites stay deterministic regardless of the operator's .env. Must run
+# before webapp is imported anywhere, as the mode is read into a module-level string
+# at import time.
 os.environ.pop("WEB_COOKIE_SECURE", None)
 
 # Same class of leak: engine reads CROSS_SESSION_INBOUND into a module-level constant

@@ -25,6 +25,7 @@ export const en = {
   'login.submit': 'Sign in',
   'login.error_wrong_password': 'Wrong passphrase',
   'login.error_totp_invalid': 'Invalid code — try again',
+  'login.error_cookie_rejected': 'Signed in, but the browser did not keep the session cookie. This usually means the cockpit is being opened over plain http:// while its cookie is marked Secure — open it over https, or set WEB_COOKIE_SECURE=auto on the server.',
   'login.back_to_password': '← Back',
 
   // ── Native app / server setup ───────────────────────────────

@@ -115,3 +115,54 @@ def test_the_setup_probe_is_bounded():
     """An address that connects and never answers must not hang the button forever."""
     src = (NATIVE / "ServerSetup.tsx").read_text(encoding="utf-8")
     assert "AbortController" in src and "PROBE_TIMEOUT_MS" in src
+
+
+# ── auth cookie: Secure must follow the route, not a single global guess ──────
+
+
+def test_cookie_secure_is_decided_per_request_by_default():
+    """One cockpit is normally reachable BOTH over https (tunnel/CDN) and over plain
+    http on the LAN. A single global answer is wrong for one of them — and wrong in the
+    worst way: the browser drops a Secure cookie over http silently while /api/login
+    still returns 200, so the cockpit opens signed-in and empty."""
+    import webapp
+
+    class _Req:
+        def __init__(self, scheme, fwd=None):
+            self.scheme = scheme
+            self.headers = {"X-Forwarded-Proto": fwd} if fwd else {}
+
+    assert webapp._cookie_secure(_Req("https")) is True
+    assert webapp._cookie_secure(_Req("http")) is False
+    # Behind Traefik/Cloudflare the socket is plain http — the forwarded scheme is the
+    # only truthful signal, and it wins.
+    assert webapp._cookie_secure(_Req("http", "https")) is True
+    assert webapp._cookie_secure(_Req("http", "https, http")) is True
+
+
+def test_cookie_secure_override_still_works_both_ways(monkeypatch):
+    import webapp
+
+    class _Req:
+        scheme = "http"
+        headers: dict = {}
+
+    monkeypatch.setattr(webapp, "_WEB_COOKIE_SECURE_MODE", "true")
+    assert webapp._cookie_secure(_Req()) is True
+    monkeypatch.setattr(webapp, "_WEB_COOKIE_SECURE_MODE", "false")
+
+    class _Https:
+        scheme = "https"
+        headers: dict = {}
+
+    assert webapp._cookie_secure(_Https()) is False
+
+
+def test_login_verifies_the_session_actually_stuck():
+    """A 200 from /api/login does not prove the browser kept the cookie."""
+    src = (HERE / "web" / "src" / "components" / "LoginScreen.tsx").read_text(encoding="utf-8")
+    login_at = src.index("api.login(")
+    me_at = src.index("api.me()")
+    handover = src.index("onLogin()", login_at)
+    assert login_at < me_at < handover, "the session check must sit between login and handover"
+    assert "login.error_cookie_rejected" in src

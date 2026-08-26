@@ -1779,14 +1779,34 @@ def _format_tool(name: str, inp: dict) -> dict:
 
 COOKIE_MAX_AGE = 2592000  # 30 days in seconds
 
-# WEB_COOKIE_SECURE: controls the Secure flag on the auth cookie.
-# When True the browser only sends the cookie over HTTPS, which is correct
-# behind an HTTPS reverse proxy or Cloudflare Tunnel.
-# When False (default) the cookie is also sent over plain http — necessary
-# for local or LAN access without TLS (http://192.168.x.x:8787 etc.).
-# ⚠️  Do NOT set to true unless you are accessing the cockpit over HTTPS;
-# otherwise the browser silently drops the cookie and login appears broken.
-_WEB_COOKIE_SECURE: bool = os.environ.get("WEB_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+# WEB_COOKIE_SECURE: the Secure flag on the auth cookie.
+#
+#   unset / "auto" (default) — decided PER REQUEST: Secure when the login arrived over
+#                              HTTPS, plain otherwise. One cockpit is normally reachable
+#                              both ways at once (https through a tunnel/CDN AND
+#                              http://192.168.x.x:8787 on the LAN), and a single global
+#                              answer is wrong for one of them.
+#   "1" / "true" / "yes"     — always Secure. Correct only if EVERY route to this
+#                              cockpit is HTTPS; plain-http access stops working.
+#   "0" / "false" / "no"     — never Secure.
+#
+# ⚠️  The failure this replaces is nasty because it does not look like a failure:
+# a global True over plain http makes the browser drop the cookie silently while
+# /api/login still answers 200, so the cockpit opens "logged in" and completely EMPTY —
+# every later call is a 401 the UI renders as "no projects". It reads as data loss.
+_WEB_COOKIE_SECURE_MODE: str = os.environ.get("WEB_COOKIE_SECURE", "").strip().lower()
+
+
+def _cookie_secure(req: web.Request) -> bool:
+    """Should the auth cookie carry Secure for THIS request?"""
+    if _WEB_COOKIE_SECURE_MODE in ("1", "true", "yes"):
+        return True
+    if _WEB_COOKIE_SECURE_MODE in ("0", "false", "no"):
+        return False
+    # Auto: trust the proxy's forwarded scheme first (Traefik/Cloudflare terminate TLS,
+    # so req.scheme alone would read "http" for a request the operator made over HTTPS).
+    fwd = (req.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+    return (fwd or req.scheme) == "https"
 
 
 # ─────────────────────────── auth ───────────────────────────
@@ -3187,7 +3207,7 @@ async def api_login(req: web.Request) -> web.Response:
     resp.set_cookie(
         "cops_auth", token,
         httponly=True,
-        secure=_WEB_COOKIE_SECURE,
+        secure=_cookie_secure(req),
         path="/",
         max_age=COOKIE_MAX_AGE,
         samesite="Lax",
