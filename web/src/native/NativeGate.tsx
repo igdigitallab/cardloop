@@ -25,20 +25,17 @@ async function serverIsAlive(url: string): Promise<boolean> {
 
 interface Props {
   saved: string
-  /** The operator asked for the picker — skip the probe and show it straight away. */
-  forced: boolean
   onConnect: (url: string, token: string) => void
 }
 
 /** Decides between "redirect to the saved server" and "show the picker", doing the
  *  reachability probe asynchronously so a dead server degrades into a usable screen
  *  instead of a blank WebView. */
-export function NativeGate({ saved, forced, onConnect }: Props) {
-  const [state, setState] = useState<'checking' | 'setup'>(forced ? 'setup' : 'checking')
+export function NativeGate({ saved, onConnect }: Props) {
+  const [state, setState] = useState<'checking' | 'setup'>('checking')
   const [error, setError] = useState('')
 
   useEffect(() => {
-    if (forced) return
     let cancelled = false
     void (async () => {
       const alive = await serverIsAlive(saved)
@@ -53,7 +50,7 @@ export function NativeGate({ saved, forced, onConnect }: Props) {
     return () => {
       cancelled = true
     }
-  }, [saved, forced])
+  }, [saved])
 
   if (state === 'checking') {
     return (

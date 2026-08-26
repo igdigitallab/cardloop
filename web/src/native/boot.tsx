@@ -2,7 +2,7 @@ import { Capacitor } from '@capacitor/core'
 import { createRoot } from 'react-dom/client'
 import { ServerSetup } from './ServerSetup'
 import { NativeGate } from './NativeGate'
-import { STORAGE_KEY, APP_ORIGIN_KEY, FORCE_SETUP_KEY, AUTH_HANDOFF_PARAM } from './keys'
+import { STORAGE_KEY, SETUP_QUERY_PARAM, APP_BUNDLE_HOST, AUTH_HANDOFF_PARAM } from './keys'
 
 function go(url: string, token: string) {
   localStorage.setItem(STORAGE_KEY, url)
@@ -18,39 +18,37 @@ function go(url: string, token: string) {
  *  self-hosted, so each install points at its own instance.
  *
  *  Returns true if the caller should mount <App/> normally right now.
- *  Returns false if this function took over rendering instead — a redirect is in
- *  flight, a reachability probe is running, or the picker is on screen. */
+ *  Returns false if this function took over rendering instead — a reachability probe
+ *  is running or the picker is on screen. */
 export function bootNative(rootEl: HTMLElement): boolean {
   if (!Capacitor.isNativePlatform()) return true
 
-  const saved = localStorage.getItem(STORAGE_KEY)
-  const forced = localStorage.getItem(FORCE_SETUP_KEY) === '1'
+  // ⚠️ Only the app bundle's own origin hosts the picker. On a real server's origin
+  // we are already where we wanted to be, so mount the app and stop.
+  //
+  // This check replaced an origin comparison against the SAVED url, which looked
+  // equivalent and was not: localStorage is per-origin, so after the redirect the
+  // saved value is NOT readable on the server's origin. "No saved value" then read as
+  // "never configured" and the picker appeared a SECOND time, immediately after the
+  // first one had just succeeded — and submitting it called location.replace() with a
+  // URL differing only in its fragment, which does not navigate at all, so the button
+  // sat on "Connecting..." forever. Observed on a real device, not theorised.
+  if (window.location.hostname !== APP_BUNDLE_HOST) return true
 
-  if (saved && !forced) {
-    // Both Capacitor's bridge (isNativePlatform() stays true) and this
-    // localStorage key survive the redirect — confirmed live via CDP: on the
-    // real server's own origin, window.Capacitor is still present and
-    // STORAGE_KEY still reads back the URL we just navigated to. Without this
-    // origin check, every load on the real server would see `saved` set and
-    // call location.replace() on itself again — a same-URL reload loop that
-    // never lets React mount (readyState reaches "complete" but #root stays
-    // empty, observed live).
-    try {
-      if (new URL(saved).origin === window.location.origin) return true
-    } catch {
-      /* a corrupt saved value falls through to the picker below */
-    }
+  const params = new URLSearchParams(window.location.search)
+  const forced = params.has(SETUP_QUERY_PARAM)
+  if (forced) {
+    // Drop the flag so a later reload of the bundle does not reopen the picker.
+    params.delete(SETUP_QUERY_PARAM)
+    const rest = params.toString()
+    history.replaceState(null, '', `${window.location.pathname}${rest ? `?${rest}` : ''}`)
   }
 
-  // We are on the app bundle's own origin — record it so the server-side
-  // "Change server" control knows where to send the WebView back to.
-  localStorage.setItem(APP_ORIGIN_KEY, window.location.origin)
-  localStorage.removeItem(FORCE_SETUP_KEY)
-
+  const saved = localStorage.getItem(STORAGE_KEY)
   createRoot(rootEl).render(
-    saved
-      ? <NativeGate saved={saved} forced={forced} onConnect={go} />
-      : <ServerSetup onConnect={go} />
+    saved && !forced
+      ? <NativeGate saved={saved} onConnect={go} />
+      : <ServerSetup initialUrl={saved ?? ''} onConnect={go} />
   )
   return false
 }

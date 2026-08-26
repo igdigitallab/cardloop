@@ -1,4 +1,5 @@
-import { AUTH_HANDOFF_PARAM, APP_ORIGIN_KEY, FORCE_SETUP_KEY, STORAGE_KEY } from './keys'
+import { Capacitor } from '@capacitor/core'
+import { AUTH_HANDOFF_PARAM, APP_BUNDLE_HOST, SETUP_QUERY_PARAM } from './keys'
 
 /** Read (and immediately erase) a passphrase handed over from the native server
  *  picker, then sign in with it so the app lands logged in instead of showing the
@@ -38,18 +39,17 @@ export async function consumeAuthHandoff(): Promise<void> {
 }
 
 /** Send the native WebView back to the app bundle with the server picker open.
- *  Returns false when there is nothing to go back to (plain browser, or an install
- *  that never recorded its own origin), so the caller can hide the control. */
-export function requestServerChange(): boolean {
-  const appOrigin = localStorage.getItem(APP_ORIGIN_KEY)
-  if (!appOrigin) return false
-  localStorage.setItem(FORCE_SETUP_KEY, '1')
-  window.location.replace(appOrigin)
-  return true
+ *
+ *  The "open the picker" request travels as a QUERY FLAG, not a localStorage key:
+ *  storage is per-origin, so a flag written here on the server's origin would be
+ *  invisible to the bundle that has to act on it. */
+export function requestServerChange(): void {
+  window.location.replace(`https://${APP_BUNDLE_HOST}/?${SETUP_QUERY_PARAM}=1`)
 }
 
-/** True when this page is a native install that has an app origin to return to —
- *  i.e. when offering "Change server" makes sense at all. */
+/** True when this page is the native app currently showing a real server — i.e. when
+ *  offering "Change server" makes sense at all. In a plain browser (or already on the
+ *  bundle) there is nothing to change. */
 export function canChangeServer(): boolean {
-  return Boolean(localStorage.getItem(APP_ORIGIN_KEY) && localStorage.getItem(STORAGE_KEY))
+  return Capacitor.isNativePlatform() && window.location.hostname !== APP_BUNDLE_HOST
 }

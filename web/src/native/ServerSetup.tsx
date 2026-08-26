@@ -2,6 +2,8 @@ import { useState, FormEvent } from 'react'
 import { t } from '../i18n'
 import { normalizeUrl } from './url'
 
+const PROBE_TIMEOUT_MS = 8000
+
 interface Props {
   /** Pre-filled when re-pointing an already-configured install (or recovering
    *  from a server that stopped answering) — empty on a genuine first run. */
@@ -37,7 +39,16 @@ export function ServerSetup({ initialUrl = '', initialError = '', onConnect }: P
     try {
       // /api/health is unauthenticated on purpose, so this probe answers "is this a
       // Cardloop instance I can reach" without needing the passphrase first.
-      const res = await fetch(`${normalized}api/health`, { method: 'GET' })
+      // Bounded: an address that accepts the connection and then never answers would
+      // otherwise leave this button on "Connecting..." with no way back.
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS)
+      let res: Response
+      try {
+        res = await fetch(`${normalized}api/health`, { method: 'GET', signal: ctrl.signal })
+      } finally {
+        clearTimeout(timer)
+      }
       if (!res.ok) throw new Error('unreachable')
       onConnect(normalized, token.trim())
     } catch {
