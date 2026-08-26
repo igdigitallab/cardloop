@@ -36,6 +36,12 @@ export const en = {
   'native.setup_connecting': 'Connecting...',
   'native.setup_error_invalid_url': 'Enter a valid https:// URL',
   'native.setup_error_unreachable': "Can't reach that server — check the URL and try again",
+  'native.setup_title_change': 'Change server',
+  'native.setup_token_label': 'Passphrase (optional)',
+  'native.setup_token_placeholder': 'Sign in automatically',
+  'native.setup_token_hint': 'Used once to sign in, never stored on this device.',
+  'native.setup_error_saved_unreachable': "That server isn't answering any more — check the address or point the app somewhere else.",
+  'native.change_server': 'Connect to a different server',
 
   // ── App / Welcome ────────────────────────────────────────────
   'app.connecting': 'Connecting...',

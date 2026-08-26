@@ -37,6 +37,12 @@ export const ru = {
   'native.setup_connecting': 'Подключаюсь...',
   'native.setup_error_invalid_url': 'Введи корректный https:// адрес',
   'native.setup_error_unreachable': 'Не удалось достучаться до сервера — проверь адрес',
+  'native.setup_title_change': 'Смена сервера',
+  'native.setup_token_label': 'Парольная фраза (необязательно)',
+  'native.setup_token_placeholder': 'Войти автоматически',
+  'native.setup_token_hint': 'Используется один раз для входа, на устройстве не сохраняется.',
+  'native.setup_error_saved_unreachable': 'Этот сервер больше не отвечает — проверь адрес или укажи другой.',
+  'native.change_server': 'Подключиться к другому серверу',
 
   // ── App / Welcome ────────────────────────────────────────────
   'app.connecting': 'Соединение...',

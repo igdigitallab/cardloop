@@ -1,6 +1,7 @@
 import { useState, FormEvent, useRef, useEffect } from 'react'
 import { api } from '../api'
 import { t } from '../i18n'
+import { canChangeServer, requestServerChange } from '../native/handoff'
 
 interface Props {
   onLogin: () => void
@@ -116,6 +117,24 @@ export function LoginScreen({ onLogin }: Props) {
             </button>
           )}
         </form>
+
+        {/* Native only: the way back to the server picker. The login screen is the
+            right home for it — it is the one screen reachable without a working
+            session, which is exactly the state you are in when the app is pointed
+            at a server you can no longer sign in to. */}
+        {canChangeServer() && (
+          <button
+            type="button"
+            className="btn-link"
+            style={{
+              marginTop: 14, width: '100%', background: 'none', border: 'none',
+              color: 'var(--text-dim, #777)', fontSize: 12, cursor: 'pointer',
+            }}
+            onClick={() => requestServerChange()}
+          >
+            {t['native.change_server']}
+          </button>
+        )}
       </div>
     </div>
   )
