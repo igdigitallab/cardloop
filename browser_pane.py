@@ -43,6 +43,15 @@ STREAM = {"width": 960, "height": 540, "quality": 45}
 _IDLE_GRACE = 120.0          # close the browser this long after the last activity with no subscribers
 _WATCH_INTERVAL = 15.0       # idle-watchdog tick
 
+# Operator page zoom (the pane's −/+ buttons and Ctrl+wheel). Chrome's own ladder, so
+# the steps feel familiar. Implemented as CSS `zoom` on documentElement rather than
+# Emulation.setDeviceMetricsOverride on purpose: an override changes the emulated
+# viewport, and pointer input is dispatched in VIEWPORT space (see the note above), so
+# every click would land at the wrong place the moment zoom left 100%. CSS zoom reflows
+# the page while leaving the viewport — and therefore the whole input contract — intact.
+ZOOM_STEPS = (0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
+ZOOM_DEFAULT = 1.0
+
 # ── keyboard: DOM key name → (Windows virtual key code, DOM code) ─────────────
 # Chromium derives an *editing command* (delete a char, move the caret, submit a
 # form) from the event's virtual key code — NOT from `key`. A dispatchKeyEvent
@@ -467,6 +476,7 @@ class BrowserSession:
         self._last_frame: "bytes | None" = None  # most recent JPEG — replayed to late subscribers
         self._last_activity = time.monotonic()
         self._watchdog: "asyncio.Task | None" = None
+        self._zoom = ZOOM_DEFAULT   # operator page zoom; re-applied after every navigation
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -797,6 +807,10 @@ class BrowserSession:
     async def _broadcast_nav(self) -> None:
         if self._page is None:
             return
+        # A new document (navigation) or a different tab starts at 100% — restore the
+        # operator's zoom before anyone looks at the frame.
+        if self._zoom != ZOOM_DEFAULT:
+            await self._apply_zoom()
         with contextlib.suppress(Exception):
             url = self._page.url
             title = await self._page.title()
@@ -815,7 +829,8 @@ class BrowserSession:
         self._subs.add(ws)
         self._touch()
         with contextlib.suppress(Exception):
-            await ws.send_json({"type": "ready", "width": VIEWPORT["width"], "height": VIEWPORT["height"], "backend": self.backend})
+            await ws.send_json({"type": "ready", "width": VIEWPORT["width"], "height": VIEWPORT["height"],
+                                "backend": self.backend, "zoom": self._zoom})
             await ws.send_json({"type": "nav", "url": self._page.url, "title": await self._page.title()})
             await ws.send_json(await self._tabs_payload())
         # Prime the new subscriber with the current page so a static page renders
@@ -896,6 +911,8 @@ class BrowserSession:
                 await self.navigate(str(msg.get("url") or ""))
             elif t in ("back", "forward", "reload"):
                 await self._history(t)
+            elif t == "zoom":
+                await self.set_zoom(msg)
         except Exception as e:
             # Every command here is a raw CDP call on an already-established session —
             # unlike the agent's selector-based click()/type_text(), there is no
@@ -930,6 +947,55 @@ class BrowserSession:
         else:
             await page.reload(wait_until="domcontentloaded")
         await self._broadcast_nav()
+
+    # ── page zoom ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _zoom_target(current: float, msg: dict) -> float:
+        """Resolve a zoom request to a concrete factor on the ZOOM_STEPS ladder."""
+        raw = msg.get("factor")
+        if raw is not None:
+            try:
+                wanted = float(raw)
+            except (TypeError, ValueError):
+                return current
+            # Snap to the nearest rung so the UI and the browser never disagree about
+            # which step is current (an off-ladder value would make the next −/+ jump).
+            return min(ZOOM_STEPS, key=lambda s: abs(s - wanted))
+        direction = str(msg.get("dir") or "")
+        if direction == "reset":
+            return ZOOM_DEFAULT
+        try:
+            i = ZOOM_STEPS.index(current)
+        except ValueError:
+            i = ZOOM_STEPS.index(ZOOM_DEFAULT)
+        if direction == "in":
+            return ZOOM_STEPS[min(i + 1, len(ZOOM_STEPS) - 1)]
+        if direction == "out":
+            return ZOOM_STEPS[max(i - 1, 0)]
+        return current
+
+    async def set_zoom(self, msg: dict) -> None:
+        """Apply operator zoom to the active tab and tell every subscriber."""
+        target = self._zoom_target(self._zoom, msg)
+        self._zoom = target
+        await self._apply_zoom()
+        await self.broadcast_json({"type": "zoom", "factor": target})
+
+    async def _apply_zoom(self) -> None:
+        """Push the current zoom onto the active page.
+
+        Called after every navigation and tab switch as well: CSS zoom lives on the
+        document, so a fresh document starts at 100% and the operator's choice would
+        silently reset on the next click-through otherwise.
+        """
+        page = self._page
+        if page is None:
+            return
+        with contextlib.suppress(Exception):
+            await page.evaluate(
+                "z => { document.documentElement.style.zoom = z === 1 ? '' : String(z) }",
+                self._zoom,
+            )
 
     @staticmethod
     def _clamp(v: Any, hi: int) -> float:
@@ -1478,6 +1544,7 @@ class BrowserSession:
             "subscribers": len(self._subs),
             "idle_seconds": round(time.monotonic() - self._last_activity, 1),
             "url": (self._page.url if self._page is not None else None),
+            "zoom": self._zoom,
         }
 
     # ── idle watchdog ────────────────────────────────────────────────────────

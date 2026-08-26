@@ -1,6 +1,7 @@
 # --- secrets and local config ---
 .env
 *.env
+.env.*
 !.env.example
 # bot self-memory (.claude-ops/memory) contains BOT_TOKEN/password — do NOT commit
 .claude-ops/

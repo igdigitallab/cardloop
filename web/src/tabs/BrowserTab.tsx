@@ -166,6 +166,9 @@ export function BrowserTab({ projectId }: Props) {
   const [urlInput, setUrlInput] = useState<string>('')
   // spec-066: which backend acquired the live session (builtin / cloakbrowser / external-cdp)
   const [backend, setBackend] = useState<string>('')
+  // Page zoom lives on the SERVER (it is CSS zoom applied inside the real browser, not a
+  // client-side transform of the frame), so this is a mirror of it, never the source.
+  const [zoom, setZoom] = useState<number>(1)
   // Multi-tab strip state
   const [tabs, setTabs] = useState<BrowserTabInfo[]>([])
   const [activeId, setActiveId] = useState<string>('')
@@ -229,6 +232,9 @@ export function BrowserTab({ projectId }: Props) {
         if (msg.type === 'ready') {
           setConnState('ready')
           if (typeof msg.backend === 'string') setBackend(msg.backend)
+          if (typeof msg.zoom === 'number') setZoom(msg.zoom)
+        } else if (msg.type === 'zoom') {
+          if (typeof msg.factor === 'number') setZoom(msg.factor)
         } else if (msg.type === 'nav') {
           const shown = displayUrl((msg.url as string) ?? '')
           setUrlValue(shown)
@@ -699,12 +705,19 @@ export function BrowserTab({ projectId }: Props) {
   const onWheel = useCallback(
     (e: React.WheelEvent) => {
       e.preventDefault()
+      // Ctrl+wheel is zoom everywhere else, so it is zoom here too. Handled BEFORE the
+      // scroll accumulator and without touching it: forwarding these as wheel events
+      // would scroll the remote page instead, which is what the gesture must not do.
+      if (e.ctrlKey || e.metaKey) {
+        if (e.deltaY !== 0) send({ t: 'zoom', dir: e.deltaY < 0 ? 'in' : 'out' })
+        return
+      }
       const rect = getImgRect()
       if (!rect) return
       const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
       accumulateWheel(x, y, e.deltaX, e.deltaY)
     },
-    [accumulateWheel, getImgRect],
+    [accumulateWheel, getImgRect, send],
   )
 
   // ── Keyboard handler ─────────────────────────────────────────────────────────
@@ -1051,6 +1064,38 @@ export function BrowserTab({ projectId }: Props) {
               border: '1px solid var(--border, #2a2a2a)',
               background: 'var(--bg, #0d0d0d)',
               color: connState === 'ready' ? 'var(--text, #d4d4d4)' : 'var(--text-dim, #555)',
+              cursor: connState === 'ready' ? 'pointer' : 'not-allowed',
+            }}
+          >
+            {b.label}
+          </button>
+        ))}
+        {/* Page zoom — the operator reads the pane on everything from a 27" desk monitor
+            to a phone, and the remote page has no other way to be made legible. The
+            middle button shows the current level and resets to 100% on click. */}
+        {([
+          { label: '−', dir: 'out', title: 'Zoom out (Ctrl + wheel down)' },
+          { label: `${Math.round(zoom * 100)}%`, dir: 'reset', title: 'Reset zoom to 100%' },
+          { label: '+', dir: 'in', title: 'Zoom in (Ctrl + wheel up)' },
+        ] as const).map(b => (
+          <button
+            key={b.dir}
+            onClick={() => send({ t: 'zoom', dir: b.dir })}
+            disabled={connState !== 'ready'}
+            title={b.title}
+            style={{
+              flexShrink: 0,
+              fontSize: b.dir === 'reset' ? 11 : 13,
+              lineHeight: 1,
+              padding: '4px 7px',
+              borderRadius: 5,
+              minWidth: b.dir === 'reset' ? 44 : undefined,
+              fontVariantNumeric: 'tabular-nums',
+              border: '1px solid var(--border, #2a2a2a)',
+              background: 'var(--bg, #0d0d0d)',
+              color: connState === 'ready'
+                ? (b.dir === 'reset' && zoom !== 1 ? 'var(--accent, #58a6ff)' : 'var(--text, #d4d4d4)')
+                : 'var(--text-dim, #555)',
               cursor: connState === 'ready' ? 'pointer' : 'not-allowed',
             }}
           >

@@ -1512,3 +1512,103 @@ def test_teardown_releases_nothing_for_a_non_manager_backend():
         finally:
             browser_pane._backends.release_profile = orig
     asyncio.run(go())
+
+
+# ── operator page zoom (−/+ buttons, Ctrl+wheel) ──────────────────────────────
+
+
+class _ZoomPage:
+    """Records page.evaluate() calls; enough for the zoom path."""
+
+    def __init__(self):
+        self.evaluated = []
+        self.url = "https://example.com/"
+
+    async def evaluate(self, script, arg=None):
+        self.evaluated.append((script, arg))
+
+    async def title(self):
+        return "Example"
+
+
+def _zoom_session() -> BrowserSession:
+    s = _session_with_fake_cdp()
+    s._page = _ZoomPage()
+    s._tabs = {"t1": s._page}
+    s._active_id = "t1"
+    return s
+
+
+def test_zoom_ladder_steps_in_and_out_from_the_default():
+    step = BrowserSession._zoom_target
+    assert step(1.0, {"dir": "in"}) == 1.1
+    assert step(1.0, {"dir": "out"}) == 0.9
+    assert step(1.1, {"dir": "in"}) == 1.25
+
+
+def test_zoom_ladder_clamps_at_both_ends():
+    step = BrowserSession._zoom_target
+    assert step(browser_pane.ZOOM_STEPS[-1], {"dir": "in"}) == browser_pane.ZOOM_STEPS[-1]
+    assert step(browser_pane.ZOOM_STEPS[0], {"dir": "out"}) == browser_pane.ZOOM_STEPS[0]
+
+
+def test_zoom_reset_and_absolute_factor_snaps_to_the_ladder():
+    step = BrowserSession._zoom_target
+    assert step(2.0, {"dir": "reset"}) == 1.0
+    # An off-ladder request snaps to the nearest rung, so the next −/+ does not jump.
+    assert step(1.0, {"factor": 1.27}) == 1.25
+    assert step(1.0, {"factor": "nonsense"}) == 1.0
+
+
+def test_zoom_off_ladder_current_value_recovers_to_the_default_rung():
+    """A factor that somehow left the ladder must not make −/+ dead."""
+    assert BrowserSession._zoom_target(1.37, {"dir": "in"}) == 1.1
+
+
+def test_zoom_applies_css_zoom_and_broadcasts_the_new_factor():
+    s = _zoom_session()
+    sent = []
+    s.broadcast_json = lambda obj: sent.append(obj) or _done()
+    asyncio.run(s.handle_input({"t": "zoom", "dir": "in"}))
+    assert s._zoom == 1.1
+    script, arg = s._page.evaluated[-1]
+    assert "documentElement.style.zoom" in script and arg == 1.1
+    assert sent[-1] == {"type": "zoom", "factor": 1.1}
+
+
+def test_zoom_of_100_percent_clears_the_style_instead_of_writing_1():
+    """`zoom: 1` still creates a containing block on some sites — reset must remove it."""
+    s = _zoom_session()
+    s.broadcast_json = lambda obj: _done()
+    s._zoom = 1.25
+    asyncio.run(s.handle_input({"t": "zoom", "dir": "reset"}))
+    script, arg = s._page.evaluated[-1]
+    assert arg == 1.0 and "z === 1 ? ''" in script
+
+
+def test_zoom_survives_navigation():
+    """CSS zoom lives on the document, so a fresh one starts at 100%."""
+    s = _zoom_session()
+    s.broadcast_json = lambda obj: _done()
+    s._broadcast_tabs = lambda: _done()
+    s._zoom = 1.5
+    asyncio.run(s._broadcast_nav())
+    assert s._page.evaluated[-1][1] == 1.5
+
+
+def test_default_zoom_does_not_touch_the_page_on_every_navigation():
+    s = _zoom_session()
+    s.broadcast_json = lambda obj: _done()
+    s._broadcast_tabs = lambda: _done()
+    asyncio.run(s._broadcast_nav())
+    assert s._page.evaluated == []
+
+
+def test_status_reports_the_current_zoom():
+    s = _zoom_session()
+    s._zoom = 1.75
+    assert s.status()["zoom"] == 1.75
+
+
+async def _done():
+    return None
