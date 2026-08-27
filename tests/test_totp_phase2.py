@@ -475,3 +475,10 @@ async def test_wrong_totp_counts_as_failed_attempt(aiohttp_client, totp_app, fak
     # 6th attempt is rate-limited
     resp = await _login(client, fake_ctx["password"], totp_code="000000", ip=ip)
     assert resp.status == 429
+
+def test_non_ascii_digits_are_rejected_without_crashing():
+    """str.isdigit() accepts Arabic-Indic digits, but hmac.compare_digest raises TypeError on
+    any non-ASCII str — a malformed code must be a plain rejection, never a 500."""
+    secret = _totp.random_base32()
+    assert _totp.verify(secret, "\u0661\u0662\u0663\u0664\u0665\u0666") is False
+    assert _totp.verify(secret, "12345６") is False

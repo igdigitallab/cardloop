@@ -113,7 +113,10 @@ def _matched_counter(
 
     Uses hmac.compare_digest for constant-time comparison.
     """
-    if not code or len(code) != digits or not code.isdigit():
+    # isascii() is not redundant: str.isdigit() is true for non-ASCII digits too (Arabic-Indic
+    # \u0661\u0662\u0663, superscripts, ...), and hmac.compare_digest raises TypeError on any str
+    # outside ASCII — turning a malformed code into a 500 instead of a rejected login.
+    if not code or len(code) != digits or not (code.isascii() and code.isdigit()):
         return None
     key_bytes = _b32decode(secret_b32)
     current_counter = int(t) // step
