@@ -808,6 +808,15 @@ PERSISTENT_CLIENT: bool = os.getenv("PERSISTENT_CLIENT", "0") == "1"
 LIVE_CLIENT_TTL_SEC: int = int(os.getenv("LIVE_CLIENT_TTL_SEC", "600"))
 # Max number of concurrent live clients held in the registry; LRU eviction beyond this.
 LIVE_CLIENT_MAX: int = int(os.getenv("LIVE_CLIENT_MAX", "10"))
+# Memory headroom guard for the same registry. A live client is a whole CLI subprocess
+# (~0.4-0.6 GB RSS each, more with sub-agents), so a count-based cap alone does not bound
+# memory: on ops the cgroup hit MemoryMax twice (2026-08-26 13:43, 2026-08-27 09:11) with
+# the registry legally under LIVE_CLIENT_MAX, the kernel OOM-killed a `claude` child, and
+# systemd restarted the whole service mid-turn — which the operator sees as a frozen chat,
+# a dead browser pane, or a sent message that never appears. Above this fraction of the
+# cgroup's memory.max we LRU-evict idle clients BEFORE connecting another one.
+# 0 disables the guard (also inert when the process is not in a memory-limited cgroup).
+LIVE_CLIENT_MEM_GUARD: float = float(os.getenv("LIVE_CLIENT_MEM_GUARD", "0.75"))
 # Per-message JSON buffer cap for the SDK's stdout reader. The SDK default is 1 MiB
 # (subprocess_cli._DEFAULT_MAX_BUFFER_SIZE) — a single inline image or a large tool_result
 # routinely exceeds that, and the reader then kills the whole subprocess mid-turn
@@ -1696,6 +1705,70 @@ async def _evict_live_client(session_key: str, ctx: "dict | None") -> None:
         print(f"[live-client] evict {session_key}: disconnect failed ({exc!r}), force-dropping")
 
 
+def _cgroup_mem_fraction() -> "float | None":
+    """Return memory.current / memory.max for this process's cgroup, or None.
+
+    None means "no usable signal" — not in a cgroup v2 hierarchy, no limit set
+    (memory.max == "max"), or the files are unreadable. Callers must treat None as
+    "guard inactive" and never as 0.0, so a container without limits behaves exactly
+    as before this guard existed.
+    """
+    try:
+        # cgroup v2: /proc/self/cgroup is a single "0::<path>" line.
+        rel = ""
+        with open("/proc/self/cgroup", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.strip().split(":", 2)
+                if len(parts) == 3 and parts[0] == "0":
+                    rel = parts[2]
+                    break
+        if not rel:
+            return None
+        base = Path("/sys/fs/cgroup") / rel.lstrip("/")
+        limit_raw = (base / "memory.max").read_text(encoding="utf-8").strip()
+        if limit_raw == "max":
+            return None
+        limit = int(limit_raw)
+        if limit <= 0:
+            return None
+        current = int((base / "memory.current").read_text(encoding="utf-8").strip())
+        return current / limit
+    except Exception:
+        return None
+
+
+async def _enforce_memory_headroom(registry: dict, ctx: "dict | None", running_dict: dict) -> None:
+    """LRU-evict idle live clients while the cgroup sits above LIVE_CLIENT_MEM_GUARD.
+
+    Each live client is a CLI subprocess, so the registry is the one knob the cockpit has on
+    its own memory. Busy clients (turn in flight or live sub-agents) are never evicted — the
+    same rule the LIVE_CLIENT_MAX loop follows; if everything is busy we log and continue,
+    because refusing the turn would be worse than the risk of one more subprocess.
+    """
+    if LIVE_CLIENT_MEM_GUARD <= 0:
+        return
+    frac = _cgroup_mem_fraction()
+    if frac is None:
+        return
+    while frac > LIVE_CLIENT_MEM_GUARD:
+        idle_keys = [k for k in registry
+                     if k not in running_dict and not _session_has_live_subagents(k)]
+        if not idle_keys:
+            print(f"[live-client] memory at {frac:.0%} of cgroup limit but every client is busy "
+                  f"— cannot free headroom, proceeding")
+            return
+        oldest_key = min(idle_keys, key=lambda k: registry[k].last_used)
+        print(f"[live-client] memory guard: {frac:.0%} of cgroup limit — evicting idle {oldest_key}")
+        await _evict_live_client(oldest_key, ctx)
+        new_frac = _cgroup_mem_fraction()
+        # A disconnect frees memory asynchronously (the child has to actually exit), so a
+        # reading that did not move is expected; stop rather than evict the whole registry
+        # over one slow teardown.
+        if new_frac is None or new_frac >= frac:
+            return
+        frac = new_frac
+
+
 async def _get_or_create_live_client(
     ctx: "dict | None",
     session_key: str,
@@ -1764,6 +1837,12 @@ async def _get_or_create_live_client(
         oldest_key = min(idle_keys, key=lambda k: registry[k].last_used)
         print(f"[live-client] LRU evict {oldest_key} (registry full at {LIVE_CLIENT_MAX})")
         await _evict_live_client(oldest_key, ctx)
+
+    # ── Free memory headroom before adding another subprocess ────────────────────────────────────
+    # LIVE_CLIENT_MAX bounds the COUNT; this bounds the actual footprint. Without it the cgroup
+    # reaches MemoryMax, the kernel OOM-kills a `claude` child mid-turn and systemd restarts the
+    # service under the operator (observed twice on ops, see LIVE_CLIENT_MEM_GUARD).
+    await _enforce_memory_headroom(registry, ctx, _running_dict)
 
     # ── Create and connect ────────────────────────────────────────────────────────────────────────
     client = ClaudeSDKClient(options=opts)

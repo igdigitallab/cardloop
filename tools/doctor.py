@@ -531,7 +531,8 @@ def probe_service(service_name: str, run=_run) -> "list[Fact]":
 
     show = run(["systemctl", "show", service_name,
                 "-p", "ActiveState", "-p", "SubState", "-p", "MemoryHigh",
-                "-p", "MemoryMax", "-p", "MemoryCurrent", "-p", "MainPID"])
+                "-p", "MemoryMax", "-p", "MemoryCurrent", "-p", "MainPID",
+                "-p", "ControlGroup", "-p", "NRestarts"])
     if not show or show[0] != 0:
         facts.append(Fact("systemd", f"could not query unit '{service_name}' "
                                       "(systemctl unavailable, no permission, or not systemd)",
@@ -562,8 +563,54 @@ def probe_service(service_name: str, run=_run) -> "list[Fact]":
 
     mc = _parse_mem_value(props.get("MemoryCurrent"))
     if mc is not None:
-        pct = f" ({mc * 100.0 / mm:.0f}% of MemoryMax)" if mm else ""
-        facts.append(Fact("MemoryCurrent", f"{mc // (1024 * 1024)} MB{pct}"))
+        # Headroom matters, not the absolute number: every live client is a ~0.5 GB CLI
+        # subprocess, so a cockpit sitting at 80-90% of MemoryMax is one fan-out away from
+        # having a child OOM-killed mid-turn (which the operator experiences as a frozen chat
+        # or a dead browser pane, not as an error).
+        frac = (mc / mm) if mm else None
+        pct = f" ({frac * 100:.0f}% of MemoryMax)" if frac is not None else ""
+        if frac is not None and frac >= 0.90:
+            level, remedy = "fail", ("almost out of headroom — an OOM kill mid-turn is imminent. "
+                                     "Lower LIVE_CLIENT_MAX / LIVE_CLIENT_TTL_SEC in .env, or raise "
+                                     f"MemoryMax: systemctl set-property {service_name} MemoryMax=...")
+        elif frac is not None and frac >= 0.75:
+            level, remedy = "warn", ("little headroom left — LIVE_CLIENT_MEM_GUARD should be evicting "
+                                     "idle clients; if it is not, lower LIVE_CLIENT_MAX in .env")
+        else:
+            level, remedy = "ok", None
+        facts.append(Fact("MemoryCurrent", f"{mc // (1024 * 1024)} MB{pct}", level=level, remedy=remedy))
+
+    # OOM history for THIS cgroup since its last start. A restart resets the counter, so a
+    # non-zero value means the kernel killed a child of the currently running service — the
+    # single most misleading failure mode there is, because `systemctl is-active` still says
+    # active and the only trace in the cockpit is work that silently stopped.
+    cgroup = (props.get("ControlGroup") or "").strip()
+    if cgroup:
+        try:
+            events = Path("/sys/fs/cgroup") / cgroup.lstrip("/") / "memory.events"
+            kills = 0
+            for line in events.read_text(encoding="utf-8").splitlines():
+                key, _, value = line.partition(" ")
+                if key == "oom_kill":
+                    kills = int(value)
+            if kills:
+                facts.append(Fact(
+                    "OOM kills", f"{kills} since this unit started", level="fail",
+                    remedy="the kernel killed a child process inside the cgroup (a CLI subprocess or "
+                           "sub-agent) — work stopped silently. See `journalctl -k | grep -i oom` and "
+                           "lower LIVE_CLIENT_MAX / raise MemoryMax",
+                ))
+            else:
+                facts.append(Fact("OOM kills", "none since this unit started"))
+        except Exception:
+            pass
+    restarts = props.get("NRestarts")
+    if restarts and restarts.isdigit() and int(restarts) > 0:
+        facts.append(Fact(
+            "Restarts", f"{restarts} since boot", level="warn",
+            remedy=f"systemd restarted the unit — check why: `journalctl -u {service_name} "
+                   "| grep -E \"Failed with result|Stopped\"`",
+        ))
 
     journal = run(["journalctl", "-u", service_name, "-n", "15", "-p", "warning", "--no-pager"])
     if journal and journal[0] == 0:

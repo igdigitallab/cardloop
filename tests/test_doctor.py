@@ -345,6 +345,48 @@ def test_service_memory_high_infinity_is_ok():
     assert mem_fact.level == "ok"
 
 
+def test_service_memory_current_warns_when_headroom_is_thin():
+    """83% of MemoryMax is the state that preceded both real OOM kills on ops (2026-08-26/27):
+    the unit still reports active/running, so nothing else in doctor would flag it."""
+    run = _fake_run({
+        ("systemctl", "show"): (0, "ActiveState=active\nSubState=running\n"
+                                    "MemoryHigh=infinity\nMemoryMax=10737418240\n"
+                                    "MemoryCurrent=8900000000\nMainPID=123", ""),
+        ("journalctl",): (0, "-- No entries --", ""),
+    })
+    facts = doctor.probe_service("cardloop", run=run)
+    mem_fact = next(f for f in facts if f.label == "MemoryCurrent")
+    assert mem_fact.level == "warn"
+    assert "LIVE_CLIENT_MAX" in mem_fact.remedy
+
+
+def test_service_memory_current_fails_at_ninety_percent():
+    run = _fake_run({
+        ("systemctl", "show"): (0, "ActiveState=active\nSubState=running\n"
+                                    "MemoryHigh=infinity\nMemoryMax=10737418240\n"
+                                    "MemoryCurrent=10200000000\nMainPID=123", ""),
+        ("journalctl",): (0, "-- No entries --", ""),
+    })
+    facts = doctor.probe_service("cardloop", run=run)
+    mem_fact = next(f for f in facts if f.label == "MemoryCurrent")
+    assert mem_fact.level == "fail"
+
+
+def test_service_restart_count_is_surfaced():
+    """systemd silently restarting the unit is invisible in the cockpit — the operator only sees
+    a chat that froze. Surface it."""
+    run = _fake_run({
+        ("systemctl", "show"): (0, "ActiveState=active\nSubState=running\n"
+                                    "MemoryHigh=infinity\nMemoryMax=infinity\n"
+                                    "MemoryCurrent=1000000000\nNRestarts=2\nMainPID=123", ""),
+        ("journalctl",): (0, "-- No entries --", ""),
+    })
+    facts = doctor.probe_service("cardloop", run=run)
+    restart_fact = next(f for f in facts if f.label == "Restarts")
+    assert restart_fact.level == "warn"
+    assert "2 since boot" in restart_fact.value
+
+
 def test_service_inactive_is_fail():
     run = _fake_run({
         ("systemctl", "show"): (0, "ActiveState=inactive\nSubState=dead\n"
