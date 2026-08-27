@@ -112,13 +112,18 @@ async def test_live_trace_events_published_to_bus(aiohttp_client, tmp_path, proj
         _webapp._bus_unsubscribe(session_key, q)
 
     assert len(events_received) > 0, "Bus must receive events"
-    # run_start / run_end are lifecycle bus events published outside the live-turn buffer;
-    # they do not carry a seq. Only live-turn events (type=text/result/tool/…) must have seq.
-    live_turn_events = [e for e in events_received if "seq" in e]
-    assert len(live_turn_events) > 0, f"Must receive seq-tagged live-turn events: {events_received}"
-    seqs = [e["seq"] for e in live_turn_events]
+    # Every event this turn publishes — including the run_start/run_end lifecycle pair —
+    # goes through _live_turn_append and is therefore seq-tagged: a client that reconnects
+    # mid-turn (?since=<cursor> in api_project_activity_stream) replays them from
+    # turn["events"], which is filtered by seq. An un-tagged event would be invisible to
+    # that replay and never reach a client that missed its one live delivery.
+    kinds_without_seq = [e.get("kind") or e.get("type") for e in events_received if "seq" not in e]
+    assert kinds_without_seq == [], f"All bus events must be seq-tagged, missing on: {kinds_without_seq}"
+    seqs = [e["seq"] for e in events_received]
     assert seqs == sorted(seqs), "seq must be monotonically increasing"
     assert seqs == list(range(seqs[0], seqs[-1] + 1)), "seq must have no gaps"
+    kinds = [e.get("kind") for e in events_received]
+    assert "run_start" in kinds and "run_end" in kinds, f"lifecycle events missing: {events_received}"
 
 
 # ─────────────────────────── test 2: replay via cursor ──────────────────────
@@ -330,6 +335,61 @@ async def test_live_snapshot_unknown_project(aiohttp_client, tmp_path, project_d
 # ─────────────────────────── test 7: /live no active turn returns zeros ──────
 
 
+# ─────────────────────────── test 8: reconnect replay includes run lifecycle ─
+
+
+async def test_activity_stream_replay_includes_run_lifecycle(aiohttp_client, tmp_path, project_dir):
+    """Reconnect replay (?since=) must include run_start/run_end, not just content events.
+
+    Before this fix, run_start/run_end were published with a bare _bus_publish() call and
+    carried no seq, so they were never part of turn["events"] and api_project_activity_stream's
+    ?since= replay filter (`e["seq"] > cursor`) could never surface them. A client that
+    reconnected between a turn's last content event and its run_end — or missed the whole
+    turn while disconnected — replayed the text/tool/result content fine but never learned the
+    turn had finished: every frontend recovery path gated on run_end (hydratedCompletedTurnRef
+    reset, busActiveRef clear, scheduleCompletionReconcile) stayed stuck until a manual reload.
+    (BUG 1 regression guard)
+    """
+    _cleanup_live_turns()
+
+    async def fake_engine(**kwargs):
+        yield {"type": "text", "text": "the answer"}
+        yield {"type": "result", "session_id": "s1"}
+
+    ctx = _make_chat_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    app = _make_app(ctx)
+    client = await aiohttp_client(app)
+    h = _auth_headers(ctx)
+
+    resp = await client.post("/api/projects/myproject/chat", json={"prompt": "go"}, headers=h)
+    await resp.read()
+
+    # A client that was disconnected for the ENTIRE turn (cursor before anything) reconnects
+    # now: ?since=-1 must replay every event of the turn.
+    stream_resp = await client.get("/api/projects/myproject/activity-stream?since=-1", headers=h)
+    try:
+        assert stream_resp.status == 200
+        chunk = await asyncio.wait_for(stream_resp.content.read(8192), timeout=2.0)
+    finally:
+        stream_resp.close()
+
+    replayed = []
+    for block in chunk.decode("utf-8", errors="replace").split("\n\n"):
+        for ln in block.splitlines():
+            if ln.startswith("data: "):
+                replayed.append(json.loads(ln[6:]))
+
+    kinds = [e.get("kind") for e in replayed]
+    assert "run_start" in kinds, f"run_start missing from replay: {replayed}"
+    assert "run_end" in kinds, f"run_end missing from replay: {replayed}"
+    assert any(e.get("type") == "text" for e in replayed), f"content missing from replay: {replayed}"
+    run_end = next(e for e in replayed if e.get("kind") == "run_end")
+    assert run_end["outcome"] == "ok"
+
+
+# ─────────────────────────── test 9: /live snapshot: no active turn ──────────
+
+
 async def test_live_snapshot_no_turn(aiohttp_client, tmp_path, project_dir):
     """GET /live when no turn has run returns the pre-first-event cursor."""
     _cleanup_live_turns()
@@ -348,3 +408,97 @@ async def test_live_snapshot_no_turn(aiohttp_client, tmp_path, project_dir):
     assert data["cursor"] == _webapp._live_seq.get("1001:42", 0) - 1
     assert data["events"] == []
     assert data["running"] is False
+
+
+# ─────────────────────────── test 10: service blocks stripped at publish ─────
+
+
+def test_bus_publish_strips_service_block_from_run_start_prompt():
+    """A run_start prompt containing a raw <task-notification> block must never reach bus
+    subscribers verbatim — _bus_publish is the single publish boundary shared by the live
+    canvas, peer chat tabs, and the timeline JSONL, so sanitizing here (rather than in each
+    of the run_start call sites, or in the frontend) fixes every consumer at once.
+
+    Covers: a prompt that is ENTIRELY a service block is cleaned to "" and flagged
+    prompt_service_only=True (render like the 'bg' lane: no user bubble, not an empty one).
+    """
+    session_key = "1001:svc-only"
+    q = _webapp._bus_subscribe(session_key)
+    try:
+        raw = ("<task-notification><task-id>abc123</task-id><result>Ran the full test "
+               "suite, all green.</result></task-notification>")
+        _webapp._bus_publish(session_key, {
+            "kind": "run_start", "source": "chat", "prompt": raw, "run_id": "r1",
+        }, persist=False)
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+    finally:
+        _webapp._bus_unsubscribe(session_key, q)
+
+    assert len(events) == 1
+    ev = events[0]
+    assert "task-notification" not in ev["prompt"], f"raw XML leaked into bus event: {ev}"
+    assert ev["prompt"] == "", f"an all-service-block prompt must clean to empty: {ev}"
+    assert ev.get("prompt_service_only") is True, f"must flag as a service-only wake-up: {ev}"
+
+
+def test_bus_publish_strips_service_block_but_keeps_human_text():
+    """A MIXED prompt (real operator text + an appended service block, e.g. a queued follow-up
+    that landed after a background notification) keeps its human content and is NOT flagged
+    prompt_service_only — only the block itself is removed."""
+    session_key = "1001:svc-mixed"
+    q = _webapp._bus_subscribe(session_key)
+    try:
+        raw = ("please double-check the deploy\n\n"
+               "<task-notification><task-id>xyz</task-id><result>done</result></task-notification>")
+        _webapp._bus_publish(session_key, {
+            "kind": "run_start", "source": "chat", "prompt": raw, "run_id": "r2",
+        }, persist=False)
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+    finally:
+        _webapp._bus_unsubscribe(session_key, q)
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["prompt"] == "please double-check the deploy", f"human text mangled: {ev}"
+    assert "task-notification" not in ev["prompt"]
+    assert "prompt_service_only" not in ev, f"mixed prompt must not be flagged service-only: {ev}"
+
+
+def test_bus_publish_leaves_ordinary_prompt_untouched():
+    """Regression: an ordinary human prompt with no service blocks passes through unchanged
+    (no spurious prompt_service_only flag, no accidental mutation)."""
+    session_key = "1001:svc-none"
+    q = _webapp._bus_subscribe(session_key)
+    try:
+        _webapp._bus_publish(session_key, {
+            "kind": "run_start", "source": "chat", "prompt": "what's the deploy status?",
+            "run_id": "r3",
+        }, persist=False)
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+    finally:
+        _webapp._bus_unsubscribe(session_key, q)
+
+    assert len(events) == 1
+    assert events[0]["prompt"] == "what's the deploy status?"
+    assert "prompt_service_only" not in events[0]
+
+
+def test_live_turn_create_strips_service_block_from_stored_prompt():
+    """_live_turn_create stores the DISPLAY copy of the prompt (GET /live's "prompt" field,
+    read by ChatTab's hydrateFromServer on a mid-turn page reload) — this is a SECOND leak
+    path for the same class of bug (run_start's bus prompt is the first, fixed in
+    _bus_publish). Must be stripped independently of the raw prompt handed to the engine."""
+    _cleanup_live_turns()
+    session_key = "1001:svc-live"
+    raw = "<task-notification><task-id>t1</task-id><result>ok</result></task-notification>"
+    turn = _webapp._live_turn_create(session_key, "sonnet", raw)
+    try:
+        assert turn["prompt"] == "", f"raw service block leaked into the live-turn buffer: {turn}"
+    finally:
+        _webapp._live_turns.pop(session_key, None)

@@ -386,6 +386,9 @@ export interface SessionInfo {
 export interface ChatEventText {
   type: 'text'
   text: string
+  /** Mirrors the twin bus event's seq — lets the direct-stream dead-bus fallback dedup
+   *  against the bus once it recovers and replays the same event. */
+  seq?: number
 }
 
 // Spec-029 §1: incremental text delta for live streaming preview.
@@ -395,6 +398,8 @@ export interface ChatEventText {
 export interface ChatEventTextDelta {
   type: 'text_delta'
   text: string
+  /** Mirrors the twin bus event's seq — see ChatEventText. */
+  seq?: number
 }
 
 // Rich tool call — kind discriminates rendering
@@ -406,7 +411,7 @@ export interface RichToolSearch { name: string; kind: 'search'; pattern: string;
 export interface RichToolOther  { name: string; kind: 'other';  summary: string }
 export type RichTool = RichToolBash | RichToolEdit | RichToolWrite | RichToolRead | RichToolSearch | RichToolOther
 
-export type ChatEventTool = RichTool & { type: 'tool' }
+export type ChatEventTool = RichTool & { type: 'tool'; seq?: number }
 
 export interface ChatEventResult {
   type: 'result'
@@ -446,7 +451,9 @@ export interface ChatEventQueued {
 }
 
 /** spec-086: backend was busy and INJECTED the prompt into the running turn (CLI steering).
- *  The user bubble renders from the activity-bus 'steer' event, not from this ack. */
+ *  The user bubble renders from THIS ack locally (not from the activity-bus 'steer' event,
+ *  which may be delayed or dropped by a dead bus connection) — the bus event is now only a
+ *  dedup-checked mirror for other tabs/sessions watching the same turn. */
 export interface ChatEventSteered {
   type: 'steered'
 }
@@ -556,6 +563,13 @@ export interface ActivityEventRunStart {
   prompt: string
   run_id: string
   chat_id?: string
+  /** Seq-tagged since spec (bus reconnect replay) — absent on older server builds. */
+  seq?: number
+  /** The server already stripped SDK service blocks (_strip_service_blocks) from `prompt` at
+   *  the _bus_publish boundary. True means the ENTIRE original prompt was service-block noise
+   *  (e.g. a background <task-notification> wake-up) — `prompt` is now empty and this turn
+   *  should render like a 'bg' source turn (no user bubble), not an empty one. */
+  prompt_service_only?: boolean
 }
 
 export interface ActivityEventText {
@@ -575,6 +589,8 @@ export interface ActivityEventRunEnd {
   outcome: 'ok' | 'fail'
   run_id: string
   chat_id?: string
+  /** Seq-tagged since spec (bus reconnect replay) — absent on older server builds. */
+  seq?: number
 }
 
 // ─── Spec-035 L4: sub-agent bus event ────────────────────────────────────────

@@ -216,6 +216,45 @@ async def test_chat_streams_text_events(aiohttp_client, tmp_path, project_dir):
     assert text_event.get("text") == "Hello from mock"
 
 
+async def test_chat_direct_stream_content_events_carry_seq(aiohttp_client, tmp_path, project_dir):
+    """text_delta/text/tool frames on the direct POST /chat body carry the SAME seq as their
+    bus twin (both come from the same _live_turn_append() call in api_project_chat).
+
+    This is the prerequisite for the frontend's dead-bus fallback renderer
+    (DIRECT_STREAM_FALLBACK_MS in ChatTab.tsx): once it renders a content frame straight off
+    this direct stream, it advances lastAppliedSeqRef using this field so that when the bus
+    reconnects and replays the identical event, the shared seq-dedup gate skips it — no
+    double-render. Without seq here, the fallback would have no safe way to dedup against the
+    bus catching back up mid-turn. (BUG 1 fix prerequisite)
+    """
+
+    async def fake_engine(**kwargs):
+        yield {"type": "text_delta", "text": "Hel"}
+        yield {"type": "text_delta", "text": "lo"}
+        yield {"type": "text", "text": "Hello"}
+        yield {"type": "tool", "name": "Bash", "input": {"command": "ls"}}
+        yield {"type": "result", "session_id": "sess-seq"}
+
+    ctx = _make_chat_ctx(tmp_path, project_dir, run_engine=fake_engine)
+    app = _make_app(ctx)
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/api/projects/myproject/chat",
+        json={"prompt": "go"},
+        headers=_auth_headers(ctx),
+    )
+    assert resp.status == 200
+    events = await _read_sse_events(resp)
+
+    content_events = [e for e in events if e.get("type") in ("text_delta", "text", "tool")]
+    assert len(content_events) == 4, f"expected 4 content frames: {events}"
+    seqs = [e.get("seq") for e in content_events]
+    assert all(isinstance(s, int) for s in seqs), f"every content frame must carry an int seq: {content_events}"
+    assert seqs == sorted(seqs), f"seq must be non-decreasing in emission order: {seqs}"
+    assert len(set(seqs)) == len(seqs), f"seq must be unique per event: {seqs}"
+
+
 async def test_chat_releases_lock_after_completion(aiohttp_client, tmp_path, project_dir):
     """After chat completes the running lock must be released."""
 

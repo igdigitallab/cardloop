@@ -528,6 +528,23 @@ function finalizeStreamingWithMetrics(
  */
 const BUS_SILENCE_REPAIR_MS = 60_000
 
+/**
+ * Direct-POST-stream fallback renderer threshold. The bus is the sole render source
+ * (spec-063 Stage 2a) — but the SAME tab that is actively POSTing /chat right now has a
+ * second, independent connection carrying the identical content (webapp.py's api_project_chat
+ * writes every text_delta/text/tool frame to BOTH the bus and this response body, back to
+ * back, from the same coroutine — see the seq comment on those _send() calls). If a real
+ * content frame arrives here while the bus has been silent this long, that is hard local
+ * evidence the bus connection is dead for THIS turn (not just quiet — a quiet tool call would
+ * make BOTH channels silent together), so render from here instead of leaving the canvas
+ * blank until the bus reconnects or the turn ends. Short relative to BUS_SILENCE_REPAIR_MS /
+ * the bus hook's own 40s dead-socket detector, because this signal is much stronger: it is
+ * corroborated by bytes arriving on a sibling connection at this exact instant. Frames carry
+ * the same seq as their bus twin, so lastAppliedSeqRef dedups the bus's later replay of the
+ * identical event once it recovers — no double-render either way.
+ */
+const DIRECT_STREAM_FALLBACK_MS = 8_000
+
 let _msgCounter = 0
 function nextId() { return `msg-${++_msgCounter}` }
 
@@ -2269,6 +2286,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     if (evt.kind === 'run_start') {
       hydratedCompletedTurnRef.current = false
       const isBg = evt.source === 'bg'
+      // The server already stripped SDK service blocks from `prompt` at the _bus_publish
+      // boundary (webapp.py) — prompt_service_only means the ENTIRE original prompt was one
+      // (e.g. a background <task-notification> wake-up drained through the ordinary chat/card
+      // lane, not the dedicated 'bg' source). `evt.prompt` is now "": render this like a 'bg'
+      // turn (no user bubble) instead of an empty one, so a harness-internal wake never shows
+      // up as a blank or (pre-fix) raw-XML chat bubble.
+      const hideUserBubble = isBg || evt.prompt_service_only === true
       busActiveRef.current = true
       setMessages(prev => {
         // spec-063 Stage 2a: own send — sendMessage already appended the optimistic
@@ -2280,7 +2304,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         // Foreign/background run: heal any dangling open bubble, then open the new turn.
         const fin = finalizeStreaming(prev)
         const assistantMsg: ChatMessage = { ...makeAssistantMsg(), ...(isBg ? { bgRun: true } : {}) }
-        if (isBg) return [...fin, assistantMsg]  // 🌙 background runs have no user prompt
+        if (hideUserBubble) return [...fin, assistantMsg]  // 🌙 no user-visible prompt to show
         const prefix = evt.source === 'card' ? '🗂 card: ' : evt.source === 'tg' ? '📱 TG: ' : ''
         return [...fin, makeUserMsg(prefix + evt.prompt), assistantMsg]
       })
@@ -2292,7 +2316,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // the next text/tool chunk opens a fresh assistant bubble (appendChunk semantics).
       // No busActiveRef gate: the operator's own injected message must never be hidden
       // by a missed run_start.
-      if (evt.text) setMessages(prev => [...finalizeStreaming(prev), makeUserMsg(evt.text)])
+      // Dedup against our OWN steer: sendMessage's {type:'steered'} handler already rendered
+      // this exact user bubble locally the instant the ack came back (it does not wait for
+      // this bus event, which may be delayed or dropped by a dead bus connection — see the
+      // DIRECT_STREAM_FALLBACK_MS comment). Skip re-adding it; still render for a PEER
+      // tab/session that steered the same turn, which has no local bubble to dedup against.
+      if (evt.text) setMessages(prev => {
+        const fin = finalizeStreaming(prev)
+        const last = fin[fin.length - 1]
+        if (last && last.role === 'user' && last.text === evt.text) return fin
+        return [...fin, makeUserMsg(evt.text)]
+      })
 
     } else if (evt.kind === 'text') {
       if (!busActiveRef.current) return
@@ -2722,13 +2756,22 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           // appended for this send, and refresh the queue display.  The backend drain loop
           // (or the lock-release drain) will deliver the message and emit run_start/run_end
           // on the activity bus so the tab re-renders the real turn.
-          // spec-086: the server injected this send into the RUNNING turn (steering).
-          // Retract the optimistic user+assistant pair — the bus 'steer' event renders
-          // the user bubble at its true in-turn position (single-writer canvas). Do NOT
-          // touch `run`: a foreign turn is still live and its bar must survive this ack.
+          // spec-086: the server injected this send into the RUNNING turn (steering). Render
+          // the user bubble NOW, from this ack — do NOT wait for the bus 'steer' mirror,
+          // which may be delayed or dropped by a dead bus connection and leave the operator's
+          // own message invisible until reload (card: "sent message doesn't appear in chat").
+          // Only the optimistic ASSISTANT placeholder is retracted (this send did not open a
+          // fresh turn — the turn continues elsewhere and will open its own bubble via bus
+          // content events, or the direct-stream fallback above if this tab owns that turn).
+          // The bus 'steer' handler dedups against this exact bubble by text, so whichever of
+          // the two arrives is a no-op for the other. Do NOT touch `run`: a foreign turn is
+          // still live and its bar must survive this ack.
           if (evt.type === 'steered') {
             setStreaming(false)
-            setMessages(prev => prev.slice(0, -2))
+            setMessages(prev => {
+              const last = prev[prev.length - 1]
+              return last && last.role === 'assistant' && last.streaming ? prev.slice(0, -1) : prev
+            })
             return
           }
 
@@ -2754,23 +2797,46 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           }
 
           setMessages(prev => {
-            // spec-063 Stage 2a: the direct POST body is a CONTROL channel only — content
-            // (deltas/text/tools/subagents) and metrics finalization render exclusively from
-            // the seq-ordered activity stream. Touching the canvas from here would race the
-            // bus connection (two sockets, no ordering guarantee) and split bubbles: a
+            // spec-063 Stage 2a: the direct POST body is normally a CONTROL channel only —
+            // content (deltas/text/tools/subagents) and metrics finalization render exclusively
+            // from the seq-ordered activity stream. Touching the canvas from here would race
+            // the bus connection (two sockets, no ordering guarantee) and split bubbles: a
             // direct 'done' finalizing while bus deltas are still in flight re-opens a new
             // bubble mid-word — exactly the S1 fragmentation class.
+            //
+            // The one exception is DIRECT_STREAM_FALLBACK_MS: once THIS request has hard local
+            // evidence the bus is dead for this turn (see the constant's comment), rendering
+            // from here is strictly better than a blank canvas. Every branch below dedups by
+            // seq against lastAppliedSeqRef — the SAME gate the bus path uses — so whichever of
+            // the two channels delivers a given event first wins and the other is a no-op; no
+            // double-render when the bus recovers mid-turn and replays what this already drew.
+            const busDeadNow = Date.now() - lastBusEventAtRef.current > DIRECT_STREAM_FALLBACK_MS
+            const applySeq = (): boolean => {
+              const s = (evt as unknown as { seq?: number }).seq
+              if (typeof s !== 'number') return true  // no seq (older server) — no dedup possible, apply anyway
+              if (s <= lastAppliedSeqRef.current) return false
+              lastAppliedSeqRef.current = s
+              return true
+            }
             switch (evt.type) {
+              case 'text_delta':
+                return busDeadNow && applySeq() ? appendDelta(prev, evt.text ?? '') : prev
               case 'text': {
-                // Canonical-final safety net: the activity stream remains the primary
-                // render source, but a just-opened subscription can miss its first replay
-                // frame. The direct stream carries the same finalized text in order. Only
-                // repair an already-open pure-text bubble; never create/split bubbles here,
-                // so tool ordering and bus dedup semantics remain unchanged.
+                if (busDeadNow) return applySeq() ? reconcileFinalText(prev, evt.text) : prev
+                // Canonical-final safety net (bus looks alive): a just-opened subscription can
+                // miss its first replay frame. The direct stream carries the same finalized
+                // text in order. Only repair an already-open pure-text bubble; never
+                // create/split bubbles here, so tool ordering and bus dedup semantics for the
+                // common (bus-healthy) path remain unchanged.
                 const last = prev[prev.length - 1]
                 return last?.role === 'assistant' && last.streaming && last.tools.length === 0
                   ? reconcileFinalText(prev, evt.text)
                   : prev
+              }
+              case 'tool': {
+                if (!busDeadNow || !applySeq()) return prev
+                const { type: _t, seq: _s, ...toolFields } = evt as unknown as Record<string, unknown>
+                return appendChunk(prev, { kind: 'tool', tool: toolFields as unknown as ChatToolCall })
               }
               case 'error':
                 // Terminal + needs immediate feedback; bus 'error' re-finalize is a no-op.

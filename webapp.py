@@ -507,6 +507,26 @@ def _bus_publish(session_key: str, event: dict, persist: bool = True) -> None:
     web-chat publish so the SSE/LiveTurn feed gets every event without changing timeline
     granularity (chat text was never per-event persisted; tool events already reach the
     timeline via the PostToolUse hook — avoid double-recording)."""
+    # A run_start's "prompt" is whatever text WOKE the turn — for an autonomous background
+    # continuation that is often a raw SDK service block (<task-notification>...</task-
+    # notification>, a scheduler ping, etc.), never meant for a human to read. Every OTHER
+    # entry point that shows a prompt to an operator already strips these (_session_history,
+    # via _strip_service_blocks) — this is the one place that did not, because it publishes
+    # the raw string straight from the request/queue-item/engine-wake path. Fixed HERE, at the
+    # single publish boundary every consumer shares (live canvas bus subscribers, peer chat
+    # tabs, the timeline JSONL persisted a few lines below, Web Push), instead of patching each
+    # of the run_start call sites (chat/queue/card/bg lanes) separately — and without touching
+    # the RAW prompt those call sites pass to the engine itself (only this display copy).
+    if event.get("kind") == "run_start" and isinstance(event.get("prompt"), str) and event["prompt"]:
+        _raw_prompt = event["prompt"]
+        _cleaned_prompt = _strip_service_blocks(_raw_prompt)
+        if _cleaned_prompt != _raw_prompt:
+            event = {**event, "prompt": _cleaned_prompt}
+            if not _cleaned_prompt:
+                # The ENTIRE prompt was service-block noise — nothing left for a human to
+                # read. Flag it so consumers render this like the 'bg' lane's autonomous
+                # turns (no user bubble) instead of an empty one.
+                event["prompt_service_only"] = True
     subscribers = _bus.get(session_key)
     if subscribers:
         for q in list(subscribers):  # list() — snapshot, since _bus_unsubscribe may be called concurrently
@@ -1530,13 +1550,21 @@ def _live_turn_create(session_key: str, model: str, prompt: str = "") -> dict:
     """Creates a new LiveTurn for session_key and stores it. Returns the turn dict.
     `prompt` is the user message that started the turn — kept so a client that
     missed the run_start (e.g. queued/card/deferred runs, or a stream that dropped)
-    can reconstruct the user bubble on hydration instead of a '…' placeholder."""
+    can reconstruct the user bubble on hydration instead of a '…' placeholder.
+
+    Stored stripped of SDK service blocks (_strip_service_blocks) — this is a DISPLAY copy
+    only (GET /live's "prompt" field, and the busy-branch duplicate-submit check), never the
+    string handed to the engine: callers pass the raw prompt to run_engine() separately from
+    this call. Without stripping here, a background wake-up whose prompt is a raw
+    <task-notification>...</task-notification> block leaked verbatim into a page-reload mid-
+    turn hydrate (api_project_live → ChatTab's hydrateFromServer), the same class of leak the
+    run_start bus event had (see _bus_publish)."""
     turn: dict = {
         "turn_id": str(_uuid.uuid4()),
         "started_at": time.time(),
         "model": model,
         "status": "running",
-        "prompt": prompt or "",
+        "prompt": _strip_service_blocks(prompt or ""),
         # spec-071: seq continues across turns (session-monotonic) so the client's
         # grow-only reconnect cursor keeps working after long turns / between turns.
         "seq": _live_seq.get(session_key, 0),
@@ -1818,6 +1846,21 @@ def _cookie_secure(req: web.Request) -> bool:
 
 import hmac as _hmac
 
+
+def _ct_eq(a: "str | bytes", b: "str | bytes") -> bool:
+    """Constant-time equality that also survives non-ASCII input.
+
+    hmac.compare_digest raises TypeError("comparing strings with non-ASCII characters is not
+    supported") when either str argument leaves ASCII — so a password/token/cookie carrying a
+    Cyrillic or accented character turned an ordinary rejection into a 500 (seen live on ops
+    2026-08-25 20:15, board incident ops:err-a93432). Comparing the UTF-8 bytes keeps the
+    comparison constant-time AND total: any input is a valid comparison, never an exception.
+    surrogatepass keeps a lone surrogate from a malformed client from raising either.
+    """
+    ab = a.encode("utf-8", "surrogatepass") if isinstance(a, str) else a
+    bb = b.encode("utf-8", "surrogatepass") if isinstance(b, str) else b
+    return _hmac.compare_digest(ab, bb)
+
 # Spec-012 Ph3: pattern for exact match of path /api/projects/{id}/incident.
 # Pre-compiled once — used in auth_middleware for tight-exempt.
 # Deliberately NOT endswith("/incident"): won't pass ../incident/evil or GET.
@@ -2006,7 +2049,7 @@ async def auth_middleware(request: web.Request, handler):
         password = request.app["ctx"]["password"]
         expected = request.app["ctx"]["_auth_token"]
         token = request.cookies.get("cops_auth", "")
-        if not _hmac.compare_digest(token, expected):
+        if not _ct_eq(token, expected):
             return web.json_response({"error": "unauthorized"}, status=401)
     return await handler(request)
 
@@ -3154,7 +3197,7 @@ async def api_login(req: web.Request) -> web.Response:
     except Exception:
         _record_attempt(ip, False)
         return web.json_response({"error": "bad request"}, status=400)
-    if not _hmac.compare_digest(password, ctx["password"]):
+    if not _ct_eq(password, ctx["password"]):
         _record_attempt(ip, False)
         return web.json_response({"error": "bad password"}, status=401)
 
@@ -4859,7 +4902,7 @@ async def api_project_incident(req: web.Request) -> web.Response:
         return web.json_response({"error": "forbidden"}, status=403)   # push not enabled for this project
     body_token = body.get("token", "")
     presented_token = req.headers.get("X-Incident-Token", "") or (body_token if isinstance(body_token, str) else "")
-    if not _hmac.compare_digest(str(presented_token), str(expected_token)):
+    if not _ct_eq(str(presented_token), str(expected_token)):
         return web.json_response({"error": "forbidden"}, status=403)
 
     # 5. Sanitize: splitlines() catches ALL line separators (incl. U+2028/U+2029/\x85) —
@@ -11653,7 +11696,11 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             _lt["provider"] = provider
             if _resolved_chat_id:
                 _lt["chat_id"] = _resolved_chat_id
-        _bus_publish(session_key, {
+        # Seq-tag via _live_turn_append (like every content event) so a client that
+        # reconnects mid-turn replays this run_start instead of never seeing it: a bare
+        # _bus_publish() event carries no seq and is therefore invisible to the ?since=
+        # replay in api_project_activity_stream, which filters turn["events"] by seq.
+        _run_start_ev = _live_turn_append(session_key, {
             "kind": "run_start",
             "source": "chat",
             "prompt": prompt,
@@ -11661,6 +11708,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             "provider": provider,
             **_cid,
         })
+        _bus_publish(session_key, _run_start_ev)
 
         if provider == "codex":
             _queue_gen = run_engine(
@@ -11751,12 +11799,17 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         outcome = "ok"
         # spec-071 parity: close the live-turn ring so /live stops reporting a running turn.
         _live_turn_finish(session_key, "done")
-        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "ok", "run_id": run_id, "provider": provider, **_cid})
+        # Seq-tag run_end too (see run_start above) — the turn dict is still in _live_turns
+        # (drop is scheduled _LIVE_TURN_RETAIN_SEC later), so appending here is safe and
+        # makes the completion signal replayable across a reconnect.
+        _run_end_ev = _live_turn_append(session_key, {"kind": "run_end", "source": "chat", "outcome": "ok", "run_id": run_id, "provider": provider, **_cid})
+        _bus_publish(session_key, _run_end_ev)
 
     except Exception as e:
         print(f"[chat_queue] execute error for {session_key} item {item['id']}: {e}")
         _live_turn_finish(session_key, "error")
-        _bus_publish(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id, "provider": locals().get("provider", "claude"), **_cid})
+        _run_end_ev = _live_turn_append(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id, "provider": locals().get("provider", "claude"), **_cid})
+        _bus_publish(session_key, _run_end_ev)
 
     finally:
         ctx["running"].pop(session_key, None)
@@ -12275,14 +12328,21 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # Publish run_start to the activity bus so other tabs (and recovery after stream drop)
     # can reconstruct the in-flight turn without requiring a hard refresh.
     # chat_id is injected so peer chat tabs in the same project can filter out foreign runs.
-    _bus_publish(session_key, {
+    # Seq-tag via _live_turn_append (like every content event, and like steer already does)
+    # so a client that reconnects mid-turn replays this run_start via ?since= instead of
+    # never seeing it — a bare _bus_publish() event has no seq and api_project_activity_stream
+    # only replays turn["events"] filtered by seq, so an un-tagged run_start is invisible to
+    # a reconnect and any recovery gated on it (e.g. the frontend's hydratedCompletedTurnRef
+    # reset) stays stuck until the operator reloads the page.
+    _run_start_ev = _live_turn_append(session_key, {
         "kind": "run_start",
         "source": "chat",
         "prompt": prompt,
         "run_id": _chat_run_id,
         "provider": _provider_for_run,
         **({"chat_id": _req_chat_id} if _req_chat_id else {}),
-    }, persist=True)
+    })
+    _bus_publish(session_key, _run_start_ev, persist=True)
 
     resp = web.StreamResponse(
         status=200,
@@ -12490,13 +12550,16 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 # the accumulated delta with the canonical final text.
                 # The _send wrapper's (ConnectionResetError, ConnectionAbortedError) guard covers
                 # benign client disconnects here exactly as it does for all other events.
-                await _send({"type": "text_delta", "text": event["text"]})
+                # seq mirrors the bus twin (_live_ev) so a frontend fallback-render off this
+                # direct stream (used only once it has hard evidence the bus is dead) can be
+                # deduped by the SAME lastAppliedSeqRef gate once the bus recovers and replays.
+                await _send({"type": "text_delta", "text": event["text"], "seq": _live_ev.get("seq")})
             elif etype == "text":
-                await _send({"type": "text", "text": event["text"]})
+                await _send({"type": "text", "text": event["text"], "seq": _live_ev.get("seq")})
                 _chat_answer_parts.append(event["text"])  # spec-034 L2: collect for reconciler
             elif etype == "tool":
                 # tool_data already computed above for buffering — reuse it
-                await _send({"type": "tool", **tool_data})
+                await _send({"type": "tool", **tool_data, "seq": _live_ev.get("seq")})
             elif etype == "result":
                 _chat_last_result_event = event  # Phase D: capture for auto-resume
                 sid = event.get("session_id") if _provider_for_run == "claude" else None
@@ -12677,14 +12740,21 @@ async def api_project_chat(req: web.Request) -> web.Response:
         _live_turn_finish(session_key, "error")
         # Publish run_end to the activity bus so other tabs can finalize the in-flight turn
         # display and so the originating tab can recover after a dropped direct stream.
-        _bus_publish(session_key, {
+        # Seq-tag via _live_turn_append (see run_start above) — the turn dict is still in
+        # _live_turns (drop is scheduled _LIVE_TURN_RETAIN_SEC later, and nothing awaits
+        # between _live_turn_finish and here to let a new turn replace it), so appending is
+        # safe and makes the completion signal replayable across a client reconnect instead
+        # of being silently unrecoverable (a bare _bus_publish() event has no seq and is
+        # invisible to the ?since= replay filter in api_project_activity_stream).
+        _run_end_ev = _live_turn_append(session_key, {
             "kind": "run_end",
             "source": "chat",
             "outcome": "ok" if _chat_run_ok else "fail",
             "run_id": _chat_run_id,
             "provider": _provider_for_run,
             **({"chat_id": _active_chat_id_for_run} if _active_chat_id_for_run else {}),
-        }, persist=True)
+        })
+        _bus_publish(session_key, _run_end_ev, persist=True)
         # spec-069 P2: re-wake the orchestrator if it left background children still running.
         _maybe_schedule_bg_continuation(ctx, session_key, _active_chat_id_for_run or _req_chat_id, project["id"])
         # spec-069 P3 (RC#3): after the continuation decision, reconcile stuck monitors from
