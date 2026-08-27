@@ -1135,11 +1135,11 @@ const isTouchDevice: boolean =
   typeof window !== 'undefined' &&
   (window.matchMedia?.('(pointer: coarse)').matches || 'ontouchstart' in window)
 
-// Multichat UI is HIDDEN on the frontend (operator decision 2026-07-02). The BACKEND is left
-// fully intact — chats.json, per-chat sessions and /api/.../chats still work; each project simply
-// shows its single ACTIVE chat and the client keeps sending that chat_id. Flip to true to restore
-// the chat tab-bar (tabs / + new / rename / close). Kept as a one-line switch rather than deleting
-// the code so it is trivially reversible.
+// Multichat UI switch. It was hidden for a while (operator decision 2026-07-02) and turned back
+// on later — the comment used to still say "hidden", which is how the tab bar ended up looking
+// abandoned while it was in fact live. Flip to false to hide the chat tab-bar (tabs / + new /
+// rename / close); the backend (chats.json, per-chat sessions, /api/.../chats) stays intact
+// either way and the client keeps sending its chat_id.
 const SHOW_MULTICHAT_UI: boolean = true
 
 export function ChatTab({ project, onProjectsReload, isActive, collapsed, onToggleCollapse, chatMax, onToggleChatMax, chromeCollapsed, onOpenCard, discussCard, onDiscussConsumed, models }: Props) {
@@ -1160,6 +1160,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const [newChatModel, setNewChatModel] = useState('')
   const [chatsLoaded, setChatsLoaded] = useState(false)
   const [hydratedChatId, setHydratedChatId] = useState<string | null>(null)
+  const [newChatName, setNewChatName] = useState('')
+  // Background-tab activity, keyed by chat id: 'running' while a turn that belongs to another
+  // chat of this project is in flight, 'ready' once it finished without the operator watching.
+  // Fed by the activity bus (events carry chat_id) — same signal the project tab bar shows.
+  const [chatActivity, setChatActivity] = useState<Record<string, 'running' | 'ready'>>({})
 
   useEffect(() => {
     api.agentProviders().then(res => setProviderRegistry(res.providers)).catch(() => {})
@@ -1205,6 +1210,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     const chat = chats.find(c => c.id === effectiveChatId)
     activeSessionIdRef.current = chat?.session_id ?? null
   }, [chats, effectiveChatId])
+
+  // Always-fresh active chat id. A send may outlive a tab switch (the POST stream is
+  // disconnect-resilient server-side), and its late catch/finally must NOT write to a canvas
+  // that now belongs to a different chat.
+  const effectiveChatIdRef = useRef<string>('')
+  useEffect(() => { effectiveChatIdRef.current = effectiveChatId }, [effectiveChatId])
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [pendingHandoff, setPendingHandoff] = useState<string | null>(null)
@@ -1954,6 +1965,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     let cancelled = false
     setHydratedChatId(null)
     abortRef.current?.abort()
+    // The abort's finally runs a microtask later, so streamingRef would still read true when
+    // hydrateFromServer checks it at the bottom of this effect — and the freshly opened chat
+    // would stay blank until the next event. Drop it here, synchronously.
+    streamingRef.current = false
     setMessages([])
     // hist-N ids restart at 0 per chat, so a stale expanded id could otherwise match
     // an unrelated bubble in the next chat — clear alongside the message list.
@@ -2162,7 +2177,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // monitor events are also project-scoped. Events without chat_id (card/TG runs, old
     // server versions) are kept as before — no regression on single-chat projects.
     const evtChatId = (evt as unknown as Record<string, unknown>).chat_id as string | undefined
-    if (evtChatId && effectiveChatId && evtChatId !== effectiveChatId && evt.kind !== 'board_event' && evt.kind !== 'monitor') return
+    if (evtChatId && effectiveChatId && evtChatId !== effectiveChatId && evt.kind !== 'board_event' && evt.kind !== 'monitor') {
+      // Foreign chat of THIS project: the canvas ignores it, but its tab should say so —
+      // a pulsing dot while the turn runs, a steady one once the answer is waiting.
+      if (evt.kind === 'run_start') {
+        setChatActivity(prev => ({ ...prev, [evtChatId]: 'running' }))
+      } else if (evt.kind === 'run_end') {
+        setChatActivity(prev => ({ ...prev, [evtChatId]: 'ready' }))
+      }
+      return
+    }
 
     // spec-063 Stage 2a: the activity stream is the SINGLE render source for every turn —
     // own sends included (the direct POST body now carries only control frames: queued ack,
@@ -2573,6 +2597,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // in that window, see a server that has not taken the run lock yet, and clear the run we
     // are about to start. Mirrors the same synchronous flip on the way down (see finally).
     streamingRef.current = true
+    // The chat this send belongs to. Checked in catch/finally — the operator may switch tabs
+    // mid-turn, and by then the canvas belongs to a different chat.
+    const sendChatId = effectiveChatId
     const startTs = Date.now()
     setRun({ startedAt: startTs, lastEventAt: startTs, currentTool: null, source: 'chat' })
 
@@ -2766,42 +2793,56 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       if (!watchdogTripped) {
         if (err instanceof Error && err.name === 'AbortError') return
         if (abortRef.current?.signal.aborted) return
+        if (effectiveChatIdRef.current !== sendChatId) return
         const msg = err instanceof Error ? err.message : String(err)
         setError(msg)
         setMessages(prev => finalizeStreaming(prev, msg))
       }
     } finally {
       window.clearInterval(watchdog)
-      setStreaming(false)
-      // Sync the ref NOW (the useEffect that mirrors `streaming` runs after render) so the
-      // recovery hydrate below is not blocked by our own streamingRef guard in hydrateFromServer.
-      streamingRef.current = false
-      setRun(null)
-      abortRef.current = null
-      textareaRef.current?.focus()
-      onProjectsReload()
-      // "Your turn" chime. The App-level run_end handler also fires it (and covers
-      // runs this tab never streamed); the throttle in playChime collapses the two.
-      // Gated on gotResult so an intentional abort (stop / unmount) stays silent.
-      if (gotResult) playChime('ok')
-      // Recovery: if the stream never delivered a clean 'result', it was cut off (SSE drop /
-      // eviction / restart). The turn often completes on the server in the background, leaving
-      // our canvas on a truncated bubble that only "appears" (out of order) on the next send.
-      // Pull authoritative server state now — it reconstructs a still-running turn from /live,
-      // or replaces the buffer with canonical history if it already finished — so the full answer
-      // lands in the right place. The /live poll keeps catching up if the turn is still running.
-      // ac.signal.aborted distinguishes an INTENTIONAL abort (reset / session-change / unmount /
-      // remount cleanup) — where recovery is unwanted — from an EXTERNAL drop (network / eviction /
-      // restart), where it is exactly what's needed. A watchdog abort counts as external. (spec-071)
-      if (!gotResult && (watchdogTripped || !ac.signal.aborted)) hydrateFromServer(() => false)
-      // Spec-041 A2: drain via shared helper (also called from bus/poll paths).
-      drainQueue()
-      // Ensure compaction indicator is cleared when the turn ends (covers error/abort paths).
-      if (isCompactingRef.current) {
-        if (compactFallbackTimerRef.current !== null) { clearTimeout(compactFallbackTimerRef.current); compactFallbackTimerRef.current = null }
-        isCompactingRef.current = false
-        setIsCompacting(false)
-        setTimeout(() => setCompactToast(false), 4000)
+      // Tab switch mid-turn: this send belongs to a chat the operator has left. The server keeps
+      // the run going (api_project_chat is disconnect-resilient) and the bus keeps routing it by
+      // chat_id — all we must do is stay off the canvas, which now belongs to another chat. Mark
+      // the origin chat as busy so its background tab shows the working dot.
+      // No early `return` here: a return inside finally swallows in-flight exceptions.
+      const leftThisChat = effectiveChatIdRef.current !== sendChatId
+      if (leftThisChat) {
+        if (abortRef.current === ac) abortRef.current = null
+        if (sendChatId) {
+          setChatActivity(prev => prev[sendChatId] === 'ready' ? prev : { ...prev, [sendChatId]: 'running' })
+        }
+      } else {
+        setStreaming(false)
+        // Sync the ref NOW (the useEffect that mirrors `streaming` runs after render) so the
+        // recovery hydrate below is not blocked by our own streamingRef guard in hydrateFromServer.
+        streamingRef.current = false
+        setRun(null)
+        abortRef.current = null
+        textareaRef.current?.focus()
+        onProjectsReload()
+        // "Your turn" chime. The App-level run_end handler also fires it (and covers
+        // runs this tab never streamed); the throttle in playChime collapses the two.
+        // Gated on gotResult so an intentional abort (stop / unmount) stays silent.
+        if (gotResult) playChime('ok')
+        // Recovery: if the stream never delivered a clean 'result', it was cut off (SSE drop /
+        // eviction / restart). The turn often completes on the server in the background, leaving
+        // our canvas on a truncated bubble that only "appears" (out of order) on the next send.
+        // Pull authoritative server state now — it reconstructs a still-running turn from /live,
+        // or replaces the buffer with canonical history if it already finished — so the full answer
+        // lands in the right place. The /live poll keeps catching up if the turn is still running.
+        // ac.signal.aborted distinguishes an INTENTIONAL abort (reset / session-change / unmount /
+        // remount cleanup) — where recovery is unwanted — from an EXTERNAL drop (network / eviction /
+        // restart), where it is exactly what's needed. A watchdog abort counts as external. (spec-071)
+        if (!gotResult && (watchdogTripped || !ac.signal.aborted)) hydrateFromServer(() => false)
+        // Spec-041 A2: drain via shared helper (also called from bus/poll paths).
+        drainQueue()
+        // Ensure compaction indicator is cleared when the turn ends (covers error/abort paths).
+        if (isCompactingRef.current) {
+          if (compactFallbackTimerRef.current !== null) { clearTimeout(compactFallbackTimerRef.current); compactFallbackTimerRef.current = null }
+          isCompactingRef.current = false
+          setIsCompacting(false)
+          setTimeout(() => setCompactToast(false), 4000)
+        }
       }
     }
   }, [input, projectId, streaming, rotating, onProjectsReload, attachments, thinkMode, ultracode, planMode, askMode, autoRotate, effectiveChatId, activeProvider, composerReady]) // eslint-disable-line react-hooks/exhaustive-deps -- queue/hydration callbacks use live refs
@@ -3012,7 +3053,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // ─── Spec-037: chat tab handlers ─────────────────────────────────────────
 
   async function handleSwitchChat(chatId: string) {
-    if (chatId === activeChatId || streaming) return
+    // Switching mid-stream is safe: the server keeps the turn running when our SSE drops
+    // (api_project_chat is disconnect-resilient), every bus event carries chat_id, and coming
+    // back replays the live buffer. The old `|| streaming` guard only trapped the operator.
+    if (chatId === activeChatId) return
+    // Clear the background marker for the chat we are opening — we are about to look at it.
+    setChatActivity(prev => {
+      if (!(chatId in prev)) return prev
+      const next = { ...prev }
+      delete next[chatId]
+      return next
+    })
     try {
       const res = await api.patchChat(projectId, chatId, { active: true })
       setActiveChatId(res.active)
@@ -3024,12 +3075,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     const claude = providerRegistry.find(p => p.provider === 'claude')
     setNewChatProvider('claude')
     setNewChatModel(claude?.models[0]?.value || project.model)
+    setNewChatName('')
     setNewChatOpen(true)
   }
 
   async function confirmCreateChat() {
     try {
       const newChat = await api.createChat(projectId, {
+        name: newChatName.trim() || undefined,
         provider: newChatProvider,
         model: newChatModel || undefined,
       })
@@ -3298,6 +3351,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   <span style={{ marginLeft: 5, fontSize: 9, opacity: .7, textTransform: 'uppercase' }}>
                     {chat.provider === 'codex' ? 'Codex' : 'Claude'}
                   </span>
+                  {!isActive && chatActivity[chat.id] === 'running' && (
+                    <span className="chat-named-tab-dot working" title={t['chat.tabs_working']} />
+                  )}
+                  {!isActive && chatActivity[chat.id] === 'ready' && (
+                    <span className="chat-named-tab-dot ready" title={t['chat.tabs_ready']} />
+                  )}
                 </span>
               )}
               {/* Close button only on the active tab */}
@@ -4467,6 +4526,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   <option key={model.value} value={model.value}>{model.label}</option>
                 ))}
               </select>
+            </label>
+            <label style={{ display: 'grid', gap: 6, fontSize: 12, color: 'var(--text2)' }}>
+              Name
+              <input
+                className="input"
+                value={newChatName}
+                placeholder="e.g. Math — lecture 4"
+                maxLength={80}
+                onChange={e => setNewChatName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && newChatModel) { e.preventDefault(); void confirmCreateChat() } }}
+              />
             </label>
             <div style={{ fontSize: 12, color: 'var(--text2)' }}>
               The provider is pinned for the lifetime of this chat. Create another chat to switch engines.

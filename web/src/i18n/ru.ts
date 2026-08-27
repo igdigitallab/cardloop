@@ -676,6 +676,8 @@ export const ru = {
   'chat.tabs_close_aria': 'Закрыть чат',
   'chat.tabs_close_last': 'Нельзя закрыть последний чат',
   'chat.tabs_loading': 'Загрузка чатов…',
+  'chat.tabs_working': 'В этом чате идёт работа…',
+  'chat.tabs_ready': 'В этом чате готов ответ',
 
   // ── Spec-039: session-health (no auto-reset) ─────────────────────────────────
   // Session health bar tooltip

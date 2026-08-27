@@ -2381,3 +2381,24 @@
 .chat-tool-diff-add { background: color-mix(in srgb, #22c55e 12%, transparent); color: var(--text1, inherit); }
 .chat-tool-diff-del { background: color-mix(in srgb, #ef4444 12%, transparent); color: var(--text1, inherit); }
 .chat-tool-diff-ctx { color: var(--text2); }
+
+/* Background chat tabs: one status dot — pulsing while that chat's turn runs, steady once its
+   answer is waiting. Mirrors .ptab-working / .ptab-reply-ready in the project tab bar. */
+.chat-named-tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
+.chat-named-tab-dot.working {
+  background: var(--yellow);
+  animation: ptab-pulse 1.2s ease-in-out infinite;
+}
+
+.chat-named-tab-dot.ready {
+  background: var(--green);
+}

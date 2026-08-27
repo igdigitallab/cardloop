@@ -707,6 +707,8 @@ export const en = {
   'chat.tabs_close_aria': 'Close chat',
   'chat.tabs_close_last': 'Cannot close the last chat',
   'chat.tabs_loading': 'Loading chats…',
+  'chat.tabs_working': 'Working in this chat…',
+  'chat.tabs_ready': 'Reply ready in this chat',
 
   // ── Spec-039: session-health (no auto-reset) ─────────────────────────────────
   // Session health bar tooltip
