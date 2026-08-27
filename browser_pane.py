@@ -43,6 +43,18 @@ STREAM = {"width": 960, "height": 540, "quality": 45}
 _IDLE_GRACE = 120.0          # close the browser this long after the last activity with no subscribers
 _WATCH_INTERVAL = 15.0       # idle-watchdog tick
 
+# Screencast self-heal: the manual CDP session that carries Page.startScreencast (and
+# the operator's raw mouse/key input) can die WITHOUT the browser itself disconnecting —
+# a renderer crash, a cross-process navigation target swap, a brief blip reattaching to
+# the remote external-cdp host. Playwright's own Page API (goto/click/type_text/...,
+# everything browser_tools.py's agent tools call) is backed by ITS OWN, separately
+# managed session and keeps working straight through this — only the operator's live
+# view goes dark, silently, because a screencast is a passive event stream: nothing
+# raises when it just stops being fed. `_rearm_screencast` re-creates the CDP session
+# for the SAME page and restarts the stream, immediate + 3 bounded backoff retries, and
+# only surfaces a visible error once every attempt has failed. See GOTCHAS.md.
+_REARM_DELAYS = (0.0, 0.5, 1.5, 3.0)
+
 # Operator page zoom (the pane's −/+ buttons and Ctrl+wheel). Chrome's own ladder, so
 # the steps feel familiar. Implemented as CSS `zoom` on documentElement rather than
 # Emulation.setDeviceMetricsOverride on purpose: an override changes the emulated
@@ -477,6 +489,12 @@ class BrowserSession:
         self._last_activity = time.monotonic()
         self._watchdog: "asyncio.Task | None" = None
         self._zoom = ZOOM_DEFAULT   # operator page zoom; re-applied after every navigation
+        # Screencast self-heal (see _REARM_DELAYS above). `_cdp_gen` is bumped every time
+        # self._cdp is (re)armed, so a "close" event from a session we already replaced —
+        # including our OWN intentional detach on a normal tab switch — is recognized as
+        # stale and ignored instead of triggering a needless re-arm.
+        self._cdp_gen = 0
+        self._rearming = False
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -578,6 +596,21 @@ class BrowserSession:
         with contextlib.suppress(Exception):
             if self._cdp:
                 await self._cdp.send("Page.stopScreencast")
+        # A subscriber's WebSocket is resolved to THIS session object once, at connect
+        # time (api_browser_ws in webapp.py), and never re-resolved for the rest of its
+        # life. Once this session retires, get_or_create() builds a fresh one under the
+        # same project key — which the agent's very next tool call picks up transparently
+        # — but an already-open operator WS still points at this now-dead object and would
+        # otherwise sit open and silent forever: no more frames, no error, nothing to tell
+        # the frontend to reconnect. Tell it explicitly so BrowserTab.tsx's onclose fires
+        # and its bounded auto-reconnect picks up the replacement session.
+        for ws in list(self._subs):
+            with contextlib.suppress(Exception):
+                await ws.send_json({"type": "error", "message": "Browser session closed. Reconnecting…"})
+            with contextlib.suppress(Exception):
+                await ws.close()
+        self._subs.clear()
+        self._busy.clear()
         await self._teardown()
         self._started = False
 
@@ -597,12 +630,17 @@ class BrowserSession:
             return False
 
     def _on_crash(self, _page: Any) -> None:
-        """Renderer crashed (commonly OOM). Tell the pane; the browser process
-        may survive, so a reload/navigate can recover."""
-        asyncio.create_task(self.broadcast_json({
-            "type": "error",
-            "message": "The page crashed (likely out of memory). Reconnect or navigate to retry.",
-        }))
+        """Renderer crashed (commonly OOM). The renderer process holds ALL of Page
+        domain's live state, including an active Page.startScreencast — that state is
+        gone even if the CDP session/target itself never technically closes, so a crash
+        needs the same re-arm as a closed CDP session. Routed through _rearm_screencast
+        so the operator gets ONE consistent story (silently recovers if Chrome reloads
+        the tab in time, a visible error only if every bounded retry fails) instead of
+        an unconditional "it's broken" message that a fast recovery would then have no
+        way to take back."""
+        _log.warning("browser renderer crashed (cwd=%s backend=%s) — re-arming screencast",
+                    self.key, self.backend)
+        asyncio.create_task(self._rearm_screencast("the page crashed (likely out of memory)"))
 
     def _on_disconnected(self, _browser: Any) -> None:
         """Browser process died (OOM-killed / crashed). Retire this session so the
@@ -656,7 +694,15 @@ class BrowserSession:
             self._active_id = self._id_of(page)
             self._last_frame = None   # the cached frame belonged to the old tab
             self._cdp = await self._ctx.new_cdp_session(page)
+            self._cdp_gen += 1
+            gen = self._cdp_gen
             self._cdp.on("Page.screencastFrame", self._on_frame)
+            # CDPSession emits "close" when its target is closed OR detach() is called
+            # (Playwright docs) — the latter fires on our OWN intentional switch-away a
+            # few lines above, which is why the handler is gen-guarded: only a "close"
+            # for the session that is STILL self._cdp when it fires means the stream
+            # actually died out from under us.
+            self._cdp.on("close", lambda _cdp, _gen=gen: self._on_cdp_session_closed(_cdp, _gen))
             page.on("framenavigated", self._on_navigated)
             page.on("crash", self._on_crash)
             await self._cdp.send("Page.startScreencast", {
@@ -667,6 +713,74 @@ class BrowserSession:
         if prime:
             await self._broadcast_nav()
             await self._reprime_subs()
+
+    # ── screencast self-heal ──────────────────────────────────────────────────
+    def _on_cdp_session_closed(self, _cdp: Any, gen: int) -> None:
+        """The manual CDP session backing the screencast (+ operator raw input) just
+        closed — a renderer crash, a cross-process navigation target swap under Site
+        Isolation, or a blip on the remote external-cdp host. This is NOT a full
+        browser disconnect (that is _on_disconnected, handled separately): the
+        Playwright Page/Browser handle the agent's own tools drive is unaffected, so
+        nothing else would ever notice — the operator's screencast would just go dark.
+        `gen` filters out a stale event from a session we already intentionally
+        replaced (see the comment where this listener is wired, in _bind_active)."""
+        if self._closed or gen != self._cdp_gen:
+            return
+        _log.warning("browser CDP session closed unexpectedly (cwd=%s backend=%s) — re-arming screencast",
+                    self.key, self.backend)
+        asyncio.create_task(self._rearm_screencast("the live-view connection dropped"))
+
+    async def _rearm_screencast(self, reason: str) -> None:
+        """Re-create the CDP session + Page.startScreencast for the CURRENT active
+        page: immediate attempt + 3 bounded backoff retries (_REARM_DELAYS). Self-heals
+        the operator's live view without touching the agent's own Playwright-driven
+        session at all. Broadcasts a visible error to subscribers only once every retry
+        has failed — the pane must never just sit on a stale frame with no signal that
+        anything is wrong (that was the whole bug this exists to close)."""
+        if self._rearming or self._closed:
+            return
+        self._rearming = True
+        try:
+            for attempt, delay in enumerate(_REARM_DELAYS, start=1):
+                if delay:
+                    await asyncio.sleep(delay)
+                if self._closed or self._page is None or self._ctx is None:
+                    return
+                async with self._switch_lock:
+                    if self._closed or self._page is None or self._ctx is None:
+                        return
+                    try:
+                        with contextlib.suppress(Exception):
+                            if self._cdp is not None:
+                                await self._cdp.detach()
+                        self._cdp = await self._ctx.new_cdp_session(self._page)
+                        self._cdp_gen += 1
+                        gen = self._cdp_gen
+                        self._cdp.on("Page.screencastFrame", self._on_frame)
+                        self._cdp.on("close", lambda _cdp, _gen=gen: self._on_cdp_session_closed(_cdp, _gen))
+                        await self._cdp.send("Page.startScreencast", {
+                            "format": "jpeg", "quality": STREAM["quality"],
+                            "maxWidth": STREAM["width"], "maxHeight": STREAM["height"],
+                            "everyNthFrame": 1,
+                        })
+                    except Exception as e:
+                        _log.warning("screencast re-arm attempt %d/%d failed (cwd=%s): %s",
+                                    attempt, len(_REARM_DELAYS), self.key, e)
+                        continue
+                _log.info("screencast re-armed after %r (cwd=%s, attempt %d/%d)",
+                         reason, self.key, attempt, len(_REARM_DELAYS))
+                await self._reprime_subs()
+                return
+            _log.warning("screencast re-arm exhausted (cwd=%s backend=%s): %s", self.key, self.backend, reason)
+            with contextlib.suppress(Exception):
+                await self.broadcast_json({
+                    "type": "error",
+                    "message": (f"Live view lost its video stream and could not reconnect "
+                                f"({reason}). The agent can still control the page — try "
+                                f"switching tabs, or reload this pane."),
+                })
+        finally:
+            self._rearming = False
 
     def _on_new_page(self, page: Any) -> None:
         asyncio.create_task(self._handle_new_page(page))
@@ -859,7 +973,15 @@ class BrowserSession:
         try:
             res = await self._cdp.send("Page.captureScreenshot", {"format": "jpeg", "quality": STREAM["quality"]})
             return base64.b64decode(res["data"])
-        except Exception:
+        except Exception as e:
+            # A dead session here means a freshly (re)joined subscriber's _prime() would
+            # otherwise find nothing FOREVER — the screencast is already silent (that's
+            # the same underlying failure), and nothing else calls _capture_frame() to
+            # ever notice. Kick off the same re-arm the "close" event triggers; a plain
+            # transient screenshot failure (e.g. mid-navigation) must NOT retire a
+            # perfectly healthy session, hence the dead-connection filter.
+            if looks_like_dead_connection(e) and not self._rearming:
+                asyncio.create_task(self._rearm_screencast("the video capture connection dropped"))
             return None
 
     def remove_subscriber(self, ws: Any) -> None:

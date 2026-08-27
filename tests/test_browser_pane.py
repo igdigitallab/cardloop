@@ -975,12 +975,16 @@ class _FakeWS:
     def __init__(self):
         self.sent_json = []
         self.sent_bytes = []
+        self.closed = False
 
     async def send_json(self, obj):
         self.sent_json.append(obj)
 
     async def send_bytes(self, b):
         self.sent_bytes.append(b)
+
+    async def close(self):
+        self.closed = True
 
 
 class _FakeCDPScreenshot:
@@ -1041,6 +1045,249 @@ def test_close_session_identity_guard():
         await browser_pane.close_session("k", s_old)
         assert browser_pane._SESSIONS.get("k") is s_new
         browser_pane._SESSIONS.pop("k", None)
+    asyncio.run(go())
+
+
+# ── screencast self-heal ─────────────────────────────────────────────────────
+# 2026-08-27: the manual CDP session backing Page.startScreencast (+ the operator's
+# raw mouse/key input) can die WITHOUT the browser itself disconnecting — a renderer
+# crash, a cross-process navigation target swap, a blip on a remote external-cdp host.
+# Playwright's own Page API (goto/click/type_text/... — everything the agent's tools
+# in browser_tools.py call) is backed by its OWN, separately managed session and rides
+# straight through this; only the operator's screencast goes dark, silently, because
+# nothing raises when an event stream just stops being fed. These tests cover the
+# re-arm that closes that gap.
+
+class _FakeCDPRearm:
+    """A CDP session that records Page.startScreencast/captureScreenshot calls and
+    lets a test decide whether THIS attempt succeeds, without a real Chromium."""
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.calls = []
+        self.handlers: "dict[str, list]" = {}
+        self.detached = False
+
+    def on(self, event, fn):
+        self.handlers.setdefault(event, []).append(fn)
+
+    async def detach(self):
+        self.detached = True
+
+    async def send(self, method, params=None):
+        self.calls.append((method, params or {}))
+        if method == "Page.startScreencast" and self.fail:
+            raise RuntimeError("Target closed")
+        if method == "Page.captureScreenshot":
+            return {"data": _b64.b64encode(b"REARMED").decode()}
+        return {}
+
+
+class _FakeCtxRearm:
+    """context.new_cdp_session(page) stand-in — one fake CDP session per call, whose
+    startScreencast succeeds or fails per the next entry of `outcomes` (True = fails)."""
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.sessions: "list[_FakeCDPRearm]" = []
+
+    async def new_cdp_session(self, page):
+        fail = self.outcomes.pop(0) if self.outcomes else False
+        cdp = _FakeCDPRearm(fail=fail)
+        self.sessions.append(cdp)
+        return cdp
+
+
+def _rearm_session(outcomes) -> "tuple[BrowserSession, _FakeCtxRearm]":
+    s = BrowserSession("k")
+    s._started = True
+    s._page = _FakePage()
+    ctx = _FakeCtxRearm(outcomes)
+    s._ctx = ctx
+    return s, ctx
+
+
+def test_bind_active_wires_a_close_listener_and_bumps_the_generation():
+    """Every (re)arm of the screencast must register for the CDPSession's own "close"
+    event (Playwright: fires when the target closes OR detach() is called) and bump
+    _cdp_gen — the generation guard that tells a stale close event apart from a live
+    one."""
+    async def go():
+        s, ctx = _rearm_session([])
+        page = s._page
+        await s._bind_active(page, prime=False)
+        assert s._cdp_gen == 1
+        assert s._cdp.handlers.get("close"), "must listen for the CDPSession's own close event"
+        assert ("Page.startScreencast", {
+            "format": "jpeg", "quality": browser_pane.STREAM["quality"],
+            "maxWidth": browser_pane.STREAM["width"], "maxHeight": browser_pane.STREAM["height"],
+            "everyNthFrame": 1,
+        }) in s._cdp.calls
+    asyncio.run(go())
+
+
+def test_cdp_session_closed_rearms_only_for_the_current_generation():
+    """A "close" event from a session we already intentionally replaced (a normal tab
+    switch also fires this same event, per Playwright's docs) must NOT trigger a
+    needless re-arm — only a close for the session that is STILL current does."""
+    async def go():
+        s = BrowserSession("k")
+        rearmed = []
+        async def fake_rearm(reason):
+            rearmed.append(reason)
+        s._rearm_screencast = fake_rearm
+        s._cdp_gen = 5
+        s._on_cdp_session_closed(object(), 3)   # stale — belongs to a superseded session
+        await asyncio.sleep(0)
+        assert rearmed == []
+        s._on_cdp_session_closed(object(), 5)   # current — the live session actually died
+        await asyncio.sleep(0)
+        assert rearmed == ["the live-view connection dropped"]
+    asyncio.run(go())
+
+
+def test_cdp_session_closed_is_a_noop_once_the_session_is_closed():
+    s = BrowserSession("k")
+    rearmed = []
+    s._rearm_screencast = lambda reason: rearmed.append(reason)
+    s._closed = True
+    s._cdp_gen = 1
+    s._on_cdp_session_closed(object(), 1)
+    assert rearmed == []
+
+
+def test_rearm_screencast_recreates_the_session_and_reprimes_subscribers():
+    """The success path: a fresh CDP session is armed on the SAME page and subscribers
+    get a frame immediately (no waiting for the next on-change screencast event) — and
+    no error reaches them, since the operator should never see a flicker for a
+    recovery that happened within the bounded retry budget."""
+    async def go():
+        s, ctx = _rearm_session([])  # first attempt succeeds
+        ws = _FakeWS()
+        s._subs.add(ws)
+        await s._rearm_screencast("the live-view connection dropped")
+        await asyncio.sleep(0)  # let the fire-and-forget _send_frame task run
+        assert len(ctx.sessions) == 1
+        assert s._cdp is ctx.sessions[0]
+        assert s._cdp_gen == 1
+        assert ws.sent_bytes == [b"REARMED"], "subscriber must be re-primed with a fresh frame"
+        assert ws.sent_json == [], "a recovery within budget must be invisible, not flash an error"
+        assert s._rearming is False
+    asyncio.run(go())
+
+
+def test_rearm_screencast_retries_with_bounded_backoff_then_recovers(monkeypatch):
+    """Two failed attempts, then a third that succeeds — bounded and retried, not
+    instant-give-up and not an infinite loop."""
+    async def go():
+        monkeypatch.setattr(browser_pane, "_REARM_DELAYS", (0.0, 0.0, 0.0, 0.0))
+        s, ctx = _rearm_session([True, True, False])  # fail, fail, succeed
+        await s._rearm_screencast("the live-view connection dropped")
+        assert len(ctx.sessions) == 3
+        assert s._cdp is ctx.sessions[-1]
+    asyncio.run(go())
+
+
+def test_rearm_screencast_gives_up_and_broadcasts_a_visible_error(monkeypatch):
+    """Every attempt in the bounded budget fails — the pane must never sit on a stale
+    frame with no signal anything is wrong; a visible error reaches every subscriber
+    instead."""
+    async def go():
+        monkeypatch.setattr(browser_pane, "_REARM_DELAYS", (0.0, 0.0, 0.0, 0.0))
+        s, ctx = _rearm_session([True, True, True, True])  # every attempt fails
+        ws = _FakeWS()
+        s._subs.add(ws)
+        await s._rearm_screencast("the live-view connection dropped")
+        assert len(ctx.sessions) == 4
+        assert ws.sent_json and ws.sent_json[-1]["type"] == "error"
+        assert "live-view connection dropped" in ws.sent_json[-1]["message"]
+        assert s._rearming is False
+    asyncio.run(go())
+
+
+def test_rearm_screencast_does_not_overlap_with_itself():
+    """A second trigger firing while a re-arm is already in flight must be a no-op —
+    otherwise a burst of "close" events (or a crash immediately followed by another)
+    would stack overlapping CDP session churn."""
+    async def go():
+        s, ctx = _rearm_session([])
+        s._rearming = True
+        await s._rearm_screencast("should not run")
+        assert ctx.sessions == [], "an overlapping call must not touch the browser at all"
+    asyncio.run(go())
+
+
+def test_on_crash_schedules_a_rearm_instead_of_an_unconditional_error():
+    """A renderer crash routes through the SAME re-arm as a closed CDP session — one
+    consistent story (silent recovery within budget, a visible error only once every
+    retry fails) instead of an unconditional "it's broken" message a fast recovery
+    would have no way to take back."""
+    async def go():
+        s = BrowserSession("k")
+        seen = []
+        async def fake_rearm(reason):
+            seen.append(reason)
+        s._rearm_screencast = fake_rearm
+        s._on_crash(None)
+        await asyncio.sleep(0)
+        assert seen and "crashed" in seen[0]
+    asyncio.run(go())
+
+
+def test_capture_frame_failure_triggers_a_rearm_on_a_dead_connection():
+    """_prime() is how a freshly (re)joined subscriber gets its first frame — if the
+    session is already dead this must not just swallow the failure and leave that
+    subscriber blank forever."""
+    async def go():
+        s = BrowserSession("k")
+        class _DeadCDP:
+            async def send(self, method, params=None):
+                raise RuntimeError("Target closed")
+        s._cdp = _DeadCDP()
+        rearmed = []
+        async def fake_rearm(reason):
+            rearmed.append(reason)
+        s._rearm_screencast = fake_rearm
+        frame = await s._capture_frame()
+        assert frame is None
+        await asyncio.sleep(0)
+        assert rearmed
+    asyncio.run(go())
+
+
+def test_capture_frame_failure_does_not_rearm_on_a_plain_error():
+    """A transient, non-connection screenshot error (e.g. mid-navigation) must not
+    retire and rebuild a perfectly healthy session."""
+    async def go():
+        s = BrowserSession("k")
+        class _FlakyCDP:
+            async def send(self, method, params=None):
+                raise RuntimeError("Cannot take screenshot: no viewport")
+        s._cdp = _FlakyCDP()
+        rearmed = []
+        async def fake_rearm(reason):
+            rearmed.append(reason)
+        s._rearm_screencast = fake_rearm
+        frame = await s._capture_frame()
+        assert frame is None
+        await asyncio.sleep(0)
+        assert rearmed == []
+    asyncio.run(go())
+
+
+def test_close_notifies_and_closes_open_subscribers():
+    """A subscriber's WebSocket resolves to one BrowserSession object for its whole
+    life (see webapp.py's api_browser_ws) and is never re-resolved — once THIS session
+    retires, an already-open WS must be told and closed, or it would sit open and
+    silent forever while a fresh session (rebuilt under the same project key) quietly
+    takes over driving the page for the agent."""
+    async def go():
+        s = BrowserSession("k")
+        s._started = True
+        ws = _FakeWS()
+        s._subs.add(ws)
+        await s.close()
+        assert ws.closed is True
+        assert ws.sent_json and ws.sent_json[-1]["type"] == "error"
+        assert s._subs == set()
     asyncio.run(go())
 
 

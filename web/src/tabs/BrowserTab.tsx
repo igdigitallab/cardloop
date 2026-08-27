@@ -9,9 +9,15 @@
  * Coordinates for all input events are mapped from the displayed <img> rect to the
  * 1280×720 frame coordinate space before sending.
  *
- * WebSocket lifecycle mirrors TerminalTab.tsx (open on mount, close on unmount,
- * show disconnected state on unexpected close — no automatic reconnect loops that
- * would spam the server; a single reconnect after close is offered via a button).
+ * WebSocket lifecycle mirrors TerminalTab.tsx (open on mount, close on unmount, show
+ * disconnected state on unexpected close). On an UNEXPECTED close (server retired the
+ * backend BrowserSession — e.g. the remote Chrome dropped and reconnected — see the
+ * "screencast self-heal" comment in browser_pane.py) it also auto-reconnects with a
+ * bounded backoff (AUTO_RECONNECT_DELAYS_MS): a project resolves to whatever session is
+ * CURRENT at connect time, so simply reopening the socket picks up the fresh one the
+ * agent is already driving. Bounded, not a loop — a hard server refusal (module off)
+ * lands in 'error' state and is deliberately excluded from auto-retry; the manual
+ * Reconnect button remains the escape hatch once the budget is exhausted.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { t } from '../i18n'
@@ -19,6 +25,11 @@ import { t } from '../i18n'
 // Native frame dimensions the server always streams at
 const FRAME_W = 1280
 const FRAME_H = 720
+
+// Bounded backoff for auto-reconnect after an UNEXPECTED WS close (see the header
+// comment above). Capped attempts, capped delay — never an unbounded retry loop.
+const AUTO_RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 8000]
+const MAX_AUTO_RECONNECT_ATTEMPTS = AUTO_RECONNECT_DELAYS_MS.length
 
 // Throttle mouse-move events to ~30 per second
 const MOUSE_MOVE_INTERVAL_MS = 33
@@ -163,6 +174,11 @@ export function BrowserTab({ projectId }: Props) {
   // or in front of — a latency-critical click/keystroke. See the "WebSocket
   // lifecycle" section below for the full rationale.
   const inputWsRef = useRef<WebSocket | null>(null)
+  // Bounded auto-reconnect bookkeeping (see AUTO_RECONNECT_DELAYS_MS above): how many
+  // attempts already used, and the pending retry timer (so a manual/visibility-driven
+  // reconnect can cancel a stale one instead of racing it).
+  const reconnectAttemptRef = useRef(0)
+  const reconnectTimerRef = useRef<number | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const lastObjUrlRef = useRef<string | null>(null)
@@ -189,6 +205,10 @@ export function BrowserTab({ projectId }: Props) {
   const tapChainRef = useRef<{ x: number; y: number; at: number; count: number } | null>(null)
 
   const [connState, setConnState] = useState<ConnState>('connecting')
+  // Mirrors connState for use inside callbacks that must read the CURRENT value
+  // without depending on it (which would rebuild the WebSocket every state change).
+  const connStateRef = useRef(connState)
+  useEffect(() => { connStateRef.current = connState }, [connState])
   const [errorMsg, setErrorMsg] = useState<string>('')
   const [frameSrc, setFrameSrc] = useState<string>('')
   // Current page URL/title received from the server
@@ -261,6 +281,11 @@ export function BrowserTab({ projectId }: Props) {
         const msg = JSON.parse(e.data) as Record<string, unknown>
         if (msg.type === 'ready') {
           setConnState('ready')
+          // A genuine 'ready' is server confirmation the socket is bound to a live
+          // session — the auto-reconnect budget is per FAILURE streak, not per pane
+          // lifetime, so a real recovery clears it instead of leaving future drops
+          // with fewer attempts than they deserve.
+          reconnectAttemptRef.current = 0
           if (typeof msg.backend === 'string') setBackend(msg.backend)
           if (typeof msg.zoom === 'number') setZoom(msg.zoom)
         } else if (msg.type === 'zoom') {
@@ -304,7 +329,17 @@ export function BrowserTab({ projectId }: Props) {
     }
   }, [])
 
+  // Indirection so connect()'s onclose handlers can trigger the bounded auto-reconnect
+  // declared below (which itself depends on connect) without a circular useCallback dep.
+  const scheduleAutoReconnectRef = useRef<() => void>(() => {})
+
   const connect = useCallback(() => {
+    // A fresh connect attempt (manual, visibility-driven, or an auto-retry firing)
+    // supersedes any still-pending auto-reconnect timer.
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
     // Close any existing connections before opening new ones
     if (wsRef.current) {
       wsRef.current.onclose = null
@@ -331,8 +366,18 @@ export function BrowserTab({ projectId }: Props) {
       // State will be set to 'ready' when server sends {type:"ready"}
       // If the server doesn't send it, we stay in 'connecting' which is fine.
     }
-    ws.onclose = () => setConnState('disconnected')
-    ws.onerror = () => setConnState('disconnected')
+    ws.onclose = () => {
+      setConnState('disconnected')
+      // Reopening simply re-resolves ?project=<id> to whatever session is CURRENT on
+      // the server — if the old one was retired (browser_pane.py's screencast/session
+      // self-heal), this is what actually lands the pane back on the live one instead
+      // of leaving the operator staring at a stale frame until they notice and click.
+      scheduleAutoReconnectRef.current()
+    }
+    ws.onerror = () => {
+      setConnState('disconnected')
+      scheduleAutoReconnectRef.current()
+    }
 
     const inputWs = new WebSocket(`${proto}//${location.host}/api/browser/input-ws?${qs}`)
     inputWsRef.current = inputWs
@@ -341,9 +386,46 @@ export function BrowserTab({ projectId }: Props) {
     // clicks silently stop working while the pane still LOOKS alive (frames keep
     // arriving on the other connection), the exact "deaf but alive" failure mode
     // already fixed once server-side for a single-socket dead session.
-    inputWs.onclose = () => setConnState('disconnected')
-    inputWs.onerror = () => setConnState('disconnected')
+    inputWs.onclose = () => {
+      setConnState('disconnected')
+      scheduleAutoReconnectRef.current()
+    }
+    inputWs.onerror = () => {
+      setConnState('disconnected')
+      scheduleAutoReconnectRef.current()
+    }
   }, [projectId, handleWsMessage])
+
+  // Bounded auto-reconnect after an UNEXPECTED close. Deliberately excludes 'error'
+  // (a hard server refusal — e.g. the browser module is disabled — retrying that in a
+  // loop would just spam the server for nothing; the operator has to act, not wait).
+  const scheduleAutoReconnect = useCallback(() => {
+    if (reconnectTimerRef.current !== null) return // already scheduled
+    if (connStateRef.current === 'error') return
+    const attempt = reconnectAttemptRef.current
+    if (attempt >= MAX_AUTO_RECONNECT_ATTEMPTS) return // budget exhausted — the manual button remains
+    reconnectAttemptRef.current = attempt + 1
+    const delay = AUTO_RECONNECT_DELAYS_MS[attempt]
+    reconnectTimerRef.current = window.setTimeout(() => {
+      reconnectTimerRef.current = null
+      if (document.visibilityState === 'visible') connect()
+      // Backgrounded: the existing visibilitychange listener below picks it back up
+      // on foreground instead of retrying uselessly while nobody can see the pane.
+    }, delay)
+  }, [connect])
+
+  useEffect(() => {
+    scheduleAutoReconnectRef.current = scheduleAutoReconnect
+  }, [scheduleAutoReconnect])
+
+  // The manual Reconnect button (shown once the overlay is up — see renderOverlay
+  // below): a fresh, explicit user action gets a fresh bounded auto-retry budget too,
+  // so exhausting it once does not silently disable self-healing for the rest of the
+  // pane's lifetime.
+  const manualReconnect = useCallback(() => {
+    reconnectAttemptRef.current = 0
+    connect()
+  }, [connect])
 
   // Open both WS on mount, clean up on unmount
   useEffect(() => {
@@ -374,6 +456,10 @@ export function BrowserTab({ projectId }: Props) {
         window.clearTimeout(copyToastTimerRef.current)
         copyToastTimerRef.current = null
       }
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = null
+      }
     }
   }, [connect])
 
@@ -382,14 +468,15 @@ export function BrowserTab({ projectId }: Props) {
   // own watchdog), leaving a dead/blank pane on wake. Re-open it when the tab
   // becomes visible / the network resumes — the server re-primes the last frame
   // (or a fresh start page) so the browser comes back instead of staying broken.
-  const connStateRef = useRef(connState)
-  useEffect(() => { connStateRef.current = connState }, [connState])
   useEffect(() => {
     const isDead = (s: WebSocket | null) => !s || s.readyState === WebSocket.CLOSED || s.readyState === WebSocket.CLOSING
     const maybeReconnect = () => {
       if (document.visibilityState !== 'visible') return
       if (connStateRef.current === 'error') return // server refused (e.g. module off) — don't loop
       if (isDead(wsRef.current) || isDead(inputWsRef.current)) {
+        // Coming back online/foreground is a fresh situation, not a continuation of
+        // whatever failure streak preceded it — give it the full auto-retry budget.
+        reconnectAttemptRef.current = 0
         connect()
       }
     }
@@ -887,7 +974,7 @@ export function BrowserTab({ projectId }: Props) {
         <span>{message}</span>
         {(connState === 'disconnected' || connState === 'error') && (
           <button
-            onClick={connect}
+            onClick={manualReconnect}
             style={{
               fontSize: 12,
               padding: '4px 14px',
