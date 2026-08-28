@@ -297,6 +297,15 @@ export const en = {
   'board.gate_conflict': 'Merge conflict: ',
   'board.gate_applied_banner': 'Applied ✓',
   'board.gate_discarded_banner': 'Discarded ✗',
+
+  // Review acceptance: bulk/selective archive of Review-column cards (backend: accept-review)
+  'board.accept_all_label': '✓ Accept all ({n})',
+  'board.accept_all_aria': 'Accept all cards in Review — archive them without a per-card check',
+  'board.accept_all_confirm': 'Accept all {n} card(s) in Review? They move to the archive (DONE.md). This action is irreversible.',
+  'board.accept_card_label': 'Accept',
+  'board.accept_card_aria': 'Accept this card — archive it',
+  'board.accept_card_confirm': 'Accept this card? It moves to the archive (DONE.md). This action is irreversible.',
+  'board.accept_toast': '✓ Accepted {n} card(s)',
   // Card 43665f: per-card model override
   'board.card_model_label': 'Model',
   'board.card_model_default': '— default (sonnet) —',

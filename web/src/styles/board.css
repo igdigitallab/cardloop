@@ -58,6 +58,8 @@
 .board-col-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  row-gap: 4px;
   gap: 8px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
@@ -73,6 +75,22 @@
 .board-col-in_progress .board-col-label { color: var(--yellow); }
 .board-col-review .board-col-label      { color: var(--accent-h); }
 .board-col-failed .board-col-label       { color: var(--red); }
+
+/* Review acceptance: bulk-archive the whole column (backend: accept-review) */
+.board-col-accept-all {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition), color var(--transition);
+}
+.board-col-accept-all:hover:not(:disabled) { background: var(--accent); color: var(--accent-fg); }
+.board-col-accept-all:disabled { opacity: 0.5; cursor: default; }
 
 .board-col-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 
@@ -166,6 +184,29 @@
 }
 .board-card .board-card-kebab:hover:not(:disabled) {
   background: var(--bg4); color: var(--text);
+}
+
+/* Review acceptance: compact per-card button, own row (right-aligned) above the
+   kebab row. Always visible (not hover-gated) — mobile has no hover state. */
+.board-card-accept-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 4px 0 0 auto;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.board-card-accept-btn:hover:not(:disabled) { background: var(--accent); color: var(--accent-fg); }
+.board-card-accept-btn:disabled { opacity: 0.4; cursor: default; }
+@media (pointer: coarse) {
+  .board-card-accept-btn { min-height: 32px; padding: 4px 12px; }
 }
 .board-card-actions button {
   flex: 0 0 auto;

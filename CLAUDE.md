@@ -19,6 +19,12 @@ Design history & specs: `docs/internal/specs/` (gitignored).
 - `data/prompts.json` — cockpit prompt templates (CRUD via `/api/prompts`). **Not in git.**
 - `cardloop.service` → `/etc/systemd/system/` (unit name overridable via `CARDLOOP_SERVICE`).
 - `web/src/components/markdown.tsx` — the shared `mdComponents` for ALL `<ReactMarkdown>` instances (Files/CLAUDE.md/Board/Memory/Chat). Renders ```mermaid blocks as live SVG: `mermaid@11` lazily (`await import` → its own chunk, doesn't bloat the main bundle), `securityLevel:'strict'`, `suppressErrorRendering:true` (on a syntax error, falls back to the source, no "bomb"). ⚠️ A new `<ReactMarkdown>` must be wired with `components={mdComponents}`, otherwise diagrams won't render.
+- `features/board_janitor/` — the Review column's only automatic exit. `logic.py` holds the pure
+  policy (a card is archived ONLY on evidence: its own run settled + project tests green — a
+  missing test signal is never permission), `loop.py` sweeps every `BOARD_JANITOR_INTERVAL_SEC`,
+  `routes.py` serves `POST /api/projects/{id}/cards/accept-review` (manual bulk accept) and
+  `GET|POST /api/board/janitor[/run]`. Cards carry an `rt=<unix>` marker stamped when they enter
+  Review — the board keeps no history otherwise. Knobs: `BOARD_JANITOR_MODE=off|digest|accept`.
 - `captcha_solver.py` — the 2captcha bridge behind `browser_solve_captcha`. Knows nothing about Playwright (page-side detection/injection lives in `browser_pane.solve_captcha`). Off unless `TWOCAPTCHA_API_KEY` / the safe's `twocaptcha_api_key` is set, and gated behind `agent_actions=full`. ⚠️ Only solves captcha **widgets** — a full-page Cloudflare interstitial is refused on purpose (IP-bound token); don't "fix" that by removing the guard, it would just burn balance on tokens Cloudflare rejects.
 - `web/src/components/Lightbox.tsx` — the shared fullscreen viewer with zoom (pinch/wheel/buttons) + pan (pointer events, `touch-action:none`). Used by both chat images/videos (`ChatImage`, `video` prop) and mermaid diagrams (`svg` prop, ⤢ button + tap). Do NOT spawn a second lightbox.
 

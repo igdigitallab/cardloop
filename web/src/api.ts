@@ -301,6 +301,18 @@ export const api = {
       { method: 'POST' }
     ),
 
+  // Review acceptance: bulk or selective archive of Review cards (moves to DONE.md).
+  // Body is either { ids: [...] } for specific cards or { all: true } for the whole column.
+  acceptReview: (id: string, body: { ids: string[] } | { all: true }) =>
+    apiFetch<import('./types').Board & { ok: boolean; accepted: number }>(
+      `/api/projects/${id}/cards/accept-review`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }
+    ),
+
   files: (id: string, path: string) =>
     apiFetch<import('./types').FileListing>(
       `/api/projects/${id}/files?path=${encodeURIComponent(path)}`

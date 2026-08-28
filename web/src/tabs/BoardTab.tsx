@@ -661,6 +661,36 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
     }
   }
 
+  // Review acceptance: bulk ('all') or selective (card ids) archive of Review-column
+  // cards. Shares the board's single `busy` flag with move()/del() below — same
+  // guard, same convention: every card-mutating button on the board face disables
+  // on `busy`, so a second click before the response lands is a no-op.
+  async function acceptReview(ids: string[] | 'all') {
+    if (busy) return
+    const reviewCount = board?.columns.find(c => c.key === 'review')?.cards.length ?? 0
+    const count = ids === 'all' ? reviewCount : ids.length
+    if (!count) return
+    const confirmMsg = ids === 'all'
+      ? t['board.accept_all_confirm'].replace('{n}', String(count))
+      : t['board.accept_card_confirm']
+    if (!window.confirm(confirmMsg)) return
+    setBusy(true); setError('')
+    try {
+      const body = ids === 'all' ? { all: true as const } : { ids }
+      const r = await api.acceptReview(projectId, body)
+      setBoard(r)
+      schedulePoll(r)
+      showToast(t['board.accept_toast'].replace('{n}', String(r.accepted)))
+    } catch (e) {
+      const status = (e as { status?: number })?.status
+      setError(status === 409
+        ? '⏳ Project is busy (TG or another card) — try again later'
+        : (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   // Spec 009: quality gate — run tests in the card's worktree
   async function checkCard(cardId: string) {
     setGateChecking(true)
@@ -822,6 +852,20 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
         </div>
         {/* spec-036 Phase 2a: live activity strip — shown when this card is being executed */}
         {liveRun?.cardId === card.id && <CardLiveStrip run={liveRun} />}
+        {/* Review acceptance: compact per-card "Accept" (backend: accept-review).
+            Same click-safety trick as .board-card-hover-actions below — stopPropagation
+            keeps the click from bubbling into the card's own onClick (toggleExpand) or
+            from being swallowed by the native HTML5 drag (draggable={!isRunning} above).
+            Always visible (not hover-gated) so it works on mobile without a hover state. */}
+        {columnKey === 'review' && (
+          <button
+            className="board-card-accept-btn"
+            disabled={busy}
+            title={t['board.accept_card_aria']}
+            aria-label={t['board.accept_card_aria']}
+            onClick={(e) => { e.stopPropagation(); acceptReview([card.id]) }}
+          >{t['board.accept_card_label']}</button>
+        )}
         {/* All actions (run / archive / move / edit / spec / defer / delete) live
             in the kebab menu — keeps the card face clean and compact. */}
         <KebabButton
@@ -1132,6 +1176,16 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
                 {/* F1: agent running indicator in column header */}
                 {isInProgress && col.cards.length > 0 && (
                   <span className="board-col-running" title={t['board.agent_running']}>⚙</span>
+                )}
+                {/* Review acceptance: bulk-archive the whole column (backend: accept-review) */}
+                {key === 'review' && col.cards.length > 0 && (
+                  <button
+                    className="board-col-accept-all"
+                    disabled={busy}
+                    title={t['board.accept_all_aria']}
+                    aria-label={t['board.accept_all_aria']}
+                    onClick={() => acceptReview('all')}
+                  >{t['board.accept_all_label'].replace('{n}', String(col.cards.length))}</button>
                 )}
               </div>
 

@@ -66,6 +66,18 @@ _BUILTIN_MODULES: list[dict[str, Any]] = [
         "provides": ["loop", "panel"],
         "default_enabled": False,
     },
+    {
+        "id": "board_janitor",
+        "name": "Board janitor",
+        "description": (
+            "Gives the Review column a way out: archives cards that pass an objective "
+            "gate (their run succeeded, nothing unmerged, tests green) and digests the "
+            "rest for you. BOARD_JANITOR_MODE=off|digest|accept."
+        ),
+        "version": "1.0.0",
+        "provides": ["loop", "api"],
+        "default_enabled": True,
+    },
 ]
 
 # Lookup by id for O(1) access.

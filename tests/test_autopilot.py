@@ -409,6 +409,104 @@ def test_fingerprint_length():
     assert len(fp) == 12  # first 12 hex chars of sha256
 
 
+# ─────────────────────────── normalize_fingerprint_text ───────────────────────────
+
+def test_normalize_strips_duration_seconds():
+    a = autopilot.normalize_fingerprint_text("1 failed in 0.03s")
+    b = autopilot.normalize_fingerprint_text("1 failed in 0.10s")
+    assert a == b
+    assert "<DUR>" in a
+
+
+def test_normalize_strips_duration_with_space_and_ms():
+    a = autopilot.normalize_fingerprint_text("elapsed 1.2 s")
+    b = autopilot.normalize_fingerprint_text("elapsed 12ms")
+    assert "<DUR>" in a
+    assert "<DUR>" in b
+
+
+def test_normalize_strips_tmp_path():
+    text = "AssertionError in /tmp/pytest-of-igor/pytest-42/test_foo0/file.py"
+    out = autopilot.normalize_fingerprint_text(text)
+    assert "/tmp/" not in out
+    assert "<TMPPATH>" in out
+
+
+def test_normalize_strips_timestamp():
+    out = autopilot.normalize_fingerprint_text("started at 2026-08-27T12:34:56")
+    assert "<TS>" in out
+    assert "12:34:56" not in out
+
+
+def test_normalize_strips_traceback_line_number():
+    out = autopilot.normalize_fingerprint_text('File "foo.py", line 42, in bar')
+    assert "line <N>" in out
+    assert "line 42" not in out
+
+
+def test_normalize_strips_hex_address():
+    out = autopilot.normalize_fingerprint_text("<Foo object at 0x7f3a2b1c9e00>")
+    assert "<HEX>" in out
+    assert "0x7f3a2b1c9e00" not in out
+
+
+def test_normalize_empty_string_returns_empty():
+    assert autopilot.normalize_fingerprint_text("") == ""
+    assert autopilot.normalize_fingerprint_text(None) == ""
+
+
+def test_fingerprint_stable_across_duration_variance():
+    """Same underlying failure, different test-run duration → same fingerprint."""
+    fp1 = autopilot.fingerprint(
+        "fix_failing_tests", [], "tests failed (pytest): 1 failed in 0.03s"
+    )
+    fp2 = autopilot.fingerprint(
+        "fix_failing_tests", [], "tests failed (pytest): 1 failed in 0.10s"
+    )
+    assert fp1 == fp2
+
+
+def test_fingerprint_stable_across_tmp_path_variance():
+    fp1 = autopilot.fingerprint(
+        "fix_failing_tests", [], "error in /tmp/pytest-of-igor/pytest-1/test_a0/x.py"
+    )
+    fp2 = autopilot.fingerprint(
+        "fix_failing_tests", [], "error in /tmp/pytest-of-igor/pytest-2/test_a0/x.py"
+    )
+    assert fp1 == fp2
+
+
+def test_fingerprint_still_differs_on_real_change():
+    """Normalization must not collapse genuinely different failures together."""
+    fp1 = autopilot.fingerprint("fix_failing_tests", [], "AssertionError: got 1")
+    fp2 = autopilot.fingerprint("fix_failing_tests", [], "AssertionError: got 2")
+    assert fp1 != fp2
+
+
+# ─────────────────────────── record_cooldown ───────────────────────────
+
+def test_record_cooldown_then_cooldown_ok_false_immediately():
+    state = {"cooldowns": {}}
+    now = time.time()
+    autopilot.record_cooldown(state, "proj-a", autopilot.LOOP_CARD_ID, now)
+    assert autopilot.cooldown_ok(state, "proj-a", autopilot.LOOP_CARD_ID, now, 3600) is False
+
+
+def test_record_cooldown_then_cooldown_ok_true_after_elapsed():
+    state = {"cooldowns": {}}
+    now = time.time()
+    autopilot.record_cooldown(state, "proj-a", autopilot.LOOP_CARD_ID, now)
+    later = now + 3601
+    assert autopilot.cooldown_ok(state, "proj-a", autopilot.LOOP_CARD_ID, later, 3600) is True
+
+
+def test_record_cooldown_does_not_affect_other_projects():
+    state = {"cooldowns": {}}
+    now = time.time()
+    autopilot.record_cooldown(state, "proj-a", autopilot.LOOP_CARD_ID, now)
+    assert autopilot.cooldown_ok(state, "proj-b", autopilot.LOOP_CARD_ID, now, 3600) is True
+
+
 # ─────────────────────────── detect_self_inflicted ───────────────────────────
 
 def test_detect_self_inflicted_returns_none_on_non_git_dir(tmp_path):

@@ -61,6 +61,11 @@ _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{2,100}$")
 # ops marker and can be globbed to a spec-<id>-*.md file without traversal.
 _SPEC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 
+# Review timestamp (unix seconds) — stamped when a card enters the Review column so
+# the board janitor can tell a card parked for weeks from one that landed a minute ago.
+# The board itself carries no history, so the marker is the only place to keep it.
+_RT_RE = re.compile(r"^\d{9,12}$")
+
 
 def _parse_marker_meta(meta_str: str | None) -> dict:
     """Parse the optional key=val pairs from a marker's metadata string.
@@ -79,6 +84,8 @@ def _parse_marker_meta(meta_str: str | None) -> dict:
                 raw_model = v
             elif k == "spec" and _SPEC_ID_RE.fullmatch(v):
                 result["spec"] = v
+            elif k == "rt" and _RT_RE.fullmatch(v):
+                result["rt"] = int(v)
     if raw_model and (raw_model in _ALLOWED_CARD_MODELS or result.get("provider") == "codex"):
         result["model"] = raw_model
     return result
@@ -194,6 +201,8 @@ def _parse_tasks(text: str):
                     card["provider"] = meta["provider"]
                 if meta.get("spec"):
                     card["spec"] = meta["spec"]
+                if meta.get("rt"):
+                    card["rt"] = meta["rt"]
                 cols[cur].append(card)
                 last_card = card
         elif cur is not None:
@@ -210,6 +219,8 @@ def _parse_tasks(text: str):
                         card["provider"] = meta["provider"]
                     if meta.get("spec"):
                         card["spec"] = meta["spec"]
+                    if meta.get("rt"):
+                        card["rt"] = meta["rt"]
                     cols[cur].append(card)
                     last_card = card
         elif not seen_header:
@@ -233,6 +244,9 @@ def _serialize_tasks(preamble: str, cols: dict, project_name: str) -> str:
             card_spec = card.get("spec") or ""
             if card_spec and _SPEC_ID_RE.fullmatch(card_spec):
                 marker_meta += f" spec={card_spec}"
+            card_rt = str(card.get("rt") or "")
+            if card_rt and _RT_RE.fullmatch(card_rt):
+                marker_meta += f" rt={card_rt}"
             out.append(f"- [{status}] {card['text']} <!--ops:{card['id']}{marker_meta}-->")
             desc = card.get("description")
             if desc:

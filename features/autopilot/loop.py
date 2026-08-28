@@ -5,6 +5,12 @@ infinite background loop.  SHADOW-MODE INVARIANT: nothing here calls
 run_engine, _run_card, _start_card_run, _drain_queue, _queue_enqueue,
 or any function that mutates repos or spends model tokens.
 
+logic.detect_self_inflicted() is intentionally NOT wired into the tick: it
+looks for git commits carrying the "X-Cardloop-Autopilot" trailer (see
+logic.commit_trailer), and shadow mode never commits anything, so every call
+would just return None. It becomes meaningful once an auto-execute phase
+exists that actually produces those commits.
+
 Import rule: feature → core is safe (see spec-068 IRON RULE).
 """
 from __future__ import annotations
@@ -105,6 +111,17 @@ async def _autopilot_tick_once(ctx: dict) -> list[dict]:
         if _autopilot.get_project_mode(project) not in ("propose", "auto"):
             continue
 
+        # project_id mirrors the formula decide_intent() uses internally — computed
+        # here too so a stuck project can be skipped BEFORE spending a test run on it.
+        project_id = project.get("id") or project.get("name") or ""
+        if not _autopilot.cooldown_ok(
+            state, project_id, _autopilot.LOOP_CARD_ID, _time.time(),
+            _autopilot.LOOP_COOLDOWN_SEC,
+        ):
+            # A previous tick already detected + logged this loop; back off
+            # entirely (no test run, no trajectory write) until the cooldown lapses.
+            continue
+
         cwd = project.get("cwd") or ""
 
         # ── gather signals (READ-ONLY) ──────────────────────────────────────
@@ -150,6 +167,40 @@ async def _autopilot_tick_once(ctx: dict) -> list[dict]:
         intent["fingerprint"] = _autopilot.fingerprint(
             intent["action"], [], test_summary
         )
+
+        # ── loop detection: suppress unbounded duplicate writes ─────────────
+        # A "loop episode" resets at each suppressed marker: records from BEFORE
+        # the last one are an already-resolved episode and must not make a fresh,
+        # genuinely different intent look like a repeat of the old one just
+        # because detect_loop's fingerprint_repeat picks the window's most
+        # common fingerprint (which would otherwise still be the stale one).
+        recent = _autopilot.read_trajectory(data_dir, project_id=project_id)
+        last_suppressed_idx = -1
+        for _i, _r in enumerate(recent):
+            if _r.get("suppressed"):
+                last_suppressed_idx = _i
+        episode = recent[last_suppressed_idx + 1:]
+        loop_signal = _autopilot.detect_loop(episode + [intent], project_id)
+        if loop_signal:
+            repeat_count = sum(
+                1 for r in episode if r.get("fingerprint") == intent["fingerprint"]
+            ) + 1
+            suppressed = {
+                "project": project_id,
+                "mode": intent.get("mode"),
+                "ts": intent["ts"],
+                "shadow": True,
+                "suppressed": True,
+                "loop_signal": loop_signal,
+                "fingerprint": intent["fingerprint"],
+                "repeat_count": repeat_count,
+                "rationale": f"loop suppressed ({loop_signal}); {repeat_count} repeats",
+            }
+            _autopilot.append_trajectory(data_dir, suppressed)
+            _autopilot.record_cooldown(state, project_id, _autopilot.LOOP_CARD_ID, intent["ts"])
+            _autopilot.save_state(data_dir, state)
+            decisions.append(suppressed)
+            continue
 
         _autopilot.append_trajectory(data_dir, intent)
         decisions.append(intent)

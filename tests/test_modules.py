@@ -53,10 +53,18 @@ import modules as _mod  # noqa: E402 (after sys.path insert)
 # ---------------------------------------------------------------------------
 
 def test_list_modules_returns_builtins():
+    """Every built-in descriptor is listed. Asserted as a subset, not an exact count,
+    so adding a module is a one-line change here instead of a false failure."""
     result = _mod.list_modules()
-    assert len(result) == 3
     ids = {m["id"] for m in result}
-    assert ids == {"github", "browser", "autopilot"}
+    assert {"github", "browser", "autopilot", "board_janitor"} <= ids
+    assert len(result) == len(ids), "module ids must be unique"
+
+
+def test_board_janitor_default_enabled():
+    """The janitor ships on: a Review column with no exit is the default failure."""
+    mods = {m["id"]: m for m in _mod.list_modules()}
+    assert mods["board_janitor"]["enabled"] is True
 
 
 def test_autopilot_default_disabled():

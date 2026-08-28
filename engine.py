@@ -1573,6 +1573,172 @@ async def _bundle_grep_guard_hook(
     return {}
 
 
+# ─────────────────────── Irreversible-command guard (PreToolUse) ───────────────────────────────
+# Every engine connection runs with permission_mode="bypassPermissions" (full-auto: no chat
+# confirmation, no card confirmation). Per Anthropic's docs a PreToolUse hook that returns
+# "deny" still blocks the tool call in that mode (this is the same mechanism the bundle-grep
+# guard above already relies on in production) — see
+# https://code.claude.com/docs/en/permissions#extend-permissions-with-hooks
+# ("Hook decisions don't bypass permission rules... A blocking hook also takes precedence over
+# allow rules") and https://code.claude.com/docs/en/permission-modes#skip-all-checks-with-bypasspermissions-mode.
+# This is a last-resort circuit breaker for a hard-coded, minimal list of commands that are
+# irreversible for the HOST (not for the project's own working directory — a plain `rm -rf` or
+# `git push` inside the repo must keep working un-gated). Extend the list at runtime with
+# DENY_COMMANDS_EXTRA (comma/newline-separated regexes, matched against the full command).
+_SUBCMD_SPLIT_RE = re.compile(r"&&|\|\||\|&|;|&|\||\n")
+
+
+def _split_subcommands(command: str) -> "list[str]":
+    """Split a Bash command on the same shell operators Claude Code's own permission-rule
+    matcher uses to isolate subcommands (see the "Compound commands" section of the permissions
+    doc), so a dangerous shape hidden after `&&`/`;`/`|` still gets classified on its own."""
+    return _SUBCMD_SPLIT_RE.split(command)
+
+
+# A root/home path used as a whole argument (not a prefix of a longer path): "/", "~", "$HOME",
+# "${HOME}", or the same followed by a "*" glob that would wipe everything under it ("/*",
+# "~/*", "$HOME/*"). The lookbehind requires the token to start right after whitespace (so a
+# trailing slash on a normal absolute path, e.g. "/home/alice/myproject/tmp/", never matches) and
+# the lookahead requires nothing else glued onto it (so "/etc" or "$HOME/tmp" never match).
+# A trailing slash is part of the same shape: `rm -rf ~/` wipes the home directory just
+# as `rm -rf ~` does, and an agent is more likely to type the slashed form.
+_BARE_ROOT_OR_HOME = r"(?<=\s)(?:/|~|\$\{?HOME\}?)(?:/\*?|\*)?(?![^\s;&|])"
+
+_RM_ROOT_HOME_RE = re.compile(
+    r"\brm\s+(?=[^;&|\n]*-[A-Za-z-]*[rR])(?=[^;&|\n]*-[A-Za-z-]*f)[^;&|\n]*?" + _BARE_ROOT_OR_HOME
+)
+_CHMOD_ROOT_RE = re.compile(
+    r"\bchmod\s+(?=[^;&|\n]*-[A-Za-z-]*R)(?=[^;&|\n]*(?:777|000|a[+=]rwx))[^;&|\n]*?"
+    + _BARE_ROOT_OR_HOME
+)
+_GIT_HARD_RESET_RE = re.compile(r"\bgit\s+reset\s+--hard\b")
+_GIT_PUSH_RE = re.compile(r"\bgit\s+push\b")
+_GIT_FORCE_FLAG_RE = re.compile(r"(?:--force(?:-with-lease)?\b|(?<!\S)-f\b)")
+_GIT_BRANCH_RE = re.compile(r"\b(?:master|main)\b")
+_GIT_PUSH_BARE_FORCE_RE = re.compile(r"^git\s+push\s+(?:--force(?:-with-lease)?|-f)\s*$")
+_GIT_PUSH_REMOTE_FORCE_RE = re.compile(r"^git\s+push\s+\S+\s+(?:--force(?:-with-lease)?|-f)\s*$")
+_DOCKER_PRUNE_RE = re.compile(r"\bdocker\s+system\s+prune\b")
+_MKFS_RE = re.compile(r"\bmkfs(?:\.\w+)?\b")
+_DD_TO_DEVICE_RE = re.compile(r"\bdd\b[^;&|\n]*\bof=/dev/(?!null\b|zero\b)")
+_FORK_BOMB_RE = re.compile(r":\s*\(\s*\)\s*\{[^}]*:\s*\|\s*:\s*&[^}]*\}\s*;\s*:")
+_SSH_PATH_RE = re.compile(r"(?:~|\$\{?HOME\}?)/\.ssh\b")
+_SSH_MUTATION_VERB_RE = re.compile(r"\b(?:rm|rmdir|mv|shred|truncate|chown)\b|>>?|\btee\b|sed\s+-i")
+# `chmod 600 ~/.ssh/id_ed25519` is documented routine (it LOCKS the key down), so chmod is
+# not a mutation verb above. Only a mode that opens the key to group/other is denied.
+_SSH_CHMOD_OPEN_RE = re.compile(r"\bchmod\b[^;&|\n]*?(?:[0-7][0-7][1-7]|[ugoa]*[+=][^\s]*[rwx][^\s]*)[^;&|\n]*?(?:~|\$\{?HOME\}?)/\.ssh")
+
+
+def _is_force_push_to_protected_branch(segment: str) -> bool:
+    """True for a `git push --force`/`-f`/`--force-with-lease` naming master/main, or an
+    unqualified force-push with no explicit ref — this project's own workflow (CLAUDE.md:
+    "everything in one branch, master") means an unqualified force-push targets master too."""
+    if not _GIT_PUSH_RE.search(segment):
+        return False
+    if not _GIT_FORCE_FLAG_RE.search(segment):
+        return False
+    if _GIT_BRANCH_RE.search(segment):
+        return True
+    stripped = segment.strip()
+    return bool(
+        _GIT_PUSH_BARE_FORCE_RE.match(stripped) or _GIT_PUSH_REMOTE_FORCE_RE.match(stripped)
+    )
+
+
+def _is_ssh_dir_mutation(segment: str) -> bool:
+    """True for a command that writes to or removes something under ~/.ssh or $HOME/.ssh
+    (rm/mv/chmod/redirection/etc). Plain reads (cat, ls, ssh-add) are left alone."""
+    return bool(_SSH_PATH_RE.search(segment)) and bool(_SSH_MUTATION_VERB_RE.search(segment))
+
+
+def _compile_extra_deny_patterns() -> "list[re.Pattern]":
+    """DENY_COMMANDS_EXTRA: operator-supplied regexes (comma or newline separated), each matched
+    against the full command. An invalid regex is skipped, never crashes startup."""
+    raw = os.environ.get("DENY_COMMANDS_EXTRA", "")
+    patterns: "list[re.Pattern]" = []
+    for line in re.split(r"[\n,]", raw):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            patterns.append(re.compile(line))
+        except re.error:
+            continue
+    return patterns
+
+
+_DENY_COMMAND_PATTERNS_EXTRA = _compile_extra_deny_patterns()
+
+
+def _classify_dangerous_command(command: str) -> "str | None":
+    """Pure classifier: returns a human-readable deny reason for a Bash command matching one
+    of the hard-coded irreversible-for-the-host shapes, or None if the command is fine.
+    Never raises. Unit-tested directly (see tests/test_deny_commands.py)."""
+    try:
+        if _FORK_BOMB_RE.search(command):
+            return "fork bomb: exhausts host processes/memory"
+        for segment in _split_subcommands(command):
+            seg = segment.strip()
+            if not seg:
+                continue
+            if _RM_ROOT_HOME_RE.search(seg):
+                return "rm -rf targeting the filesystem root or $HOME wipes the host"
+            if _CHMOD_ROOT_RE.search(seg):
+                return "chmod -R on the filesystem root can lock out the whole host"
+            if _is_force_push_to_protected_branch(seg):
+                return "git push --force into master/main rewrites shared history irreversibly"
+            if _GIT_HARD_RESET_RE.search(seg):
+                return "git reset --hard discards uncommitted work irreversibly"
+            if _is_ssh_dir_mutation(seg):
+                return "writing to or deleting ~/.ssh can lock out or leak host SSH access"
+            if _SSH_CHMOD_OPEN_RE.search(seg):
+                return "opening ~/.ssh permissions to group/other exposes the host's SSH keys"
+            if _DOCKER_PRUNE_RE.search(seg):
+                return "docker system prune deletes every unused image/volume/network on the host"
+            if _MKFS_RE.search(seg):
+                return "mkfs formats a filesystem and destroys existing data"
+            if _DD_TO_DEVICE_RE.search(seg):
+                return "dd writing to a raw block device can overwrite the host disk"
+            if _FORK_BOMB_RE.search(seg):
+                return "fork bomb: exhausts host processes/memory"
+        for extra in _DENY_COMMAND_PATTERNS_EXTRA:
+            if extra.search(command):
+                return f"blocked by an operator-defined DENY_COMMANDS_EXTRA pattern ({extra.pattern!r})"
+    except Exception:
+        return None
+    return None
+
+
+async def _dangerous_command_guard_hook(
+    hook_input: dict,
+    tool_use_id: "str | None",
+    context: "HookContext",
+) -> dict:
+    """PreToolUse guard for Bash: deny a hard-coded, minimal list of commands that are
+    irreversible for the HOST (rm -rf on / or $HOME, git push --force to master/main,
+    git reset --hard, ~/.ssh writes/deletes, docker system prune, mkfs, dd onto a raw device,
+    a fork bomb), even under permission_mode="bypassPermissions" where there is no chat/card
+    confirmation to catch it. Never raises; anything unexpected falls through to allow."""
+    try:
+        tool_input = hook_input.get("tool_input") if isinstance(hook_input, dict) else None
+        command = (tool_input or {}).get("command", "") if isinstance(tool_input, dict) else ""
+        if command:
+            reason = _classify_dangerous_command(command)
+            if reason:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": (
+                            f"Blocked: {reason}. This shape is on the irreversible-for-the-host "
+                            "deny list and cannot run even in full-auto mode."
+                        ),
+                    }
+                }
+    except Exception:
+        pass
+    return {}
+
+
 # ─────────────────────────── Spec-039: PreCompact observe hook ─────────────────────────────────
 
 def _make_pre_compact_hook(project_name: str, session_key: str):
@@ -2777,7 +2943,10 @@ async def run_engine(  # type: ignore[return]
         # --settings JSON. None → no flag at all.
         settings=_compose_settings(ultracode),
         hooks={
-            "PreToolUse": [HookMatcher(matcher="Bash", hooks=[_bundle_grep_guard_hook])],
+            "PreToolUse": [HookMatcher(
+                matcher="Bash",
+                hooks=[_bundle_grep_guard_hook, _dangerous_command_guard_hook],
+            )],
             "PostToolUse": [HookMatcher(hooks=[_post_tool_hook])],
             "PreCompact": [HookMatcher(hooks=[_pre_compact_hook])],
         },

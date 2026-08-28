@@ -469,6 +469,115 @@ async def test_tick_once_free_chat_skipped(tick_tmp):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Loop detection: suppression stops unbounded trajectory growth
+# ═══════════════════════════════════════════════════════════════════
+
+def _fail_gate(dur: str) -> dict:
+    """A failing quality-gate result whose only volatile bit is the duration text."""
+    return {
+        "verdict": "risky",
+        "tests": {"cmd": "pytest", "output": f"1 failed in {dur}", "detected": True,
+                  "ok": False, "exit_code": 1, "timed_out": False},
+        "lint": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_tick_suppresses_repeated_loop_and_stops_trajectory_growth(tick_tmp):
+    """Same underlying failure every tick (duration text varies, like real pytest
+    output) must not grow the trajectory one record per tick forever: once
+    detect_loop fires, exactly one suppressed marker is written and the file
+    stops growing for as long as the cooldown holds.
+    """
+    data_dir, proj_dir = tick_tmp
+    ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="propose")
+    _set_state(data_dir, enabled=True)
+
+    durations = ["0.03s", "0.04s", "0.05s", "0.06s", "0.07s", "0.08s"]
+    gate_mock = AsyncMock(side_effect=[_fail_gate(d) for d in durations])
+
+    with patch.object(_ap_loop, "_run_quality_gate", new=gate_mock):
+        for _ in durations:
+            await _ap_loop._autopilot_tick_once(ctx)
+
+    records = autopilot.read_trajectory(data_dir)
+    # Growth must stop well short of one record per tick (6 ticks here).
+    assert len(records) < len(durations)
+    suppressed = [r for r in records if r.get("suppressed")]
+    assert len(suppressed) == 1
+    assert suppressed[0]["loop_signal"] == "fingerprint_repeat"
+    assert suppressed[0]["repeat_count"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_tick_cooldown_skips_test_run_entirely(tick_tmp):
+    """While a project is cooling down after a detected loop, the tick must not
+    even run the test command again (not just skip the trajectory write)."""
+    data_dir, proj_dir = tick_tmp
+    ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="propose")
+    _set_state(data_dir, enabled=True)
+
+    durations = ["0.03s", "0.04s", "0.05s", "0.06s"]
+    gate_mock = AsyncMock(side_effect=[_fail_gate(d) for d in durations])
+    with patch.object(_ap_loop, "_run_quality_gate", new=gate_mock):
+        for _ in durations:
+            await _ap_loop._autopilot_tick_once(ctx)
+
+    records = autopilot.read_trajectory(data_dir)
+    assert any(r.get("suppressed") for r in records)
+
+    # The cooldown is active now — a further tick must not call the gate at all.
+    with patch.object(_ap_loop, "_run_quality_gate",
+                       new=AsyncMock(side_effect=AssertionError("must not run during cooldown"))):
+        result = await _ap_loop._autopilot_tick_once(ctx)
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_tick_resumes_after_cooldown_with_differing_intent(tick_tmp):
+    """After the cooldown lapses, a genuinely DIFFERENT intent (tests now pass)
+    is written normally again — suppression is not permanent."""
+    data_dir, proj_dir = tick_tmp
+    ctx = _make_tick_ctx(data_dir, proj_dir, enabled=True, mode="propose")
+    _set_state(data_dir, enabled=True)
+
+    durations = ["0.03s", "0.04s", "0.05s", "0.06s"]
+    gate_mock = AsyncMock(side_effect=[_fail_gate(d) for d in durations])
+    with patch.object(_ap_loop, "_run_quality_gate", new=gate_mock):
+        for _ in durations:
+            await _ap_loop._autopilot_tick_once(ctx)
+
+    records = autopilot.read_trajectory(data_dir)
+    suppressed = [r for r in records if r.get("suppressed")]
+    assert len(suppressed) == 1
+    project_id = suppressed[0]["project"]
+
+    # Force the cooldown to have already elapsed.
+    state = autopilot.load_state(data_dir)
+    state["cooldowns"][f"{project_id}/{autopilot.LOOP_CARD_ID}"] = (
+        time.time() - autopilot.LOOP_COOLDOWN_SEC - 1
+    )
+    autopilot.save_state(data_dir, state)
+
+    passing_gate = {
+        "verdict": "safe",
+        "tests": {"cmd": "pytest", "output": "3 passed in 0.02s", "detected": True,
+                  "ok": True, "exit_code": 0, "timed_out": False},
+        "lint": None,
+    }
+    with patch.object(_ap_loop, "_run_quality_gate", new=AsyncMock(return_value=passing_gate)):
+        result = await _ap_loop._autopilot_tick_once(ctx)
+
+    assert len(result) == 1
+    assert result[0].get("suppressed") is not True
+    assert result[0]["action"] != "fix_failing_tests"
+
+    new_records = autopilot.read_trajectory(data_dir)
+    assert new_records[-1]["fingerprint"] != suppressed[0]["fingerprint"]
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Endpoint tests — POST /api/autopilot/tick + GET /api/autopilot/decisions
 # ═══════════════════════════════════════════════════════════════════
 

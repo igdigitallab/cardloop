@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import date, timezone
@@ -41,6 +42,17 @@ MAX_CONCURRENT: int = int(os.environ.get("AUTOPILOT_MAX_CONCURRENT", "1"))
 # operator use.  0.2 means the autopilot backs off when ANY bucket's utilization
 # exceeds 80% (1 - 0.2).
 RL_RESERVE: float = float(os.environ.get("AUTOPILOT_RL_RESERVE", "0.2"))
+
+# AUTOPILOT_LOOP_COOLDOWN_SEC: once detect_loop() flags a project as stuck, how
+# long (seconds) the shadow tick skips that project entirely before evaluating
+# it again.  Default 1h — long enough to stop hammering the same dead end every
+# tick (AUTOPILOT_TICK_SEC, default 300s), short enough to notice a real fix.
+LOOP_COOLDOWN_SEC: int = int(os.environ.get("AUTOPILOT_LOOP_COOLDOWN_SEC", "3600"))
+
+# Sentinel "card id" used as the second half of the cooldowns composite key
+# ("<project_id>/<card_id>") when a project is cooling down after a detected
+# loop, as opposed to a real card-run cooldown.
+LOOP_CARD_ID: str = "__loop_suppress__"
 
 # ── Default state schema ──────────────────────────────────────────────────
 _STATE_DEFAULTS: dict[str, Any] = {
@@ -217,6 +229,16 @@ def release_run(state: dict, project_id: str) -> None:
     (state.get("pending_by_project") or {}).pop(project_id, None)
 
 
+def record_cooldown(state: dict, project_id: str, card_id: str, now_ts: float) -> None:
+    """Stamp the current cooldown timestamp for "<project_id>/<card_id>".
+
+    Mutates state["cooldowns"] in-place using the same composite key format
+    read by cooldown_ok(). The caller is responsible for saving the state.
+    """
+    key = f"{project_id}/{card_id}"
+    state.setdefault("cooldowns", {})[key] = now_ts
+
+
 # ─────────────────────────── observer primitives ───────────────────────────
 
 def commit_trailer(card_id: str, run_id: str) -> str:
@@ -271,14 +293,55 @@ def read_trajectory(data_dir: "str | Path", project_id: str | None = None,
     return records[-limit:]
 
 
+# ── fingerprint text normalization ───────────────────────────────────────
+#
+# A test-run summary carries real signal (which assertion, which file) mixed
+# with volatile noise (how long it took, which /tmp dir it ran in) that
+# differs between two ticks even when the underlying result is identical.
+# Hashing the noise in makes fingerprint() flap every tick, which defeats
+# detect_loop()'s fingerprint_repeat signal before it can ever fire.
+
+_RE_TMP_PATH = re.compile(r"/tmp/\S+")
+_RE_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?")
+_RE_DURATION = re.compile(r"\b\d+(?:\.\d+)?\s?m?s\b")
+_RE_TRACEBACK_LINE = re.compile(r"\bline \d+\b")
+_RE_HEX_ADDR = re.compile(r"0x[0-9a-fA-F]+")
+
+
+def normalize_fingerprint_text(text: str) -> str:
+    """Strip volatile substrings from *text* before it is hashed by fingerprint().
+
+    Removes, in order: absolute /tmp paths, ISO-ish timestamps, durations
+    ("0.03s", "1.2 s", "12ms"), traceback "line N" markers, and hex object
+    addresses ("0x7f3a2b1c9e00") — replacing each with a fixed placeholder so
+    two runs that differ only in these respects normalize to the same text.
+
+    Pure function, no I/O. Never raises; a falsy *text* returns "".
+    """
+    if not text:
+        return ""
+    out = _RE_TMP_PATH.sub("<TMPPATH>", text)
+    out = _RE_TIMESTAMP.sub("<TS>", out)
+    out = _RE_DURATION.sub("<DUR>", out)
+    out = _RE_TRACEBACK_LINE.sub("line <N>", out)
+    out = _RE_HEX_ADDR.sub("<HEX>", out)
+    return out
+
+
 def fingerprint(action: str, files: list, error_class: str) -> str:
     """Return a stable short hash for a (action, files, error_class) triple.
 
     Suitable as a loop-detection key.  Uses SHA-256 (first 12 hex chars).
     File list is sorted before hashing so order does not matter.
+    *error_class* (and each file entry) is passed through
+    normalize_fingerprint_text() first so run-to-run noise (durations, /tmp
+    paths, timestamps, traceback line numbers, hex addresses) does not change
+    the fingerprint of an otherwise-identical result.
     """
+    norm_files = sorted(normalize_fingerprint_text(str(f)) for f in files)
+    norm_error_class = normalize_fingerprint_text(str(error_class))
     key = json.dumps(
-        {"action": action, "files": sorted(str(f) for f in files), "error_class": error_class},
+        {"action": action, "files": norm_files, "error_class": norm_error_class},
         sort_keys=True,
     )
     return hashlib.sha256(key.encode()).hexdigest()[:12]

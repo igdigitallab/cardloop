@@ -509,24 +509,15 @@ def _bus_publish(session_key: str, event: dict, persist: bool = True) -> None:
     timeline via the PostToolUse hook — avoid double-recording)."""
     # A run_start's "prompt" is whatever text WOKE the turn — for an autonomous background
     # continuation that is often a raw SDK service block (<task-notification>...</task-
-    # notification>, a scheduler ping, etc.), never meant for a human to read. Every OTHER
-    # entry point that shows a prompt to an operator already strips these (_session_history,
-    # via _strip_service_blocks) — this is the one place that did not, because it publishes
-    # the raw string straight from the request/queue-item/engine-wake path. Fixed HERE, at the
-    # single publish boundary every consumer shares (live canvas bus subscribers, peer chat
-    # tabs, the timeline JSONL persisted a few lines below, Web Push), instead of patching each
-    # of the run_start call sites (chat/queue/card/bg lanes) separately — and without touching
-    # the RAW prompt those call sites pass to the engine itself (only this display copy).
-    if event.get("kind") == "run_start" and isinstance(event.get("prompt"), str) and event["prompt"]:
-        _raw_prompt = event["prompt"]
-        _cleaned_prompt = _strip_service_blocks(_raw_prompt)
-        if _cleaned_prompt != _raw_prompt:
-            event = {**event, "prompt": _cleaned_prompt}
-            if not _cleaned_prompt:
-                # The ENTIRE prompt was service-block noise — nothing left for a human to
-                # read. Flag it so consumers render this like the 'bg' lane's autonomous
-                # turns (no user bubble) instead of an empty one.
-                event["prompt_service_only"] = True
+    # notification>, a scheduler ping, etc.) or a synthetic auto-continue wake-up
+    # (_BG_CONTINUE_PREFIX), never meant for a human to read. Every OTHER entry point that
+    # shows a prompt to an operator already routes through the same helper (_session_history,
+    # _live_turn_create/_live_turn_append, via _display_prompt/_clean_run_start_event) — this
+    # is the publish boundary every consumer shares (live canvas bus subscribers, peer chat
+    # tabs, the timeline JSONL persisted a few lines below, Web Push), so cleaning here too
+    # covers any run_start built directly (e.g. the card/deferred lanes) without touching the
+    # RAW prompt those call sites pass to the engine itself (only this display copy).
+    event = _clean_run_start_event(event)
     subscribers = _bus.get(session_key)
     if subscribers:
         for q in list(subscribers):  # list() — snapshot, since _bus_unsubscribe may be called concurrently
@@ -1552,19 +1543,19 @@ def _live_turn_create(session_key: str, model: str, prompt: str = "") -> dict:
     missed the run_start (e.g. queued/card/deferred runs, or a stream that dropped)
     can reconstruct the user bubble on hydration instead of a '…' placeholder.
 
-    Stored stripped of SDK service blocks (_strip_service_blocks) — this is a DISPLAY copy
-    only (GET /live's "prompt" field, and the busy-branch duplicate-submit check), never the
-    string handed to the engine: callers pass the raw prompt to run_engine() separately from
-    this call. Without stripping here, a background wake-up whose prompt is a raw
-    <task-notification>...</task-notification> block leaked verbatim into a page-reload mid-
-    turn hydrate (api_project_live → ChatTab's hydrateFromServer), the same class of leak the
-    run_start bus event had (see _bus_publish)."""
+    Stored as a human-safe DISPLAY copy (_display_prompt) — this is only GET /live's "prompt"
+    field and the busy-branch duplicate-submit check, never the string handed to the engine:
+    callers pass the raw prompt to run_engine() separately from this call. Without cleaning
+    here, a background wake-up whose prompt is a raw <task-notification>...</task-notification>
+    block (or a synthetic auto-continue prefix) leaked verbatim into a page-reload mid-turn
+    hydrate (api_project_live → ChatTab's hydrateFromServer), the same class of leak the
+    run_start bus event had (see _bus_publish / _clean_run_start_event)."""
     turn: dict = {
         "turn_id": str(_uuid.uuid4()),
         "started_at": time.time(),
         "model": model,
         "status": "running",
-        "prompt": _strip_service_blocks(prompt or ""),
+        "prompt": _display_prompt(prompt or ""),
         # spec-071: seq continues across turns (session-monotonic) so the client's
         # grow-only reconnect cursor keeps working after long turns / between turns.
         "seq": _live_seq.get(session_key, 0),
@@ -1577,7 +1568,13 @@ def _live_turn_create(session_key: str, model: str, prompt: str = "") -> dict:
 
 def _live_turn_append(session_key: str, event: dict) -> dict:
     """Assigns the next seq to event, appends to the ring buffer, updates cost_usd.
-    Returns the seq-tagged event dict (shallow copy + seq)."""
+    Returns the seq-tagged event dict (shallow copy + seq).
+
+    A run_start event is cleaned (_clean_run_start_event) BEFORE it is stored — the stored
+    copy, not just the later _bus_publish fan-out, is what GET /live and a reconnecting
+    client's ?since= replay serve, so cleaning only at _bus_publish left this ring buffer
+    holding the raw prompt (auto-continue prefix or a <task-notification> block) forever."""
+    event = _clean_run_start_event(event)
     turn = _live_turns.get(session_key)
     if turn is None:
         return event  # guard: no active turn (shouldn't happen in normal flow)
@@ -6514,6 +6511,11 @@ async def _move_card_after_run(
             moved = _pop_card(cols, card_id)
             if moved is None:
                 moved = card
+            # Stamp when the card entered Review — the board keeps no history of its
+            # own, and without this the janitor cannot tell a card parked for weeks
+            # from one that landed a second ago.
+            if target_col == "review":
+                moved["rt"] = int(time.time())
             cols[target_col].append(moved)
             _save_board(cwd, name, preamble, cols)
         # spec-052 Phase 2: emit moved event (outside the lock, after board write)
@@ -6998,6 +7000,8 @@ async def api_move_task(req: web.Request) -> web.Response:
             dp.write_text(new, encoding="utf-8")
             _save_board(cwd, name, preamble, cols)
         elif to in cols:
+            if to == "review":
+                card["rt"] = int(time.time())
             cols[to].append(card)
             _save_board(cwd, name, preamble, cols)
         else:
@@ -10948,6 +10952,58 @@ def _strip_service_blocks(text: str) -> str:
     return _SERVICE_BLOCK_RE.sub("", text).strip()
 
 
+def _display_prompt(text: "str | None") -> str:
+    """Human-safe display copy of a prompt/message string for the chat feed.
+
+    Two distinct kinds of cockpit-internal noise are removed here so neither ever renders
+    as an operator-authored bubble:
+      - a synthetic auto-continue wake-up (starts with _BG_CONTINUE_PREFIX, defined below) —
+        dropped WHOLE, since a human never typed it; it exists only to re-arm the model after
+        a background child finishes (see _completion_wake_fire). A prefix check only — a
+        human message that merely mentions "auto-continue" mid-sentence is untouched.
+      - an SDK service XML block (<task-notification>, <system-reminder>, ...) embedded in
+        an otherwise human prompt (see _strip_service_blocks) — only the block is removed,
+        surrounding human text survives.
+    Returns "" if nothing human-authored remains. This is the single place every prompt-display
+    boundary routes through: session-history hydration (_session_history), the live-turn
+    buffer (_live_turn_create's top-level "prompt", and _clean_run_start_event's run_start
+    events), and the bus publish boundary (_bus_publish, via the same helper).
+    """
+    if not text:
+        return ""
+    if text.startswith(_BG_CONTINUE_PREFIX):
+        return ""
+    return _strip_service_blocks(text)
+
+
+def _clean_run_start_event(event: dict) -> dict:
+    """Returns `event` with a human-safe "prompt" for kind == "run_start" (see _display_prompt).
+
+    Applied at BOTH ends of the one path that stores a run_start event before it is ever
+    broadcast: _live_turn_append (so the ring-buffer copy served by GET /live and the
+    ?since= reconnect replay is already clean, not just the live SSE fan-out) and
+    _bus_publish (the shared publish boundary — covers lanes, e.g. card/deferred, that
+    build a run_start dict directly and never touch _live_turn_append). Idempotent: running
+    it twice on an already-clean event is a no-op, so double coverage is safe.
+    Non-run_start events, or a run_start with no string prompt, pass through unchanged.
+    """
+    if event.get("kind") != "run_start":
+        return event
+    raw = event.get("prompt")
+    if not isinstance(raw, str) or not raw:
+        return event
+    cleaned = _display_prompt(raw)
+    if cleaned == raw:
+        return event
+    out = {**event, "prompt": cleaned}
+    if not cleaned:
+        # The ENTIRE prompt was noise (service block or an auto-continue wake) — nothing left
+        # for a human to read. Flag it so consumers render this like the 'bg' lane's autonomous
+        # turns (no user bubble) instead of an empty one.
+        out["prompt_service_only"] = True
+    return out
+
+
 # A cross-session delivery ("Another Claude session sent a message: <agent-message from=...>")
 # is the ONE isMeta payload that must survive the harness-noise filter in _session_history: it
 # is the only place a teammate agent's verbatim report ever reaches the feed. The SDK stamps
@@ -11003,7 +11059,10 @@ def _session_history(jsonl_path: Path, limit: int = 100,
                 if t == "attachment":
                     _att = o.get("attachment") or {}
                     if _att.get("type") == "queued_command":
-                        _steered = (_att.get("prompt") or "").strip()
+                        # _display_prompt: an auto-continue wake or a raw <task-notification>
+                        # block can in principle land here too (steered mid-turn) — same
+                        # noise class as an ordinary user line, same cleanup.
+                        _steered = _display_prompt(_att.get("prompt") or "")
                         if _steered:
                             msgs.append({"role": "user", "text": _steered, "tools": [],
                                          "uuid": o.get("uuid"), "steered": True,
@@ -11034,7 +11093,10 @@ def _session_history(jsonl_path: Path, limit: int = 100,
                             isinstance(c, str) and _CROSS_AGENT_MSG_RE.search(c)):
                         continue
                     if isinstance(c, str):
-                        cleaned = _strip_service_blocks(c)
+                        # _display_prompt: drops a synthetic auto-continue wake whole (never
+                        # operator-typed) and strips any embedded SDK service XML block —
+                        # see _display_prompt's docstring for both classes of noise.
+                        cleaned = _display_prompt(c)
                         if cleaned:
                             # spec-073: uuid = the file-checkpoint anchor for rewind_files.
                             msgs.append({"role": "user", "text": cleaned, "tools": [],
@@ -16229,6 +16291,11 @@ async def start(ctx: dict) -> None:
         # Deferred import: MUST stay inside this function body (IRON RULE — spec-068).
         from features.autopilot import register as _register_autopilot  # deferred import
         _register_autopilot(app, ctx)
+
+        # Board janitor — the Review column's only automatic exit.
+        # Deferred import for the same reason as autopilot above (IRON RULE — spec-068).
+        from features.board_janitor import register as _register_janitor  # deferred import
+        _register_janitor(app, ctx)
 
         # Static files — everything else (SPA)
         app.router.add_get("/dl/{name}", public_download)
