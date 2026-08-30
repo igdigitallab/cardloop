@@ -510,6 +510,11 @@ class BrowserSession:
         # Debounced re-measure for Page.frameResized (a drag on the real window fires it
         # dozens of times) — see _on_frame_resized.
         self._resize_task: "asyncio.Task | None" = None
+        # Live JPEG dimensions + the last time we restarted the stream because they
+        # stopped covering the viewport — see _check_frame_covers_viewport.
+        self._frame_dims: "tuple[int, int] | None" = None
+        self._recapture_task: "asyncio.Task | None" = None
+        self._recapture_at = 0.0
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -610,6 +615,8 @@ class BrowserSession:
             self._watchdog.cancel()
         if self._resize_task is not None:
             self._resize_task.cancel()
+        if self._recapture_task is not None:
+            self._recapture_task.cancel()
         with contextlib.suppress(Exception):
             if self._cdp:
                 await self._cdp.send("Page.stopScreencast")
@@ -684,6 +691,87 @@ class BrowserSession:
     def _id_of(self, page: Any) -> "str | None":
         return next((tid for tid, p in self._tabs.items() if p is page), None)
 
+    @staticmethod
+    def _jpeg_size(raw: bytes) -> "tuple[int, int] | None":
+        """Width/height straight out of the JPEG's SOF header.
+
+        The frame's own pixels are the only honest statement of WHAT AREA of the page
+        the operator is actually looking at — see _check_frame_covers_viewport.
+        """
+        i, n = 2, len(raw)
+        while i + 9 < n:
+            if raw[i] != 0xFF:
+                i += 1
+                continue
+            marker = raw[i + 1]
+            i += 2
+            if marker == 0xD8 or marker == 0x01 or 0xD0 <= marker <= 0xD7:
+                continue
+            if i + 2 > n:
+                break
+            seg = int.from_bytes(raw[i:i + 2], "big")
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                if i + 7 > n:
+                    break
+                h = int.from_bytes(raw[i + 3:i + 5], "big")
+                w = int.from_bytes(raw[i + 5:i + 7], "big")
+                return (w, h) if w > 0 and h > 0 else None
+            if seg <= 0:
+                break
+            i += seg
+        return None
+
+    def _check_frame_covers_viewport(self) -> None:
+        """Does the picture still show the WHOLE page, or a stale corner of it?
+
+        Page.startScreencast pins its capture area when it starts. A viewport that
+        changes afterwards — an emulation override dropped by a cross-process
+        navigation, the real window resized — does NOT resize the stream: Chromium
+        keeps sending the old area, so the pane silently shows the top-left crop of the
+        page (2026-08-30: a 1280x720 capture of a 1920x947 page, the operator could not
+        see the bottom two rows) and every click below/right of the crop is mapped
+        against a picture that never contained it. Aspect ratio is the tell, since the
+        stream is downscaled: it can only match if the frame is the entire viewport.
+        """
+        dims = self._frame_dims
+        if not dims or self._closed:
+            return
+        fw, fh = dims
+        vw, vh = self.viewport["width"], self.viewport["height"]
+        if min(fw, fh, vw, vh) <= 0:
+            return
+        want = vw / vh
+        if abs((fw / fh) - want) <= 0.02 * want:
+            return
+        now = time.monotonic()
+        if now - self._recapture_at < 10.0:
+            return  # already tried recently; don't spin restarting the stream
+        if self._recapture_task is not None and not self._recapture_task.done():
+            return
+        self._recapture_at = now
+        self._recapture_task = asyncio.create_task(self._restart_screencast(
+            f"frame {fw}x{fh} does not cover viewport {vw}x{vh}"))
+
+    async def _restart_screencast(self, why: str) -> None:
+        """Stop and re-start the stream so its capture area is re-derived from the page
+        as it is NOW. Cheap (one stop + one start on the existing CDP session) and the
+        only way to move a pinned capture area."""
+        cdp = self._cdp
+        if cdp is None or self._closed:
+            return
+        _log.info("restarting screencast (%s, cwd=%s backend=%s)", why, self.key, self.backend)
+        with contextlib.suppress(Exception):
+            await cdp.send("Page.stopScreencast")
+        with contextlib.suppress(Exception):
+            await cdp.send("Page.startScreencast", {
+                "format": "jpeg", "quality": STREAM["quality"],
+                "maxWidth": STREAM["width"], "maxHeight": STREAM["height"],
+                "everyNthFrame": 1,
+            })
+        self._frame_dims = None
+        with contextlib.suppress(Exception):
+            await self._reprime_subs()
+
     def _on_frame_resized(self, _params: Any = None) -> None:
         """The remote window changed size — re-measure the coordinate space (debounced).
 
@@ -738,6 +826,9 @@ class BrowserSession:
                       self.viewport["width"], self.viewport["height"],
                       vp["width"], vp["height"], self.key, self.backend)
             self.viewport = vp
+            # The stream's capture area was pinned to the OLD size — check it against the
+            # new one (a no-op when the frame already covers it).
+            self._check_frame_covers_viewport()
         # Broadcast unconditionally: an explicit resync must answer even when nothing
         # changed, and a late subscriber's own `ready` already carries the same numbers.
         await self.broadcast_json({"type": "geometry",
@@ -978,6 +1069,18 @@ class BrowserSession:
         # emits on CHANGE, so a subscriber that joins a static page would otherwise
         # never receive a frame (the "Browser stream not yet ready" blank pane).
         self._last_frame = raw
+        # The frame's own size is free to read and is the ground truth for what the
+        # operator can see. Only acted on when it CHANGES, so this is a no-op per frame
+        # in the steady state.
+        dims = self._jpeg_size(raw)
+        if dims and dims != self._frame_dims:
+            self._frame_dims = dims
+            meta = params.get("metadata") or {}
+            _log.info("browser frame %dx%d (viewport %dx%d, cdp dev=%sx%s scale=%s) cwd=%s",
+                      dims[0], dims[1], self.viewport["width"], self.viewport["height"],
+                      meta.get("deviceWidth"), meta.get("deviceHeight"),
+                      meta.get("pageScaleFactor"), self.key)
+            self._check_frame_covers_viewport()
         if not self._subs:
             return
         for ws in list(self._subs):
@@ -1130,10 +1233,12 @@ class BrowserSession:
             elif t == "zoom":
                 await self.set_zoom(msg)
             elif t == "resync":
-                # The pane's "sync" button: re-assert + re-measure the coordinate space
-                # and push a fresh frame, so a drifted pane is one tap from correct.
+                # The pane's "sync" button: re-measure the coordinate space AND re-derive
+                # the stream's capture area, so a drifted pane is one tap from correct
+                # whichever of the two drifted.
                 await self._sync_viewport()
-                await self._reprime_subs()
+                self._recapture_at = 0.0  # an explicit ask overrides the cooldown
+                await self._restart_screencast("operator pressed sync")
         except Exception as e:
             # Every command here is a raw CDP call on an already-established session —
             # unlike the agent's selector-based click()/type_text(), there is no

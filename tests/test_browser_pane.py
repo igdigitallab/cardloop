@@ -2005,3 +2005,77 @@ def test_a_resize_storm_schedules_only_one_remeasure():
         assert s._resize_task is not task
         s._resize_task.cancel()
     asyncio.run(go())
+
+
+# ── the stream's capture area can go stale independently of the viewport ─────
+# Page.startScreencast pins its capture area. When the viewport changes afterwards
+# (an override dropped by a cross-process navigation, the real window resized) the
+# stream keeps sending the OLD area: the pane shows the page's top-left crop, and every
+# click past the crop is mapped against a picture that never contained it. Live on
+# 2026-08-30: a 1280×720 capture of a 1920×947 page — two of the four rows invisible.
+
+def _jpeg_of(width: int, height: int) -> bytes:
+    """Minimal JPEG header carrying a SOF0 of the given size."""
+    return (b"\xff\xd8"
+            + b"\xff\xc0" + (17).to_bytes(2, "big") + b"\x08"
+            + height.to_bytes(2, "big") + width.to_bytes(2, "big")
+            + b"\x03" + b"\x00" * 9
+            + b"\xff\xd9")
+
+
+def test_jpeg_size_reads_the_sof_header():
+    assert BrowserSession._jpeg_size(_jpeg_of(960, 474)) == (960, 474)
+    assert BrowserSession._jpeg_size(b"not a jpeg at all") is None
+
+
+def test_a_frame_that_covers_the_viewport_is_left_alone():
+    s = _viewport_session(1920, 947)
+    s.viewport = {"width": 1920, "height": 947}
+    s._frame_dims = (960, 474)          # the whole viewport, downscaled
+    s._check_frame_covers_viewport()
+    assert s._recapture_task is None
+
+
+def test_a_stale_capture_area_restarts_the_stream():
+    async def go():
+        s = _viewport_session(1920, 947)
+        s.viewport = {"width": 1920, "height": 947}
+        s._frame_dims = (843, 474)      # 16:9 — a 1280×720 crop of a 1920×947 page
+        s._reprime_subs = lambda: _done()
+        s._check_frame_covers_viewport()
+        assert s._recapture_task is not None
+        await s._recapture_task
+        methods = [m for m, _ in s._cdp.calls]
+        assert "Page.stopScreencast" in methods and "Page.startScreencast" in methods
+        # …and it does not spin: the cooldown blocks an immediate second attempt.
+        s._recapture_task = None
+        s._frame_dims = (843, 474)
+        s._check_frame_covers_viewport()
+        assert s._recapture_task is None
+    asyncio.run(go())
+
+
+def test_an_incoming_frame_records_its_size_and_checks_coverage():
+    async def go():
+        s = _viewport_session(1920, 947)
+        s.viewport = {"width": 1920, "height": 947}
+        s._reprime_subs = lambda: _done()
+        import base64
+        s._on_frame({"data": base64.b64encode(_jpeg_of(843, 474)).decode(), "metadata": {}})
+        assert s._frame_dims == (843, 474)
+        assert s._recapture_task is not None
+        s._recapture_task.cancel()
+    asyncio.run(go())
+
+
+def test_resync_restarts_the_stream_as_well_as_remeasuring():
+    """The ⌖ button must fix EITHER drift — the coordinate space or the capture area."""
+    async def go():
+        s = _viewport_session(1600, 900)
+        s.broadcast_json = lambda obj: _done()
+        s._reprime_subs = lambda: _done()
+        await s.handle_input({"t": "resync"})
+        methods = [m for m, _ in s._cdp.calls]
+        assert s.viewport == {"width": 1600, "height": 900}
+        assert "Page.stopScreencast" in methods and "Page.startScreencast" in methods
+    asyncio.run(go())
