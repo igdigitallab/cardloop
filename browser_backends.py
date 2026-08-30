@@ -414,8 +414,16 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
         owns_page = True
     else:
         page = context.pages[0]
-    with contextlib.suppress(Exception):
-        await page.set_viewport_size(viewport)
+    # NO set_viewport_size here, deliberately. It sets an emulation override, and on a
+    # connect_over_cdp profile the override does NOT win the layout — the profile keeps
+    # laying the page out at its own window size (1920x947 on the Cloak profile) — but it
+    # DOES clamp what Chromium captures. Result: screenshots and the operator's screencast
+    # showed the top-left 1280x720 CROP of a 1920-wide page, with the rest simply invisible
+    # and every click past the crop mapped against a picture that never contained it
+    # (verified 2026-08-30: raw Page.captureScreenshot 1280x720 vs cssLayoutViewport
+    # 1920x947; clearing the override restored the full 1920x947 capture). An external
+    # browser's window belongs to whoever owns it — measure it (BrowserSession._sync_viewport),
+    # never impose ours.
     return Acquired(pw=pw, browser=browser, context=context, page=page,
                     owns_browser=False, backend="external-cdp", label=label,
                     owns_page=owns_page, shared_context=isolate, profile=profile)

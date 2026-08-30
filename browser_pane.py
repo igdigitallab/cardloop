@@ -515,6 +515,7 @@ class BrowserSession:
         self._frame_dims: "tuple[int, int] | None" = None
         self._recapture_task: "asyncio.Task | None" = None
         self._recapture_at = 0.0
+        self._recapture_for: "tuple[int, int, int, int] | None" = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -743,14 +744,36 @@ class BrowserSession:
         want = vw / vh
         if abs((fw / fh) - want) <= 0.02 * want:
             return
+        if self._recapture_for == (fw, fh, vw, vh):
+            return  # already tried for exactly this mismatch; retrying changes nothing
         now = time.monotonic()
         if now - self._recapture_at < 10.0:
             return  # already tried recently; don't spin restarting the stream
         if self._recapture_task is not None and not self._recapture_task.done():
             return
         self._recapture_at = now
-        self._recapture_task = asyncio.create_task(self._restart_screencast(
+        self._recapture_for = (fw, fh, vw, vh)
+        self._recapture_task = asyncio.create_task(self._align_capture_area(
             f"frame {fw}x{fh} does not cover viewport {vw}x{vh}"))
+
+    async def _align_capture_area(self, why: str) -> None:
+        """Make the captured area match the page again.
+
+        Restarting the stream alone is not enough when something has clamped the capture
+        area — an emulation override (ours, historically, or the profile's own) survives
+        a stop/start. Setting the override to the size the page ACTUALLY lays out at is
+        what moves it; it is a no-op for a page that already agrees, and it never invents
+        a size, it copies the measured one.
+        """
+        cdp = self._cdp
+        if cdp is None or self._closed:
+            return
+        with contextlib.suppress(Exception):
+            await cdp.send("Emulation.setDeviceMetricsOverride", {
+                "width": self.viewport["width"], "height": self.viewport["height"],
+                "deviceScaleFactor": 1, "mobile": False,
+            })
+        await self._restart_screencast(why)
 
     async def _restart_screencast(self, why: str) -> None:
         """Stop and re-start the stream so its capture area is re-derived from the page
@@ -801,13 +824,13 @@ class BrowserSession:
         page, cdp = self._page, self._cdp
         if page is None or cdp is None:
             return dict(self.viewport)
-        if apply:
+        # Only a context WE created is ours to resize. Imposing a viewport on an external
+        # profile does not move its layout, it just clamps what gets captured — see the
+        # long note in browser_backends._acquire_external.
+        if apply and self._owns_browser:
             try:
                 await page.set_viewport_size(VIEWPORT)
             except Exception as e:
-                # Expected on a CDP-connected profile whose context has no viewport of
-                # its own. Not an error — it is precisely why we measure below instead
-                # of trusting the request to have taken effect.
                 _log.debug("set_viewport_size failed (cwd=%s backend=%s): %s",
                            self.key, self.backend, e)
         vp = dict(self.viewport)
@@ -1237,7 +1260,8 @@ class BrowserSession:
                 # the stream's capture area, so a drifted pane is one tap from correct
                 # whichever of the two drifted.
                 await self._sync_viewport()
-                self._recapture_at = 0.0  # an explicit ask overrides the cooldown
+                self._recapture_at = 0.0     # an explicit ask overrides the cooldown
+                self._recapture_for = None
                 await self._restart_screencast("operator pressed sync")
         except Exception as e:
             # Every command here is a raw CDP call on an already-established session —

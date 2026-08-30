@@ -1910,6 +1910,7 @@ def _viewport_session(width=1920, height=947, page_fails=False) -> BrowserSessio
 
 def test_sync_viewport_adopts_the_measured_size_not_the_requested_one():
     s = _viewport_session(1920, 947)
+    s._owns_browser = True
     sent = []
     s.broadcast_json = lambda obj: sent.append(obj) or _done()
     vp = asyncio.run(s._sync_viewport())
@@ -1924,6 +1925,7 @@ def test_sync_viewport_measures_even_when_the_override_is_refused():
     """connect_over_cdp contexts routinely refuse set_viewport_size. That is not a
     failure mode — it is the reason the measurement exists."""
     s = _viewport_session(1920, 947, page_fails=True)
+    s._owns_browser = True
     s.broadcast_json = lambda obj: _done()
     assert asyncio.run(s._sync_viewport()) == {"width": 1920, "height": 947}
 
@@ -1939,6 +1941,7 @@ def test_apply_false_measures_without_touching_the_page():
     """On navigation we re-measure but must NOT re-assert: that would fight a window
     the operator resized himself, mid-session."""
     s = _viewport_session()
+    s._owns_browser = True
     s.broadcast_json = lambda obj: _done()
     asyncio.run(s._sync_viewport(apply=False))
     assert s._page.requested == []
@@ -2036,7 +2039,10 @@ def test_a_frame_that_covers_the_viewport_is_left_alone():
     assert s._recapture_task is None
 
 
-def test_a_stale_capture_area_restarts_the_stream():
+def test_a_stale_capture_area_is_realigned_and_the_stream_restarted():
+    """Restarting the stream alone does NOT move a clamped capture area — an emulation
+    override survives stop/start. The override has to be set to the size the page really
+    lays out at, which is the measured one."""
     async def go():
         s = _viewport_session(1920, 947)
         s.viewport = {"width": 1920, "height": 947}
@@ -2045,14 +2051,37 @@ def test_a_stale_capture_area_restarts_the_stream():
         s._check_frame_covers_viewport()
         assert s._recapture_task is not None
         await s._recapture_task
+        calls = dict(s._cdp.calls)
         methods = [m for m, _ in s._cdp.calls]
+        assert calls["Emulation.setDeviceMetricsOverride"]["width"] == 1920
+        assert calls["Emulation.setDeviceMetricsOverride"]["height"] == 947
         assert "Page.stopScreencast" in methods and "Page.startScreencast" in methods
-        # …and it does not spin: the cooldown blocks an immediate second attempt.
+        # …and it does not spin: the same mismatch is never retried.
         s._recapture_task = None
+        s._recapture_at = 0.0
         s._frame_dims = (843, 474)
         s._check_frame_covers_viewport()
         assert s._recapture_task is None
     asyncio.run(go())
+
+
+def test_an_external_profile_is_never_resized_by_us():
+    """Imposing our viewport on a browser we merely connected to does not move its
+    layout — it only clamps what gets captured, which is the crop bug itself."""
+    s = _viewport_session(1920, 947)
+    s._owns_browser = False
+    s.broadcast_json = lambda obj: _done()
+    asyncio.run(s._sync_viewport(apply=True))
+    assert s._page.requested == []
+    assert s.viewport == {"width": 1920, "height": 947}
+
+
+def test_a_browser_we_launched_is_still_ours_to_resize():
+    s = _viewport_session(1280, 720)
+    s._owns_browser = True
+    s.broadcast_json = lambda obj: _done()
+    asyncio.run(s._sync_viewport(apply=True))
+    assert s._page.requested == [VIEWPORT]
 
 
 def test_an_incoming_frame_records_its_size_and_checks_coverage():
