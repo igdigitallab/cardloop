@@ -15917,8 +15917,9 @@ async def _resolve_browser_session(req: web.Request) -> "tuple[_browser_pane.Bro
 async def api_browser_ws(req: web.Request) -> web.WebSocketResponse:
     """GET /api/browser/ws?project=<id> — live browser screencast over WebSocket.
 
-    Server→client: binary = one JPEG frame (1280x720); text = JSON control
-    ({type:ready|nav|error|clipboard}). Client→server: JSON input ({t:mouse|wheel|key|navigate|copy|paste})
+    Server→client: binary = one JPEG frame (downscaled from the live remote window,
+    whatever size that is); text = JSON control ({type:ready|geometry|nav|error|clipboard}).
+    Client→server: JSON input ({t:mouse|wheel|key|navigate|copy|paste|resync})
     — though the pane's own frontend now sends input on the separate
     /api/browser/input-ws below; this socket still accepts it too (e.g. for any
     other future consumer), it just isn't where BrowserTab.tsx's clicks go.

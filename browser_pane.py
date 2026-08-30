@@ -30,8 +30,11 @@ _log = logging.getLogger(__name__)
 
 import browser_backends as _backends
 
-# Frame / viewport geometry — the frontend maps pointer coordinates into this
-# exact space, so it MUST match the client contract (BrowserTab.tsx).
+# Frame / viewport geometry we REQUEST for a session. It is not a guarantee: only a
+# context we create ourselves is really bound to it, and an external / Cloak-Manager
+# profile keeps its own window size. The live value is measured per active tab into
+# BrowserSession.viewport and pushed to the pane ({"type":"geometry"}) — the client maps
+# pointer coordinates into THAT, never into this constant.
 VIEWPORT = {"width": 1280, "height": 720}
 # The page RENDERS at VIEWPORT, but the screencast is downscaled to STREAM before JPEG
 # encoding. Per-frame bytes on the operator's connection (cockpit WS → proxy → device)
@@ -480,6 +483,15 @@ class BrowserSession:
         self._shared_ctx = False    # True when the context is shared with other projects
         self._profile = ""          # Cloak Manager profile id, handed back on teardown
         self.backend = "builtin"    # spec-066: which backend acquired this session (for the pane header)
+        # The LIVE pointer coordinate space. VIEWPORT is only what we ASK for: an
+        # external / Cloak-Manager profile owns its own window, and set_viewport_size()
+        # over connect_over_cdp is best-effort AND per-page — a tab we merely adopted (or
+        # one Chromium re-created on a cross-process navigation) keeps the profile's real
+        # size, e.g. 1920x947. Every pointer coordinate the pane sends is interpreted in
+        # THIS space, so it is measured from the page (_sync_viewport) and pushed to the
+        # client, never assumed. Assuming it is exactly what made clicks land elsewhere:
+        # a tap aimed at the middle of a 1920-wide page arrived at x=640 of 1920.
+        self.viewport = dict(VIEWPORT)
         self._started = False
         self._closed = False
         self._start_lock = asyncio.Lock()
@@ -495,6 +507,9 @@ class BrowserSession:
         # stale and ignored instead of triggering a needless re-arm.
         self._cdp_gen = 0
         self._rearming = False
+        # Debounced re-measure for Page.frameResized (a drag on the real window fires it
+        # dozens of times) — see _on_frame_resized.
+        self._resize_task: "asyncio.Task | None" = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -593,6 +608,8 @@ class BrowserSession:
         self._closed = True
         if self._watchdog:
             self._watchdog.cancel()
+        if self._resize_task is not None:
+            self._resize_task.cancel()
         with contextlib.suppress(Exception):
             if self._cdp:
                 await self._cdp.send("Page.stopScreencast")
@@ -667,6 +684,66 @@ class BrowserSession:
     def _id_of(self, page: Any) -> "str | None":
         return next((tid for tid, p in self._tabs.items() if p is page), None)
 
+    def _on_frame_resized(self, _params: Any = None) -> None:
+        """The remote window changed size — re-measure the coordinate space (debounced).
+
+        Fired continuously while a window is being dragged, so at most one re-measure is
+        ever in flight; it settles a quarter-second after the resize stops.
+        """
+        if self._resize_task is not None and not self._resize_task.done():
+            return
+
+        async def _later() -> None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.sleep(0.25)
+                await self._sync_viewport(apply=False)
+
+        self._resize_task = asyncio.create_task(_later())
+
+    async def _sync_viewport(self, apply: bool = True) -> dict:
+        """Re-assert (best-effort) and MEASURE the active page's CSS viewport, then tell
+        the pane about it.
+
+        This is the single source of truth for the input coordinate space. It is called
+        on every tab bind, on every main-frame navigation (measure only), and on the
+        pane's explicit "sync" button — so a browser window the operator resized, or a
+        tab that never got our viewport override, self-corrects instead of silently
+        offsetting every click.
+        """
+        page, cdp = self._page, self._cdp
+        if page is None or cdp is None:
+            return dict(self.viewport)
+        if apply:
+            try:
+                await page.set_viewport_size(VIEWPORT)
+            except Exception as e:
+                # Expected on a CDP-connected profile whose context has no viewport of
+                # its own. Not an error — it is precisely why we measure below instead
+                # of trusting the request to have taken effect.
+                _log.debug("set_viewport_size failed (cwd=%s backend=%s): %s",
+                           self.key, self.backend, e)
+        vp = dict(self.viewport)
+        try:
+            metrics = await cdp.send("Page.getLayoutMetrics")
+            box = metrics.get("cssLayoutViewport") or metrics.get("cssVisualViewport") or {}
+            w = int(box.get("clientWidth") or 0)
+            h = int(box.get("clientHeight") or 0)
+            if w > 0 and h > 0:
+                vp = {"width": w, "height": h}
+        except Exception as e:
+            _log.debug("viewport measure failed (cwd=%s backend=%s): %s",
+                       self.key, self.backend, e)
+        if vp != self.viewport:
+            _log.info("browser viewport %dx%d -> %dx%d (cwd=%s backend=%s)",
+                      self.viewport["width"], self.viewport["height"],
+                      vp["width"], vp["height"], self.key, self.backend)
+            self.viewport = vp
+        # Broadcast unconditionally: an explicit resync must answer even when nothing
+        # changed, and a late subscriber's own `ready` already carries the same numbers.
+        await self.broadcast_json({"type": "geometry",
+                                   "width": vp["width"], "height": vp["height"]})
+        return dict(vp)
+
     async def _bind_active(self, page: Any, *, prime: bool = True) -> None:
         """Make `page` the active tab: move the CDP screencast + nav/crash listeners onto
         it. The previous active tab's screencast is stopped and its CDP detached (only ONE
@@ -697,6 +774,14 @@ class BrowserSession:
             self._cdp_gen += 1
             gen = self._cdp_gen
             self._cdp.on("Page.screencastFrame", self._on_frame)
+            # The remote window can be resized out from under us (an operator resizing the
+            # real Chrome, a Cloak Manager profile viewer, a mobile rotation). That silently
+            # changes the coordinate space input is dispatched in, so listen for it rather
+            # than waiting for the next navigation to notice. Page.enable is what makes
+            # frameResized arrive on THIS session; the screencast alone does not.
+            with contextlib.suppress(Exception):
+                await self._cdp.send("Page.enable")
+            self._cdp.on("Page.frameResized", self._on_frame_resized)
             # CDPSession emits "close" when its target is closed OR detach() is called
             # (Playwright docs) — the latter fires on our OWN intentional switch-away a
             # few lines above, which is why the handler is gen-guarded: only a "close"
@@ -710,6 +795,9 @@ class BrowserSession:
                 "maxWidth": STREAM["width"], "maxHeight": STREAM["height"],
                 "everyNthFrame": 1,
             })
+            # The coordinate space belongs to the page we just bound, not to the one we
+            # bound before it — measure it here, while still holding _switch_lock.
+            await self._sync_viewport()
         if prime:
             await self._broadcast_nav()
             await self._reprime_subs()
@@ -925,6 +1013,11 @@ class BrowserSession:
         # operator's zoom before anyone looks at the frame.
         if self._zoom != ZOOM_DEFAULT:
             await self._apply_zoom()
+        # A cross-process navigation re-creates the renderer and can drop an emulation
+        # override with it, silently resizing the coordinate space mid-session. Measure
+        # (never re-apply here — that would fight a window the operator resized himself).
+        with contextlib.suppress(Exception):
+            await self._sync_viewport(apply=False)
         with contextlib.suppress(Exception):
             url = self._page.url
             title = await self._page.title()
@@ -943,7 +1036,8 @@ class BrowserSession:
         self._subs.add(ws)
         self._touch()
         with contextlib.suppress(Exception):
-            await ws.send_json({"type": "ready", "width": VIEWPORT["width"], "height": VIEWPORT["height"],
+            await ws.send_json({"type": "ready",
+                                "width": self.viewport["width"], "height": self.viewport["height"],
                                 "backend": self.backend, "zoom": self._zoom})
             await ws.send_json({"type": "nav", "url": self._page.url, "title": await self._page.title()})
             await ws.send_json(await self._tabs_payload())
@@ -1035,6 +1129,11 @@ class BrowserSession:
                 await self._history(t)
             elif t == "zoom":
                 await self.set_zoom(msg)
+            elif t == "resync":
+                # The pane's "sync" button: re-assert + re-measure the coordinate space
+                # and push a fresh frame, so a drifted pane is one tap from correct.
+                await self._sync_viewport()
+                await self._reprime_subs()
         except Exception as e:
             # Every command here is a raw CDP call on an already-established session —
             # unlike the agent's selector-based click()/type_text(), there is no
@@ -1127,8 +1226,8 @@ class BrowserSession:
             return 0.0
 
     async def _mouse(self, msg: dict) -> None:
-        x = self._clamp(msg.get("x"), VIEWPORT["width"])
-        y = self._clamp(msg.get("y"), VIEWPORT["height"])
+        x = self._clamp(msg.get("x"), self.viewport["width"])
+        y = self._clamp(msg.get("y"), self.viewport["height"])
         action = msg.get("action")
         cdp_type = {"move": "mouseMoved", "down": "mousePressed", "up": "mouseReleased"}.get(action)
         if not cdp_type:
@@ -1157,8 +1256,8 @@ class BrowserSession:
     async def _wheel(self, msg: dict) -> None:
         await self._cdp.send("Input.dispatchMouseEvent", {
             "type": "mouseWheel",
-            "x": self._clamp(msg.get("x"), VIEWPORT["width"]),
-            "y": self._clamp(msg.get("y"), VIEWPORT["height"]),
+            "x": self._clamp(msg.get("x"), self.viewport["width"]),
+            "y": self._clamp(msg.get("y"), self.viewport["height"]),
             "deltaX": float(msg.get("dx") or 0),
             "deltaY": float(msg.get("dy") or 0),
         })
@@ -1667,6 +1766,9 @@ class BrowserSession:
             "idle_seconds": round(time.monotonic() - self._last_activity, 1),
             "url": (self._page.url if self._page is not None else None),
             "zoom": self._zoom,
+            # The MEASURED coordinate space (see _sync_viewport) — not the constant we
+            # asked for. A mismatch with 1280x720 is normal on an external profile.
+            "viewport": f"{self.viewport['width']}x{self.viewport['height']}",
         }
 
     # ── idle watchdog ────────────────────────────────────────────────────────

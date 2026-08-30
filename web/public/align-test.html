@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Browser pane alignment test</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #101216; color: #e6e6e6; }
+  #grid { position: absolute; inset: 0; display: grid; }
+  .cell { border: 1px solid #2a2f3a; display: flex; align-items: center; justify-content: center;
+    font-size: clamp(18px, 4vmin, 44px); font-weight: 700; color: #48505f; user-select: none; }
+  .cell.hit { background: #1d4ed8; color: #fff; }
+  .cell.aim { outline: 3px dashed #f59e0b; outline-offset: -6px; color: #f59e0b; }
+  #hud { position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+    background: rgba(0,0,0,.82); border: 1px solid #3a4150; border-radius: 10px;
+    padding: 10px 16px; text-align: center; pointer-events: none; z-index: 5; min-width: 60%; }
+  #verdict { font-size: clamp(16px, 3.2vmin, 30px); font-weight: 700; }
+  #detail { font-size: clamp(11px, 1.8vmin, 16px); color: #9aa4b8; margin-top: 4px; }
+  #size { position: absolute; right: 10px; bottom: 8px; font-size: 14px; color: #9aa4b8; z-index: 5; }
+  #hint { position: absolute; left: 10px; bottom: 8px; font-size: 13px; color: #6b7385; z-index: 5; }
+  .corner { position: absolute; width: 60px; height: 60px; border: 3px solid #ef4444; z-index: 4; }
+  .tl { left: 0; top: 0; border-right: 0; border-bottom: 0; }
+  .tr { right: 0; top: 0; border-left: 0; border-bottom: 0; }
+  .bl { left: 0; bottom: 0; border-right: 0; border-top: 0; }
+  .br { right: 0; bottom: 0; border-left: 0; border-top: 0; }
+  .mark { position: absolute; width: 26px; height: 26px; margin: -13px 0 0 -13px; z-index: 6;
+    pointer-events: none; }
+  .mark::before, .mark::after { content: ''; position: absolute; background: #22c55e; }
+  .mark::before { left: 12px; top: 0; width: 2px; height: 26px; }
+  .mark::after { top: 12px; left: 0; height: 2px; width: 26px; }
+  .mark.old::before, .mark.old::after { background: #64748b; }
+</style>
+</head>
+<body>
+  <div id="grid"></div>
+  <div class="corner tl"></div><div class="corner tr"></div>
+  <div class="corner bl"></div><div class="corner br"></div>
+  <div id="hud"><div id="verdict">Tap the cell marked with the dashed outline</div>
+    <div id="detail">waiting for the first click…</div></div>
+  <div id="size"></div>
+  <div id="hint">green cross = where the click actually landed</div>
+<script>
+(function () {
+  var COLS = 6, ROWS = 4;
+  var grid = document.getElementById('grid');
+  var verdict = document.getElementById('verdict');
+  var detail = document.getElementById('detail');
+  var sizeEl = document.getElementById('size');
+  var cells = [], aim = -1, marks = [];
+
+  function build() {
+    grid.style.gridTemplateColumns = 'repeat(' + COLS + ', 1fr)';
+    grid.style.gridTemplateRows = 'repeat(' + ROWS + ', 1fr)';
+    grid.innerHTML = '';
+    cells = [];
+    for (var i = 0; i < COLS * ROWS; i++) {
+      var d = document.createElement('div');
+      d.className = 'cell';
+      d.textContent = String(i + 1);
+      grid.appendChild(d);
+      cells.push(d);
+    }
+    newAim();
+  }
+
+  // A target to aim at, so a miss is unambiguous instead of a judgement call.
+  function newAim() {
+    cells.forEach(function (c) { c.classList.remove('aim'); });
+    aim = Math.floor(Math.random() * cells.length);
+    cells[aim].classList.add('aim');
+  }
+
+  function showSize() {
+    sizeEl.textContent = 'viewport ' + window.innerWidth + '×' + window.innerHeight +
+      '  dpr ' + (window.devicePixelRatio || 1);
+  }
+
+  function cellAt(x, y) {
+    var col = Math.min(COLS - 1, Math.floor(x / (window.innerWidth / COLS)));
+    var row = Math.min(ROWS - 1, Math.floor(y / (window.innerHeight / ROWS)));
+    return row * COLS + col;
+  }
+
+  function onClick(x, y) {
+    var idx = cellAt(x, y);
+    cells.forEach(function (c) { c.classList.remove('hit'); });
+    cells[idx].classList.add('hit');
+
+    var m = document.createElement('div');
+    m.className = 'mark';
+    m.style.left = x + 'px';
+    m.style.top = y + 'px';
+    document.body.appendChild(m);
+    marks.push(m);
+    if (marks.length > 6) { var old = marks.shift(); old.remove(); }
+    marks.forEach(function (mm, i) { mm.classList.toggle('old', i < marks.length - 1); });
+
+    var ok = idx === aim;
+    verdict.textContent = ok ? '✓ HIT cell ' + (idx + 1) + ' — aligned'
+                             : '✗ aimed at ' + (aim + 1) + ', landed on ' + (idx + 1);
+    verdict.style.color = ok ? '#22c55e' : '#f87171';
+    detail.textContent = 'click at x=' + Math.round(x) + ' y=' + Math.round(y) +
+      '  (' + (x / window.innerWidth * 100).toFixed(1) + '% , ' +
+      (y / window.innerHeight * 100).toFixed(1) + '%)  of ' +
+      window.innerWidth + '×' + window.innerHeight;
+    newAim();
+  }
+
+  document.addEventListener('mousedown', function (e) { onClick(e.clientX, e.clientY); });
+  window.addEventListener('resize', function () {
+    showSize();
+    detail.textContent = 'window resized to ' + window.innerWidth + '×' + window.innerHeight +
+      ' — click again to re-check alignment';
+  });
+  build();
+  showSize();
+})();
+</script>
+</body>
+</html>

@@ -2,12 +2,16 @@
  * Spec-065 Phase B — live agent-driven browser pane.
  *
  * Connects to ws(s)://<host>/api/browser/ws?project=<projectId> (see webapp.py).
- * The server streams JPEG frames as binary WS messages (raw bytes, 1280×720 native).
- * Text messages carry JSON control events: ready / nav / error.
- * The client sends JSON text messages for mouse, keyboard, wheel, and navigate commands.
+ * The server streams JPEG frames as binary WS messages (raw bytes, downscaled from
+ * whatever the remote window actually is). Text messages carry JSON control events:
+ * ready / geometry / nav / error. The client sends JSON text messages for mouse,
+ * keyboard, wheel, navigate and resync commands.
  *
- * Coordinates for all input events are mapped from the displayed <img> rect to the
- * 1280×720 frame coordinate space before sending.
+ * Coordinates for all input events are mapped from the painted picture inside the <img>
+ * (measured, see paintedBox) into the remote page's coordinate space (measured by the
+ * server, see {type:'geometry'}). Neither size is assumed: an external CDP / Cloak
+ * profile streams its own window (1920×947 in the wild), and mapping into a hardcoded
+ * 1280×720 put every click somewhere else.
  *
  * WebSocket lifecycle mirrors TerminalTab.tsx (open on mount, close on unmount, show
  * disconnected state on unexpected close). On an UNEXPECTED close (server retired the
@@ -22,7 +26,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { t } from '../i18n'
 
-// Native frame dimensions the server always streams at
+// Fallback frame/viewport size, used ONLY until the server reports the real one
+// ({type:'ready'|'geometry'}, measured from the live page — see browser_pane.py).
+// It is a starting guess, not a contract: the remote window is frequently something
+// else entirely, and every coordinate below is mapped against the measured value.
 const FRAME_W = 1280
 const FRAME_H = 720
 
@@ -92,35 +99,52 @@ function clamp(v: number, min: number, max: number): number {
 }
 
 /**
- * Map a point from the displayed <img> element's client rect to the 1280×720
- * frame coordinate space.
+ * Where the picture actually sits inside the <img> element, and how big it is.
  *
- * ⚠️ The element's rect is NOT the painted picture. The <img> stretches to fill the
- * pane and `object-fit: contain` letterboxes the frame inside it, so on any pane whose
- * shape differs from 16:9 there are bars on one axis. Dividing by the element's own
- * width/height — which is what this did before the frame was allowed to scale up —
- * shifts and stretches every coordinate by exactly the size of those bars, and clicks
- * land next to what the operator aimed at. Recompute the painted box the same way
- * `contain` does, and map against that.
+ * ⚠️ TWO things here are measured, never assumed, and both used to be assumed:
+ *
+ * 1. The element's rect is NOT the painted picture. The <img> stretches to fill the
+ *    pane and `object-fit: contain` letterboxes the frame inside it, so unless the pane
+ *    happens to match the frame's shape there are bars on one axis. Dividing by the
+ *    element's own width/height shifts and stretches every coordinate by exactly the
+ *    size of those bars.
+ * 2. The frame's own shape is whatever the REMOTE window is — 1280×720 only when the
+ *    backend really honoured our request. A Cloak-Manager profile streams its native
+ *    window (e.g. 1920×947, so the JPEG is 960×474, nowhere near 16:9). Letterboxing a
+ *    2.03 picture as if it were 1.78 moves every click, and the error CHANGES as the
+ *    operator drags the split — which is exactly how this surfaced.
+ *
+ * naturalWidth/naturalHeight is the decoded JPEG's true size, so it answers both.
  */
-function paintedBox(rect: DOMRect): { scale: number; offX: number; offY: number } {
-  const scale = Math.min(rect.width / FRAME_W, rect.height / FRAME_H)
-  return {
-    scale,
-    offX: (rect.width - FRAME_W * scale) / 2,
-    offY: (rect.height - FRAME_H * scale) / 2,
-  }
+interface PaintedBox { scale: number; offX: number; offY: number; picW: number; picH: number }
+
+function paintedBox(rect: DOMRect, img: HTMLImageElement | null): PaintedBox {
+  const natW = img?.naturalWidth || FRAME_W
+  const natH = img?.naturalHeight || FRAME_H
+  const scale = Math.min(rect.width / natW, rect.height / natH)
+  const picW = natW * scale
+  const picH = natH * scale
+  return { scale, offX: (rect.width - picW) / 2, offY: (rect.height - picH) / 2, picW, picH }
 }
 
+/**
+ * Map a point on the displayed picture into the REMOTE page's coordinate space.
+ *
+ * Goes through a normalized 0..1 position rather than a pixel scale, so the JPEG's
+ * size (a downscaled stream) and the remote viewport's size (the space CDP dispatches
+ * input in) are allowed to differ — which they always do.
+ */
 function toFrameCoords(
   clientX: number,
   clientY: number,
   rect: DOMRect,
+  img: HTMLImageElement | null,
+  vp: { w: number; h: number },
 ): { x: number; y: number } {
-  const { scale, offX, offY } = paintedBox(rect)
-  const x = Math.round(clamp((clientX - rect.left - offX) / scale, 0, FRAME_W))
-  const y = Math.round(clamp((clientY - rect.top - offY) / scale, 0, FRAME_H))
-  return { x, y }
+  const b = paintedBox(rect, img)
+  const u = clamp((clientX - rect.left - b.offX) / (b.picW || 1), 0, 1)
+  const v = clamp((clientY - rect.top - b.offY) / (b.picH || 1), 0, 1)
+  return { x: Math.round(u * vp.w), y: Math.round(v * vp.h) }
 }
 
 function buttonName(button: number): 'left' | 'right' | 'middle' {
@@ -204,6 +228,12 @@ export function BrowserTab({ projectId }: Props) {
   // was simply two single clicks and dblclick never fired on the remote page.
   const tapChainRef = useRef<{ x: number; y: number; at: number; count: number } | null>(null)
 
+  // The remote page's live coordinate space, as MEASURED and reported by the server.
+  // A ref because every pointer callback reads it and none of them should be rebuilt
+  // when it changes; the state twin only feeds the toolbar readout.
+  const viewportRef = useRef<{ w: number; h: number }>({ w: FRAME_W, h: FRAME_H })
+  const [viewportLabel, setViewportLabel] = useState<string>('')
+
   const [connState, setConnState] = useState<ConnState>('connecting')
   // Mirrors connState for use inside callbacks that must read the CURRENT value
   // without depending on it (which would rebuild the WebSocket every state change).
@@ -279,6 +309,16 @@ export function BrowserTab({ projectId }: Props) {
       // Text message = JSON control event
       try {
         const msg = JSON.parse(e.data) as Record<string, unknown>
+        if (msg.type === 'ready' || msg.type === 'geometry') {
+          // The server measured the live page: adopt its coordinate space. Ignoring
+          // this (and mapping into a hardcoded 1280×720) is what made a click land
+          // somewhere else on any window that was not exactly that size.
+          if (typeof msg.width === 'number' && typeof msg.height === 'number'
+              && msg.width > 0 && msg.height > 0) {
+            viewportRef.current = { w: msg.width, h: msg.height }
+            setViewportLabel(`${msg.width}×${msg.height}`)
+          }
+        }
         if (msg.type === 'ready') {
           setConnState('ready')
           // A genuine 'ready' is server confirmation the socket is bound to a live
@@ -313,9 +353,10 @@ export function BrowserTab({ projectId }: Props) {
           if (imgRect && containerRect && typeof msg.x === 'number' && typeof msg.y === 'number') {
             // Same letterbox offset toFrameCoords() removes, applied in reverse —
             // otherwise the ripple drifts away from the click it is confirming.
-            const box = paintedBox(imgRect)
-            const x = imgRect.left - containerRect.left + box.offX + msg.x * box.scale
-            const y = imgRect.top - containerRect.top + box.offY + msg.y * box.scale
+            const box = paintedBox(imgRect, imgRef.current)
+            const vp = viewportRef.current
+            const x = imgRect.left - containerRect.left + box.offX + (msg.x / vp.w) * box.picW
+            const y = imgRect.top - containerRect.top + box.offY + (msg.y / vp.h) * box.picH
             const id = ++rippleIdRef.current
             setClickRipples(prev => [...prev, { id, x, y }])
             window.setTimeout(() => {
@@ -628,7 +669,7 @@ export function BrowserTab({ projectId }: Props) {
       lastMouseMoveRef.current = now
       const rect = getImgRect()
       if (!rect) return
-      const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
+      const { x, y } = toFrameCoords(e.clientX, e.clientY, rect, imgRef.current, viewportRef.current)
       // `buttons` is what makes a move a DRAG (text selection) rather than a hover.
       send({ t: 'mouse', action: 'move', x, y, buttons: e.buttons, mods: modsOf(e) })
     },
@@ -648,7 +689,7 @@ export function BrowserTab({ projectId }: Props) {
       // afterwards (the container, tabIndex=0, owns the desktop key handlers).
       containerRef.current?.focus()
       setCtxMenu(null)
-      const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
+      const { x, y } = toFrameCoords(e.clientX, e.clientY, rect, imgRef.current, viewportRef.current)
       // e.detail = the click count (2 = select word, 3 = select line, for Chromium).
       send({
         t: 'mouse', action: 'down', x, y, button: buttonName(e.button),
@@ -664,7 +705,7 @@ export function BrowserTab({ projectId }: Props) {
       if (e.button === 2) return
       const rect = getImgRect()
       if (!rect) return
-      const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
+      const { x, y } = toFrameCoords(e.clientX, e.clientY, rect, imgRef.current, viewportRef.current)
       send({
         t: 'mouse', action: 'up', x, y, button: buttonName(e.button),
         buttons: e.buttons, mods: modsOf(e), clickCount: e.detail || 1,
@@ -705,7 +746,7 @@ export function BrowserTab({ projectId }: Props) {
       const tc = e.touches[0]
       const rect = getImgRect()
       if (!tc || !rect) return
-      const { x, y } = toFrameCoords(tc.clientX, tc.clientY, rect)
+      const { x, y } = toFrameCoords(tc.clientX, tc.clientY, rect, imgRef.current, viewportRef.current)
       touchStartRef.current = { x, y, cx: tc.clientX, cy: tc.clientY }
       lastTouchRef.current = { cx: tc.clientX, cy: tc.clientY }
       touchMovedRef.current = false
@@ -738,14 +779,16 @@ export function BrowserTab({ projectId }: Props) {
         clearLongPress()
       }
       if (touchMovedRef.current) {
-        const { x, y } = toFrameCoords(tc.clientX, tc.clientY, rect)
-        // Scale the finger delta into frame space; natural-scroll sign (finger up → page down).
-        // Divide by the PAINTED scale, not the element's own width: with letterboxing the
-        // element is larger than the picture, and using it would make the page scroll less
-        // than the finger travelled.
-        const { scale } = paintedBox(rect)
-        const dx = (last.cx - tc.clientX) / scale
-        const dy = (last.cy - tc.clientY) / scale
+        const vp = viewportRef.current
+        const { x, y } = toFrameCoords(tc.clientX, tc.clientY, rect, imgRef.current, vp)
+        // Scale the finger delta into REMOTE PAGE space; natural-scroll sign (finger up
+        // → page down). Not by the element's own width (letterboxing makes the element
+        // larger than the picture) and not by the painted scale alone (the picture is a
+        // downscaled stream of a viewport that may be a different size again) — go
+        // through the painted picture's size and out into the viewport's.
+        const box = paintedBox(rect, imgRef.current)
+        const dx = ((last.cx - tc.clientX) / (box.picW || 1)) * vp.w
+        const dy = ((last.cy - tc.clientY) / (box.picH || 1)) * vp.h
         accumulateWheel(x, y, dx, dy)
       }
       lastTouchRef.current = { cx: tc.clientX, cy: tc.clientY }
@@ -850,7 +893,7 @@ export function BrowserTab({ projectId }: Props) {
       }
       const rect = getImgRect()
       if (!rect) return
-      const { x, y } = toFrameCoords(e.clientX, e.clientY, rect)
+      const { x, y } = toFrameCoords(e.clientX, e.clientY, rect, imgRef.current, viewportRef.current)
       accumulateWheel(x, y, e.deltaX, e.deltaY)
     },
     [accumulateWheel, getImgRect, send],
@@ -1206,6 +1249,29 @@ export function BrowserTab({ projectId }: Props) {
             {b.label}
           </button>
         ))}
+        {/* Sync — re-measure the remote page's coordinate space and pull a fresh frame.
+            Everything below it is automatic (bind, navigation, Page.frameResized), so this
+            is the manual escape hatch for the case the automatics missed: taps landing
+            next to what they aimed at. The title shows the live space, which is the one
+            number that tells you whether alignment can even be right. */}
+        <button
+          onClick={() => send({ t: 'resync' })}
+          disabled={connState !== 'ready'}
+          title={viewportLabel ? `Sync click alignment (page is ${viewportLabel})` : 'Sync click alignment'}
+          style={{
+            flexShrink: 0,
+            fontSize: 13,
+            lineHeight: 1,
+            padding: '4px 7px',
+            borderRadius: 5,
+            border: '1px solid var(--border, #2a2a2a)',
+            background: 'var(--bg, #0d0d0d)',
+            color: connState === 'ready' ? 'var(--text, #d4d4d4)' : 'var(--text-dim, #555)',
+            cursor: connState === 'ready' ? 'pointer' : 'not-allowed',
+          }}
+        >
+          ⌖
+        </button>
         {/* Page zoom — the operator reads the pane on everything from a 27" desk monitor
             to a phone, and the remote page has no other way to be made legible. The
             middle button shows the current level and resets to 100% on click. */}

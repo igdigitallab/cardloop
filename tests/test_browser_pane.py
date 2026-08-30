@@ -1859,3 +1859,149 @@ def test_status_reports_the_current_zoom():
 
 async def _done():
     return None
+
+
+# ── coordinate space: measured, never assumed ────────────────────────────────
+# The pane maps every click into the REMOTE page's coordinate space. That space used to
+# be the VIEWPORT constant (1280×720) on both sides — but an external / Cloak-Manager
+# profile keeps its own window (1920×947 was the live one), and set_viewport_size() over
+# connect_over_cdp is best-effort AND per-page. The result: a tap aimed at the middle of
+# the picture arrived at x=640 of a 1920-wide page, i.e. a third of the way in, with the
+# error growing towards the bottom-right. These tests pin the fix: measure the page.
+
+class _MetricsCDP(_FakeCDP):
+    """A fake CDP session that answers Page.getLayoutMetrics with a real window size."""
+
+    def __init__(self, width=1920, height=947):
+        super().__init__()
+        self.metrics = {"cssLayoutViewport": {"clientWidth": width, "clientHeight": height}}
+
+    async def send(self, method, params=None):
+        await super().send(method, params)
+        if method == "Page.getLayoutMetrics":
+            return self.metrics
+        return None
+
+
+class _ViewportPage:
+    def __init__(self, fails=False):
+        self.requested = []
+        self.fails = fails
+        self.url = "https://example.test/"
+
+    async def set_viewport_size(self, vp):
+        if self.fails:
+            raise RuntimeError("Cannot set viewport size over CDP")
+        self.requested.append(dict(vp))
+
+    async def title(self):
+        return "t"
+
+
+def _viewport_session(width=1920, height=947, page_fails=False) -> BrowserSession:
+    s = BrowserSession("k")
+    s._started = True
+    s._cdp = _MetricsCDP(width, height)
+    s._page = _ViewportPage(fails=page_fails)
+    s._tabs = {"t1": s._page}
+    s._active_id = "t1"
+    return s
+
+
+def test_sync_viewport_adopts_the_measured_size_not_the_requested_one():
+    s = _viewport_session(1920, 947)
+    sent = []
+    s.broadcast_json = lambda obj: sent.append(obj) or _done()
+    vp = asyncio.run(s._sync_viewport())
+    assert vp == {"width": 1920, "height": 947}
+    assert s.viewport == {"width": 1920, "height": 947}
+    assert sent[-1] == {"type": "geometry", "width": 1920, "height": 947}
+    # It still ASKS for the standard size first — it just refuses to believe the answer.
+    assert s._page.requested == [VIEWPORT]
+
+
+def test_sync_viewport_measures_even_when_the_override_is_refused():
+    """connect_over_cdp contexts routinely refuse set_viewport_size. That is not a
+    failure mode — it is the reason the measurement exists."""
+    s = _viewport_session(1920, 947, page_fails=True)
+    s.broadcast_json = lambda obj: _done()
+    assert asyncio.run(s._sync_viewport()) == {"width": 1920, "height": 947}
+
+
+def test_sync_viewport_ignores_a_nonsense_measurement():
+    s = _viewport_session()
+    s._cdp.metrics = {"cssLayoutViewport": {"clientWidth": 0, "clientHeight": 0}}
+    s.broadcast_json = lambda obj: _done()
+    assert asyncio.run(s._sync_viewport()) == dict(VIEWPORT)
+
+
+def test_apply_false_measures_without_touching_the_page():
+    """On navigation we re-measure but must NOT re-assert: that would fight a window
+    the operator resized himself, mid-session."""
+    s = _viewport_session()
+    s.broadcast_json = lambda obj: _done()
+    asyncio.run(s._sync_viewport(apply=False))
+    assert s._page.requested == []
+
+
+def test_clicks_are_clamped_to_the_measured_viewport():
+    """THE bug: with a 1920×947 page, an input at the far edge must survive the clamp
+    instead of being cut down to the 1280×720 constant."""
+    s = _viewport_session(1920, 947)
+    s.broadcast_json = lambda obj: _done()
+    asyncio.run(s._sync_viewport())
+    asyncio.run(s.handle_input({"t": "mouse", "action": "down", "x": 1900, "y": 940}))
+    _, params = s._cdp.calls[-1]
+    assert (params["x"], params["y"]) == (1900.0, 940.0)
+    # …and a genuinely out-of-range coordinate still clamps, to the LIVE bound.
+    asyncio.run(s.handle_input({"t": "mouse", "action": "move", "x": 99999, "y": 99999}))
+    _, params = s._cdp.calls[-1]
+    assert (params["x"], params["y"]) == (1920.0, 947.0)
+
+
+def test_wheel_is_clamped_to_the_measured_viewport():
+    s = _viewport_session(1920, 947)
+    s.broadcast_json = lambda obj: _done()
+    asyncio.run(s._sync_viewport())
+    asyncio.run(s.handle_input({"t": "wheel", "x": 1900, "y": 940, "dx": 0, "dy": 5}))
+    _, params = s._cdp.calls[-1]
+    assert (params["x"], params["y"]) == (1900.0, 940.0)
+
+
+def test_resync_input_remeasures_and_repushes_a_frame():
+    """The pane's ⌖ button: one tap must both re-measure and refresh the picture."""
+    s = _viewport_session(1600, 900)
+    sent = []
+    s.broadcast_json = lambda obj: sent.append(obj) or _done()
+    primed = []
+    s._reprime_subs = lambda: primed.append(True) or _done()
+    asyncio.run(s.handle_input({"t": "resync"}))
+    assert s.viewport == {"width": 1600, "height": 900}
+    assert {"type": "geometry", "width": 1600, "height": 900} in sent
+    assert primed == [True]
+
+
+def test_status_reports_the_measured_viewport():
+    s = _viewport_session(1920, 947)
+    s.broadcast_json = lambda obj: _done()
+    asyncio.run(s._sync_viewport())
+    assert s.status()["viewport"] == "1920x947"
+
+
+def test_a_resize_storm_schedules_only_one_remeasure():
+    """Dragging a window fires Page.frameResized continuously — one settled re-measure
+    is the point, not one per event."""
+    async def go():
+        s = _viewport_session()
+        s.broadcast_json = lambda obj: _done()
+        for _ in range(20):
+            s._on_frame_resized()
+        task = s._resize_task
+        assert task is not None
+        await task
+        assert s.viewport == {"width": 1920, "height": 947}
+        # Settled → the next resize is free to schedule again.
+        s._on_frame_resized()
+        assert s._resize_task is not task
+        s._resize_task.cancel()
+    asyncio.run(go())
