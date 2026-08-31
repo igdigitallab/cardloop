@@ -170,7 +170,94 @@ def env_overrides(account_id: "str | None" = None) -> dict[str, str]:
     if not ok:
         print(f"[accounts] {aid!r} unusable ({reason}) — running on {MAIN_ID}")
         return {}
-    return {"CLAUDE_CONFIG_DIR": state["accounts"][aid]["config_dir"]}
+    cdir = Path(state["accounts"][aid]["config_dir"])
+    sync_shared_config(cdir)
+    return {"CLAUDE_CONFIG_DIR": str(cdir)}
+
+
+# ---------------------------------------------------------------------------
+# Shared config mirroring (MCP)
+# ---------------------------------------------------------------------------
+# `.claude.json` and `.credentials.json` CANNOT be symlinked like the rest of SHARED_LINKS:
+# they carry the per-account identity (`oauthAccount`, `claudeAiOauth`) that the whole
+# multi-account feature exists to keep apart. But two keys inside them are NOT identity —
+# they are machine-wide tooling:
+#   * `.claude.json` -> `mcpServers`   (which MCP servers exist)
+#   * `.credentials.json` -> `mcpOAuth` (their per-server OAuth tokens)
+# Without mirroring, a cockpit session on an extra account starts with ZERO MCP servers —
+# no mail, no webmail, no ticktick, no canva — and the failure is silent: the tools simply
+# are not in the prompt, which reads to the agent like "the mail service is broken".
+# Verified 2026-08-30: `claude mcp list` под work выдавал "No MCP servers configured".
+
+
+def _main_state_file() -> Path:
+    """Where the CLI keeps `mcpServers` for account `main`.
+
+    A default install puts it at ~/.claude.json (NOT inside ~/.claude); an operator who
+    exported CLAUDE_CONFIG_DIR gets it inside that dir instead. Try the dir first.
+    """
+    inside = main_config_dir() / ".claude.json"
+    return inside if inside.exists() else (Path.home() / ".claude.json")
+
+
+def _merge_key(dst_path: Path, src: dict, key: str, *, mirror: bool) -> bool:
+    """Write src[key] into dst_path[key]. Returns True if the file was rewritten.
+
+    mirror=True  — dst becomes an exact copy of src[key] (main is the source of truth).
+    mirror=False — union, src wins on conflicts, dst-only entries survive (tokens).
+    Atomic (tmp+rename), 0600, and never touches any other key in the file.
+    """
+    want = src.get(key)
+    if not isinstance(want, dict) or not want:
+        return False
+    try:
+        dst = json.loads(dst_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    have = dst.get(key) if isinstance(dst.get(key), dict) else {}
+    merged = dict(want) if mirror else {**have, **want}
+    if merged == have:
+        return False
+    dst[key] = merged
+    tmp = dst_path.with_name(dst_path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(dst, indent=2), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, dst_path)
+    except Exception as exc:
+        print(f"[accounts] could not sync {key} into {dst_path}: {exc!r}")
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+        return False
+    return True
+
+
+def sync_shared_config(cdir: Path) -> list[str]:
+    """Mirror machine-wide MCP config from `main` into an extra account's config dir.
+
+    Cheap and idempotent: reads two small JSON files and writes only on an actual diff,
+    so it is safe to call on every turn. Returns the names of the keys it rewrote.
+    """
+    done: list[str] = []
+    try:
+        main_state = json.loads(_main_state_file().read_text(encoding="utf-8"))
+    except Exception:
+        main_state = {}
+    try:
+        main_creds = json.loads((main_config_dir() / ".credentials.json").read_text(encoding="utf-8"))
+    except Exception:
+        main_creds = {}
+    # mcpServers: main is the source of truth — a server deleted there must not linger here.
+    if _merge_key(cdir / ".claude.json", main_state, "mcpServers", mirror=True):
+        done.append("mcpServers")
+    # mcpOAuth: never delete — this account may have authenticated a server on its own.
+    if _merge_key(cdir / ".credentials.json", main_creds, "mcpOAuth", mirror=False):
+        done.append("mcpOAuth")
+    if done:
+        print(f"[accounts] synced {', '.join(done)} from main into {cdir}")
+    return done
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +429,8 @@ def scaffold(account_id: str) -> "tuple[Path, list[str]]":
             linked.append(name)
         except Exception as exc:
             print(f"[accounts] could not link {name}: {exc!r}")
+    # A brand-new profile has no MCP at all until this runs (see sync_shared_config).
+    sync_shared_config(cdir)
     return cdir, linked
 
 
@@ -364,6 +453,7 @@ def touched_at() -> float:
 
 __all__ = [
     "MAIN_ID", "SHARED_LINKS", "accounts_root", "main_config_dir", "load_state",
+    "sync_shared_config",
     "config_dir", "creds_path", "active_id", "env_overrides", "inspect", "list_accounts",
     "set_active", "register", "unregister", "scaffold", "summary_for_prompt", "touched_at",
     "resolve", "validate",

@@ -244,3 +244,93 @@ def test_broken_project_override_degrades_to_global_not_to_a_dead_run(acct):
     # The project points at an account that was never registered (renamed/removed).
     assert acct.resolve("ghost") == "work"
     assert acct.env_overrides(acct.resolve("ghost")) == {"CLAUDE_CONFIG_DIR": str(cdir)}
+
+
+# ── 5. MCP config is mirrored from main into every extra account ───────────────────────────
+# Regression 2026-08-30: work profile had `mcpServers: {}` while ~/.claude.json held eleven
+# servers, so every cockpit session on that account started with NO mail/webmail/ticktick/canva
+# and the failure was invisible — the tools simply were not in the prompt.
+
+def _seed_main_mcp(mod, servers, oauth=None):
+    home_claude = mod.main_config_dir()
+    (home_claude / ".claude.json").write_text(json.dumps({"mcpServers": servers}))
+    creds = json.loads((home_claude / ".credentials.json").read_text())
+    if oauth is not None:
+        creds["mcpOAuth"] = oauth
+    (home_claude / ".credentials.json").write_text(json.dumps(creds))
+
+
+def test_env_overrides_mirrors_mcp_servers_into_the_account(acct):
+    _seed_main_mcp(acct, {"mail": {"type": "stdio", "command": "/x/py"}},
+                   oauth={"canva|abc": {"accessToken": "t"}})
+    acct.scaffold("second")
+    _login(acct, "second")
+    acct.register("second", "Second", str(acct.accounts_root() / "second"))
+
+    acct.env_overrides("second")
+
+    cdir = acct.accounts_root() / "second"
+    assert json.loads((cdir / ".claude.json").read_text())["mcpServers"] == {
+        "mail": {"type": "stdio", "command": "/x/py"}
+    }
+    assert json.loads((cdir / ".credentials.json").read_text())["mcpOAuth"] == {
+        "canva|abc": {"accessToken": "t"}
+    }
+
+
+def test_sync_never_touches_the_account_identity(acct):
+    """The whole point of separate config dirs: `main`'s tokens must not leak into account #2."""
+    _seed_main_mcp(acct, {"mail": {"command": "/x/py"}}, oauth={"canva|abc": {"accessToken": "t"}})
+    acct.scaffold("second")
+    _login(acct, "second", token="sk-ant-oat01-second", email="second@example.com")
+    acct.register("second", "Second", str(acct.accounts_root() / "second"))
+
+    acct.env_overrides("second")
+
+    cdir = acct.accounts_root() / "second"
+    creds = json.loads((cdir / ".credentials.json").read_text())
+    state = json.loads((cdir / ".claude.json").read_text())
+    assert creds["claudeAiOauth"]["accessToken"] == "sk-ant-oat01-second"
+    assert state["oauthAccount"]["emailAddress"] == "second@example.com"
+
+
+def test_mcp_servers_mirror_drops_a_server_deleted_in_main(acct):
+    _seed_main_mcp(acct, {"mail": {"command": "/x/py"}, "old": {"command": "/gone"}})
+    acct.scaffold("second")
+    _login(acct, "second")
+    acct.register("second", "Second", str(acct.accounts_root() / "second"))
+    acct.env_overrides("second")
+
+    _seed_main_mcp(acct, {"mail": {"command": "/x/py"}})
+    acct.env_overrides("second")
+
+    cdir = acct.accounts_root() / "second"
+    assert set(json.loads((cdir / ".claude.json").read_text())["mcpServers"]) == {"mail"}
+
+
+def test_mcp_oauth_is_a_union_so_local_logins_survive(acct):
+    """A token this account obtained itself must not be wiped by the mirror."""
+    _seed_main_mcp(acct, {"mail": {"command": "/x/py"}}, oauth={"canva|abc": {"accessToken": "t"}})
+    acct.scaffold("second")
+    _login(acct, "second")
+    acct.register("second", "Second", str(acct.accounts_root() / "second"))
+    cdir = acct.accounts_root() / "second"
+    creds = json.loads((cdir / ".credentials.json").read_text())
+    creds["mcpOAuth"] = {"ticktick|zzz": {"accessToken": "local"}}
+    (cdir / ".credentials.json").write_text(json.dumps(creds))
+
+    acct.env_overrides("second")
+
+    got = json.loads((cdir / ".credentials.json").read_text())["mcpOAuth"]
+    assert got == {"ticktick|zzz": {"accessToken": "local"}, "canva|abc": {"accessToken": "t"}}
+
+
+def test_sync_is_idempotent_and_does_not_rewrite_a_file_in_sync(acct):
+    """Called on every turn — a no-op sync must not churn the file (concurrent CLI writers)."""
+    _seed_main_mcp(acct, {"mail": {"command": "/x/py"}})
+    acct.scaffold("second")
+    _login(acct, "second")
+    acct.register("second", "Second", str(acct.accounts_root() / "second"))
+    acct.env_overrides("second")
+
+    assert acct.sync_shared_config(acct.accounts_root() / "second") == []
