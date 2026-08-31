@@ -2615,8 +2615,22 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // bubble at its true in-turn position. Non-steerable turn (plan/ask gate, codex,
       // rotation) → the server enqueues it instead, same as the old chatQueueAdd path.
       api.chatSteer(projectId, fullText, effectiveChatId || undefined)
-        .then(res => { if (!res.steered && res.item) setQueueItems(prev => [...prev, res.item!]) })
-        .catch(() => {/* queue full or network — silently drop */})
+        .then(res => {
+          if (!res.steered && res.item) { setQueueItems(prev => [...prev, res.item!]); return }
+          // Steered: render the user bubble HERE, from the ack. Waiting for the bus 'steer'
+          // mirror was the bug — before spec-086 this branch always pushed the message into
+          // the visible queue panel, so it could never vanish; after it, a bus that is dead or
+          // lagging (the whole premise of DIRECT_STREAM_FALLBACK_MS) left the operator's
+          // follow-up with NO on-screen trace at all, which reads as "it wasn't sent".
+          // The bus 'steer' handler dedups against this exact bubble by text.
+          setMessages(prev => {
+            const fin = finalizeStreaming(prev)
+            const last = fin[fin.length - 1]
+            if (last && last.role === 'user' && last.text === fullText) return fin
+            return [...fin, makeUserMsg(fullText)]
+          })
+        })
+        .catch(() => { setError(t['chat.send_failed']) })
       return
     }
 

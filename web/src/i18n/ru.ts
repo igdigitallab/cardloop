@@ -307,6 +307,7 @@ export const ru = {
   'chat.input_placeholder': 'Сообщение агенту… (Enter — отправить, Shift+Enter — перенос)',
   'chat.input_placeholder_touch': 'Сообщение агенту…',
   'chat.look_at_files': 'Посмотри прикреплённые файлы.',
+  'chat.send_failed': 'Сообщение не доставлено — попробуй ещё раз.',
 
   // ── Message queue ──────────────────────────────────────────────
   'chat.queue_panel_label': 'Очередь сообщений',

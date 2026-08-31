@@ -344,6 +344,7 @@ export const en = {
   'chat.input_placeholder': 'Message to agent… (Enter to send, Shift+Enter for newline)',
   'chat.input_placeholder_touch': 'Message to agent…',
   'chat.look_at_files': 'Look at the attached files.',
+  'chat.send_failed': 'Message not delivered — try again.',
 
   // ── Message queue ──────────────────────────────────────────────
   'chat.queue_panel_label': 'Queued messages',

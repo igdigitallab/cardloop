@@ -2195,6 +2195,14 @@ async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
                 pass
         raise
     except Exception as exc:
+        # Close a half-open background run here too. The cockpit now treats a live bg run as
+        # "CLI busy" (it gates /chat and the chat-queue drain), so leaking one on a reader
+        # error would wedge the project as permanently busy.
+        if bg_open and _bg_run_cb:
+            try:
+                _bg_run_cb(session_key, "end")
+            except Exception:
+                pass
         print(f"[live-drain] {session_key}: reader stopped ({exc!r})")
 
 

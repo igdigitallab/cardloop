@@ -711,6 +711,22 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
 # surfaces them here as first-class runs: a bg-marked live turn + kind:run_start/run_end
 # with source:'bg' + seq-tagged type:text events. run_end fires the existing web-push path.
 _bg_run_ids: "dict[str, str]" = {}        # session_key → active bg run_id
+_bg_run_started: "dict[str, float]" = {}  # session_key → monotonic start of the active bg run
+# A live bg run gates /chat and the chat-queue drain (the CLI is genuinely busy), so a marker
+# that leaked — drain task killed in a way that skipped its close path — would wedge the project
+# as permanently busy. Past this age the marker is presumed stale and ignored. Generous: a real
+# autonomous turn with sub-agents can legitimately run long.
+_BG_RUN_STALE_SEC = float(os.environ.get("BG_RUN_STALE_SEC", "1800"))
+
+
+def _bg_turn_active(session_key: str) -> bool:
+    """True while a drain-surfaced autonomous turn owns the CLI (stale markers ignored)."""
+    if not _bg_run_ids.get(session_key):
+        return False
+    started = _bg_run_started.get(session_key)
+    if started is not None and (time.monotonic() - started) > _BG_RUN_STALE_SEC:
+        return False
+    return True
 _bg_run_buffered: "dict[str, bool]" = {}  # session_key → whether this bg run owns the live buffer
 _bg_run_preview: "dict[str, str]" = {}    # session_key → first text chunk (push preview)
 
@@ -721,6 +737,7 @@ def _bg_run_event(session_key: str, phase: str, text: "str | None" = None) -> No
         if phase == "start":
             run_id = _uuid.uuid4().hex[:6]
             _bg_run_ids[session_key] = run_id
+            _bg_run_started[session_key] = time.monotonic()
             # Clobber guard: never steal the live buffer from an operator turn that is
             # starting concurrently (running flag set / non-bg turn already open).
             ctx = _WEBAPP_CTX
@@ -745,6 +762,7 @@ def _bg_run_event(session_key: str, phase: str, text: "str | None" = None) -> No
             _timeline_append(session_key, {"kind": "text", "text": text, "bg": True})
         elif phase == "end":
             run_id = _bg_run_ids.pop(session_key, None) or ""
+            _bg_run_started.pop(session_key, None)
             if _bg_run_buffered.pop(session_key, False):
                 _live_turn_finish(session_key, "done")
             preview = _bg_run_preview.pop(session_key, "")
@@ -7379,7 +7397,10 @@ async def api_project_live(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
-    running = ctx["running"].get(session_key) is not None
+    # A drain-surfaced autonomous turn is real work on the CLI but is not registered in
+    # ctx["running"], so /live reported running:false while the agent was working — the run
+    # bar disappeared and Send stayed enabled ("looks like it's working but nothing is marked").
+    running = ctx["running"].get(session_key) is not None or _bg_turn_active(session_key)
     turn = _live_turns.get(session_key)
     pending_handoff = (ctx.get("pending_handoff") or {}).get(session_key) or None
     board_events = _recent_board_events_for(session_key)
@@ -11908,6 +11929,11 @@ async def _chat_queue_drain_one(ctx: dict, session_key: str) -> bool:
     """
     if ctx["running"].get(session_key) is not None:
         return False
+    # Same reason as the /chat busy branch: a drain-surfaced bg turn owns the CLI without
+    # appearing in ctx["running"].  Draining into it would read that turn's tail as this
+    # message's answer.  Leave the item queued; the backstop loop retries after it ends.
+    if _bg_turn_active(session_key):
+        return False
     items = _chat_queue_get(session_key)
     if not items:
         return False
@@ -12297,7 +12323,12 @@ async def api_project_chat(req: web.Request) -> web.Response:
 
     # Lock check (SYNCHRONOUSLY — before first await, against race)
     # Spec-041 A3: enqueue on busy instead of returning an error — backend drains it.
-    if ctx["running"].get(session_key) is not None:
+    # A live bg turn occupies the CLI just as much as a registered run does, but it is invisible
+    # to ctx["running"].  Starting an engine turn on top of it desyncs the stream: the engine
+    # cancels the drain, calls query(), and receive_response() then terminates on the BG turn's
+    # ResultMessage — the operator's message gets the bg turn's tail as its "answer" and its own
+    # answer is orphaned into the next bg run.  Treat it as busy and take the queue branch.
+    if ctx["running"].get(session_key) is not None or _bg_turn_active(session_key):
         resp = web.StreamResponse(
             status=200,
             headers={"Content-Type": "text/event-stream",
@@ -12903,6 +12934,18 @@ async def api_project_chat_stop(req: web.Request) -> web.Response:
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
     client = ctx["running"].get(session_key)
 
+    # A drain-surfaced autonomous turn (kind:run_start source:'bg' — a task-notification wake
+    # or a steered message the CLI deferred past the turn boundary) is real work on the CLI,
+    # but it is NOT registered in ctx["running"]: the engine popped that the moment the
+    # operator's own turn ended.  Without this fallback the Stop button silently did nothing
+    # for the whole bg turn ({"stopped": false}) — the operator's "sometimes stop doesn't
+    # work".  Reach the live client directly instead.
+    if not hasattr(client, "interrupt") and _bg_turn_active(session_key):
+        _entry = (ctx.get("live_clients") or {}).get(session_key)
+        _bg_client = getattr(_entry, "client", None)
+        if _bg_client is not None:
+            client = _bg_client
+
     if client is not None and hasattr(client, "interrupt"):
         try:
             await client.interrupt()
@@ -12925,7 +12968,8 @@ async def api_project_running(req: web.Request) -> web.Response:
     if project is None:
         return web.json_response({"error": "project not found"}, status=404)
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
-    return web.json_response({"running": ctx["running"].get(session_key) is not None})
+    return web.json_response({
+        "running": ctx["running"].get(session_key) is not None or _bg_turn_active(session_key)})
 
 
 async def api_project_seen(req: web.Request) -> web.Response:
