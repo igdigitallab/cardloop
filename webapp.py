@@ -1677,6 +1677,67 @@ def _timeline_path(session_key: str) -> "Path | None":
     return _TIMELINE_DATA_DIR / f"{slug}.jsonl"
 
 
+# ─────────────────────────── Chat message trace (spec-087) ───────────────────────────
+#
+# The timeline JSONL records TURNS (run_start/run_end/tool_result). It has no notion of an
+# operator MESSAGE, so every path that can swallow one before it becomes a turn — the
+# duplicate guard, a full queue, a rejected steer, a gated lane, a drain that declined —
+# left no trace at all. "My message vanished" was therefore unfalsifiable: nothing on disk
+# could say whether the server ever saw it.
+#
+# This log answers exactly one question: what happened to THIS message. One line per stage,
+# joined by msg_id (minted by the client in sendMessage, so a UI-side disappearance can be
+# told apart from a server-side drop). The full text is never stored twice — a 120-char
+# preview plus length and a short digest are enough to match a line to a message.
+_CHAT_TRACE_FILE: "Path | None" = None       # DATA/chat-trace.jsonl — set in _chat_trace_init
+_CHAT_TRACE_MAX_SIZE = 5 * 1024 * 1024       # rotate to .1 past this
+_CHAT_TRACE_PREVIEW = 120
+
+
+def _chat_trace_init(ctx: dict) -> None:
+    """Called from start(). Best-effort: a broken trace must never break a send."""
+    global _CHAT_TRACE_FILE
+    try:
+        _CHAT_TRACE_FILE = ctx["DATA"] / "chat-trace.jsonl"
+    except Exception:
+        _CHAT_TRACE_FILE = None
+
+
+def _chat_trace(session_key: str, stage: str, *, msg_id: str = "", chat_id: "str | None" = None,
+                text: "str | None" = None, **extra) -> None:
+    """Append one stage of a message's life. Never raises, never blocks a send.
+
+    stage is the verb: recv, direct, steer, steer_reject, queue, queue_full, dedup_drop,
+    gated_queue, drain, drain_blocked, engine_start, engine_end, delete, edit.
+    """
+    if _CHAT_TRACE_FILE is None:
+        return
+    try:
+        rec: dict = {"ts": round(time.time(), 3),
+                     "at": time.strftime("%H:%M:%S", time.localtime()),
+                     "session_key": session_key, "stage": stage}
+        if msg_id:
+            rec["msg_id"] = msg_id
+        if chat_id:
+            rec["chat_id"] = chat_id
+        if text is not None:
+            rec["len"] = len(text)
+            rec["sha8"] = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:8]
+            rec["preview"] = text[:_CHAT_TRACE_PREVIEW]
+        for k, v in extra.items():
+            if v is not None:
+                rec[k] = v
+        try:
+            if _CHAT_TRACE_FILE.exists() and _CHAT_TRACE_FILE.stat().st_size > _CHAT_TRACE_MAX_SIZE:
+                _CHAT_TRACE_FILE.rename(_CHAT_TRACE_FILE.with_suffix(".jsonl.1"))
+        except Exception:
+            pass
+        with open(_CHAT_TRACE_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def _timeline_append(session_key: str, event: dict) -> None:
     """Appends an event to the JSONL log. Swallows errors (never breaks a run).
     Never logs env fields — they don't appear in events; guard against future changes."""
@@ -11402,7 +11463,8 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
                         ultracode: "bool | None" = None,
                         auto_rotate: "bool | None" = None,
                         plan_mode: "bool | None" = None,
-                        ask_mode: "bool | None" = None) -> "dict | None":
+                        ask_mode: "bool | None" = None,
+                        msg_id: str = "") -> "dict | None":
     """Append a message to the chat queue for session_key.
     Returns the new item dict, or None if the queue is full.
 
@@ -11418,6 +11480,11 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
     if len(lst) >= _CHAT_QUEUE_MAX:
         return None
     item: dict = {"id": str(_uuid_mod.uuid4()), "text": text, "created_at": time.time()}
+    # spec-087: the client's msg_id rides with the item so the drain's trace line joins back
+    # to the send that produced it — otherwise a queued message loses its identity at the
+    # exact moment it matters most (it sat in the queue and the operator wants to know why).
+    if msg_id:
+        item["msg_id"] = msg_id
     if chat_id:
         item["chat_id"] = chat_id
     if project_id:
@@ -11522,7 +11589,8 @@ async def api_chat_queue_add(req: web.Request) -> web.Response:
     return web.json_response({"item": item}, status=201)
 
 
-async def _try_steer_mid_turn(ctx, session_key: str, prompt: str, chat_id: "str | None") -> bool:
+async def _try_steer_mid_turn(ctx, session_key: str, prompt: str, chat_id: "str | None",
+                              msg_id: str = "") -> bool:
     """spec-086: inject `prompt` into the in-flight turn (CLI steering). Returns True on inject.
 
     The bundled CLI queues stdin user messages and weaves them into the running turn between
@@ -11540,18 +11608,29 @@ async def _try_steer_mid_turn(ctx, session_key: str, prompt: str, chat_id: "str 
     run (spec-063 'bg' lane) — visible and in the transcript, never lost.
     """
     if not STEER_MID_TURN:
+        _chat_trace(session_key, "steer_reject", msg_id=msg_id, chat_id=chat_id, why="disabled")
         return False
     run_client = ctx["running"].get(session_key)
     entry = (ctx.get("live_clients") or {}).get(session_key)
     if entry is None or run_client is None or run_client is not getattr(entry, "client", None):
+        # The single most common refusal, and previously the most opaque: the turn is not on
+        # this session's live client (True placeholder / plan-ask fresh client / codex /
+        # rotation), so the message falls through to the queue.
+        _chat_trace(session_key, "steer_reject", msg_id=msg_id, chat_id=chat_id,
+                    why="not_live_client", has_entry=entry is not None,
+                    running=type(run_client).__name__ if run_client is not None else None)
         return False
     turn_chat = (_live_turns.get(session_key) or {}).get("chat_id")
     if turn_chat and chat_id and turn_chat != chat_id:
+        _chat_trace(session_key, "steer_reject", msg_id=msg_id, chat_id=chat_id,
+                    why="chat_mismatch", turn_chat=turn_chat)
         return False
     try:
         await run_client.query(prompt)
     except Exception as exc:
         print(f"[steer] {session_key}: inject failed ({exc!r}) — falling back to queue")
+        _chat_trace(session_key, "steer_reject", msg_id=msg_id, chat_id=chat_id,
+                    why="inject_failed", error=repr(exc)[:200])
         return False
     # Single-writer canvas (spec-063): publish the steered message as a seq-tagged bus event
     # so every tab renders the user bubble at its true in-turn position. persist=True — a
@@ -11561,6 +11640,8 @@ async def _try_steer_mid_turn(ctx, session_key: str, prompt: str, chat_id: "str 
         **({"chat_id": chat_id} if chat_id else {}),
     })
     _bus_publish(session_key, ev, persist=True)
+    _chat_trace(session_key, "steer", msg_id=msg_id, chat_id=chat_id, text=prompt,
+                seq=ev.get("seq"))
     return True
 
 
@@ -11584,13 +11665,60 @@ async def api_chat_steer(req: web.Request) -> web.Response:
     _s_chat_id = (body.get("chat_id") or "").strip() or None
     if _s_chat_id and not _valid_chat_id(_s_chat_id):
         return web.json_response({"error": "invalid chat_id"}, status=400)
+    _s_msg_id = str(body.get("msg_id") or "")[:64]
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
-    if await _try_steer_mid_turn(ctx, session_key, text, _s_chat_id):
+    _chat_trace(session_key, "recv", msg_id=_s_msg_id, chat_id=_s_chat_id, text=text,
+                via="POST /chat/steer", project=project["id"])
+    if await _try_steer_mid_turn(ctx, session_key, text, _s_chat_id, msg_id=_s_msg_id):
         return web.json_response({"steered": True})
-    item = _chat_queue_enqueue(session_key, text, _s_chat_id, project["id"])
+    item = _chat_queue_enqueue(session_key, text, _s_chat_id, project["id"], msg_id=_s_msg_id)
     if item is None:
+        _chat_trace(session_key, "queue_full", msg_id=_s_msg_id, chat_id=_s_chat_id, text=text,
+                    limit=_CHAT_QUEUE_MAX)
         return web.json_response({"error": "queue full"}, status=429)
+    _chat_trace(session_key, "queue", msg_id=_s_msg_id, chat_id=_s_chat_id, text=text,
+                item_id=item.get("id"), reason="steer_fallback",
+                depth=len(_chat_queue_get(session_key)))
     return web.json_response({"steered": False, "item": item}, status=201)
+
+
+async def api_chat_trace(req: web.Request) -> web.Response:
+    """GET /api/chat-trace?project=<id>&msg_id=&limit=200 — the message-lifecycle log.
+
+    Answers "what happened to my message": one line per stage, newest last. Filter by
+    project (session_key) or by a single msg_id to get that message's whole life.
+    """
+    ctx = req.app["ctx"]
+    if _CHAT_TRACE_FILE is None or not _CHAT_TRACE_FILE.exists():
+        return web.json_response({"rows": [], "note": "no trace file yet"})
+    try:
+        limit = max(1, min(2000, int(req.query.get("limit", "200"))))
+    except ValueError:
+        limit = 200
+    want_msg = (req.query.get("msg_id") or "").strip()
+    want_key = ""
+    pid = (req.query.get("project") or "").strip()
+    if pid:
+        project = _find_project_by_id(ctx, pid)
+        if project is None:
+            return web.json_response({"error": "project not found"}, status=404)
+        want_key = (project.get("session_key") or project.get("tg_thread", ""))
+    rows: list = []
+    try:
+        with open(_CHAT_TRACE_FILE, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if want_key and r.get("session_key") != want_key:
+                    continue
+                if want_msg and r.get("msg_id") != want_msg:
+                    continue
+                rows.append(r)
+    except Exception as exc:
+        return web.json_response({"error": f"read failed: {exc!r}"}, status=500)
+    return web.json_response({"rows": rows[-limit:], "total": len(rows)})
 
 
 async def api_chat_queue_edit(req: web.Request) -> web.Response:
@@ -11928,11 +12056,17 @@ async def _chat_queue_drain_one(ctx: dict, session_key: str) -> bool:
     The lock is reserved SYNCHRONOUSLY before any await/spawn to prevent races.
     """
     if ctx["running"].get(session_key) is not None:
+        if _chat_queue_get(session_key):
+            _chat_trace(session_key, "drain_blocked", why="running",
+                        depth=len(_chat_queue_get(session_key)))
         return False
     # Same reason as the /chat busy branch: a drain-surfaced bg turn owns the CLI without
     # appearing in ctx["running"].  Draining into it would read that turn's tail as this
     # message's answer.  Leave the item queued; the backstop loop retries after it ends.
     if _bg_turn_active(session_key):
+        if _chat_queue_get(session_key):
+            _chat_trace(session_key, "drain_blocked", why="bg_turn",
+                        depth=len(_chat_queue_get(session_key)))
         return False
     items = _chat_queue_get(session_key)
     if not items:
@@ -11940,6 +12074,9 @@ async def _chat_queue_drain_one(ctx: dict, session_key: str) -> bool:
     item = _chat_queue_pop(session_key)
     if item is None:
         return False
+    _chat_trace(session_key, "drain", msg_id=item.get("msg_id", ""),
+                chat_id=item.get("chat_id"), text=item.get("text", ""),
+                item_id=item.get("id"), waited_sec=round(time.time() - item.get("created_at", time.time()), 1))
     # Reserve lock synchronously before the first await.
     ctx["running"][session_key] = True
     # Populate the live-turn buffer SYNCHRONOUSLY, in lockstep with the running flag, BEFORE
@@ -12250,6 +12387,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
     prompt = (body.get("prompt") or "").strip()
     if not prompt:
         return web.json_response({"error": "empty prompt"}, status=400)
+    # spec-087: msg_id is minted by the client so a UI-side disappearance can be told apart
+    # from a server-side drop. Absent (TG, older client) → the trace still records the stage.
+    _msg_id = str(body.get("msg_id") or "")[:64]
 
     # Thinking ladder (effort). The UI sends one of: low | medium | high | xhigh | max.
     # The value is passed 1:1 to run_engine as the effort override (same string the SDK's
@@ -12296,6 +12436,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
     name = project["name"]
     model = project.get("model", ctx.get("DEFAULT_MODEL", "sonnet"))
     session_key = (project.get("session_key") or project.get("tg_thread", ""))  # SHARED key with TG and F1
+    _chat_trace(session_key, "recv", msg_id=_msg_id, chat_id=_req_chat_id, text=prompt,
+                via="POST /chat", project=project["id"])
 
     # Provider is pinned to the chat at creation. Legacy records omit it and
     # therefore remain Claude. Resolve before reserving the shared run slot so
@@ -12346,12 +12488,19 @@ async def api_project_chat(req: web.Request) -> web.Response:
             it.get("text") == prompt for it in _chat_queue_get(session_key)
         )
         if _is_dup:
+            # This DROPS the message — it is neither run nor queued. It exists to absorb a
+            # mobile OptionPicker double-submit, but it fires on any text equal to the running
+            # prompt or an already-queued item, so a deliberate re-send is eaten too. Say so
+            # on the wire (the client keeps the bubble and shows why) and record it here.
+            _chat_trace(session_key, "dedup_drop", msg_id=_msg_id, chat_id=_req_chat_id,
+                        text=prompt,
+                        against="running_prompt" if prompt == _running_prompt else "queued_item")
             payload = json.dumps({"type": "queued", "duplicate": True}, ensure_ascii=False)
             await resp.write(f"data: {payload}\n\n".encode())
             return resp
         # spec-086: try steering first — inject into the running turn's CLI stdin instead of
         # parking until turn end. Falls through to the queue on any non-steerable lane.
-        if await _try_steer_mid_turn(ctx, session_key, prompt, _req_chat_id):
+        if await _try_steer_mid_turn(ctx, session_key, prompt, _req_chat_id, msg_id=_msg_id):
             payload = json.dumps({"type": "steered"}, ensure_ascii=False)
             await resp.write(f"data: {payload}\n\n".encode())
             return resp
@@ -12361,10 +12510,15 @@ async def api_project_chat(req: web.Request) -> web.Response:
         item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"],
                                    effort=_effort_override, ultracode=_ultracode,
                                    auto_rotate=_auto_rotate, plan_mode=_plan_mode,
-                                   ask_mode=_ask_mode)
+                                   ask_mode=_ask_mode, msg_id=_msg_id)
         if item is None:
+            _chat_trace(session_key, "queue_full", msg_id=_msg_id, chat_id=_req_chat_id,
+                        text=prompt, limit=_CHAT_QUEUE_MAX)
             payload = json.dumps({"type": "error", "error": "queue full"}, ensure_ascii=False)
         else:
+            _chat_trace(session_key, "queue", msg_id=_msg_id, chat_id=_req_chat_id, text=prompt,
+                        item_id=item.get("id"), reason="busy",
+                        depth=len(_chat_queue_get(session_key)))
             payload = json.dumps({"type": "queued", "item": item}, ensure_ascii=False)
         await resp.write(f"data: {payload}\n\n".encode())
         return resp
@@ -12388,7 +12542,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
         item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"],
                                    effort=_effort_override, ultracode=_ultracode,
                                    auto_rotate=_auto_rotate, plan_mode=_plan_mode,
-                                   ask_mode=_ask_mode)
+                                   ask_mode=_ask_mode, msg_id=_msg_id)
         payload = json.dumps({
             "type": "queued",
             "item": item,
@@ -16061,6 +16215,7 @@ async def start(ctx: dict) -> None:
 
         # Timeline: initialise bus persistence (DATA/timeline/)
         _timeline_init(ctx)
+        _chat_trace_init(ctx)
         # Chat message queue: initialise persistence and reload surviving items (DATA/chat-queue.json)
         _chat_queue_init(ctx)
         _settings_init(ctx)
@@ -16183,6 +16338,7 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/chat/queue", api_chat_queue_list)
         app.router.add_post("/api/projects/{id}/chat/queue", api_chat_queue_add)
         app.router.add_post("/api/projects/{id}/chat/steer", api_chat_steer)
+        app.router.add_get("/api/chat-trace", api_chat_trace)
         app.router.add_patch("/api/projects/{id}/chat/queue/{msg_id}", api_chat_queue_edit)
         app.router.add_delete("/api/projects/{id}/chat/queue/{msg_id}", api_chat_queue_delete)
         app.router.add_get("/api/projects/{id}/running", api_project_running)

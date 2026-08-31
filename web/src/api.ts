@@ -443,13 +443,13 @@ export const api = {
     ),
   // spec-086: inject a message into the RUNNING turn (CLI steering); server falls back to
   // the ordinary queue when the turn is not steerable — {steered:false, item} then.
-  chatSteer: (id: string, text: string, chatId?: string) =>
+  chatSteer: (id: string, text: string, chatId?: string, msgId?: string) =>
     apiFetch<{ steered: boolean; item?: { id: string; text: string; created_at: number } }>(
       `/api/projects/${id}/chat/steer`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, ...(chatId ? { chat_id: chatId } : {}) }),
+        body: JSON.stringify({ text, ...(chatId ? { chat_id: chatId } : {}), ...(msgId ? { msg_id: msgId } : {}) }),
       }
     ),
   chatQueueEdit: (id: string, msgId: string, text: string) =>

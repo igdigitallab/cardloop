@@ -345,6 +345,7 @@ export const en = {
   'chat.input_placeholder_touch': 'Message to agent…',
   'chat.look_at_files': 'Look at the attached files.',
   'chat.send_failed': 'Message not delivered — try again.',
+  'chat.duplicate_dropped': 'Not sent: identical text is already running or queued. Edit it slightly to send anyway.',
 
   // ── Message queue ──────────────────────────────────────────────
   'chat.queue_panel_label': 'Queued messages',

@@ -447,7 +447,11 @@ export interface ChatEventRateLimit {
 /** Spec-041 A3: backend was busy and enqueued the prompt instead of starting a turn. */
 export interface ChatEventQueued {
   type: 'queued'
-  item: { id: string; text: string; created_at: number }
+  /** Absent when the server DROPPED the text as a duplicate — there is no queue item then,
+   *  which is why the client must not treat this ack as "safely parked somewhere". */
+  item?: { id: string; text: string; created_at: number }
+  /** true = identical text is already running or queued, so this send was discarded. */
+  duplicate?: boolean
 }
 
 /** spec-086: backend was busy and INJECTED the prompt into the running turn (CLI steering).

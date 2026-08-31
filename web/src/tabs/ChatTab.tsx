@@ -2589,6 +2589,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const sendMessage = useCallback(async (overrideText?: string) => {
     if (!composerReady) return
     hydratedCompletedTurnRef.current = false
+    // spec-087: one id per send, carried to whichever lane takes it (direct / steer / queue).
+    // The server writes a trace line per stage under this id, so "my message vanished" becomes
+    // a lookup instead of a guess — and a message with a `recv` line but nothing after it
+    // points at the server, while no `recv` at all points at the client or the network.
+    const msgId = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
     const text = (overrideText ?? input).trim()
 
     const readyFiles = overrideText === undefined ? attachments.filter(a => a.path) : []
@@ -2614,7 +2619,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // (terminal Claude Code behaviour) and the bus 'steer' event renders the user
       // bubble at its true in-turn position. Non-steerable turn (plan/ask gate, codex,
       // rotation) → the server enqueues it instead, same as the old chatQueueAdd path.
-      api.chatSteer(projectId, fullText, effectiveChatId || undefined)
+      api.chatSteer(projectId, fullText, effectiveChatId || undefined, msgId)
         .then(res => {
           if (!res.steered && res.item) { setQueueItems(prev => [...prev, res.item!]); return }
           // Steered: render the user bubble HERE, from the ack. Waiting for the bus 'steer'
@@ -2686,7 +2691,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         // Spec-037: pass active chat_id so the backend writes session_id to the right chat entry
-        body: JSON.stringify({ prompt: fullPrompt, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), ...(planMode ? { plan_mode: true } : {}), ...(askMode && !planMode ? { ask_mode: true } : {}), auto_rotate: activeProvider === 'claude' ? autoRotate : false, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
+        body: JSON.stringify({ prompt: fullPrompt, msg_id: msgId, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), ...(planMode ? { plan_mode: true } : {}), ...(askMode && !planMode ? { ask_mode: true } : {}), auto_rotate: activeProvider === 'claude' ? autoRotate : false, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
         signal: ac.signal,
       })
 
@@ -2792,6 +2797,20 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           if (evt.type === 'queued') {
             setStreaming(false)
             setRun(null)
+            // duplicate:true means the server DROPPED this text — it is neither running nor
+            // queued (the guard absorbs a mobile OptionPicker double-submit, but it fires on
+            // any text equal to the running prompt or a queued item, so a deliberate re-send
+            // is eaten too). Deleting the bubble here is what made a message "vanish": the
+            // operator's own words disappeared with no queue entry and no error. Keep the
+            // user bubble, drop only the assistant placeholder, and say why.
+            if (evt.duplicate) {
+              setMessages(prev => {
+                const last = prev[prev.length - 1]
+                return last && last.role === 'assistant' && last.streaming ? prev.slice(0, -1) : prev
+              })
+              setError(t['chat.duplicate_dropped'])
+              return
+            }
             // Remove the optimistic user + assistant bubbles added for this aborted send.
             setMessages(prev => prev.slice(0, -2))
             // Refresh queue display from server so the newly-enqueued item appears.
