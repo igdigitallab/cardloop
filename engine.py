@@ -246,6 +246,35 @@ def _plugin_install_path(plugin_id: str) -> "str | None":
     return None
 
 
+def _merge_project_skills(project_skills, default):
+    """Resolve a project's skill filter against the global default.
+
+    A plain list REPLACES the default (spec-078 behaviour, unchanged). A list whose entries are
+    prefixed with "+" is ADDITIVE: the project keeps the global core and adds its own on top.
+
+    Without the additive form, scoping (say) the video skills to one project means re-listing the
+    entire engineering core in that project's settings — and every one of those copies rots the
+    day the core changes. With no global default set (None = the CLI's own default, i.e. every
+    skill), "+" has nothing to add to and degrades to None rather than silently narrowing the
+    project down to its own few entries.
+    """
+    if project_skills is None or isinstance(project_skills, str):
+        return project_skills if project_skills is not None else default
+    plus = [s[1:].strip() for s in project_skills
+            if isinstance(s, str) and s.startswith("+") and s[1:].strip()]
+    if not plus:
+        return project_skills
+    if not isinstance(default, list):
+        return default  # base is "everything" already — narrowing here would be a downgrade
+    rest = [s for s in project_skills if isinstance(s, str) and not s.startswith("+")]
+    merged, seen = [], set()
+    for name in [*default, *plus, *rest]:
+        if name and name not in seen:
+            seen.add(name)
+            merged.append(name)
+    return merged
+
+
 def _build_agents_kwargs(agents_config: dict) -> dict:
     """Build keyword args for run_engine from a project's agents_config dict.
 
@@ -3083,7 +3112,7 @@ async def run_engine(  # type: ignore[return]
     # all skills; list → only those; "all" → every skill). Default to the global lean allowlist so a
     # project pulls only ITS relevant skills. `plugins` opt-in loads a plugin for THIS project only
     # (e.g. marketing-skills on the marketing project) without enabling it globally for others.
-    _effective_skills = project_skills if project_skills is not None else _DEFAULT_SKILLS
+    _effective_skills = _merge_project_skills(project_skills, _DEFAULT_SKILLS)
 
     # spec-078 Phase 3a: one canonical brain. "project" turns the CLI's native auto-memory off so
     # the curated ./.claude-ops/memory/ is all the project loads.

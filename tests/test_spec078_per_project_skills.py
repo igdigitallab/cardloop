@@ -64,3 +64,37 @@ def test_fingerprint_changes_with_plugins():
 def test_fingerprint_stable_when_skills_identical():
     assert engine._compute_fingerprint(_opts(skills=["a", "b"])) == \
            engine._compute_fingerprint(_opts(skills=["a", "b"]))
+
+
+# ── additive per-project filter ("+name" keeps the global core) ─────────────────────────────────
+
+CORE = ["tdd", "docker-scan", "research"]
+
+
+def test_plain_list_still_replaces_the_default():
+    """Unchanged spec-078 behaviour: an explicit list is the whole answer."""
+    assert engine._merge_project_skills(["meta-ads"], CORE) == ["meta-ads"]
+
+
+def test_plus_entries_extend_the_default():
+    out = engine._merge_project_skills(["+hyperframes", "+media-use"], CORE)
+    assert out == ["tdd", "docker-scan", "research", "hyperframes", "media-use"]
+
+
+def test_plus_and_plain_entries_mix_without_duplicates():
+    out = engine._merge_project_skills(["+docker-scan", "+meta-ads", "song"], CORE)
+    assert out == ["tdd", "docker-scan", "research", "meta-ads", "song"]
+
+
+def test_plus_degrades_to_the_default_when_there_is_no_allowlist():
+    """Default None = every skill loads; narrowing to the project's own few would be a downgrade."""
+    assert engine._merge_project_skills(["+hyperframes"], None) is None
+
+
+def test_all_and_none_are_passed_through():
+    assert engine._merge_project_skills("all", CORE) == "all"
+    assert engine._merge_project_skills(None, CORE) == CORE
+
+
+def test_a_bare_plus_is_ignored():
+    assert engine._merge_project_skills(["+", "+song"], CORE) == [*CORE, "song"]
