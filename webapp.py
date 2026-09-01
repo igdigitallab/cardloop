@@ -700,15 +700,22 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
         # crash_recovery marks a flip derived from post-restart reconciliation (root-fix B1)
         # so the completion-wake prompt can say "verify, the service died mid-run".
         for k in ("kind", "label", "status", "tail", "agent", "persistent", "tool_use_id",
-                  "crash_recovery"):
+                  "crash_recovery", "stale"):
             if delta.get(k) not in (None, ""):
                 rec[k] = delta[k]
         rec["ts"] = now
         # spec-069 P2 v2 (spec-071): the running→terminal transition IS the completion event.
         # Every detection path (in-turn notification, the between-turns drain, the sweeper,
         # the transcript reconcile) converges here — schedule the event-driven wake once.
-        if (_was_running and rec.get("status") in ("done", "failed", "stopped")
-                and rec.get("kind") != "bash"):
+        # spec-088: an explicit stop is NOT a completion. 'stopped' comes from the model's own
+        # TaskStop/KillShell (it already knows) or from the operator; waking on it produced a
+        # phantom turn that re-entered a /goal Stop-hook loop (2026-09-01, 9 more blocked
+        # stops). The two 'stopped' flips that must still wake are the ones the orchestrator
+        # never saw: a crash-recovery flip after a restart and a sweeper staleness flip.
+        _status = rec.get("status")
+        _terminal_wake = _status in ("done", "failed") or (
+            _status == "stopped" and bool(rec.get("crash_recovery") or rec.get("stale")))
+        if _was_running and _terminal_wake and rec.get("kind") != "bash":
             _schedule_completion_wake(session_key, dict(rec))
         # Trim: keep all running + most recent terminal entries.
         if len(bucket) > _MONITORS_MAX:
@@ -1492,7 +1499,7 @@ async def _agent_activity_sweep_loop(ctx: dict) -> None:
                                 if _silent > _MONITOR_STALE_SEC:
                                     _monitor_update(
                                         session_key,
-                                        {"id": agent_id, "status": "stopped",
+                                        {"id": agent_id, "status": "stopped", "stale": True,
                                          "tail": f"(stale — no activity for {int(_silent // 60)} min)"},
                                         only_existing=True)
                                     continue
@@ -1523,7 +1530,7 @@ async def _agent_activity_sweep_loop(ctx: dict) -> None:
                                 > _MONITOR_STALE_WF_SEC):
                             _monitor_update(
                                 sk,
-                                {"id": rec.get("id"), "status": "stopped",
+                                {"id": rec.get("id"), "status": "stopped", "stale": True,
                                  "tail": f"(stale — no updates for "
                                          f"{int((_now - (rec.get('ts') or _now)) // 60)} min)"},
                                 only_existing=True)
@@ -1629,19 +1636,28 @@ def _live_turn_append(session_key: str, event: dict) -> dict:
 
 
 def _live_turn_finish(session_key: str, status: str) -> None:
-    """Marks the LiveTurn as done/error (idempotent). Schedules cleanup after retain period."""
+    """Marks the LiveTurn as done/error (idempotent). Schedules cleanup after retain period.
+
+    The deferred drop is bound to THIS turn object. A session that starts its next turn inside
+    the retain window (a follow-up, a queued message, an auto-continue wake) must not lose that
+    NEW turn's buffer when the old timer fires — it did: every event after the 5-minute mark
+    lost its seq (steer bubbles invisible until reload, run_end without seq, /live hydrate
+    empty mid-turn), measured 2026-09-01 on three turns in two sessions (spec-088)."""
     turn = _live_turns.get(session_key)
     if turn is None or turn["status"] != "running":
         return  # idempotent — already finished or gone
     turn["status"] = status
     try:
-        asyncio.get_event_loop().call_later(_LIVE_TURN_RETAIN_SEC, _live_turn_drop, session_key)
+        asyncio.get_event_loop().call_later(_LIVE_TURN_RETAIN_SEC, _live_turn_drop, session_key, turn)
     except RuntimeError:
         pass  # no running loop (e.g., during tests with custom loops) — skip cleanup scheduling
 
 
-def _live_turn_drop(session_key: str) -> None:
-    """Removes the LiveTurn from memory."""
+def _live_turn_drop(session_key: str, turn: "dict | None" = None) -> None:
+    """Removes the LiveTurn from memory. With `turn` given, drops ONLY that turn — a newer
+    turn that replaced it in the meantime is left alone (see _live_turn_finish)."""
+    if turn is not None and _live_turns.get(session_key) is not turn:
+        return
     _live_turns.pop(session_key, None)
 
 
@@ -2954,8 +2970,14 @@ async def api_health(req: web.Request) -> web.Response:
     if req.query.get("deep") == "1":
         ctx = req.app["ctx"]
         running = ctx.get("running") or {}
+        # bg_turns: CLI-autonomous turns (task-notification wakes surfaced by the drain) own
+        # the CLI without appearing in ctx["running"] — this was the one busy-check never
+        # patched to see them, and a deploy restarted mid-turn on 2026-09-01 (a Bash call
+        # inside the turn came back exit 137). spec-088.
+        _bg_turns = sum(1 for _sk in list(_bg_run_ids) if _bg_turn_active(_sk))
         return web.json_response({"ok": True, "running": len(running),
                                   "agents": _live_agent_monitor_count(),
+                                  "bg_turns": _bg_turns,
                                   "plan_pending": len(_plan_pending_by_session)},
                                   headers=headers)
     return web.json_response({"ok": True}, headers=headers)
@@ -8465,7 +8487,7 @@ async def api_search_reindex(req: web.Request) -> web.Response:
 _MODELS_URL = "https://api.anthropic.com/v1/models?limit=50"
 # Alias → static fallback label. Order is load-bearing (matches web/src/lib/models.ts).
 _MODEL_FAMILIES: list[tuple[str, str]] = [
-    ("fable", "Fable 5"),
+    ("fable", "Fable 5.1"),
     ("sonnet", "Sonnet 5"),
     ("opus", "Opus 5"),
     ("haiku", "Haiku 4.5"),

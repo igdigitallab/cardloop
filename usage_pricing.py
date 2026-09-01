@@ -19,6 +19,7 @@ from __future__ import annotations
 # model id -> {input, output, cache_read, cache_write} in USD per million tokens.
 PRICING: dict[str, dict[str, float]] = {
     # Fable / Mythos — Anthropic's most capable class, priced at 2x Opus.
+    "claude-fable-5-1":  {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
     "claude-fable-5":    {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
     "claude-mythos-5":   {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
     "claude-opus-4-8":   {"input":  5.00, "output": 25.00, "cache_read": 0.50, "cache_write":  6.25},

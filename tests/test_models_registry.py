@@ -46,7 +46,7 @@ def test_build_registry_static_fallback_when_none():
     reg = _webapp._build_model_registry(None)
     assert reg["source"] == "static"
     assert reg["models"] == [
-        {"value": "fable", "label": "Fable 5"},
+        {"value": "fable", "label": "Fable 5.1"},
         {"value": "sonnet", "label": "Sonnet 5"},
         {"value": "opus", "label": "Opus 5"},
         {"value": "haiku", "label": "Haiku 4.5"},
@@ -71,7 +71,7 @@ async def test_api_models_live_path(monkeypatch):
     assert by_value["opus"] == "Opus 4.8"
     assert by_value["haiku"] == "Haiku 4.5"
     # Families without a live match still present via static fallback.
-    assert by_value["fable"] == "Fable 5"
+    assert by_value["fable"] == "Fable 5.1"
     assert by_value["sonnet"] == "Sonnet 5"
     _reset_cache()
 

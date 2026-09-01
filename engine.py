@@ -2374,9 +2374,13 @@ async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
                 # spec-063 Stage 2a: an autonomous CLI turn (native task-notification wake)
                 # is a first-class background run — streamed live via the webapp callback
                 # (kind:run_start source:'bg' → seq-tagged text → run_end + web push).
+                # The run opens on the FIRST top-level assistant message, text or not: a wake
+                # that spends minutes in tool calls before its first sentence used to be
+                # invisible the whole time (a 4-minute Workflow relaunch on 2026-09-01 left no
+                # run bracket at all) and the cockpit read the CLI as idle. spec-088.
                 texts = [blk.text for blk in msg.content
                          if isinstance(blk, TextBlock) and blk.text.strip()]
-                if texts and _bg_run_cb:
+                if _bg_run_cb:
                     try:
                         if not bg_open:
                             _bg_run_cb(session_key, "start")
@@ -2393,6 +2397,15 @@ async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
                     except Exception:
                         pass
                 bg_open = False
+            elif isinstance(msg, SystemMessage):
+                # Task lifecycle (TaskStarted/TaskProgress) and newer subtypes
+                # (background_tasks_changed, status, …) reach the drain too. Until spec-088
+                # surfaces them, log each distinct one once per process so the blind spot is
+                # at least visible in the journal instead of vanishing with no trace.
+                _st = f"drain:{type(msg).__name__}:{getattr(msg, 'subtype', None) or '?'}"
+                if _st not in _UNKNOWN_SUBTYPES_SEEN:
+                    _UNKNOWN_SUBTYPES_SEEN.add(_st)
+                    print(f"[live-drain] {session_key}: unhandled {_st} between turns — logged once")
     except asyncio.CancelledError:
         # Normal pause path (turn starting / eviction) — close a half-open background run
         # so the cockpit strip doesn't dangle.

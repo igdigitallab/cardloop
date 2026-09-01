@@ -51,6 +51,23 @@ fi
 WEB_PORT="${WEB_PORT:-8787}"
 BASE_URL="http://127.0.0.1:${WEB_PORT}"
 
+# ─────────────────────────── Pre-restart: frontend freshness ───────────────────────────
+# web/dist is what the service serves. A frontend commit deployed by a plain restart shipped
+# NOTHING (2026-09-01: fa1b12b committed 10:28, restart 10:44, dist still from 10:26 — the
+# operator kept seeing the bug the commit had fixed). Rebuild when any web/src file is newer
+# than the built index; a failed build logs and keeps the old bundle (spec-088).
+if [ "${CANARY_DRY_RUN:-0}" != "1" ] && [ -d "$DIR/web/src" ] && command -v npm >/dev/null 2>&1; then
+  if [ ! -f "$DIR/web/dist/index.html" ] \
+     || [ -n "$(find "$DIR/web/src" -type f -newer "$DIR/web/dist/index.html" 2>/dev/null | head -1)" ]; then
+    echo "web/src is newer than web/dist — rebuilding the frontend before restarting ${SERVICE}..."
+    if (cd "$DIR/web" && npm run build >/tmp/cardloop-prerestart-build.log 2>&1); then
+      echo "Frontend rebuilt."
+    else
+      echo "⚠️  WARNING: frontend build FAILED (see /tmp/cardloop-prerestart-build.log) — restarting with the OLD web/dist."
+    fi
+  fi
+fi
+
 # ─────────────────────────── Pre-restart: wait-for-idle ───────────────────────────
 # Root-fix A3: wait for BOTH in-flight turns (running) AND background children (agents —
 # sub-agents/workflows whose parent turn already ended). A restart at running==0 used to
@@ -63,7 +80,13 @@ if command -v curl >/dev/null 2>&1; then
   waited=0
   running=""
   agents=""
+  bgturns=""
   plans=""
+  # One idle sample is not idle: a TaskStop→relaunch leaves a ~3s window where agents==0 while
+  # the orchestrator is mid-turn (2026-09-01, the restart landed inside it). Require the idle
+  # reading to hold for IDLE_CONFIRM_POLLS consecutive 5s polls (spec-088).
+  IDLE_CONFIRM_POLLS="${IDLE_CONFIRM_POLLS:-2}"
+  idle_streak=0
   while [ "$waited" -lt "$WAIT_FOR_IDLE_MAX_SEC" ]; do
     resp="$(curl -fsS --max-time 3 "${BASE_URL}/api/health?deep=1" 2>/dev/null || true)"
     if [ -z "$resp" ]; then
@@ -75,14 +98,22 @@ if command -v curl >/dev/null 2>&1; then
     # tolerate an optional space so this doesn't silently misparse as "idle".
     running="$(printf '%s' "$resp" | grep -oE '"running"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' || true)"
     agents="$(printf '%s' "$resp" | grep -oE '"agents"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' || true)"
+    # bg_turns: CLI-autonomous turns (task-notification wakes) that ctx["running"] never sees.
+    bgturns="$(printf '%s' "$resp" | grep -oE '"bg_turns"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' || true)"
     plans="$(printf '%s' "$resp" | grep -oE '"plan_pending"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' || true)"
     if [ -n "$plans" ] && [ "$plans" != "0" ] && [ "$waited" -eq 60 ]; then
       # spec-080: a restart silently loses a pending plan decision (the parked approval dies
       # with the process; boot flips it to 'orphaned'). Say so early, keep the same soft cap.
       echo "⏸  ${plans} plan(s) awaiting operator approval — approve/reject in the cockpit, or this proceeds after the ${WAIT_FOR_IDLE_MAX_SEC}s cap and the decision is lost."
     fi
-    if { [ -z "$running" ] || [ "$running" = "0" ]; } && { [ -z "$agents" ] || [ "$agents" = "0" ]; } && { [ -z "$plans" ] || [ "$plans" = "0" ]; }; then
-      break
+    if { [ -z "$running" ] || [ "$running" = "0" ]; } && { [ -z "$agents" ] || [ "$agents" = "0" ]; } \
+       && { [ -z "$bgturns" ] || [ "$bgturns" = "0" ]; } && { [ -z "$plans" ] || [ "$plans" = "0" ]; }; then
+      idle_streak=$((idle_streak + 1))
+      if [ "$idle_streak" -ge "$IDLE_CONFIRM_POLLS" ]; then
+        break
+      fi
+    else
+      idle_streak=0
     fi
     sleep 5
     waited=$((waited + 5))

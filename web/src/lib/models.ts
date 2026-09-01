@@ -3,7 +3,7 @@
  *  IMPORTANT: do NOT change `value` — it maps to what run_engine / setModel expects.
  */
 export const MODELS = [
-  { value: 'fable',  label: 'Fable 5'    },
+  { value: 'fable',  label: 'Fable 5.1'  },
   { value: 'sonnet', label: 'Sonnet 5'   },
   { value: 'opus',   label: 'Opus 5'     },
   { value: 'haiku',  label: 'Haiku 4.5'  },

@@ -116,3 +116,32 @@ Projects are registered in `data/registry.json` (gitignored) or auto-scanned fro
   "killed", notification suppressed) — always handle BOTH message types.
 - Test fakes: `MagicMock(spec=AssistantMessage)` MUST set `parent_tool_use_id = None`, or the
   spec-071 chat-lane filter silently skips the fake (truthy Mock attribute).
+
+## spec-088: background work visibility (2026-09-01 incident)
+
+- **A frontend commit is NOT deployed by `restart-self.sh` alone.** The service serves `web/dist`;
+  a restart after a `web/src`-only commit ships nothing (fa1b12b: committed 10:28, restarted
+  10:44, dist still 10:26). `restart-self.sh` now rebuilds when `web/src` is newer than
+  `web/dist/index.html`, but the rule stands: after editing `web/`, `cd web && npm run build`
+  BEFORE the restart, and verify from the browser, not from the build log.
+- **`_live_turn_drop` used to kill the NEXT turn's buffer.** `_live_turn_finish` schedules a
+  drop 300 s later; any turn started inside that window lost its live buffer at the mark
+  (events without `seq`, steer bubbles invisible until reload, `/live` empty mid-turn). The
+  drop is now bound to the turn object it was scheduled for. Symptom to recognise: a
+  `run_end` timeline row without `seq`.
+- **`stopped` is not a completion.** The auto-continue wake fires on done/failed only (plus
+  crash-recovery flips). A model-issued `TaskStop` used to wake the orchestrator ~6 min later
+  with "background task finished → stopped", and that phantom turn re-entered a `/goal`
+  Stop-hook loop (9 more blocked stops).
+- **`/api/health?deep=1` reports `bg_turns`.** A CLI-autonomous turn (task-notification wake
+  surfaced by the drain) is not in `ctx["running"]`; `restart-self.sh` waits for `bg_turns`
+  too and needs 2 consecutive idle polls — one sample sat inside the ~3 s TaskStop→relaunch
+  window and restarted the service under a live orchestration.
+- **Workflow sub-agents are invisible between turns (open, spec-088 P1).** After the launching
+  turn ends, `_drain_between_turns` drops `TaskStartedMessage`/`TaskProgressMessage` and every
+  `parent_tool_use_id` message; the one `kind=workflow` monitor row never gets a tail; the
+  chat's ⚙ chip is wiped on `run_end`. The operator sees an idle composer while 12 agents run.
+- **Roster `maxTurns` is the cap that empties agents.** `researcher`/`skeptic` = 20 turns,
+  `executor` = 40 (engine.py DEFAULT_AGENTS). A 20-turn budget cannot read webapp.py; the agent
+  dies with `null` and no partial. Give research agents a disk-first brief and a narrow scope,
+  or raise the cap on purpose.
