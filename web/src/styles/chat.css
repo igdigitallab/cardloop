@@ -781,6 +781,26 @@
   margin-top: 1px;
 }
 .msg-meta .msg-actions { margin-top: 0; }
+/* spec-088: day separator — the first message of a new calendar day gets the full date above
+   it, so an operator returning after weeks sees at a glance when the last exchange happened. */
+.chat-day-sep {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 6px;
+  color: var(--text3, #888);
+  font-size: 11px;
+  user-select: none;
+}
+.chat-day-sep::before,
+.chat-day-sep::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border, #374151);
+}
+.chat-day-sep span { white-space: nowrap; text-transform: capitalize; }
+
 .msg-time {
   font-size: 10px;
   color: var(--text3, #888);

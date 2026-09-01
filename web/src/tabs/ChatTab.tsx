@@ -290,21 +290,44 @@ function fmtHHMM(ts: number): string {
 }
 
 /** Compact per-message stamp shown next to the copy/save actions.
- *  Today → "HH:MM" (date is implicit); earlier this year → "DD.MM HH:MM";
- *  earlier year → "DD.MM.YY HH:MM". Full locale date/time is on the hover title. */
+ *  Today → "HH:MM" (date is implicit); earlier this year → "Sep 1 HH:MM" in the browser's
+ *  locale ("1 сент. HH:MM"); earlier year → "Sep 1, 2025 HH:MM". The old "DD.MM" form did
+ *  not read as a date at a glance (spec-088). Full locale date/time is on the hover title. */
 function fmtStamp(ts: number): string {
   const d = new Date(ts)
   const now = new Date()
   const hhmm = fmtHHMM(ts)
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate()
-  if (sameDay) return hhmm
-  const dd = d.getDate().toString().padStart(2, '0')
-  const mm = (d.getMonth() + 1).toString().padStart(2, '0')
-  if (d.getFullYear() === now.getFullYear()) return `${dd}.${mm} ${hhmm}`
-  return `${dd}.${mm}.${d.getFullYear().toString().slice(2)} ${hhmm}`
+  if (sameLocalDay(ts, now.getTime())) return hhmm
+  const opts: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'short' }
+  if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric'
+  return `${d.toLocaleDateString(undefined, opts)} ${hhmm}`
+}
+
+function sameLocalDay(a: number, b: number): boolean {
+  const x = new Date(a), y = new Date(b)
+  return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate()
+}
+
+/** Full localized date for a day separator ("Tuesday, September 1" / "вторник, 1 сентября"),
+ *  with the year once it differs from the current one. Browser locale on purpose. */
+function fmtDayLabel(ts: number): string {
+  const d = new Date(ts)
+  const opts: Intl.DateTimeFormatOptions = { weekday: 'long', day: 'numeric', month: 'long' }
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric'
+  return d.toLocaleDateString(undefined, opts)
+}
+
+/** spec-088: the day-separator label to render ABOVE message `idx` (start timestamp `ts`), or
+ *  null when the nearest earlier timestamped message is on the same calendar day. The first
+ *  timestamped message always gets one, so a transcript opened after weeks away says when it
+ *  starts and when it last moved. */
+function daySepLabel(messages: ChatMessage[], idx: number, ts: number | undefined): string | null {
+  if (ts == null) return null
+  for (let j = idx - 1; j >= 0; j--) {
+    const p = messages[j].ts
+    if (p != null) return sameLocalDay(p, ts) ? null : fmtDayLabel(ts)
+  }
+  return fmtDayLabel(ts)
 }
 
 /** Format a turn duration from milliseconds. E.g. "38s", "2m 41s". Returns null when ms is null. */
@@ -3952,8 +3975,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             for (let j = groupMsgs.length - 1; j >= 0; j--) {
               if (groupMsgs[j].ts != null) { groupTs = groupMsgs[j].ts; break }
             }
+            // spec-088: a day separator above the group when it starts a new calendar day
+            // (an autonomous run that landed overnight, or the first answer after a long gap).
+            const groupStartTs = groupMsgs.find(f => f.ts != null)?.ts
+            const groupDayLabel = daySepLabel(messages, idx, groupStartTs)
             return (
-              <div key={msg.id} className={`chat-msg chat-msg-assistant chat-msg-group${anyBgRun ? ' chat-msg-bgrun' : ''}`}>
+              <React.Fragment key={msg.id}>
+              {groupDayLabel && (
+                <div className="chat-day-sep"><span>{groupDayLabel}</span></div>
+              )}
+              <div className={`chat-msg chat-msg-assistant chat-msg-group${anyBgRun ? ' chat-msg-bgrun' : ''}`}>
                 {/* spec-063: autonomous background run — happened while the operator was away */}
                 {anyBgRun && (
                   <div className="chat-msg-bgrun-tag">🌙 {t['chat.bg_run_label']}</div>
@@ -3980,6 +4011,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   </div>
                 )}
               </div>
+              </React.Fragment>
             )
           }
 
@@ -3992,9 +4024,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             prevMsg?.ts != null &&
             (msg.ts - prevMsg.ts) > CACHE_TTL_MS
           )
+          // spec-088: full date above the first message of a new calendar day.
+          const userDayLabel = daySepLabel(messages, idx, msg.ts)
 
           return (
             <div key={msg.id}>
+              {userDayLabel && (
+                <div className="chat-day-sep"><span>{userDayLabel}</span></div>
+              )}
               {showColdDivider && msg.ts != null && prevMsg!.ts != null && (
                 <div style={{
                   display: 'flex', alignItems: 'center', margin: '8px 0', gap: 8,
