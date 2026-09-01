@@ -29,6 +29,7 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     ProcessError,
     RateLimitEvent,
+    ResultError,
     ResultMessage,
     StreamEvent,
     SystemMessage,
@@ -765,7 +766,28 @@ def short(cmd: str, limit=90) -> str:
     return cmd if len(cmd) <= limit else cmd[:limit] + "…"
 
 
-def _record_turn_abort(session_key: str, reason: str, detail: str = "") -> None:
+def _abort_reason_for(exc: BaseException, hint: "str | None") -> "tuple[str, str | None, list | None]":
+    """Name the abort cause, preferring the CLI's verdict only where the CLI has one.
+
+    Precedence here is mechanical, not stylistic. A buffer overflow is OUR reader giving up on an
+    oversized message, so no result frame exists for the CLI to have reported — our hint wins.
+    A SIGTERM (handled by its own branch before this is called) is the same story. Everything
+    else that surfaces as a ResultError carries the CLI's own `terminal_reason` ("max_turns",
+    "api_error", ...), which is strictly more specific than the flat "sdk_error" we used to
+    write for the whole catch-all bucket.
+
+    Returns (reason, sdk_subtype, sdk_errors)."""
+    if hint:
+        return "buffer_overflow", None, None
+    if isinstance(exc, ResultError):
+        return (getattr(exc, "terminal_reason", None) or "sdk_error",
+                getattr(exc, "subtype", None), getattr(exc, "errors", None))
+    return "sdk_error", None, None
+
+
+def _record_turn_abort(session_key: str, reason: str, detail: str = "",
+                       sdk_subtype: "str | None" = None,
+                       sdk_errors: "list | None" = None) -> None:
     """Root-fix B2: write the TRUE abort cause to the timeline at the moment it happens.
 
     The CLI stamps an ambiguous "[Request interrupted by user]" into the transcript on
@@ -773,8 +795,12 @@ def _record_turn_abort(session_key: str, reason: str, detail: str = "") -> None:
     operator for infra aborts. Cardloop always knows the real cause — record it. Never raises."""
     try:
         if _timeline_append_cb:
-            _timeline_append_cb(session_key, {"kind": "turn_aborted", "reason": reason,
-                                              "detail": detail[:300]})
+            _row = {"kind": "turn_aborted", "reason": reason, "detail": detail[:300]}
+            if sdk_subtype:
+                _row["sdk_subtype"] = sdk_subtype
+            if sdk_errors:
+                _row["sdk_errors"] = sdk_errors[:5]
+            _timeline_append_cb(session_key, _row)
     except Exception:
         pass
 
@@ -2162,6 +2188,26 @@ async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
             # the monitors panel is fed by the PostToolUse hook + transcript sweeper instead.
             if getattr(msg, "parent_tool_use_id", None):
                 continue
+            if isinstance(msg, UserMessage):
+                # A peer/channel delivery that landed while NO turn was running. The mid-turn
+                # case is covered in _process_messages(); without this branch the message hits
+                # no if/elif below and vanishes — no log, no bus event, no timeline row. And
+                # between turns is the LIKELIER arrival window: a peer message is injected by
+                # another session, not triggered by the operator sending anything.
+                _peer_ev = _peer_message_event(msg)
+                if _peer_ev is not None:
+                    print(f"[live-drain] {session_key}: {_peer_ev['kind']} message from "
+                          f"{_peer_ev['sender']} ({len(_peer_ev['text'])} chars)")
+                    if _bus_publish_cb:
+                        try:
+                            # kind= routes the bus event in the cockpit; the origin's own kind
+                            # (peer-message / channel / ...) rides along as peer_kind so it is
+                            # not clobbered by the routing key.
+                            _bus_publish_cb(session_key, {**_peer_ev, "kind": "peer_message",
+                                                          "peer_kind": _peer_ev["kind"]})
+                        except Exception:
+                            pass  # never let a publish error kill the drain
+                continue
             if isinstance(msg, AssistantMessage):
                 # spec-063 Stage 2a: an autonomous CLI turn (native task-notification wake)
                 # is a first-class background run — streamed live via the webapp callback
@@ -3122,6 +3168,13 @@ async def run_engine(  # type: ignore[return]
                         "cost_usd": getattr(msg, "total_cost_usd", None),
                         "duration_ms": _dur,
                     })
+                # A clean interrupt never raises: client.interrupt() makes the CLI end the
+                # query loop and say so HERE, not through an exception. Without this the only
+                # trace of an operator Stop is the optimistic `operator_stop` row the caller
+                # writes before it knows whether the interrupt even landed.
+                _tr = getattr(msg, "terminal_reason", None)
+                if _tr in ("aborted_streaming", "aborted_tools"):
+                    _record_turn_abort(session_key, _tr, "clean interrupt (client.interrupt())")
                 yield {
                     "type": "result",
                     "session_id": getattr(msg, "session_id", None),
@@ -3144,6 +3197,16 @@ async def run_engine(  # type: ignore[return]
                     "model_served": served_model,
                     # FIX 1(f): stop_reason from ResultMessage (available in SDK types.py).
                     "stop_reason": getattr(msg, "stop_reason", None),
+                    # The CLI's own account of how the query loop ended ("completed",
+                    # "max_turns", "aborted_streaming", "aborted_tools", ...). Cardloop used to
+                    # guess this; the CLI knows the cases we cannot see.
+                    "terminal_reason": getattr(msg, "terminal_reason", None),
+                    # is_error: the ONE ResultMessage field this repo never read anywhere.
+                    "is_error": getattr(msg, "is_error", None),
+                    # Why this turn was initiated (human prompt vs task notification vs peer).
+                    "origin": getattr(msg, "origin", None),
+                    # Structured error payload the CLI attaches to a failed result.
+                    "errors": getattr(msg, "errors", None),
                 }
             elif isinstance(msg, SystemMessage):
                 if isinstance(msg, TaskStartedMessage):
@@ -3313,7 +3376,9 @@ async def run_engine(  # type: ignore[return]
                 if _hint:
                     print(f"[engine] {_hint} ({session_key})")
                 print(f"[live-client] error during turn for {session_key} ({exc!r}) — evicting")
-                _record_turn_abort(session_key, "buffer_overflow" if _hint else "sdk_error", str(exc))
+                _reason, _sub, _errs = _abort_reason_for(exc, _hint)
+                _record_turn_abort(session_key, _reason, str(exc),
+                                   sdk_subtype=_sub, sdk_errors=_errs)
                 await _evict_live_client(session_key, ctx)
                 yield {"type": "error", "exc": exc}
         except Exception as exc:
@@ -3322,7 +3387,9 @@ async def run_engine(  # type: ignore[return]
             if _hint:
                 print(f"[engine] {_hint} ({session_key})")
             print(f"[live-client] error during turn for {session_key} ({exc!r}) — evicting")
-            _record_turn_abort(session_key, "buffer_overflow" if _hint else "sdk_error", str(exc))
+            _reason, _sub, _errs = _abort_reason_for(exc, _hint)
+            _record_turn_abort(session_key, _reason, str(exc),
+                               sdk_subtype=_sub, sdk_errors=_errs)
             await _evict_live_client(session_key, ctx)
             yield {"type": "error", "exc": exc}
         finally:
@@ -3405,13 +3472,17 @@ async def run_engine(  # type: ignore[return]
                 _hint = _buffer_overflow_hint(exc)
                 if _hint:
                     print(f"[engine] {_hint} ({session_key})")
-                _record_turn_abort(session_key, "buffer_overflow" if _hint else "sdk_error", str(exc))
+                _reason, _sub, _errs = _abort_reason_for(exc, _hint)
+                _record_turn_abort(session_key, _reason, str(exc),
+                                   sdk_subtype=_sub, sdk_errors=_errs)
                 yield {"type": "error", "exc": exc}
         except Exception as exc:
             _hint = _buffer_overflow_hint(exc)
             if _hint:
                 print(f"[engine] {_hint} ({session_key})")
-            _record_turn_abort(session_key, "buffer_overflow" if _hint else "sdk_error", str(exc))
+            _reason, _sub, _errs = _abort_reason_for(exc, _hint)
+            _record_turn_abort(session_key, _reason, str(exc),
+                               sdk_subtype=_sub, sdk_errors=_errs)
             yield {"type": "error", "exc": exc}
 
 
