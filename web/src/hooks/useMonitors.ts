@@ -17,7 +17,14 @@ import { Monitor } from '../types'
 import { useProjectActivity } from './useProjectActivity'
 
 const TERMINAL = new Set(['done', 'stopped', 'failed'])
-const AUTO_REMOVE_MS = 5000  // grace window: show the final status, then the row clears itself
+// Grace window before a finished row clears itself. spec-088: agent/workflow rows used to vanish
+// 5 s after the flip — an operator who looked at the chat a minute after a 12-agent workflow
+// finished saw an EMPTY panel and read it as "nothing happened". Those rows now stay until the
+// next operator turn (see the run_start handler below) with a long safety timer; plain shells
+// keep the short grace.
+const AUTO_REMOVE_MS = 5000
+const AUTO_REMOVE_WORK_MS = 30 * 60 * 1000
+const WORK_KINDS = new Set(['agent', 'workflow'])
 
 export function useMonitors(projectId: string, active: boolean): {
   monitors: Monitor[]
@@ -43,14 +50,29 @@ export function useMonitors(projectId: string, active: boolean): {
 
   // Arm (or re-arm) the auto-remove timer for one monitor. Re-arming always clears the previous
   // timer first, so a status that flaps running→done→running cancels a pending removal.
-  const armAutoRemove = useCallback((id: string, status: string) => {
+  const armAutoRemove = useCallback((id: string, status: string, kind?: string) => {
     clearTimer(id)
     if (!TERMINAL.has(status)) return
+    const grace = WORK_KINDS.has(kind ?? '') ? AUTO_REMOVE_WORK_MS : AUTO_REMOVE_MS
     timersRef.current.set(id, setTimeout(() => {
       timersRef.current.delete(id)
       mapRef.current.delete(id)
       flush()
-    }, AUTO_REMOVE_MS))
+    }, grace))
+  }, [clearTimer, flush])
+
+  // spec-088: an operator turn is the natural "I have seen it" boundary — finished agent/workflow
+  // rows clear then, running ones stay.
+  const clearFinishedWork = useCallback(() => {
+    let changed = false
+    for (const [id, m] of mapRef.current) {
+      if (WORK_KINDS.has(m.kind) && TERMINAL.has(m.status)) {
+        clearTimer(id)
+        mapRef.current.delete(id)
+        changed = true
+      }
+    }
+    if (changed) flush()
   }, [clearTimer, flush])
 
   // Initial hydration on project switch.
@@ -67,7 +89,7 @@ export function useMonitors(projectId: string, active: boolean): {
         if (cancelled) return
         for (const m of r.monitors) {
           mapRef.current.set(m.id, m)
-          armAutoRemove(m.id, m.status)  // a registry that hydrates an already-done monitor still clears it
+          armAutoRemove(m.id, m.status, m.kind)  // a registry that hydrates an already-done monitor still clears it
         }
         flush()
       })
@@ -81,6 +103,10 @@ export function useMonitors(projectId: string, active: boolean): {
 
   // Live merge.
   useProjectActivity(useCallback((evt) => {
+    if (evt.kind === 'run_start' && (evt as { source?: string }).source === 'chat') {
+      clearFinishedWork()
+      return
+    }
     if (evt.kind !== 'monitor' || !evt.monitor?.id) return
     const id = evt.monitor.id
     // Removal event (operator dismissed / cleared) → drop it.
@@ -94,9 +120,9 @@ export function useMonitors(projectId: string, active: boolean): {
     // Merge so a tail/status-only delta doesn't blank earlier fields.
     const merged = { ...cur, ...evt.monitor } as Monitor
     mapRef.current.set(id, merged)
-    armAutoRemove(id, merged.status)
+    armAutoRemove(id, merged.status, merged.kind)
     flush()
-  }, [flush, clearTimer, armAutoRemove]))
+  }, [flush, clearTimer, armAutoRemove, clearFinishedWork]))
 
   // Optimistic local dismiss (also hits the API to clear the server registry + notify others).
   const dismiss = useCallback((id: string) => {

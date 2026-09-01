@@ -700,7 +700,7 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
         # crash_recovery marks a flip derived from post-restart reconciliation (root-fix B1)
         # so the completion-wake prompt can say "verify, the service died mid-run".
         for k in ("kind", "label", "status", "tail", "agent", "persistent", "tool_use_id",
-                  "crash_recovery", "stale"):
+                  "crash_recovery", "stale", "stream"):
             if delta.get(k) not in (None, ""):
                 rec[k] = delta[k]
         rec["ts"] = now
@@ -1423,6 +1423,32 @@ async def _memory_alert_loop(ctx: dict) -> None:
         await asyncio.sleep(_MEMORY_ALERT_INTERVAL_SEC)
 
 
+def _sweep_stale_monitors(_now: float) -> None:
+    """Flip running rows that went silent to stopped(stale). Workflow/monitor rows are judged
+    on _MONITOR_STALE_WF_SEC of update silence. spec-088: stream-fed agent rows (created from
+    TaskStarted/TaskProgress, `stream: True`) have no transcript to tail — their liveness IS
+    the progress deltas — so they are judged the same way, on the shorter agent threshold.
+    Never raises."""
+    for sk, bucket in list(_monitors.items()):
+        for rec in list(bucket.values()):
+            try:
+                _is_stream_agent = rec.get("kind") == "agent" and bool(rec.get("stream"))
+                if not (rec.get("kind") in ("workflow", "monitor") or _is_stream_agent):
+                    continue
+                if rec.get("status") != "running":
+                    continue
+                _stale_after = _MONITOR_STALE_SEC if _is_stream_agent else _MONITOR_STALE_WF_SEC
+                _silent = _now - (rec.get("ts") or rec.get("started") or _now)
+                if _silent > _stale_after:
+                    _monitor_update(
+                        sk,
+                        {"id": rec.get("id"), "status": "stopped", "stale": True,
+                         "tail": f"(stale — no updates for {int(_silent // 60)} min)"},
+                        only_existing=True)
+            except Exception:
+                pass
+
+
 async def _agent_activity_sweep_loop(ctx: dict) -> None:
     """spec-069 P3-B: every _AGENT_SWEEP_INTERVAL_SEC, tail each running agent monitor's
     transcript and push a tail update if anything new has happened.  Also calls
@@ -1471,9 +1497,20 @@ async def _agent_activity_sweep_loop(ctx: dict) -> None:
                                 continue
                             try:
                                 # Locate the agent transcript via glob (session_id varies).
+                                # spec-088: a Workflow's own agents live one level deeper
+                                # (subagents/workflows/<runId>/agent-<id>.jsonl) — the old
+                                # glob never reached them, so no row of theirs ever got a tail.
                                 matches = list(sdk_dir.glob(
                                     f"*/subagents/agent-{agent_id}.jsonl"))
                                 if not matches:
+                                    matches = list(sdk_dir.glob(
+                                        f"*/subagents/workflows/*/agent-{agent_id}.jsonl"))
+                                if not matches:
+                                    # spec-088: a stream-fed row (TaskStarted/TaskProgress) is
+                                    # alive by its own deltas — no transcript is not death;
+                                    # _sweep_stale_monitors judges it by update silence.
+                                    if rec.get("stream"):
+                                        continue
                                     # spec-071 staleness: no transcript well past launch means
                                     # the agent never started or its CLI died with it.
                                     _age = time.time() - (rec.get("started") or time.time())
@@ -1520,22 +1557,7 @@ async def _agent_activity_sweep_loop(ctx: dict) -> None:
             # Root-fix A3: staleness for workflow/monitor kinds (agent kind is handled above
             # via its transcript mtime). Judged by monitor-update silence: no delta from the
             # drain / notifications / PostToolUse for _MONITOR_STALE_WF_SEC → presumed dead.
-            _now = time.time()
-            for sk, bucket in list(_monitors.items()):
-                for rec in list(bucket.values()):
-                    try:
-                        if (rec.get("kind") in ("workflow", "monitor")
-                                and rec.get("status") == "running"
-                                and _now - (rec.get("ts") or rec.get("started") or _now)
-                                > _MONITOR_STALE_WF_SEC):
-                            _monitor_update(
-                                sk,
-                                {"id": rec.get("id"), "status": "stopped", "stale": True,
-                                 "tail": f"(stale — no updates for "
-                                         f"{int((_now - (rec.get('ts') or _now)) // 60)} min)"},
-                                only_existing=True)
-                    except Exception:
-                        pass
+            _sweep_stale_monitors(time.time())
         except Exception:
             pass
         await asyncio.sleep(_AGENT_SWEEP_INTERVAL_SEC)

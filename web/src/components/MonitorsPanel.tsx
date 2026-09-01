@@ -30,11 +30,13 @@ function statusClass(s: string): string {
 /** Render one monitor row. Agent kind gets inline tail + no expand-click requirement. */
 function MonitorRow({ m, onDismiss }: { m: Monitor; onDismiss: (id: string) => void }) {
   const [open, setOpen] = useState(false)
-  const isAgent = m.kind === 'agent'
+  // spec-088: a workflow row behaves like an agent row — its tail is the live progress summary
+  // the server keeps ("3/5 agents done · ↳ Bash"), shown inline, icon spinning while running.
+  const isAgent = m.kind === 'agent' || m.kind === 'workflow'
   const isDone = m.status === 'done' || m.status === 'stopped'
   // Agent rows: pick checkmark icon when done, spinning Bot when running/failed
   const Icon = isAgent
-    ? (isDone ? CheckCircle2 : Bot)
+    ? (isDone ? CheckCircle2 : (m.kind === 'workflow' ? Workflow : Bot))
     : (KIND_ICON[m.kind] || Activity)
   const hasTail = !!(m.tail && m.tail.trim())
 
@@ -94,7 +96,9 @@ export function MonitorsPanel({
   const [manualOverride, setManualOverride] = useState<boolean | null>(null)
   const prevAgentRunning = useRef(false)
 
-  const agentRunning = monitors.some(m => m.kind === 'agent' && m.status === 'running')
+  // spec-088: a running Workflow counts as agent work too — the panel used to stay collapsed
+  // for a workflow-only list while 12 agents ran, and the operator saw nothing.
+  const agentRunning = monitors.some(m => (m.kind === 'agent' || m.kind === 'workflow') && m.status === 'running')
 
   // Auto-expand when an agent becomes active; auto-collapse when the last one finishes —
   // but only if the user has NOT manually toggled since the last auto-event.
@@ -119,6 +123,9 @@ export function MonitorsPanel({
 
   const running = monitors.filter(m => m.status === 'running').length
   const agentCount = monitors.filter(m => m.kind === 'agent' && m.status === 'running').length
+  const agentDone = monitors.filter(m => m.kind === 'agent' && (m.status === 'done' || m.status === 'stopped')).length
+  const agentFailed = monitors.filter(m => m.kind === 'agent' && m.status === 'failed').length
+  const workflowRunning = monitors.filter(m => m.kind === 'workflow' && m.status === 'running').length
 
   return (
     <div className="mon-panel">
@@ -128,11 +135,14 @@ export function MonitorsPanel({
       >
         {agentRunning ? <Bot size={12} className="mon-agent-spin" /> : <Activity size={12} />}
         <span className="mon-panel-title">
-          {agentCount > 0 ? `Agent Activity` : 'Monitors'}
+          {agentCount > 0 || workflowRunning > 0 ? `Agent Activity` : 'Monitors'}
         </span>
         <span className="mon-panel-count">
-          {agentCount > 0
-            ? `${agentCount} agent${agentCount > 1 ? 's' : ''} running · ${monitors.length} total`
+          {agentCount > 0 || workflowRunning > 0
+            ? `${agentCount} agent${agentCount === 1 ? '' : 's'} running`
+              + (agentDone > 0 ? ` · ${agentDone} done` : '')
+              + (agentFailed > 0 ? ` · ${agentFailed} failed` : '')
+              + (workflowRunning > 0 ? ` · ${workflowRunning} workflow${workflowRunning === 1 ? '' : 's'}` : '')
             : `${running} running · ${monitors.length} total`}
         </span>
         <ChevronRight size={13} className="mon-chevron" style={{

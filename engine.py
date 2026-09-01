@@ -2330,6 +2330,42 @@ def _notification_monitor_delta(msg) -> "dict | None":
         return None
 
 
+# spec-088: a background sub-agent's lifecycle rides the SDK stream as TaskStarted /
+# TaskProgress system messages — the ONLY per-agent signal for agents a Workflow spawns itself
+# (no Agent tool call → no PostToolUse row, and the transcript sweeper's glob never reaches
+# subagents/workflows/*/). Rows are keyed by task_id, the namespace the terminal
+# TaskNotification/TaskUpdated carries, so they flip by id. The Workflow's OWN task
+# (local_workflow) is skipped: PostToolUse already registered it under the tool's taskId.
+# `stream: True` tells the transcript sweeper to leave these rows alone (it would otherwise
+# glob for agent-<task_id>.jsonl, find nothing and flip them "failed").
+_TASK_ROW_TYPES = frozenset({"local_agent"})
+
+
+def _task_lifecycle_monitor_delta(msg) -> "dict | None":
+    """Map a TaskStartedMessage / TaskProgressMessage to a monitor delta (None = ignore).
+
+    Started → a creating delta (kind=agent, running, label=description). Progress → a
+    tail-only delta (apply with only_existing=True). Never raises."""
+    try:
+        task_id = getattr(msg, "task_id", None)
+        if not task_id:
+            return None
+        if isinstance(msg, TaskStartedMessage):
+            if str(getattr(msg, "task_type", None) or "") not in _TASK_ROW_TYPES:
+                return None
+            label = str(getattr(msg, "description", None) or "agent").strip()[:200]
+            return {"id": str(task_id), "kind": "agent", "status": "running",
+                    "label": label, "stream": True}
+        if isinstance(msg, TaskProgressMessage):
+            tool = getattr(msg, "last_tool_name", None)
+            if not tool:
+                return None
+            return {"id": str(task_id), "tail": f"↳ {tool}"}
+    except Exception:
+        return None
+    return None
+
+
 async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
     """Consume the live client's SDK stream until cancelled (see block comment above)."""
     session_key = entry.session_key
@@ -2343,6 +2379,16 @@ async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
                     print(f"[live-drain] {session_key}: task-notification id={delta['id']} → {delta['status']}")
                     try:
                         _monitor_update_cb(session_key, delta, only_existing=True)
+                    except Exception:
+                        pass
+                continue
+            if isinstance(msg, (TaskStartedMessage, TaskProgressMessage)):
+                # spec-088: per-agent rows for work that outlives the turn that launched it.
+                delta = _task_lifecycle_monitor_delta(msg)
+                if delta and _monitor_update_cb:
+                    try:
+                        _monitor_update_cb(session_key, delta,
+                                           only_existing=not isinstance(msg, TaskStartedMessage))
                     except Exception:
                         pass
                 continue
@@ -3422,6 +3468,14 @@ async def run_engine(  # type: ignore[return]
                     if getattr(msg, "tool_use_id", None):
                         _sub_tool_to_task[msg.tool_use_id] = msg.task_id
                     _sub_task_types[msg.task_id] = getattr(msg, "task_type", None) or ""
+                    # spec-088: the durable per-agent row (monitors registry) — the chat lane
+                    # below is client state and is wiped on run_end.
+                    _ld = _task_lifecycle_monitor_delta(msg)
+                    if _ld and _monitor_update_cb:
+                        try:
+                            _monitor_update_cb(session_key, _ld)
+                        except Exception:
+                            pass
                     yield {
                         "type": "subagent",
                         "subtype": "started",
@@ -3433,6 +3487,12 @@ async def run_engine(  # type: ignore[return]
                         "task_type": getattr(msg, "task_type", None),
                     }
                 elif isinstance(msg, TaskProgressMessage):
+                    _ld = _task_lifecycle_monitor_delta(msg)  # spec-088: live tail on the row
+                    if _ld and _monitor_update_cb:
+                        try:
+                            _monitor_update_cb(session_key, _ld, only_existing=True)
+                        except Exception:
+                            pass
                     yield {
                         "type": "subagent",
                         "subtype": "progress",
