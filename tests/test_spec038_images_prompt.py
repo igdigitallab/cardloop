@@ -184,3 +184,10 @@ async def test_subagent_files_prompt_absent_without_media_env(tmp_path):
     for name in ("executor", "researcher", "skeptic", "quick"):
         assert opts.agents[name].prompt == engine.DEFAULT_AGENTS[name].prompt
         assert engine.SUBAGENT_FILES_PROMPT not in opts.agents[name].prompt
+
+
+def test_card_runs_are_marked_in_the_environment():
+    """A card is unattended: the SessionStart skills-router hook keys off this marker to stay
+    silent, since a card is one scoped instruction, not a conversation that needs routing."""
+    src = open("webapp.py").read()
+    assert '"CARDLOOP_RUN_MODE": "card"' in src

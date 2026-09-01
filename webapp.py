@@ -6773,7 +6773,11 @@ async def _run_card(
                     session_key=session_key,
                     model=model,
                     resume_session_id=resume_sid,
-                    env=project_secrets,
+                    # CARDLOOP_RUN_MODE marks an UNATTENDED run for anything downstream that
+                    # must behave differently with no operator watching — notably the
+                    # SessionStart skills-router hook, which stays silent here: a card is a
+                    # single scoped instruction, not a conversation to route.
+                    env={**(project_secrets or {}), "CARDLOOP_RUN_MODE": "card"},
                     project_account=(project or {}).get("account"),
                     **agents_kwargs,
                     ctx=ctx,
