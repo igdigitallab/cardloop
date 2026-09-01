@@ -51,3 +51,26 @@ def test_every_alias_runs_the_newest_model_of_its_family():
         "UI label <-> actual model mismatch — the bundled CLI is stale; bump "
         "claude-agent-sdk in requirements.txt:\n  " + "\n  ".join(mismatches)
     )
+
+
+def test_helper_haiku_traffic_does_not_masquerade_as_the_alias():
+    """A multi-model `modelUsage` must resolve to the alias's OWN family.
+
+    CLI 2.1.252 bills helper traffic (auto-mode classification) to Haiku and lists it
+    first, so reading the first key reported every alias as running Haiku.
+    """
+    v = _load_verifier()
+    mu = {
+        "claude-haiku-4-5-20251001": {"outputTokens": 9},
+        "claude-sonnet-5": {"outputTokens": 4},
+    }
+    assert v._pick_family_model(mu, "sonnet") == "claude-sonnet-5"
+    assert v._pick_family_model(mu, "haiku") == "claude-haiku-4-5-20251001"
+
+
+def test_a_genuine_downgrade_is_still_reported():
+    """No entry from the requested family = a real mismatch, not something to hide."""
+    v = _load_verifier()
+    mu = {"claude-haiku-4-5-20251001": {"outputTokens": 9}, "claude-opus-4-8": {"outputTokens": 40}}
+    assert v._pick_family_model(mu, "sonnet") == "claude-opus-4-8"
+    assert v._pick_family_model({}, "opus") is None

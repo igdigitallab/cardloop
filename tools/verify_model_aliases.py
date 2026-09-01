@@ -79,6 +79,24 @@ def fetch_newest_per_family(token: str) -> "dict[str, dict] | None":
     return newest
 
 
+def _pick_family_model(mu: dict, alias: str) -> "str | None":
+    """Pick the model the ALIAS ran out of a multi-model `modelUsage` map.
+
+    Since CLI 2.1.252 a single -p run bills more than one model: the answer comes from
+    the requested alias, but helper traffic (auto-mode tool classification, utility
+    calls) is billed to Haiku and lands FIRST in the map. Taking `next(iter(...))`
+    therefore reported every alias as running Haiku — a false MISMATCH that would page
+    the daily --watch cron. Prefer an entry from the alias's own family; only when the
+    family is absent has the alias genuinely run something else, and then the heaviest
+    entry is the honest answer."""
+    if not mu:
+        return None
+    same_family = [k for k in mu if k.startswith(f"claude-{alias}")]
+    if same_family:
+        return same_family[0]
+    return max(mu, key=lambda k: (mu.get(k) or {}).get("outputTokens") or 0)
+
+
 def resolve_alias(cli: str, alias: str) -> "str | None":
     """Ask the bundled CLI which model the alias ACTUALLY runs (via the modelUsage key)."""
     env = dict(os.environ)
@@ -96,7 +114,7 @@ def resolve_alias(cli: str, alias: str) -> "str | None":
     except Exception:
         return None
     mu = d.get("modelUsage") or {}
-    return next(iter(mu.keys())) if mu else d.get("model")
+    return _pick_family_model(mu, alias) or d.get("model")
 
 
 def check() -> "tuple[int, list[tuple[str, str, str]]]":
