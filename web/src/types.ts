@@ -433,6 +433,10 @@ export interface ChatEventResult {
 export interface ChatEventError {
   type: 'error'
   error: string
+  /** The CLI's own verdict when the turn died on a result frame ("max_turns", "api_error", ...). */
+  terminal_reason?: string | null
+  /** The result frame's subtype ("error_max_turns", "error_during_execution", ...). */
+  subtype?: string | null
 }
 
 export interface ChatEventDone {
@@ -468,6 +472,10 @@ export interface ChatEventModelInfo {
   requested: string
   served: string
   fallback?: boolean
+  /** true = the family matched but the GENERATION is stale (a stale CLI bundle). */
+  generation?: boolean
+  /** Newest id of the requested family, per the live /v1/models listing. */
+  expected?: string | null
 }
 
 export type ChatSSEEvent =
@@ -547,7 +555,7 @@ export interface ChatMessage {
   /** Spec-052: board event payload — present only when role === 'board' */
   board?: ActivityEventBoard
   /** Model fallback payload — present only when role === 'model_fallback' */
-  modelFallback?: { requested: string; served: string }
+  modelFallback?: { requested: string; served: string; expected?: string | null; generation?: boolean }
 }
 
 // ─── Prompt templates ─────────────────────────────────────────────────────
@@ -668,6 +676,18 @@ export interface ActivityEventCompact {
   kind: 'compact'
   trigger: string
   project: string
+}
+
+/** A peer delivery that landed while NO turn was running, so it arrives on the bus rather
+ *  than on a turn's SSE stream (the mid-turn twin is ChatEventPeerMessage). */
+export interface ActivityEventPeerMessage {
+  kind: 'peer_message'
+  /** The origin's own kind ('peer-message' | 'channel' | ...), kept out of `kind` so the
+   *  bus routing key stays stable. */
+  peer_kind?: string | null
+  sender?: string | null
+  from_session?: string | null
+  text: string
 }
 
 // ─── Background-task monitors (card b6f5cc) ────────────────────────────────────
@@ -791,6 +811,7 @@ export type ActivityEvent =
   | ActivityEventRunEnd
   | ActivityEventSubagent
   | ActivityEventCompact
+  | ActivityEventPeerMessage
   | ActivityEventMonitor
   | ActivityEventRateLimitPrompt
   | ActivityEventBoard

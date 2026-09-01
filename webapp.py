@@ -565,6 +565,23 @@ def _bus_publish(session_key: str, event: dict, persist: bool = True) -> None:
         _awaiting.pop(session_key, None)
 
 
+def _error_event_payload(exc_obj, fallback: str = "unknown error") -> dict:
+    """Build the operator-visible error event, keeping the CLI's structured verdict.
+
+    A ResultError carries terminal_reason/subtype (why the CLI ended the loop) — coercing the
+    whole thing to str() throws that away and leaves the operator one opaque line. Keep
+    `error` as the primary string so every existing consumer is unaffected; the extra keys are
+    additive and optional."""
+    if exc_obj is None:
+        return {"type": "error", "error": fallback}
+    payload = {"type": "error", "error": str(exc_obj)}
+    for _f in ("terminal_reason", "subtype"):
+        _v = getattr(exc_obj, _f, None)
+        if _v:
+            payload[_f] = _v
+    return payload
+
+
 def _emit_board_event(session_key: str, *, event: str, card_id: str, title: str = "",
                       column_from=None, column_to=None, severity: str = "info",
                       summary: str = "") -> None:
@@ -6783,6 +6800,16 @@ async def _run_card(
                     _bus_publish(session_key, _live_ev, persist=True)
                 elif etype == "result":
                     _card_last_result_event = event  # Phase D: capture for auto-resume
+                    # A card runs with nobody watching, which is exactly where a silent
+                    # downgrade costs the most — and until now cards had no alert path at all.
+                    _card_stale = _check_model_freshness(event.get("model_requested"),
+                                                         event.get("canonical_served"))
+                    if _card_stale:
+                        _emit_board_event(
+                            session_key, event="model_stale", card_id=card_id,
+                            title=card.get("text", "")[:120], severity="warning",
+                            summary=(f"Ran {_card_stale['served']} — newest "
+                                     f"{_card_stale['requested']} is {_card_stale['expected']}"))
                     # Spec-021 Part 2: do NOT write card session_id back to ctx["sessions"].
                     # Cards are isolated — each card run is its own fresh session.
                     # Spec-029 item 3: extract structured_output when STRUCTURED_CARDS=1.
@@ -8494,6 +8521,33 @@ def _build_model_registry(live: "list[dict] | None") -> dict:
     return {"source": "live" if live else "static", "models": models}
 
 
+def _check_model_freshness(requested: "str | None",
+                           canonical_served: "str | None") -> "dict | None":
+    """Did this turn run the NEWEST model of the family it asked for?
+
+    Returns None when there is no alert to raise — no data, or served == newest. The
+    already-shipped `model_info` strip only compares FAMILIES ("opus" in "claude-opus-4-8"
+    matches), so it is blind to exactly the failure that bit us: a stale CLI bundle serving a
+    previous-generation model under the same alias.
+
+    Reads the 6h `/api/models` cache and never triggers a fetch: this runs on every turn, and a
+    turn is the wrong place to block on an HTTPS call. A cold cache simply means no check.
+    """
+    if not requested or not canonical_served:
+        return None  # older CLI / third-party provider: no canonicalModel to compare
+    live = _models_cache.get("live")
+    if not live:
+        return None
+    family = requested.replace("claude-", "").split("-")[0]
+    if not family:
+        return None
+    newest = next((str(m.get("id")) for m in live
+                   if str(m.get("id", "")).startswith(f"claude-{family}")), None)
+    if not newest or canonical_served == newest:
+        return None
+    return {"requested": requested, "served": canonical_served, "expected": newest}
+
+
 async def api_models(req: web.Request) -> web.Response:
     """Live model registry (cached ~6h). Fully best-effort → static fallback on any error."""
     now = time.time()
@@ -8504,6 +8558,9 @@ async def api_models(req: web.Request) -> web.Response:
         # Only cache successful live results; keep retrying while we're on the static fallback.
         if cached.get("source") == "live":
             _models_cache["data"] = cached
+            # The registry only carries labels; the freshness check below needs the raw ids,
+            # so keep the listing itself instead of re-fetching it inside a turn's hot path.
+            _models_cache["live"] = live
             _models_cache["ts"] = now
     return web.json_response(cached)
 
@@ -11952,8 +12009,8 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                    **_format_tool(event["name"], _inp if isinstance(_inp, dict) else {})}
             elif etype == "error":
                 _exc_obj = event.get("exc")
-                _buffered_event = {"type": "error",
-                                   "error": str(_exc_obj) if _exc_obj is not None else event.get("error", "unknown error")}
+                _buffered_event = _error_event_payload(
+                    _exc_obj, event.get("error", "unknown error"))
             else:
                 _buffered_event = event
             _live_ev = _live_turn_append(session_key, _buffered_event)
@@ -12779,10 +12836,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 # JSON-serializable.  Raw exception objects (e.g. ProcessError) would
                 # cause a TypeError in web.json_response at GET /live.
                 exc_obj = event.get("exc")
-                _buffered_event = {
-                    "type": "error",
-                    "error": str(exc_obj) if exc_obj is not None else event.get("error", "unknown error"),
-                }
+                _buffered_event = _error_event_payload(
+                    exc_obj, event.get("error", "unknown error"))
             else:
                 _buffered_event = event
             _live_ev = _live_turn_append(session_key, _buffered_event)
@@ -12809,6 +12864,22 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 await _send({"type": "tool", **tool_data, "seq": _live_ev.get("seq")})
             elif etype == "result":
                 _chat_last_result_event = event  # Phase D: capture for auto-resume
+                # Generation-level model check, per turn. The init-message strip catches a
+                # FAMILY swap; this catches the stale-bundle case where the family matches and
+                # the generation does not (the "UI says Opus 5, 4.8 runs" incident).
+                _stale = _check_model_freshness(event.get("model_requested"),
+                                                event.get("canonical_served"))
+                if _stale:
+                    print(f"[model] {session_key}: served {_stale['served']} but newest "
+                          f"{_stale['requested']} is {_stale['expected']}")
+                    await _send({
+                        "type": "model_info",
+                        "requested": _stale["requested"],
+                        "served": _stale["served"],
+                        "expected": _stale["expected"],
+                        "generation": True,
+                        "fallback": True,
+                    })
                 sid = event.get("session_id") if _provider_for_run == "claude" else None
                 codex_thread_id = event.get("thread_id") if _provider_for_run == "codex" else None
                 if sid or codex_thread_id:
@@ -12901,7 +12972,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 # context_warn=True in the SSE result frame above still feeds the cockpit.
             elif etype == "error":
                 exc = event.get("exc")
-                await _send({"type": "error", "error": str(exc) if exc else "unknown error"})
+                await _send(_error_event_payload(exc))
             elif etype == "rate_limit":
                 rl_type = event.get("rate_limit_type")
                 if rl_type:

@@ -510,6 +510,7 @@ export const ru = {
   'chat.think_mode_min': 'Мин',
   'chat.think_mode_hint': 'Глубина думания на следующий ход (Макс / Норм / Мин). Работает на всех моделях, включая Fable 5.',
   'chat.model_fallback': '⚠ Фолбэк модели: запрошен {requested}, отвечает {served}',
+  'chat.model_stale': '⚠ Устаревшая модель: {requested} отработал {served}, новейшая — {expected}',
 
   // ── Ultracode mode (spec-058) ────────────────────────────────────
   'chat.ultracode_label': 'Ultracode',

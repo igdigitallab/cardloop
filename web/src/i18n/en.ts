@@ -547,6 +547,7 @@ export const en = {
   'chat.think_mode_min': 'Min',
   'chat.think_mode_hint': 'Thinking effort for the next turn (Max / Default / Min). Works on all models including Fable 5.',
   'chat.model_fallback': '⚠ Model fallback: requested {requested}, served by {served}',
+  'chat.model_stale': '⚠ Stale model: {requested} ran {served}, newest is {expected}',
 
   // ── Ultracode mode (spec-058) ────────────────────────────────────
   'chat.ultracode_label': 'Ultracode',

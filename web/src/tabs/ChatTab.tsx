@@ -2254,7 +2254,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         // lifecycle (run bar reset, queue drain, completion reconcile).
         setMessages(prev => finalizeStreamingWithMetrics(prev, rec as unknown as ChatEventResult, now))
       } else if (rec.type === 'error') {
-        setMessages(prev => finalizeStreaming(prev, rec.error || 'unknown error'))
+        // The CLI's own verdict, when it has one, beats a bare stringified exception.
+        const er = rec as unknown as { error?: string; terminal_reason?: string | null }
+        const detail = er.terminal_reason ? ` (${er.terminal_reason})` : ''
+        setMessages(prev => finalizeStreaming(prev, (er.error || 'unknown error') + detail))
       } else if (rec.type === 'peer_message') {
         // Another session wrote to this one. Close whatever bubble is open and render the
         // delivery in place, so it reads as part of the conversation rather than appearing
@@ -2263,11 +2266,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         const body = (rec.text as string) || ''
         if (body) setMessages(prev => [...finalizeStreaming(prev), makeUserMsg(`↔ ${who} · ${body}`)])
       } else if (rec.type === 'model_info') {
-        const mi = rec as unknown as { requested: string; served: string; fallback?: boolean }
+        const mi = rec as unknown as {
+          requested: string; served: string; fallback?: boolean
+          generation?: boolean; expected?: string | null
+        }
         if (mi.fallback) {
           const strip: ChatMessage = {
             id: nextId(), role: 'model_fallback', text: '', tools: [], streaming: false, ts: now,
-            modelFallback: { requested: mi.requested, served: mi.served },
+            modelFallback: {
+              requested: mi.requested, served: mi.served,
+              expected: mi.expected ?? null, generation: !!mi.generation,
+            },
           }
           setMessages(prev => [...prev, strip])
         }
@@ -2496,6 +2505,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         const e = evt as unknown as { plan_id: string; approved?: boolean }
         setPlanPrompt(p => (p && p.planId === e.plan_id) ? null : p)
         if (e.approved) handlePlanModeChange(false)
+      }
+
+    } else if (evt.kind === 'peer_message') {
+      // A delivery from another session that landed while no turn was running. The mid-turn
+      // copy rides the turn's own SSE stream (rec.type === 'peer_message'); this is the idle
+      // path, which used to be dropped in the engine's drain loop entirely.
+      {
+        const e = evt as unknown as { sender?: string | null; text?: string }
+        const who = e.sender || 'another session'
+        const body = e.text || ''
+        if (body) setMessages(prev => [...finalizeStreaming(prev), makeUserMsg(`↔ ${who} · ${body}`)])
       }
 
     } else if (evt.kind === 'compact') {
@@ -3743,9 +3763,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           // Live-only (not replayed from history); disappears on reload.
           if (msg.role === 'model_fallback' && msg.modelFallback) {
             const mf = msg.modelFallback
-            const text = t['chat.model_fallback']
-              .replace('{requested}', mf.requested)
-              .replace('{served}', mf.served)
+            // Two distinct failures share one strip: a FAMILY swap (fable answered by opus)
+            // and a stale GENERATION under the right family (the "Opus 5 label, 4.8 runs" case).
+            const text = (mf.generation && mf.expected)
+              ? t['chat.model_stale']
+                  .replace('{requested}', mf.requested)
+                  .replace('{served}', mf.served)
+                  .replace('{expected}', mf.expected)
+              : t['chat.model_fallback']
+                  .replace('{requested}', mf.requested)
+                  .replace('{served}', mf.served)
             return (
               <div key={msg.id} className="chat-board-event chat-board-event-warn">
                 <span className="chat-board-event-head">

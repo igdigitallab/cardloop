@@ -779,6 +779,30 @@ def short(cmd: str, limit=90) -> str:
     return cmd if len(cmd) <= limit else cmd[:limit] + "…"
 
 
+def _pick_served_model(model_usage: "dict | None", requested: "str | None") -> "str | None":
+    """Which model did THIS turn actually run on, out of a multi-model `model_usage` map?
+
+    Since bundled CLI 2.1.252 one turn bills more than one model: the requested alias plus
+    helper traffic (auto-mode tool classification) billed to Haiku — and the helper lands FIRST
+    in the map. Reading `next(iter(...))` therefore names Haiku for every turn; that exact bug
+    produced a false alias MISMATCH on 2026-08-31. Same rule as
+    tools/verify_model_aliases.py::_pick_family_model: prefer the requested family, else the
+    heaviest entry, which is the honest answer when the turn genuinely ran something else.
+
+    Returns None when there is nothing to read (older CLI, or a turn that died before any
+    model call) — callers fall back to the init-message `served_model`."""
+    # isinstance, not truthiness: a non-dict (an older SDK's Any, a test double) is "no data",
+    # and max() over it would explode inside the turn.
+    if not isinstance(model_usage, dict) or not model_usage:
+        return None
+    family = (requested or "").replace("claude-", "").split("-")[0]
+    if family:
+        same_family = [k for k in model_usage if str(k).startswith(f"claude-{family}")]
+        if same_family:
+            return same_family[0]
+    return max(model_usage, key=lambda k: (model_usage.get(k) or {}).get("outputTokens") or 0)
+
+
 def _abort_reason_for(exc: BaseException, hint: "str | None") -> "tuple[str, str | None, list | None]":
     """Name the abort cause, preferring the CLI's verdict only where the CLI has one.
 
@@ -3197,6 +3221,8 @@ async def run_engine(  # type: ignore[return]
                 # query loop and say so HERE, not through an exception. Without this the only
                 # trace of an operator Stop is the optimistic `operator_stop` row the caller
                 # writes before it knows whether the interrupt even landed.
+                _mu = getattr(msg, "model_usage", None) or {}
+                _canonical_served = _pick_served_model(_mu, resolved_model) or served_model
                 _tr = getattr(msg, "terminal_reason", None)
                 if _tr in ("aborted_streaming", "aborted_tools"):
                     _record_turn_abort(session_key, _tr, "clean interrupt (client.interrupt())")
@@ -3232,6 +3258,15 @@ async def run_engine(  # type: ignore[return]
                     "origin": getattr(msg, "origin", None),
                     # Structured error payload the CLI attaches to a failed result.
                     "errors": getattr(msg, "errors", None),
+                    # The alias/id this turn ASKED for, so a consumer can compare without
+                    # re-deriving it from project state.
+                    "model_requested": resolved_model,
+                    # What actually ran, per turn, from model_usage — unlike model_served
+                    # above (init message only, i.e. once per live-client lifetime).
+                    "canonical_served": _canonical_served,
+                    # Raw per-model usage (2-3 small dicts): lets a later pass split the
+                    # turn's own cost from auto-mode helper traffic without re-deriving it.
+                    "model_usage": _mu or None,
                 }
             elif isinstance(msg, SystemMessage):
                 if isinstance(msg, TaskStartedMessage):
