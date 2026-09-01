@@ -125,26 +125,37 @@ DEFAULT_AGENTS: dict = {
             "DOUBT CHECK — before committing: is this decision non-trivial? "
             "(New branching logic? Crosses module boundary? Irreversible in production?) "
             "If YES → run the doubt cycle: Claim → Contract → Adversarial → Reconcile → Stop. "
-            "Stop after 3 cycles or when findings are already handled."
+            "Stop after 3 cycles or when findings are already handled.\n\n"
+            "PROGRESS ON DISK — every ~15 tool calls, append what you have done and learned so "
+            "far to /tmp/cardloop-scratch/<task-slug>.md (mkdir -p first). If you hit your turn "
+            "limit, that file IS your deliverable; your final message must name its path."
         ),
         model=_EXECUTOR_MODEL,
         permissionMode="bypassPermissions",
         # Minimal tool set: executor needs read/write/run + web for doc lookups.
         tools=["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch"],
-        maxTurns=40,
+        # spec-088 P2: 40 was hit routinely with nothing written; the ceiling is a runaway
+        # guard, not a work budget. A stuck loop still ends here instead of at the 30-min TTL.
+        maxTurns=200,
     ),
     "researcher": AgentDefinition(
         description="Read-only research agent. Web lookups, file reads, grep. No writes.",
         prompt=(
             "You are a researcher sub-agent. Gather information requested in the task brief. "
-            "Use web search, file reads, and grep. Do NOT write or edit files."
+            "Use web search, file reads, and grep. Do NOT write or edit project files.\n"
+            "PROGRESS ON DISK — every ~15 tool calls, append your findings so far (facts with "
+            "file:line or URL) to /tmp/cardloop-scratch/<task-slug>.md via a Bash heredoc "
+            "(mkdir -p first; this scratch file is the ONLY thing you may write). If you hit "
+            "your turn limit, that file IS your deliverable; your final answer must name its path."
         ),
         model=_RESEARCHER_MODEL,
         permissionMode="bypassPermissions",
         disallowedTools=["Write", "Edit", "NotebookEdit"],
         # Minimal tool set: read-only lookups only.
         tools=["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"],
-        maxTurns=20,
+        # spec-088 P2: 20 turns could not read a 17K-line file — 6 of 37 workflow agents died
+        # here with `null`. Runaway guard, not a work budget.
+        maxTurns=120,
     ),
     # spec-058 v2: adversarial verifier for ultracode workflows (Workflow opts.agentType or Task).
     # A dedicated skeptic role keeps verification INDEPENDENT of whoever produced the finding —
@@ -159,13 +170,17 @@ DEFAULT_AGENTS: dict = {
             "Verdict rules: default to REFUTED when the evidence is inconclusive; say CONFIRMED "
             "only when you personally traced concrete evidence that the claim holds. Return: "
             "verdict (CONFIRMED | REFUTED), the strongest counter-argument you found, and the "
-            "evidence trail (files/lines/commands)."
+            "evidence trail (files/lines/commands).\n"
+            "PROGRESS ON DISK — every ~15 tool calls, append your evidence so far to "
+            "/tmp/cardloop-scratch/<task-slug>.md via a Bash heredoc (mkdir -p first; the ONLY "
+            "file you may write). If you hit your turn limit, that file IS your deliverable; "
+            "your final answer must name its path."
         ),
         model=_RESEARCHER_MODEL,
         permissionMode="bypassPermissions",
         disallowedTools=["Write", "Edit", "NotebookEdit"],
         tools=["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"],
-        maxTurns=20,
+        maxTurns=80,  # spec-088 P2: scoped task (one claim) — runaway guard, not a work budget
     ),
     "quick": AgentDefinition(
         description="Fast lookup and simple transform agent. Cheap, low-latency questions.",
@@ -177,7 +192,7 @@ DEFAULT_AGENTS: dict = {
         # Minimal tool set: lightweight lookups only; no web fetch needed for simple transforms.
         tools=["Bash", "Read", "Glob", "Grep"],
         effort="low",   # haiku + low effort: fastest possible response, no extended thinking overhead
-        maxTurns=10,
+        maxTurns=25,    # spec-088 P2
     ),
 }
 

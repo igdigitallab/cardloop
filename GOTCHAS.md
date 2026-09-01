@@ -141,7 +141,9 @@ Projects are registered in `data/registry.json` (gitignored) or auto-scanned fro
   turn ends, `_drain_between_turns` drops `TaskStartedMessage`/`TaskProgressMessage` and every
   `parent_tool_use_id` message; the one `kind=workflow` monitor row never gets a tail; the
   chat's ⚙ chip is wiped on `run_end`. The operator sees an idle composer while 12 agents run.
-- **Roster `maxTurns` is the cap that empties agents.** `researcher`/`skeptic` = 20 turns,
-  `executor` = 40 (engine.py DEFAULT_AGENTS). A 20-turn budget cannot read webapp.py; the agent
-  dies with `null` and no partial. Give research agents a disk-first brief and a narrow scope,
-  or raise the cap on purpose.
+- **Roster `maxTurns` is a runaway guard, not a work budget.** Was researcher/skeptic 20,
+  executor 40 — 6 of 37 workflow agents died there with `null` and no partial. Now researcher
+  120, skeptic 80, executor 200, quick 25, and every role's prompt carries PROGRESS ON DISK:
+  append findings to `/tmp/cardloop-scratch/<task-slug>.md` every ~15 tool calls (read-only
+  roles via a Bash heredoc), so a capped agent still leaves its work. Never remove the cap: a
+  looping agent without one burns until the 30-min TTL eviction at a growing context per turn.
