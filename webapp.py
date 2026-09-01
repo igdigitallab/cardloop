@@ -11530,6 +11530,23 @@ def _chat_queue_pop(session_key: str) -> "dict | None":
     return item
 
 
+def _chat_queue_take_all(session_key: str) -> list:
+    """Pops and returns EVERY pending item for session_key (does not execute them).
+
+    Used by conversation rewind (docs/internal/sdk-feature-audit/04-session-rewind.md §4/§6):
+    a prompt sitting in the queue when a rewind fires was typed against the about-to-be-
+    discarded context. Draining it normally (via _chat_queue_drain_one, which RUNS the item
+    as a turn) would land it on the freshly-forked session as a message the operator doesn't
+    remember writing there — the same failure class as the steered-message bug. Callers must
+    surface the returned items' text back to the operator (composer), never silently drop or
+    silently re-send them. Caller is responsible for holding ctx["running"][session_key]
+    across this call so _chat_queue_drain_one cannot race a pop out from under it."""
+    items = _CHAT_QUEUE.pop(session_key, None) or []
+    if items:
+        _chat_queue_flush()
+    return items
+
+
 def _chat_queue_edit(session_key: str, msg_id: str, new_text: str) -> "dict | None":
     """Edits the text of a queued item by id.  Returns the updated item or None if not found."""
     for item in _CHAT_QUEUE.get(session_key, []):
@@ -13073,6 +13090,185 @@ async def api_project_rewind(req: web.Request) -> web.Response:
                                "summary": f"Files restored to checkpoint {message_uuid[:8]}…",
                                "ts": time.time()}, persist=True)
     return web.json_response({"ok": True})
+
+
+# Lazy import of claude_agent_sdk names needed only for conversation rewind — mirrors the
+# handoff-producer import further down this file. engine.rewind_conversation() and
+# engine._rewind_refused_hint reach this handler via ctx["rewind_conversation"] /
+# ctx["rewind_refused_hint"] instead of a direct `import engine` — same anti-circular-import
+# convention as the _MEMORY_MODES comment above (engine imports webapp lazily inside
+# _build_ctx, so webapp must not import engine back at module scope).
+from claude_agent_sdk import (  # noqa: E402
+    ProcessError as _ProcessError,
+    get_session_messages as _get_session_messages,
+)
+
+
+def _rewind_resolve_prev_uuid(cwd: str, session_id: str, message_uuid: str) -> "tuple[str | None, str | None]":
+    """Resolves the transcript-entry uuid immediately BEFORE `message_uuid` in `session_id`'s
+    raw transcript (both user and assistant entries — every raw line, not the render-collapsed
+    view _session_history returns, which never attaches a uuid to assistant lines at all — see
+    docs/internal/sdk-feature-audit/04-session-rewind.md §3, which assumed the frontend already
+    had this uuid; it does not).
+
+    Returns (prev_uuid, error) — exactly one is non-None. error is a human-readable 400 reason:
+    the session has no transcript / message_uuid not found / message_uuid is the first entry
+    (nothing to keep — use /reset instead)."""
+    try:
+        messages = _get_session_messages(session_id, directory=cwd)
+    except Exception as exc:
+        return None, f"could not read session transcript: {exc}"
+    idx = next((i for i, m in enumerate(messages) if getattr(m, "uuid", None) == message_uuid), -1)
+    if idx < 0:
+        return None, "message not found in this session's transcript"
+    if idx == 0:
+        return None, "cannot rewind before the first message — use /reset for a fresh session"
+    prev = messages[idx - 1]
+    prev_uuid = getattr(prev, "uuid", None)
+    if not prev_uuid:
+        return None, "the preceding transcript entry has no uuid — cannot anchor the rewind"
+    return prev_uuid, None
+
+
+async def api_project_rewind_conversation(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/rewind-conversation — body {"message_uuid": "..."}.
+
+    docs/internal/sdk-feature-audit/04-session-rewind.md: forgets `message_uuid` and every
+    turn after it, keeping everything before it — via a NEW forked session id
+    (resume_session_at + resume_drops_turn + fork_session=True, engine.rewind_conversation).
+    Distinct from /rewind above (files only, chat history untouched); this is the
+    conversation-side counterpart. Claude chat sessions only — Codex has no equivalent
+    mechanism, and card runs are out of scope (ephemeral, output_format-bearing by
+    construction, exactly the boundary case the SDK refuses to fork at).
+
+    The original session's transcript file is left untouched on disk (fork_session=True is
+    mandatory, never the bare truncating path) — a bad rewind is reversible by reopening the
+    old session id from the existing session dropdown (action=="resume").
+    """
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    message_uuid = (body.get("message_uuid") or "").strip()
+    if not message_uuid:
+        return web.json_response({"error": "message_uuid required"}, status=400)
+
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    if ctx["running"].get(session_key) is not None:
+        return web.json_response(
+            {"error": "a turn is running — stop it before rewinding the conversation"}, status=409)
+
+    chats_entry = _load_chats(ctx).get(project["id"], {})
+    active_chat = _find_chat(chats_entry)
+    if _chat_provider(active_chat) != "claude":
+        return web.json_response(
+            {"error": "conversation rewind is only available for Claude sessions"}, status=400)
+    resume_session_id = (active_chat or {}).get("session_id") or ctx["sessions"].get(session_key)
+    if not resume_session_id:
+        return web.json_response(
+            {"error": "no active session to rewind — nothing to fork from"}, status=400)
+
+    cwd = project.get("cwd") or ""
+    prev_uuid, resolve_err = _rewind_resolve_prev_uuid(cwd, resume_session_id, message_uuid)
+    if resolve_err:
+        return web.json_response({"error": resolve_err}, status=400)
+
+    rewind_fn = ctx.get("rewind_conversation")
+    if rewind_fn is None:
+        return web.json_response({"error": "conversation rewind unavailable"}, status=503)
+
+    # Reserve the running slot SYNCHRONOUSLY (no await yet) so a concurrent /chat send or
+    # queue drain cannot slip in between resolving the rewind target and actually issuing it.
+    ctx["running"][session_key] = True
+    try:
+        # spec-086-class fix (docs/internal/sdk-feature-audit/04-session-rewind.md §4/§6): a
+        # prompt sitting in the queue was typed against the about-to-be-discarded context.
+        # Drain it BEFORE rewinding and hand it back to the operator instead of letting it
+        # silently drain into the forked session later.
+        drained_items = _chat_queue_take_all(session_key)
+        drained_texts = [it.get("text", "") for it in drained_items if it.get("text")]
+
+        # Stale strips from the discarded turns must not re-hydrate into the rewound chat
+        # (same fix already shipped for /rotate — reset-must-clear-board-events-buffer).
+        _board_events_clear(session_key)
+
+        # resume_session_at/resume_drops_turn/fork_session only take effect at CONNECT time,
+        # and `resume` is deliberately excluded from the live-client fingerprint — an existing
+        # PERSISTENT_CLIENT=1 live client for this session_key would otherwise ignore the
+        # rewind entirely and keep talking on the old, unforked transcript. Evict unconditionally
+        # (a cheap no-op under the shipped PERSISTENT_CLIENT=0 default, where every turn already
+        # reconnects fresh).
+        try:
+            evict_fn = ctx.get("evict_live_client")
+            if evict_fn is not None:
+                await evict_fn(session_key, ctx)
+        except Exception as exc:
+            print(f"[rewind-conversation] {session_key}: live-client eviction error: {exc!r}")
+
+        try:
+            new_sid = await rewind_fn(
+                cwd=cwd,
+                resume_session_id=resume_session_id,
+                rewind_at_uuid=prev_uuid,
+                rewind_drop_turn_uuid=message_uuid,
+            )
+        except _ProcessError as exc:
+            hint = None
+            try:
+                hint_fn = ctx.get("rewind_refused_hint")
+                if hint_fn is not None:
+                    hint = hint_fn(exc)
+            except Exception:
+                pass
+            print(f"[rewind-conversation] {session_key}: refused: {exc!r}")
+            return web.json_response(
+                {"error": hint or f"rewind failed: {exc}", "drained_queue": drained_texts},
+                status=502)
+        except Exception as exc:
+            print(f"[rewind-conversation] {session_key}: failed: {exc!r}")
+            return web.json_response(
+                {"error": f"rewind failed: {exc}", "drained_queue": drained_texts}, status=502)
+
+        # Write the forked session id back — same shape as api_project_chat's per-turn
+        # write-back (webapp.py ~12810), scoped to this chat since rewind is chat-only.
+        if active_chat is not None:
+            try:
+                async with _chats_lock():
+                    fresh = _load_chats(ctx)
+                    fresh_entry = fresh.get(project["id"])
+                    if fresh_entry:
+                        fresh_chat = next(
+                            (c for c in fresh_entry.get("chats", []) if c["id"] == active_chat["id"]),
+                            None,
+                        )
+                        if fresh_chat is not None:
+                            fresh_chat["session_id"] = new_sid
+                            _save_chats(ctx, fresh)
+                            if fresh_entry.get("active") == active_chat["id"]:
+                                ctx["sessions"][session_key] = new_sid
+                                ctx["save_sessions"]()
+            except Exception as exc:
+                print(f"[rewind-conversation] {session_key}: session_id write-back error: {exc!r}")
+                ctx["sessions"][session_key] = new_sid
+                ctx["save_sessions"]()
+        else:
+            ctx["sessions"][session_key] = new_sid
+            ctx["save_sessions"]()
+
+        print(f"[rewind-conversation] {session_key}: forked {resume_session_id} -> {new_sid} "
+              f"at {prev_uuid[:8]}… (dropped turn {message_uuid[:8]}…)")
+        _bus_publish(session_key, {"kind": "board_event", "event": "reconcile",
+                                   "card_id": "rewind-conversation", "title": "Conversation rewound",
+                                   "severity": "info",
+                                   "summary": f"Forked to a new session before {message_uuid[:8]}…",
+                                   "ts": time.time()}, persist=True)
+        return web.json_response({"ok": True, "session_id": new_sid, "drained_queue": drained_texts})
+    finally:
+        ctx["running"].pop(session_key, None)
 
 
 async def api_project_chat_stop(req: web.Request) -> web.Response:
@@ -16334,6 +16530,7 @@ async def start(ctx: dict) -> None:
         # C1-stop: interrupt current agent run
         app.router.add_post("/api/projects/{id}/chat/stop", api_project_chat_stop)
         app.router.add_post("/api/projects/{id}/rewind", api_project_rewind)
+        app.router.add_post("/api/projects/{id}/rewind-conversation", api_project_rewind_conversation)
         # Chat message queue (server-side persist across reload; editable/deletable)
         app.router.add_get("/api/projects/{id}/chat/queue", api_chat_queue_list)
         app.router.add_post("/api/projects/{id}/chat/queue", api_chat_queue_add)

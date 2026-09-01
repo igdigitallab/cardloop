@@ -3573,6 +3573,7 @@ def _build_ctx(*, web_port: int = None, web_password: str = None) -> dict:
         # ctx so webapp.py can fork a conversation without importing engine.py directly
         # (same anti-circular-import convention as evict_live_client/run_engine above).
         "rewind_conversation": rewind_conversation,
+        "rewind_refused_hint": _rewind_refused_hint,
         # spec-080: pending-plan store hooks exposed via ctx so e2e_fake_engine (which never
         # touches engine.py's private callback registry) can drive the exact same store.
         "create_pending_plan": _webapp.create_pending_plan,
