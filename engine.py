@@ -792,6 +792,24 @@ def _buffer_overflow_hint(exc: BaseException) -> "str | None":
     return None
 
 
+def _rewind_refused_hint(exc: BaseException) -> "str | None":
+    """Recognize the SDK's connect-time refusal of a truncating resume and name the cause.
+
+    docs/internal/sdk-feature-audit/04-session-rewind.md §1: `resume_drops_turn` validation
+    refuses to load a session whenever the range between `resume_session_at` and the next
+    turn contains anything the caller didn't declare (e.g. a queued message or task
+    notification the session absorbed mid-turn) — the CLI's own message contains the literal
+    substring matched below. Per the SDK docstring this is deterministic: never retry the
+    same resume_at/drops_turn pair, only re-resolve the split point (or fall back to a plain
+    resume with no truncation).
+    """
+    if "Resume rejected by --resume-drops-turn:" in str(exc):
+        return ("rewind refused — the discarded range was not a clean single turn "
+                "(a queued message or background task notification landed in it); "
+                "pick a different message to rewind to, or use /reset instead")
+    return None
+
+
 # ─────────────────────────── audit ───────────────────────────
 AUDIT_DIR = DATA / "audit"
 # STALL_SECONDS / MAX_SECONDS removed (root-fix C): the stall interrupt was deleted in
@@ -1869,6 +1887,84 @@ async def _evict_live_client(session_key: str, ctx: "dict | None") -> None:
         await asyncio.wait_for(entry.client.disconnect(), timeout=10)
     except Exception as exc:
         print(f"[live-client] evict {session_key}: disconnect failed ({exc!r}), force-dropping")
+
+
+async def rewind_conversation(
+    cwd: str,
+    resume_session_id: str,
+    rewind_at_uuid: str,
+    rewind_drop_turn_uuid: str,
+    *,
+    timeout: float = 30.0,
+) -> str:
+    """Fork `resume_session_id` at `rewind_at_uuid`, discarding `rewind_drop_turn_uuid`
+    onward, and return the NEW forked session id.
+
+    docs/internal/sdk-feature-audit/04-session-rewind.md is the design doc. Summary of the
+    load-bearing decisions:
+
+    - `fork_session=True` is MANDATORY, never operator-configurable. Paired with
+      `resume_session_at` it produces a brand-new session id and leaves the source
+      transcript file untouched on disk — the bare (non-fork) combination is UNVERIFIED
+      (unknown whether it truncates the original file in place) and must never be used.
+    - `resume_drops_turn` is always set alongside `resume_session_at` (never skipped): it is
+      the SDK's own defense against silently discarding more than the caller intended (a
+      queued message or task notification absorbed mid-turn). A violation raises ProcessError
+      with "Resume rejected by --resume-drops-turn:" in the message — deterministic, never
+      retry the same pair (see _rewind_refused_hint).
+    - Connect-only, no prompt is ever sent: this never invokes the model and costs nothing.
+      Verified against the bundled CLI binary (venv's claude_agent_sdk/_bundled/claude, via
+      `strings`): the init SystemMessage's `data` dict is built as
+      `{type:"system",subtype:"init",...,session_id:b.sessionId,...}` — session_id is a
+      top-level key, populated at connect time BEFORE any query is sent, and the
+      resume-drops-turn validation happens at CLI load time (also before any query). So the
+      forked session id can be read off the very first message with zero turns/tokens spent.
+      This confirms (rather than merely assumes, as the audit left it) that "rewind-only, no
+      prompt" is implementable — it does not need to be folded into run_engine()'s
+      prompt-requiring turn machinery, which would have meant touching the hot shared
+      options-builder for a fundamentally different (query-less) connect.
+
+    Raises:
+        ProcessError — connect-time refusal (see _rewind_refused_hint) or any other CLI
+            subprocess failure.
+        asyncio.TimeoutError — no init message arrived within `timeout` seconds.
+        RuntimeError — the connection closed, or the init message carried no session_id,
+            before an init message was observed (should not happen against a conforming CLI;
+            surfaced rather than silently treating the rewind as failed-but-unclear).
+    """
+    stderr_lines: list = []
+    opts = ClaudeAgentOptions(
+        cwd=cwd,
+        resume=resume_session_id,
+        resume_session_at=rewind_at_uuid,
+        resume_drops_turn=rewind_drop_turn_uuid,
+        fork_session=True,
+        stderr=stderr_lines.append,
+    )
+
+    async def _wait_for_init(client: "ClaudeSDKClient") -> str:
+        async for msg in client.receive_messages():
+            if isinstance(msg, SystemMessage) and msg.subtype == "init":
+                sid = (msg.data or {}).get("session_id")
+                if sid:
+                    return str(sid)
+                raise RuntimeError("rewind: init message carried no session_id")
+        raise RuntimeError("rewind: connection closed before an init message arrived")
+
+    try:
+        async with ClaudeSDKClient(options=opts) as client:
+            return await asyncio.wait_for(_wait_for_init(client), timeout=timeout)
+    except ProcessError as exc:
+        # Re-raise with the captured stderr folded in — by default the SDK does not pipe
+        # stderr into the exception message (only "Check stderr output for details"), which
+        # would silently swallow the literal "Resume rejected by --resume-drops-turn:" text
+        # _rewind_refused_hint needs to match on. Passing stderr=stderr_lines.append above is
+        # what makes this text reach us at all.
+        if stderr_lines:
+            raise ProcessError(f"CLI subprocess failed during rewind connect: {exc}",
+                                exit_code=exc.exit_code,
+                                stderr="\n".join(stderr_lines)[-4000:]) from exc
+        raise
 
 
 def _cgroup_mem_fraction() -> "float | None":
@@ -3473,6 +3569,10 @@ def _build_ctx(*, web_port: int = None, web_password: str = None) -> dict:
         # spec-039: eviction callable exposed via ctx so webapp.py can evict live clients
         # without importing bot.py.  Signature: async (session_key: str, ctx: dict|None) -> None.
         "evict_live_client": _evict_live_client,
+        # session rewind (docs/internal/sdk-feature-audit/04-session-rewind.md): exposed via
+        # ctx so webapp.py can fork a conversation without importing engine.py directly
+        # (same anti-circular-import convention as evict_live_client/run_engine above).
+        "rewind_conversation": rewind_conversation,
         # spec-080: pending-plan store hooks exposed via ctx so e2e_fake_engine (which never
         # touches engine.py's private callback registry) can drive the exact same store.
         "create_pending_plan": _webapp.create_pending_plan,
