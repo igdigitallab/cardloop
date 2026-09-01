@@ -8,6 +8,7 @@ them to the task_id from TaskStartedMessage.tool_use_id and emits capped
 """
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -15,7 +16,15 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 import engine as _engine
-from claude_agent_sdk import AssistantMessage, TextBlock, ThinkingBlock, ToolUseBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+)
 
 
 def _sub_msg(text_blocks, parent="tu-1"):
@@ -191,3 +200,83 @@ def test_noise_kinds_are_skipped_but_unknown_kinds_pass():
 def test_peer_message_text_is_capped():
     ev = _engine._peer_message_event(_UserMsg("", _Origin(kind="peer", body="z" * 20000)))
     assert ev is not None and len(ev["text"]) == _engine.PEER_MESSAGE_MAX_CHARS
+
+
+# ─── docs/internal/sdk-feature-audit/02-subagent-output.md: TaskNotificationMessage.output_file ───
+#
+# output_file is a REQUIRED field on TaskNotificationMessage — the CLI unconditionally names an
+# on-disk file alongside every task-completion notification. engine.py discarded it; surface it
+# on the "subagent"/"notification" event so the cockpit can offer the raw output even when the
+# sub-agent forgot to cockpit-file its own report.
+
+class _FakeTurnClient:
+    """A ClaudeSDKClient stand-in that replays a fixed message list for one turn."""
+
+    def __init__(self, messages):
+        self._messages = messages
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def query(self, prompt):
+        pass
+
+    async def receive_response(self):
+        for m in self._messages:
+            yield m
+
+
+def _notification(task_id, output_file, tool_use_id=None):
+    return TaskNotificationMessage(
+        subtype="task_notification", data={}, task_id=task_id, status="completed",
+        output_file=output_file, summary="done", uuid="u", session_id="sid",
+        tool_use_id=tool_use_id,
+    )
+
+
+def _started(task_id, tool_use_id=None):
+    return TaskStartedMessage(
+        subtype="task_started", data={}, task_id=task_id, description="do X",
+        uuid="u", session_id="sid", tool_use_id=tool_use_id, task_type="local_agent",
+    )
+
+
+def _result(session_id="sid"):
+    return ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1,
+                         is_error=False, num_turns=1, session_id=session_id)
+
+
+@pytest.mark.asyncio
+async def test_notification_event_carries_output_file(tmp_path):
+    msgs = [
+        _started("t1", tool_use_id="tu1"),
+        _notification("t1", "/tmp/agent-t1-report.jsonl", tool_use_id="tu1"),
+        _result(),
+    ]
+    events = []
+    with patch.object(_engine, "ClaudeSDKClient", return_value=_FakeTurnClient(msgs)):
+        async for ev in _engine.run_engine(
+            project_name="t", cwd=str(tmp_path), prompt="hi",
+            session_key="chat:output-file-test", model="opus", ctx=None,
+        ):
+            events.append(ev)
+
+    notif = next(e for e in events if e["type"] == "subagent" and e["subtype"] == "notification")
+    assert notif["output_file"] == "/tmp/agent-t1-report.jsonl"
+
+
+def test_notification_event_output_file_key_uses_defensive_getattr():
+    """SDK guarantees the field, but the branch must not crash if a future SDK drops it."""
+    import inspect
+    src = inspect.getsource(_engine.run_engine)
+    assert '"output_file": getattr(msg, "output_file", None),' in src
+
+
+def test_webapp_forwards_output_file_to_the_client():
+    import webapp as _webapp
+    src = Path(_webapp.__file__).read_text(encoding="utf-8")
+    assert '"output_file": event.get("output_file"),' in src, \
+        "the SSE/bus payload must carry output_file or the cockpit can't offer the raw output"

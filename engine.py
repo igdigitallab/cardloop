@@ -477,6 +477,19 @@ FILES_PROMPT = (
     "want to hand over, instead of Telegram or pasting a bare filesystem path."
 )
 
+# docs/internal/sdk-feature-audit/02-subagent-output.md: a sub-agent's full final text becomes
+# the tool_result of the parent's Agent tool_use, and every later turn in that chat re-sends the
+# whole transcript — a long report (detailed findings, multi-file audit, log dump) is paid again
+# on every subsequent turn, not just once. Same COPS_MEDIA_DIR gate as FILES_PROMPT above.
+# Appended to sub-agent prompts that produce open-ended reports — NOT "quick", whose whole point
+# is a short inline answer with no report.
+SUBAGENT_FILES_PROMPT = (
+    "If your final report would run long (detailed findings, multi-file audit, long log dump), "
+    "write the FULL report to a file and run `cockpit-file <path>` — paste the `attached file: …` "
+    "line it prints into your final reply, then summarize in 5-10 lines. Do not paste the full "
+    "report body into your final reply."
+)
+
 # AskUserQuestion = interactive prompt (no reply in TG -> agent hangs or decides on its own).
 # EnterPlanMode = the model self-invoking plan mode mid-turn: a turn that did not START in
 # plan mode has no can_use_tool wired, so a later ExitPlanMode would hang unanswered. Plan
@@ -2859,6 +2872,18 @@ async def run_engine(  # type: ignore[return]
         # not first — defeating the shadow-the-stale-copy intent (and making it env-fragile).
         _path_parts = [p for p in _cur_path.split(os.pathsep) if p and p != _tools_dir]
         env["PATH"] = os.pathsep.join([_tools_dir, *_path_parts])
+        # Same gate: tell report-producing sub-agents about cockpit-file too — otherwise they
+        # never learn the tool exists (each AgentDefinition has its own separate `prompt`,
+        # untouched by the orchestrator's system_prompt append above). "quick" is deliberately
+        # skipped: its whole point is a short inline answer, never a file.
+        if effective_agents:
+            effective_agents = {
+                _name: (
+                    dataclasses.replace(_def, prompt=_def.prompt + "\n\n" + SUBAGENT_FILES_PROMPT)
+                    if _name != "quick" else _def
+                )
+                for _name, _def in effective_agents.items()
+            }
 
     # FIX 2: Build a hash of the STABLE append pieces so that toggling ultracode/conductor/browser
     # or changing RESPONSE_LANGUAGE forces a live-client reconnect, while a mere board-card content
@@ -3205,6 +3230,12 @@ async def run_engine(  # type: ignore[return]
                         "summary": msg.summary,
                         "last_tool_name": None,
                         "task_type": _sub_task_types.get(msg.task_id) or None,
+                        # docs/internal/sdk-feature-audit/02-subagent-output.md: the CLI always
+                        # names an on-disk file alongside a task-completion notification
+                        # (required field on TaskNotificationMessage); surface it so the cockpit
+                        # can offer the raw output even when the agent forgot to cockpit-file it.
+                        # getattr(..., None) is defensive only — the SDK guarantees this key.
+                        "output_file": getattr(msg, "output_file", None),
                     }
                 elif isinstance(msg, TaskUpdatedMessage):
                     # spec-071: a background task's terminal state can arrive ONLY here (per SDK
