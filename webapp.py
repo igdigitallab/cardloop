@@ -774,8 +774,10 @@ def _bg_run_event(session_key: str, phase: str, text: "str | None" = None) -> No
             if buffered:
                 turn = _live_turn_create(session_key, "bg", "")
                 turn["bg"] = True
-            _bus_publish(session_key, {"kind": "run_start", "source": "bg",
-                                       "prompt": "", "run_id": run_id})
+            # spec-088: seq-tagged like the chat lane, so a client that reconnects mid-run
+            # replays the bracket instead of waiting for the 5 s /live poll to notice.
+            _bus_publish(session_key, _live_turn_append(session_key, {
+                "kind": "run_start", "source": "bg", "prompt": "", "run_id": run_id}))
         elif phase == "text" and text:
             _bg_run_preview.setdefault(session_key, text)
             if _bg_run_buffered.get(session_key):
@@ -787,11 +789,14 @@ def _bg_run_event(session_key: str, phase: str, text: "str | None" = None) -> No
         elif phase == "end":
             run_id = _bg_run_ids.pop(session_key, None) or ""
             _bg_run_started.pop(session_key, None)
+            preview = _bg_run_preview.pop(session_key, "")
+            # spec-088: tag BEFORE finishing so the run_end carries the turn's next seq.
+            _end_ev = _live_turn_append(session_key, {
+                "kind": "run_end", "source": "bg", "outcome": "ok",
+                "run_id": run_id, "preview": preview[:200]})
             if _bg_run_buffered.pop(session_key, False):
                 _live_turn_finish(session_key, "done")
-            preview = _bg_run_preview.pop(session_key, "")
-            _bus_publish(session_key, {"kind": "run_end", "source": "bg", "outcome": "ok",
-                                       "run_id": run_id, "preview": preview[:200]})
+            _bus_publish(session_key, _end_ev)
     except Exception:
         pass
 
@@ -6761,14 +6766,15 @@ async def _run_card(
             # Live buffer for hydration (with the prompt, so a client that missed
             # the bus run_start reconstructs the user bubble instead of a '…').
             _live_turn_create(session_key, model, prompt)
-            # Publish run start to the bus (activity-stream subscribers will see it live)
-            _bus_publish(session_key, {
+            # Publish run start to the bus (activity-stream subscribers will see it live).
+            # spec-088: seq-tagged so a reconnecting client replays the bracket.
+            _bus_publish(session_key, _live_turn_append(session_key, {
                 "kind": "run_start",
                 "source": "card",
                 "prompt": prompt,
                 "run_id": card_id,
                 "provider": provider,
-            })
+            }))
             # spec-052 Phase 2: surface card run start in the project chat
             _emit_board_event(
                 session_key,
@@ -6944,13 +6950,13 @@ async def _run_card(
         )
 
     finally:
-        # Publish run completion to bus (BEFORE releasing the lock)
-        _bus_publish(session_key, {
+        # Publish run completion to bus (BEFORE releasing the lock). spec-088: seq-tagged.
+        _bus_publish(session_key, _live_turn_append(session_key, {
             "kind": "run_end",
             "outcome": "ok" if ok else "fail",
             "run_id": card_id,
             "provider": provider,
-        })
+        }))
         # spec-052 Phase 2: the run OUTCOME is surfaced as the card's move
         # (→ Review/Failed) board_event from _move_card_after_run — we deliberately
         # do NOT emit a separate run_end board_event here, to keep one card run to
@@ -8723,9 +8729,11 @@ async def _maybe_auto_resume(
         )
     else:  # ask — surface an interactive Yes/No prompt in that project's chat
         try:
+            # spec-088: kind-keyed ONLY. A `type` key sent this event down ChatTab's
+            # type-first branch (text/tool/result), which has no case for it — the Yes/No
+            # resume card never appeared live, only after a reload.
             _bus_publish(session_key, {
                 "kind": "rate_limit_prompt",
-                "type": "rate_limit_prompt",
                 "deferred_id": record["id"],
                 "project": project_name,
                 "session_key": session_key,
@@ -8854,12 +8862,12 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
 
         # Live buffer (with prompt) so a hydrating client rebuilds the user bubble.
         _live_turn_create(session_key, model, prompt)
-        _bus_publish(session_key, {
+        _bus_publish(session_key, _live_turn_append(session_key, {  # spec-088: seq-tagged
             "kind": "run_start",
             "source": "deferred",
             "prompt": prompt,
             "run_id": record["id"],
-        })
+        }))
 
         # Phase D: use record's resume_session_id if present (preserves interrupted context)
         resume_sid = record.get("resume_session_id") or ctx["sessions"].get(session_key)
@@ -8906,7 +8914,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
                 raise event["exc"]
 
         _live_turn_finish(session_key, "done")
-        _bus_publish(session_key, {"kind": "run_end", "outcome": "ok", "run_id": record["id"]})
+        _bus_publish(session_key, _live_turn_append(session_key, {"kind": "run_end", "outcome": "ok", "run_id": record["id"]}))  # spec-088: seq-tagged
 
         result_text = "\n".join(answer_parts).strip()
         if rec:
@@ -8934,7 +8942,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
 
     except Exception as e:
         _live_turn_finish(session_key, "error")
-        _bus_publish(session_key, {"kind": "run_end", "outcome": "fail", "run_id": record["id"]})
+        _bus_publish(session_key, _live_turn_append(session_key, {"kind": "run_end", "outcome": "fail", "run_id": record["id"]}))  # spec-088: seq-tagged
         if rec:
             rec["status"] = "failed"
             rec["error"] = str(e)[:200]
@@ -12937,7 +12945,10 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 if _stale:
                     print(f"[model] {session_key}: served {_stale['served']} but newest "
                           f"{_stale['requested']} is {_stale['expected']}")
-                    await _send({
+                    # spec-088: seq-tag + bus like every other in-turn event. A bare direct
+                    # send reached only the one tab whose POST stream was open at that instant;
+                    # every other tab, and a reload, never saw the staleness strip.
+                    _stale_ev = _live_turn_append(session_key, {
                         "type": "model_info",
                         "requested": _stale["requested"],
                         "served": _stale["served"],
@@ -12945,6 +12956,10 @@ async def api_project_chat(req: web.Request) -> web.Response:
                         "generation": True,
                         "fallback": True,
                     })
+                    _bus_publish(session_key, ({**_stale_ev, "chat_id": _active_chat_id_for_run}
+                                               if _active_chat_id_for_run else _stale_ev),
+                                 persist=False)
+                    await _send(_stale_ev)
                 sid = event.get("session_id") if _provider_for_run == "claude" else None
                 codex_thread_id = event.get("thread_id") if _provider_for_run == "codex" else None
                 if sid or codex_thread_id:

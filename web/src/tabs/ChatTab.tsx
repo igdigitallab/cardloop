@@ -1077,8 +1077,11 @@ const RunStatusBar = memo(function RunStatusBar({
   const timerBase = serverStartedAt ?? run.startedAt
   const elapsedSec = (tick - timerBase) / 1000
   const silenceSec = (tick - run.lastEventAt) / 1000
-  const lvl = silenceSec > 120 ? 'silence-red' : silenceSec > 30 ? 'silence-yellow' : 'silence-ok'
+  // spec-088: a tool in flight is not silence — a healthy 3-minute Bash/WebFetch used to
+  // escalate to "hung?" with no way back. Only "no tool, no events" escalates.
   const tool = run.currentTool
+  const quiet = !tool
+  const lvl = quiet && silenceSec > 120 ? 'silence-red' : quiet && silenceSec > 30 ? 'silence-yellow' : 'silence-ok'
   let label: string
   if (tool) {
     const hint = toolHint(tool)
@@ -1101,7 +1104,7 @@ const RunStatusBar = memo(function RunStatusBar({
         {/* flex:1 on text truncates long tool names instead of pushing siblings right */}
         <span className="chat-status-text">{label}</span>
         <span className="chat-status-time">{formatDuration(elapsedSec)}</span>
-        {silenceSec > 30 && (
+        {quiet && silenceSec > 30 && (
           <span className="chat-status-silence">
             ⚠ {formatDuration(silenceSec)}{silenceSec > 120 && ' · hung?'}
           </span>
@@ -2352,6 +2355,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         const isOptimisticOwn = !isBg && tail.length === 2 && tail[0].role === 'user' &&
           tail[0].text === evt.prompt && tail[1].role === 'assistant' && !!tail[1].streaming
         if (isOptimisticOwn) return prev
+        // spec-088: our own QUEUED message being drained. The queued ack stripped the
+        // assistant half and left a lone user bubble marked queued:true, so the shape above
+        // does not match and the bubble used to be rendered a second time (both visible
+        // for the whole turn, one still badged). Clear the badge and open the turn.
+        const lone = prev[prev.length - 1]
+        const isOwnQueued = !isBg && !!lone && lone.role === 'user' && !!lone.queued &&
+          lone.text === evt.prompt
+        if (isOwnQueued) {
+          const assistantMsg: ChatMessage = { ...makeAssistantMsg() }
+          return [...prev.slice(0, -1), { ...lone, queued: false }, assistantMsg]
+        }
         // Foreign/background run: heal any dangling open bubble, then open the new turn.
         const fin = finalizeStreaming(prev)
         const assistantMsg: ChatMessage = { ...makeAssistantMsg(), ...(isBg ? { bgRun: true } : {}) }
@@ -2373,10 +2387,18 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // DIRECT_STREAM_FALLBACK_MS comment). Skip re-adding it; still render for a PEER
       // tab/session that steered the same turn, which has no local bubble to dedup against.
       if (evt.text) setMessages(prev => {
-        const fin = finalizeStreaming(prev)
-        const last = fin[fin.length - 1]
-        if (last && last.role === 'user' && last.text === evt.text) return fin
-        return [...fin, makeUserMsg(evt.text)]
+        // spec-088: this bus event can beat our own {type:'steered'} ack. The optimistic
+        // [user, assistant(streaming, empty)] pair is then still intact, so "is the last
+        // message this user bubble?" saw the empty placeholder, not the bubble, and pushed a
+        // duplicate. Retract a trailing EMPTY streaming placeholder before deduping; a
+        // placeholder that already has content is a real answer and stays.
+        const tail = prev[prev.length - 1]
+        const emptyPlaceholder = !!tail && tail.role === 'assistant' && !!tail.streaming &&
+          !tail.text && tail.tools.length === 0 && !tail.error
+        const base = emptyPlaceholder ? prev.slice(0, -1) : finalizeStreaming(prev)
+        const last = base[base.length - 1]
+        if (last && last.role === 'user' && last.text === evt.text) return base
+        return [...base, makeUserMsg(evt.text)]
       })
 
     } else if (evt.kind === 'text') {
@@ -2681,8 +2703,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // (terminal Claude Code behaviour) and the bus 'steer' event renders the user
       // bubble at its true in-turn position. Non-steerable turn (plan/ask gate, codex,
       // rotation) → the server enqueues it instead, same as the old chatQueueAdd path.
+      // spec-088: remember which chat this follow-up belongs to. The ack lands later; if the
+      // operator switched chats in between, rendering into the now-active chat put the bubble
+      // in the wrong transcript (and it "appeared" only after a reload of the right one).
+      const steerChatId = effectiveChatId
       api.chatSteer(projectId, fullText, effectiveChatId || undefined, msgId)
         .then(res => {
+          if (effectiveChatIdRef.current !== steerChatId) {
+            if (steerChatId) setChatActivity(prev => prev[steerChatId] === 'ready' ? prev : { ...prev, [steerChatId]: 'running' })
+            return
+          }
           if (!res.steered && res.item) {
             // Not steerable → the server queued it. Render the bubble anyway (marked pending),
             // for the same reason as the ack path above: the queue panel alone is not a trace.
@@ -2958,6 +2988,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 const { type: _t, seq: _s, ...toolFields } = evt as unknown as Record<string, unknown>
                 return appendChunk(prev, { kind: 'tool', tool: toolFields as unknown as ChatToolCall })
               }
+              case 'result':
+                // spec-088: with the bus dead, the direct stream is the ONLY carrier of the
+                // turn's metrics + timestamp. There was no case here, so the bubble was
+                // finalized bare (no ts, no tokens/cost) and the bus's later replay of the same
+                // seq was a no-op — the turn stayed unstamped until a full reload.
+                return busDeadNow && applySeq()
+                  ? finalizeStreamingWithMetrics(prev, evt as unknown as ChatEventResult, Date.now())
+                  : prev
               case 'error':
                 // Terminal + needs immediate feedback; bus 'error' re-finalize is a no-op.
                 return finalizeStreaming(prev, evt.error)
