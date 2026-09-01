@@ -144,3 +144,43 @@ async def test_path_not_touched_without_media_env(tmp_path):
     opts = await _drain_run_engine(tmp_path, env={})
     assert opts is not None
     assert "PATH" not in (opts.env or {})
+
+
+# ─── docs/internal/sdk-feature-audit/02-subagent-output.md: SUBAGENT_FILES_PROMPT ───
+#
+# Each sub-agent AgentDefinition carries its OWN separate `prompt` string — FILES_PROMPT
+# appended to the orchestrator's system_prompt above never reaches it. A report-producing
+# sub-agent (executor/researcher/skeptic) must be told about cockpit-file too, gated on the
+# same COPS_MEDIA_DIR env. "quick" is deliberately excluded — its whole point is a short
+# inline answer, never a file.
+
+
+@pytest.mark.asyncio
+async def test_subagent_files_prompt_appended_when_media_env_present(tmp_path):
+    """COPS_MEDIA_DIR in env → executor/researcher/skeptic prompts gain the cockpit-file hint."""
+    opts = await _drain_run_engine(tmp_path, env={"COPS_MEDIA_DIR": str(tmp_path)})
+    assert opts is not None
+    agents = opts.agents
+    assert agents is not None
+    for name in ("executor", "researcher", "skeptic"):
+        assert engine.SUBAGENT_FILES_PROMPT in agents[name].prompt, (
+            f"{name} prompt missing SUBAGENT_FILES_PROMPT: {agents[name].prompt!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_subagent_files_prompt_skips_quick(tmp_path):
+    """quick stays untouched — its whole point is a short inline answer, never a file."""
+    opts = await _drain_run_engine(tmp_path, env={"COPS_MEDIA_DIR": str(tmp_path)})
+    assert opts is not None
+    assert engine.SUBAGENT_FILES_PROMPT not in opts.agents["quick"].prompt
+
+
+@pytest.mark.asyncio
+async def test_subagent_files_prompt_absent_without_media_env(tmp_path):
+    """No COPS_MEDIA_DIR → sub-agent prompts stay exactly the DEFAULT_AGENTS originals."""
+    opts = await _drain_run_engine(tmp_path, env={})
+    assert opts is not None
+    for name in ("executor", "researcher", "skeptic", "quick"):
+        assert opts.agents[name].prompt == engine.DEFAULT_AGENTS[name].prompt
+        assert engine.SUBAGENT_FILES_PROMPT not in opts.agents[name].prompt

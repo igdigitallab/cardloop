@@ -12927,6 +12927,10 @@ async def api_project_chat(req: web.Request) -> web.Response:
                     # spec-085 Phase 3 fix: the cockpit needs the task TYPE to tell an agent
                     # from a tool execution the CLI also reports as a task.
                     "task_type": event.get("task_type"),
+                    # docs/internal/sdk-feature-audit/02-subagent-output.md: the CLI-managed raw
+                    # output file for a completed task (populated on "notification", None on
+                    # every other subtype — additive key, no schema break).
+                    "output_file": event.get("output_file"),
                     **({"text": event["text"]} if event.get("text") else {}),
                 })
             elif etype == "peer_message":
