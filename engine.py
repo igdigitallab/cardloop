@@ -2703,7 +2703,12 @@ async def reconcile_board(
         # Edit/Write, but the CLI's own memory-extraction pass uses internal tooling that the
         # allowlist does not gate — and it inherits THIS model. On 2026-06-23 a haiku helper wrote
         # four articles into two project wikis, one of them a pure ledger. Belt and braces.
-        env=_memory_env_overrides("project"),
+        # Аккаунт: внутренний помощник обязан идти под тем же аккаунтом, что выбран в UI.
+        # 01.09.2026 у основного аккаунта истёк refresh-токен, и reconcile падал каждые
+        # несколько минут с "OAuth session expired", хотя активным был живой аккаунт —
+        # потому что здесь env собирался без accounts.env_overrides() и CLI получал
+        # дефолтный ~/.claude. Переключатель аккаунтов на этот вызов не влиял вообще.
+        env={**_memory_env_overrides("project"), **_accounts.env_overrides()},
         effort="low",
     )
 
