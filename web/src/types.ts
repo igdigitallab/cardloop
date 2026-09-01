@@ -554,6 +554,8 @@ export interface ChatMessage {
   metrics?: TurnMetrics
   /** Spec-052: board event payload — present only when role === 'board' */
   board?: ActivityEventBoard
+  /** True while this user message is sitting in the server-side send queue, not yet run. */
+  queued?: boolean
   /** Model fallback payload — present only when role === 'model_fallback' */
   modelFallback?: { requested: string; served: string; expected?: string | null; generation?: boolean }
 }

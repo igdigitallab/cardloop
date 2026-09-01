@@ -348,6 +348,8 @@ export const en = {
   'chat.duplicate_dropped': 'Not sent: identical text is already running or queued. Edit it slightly to send anyway.',
 
   // ── Message queue ──────────────────────────────────────────────
+  'chat.queued_badge': 'queued',
+  'chat.queued_badge_title': 'Waiting in the queue — sends automatically when the agent is free',
   'chat.queue_panel_label': 'Queued messages',
   'chat.defer_panel_label': 'Scheduled',
   'chat.queue_edit_btn': 'Edit',

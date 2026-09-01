@@ -1353,6 +1353,25 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const [queueItems, setQueueItems] = useState<QueueItem[]>([])
   const [queueEditId, setQueueEditId] = useState<string | null>(null)
   const [queueEditText, setQueueEditText] = useState<string>('')
+
+  // The server-side queue is the ONE authority on what is still pending: reconcile the
+  // bubbles' pending mark against it on every change. This is what clears the mark when the
+  // item drains into a real turn, when Stop empties the queue, or when a row is deleted from
+  // the panel — without it, a bubble could sit "queued" forever, which is the next bug report.
+  useEffect(() => {
+    const pending = new Set(queueItems.map(i => i.text))
+    setMessages(prev => {
+      let changed = false
+      const next = prev.map(m => {
+        if (m.role !== 'user') return m
+        const shouldBeQueued = pending.has(m.text)
+        if (!!m.queued === shouldBeQueued) return m
+        changed = true
+        return { ...m, queued: shouldBeQueued }
+      })
+      return changed ? next : prev
+    })
+  }, [queueItems])
   const streamingRef = useRef(false)
   // spec-063 Stage 2a: highest seq already APPLIED to the canvas. The activity stream is the
   // single render source for every turn (own sends included); this ref is the only dedup —
@@ -2641,7 +2660,18 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // rotation) → the server enqueues it instead, same as the old chatQueueAdd path.
       api.chatSteer(projectId, fullText, effectiveChatId || undefined, msgId)
         .then(res => {
-          if (!res.steered && res.item) { setQueueItems(prev => [...prev, res.item!]); return }
+          if (!res.steered && res.item) {
+            // Not steerable → the server queued it. Render the bubble anyway (marked pending),
+            // for the same reason as the ack path above: the queue panel alone is not a trace.
+            setQueueItems(prev => [...prev, res.item!])
+            setMessages(prev => {
+              const fin = finalizeStreaming(prev)
+              const last = fin[fin.length - 1]
+              if (last && last.role === 'user' && last.text === fullText) return fin
+              return [...fin, { ...makeUserMsg(fullText), queued: true }]
+            })
+            return
+          }
           // Steered: render the user bubble HERE, from the ack. Waiting for the bus 'steer'
           // mirror was the bug — before spec-086 this branch always pushed the message into
           // the visible queue panel, so it could never vanish; after it, a bus that is dead or
@@ -2831,8 +2861,22 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               setError(t['chat.duplicate_dropped'])
               return
             }
-            // Remove the optimistic user + assistant bubbles added for this aborted send.
-            setMessages(prev => prev.slice(0, -2))
+            // Keep the operator's user bubble; drop only the assistant placeholder. Deleting
+            // the user bubble here is what made a queued message "vanish": it survived solely
+            // as a row in the queue panel, so a racing refresh, a different chat_id or a
+            // scrolled-away panel left the send with no on-screen trace at all. The bubble is
+            // where you SEE it; the panel is where you edit or drop it. The effect below marks
+            // it pending and unmarks it when the server's queue no longer holds that text.
+            setMessages(prev => {
+              const last = prev[prev.length - 1]
+              const withoutPlaceholder = last && last.role === 'assistant' && last.streaming
+                ? prev.slice(0, -1) : prev
+              const tail = withoutPlaceholder[withoutPlaceholder.length - 1]
+              if (tail && tail.role === 'user') {
+                return [...withoutPlaceholder.slice(0, -1), { ...tail, queued: true }]
+              }
+              return withoutPlaceholder
+            })
             // Refresh queue display from server so the newly-enqueued item appears.
             const currentProjectId = projectIdRef.current
             api.chatQueue(currentProjectId)
@@ -3961,7 +4005,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   <div style={{ flex: 1, height: 1, background: 'var(--border, #374151)' }} />
                 </div>
               )}
-              <div className={`chat-msg chat-msg-${msg.role}${msg.bgRun ? ' chat-msg-bgrun' : ''}`}>
+              <div className={`chat-msg chat-msg-${msg.role}${msg.bgRun ? ' chat-msg-bgrun' : ''}`
+                + (msg.queued ? ' chat-msg-queued' : '')}>
+                {msg.queued && (
+                  <span className="chat-msg-queued-badge" title={t['chat.queued_badge_title']}>
+                    ⏭ {t['chat.queued_badge']}
+                  </span>
+                )}
                 {renderFragmentContent(msg, idx)}
                 {/* Meta row: timestamp (always visible) sits inline with the file-rewind
                     action (hover-revealed). One row, so the time never adds an extra line. */}

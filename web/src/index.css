@@ -1,0 +1,10 @@
+
+/* A user message still waiting in the server-side send queue. Muted, with a small badge —
+   it must read as "not sent yet", while staying in place in the transcript so the operator
+   can see what they wrote. Deleting the bubble instead is what made queued messages vanish. */
+.chat-msg-queued { opacity: .72; border-left: 2px solid var(--accent, #6b7280); }
+.chat-msg-queued-badge {
+  display: inline-block; margin-bottom: 4px; padding: 1px 6px;
+  font-size: 10px; line-height: 16px; border-radius: 8px;
+  color: var(--text2, #9ca3af); background: var(--bg2, #1f2937);
+}
