@@ -878,6 +878,23 @@ def _has_live_agent_monitors(session_key: str) -> bool:
         return False
 
 
+def _running_stream_agents(session_key: str) -> dict:
+    """{monitor id: started ts} of this session's running stream-fed agent rows (spec-089 §6).
+
+    The between-turns drain diffs this against the CLI's `background_tasks_changed` task list
+    and flips whatever the CLI no longer knows about (engine._gone_agent_deltas). Only rows
+    created from the SDK stream (`stream: True`) are eligible: their id IS the CLI task id.
+    Pure — never raises."""
+    try:
+        bucket = _monitors.get(session_key) or {}
+        return {r["id"]: float(r.get("started") or 0)
+                for r in bucket.values()
+                if r.get("kind") == "agent" and r.get("stream")
+                and r.get("status") in ("running", "stopping") and r.get("id")}
+    except Exception:
+        return {}
+
+
 def _live_agent_monitor_count() -> int:
     """Any-session count of 'running' agent/workflow/monitor monitors — the deploy-gap
     counterpart to _has_live_agent_monitors (per-session). Exposed via /api/health?deep=1

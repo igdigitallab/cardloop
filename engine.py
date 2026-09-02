@@ -128,7 +128,10 @@ DEFAULT_AGENTS: dict = {
             "Stop after 3 cycles or when findings are already handled.\n\n"
             "PROGRESS ON DISK — every ~15 tool calls, append what you have done and learned so "
             "far to /tmp/cardloop-scratch/<task-slug>.md (mkdir -p first). If you hit your turn "
-            "limit, that file IS your deliverable; your final message must name its path."
+            "limit, that file IS your deliverable; your final message must name its path.\n"
+            # spec-089 §3: the CLI pastes a child's whole final text into the orchestrator's
+            # context via <task-notification>, and it rides in every later request.
+            "FINAL ANSWER = the path of your report file on disk + at most 5 lines of summary. Never paste the report into the final answer — the orchestrator opens the file when it needs detail."
         ),
         model=_EXECUTOR_MODEL,
         permissionMode="bypassPermissions",
@@ -146,7 +149,8 @@ DEFAULT_AGENTS: dict = {
             "PROGRESS ON DISK — every ~15 tool calls, append your findings so far (facts with "
             "file:line or URL) to /tmp/cardloop-scratch/<task-slug>.md via a Bash heredoc "
             "(mkdir -p first; this scratch file is the ONLY thing you may write). If you hit "
-            "your turn limit, that file IS your deliverable; your final answer must name its path."
+            "your turn limit, that file IS your deliverable; your final answer must name its path.\n"
+            "FINAL ANSWER = the path of your report file on disk + at most 5 lines of summary. Never paste the report into the final answer — the orchestrator opens the file when it needs detail."  # spec-089 §3
         ),
         model=_RESEARCHER_MODEL,
         permissionMode="bypassPermissions",
@@ -174,7 +178,8 @@ DEFAULT_AGENTS: dict = {
             "PROGRESS ON DISK — every ~15 tool calls, append your evidence so far to "
             "/tmp/cardloop-scratch/<task-slug>.md via a Bash heredoc (mkdir -p first; the ONLY "
             "file you may write). If you hit your turn limit, that file IS your deliverable; "
-            "your final answer must name its path."
+            "your final answer must name its path.\n"
+            "FINAL ANSWER = the path of your report file on disk + at most 5 lines of summary. Never paste the report into the final answer — the orchestrator opens the file when it needs detail."  # spec-089 §3
         ),
         model=_RESEARCHER_MODEL,
         permissionMode="bypassPermissions",
@@ -185,7 +190,11 @@ DEFAULT_AGENTS: dict = {
     "quick": AgentDefinition(
         description="Fast lookup and simple transform agent. Cheap, low-latency questions.",
         prompt=(
-            "You are a quick-response sub-agent. Answer the task brief concisely and directly."
+            "You are a quick-response sub-agent. Answer the task brief concisely and directly.\n"
+            # spec-089 §3: same contract as the heavy roles, sized for a lookup agent.
+            "FINAL ANSWER = at most 5 lines. If the result is longer, write it to "
+            "/tmp/cardloop-scratch/<task-slug>.md (mkdir -p first) and return that path + at "
+            "most 5 lines of summary. Never paste a long report into the final answer."
         ),
         model=_QUICK_MODEL,
         permissionMode="bypassPermissions",
@@ -382,6 +391,10 @@ ULTRACODE_PROMPT = (
     "(Sonnet — writes files, runs commands), `researcher` (Sonnet — read-only research), `skeptic` "
     "(Sonnet — adversarial verifier: tries to refute a claim), `quick` (Haiku — fast cheap lookups). "
     "Pick per stage; the default workflow subagent is also fine.\n"
+    "- Sub-agent reports live on disk (spec-089 §3): every brief you write — a Workflow agent() "
+    "prompt or a Task brief — must demand `FINAL ANSWER = report file path + at most 5 lines of "
+    "summary`, never the full report; you read only the summary and open the file when you need "
+    "detail. A Workflow agent() with a `schema` is exempt: its structured result IS the contract.\n"
     "- The operator watches the cockpit and cannot read workflow internals: your final message must "
     "carry the complete synthesis (findings, decisions, evidence, next steps) — never a reference "
     "to sub-agent output."
@@ -1097,21 +1110,26 @@ _has_live_subagents_cb = None
 # spec-063 Stage 2a: webapp callback surfacing autonomous CLI turns (drain-observed) as
 # first-class background runs. Signature: (session_key, phase: 'start'|'text'|'end', text?).
 _bg_run_cb = None
+# spec-089 §6: webapp snapshot — {monitor id: started ts} of this session's running stream-fed
+# agent rows, so the between-turns drain can diff them against the CLI's own live task list.
+_running_stream_agents_cb = None
 
 
 def _register_webapp_callbacks(timeline_append, bus_publish, monitor_update=None,
                                has_live_subagents=None, bg_run_event=None,
                                create_pending_plan=None, resolve_plan=None,
-                               pending_plan_id=None, create_pending_tool=None):
+                               pending_plan_id=None, create_pending_tool=None,
+                               running_stream_agents=None):
     """Inject webapp callbacks so engine.py can publish events without importing webapp."""
     global _timeline_append_cb, _bus_publish_cb, _monitor_update_cb, _has_live_subagents_cb, \
         _bg_run_cb, _create_pending_plan_cb, _resolve_plan_cb, _pending_plan_id_cb, \
-        _create_pending_tool_cb
+        _create_pending_tool_cb, _running_stream_agents_cb
     _timeline_append_cb = timeline_append
     _bus_publish_cb = bus_publish
     _monitor_update_cb = monitor_update
     _has_live_subagents_cb = has_live_subagents
     _bg_run_cb = bg_run_event
+    _running_stream_agents_cb = running_stream_agents
     _create_pending_plan_cb = create_pending_plan
     _resolve_plan_cb = resolve_plan
     _pending_plan_id_cb = pending_plan_id
@@ -2381,6 +2399,47 @@ def _task_lifecycle_monitor_delta(msg) -> "dict | None":
     return None
 
 
+# spec-089 §6: dead-agent detector. A child killed by TTL eviction / restart / OOM leaves its
+# row `running` until the sweeper's staleness flip (minutes), while the CLI already tells us the
+# live set after every change: `background_tasks_changed` (a plain SystemMessage, `.data.tasks[]`,
+# REPLACE semantics). It omits FOREGROUND agents, so the diff is trustworthy ONLY between turns —
+# never wire this into _process_messages. A row younger than the grace window is skipped so an
+# out-of-order emission cannot flip an agent that just started.
+_GONE_AGENT_GRACE_SEC = 3.0
+
+
+def _gone_agent_deltas(session_key: str, msg, now: "float | None" = None) -> list:
+    """Diff the CLI's live task list against this session's running stream-fed agent rows.
+
+    Returns one stopped(stale) delta per row missing from the list; [] when the message carries
+    no task list at all (malformed → no verdict), when no snapshot callback is registered, or
+    when nothing is missing. Never raises."""
+    try:
+        data = getattr(msg, "data", None)
+        tasks = data.get("tasks") if isinstance(data, dict) else None
+        if not isinstance(tasks, list) or _running_stream_agents_cb is None:
+            return []
+        live = set()
+        for t in tasks:
+            if isinstance(t, dict):
+                tid = t.get("task_id") or t.get("id")
+                if tid:
+                    live.add(str(tid))
+        running = _running_stream_agents_cb(session_key) or {}
+        _now = time.time() if now is None else now
+        out = []
+        for mid, started in sorted(running.items()):
+            if mid in live:
+                continue
+            if started and (_now - float(started)) < _GONE_AGENT_GRACE_SEC:
+                continue
+            out.append({"id": mid, "status": "stopped", "stale": True,
+                        "tail": "(gone from the CLI task list)"})
+        return out
+    except Exception:
+        return []
+
+
 async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
     """Consume the live client's SDK stream until cancelled (see block comment above)."""
     session_key = entry.session_key
@@ -2406,6 +2465,20 @@ async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
                                            only_existing=not isinstance(msg, TaskStartedMessage))
                     except Exception:
                         pass
+                continue
+            if isinstance(msg, SystemMessage) and getattr(msg, "subtype", None) == "background_tasks_changed":
+                # spec-089 §6: rows the CLI no longer lists are dead — flip them now instead of
+                # waiting minutes for the staleness sweep (see _gone_agent_deltas).
+                _gone = _gone_agent_deltas(session_key, msg)
+                if _gone and _monitor_update_cb:
+                    print(f"[live-drain] {session_key}: background_tasks_changed → "
+                          f"{len(_gone)} agent row(s) gone from the CLI task list: "
+                          f"{', '.join(d['id'] for d in _gone)}")
+                    for _d in _gone:
+                        try:
+                            _monitor_update_cb(session_key, _d, only_existing=True)
+                        except Exception:
+                            pass
                 continue
             # Sub-agent traffic (parent_tool_use_id set) — never surfaced in the chat lane;
             # the monitors panel is fed by the PostToolUse hook + transcript sweeper instead.
@@ -3786,7 +3859,8 @@ def _build_ctx(*, web_port: int = None, web_password: str = None) -> dict:
                                create_pending_plan=_webapp.create_pending_plan,
                                resolve_plan=_webapp.resolve_decision,
                                pending_plan_id=_webapp._pending_plan_id,
-                               create_pending_tool=_webapp.create_pending_tool_decision)
+                               create_pending_tool=_webapp.create_pending_tool_decision,
+                               running_stream_agents=_webapp._running_stream_agents)
 
     _web_port = web_port if web_port is not None else int(os.getenv("WEB_PORT", "8787"))
     _web_password = web_password if web_password is not None else os.getenv("WEB_PASSWORD", "")
