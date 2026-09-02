@@ -11812,7 +11812,7 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
                         auto_rotate: "bool | None" = None,
                         plan_mode: "bool | None" = None,
                         ask_mode: "bool | None" = None,
-                        msg_id: str = "") -> "dict | None":
+                        msg_id: str = "", front: bool = False) -> "dict | None":
     """Append a message to the chat queue for session_key.
     Returns the new item dict, or None if the queue is full.
 
@@ -11823,7 +11823,12 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
 
     spec-071: effort/ultracode carry the originating turn's per-turn options so the drained
     run reproduces the live-client fingerprint (a bare run_engine call used to mismatch it
-    and evict+SIGTERM the client's still-working background sub-agents)."""
+    and evict+SIGTERM the client's still-working background sub-agents).
+
+    spec-089 §5: front=True inserts at index 0 instead of appending — an urgent send (a
+    local CLI command like `/goal clear` typed while the turn is busy) must drain BEFORE
+    whatever was already queued, not behind it. The max-depth check is unchanged (front
+    does not bypass the cap, it only changes where within the cap the item lands)."""
     lst = _CHAT_QUEUE.setdefault(session_key, [])
     if len(lst) >= _CHAT_QUEUE_MAX:
         return None
@@ -11856,7 +11861,10 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
         # session's last turn on drain (see _chat_queue_drain), because ask is a standing
         # posture ("don't touch anything without asking me"), not a one-shot planning turn.
         item["ask_mode"] = bool(ask_mode)
-    lst.append(item)
+    if front:
+        lst.insert(0, item)
+    else:
+        lst.append(item)
     _chat_queue_flush()
     return item
 
@@ -12010,12 +12018,42 @@ async def _try_steer_mid_turn(ctx, session_key: str, prompt: str, chat_id: "str 
     return True
 
 
+def _resolve_interruptible_client(ctx: dict, session_key: str):
+    """Resolve the live SDK client to call .interrupt() on for session_key, or None.
+
+    spec-089 §5: shared by api_project_chat_stop and api_chat_steer's urgent path — both
+    need the exact same "what is actually interruptible right now" answer, previously
+    duplicated between them. ctx["running"] holds the True-placeholder until the engine
+    swaps in the real client (engine.py, right after connect), so a stop/interrupt racing
+    that window sees a value with no .interrupt. A drain-surfaced bg turn (kind:run_start
+    source:'bg' — a task-notification wake or a steered message the CLI deferred past the
+    turn boundary) is real work on the CLI but is NOT registered in ctx["running"] — the
+    engine popped that the moment the operator's own turn ended — so fall back to the live
+    client entry when a bg turn is active and the running slot has nothing interruptible.
+    """
+    client = ctx["running"].get(session_key)
+    if not hasattr(client, "interrupt") and _bg_turn_active(session_key):
+        _entry = (ctx.get("live_clients") or {}).get(session_key)
+        _bg_client = getattr(_entry, "client", None)
+        if _bg_client is not None:
+            client = _bg_client
+    return client if hasattr(client, "interrupt") else None
+
+
 async def api_chat_steer(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/chat/steer — inject a message into the running turn (spec-086).
 
     Falls back to the ordinary chat queue when the turn is not steerable (fresh-client turn,
     codex lane, rotation, or the turn just ended), so the caller can always fire-and-forget:
-    response is {"steered": true} or {"steered": false, "item": {...}} (enqueued)."""
+    response is {"steered": true} or {"steered": false, "item": {...}} (enqueued).
+
+    spec-089 §5: "urgent": true in the body takes a DIFFERENT path, for local CLI commands
+    (/goal clear, /clear, /compact, ...) that only take effect at a turn boundary — a Stop-hook
+    loop (/goal) never yields one, so mid-turn steer-injection (which weaves into the CLI's own
+    turn, not a boundary) and the ordinary queue (which waits behind the current turn AND
+    everything already queued) both leave the command sitting for as long as the turn runs.
+    Urgent instead: interrupt whatever is running now (same effect as the Stop button) and
+    enqueue at the HEAD of the queue so it drains first. Non-urgent behaviour is unchanged."""
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
     if project is None:
@@ -12034,6 +12072,46 @@ async def api_chat_steer(req: web.Request) -> web.Response:
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
     _chat_trace(session_key, "recv", msg_id=_s_msg_id, chat_id=_s_chat_id, text=text,
                 via="POST /chat/steer", project=project["id"])
+
+    if bool(body.get("urgent")):
+        # spec-089 §5a: resolve exactly like /chat/stop, interrupt, and record the SAME
+        # operator_stop timeline event the Stop button records — this genuinely IS an
+        # operator-initiated stop, and the handoff digest must be able to tell it apart
+        # from an infra abort.
+        _s_client = _resolve_interruptible_client(ctx, session_key)
+        _s_interrupted = _s_client is not None
+        if _s_interrupted:
+            try:
+                await _s_client.interrupt()
+            except Exception:
+                pass
+            _timeline_append(session_key, {"kind": "operator_stop"})
+        # spec-089 §5b: head of queue, carrying the live-client fingerprint options the way
+        # _completion_wake_fire does — a bare enqueue without them would mismatch the
+        # fingerprint on drain and evict+rebuild the persistent client (full floor re-paid,
+        # and any still-running background children get SIGTERM'd).
+        _s_opts = _last_turn_options.get(session_key) or {}
+        _s_item = _chat_queue_enqueue(session_key, text, _s_chat_id, project["id"],
+                                      effort=_s_opts.get("effort"), ultracode=_s_opts.get("ultracode"),
+                                      msg_id=_s_msg_id, front=True)
+        if _s_item is None:
+            _chat_trace(session_key, "queue_full", msg_id=_s_msg_id, chat_id=_s_chat_id,
+                        text=text, limit=_CHAT_QUEUE_MAX, urgent=True)
+            return web.json_response({"error": "queue full"}, status=429)
+        # spec-089 §5c: the interrupted turn's own finally already re-drains on lock release
+        # (api_project_chat / _chat_queue_execute both do — see the callers of
+        # _chat_queue_drain_one), so this is a belt-and-braces nudge for the race where this
+        # redrain runs before interrupt() has actually released the lock: idempotent,
+        # _chat_queue_drain_one no-ops while the slot is still held.
+        await _chat_queue_redrain_soon(ctx, session_key)
+        _chat_trace(session_key, "urgent", msg_id=_s_msg_id, chat_id=_s_chat_id, text=text,
+                    interrupted=_s_interrupted, item_id=_s_item.get("id"))
+        print(f"[steer] {session_key}: urgent → interrupted={_s_interrupted}, queued at head")
+        return web.json_response(
+            {"steered": False, "urgent": True, "interrupted": _s_interrupted, "item": _s_item},
+            status=201,
+        )
+
     if await _try_steer_mid_turn(ctx, session_key, text, _s_chat_id, msg_id=_s_msg_id):
         return web.json_response({"steered": True})
     item = _chat_queue_enqueue(session_key, text, _s_chat_id, project["id"], msg_id=_s_msg_id)
@@ -13731,21 +13809,11 @@ async def api_project_chat_stop(req: web.Request) -> web.Response:
         return web.json_response({"error": "project not found"}, status=404)
 
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
-    client = ctx["running"].get(session_key)
+    # spec-089 §5: shared with api_chat_steer's urgent path — see _resolve_interruptible_client
+    # for why the True-placeholder and the bg-turn lane both need handling here.
+    client = _resolve_interruptible_client(ctx, session_key)
 
-    # A drain-surfaced autonomous turn (kind:run_start source:'bg' — a task-notification wake
-    # or a steered message the CLI deferred past the turn boundary) is real work on the CLI,
-    # but it is NOT registered in ctx["running"]: the engine popped that the moment the
-    # operator's own turn ended.  Without this fallback the Stop button silently did nothing
-    # for the whole bg turn ({"stopped": false}) — the operator's "sometimes stop doesn't
-    # work".  Reach the live client directly instead.
-    if not hasattr(client, "interrupt") and _bg_turn_active(session_key):
-        _entry = (ctx.get("live_clients") or {}).get(session_key)
-        _bg_client = getattr(_entry, "client", None)
-        if _bg_client is not None:
-            client = _bg_client
-
-    if client is not None and hasattr(client, "interrupt"):
+    if client is not None:
         try:
             await client.interrupt()
         except Exception:

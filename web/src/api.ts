@@ -449,13 +449,26 @@ export const api = {
     ),
   // spec-086: inject a message into the RUNNING turn (CLI steering); server falls back to
   // the ordinary queue when the turn is not steerable — {steered:false, item} then.
-  chatSteer: (id: string, text: string, chatId?: string, msgId?: string) =>
-    apiFetch<{ steered: boolean; item?: { id: string; text: string; created_at: number } }>(
+  // spec-089 §5: `urgent` interrupts the running turn (like Stop) and enqueues at the HEAD
+  // of the queue instead — for local CLI commands (/goal, /clear, ...) that only take effect
+  // at a turn boundary. Response then carries `urgent`/`interrupted`.
+  chatSteer: (id: string, text: string, chatId?: string, msgId?: string, urgent?: boolean) =>
+    apiFetch<{
+      steered: boolean;
+      item?: { id: string; text: string; created_at: number };
+      urgent?: boolean;
+      interrupted?: boolean;
+    }>(
       `/api/projects/${id}/chat/steer`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, ...(chatId ? { chat_id: chatId } : {}), ...(msgId ? { msg_id: msgId } : {}) }),
+        body: JSON.stringify({
+          text,
+          ...(chatId ? { chat_id: chatId } : {}),
+          ...(msgId ? { msg_id: msgId } : {}),
+          ...(urgent ? { urgent: true } : {}),
+        }),
       }
     ),
   chatQueueEdit: (id: string, msgId: string, text: string) =>
