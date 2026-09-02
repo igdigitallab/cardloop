@@ -1393,17 +1393,124 @@ def _file_tail_lines(path: "str | Path", n: int = 5, max_bytes: int = 65536,
         return []
 
 
-def _workflow_journal_summary(cwd: "str | None", rec: dict) -> "str | None":
-    """Best-effort resolution of a terminal 'workflow' monitor row's journal.jsonl, returned
-    as "<path> (started=N, result=N, failed=N)".
+def _tail_read_lines(path: "Path", max_bytes: int) -> "list[str] | None":
+    """Shared seek-to-tail byte reader: opens `path`, seeks to its last `max_bytes`, decodes and
+    splits into lines, dropping a possibly-partial first line when the read didn't start at
+    byte 0. None when the file is missing or empty.
 
-    spec-089 §2: workflow journals live at
+    spec-089 §7: this is the third caller of the exact seek/decode/drop-partial-line pattern
+    (after _agent_last_tool_tail and _file_tail_lines above) — factored out here rather than
+    forking a fourth inline copy for the transcript peek. Never raises."""
+    try:
+        if not path.exists():
+            return None
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            file_size = fh.tell()
+            if file_size == 0:
+                return None
+            read_start = max(0, file_size - max_bytes)
+            fh.seek(read_start)
+            raw = fh.read()
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if read_start > 0 and lines:
+            lines = lines[1:]  # drop a potentially partial first line
+        return lines
+    except Exception:
+        return None
+
+
+def _transcript_tail_ts(raw: object) -> str:
+    """Formats a transcript entry's top-level `timestamp` (ISO 8601, typically with a trailing
+    'Z') as server-local HH:MM:SS. '--:--:--' when missing or unparsable. Never raises."""
+    if not raw:
+        return "--:--:--"
+    try:
+        s = str(raw)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"  # be explicit about the offset regardless of Python version
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone()  # UTC (or whatever offset) -> server-local time
+        return dt.strftime("%H:%M:%S")
+    except Exception:
+        return "--:--:--"
+
+
+def _ws_collapse(s: str) -> str:
+    """Collapses any run of whitespace (including newlines) to a single space and strips ends."""
+    return " ".join(s.split())
+
+
+_TRANSCRIPT_TAIL_TOOL_TARGET_MAX = 120  # spec-089 §7: tool_use target cap
+_TRANSCRIPT_TAIL_TEXT_MAX = 200         # spec-089 §7: text-block cap
+
+
+def _transcript_tail_entries(path: "Path", n: int, max_bytes: int = 65536) -> "list[str]":
+    """Renders the last `n` formatted steps from a sub-agent transcript for the monitors panel's
+    click-to-expand peek (spec-089 §7). Tails only the last `max_bytes` of the file — never
+    reads it whole. Each JSON line's message.content[] blocks are inspected the same way
+    _agent_last_tool_tail does above (a 'user' line's tool_result blocks are naturally skipped —
+    their block type is neither 'tool_use' nor 'text'):
+      tool_use -> "[HH:MM:SS] ⚙ <tool>: <target>" (target = the first set of command/file_path/
+                  pattern/description/prompt, one line, whitespace collapsed, <=120 chars)
+      text     -> "[HH:MM:SS] ✎ <first line>" (whitespace collapsed, <=200 chars)
+    Never raises; a malformed line is skipped rather than aborting the whole read."""
+    entries: "list[str]" = []
+    lines = _tail_read_lines(path, max_bytes)
+    if not lines:
+        return entries
+    for line in lines:
+        try:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            msg = obj.get("message")
+            content = ((msg.get("content") if isinstance(msg, dict) else None)
+                       or obj.get("content") or [])
+            if not isinstance(content, list):
+                continue
+            ts = _transcript_tail_ts(obj.get("timestamp"))
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "tool_use":
+                    name = str(block.get("name") or "")
+                    inp = block.get("input") or {}
+                    if not isinstance(inp, dict):
+                        inp = {}
+                    target = (inp.get("command") or inp.get("file_path") or inp.get("pattern")
+                              or inp.get("description") or inp.get("prompt") or "")
+                    target = _ws_collapse(str(target))
+                    if len(target) > _TRANSCRIPT_TAIL_TOOL_TARGET_MAX:
+                        target = target[:_TRANSCRIPT_TAIL_TOOL_TARGET_MAX - 1] + "…"
+                    entries.append(f"[{ts}] ⚙ {name}: {target}" if target else f"[{ts}] ⚙ {name}")
+                elif btype == "text":
+                    raw_text = str(block.get("text") or "")
+                    first_line = raw_text.splitlines()[0] if raw_text else ""
+                    first_line = _ws_collapse(first_line)
+                    if len(first_line) > _TRANSCRIPT_TAIL_TEXT_MAX:
+                        first_line = first_line[:_TRANSCRIPT_TAIL_TEXT_MAX - 1] + "…"
+                    entries.append(f"[{ts}] ✎ {first_line}")
+        except Exception:
+            continue
+    return entries[-n:]
+
+
+def _workflow_journal_path(cwd: "str | None", rec: dict) -> "Path | None":
+    """Best-effort resolution of a 'workflow' monitor row's journal.jsonl.
+
+    spec-089 §2/§7: workflow journals live at
     <sdk_dir>/<session_id>/subagents/workflows/<runId>/journal.jsonl. The monitor row's id is
     the tool's taskId, which may or may not equal the wf_<runId> directory name — prefer a
     directory whose name contains rec['id'] or rec['tool_use_id'], else fall back to the
-    journal with the newest mtime strictly after rec['started']. Counts come from a bounded
-    read (last 1 MB — a long-running workflow's journal can grow large). None on any miss
-    (no cwd, no journals, no match) — never raises."""
+    journal with the newest mtime strictly after rec['started']. Factored out of
+    _workflow_journal_summary (spec-089 §2) so the transcript-peek endpoint (spec-089 §7) can
+    reuse the same match logic without also computing counts. None on any miss (no cwd, no
+    journals, no match) — never raises."""
     try:
         if not cwd:
             return None
@@ -1413,21 +1520,32 @@ def _workflow_journal_summary(cwd: "str | None", rec: dict) -> "str | None":
             return None
         rid = str(rec.get("id") or "")
         tuid = str(rec.get("tool_use_id") or "")
-        match = None
         for c in candidates:
             run_dir_name = c.parent.name  # "wf_<runId>"
             if (rid and rid in run_dir_name) or (tuid and tuid in run_dir_name):
-                match = c
-                break
+                return c
+        started = rec.get("started")
+        if started is None:
+            return max(candidates, key=lambda c: c.stat().st_mtime)
+        after = [c for c in candidates if c.stat().st_mtime > float(started)]
+        if not after:
+            return None
+        return max(after, key=lambda c: c.stat().st_mtime)
+    except Exception:
+        return None
+
+
+def _workflow_journal_summary(cwd: "str | None", rec: dict) -> "str | None":
+    """Best-effort resolution of a terminal 'workflow' monitor row's journal.jsonl, returned
+    as "<path> (started=N, result=N, failed=N)".
+
+    spec-089 §2: path resolution is _workflow_journal_path; counts come from a bounded read
+    (last 1 MB — a long-running workflow's journal can grow large). None on any miss (no cwd,
+    no journals, no match) — never raises."""
+    try:
+        match = _workflow_journal_path(cwd, rec)
         if match is None:
-            started = rec.get("started")
-            if started is None:
-                match = max(candidates, key=lambda c: c.stat().st_mtime)
-            else:
-                after = [c for c in candidates if c.stat().st_mtime > float(started)]
-                if not after:
-                    return None
-                match = max(after, key=lambda c: c.stat().st_mtime)
+            return None
         counts: "dict[str, int]" = {}
         with open(match, "rb") as fh:
             fh.seek(0, 2)
@@ -1454,6 +1572,48 @@ def _workflow_journal_summary(cwd: "str | None", rec: dict) -> "str | None":
                 f"result={counts.get('result', 0)}, failed={counts.get('failed', 0)})")
     except Exception:
         return None
+
+
+def _workflow_journal_tail_entries(path: "Path", n: int, max_bytes: int = 1_000_000) -> "list[str]":
+    """Renders a 'workflow' monitor row's journal.jsonl as a header count line plus one summary
+    line per agent, for the monitors panel's click-to-expand peek (spec-089 §7) — a Workflow row
+    has no transcript of its own, journal.jsonl is the closest thing.
+
+    Journal lines carry NO per-entry timestamp (unlike agent transcripts), so unlike
+    _transcript_tail_entries there is no [HH:MM:SS] prefix here. Per-agent line is built from
+    the ordered sequence of {started,result,failed} events seen for that agentId, e.g.
+    "<agentId>: started" or "<agentId>: started → result" / "... → failed".
+
+    Returns [header] + the last `n` per-agent lines — the header itself does not count against
+    `n`, it is always kept so the peek never loses the totals to truncation.
+    Never raises; on any failure returns []."""
+    lines = _tail_read_lines(path, max_bytes)
+    if not lines:
+        return []
+    order: "list[str]" = []             # agentId, first-seen order
+    steps: "dict[str, list[str]]" = {}  # agentId -> ordered event types seen
+    counts: "dict[str, int]" = {}
+    for line in lines:
+        try:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            t = obj.get("type")
+            agent_id = obj.get("agentId")
+            if not t or not agent_id:
+                continue
+            counts[t] = counts.get(t, 0) + 1
+            if agent_id not in steps:
+                steps[agent_id] = []
+                order.append(agent_id)
+            steps[agent_id].append(t)
+        except Exception:
+            continue
+    header = (f"{len(order)} agent(s): started={counts.get('started', 0)} "
+              f"result={counts.get('result', 0)} failed={counts.get('failed', 0)}")
+    agent_lines = [f"{aid}: {' → '.join(steps[aid])}" for aid in order]
+    return [header] + agent_lines[-n:]
 
 
 # ── Root-fix A2: cgroup memory alert ─────────────────────────────────────────
@@ -7756,6 +7916,83 @@ async def api_project_agents_stop(req: web.Request) -> web.Response:
 
     _spawn_bg(_agents_stop_followup(session_key, ids))
     return web.json_response({"ok": True, "stopped": ids, "via": via})
+
+
+# spec-089 §7: bounded path cache for resolved agent transcripts, keyed by (session_key, mid).
+# The panel's peek re-polls this endpoint every 5s while a row is live — without a cache each
+# tick would re-glob the whole SDK sessions dir just to find a path that never moves once the
+# agent has started. Only successful resolutions are cached: a miss can resolve later (the
+# transcript file may not exist yet right after spawn), so caching None would wrongly pin the
+# endpoint to 404 for the rest of the row's life.
+_TRANSCRIPT_PATH_CACHE: "dict[tuple[str, str], Path]" = {}
+_TRANSCRIPT_PATH_CACHE_MAX = 500
+
+
+def _resolve_agent_transcript_path(session_key: str, mid: str, cwd: str) -> "Path | None":
+    """Locates a sub-agent's transcript file using the SAME two globs the sweep loop uses
+    (_agent_activity_sweep_loop above) so a workflow-internal agent (one level deeper) is found
+    too. A cache hit skips the glob entirely. Never raises — None on any miss."""
+    key = (session_key, mid)
+    cached = _TRANSCRIPT_PATH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        sdk_dir = _sdk_sessions_dir(cwd)
+        matches = list(sdk_dir.glob(f"*/subagents/agent-{mid}.jsonl"))
+        if not matches:
+            matches = list(sdk_dir.glob(f"*/subagents/workflows/*/agent-{mid}.jsonl"))
+        if not matches:
+            return None
+        path = matches[0]
+    except Exception:
+        return None
+    if len(_TRANSCRIPT_PATH_CACHE) >= _TRANSCRIPT_PATH_CACHE_MAX:
+        _TRANSCRIPT_PATH_CACHE.pop(next(iter(_TRANSCRIPT_PATH_CACHE)))  # FIFO eviction
+    _TRANSCRIPT_PATH_CACHE[key] = path
+    return path
+
+
+async def api_project_monitor_tail(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/monitors/{mid}/tail?n=20 — spec-089 §7: last N steps of a sub-agent
+    or Workflow monitor row, for the panel's click-to-expand transcript peek.
+
+    Agent rows tail the SDK transcript (_transcript_tail_entries); a Workflow row has no
+    transcript of its own, so it summarises the run's journal.jsonl instead
+    (_workflow_journal_tail_entries). A row with neither (a stream-only row whose transcript was
+    never written) 404s with {"error": "no transcript"} rather than a blank 200, so the frontend
+    can render "(no transcript yet)" instead of an empty peek box."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    mid = req.match_info["mid"]
+    rec = _monitors.get(session_key, {}).get(mid)
+    if rec is None:
+        return web.json_response({"error": "monitor not found"}, status=404)
+
+    try:
+        n = int(req.rel_url.query.get("n", "20"))
+    except (TypeError, ValueError):
+        n = 20
+    n = max(1, min(200, n))
+
+    cwd = project.get("cwd") or ""
+    if rec.get("kind") == "workflow":
+        path = _workflow_journal_path(cwd, rec)
+        if path is None:
+            return web.json_response({"error": "no transcript"}, status=404)
+        lines = _workflow_journal_tail_entries(path, n)
+    else:
+        path = _resolve_agent_transcript_path(session_key, mid, cwd)
+        if path is None:
+            return web.json_response({"error": "no transcript"}, status=404)
+        lines = _transcript_tail_entries(path, n)
+
+    return web.json_response({
+        "kind": rec.get("kind"), "status": rec.get("status"), "path": str(path), "lines": lines,
+    })
 
 
 async def api_project_live(req: web.Request) -> web.Response:
@@ -16914,6 +17151,8 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/settings", api_project_settings_get)
         app.router.add_get("/api/projects/{id}/monitors", api_project_monitors)
         app.router.add_delete("/api/projects/{id}/monitors/{mid}", api_project_monitor_dismiss)
+        # spec-089 §7: last N steps of one monitor row (transcript peek on click)
+        app.router.add_get("/api/projects/{id}/monitors/{mid}/tail", api_project_monitor_tail)
         # spec-089 §1: stop every running Workflow/sub-agent for this session
         app.router.add_post("/api/projects/{id}/agents/stop", api_project_agents_stop)
         app.router.add_post("/api/projects/{id}/settings", api_project_settings_post)
