@@ -184,6 +184,28 @@ async def test_busy_turn_steers_stop_instruction(aiohttp_client, fake_ctx, stop_
 
 
 @pytest.mark.asyncio
+async def test_bg_turn_injects_into_live_client_directly(aiohttp_client, fake_ctx, stop_app, monkeypatch):
+    """A drain-surfaced autonomous turn (wake / Stop-hook loop) holds no ctx["running"], so the
+    steer guard refuses it; the endpoint must feed the live client directly instead of queueing
+    behind the very turn it is trying to stop."""
+    monkeypatch.setattr(_webapp, "_spawn_bg", lambda c: c.close())
+    monkeypatch.setattr(_webapp, "_bg_turn_active", lambda sk: True)
+    sk = "1001:42"
+    _webapp._monitors[sk] = {"a1": _row("a1", kind="agent")}
+    fake_client = _FakeClient()
+    fake_ctx["live_clients"][sk] = _FakeEntry(fake_client)  # no ctx["running"] entry
+
+    client = await aiohttp_client(stop_app)
+    resp = await client.post("/api/projects/myproject/agents/stop", headers=_auth_headers(fake_ctx))
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["via"] == "steer-bg"
+    assert fake_client.queries and fake_client.queries[0].startswith(_webapp._AGENT_STOP_PREFIX)
+    assert _webapp._chat_queue_get(sk) == []
+    assert _webapp._monitors[sk]["a1"]["status"] == "stopping"
+
+
+@pytest.mark.asyncio
 async def test_idle_enqueues_and_drains(aiohttp_client, fake_ctx, stop_app, monkeypatch):
     """No running turn -> the instruction is enqueued and _chat_queue_drain_one is awaited
     (spec-089 §1 step 6, the idle path _completion_wake_fire also uses)."""

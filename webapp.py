@@ -7723,12 +7723,26 @@ async def api_project_agents_stop(req: web.Request) -> web.Response:
             f"of these task ids, then stop and answer in one line: {', '.join(bounded_ids)}")
 
     steered = False
+    via = "steer"
     if ctx["running"].get(session_key) is not None or _bg_turn_active(session_key):
         steered = await _try_steer_mid_turn(ctx, session_key, text, None)
+        if not steered and ctx["running"].get(session_key) is None and _bg_turn_active(session_key):
+            # A drain-surfaced autonomous turn (completion wake / Stop-hook loop) owns the CLI
+            # without holding ctx["running"], so _try_steer_mid_turn's identity check refuses
+            # it — and the queue path below would wait for that turn to END, the opposite of
+            # a stop. Feed the live client directly: the CLI weaves stdin between tool calls.
+            _entry = (ctx.get("live_clients") or {}).get(session_key)
+            _cli = getattr(_entry, "client", None)
+            if _cli is not None and hasattr(_cli, "query"):
+                try:
+                    await _cli.query(text)
+                    steered = True
+                    via = "steer-bg"
+                except Exception as exc:
+                    print(f"[agents-stop] {session_key}: bg-turn inject failed ({exc!r}) — queueing")
 
     if steered:
-        via = "steer"
-        print(f"[agents-stop] {session_key}: steered into the running turn")
+        print(f"[agents-stop] {session_key}: steered into the running turn ({via})")
     else:
         # Idle path — same lane _completion_wake_fire uses so the drained turn reproduces the
         # live-client fingerprint (a different effort would evict+rebuild the client, which is
