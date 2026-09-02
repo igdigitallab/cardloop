@@ -2357,8 +2357,21 @@ def _notification_monitor_delta(msg) -> "dict | None":
         mapped = _NOTIFICATION_STATUS_MAP.get(str(status or "").lower())
         if not mapped:
             return None
-        return {"id": str(task_id), "tool_use_id": getattr(msg, "tool_use_id", None),
-                "status": mapped}
+        delta = {"id": str(task_id), "tool_use_id": getattr(msg, "tool_use_id", None),
+                 "status": mapped}
+        # spec-089 §2: carry the SDK's own result pointers so the completion wake can read
+        # them straight off the monitor record instead of the model grepping journal.jsonl.
+        # TaskNotificationMessage has them as top-level fields; TaskUpdatedMessage carries
+        # whatever changed in `patch` (may or may not include them).
+        patch = getattr(msg, "patch", None)
+        patch = patch if isinstance(patch, dict) else {}
+        output_file = getattr(msg, "output_file", None) or patch.get("output_file")
+        summary = getattr(msg, "summary", None) or patch.get("summary")
+        if output_file:
+            delta["output_file"] = str(output_file)
+        if summary:
+            delta["summary"] = str(summary)[:600]
+        return delta
     except Exception:
         return None
 

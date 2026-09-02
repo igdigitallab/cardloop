@@ -704,7 +704,7 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
         # crash_recovery marks a flip derived from post-restart reconciliation (root-fix B1)
         # so the completion-wake prompt can say "verify, the service died mid-run".
         for k in ("kind", "label", "status", "tail", "agent", "persistent", "tool_use_id",
-                  "crash_recovery", "stale", "stream"):
+                  "crash_recovery", "stale", "stream", "output_file", "summary"):
             if delta.get(k) not in (None, ""):
                 rec[k] = delta[k]
         rec["ts"] = now
@@ -1345,6 +1345,99 @@ def _agent_last_tool_tail(path: "Path") -> "str | None":
         if last_target:
             tail = f"{tail} {last_target}"
         return tail
+    except Exception:
+        return None
+
+
+def _file_tail_lines(path: "str | Path", n: int = 5, max_bytes: int = 65536,
+                      max_chars: int = 600) -> "list[str]":
+    """Return the last `n` non-empty lines of `path`, reading only its last `max_bytes`
+    (never the whole file — an agent's output_file can be arbitrarily large).
+
+    spec-089 §2: gives the completion-wake prompt a peek at what a finished background task
+    actually produced. Each returned line is truncated to `max_chars`. Missing/unreadable
+    file, or an empty file, → []. Pure — never raises."""
+    try:
+        p = Path(path)
+        if not p.exists():
+            return []
+        with open(p, "rb") as fh:
+            fh.seek(0, 2)
+            file_size = fh.tell()
+            if file_size == 0:
+                return []
+            read_start = max(0, file_size - max_bytes)
+            fh.seek(read_start)
+            raw = fh.read()
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if read_start > 0 and lines:
+            lines = lines[1:]  # drop a potentially partial first line
+        non_empty = [ln.strip() for ln in lines if ln.strip()]
+        return [ln[:max_chars] for ln in non_empty[-n:]]
+    except Exception:
+        return []
+
+
+def _workflow_journal_summary(cwd: "str | None", rec: dict) -> "str | None":
+    """Best-effort resolution of a terminal 'workflow' monitor row's journal.jsonl, returned
+    as "<path> (started=N, result=N, failed=N)".
+
+    spec-089 §2: workflow journals live at
+    <sdk_dir>/<session_id>/subagents/workflows/<runId>/journal.jsonl. The monitor row's id is
+    the tool's taskId, which may or may not equal the wf_<runId> directory name — prefer a
+    directory whose name contains rec['id'] or rec['tool_use_id'], else fall back to the
+    journal with the newest mtime strictly after rec['started']. Counts come from a bounded
+    read (last 1 MB — a long-running workflow's journal can grow large). None on any miss
+    (no cwd, no journals, no match) — never raises."""
+    try:
+        if not cwd:
+            return None
+        sdk_dir = _sdk_sessions_dir(cwd)
+        candidates = sorted(sdk_dir.glob("*/subagents/workflows/*/journal.jsonl"))
+        if not candidates:
+            return None
+        rid = str(rec.get("id") or "")
+        tuid = str(rec.get("tool_use_id") or "")
+        match = None
+        for c in candidates:
+            run_dir_name = c.parent.name  # "wf_<runId>"
+            if (rid and rid in run_dir_name) or (tuid and tuid in run_dir_name):
+                match = c
+                break
+        if match is None:
+            started = rec.get("started")
+            if started is None:
+                match = max(candidates, key=lambda c: c.stat().st_mtime)
+            else:
+                after = [c for c in candidates if c.stat().st_mtime > float(started)]
+                if not after:
+                    return None
+                match = max(after, key=lambda c: c.stat().st_mtime)
+        counts: "dict[str, int]" = {}
+        with open(match, "rb") as fh:
+            fh.seek(0, 2)
+            file_size = fh.tell()
+            read_start = max(0, file_size - 1_000_000)
+            fh.seek(read_start)
+            raw = fh.read()
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if read_start > 0 and lines:
+            lines = lines[1:]  # drop a potentially partial first line
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            t = obj.get("type")
+            if t:
+                counts[t] = counts.get(t, 0) + 1
+        return (f"{match} (started={counts.get('started', 0)}, "
+                f"result={counts.get('result', 0)}, failed={counts.get('failed', 0)})")
     except Exception:
         return None
 
@@ -12323,6 +12416,11 @@ _last_turn_options: "dict[str, dict]" = {}  # session_key → {effort, ultracode
 _WEBAPP_CTX: "dict | None" = None  # set in start() — lets registry-driven hooks reach ctx
 
 _BG_CONTINUE_PREFIX = "[auto-continue]"
+# spec-089 §2: soft cap on the completion-wake prompt's total size. _build_prompt (inside
+# _completion_wake_fire) degrades in stages when over cap: drop tail lines, then summaries,
+# then hard-truncate as a last resort — never raise, never grow unbounded (8 records × a
+# full tail/summary/journal block per record could otherwise run well past this).
+_WAKE_PROMPT_BYTE_CAP = int(os.getenv("WAKE_PROMPT_BYTE_CAP", str(6 * 1024)))
 
 
 def _bg_continue_reset(session_key: str) -> None:
@@ -12375,11 +12473,48 @@ def _schedule_completion_wake(session_key: str, rec: dict) -> None:
         print(f"[auto-continue] wake schedule error for {session_key}: {exc!r}")
 
 
+def _completion_wake_records_block(recs: "list[dict]", cwd: "str | None",
+                                    include_tails: bool = True,
+                                    include_summaries: bool = True) -> str:
+    """Render the per-record detail block of the completion-wake prompt (cap 8 records):
+    one "- "<label>" → <status>" line, then optional output/summary/tail-lines/journal
+    lines. spec-089 §2: this is what turns the model's first move after a wake from a
+    journal grep into a targeted Read (or nothing). Never raises — a per-record failure is
+    skipped rather than aborting the whole block."""
+    lines: "list[str]" = []
+    for r in recs[:8]:
+        try:
+            label = str(r.get("label") or r.get("id") or "?")[:80]
+            lines.append(f'- "{label}" → {r.get("status")}')
+            output_file = r.get("output_file")
+            if output_file:
+                lines.append(f"  output: {output_file}")
+            if include_summaries and r.get("summary"):
+                lines.append(f"  summary: {str(r['summary'])[:300]}")
+            if include_tails and output_file:
+                tail = _file_tail_lines(output_file)
+                if tail:
+                    lines.append("  last lines:")
+                    lines.extend(f"    {t}" for t in tail)
+            if r.get("kind") == "workflow":
+                journal = _workflow_journal_summary(cwd, r)
+                if journal:
+                    lines.append(f"  journal: {journal}")
+        except Exception:
+            continue
+    return "\n".join(lines)
+
+
 async def _completion_wake_fire(ctx: dict, session_key: str) -> None:
     """After the debounce window: if the session is idle, enqueue ONE continuation turn that
     names the finished children, using the operator's last per-turn options so the synthetic
     turn matches the live-client fingerprint (a mismatch used to evict+SIGTERM the remaining
     children mid-flight).
+
+    spec-089 §2: the prompt carries each record's output_file path, summary, a bounded tail
+    of the output file's last lines, and (for a Workflow row) the run's journal counts — see
+    _completion_wake_records_block — so the model's first move is a targeted Read instead of
+    a journal grep.
 
     A turn already in flight DEFERS the wake instead of dropping it — see the long comment on
     the busy branch below."""
@@ -12442,29 +12577,50 @@ async def _completion_wake_fire(ctx: dict, session_key: str) -> None:
         # Don't stack: skip when a continuation is already queued for this session.
         if any((it.get("text") or "").startswith(_BG_CONTINUE_PREFIX) for it in _chat_queue_get(session_key)):
             return
-        prompt = (
-            f"{_BG_CONTINUE_PREFIX} Background task(s) just finished: {labels}. "
-            "Collect their results now (TaskOutput / the run's transcripts / files they wrote) "
-            "and continue the work. If other background tasks are still running, say so in one "
-            "line and stop."
-        )
-        # Root-fix B1: a crash-recovery flip is a transcript-derived verdict, not a live
-        # completion — the model must verify, not confidently report second-hand state.
-        if any(r.get("crash_recovery") for r in recs):
-            prompt += (
-                " NOTE: the service restarted while these task(s) were running — the statuses "
-                "above come from post-restart transcript reconciliation, NOT from a live "
-                "completion. Verify what actually finished (transcripts, files on disk, git "
-                "log) before reporting, and relaunch whatever died mid-work."
-            )
         project_id = None
+        project_cwd = None
         try:
             for proj in _collect_projects(ctx):
                 if (proj.get("session_key") or proj.get("tg_thread", "")) == session_key:
                     project_id = proj.get("id")
+                    project_cwd = proj.get("cwd")
                     break
         except Exception:
             pass  # best-effort — enqueue falls back to the legacy flat-session path
+        # spec-089 §2: the prompt used to name only the labels, forcing the orchestrator to
+        # spend 3-5 Bash calls grepping journal.jsonl / agent-*.jsonl to find out WHAT
+        # finished. Now it carries the paths and a tail straight off the monitor records, so
+        # the model's first tool call is a targeted Read (or nothing) instead of a journal
+        # grep. Bounded to _WAKE_PROMPT_BYTE_CAP: tails are dropped first, then summaries.
+        def _build_prompt(include_tails: bool, include_summaries: bool) -> str:
+            block = _completion_wake_records_block(recs, project_cwd, include_tails, include_summaries)
+            text = (
+                f"{_BG_CONTINUE_PREFIX} Background task(s) just finished:\n"
+                f"{block}\n\n"
+                "The paths above are authoritative — Read an output file only when you need "
+                "more detail than the summary/tail already gives you. Collect their results "
+                "now and continue the work. If other background tasks are still running, say "
+                "so in one line and stop."
+            )
+            # Root-fix B1: a crash-recovery flip is a transcript-derived verdict, not a live
+            # completion — the model must verify, not confidently report second-hand state.
+            if any(r.get("crash_recovery") for r in recs):
+                text += (
+                    " NOTE: the service restarted while these task(s) were running — the "
+                    "statuses above come from post-restart transcript reconciliation, NOT "
+                    "from a live completion. Verify what actually finished (transcripts, "
+                    "files on disk, git log) before reporting, and relaunch whatever died "
+                    "mid-work."
+                )
+            return text
+
+        prompt = _build_prompt(include_tails=True, include_summaries=True)
+        if len(prompt.encode("utf-8")) > _WAKE_PROMPT_BYTE_CAP:
+            prompt = _build_prompt(include_tails=False, include_summaries=True)
+        if len(prompt.encode("utf-8")) > _WAKE_PROMPT_BYTE_CAP:
+            prompt = _build_prompt(include_tails=False, include_summaries=False)
+        if len(prompt.encode("utf-8")) > _WAKE_PROMPT_BYTE_CAP:
+            prompt = prompt.encode("utf-8")[:_WAKE_PROMPT_BYTE_CAP].decode("utf-8", "ignore")
         # spec-071: the synthetic turn REUSES the operator's last effort/ultracode on purpose —
         # a different effort would mismatch the live-client fingerprint (engine.py:_compute_fingerprint
         # includes effort), evicting + rebuilding the persistent client (full floor re-paid) and
