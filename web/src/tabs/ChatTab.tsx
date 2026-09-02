@@ -1267,8 +1267,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // Two-tier cost-management thresholds (delivered by the backend; defaults match webapp.py).
   // CONTEXT_WARN_YELLOW = 300K (yellow banner), CONTEXT_WARN_RED = 500K (red banner).
   // These are ABSOLUTE cost values, NOT fractions of the 1M window.
-  const CONTEXT_WARN_YELLOW_DEFAULT = 300_000
-  const CONTEXT_WARN_RED_DEFAULT    = 500_000
+  // Mirrors webapp.py CONTEXT_WARN_YELLOW / CONTEXT_WARN_RED (1M-window era: 500K / 700K).
+  const CONTEXT_WARN_YELLOW_DEFAULT = 500_000
+  const CONTEXT_WARN_RED_DEFAULT    = 700_000
   const [contextWarnAt, setContextWarnAt] = useState<number>(CONTEXT_WARN_YELLOW_DEFAULT)
   const [contextWarnRed, setContextWarnRed] = useState<number>(CONTEXT_WARN_RED_DEFAULT)
   // Rotate threshold (280K auto-rotate, opt-in) — tracked for the setter; not shown directly.

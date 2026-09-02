@@ -109,19 +109,23 @@ CONTEXT_WINDOW = int(os.environ.get("CONTEXT_WINDOW", "1000000"))
 # ~138K (median), but unreset ones balloon (measured: one hit 490K over 526 turns).  The old
 # defaults (85%/95% of the 1M window = 850K/950K) never fired in the real pain-zone, so they were
 # effectively dead.  Two-tier warning in the real cost zone:
-#   CONTEXT_WARN_YELLOW — yellow "getting expensive" banner.  Default 300K.
-#   CONTEXT_WARN_RED    — red "critical / reset now" banner.  Default 500K.
+#   CONTEXT_WARN_YELLOW — yellow "getting expensive" banner.  Default 500K.
+#   CONTEXT_WARN_RED    — red "critical / reset now" banner.  Default 700K.
 #   CONTEXT_WARN_AT     — alias for CONTEXT_WARN_YELLOW (used by the banner; env-tunable).
-#   CONTEXT_ROTATE_AT   — auto-rotate-with-handoff trigger (caps the tail). Default 280K.
+#   CONTEXT_ROTATE_AT   — auto-rotate-with-handoff trigger (caps the tail). Default 750K,
+#                         i.e. AFTER red — rotation is opt-in per chat and must not pre-empt
+#                         the badges (it sat at 280K, below yellow, and hid them).
 # Both env-tunable — watch data/usage_ledger.jsonl and tune to where YOUR tail actually hurts.
-CONTEXT_WARN_YELLOW = int(os.environ.get("CONTEXT_WARN_YELLOW", "300000"))
+# spec-088 (operator decision 2026-09-01): 300K/500K → 500K/700K. Price of the top end: a turn
+# at 700K re-reads 700K tokens — ~$0.70 cache-read on Fable, ~$7 cold after the 1h cache TTL.
+CONTEXT_WARN_YELLOW = int(os.environ.get("CONTEXT_WARN_YELLOW", "500000"))
 # spec-086: mid-turn steering — inject an operator message into the RUNNING turn's CLI stdin
 # (terminal Claude Code behaviour) instead of parking it in the chat queue until the turn ends.
 STEER_MID_TURN = int(os.environ.get("STEER_MID_TURN", "1"))
-CONTEXT_WARN_RED    = int(os.environ.get("CONTEXT_WARN_RED",    "500000"))
+CONTEXT_WARN_RED    = int(os.environ.get("CONTEXT_WARN_RED",    "700000"))
 # CONTEXT_WARN_AT: canonical alias — the backend uses this one name throughout.
 CONTEXT_WARN_AT = int(os.environ.get("CONTEXT_WARN_AT", str(CONTEXT_WARN_YELLOW)))
-CONTEXT_ROTATE_AT = int(os.environ.get("CONTEXT_ROTATE_AT", "280000"))
+CONTEXT_ROTATE_AT = int(os.environ.get("CONTEXT_ROTATE_AT", "750000"))
 # CONTEXT_ROTATION: master switch for auto-rotation (revived; spec-039 had removed the trigger,
 # spec-042 shipped the handoff producer this reuses). Default ON. Set CONTEXT_ROTATION=0 to disable.
 CONTEXT_ROTATION = os.environ.get("CONTEXT_ROTATION", "1") == "1"
