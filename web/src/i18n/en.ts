@@ -755,6 +755,18 @@ export const en = {
   // Scroll-to-bottom pill (shown when user has scrolled up while messages arrive)
   'chat.scroll_to_bottom': '↓ New messages',
 
+  // ── Spec-089 §5: urgent send — local CLI commands (/goal, /clear, ...) need a turn
+  // boundary, which a Stop-hook loop never yields on its own. Banner above the composer
+  // offers interrupt-and-send instead of waiting behind the turn.
+  'chat.urgent_needs_idle': '{cmd} needs an idle CLI — Stop & send',
+  'chat.urgent_stop_send_btn': 'Stop & send',
+  'chat.urgent_dismiss_aria': 'Dismiss',
+  // 🎯 goal chip — client-side only (the native /goal lives in the CLI's own session
+  // memory; the server has no way to read or clear it, see spec-089 §5 research note).
+  'chat.goal_chip_aria': 'Goal: {text}',
+  'chat.goal_clear_aria': 'Clear goal',
+  'chat.goal_clear_tip': 'Clear goal',
+
   // ── Spec-065: Extensions panel ────────────────────────────────────────────────
   'extensions.section_title': '🧩 Extensions',
   'extensions.section_hint': 'Enable or disable optional modules. Changes take effect immediately.',

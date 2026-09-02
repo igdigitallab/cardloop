@@ -33,6 +33,7 @@ import { MODELS, modelLabel } from '../lib/models'
 import { playChime } from '../lib/chime'
 import { t } from '../i18n'
 import { setAppBusy } from '../lib/appBusy'
+import { isLocalCliCommand } from '../localCommands'
 import { Modal, ModalHead } from '../components/Modal'
 import { Paperclip, ClipboardList, Wrench, Clock, Square, Pencil, Trash2, File, Image, Flame, Snowflake, Plus } from 'lucide-react'
 
@@ -233,6 +234,37 @@ function askModeStorageKey(projectId: string, chatId?: string) {
 function draftStorageKey(projectId: string, chatId?: string) {
   // Per-chat draft key; falls back to per-project when chatId is not yet known.
   return chatId ? `cops.chat.draft.${projectId}:${chatId}` : `cops.chat.draft.${projectId}`
+}
+
+function goalStorageKey(projectId: string, chatId?: string) {
+  // spec-089 §5: per-chat 🎯 goal chip. Client-side approximation on purpose: the CLI DOES
+  // write a durable, server-readable record (a `type:"attachment"` message with
+  // `attachment.type==="goal_status"` appended to the session transcript, and read back via
+  // the same mechanism the CLI itself uses to restore an active goal on session resume — see
+  // the bundled CLI's `Zfr`/`WJt`/`iAe`/`sAe` — spec-076's server-side overlay was removed
+  // 2026-07-22, and no such attachment existed in the transcripts probed 2026-09-01, only
+  // because `/goal` had not actually been used in that window, not because the mechanism is
+  // unreachable), but wiring a transcript scan (locate the right session's JSONL, walk
+  // messages for the latest unresolved goal_status attachment, mirror the CLI's own
+  // met/failed semantics) is real new surface — left as a follow-up. This localStorage
+  // record is the client's own memory of the operator's last `/goal <text>` send, nothing
+  // more. Mirrors ultracodeStorageKey's per-chat/per-project fallback pattern.
+  return chatId ? `cops.chat.goal.${projectId}:${chatId}` : `cops.chat.goal.${projectId}`
+}
+
+// spec-089 §5: the bundled CLI treats all of these as "clear the goal" (see the `/goal`
+// command's own `k = new Set([...])` / `oAe()` check) — not just the literal word "clear".
+// Matching it exactly here keeps the chip in sync with what the CLI itself will do.
+const GOAL_CLEAR_WORDS = new Set(['clear', 'stop', 'off', 'reset', 'none', 'cancel'])
+
+/** spec-089 §5: classify a `/goal ...` send for the goal-chip side effect. Bare "/goal" with
+ * no argument is a CLI query (shows the current goal) — no side effect, returns null. */
+function parseGoalCommand(raw: string): { kind: 'set'; text: string } | { kind: 'clear' } | null {
+  const m = /^\/goal(?:\s+([\s\S]*))?$/i.exec(raw.trim())
+  if (!m) return null
+  const rest = (m[1] ?? '').trim()
+  if (!rest) return null
+  return GOAL_CLEAR_WORDS.has(rest.toLowerCase()) ? { kind: 'clear' } : { kind: 'set', text: rest }
 }
 
 /** Rough token estimate: ~4 characters per token (common heuristic for English/Russian). */
@@ -1332,6 +1364,18 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     } catch { /* localStorage unavailable */ }
     return false
   })
+  // spec-089 §5: 🎯 goal chip — client-side memory of the operator's last /goal <text> send
+  // (see goalStorageKey's doc comment for why this can't be server-driven).
+  const [goalText, setGoalText] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(goalStorageKey(projectId, effectiveChatId || undefined))
+    } catch { /* localStorage unavailable */ }
+    return null
+  })
+  // spec-089 §5: which exact composer text the "needs idle CLI" banner was dismissed for.
+  // Self-resetting: any edit to the composer (or the turn going idle, which drops the
+  // banner's own display condition) makes it reappear on its own — no cleanup effect needed.
+  const [urgentDismissedText, setUrgentDismissedText] = useState<string | null>(null)
   const [run, setRun] = useState<RunIndicator | null>(null)
   // Spec-035: server-authoritative turn start timestamp (epoch ms).
   // Set from /live started_at; null when not available (falls back to run.startedAt).
@@ -1560,6 +1604,32 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const handleAskModeChange = useCallback((v: boolean) => {
     setAskMode(v)
     try { localStorage.setItem(askModeStorageKey(projectId, effectiveChatId || undefined), v ? '1' : '0') } catch { /* ignore */ }
+  }, [projectId, effectiveChatId])
+
+  // spec-089 §5: re-load the goal chip from localStorage on project/chat switch (per-chat key)
+  useEffect(() => {
+    try {
+      setGoalText(localStorage.getItem(goalStorageKey(projectId, effectiveChatId || undefined)))
+      return
+    } catch { /* localStorage unavailable */ }
+    setGoalText(null)
+  }, [projectId, effectiveChatId])
+
+  // spec-089 §5: apply the 🎯 goal chip side effect for a just-sent message, if it parses as
+  // `/goal <text>` or `/goal clear`. Called regardless of which lane the send actually took
+  // (direct /chat, steer, or urgent) — the chip tracks operator intent, not delivery.
+  const applyGoalCommand = useCallback((sentText: string) => {
+    const parsed = parseGoalCommand(sentText)
+    if (!parsed) return
+    const key = goalStorageKey(projectId, effectiveChatId || undefined)
+    if (parsed.kind === 'clear') {
+      try { localStorage.removeItem(key) } catch { /* ignore */ }
+      setGoalText(null)
+    } else {
+      const stored = parsed.text.slice(0, 200) // cap stored length; the chip itself truncates to 60 for display
+      try { localStorage.setItem(key, stored) } catch { /* ignore */ }
+      setGoalText(stored)
+    }
   }, [projectId, effectiveChatId])
 
   // spec-080: persist planMode toggle (per-chat key)
@@ -2685,6 +2755,20 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     const effectiveText = text || (readyFiles.length > 0 ? t['chat.look_at_files'] : '')
     if (!effectiveText) return
 
+    // spec-089 §5: a local CLI command (/goal, /clear, /compact, /model, /effort, /mcp) only
+    // takes effect at a turn boundary — steer-injection weaves it into the CLI's OWN turn
+    // (not a boundary), and the ordinary queue waits behind the current turn. Block the send
+    // here rather than let it fall into either; the "needs idle CLI" banner rendered near the
+    // composer offers the urgent interrupt-and-send action (sendUrgent) instead. The composer
+    // text is left untouched — the operator can still edit, dismiss, or wait it out.
+    if ((streaming || run != null) && overrideText === undefined && isLocalCliCommand(text)) {
+      return
+    }
+
+    // spec-089 §5: 🎯 goal chip. Applied only once the send actually proceeds (past the
+    // urgent-send gate above) — sendUrgent applies the same side effect for its own lane.
+    applyGoalCommand(text)
+
     // Card f3e7fb: enqueue ONLY while THIS client is actively streaming a direct /chat
     // turn (reliable local truth). Do NOT gate on busActiveRef — it goes stale (missed
     // run_end on a dropped SSE / a card run that ended / an orientation remount), and a
@@ -3070,7 +3154,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         }
       }
     }
-  }, [input, projectId, streaming, rotating, onProjectsReload, attachments, thinkMode, ultracode, planMode, askMode, autoRotate, effectiveChatId, activeProvider, composerReady]) // eslint-disable-line react-hooks/exhaustive-deps -- queue/hydration callbacks use live refs
+  }, [input, projectId, streaming, rotating, run, onProjectsReload, attachments, thinkMode, ultracode, planMode, askMode, autoRotate, effectiveChatId, activeProvider, composerReady, applyGoalCommand]) // eslint-disable-line react-hooks/exhaustive-deps -- queue/hydration callbacks use live refs
 
   // ── Inline "/" skill palette (derived state; the skill list is tiny, so recompute per render) ──
   // Open only while the whole input is a single leading-slash token ("/", "/lo", "/loop") — a space
@@ -3179,13 +3263,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     }
   }, [project.model, projectId, onProjectsReload])
 
-  async function stopStream() {
-    try {
-      await api.stopChat(projectId)
-    } catch {
-      // non-critical
-    }
-    abortRef.current?.abort()
+  // spec-089 §5: local run-state teardown shared by stopStream (full Stop) and sendUrgent
+  // (interrupt + head-of-queue) — everything EXCEPT the server-side queue clear, which stays
+  // stopStream-only: an urgent send must preserve whatever else is already queued, only
+  // cutting in ahead of it, not wipe it out.
+  const resetLocalRunState = useCallback(() => {
     // Tear the run state down HERE instead of leaning on sendMessage's finally: that finally
     // only exists while this tab still owns the SSE stream. Once the stream drops (the server
     // logs "client disconnected, task continues in background") the turn is adopted by the
@@ -3207,12 +3289,60 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // optimistically so the composer never shows a stale approval over an idle chat.
     setPlanPrompt(null)
     setPlanRejecting(false)
+  }, [])
+
+  async function stopStream() {
+    try {
+      await api.stopChat(projectId)
+    } catch {
+      // non-critical
+    }
+    abortRef.current?.abort()
+    resetLocalRunState()
     // Clear server-side queue entries (fire-and-forget per item)
     setQueueItems(prev => {
       prev.forEach(item => api.chatQueueDelete(projectId, item.id).catch(() => {}))
       return []
     })
     setQueueEditId(null)
+  }
+
+  // spec-089 §5: interrupt-and-send for a local CLI command (/goal, /clear, /compact, /model,
+  // /effort, /mcp) typed while a turn is active. These only take effect at a turn boundary —
+  // steer-injection weaves into the CLI's own turn, not a boundary, and the ordinary queue
+  // waits behind the current turn AND everything already queued — so a Stop-hook loop (/goal)
+  // can leave the command sitting for as long as the loop runs. This interrupts the running
+  // turn (server-side: same effect as Stop) and enqueues at the HEAD of the queue instead,
+  // preserving whatever else was already queued behind it.
+  async function sendUrgent(cmdText: string) {
+    const text = cmdText.trim()
+    if (!text || !isLocalCliCommand(text)) return
+    const readyFiles = attachments.filter(a => a.path)
+    const filePaths = readyFiles.map(a => `attached file: ${a.path}`)
+    const fullText = filePaths.length > 0 ? `${text}\n\n${filePaths.join('\n')}` : text
+    const msgId = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    setInput('')
+    setAttachments([])
+    setUrgentDismissedText(null)
+    applyGoalCommand(text)
+    abortRef.current?.abort()
+    resetLocalRunState()
+    try {
+      const res = await api.chatSteer(projectId, fullText, effectiveChatId || undefined, msgId, true)
+      const item = res.item
+      if (item) setQueueItems(prev => [...prev, item])
+      // Mirror the ordinary steer-fallback bubble (see sendMessage's `!res.steered && res.item`
+      // branch): render it as queued, not as a normal sent message — it is genuinely sitting
+      // at the head of the queue, not running yet.
+      setMessages(prev => {
+        const fin = finalizeStreaming(prev)
+        const last = fin[fin.length - 1]
+        if (last && last.role === 'user' && last.text === fullText) return fin
+        return [...fin, { ...makeUserMsg(fullText), queued: true }]
+      })
+    } catch {
+      setError(t['chat.send_failed'])
+    }
   }
 
   // Shared reset handler — called after the unified confirm modal resolves.
@@ -4160,6 +4290,37 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           </div>
         )}
         {dragOver && <div className="chat-drop-hint">📎 Drop files here</div>}
+        {/* spec-089 §5: 🎯 goal chip — client-side memory of the operator's last /goal <text>
+            send (see goalStorageKey's doc comment for why this can't be server-driven).
+            Rendered near the run indicator so the current goal stays visible while working;
+            the clear action reuses the same send lanes as typing "/goal clear" by hand. */}
+        {goalText && (
+          <div className="chat-status-bar" style={{ margin: '0 0 4px 0', justifyContent: 'space-between' }}>
+            <span
+              style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              title={t['chat.goal_chip_aria'].replace('{text}', goalText)}
+            >
+              🎯 {goalText.length > 60 ? `${goalText.slice(0, 60)}…` : goalText}
+            </span>
+            <button
+              style={{
+                fontSize: 13, padding: '0 4px', cursor: 'pointer',
+                background: 'transparent', border: 'none',
+                color: 'var(--text2)', lineHeight: 1, flexShrink: 0,
+              }}
+              title={t['chat.goal_clear_tip']}
+              aria-label={t['chat.goal_clear_aria']}
+              onClick={() => {
+                // Same "needs an idle CLI" reasoning as any other local CLI command: while a
+                // turn is active this must go through the urgent lane, not a plain send.
+                if (streaming || run != null) sendUrgent('/goal clear')
+                else sendMessage('/goal clear')
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {/* Compact run status bar (owns its own tick so the message list doesn't re-render
             every second). Sub-agents fold into its expandable disclosure; Stop is in the composer. */}
         {run && (
@@ -4552,6 +4713,56 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             ))}
           </div>
         )}
+        {/* spec-089 §5: local CLI commands (/goal, /clear, /compact, /model, /effort, /mcp)
+            only take effect at a turn boundary — a Stop-hook loop (/goal) never yields one
+            on its own. Offer interrupt-and-send instead of silently blocking the composer.
+            Same visual family as the context-warning banner above (inline styles, yellow
+            accent, dismiss ✕). Self-resetting: any edit to the composer, or the turn going
+            idle, makes the banner reappear/disappear on its own. */}
+        {(streaming || run != null) && isLocalCliCommand(input) && input.trim() !== urgentDismissedText && (() => {
+          const trimmed = input.trim()
+          const preview = trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed
+          return (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '6px 10px',
+              background: 'rgba(234,179,8,0.08)',
+              border: '1px solid var(--yellow)',
+              borderRadius: 6,
+              fontSize: 12,
+              color: 'var(--yellow)',
+              margin: '4px 0',
+              flexShrink: 0,
+            }}>
+              <span style={{ flex: 1, lineHeight: 1.4 }}>
+                {t['chat.urgent_needs_idle'].replace('{cmd}', `\`${preview}\``)}
+              </span>
+              <button
+                style={{
+                  fontSize: 11, padding: '2px 7px', cursor: 'pointer',
+                  background: 'transparent', border: '1px solid var(--yellow)',
+                  borderRadius: 4, color: 'var(--yellow)', fontWeight: 600, whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                }}
+                onClick={() => sendUrgent(input)}
+              >
+                {t['chat.urgent_stop_send_btn']}
+              </button>
+              <button
+                style={{
+                  fontSize: 13, padding: '0 4px', cursor: 'pointer',
+                  background: 'transparent', border: 'none',
+                  color: 'var(--yellow)', lineHeight: 1, flexShrink: 0,
+                }}
+                title={t['chat.urgent_dismiss_aria']}
+                aria-label={t['chat.urgent_dismiss_aria']}
+                onClick={() => setUrgentDismissedText(trimmed)}
+              >
+                ✕
+              </button>
+            </div>
+          )
+        })()}
         {/* Unified composer box: textarea on top, slim bottom bar with icons-left + Send-right */}
         <div className="chat-composer">
           <textarea
