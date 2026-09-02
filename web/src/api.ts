@@ -412,6 +412,12 @@ export const api = {
       method: 'POST',
     }),
 
+  // spec-089 §1: stop every running Workflow/sub-agent (monitors panel button)
+  stopAgents: (id: string) =>
+    apiFetch<{ ok: boolean; stopped: string[]; via: string }>(`/api/projects/${id}/agents/stop`, {
+      method: 'POST',
+    }),
+
   // ops:b2a081 — mark project as seen (clears attention badge on background tabs)
   projectSeen: (id: string) =>
     apiFetch<{ ok: boolean; awaiting: boolean }>(`/api/projects/${id}/seen`, {

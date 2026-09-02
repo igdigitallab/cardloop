@@ -4180,7 +4180,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           </div>
         )}
         {/* Card b6f5cc: background-task monitors (shells / Monitor / Workflow tasks). */}
-        <MonitorsPanel monitors={monitors} onDismiss={dismissMonitor} />
+        <MonitorsPanel monitors={monitors} onDismiss={dismissMonitor} projectId={projectId} />
         {showPrompts && (
           <PromptPicker
             onSelect={handlePromptSelect}

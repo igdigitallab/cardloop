@@ -699,7 +699,7 @@ export interface Monitor {
   id: string
   kind: 'bash' | 'monitor' | 'workflow' | 'task' | string
   label: string
-  status: 'running' | 'stopped' | 'done' | 'failed' | string
+  status: 'running' | 'stopping' | 'stopped' | 'done' | 'failed' | string
   started: number
   ts: number
   tail?: string
