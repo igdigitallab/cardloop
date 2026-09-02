@@ -705,6 +705,10 @@ export interface Monitor {
   tail?: string
   agent?: string | null
   persistent?: boolean
+  /** spec-089 §2: the SDK's own result pointers, carried through from the terminal
+   *  TaskNotification/TaskUpdated so the completion-wake prompt can cite them directly. */
+  output_file?: string
+  summary?: string
   /** Set on a bus event when the monitor was dismissed/cleared — drop it from the list. */
   removed?: boolean
 }

@@ -52,8 +52,9 @@ def _result(session_id="sid"):
 # ─────────────────────────── _notification_monitor_delta ────────────────────────────────────────
 
 def test_delta_from_notification_completed():
+    # spec-089 §2: a non-empty summary on the notification now rides along in the delta.
     d = engine._notification_monitor_delta(_notification("t1", "completed", tool_use_id="tu"))
-    assert d == {"id": "t1", "tool_use_id": "tu", "status": "done"}
+    assert d == {"id": "t1", "tool_use_id": "tu", "status": "done", "summary": "done"}
 
 
 def test_delta_from_notification_killed_maps_to_stopped():
@@ -110,7 +111,8 @@ async def test_drain_flips_monitors_and_surfaces_autonomous_turn(monkeypatch):
     await engine._stop_drain(entry)
     assert entry.drain_task is None
 
-    assert ("s", {"id": "a1", "tool_use_id": None, "status": "done"}) in flips
+    # spec-089 §2: the fixture's placeholder summary="done" now rides along in the delta.
+    assert ("s", {"id": "a1", "tool_use_id": None, "status": "done", "summary": "done"}) in flips
     assert ("s", {"id": "w1", "tool_use_id": None, "status": "stopped"}) in flips
     # spec-063 Stage 2a: autonomous turn = first-class background run; sub-agent noise excluded.
     assert bg_events == [("s", "start", None), ("s", "text", "background reply"), ("s", "end", None)]

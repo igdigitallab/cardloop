@@ -133,6 +133,14 @@ Projects are registered in `data/registry.json` (gitignored) or auto-scanned fro
   crash-recovery flips). A model-issued `TaskStop` used to wake the orchestrator ~6 min later
   with "background task finished → stopped", and that phantom turn re-entered a `/goal`
   Stop-hook loop (9 more blocked stops).
+- **spec-089 §2: the completion wake carries results, not just labels.** The wake prompt
+  used to name only "<label> → <status>", so the orchestrator spent 3-5 Bash calls grepping
+  `journal.jsonl` / `agent-*.jsonl` to find out what actually finished. Now the SDK's own
+  `output_file`/`summary` ride the monitor record from `_notification_monitor_delta` through
+  `_monitor_update` into the prompt, plus a bounded tail of the output file and (for a
+  Workflow row) the run's journal counts (`_workflow_journal_summary`, best-effort match on
+  the row id vs. the `wf_<runId>` directory name, else newest-mtime fallback). Prompt capped
+  at `WAKE_PROMPT_BYTE_CAP` (default 6 KB) — degrades by dropping tails, then summaries.
 - **`/api/health?deep=1` reports `bg_turns`.** A CLI-autonomous turn (task-notification wake
   surfaced by the drain) is not in `ctx["running"]`; `restart-self.sh` waits for `bg_turns`
   too and needs 2 consecutive idle polls — one sample sat inside the ~3 s TaskStop→relaunch
