@@ -699,7 +699,10 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
             rec = {"id": mid, "kind": delta.get("kind", "task"), "label": delta.get("label", ""),
                    "status": "running", "started": now, "tail": "", "agent": None}
             bucket[mid] = rec
-        _was_running = rec.get("status") == "running"
+        # spec-089 §1: 'stopping' is a live state too — a running→stopping flip must NOT wake
+        # (the operator just asked for this), and it must not fall out of the "was alive"
+        # bookkeeping other liveness checks below rely on being consistent with.
+        _was_running = rec.get("status") in ("running", "stopping")
         # Merge known fields (delta may be partial — e.g. a tail/status-only update).
         # crash_recovery marks a flip derived from post-restart reconciliation (root-fix B1)
         # so the completion-wake prompt can say "verify, the service died mid-run".
@@ -721,10 +724,12 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
             _status == "stopped" and bool(rec.get("crash_recovery") or rec.get("stale")))
         if _was_running and _terminal_wake and rec.get("kind") != "bash":
             _schedule_completion_wake(session_key, dict(rec))
-        # Trim: keep all running + most recent terminal entries.
+        # Trim: keep all running/stopping + most recent terminal entries. spec-089 §1: a
+        # 'stopping' row is mid-flight, not terminal — trimming it early would drop the row
+        # the operator just asked to stop before the follow-up ever resolves it.
         if len(bucket) > _MONITORS_MAX:
             terminal = sorted(
-                (r for r in bucket.values() if r.get("status") != "running"),
+                (r for r in bucket.values() if r.get("status") not in ("running", "stopping")),
                 key=lambda r: r.get("ts", 0))
             for r in terminal[: len(bucket) - _MONITORS_MAX]:
                 bucket.pop(r["id"], None)
@@ -866,13 +871,17 @@ def _has_live_agent_monitors(session_key: str) -> bool:
     spec-071: counts workflow/monitor kinds too — the agent-only guard let a TTL eviction
     SIGTERM a live Workflow mid-run (ig-digital-lab seo-research, 2026-07-05 00:09: 6/10
     agents finished, 2/9 reports written, the rest died). Zombie pins are bounded by the
-    sweeper's staleness flips and engine.LIVE_CLIENT_MAX_PIN_SEC. Pure — never raises."""
+    sweeper's staleness flips and engine.LIVE_CLIENT_MAX_PIN_SEC. Pure — never raises.
+
+    spec-089 §1: 'stopping' counts as still-working too — the child hasn't actually died
+    yet (only asked to), so evicting/rotating out from under it now would turn a graceful
+    TaskStop into the same SIGTERM this guard exists to prevent."""
     try:
         bucket = _monitors.get(session_key)
         if not bucket:
             return False
         return any(r.get("kind") in ("agent", "workflow", "monitor")
-                   and r.get("status") == "running"
+                   and r.get("status") in ("running", "stopping")
                    for r in bucket.values())
     except Exception:
         return False
@@ -896,15 +905,17 @@ def _running_stream_agents(session_key: str) -> dict:
 
 
 def _live_agent_monitor_count() -> int:
-    """Any-session count of 'running' agent/workflow/monitor monitors — the deploy-gap
-    counterpart to _has_live_agent_monitors (per-session). Exposed via /api/health?deep=1
-    so restart-self.sh can wait for background children too, not just in-flight turns.
-    Never raises."""
+    """Any-session count of 'running'/'stopping' agent/workflow/monitor monitors — the
+    deploy-gap counterpart to _has_live_agent_monitors (per-session). Exposed via
+    /api/health?deep=1 so restart-self.sh can wait for background children too, not just
+    in-flight turns. spec-089 §1: same 'stopping is still alive' reasoning as the sibling
+    check. Never raises."""
     try:
         return sum(
             1 for bucket in _monitors.values()
             for r in bucket.values()
-            if r.get("kind") in ("agent", "workflow", "monitor") and r.get("status") == "running"
+            if r.get("kind") in ("agent", "workflow", "monitor")
+            and r.get("status") in ("running", "stopping")
         )
     except Exception:
         return 0
@@ -1013,7 +1024,10 @@ def _monitors_reconcile_on_boot(ctx: dict) -> None:
                 continue
             _monitors.setdefault(sk, {}).update(
                 {mid: dict(rec) for mid, rec in bucket.items() if isinstance(rec, dict)})
-            running = [r for r in _monitors[sk].values() if r.get("status") == "running"]
+            # spec-089 §1: a 'stopping' row died with the process too — the 60s follow-up
+            # that would have resolved it is an asyncio task, gone with everything else in
+            # RAM. Left unhandled it would leak as 'stopping' forever after a restart.
+            running = [r for r in _monitors[sk].values() if r.get("status") in ("running", "stopping")]
             if not running:
                 continue
             # Resolve the project once for transcript-based reconciliation.
@@ -1044,7 +1058,7 @@ def _monitors_reconcile_on_boot(ctx: dict) -> None:
                             # to disk before the crash.
                             _reconcile_agent_monitor_from_parent(sk, matches[0])
                     cur = _monitors.get(sk, {}).get(mid) or rec
-                    if cur.get("status") == "running":
+                    if cur.get("status") in ("running", "stopping"):
                         _monitor_update(sk, {
                             "id": mid, "status": "failed",
                             "tail": "(service restarted while this task was running — no "
@@ -1554,7 +1568,11 @@ def _sweep_stale_monitors(_now: float) -> None:
                 _is_stream_agent = rec.get("kind") == "agent" and bool(rec.get("stream"))
                 if not (rec.get("kind") in ("workflow", "monitor") or _is_stream_agent):
                     continue
-                if rec.get("status") != "running":
+                # spec-089 §1: 'stopping' is alive too — this is only a safety net (the 60s
+                # follow-up normally resolves a stop long before this threshold), but a row
+                # whose follow-up task somehow never ran must still not leak as 'stopping'
+                # forever.
+                if rec.get("status") not in ("running", "stopping"):
                     continue
                 _stale_after = _MONITOR_STALE_SEC if _is_stream_agent else _MONITOR_STALE_WF_SEC
                 _silent = _now - (rec.get("ts") or rec.get("started") or _now)
@@ -1576,11 +1594,14 @@ async def _agent_activity_sweep_loop(ctx: dict) -> None:
     await asyncio.sleep(5)  # let the service settle before the first tick
     while True:
         try:
-            # Snapshot: {session_key: [list of running agent monitor records]}
+            # Snapshot: {session_key: [list of running/stopping agent monitor records]}.
+            # spec-089 §1: a session whose agents are ALL 'stopping' must still get the
+            # per-session _reconcile_monitors_from_transcript call below — it is how a real
+            # completion that landed before the stop did gets caught (stopping -> done).
             sessions_with_agents: dict[str, list[dict]] = {}
             for sk, bucket in list(_monitors.items()):
                 recs = [r for r in bucket.values()
-                        if r.get("kind") == "agent" and r.get("status") == "running"]
+                        if r.get("kind") == "agent" and r.get("status") in ("running", "stopping")]
                 if recs:
                     sessions_with_agents[sk] = recs
 
@@ -7621,7 +7642,8 @@ async def api_project_monitors(req: web.Request) -> web.Response:
     # spec-069 P3 (RC#3): reconcile before snapshot so a cold (re)load shows the correct status.
     _reconcile_monitors_from_transcript(ctx, session_key, project["id"])
     mons = list(_monitors.get(session_key, {}).values())
-    mons.sort(key=lambda r: (r.get("status") != "running", -r.get("ts", 0)))
+    # spec-089 §1: 'stopping' sorts alongside 'running' — both are still active work.
+    mons.sort(key=lambda r: (r.get("status") not in ("running", "stopping"), -r.get("ts", 0)))
     return web.json_response({"monitors": mons})
 
 
@@ -7637,6 +7659,89 @@ async def api_project_monitor_dismiss(req: web.Request) -> web.Response:
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
     removed = _monitor_dismiss(session_key, req.match_info["mid"])
     return web.json_response({"ok": True, "removed": removed})
+
+
+async def _agents_stop_followup(session_key: str, ids: list) -> None:
+    """spec-089 §1: 60s (default) after api_project_agents_stop fires, resolve any target row
+    the CLI never confirmed — the operator asked for a stop, the row must not hang as
+    'stopping' forever if TaskStop was never actually delivered/executed.
+
+    No 'stale' flag on this flip (unlike _sweep_stale_monitors' staleness path): a stop is not
+    a completion, so it must NOT re-arm the completion wake (see _monitor_update's
+    _terminal_wake — stopped+stale wakes, plain stopped does not). Never raises."""
+    try:
+        await asyncio.sleep(_AGENTS_STOP_FOLLOWUP_SEC)
+        bucket = _monitors.get(session_key) or {}
+        left = [mid for mid in ids if (bucket.get(mid) or {}).get("status") == "stopping"]
+        for mid in left:
+            _monitor_update(session_key, {
+                "id": mid, "status": "stopped",
+                "tail": "(stop requested — the CLI never confirmed)",
+            }, only_existing=True)
+        if left:
+            print(f"[agents-stop] {session_key}: follow-up resolved {len(left)} unconfirmed "
+                  f"row(s): {', '.join(left)}")
+    except Exception as exc:
+        print(f"[agents-stop] {session_key}: follow-up error: {exc!r}")
+
+
+async def api_project_agents_stop(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/agents/stop — spec-089 §1: stop every running Workflow/sub-agent.
+
+    There is no server-side kill for a sub-agent task — only the model's own TaskStop tool
+    reaches it — so this optimistically flips every running agent/workflow row to 'stopping'
+    (instant operator feedback) and then hands the model a synthetic instruction to call
+    TaskStop for each id: steered into the live turn if one is running, otherwise queued and
+    drained like the auto-continue wake-up (_completion_wake_fire). A 60s follow-up
+    (_agents_stop_followup) resolves any row the CLI never confirms, without waking the
+    orchestrator (see the module-level _AGENT_STOP_PREFIX / _monitor_update docs — a stop is
+    not a completion). Returns {"ok": true, "stopped": [...], "via": "steer"|"queue"|"none"}."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+
+    bucket = _monitors.get(session_key, {})
+    ids = [mid for mid, rec in bucket.items()
+           if rec.get("kind") in ("agent", "workflow") and rec.get("status") == "running"]
+    if not ids:
+        # A second click (or a click with nothing to stop) is a no-op, not an error.
+        print(f"[agents-stop] {session_key}: no running agent/workflow rows — no-op")
+        return web.json_response({"ok": True, "stopped": [], "via": "none"})
+
+    for mid in ids:
+        _monitor_update(session_key, {"id": mid, "status": "stopping",
+                                      "tail": "⏹ stop requested"}, only_existing=True)
+    print(f"[agents-stop] {session_key}: flipped {len(ids)} row(s) to stopping: {', '.join(ids)}")
+
+    # Bounded to 40 ids in the instruction text only — every targeted row still gets flipped
+    # and returned above/below regardless of list length.
+    bounded_ids = ids[:40]
+    text = (f"{_AGENT_STOP_PREFIX} The operator pressed Stop agents. Call TaskStop for each "
+            f"of these task ids, then stop and answer in one line: {', '.join(bounded_ids)}")
+
+    steered = False
+    if ctx["running"].get(session_key) is not None or _bg_turn_active(session_key):
+        steered = await _try_steer_mid_turn(ctx, session_key, text, None)
+
+    if steered:
+        via = "steer"
+        print(f"[agents-stop] {session_key}: steered into the running turn")
+    else:
+        # Idle path — same lane _completion_wake_fire uses so the drained turn reproduces the
+        # live-client fingerprint (a different effort would evict+rebuild the client, which is
+        # a crash, not a stop).
+        opts = _last_turn_options.get(session_key) or {}
+        _chat_queue_enqueue(session_key, text, None, project["id"],
+                            effort=opts.get("effort"), ultracode=opts.get("ultracode"))
+        await _chat_queue_drain_one(ctx, session_key)
+        via = "queue"
+        print(f"[agents-stop] {session_key}: enqueued via the idle queue path")
+
+    _spawn_bg(_agents_stop_followup(session_key, ids))
+    return web.json_response({"ok": True, "stopped": ids, "via": via})
 
 
 async def api_project_live(req: web.Request) -> web.Response:
@@ -11264,12 +11369,14 @@ def _strip_service_blocks(text: str) -> str:
 def _display_prompt(text: "str | None") -> str:
     """Human-safe display copy of a prompt/message string for the chat feed.
 
-    Two distinct kinds of cockpit-internal noise are removed here so neither ever renders
+    Three distinct kinds of cockpit-internal noise are removed here so none ever renders
     as an operator-authored bubble:
       - a synthetic auto-continue wake-up (starts with _BG_CONTINUE_PREFIX, defined below) —
         dropped WHOLE, since a human never typed it; it exists only to re-arm the model after
         a background child finishes (see _completion_wake_fire). A prefix check only — a
         human message that merely mentions "auto-continue" mid-sentence is untouched.
+      - spec-089 §1: a synthetic Stop-agents instruction (starts with _AGENT_STOP_PREFIX) —
+        same treatment, same reasoning: the operator pressed a button, not a chat message.
       - an SDK service XML block (<task-notification>, <system-reminder>, ...) embedded in
         an otherwise human prompt (see _strip_service_blocks) — only the block is removed,
         surrounding human text survives.
@@ -11280,7 +11387,7 @@ def _display_prompt(text: "str | None") -> str:
     """
     if not text:
         return ""
-    if text.startswith(_BG_CONTINUE_PREFIX):
+    if text.startswith(_BG_CONTINUE_PREFIX) or text.startswith(_AGENT_STOP_PREFIX):
         return ""
     return _strip_service_blocks(text)
 
@@ -12047,8 +12154,10 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         if run_engine is None:
             raise RuntimeError("run_engine not available in ctx")
 
-        # spec-071: an operator-typed message opens a new auto-continue episode.
-        if not prompt.startswith(_BG_CONTINUE_PREFIX):
+        # spec-071: an operator-typed message opens a new auto-continue episode. spec-089 §1:
+        # the synthetic Stop-agents turn is cockpit-internal too — not operator-typed, so it
+        # must not open a new episode either.
+        if not prompt.startswith(_BG_CONTINUE_PREFIX) and not prompt.startswith(_AGENT_STOP_PREFIX):
             _bg_continue_reset(session_key)
 
         # spec-071 env parity with the direct POST /chat path: resolve secret: references and
@@ -12421,6 +12530,12 @@ _BG_CONTINUE_PREFIX = "[auto-continue]"
 # then hard-truncate as a last resort — never raise, never grow unbounded (8 records × a
 # full tail/summary/journal block per record could otherwise run well past this).
 _WAKE_PROMPT_BYTE_CAP = int(os.getenv("WAKE_PROMPT_BYTE_CAP", str(6 * 1024)))
+# spec-089 §1: marks the synthetic TaskStop instruction api_project_agents_stop injects/queues
+# — same "cockpit-internal, never a human bubble" treatment as _BG_CONTINUE_PREFIX below.
+_AGENT_STOP_PREFIX = "[agent-stop]"
+# How long the follow-up (_agents_stop_followup) waits before resolving any row the CLI never
+# confirmed. A module constant so tests can monkeypatch it to 0.
+_AGENTS_STOP_FOLLOWUP_SEC = float(os.getenv("AGENTS_STOP_FOLLOWUP_SEC", "60"))
 
 
 def _bg_continue_reset(session_key: str) -> None:
@@ -12447,12 +12562,14 @@ def _notify_wake_suppressed(session_key: str, labels: str, reason: str) -> None:
 
 
 def _has_running_bg(session_key: str) -> bool:
-    """True if the session has a background monitor still marked running.
+    """True if the session has a background monitor still marked running or stopping.
 
     Excludes raw bg-bash shells: their natural completion is a CLI-internal input injection the
-    engine cannot observe, so they linger as 'running' and would trigger false continuations."""
+    engine cannot observe, so they linger as 'running' and would trigger false continuations.
+    spec-089 §1: 'stopping' counts too — the episode isn't closed until the stop resolves."""
     bucket = _monitors.get(session_key) or {}
-    return any(r.get("status") == "running" and r.get("kind") != "bash" for r in bucket.values())
+    return any(r.get("status") in ("running", "stopping") and r.get("kind") != "bash"
+               for r in bucket.values())
 
 
 def _schedule_completion_wake(session_key: str, rec: dict) -> None:
@@ -12836,9 +12953,12 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # bypassPermissions. Queue the message instead — the queue drains automatically when the
     # children finish and the client can reconnect.
     if (_plan_mode or _ask_mode) and _has_live_agent_monitors(session_key):
+        # spec-089 §1: count matches _has_live_agent_monitors' definition ('stopping' is
+        # still-working) so this message never says "0 background task(s)".
         _n_children = sum(
             1 for r in _monitors.get(session_key, {}).values()
-            if r.get("kind") in ("agent", "workflow", "monitor") and r.get("status") == "running")
+            if r.get("kind") in ("agent", "workflow", "monitor")
+            and r.get("status") in ("running", "stopping"))
         resp = web.StreamResponse(
             status=200,
             headers={"Content-Type": "text/event-stream",
@@ -13703,9 +13823,12 @@ async def api_project_rotate(req: web.Request) -> web.Response:
     # path has had this guard since spec-069; the manual button did not. {force: true} bypasses
     # for a deliberate operator override.
     if not bool(body.get("force")) and _has_live_agent_monitors(session_key):
+        # spec-089 §1: count matches _has_live_agent_monitors' definition ('stopping' is
+        # still-working) so this message never says "0 background task(s)".
         n = sum(
             1 for r in _monitors.get(session_key, {}).values()
-            if r.get("kind") in ("agent", "workflow", "monitor") and r.get("status") == "running"
+            if r.get("kind") in ("agent", "workflow", "monitor")
+            and r.get("status") in ("running", "stopping")
         )
         return web.json_response(
             {"error": f"{n} background task(s) still running — wait for them to finish or stop "
@@ -16777,6 +16900,8 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/settings", api_project_settings_get)
         app.router.add_get("/api/projects/{id}/monitors", api_project_monitors)
         app.router.add_delete("/api/projects/{id}/monitors/{mid}", api_project_monitor_dismiss)
+        # spec-089 §1: stop every running Workflow/sub-agent for this session
+        app.router.add_post("/api/projects/{id}/agents/stop", api_project_agents_stop)
         app.router.add_post("/api/projects/{id}/settings", api_project_settings_post)
         # spec-075 §5: preview the context pack for a project (read-only)
         app.router.add_get("/api/projects/{id}/context-pack", api_project_context_pack)

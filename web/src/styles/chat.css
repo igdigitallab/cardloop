@@ -1526,8 +1526,12 @@
   border-radius: var(--radius);
   overflow: hidden;
 }
+/* spec-089 §1: wraps the collapse-toggle head button + the "stop agents" button — two
+   buttons can't nest, so the row that used to BE .mon-panel-head now just contains it. */
+.mon-panel-head-row { display: flex; align-items: stretch; }
 .mon-panel-head {
   display: flex; align-items: center; gap: 6px;
+  flex: 1 1 auto; min-width: 0;
   padding: 5px 8px;
   background: none; border: none; cursor: pointer;
   color: var(--text2); font-size: 11px; text-align: left;
@@ -1535,6 +1539,22 @@
 .mon-panel-head:hover { background: var(--bg2); }
 .mon-panel-title { font-weight: 600; }
 .mon-panel-count { color: var(--text3); }
+/* spec-089 §1: "⏹ stop agents" — danger outline while actionable, muted while waiting for
+   the CLI to confirm ("stopping…", disabled). */
+.mon-stop-btn {
+  flex: 0 0 auto; align-self: center;
+  display: inline-flex; align-items: center;
+  margin: 0 8px;
+  padding: 3px 10px;
+  background: none; border: 1px solid var(--red); border-radius: 999px;
+  color: var(--red); font-size: 11px; font-family: var(--sans); cursor: pointer;
+  white-space: nowrap;
+}
+.mon-stop-btn:hover:not(:disabled) { background: rgba(239,68,68,0.1); }
+.mon-stop-btn:disabled {
+  border-color: var(--border2); color: var(--text3); cursor: default;
+}
+.mon-stop-glyph { flex: 0 0 auto; color: var(--red); font-size: 10px; line-height: 1; }
 .mon-list { display: flex; flex-direction: column; border-top: 1px solid var(--border); }
 .mon-row { display: flex; flex-direction: column; border-bottom: 1px solid var(--border); }
 .mon-row:last-child { border-bottom: none; }
@@ -1599,7 +1619,7 @@
   color: var(--accent);
 }
 @media (pointer: coarse) {
-  .mon-head, .mon-panel-head { min-height: 32px; }
+  .mon-head, .mon-panel-head, .mon-stop-btn { min-height: 32px; }
 }
 
 /* ── Queue panel (Part 3) ───────────────────────────────────────── */

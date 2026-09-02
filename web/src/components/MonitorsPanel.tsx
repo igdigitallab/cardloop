@@ -3,15 +3,23 @@
  *
  * A compact, collapsible strip above the composer listing the long-running "service monitors"
  * the agent started — background shells (npm run dev, journalctl -f …) and Monitor/Workflow
- * tasks. Read-only: shows status + last output tail. Stop/control is card 6c9a57.
+ * tasks. Read-only: shows status + last output tail.
  *
  * spec-069 P3-B: "agent" kind monitors get special treatment — always-visible inline tail,
  * Bot icon (spinning while running, checkmark when done), and the panel auto-expands whenever
  * ≥1 agent monitor is running, then auto-collapses when none remain.
+ *
+ * spec-089 §1: the panel header also carries the "⏹ stop agents" control — the ONLY way to
+ * kill a background Workflow/sub-agent short of typing a message and waiting for the CLI to
+ * notice. There is no server-side kill; the button asks the model to call TaskStop for every
+ * running row (see api.stopAgents), which flips rows to a 'stopping' status first (instant
+ * feedback) and to 'stopped' once the CLI confirms (or the server's 60s follow-up gives up).
  */
 import { useEffect, useRef, useState } from 'react'
 import { Activity, Bot, CheckCircle2, Terminal, Workflow, ChevronRight, X } from 'lucide-react'
 import { Monitor } from '../types'
+import { api } from '../api'
+import { ConfirmModal } from './ConfirmModal'
 
 // https://lucide.dev/icons/ — Bot for agent sub-process, CheckCircle2 for done state
 const KIND_ICON: Record<string, typeof Terminal> = {
@@ -22,7 +30,9 @@ const KIND_ICON: Record<string, typeof Terminal> = {
 }
 
 function statusClass(s: string): string {
-  if (s === 'running') return 'mon-running'
+  // spec-089 §1: 'stopping' renders exactly like 'running' — it is still active work, just
+  // headed for a terminal state.
+  if (s === 'running' || s === 'stopping') return 'mon-running'
   if (s === 'failed') return 'mon-failed'
   return 'mon-stopped' // stopped / done
 }
@@ -34,7 +44,8 @@ function MonitorRow({ m, onDismiss }: { m: Monitor; onDismiss: (id: string) => v
   // the server keeps ("3/5 agents done · ↳ Bash"), shown inline, icon spinning while running.
   const isAgent = m.kind === 'agent' || m.kind === 'workflow'
   const isDone = m.status === 'done' || m.status === 'stopped'
-  // Agent rows: pick checkmark icon when done, spinning Bot when running/failed
+  const isLive = m.status === 'running' || m.status === 'stopping' // spec-089 §1
+  // Agent rows: pick checkmark icon when done, spinning Bot when running/stopping/failed
   const Icon = isAgent
     ? (isDone ? CheckCircle2 : (m.kind === 'workflow' ? Workflow : Bot))
     : (KIND_ICON[m.kind] || Activity)
@@ -57,10 +68,14 @@ function MonitorRow({ m, onDismiss }: { m: Monitor; onDismiss: (id: string) => v
           <span className={`mon-dot ${statusClass(m.status)}`} />
           <Icon
             size={13}
-            className={`mon-kind-icon${isAgent && m.status === 'running' ? ' mon-agent-spin' : ''}`}
+            className={`mon-kind-icon${isAgent && isLive ? ' mon-agent-spin' : ''}`}
           />
           <span className="mon-label">{m.label || m.id}</span>
           {m.agent && <span className="mon-agent">{m.agent}</span>}
+          {/* spec-089 §1: a stop glyph alongside the spinning icon while the row is 'stopping' */}
+          {m.status === 'stopping' && (
+            <span className="mon-stop-glyph" title="Stop requested">⏹</span>
+          )}
           <span className="mon-status">{m.status}</span>
           {!isAgent && hasTail && (
             <ChevronRight size={13} className="mon-chevron" style={{
@@ -88,17 +103,26 @@ function MonitorRow({ m, onDismiss }: { m: Monitor; onDismiss: (id: string) => v
 export function MonitorsPanel({
   monitors,
   onDismiss,
+  projectId,
 }: {
   monitors: Monitor[]
   onDismiss: (id: string) => void
+  projectId: string
 }) {
   // manualOverride: null = no user action yet (auto-drive), true/false = user toggled
   const [manualOverride, setManualOverride] = useState<boolean | null>(null)
   const prevAgentRunning = useRef(false)
+  // spec-089 §1: confirm-before-stop (no window.confirm — this is a mobile cockpit) + a busy
+  // flag so a double-tap while the request is in flight can't fire it twice.
+  const [confirmStop, setConfirmStop] = useState(false)
+  const [stopBusy, setStopBusy] = useState(false)
 
-  // spec-088: a running Workflow counts as agent work too — the panel used to stay collapsed
-  // for a workflow-only list while 12 agents ran, and the operator saw nothing.
-  const agentRunning = monitors.some(m => (m.kind === 'agent' || m.kind === 'workflow') && m.status === 'running')
+  const agentOrWorkflow = (m: Monitor) => m.kind === 'agent' || m.kind === 'workflow'
+  const anyAgentRunning = monitors.some(m => agentOrWorkflow(m) && m.status === 'running')
+  const anyAgentStopping = monitors.some(m => agentOrWorkflow(m) && m.status === 'stopping')
+  // spec-088/spec-089 §1: a running Workflow counts as agent work too, and so does a 'stopping'
+  // one — the panel stays expanded and the Stop button stays visible until the stop resolves.
+  const agentRunning = anyAgentRunning || anyAgentStopping
 
   // Auto-expand when an agent becomes active; auto-collapse when the last one finishes —
   // but only if the user has NOT manually toggled since the last auto-event.
@@ -123,36 +147,76 @@ export function MonitorsPanel({
 
   const running = monitors.filter(m => m.status === 'running').length
   const agentCount = monitors.filter(m => m.kind === 'agent' && m.status === 'running').length
+  const agentStopping = monitors.filter(m => agentOrWorkflow(m) && m.status === 'stopping').length
   const agentDone = monitors.filter(m => m.kind === 'agent' && (m.status === 'done' || m.status === 'stopped')).length
   const agentFailed = monitors.filter(m => m.kind === 'agent' && m.status === 'failed').length
   const workflowRunning = monitors.filter(m => m.kind === 'workflow' && m.status === 'running').length
 
+  async function handleStopConfirm() {
+    setConfirmStop(false)
+    setStopBusy(true)
+    try {
+      await api.stopAgents(projectId)
+      // Rows flip to 'stopping' (and later 'stopped') via the existing monitor bus events —
+      // nothing else to do here.
+    } catch (err) {
+      console.error('[agents-stop] request failed', err)
+    } finally {
+      setStopBusy(false)
+    }
+  }
+
   return (
     <div className="mon-panel">
-      <button
-        className="mon-panel-head"
-        onClick={() => setManualOverride(!collapsed)}
-      >
-        {agentRunning ? <Bot size={12} className="mon-agent-spin" /> : <Activity size={12} />}
-        <span className="mon-panel-title">
-          {agentCount > 0 || workflowRunning > 0 ? `Agent Activity` : 'Monitors'}
-        </span>
-        <span className="mon-panel-count">
-          {agentCount > 0 || workflowRunning > 0
-            ? `${agentCount} agent${agentCount === 1 ? '' : 's'} running`
-              + (agentDone > 0 ? ` · ${agentDone} done` : '')
-              + (agentFailed > 0 ? ` · ${agentFailed} failed` : '')
-              + (workflowRunning > 0 ? ` · ${workflowRunning} workflow${workflowRunning === 1 ? '' : 's'}` : '')
-            : `${running} running · ${monitors.length} total`}
-        </span>
-        <ChevronRight size={13} className="mon-chevron" style={{
-          marginLeft: 'auto', transform: collapsed ? 'none' : 'rotate(90deg)',
-        }} />
-      </button>
+      <div className="mon-panel-head-row">
+        <button
+          className="mon-panel-head"
+          onClick={() => setManualOverride(!collapsed)}
+        >
+          {agentRunning ? <Bot size={12} className="mon-agent-spin" /> : <Activity size={12} />}
+          <span className="mon-panel-title">
+            {agentCount > 0 || workflowRunning > 0 || agentStopping > 0 ? `Agent Activity` : 'Monitors'}
+          </span>
+          <span className="mon-panel-count">
+            {agentCount > 0 || workflowRunning > 0 || agentStopping > 0
+              ? `${agentCount} agent${agentCount === 1 ? '' : 's'} running`
+                + (agentStopping > 0 ? ` · ${agentStopping} stopping` : '')
+                + (agentDone > 0 ? ` · ${agentDone} done` : '')
+                + (agentFailed > 0 ? ` · ${agentFailed} failed` : '')
+                + (workflowRunning > 0 ? ` · ${workflowRunning} workflow${workflowRunning === 1 ? '' : 's'}` : '')
+              : `${running} running · ${monitors.length} total`}
+          </span>
+          <ChevronRight size={13} className="mon-chevron" style={{
+            marginLeft: 'auto', transform: collapsed ? 'none' : 'rotate(90deg)',
+          }} />
+        </button>
+        {agentRunning && (
+          <button
+            className="mon-stop-btn"
+            onClick={() => setConfirmStop(true)}
+            disabled={!anyAgentRunning || stopBusy}
+            title={anyAgentRunning
+              ? 'Stop every running sub-agent and Workflow task'
+              : 'Waiting for the CLI to confirm the stop'}
+          >
+            {anyAgentRunning ? '⏹ stop agents' : 'stopping…'}
+          </button>
+        )}
+      </div>
       {!collapsed && (
         <div className="mon-list">
           {monitors.map(m => <MonitorRow key={m.id} m={m} onDismiss={onDismiss} />)}
         </div>
+      )}
+      {confirmStop && (
+        <ConfirmModal
+          title="Stop agents"
+          message="Stop every running sub-agent and Workflow task for this project? This asks the model to call TaskStop for each of them — in-progress work is interrupted."
+          confirmLabel="Stop agents"
+          danger
+          onConfirm={handleStopConfirm}
+          onCancel={() => setConfirmStop(false)}
+        />
       )}
     </div>
   )
