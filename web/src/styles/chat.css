@@ -1609,6 +1609,17 @@
   color: var(--text3); font-style: italic;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* spec-089 §7: transcript peek — click-to-expand last-N-steps panel for an agent/workflow row.
+   Reuses .mon-tail's tokens (background/border/font/color) but a taller max-height, since this
+   is an on-demand deep look rather than the always-visible one-line inline tail above. */
+.mon-peek {
+  margin: 0; padding: 6px 10px;
+  background: var(--bg); border-top: 1px dashed var(--border);
+  font-family: var(--mono); font-size: 11px; line-height: 1.45;
+  color: var(--text2);
+  max-height: 40vh; overflow: auto; white-space: pre-wrap; word-break: break-word;
+}
+.mon-peek-path { color: var(--text3); opacity: 0.7; }
 /* Spinning bot icon while agent is running */
 @keyframes mon-agent-spin {
   from { transform: rotate(0deg); }

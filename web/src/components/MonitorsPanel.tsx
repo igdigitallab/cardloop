@@ -14,8 +14,13 @@
  * notice. There is no server-side kill; the button asks the model to call TaskStop for every
  * running row (see api.stopAgents), which flips rows to a 'stopping' status first (instant
  * feedback) and to 'stopped' once the CLI confirms (or the server's 60s follow-up gives up).
+ *
+ * spec-089 §7: an agent/workflow row's head is ALSO the transcript-peek toggle — a click fetches
+ * the row's last N steps (api.monitorTail) and shows them in a scrollable panel, polled every
+ * 5 s while the row is still live. "What are they doing?" used to mean waiting for the one-line
+ * inline tail to update; the peek gives the operator the actual recent steps on demand.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Activity, Bot, CheckCircle2, Terminal, Workflow, ChevronRight, X } from 'lucide-react'
 import { Monitor } from '../types'
 import { api } from '../api'
@@ -37,8 +42,11 @@ function statusClass(s: string): string {
   return 'mon-stopped' // stopped / done
 }
 
-/** Render one monitor row. Agent kind gets inline tail + no expand-click requirement. */
-function MonitorRow({ m, onDismiss }: { m: Monitor; onDismiss: (id: string) => void }) {
+/** Render one monitor row. Agent/workflow kind gets inline tail + a click-to-expand transcript
+ *  peek (spec-089 §7); other kinds keep the plain click-to-expand tail (spec-069 P3-B). */
+function MonitorRow({ m, onDismiss, projectId }: {
+  m: Monitor; onDismiss: (id: string) => void; projectId: string
+}) {
   const [open, setOpen] = useState(false)
   // spec-088: a workflow row behaves like an agent row — its tail is the live progress summary
   // the server keeps ("3/5 agents done · ↳ Bash"), shown inline, icon spinning while running.
@@ -56,13 +64,46 @@ function MonitorRow({ m, onDismiss }: { m: Monitor; onDismiss: (id: string) => v
   const showTailInline = isAgent && hasTail
   const showTailExpanded = !isAgent && open && hasTail
 
+  // spec-089 §7: transcript peek — agent/workflow rows only. null lines = not fetched yet
+  // (renders "Loading…"); [] with peekError = the 404 "no transcript" case.
+  const [peekOpen, setPeekOpen] = useState(false)
+  const [peekLines, setPeekLines] = useState<string[] | null>(null)
+  const [peekPath, setPeekPath] = useState<string | null>(null)
+  const [peekError, setPeekError] = useState(false)
+
+  const fetchPeek = useCallback(() => {
+    api.monitorTail(projectId, m.id)
+      .then(r => { setPeekLines(r.lines); setPeekPath(r.path); setPeekError(false) })
+      // 404 (unknown monitor / stream-only row with no transcript) or any other failure — render
+      // "(no transcript yet)" rather than an error toast; the bus will fix a stale row anyway.
+      .catch(() => { setPeekError(true); setPeekLines([]) })
+  }, [projectId, m.id])
+
+  // Poll every 5s while the peek is open AND the row is still live; re-evaluated on every
+  // status change so the interval stops the moment the row goes terminal (no leaked timers).
+  useEffect(() => {
+    if (!peekOpen) return
+    fetchPeek()
+    if (!isLive) return
+    const t = setInterval(fetchPeek, 5000)
+    return () => clearInterval(t)
+  }, [peekOpen, isLive, fetchPeek])
+
+  const togglePeek = () => {
+    setPeekOpen(o => {
+      const next = !o
+      if (!next) { setPeekLines(null); setPeekPath(null); setPeekError(false) }
+      return next
+    })
+  }
+
   return (
     <div className={`mon-row${isAgent ? ' mon-row-agent' : ''}`}>
       <div className="mon-head-row">
         <button
           className="mon-head"
-          onClick={() => !isAgent && hasTail && setOpen(o => !o)}
-          style={{ cursor: (!isAgent && hasTail) ? 'pointer' : 'default' }}
+          onClick={() => { if (isAgent) togglePeek(); else if (hasTail) setOpen(o => !o) }}
+          style={{ cursor: (isAgent || hasTail) ? 'pointer' : 'default' }}
           title={m.label}
         >
           <span className={`mon-dot ${statusClass(m.status)}`} />
@@ -77,9 +118,9 @@ function MonitorRow({ m, onDismiss }: { m: Monitor; onDismiss: (id: string) => v
             <span className="mon-stop-glyph" title="Stop requested">⏹</span>
           )}
           <span className="mon-status">{m.status}</span>
-          {!isAgent && hasTail && (
+          {(isAgent || hasTail) && (
             <ChevronRight size={13} className="mon-chevron" style={{
-              transform: open ? 'rotate(90deg)' : 'none',
+              transform: (isAgent ? peekOpen : open) ? 'rotate(90deg)' : 'none',
             }} />
           )}
         </button>
@@ -96,6 +137,18 @@ function MonitorRow({ m, onDismiss }: { m: Monitor; onDismiss: (id: string) => v
       )}
       {/* Other kinds: collapsible tail */}
       {showTailExpanded && <pre className="mon-tail">{m.tail}</pre>}
+      {/* spec-089 §7: agent/workflow transcript peek, click-to-expand on the row head above */}
+      {isAgent && peekOpen && (
+        <pre className="mon-peek">
+          {peekPath && (
+            <span className="mon-peek-path" title={peekPath}>{peekPath.split('/').pop()}</span>
+          )}
+          {peekPath && '\n'}
+          {peekError || (peekLines !== null && peekLines.length === 0)
+            ? '(no transcript yet)'
+            : (peekLines === null ? 'Loading…' : peekLines.join('\n'))}
+        </pre>
+      )}
     </div>
   )
 }
@@ -205,7 +258,9 @@ export function MonitorsPanel({
       </div>
       {!collapsed && (
         <div className="mon-list">
-          {monitors.map(m => <MonitorRow key={m.id} m={m} onDismiss={onDismiss} />)}
+          {monitors.map(m => (
+            <MonitorRow key={m.id} m={m} onDismiss={onDismiss} projectId={projectId} />
+          ))}
         </div>
       )}
       {confirmStop && (

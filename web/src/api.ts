@@ -213,6 +213,12 @@ export const api = {
   dismissMonitor: (id: string, mid: string) =>
     apiFetch<{ ok: boolean; removed: boolean }>(`/api/projects/${id}/monitors/${mid}`, { method: 'DELETE' }),
 
+  // spec-089 §7: last N steps of one monitor row (transcript peek on row click)
+  monitorTail: (id: string, mid: string, n = 20) =>
+    apiFetch<{ kind: string; status: string; path: string; lines: string[] }>(
+      `/api/projects/${id}/monitors/${encodeURIComponent(mid)}/tail?n=${n}`
+    ),
+
   tasks: (id: string) =>
     apiFetch<import('./types').Board>(`/api/projects/${id}/tasks`),
 
