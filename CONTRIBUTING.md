@@ -97,6 +97,7 @@ tests/          — pytest suite (2400+ tests; run via venv/bin/python -m pytest
 data/           — runtime state (gitignored: topics.json, sessions.json, audit/, runs/)
 docs/API.md     — HTTP API reference
 tools/doctor.py — one-command cockpit diagnosis (make doctor)
+tools/daily-journal.py — Haiku digest of the day's cockpit work → a vault Markdown note (README)
 ```
 
 See ARCHITECTURE.md for a full code map with file:line references.

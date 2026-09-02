@@ -209,6 +209,36 @@ reachability, and data counts, ending with a ✗/⚠ verdict and a one-line reme
 (exit code is non-zero when any ✗ is present). Read-only — it never restarts anything or touches
 your data — and secret values are always redacted. Paste its output into a GitHub issue.
 
+### Daily activity journal
+
+Want a diary of what you did through the cockpit each day — every project, IT or non-IT, with
+times? `tools/daily-journal.py` scans the previous local calendar day's sessions, commits, board
+cards, and specs across every project, and asks a small model (Haiku, on your subscription — no
+extra API billing) to write a short Markdown note into your notes vault:
+
+```bash
+venv/bin/python tools/daily-journal.py                    # yesterday, written to $JOURNAL_DIR
+venv/bin/python tools/daily-journal.py --date 2026-08-30  # a specific day
+venv/bin/python tools/daily-journal.py --days 7           # backfill the last 7 days
+venv/bin/python tools/daily-journal.py --dry-run --no-model --date 2026-08-30  # preview, no model call
+```
+
+Idempotent (`--date`/`--days` regenerate in place) and safe by construction: a generated note
+always carries `generated: cardloop-daily-journal` frontmatter, and a file at that path which
+lacks the marker (i.e. one you wrote by hand) is never overwritten — the note goes to
+`YYYY-MM-DD-cardloop.md` instead. Configure the destination and timezone with `JOURNAL_DIR` /
+`JOURNAL_TZ` in `.env` (defaults: `$HOME/vault/Journal`, `America/Los_Angeles`); the note's
+language follows `RESPONSE_LANGUAGE`. For a daily cron, source the vars it needs and log to a
+file, e.g.:
+
+```cron
+30 3 * * * RESPONSE_LANGUAGE=$(grep -m1 '^RESPONSE_LANGUAGE=' /path/to/cardloop/.env | cut -d= -f2-) /path/to/cardloop/venv/bin/python /path/to/cardloop/tools/daily-journal.py --data-dir /path/to/cardloop/data >> $HOME/logs/daily-journal.log 2>&1
+```
+
+(Extract just the variables you need rather than `source .env` wholesale — `.env` is written for
+systemd's `EnvironmentFile=` parser, not bash, and a value elsewhere in the file can break a plain
+`source`.)
+
 ---
 
 ## Install it on your phone (PWA)
