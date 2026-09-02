@@ -24,6 +24,8 @@ __pycache__/
 
 # --- node / web build ---
 web/node_modules/
+# a symlinked node_modules (worktree builds) is a file, not a dir — the slash form misses it
+web/node_modules
 web/dist/
 
 # --- worktrees (for agents) ---
