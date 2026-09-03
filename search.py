@@ -1,10 +1,15 @@
-"""search.py — Global search index (spec-074): SQLite FTS5 over chat transcripts,
-timelines, and kanban boards. The daily-use "second brain" — one search box over
-everything the operator has ever discussed or planned across every project.
+"""search.py — Global search index (spec-074/079/090): SQLite FTS5 over chat transcripts,
+timelines, kanban boards, project files and curated memory. The daily-use "second brain" —
+one search box over everything the operator has ever discussed or planned across every
+project.
 
 Design:
-- Pure stdlib (sqlite3/json/re/pathlib). webapp.py imports THIS module — never the
-  reverse — so the indexer stays unit-testable in isolation with tmp fixtures.
+- Stdlib only on the indexing and storage path (sqlite3/json/re/pathlib). The ONE optional
+  third-party import is snowballstemmer, used at QUERY time for morphology (spec-090); it is
+  resolved lazily inside _get_stemmer and its absence degrades search to the pre-spec-090
+  literal-prefix behaviour rather than failing. Nothing else may be added: webapp.py imports
+  THIS module — never the reverse — so the indexer stays unit-testable in isolation with
+  tmp fixtures.
 - Reuses board.py's card-line parsing (_CARD_RE / _PLAIN_CARD_RE / _extract_id_and_text)
   so a card's indexed text always matches what the board actually renders — no
   re-implementation of the card-line grammar here.
@@ -807,18 +812,31 @@ def full_reindex_at(db_path: "Path | str", chat_sources: list, timeline_sources:
 
 # ─────────────────────────── recall telemetry ───────────────────────────
 
+def _field(row, key: str) -> str:
+    """One accessor for both row shapes the recorder sees: sqlite3.Row from search() and
+    plain dicts from callers that assembled hits themselves. Missing/oddly-shaped rows
+    yield "" so a single bad row can never abort the batch."""
+    try:
+        value = row[key]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    return str(value) if value is not None else ""
+
+
 def record_hits(conn: sqlite3.Connection, channel: str, rows: list) -> int:
     """Counts documents a query actually returned. Best-effort by contract: telemetry must
     never break or slow a search, so every failure here is swallowed."""
-    if not channel or not rows:
+    if channel not in HIT_CHANNELS or not rows:
+        # An unknown channel is dropped rather than stored: a typo would otherwise mint a
+        # phantom channel that silently splits the counts it was meant to join.
         return 0
     now = time.time()
     written = 0
     try:
         for r in rows:
-            ref = (r["ref"] if not isinstance(r, dict) else r.get("ref")) or ""
-            pid = (r["project_id"] if not isinstance(r, dict) else r.get("project_id")) or ""
-            src = (r["source"] if not isinstance(r, dict) else r.get("source")) or ""
+            ref = _field(r, "ref")
+            pid = _field(r, "project_id")
+            src = _field(r, "source")
             if not ref:
                 continue
             conn.execute(
@@ -871,8 +889,10 @@ def hit_stats(conn: sqlite3.Connection, source: "str | None" = None,
     top = sorted(
         ({"project_id": k[0], "source": k[1], "ref": k[2], **v} for k, v in hits.items()),
         key=lambda d: -d["hits"])[:max(1, int(limit))]
-    cold = sorted({"project_id": k[0], "source": k[1], "ref": k[2]}
-                   for k in indexed - set(hits))
+    # Sort the KEYS (tuples), then build the dicts — sorting dicts directly raises
+    # TypeError as soon as there is more than one of them.
+    cold = [{"project_id": k[0], "source": k[1], "ref": k[2]}
+            for k in sorted(indexed - set(hits))]
     return {
         "top": top,
         "cold": cold[:max(1, int(limit))],
@@ -1000,9 +1020,11 @@ def _score(row, now: float) -> float:
     base = row["rank"]                       # negative; more negative = stronger match
     source, tier = row["source"], (row["tier"] or "")
     mult = _SOURCE_WEIGHT.get(source, 1.0)
+    if source == "file":
+        mult = _SOURCE_WEIGHT["file_code"] if tier == "code" else _SOURCE_WEIGHT["file_doc"]
     if source in ("file", "memory"):
-        if source == "file":
-            mult = _SOURCE_WEIGHT["file_code"] if tier == "code" else _SOURCE_WEIGHT["file_doc"]
+        # Both are documents with a name of their own, so a hit on that name outranks a
+        # hit in the body. Memory keeps its own (higher) source weight.
         ref = (row["ref"] or "").lower()
         if ref:
             for term in row["_terms"]:

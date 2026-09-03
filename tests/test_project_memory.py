@@ -234,20 +234,29 @@ def test_memory_read_all_migrates_legacy(tmp_path):
 
 
 def test_memory_read_all_new_takes_priority(tmp_path):
-    """If both locations have files — the new one (.claude-ops/memory/) takes priority."""
+    """If both locations hold the SAME name, the new one (.claude-ops/memory/) wins.
+
+    spec-090 corrected the other half of this: a legacy article the new location does NOT
+    have is migrated in, not hidden. The old all-or-nothing gate ("migrate only if
+    .claude-ops/memory is absent") meant one memory write shadowed every legacy article
+    behind it — 19 live projects were stuck that way with ~150 unreachable articles."""
     cwd = str(tmp_path)
     # Old location
     old_dir = _sdk_sessions_dir(cwd) / "memory"
     old_dir.mkdir(parents=True, exist_ok=True)
     (old_dir / "old-note.md").write_text("Old")
+    (old_dir / "shared.md").write_text("legacy version")
     try:
         # New location
         _memory_write(cwd, "new-note.md", "New")
+        _memory_write(cwd, "shared.md", "new version")
         files, legacy = _memory_read_all(cwd)
         assert legacy is False
         names = [f["name"] for f in files]
         assert "new-note.md" in names
-        assert "old-note.md" not in names
+        assert "old-note.md" in names, "a legacy-only article must be migrated in, not hidden"
+        by_name = {f["name"]: f["content"] for f in files}
+        assert by_name["shared.md"] == "new version", "the new location wins a name collision"
     finally:
         # clean up legacy in the real ~/.claude (tmp_path resolves to HOME) — otherwise
         # mkdir without exist_ok fails on the next run with the same pytest-tmp slug

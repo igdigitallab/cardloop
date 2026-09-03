@@ -8877,19 +8877,14 @@ def _build_search_sources(ctx: dict):
             # ~/.claude/projects/<slug>/memory/), so the cwd walk alone can never see it.
             # Both locations are indexed together — one call, so one sweep owns them.
             memory_roots = [_project_memory_dir(cwd), _sdk_sessions_dir(cwd) / "memory"]
-            file_sources.append({
-                "project_id": pid, "project_name": name, "root": cwd,
-                "exclude_dirs": _FS_EXCLUDE_DIRS, "is_secret": _is_secret_name,
-                "index_code": True,
-                # …and pruned from the plain file walk, so no article is indexed twice
-                # under two sources with two sweeps fighting over it.
-                "skip_roots": memory_roots,
-            })
-            file_sources.append({
-                "project_id": pid, "project_name": name, "root": memory_roots,
-                "exclude_dirs": _FS_EXCLUDE_DIRS, "is_secret": _is_secret_name,
-                "index_code": False, "source_kind": "memory",
-            })
+            common = {"project_id": pid, "project_name": name,
+                      "exclude_dirs": _FS_EXCLUDE_DIRS, "is_secret": _is_secret_name}
+            # …and pruned from the plain file walk, so no article is indexed twice under
+            # two sources whose sweeps would then fight over it.
+            file_sources.append({**common, "root": cwd, "index_code": True,
+                                 "skip_roots": memory_roots})
+            file_sources.append({**common, "root": memory_roots, "index_code": False,
+                                 "source_kind": "memory"})
     return chat_sources, timeline_sources, board_sources, file_sources
 
 
@@ -15070,26 +15065,45 @@ def _memory_read_all(cwd: str) -> tuple[list[dict], bool]:
     (which work only with the new location) stop returning 404 for legacy memory.
     Returns (files, from_legacy). files = [{name, content}], MEMORY.md first."""
     new_dir = _project_memory_dir(cwd)
+    old_dir = _sdk_sessions_dir(cwd) / "memory"
+    migrated = _memory_migrate_legacy(new_dir, old_dir)
     if new_dir.is_dir():
         return _read_memory_dir(new_dir), False
-    # Auto-migrate old location ~/.claude/projects/<cwd>/memory/ → .claude-ops/memory/
-    old_dir = _sdk_sessions_dir(cwd) / "memory"
-    if old_dir.is_dir():
-        migrated = False
-        try:
-            new_dir.mkdir(parents=True, exist_ok=True)
-            for f in old_dir.glob("*.md"):
-                dest = new_dir / f.name
-                if not dest.exists():
-                    dest.write_text(f.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
-            migrated = True
-        except Exception as e:
-            print(f"[memory] auto-migration legacy→new failed for {cwd}: {e}")
-        if migrated and new_dir.is_dir():
-            return _read_memory_dir(new_dir), False
-        # migration failed — read the old location as-is (legacy)
+    if old_dir.is_dir() and not migrated:
+        # migration failed — read the old location as-is (legacy, read-only in practice)
         return _read_memory_dir(old_dir), True
     return [], False
+
+
+def _memory_migrate_legacy(new_dir: Path, old_dir: Path) -> bool:
+    """Tops the new location up with legacy articles it is missing. Copy only: an existing
+    file is never overwritten, so the new location keeps priority on a name collision.
+
+    ⚠️ The gate used to be "run only if new_dir does not exist", which made this migration
+    all-or-nothing — and a SINGLE memory write created new_dir, permanently shadowing every
+    legacy article behind it. Measured 2026-09-02 across the live cockpit: 19 projects were
+    stuck half-migrated with ~150 articles on disk that the Memory tab could not show at all
+    (sysadmin 43, iggo-llc 24, ig-digital-lab 21). Topping up per FILE is what the docstring
+    above always claimed to do. Do not re-gate it on new_dir being absent.
+
+    Note MEMORY.md is copied by the same rule: if the new location already has one, the
+    legacy index is not merged into it. Merging two routing tables is a content decision,
+    not a migration — left to the operator."""
+    if not old_dir.is_dir():
+        return False
+    try:
+        pending = [f for f in old_dir.glob("*.md") if not (new_dir / f.name).exists()]
+        if not pending:
+            return True
+        new_dir.mkdir(parents=True, exist_ok=True)
+        for f in pending:
+            (new_dir / f.name).write_text(
+                f.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+        print(f"[memory] migrated {len(pending)} legacy article(s) → {new_dir}")
+        return True
+    except Exception as e:
+        print(f"[memory] auto-migration legacy→new failed for {new_dir}: {e}")
+        return False
 
 
 def _read_memory_dir(mem_dir: Path) -> list[dict]:

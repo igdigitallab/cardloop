@@ -211,6 +211,15 @@ def test_hits_accumulate_per_channel(conn, tmp_path):
     assert rows == {"cli": 2, "pack": 1}
 
 
+def test_unknown_channel_is_dropped(conn, tmp_path):
+    """A typo must not mint a phantom channel that splits the counts it meant to join."""
+    cwd, native = _project(tmp_path)
+    _index(conn, cwd, native)
+    S.search(conn, "Coolify", channel="clii")
+    assert conn.execute("SELECT COUNT(*) FROM doc_hits").fetchone()[0] == 0
+    assert set(S.HIT_CHANNELS) == {"ui", "cli", "pack"}
+
+
 def test_hit_stats_separates_returned_from_never_returned(conn, tmp_path):
     cwd, native = _project(tmp_path)
     _index(conn, cwd, native)
@@ -219,6 +228,19 @@ def test_hit_stats_separates_returned_from_never_returned(conn, tmp_path):
     assert report["totals"]["indexed_docs"] == 2
     assert [r["ref"] for r in report["top"]] == ["native-note.md"]
     assert [r["ref"] for r in report["cold"]] == ["inrepo-note.md"]
+
+
+def test_hit_stats_handles_many_cold_documents(conn, tmp_path):
+    """Regression: the cold list was built by sorting dicts, which raises TypeError the
+    moment there is more than one — the one-cold-doc test above never compared anything."""
+    cwd, native = _project(tmp_path)
+    for i in range(4):
+        (native / f"extra-{i}.md").write_text(f"# Extra {i}\nunrelated prose\n", encoding="utf-8")
+    _index(conn, cwd, native)
+    S.search(conn, "Coolify", channel="cli")
+    report = S.hit_stats(conn, source="memory")
+    assert len(report["cold"]) >= 4
+    assert [r["ref"] for r in report["cold"]] == sorted(r["ref"] for r in report["cold"])
 
 
 def test_telemetry_survives_a_full_reindex(conn, tmp_path):
