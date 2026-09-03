@@ -51,6 +51,8 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote, urlencode
+from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 LOG_PREFIX = "[daily-journal]"
@@ -1030,6 +1032,99 @@ def render_fallback_body(g: dict, numbers: DayNumbers, tz_name: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Optional Telegram ping ("the journal for <day> is written")
+# ─────────────────────────────────────────────────────────────────────────────
+
+TG_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
+TG_TEXT_LIMIT = 3500          # Telegram hard limit is 4096; leave room for markup
+
+
+def _dotenv_value(repo_root: Path, key: str) -> str:
+    """Read one key from the repo's gitignored .env (no personal value in code)."""
+    path = repo_root / ".env"
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def extract_glance(body: str) -> "list[str]":
+    """Bullets of the note's FIRST section ('Day at a glance', heading localized)."""
+    out: "list[str]" = []
+    started = False
+    for raw in body.splitlines():
+        line = raw.strip()
+        if line.startswith("## "):
+            if started:
+                break
+            started = True
+            continue
+        if started and line.startswith(("- ", "* ")):
+            out.append(line[2:].strip())
+    return out[:6]
+
+
+def _tg_html(text: str) -> str:
+    """Escape for Telegram HTML, then re-apply **bold** as <b>."""
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+
+
+def build_telegram_message(day: date, numbers: DayNumbers, body: str,
+                            note_path: Path, public_url: str) -> str:
+    hours, minutes = divmod(max(numbers.active_minutes, 0), 60)
+    active = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
+    head = (f"\U0001F4D4 <b>{day.isoformat()} ({day.strftime('%A')})</b>\n"
+            f"{numbers.projects_count} projects \u00b7 {numbers.sessions} sessions \u00b7 "
+            f"{active} \u00b7 {numbers.commits} commits")
+
+    bullets = "\n".join("\u2022 " + _tg_html(b) for b in extract_glance(body))
+    obsidian = "obsidian://open?file=" + quote(f"Journal/{day.isoformat()}", safe="")
+    home = str(Path.home())
+    shown = str(note_path)
+    if shown.startswith(home):
+        shown = "~" + shown[len(home):]
+    tail = f"<code>{_tg_html(shown)}</code>\n<code>{_tg_html(obsidian)}</code>"
+    if public_url:
+        tail += f'\n<a href="{public_url}">cockpit</a>'
+
+    msg = head + ("\n\n" + bullets if bullets else "") + "\n\n" + tail
+    if len(msg) > TG_TEXT_LIMIT:
+        keep = TG_TEXT_LIMIT - len(head) - len(tail) - 16
+        msg = head + "\n\n" + bullets[:max(keep, 0)] + "\u2026\n\n" + tail
+    return msg
+
+
+def notify_telegram(day: date, numbers: DayNumbers, body: str, note_path: Path,
+                     repo_root: Path) -> None:
+    """Best-effort ping; never fails the journal run."""
+    token = os.environ.get("JOURNAL_TG_BOT_TOKEN") or _dotenv_value(repo_root, "BOT_TOKEN")
+    chat = (os.environ.get("JOURNAL_TG_CHAT_ID")
+            or _dotenv_value(repo_root, "ALLOWED_USERS").split(",")[0].strip())
+    if not token or not chat:
+        print(f"{LOG_PREFIX} telegram notify skipped: no token/chat id "
+              f"(set JOURNAL_TG_BOT_TOKEN / JOURNAL_TG_CHAT_ID or BOT_TOKEN / ALLOWED_USERS)",
+              file=sys.stderr)
+        return
+    public_url = os.environ.get("JOURNAL_PUBLIC_URL") or _dotenv_value(repo_root, "PUBLIC_URL")
+    payload = urlencode({
+        "chat_id": chat,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true",
+        "text": build_telegram_message(day, numbers, body, note_path, public_url),
+    }).encode()
+    try:
+        with urlopen(TG_SEND_URL.format(token=token), data=payload, timeout=20) as r:
+            ok = json.loads(r.read().decode()).get("ok")
+        print(f"{LOG_PREFIX} telegram notify: {'sent' if ok else 'rejected'}")
+    except Exception as e:  # noqa: BLE001 — a failed ping must not fail the journal
+        print(f"{LOG_PREFIX} telegram notify failed: {e}", file=sys.stderr)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1051,6 +1146,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", default="haiku", help="model alias for the SDK call (default: haiku)")
     p.add_argument("--model-timeout", type=int, default=MODEL_CALL_TIMEOUT_S,
                     help=f"seconds before the model call is killed (default: {MODEL_CALL_TIMEOUT_S})")
+    p.add_argument("--notify-telegram", action="store_true",
+                    help="after writing the note, send the operator a Telegram summary "
+                         "(JOURNAL_TG_BOT_TOKEN/JOURNAL_TG_CHAT_ID, falling back to "
+                         "BOT_TOKEN/ALLOWED_USERS in .env)")
     return p
 
 
@@ -1095,6 +1194,9 @@ def _process_one_day(day: date, tz_name: str, data_dir: Path, vault_dir: Path,
     write_note_atomic(index_path, upsert_index(existing_index, day, line))
 
     print(f"{LOG_PREFIX} wrote {note_path}")
+
+    if getattr(args, "notify_telegram", False):
+        notify_telegram(day, numbers, body, note_path, Path(__file__).resolve().parent.parent)
 
 
 def main(argv: "list[str] | None" = None) -> int:
