@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""cardloop-search — query the cockpit's global index from a shell (spec-090).
+
+The index (data/search.db, FTS5 over every project's chats, boards, timelines, files and
+curated memory) already existed, but nothing outside the web UI could reach it: an agent
+mid-session had only grep. This is that missing entry point — the "have we solved this
+before?" lookup, across ALL projects, in about a millisecond.
+
+Usage:
+    cardloop-search "hiddify block user"          # everything, ranked
+    cardloop-search -s memory "почему не монорепо" # curated memory only
+    cardloop-search -p cardloop -n 5 "steer race"  # one project, 5 hits
+    cardloop-search --json "coolify redeploy"      # machine-readable
+    cardloop-search --stats                        # recall telemetry
+    cardloop-search --cold -s memory               # memory never returned by any query
+
+Query syntax is the cockpit's own: bare words plus `project:x source:chat path:*.md
+after:2026-06-01 before:… is:memory|spec|claudemd|readme`. Terms are stemmed, so a word
+in one grammatical case still finds the others.
+
+Exit codes: 0 = hits (or a successful report), 1 = no hits, 2 = usage/index error.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+sys.path.insert(0, str(REPO))
+
+# Stemming lives in the repo venv (snowballstemmer). Running under a bare system python
+# would silently fall back to literal prefixes — the exact defect this tool was built to
+# fix — so re-exec once under the venv when it exists and has what the plain interpreter
+# lacks. The guard env var makes the recursion impossible.
+_VENV_PY = REPO / "venv" / "bin" / "python"
+if not os.environ.get("CARDLOOP_SEARCH_REEXEC") and _VENV_PY.exists() \
+        and Path(sys.executable).resolve() != _VENV_PY.resolve():
+    try:
+        import snowballstemmer  # noqa: F401 — presence check only
+    except ImportError:
+        os.environ["CARDLOOP_SEARCH_REEXEC"] = "1"
+        os.execv(str(_VENV_PY), [str(_VENV_PY), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+try:
+    import search as S
+except Exception as e:  # pragma: no cover — only when run outside the repo
+    print(f"cardloop-search: cannot import the search module from {REPO}: {e}", file=sys.stderr)
+    sys.exit(2)
+
+RESET, DIM, BOLD, MARK = "\033[0m", "\033[2m", "\033[1m", "\033[7m"
+
+
+def _data_dir() -> Path:
+    return Path(os.environ.get("CARDLOOP_DATA") or (REPO / "data"))
+
+
+def _colour(stream) -> bool:
+    return stream.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def _render_snippet(text: str, colour: bool) -> str:
+    """search.py marks matches with private-use control chars, not literal <mark>."""
+    if colour:
+        text = text.replace(S.SNIPPET_OPEN, MARK).replace(S.SNIPPET_CLOSE, RESET)
+    else:
+        text = text.replace(S.SNIPPET_OPEN, "[").replace(S.SNIPPET_CLOSE, "]")
+    return " ".join(text.split())
+
+
+def _anchor(hit: dict) -> str:
+    ref = hit.get("ref") or {}
+    for key in ("memory", "path", "card_id", "session_id"):
+        if ref.get(key):
+            value = str(ref[key])
+            if key == "path" and ref.get("line"):
+                value += f":{ref['line']}"
+            return value
+    return ""
+
+
+def _when(ts) -> str:
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d") if ts else "—"
+    except (TypeError, ValueError, OSError):
+        return "—"
+
+
+def cmd_search(args) -> int:
+    db = S.db_path_for(_data_dir())
+    if not db.exists():
+        print(f"cardloop-search: no index at {db} — open the cockpit once to build it",
+              file=sys.stderr)
+        return 2
+
+    query = " ".join(args.query).strip()
+    if args.source:
+        query = f"source:{args.source} {query}".strip()
+    if not query:
+        print("cardloop-search: empty query", file=sys.stderr)
+        return 2
+
+    hits = S.search_at(db, query, limit=args.limit, project_id=args.project, channel="cli")
+    if args.json:
+        json.dump(hits, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 0 if hits else 1
+    if not hits:
+        print("no hits")
+        return 1
+
+    colour = _colour(sys.stdout)
+    for i, h in enumerate(hits, 1):
+        head = f"{h['project_name']} · {h['source']} · {_when(h.get('ts'))}"
+        anchor = _anchor(h)
+        if anchor:
+            head += f" · {anchor}"
+        print(f"{BOLD if colour else ''}{i:>2}. {head}{RESET if colour else ''}")
+        print(f"    {_render_snippet(h.get('snippet') or '', colour)}")
+    return 0
+
+
+def cmd_stats(args) -> int:
+    db = S.db_path_for(_data_dir())
+    if not db.exists():
+        print(f"cardloop-search: no index at {db}", file=sys.stderr)
+        return 2
+    report = S.hit_stats_at(db, source=args.source, project_id=args.project, limit=args.limit)
+    if args.json:
+        json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    t = report["totals"]
+    scope = args.source or "all sources"
+    print(f"{scope}: {t['indexed_docs']} indexed docs · {t['hit_docs']} ever returned "
+          f"· {t['cold_docs']} never · {t['total_hits']} total hits")
+    if args.cold:
+        if not report["cold"]:
+            print("\nno cold documents — everything indexed has been returned at least once")
+            return 0
+        print(f"\nnever returned (first {len(report['cold'])}):")
+        for row in report["cold"]:
+            print(f"  {row['project_id']:<24} {row['source']:<8} {row['ref']}")
+        return 0
+    if not report["top"]:
+        print("\nno hits recorded yet — the counter starts empty by design")
+        return 0
+    print("\nmost returned:")
+    for row in report["top"]:
+        channels = ",".join(f"{k}:{v}" for k, v in sorted(row["by_channel"].items()))
+        print(f"  {row['hits']:>4}  {row['project_id']:<24} {row['source']:<8} "
+              f"{row['ref']}  ({channels})")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="cardloop-search",
+        description="Search every Cardloop project's chats, boards, files and memory.")
+    p.add_argument("query", nargs="*", help="free-form query (cockpit filter syntax allowed)")
+    p.add_argument("-p", "--project", help="restrict to one project id")
+    p.add_argument("-s", "--source", choices=list(S.SEARCHABLE_SOURCES),
+                    help="restrict to one source")
+    p.add_argument("-n", "--limit", type=int, default=10, help="max hits (default 10)")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--stats", action="store_true",
+                    help="recall telemetry instead of a search: what retrieval returns")
+    p.add_argument("--cold", action="store_true",
+                    help="with --stats: list indexed documents never returned by any query")
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.stats or args.cold:
+        args.limit = max(args.limit, 20)
+        return cmd_stats(args)
+    return cmd_search(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

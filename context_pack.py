@@ -161,7 +161,9 @@ def _recall(data_dir: str, query: str, project_id: str | None, k: int = 3) -> li
     try:
         from search import search_at, db_path_for  # local import — no circular dep
         db = db_path_for(Path(data_dir))
-        hits = search_at(db, query, limit=k, project_id=project_id)
+        # channel="pack": this hit is INJECTED into a live session's context, which is the
+        # only recall signal that proves an article was actually put in front of an agent.
+        hits = search_at(db, query, limit=k, project_id=project_id, channel="pack")
         return hits if isinstance(hits, list) else []
     except Exception:
         return []

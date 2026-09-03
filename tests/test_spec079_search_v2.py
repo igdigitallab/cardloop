@@ -463,9 +463,13 @@ class TestParseQuery:
         assert "after:yesterday" in terms and f["after"] is None
 
     def test_is_memory_targets_memory_articles(self):
+        """spec-090 changed the mechanism: memory articles are their own SOURCE now, because
+        half of them (native auto-memory) live outside the project cwd and a path filter on
+        `.claude-ops/memory/` could never reach them. The user-facing contract is unchanged —
+        `is:memory` still narrows to memory articles — so the assertion moves, not the query."""
         _t, f = S.parse_query("browser is:memory")
-        assert f["sources"] == ["file"]
-        assert any(".claude-ops/memory/" in p for p in f["path_like"])
+        assert f["sources"] == ["memory"]
+        assert f["path_like"] == []
 
     def test_filters_only_query_is_valid(self):
         terms, f = S.parse_query("source:board")

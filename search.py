@@ -69,6 +69,7 @@ MAX_LIMIT = 100
 # spec-079 B: ranking. bm25 is negative (more negative = better), so these are applied as
 # MULTIPLIERS — >1 promotes, <1 demotes.
 _SOURCE_WEIGHT = {
+    "memory": 1.60,     # a distilled durable fact — the highest-signal text in the corpus
     "board": 1.45,      # a card is a deliberate, curated statement of intent
     "file_doc": 1.30,   # CLAUDE.md / README / specs / memory articles
     "chat": 1.00,       # the baseline: lots of it, much of it thinking out loud
@@ -90,6 +91,61 @@ SNIPPET_OPEN = "\x01"
 SNIPPET_CLOSE = "\x02"
 
 _WS_RE = re.compile(r"\s+")
+
+# ─────────────────────────── query-side morphology ───────────────────────────
+# FTS5's unicode61 tokenizer does no stemming, so "переезда" and "переезд" are different
+# terms and the same question asked in another grammatical case missed most of the corpus
+# (measured on the live index: 230 / 261 / 79 hits for переезд / переезда / переезде).
+#
+# The fix is QUERY-side only — the stored index is untouched, so this needs no reindex and
+# no schema bump. Each term is stemmed, then the ORIGINAL token is sliced to the stem's
+# length; the stem itself is never used verbatim. Snowball rewrites letters (ru ё→е,
+# en happy→happi) and FTS5 does NOT fold ё, so a verbatim stem would build a prefix that
+# matches nothing. Slicing keeps the operator's own letters and can only ever widen.
+#
+# Aspect pairs (развернул / разворачивать) stay unmatched — that is lemmatisation, not
+# stemming, and is out of scope here.
+_CYRILLIC_RE = re.compile(r"[\u0400-\u04ff]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+MIN_STEM_CHARS = 3        # never widen a term into a 1-2 letter prefix
+MIN_TOKEN_CHARS = 4       # shorter words are already their own stem
+_STEMMER_CACHE: dict = {}
+
+
+def _get_stemmer(lang: str):
+    """Lazily builds a Snowball stemmer. snowballstemmer is an OPTIONAL dependency: without
+    it every term keeps its literal prefix behaviour, i.e. exactly the pre-stemming search."""
+    if lang not in _STEMMER_CACHE:
+        try:
+            import snowballstemmer  # noqa: PLC0415 — optional, resolved once and cached
+            _STEMMER_CACHE[lang] = snowballstemmer.stemmer(lang)
+        except Exception:
+            _STEMMER_CACHE[lang] = None
+    return _STEMMER_CACHE[lang]
+
+
+def _stem_prefix(token: str) -> str:
+    """Widens one search token to its stem-length prefix. Returns the token unchanged when
+    stemming is unavailable, the token is short, or the stem would be too aggressive."""
+    if len(token) < MIN_TOKEN_CHARS:
+        return token
+    if _CYRILLIC_RE.search(token):
+        lang = "russian"
+    elif _LATIN_RE.search(token):
+        lang = "english"
+    else:
+        return token
+    stemmer = _get_stemmer(lang)
+    if stemmer is None:
+        return token
+    try:
+        stem = stemmer.stemWord(token.lower())
+    except Exception:
+        return token
+    n = len(stem)
+    if n < MIN_STEM_CHARS or n >= len(token):
+        return token
+    return token[:n]
 
 
 # ─────────────────────────── schema / connection ───────────────────────────
@@ -142,7 +198,26 @@ _CREATE_SQL = """
     );
     CREATE INDEX IF NOT EXISTS idx_doc_rows_path ON doc_rows(path);
     CREATE INDEX IF NOT EXISTS idx_doc_rows_scope ON doc_rows(source, project_id);
+    -- Recall telemetry: which documents retrieval ACTUALLY returns, per channel.
+    -- Without it, "did that memory article ever get read" is unanswerable and any
+    -- retrieval change is faith rather than engineering. Survives a reindex on purpose:
+    -- it is measurement, not derived data, so reset_db()/init_db() never drop it.
+    CREATE TABLE IF NOT EXISTS doc_hits (
+        channel    TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        source     TEXT NOT NULL,
+        ref        TEXT NOT NULL,
+        hits       INTEGER NOT NULL DEFAULT 0,
+        first_ts   REAL,
+        last_ts    REAL,
+        PRIMARY KEY (channel, project_id, source, ref)
+    );
+    CREATE INDEX IF NOT EXISTS idx_doc_hits_scope ON doc_hits(source, project_id);
 """
+
+# Channels a hit can be recorded under. 'pack' is the one that matters most: it means the
+# document was injected into a live session's context, i.e. genuinely read by an agent.
+HIT_CHANNELS = ("ui", "cli", "pack")
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -554,15 +629,24 @@ def _tier_for(name: str, index_code: bool) -> str:
     return ""
 
 
-def _walk_candidates(root: Path, exclude_dirs: set, is_secret, index_code: bool) -> list:
+def _walk_candidates(root: Path, exclude_dirs: set, is_secret, index_code: bool,
+                      skip_roots: "tuple | list" = ()) -> list:
     """Returns [(path, tier)] for everything indexable under root.
 
     Note it does NOT prune every dotted directory: `.claude-ops/memory/` is exactly the kind
     of curated prose this feature exists to surface. Only the caller's explicit exclude set
     (webapp's own _FS_EXCLUDE_DIRS, so the index and the file browser agree on what exists)
-    is pruned."""
+    is pruned.
+
+    `skip_roots` prunes sub-trees that a DIFFERENT source owns (memory articles), so the same
+    file is never indexed twice under two sources — which would also make the two sweeps fight
+    over it."""
     out: list = []
+    skip = {str(Path(r).resolve()) for r in (skip_roots or ())}
     for dirpath, dirnames, filenames in os.walk(root):
+        if skip:
+            dirnames[:] = [d for d in dirnames
+                            if str((Path(dirpath) / d).resolve()) not in skip]
         dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
         for name in filenames:
             if is_secret(name):
@@ -575,22 +659,38 @@ def _walk_candidates(root: Path, exclude_dirs: set, is_secret, index_code: bool)
 
 
 def index_project_files(conn: sqlite3.Connection, project_id: str, project_name: str,
-                        root: "Path | str", exclude_dirs: "set | None" = None,
-                        is_secret=None, index_code: bool = True) -> dict:
+                        root: "Path | str | list", exclude_dirs: "set | None" = None,
+                        is_secret=None, index_code: bool = True,
+                        source_kind: str = "file", skip_roots: "tuple | list" = ()) -> dict:
     """Indexes a project's own files (CLAUDE.md, README, docs, specs, memory articles, code).
+
+    `root` may be one path or a list of them — one call per (project, source_kind), because
+    the sweep below is scoped to that pair. Splitting the same source across two calls would
+    make the second call's sweep delete the first call's rows.
+
+    `source_kind` names the source column ("file", or "memory" for curated memory articles,
+    which are ranked far above ordinary prose and live partly OUTSIDE the project cwd).
 
     Rewrite-in-place semantics like boards: a changed file is deleted and re-inserted, since
     source files are edited, not appended. Files that have disappeared since the last scan are
     swept — otherwise the index keeps answering with content that no longer exists, which is
     worse than not indexing it at all."""
-    root = Path(root)
+    roots = [Path(r) for r in (root if isinstance(root, (list, tuple)) else [root])]
     exclude_dirs = exclude_dirs if exclude_dirs is not None else set()
     is_secret = is_secret or (lambda _n: False)
     stats = {"files": 0, "docs": 0, "removed": 0, "code_skipped": False}
-    if not root.is_dir():
+    live_roots = [r for r in roots if r.is_dir()]
+    if not live_roots:
         return stats
 
-    candidates = _walk_candidates(root, exclude_dirs, is_secret, index_code)
+    candidates: list = []
+    root_of: dict = {}
+    for r in live_roots:
+        for path, tier in _walk_candidates(r, exclude_dirs, is_secret, index_code, skip_roots):
+            if str(path) in root_of:
+                continue          # nested roots: first one wins, never index a file twice
+            root_of[str(path)] = r
+            candidates.append((path, tier))
     if index_code and len(candidates) > MAX_PROJECT_FILES:
         # Big repo: keep prose (what the operator actually searches for), drop the code tier.
         # Surfaced in the stats rather than silently applied.
@@ -621,17 +721,18 @@ def index_project_files(conn: sqlite3.Connection, project_id: str, project_name:
         if "\x00" in text[:8192]:
             continue  # binary despite the extension
 
-        rel = str(path.relative_to(root)) if path.is_relative_to(root) else path.name
+        base = root_of.get(key, live_roots[0])
+        rel = str(path.relative_to(base)) if path.is_relative_to(base) else path.name
         _delete_docs_for_path(conn, key)
-        stats["docs"] += _insert_doc(conn, project_id, project_name, "file", stat.st_mtime,
-                                     rel, key, text, title=rel, tier=tier)
+        stats["docs"] += _insert_doc(conn, project_id, project_name, source_kind,
+                                     stat.st_mtime, rel, key, text, title=rel, tier=tier)
         _save_file_state(conn, key, stat.st_mtime, stat.st_size, 0)
 
     # Sweep files that vanished. Scoped to this project's file docs so a project whose root
     # is temporarily unreadable can never wipe another project's rows.
     known = {r[0] for r in conn.execute(
-        "SELECT DISTINCT path FROM doc_rows WHERE source = 'file' AND project_id = ?",
-        (project_id,))}
+        "SELECT DISTINCT path FROM doc_rows WHERE source = ? AND project_id = ?",
+        (source_kind, project_id))}
     for gone in known - seen:
         _delete_docs_for_path(conn, gone)
         conn.execute("DELETE FROM file_state WHERE path = ?", (gone,))
@@ -669,7 +770,9 @@ def scan_all(conn: sqlite3.Connection, chat_sources: list, timeline_sources: lis
         r = index_project_files(
             conn, src["project_id"], src["project_name"], src["root"],
             exclude_dirs=src.get("exclude_dirs"), is_secret=src.get("is_secret"),
-            index_code=src.get("index_code", True))
+            index_code=src.get("index_code", True),
+            source_kind=src.get("source_kind", "file"),
+            skip_roots=src.get("skip_roots", ()))
         stats["file_docs"] += r["docs"]
         stats["files_removed"] += r["removed"]
         stats["files_scanned"] += r["files"]
@@ -702,6 +805,93 @@ def full_reindex_at(db_path: "Path | str", chat_sources: list, timeline_sources:
         conn.close()
 
 
+# ─────────────────────────── recall telemetry ───────────────────────────
+
+def record_hits(conn: sqlite3.Connection, channel: str, rows: list) -> int:
+    """Counts documents a query actually returned. Best-effort by contract: telemetry must
+    never break or slow a search, so every failure here is swallowed."""
+    if not channel or not rows:
+        return 0
+    now = time.time()
+    written = 0
+    try:
+        for r in rows:
+            ref = (r["ref"] if not isinstance(r, dict) else r.get("ref")) or ""
+            pid = (r["project_id"] if not isinstance(r, dict) else r.get("project_id")) or ""
+            src = (r["source"] if not isinstance(r, dict) else r.get("source")) or ""
+            if not ref:
+                continue
+            conn.execute(
+                "INSERT INTO doc_hits (channel, project_id, source, ref, hits, first_ts, last_ts) "
+                "VALUES (?, ?, ?, ?, 1, ?, ?) "
+                "ON CONFLICT(channel, project_id, source, ref) DO UPDATE SET "
+                "hits = hits + 1, last_ts = excluded.last_ts",
+                (channel, pid, src, ref, now, now))
+            written += 1
+        conn.commit()
+    except Exception:
+        # Deliberately broad: the docstring promises telemetry can never break a search,
+        # and a narrower `sqlite3.Error` would still let a bad row shape (TypeError) through
+        # to the caller — search() invokes this inline, on the request path.
+        return written
+    return written
+
+
+def hit_stats(conn: sqlite3.Connection, source: "str | None" = None,
+              project_id: "str | None" = None, limit: int = 20) -> dict:
+    """{top: [...], cold: [...], totals: {...}} — what retrieval returns and what it never
+    returns. `cold` is the point of the whole table: indexed documents with zero recorded
+    hits are cost, not memory."""
+    where, params = [], []
+    if source:
+        where.append("dr.source = ?")
+        params.append(source)
+    if project_id:
+        where.append("dr.project_id = ?")
+        params.append(project_id)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+
+    # doc_rows holds absolute paths; doc_hits holds the returned ref (project-relative), so
+    # they are joined through docs, the one table that carries both.
+    docs_sql = (
+        "SELECT DISTINCT d.project_id AS project_id, d.source AS source, d.ref AS ref "
+        "FROM docs d JOIN doc_rows dr ON dr.doc_rowid = d.rowid" + clause)
+    indexed = {(r["project_id"], r["source"], r["ref"]) for r in conn.execute(docs_sql, params)}
+
+    hits: dict = {}
+    for r in conn.execute("SELECT channel, project_id, source, ref, hits, last_ts FROM doc_hits"):
+        key = (r["project_id"], r["source"], r["ref"])
+        if key not in indexed:
+            continue
+        agg = hits.setdefault(key, {"hits": 0, "last_ts": 0.0, "by_channel": {}})
+        agg["hits"] += r["hits"]
+        agg["last_ts"] = max(agg["last_ts"], r["last_ts"] or 0.0)
+        agg["by_channel"][r["channel"]] = r["hits"]
+
+    top = sorted(
+        ({"project_id": k[0], "source": k[1], "ref": k[2], **v} for k, v in hits.items()),
+        key=lambda d: -d["hits"])[:max(1, int(limit))]
+    cold = sorted({"project_id": k[0], "source": k[1], "ref": k[2]}
+                   for k in indexed - set(hits))
+    return {
+        "top": top,
+        "cold": cold[:max(1, int(limit))],
+        "totals": {"indexed_docs": len(indexed), "hit_docs": len(hits),
+                    "cold_docs": len(indexed) - len(hits),
+                    "total_hits": sum(v["hits"] for v in hits.values())},
+    }
+
+
+def hit_stats_at(db_path: "Path | str", source: "str | None" = None,
+                  project_id: "str | None" = None, limit: int = 20) -> dict:
+    conn = get_db(db_path)
+    try:
+        init_db(conn)
+        return hit_stats(conn, source=source, project_id=project_id, limit=limit)
+    finally:
+        conn.close()
+
+
 # ─────────────────────────── search ───────────────────────────
 
 def _build_match_expr(q: str) -> str:
@@ -710,22 +900,29 @@ def _build_match_expr(q: str) -> str:
     with a trailing prefix wildcard ("token"*) — quoting escapes every FTS5 special
     character (colons, parens, NEAR/AND/OR keywords, unbalanced quotes...) except the
     quote character itself, which is escaped by doubling per the FTS5 string-literal
-    rule. A user typing `what's "this"` therefore can never produce invalid syntax."""
+    rule. A user typing `what's "this"` therefore can never produce invalid syntax.
+
+    Each token is first widened to its stem-length prefix (see _stem_prefix) so a query in
+    one grammatical case still finds the other cases."""
     tokens = [tok for tok in _WS_RE.split(q.strip()) if tok]
-    parts = [f'"{tok.replace(chr(34), chr(34) * 2)}"*' for tok in tokens]
+    parts = [f'"{_stem_prefix(tok).replace(chr(34), chr(34) * 2)}"*' for tok in tokens]
     return " ".join(parts)
 
 
 _FILTER_RE = re.compile(r"^(project|in|source|path|after|before|is):(.+)$", re.IGNORECASE)
 _DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
-# Named doc classes so "is:memory" does not require the operator to remember paths.
+SEARCHABLE_SOURCES = ("chat", "board", "timeline", "file", "memory")
+
+# Named doc classes so "is:spec" does not require the operator to remember paths.
+# "memory" is deliberately absent: memory articles are their own SOURCE now (they live
+# partly outside the project cwd), so `is:memory` maps to a source filter, not a path one.
 _IS_PATH_HINTS = {
-    "memory": ".claude-ops/memory/",
     "spec": "spec",
     "claudemd": "CLAUDE.md",
     "readme": "README",
 }
+_IS_SOURCE_HINTS = {"memory": "memory"}
 
 
 def _parse_date(v: str) -> "float | None":
@@ -763,15 +960,18 @@ def parse_query(q: str) -> tuple:
             # An unrecognised value must NOT be dropped: silently discarding it would
             # widen the query to everything instead of narrowing it, which is the
             # opposite of what the operator asked for.
-            if val.lower() in ("chat", "board", "timeline", "file"):
+            if val.lower() in SEARCHABLE_SOURCES:
                 filters["sources"].append(val.lower())
             else:
                 terms.append(tok)
         elif key == "path":
             filters["path_like"].append(val.replace("*", "%"))
         elif key == "is":
+            src_hint = _IS_SOURCE_HINTS.get(val.lower())
             hint = _IS_PATH_HINTS.get(val.lower())
-            if hint:
+            if src_hint:
+                filters["sources"].append(src_hint)
+            elif hint:
                 filters["sources"].append("file")
                 filters["path_like"].append(f"%{hint}%")
             else:
@@ -800,8 +1000,9 @@ def _score(row, now: float) -> float:
     base = row["rank"]                       # negative; more negative = stronger match
     source, tier = row["source"], (row["tier"] or "")
     mult = _SOURCE_WEIGHT.get(source, 1.0)
-    if source == "file":
-        mult = _SOURCE_WEIGHT["file_code"] if tier == "code" else _SOURCE_WEIGHT["file_doc"]
+    if source in ("file", "memory"):
+        if source == "file":
+            mult = _SOURCE_WEIGHT["file_code"] if tier == "code" else _SOURCE_WEIGHT["file_doc"]
         ref = (row["ref"] or "").lower()
         if ref:
             for term in row["_terms"]:
@@ -822,7 +1023,7 @@ def _doc_key(row) -> tuple:
 
 
 def search(conn: sqlite3.Connection, q: str, limit: int = DEFAULT_LIMIT,
-           project_id: "str | None" = None) -> list:
+           project_id: "str | None" = None, channel: "str | None" = None) -> list:
     q = (q or "").strip()
     if not q:
         return []
@@ -906,6 +1107,9 @@ def search(conn: sqlite3.Connection, q: str, limit: int = DEFAULT_LIMIT,
         if len(kept) >= limit:
             break
 
+    if channel:
+        record_hits(conn, channel, kept)
+
     hits = []
     for r in kept:
         source = r["source"]
@@ -927,6 +1131,12 @@ def search(conn: sqlite3.Connection, q: str, limit: int = DEFAULT_LIMIT,
                 ref_obj["line"] = r["line"]
             if r["tier"]:
                 ref_obj["tier"] = r["tier"]
+        elif source == "memory" and r["ref"]:
+            # The Memory tab addresses articles by BARE NAME (api_project_memory), not by
+            # path — and native memory lives outside the cwd, so a path ref could not be
+            # opened. Hand back the name, and the relative path only as a label.
+            ref_obj["memory"] = r["ref"].rsplit("/", 1)[-1]
+            ref_obj["path"] = r["ref"]
         hits.append({
             "project_id": r["project_id"],
             "project_name": r["project_name"],
@@ -939,10 +1149,10 @@ def search(conn: sqlite3.Connection, q: str, limit: int = DEFAULT_LIMIT,
 
 
 def search_at(db_path: "Path | str", q: str, limit: int = DEFAULT_LIMIT,
-              project_id: "str | None" = None) -> list:
+              project_id: "str | None" = None, channel: "str | None" = None) -> list:
     conn = get_db(db_path)
     try:
         init_db(conn)
-        return search(conn, q, limit=limit, project_id=project_id)
+        return search(conn, q, limit=limit, project_id=project_id, channel=channel)
     finally:
         conn.close()

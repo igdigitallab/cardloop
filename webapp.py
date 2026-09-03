@@ -8872,10 +8872,23 @@ def _build_search_sources(ctx: dict):
             # spec-079 A3: the file browser's OWN exclusion rules are handed to the indexer,
             # so the index can never surface a file the cockpit refuses to list or read
             # (notably .env*, which _is_secret_name gates).
+            # Curated memory is its own source: it outranks every other kind of text and
+            # HALF OF IT LIVES OUTSIDE the project cwd (native auto-memory under
+            # ~/.claude/projects/<slug>/memory/), so the cwd walk alone can never see it.
+            # Both locations are indexed together — one call, so one sweep owns them.
+            memory_roots = [_project_memory_dir(cwd), _sdk_sessions_dir(cwd) / "memory"]
             file_sources.append({
                 "project_id": pid, "project_name": name, "root": cwd,
                 "exclude_dirs": _FS_EXCLUDE_DIRS, "is_secret": _is_secret_name,
                 "index_code": True,
+                # …and pruned from the plain file walk, so no article is indexed twice
+                # under two sources with two sweeps fighting over it.
+                "skip_roots": memory_roots,
+            })
+            file_sources.append({
+                "project_id": pid, "project_name": name, "root": memory_roots,
+                "exclude_dirs": _FS_EXCLUDE_DIRS, "is_secret": _is_secret_name,
+                "index_code": False, "source_kind": "memory",
             })
     return chat_sources, timeline_sources, board_sources, file_sources
 
@@ -8935,7 +8948,8 @@ async def api_search(req: web.Request) -> web.Response:
     db_path = _search_db_path(ctx)
     loop = asyncio.get_running_loop()
     try:
-        hits = await loop.run_in_executor(None, _search.search_at, db_path, q, limit, project_id)
+        hits = await loop.run_in_executor(
+            None, _search.search_at, db_path, q, limit, project_id, "ui")
     except Exception:
         logging.exception("[search] query failed")
         return web.json_response({"hits": [], "error": "search failed"})

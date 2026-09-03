@@ -26,6 +26,18 @@ Design history & specs: `docs/internal/specs/` (gitignored).
   `GET|POST /api/board/janitor[/run]`. Cards carry an `rt=<unix>` marker stamped when they enter
   Review — the board keeps no history otherwise. Knobs: `BOARD_JANITOR_MODE=off|digest|accept`.
 - `captcha_solver.py` — the 2captcha bridge behind `browser_solve_captcha`. Knows nothing about Playwright (page-side detection/injection lives in `browser_pane.solve_captcha`). Off unless `TWOCAPTCHA_API_KEY` / the safe's `twocaptcha_api_key` is set, and gated behind `agent_actions=full`. ⚠️ Only solves captcha **widgets** — a full-page Cloudflare interstitial is refused on purpose (IP-bound token); don't "fix" that by removing the guard, it would just burn balance on tokens Cloudflare rejects.
+- `search.py` — the global index (spec-074/079/090): FTS5 over five sources — `chat`,
+  `board`, `timeline`, `file` and `memory`. **`memory` spans BOTH memory locations**
+  (`<cwd>/.claude-ops/memory/` and the native `~/.claude/projects/<slug>/memory/`, which is
+  outside the cwd and was invisible to the file walk); it outranks every other source. Terms
+  are stemmed query-side — the stored index is untouched, so morphology needs no reindex.
+  `doc_hits` records what retrieval actually returned per channel (`ui`/`cli`/`pack`) and is
+  deliberately NOT dropped by a reindex. ⚠️ One `index_project_files` call per
+  (project, source_kind): the sweep is scoped to that pair, so splitting one source across
+  two calls makes the second sweep delete the first one's rows.
+- `tools/cardloop-search` — shell entry point to that index (`tools/` is on PATH). The agent's
+  "have we solved this before?" lookup across ALL projects; `--stats [--cold]` prints recall
+  telemetry. Re-execs under the repo venv when the stemmer is missing from the system python.
 - `web/src/components/Lightbox.tsx` — the shared fullscreen viewer with zoom (pinch/wheel/buttons) + pan (pointer events, `touch-action:none`). Used by both chat images/videos (`ChatImage`, `video` prop) and mermaid diagrams (`svg` prop, ⤢ button + tap). Do NOT spawn a second lightbox.
 
 More detail in ARCHITECTURE.md.
