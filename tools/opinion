@@ -9,6 +9,7 @@ VERSION="1.1"
 AGY_MODEL="${OPINION_AGY_MODEL:-gemini-3.8-flash-high}"
 CODEX_MODEL="${OPINION_CODEX_MODEL:-}"
 TIMEOUT="${OPINION_TIMEOUT:-300}"
+EFFORT="${OPINION_EFFORT:-high}"
 WORKDIR="$PWD"
 WANT_AGY=1; WANT_CODEX=1; MODE=text; WRITABLE=0
 declare -a FILES=(); declare -a WORDS=()
@@ -34,6 +35,7 @@ opinion — два независимых внешних мнения одной
   -t, --timeout SEC      таймаут на каждый движок (по умолчанию 300)
   --agy-model M          модель Antigravity (по умолчанию gemini-3.8-flash-high)
   --codex-model M        модель Codex (по умолчанию из ~/.codex/config.toml)
+  --effort L             глубина рассуждения обоих: low|medium|high (по умолчанию high)
   --rw                   разрешить движкам ПИСАТЬ (по умолчанию read-only)
   --json                 машинный вывод: {"agy":{...},"codex":{...}}
   --models               показать доступные модели обоих и выйти
@@ -56,6 +58,7 @@ while [[ $# -gt 0 ]]; do
     -t|--timeout)  need "$1" $#; TIMEOUT="$2"; shift 2 ;;
     --agy-model)   need "$1" $#; AGY_MODEL="$2"; shift 2 ;;
     --codex-model) need "$1" $#; CODEX_MODEL="$2"; shift 2 ;;
+    --effort)      need "$1" $#; EFFORT="$2"; shift 2 ;;
     --rw)          WRITABLE=1; shift ;;
     --json)        MODE=json; shift ;;
     --models)      echo "── Antigravity ──"; agy models 2>&1
@@ -72,6 +75,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || die "--timeout ждёт число секунд, получил «$TIMEOUT»"
+[[ "$EFFORT" =~ ^(low|medium|high)$ ]] || die "--effort ждёт low|medium|high, получил «$EFFORT»"
 PROMPT="${WORDS[*]:-}"
 [[ -z "${PROMPT// }" && ! -t 0 ]] && PROMPT="$(cat)"
 [[ -z "${PROMPT// }" ]] && die "нечего спрашивать (см. --help)"
@@ -108,7 +112,7 @@ run_agy() {
          --bind "$HOME/.gemini" "$HOME/.gemini" --bind "$HOME/.cache" "$HOME/.cache"
          --die-with-parent --chdir "$WORKDIR")
   fi
-  ( cd "$WORKDIR" && timeout "$TIMEOUT" "${pre[@]}" agy --model "$AGY_MODEL" \
+  ( cd "$WORKDIR" && timeout "$TIMEOUT" "${pre[@]}" agy --model "$AGY_MODEL" --effort "$EFFORT" \
       --print-timeout "${TIMEOUT}s" -p "$PROMPT" ) >"$TMP/agy.out" 2>"$TMP/agy.err"
   echo $? >"$TMP/agy.rc"; echo $((SECONDS-t0)) >"$TMP/agy.sec"
 }
@@ -118,9 +122,12 @@ run_codex() {
   local -a sb=(-s read-only); [[ $WRITABLE -eq 1 ]] && sb=(-s danger-full-access)
   local -a mdl=(); [[ -n "$CODEX_MODEL" ]] && mdl=(-m "$CODEX_MODEL")
   timeout "$TIMEOUT" codex exec --skip-git-repo-check --ephemeral --color never \
+      -c model_reasoning_effort="$EFFORT" \
       -C "$WORKDIR" "${sb[@]}" "${mdl[@]}" -o "$TMP/codex.out" -- "$PROMPT" \
       >"$TMP/codex.err" 2>&1 </dev/null
   echo $? >"$TMP/codex.rc"; echo $((SECONDS-t0)) >"$TMP/codex.sec"
+  # codex сам печатает выбранную модель — вытаскиваем, чтобы в шапке не стояло «по умолчанию»
+  awk -F': *' '/^model:/{print $2; exit}' "$TMP/codex.err" >"$TMP/codex.model" 2>/dev/null
   # НЕ подменяем ответ логом: пустой ответ должен читаться как провал, а не как успех
 }
 
@@ -163,16 +170,16 @@ def part(n,model):
             "ok":rc=="0" and bool(ans),"answer":ans,"stderr":rd(n+".err").strip()[:2000]}
 o={}
 if wa: o["agy"]=part("agy",am)
-if wc: o["codex"]=part("codex",cm)
+if wc: o["codex"]=part("codex",(rd("codex.model").strip() or cm))
 print(json.dumps(o,ensure_ascii=False,indent=2))
 PY
 else
   if [[ $WANT_AGY -eq 1 ]]; then
-    printf '\n===== ANTIGRAVITY (%s) — %ss =====\n' "$AGY_MODEL" "$(cat "$TMP/agy.sec" 2>/dev/null || echo ?)"
+    printf '\n===== ANTIGRAVITY (%s, effort=%s) — %ss =====\n' "$AGY_MODEL" "$EFFORT" "$(cat "$TMP/agy.sec" 2>/dev/null || echo ?)"
     read_part agy
   fi
   if [[ $WANT_CODEX -eq 1 ]]; then
-    printf '\n===== CODEX (%s) — %ss =====\n' "${CODEX_MODEL:-по умолчанию}" "$(cat "$TMP/codex.sec" 2>/dev/null || echo ?)"
+    printf '\n===== CODEX (%s, effort=%s) — %ss =====\n' "$(cat "$TMP/codex.model" 2>/dev/null || echo "${CODEX_MODEL:-?}")" "$EFFORT" "$(cat "$TMP/codex.sec" 2>/dev/null || echo ?)"
     read_part codex
   fi
   echo
