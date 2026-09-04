@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # opinion — второе мнение от двух внешних моделей ПАРАЛЛЕЛЬНО.
 #   Antigravity (agy, Google, бесплатно) + Codex (OpenAI, подписка ChatGPT Team).
-# Оба по умолчанию read-only: смотреть файлы можно, менять — нет.
+# Оба по умолчанию read-only: файлы читают, менять не могут.
+# Коды возврата: 0 — ответили все запрошенные; 1 — ответил не каждый; 2 — никто/ошибка вызова.
 set -uo pipefail
 
-VERSION="1.0"
+VERSION="1.1"
 AGY_MODEL="${OPINION_AGY_MODEL:-gemini-3.8-flash-high}"
 CODEX_MODEL="${OPINION_CODEX_MODEL:-}"
 TIMEOUT="${OPINION_TIMEOUT:-300}"
 WORKDIR="$PWD"
 WANT_AGY=1; WANT_CODEX=1; MODE=text; WRITABLE=0
-declare -a FILES=(); PROMPT=""
+declare -a FILES=(); declare -a WORDS=()
+
+die() { echo "opinion: $*" >&2; exit 2; }
+need() { [[ $2 -ge 2 ]] || die "опции $1 нужен аргумент (см. --help)"; }
 
 usage() {
 cat <<'USAGE'
@@ -21,6 +25,7 @@ opinion — два независимых внешних мнения одной
   opinion --codex "вопрос"          только Codex (OpenAI, подписка)
   echo "вопрос" | opinion           вопрос из stdin
   opinion -f app.py -f log.txt "что тут не так?"
+  opinion -- "--rw это что за флаг?"   всё после -- считается вопросом
 
 Опции:
   --agy | --codex        только один движок (по умолчанию — оба)
@@ -34,20 +39,23 @@ opinion — два независимых внешних мнения одной
   --models               показать доступные модели обоих и выйти
   -h, --help             эта справка
 
-Модели: `opinion --models`. Каждый движок отвечает независимо — расхождение
-между ними и есть полезный сигнал.
+Коды возврата: 0 — ответили все; 1 — ответил не каждый; 2 — никто не ответил.
+Модели: `opinion --models`. Расхождение между движками и есть полезный сигнал.
 USAGE
 }
 
+only_positional=0
 while [[ $# -gt 0 ]]; do
+  if [[ $only_positional -eq 1 ]]; then WORDS+=("$1"); shift; continue; fi
   case "$1" in
+    --)            only_positional=1; shift ;;
     --agy)         WANT_CODEX=0; shift ;;
     --codex)       WANT_AGY=0; shift ;;
-    -f|--file)     FILES+=("$2"); shift 2 ;;
-    -C|--cd)       WORKDIR="$2"; shift 2 ;;
-    -t|--timeout)  TIMEOUT="$2"; shift 2 ;;
-    --agy-model)   AGY_MODEL="$2"; shift 2 ;;
-    --codex-model) CODEX_MODEL="$2"; shift 2 ;;
+    -f|--file)     need "$1" $#; FILES+=("$2"); shift 2 ;;
+    -C|--cd)       need "$1" $#; WORKDIR="$2"; shift 2 ;;
+    -t|--timeout)  need "$1" $#; TIMEOUT="$2"; shift 2 ;;
+    --agy-model)   need "$1" $#; AGY_MODEL="$2"; shift 2 ;;
+    --codex-model) need "$1" $#; CODEX_MODEL="$2"; shift 2 ;;
     --rw)          WRITABLE=1; shift ;;
     --json)        MODE=json; shift ;;
     --models)      echo "── Antigravity ──"; agy models 2>&1
@@ -57,35 +65,45 @@ while [[ $# -gt 0 ]]; do
                    exit 0 ;;
     -h|--help)     usage; exit 0 ;;
     -V|--version)  echo "opinion $VERSION"; exit 0 ;;
-    -)             PROMPT="$(cat)"; shift ;;
-    -*)            echo "opinion: неизвестная опция $1 (см. --help)" >&2; exit 2 ;;
-    *)             PROMPT="${PROMPT:+$PROMPT }$1"; shift ;;
+    -)             WORDS+=("$(cat)"); shift ;;
+    -*)            die "неизвестная опция $1 (вопрос с дефиса передавай после --)" ;;
+    *)             WORDS+=("$1"); shift ;;
   esac
 done
 
-[[ -z "$PROMPT" && ! -t 0 ]] && PROMPT="$(cat)"
-if [[ -z "${PROMPT// }" ]]; then echo "opinion: нечего спрашивать (см. --help)" >&2; exit 2; fi
-[[ -d "$WORKDIR" ]] || { echo "opinion: нет каталога $WORKDIR" >&2; exit 2; }
+[[ "$TIMEOUT" =~ ^[0-9]+$ ]] || die "--timeout ждёт число секунд, получил «$TIMEOUT»"
+PROMPT="${WORDS[*]:-}"
+[[ -z "${PROMPT// }" && ! -t 0 ]] && PROMPT="$(cat)"
+[[ -z "${PROMPT// }" ]] && die "нечего спрашивать (см. --help)"
+[[ -d "$WORKDIR" ]] || die "нет каталога $WORKDIR"
+WORKDIR="$(cd "$WORKDIR" && pwd)"
 
-for f in "${FILES[@]:-}"; do
-  [[ -z "$f" ]] && continue
-  if [[ -r "$f" ]]; then
-    PROMPT+=$'\n\n--- '"$f"$' ---\n'"$(cat -- "$f")"
-  else
-    echo "opinion: не читается файл $f" >&2; exit 2
-  fi
+# файл ищем сперва как дан (относительно PWD), затем относительно -C
+for f in ${FILES[@]+"${FILES[@]}"}; do
+  p="$f"; [[ -r "$p" ]] || p="$WORKDIR/$f"
+  [[ -r "$p" ]] || die "не читается файл $f"
+  PROMPT+=$'\n\n--- '"$f"$' ---\n'"$(cat -- "$p")"
 done
 
 TMP="$(mktemp -d /tmp/opinion.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
+AGY_PID=""; CODEX_PID=""
+cleanup() {
+  [[ -n "$AGY_PID"   ]] && kill -- "-$AGY_PID"   2>/dev/null
+  [[ -n "$CODEX_PID" ]] && kill -- "-$CODEX_PID" 2>/dev/null
+  [[ -n "$AGY_PID"   ]] && kill "$AGY_PID"   2>/dev/null
+  [[ -n "$CODEX_PID" ]] && kill "$CODEX_PID" 2>/dev/null
+  rm -rf "$TMP"
+}
+trap cleanup EXIT INT TERM
 
 run_agy() {
   local t0=$SECONDS
   # ⚠️ У agy НЕТ рабочего read-only: ни --sandbox, ни --mode plan, ни урезанный
-  # settings.json не держат запись в print-режиме (проверено — пишет через раз).
-  # Единственный настоящий гейт — bubblewrap: весь корень ro, rw только своё состояние.
+  # settings.json не держат запись в print-режиме (пишет через раз — это инструкция
+  # модели, а не гейт). Единственный настоящий замок — bubblewrap.
   local -a pre=()
-  if [[ $WRITABLE -eq 0 ]] && command -v bwrap >/dev/null 2>&1; then
+  if [[ $WRITABLE -eq 0 ]]; then
+    command -v bwrap >/dev/null 2>&1 || { echo "нет bubblewrap — read-only для agy негарантирован; ставь 'apt install bubblewrap' или зови с --rw осознанно" >"$TMP/agy.err"; echo 3 >"$TMP/agy.rc"; echo 0 >"$TMP/agy.sec"; return; }
     pre=(bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp
          --bind "$HOME/.gemini" "$HOME/.gemini" --bind "$HOME/.cache" "$HOME/.cache"
          --die-with-parent --chdir "$WORKDIR")
@@ -100,25 +118,37 @@ run_codex() {
   local -a sb=(-s read-only); [[ $WRITABLE -eq 1 ]] && sb=(-s danger-full-access)
   local -a mdl=(); [[ -n "$CODEX_MODEL" ]] && mdl=(-m "$CODEX_MODEL")
   timeout "$TIMEOUT" codex exec --skip-git-repo-check --ephemeral --color never \
-      -C "$WORKDIR" "${sb[@]}" "${mdl[@]}" -o "$TMP/codex.out" "$PROMPT" \
-      >"$TMP/codex.log" 2>&1
+      -C "$WORKDIR" "${sb[@]}" "${mdl[@]}" -o "$TMP/codex.out" -- "$PROMPT" \
+      >"$TMP/codex.err" 2>&1 </dev/null
   echo $? >"$TMP/codex.rc"; echo $((SECONDS-t0)) >"$TMP/codex.sec"
-  [[ -s "$TMP/codex.out" ]] || cp "$TMP/codex.log" "$TMP/codex.out" 2>/dev/null
+  # НЕ подменяем ответ логом: пустой ответ должен читаться как провал, а не как успех
 }
 
-[[ $WANT_AGY   -eq 1 ]] && run_agy &   AGY_PID=$!
-[[ $WANT_CODEX -eq 1 ]] && run_codex & CODEX_PID=$!
-wait 2>/dev/null
+if [[ $WANT_AGY   -eq 1 ]]; then run_agy   & AGY_PID=$!;   fi
+if [[ $WANT_CODEX -eq 1 ]]; then run_codex & CODEX_PID=$!; fi
+[[ -n "$AGY_PID"   ]] && wait "$AGY_PID"   2>/dev/null
+[[ -n "$CODEX_PID" ]] && wait "$CODEX_PID" 2>/dev/null
+AGY_PID=""; CODEX_PID=""
 
-read_part() { # $1=имя  → печатает ответ или диагностику
-  local n="$1" rc out
-  rc="$(cat "$TMP/$n.rc" 2>/dev/null || echo 127)"
-  out="$(cat "$TMP/$n.out" 2>/dev/null)"
-  if [[ "$rc" == "124" ]]; then echo "ТАЙМАУТ ${TIMEOUT}s — ответа нет"
-  elif [[ "$rc" != "0" || -z "${out// }" ]]; then
-    echo "ОШИБКА (код $rc)"; sed -n '1,15p' "$TMP/$n.err" "$TMP/$n.log" 2>/dev/null
-  else printf '%s\n' "$out"; fi
+ok_of() { # 0 = движок реально ответил
+  local n="$1" rc; rc="$(cat "$TMP/$n.rc" 2>/dev/null || echo 127)"
+  [[ "$rc" == "0" && -s "$TMP/$n.out" && -n "$(tr -d '[:space:]' <"$TMP/$n.out")" ]]
 }
+read_part() {
+  local n="$1" rc; rc="$(cat "$TMP/$n.rc" 2>/dev/null || echo 127)"
+  if ok_of "$n"; then cat "$TMP/$n.out"; return; fi
+  case "$rc" in
+    124) echo "ТАЙМАУТ ${TIMEOUT}s — ответа нет" ;;
+    3)   echo "НЕ ЗАПУЩЕН: $(cat "$TMP/$n.err" 2>/dev/null)" ;;
+    0)   echo "ПУСТОЙ ОТВЕТ (движок завершился успешно, но ничего не сказал)" ;;
+    *)   echo "ОШИБКА (код $rc)" ;;
+  esac
+  [[ "$rc" != "3" ]] && sed -n '1,12p' "$TMP/$n.err" 2>/dev/null
+}
+
+want=0; good=0
+[[ $WANT_AGY   -eq 1 ]] && { want=$((want+1)); ok_of agy   && good=$((good+1)); }
+[[ $WANT_CODEX -eq 1 ]] && { want=$((want+1)); ok_of codex && good=$((good+1)); }
 
 if [[ "$MODE" == json ]]; then
   python3 - "$TMP" "$WANT_AGY" "$WANT_CODEX" "$AGY_MODEL" "${CODEX_MODEL:-default}" <<'PY'
@@ -128,24 +158,26 @@ def rd(p):
     try: return open(os.path.join(tmp,p),encoding="utf-8",errors="replace").read()
     except OSError: return ""
 def part(n,model):
-    rc=(rd(n+".rc") or "127").strip()
+    rc=(rd(n+".rc") or "127").strip(); ans=rd(n+".out").strip()
     return {"model":model,"exit_code":int(rc),"seconds":int((rd(n+".sec") or "0").strip() or 0),
-            "ok":rc=="0" and bool(rd(n+".out").strip()),
-            "answer":rd(n+".out").strip(),"stderr":(rd(n+".err")+rd(n+".log")).strip()[:2000]}
+            "ok":rc=="0" and bool(ans),"answer":ans,"stderr":rd(n+".err").strip()[:2000]}
 o={}
 if wa: o["agy"]=part("agy",am)
 if wc: o["codex"]=part("codex",cm)
 print(json.dumps(o,ensure_ascii=False,indent=2))
 PY
-  exit 0
+else
+  if [[ $WANT_AGY -eq 1 ]]; then
+    printf '\n===== ANTIGRAVITY (%s) — %ss =====\n' "$AGY_MODEL" "$(cat "$TMP/agy.sec" 2>/dev/null || echo ?)"
+    read_part agy
+  fi
+  if [[ $WANT_CODEX -eq 1 ]]; then
+    printf '\n===== CODEX (%s) — %ss =====\n' "${CODEX_MODEL:-по умолчанию}" "$(cat "$TMP/codex.sec" 2>/dev/null || echo ?)"
+    read_part codex
+  fi
+  echo
 fi
 
-if [[ $WANT_AGY -eq 1 ]]; then
-  printf '\n===== ANTIGRAVITY (%s) — %ss =====\n' "$AGY_MODEL" "$(cat "$TMP/agy.sec" 2>/dev/null || echo ?)"
-  read_part agy
-fi
-if [[ $WANT_CODEX -eq 1 ]]; then
-  printf '\n===== CODEX (%s) — %ss =====\n' "${CODEX_MODEL:-по умолчанию}" "$(cat "$TMP/codex.sec" 2>/dev/null || echo ?)"
-  read_part codex
-fi
-echo
+if   [[ $good -eq $want ]]; then exit 0
+elif [[ $good -gt 0     ]]; then exit 1
+else exit 2; fi
