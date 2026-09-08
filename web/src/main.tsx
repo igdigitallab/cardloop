@@ -1,6 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import '@fontsource-variable/geist'
 import '@fontsource-variable/geist-mono'
 import './styles.css'
@@ -20,7 +21,9 @@ async function start() {
   await consumeAuthHandoff()
   ReactDOM.createRoot(rootEl).render(
     <React.StrictMode>
-      <App />
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
     </React.StrictMode>
   )
 }

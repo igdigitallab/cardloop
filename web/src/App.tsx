@@ -15,6 +15,7 @@ import { VaultTab } from './tabs/VaultTab'
 import { UsageTab } from './tabs/UsageTab'
 import { TerminalTab } from './tabs/TerminalTab'
 import { GlobalSettingsTab } from './tabs/GlobalSettingsTab'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { useToast, ToastContainer } from './components/Toast'
 import { UpdatePill } from './components/UpdatePill'
 import { useBuildWatch } from './hooks/useBuildWatch'
@@ -1161,7 +1162,9 @@ export default function App() {
               overflow: 'hidden',
             }}
           >
-            <GlobalSettingsTab />
+            <ErrorBoundary label="Settings">
+              <GlobalSettingsTab />
+            </ErrorBoundary>
           </div>
         )}
 

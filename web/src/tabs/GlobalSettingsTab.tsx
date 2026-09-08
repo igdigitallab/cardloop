@@ -25,7 +25,9 @@ function relTime(ts: number): string {
   return Math.floor(s / 86400) + 'd ago'
 }
 
-function formatAction(action: string): string {
+function formatAction(action: string | null | undefined): string {
+  // A suppressed decision has no action — never assume the field is a string.
+  if (typeof action !== 'string' || !action) return 'No action recorded'
   if (action === 'fix_failing_tests') return 'Would fix failing tests'
   if (action === 'run_backlog_card') return 'Would run a backlog card'
   if (action === 'scout') return 'Would propose improvement cards'
@@ -323,7 +325,7 @@ export function GlobalSettingsTab() {
                 </p>
               ) : (
                 decisions.map((d, i) => {
-                  const ps = PRIORITY_STYLE[d.priority] ?? PRIORITY_STYLE.P4
+                  const ps = (d.priority ? PRIORITY_STYLE[d.priority] : undefined) ?? PRIORITY_STYLE.P4
                   return (
                     <div
                       key={i}
@@ -347,13 +349,15 @@ export function GlobalSettingsTab() {
                           color: ps.color,
                           flexShrink: 0,
                         }}>
-                          {d.priority}
+                          {d.priority ?? (d.suppressed ? 'SKIP' : '—')}
                         </span>
                         <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{d.project}</span>
                         <span style={{ fontSize: 11, color: 'var(--text3)', marginLeft: 'auto' }}>{relTime(d.ts)}</span>
                       </div>
                       {/* Line 2: action */}
-                      <div style={{ fontSize: 12, color: 'var(--text2)' }}>{formatAction(d.action)}</div>
+                      <div style={{ fontSize: 12, color: 'var(--text2)' }}>
+                        {d.suppressed ? `Suppressed — ${d.loop_signal || 'loop guard'}` : formatAction(d.action)}
+                      </div>
                       {/* Line 3: rationale */}
                       {d.rationale && (
                         <div

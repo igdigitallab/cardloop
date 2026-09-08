@@ -260,11 +260,17 @@ export interface ProjectSettings {
 export interface AutopilotDecision {
   ts: number
   project: string
-  action: string
-  priority: 'P1' | 'P3' | 'P4' | 'P5'
-  rationale: string
+  // A suppressed decision (loop guard) carries no action/priority/rationale at all —
+  // the shadow loop records only why it stopped. Typing these as non-null once crashed
+  // the whole Settings tab (formatAction called .replace on undefined).
+  action: string | null
+  priority: 'P1' | 'P3' | 'P4' | 'P5' | null
+  rationale: string | null
   mode: 'propose' | 'auto'
   shadow: true
+  suppressed?: boolean
+  loop_signal?: string
+  repeat_count?: number
 }
 
 export interface AutopilotStatus {
