@@ -265,12 +265,6 @@ def test_b3_disabled_excluded_from_load_roles_but_present_in_list_roles(isolated
     assert found[0].enabled is False
 
 
-def test_b4_main_never_in_compiled_roster(isolated_dirs):
-    cwd, _ = isolated_dirs
-    R.write_role(cwd, "main", "project", MINIMAL.format(name="main"))
-    assert "main" not in R.load_roles(cwd)
-
-
 def test_b5_compile_agents_maps_every_field_and_defaults_permission_mode(isolated_dirs):
     cwd, _ = isolated_dirs
     content = (
@@ -307,8 +301,8 @@ def test_b5_compile_agents_honours_explicit_permission_mode(isolated_dirs):
 
 def test_b6_registry_fingerprint_stable_when_nothing_changes(isolated_dirs):
     cwd, _ = isolated_dirs
-    fp1 = R.registry_fingerprint(R.load_roles(cwd), R.main_role(cwd))
-    fp2 = R.registry_fingerprint(R.load_roles(cwd), R.main_role(cwd))
+    fp1 = R.registry_fingerprint(R.load_roles(cwd))
+    fp2 = R.registry_fingerprint(R.load_roles(cwd))
     assert fp1 == fp2
 
 
@@ -322,24 +316,12 @@ def test_b6_registry_fingerprint_changes_on_field_edit(isolated_dirs, field, mut
     cwd, _ = isolated_dirs
     base = "---\nname: fp-role\ndescription: Use this when fp.\n---\nBody.\n"
     R.write_role(cwd, "fp-role", "project", base)
-    fp_before = R.registry_fingerprint(R.load_roles(cwd), R.main_role(cwd))
+    fp_before = R.registry_fingerprint(R.load_roles(cwd))
 
     # I1k: write_role now refuses to clobber an existing file unless overwrite=True is passed.
     R.write_role(cwd, "fp-role", "project", mutate(base), overwrite=True)
-    fp_after = R.registry_fingerprint(R.load_roles(cwd), R.main_role(cwd))
+    fp_after = R.registry_fingerprint(R.load_roles(cwd))
     assert fp_before != fp_after, f"fingerprint did not change when {field} changed"
-
-
-def test_b6_registry_fingerprint_changes_when_main_prompt_changes(isolated_dirs):
-    cwd, _ = isolated_dirs
-    R.write_role(cwd, "main", "project", MINIMAL.format(name="main"))
-    fp_before = R.registry_fingerprint(R.load_roles(cwd), R.main_role(cwd))
-
-    changed = MINIMAL.format(name="main").replace("Body for main.", "Changed main body.")
-    # I1k: write_role now refuses to clobber an existing file unless overwrite=True is passed.
-    R.write_role(cwd, "main", "project", changed, overwrite=True)
-    fp_after = R.registry_fingerprint(R.load_roles(cwd), R.main_role(cwd))
-    assert fp_before != fp_after
 
 
 def test_b7_missing_directories_are_not_an_error_and_not_created(tmp_path, monkeypatch):

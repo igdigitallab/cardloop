@@ -28,7 +28,6 @@ from claude_agent_sdk.types import PermissionMode as _SDK_PermissionMode
 # ─────────────────────────── constants ───────────────────────────
 
 ROLE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
-MAIN_ROLE_NAME = "main"  # reserved: per-project main-agent instructions (prompt-only, see D3)
 PROJECT_SUBDIR = ".claude-ops/roles"
 BUILTIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roles", "builtin")
 
@@ -44,8 +43,8 @@ _KNOWN_KEYS = frozenset({
 _INT_RE = re.compile(r"^-?\d+$")
 
 # I1j fix (A2-audit.md/F7 residual): enum validation used to live ONLY in webapp.py's HTTP
-# write path, so a role file written by hand or by any agent with Bash (main.md's own gotcha —
-# see §3.4) reached AgentDefinition with a garbage effort/permissionMode/memory/maxTurns
+# write path, so a role file written by hand or by any agent with Bash reached
+# AgentDefinition with a garbage effort/permissionMode/memory/maxTurns
 # verbatim; the SDK's dataclass does not enforce its own Literal types at runtime. parse_role
 # is the one choke point every read (and write, which re-parses) goes through, so the checks
 # move here. effort/memory mirror the SDK's own Literal values; permissionMode is read straight
@@ -381,37 +380,19 @@ def scope_rank(scope: str) -> int:
 
 def load_roles(cwd: "str | None", _all: "list[Role] | None" = None) -> "dict[str, Role]":
     """Merged effective registry: project > global > builtin, whole-file override by name.
-    Excludes MAIN_ROLE_NAME. Only enabled roles are returned.
+    Only enabled roles are returned.
 
     `_all` lets a caller that already ran `list_roles_report(cwd)` THIS turn/request pass that
     result in, instead of re-walking the filesystem a second time — `engine.py`'s run_engine and
-    `webapp.py`'s api_project_roles both do one walk per call and reuse it here and in
-    `main_role()` below (see A1-audit.md's per-turn/per-request filesystem-cost finding)."""
+    `webapp.py`'s api_project_roles both do one walk per call and reuse it here (see
+    A1-audit.md's per-turn/per-request filesystem-cost finding)."""
     roles_list = _all if _all is not None else list_roles_report(cwd)[0]
     best: "dict[str, Role]" = {}
     for r in roles_list:
-        if r.name == MAIN_ROLE_NAME:
-            continue
         cur = best.get(r.name)
         if cur is None or _SCOPE_RANK[r.scope] >= _SCOPE_RANK[cur.scope]:
             best[r.name] = r
     return {name: r for name, r in best.items() if r.enabled}
-
-
-def main_role(cwd: "str | None", _all: "list[Role] | None" = None) -> "Role | None":
-    """The `main` role for this project: project scope wins if present (enabled or not —
-    an explicitly disabled project `main` does NOT fall back to global); otherwise an
-    enabled global `main` is the default. None when nothing resolves.
-
-    `_all` — see `load_roles()`."""
-    roles_list = _all if _all is not None else list_roles_report(cwd)[0]
-    project_main = next((r for r in roles_list if r.name == MAIN_ROLE_NAME and r.scope == "project"), None)
-    if project_main is not None:
-        return project_main if project_main.enabled else None
-    global_main = next((r for r in roles_list if r.name == MAIN_ROLE_NAME and r.scope == "global"), None)
-    if global_main is not None and global_main.enabled:
-        return global_main
-    return None
 
 
 def compile_agents(roles: "dict[str, Role]") -> dict:
@@ -436,7 +417,7 @@ def compile_agents(roles: "dict[str, Role]") -> dict:
     return out
 
 
-def registry_fingerprint(roles: "dict[str, Role]", main: "Role | None") -> str:
+def registry_fingerprint(roles: "dict[str, Role]") -> str:
     """sha256 over the identity-relevant fields of the effective registry. Feeds engine's
     _stable_append_pieces so a reused live client cannot serve a stale roster."""
     h = hashlib.sha256()
@@ -447,9 +428,6 @@ def registry_fingerprint(roles: "dict[str, Role]", main: "Role | None") -> str:
             r.description, r.prompt, r.enabled, r.tools, r.disallowed_tools, r.model,
             r.effort, r.max_turns, r.skills, r.mcp_servers, r.memory, r.permission_mode,
         )).encode("utf-8"))
-    h.update(b"|main:")
-    if main is not None:
-        h.update(repr((main.prompt, main.enabled)).encode("utf-8"))
     return h.hexdigest()
 
 

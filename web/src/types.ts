@@ -198,7 +198,7 @@ export interface FileContent {
   error?: string
 }
 
-export type TabId = 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings' | 'specs' | 'browser' | 'agents'
+export type TabId = 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings' | 'specs' | 'browser' | 'agents'
 
 // ─── Epic-lens: Spec list (GET /api/projects/{id}/epic-specs) ─────────────────
 
@@ -359,8 +359,10 @@ export interface ProjectMemory {
 
 export type RoleScope = 'builtin' | 'global' | 'project'
 
-/** The `Role` dataclass (roles.py) serialized to JSON, plus the two UI-only fields
- *  the HTTP layer adds: `shadowed_by` and `is_main`. */
+/** The `Role` dataclass (roles.py) serialized to JSON, plus the one UI-only field
+ *  the HTTP layer adds: `shadowed_by`. (The `main` role concept — a separate per-project
+ *  prompt appended to CLAUDE.md — was removed: CLAUDE.md is already the main agent's own
+ *  instruction file, so `is_main`/`main` no longer exist on this contract.) */
 export interface RoleJSON {
   name: string
   scope: RoleScope
@@ -383,7 +385,6 @@ export interface RoleJSON {
   /** The scope that currently overrides this same-named role, or null when this
    *  row IS the effective one for its name. */
   shadowed_by: RoleScope | null
-  is_main: boolean
 }
 
 export interface RoleParseError {
@@ -398,7 +399,6 @@ export interface RoleParseError {
 export interface ProjectRoles {
   roles: RoleJSON[]
   errors: RoleParseError[]
-  main: RoleJSON | null
   global_dir: string
   project_dir: string
 }

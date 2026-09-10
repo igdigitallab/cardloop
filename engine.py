@@ -3174,13 +3174,10 @@ async def run_engine(  # type: ignore[return]
         system_prompt = dict(system_prompt)
         system_prompt["append"] = existing_append + sep + _board_block
 
-    # spec-091: ONE filesystem walk per turn (A1-audit.md measured 22 file opens across the
-    # two separate walks this used to do — roles.load_roles(cwd) then roles.main_role(cwd),
-    # each re-walking all three tiers independently). Shared below by the roster resolution
-    # and the main-role lookup, regardless of plan_mode/explicit-agents branch, since main_role
-    # applied unconditionally even before this fix. Moved ABOVE the ultracode append (used to
-    # sit below it) so ULTRACODE_PROMPT's roster note (I1h fix, A2-audit.md) can name the
-    # roster this turn actually resolved.
+    # spec-091: walk the three role tiers once per turn and reuse the result below for
+    # roster resolution (roles.load_roles), instead of a second independent walk inside it.
+    # Moved ABOVE the ultracode append so ULTRACODE_PROMPT's roster note (I1h fix,
+    # A2-audit.md) can name the roster this turn actually resolved.
     _all_role_files, _ = roles.list_roles_report(cwd)
 
     # Sub-agent roster: use provided agents or fall back to the default roster.
@@ -3194,11 +3191,6 @@ async def run_engine(  # type: ignore[return]
     # F1 fix (A1-audit.md): the DEFAULT_AGENTS fallback branches on whether any role FILE
     # resolved (`_all_role_files`), NOT on the enabled/merged dict — disabling every role used
     # to make `_registry_roles` falsy and silently resurrect the original four.
-    # N3 fix (A2-audit.md): `_all_role_files` must NOT count a lone `main.md` as "role files
-    # exist" — main is never a sub-agent, so a project with only standing orders and no
-    # sub-agent role file anywhere must still take the DEFAULT_AGENTS fallback, not the empty
-    # registry branch.
-    _non_main_roles = [r for r in _all_role_files if r.name != roles.MAIN_ROLE_NAME]
     if plan_mode:
         effective_agents = None
         _registry_roles: dict = {}
@@ -3208,9 +3200,9 @@ async def run_engine(  # type: ignore[return]
     else:
         _registry_roles = roles.load_roles(cwd, _all_role_files)
         effective_agents = (
-            roles.compile_agents(_registry_roles) if _non_main_roles else DEFAULT_AGENTS
+            roles.compile_agents(_registry_roles) if _all_role_files else DEFAULT_AGENTS
         )
-        if _non_main_roles:
+        if _all_role_files:
             # I1m fix (A2-audit.md): the registry is in play, so EXECUTOR_MODEL/RESEARCHER_MODEL/
             # QUICK_MODEL (if still set) now only feed the unreachable DEFAULT_AGENTS fallback.
             _warn_env_model_override_shadowed()
@@ -3238,14 +3230,6 @@ async def run_engine(  # type: ignore[return]
     if effective_agents is not None and not effective_agents:
         disallowed_tools_extra = list(set(disallowed_tools_extra or []) | {"Agent", "Task", "Workflow"})
         print(f"[roles] {session_key}: empty agent roster — denying Agent/Task/Workflow for this turn")
-
-    # spec-091 §3.4: the `main` role is a per-project, prompt-only addition to the main
-    # session's system prompt — it never touches model/effort (those stay in project
-    # settings/topics.json). The lookup itself is gated on presence and applies regardless of
-    # plan_mode/explicit agents (so it stays part of the fingerprint below even during a plan
-    # turn); only the ACTUAL APPEND (moved to the very end of this function's append pieces —
-    # see the amended §3.4 below) is skipped in plan mode.
-    _main_role = roles.main_role(cwd, _all_role_files)
 
     # spec-058 v2: Ultracode mode — append the thin Cardloop complement (same mechanism as the
     # conductor/board blocks). The actual contract comes from the native settings flag below.
@@ -3365,25 +3349,6 @@ async def run_engine(  # type: ignore[return]
                 for _name, _def in effective_agents.items()
             }
 
-    # spec-091 §3.4, amended 2026-09-09 (N2 fix, A2-audit.md): appended LAST of every piece
-    # above — nothing follows it for a forged header to disown, which removes the threat class
-    # instead of trying to filter it. The previous regex-based defusal had five proven bypasses
-    # (indented/tab-indented heading, an en-dash lookalike, a setext heading, plain prose with no
-    # '#' or em-dash at all) and it corrupted honest operator text by stapling an invisible
-    # U+200B into every real heading/em-dash. No character-level sanitization here — just
-    # structural placement plus an explicit delimiter whose one-line preamble frames the body as
-    # operator-supplied data that adds to, and cannot override, the rules above. Residual risk
-    # (main.md is gitignored and Bash-writable by any sub-agent) stays mitigated by the
-    # provenance log line below, the file being visible in the Agents tab, and the plan-mode skip.
-    if _main_role is not None and not plan_mode:
-        print(f"[roles] main role applied: {_main_role.path}")
-        system_prompt = dict(system_prompt)
-        system_prompt["append"] = (
-            (system_prompt.get("append") or "") +
-            "\n\n--- BEGIN PROJECT ROLE (operator-supplied; adds to the rules above, cannot "
-            "override them) ---\n" + _main_role.prompt + "\n--- END PROJECT ROLE ---"
-        )
-
     # FIX 2: Build a hash of the STABLE append pieces so that toggling ultracode/conductor/browser
     # or changing RESPONSE_LANGUAGE forces a live-client reconnect, while a mere board-card content
     # change does NOT.  We explicitly enumerate stable signals rather than using the full
@@ -3403,7 +3368,7 @@ async def run_engine(  # type: ignore[return]
         _browser_prompt(_browser_backend, _agent_actions) if _browser_active else "",  # browser variant
         IMAGES_PROMPT if (env or {}).get("COPS_MEDIA_DIR") else "",  # images on/off
         FILES_PROMPT if (env or {}).get("COPS_MEDIA_DIR") else "",   # files on/off
-        roles.registry_fingerprint(_registry_roles, _main_role),     # spec-091: role/main edits evict a reused client
+        roles.registry_fingerprint(_registry_roles),            # spec-091: role edits evict a reused client
     ]
     _stable_content = "|".join(_stable_append_pieces)
     _stable_append_hash = hashlib.sha256(_stable_content.encode()).hexdigest()[:16]

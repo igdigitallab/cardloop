@@ -127,7 +127,6 @@ export const en = {
   'mobile.chat_tab': '💬 Chat',
 
   // ── Project tabs labels ──────────────────────────────────────
-  'tab.claude_md': 'CLAUDE.md',
   'tab.logs': 'Logs',
   'tab.board': 'Board',
   'tab.files': 'Files',
@@ -439,31 +438,24 @@ export const en = {
   'memory.confirm_delete_yes': 'Yes, delete',
   'memory.path_hint': '.claude-ops/memory/',
 
-  // ── Agents tab (spec-091 Phase 1) ───────────────────────────────
+  // ── Agents tab (spec-091 Phase 1; FX5 merged the standalone CLAUDE.md tab in here) ──
   'agents.loading': 'Loading agent roles…',
   'agents.unavailable': 'Agent roles are not available in this build yet.',
   'agents.retry': 'Retry',
-  'agents.main_title': 'Main agent',
-  'agents.main_hint': "This project's CLAUDE.md remains the primary document — this prompt is an addition to it, appended to every main-session turn.",
-  'agents.main_empty': 'No project-level instructions yet.',
-  'agents.main_edit_btn': 'Edit',
-  'agents.main_edit_aria': 'Edit main agent instructions',
-  'agents.main_inherited': 'Inherited from the global default — saving here creates a project-level override.',
+  'agents.main_title': 'Main agent — CLAUDE.md',
+  'agents.main_hint': "This is the project's own CLAUDE.md — the main agent's instruction file. Edit it here directly; it takes effect on the next turn.",
   'agents.roles_title': 'Sub-agent roles',
   'agents.roles_empty': 'No role files found — the built-in roster (executor / researcher / skeptic / quick) is used as-is.',
   'agents.new_btn': '+ New role',
   'agents.new_btn_aria': 'Create a new role',
   'agents.new_name_label': 'Role name (lowercase, digits, hyphen):',
   'agents.new_name_placeholder': 'reviewer-perf',
-  'agents.name_reserved': '"main" is reserved for the main agent — use the block above instead.',
   'agents.name_invalid': 'Lowercase a-z / 0-9 / hyphen, 2-32 characters, must start with a letter or digit.',
   'agents.new_scope_label': 'Scope:',
   'agents.scope_global_warning': 'This role will be available in every project on this cockpit.',
   'agents.content_label': 'Role file (YAML frontmatter + prompt body):',
   'agents.save_btn': 'Save',
   'agents.saving': 'Saving…',
-  'agents.view_title': 'View role',
-  'agents.view_btn_aria': 'View role (read-only, builtin)',
   'agents.edit_title': 'Edit role',
   'agents.edit_btn_aria': 'Edit role',
   'agents.delete_btn_aria': 'Delete role',
@@ -473,7 +465,11 @@ export const en = {
   'agents.confirm_delete_body': 'The role file will be permanently deleted. This action is irreversible.',
   'agents.confirm_delete_global_body': 'This role is shared by every project on this cockpit. Deleting it removes it everywhere, and the file is not tracked in git — this action is irreversible.',
   'agents.confirm_delete_yes': 'Yes, delete',
-  'agents.builtin_note': 'Builtin roles ship with Cardloop and are read-only — copy to project to customize.',
+  // FX5 decision 2: every role now opens a real editor (no more read-only "view" mode);
+  // this note only shows while editing a BUILTIN role, explaining that Save forks the
+  // edit into a project-scope copy instead of writing the (read-only) builtin file itself.
+  'agents.builtin_note': 'Builtin roles ship with Cardloop and are read-only — saving here creates or updates a project-scope copy instead; the builtin file itself is never changed.',
+  'agents.save_target_label': 'Saves to:',
   'agents.shadowed_by': 'shadowed by',
   // FX4/N5: toggling a global row writes the shared file directly — every project on this
   // cockpit is affected, so it needs its own confirm (reuses scope_global_warning as the body).

@@ -15378,23 +15378,20 @@ def _role_shadowed_by(all_roles: "list", role: "_roles.Role") -> "str | None":
 
 
 def _role_to_json(role: "_roles.Role", all_roles: "list") -> dict:
-    """The Role dataclass as a dict (IMPLEMENTATION.md §4's RoleJSON), plus `shadowed_by`
-    and `is_main`."""
+    """The Role dataclass as a dict (IMPLEMENTATION.md §4's RoleJSON), plus `shadowed_by`."""
     d = dataclasses.asdict(role)
     d["shadowed_by"] = _role_shadowed_by(all_roles, role)
-    d["is_main"] = role.name == _roles.MAIN_ROLE_NAME
     return d
 
 
 async def api_project_roles(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/roles
-    Returns {roles, errors, main, global_dir, project_dir} — see IMPLEMENTATION.md §4.
+    Returns {roles, errors, global_dir, project_dir} — see IMPLEMENTATION.md §4.
     `roles` is EVERY role file across all three tiers, unmerged.
 
     Post-audit (F12 leanness): `effective` was dropped — it had no frontend reader and cost a
-    full extra three-tier walk. One `list_roles_report` call now serves both `roles` and
-    `main` (passed in via `_all`) instead of three independent walks (A1-audit.md: 33 file
-    opens + 9 listdirs per request before this fix, ~11 opens + 3 listdirs after)."""
+    full extra three-tier walk. One `list_roles_report` call serves `roles` (A1-audit.md:
+    33 file opens + 9 listdirs per request before this fix, ~11 opens + 3 listdirs after)."""
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     project = _find_project_by_id(ctx, pid)
@@ -15403,11 +15400,9 @@ async def api_project_roles(req: web.Request) -> web.Response:
 
     cwd = project["cwd"]
     all_roles, errors = _roles.list_roles_report(cwd)
-    main = _roles.main_role(cwd, all_roles)
     return web.json_response({
         "roles": [_role_to_json(r, all_roles) for r in all_roles],
         "errors": errors,
-        "main": _role_to_json(main, all_roles) if main is not None else None,
         "global_dir": _roles.global_dir(),
         "project_dir": os.path.join(cwd, _roles.PROJECT_SUBDIR),
     })

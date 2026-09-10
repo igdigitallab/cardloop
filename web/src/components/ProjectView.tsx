@@ -6,7 +6,6 @@ import { ProjectActivityProvider, useOnRunEnd, useProjectActivity } from '../hoo
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { Modal } from '../components/Modal'
 import { TestResult } from '../types'
-import { ClaudeMdTab } from '../tabs/ClaudeMdTab'
 import { LogsTab } from '../tabs/LogsTab'
 import { BoardTab } from '../tabs/BoardTab'
 import { ChatTab } from '../tabs/ChatTab'
@@ -26,10 +25,14 @@ interface Tab {
   disabled?: boolean
 }
 
-// secrets tab removed (merged into Settings); overview tab removed (merged into Settings); 8 base tabs.
+// secrets tab removed (merged into Settings); overview tab removed (merged into Settings);
+// claude-md tab merged into agents (spec-091 Phase 1 follow-up: CLAUDE.md is the main
+// agent's own instruction file, editing it belongs next to the rest of the agent roster,
+// not in a separate tab) — 8 base tabs. 'agents' is FIRST: it is the main agent's own
+// configuration surface, the natural landing tab for a project.
 // The 'browser' tab is added dynamically inside the component when the browser module is enabled.
 const BASE_TABS: Tab[] = [
-  { id: 'claude-md', label: t['tab.claude_md'] },
+  { id: 'agents',    label: t['tab.agents'] },
   { id: 'logs',      label: t['tab.logs'] },
   { id: 'board',     label: t['tab.board'] },
   { id: 'files',     label: t['tab.files'] },
@@ -37,7 +40,6 @@ const BASE_TABS: Tab[] = [
   { id: 'timeline',  label: t['tab.timeline'] },
   { id: 'settings',  label: t['tab.settings'] },
   { id: 'specs',     label: t['tab.specs'] },
-  { id: 'agents',    label: t['tab.agents'] },
 ]
 
 // localStorage keys
@@ -84,7 +86,13 @@ function readLSBool(key: string, fallback: boolean): boolean {
 // it (or relaunching the PWA) restores the spot instead of resetting to Chat.
 const mtabKey = (pid: string) => `cops.mtab.${pid}`
 function readMobileTab(pid: string): string | null {
-  try { return localStorage.getItem(mtabKey(pid)) || null } catch { return null }
+  try {
+    const v = localStorage.getItem(mtabKey(pid))
+    // claude-md merged into agents (spec-091 Phase 1 follow-up) — a value persisted by an
+    // older cockpit build must not resolve to a tab id nothing renders any more, which
+    // would leave the operator staring at a blank inner-tab pane on reopen.
+    return v === 'claude-md' ? 'agents' : (v || null)
+  } catch { return null }
 }
 
 
@@ -801,7 +809,6 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
               </div>
             ) : (
               <div className="tab-content">
-                {mobileInnerTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'logs'      && <ErrorBoundary label="Logs"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
                 {mobileInnerTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} focusCard={focusCard} onDiscuss={(c) => { setDiscussCard(c); setMobileInnerTab(null) }} /></ErrorBoundary>}
                 {mobileInnerTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} openPath={focusFile} /></ErrorBoundary>}
@@ -951,7 +958,6 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
         </div>
 
         <div className="tab-content">
-          {activeTab === 'claude-md' && <ErrorBoundary label="CLAUDE.md"><ClaudeMdTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'logs'      && <ErrorBoundary label="Logs"><LogsTab projectId={project.id} projectName={project.name} /></ErrorBoundary>}
           {activeTab === 'board'     && <ErrorBoundary label="Board"><BoardTab projectId={project.id} isActive={isActive} focusCard={focusCard} onDiscuss={setDiscussCard} /></ErrorBoundary>}
           {activeTab === 'files'     && <ErrorBoundary label="Files"><FilesTab projectId={project.id} openPath={focusFile} /></ErrorBoundary>}

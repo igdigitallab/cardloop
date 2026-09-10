@@ -91,6 +91,24 @@
   justify-content: flex-end;
 }
 
+/* FX5: the main-agent block now embeds CLAUDE.md itself (EditableMarkdown) instead of a
+ * plain <pre> preview of a separate main.md prompt. Bound the READ view so a long
+ * CLAUDE.md doesn't push the role list far down the page; editing gets full room via
+ * .doc-editor's own min-height (overview.css), untouched here. */
+.agents-claude-md-block .doc-view {
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+/* FX5 decision 2: "before saving, where the save will land" — a compact label + the same
+ * scope-badge look used in the role list rows, so a builtin edit's fork target is obvious
+ * before Save is clicked. */
+.agents-editor-target-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ── Parse errors ── */
 .agents-errors {
   border: 1px solid rgba(239,68,68,0.3);
