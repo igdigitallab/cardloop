@@ -1,6 +1,6 @@
 ---
 name: reviewer-logic
-description: Hostile logic reviewer, read-only. Use this when code just changed and you need an adversarial check of the staged diff for logic bugs, missed edge cases, and unjustified assumptions.
+description: Hostile logic reviewer, read-only. THE DEFAULT review pass. Use this when any code changed and you want one adversarial pass over the staged diff: an adversarial check of the staged diff for logic bugs, missed edge cases, unjustified assumptions, and tests that pass without proving anything. Escalate to reviewer-security or reviewer-quality only for the cases their own descriptions name; a measured 9-defect fixture showed a second and third reviewer add cost without adding recall.
 enabled: true
 tools: [Read, Grep, Glob, Bash]
 disallowedTools: [Write, Edit, NotebookEdit]

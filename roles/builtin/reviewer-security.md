@@ -1,6 +1,6 @@
 ---
 name: reviewer-security
-description: Security reviewer, read-only. Use this when code touching auth, input handling, secrets, or a trust boundary just changed and needs a hostile security pass before merge.
+description: Security reviewer, read-only. NOT the default pass — reviewer-logic is. Use this when the diff touches a real trust boundary: authentication or authorization, secrets and tokens, input crossing into SQL/shell/filesystem paths, deserialization, or an outbound request built from user data. Also use it when reviewer-logic flags something it cannot judge.
 enabled: true
 tools: [Read, Grep, Glob, Bash, WebFetch, WebSearch]
 disallowedTools: [Write, Edit, NotebookEdit]

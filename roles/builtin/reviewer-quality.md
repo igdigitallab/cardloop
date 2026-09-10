@@ -1,6 +1,6 @@
 ---
 name: reviewer-quality
-description: Code-quality reviewer, read-only. Use this when a diff is logically sound but needs a pass for naming, duplication, dead code, and missing test coverage.
+description: Code-quality reviewer, read-only. NOT the default pass — reviewer-logic is, and it already covers vacuous tests. Use this when a large or long-lived diff makes maintainability the actual risk: duplication that will drift, dead code, misleading names a future caller will trust, and missing coverage of new logic.
 enabled: true
 tools: [Read, Grep, Glob, Bash]
 disallowedTools: [Write, Edit, NotebookEdit]
