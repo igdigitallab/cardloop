@@ -85,8 +85,8 @@ web/src/
 ├── api.ts                    HTTP client (VITE_BACKEND_URL || localhost:8787)
 ├── types.ts                  types (ChatSSEEvent etc.)
 ├── i18n/
-│   ├── ru.ts                 ~110 UI string keys
-│   └── index.ts              export const t = ru
+│   ├── en.ts                 UI string keys (the only locale)
+│   └── index.ts              export const t = en
 ├── lib/
 │   └── storage.ts            readLS/writeLS (localStorage)
 ├── hooks/

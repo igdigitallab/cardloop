@@ -1,9 +1,12 @@
 """Native (Capacitor) server picker — guards on the parts a typo silently breaks.
 
 There is no JS test runner in this repo, so these assert the source-level contracts
-that TypeScript cannot: that both translations carry the same keys, that every key
-the native screens reference actually exists, and that the passphrase handed to the
-server never gets written to disk on the device.
+that TypeScript cannot: that every key the native screens reference actually exists,
+and that the passphrase handed to the server never gets written to disk on the device.
+
+The cockpit ships ONE locale (`en.ts`). The Russian dictionary was deleted 2026-09-10 —
+it had been unreachable since the initial commit while agents kept translating into it.
+If a second locale is ever added, it needs a runtime switcher first, then a parity test.
 """
 import re
 from pathlib import Path
@@ -19,17 +22,6 @@ def _keys(name: str) -> set:
     return set(_KEY_RE.findall((I18N / name).read_text(encoding="utf-8")))
 
 
-def test_native_namespace_is_translated_in_both_files():
-    """Scoped to `native.*` on purpose: the wider en/ru sets are NOT in sync today
-    (22 English keys have no Russian counterpart), and ru.ts is not wired into the
-    runtime at all — `i18n/index.ts` exports `t = en` unconditionally. Asserting full
-    parity here would fail on a pre-existing gap this feature did not create; asserting
-    it for the namespace this feature owns keeps the new strings honest."""
-    en = {k for k in _keys("en.ts") if k.startswith("native.")}
-    ru = {k for k in _keys("ru.ts") if k.startswith("native.")}
-    assert en and en == ru, {"only_en": sorted(en - ru), "only_ru": sorted(ru - en)}
-
-
 def test_every_native_i18n_key_used_in_the_ui_exists():
     used = set()
     for f in NATIVE.glob("*.tsx"):
@@ -40,10 +32,9 @@ def test_every_native_i18n_key_used_in_the_ui_exists():
     assert used <= _keys("en.ts")
 
 
-def test_the_change_server_control_is_translated():
-    """The escape hatch out of a dead server must not be the one untranslated string."""
+def test_the_change_server_control_has_a_string():
+    """The escape hatch out of a dead server must not be the one hardcoded label."""
     assert "native.change_server" in _keys("en.ts")
-    assert "native.change_server" in _keys("ru.ts")
 
 
 def test_passphrase_is_never_persisted_on_the_device():

@@ -16333,8 +16333,8 @@ def _intent_is_thin(intent: str) -> bool:
 
 # F5: dependency-free Cyrillic -> Latin transliteration table (common web-slug scheme),
 # so a Russian intent produces a readable folder name instead of collapsing to nothing.
-# Deliberately no new package (unidecode/python-slugify) — this is the one alphabet the
-# cockpit's own ru.ts locale makes common; anything else unrepresentable (CJK, emoji, ...)
+# Deliberately no new package (unidecode/python-slugify) — Cyrillic is the one alphabet
+# operators actually type intents in here; anything else unrepresentable (CJK, emoji, ...)
 # still falls through to the NFKD/ASCII pass below and is dropped, same as before.
 _CYRILLIC_TRANSLIT = {
     "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
