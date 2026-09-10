@@ -113,6 +113,9 @@ function MonitorRow({ m, onDismiss, projectId }: {
           />
           <span className="mon-label">{m.label || m.id}</span>
           {m.agent && <span className="mon-agent">{m.agent}</span>}
+          {/* spec-091 G7: the role's model from the registry, when the payload carries one —
+              nothing rendered when the backend doesn't know it (no roster / unknown role). */}
+          {m.model && <span className="mon-agent-model">{m.model}</span>}
           {/* spec-089 §1: a stop glyph alongside the spinning icon while the row is 'stopping' */}
           {m.status === 'stopping' && (
             <span className="mon-stop-glyph" title="Stop requested">⏹</span>

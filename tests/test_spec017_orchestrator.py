@@ -726,15 +726,15 @@ async def test_conductor_prompt_skipped_when_toggle_off(tmp_path):
 
 
 def test_build_agents_kwargs_model_override(tmp_path):
-    """_build_agents_kwargs with executor_model='haiku' must return agents dict with overridden executor."""
+    """_build_agents_kwargs with executor_model='haiku' must return the override as
+    `agent_model_overrides`, not a full `agents` roster (spec-091 F4 fix, A1-audit.md —
+    a full `agents` kwarg beats the role registry outright per C1's precedence, so the old
+    shape silently hid every custom/builtin role; run_engine now MERGES this dict into
+    whichever roster it resolves). See tests/test_spec091_wiring.py's test_c5_* for the
+    merge itself."""
     kwargs = bot._build_agents_kwargs({"executor_model": "haiku"})
-    assert "agents" in kwargs
-    agents = kwargs["agents"]
-    assert "executor" in agents
-    assert agents["executor"].model == "haiku"
-    # researcher and quick should keep defaults
-    assert agents.get("researcher") is not None
-    assert agents.get("quick") is not None
+    assert "agents" not in kwargs
+    assert kwargs["agent_model_overrides"] == {"executor": "haiku"}
 
 
 def test_build_agents_kwargs_empty(tmp_path):
@@ -897,11 +897,11 @@ async def test_run_engine_system_prompt_has_exclude_dynamic_sections(tmp_path):
 
 
 def test_build_agents_kwargs_preserves_tools_and_effort(tmp_path):
-    """_build_agents_kwargs model override must preserve tools and effort from the base definition."""
+    """_build_agents_kwargs itself no longer touches tools/effort/maxTurns at all (spec-091
+    F4 fix) — it only forwards the override string. The actual field-preservation guarantee
+    (tools/effort/maxTurns/skills/memory/mcpServers surviving a model override) now lives at
+    the merge point in engine.py's roster resolution, via dataclasses.replace; see
+    tests/test_spec091_wiring.py's test_c5_model_override_merges_into_registry_preserving_other_fields."""
     kwargs = bot._build_agents_kwargs({"quick_model": "sonnet"})
-    assert "agents" in kwargs
-    quick = kwargs["agents"]["quick"]
-    base_quick = bot.DEFAULT_AGENTS["quick"]
-    assert quick.tools == base_quick.tools, "tools not preserved after model override"
-    assert quick.effort == base_quick.effort, "effort not preserved after model override"
-    assert quick.maxTurns == base_quick.maxTurns, "maxTurns not preserved after model override"
+    assert "agents" not in kwargs
+    assert kwargs["agent_model_overrides"] == {"quick": "sonnet"}

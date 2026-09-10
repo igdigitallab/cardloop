@@ -9,6 +9,7 @@ Does NOT import bot.py directly (re-import would create a second instance).
 import asyncio
 import contextlib
 import csv
+import dataclasses
 import glob
 import hashlib
 import json
@@ -62,6 +63,10 @@ import codex_engine as _codex
 
 # spec-075: context pack — deterministic project-state injection on fresh sessions
 import context_pack as _context_pack
+
+# spec-091: declarative sub-agent role registry (.claude-ops/roles/). No import back to
+# webapp/engine from roles.py — see roles.py module docstring.
+import roles as _roles
 
 # spec-053 Phase B: Web Push (VAPID + pywebpush). Optional — degrades gracefully if absent.
 try:
@@ -15321,6 +15326,238 @@ async def api_project_memory_delete(req: web.Request) -> web.Response:
     return web.json_response({"files": files, "exists": exists})
 
 
+# ─────────────────────────── Agent roles (spec-091) ───────────────────────────
+#
+# Mirrors the memory endpoints above: files are the source of truth (roles.py), auth/error
+# shape copied verbatim (auth_middleware covers /api/* globally — no per-handler auth code
+# needed, same as api_project_memory*). scope=builtin is readable everywhere (GET), read-only
+# on write/delete (CHECKLIST E3). `roles.write_role`/`roles.delete_role`/`roles.set_enabled`
+# already enforce name-shape (ROLE_NAME_RE) and scope rules — handlers below re-check the name
+# shape once more before touching any path built directly here (CHECKLIST E4), and otherwise
+# just translate roles.py's ValueError/FileNotFoundError into the HTTP shape.
+
+# CHECKLIST C9: a role's `model` is validated at WRITE time, not at run time. This is
+# deliberately looser than `_ALLOWED_MODELS` (session/card models only): the shipped builtin
+# roles carry explicit ids like "claude-sonnet-5" (see engine.py:84-87 — the bare `sonnet`
+# alias still resolves to an older generation on this bundle), so a role's model is valid
+# when it is either one of the four session aliases or a non-empty `claude-*` id shape. A
+# tighter, live-probed check belongs with tools/verify_model_aliases.py, not this endpoint.
+#
+# I1j fix (A2-audit.md/F7 residual): `effort`/`permissionMode`/`memory`/`maxTurns` used to be
+# validated a SECOND time here, duplicating `roles._ROLE_EFFORT_VALUES` etc. — two definitions
+# of "valid" that could drift. `roles.parse_role` is now the single choke point (it rejects a
+# bad value at parse time, read or write), so this endpoint delegates to it instead of
+# re-checking; `model` stays the one field validated only here (parse_role has no fixed enum
+# for it — see the CHECKLIST C9 note above).
+_ROLE_MODEL_ALIASES = frozenset({"opus", "sonnet", "haiku", "fable"})
+_ROLE_MODEL_ID_RE = re.compile(r"^claude-[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def _valid_role_model(model: "str | None") -> bool:
+    """A role's `model:` field is optional; when present it must be a session alias or a
+    `claude-*` id shape. See the CHECKLIST C9 note above for why this is looser than
+    _ALLOWED_MODELS."""
+    if model is None:
+        return True
+    if not isinstance(model, str) or not model.strip():
+        return False
+    m = model.strip()
+    return m in _ROLE_MODEL_ALIASES or bool(_ROLE_MODEL_ID_RE.match(m))
+
+
+def _role_shadowed_by(all_roles: "list", role: "_roles.Role") -> "str | None":
+    """The scope that overrides `role`'s name (whole-file override, per roles.load_roles),
+    or None if `role` is already the highest-ranked file with that name. Considers every
+    file with the name regardless of `enabled` — override is a file-level fact, not an
+    enabled-level one (matches roles.load_roles's own precedence walk)."""
+    best_scope, best_rank = role.scope, _roles.scope_rank(role.scope)
+    for r in all_roles:
+        if r.name == role.name and _roles.scope_rank(r.scope) > best_rank:
+            best_scope, best_rank = r.scope, _roles.scope_rank(r.scope)
+    return best_scope if best_scope != role.scope else None
+
+
+def _role_to_json(role: "_roles.Role", all_roles: "list") -> dict:
+    """The Role dataclass as a dict (IMPLEMENTATION.md §4's RoleJSON), plus `shadowed_by`
+    and `is_main`."""
+    d = dataclasses.asdict(role)
+    d["shadowed_by"] = _role_shadowed_by(all_roles, role)
+    d["is_main"] = role.name == _roles.MAIN_ROLE_NAME
+    return d
+
+
+async def api_project_roles(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/roles
+    Returns {roles, errors, main, global_dir, project_dir} — see IMPLEMENTATION.md §4.
+    `roles` is EVERY role file across all three tiers, unmerged.
+
+    Post-audit (F12 leanness): `effective` was dropped — it had no frontend reader and cost a
+    full extra three-tier walk. One `list_roles_report` call now serves both `roles` and
+    `main` (passed in via `_all`) instead of three independent walks (A1-audit.md: 33 file
+    opens + 9 listdirs per request before this fix, ~11 opens + 3 listdirs after)."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    cwd = project["cwd"]
+    all_roles, errors = _roles.list_roles_report(cwd)
+    main = _roles.main_role(cwd, all_roles)
+    return web.json_response({
+        "roles": [_role_to_json(r, all_roles) for r in all_roles],
+        "errors": errors,
+        "main": _role_to_json(main, all_roles) if main is not None else None,
+        "global_dir": _roles.global_dir(),
+        "project_dir": os.path.join(cwd, _roles.PROJECT_SUBDIR),
+    })
+
+
+async def api_project_role_get(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/roles/{name}?scope=
+    Returns {role, content} (content = raw file text). `role` is null and `error` names the
+    parse failure when the file exists but fails to parse (the UI still needs the raw text
+    to fix it)."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    name = req.match_info["name"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    if not _roles.ROLE_NAME_RE.match(name):
+        return web.json_response({"error": "invalid role name"}, status=400)
+    scope = req.query.get("scope", "")
+    if scope not in ("builtin", "global", "project"):
+        return web.json_response({"error": "scope must be 'builtin', 'global' or 'project'"}, status=400)
+
+    # name is already regex-validated and scope is one of the three known literals above, so
+    # this is safe against path traversal (CHECKLIST E4) — role_path() itself does not
+    # validate `name`, only roles.py's write/delete/set_enabled do.
+    try:
+        path = _roles.role_path(cwd=project["cwd"], name=name, scope=scope)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    if not os.path.isfile(path):
+        return web.json_response({"error": "not found"}, status=404)
+    try:
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+    except OSError as e:
+        return web.json_response({"error": f"read failed: {e}"}, status=500)
+
+    role, err = _roles.parse_role(content, name=name, scope=scope, path=path)
+    all_roles = _roles.list_roles_report(project["cwd"])[0]
+    role_json = _role_to_json(role, all_roles) if role is not None else None
+    return web.json_response({"role": role_json, "content": content, "error": err})
+
+
+async def api_project_role_write(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/roles/{name}
+    Body: {scope: "project"|"global", content, overwrite?: bool}. Creates the role file; an
+    EXISTING file is left untouched unless overwrite=true (I1k fix, A2-audit.md) — then the
+    client-side `shadowed_by` snapshot from the last GET was the only guard, defeated by a
+    stale tab, a second window or a direct API call.
+    scope="builtin" → 400 (roles.write_role's own message, CHECKLIST E3).
+    Target already exists and overwrite was not requested → 409."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    name = req.match_info["name"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+
+    scope = body.get("scope")
+    content = body.get("content", "")
+    overwrite = bool(body.get("overwrite", False))
+    if not isinstance(scope, str) or not isinstance(content, str):
+        return web.json_response({"error": "scope and content must be strings"}, status=400)
+
+    # CHECKLIST C9: probe `model` BEFORE anything is written — parse_role is pure (R1 —
+    # roles.py never touches the filesystem inside it), so this never creates a file even for
+    # scope="builtin" or a malformed name. Every OTHER enum field (effort/permissionMode/
+    # memory/maxTurns) is validated inside parse_role itself now (I1j fix) — write_role below
+    # re-parses and raises ValueError for those, caught the same way.
+    probe, _probe_err = _roles.parse_role(content, name=name, scope=scope, path="")
+    if probe is not None and not _valid_role_model(probe.model):
+        return web.json_response(
+            {"error": f"model {probe.model!r} is not a recognized alias or claude-* model id"},
+            status=400,
+        )
+
+    try:
+        role = _roles.write_role(project["cwd"], name, scope, content, overwrite=overwrite)
+    except FileExistsError as e:
+        return web.json_response({"error": str(e)}, status=409)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except Exception as e:
+        return web.json_response({"error": f"write failed: {e}"}, status=500)
+
+    all_roles = _roles.list_roles_report(project["cwd"])[0]
+    return web.json_response({"role": _role_to_json(role, all_roles)})
+
+
+async def api_project_role_delete(req: web.Request) -> web.Response:
+    """DELETE /api/projects/{id}/roles/{name}?scope=
+    scope="builtin" → 400 (roles.delete_role's own message, CHECKLIST E3)."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    name = req.match_info["name"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    if not _roles.ROLE_NAME_RE.match(name):
+        return web.json_response({"error": "invalid role name"}, status=400)
+    scope = req.query.get("scope", "")
+
+    try:
+        _roles.delete_role(project["cwd"], name, scope)
+    except FileNotFoundError:
+        return web.json_response({"error": "not found"}, status=404)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    return web.json_response({"ok": True})
+
+
+async def api_project_role_enabled(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/roles/{name}/enabled
+    Body: {scope, enabled}. Toggling a builtin role copies it into the project scope first
+    (roles.set_enabled's own behaviour) — the repo's builtin file is never mutated."""
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    name = req.match_info["name"]
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+
+    scope = body.get("scope")
+    enabled = body.get("enabled")
+    if not isinstance(scope, str) or not isinstance(enabled, bool):
+        return web.json_response({"error": "scope (string) and enabled (bool) are required"}, status=400)
+
+    try:
+        role = _roles.set_enabled(project["cwd"], name, scope, enabled)
+    except FileNotFoundError:
+        return web.json_response({"error": "not found"}, status=404)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+    all_roles = _roles.list_roles_report(project["cwd"])[0]
+    return web.json_response({"role": _role_to_json(role, all_roles)})
+
+
 # ─────────────────────────── Project secrets (secrets) ──────────────────────────────────────
 #
 # Storage: <cwd>/.claude-ops/secrets/secrets.env (chmod 600, not in git)
@@ -17408,6 +17645,12 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/memory", api_project_memory)
         app.router.add_post("/api/projects/{id}/memory/{name}", api_project_memory_write)
         app.router.add_delete("/api/projects/{id}/memory/{name}", api_project_memory_delete)
+        # Agent roles (spec-091): declarative sub-agent registry, cockpit-editable
+        app.router.add_get("/api/projects/{id}/roles", api_project_roles)
+        app.router.add_get("/api/projects/{id}/roles/{name}", api_project_role_get)
+        app.router.add_post("/api/projects/{id}/roles/{name}", api_project_role_write)
+        app.router.add_delete("/api/projects/{id}/roles/{name}", api_project_role_delete)
+        app.router.add_post("/api/projects/{id}/roles/{name}/enabled", api_project_role_enabled)
         # Project secrets (Spec 007): names only in API, values — agent via env only
         app.router.add_get("/api/projects/{id}/secrets", api_project_secrets)
         app.router.add_post("/api/projects/{id}/secrets/{key}", api_project_secrets_set)

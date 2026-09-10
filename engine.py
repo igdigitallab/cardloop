@@ -47,6 +47,7 @@ from second_opinion import build_antigravity_server
 import modules as _modules                # spec-065: module enable/disable registry
 import accounts as _accounts              # multi-subscription switch (CLAUDE_CONFIG_DIR per run)
 import browser_tools as _browser_tools    # spec-065: agent browser tools (built per-run)
+import roles                              # spec-091: declarative sub-agent role registry
 from board import (
     board_summary,
     _load_board,
@@ -205,6 +206,24 @@ DEFAULT_AGENTS: dict = {
     ),
 }
 
+_env_model_override_warned = False
+
+
+def _warn_env_model_override_shadowed() -> None:
+    """N4/I1m fix (A2-audit.md): EXECUTOR_MODEL/RESEARCHER_MODEL/QUICK_MODEL only feed
+    DEFAULT_AGENTS, the day-one fallback used when zero role FILES resolve (roles/builtin/*.md
+    always ship, so a normal checkout never reaches it). Warn once, at the point the registry is
+    actually chosen over that fallback, so an operator who still has one of these three set
+    learns their pin is now a no-op instead of silently losing it."""
+    global _env_model_override_warned
+    if _env_model_override_warned:
+        return
+    set_vars = [n for n in ("EXECUTOR_MODEL", "RESEARCHER_MODEL", "QUICK_MODEL") if os.getenv(n)]
+    if set_vars:
+        print(f"[roles] {'/'.join(set_vars)} set but role files resolve the registry instead of "
+              "DEFAULT_AGENTS — that pin now only feeds the unreachable fallback roster")
+        _env_model_override_warned = True
+
 
 # spec-078 Phase 2 — per-project brains. A global lean default for the SDK `skills` context
 # filter: SKILLS_DEFAULT_ALLOW="a,b,c" restricts EVERY project to that skill set unless the
@@ -320,30 +339,20 @@ def _build_agents_kwargs(agents_config: dict) -> dict:
 
     kwargs: dict = {}
 
+    # spec-091 F4 fix: used to rebuild a FULL {name: AgentDefinition} dict from DEFAULT_AGENTS
+    # and hand it to run_engine as the explicit `agents` kwarg — which (per C1's own
+    # precedence) beats the role registry outright, so setting any ONE of these three legacy
+    # fields silently hid every custom/builtin role for that project (A1-audit.md F4). Now we
+    # pass just the override strings; run_engine MERGES them into whichever roster (registry
+    # or the DEFAULT_AGENTS fallback) it resolves — see the roster-resolution block there.
     model_overrides = {
         "executor":   agents_config.get("executor_model"),
         "researcher": agents_config.get("researcher_model"),
         "quick":      agents_config.get("quick_model"),
     }
-    has_model_override = any(v for v in model_overrides.values())
-    if has_model_override:
-        overridden: dict = {}
-        for agent_name, agent_def in DEFAULT_AGENTS.items():
-            override_model = model_overrides.get(agent_name)
-            if override_model:
-                overridden[agent_name] = AgentDefinition(
-                    description=agent_def.description,
-                    prompt=agent_def.prompt,
-                    model=override_model,
-                    permissionMode=agent_def.permissionMode,
-                    disallowedTools=agent_def.disallowedTools,
-                    tools=agent_def.tools,
-                    effort=agent_def.effort,
-                    maxTurns=agent_def.maxTurns,
-                )
-            else:
-                overridden[agent_name] = agent_def
-        kwargs["agents"] = overridden
+    model_overrides = {k: v for k, v in model_overrides.items() if v}
+    if model_overrides:
+        kwargs["agent_model_overrides"] = model_overrides
 
     if "conductor_prompt" in agents_config:
         kwargs["skip_conductor_prompt"] = not agents_config["conductor_prompt"]
@@ -399,6 +408,20 @@ ULTRACODE_PROMPT = (
     "carry the complete synthesis (findings, decisions, evidence, next steps) — never a reference "
     "to sub-agent output."
 )
+
+
+def _ultracode_roster_note(effective_agents: "dict | None") -> str:
+    """I1h fix (A2-audit.md): ULTRACODE_PROMPT's own text above still illustrates the four
+    original names as a fixed example (kept verbatim on purpose — several tests pin that exact
+    string). This is the part that must stay ACCURATE: a per-call line naming the roster THIS
+    turn actually resolved (registry or the DEFAULT_AGENTS fallback), so a Workflow/Task call
+    routes to a name that exists instead of a stale hardcoded four. Cheap — a joined list of
+    names, not a generated catalogue."""
+    names = sorted(effective_agents or {})
+    if not names:
+        return "- No named agent types are wired for this turn (every sub-agent role is disabled)."
+    return "- Agent types actually available this turn: " + ", ".join(f"`{n}`" for n in names) + "."
+
 
 # spec-058 v2: inline JSON passed to the SDK's `settings` option (forwarded verbatim to the CLI
 # --settings flag, which accepts a path OR an inline JSON object). {"ultracode": true} is the
@@ -1492,14 +1515,15 @@ def _monitor_tail(tr) -> str:
     return s
 
 
-def _monitor_delta(tool_name, tool_input, tool_response, agent_type, tool_use_id=None):
+def _monitor_delta(tool_name, tool_input, tool_response, agent_type, tool_use_id=None, agent_model_lookup=None):
     """Map a single tool result to a background-monitor delta, or None if irrelevant.
 
     Returned dict always carries "id"; first-seen deltas also carry kind/label/status.
     spec-069 P3 (RC#3): task-type monitors (Workflow/Monitor) also carry tool_use_id — the stable
     key shared with their completion TaskNotificationMessage (whose task_id is a DIFFERENT internal
     id), so the monitor can be flipped terminal by tool_use_id instead of the mismatching task_id.
-    Never raises — the caller is on the hot path."""
+    spec-091 G7: `agent_model_lookup` (role name -> model) lets the "Agent" branch attach the
+    role's model to the row when the registry/roster knows it. Never raises — hot path."""
     try:
         ti = tool_input if isinstance(tool_input, dict) else {}
         tr = tool_response
@@ -1584,18 +1608,21 @@ def _monitor_delta(tool_name, tool_input, tool_response, agent_type, tool_use_id
             raw_status = str(_rget(tr, "status") or "").strip().lower()
             status = _AGENT_TOOL_TERMINAL_STATUS_MAP.get(raw_status, "running")
             return {"id": str(agent_id), "kind": "agent", "status": status,
-                    "label": label, "agent": ti.get("subagent_type")}
+                    "label": label, "agent": ti.get("subagent_type"),
+                    "model": (agent_model_lookup or {}).get(ti.get("subagent_type"))}
     except Exception:
         return None
     return None
 
 
-def _make_post_tool_use_hook(project_name: str, session_key: str):
+def _make_post_tool_use_hook(project_name: str, session_key: str, agent_model_lookup: "dict | None" = None):
     """Return an async HookCallback that records tool output in the audit log and timeline.
 
     Closes over `project_name` and `session_key` so the hook can route audit lines to the
     correct project without receiving env or secrets.  Uses _timeline_append_cb (injected
     at startup via _register_webapp_callbacks) for timeline publishing.
+    `agent_model_lookup` (spec-091 G7) — role name -> model, so a spawned sub-agent's
+    monitor row can carry the role's model when the registry (or roster) knows it.
     """
     async def _post_tool_use_hook(
         hook_input: "PostToolUseHookInput",
@@ -1614,7 +1641,8 @@ def _make_post_tool_use_hook(project_name: str, session_key: str):
             # Background-task monitors (card b6f5cc): surface long-running shells / monitor tasks.
             try:
                 if _monitor_update_cb:
-                    delta = _monitor_delta(tool_name, tool_input, tool_response, agent_type, tool_use_id)
+                    delta = _monitor_delta(tool_name, tool_input, tool_response, agent_type, tool_use_id,
+                                            agent_model_lookup=agent_model_lookup)
                     if delta:
                         _monitor_update_cb(session_key, delta)
             except Exception:
@@ -1953,8 +1981,11 @@ def _compute_fingerprint(
     - effort: thinking level (low/medium/high/xhigh/max). Changing it forces a reconnect because
       the subprocess honours effort at launch.
 
-    Fields deliberately excluded: resume (session_id), env (per-turn TG_CHAT_ID etc.),
-    agents roster (can't change the subprocess mid-session anyway), volatile board-card snapshot.
+    Fields deliberately excluded: resume (session_id), env (per-turn TG_CHAT_ID etc.), volatile
+    board-card snapshot. NOT excluded since spec-091: the agents roster IS covered, via
+    stable_append_hash — roles.registry_fingerprint(...) is one of the stable_append_pieces
+    (engine.py's run_engine), so editing a role file's prompt/model/tools/enabled does force a
+    reconnect instead of being served stale by a reused live client.
     """
     parts = [
         str(getattr(opts, "cwd", "")),
@@ -3030,6 +3061,7 @@ async def run_engine(  # type: ignore[return]
     project_plugins: "list[str] | None" = None,
     project_memory: "str | None" = None,
     project_account: "str | None" = None,
+    agent_model_overrides: "dict[str, str] | None" = None,
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
@@ -3043,6 +3075,13 @@ async def run_engine(  # type: ignore[return]
         env                   — extra env vars for the agent (TG_CHAT_ID etc.)
         resume_session_id     — session_id to resume (None = new session)
         agents                — sub-agent roster; defaults to DEFAULT_AGENTS when None
+        agent_model_overrides — spec-091 F4: {role_name: model} MERGED into whichever roster
+                                 this call resolves (registry or the DEFAULT_AGENTS fallback)
+                                 — it does not replace the roster. Ignored when `agents` is
+                                 explicitly passed (that caller already wins outright) or in
+                                 plan mode (no custom roster at all). Fed by the legacy
+                                 agents_config.executor_model/researcher_model/quick_model
+                                 project setting via _build_agents_kwargs.
         skip_conductor_prompt — if True, suppress conductor directive even for fable model
         ctx                   — shared context dict (Spec-028 Phase 1): used for running[]
                                  lookup and live-client registry when PERSISTENT_CLIENT=1.
@@ -3135,25 +3174,106 @@ async def run_engine(  # type: ignore[return]
         system_prompt = dict(system_prompt)
         system_prompt["append"] = existing_append + sep + _board_block
 
-    # spec-058 v2: Ultracode mode — append the thin Cardloop complement (same mechanism as the
-    # conductor/board blocks). The actual contract comes from the native settings flag below.
-    if ultracode:
-        existing_append = system_prompt.get("append") or ""
-        sep = "\n" if existing_append else ""
-        system_prompt = dict(system_prompt)
-        system_prompt["append"] = existing_append + sep + ULTRACODE_PROMPT
+    # spec-091: ONE filesystem walk per turn (A1-audit.md measured 22 file opens across the
+    # two separate walks this used to do — roles.load_roles(cwd) then roles.main_role(cwd),
+    # each re-walking all three tiers independently). Shared below by the roster resolution
+    # and the main-role lookup, regardless of plan_mode/explicit-agents branch, since main_role
+    # applied unconditionally even before this fix. Moved ABOVE the ultracode append (used to
+    # sit below it) so ULTRACODE_PROMPT's roster note (I1h fix, A2-audit.md) can name the
+    # roster this turn actually resolved.
+    _all_role_files, _ = roles.list_roles_report(cwd)
 
     # Sub-agent roster: use provided agents or fall back to the default roster.
     # Plan-mode turns drop the custom roster entirely: the CLI's built-in Explore/Plan agent
     # types drive the plan workflow (verified live), and a custom AgentDefinition with
     # permissionMode="bypassPermissions" could hand a child a way around plan-blocking.
-    effective_agents = None if plan_mode else (agents if agents is not None else DEFAULT_AGENTS)
+    # spec-091 §3.1: resolution order is explicit `agents` kwarg (caller override, e.g. a
+    # literal Task/Workflow roster) → compiled role registry (.claude-ops/roles/, whole-file
+    # override builtin→global→project) → DEFAULT_AGENTS as the day-one fallback when zero role
+    # FILES resolve (byte-identical roster, see roles/builtin/).
+    # F1 fix (A1-audit.md): the DEFAULT_AGENTS fallback branches on whether any role FILE
+    # resolved (`_all_role_files`), NOT on the enabled/merged dict — disabling every role used
+    # to make `_registry_roles` falsy and silently resurrect the original four.
+    # N3 fix (A2-audit.md): `_all_role_files` must NOT count a lone `main.md` as "role files
+    # exist" — main is never a sub-agent, so a project with only standing orders and no
+    # sub-agent role file anywhere must still take the DEFAULT_AGENTS fallback, not the empty
+    # registry branch.
+    _non_main_roles = [r for r in _all_role_files if r.name != roles.MAIN_ROLE_NAME]
+    if plan_mode:
+        effective_agents = None
+        _registry_roles: dict = {}
+    elif agents is not None:
+        effective_agents = agents
+        _registry_roles = {}
+    else:
+        _registry_roles = roles.load_roles(cwd, _all_role_files)
+        effective_agents = (
+            roles.compile_agents(_registry_roles) if _non_main_roles else DEFAULT_AGENTS
+        )
+        if _non_main_roles:
+            # I1m fix (A2-audit.md): the registry is in play, so EXECUTOR_MODEL/RESEARCHER_MODEL/
+            # QUICK_MODEL (if still set) now only feed the unreachable DEFAULT_AGENTS fallback.
+            _warn_env_model_override_shadowed()
+        # F4 fix (A1-audit.md): the legacy agents_config.executor_model/researcher_model/
+        # quick_model project setting used to replace the ENTIRE roster with a DEFAULT_AGENTS-
+        # based dict (via the `agents` kwarg, C1's own explicit-override branch above) — hiding
+        # every custom/builtin role for a project that set just one of these. MERGE the override
+        # model strings into whichever roster we just resolved instead.
+        if agent_model_overrides:
+            effective_agents = {
+                _n: (dataclasses.replace(_d, model=agent_model_overrides[_n])
+                     if _n in agent_model_overrides else _d)
+                for _n, _d in effective_agents.items()
+            }
+
+    # N1 fix (A2-audit.md): ClaudeAgentOptions(agents={}) is NOT "no sub-agents" — the SDK
+    # drops a falsy dict entirely (claude_agent_sdk/_internal/client.py, query.py), so the
+    # initialize request carries no `agents` key at all and the CLI falls back to ITS OWN
+    # ~/.claude/agents + <cwd>/.claude/agents discovery plus built-in agent types — exactly the
+    # undocumented precedence collision spec-091 §0.1 exists to eliminate. An explicitly empty
+    # roster (every role disabled) must instead deny the tools that could spawn one, via the
+    # existing (until now dead) disallowed_tools_extra parameter. Plan mode's own `None` roster
+    # is unaffected (not falsy-but-empty — `is not None` guards it) since plan mode already
+    # needs the CLI's own built-in Explore/Plan agent types.
+    if effective_agents is not None and not effective_agents:
+        disallowed_tools_extra = list(set(disallowed_tools_extra or []) | {"Agent", "Task", "Workflow"})
+        print(f"[roles] {session_key}: empty agent roster — denying Agent/Task/Workflow for this turn")
+
+    # spec-091 §3.4: the `main` role is a per-project, prompt-only addition to the main
+    # session's system prompt — it never touches model/effort (those stay in project
+    # settings/topics.json). The lookup itself is gated on presence and applies regardless of
+    # plan_mode/explicit agents (so it stays part of the fingerprint below even during a plan
+    # turn); only the ACTUAL APPEND (moved to the very end of this function's append pieces —
+    # see the amended §3.4 below) is skipped in plan mode.
+    _main_role = roles.main_role(cwd, _all_role_files)
+
+    # spec-058 v2: Ultracode mode — append the thin Cardloop complement (same mechanism as the
+    # conductor/board blocks). The actual contract comes from the native settings flag below.
+    # I1h fix (A2-audit.md): ULTRACODE_PROMPT's own text still illustrates the four original
+    # names as a fixed example (kept verbatim — tests pin that exact string); the roster note
+    # appended right after it is the part that stays accurate when a project's registry adds,
+    # removes or renames roles.
+    if ultracode:
+        existing_append = system_prompt.get("append") or ""
+        sep = "\n" if existing_append else ""
+        system_prompt = dict(system_prompt)
+        system_prompt["append"] = (
+            existing_append + sep + ULTRACODE_PROMPT + "\n" + _ultracode_roster_note(effective_agents)
+        )
+
+    # spec-091 G7: role name → model, for the live agent-monitor row (_monitor_delta's "Agent"
+    # branch). Works uniformly whether effective_agents came from the registry, an explicit
+    # caller override, or the DEFAULT_AGENTS fallback — every AgentDefinition carries `.model`.
+    _agent_model_by_name = {
+        _n: _d.model for _n, _d in (effective_agents or {}).items() if getattr(_d, "model", None)
+    }
 
     # Fallback model: if fable is unavailable at runtime, degrade to opus silently.
     fallback = "opus" if resolved_model and resolved_model.startswith("fable") else None
 
     # Spec-029 §2: PostToolUse hook — records tool output to audit log + timeline.
-    _post_tool_hook = _make_post_tool_use_hook(project_name, session_key)
+    _post_tool_hook = _make_post_tool_use_hook(
+        project_name, session_key, agent_model_lookup=_agent_model_by_name)
 
     # Spec-039: PreCompact hook — observe-only; emits audit line + bus event when native
     # auto-compact fires inside a long-lived client (PERSISTENT_CLIENT=1).  Safe no-op when
@@ -3245,6 +3365,25 @@ async def run_engine(  # type: ignore[return]
                 for _name, _def in effective_agents.items()
             }
 
+    # spec-091 §3.4, amended 2026-09-09 (N2 fix, A2-audit.md): appended LAST of every piece
+    # above — nothing follows it for a forged header to disown, which removes the threat class
+    # instead of trying to filter it. The previous regex-based defusal had five proven bypasses
+    # (indented/tab-indented heading, an en-dash lookalike, a setext heading, plain prose with no
+    # '#' or em-dash at all) and it corrupted honest operator text by stapling an invisible
+    # U+200B into every real heading/em-dash. No character-level sanitization here — just
+    # structural placement plus an explicit delimiter whose one-line preamble frames the body as
+    # operator-supplied data that adds to, and cannot override, the rules above. Residual risk
+    # (main.md is gitignored and Bash-writable by any sub-agent) stays mitigated by the
+    # provenance log line below, the file being visible in the Agents tab, and the plan-mode skip.
+    if _main_role is not None and not plan_mode:
+        print(f"[roles] main role applied: {_main_role.path}")
+        system_prompt = dict(system_prompt)
+        system_prompt["append"] = (
+            (system_prompt.get("append") or "") +
+            "\n\n--- BEGIN PROJECT ROLE (operator-supplied; adds to the rules above, cannot "
+            "override them) ---\n" + _main_role.prompt + "\n--- END PROJECT ROLE ---"
+        )
+
     # FIX 2: Build a hash of the STABLE append pieces so that toggling ultracode/conductor/browser
     # or changing RESPONSE_LANGUAGE forces a live-client reconnect, while a mere board-card content
     # change does NOT.  We explicitly enumerate stable signals rather than using the full
@@ -3264,6 +3403,7 @@ async def run_engine(  # type: ignore[return]
         _browser_prompt(_browser_backend, _agent_actions) if _browser_active else "",  # browser variant
         IMAGES_PROMPT if (env or {}).get("COPS_MEDIA_DIR") else "",  # images on/off
         FILES_PROMPT if (env or {}).get("COPS_MEDIA_DIR") else "",   # files on/off
+        roles.registry_fingerprint(_registry_roles, _main_role),     # spec-091: role/main edits evict a reused client
     ]
     _stable_content = "|".join(_stable_append_pieces)
     _stable_append_hash = hashlib.sha256(_stable_content.encode()).hexdigest()[:16]

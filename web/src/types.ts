@@ -198,7 +198,7 @@ export interface FileContent {
   error?: string
 }
 
-export type TabId = 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings' | 'specs' | 'browser'
+export type TabId = 'claude-md' | 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings' | 'specs' | 'browser' | 'agents'
 
 // ─── Epic-lens: Spec list (GET /api/projects/{id}/epic-specs) ─────────────────
 
@@ -351,6 +351,67 @@ export interface MemoryFile {
 export interface ProjectMemory {
   files: MemoryFile[]
   exists: boolean
+}
+
+// ─── Agent roles (spec-091 Phase 1): declarative sub-agent + main-agent role
+// files under .claude-ops/roles/, mirrors docs/internal/specs/spec-091-agent-roles/
+// IMPLEMENTATION.md §4 exactly. ────────────────────────────────────────────
+
+export type RoleScope = 'builtin' | 'global' | 'project'
+
+/** The `Role` dataclass (roles.py) serialized to JSON, plus the two UI-only fields
+ *  the HTTP layer adds: `shadowed_by` and `is_main`. */
+export interface RoleJSON {
+  name: string
+  scope: RoleScope
+  path: string
+  description: string
+  prompt: string
+  enabled: boolean
+  tools: string[] | null
+  disallowed_tools: string[] | null
+  model: string | null
+  effort: string | null
+  max_turns: number | null
+  skills: string[] | null
+  mcp_servers: string[] | null
+  memory: string | null
+  permission_mode: string | null
+  color: string | null
+  extras: Record<string, unknown>
+  warnings: string[]
+  /** The scope that currently overrides this same-named role, or null when this
+   *  row IS the effective one for its name. */
+  shadowed_by: RoleScope | null
+  is_main: boolean
+}
+
+export interface RoleParseError {
+  name: string
+  scope: RoleScope
+  path: string
+  error: string
+}
+
+/** GET /api/projects/{id}/roles. No `effective` key — the backend computes it for
+ *  nothing (no reader); the effective set is `shadowed_by === null` on `roles`. */
+export interface ProjectRoles {
+  roles: RoleJSON[]
+  errors: RoleParseError[]
+  main: RoleJSON | null
+  global_dir: string
+  project_dir: string
+}
+
+/** GET /api/projects/{id}/roles/{name}?scope= — the raw file text alongside the
+ *  parsed role, so the editor round-trips unknown frontmatter keys byte-for-byte.
+ *  `role` is null and `error` names the parse failure when the file exists but fails
+ *  to parse (webapp.py `api_project_role_get`) — the raw `content` is still returned
+ *  so the UI can show it for the operator to fix. */
+export interface RoleFile {
+  role: RoleJSON | null
+  content: string
+  error: string | null
 }
 
 // ─── Spec-037: Multi-chat per project ─────────────────────────────────────
@@ -710,6 +771,9 @@ export interface Monitor {
   ts: number
   tail?: string
   agent?: string | null
+  /** spec-091 G7: the agent role's model, when the roles registry knows the role name.
+   *  Absent for rows the registry can't identify (e.g. no role files at all yet). */
+  model?: string | null
   persistent?: boolean
   /** spec-089 §2: the SDK's own result pointers, carried through from the terminal
    *  TaskNotification/TaskUpdated so the completion-wake prompt can cite them directly. */

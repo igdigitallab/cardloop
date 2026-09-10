@@ -30,6 +30,7 @@ Navigation guide for the codebase. Source of truth = the code; this file is the 
 - **Engine consumers:**
   - `_run_card(...)` in **webapp.py** — card auto-run.
   - `api_project_chat` in **webapp.py** — web chat (SSE consumer).
+- **Sub-agent roster (`roles.py`, spec-091)** — declarative, cockpit-editable `AgentDefinition`s for the Task/Workflow tool: a three-tier file registry (builtin ships in git → global → project), whole-file override by name. `run_engine` compiles it via `roles.compile_agents(roles.load_roles(cwd))`; `DEFAULT_AGENTS` in engine.py is only the fallback for a broken/partial install (zero role files resolved) — a normal checkout never reaches it.
 
 ### Concurrency / state
 - **`running{key: bool}`** — per-`cwd` lock. Reserved SYNCHRONOUSLY before the first await, released in `finally`. Guards against two parallel processes on the same project.

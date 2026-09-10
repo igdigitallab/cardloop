@@ -58,7 +58,38 @@ async def test_off_path_unchanged(tmp_path):
     opts = await _drain(tmp_path)
     assert opts.permission_mode == "bypassPermissions"
     assert opts.can_use_tool is None
-    assert opts.agents == engine.DEFAULT_AGENTS
+    # spec-091: the OFF-path roster now resolves through the declarative role registry
+    # (roles/builtin/*.md ship in git, so a real checkout is never "zero role files" —
+    # see IMPLEMENTATION.md §3.1's precedence order and CHECKLIST C2/C3). dict-equality
+    # with DEFAULT_AGENTS is no longer expected: the registry adds seven more shipped
+    # roles (reviewers/architect/debugger/test-writer/docs-writer) alongside the four
+    # original ones. Those four stay field-identical to DEFAULT_AGENTS, asserted the same
+    # way as tests/test_spec091_wiring.py::test_c3_shipped_builtins_match_default_agents_field_by_field.
+    # N4/I1m fix (A2-audit.md): `engine.DEFAULT_AGENTS[name].model` reads EXECUTOR_MODEL/
+    # RESEARCHER_MODEL/QUICK_MODEL at import time, so comparing against it made this test
+    # env-sensitive for no code-bug reason. The role FILES pin a fixed id regardless of env —
+    # compare the `model` field against that literal baseline instead (every other field stays
+    # compared against DEFAULT_AGENTS, which is unaffected by those three vars).
+    _model_baseline = {
+        "executor": "claude-sonnet-5", "researcher": "claude-sonnet-5",
+        "skeptic": "claude-sonnet-5", "quick": "haiku",
+    }
+    for name, default_def in engine.DEFAULT_AGENTS.items():
+        got = opts.agents[name]
+        assert got.prompt == default_def.prompt, name
+        assert got.tools == default_def.tools, name
+        assert got.disallowedTools == default_def.disallowedTools, name
+        assert got.model == _model_baseline[name], name
+        assert got.effort == default_def.effort, name
+        assert got.maxTurns == default_def.maxTurns, name
+        # F5 fix (A1-audit.md): this loop used to silently skip `description` — the one field
+        # IMPLEMENTATION.md §0.4 (amended post-audit) says is DELIBERATELY not byte-identical
+        # (rewritten into H7's "use this when…" routing language). Assert that deliberately,
+        # instead of never looking at the field at all — see
+        # tests/test_spec091_roles.py::test_copied_roles_match_default_agents_except_improved_description
+        # for the fuller pin against the role files' literal text.
+        assert got.description != default_def.description, name
+        assert "use this when" in got.description.lower(), name
     assert "EnterPlanMode" in opts.disallowed_tools
 
 

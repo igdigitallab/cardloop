@@ -1589,6 +1589,11 @@
   flex: 0 0 auto; font-size: 10px; color: var(--text3);
   padding: 1px 5px; border: 1px solid var(--border); border-radius: 999px;
 }
+/* spec-091 G7: the role's model, from the roles registry — a plain dim label, no pill
+   (the role-name pill above already carries the border accent). */
+.mon-agent-model {
+  flex: 0 0 auto; font-size: 10px; color: var(--text3); opacity: 0.75;
+}
 .mon-status { flex: 0 0 auto; font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.03em; }
 .mon-chevron { flex: 0 0 auto; color: var(--text3); transition: transform 0.15s ease; }
 .mon-tail {

@@ -26,6 +26,7 @@ Design history & specs: `docs/internal/specs/` (gitignored).
   `GET|POST /api/board/janitor[/run]`. Cards carry an `rt=<unix>` marker stamped when they enter
   Review — the board keeps no history otherwise. Knobs: `BOARD_JANITOR_MODE=off|digest|accept`.
 - `captcha_solver.py` — the 2captcha bridge behind `browser_solve_captcha`. Knows nothing about Playwright (page-side detection/injection lives in `browser_pane.solve_captcha`). Off unless `TWOCAPTCHA_API_KEY` / the safe's `twocaptcha_api_key` is set, and gated behind `agent_actions=full`. ⚠️ Only solves captcha **widgets** — a full-page Cloudflare interstitial is refused on purpose (IP-bound token); don't "fix" that by removing the guard, it would just burn balance on tokens Cloudflare rejects.
+- `roles.py` + `roles/builtin/*.md` — spec-091 declarative sub-agent roles: a three-tier file registry (builtin ships in git → global `$CARDLOOP_ROLES_DIR`/`~/.claude-ops/roles` → project `<cwd>/.claude-ops/roles`), whole-file override by name, cockpit-editable via the Agents tab. `engine.py` compiles it into the Task/Workflow roster; `DEFAULT_AGENTS` there is only the broken-install fallback when zero role files resolve.
 - `search.py` — the global index (spec-074/079/090): FTS5 over five sources — `chat`,
   `board`, `timeline`, `file` and `memory`. **`memory` spans BOTH memory locations**
   (`<cwd>/.claude-ops/memory/` and the native `~/.claude/projects/<slug>/memory/`, which is

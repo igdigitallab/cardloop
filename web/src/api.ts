@@ -533,6 +533,46 @@ export const api = {
       method: 'DELETE',
     }),
 
+  // spec-091 Phase 1: declarative agent role registry (.claude-ops/roles/), mirrors the
+  // memory endpoints above exactly — see IMPLEMENTATION.md §4.
+  roles: (id: string) =>
+    apiFetch<import('./types').ProjectRoles>(`/api/projects/${id}/roles`),
+
+  role: (id: string, name: string, scope: import('./types').RoleScope) =>
+    apiFetch<import('./types').RoleFile>(
+      `/api/projects/${id}/roles/${encodeURIComponent(name)}?scope=${encodeURIComponent(scope)}`
+    ),
+
+  // `overwrite` is sent only when the caller KNOWS the write should replace an existing
+  // file (a self-edit of the file already open, or the operator confirmed a 409 from a
+  // prior attempt) — FX4/N5: the backend now answers 409 when the target exists and this
+  // flag is absent, so an unconditional `{overwrite:true}` here would defeat that guard.
+  saveRole: (id: string, name: string, scope: import('./types').RoleScope, content: string, overwrite?: boolean) =>
+    apiFetch<{ role: import('./types').RoleJSON }>(
+      `/api/projects/${id}/roles/${encodeURIComponent(name)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(overwrite ? { scope, content, overwrite: true } : { scope, content }),
+      }
+    ),
+
+  deleteRole: (id: string, name: string, scope: import('./types').RoleScope) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/projects/${id}/roles/${encodeURIComponent(name)}?scope=${encodeURIComponent(scope)}`,
+      { method: 'DELETE' }
+    ),
+
+  setRoleEnabled: (id: string, name: string, scope: import('./types').RoleScope, enabled: boolean) =>
+    apiFetch<{ role: import('./types').RoleJSON }>(
+      `/api/projects/${id}/roles/${encodeURIComponent(name)}/enabled`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, enabled }),
+      }
+    ),
+
   // Free chats (not bound to a project)
   freeCreate: (body?: { cwd?: string; model?: string; label?: string; provider?: import('./types').Provider }) =>
     apiFetch<{ id: string; label: string; cwd: string; model: string; created_at: number }>(

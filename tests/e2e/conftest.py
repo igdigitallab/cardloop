@@ -65,7 +65,7 @@ def _build_app_copy(dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     for py in REPO_ROOT.glob("*.py"):
         shutil.copy2(py, dest / py.name)
-    for name in ("templates", "features", "tools"):
+    for name in ("templates", "features", "tools", "roles"):
         src = REPO_ROOT / name
         if src.is_dir():
             (dest / name).symlink_to(src, target_is_directory=True)

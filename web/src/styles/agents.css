@@ -1,0 +1,312 @@
+/* ── Agents tab (spec-091 Phase 1) ──────────────────────────────────────
+ * Declarative agent-role registry: main-agent block + sub-agent role list.
+ * Reuses .doc-btn / .doc-textarea / .error-state / .no-content / .memory-action-btn /
+ * .memory-edit-modal from overview.css and base.css — no new colour palette, achromatic
+ * (Graphite & Chalk).
+ */
+
+.agents-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 900px;
+}
+
+.agents-tab-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+/* ── Main agent block — visually distinct, sits at the top ── */
+.agents-main-block {
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agents-main-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agents-main-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Shared by the main-block hint and the builtin-note in the editor modal — identical
+ * look, one rule instead of two (leanness pass, A1-audit). */
+.agents-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text3);
+}
+
+.agents-main-inherited {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--yellow);
+}
+
+.agents-main-preview {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow-y: auto;
+  color: var(--text2);
+}
+
+.agents-main-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agents-main-editor .doc-textarea {
+  min-height: 200px;
+}
+
+.agents-main-editor-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* ── Parse errors ── */
+.agents-errors {
+  border: 1px solid rgba(239,68,68,0.3);
+  background: rgba(239,68,68,0.06);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agents-errors-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--red);
+}
+
+.agents-error-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.agents-error-name {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.agents-error-scope {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text3);
+}
+
+.agents-error-msg {
+  color: var(--red);
+  flex: 1 1 auto;
+}
+
+/* ── Sub-agent role list ── */
+.agents-roles-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agents-roles-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agents-roles-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.agents-role-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agents-role-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+}
+
+.agents-role-row--muted {
+  opacity: 0.55;
+}
+
+.agents-role-toggle {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* F2: a real disabled state, not just the row-level opacity — the checkbox/copy button
+ * on a shadowed row must look inert, not merely muted like the rest of the row. */
+.agents-role-toggle input:disabled,
+.agents-role-actions .memory-action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.agents-role-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agents-role-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.agents-role-name {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.agents-role-scope-badge {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border2);
+  color: var(--text3);
+  flex-shrink: 0;
+}
+
+.agents-role-scope-badge--builtin { border-style: dashed; }
+.agents-role-scope-badge--global  { color: var(--text2); }
+.agents-role-scope-badge--project { color: var(--text); border-color: var(--text3); }
+
+.agents-role-shadowed {
+  font-size: 10.5px;
+  color: var(--yellow);
+  font-style: italic;
+}
+
+.agents-role-desc {
+  font-size: 12px;
+  color: var(--text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agents-role-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text3);
+}
+
+/* F11: parse_role()'s `warnings` (e.g. name/filename mismatch) — yellow, distinct from
+ * the red .agents-error-msg used for hard parse failures. */
+.agents-role-warning-msg {
+  font-size: 11px;
+  color: var(--yellow);
+}
+
+.agents-role-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* ── Editor modal ── */
+/* Reuses .memory-edit-modal (overview.css) for sizing instead of a near-duplicate rule —
+ * both are "a wide modal for a textarea", no reason for two width constants. */
+
+/* New-role scope selector (FIXES.md F-2) and the global-scope warning, shared by the
+ * create selector above and the plain "editing a global role" notice below. */
+.agents-scope-select {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text2);
+}
+
+.agents-scope-option {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.agents-scope-global-warning {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--yellow);
+}
+
+/* ── Mobile parity: usable at 360px — rows wrap, actions drop to their own line ── */
+@media (max-width: 480px) {
+  .agents-role-row {
+    flex-wrap: wrap;
+  }
+
+  .agents-role-main {
+    flex: 1 1 100%;
+    order: 1;
+  }
+
+  .agents-role-actions {
+    order: 2;
+    flex: 1 1 auto;
+    justify-content: flex-end;
+  }
+
+  .agents-main-block {
+    padding: 12px;
+  }
+}

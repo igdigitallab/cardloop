@@ -16,6 +16,7 @@ import { TimelineTab } from '../tabs/TimelineTab'
 import { SettingsTab } from '../tabs/SettingsTab'
 import { SpecsTab } from '../tabs/SpecsTab'
 import { BrowserTab } from '../tabs/BrowserTab'
+import { AgentsTab } from '../tabs/AgentsTab'
 import { t } from '../i18n'
 import { useModules } from '../hooks/useModules'
 
@@ -36,6 +37,7 @@ const BASE_TABS: Tab[] = [
   { id: 'timeline',  label: t['tab.timeline'] },
   { id: 'settings',  label: t['tab.settings'] },
   { id: 'specs',     label: t['tab.specs'] },
+  { id: 'agents',    label: t['tab.agents'] },
 ]
 
 // localStorage keys
@@ -807,6 +809,7 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
                 {mobileInnerTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
                 {mobileInnerTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} onProjectsReload={onProjectsReload} /></ErrorBoundary>}
                 {mobileInnerTab === 'specs'     && <ErrorBoundary label="Specs"><SpecsTab projectId={project.id} /></ErrorBoundary>}
+                {mobileInnerTab === 'agents'    && <ErrorBoundary label="Agents"><AgentsTab projectId={project.id} /></ErrorBoundary>}
               </div>
             )}
           </div>
@@ -956,6 +959,7 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
           {activeTab === 'timeline'  && <ErrorBoundary label="Activity"><TimelineTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'settings'  && <ErrorBoundary label="Settings"><SettingsTab projectId={project.id} project={project} health={structHealth} refreshHealth={refreshHealth} models={models} onProjectsReload={onProjectsReload} /></ErrorBoundary>}
           {activeTab === 'specs'     && <ErrorBoundary label="Specs"><SpecsTab projectId={project.id} /></ErrorBoundary>}
+          {activeTab === 'agents'    && <ErrorBoundary label="Agents"><AgentsTab projectId={project.id} /></ErrorBoundary>}
           {activeTab === 'browser'   && browserEnabled && <ErrorBoundary label="Browser"><BrowserTab projectId={project.id} /></ErrorBoundary>}
         </div>
       </div>
