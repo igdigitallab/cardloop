@@ -906,8 +906,9 @@ written for you elsewhere; do not repeat them and do not add a title of your own
 Sections, in this order:
 
 ## Day at a glance
-3 to 6 bullets — the most consequential things done (shipped, decided, learned), each naming \
-its project.
+Up to 6 bullets — the most consequential things done (shipped, decided, learned), each \
+naming its project. Fewer is correct on a quiet day, and one is a complete answer: never \
+stretch a single event across several bullets or promote noise to reach a count.
 
 ## Timeline
 A Markdown table `| Time | Project | What | Outcome |`, one row per meaningful block of work \

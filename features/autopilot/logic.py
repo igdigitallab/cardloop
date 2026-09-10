@@ -523,7 +523,7 @@ Choose the single most valuable next focus, by priority:
   P4 — propose concrete improvements (ONLY grounded in real signals: the code, tests, TODOs, the notebook — never vague "make it nicer")
   P5 — nothing actionable right now
 
-Then produce: a 1-3 sentence assessment; up to 3 concrete proposed cards (each a small, verifiable unit of work, in dependency order — these are the tasks YOU issue); ONE short yes/no question that would unblock you (or null if none); and a brief note to your future self. Be concise and high-signal — a senior director, not a generator of busywork. Never propose a card that duplicates an existing open card.'''
+Then produce: a 1-3 sentence assessment; up to 3 concrete proposed cards (each a small, verifiable unit of work, in dependency order — these are the tasks YOU issue); ONE short yes/no question that would unblock you (or null if none); and a brief note to your future self. Be concise and high-signal — a senior director, not a generator of busywork. On P5 the assessment and the note may each be a single short sentence — "nothing to do" is a complete answer, do not pad them to fill the field. Never propose a card that duplicates an existing open card.'''
 
 DIRECTOR_SCHEMA: dict = {
     "type": "object",

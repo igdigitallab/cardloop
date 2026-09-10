@@ -3658,7 +3658,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           Layout: [tab…] [+]  [↺] [◉ session ▾]  ·(auto)·  [▬ ctx] [♨️ cache] [◆ model ▾] [🧠 think] [⟩]
           The ⟩ collapse button renders only when onToggleCollapse is provided (desktop-split). */}
       <div className={`chat-session-bar${isMobile && chromeCollapsed ? ' collapsed' : ''}`}>
-        {/* Left: chat tabs inline — HIDDEN via SHOW_MULTICHAT_UI (backend intact; single active chat only) */}
+        {/* Left: chat tabs inline — shown while SHOW_MULTICHAT_UI is true (see its declaration). */}
         {SHOW_MULTICHAT_UI && (<>
         {chats.map(chat => {
           const isActive = chat.id === activeChatId
