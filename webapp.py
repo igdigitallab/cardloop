@@ -5784,6 +5784,31 @@ def _effective_card_model(card: dict) -> str:
     return "sonnet"
 
 
+# Ascending $/input-token rank (usage_pricing.py PRICING table) — used only to cap the
+# onboarding model below, not for card-model resolution above.
+_MODEL_COST_RANK = {"haiku": 0, "sonnet": 1, "opus": 2, "fable": 3}
+_ONBOARDING_MODEL_CAP = "sonnet"
+
+
+def _onboarding_model(ctx: dict) -> str:
+    """Model for the new-project onboarding card.
+
+    Scaffolding here is two file edits + a commit, not judgment work, so it should not
+    default to the project's often-Opus tier (_effective_default_model) — that is a 30-35k
+    input-token first turn on the most expensive model, for every new project, unconditionally.
+    Cap at _ONBOARDING_MODEL_CAP ('sonnet'). board_card_model is deliberately NOT the knob
+    here (see the comment on its call site) — it is the operator's "routine board card" cheap
+    default and onboarding is not a routine card. The one existing lever this respects is the
+    operator's own default_model setting: if it is ALREADY cheaper than the cap (haiku), that
+    choice is kept rather than bumped up to sonnet.
+    """
+    default_model = _effective_default_model(ctx)
+    cap_rank = _MODEL_COST_RANK[_ONBOARDING_MODEL_CAP]
+    if _MODEL_COST_RANK.get(default_model, cap_rank) < cap_rank:
+        return default_model
+    return _ONBOARDING_MODEL_CAP
+
+
 def _effective_card_provider(card: dict, project: dict) -> str:
     """Card override → project board default → Claude compatibility default."""
     if card.get("provider") == "codex":
@@ -5801,6 +5826,10 @@ def _git_enabled(project: dict) -> bool:
 
 
 # ─────────────────────── API: settings (global + per-project) ───────────────────────
+
+# Project archetypes — also the only legal values for the 'type' setting field below and
+# the return values of _infer_archetype() further down this file.
+_PROJECT_ARCHETYPES = ("software", "content", "ops", "scratchpad")
 
 _PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", "codex_model", "ask_always_allow", "account")
 
@@ -6127,6 +6156,15 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
                         status=400,
                     )
             updates[k] = clean_cfg if clean_cfg else None
+        elif k == "type":
+            # F4 fix: 'type' is an archetype label, not a diagnostic command — it must NOT
+            # fall into the log_cmd/test_cmd branch below (that rejected every real archetype
+            # with a 400, and would have silently accepted 'cat' as a fake one).
+            sv = str(v).strip().lower()
+            if sv not in _PROJECT_ARCHETYPES:
+                return web.json_response(
+                    {"error": f"type: must be one of {list(_PROJECT_ARCHETYPES)}"}, status=400)
+            updates[k] = sv
         else:  # log_cmd / test_cmd — strings; empty → reset key
             sv = str(v) if v else ""
             if sv and not _validate_diag_cmd(sv):
@@ -6955,7 +6993,19 @@ async def _move_card_after_run(
                     break
             moved = _pop_card(cols, card_id)
             if moved is None:
-                moved = card
+                # F3: the card vanished from every column — the agent edited TASKS.md and
+                # dropped its own running card. Falling back to the raw `card` dict is unsafe
+                # when its text is a multi-line prompt (onboarding/audit): _serialize_tasks
+                # writes one line per card, so embedded newlines corrupt the next parse (the
+                # first physical line becomes an id-less card, the remaining lines leak into
+                # the board as spurious plain-card entries — board.py `_serialize_tasks` /
+                # `_parse_tasks`). Collapse to a single line before re-inserting; a copy, so
+                # the caller's own `card` dict is untouched.
+                first_line = next(
+                    (ln.strip() for ln in (card.get("text") or "").splitlines() if ln.strip()),
+                    "",
+                )
+                moved = {**card, "text": first_line or "Card (recovered)"}
             # Stamp when the card entered Review — the board keeps no history of its
             # own, and without this the janitor cannot tell a card parked for weeks
             # from one that landed a second ago.
@@ -16253,11 +16303,64 @@ def _infer_archetype(intent: str) -> str:
     return "software"
 
 
+_THIN_INTENT_FILLER_WORDS = {
+    "test", "tests", "testing", "tmp", "temp", "new", "asdf", "project", "app",
+    "тест", "тестовый", "тестовая", "проект", "новый", "новая",
+}
+
+
+def _intent_is_thin(intent: str) -> bool:
+    """True when the intent carries no goal an agent could cite without inventing one.
+
+    Rule is script-agnostic — it counts WORDS, not characters or bytes, so Cyrillic/CJK
+    input is judged by the same yardstick as English (no "every non-Latin phrase is thin"
+    or "every non-Latin phrase is rich" shortcut):
+      - empty / whitespace-only -> thin.
+      - fewer than 3 words -> thin. A bare word or two-word label states a NAME, not a
+        goal, in any language: "test", "asdf", "landing page", "тестовый проект".
+      - 3+ words where EVERY word is a filler/placeholder token
+        (_THIN_INTENT_FILLER_WORDS, English + Russian synonyms) -> thin:
+        "a new test project", "новый тестовый проект".
+      - otherwise (3+ words, at least one non-filler token) -> rich, regardless of
+        script: "Build a Next.js landing page for Acme dental" and "Сделать лендинг
+        для стоматологии Acme" both count as rich.
+    """
+    words = [w for w in re.split(r"[\s\-_/]+", intent.strip().lower()) if w]
+    if len(words) < 3:
+        return True
+    return all(w in _THIN_INTENT_FILLER_WORDS for w in words)
+
+
+# F5: dependency-free Cyrillic -> Latin transliteration table (common web-slug scheme),
+# so a Russian intent produces a readable folder name instead of collapsing to nothing.
+# Deliberately no new package (unidecode/python-slugify) — this is the one alphabet the
+# cockpit's own ru.ts locale makes common; anything else unrepresentable (CJK, emoji, ...)
+# still falls through to the NFKD/ASCII pass below and is dropped, same as before.
+_CYRILLIC_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
+    "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "ts",
+    "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu",
+    "я": "ya",
+}
+
+
+def _transliterate_cyrillic(text: str) -> str:
+    """Char-by-char Cyrillic -> Latin. Non-Cyrillic characters pass through untouched
+    (case-sensitive lookup — caller lowercases first)."""
+    return "".join(_CYRILLIC_TRANSLIT.get(ch, ch) for ch in text)
+
+
 def _intent_to_slug(intent: str) -> str:
-    """Derive a kebab-case slug from an intent string."""
+    """Derive a kebab-case slug from an intent string.
+
+    Cyrillic is transliterated to Latin first (F5), THEN run through the original
+    NFKD/ASCII pass (handles accented Latin, drops anything still non-ASCII — CJK,
+    emoji, ...). Falls back to '' (caller uses untitled-<ts>) when fewer than 2
+    characters survive either way."""
+    text = _transliterate_cyrillic(intent.lower())
     # Normalize unicode → ASCII approximation
-    text = unicodedata.normalize("NFKD", intent).encode("ascii", "ignore").decode()
-    text = text.lower()
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     text = re.sub(r"[^a-z0-9\s-]", "", text)
     text = re.sub(r"[\s-]+", "-", text).strip("-")
     # Truncate to 40 chars, trim trailing dash
@@ -16307,8 +16410,14 @@ def _render_template_archetype(template_name: str, vars: dict, here: Path, proje
     return text
 
 
-def _build_onboarding_prompt(project_type: str, cwd: str, intent: str) -> str:
-    """Build an archetype-aware onboarding prompt for a new project."""
+def _build_onboarding_prompt(project_type: str, cwd: str, intent: str, thin: bool = False) -> str:
+    """Build an archetype-aware onboarding prompt for a new project.
+
+    thin=True (see _intent_is_thin): the intent has no goal to cite, so STEP 1 is swapped
+    for a "don't invent, ask" block instead of "infer the goal and write it down". Only
+    STEP 1 changes — STEP 2/3 stay the rich-path text since they only fire after the
+    operator's reply, which by then carries real content either way.
+    """
     git_step = (
         "\n- After scaffolding: run `git init` + initial commit if not already done."
         if project_type in ("software", "ops") else ""
@@ -16327,18 +16436,35 @@ def _build_onboarding_prompt(project_type: str, cwd: str, intent: str) -> str:
         if project_type in ("software", "ops") else ""
     )
 
+    if thin:
+        step1 = (
+            f"STEP 1 — Don't guess, ask:\n"
+            f"- The intent field says only \"{intent}\" — that is not enough to state a goal.\n"
+            f"- Do NOT invent one. Do NOT edit CLAUDE.md, TASKS.md or README.md in this turn — "
+            f"leave the Goal placeholder exactly as it is.\n"
+            f"- Reply with at most 3 short questions: what this project is for, what the first "
+            f"deliverable is, and (if not already obvious) the stack. Then stop and wait for my answer."
+        )
+    else:
+        step1 = (
+            f"STEP 1 — Propose and scaffold immediately:\n"
+            f"- Based on the intent \"{intent}\", infer the project goal, then:\n"
+            f"- Rewrite the Goal section in CLAUDE.md (1-2 sentences about what and why).\n"
+            f"- Add 3 real starter tasks to ## Backlog in TASKS.md as `- [ ] text` lines, "
+            f"replacing the placeholder cards there (card-id markers are added automatically — "
+            f"don't add them yourself). Leave ## In Progress and this card alone; the cockpit "
+            f"moves it for you when you're done. Make the new tasks specific and actionable: "
+            f"verb + object + done-criterion.\n"
+            f"- End with ONE brief question: ask what's most important to clarify first, "
+            f"or suggest \"start with task 1?\""
+            f"{git_step}{stack_step}"
+        )
+
     return (
         f"New {project_type} project initialized. Folder: {cwd}.\n"
         f"Intent: \"{intent}\"\n\n"
         f"Starter files are in place. Your job: be a proactive partner, not an interrogator.\n\n"
-        f"STEP 1 — Propose and scaffold immediately:\n"
-        f"- Based on the intent \"{intent}\", infer the project goal, then:\n"
-        f"- Rewrite the Goal section in CLAUDE.md (1-2 sentences about what and why).\n"
-        f"- Add 3 real starter tasks to ## Backlog in TASKS.md (remove placeholder cards). "
-        f"Make them specific and actionable: verb + object + done-criterion.\n"
-        f"- End with ONE brief question: ask what's most important to clarify first, "
-        f"or suggest \"start with task 1?\""
-        f"{git_step}{stack_step}\n\n"
+        f"{step1}\n\n"
         f"STEP 2 — After my response:\n"
         f"- Adapt CLAUDE.md further based on what I say.\n"
         f"- If I mentioned existing code/files → scan them (Read a few), brief summary.\n"
@@ -16545,9 +16671,12 @@ async def api_new_project(req: web.Request) -> web.Response:
     ctx["running"][session_key] = True
 
     # Build archetype-aware onboarding prompt and assign to init_card
-    init_card["text"] = _build_onboarding_prompt(project_type, str(cwd), intent)
-    # Use the project's default model for onboarding (not board_card_model)
-    init_card["model"] = _effective_default_model(ctx)
+    init_card["text"] = _build_onboarding_prompt(
+        project_type, str(cwd), intent, thin=_intent_is_thin(intent)
+    )
+    # Cost fix: cap at sonnet unless the project default is already cheaper — see
+    # _onboarding_model's docstring for why board_card_model is still not the knob.
+    init_card["model"] = _onboarding_model(ctx)
     _spawn_bg(_run_card(ctx, req.app, project, init_card, session_key))
 
     return web.json_response({
