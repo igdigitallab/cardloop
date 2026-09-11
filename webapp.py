@@ -13150,7 +13150,11 @@ async def _completion_wake_fire(ctx: dict, session_key: str) -> None:
         # a different effort would mismatch the live-client fingerprint (engine.py:_compute_fingerprint
         # includes effort), evicting + rebuilding the persistent client (full floor re-paid) and
         # risking a SIGTERM of still-running children. So we keep inheritance for fingerprint
-        # stability and bound the COST instead via AUTO_CONTINUE_MAX (spec-078: default lowered to 1).
+        # stability and bound the COST instead via AUTO_CONTINUE_MAX. ⚠️ That default is 12,
+        # NOT 1: spec-078 lowered it to 1 to bound tokens, and c63fc15 (2026-08-01) raised it
+        # again on purpose — a cap of 1 bounds WAVES, not runaway, and real orchestration is
+        # multi-wave (launch → audit → implement → test), so wave 2 onward was being dropped
+        # silently. It is an unattended-blow-up breaker now, reset on every operator turn.
         opts = _last_turn_options.get(session_key) or {}
         item = _chat_queue_enqueue(session_key, prompt, None, project_id,
                                    effort=opts.get("effort"), ultracode=opts.get("ultracode"))
