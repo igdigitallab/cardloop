@@ -1364,7 +1364,8 @@ def _make_ask_gate_cb(session_key: str, ctx: "dict | None"):
 
 
 def _plan_client_fingerprint_ok(ctx: "dict | None", session_key: str, opts,
-                                stable_append_hash, effort, memory_mode, account="") -> bool:
+                                stable_append_hash, effort, memory_mode, account="",
+                                backend="") -> bool:
     """spec-080 C1 safeguard (spec-082 A reuses it for ask turns): a live client pinned by
     running background children is REUSED on fingerprint mismatch (deferred reconnect,
     spec-069 f9d60d) — but can_use_tool binds at connect time, so a gated turn serviced by a
@@ -1376,7 +1377,8 @@ def _plan_client_fingerprint_ok(ctx: "dict | None", session_key: str, opts,
         if entry is None:
             return True
         want = _compute_fingerprint(opts, stable_append_hash=stable_append_hash,
-                                    effort=effort, memory_mode=memory_mode, account=account)
+                                    effort=effort, memory_mode=memory_mode, account=account,
+                                    backend=backend)
         return entry.fingerprint == want
     except Exception:
         return True  # never block on safeguard errors; worst case is pre-fix behavior
@@ -1395,6 +1397,22 @@ def _session_has_live_subagents(session_key: str) -> bool:
         return bool(_has_live_subagents_cb and _has_live_subagents_cb(session_key))
     except Exception:
         return False
+
+
+def session_has_live_subagents(session_key: str) -> bool:
+    """Public wrapper over `_session_has_live_subagents` for callers outside this module.
+
+    spec-092: a fingerprint change (e.g. a runtime/backend switch) is DELIBERATELY deferred
+    while background sub-agents are still live (see the deferred-reuse branch in
+    `_get_or_create_live_client`, defined further down this module) — evicting would SIGTERM
+    them mid-flight. That means a
+    UI control that lets the operator switch runtime while sub-agents are running would show
+    the new selection while the OLD live client keeps answering underneath it. A caller (e.g.
+    the cockpit's runtime-switch route) needs this predicate to refuse the switch instead of
+    silently lying about which backend is actually in effect. This does NOT change the
+    deferral behaviour itself — it only exposes the same read used internally.
+    """
+    return _session_has_live_subagents(session_key)
 
 
 # ─────────────────────────── Spec-029 §2: PostToolUse hook ────────────────────────────────────
@@ -1964,6 +1982,7 @@ def _compute_fingerprint(
     effort: str = "",
     memory_mode: str = "",
     account: str = "",
+    backend: str = "",
 ) -> str:
     """Hash the subset of opts fields that are immutable once a ClaudeSDKClient is connected.
 
@@ -1987,6 +2006,13 @@ def _compute_fingerprint(
     (engine.py's run_engine), so editing a role file's prompt/model/tools/enabled does force a
     reconnect instead of being served stale by a reused live client.
     """
+    # spec-092: `backend` identifies which inference backend this run targets (e.g. the default
+    # Claude subscription vs. a local Ollama endpoint). It rides in `env` (ANTHROPIC_BASE_URL /
+    # ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_HAIKU_MODEL overlay), which is
+    # EXCLUDED above, and the CLI subprocess reads those vars at launch — so without threading it
+    # in explicitly, a live client started for Claude would be silently REUSED for an Ollama run
+    # (or vice versa): the turn would succeed while talking to the wrong endpoint. Same failure
+    # class the `account` argument exists to prevent.
     parts = [
         str(getattr(opts, "cwd", "")),
         str(getattr(opts, "model", "")),
@@ -2014,6 +2040,9 @@ def _compute_fingerprint(
         # EXCLUDED above, and the CLI reads it at launch — so without this the operator could
         # switch accounts and a live client would keep burning the OLD subscription with no sign.
         account,
+        # spec-092: the inference backend (Claude vs. a local Ollama overlay) — see the
+        # comment just below the docstring for why it cannot ride in `env` alone.
+        backend,
         # spec-058 v2: the --settings payload (native ultracode switch) is launch-immutable too.
         str(getattr(opts, "settings", "") or ""),
     ]
@@ -2197,6 +2226,7 @@ async def _get_or_create_live_client(
     effort: str = "",
     memory_mode: str = "",
     account: str = "",
+    backend: str = "",
 ) -> "object | None":
     """Return a reusable connected ClaudeSDKClient for session_key, or None.
 
@@ -2216,7 +2246,7 @@ async def _get_or_create_live_client(
 
     registry: "dict[str, _LiveEntry]" = ctx.get("live_clients", _live_clients)
     fingerprint = _compute_fingerprint(opts, stable_append_hash=stable_append_hash, effort=effort,
-                                       memory_mode=memory_mode, account=account)
+                                       memory_mode=memory_mode, account=account, backend=backend)
 
     existing = registry.get(session_key)
     if existing is not None:
@@ -3062,6 +3092,7 @@ async def run_engine(  # type: ignore[return]
     project_memory: "str | None" = None,
     project_account: "str | None" = None,
     agent_model_overrides: "dict[str, str] | None" = None,
+    backend: str = "",
 ) -> "AsyncGenerator[dict, None]":
     """Async SDK event generator. Single source of truth for prompt execution.
 
@@ -3115,6 +3146,16 @@ async def run_engine(  # type: ignore[return]
                                  "chat" (interactive cockpit, default), "card" (kanban auto-run),
                                  "deferred" (post-reset deferred run). Recorded per turn; does not
                                  affect execution.
+        backend               — spec-092: identifies which inference backend this call is bound
+                                 to (e.g. "" for the default Claude subscription, or an
+                                 identifier for a local Ollama endpoint reached via an
+                                 ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN/ANTHROPIC_MODEL overlay
+                                 in `env`). Mirrors project_account/project_memory: the actual
+                                 selection rides in `env`, which the live-client fingerprint
+                                 excludes, so it must be threaded in explicitly here — otherwise
+                                 a client connected for one backend would be reused for the
+                                 other. Default "" (Claude, current behaviour) is byte-identical
+                                 to every caller that does not pass this argument.
 
     Yields event dicts. SDK exceptions are wrapped as {"type": "error", "exc": ...}.
     """
@@ -3798,7 +3839,7 @@ async def run_engine(  # type: ignore[return]
         live = await _get_or_create_live_client(
             ctx, session_key, opts, ephemeral=ephemeral,
             stable_append_hash=_stable_append_hash, effort=_eff_effort,
-            memory_mode=_memory_mode, account=_account_id,
+            memory_mode=_memory_mode, account=_account_id, backend=backend,
         )
     except Exception as _lc_exc:
         # Live-client setup failure must never silently swallow the turn — degrade gracefully.
@@ -3811,7 +3852,8 @@ async def run_engine(  # type: ignore[return]
     # in bypassPermissions — the turn would execute full-auto with no gate and no error. Abort
     # loudly instead.
     if (plan_mode or ask_mode) and live is not None and not _plan_client_fingerprint_ok(
-            ctx, session_key, opts, _stable_append_hash, _eff_effort, _memory_mode, _account_id):
+            ctx, session_key, opts, _stable_append_hash, _eff_effort, _memory_mode, _account_id,
+            backend=backend):
         _mode_name = "Plan mode" if plan_mode else "Ask mode"
         print(f"[{'plan' if plan_mode else 'ask'}-gate] {session_key}: live client pinned by "
               f"running background tasks — aborting gated turn instead of running ungated")
