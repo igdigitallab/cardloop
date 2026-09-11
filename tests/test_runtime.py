@@ -1,21 +1,24 @@
-"""runtime.py — the single provider×account×model decision point (spec-092).
+"""runtime.py -- the single provider x account x model decision point (spec-092).
 
 The invariants worth protecting, in order of how badly a silent version of each bites:
 
-1. An unknown/unavailable provider must never resolve to Claude by accident — that fail-
-   OPEN bug is exactly what shipped as `_chat_provider` before this module existed.
-2. A legacy chat record with no `provider` key at all is a real, separate rule (always
-   Claude) — not the same code path as "unknown provider", and must keep working forever.
-3. Inheritance (chat → project → global) must apply per-field, and an EXPLICIT account pin
-   must never quietly degrade to a different subscription — only a soft *default* may.
-4. Two tabs racing a PATCH must not clobber each other — compare-and-swap on a revision.
-5. A capability gap must surface as an error the caller can act on, never a silent
-   downgrade of the option that was asked for.
-6. A model that belongs to a different provider must be rejected at validation time, before
-   it ever reaches a run.
+1. RunContext must be constructible for every real integration point (chat/card/director/
+   wake), not just chats -- a bare `chat_id` requirement crashes on first contact for three
+   of the four.
+2. chat_provider() is the ONLY place a chat record's own provider signal is judged --
+   resolve_runtime() must agree with it on every input, including the legacy no-key case,
+   with no second, independently re-derived availability check layered on top.
+3. The Ollama env overlay is gated on `backend`, never `provider` -- and a non-ollama run
+   must actively CLEAR the overlay vars, not just skip adding them.
+4. Two tabs racing a PATCH must not clobber each other (CAS), a no-op patch must not mint a
+   revision, a corrupt/mistyped revision is a reported error not a crash or a silent
+   coercion, and the input dict is never mutated in place.
+5. A change must be validated by its RESULT, not by which keys happen to appear in the
+   patch -- switching provider without a compatible model must be rejected at PATCH time.
+6. Every required RunContext field is validated, model included.
 """
-import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -32,6 +35,7 @@ import runtime as rt
 CLAUDE = rt.ProviderInfo(
     provider="claude", available=True,
     models=("opus", "sonnet", "haiku"),
+    backends=("", "ollama"),
     capabilities={"ask_mode": True, "plan_mode": True, "multi_agent": True},
 )
 CODEX = rt.ProviderInfo(
@@ -39,14 +43,16 @@ CODEX = rt.ProviderInfo(
     models=("gpt-5.6-sol",),
     capabilities={"plan_mode": True, "multi_agent": True},  # no ask_mode: no can_use_tool hook
 )
-OLLAMA_UNAVAILABLE = rt.ProviderInfo(provider="ollama", available=False, models=("qwen3.8",))
+# A provider that IS registered but currently down -- distinct from one never registered.
+GEMINI_DOWN = rt.ProviderInfo(provider="gemini", available=False, models=("gemini-3",))
 
-PROVIDERS = {"claude": CLAUDE, "codex": CODEX, "ollama": OLLAMA_UNAVAILABLE}
+PROVIDERS = {"claude": CLAUDE, "codex": CODEX, "gemini": GEMINI_DOWN}
 
 
 @pytest.fixture
 def acct(tmp_path, monkeypatch):
     """Real accounts.py bound to an isolated tmp registry (same pattern as test_accounts.py)."""
+    import json
     import accounts as mod
 
     data = tmp_path / "data"
@@ -69,6 +75,7 @@ def acct(tmp_path, monkeypatch):
 
 def _register_working_account(mod, aid="work"):
     """Register + 'log in' an extra account so accounts.validate(aid) == (True, '')."""
+    import json
     cdir, _ = mod.scaffold(aid)
     mod.register(aid, "Work", str(cdir))
     (cdir / ".credentials.json").write_text(
@@ -79,53 +86,160 @@ def _register_working_account(mod, aid="work"):
 
 
 # ---------------------------------------------------------------------------
-# 1 + 2. chat_provider: fail-closed vs the legacy no-key path
+# 1. RunContext: discriminated origin, not a bare chat_id
 # ---------------------------------------------------------------------------
 
-def test_chat_provider_fails_closed_on_unknown_value():
-    chat = {"provider": "ollama"}  # registered but NOT available in this registry snapshot
-    known = rt.available_providers(PROVIDERS)
-    assert rt.chat_provider(chat, known_providers=known) is None
+def test_runcontext_constructs_for_every_origin_kind():
+    for kind in rt.ORIGIN_KINDS:
+        rc = rt.RunContext(origin_kind=kind, origin_id=f"{kind}-1", provider="claude",
+                            backend="", model="sonnet", account="main", revision=0)
+        assert rc.origin_kind == kind
 
 
-def test_chat_provider_fails_closed_on_never_registered_value():
-    chat = {"provider": "gemini"}  # never existed in the registry at all
-    known = rt.available_providers(PROVIDERS)
-    assert rt.chat_provider(chat, known_providers=known) is None
+def test_runcontext_rejects_unknown_origin_kind():
+    with pytest.raises(rt.RuntimeResolutionError):
+        rt.RunContext(origin_kind="ghost-kind", origin_id="x", provider="claude",
+                       backend="", model="sonnet", account="main", revision=0)
+
+
+def test_runcontext_rejects_empty_origin_id():
+    with pytest.raises(rt.RuntimeResolutionError):
+        rt.RunContext(origin_kind="card", origin_id="", provider="claude",
+                       backend="", model="sonnet", account="main", revision=0)
+
+
+def test_runcontext_invalid_construction_is_the_one_exception_type():
+    """A wake/card/director construction failure must raise the SAME exception type as
+    resolve_runtime() -- not a bare ValueError a caller's `except RuntimeResolutionError`
+    would miss."""
+    with pytest.raises(rt.RuntimeResolutionError):
+        rt.RunContext(origin_kind="wake", origin_id="", provider="claude",
+                       backend="", model="sonnet", account="main", revision=0)
+
+
+def test_card_and_director_origins_build_without_a_chat_entity():
+    """The three chat-less integration points named in the review must not crash."""
+    card_rc = rt.RunContext(origin_kind="card", origin_id="card-42", provider="claude",
+                             backend="", model="sonnet", account="main", revision=0)
+    director_rc = rt.RunContext(origin_kind="director", origin_id="director-run-7",
+                                 provider="claude", backend="", model="opus",
+                                 account="main", revision=0)
+    assert card_rc.origin_id == "card-42"
+    assert director_rc.origin_id == "director-run-7"
+
+
+def test_wake_context_from_inherits_parent_runtime_unchanged():
+    parent = rt.RunContext(origin_kind="chat", origin_id="chat-1", provider="codex",
+                            backend="", model="gpt-5.6-sol", account="work", revision=3,
+                            session_id="s1", codex_thread_id="t1", ask_mode=True)
+    wake = rt.wake_context_from(parent, "run-99")
+    assert wake.origin_kind == "wake"
+    assert wake.origin_id == "run-99"
+    # Everything else must be byte-identical -- a wake is not a re-resolution.
+    assert wake.provider == parent.provider
+    assert wake.backend == parent.backend
+    assert wake.model == parent.model
+    assert wake.account == parent.account
+    assert wake.session_id == parent.session_id
+    assert wake.ask_mode == parent.ask_mode
+
+
+def test_wake_context_from_rejects_empty_wake_id():
+    parent = rt.RunContext(origin_kind="chat", origin_id="chat-1", provider="claude",
+                            backend="", model="sonnet", account="main", revision=0)
+    with pytest.raises(rt.RuntimeResolutionError):
+        rt.wake_context_from(parent, "")
+
+
+# ---------------------------------------------------------------------------
+# 6. RunContext: every required field validated, model included
+# ---------------------------------------------------------------------------
+
+def test_runcontext_rejects_empty_model():
+    with pytest.raises(rt.RuntimeResolutionError):
+        rt.RunContext(origin_kind="chat", origin_id="c1", provider="claude",
+                       backend="", model="", account="main", revision=0)
+
+
+def test_runcontext_accepts_empty_string_backend_as_native():
+    """backend="" is the NATIVE case (matches engine.py's own default), not an error."""
+    rc = rt.RunContext(origin_kind="chat", origin_id="c1", provider="claude",
+                        backend="", model="sonnet", account="main", revision=0)
+    assert rc.backend == ""
+
+
+# ---------------------------------------------------------------------------
+# 2. chat_provider(): single source of truth, three states
+# ---------------------------------------------------------------------------
+
+def test_chat_provider_unavailable_vs_unknown_are_distinct_states():
+    known = rt.available_providers(PROVIDERS)  # gemini: False, claude/codex: True
+    unavailable = rt.chat_provider({"provider": "gemini"}, known_providers=known)
+    unknown = rt.chat_provider({"provider": "vertex"}, known_providers=known)
+    assert unavailable.status is rt.ProviderStatus.UNAVAILABLE
+    assert unknown.status is rt.ProviderStatus.UNKNOWN
+    assert unavailable.status != unknown.status
 
 
 def test_chat_provider_legacy_no_key_is_claude_even_if_claude_marked_unavailable():
-    """The legacy path is a SEPARATE rule from availability — a record with no `provider`
+    """The legacy path is a SEPARATE rule from availability -- a record with no `provider`
     key predates the registry entirely and must not be re-judged against it."""
     chat = {"name": "Main", "session_id": "sess-1"}  # no "provider" key at all
     known = {"claude": False, "codex": True}  # claude marked unavailable on purpose
-    assert rt.chat_provider(chat, known_providers=known) == "claude"
+    result = rt.chat_provider(chat, known_providers=known)
+    assert result.status is rt.ProviderStatus.OK
+    assert result.value == "claude"
 
 
 def test_chat_provider_none_chat_is_legacy_claude():
-    assert rt.chat_provider(None, known_providers={}) == "claude"
+    result = rt.chat_provider(None, known_providers={})
+    assert result.status is rt.ProviderStatus.OK and result.value == "claude"
 
 
 def test_chat_provider_known_and_available_passes_through():
-    chat = {"provider": "codex"}
     known = rt.available_providers(PROVIDERS)
-    assert rt.chat_provider(chat, known_providers=known) == "codex"
+    result = rt.chat_provider({"provider": "codex"}, known_providers=known)
+    assert result.status is rt.ProviderStatus.OK and result.value == "codex"
+
+
+def test_resolve_runtime_agrees_with_chat_provider_on_the_legacy_path():
+    """The exact repro from the review: a legacy no-key chat resolves to claude even when
+    the registry marks claude unavailable -- resolve_runtime() must NOT re-derive its own,
+    disagreeing answer via a second availability check."""
+    chat = {"name": "Main"}  # no provider key
+    providers_with_claude_down = {
+        "claude": rt.ProviderInfo(provider="claude", available=False, models=("sonnet",)),
+    }
+    standalone = rt.chat_provider(chat, known_providers=rt.available_providers(providers_with_claude_down))
+    assert standalone.status is rt.ProviderStatus.OK and standalone.value == "claude"
+
+    rc = rt.resolve_runtime(
+        origin_kind="chat", origin_id="c1", chat=chat,
+        providers=providers_with_claude_down,
+        global_defaults={"models": {"claude": "sonnet"}},
+    )
+    assert rc.provider == "claude"  # must NOT raise, must match chat_provider()'s own answer
+
+
+def test_resolve_runtime_unavailable_chat_provider_raises_and_is_retryable_language():
+    chat = {"provider": "gemini", "model": "gemini-3"}
+    with pytest.raises(rt.RuntimeResolutionError, match="temporarily unavailable"):
+        rt.resolve_runtime(origin_kind="chat", origin_id="c1", chat=chat, providers=PROVIDERS)
+
+
+def test_resolve_runtime_unknown_chat_provider_raises_and_is_permanent_language():
+    chat = {"provider": "vertex", "session_id": "s1"}
+    with pytest.raises(rt.RuntimeResolutionError, match="not a registered provider"):
+        rt.resolve_runtime(origin_kind="chat", origin_id="c1", chat=chat, providers=PROVIDERS)
 
 
 # ---------------------------------------------------------------------------
-# 3. resolve_runtime: chat → project → global inheritance
+# resolve_runtime: model/backend/account inheritance + turn options passthrough
 # ---------------------------------------------------------------------------
-
-def test_resolve_runtime_unknown_chat_provider_raises_not_degrades():
-    chat = {"provider": "gemini", "session_id": "s1"}
-    with pytest.raises(rt.RuntimeResolutionError):
-        rt.resolve_runtime(chat_id="c1", chat=chat, providers=PROVIDERS)
-
 
 def test_resolve_runtime_model_inherits_project_then_global():
-    # No chat model, project sets its own — must win over the global default.
     rc = rt.resolve_runtime(
-        chat_id="c1",
+        origin_kind="chat", origin_id="c1",
         chat={"provider": "claude"},
         project={"model": "opus"},
         global_defaults={"models": {"claude": "haiku"}},
@@ -133,9 +247,8 @@ def test_resolve_runtime_model_inherits_project_then_global():
     )
     assert rc.model == "opus"
 
-    # No chat, no project → falls through to the global default.
     rc2 = rt.resolve_runtime(
-        chat_id="c1",
+        origin_kind="chat", origin_id="c1",
         chat={"provider": "claude"},
         project=None,
         global_defaults={"models": {"claude": "haiku"}},
@@ -145,49 +258,47 @@ def test_resolve_runtime_model_inherits_project_then_global():
 
 
 def test_resolve_runtime_explicit_account_never_degrades(acct):
-    """An explicit, broken chat-level account pin must raise — NOT fall back to `main`,
-    unlike accounts.resolve()'s own (correct, but different-purpose) soft-degrade policy."""
-    chat = {"provider": "claude", "account": "ghost-account"}  # never registered
+    chat = {"provider": "claude", "account": "ghost-account", "model": "sonnet"}
     with pytest.raises(rt.RuntimeResolutionError):
-        rt.resolve_runtime(chat_id="c1", chat=chat, providers=PROVIDERS, accounts_mod=acct)
+        rt.resolve_runtime(origin_kind="chat", origin_id="c1", chat=chat, providers=PROVIDERS,
+                            accounts_mod=acct)
 
 
 def test_resolve_runtime_explicit_account_resolves_when_usable(acct):
     _register_working_account(acct, "work")
     chat = {"provider": "claude", "account": "work", "model": "sonnet"}
-    rc = rt.resolve_runtime(chat_id="c1", chat=chat, providers=PROVIDERS, accounts_mod=acct)
+    rc = rt.resolve_runtime(origin_kind="chat", origin_id="c1", chat=chat, providers=PROVIDERS,
+                             accounts_mod=acct)
     assert rc.account == "work"
 
 
 def test_resolve_runtime_project_account_default_may_degrade(acct):
-    """A PROJECT-level account override that is broken is a soft default — it degrades to
-    the global active account instead of failing the run (accounts.py's documented rule)."""
-    chat = {"provider": "claude", "model": "sonnet"}  # no chat-level account pin
-    project = {"account": "ghost-account"}  # broken project default
-    rc = rt.resolve_runtime(
-        chat_id="c1", chat=chat, project=project, providers=PROVIDERS, accounts_mod=acct,
-    )
-    assert rc.account == acct.MAIN_ID  # degraded, did not raise
+    chat = {"provider": "claude", "model": "sonnet"}
+    project = {"account": "ghost-account"}
+    rc = rt.resolve_runtime(origin_kind="chat", origin_id="c1", chat=chat, project=project,
+                             providers=PROVIDERS, accounts_mod=acct)
+    assert rc.account == acct.MAIN_ID
 
 
-def test_resolve_runtime_backend_defaults_and_overrides():
-    rc = rt.resolve_runtime(chat_id="c1", chat={"provider": "claude", "model": "sonnet"},
+def test_resolve_runtime_backend_defaults_to_native_empty_string():
+    rc = rt.resolve_runtime(origin_kind="chat", origin_id="c1",
+                             chat={"provider": "claude", "model": "sonnet"},
                              providers=PROVIDERS)
-    assert rc.backend == "anthropic"
+    assert rc.backend == rt.DEFAULT_BACKEND == ""
 
-    rc2 = rt.resolve_runtime(
-        chat_id="c1", chat={"provider": "claude", "model": "sonnet", "backend": "ollama"},
+
+def test_resolve_runtime_backend_override_to_ollama():
+    rc = rt.resolve_runtime(
+        origin_kind="chat", origin_id="c1",
+        chat={"provider": "claude", "model": "sonnet", "backend": "ollama"},
         providers=PROVIDERS,
     )
-    assert rc2.backend == "ollama" and rc2.provider == "claude"
+    assert rc.backend == "ollama" and rc.provider == "claude"
 
 
 def test_resolve_runtime_carries_turn_options_unchanged():
-    """ask_mode must survive resolve_runtime() untouched even for Codex — the old bug
-    cleared it silently at the run-dispatch site; that decision belongs to
-    capability_conflicts(), not to resolve_runtime()."""
     rc = rt.resolve_runtime(
-        chat_id="c1",
+        origin_kind="chat", origin_id="c1",
         chat={"provider": "codex", "model": "gpt-5.6-sol"},
         providers=PROVIDERS,
         turn_options={"ask_mode": True, "effort": "high"},
@@ -199,48 +310,135 @@ def test_resolve_runtime_carries_turn_options_unchanged():
 def test_resolve_runtime_carries_both_session_ids_regardless_of_active_provider():
     chat = {"provider": "codex", "model": "gpt-5.6-sol",
             "session_id": "sess-claude-1", "codex_thread_id": "thread-1"}
-    rc = rt.resolve_runtime(chat_id="c1", chat=chat, providers=PROVIDERS)
+    rc = rt.resolve_runtime(origin_kind="chat", origin_id="c1", chat=chat, providers=PROVIDERS)
     assert rc.session_id == "sess-claude-1"
     assert rc.codex_thread_id == "thread-1"
 
 
 # ---------------------------------------------------------------------------
-# 5. capability_conflicts: error, never downgrade
+# capability_conflicts: error, never downgrade (unaffected by the review, still covered)
 # ---------------------------------------------------------------------------
 
 def test_capability_conflict_on_ask_mode_without_hook():
-    rc = rt.RunContext(chat_id="c1", provider="codex", backend="chatgpt",
+    rc = rt.RunContext(origin_kind="chat", origin_id="c1", provider="codex", backend="",
                         model="gpt-5.6-sol", account="main", revision=0, ask_mode=True)
     conflicts = rt.capability_conflicts(rc, CODEX.capabilities)
-    assert conflicts, "ask_mode on a hookless runtime must be reported as a conflict"
+    assert conflicts
     assert "ask_mode" in conflicts[0]
-    # And crucially: the flag itself is untouched — capability_conflicts must not mutate.
-    assert rc.ask_mode is True
+    assert rc.ask_mode is True  # untouched -- no silent downgrade
 
 
 def test_capability_no_conflict_when_supported():
-    rc = rt.RunContext(chat_id="c1", provider="claude", backend="anthropic",
+    rc = rt.RunContext(origin_kind="chat", origin_id="c1", provider="claude", backend="",
                         model="sonnet", account="main", revision=0, ask_mode=True)
     assert rt.capability_conflicts(rc, CLAUDE.capabilities) == []
 
 
 def test_capability_conflict_absent_key_is_treated_as_unsupported():
-    """A capabilities map missing the key entirely must fail closed (unsupported), not be
-    read as 'no opinion → assume yes'."""
-    rc = rt.RunContext(chat_id="c1", provider="claude", backend="anthropic",
+    rc = rt.RunContext(origin_kind="chat", origin_id="c1", provider="claude", backend="",
                         model="sonnet", account="main", revision=0, plan_mode=True)
     assert rt.capability_conflicts(rc, {}) != []
 
 
 # ---------------------------------------------------------------------------
-# 6. validate_runtime_change: model must belong to its provider
+# 3. ollama_env_overlay: gated on backend, actively clears when not ollama
 # ---------------------------------------------------------------------------
+
+def test_ollama_overlay_ignores_provider_and_gates_on_backend_alone():
+    """The review's exact concern: an operator selection may arrive as provider='ollama'.
+    The overlay must key off `backend`, not `provider`, so mislabeling provider does not
+    silently produce {} and route to Anthropic."""
+    rc_claude_ollama = rt.RunContext(origin_kind="chat", origin_id="c1", provider="claude",
+                                      backend="ollama", model="qwen3.8", account="main",
+                                      revision=0)
+    overlay = rt.ollama_env_overlay(rc_claude_ollama, base_url="http://shim:11434")
+    assert overlay.to_set["ANTHROPIC_BASE_URL"] == "http://shim:11434"
+    assert overlay.to_unset == ()
+
+    # Even an (invalid-in-practice) provider="codex" runcontext with backend="ollama" must
+    # still get the overlay -- provider plays no part in this function's gate.
+    rc_codex_ollama = rt.RunContext(origin_kind="chat", origin_id="c1", provider="codex",
+                                     backend="ollama", model="qwen3.8", account="main",
+                                     revision=0)
+    overlay2 = rt.ollama_env_overlay(rc_codex_ollama, base_url="http://shim:11434")
+    assert overlay2.to_set["ANTHROPIC_BASE_URL"] == "http://shim:11434"
+
+
+def test_ollama_env_never_leaks_into_claude_run():
+    """A native-backend Claude run must actively CLEAR the overlay vars, not merely omit
+    them -- an empty `to_set` alone does not guarantee the CLI never sees a leftover
+    ANTHROPIC_BASE_URL from the service's own environment."""
+    rc_claude = rt.RunContext(origin_kind="chat", origin_id="c1", provider="claude",
+                               backend="", model="sonnet", account="main", revision=0)
+    overlay = rt.ollama_env_overlay(rc_claude, base_url="http://shim:11434")
+    assert overlay.to_set == {}
+    assert set(overlay.to_unset) == set(rt.OLLAMA_ENV_VAR_NAMES)
+
+    rc_codex = rt.RunContext(origin_kind="chat", origin_id="c1", provider="codex",
+                              backend="", model="gpt-5.6-sol", account="main", revision=0)
+    overlay_codex = rt.ollama_env_overlay(rc_codex, base_url="http://shim:11434")
+    assert overlay_codex.to_set == {}
+    assert set(overlay_codex.to_unset) == set(rt.OLLAMA_ENV_VAR_NAMES)
+
+
+def test_ollama_overlay_requires_base_url():
+    rc = rt.RunContext(origin_kind="chat", origin_id="c1", provider="claude", backend="ollama",
+                        model="qwen3.8", account="main", revision=0)
+    with pytest.raises(rt.RuntimeResolutionError):
+        rt.ollama_env_overlay(rc, base_url=None)
+
+
+def test_validate_rejects_ollama_as_a_provider_value():
+    ok, reason = rt.validate_runtime_change(
+        {"provider": "ollama"}, providers=PROVIDERS, accounts_list=[{"id": "main"}],
+    )
+    assert ok is False
+    assert "ollama" in reason and "backend" in reason
+
+
+# ---------------------------------------------------------------------------
+# 5. validate_runtime_change: validates the RESULTING state
+# ---------------------------------------------------------------------------
+
+def test_validate_rejects_provider_switch_that_leaves_an_incompatible_model_behind():
+    """The review's exact repro: {"provider": "codex"} alone used to pass validation because
+    only `"model" in patch` was checked. The chat's CURRENT model belongs to claude, not
+    codex -- the resulting state is unrunnable and must be rejected here."""
+    current = {"provider": "claude", "model": "claude-sonnet-5"}
+    ok, reason = rt.validate_runtime_change(
+        {"provider": "codex"}, providers=PROVIDERS, accounts_list=[{"id": "main"}],
+        current=current,
+    )
+    assert ok is False
+    # Specifically the RESULTING-model mismatch message, not the separate "no model at all"
+    # guard -- proves the inherited current model was actually consulted, not just presence
+    # of a "model" key in the patch.
+    assert "does not belong to provider" in reason
+    assert "claude-sonnet-5" in reason
+
+
+def test_validate_rejects_provider_switch_with_no_current_state_at_all():
+    """Same defect, worst case: no `current` supplied either, so there is no way to know
+    what model would result -- must still be rejected, not silently accepted."""
+    ok, reason = rt.validate_runtime_change(
+        {"provider": "codex"}, providers=PROVIDERS, accounts_list=[{"id": "main"}],
+    )
+    assert ok is False
+
+
+def test_validate_accepts_provider_switch_with_a_compatible_model_in_the_same_patch():
+    current = {"provider": "claude", "model": "claude-sonnet-5"}
+    ok, reason = rt.validate_runtime_change(
+        {"provider": "codex", "model": "gpt-5.6-sol"},
+        providers=PROVIDERS, accounts_list=[{"id": "main"}], current=current,
+    )
+    assert ok is True and reason == ""
+
 
 def test_validate_rejects_model_from_a_different_provider():
     ok, reason = rt.validate_runtime_change(
-        {"provider": "claude", "model": "gpt-5.6-sol"},  # a Codex model name
-        providers=PROVIDERS,
-        accounts_list=[{"id": "main"}],
+        {"provider": "claude", "model": "gpt-5.6-sol"},
+        providers=PROVIDERS, accounts_list=[{"id": "main"}],
     )
     assert ok is False
     assert "gpt-5.6-sol" in reason
@@ -249,42 +447,35 @@ def test_validate_rejects_model_from_a_different_provider():
 def test_validate_accepts_model_that_belongs_to_its_provider():
     ok, reason = rt.validate_runtime_change(
         {"provider": "claude", "model": "opus"},
-        providers=PROVIDERS,
-        accounts_list=[{"id": "main"}],
+        providers=PROVIDERS, accounts_list=[{"id": "main"}],
     )
     assert ok is True and reason == ""
 
 
 def test_validate_rejects_unavailable_provider():
     ok, reason = rt.validate_runtime_change(
-        {"provider": "ollama"},  # registered but available=False
-        providers=PROVIDERS,
-        accounts_list=[{"id": "main"}],
+        {"provider": "gemini"}, providers=PROVIDERS, accounts_list=[{"id": "main"}],
     )
-    assert ok is False
-    assert "ollama" in reason
+    assert ok is False and "gemini" in reason
 
 
 def test_validate_rejects_unknown_account():
     ok, reason = rt.validate_runtime_change(
-        {"account": "nope"},
-        providers=PROVIDERS,
+        {"account": "nope"}, providers=PROVIDERS,
         accounts_list=[{"id": "main"}, {"id": "work"}],
     )
-    assert ok is False
-    assert "nope" in reason
+    assert ok is False and "nope" in reason
 
 
 def test_validate_model_without_a_provider_in_scope_is_rejected():
-    """Model given, but no provider anywhere (no patch value, no current chat provider)."""
     ok, reason = rt.validate_runtime_change(
-        {"model": "opus"}, providers=PROVIDERS, accounts_list=[], current_provider=None,
+        {"model": "opus"}, providers=PROVIDERS, accounts_list=[], current=None,
     )
     assert ok is False
 
 
 # ---------------------------------------------------------------------------
-# 4. apply_change: compare-and-swap
+# 4. apply_change: CAS -- no mutation, no spurious bump, coerced/validated revisions
 # ---------------------------------------------------------------------------
 
 def test_apply_change_rejects_stale_revision():
@@ -292,55 +483,79 @@ def test_apply_change_rejects_stale_revision():
     ok, reason, snapshot = rt.apply_change(chat, {"model": "opus"}, expected_revision=1)
     assert ok is False
     assert "stale" in reason.lower()
-    # The chat must be untouched — a rejected CAS is not a partial write.
-    assert chat["model"] == "sonnet"
+    assert chat == {"id": "c1", "provider": "claude", "model": "sonnet", "runtime_revision": 3}
+
+
+def test_apply_change_never_mutates_the_input_dict():
+    """Passing an actually-immutable mapping proves apply_change never attempts a write to
+    `chat` -- a MappingProxyType would raise TypeError on any assignment."""
+    chat = types.MappingProxyType({
+        "id": "c1", "provider": "claude", "model": "sonnet", "runtime_revision": 3,
+    })
+    ok, reason, snapshot = rt.apply_change(chat, {"model": "opus"}, expected_revision=3)
+    assert ok is True
+    assert snapshot["model"] == "opus"
+    assert snapshot["runtime_revision"] == 4
+    assert chat["model"] == "sonnet"  # original untouched
     assert chat["runtime_revision"] == 3
 
 
-def test_apply_change_accepts_matching_revision_and_bumps_it():
+def test_apply_change_expected_revision_string_matches_int():
+    """A JSON body's revision arrives as whatever the client serialised -- a `"3"` string
+    must compare equal to the stored `3` int, not false-reject a legitimate CAS."""
     chat = {"id": "c1", "provider": "claude", "model": "sonnet", "runtime_revision": 3}
-    ok, reason, snapshot = rt.apply_change(chat, {"model": "opus"}, expected_revision=3)
-    assert ok is True and reason == ""
-    assert chat["model"] == "opus"
-    assert chat["runtime_revision"] == 4
-    assert snapshot["model"] == "opus"
+    ok, reason, snapshot = rt.apply_change(chat, {"model": "opus"}, expected_revision="3")
+    assert ok is True, reason
+    assert snapshot["runtime_revision"] == 4
+
+
+def test_apply_change_no_op_patch_does_not_bump_revision():
+    """A patch that changes nothing (same value, or only unrecognised keys) must not mint a
+    new revision -- doing so would false-reject the NEXT legitimate concurrent writer."""
+    chat = {"id": "c1", "provider": "claude", "model": "sonnet", "runtime_revision": 3}
+    ok, reason, snapshot = rt.apply_change(chat, {"model": "sonnet"}, expected_revision=3)
+    assert ok is True
+    assert snapshot["runtime_revision"] == 3
+
+    ok2, reason2, snapshot2 = rt.apply_change(chat, {"unrelated_field": "x"}, expected_revision=3)
+    assert ok2 is True
+    assert snapshot2["runtime_revision"] == 3
+
+    ok3, reason3, snapshot3 = rt.apply_change(chat, {}, expected_revision=3)
+    assert ok3 is True
+    assert snapshot3["runtime_revision"] == 3
+
+
+def test_apply_change_rejects_corrupt_stored_revision_without_raising():
+    chat = {"id": "c1", "provider": "claude", "model": "sonnet", "runtime_revision": -1}
+    ok, reason, snapshot = rt.apply_change(chat, {"model": "opus"}, expected_revision=-1)
+    assert ok is False
+    assert "runtime_revision" in reason or "revision" in reason.lower()
+    # And crucially: no exception escaped, and nothing was mutated or coerced forward.
+    assert chat["runtime_revision"] == -1
+
+
+def test_apply_change_rejects_corrupt_expected_revision_without_raising():
+    chat = {"id": "c1", "provider": "claude", "model": "sonnet", "runtime_revision": 0}
+    ok, reason, snapshot = rt.apply_change(chat, {"model": "opus"}, expected_revision="not-a-number")
+    assert ok is False
+    assert chat["runtime_revision"] == 0
 
 
 def test_apply_change_defaults_revision_to_zero_for_a_brand_new_chat():
     chat = {"id": "c1", "provider": "claude", "model": "sonnet"}  # no runtime_revision key yet
     ok, reason, snapshot = rt.apply_change(chat, {"model": "opus"}, expected_revision=0)
     assert ok is True
-    assert chat["runtime_revision"] == 1
+    assert snapshot["runtime_revision"] == 1
+    assert "runtime_revision" not in chat  # original untouched
 
 
-def test_apply_change_validates_the_patch_when_given_a_registry():
+def test_apply_change_validates_the_resulting_state_when_given_a_registry():
     chat = {"id": "c1", "provider": "claude", "model": "sonnet", "runtime_revision": 0}
     ok, reason, snapshot = rt.apply_change(
         chat, {"model": "gpt-5.6-sol"}, expected_revision=0,
         providers=PROVIDERS, accounts_list=[{"id": "main"}],
     )
     assert ok is False
-    assert chat["model"] == "sonnet"  # invalid patch must not be applied even at the right revision
+    assert chat["model"] == "sonnet"
     assert chat["runtime_revision"] == 0
-
-
-# ---------------------------------------------------------------------------
-# Ollama leak guard
-# ---------------------------------------------------------------------------
-
-def test_ollama_env_never_leaks_into_claude_run():
-    rc_claude = rt.RunContext(chat_id="c1", provider="claude", backend="anthropic",
-                               model="sonnet", account="main", revision=0)
-    assert rt.ollama_env_overlay(rc_claude, base_url="http://shim:11434") == {}
-
-    rc_codex = rt.RunContext(chat_id="c1", provider="codex", backend="chatgpt",
-                              model="gpt-5.6-sol", account="main", revision=0)
-    assert rt.ollama_env_overlay(rc_codex, base_url="http://shim:11434") == {}
-
-
-def test_ollama_env_overlay_applies_only_for_claude_plus_ollama_backend():
-    rc = rt.RunContext(chat_id="c1", provider="claude", backend="ollama",
-                        model="qwen3.8", account="main", revision=0)
-    env = rt.ollama_env_overlay(rc, base_url="http://shim:11434")
-    assert env["ANTHROPIC_BASE_URL"] == "http://shim:11434"
-    assert env["ANTHROPIC_MODEL"] == "qwen3.8"
