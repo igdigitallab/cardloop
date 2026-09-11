@@ -117,6 +117,13 @@ async def provider_info(*, force: bool = False) -> dict:
     return data
 
 
+def capabilities() -> dict:
+    """Public accessor for the static capability map (spec-092: runtime.capability_conflicts
+    needs this without paying for an account/auth probe — capabilities never depend on live
+    auth state, only on what this harness can structurally do)."""
+    return _capabilities()
+
+
 def _capabilities() -> dict:
     return {
         "chat": True,

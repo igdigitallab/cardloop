@@ -43,6 +43,11 @@ import modules as _modules
 # Multi-subscription switch: which credentials every new run uses.
 import accounts as _accounts
 
+# spec-092: the single place a run's provider x account x model gets decided. Pure logic,
+# no aiohttp/engine import back — safe to import at module scope (unlike engine.py, which
+# imports webapp.py lazily to avoid a cycle).
+import runtime
+
 # spec-065 Phase B: live browser pane (lazy — playwright imported only on first use)
 import browser_pane as _browser_pane
 # spec-066: pluggable browser backends (builtin / cloakbrowser / external-cdp + Manager)
@@ -11076,18 +11081,115 @@ def _ensure_chat_entry(ctx: dict, project_id: str, session_key: str) -> dict:
     return chats_data
 
 
+# spec-092: Claude's static capability map, shared by GET /api/agent-providers (display) and
+# the ask/plan/ultracode capability check at the chat-send decision point (runtime.
+# capability_conflicts) — one dict, not two copies that can drift. `ask_mode` is real: the
+# CLI's can_use_tool gate (spec-082 A). Codex's equivalent lives in codex_engine.capabilities()
+# and deliberately has NO ask_mode key — it has no per-tool approval hook at all, which is
+# exactly the gap runtime.capability_conflicts exists to fail loudly on instead of silently
+# clearing the flag (the old bug this module replaces).
+_CLAUDE_CAPABILITIES: dict = {
+    "chat": True, "board": True, "history": True, "search": True,
+    "usage": True, "plan_mode": True, "multi_agent": True,
+    "skills": True, "plugins": True, "interrupt": True,
+    "ask_mode": True,
+}
+
+
+def _known_agent_providers() -> dict:
+    """Sync, zero-I/O-beyond-one-env-read availability map for runtime.chat_provider().
+
+    Claude is always registered. Codex's live availability (real auth check) is async
+    (_codex.provider_info hits the SDK) and not worth paying for just to LABEL a chat
+    record — codex_enabled() (the CODEX_ENABLED env flag) is the same cheap proxy
+    _effective_active_chat already used before this module existed. This map answers
+    "is this a provider id CockPit knows about at all, and is it turned on" — it is NOT the
+    richer registry (models/backends/capabilities) runtime.validate_runtime_change and
+    capability_conflicts need; see _runtime_providers() for that.
+    """
+    return {"claude": True, "codex": _codex.codex_enabled()}
+
+
+def _chat_provider_lookup(chat: "dict | None") -> "runtime.ProviderLookup":
+    """The single place a chat record's own provider signal is judged (spec-092). See
+    runtime.chat_provider()'s docstring for the OK/UNAVAILABLE/UNKNOWN contract this
+    returns. Every RUN-LAUNCH decision point (api_project_chat, the chat-queue drain, the
+    runtime-switch PATCH) must consult THIS, not the permissive `_chat_provider` below —
+    those are the places the old "any unrecognised value silently becomes claude" bug
+    actually cost something (a run on the wrong engine)."""
+    return runtime.chat_provider(chat, known_providers=_known_agent_providers())
+
+
 def _chat_provider(chat: "dict | None") -> str:
-    """Compatibility rule: absent/unknown provider is always Claude."""
-    return "codex" if isinstance(chat, dict) and chat.get("provider") == "codex" else "claude"
+    """Best-effort provider LABEL for the many read-only call sites (filtering, session-
+    mirroring, display) that need some string back and have no error path of their own.
+    Never raises.
+
+    Compatibility rule preserved exactly: a record with no `provider` key predates the
+    field entirely and is unconditionally "claude" (chat_provider()'s legacy/OK branch). A
+    recognised value — OK or temporarily UNAVAILABLE — returns itself unchanged: a disabled
+    Codex chat is still a Codex chat for display/filtering purposes, not a Claude one (the
+    old code already returned "codex" here regardless of the enabled flag, so this is not a
+    behaviour change for the two providers that exist today). Only a genuinely UNKNOWN value
+    (never valid, or a provider the registry has dropped entirely) falls back to the bedrock
+    default, because this function has no error path to report it through and a hard raise
+    here would crash a dozen unrelated filtering/mirroring call sites that were never part
+    of the measured bug. Do NOT use this function to decide whether a RUN may proceed —
+    use `_chat_provider_lookup` and fail closed on anything but OK.
+    """
+    lookup = _chat_provider_lookup(chat)
+    if lookup.status is runtime.ProviderStatus.UNKNOWN:
+        return runtime.DEFAULT_PROVIDER
+    return lookup.value or runtime.DEFAULT_PROVIDER
+
+
+async def _runtime_providers(ctx: dict) -> "dict[str, runtime.ProviderInfo]":
+    """The live `{provider: ProviderInfo}` registry runtime.py's validation/resolution
+    functions need — the richer counterpart to `_known_agent_providers()` above (models +
+    backends + availability, not just a bool). Mirrors GET /api/agent-providers' own
+    provider/model shape so the two never disagree about what is selectable.
+
+    Claude's `backends` is deliberately left empty (→ only the native "" backend validates)
+    — the Ollama backend overlay (spec-092 P3) is not wired into any run dispatch yet, so
+    advertising it as a legal PATCH target here would accept a setting that silently does
+    nothing at run time.
+    """
+    claude_models = tuple((ctx.get("MODELS") or {}).values()) or tuple(_ALLOWED_MODELS)
+    codex_info_fn = ctx.get("codex_provider_info") or _codex.provider_info
+    codex_info = await codex_info_fn()
+    codex_models = tuple(
+        m.get("value") for m in (codex_info.get("models") or []) if m.get("value")
+    )
+    return {
+        "claude": runtime.ProviderInfo(
+            provider="claude", available=True, models=claude_models,
+            capabilities=_CLAUDE_CAPABILITIES,
+        ),
+        "codex": runtime.ProviderInfo(
+            provider="codex", available=bool(codex_info.get("available")),
+            models=codex_models, capabilities=codex_info.get("capabilities") or {},
+        ),
+    }
 
 
 def _chat_response(chat: dict) -> dict:
-    """Add provider fields to API output without rewriting legacy chats.json."""
+    """Add provider fields to API output without rewriting legacy chats.json.
+
+    spec-092: `provider` stays the existing best-effort label (never null — matches
+    `_chat_provider`'s compatibility contract) so old clients keep working unchanged.
+    `provider_status` and `runtime_revision` are new and purely additive: an old client
+    ignores unknown fields, a future picker uses them to show "this chat's provider is
+    currently down" apart from "this chat is on Claude", and to round-trip the CAS token
+    PATCH /chats/{id} now expects.
+    """
+    lookup = _chat_provider_lookup(chat)
     return {
         **chat,
         "provider": _chat_provider(chat),
+        "provider_status": lookup.status.value,
         "model": chat.get("model"),
         "codex_thread_id": chat.get("codex_thread_id"),
+        "runtime_revision": chat.get("runtime_revision", 0),
     }
 
 
@@ -11186,10 +11288,52 @@ async def api_project_chats_create(req: web.Request) -> web.Response:
     return web.json_response(_chat_response(new_chat), status=201)
 
 
+# spec-092: mirrors runtime._RUNTIME_PATCH_KEYS exactly (test_runtime_patch_keys_match_module
+# pins the two together, same precedent as engine._MEMORY_MODES above) — this is the local
+# filter for "which PATCH body keys are a runtime change" vs the pre-existing {name, active}.
+_RUNTIME_PATCH_KEYS = ("provider", "model", "backend", "account")
+
+
+def _runtime_switch_blocked_reason(ctx: dict, session_key: str) -> "str | None":
+    """spec-092 item 2: why a runtime PATCH must be refused right now, or None if it is safe.
+
+    Three distinct busy signals, each of which means the CLI subprocess for this session is
+    doing real work RIGHT NOW and a fingerprint/engine change would not actually take effect:
+      - ctx["running"][session_key] — an operator turn is mid-flight.
+      - _bg_turn_active() — a drain-surfaced autonomous turn owns the CLI without ever
+        appearing in ctx["running"] (spec-063 Stage 2a).
+      - live background sub-agents — engine.py's _get_or_create_live_client deliberately
+        REUSES the old client and DEFERS a fingerprint change while they run (disconnect()
+        would SIGTERM them mid-flight); `session_has_live_subagents` is the public predicate
+        added for exactly this check. Read via ctx (anti-circular-import convention — engine
+        imports webapp lazily, so webapp must not import engine back at module scope; see the
+        rewind_conversation/evict_live_client precedent above), falling back to webapp's own
+        _has_live_agent_monitors (the SAME function wired as engine's callback for this) when
+        a caller's ctx predates this key.
+    """
+    if ctx["running"].get(session_key) is not None:
+        return "a turn is in flight for this chat's session"
+    if _bg_turn_active(session_key):
+        return "a background turn owns this chat's session"
+    live_subagents_fn = ctx.get("session_has_live_subagents") or _has_live_agent_monitors
+    if live_subagents_fn(session_key):
+        return "background sub-agents are still running for this chat's session"
+    return None
+
+
 async def api_project_chats_patch(req: web.Request) -> web.Response:
-    """PATCH /api/projects/{id}/chats/{chat_id}  {name?, active?}
-    Rename and/or set the active chat.
-    Setting active=true mirrors that chat's session_id into ctx['sessions']."""
+    """PATCH /api/projects/{id}/chats/{chat_id}
+    {name?, active?, provider?, model?, backend?, account?, expected_revision?}
+
+    Rename / set-active are unchanged. spec-092 adds the runtime switch: provider/model/
+    backend/account are validated against the RESULTING state — not the patch in isolation,
+    see runtime.validate_runtime_change — and applied as a compare-and-swap on
+    `runtime_revision` (runtime.apply_change). Refuses with 409 while this chat's session has
+    a turn, a background turn, or live sub-agents in flight (_runtime_switch_blocked_reason)
+    — switching the runtime under a still-answering engine would report a selection that is
+    not actually in effect yet. A stale/corrupt `expected_revision` is also a 409 (the UI
+    should refetch and retry); an invalid provider/model/account/backend combination is 400.
+    """
     ctx = req.app["ctx"]
     pid = req.match_info["id"]
     chat_id = req.match_info["chat_id"]
@@ -11202,18 +11346,51 @@ async def api_project_chats_patch(req: web.Request) -> web.Response:
         body = await req.json()
     except Exception:
         return web.json_response({"error": "bad request"}, status=400)
-    if "provider" in body:
-        return web.json_response(
-            {"error": "chat provider is immutable; create a new chat to switch providers"},
-            status=400,
-        )
+    if not isinstance(body, dict):
+        return web.json_response({"error": "bad request"}, status=400)
+
+    runtime_patch = {k: body[k] for k in _RUNTIME_PATCH_KEYS if k in body}
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
+
+    providers: "dict[str, runtime.ProviderInfo] | None" = None
+    if runtime_patch:
+        # Fetched OUTSIDE the chats lock: this may run a TTL-cached Codex auth probe, and
+        # holding a process-wide lock across that would stall every other chat's read/write.
+        providers = await _runtime_providers(ctx)
+
     async with _chats_lock():
         chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
         entry = chats_data[project["id"]]
         chat = next((c for c in entry["chats"] if c["id"] == chat_id), None)
         if chat is None:
             return web.json_response({"error": "chat not found"}, status=404)
+
+        if runtime_patch:
+            # The busy check and the apply_change() write happen under the SAME lock
+            # acquisition as everything else in this branch — checking busy-ness BEFORE
+            # taking the lock would leave a window where a turn starts between the check
+            # and the write, the exact TOCTOU apply_change()'s own docstring warns about
+            # for the revision CAS.
+            blocked = _runtime_switch_blocked_reason(ctx, session_key)
+            if blocked:
+                return web.json_response(
+                    {"error": f"cannot change runtime: {blocked}", "busy": True},
+                    status=409,
+                )
+            ok, reason, new_chat = runtime.apply_change(
+                chat, runtime_patch, body.get("expected_revision"),
+                providers=providers, accounts_list=_accounts.list_accounts(),
+            )
+            if not ok:
+                status = 409 if "revision" in reason.lower() else 400
+                return web.json_response(
+                    {"error": reason, "current_revision": chat.get("runtime_revision", 0)},
+                    status=status,
+                )
+            idx = next(i for i, c in enumerate(entry["chats"]) if c["id"] == chat_id)
+            entry["chats"][idx] = new_chat
+            chat = new_chat
+
         if "name" in body:
             name = (body["name"] or "").strip()
             if name:
@@ -11273,11 +11450,7 @@ async def api_agent_providers(req: web.Request) -> web.Response:
                 "provider": "claude", "enabled": True, "available": True,
                 "authenticated": True, "models": claude_models,
                 "reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
-                "capabilities": {
-                    "chat": True, "board": True, "history": True, "search": True,
-                    "usage": True, "plan_mode": True, "multi_agent": True,
-                    "skills": True, "plugins": True, "interrupt": True,
-                },
+                "capabilities": _CLAUDE_CAPABILITIES,
                 "error": None,
             },
             codex_info,
@@ -12128,7 +12301,8 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
                         auto_rotate: "bool | None" = None,
                         plan_mode: "bool | None" = None,
                         ask_mode: "bool | None" = None,
-                        msg_id: str = "", front: bool = False) -> "dict | None":
+                        msg_id: str = "", front: bool = False,
+                        pinned_runtime: "dict | None" = None) -> "dict | None":
     """Append a message to the chat queue for session_key.
     Returns the new item dict, or None if the queue is full.
 
@@ -12144,7 +12318,19 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
     spec-089 §5: front=True inserts at index 0 instead of appending — an urgent send (a
     local CLI command like `/goal clear` typed while the turn is busy) must drain BEFORE
     whatever was already queued, not behind it. The max-depth check is unchanged (front
-    does not bypass the cap, it only changes where within the cap the item lands)."""
+    does not bypass the cap, it only changes where within the cap the item lands).
+
+    spec-092 item 3: `pinned_runtime` (a plain {"provider", "model"} dict, NOT a full
+    runtime.RunContext) freezes what this message was ACCEPTED against so a later operator
+    switch cannot silently re-route it — the measured bug this closes is `_chat_queue_execute`
+    re-reading the chat record at drain time, so a message typed against Claude could execute
+    on Codex if the picker moved while it waited. Deliberately does NOT pin session_id/
+    codex_thread_id: several queued items for the SAME chat drain one after another, and each
+    one must resume the id the PRECEDING item just advanced, not the id that was current when
+    it was merely accepted — see _chat_queue_execute's own comment at the resolution site.
+    Callers that cannot cheaply resolve a runtime (synthetic/internal enqueues — completion
+    wakes, the Stop-agents turn, plan-decision follow-ups) pass None; the drain then falls
+    back to the pre-spec-092 re-resolve-at-drain behaviour and logs that it did."""
     lst = _CHAT_QUEUE.setdefault(session_key, [])
     if len(lst) >= _CHAT_QUEUE_MAX:
         return None
@@ -12177,6 +12363,9 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
         # session's last turn on drain (see _chat_queue_drain), because ask is a standing
         # posture ("don't touch anything without asking me"), not a one-shot planning turn.
         item["ask_mode"] = bool(ask_mode)
+    if pinned_runtime and pinned_runtime.get("provider"):
+        item["runtime"] = {"provider": pinned_runtime["provider"],
+                           "model": pinned_runtime.get("model")}
     if front:
         lst.insert(0, item)
     else:
@@ -12254,6 +12443,36 @@ async def api_chat_queue_list(req: web.Request) -> web.Response:
     return web.json_response({"items": _chat_queue_get(session_key)})
 
 
+def _pin_chat_runtime(ctx: dict, project: dict, chat_id: "str | None") -> "dict | None":
+    """Best-effort {"provider", "model"} snapshot of chat_id's CURRENT runtime, for pinning
+    onto a chat-queue item at ACCEPT time (spec-092 item 3).
+
+    Returns None on any resolution problem (chat missing, provider unavailable/unknown) —
+    callers must treat None as "no pin available", not as an error: `_chat_queue_execute`
+    already has a documented legacy fallback for items with no pinned runtime, and turning a
+    resolution miss into a hard failure here would make queueing a message strictly less
+    reliable than it was before this module existed.
+    """
+    try:
+        entry = _load_chats(ctx).get(project["id"], {})
+        chat = _find_chat(entry, chat_id)
+    except Exception:
+        return None
+    if chat is None:
+        return None
+    lookup = _chat_provider_lookup(chat)
+    if lookup.status is not runtime.ProviderStatus.OK:
+        return None
+    provider = lookup.value
+    if chat.get("model"):
+        model = chat["model"]
+    elif provider == "codex":
+        model = project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL
+    else:
+        model = project.get("model") or ctx.get("DEFAULT_MODEL", "sonnet")
+    return {"provider": provider, "model": model}
+
+
 async def api_chat_queue_add(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/chat/queue — enqueue a message (called when project is busy)."""
     ctx = req.app["ctx"]
@@ -12272,7 +12491,10 @@ async def api_chat_queue_add(req: web.Request) -> web.Response:
     if _q_chat_id and not _valid_chat_id(_q_chat_id):
         return web.json_response({"error": "invalid chat_id"}, status=400)
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
-    item = _chat_queue_enqueue(session_key, text, _q_chat_id, project["id"])
+    # spec-092 item 3: pin the runtime this message was accepted against.
+    _pinned_rt = _pin_chat_runtime(ctx, project, _q_chat_id)
+    item = _chat_queue_enqueue(session_key, text, _q_chat_id, project["id"],
+                               pinned_runtime=_pinned_rt)
     if item is None:
         return web.json_response({"error": "queue full"}, status=429)
     return web.json_response({"item": item}, status=201)
@@ -12631,9 +12853,32 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                     _tc = next((c for c in _cp.get("chats", []) if c["id"] == _tid), None)
                     if _tc is not None:
                         _resolved_chat_id = _tc["id"]
-                        provider = _chat_provider(_tc)
-                        if _tc.get("model"):
-                            model = _tc["model"]
+                        # spec-092 item 3: an item enqueued with a pinned runtime executes
+                        # on THAT provider/model, not whatever the chat record says NOW — the
+                        # measured bug this replaces is exactly this re-read: the chat's
+                        # provider can have changed (an operator flip, or another queued item
+                        # ahead of this one switching it) since this message was accepted.
+                        # session_id/codex_thread_id are deliberately NOT pinned and are
+                        # always read fresh here: several queued items for the same chat
+                        # drain one after another, and each must resume the id the PRECEDING
+                        # item just advanced, not the id that was current at accept time.
+                        _pinned_rt = item.get("runtime")
+                        if isinstance(_pinned_rt, dict) and _pinned_rt.get("provider"):
+                            provider = _pinned_rt["provider"]
+                            model = _pinned_rt.get("model") or model
+                        else:
+                            # Legacy item: enqueued before spec-092 pinning existed, or via a
+                            # call site that intentionally does not pin (completion wakes,
+                            # the Stop-agents synthetic turn, plan-decision follow-ups). Never
+                            # guess silently — the old re-resolve-at-drain behaviour is kept,
+                            # but is now visible in the trace/log instead of indistinguishable
+                            # from a pinned drain.
+                            provider = _chat_provider(_tc)
+                            if _tc.get("model"):
+                                model = _tc["model"]
+                            print(f"[chat_queue] {session_key}: draining item {item.get('id')} "
+                                  f"with NO pinned runtime — assumed current chat state "
+                                  f"(provider={provider!r})")
                         if provider == "codex":
                             resume_thread_id = _tc.get("codex_thread_id") or None
                         else:
@@ -12837,7 +13082,8 @@ async def _chat_queue_drain_one(ctx: dict, session_key: str) -> bool:
         return False
     _chat_trace(session_key, "drain", msg_id=item.get("msg_id", ""),
                 chat_id=item.get("chat_id"), text=item.get("text", ""),
-                item_id=item.get("id"), waited_sec=round(time.time() - item.get("created_at", time.time()), 1))
+                item_id=item.get("id"), waited_sec=round(time.time() - item.get("created_at", time.time()), 1),
+                runtime_pinned=bool(item.get("runtime")))
     # Reserve lock synchronously before the first await.
     ctx["running"][session_key] = True
     # Populate the live-turn buffer SYNCHRONOUSLY, in lockstep with the running flag, BEFORE
@@ -13278,24 +13524,55 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # Provider is pinned to the chat at creation. Legacy records omit it and
     # therefore remain Claude. Resolve before reserving the shared run slot so
     # every downstream event and model choice is provider-consistent.
+    #
+    # spec-092 item 4: this is a RUN-LAUNCH decision, so it goes through
+    # `_chat_provider_lookup` (fail-closed) instead of the permissive `_chat_provider` label
+    # — a chat naming a provider that is unregistered or currently unavailable must error
+    # here, not silently execute on whatever the old two-way ternary guessed.
     _run_chat: "dict | None" = None
     try:
         _entry = _load_chats(ctx).get(project["id"], {})
         _run_chat = _find_chat(_entry, _req_chat_id)
     except Exception:
         _run_chat = None
-    _provider_for_run = _chat_provider(_run_chat)
-    # spec-082 A: the ask gate IS a Claude can_use_tool callback — Codex has no equivalent hook,
-    # so the toggle cannot apply there. The UI greys the row for Codex chats; this is the
-    # server-side backstop so a stale client can never believe a Codex turn was gated.
-    if _provider_for_run == "codex":
-        _ask_mode = False
-    if _provider_for_run == "claude" and _effort_override == "ultra":
-        _effort_override = None
+    _provider_lookup = _chat_provider_lookup(_run_chat)
+    if _provider_lookup.status is runtime.ProviderStatus.UNAVAILABLE:
+        return web.json_response(
+            {"error": f"chat provider {_provider_lookup.value!r} is temporarily "
+                      f"unavailable — retry once it is back"},
+            status=409,
+        )
+    if _provider_lookup.status is runtime.ProviderStatus.UNKNOWN:
+        return web.json_response(
+            {"error": f"chat provider {_provider_lookup.value!r} is not a registered "
+                      f"provider — this chat's selection is stale"},
+            status=400,
+        )
+    _provider_for_run = _provider_lookup.value
     if _run_chat and _run_chat.get("model"):
         model = _run_chat["model"]
     elif _provider_for_run == "codex":
         model = project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL
+
+    # spec-092 item 5: a runtime that cannot honour a requested per-turn option must ERROR
+    # the request, never silently clear the flag — the old `_ask_mode = False for Codex`
+    # line here removed the operator's approval gate with no visible sign it had happened.
+    # Capabilities are the same static maps GET /api/agent-providers reports, so this can
+    # never disagree with what the picker showed the operator.
+    if _ask_mode or _plan_mode or _ultracode:
+        _run_capabilities = (
+            _CLAUDE_CAPABILITIES if _provider_for_run == "claude" else _codex.capabilities()
+        )
+        _cap_probe = runtime.RunContext(
+            origin_kind="chat", origin_id=project["id"], provider=_provider_for_run,
+            backend="", model=model, account=_accounts.resolve(project.get("account")),
+            revision=0, ask_mode=_ask_mode, plan_mode=_plan_mode, ultracode=_ultracode,
+        )
+        _conflicts = runtime.capability_conflicts(_cap_probe, _run_capabilities)
+        if _conflicts:
+            return web.json_response({"error": "; ".join(_conflicts)}, status=409)
+    if _provider_for_run == "claude" and _effort_override == "ultra":
+        _effort_override = None
     run_engine = (ctx.get("run_codex_engine") if _provider_for_run == "codex"
                   else ctx.get("run_engine"))
 
@@ -13342,11 +13619,14 @@ async def api_project_chat(req: web.Request) -> web.Response:
             return resp
         # Multichat: stamp the originating chat_id so the drained run routes back to
         # this tab only (not every chat in the project). spec-071: carry the per-turn
-        # options so the drained run matches the live-client fingerprint.
+        # options so the drained run matches the live-client fingerprint. spec-092 item 3:
+        # pin the runtime already resolved above so a picker switch while this item waits
+        # cannot silently re-route it at drain time.
         item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"],
                                    effort=_effort_override, ultracode=_ultracode,
                                    auto_rotate=_auto_rotate, plan_mode=_plan_mode,
-                                   ask_mode=_ask_mode, msg_id=_msg_id)
+                                   ask_mode=_ask_mode, msg_id=_msg_id,
+                                   pinned_runtime={"provider": _provider_for_run, "model": model})
         if item is None:
             _chat_trace(session_key, "queue_full", msg_id=_msg_id, chat_id=_req_chat_id,
                         text=prompt, limit=_CHAT_QUEUE_MAX)
@@ -13378,10 +13658,12 @@ async def api_project_chat(req: web.Request) -> web.Response:
                      "X-Accel-Buffering": "no"},
         )
         await resp.prepare(req)
+        # spec-092 item 3: pin the runtime already resolved above.
         item = _chat_queue_enqueue(session_key, prompt, _req_chat_id, project["id"],
                                    effort=_effort_override, ultracode=_ultracode,
                                    auto_rotate=_auto_rotate, plan_mode=_plan_mode,
-                                   ask_mode=_ask_mode, msg_id=_msg_id)
+                                   ask_mode=_ask_mode, msg_id=_msg_id,
+                                   pinned_runtime={"provider": _provider_for_run, "model": model})
         payload = json.dumps({
             "type": "queued",
             "item": item,

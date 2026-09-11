@@ -315,6 +315,12 @@ async def test_provider_registry_reports_codex_auth_models(aiohttp_client, chats
 
 
 async def test_chat_provider_cannot_be_changed_in_place(aiohttp_client, chats_app, fake_ctx):
+    """spec-092: the provider PATCH is no longer hard-blocked — it now runs real validation
+    (runtime.validate_runtime_change). This still 400s because a bare {"provider": "codex"}
+    leaves the chat's existing Claude model behind, which is not a valid codex model — see
+    tests/test_spec092_runtime_wiring.py for the case that actually SUCCEEDS with a
+    compatible model, and for coverage that distinguishes this from the old hardcoded
+    immutability rejection this test predates."""
     client = await aiohttp_client(chats_app)
     created = await client.post("/api/projects/myproject/chats", json={}, headers=_auth(fake_ctx))
     chat_id = (await created.json())["id"]
