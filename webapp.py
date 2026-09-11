@@ -11304,19 +11304,19 @@ def _runtime_switch_blocked_reason(ctx: dict, session_key: str) -> "str | None":
         appearing in ctx["running"] (spec-063 Stage 2a).
       - live background sub-agents — engine.py's _get_or_create_live_client deliberately
         REUSES the old client and DEFERS a fingerprint change while they run (disconnect()
-        would SIGTERM them mid-flight); `session_has_live_subagents` is the public predicate
-        added for exactly this check. Read via ctx (anti-circular-import convention — engine
-        imports webapp lazily, so webapp must not import engine back at module scope; see the
-        rewind_conversation/evict_live_client precedent above), falling back to webapp's own
-        _has_live_agent_monitors (the SAME function wired as engine's callback for this) when
-        a caller's ctx predates this key.
+        would SIGTERM them mid-flight).
+
+    The liveness read is `_has_live_agent_monitors` directly — webapp's own function, and the
+    very one handed to engine as its `has_live_subagents` callback (engine.py:4018). So this
+    gate and engine's eviction guard judge by the same source by construction, and no import
+    of engine is needed. (An earlier draft read an optional ctx override first; nothing ever
+    populated that key, so it was a dead branch pinned by a test that could not fail.)
     """
     if ctx["running"].get(session_key) is not None:
         return "a turn is in flight for this chat's session"
     if _bg_turn_active(session_key):
         return "a background turn owns this chat's session"
-    live_subagents_fn = ctx.get("session_has_live_subagents") or _has_live_agent_monitors
-    if live_subagents_fn(session_key):
+    if _has_live_agent_monitors(session_key):
         return "background sub-agents are still running for this chat's session"
     return None
 

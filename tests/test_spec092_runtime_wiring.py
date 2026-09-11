@@ -322,28 +322,6 @@ async def test_patch_refuses_runtime_change_while_live_subagents(
     assert body.get("busy") is True
 
 
-@pytest.mark.asyncio
-async def test_patch_via_injected_session_has_live_subagents_ctx_key(
-    aiohttp_client, fake_ctx, chats_app
-):
-    """A ctx that DOES provide the engine.session_has_live_subagents wrapper (the way
-    _build_ctx wires it in production) must be honoured too, not just the local monitors
-    fallback."""
-    session_key = "1001:42"
-    client = await aiohttp_client(chats_app)
-    created = await client.post("/api/projects/myproject/chats", json={}, headers=_auth(fake_ctx))
-    chat_id = (await created.json())["id"]
-
-    fake_ctx["session_has_live_subagents"] = lambda sk: sk == session_key
-    resp = await client.patch(
-        f"/api/projects/myproject/chats/{chat_id}",
-        json={"model": "opus", "expected_revision": 0},
-        headers=_auth(fake_ctx),
-    )
-    assert resp.status == 409
-
-
-@pytest.mark.asyncio
 async def test_patch_rename_still_works_while_running_and_untouched_by_revision(
     aiohttp_client, fake_ctx, chats_app
 ):
