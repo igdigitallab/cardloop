@@ -298,3 +298,46 @@ def test_session_has_live_subagents_wrapper_false_on_no_callback():
     """No callback registered (webapp not wired) → False, never an exception."""
     with patch.object(engine, "_has_live_subagents_cb", None):
         assert engine.session_has_live_subagents("chat:anything") is False
+
+
+# ───────────────── backend dimension on the plan/ask fingerprint guard ─────────────────
+
+
+def _live_entry_for(opts, *, backend, session_key="proj:chat"):
+    """A live-client registry entry whose fingerprint was computed for `backend`."""
+    return engine._LiveEntry(
+        client=MagicMock(),
+        fingerprint=engine._compute_fingerprint(
+            opts, stable_append_hash="h", effort="high", memory_mode="auto",
+            account="main", backend=backend,
+        ),
+        last_used=0.0,
+        idle_task=None,
+        session_key=session_key,
+    )
+
+
+def test_plan_gate_accepts_a_client_connected_for_the_same_backend(tmp_path):
+    """The plan/ask guard recomputes the fingerprint independently of
+    _get_or_create_live_client. If it were to drop `backend`, its `want` would never match an
+    entry whose fingerprint includes one — a permanent mismatch, not a race — and EVERY plan
+    or ask turn on that session would abort with the misleading "pinned by background tasks"
+    error even with zero sub-agents running. This pins the matching half.
+    """
+    opts = _make_base_opts(tmp_path)
+    ctx = {"live_clients": {"proj:chat": _live_entry_for(opts, backend="ollama:local")}}
+    assert engine._plan_client_fingerprint_ok(
+        ctx, "proj:chat", opts, "h", "high", "auto", "main", backend="ollama:local"
+    ) is True
+
+
+def test_plan_gate_rejects_a_client_connected_for_another_backend(tmp_path):
+    """The mismatching half: a client connected against one backend must NOT be accepted for
+    a gated turn bound to another. can_use_tool binds at connect time, so reusing it would run
+    the turn full-auto against the wrong endpoint with no gate and no error.
+    """
+    opts = _make_base_opts(tmp_path)
+    ctx = {"live_clients": {"proj:chat": _live_entry_for(opts, backend="ollama:local")}}
+    assert engine._plan_client_fingerprint_ok(
+        ctx, "proj:chat", opts, "h", "high", "auto", "main", backend=""
+    ) is False

@@ -1404,7 +1404,8 @@ def session_has_live_subagents(session_key: str) -> bool:
 
     spec-092: a fingerprint change (e.g. a runtime/backend switch) is DELIBERATELY deferred
     while background sub-agents are still live (see the deferred-reuse branch in
-    `_get_or_create_live_client` above) — evicting would SIGTERM them mid-flight. That means a
+    `_get_or_create_live_client`, defined further down this module) — evicting would SIGTERM
+    them mid-flight. That means a
     UI control that lets the operator switch runtime while sub-agents are running would show
     the new selection while the OLD live client keeps answering underneath it. A caller (e.g.
     the cockpit's runtime-switch route) needs this predicate to refuse the switch instead of
@@ -2039,8 +2040,8 @@ def _compute_fingerprint(
         # EXCLUDED above, and the CLI reads it at launch — so without this the operator could
         # switch accounts and a live client would keep burning the OLD subscription with no sign.
         account,
-        # spec-092: the inference backend (Claude vs. a local Ollama overlay) — see the comment
-        # above the docstring for why it cannot ride in `env` alone.
+        # spec-092: the inference backend (Claude vs. a local Ollama overlay) — see the
+        # comment just below the docstring for why it cannot ride in `env` alone.
         backend,
         # spec-058 v2: the --settings payload (native ultracode switch) is launch-immutable too.
         str(getattr(opts, "settings", "") or ""),
