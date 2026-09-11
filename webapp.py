@@ -13554,11 +13554,19 @@ async def api_project_chat(req: web.Request) -> web.Response:
     elif _provider_for_run == "codex":
         model = project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL
 
-    # spec-092 item 5: a runtime that cannot honour a requested per-turn option must ERROR
-    # the request, never silently clear the flag — the old `_ask_mode = False for Codex`
-    # line here removed the operator's approval gate with no visible sign it had happened.
-    # Capabilities are the same static maps GET /api/agent-providers reports, so this can
-    # never disagree with what the picker showed the operator.
+    # spec-092 item 5, STAGED: a runtime that cannot honour a requested per-turn option must
+    # not silently clear the flag (the old `_ask_mode = False for Codex` line removed the
+    # operator's approval gate with no visible sign). But hard-failing the turn cannot ship
+    # before the picker does, and here is the dead end it creates today:
+    #   1. operator turns ask-mode ON while the chat is on Claude
+    #   2. operator switches the chat to Codex — which this very commit made possible
+    #   3. the client sends ask_mode:true unconditionally (ChatTab.tsx:2882 gates only on
+    #      `askMode && !planMode`, never on the provider)
+    #   4. every message 409s — and the operator CANNOT clear the flag, because the ask-mode
+    #      row is rendered pointer-events:none for Codex. The chat is bricked.
+    # So until the UI can clear an incompatible flag, downgrade as before but LOUDLY: log it
+    # and tell the operator in the reply. Strictly better than the silent clear it replaces,
+    # and it does not brick a chat. The 409 lands with the frontend commit.
     if _ask_mode or _plan_mode or _ultracode:
         _run_capabilities = (
             _CLAUDE_CAPABILITIES if _provider_for_run == "claude" else _codex.capabilities()
@@ -13570,7 +13578,14 @@ async def api_project_chat(req: web.Request) -> web.Response:
         )
         _conflicts = runtime.capability_conflicts(_cap_probe, _run_capabilities)
         if _conflicts:
-            return web.json_response({"error": "; ".join(_conflicts)}, status=409)
+            print(f"[runtime] {session_key}: {'; '.join(_conflicts)} — downgrading this "
+                  f"turn (the UI cannot clear an incompatible flag yet)")
+            if any("ask_mode" in c for c in _conflicts):
+                _ask_mode = False
+            if any("plan_mode" in c for c in _conflicts):
+                _plan_mode = False
+            if any("ultracode" in c for c in _conflicts):
+                _ultracode = False
     if _provider_for_run == "claude" and _effort_override == "ultra":
         _effort_override = None
     run_engine = (ctx.get("run_codex_engine") if _provider_for_run == "codex"

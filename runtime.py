@@ -472,7 +472,22 @@ def validate_runtime_change(
     error if a run is actually launched against it as an explicit pin.
     """
     resulting = {**(current or {}), **patch}
+    # A pre-provider-field chat record has NO `provider` key at all, and the module's own
+    # legacy rule says that record is Claude (see chat_provider). A raw dict merge does not
+    # know that, so a model-only PATCH on any chat created before the field existed was
+    # rejected as "no resolvable provider" -- the operator could not even change the model on
+    # their oldest chats. Resolve the same way the rest of the module does instead of
+    # re-deriving it here: one legacy rule, one place.
     provider = resulting.get("provider")
+    if provider is None and "provider" not in patch and isinstance(current, Mapping) \
+            and "provider" not in current:
+        # `current` must be a REAL record that simply predates the field. A `current=None`
+        # caller has no record at all and gets no legacy default -- "I did not give you the
+        # chat" is not the same statement as "this chat predates the provider field".
+        legacy = chat_provider(current, known_providers={p: True for p in providers})
+        if legacy.status is ProviderStatus.OK:
+            provider = legacy.value
+            resulting["provider"] = provider
 
     if "provider" in patch and patch["provider"] == OLLAMA_BACKEND:
         return False, (

@@ -559,3 +559,49 @@ def test_apply_change_validates_the_resulting_state_when_given_a_registry():
     assert ok is False
     assert chat["model"] == "sonnet"
     assert chat["runtime_revision"] == 0
+
+
+def test_validate_accepts_a_model_only_patch_on_a_pre_provider_field_chat():
+    """A chat created before the `provider` field existed must still be able to change model.
+
+    Those records have NO `provider` key, and this module's legacy rule says such a record is
+    Claude. `validate_runtime_change` used to merge `current` and `patch` as raw dicts, which
+    does not know that rule, so a model-only PATCH on the operator's oldest chats was rejected
+    with "cannot validate a model without a resolvable provider" — they could not change model
+    at all. Found in review before any frontend could hit it.
+    """
+    providers = {
+        "claude": rt.ProviderInfo(provider="claude", available=True, models=["opus", "sonnet"]),
+        "codex": rt.ProviderInfo(provider="codex", available=True, models=["gpt-5.6-sol"]),
+    }
+    legacy_chat = {"id": "c1", "model": "opus"}  # no provider key at all
+
+    ok, reason = rt.validate_runtime_change(
+        {"model": "sonnet"}, providers=providers, accounts_list=[{"id": "main"}],
+        current=legacy_chat,
+    )
+    assert ok, reason
+
+    # The legacy default must be a real resolution, not a bypass: a model belonging to
+    # ANOTHER provider is still rejected, judged against Claude.
+    ok, reason = rt.validate_runtime_change(
+        {"model": "gpt-5.6-sol"}, providers=providers, accounts_list=[{"id": "main"}],
+        current=legacy_chat,
+    )
+    assert not ok
+    assert "claude" in reason
+
+
+def test_validate_still_refuses_an_explicitly_null_provider():
+    """Key absent (legacy) and key present-but-null are different states, on purpose.
+
+    The absent key is a documented pre-field record; an explicit null is a malformed one and
+    must not silently inherit the legacy Claude default.
+    """
+    providers = {"claude": rt.ProviderInfo(provider="claude", available=True, models=["opus"])}
+    ok, reason = rt.validate_runtime_change(
+        {"model": "opus"}, providers=providers, accounts_list=[{"id": "main"}],
+        current={"id": "c1", "provider": None, "model": "opus"},
+    )
+    assert not ok
+    assert "resolvable provider" in reason

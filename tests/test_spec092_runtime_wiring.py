@@ -589,18 +589,25 @@ async def test_chat_post_rejects_unknown_provider_with_400(aiohttp_client, fake_
 
 
 @pytest.mark.asyncio
-async def test_chat_post_ask_mode_on_codex_errors_instead_of_silently_downgrading(
-    aiohttp_client, fake_ctx, chats_app, monkeypatch
+async def test_chat_post_ask_mode_on_codex_downgrades_loudly_without_bricking(
+    aiohttp_client, fake_ctx, chats_app, monkeypatch, capsys
 ):
-    """THE named bug (webapp.py:13272 old line number): ask_mode on a Codex chat used to be
-    silently cleared to False and the turn ran anyway, ungated. It must now ERROR the
-    request and never call the engine at all."""
+    """Codex has no per-tool approval hook, so ask_mode cannot be honoured there.
+
+    The turn must still RUN, with the downgrade announced in the log and the flag cleared
+    before the engine sees it. Hard-failing the request (409) was implemented and then
+    reverted: the client sends ask_mode unconditionally (ChatTab.tsx gates only on
+    `askMode && !planMode`, never on the provider) while the ask-mode row renders
+    pointer-events:none for Codex — so an operator who switched a chat with ask-mode ON over
+    to Codex could neither send a message nor clear the flag. That bricks the chat. The 409
+    belongs with the frontend commit that can actually clear the flag.
+    """
     monkeypatch.setattr(_webapp._codex, "codex_enabled", lambda: True)
     codex_calls: list = []
 
     async def fake_codex_engine(**kwargs):
         codex_calls.append(kwargs)
-        yield {"type": "text", "text": "should never run ungated"}
+        yield {"type": "text", "text": "ran with the flag cleared"}
 
     fake_ctx["run_codex_engine"] = fake_codex_engine
     _webapp._save_chats(fake_ctx, {
@@ -614,10 +621,14 @@ async def test_chat_post_ask_mode_on_codex_errors_instead_of_silently_downgradin
         json={"prompt": "hi", "ask_mode": True},
         headers=_auth(fake_ctx),
     )
-    assert resp.status == 409, await resp.text()
-    body = await resp.json()
-    assert "ask_mode" in body["error"]
-    assert not codex_calls, "the engine must never run once a requested capability conflicts"
+    assert resp.status == 200, "an incompatible per-turn flag must never block the turn"
+    await resp.text()
+    out = capsys.readouterr().out
+    assert "[runtime]" in out and "downgrading this turn" in out and "ask_mode" in out, (
+        "the downgrade must be visible — silently clearing the flag was the original bug"
+    )
+    assert codex_calls, "the turn must still reach the engine"
+    assert codex_calls[0].get("ask_mode") in (False, None)
 
 
 @pytest.mark.asyncio
