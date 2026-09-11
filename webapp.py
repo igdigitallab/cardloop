@@ -12095,16 +12095,31 @@ def _chat_queue_init(ctx: dict) -> None:
         pass  # corrupted file — start fresh, do not break startup
 
 
-def _chat_queue_flush() -> None:
-    """Atomically persist _CHAT_QUEUE to disk.  Swallows all I/O errors."""
+def _chat_queue_flush() -> bool:
+    """Atomically persist _CHAT_QUEUE to disk. Returns True when the queue is durable.
+
+    spec-092 P0b: this used to swallow every I/O error in silence, which made the queue's
+    single most dangerous failure invisible. The queue is the ONLY record of a message the
+    cockpit has already told the operator it accepted: `_chat_queue_pop` removes an item and
+    flushes BEFORE the run is started, so a failed flush plus a crash loses a message the
+    operator watched being accepted, with nothing in the log to explain it.
+
+    Errors are still not raised — a failed persist must never take down the turn that is
+    already in flight — but they are now loud, and the return value lets a caller that cares
+    about durability know the on-disk copy is stale.
+    """
     if _CHAT_QUEUE_FILE is None:
-        return
+        return False
     try:
         tmp = _CHAT_QUEUE_FILE.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(_CHAT_QUEUE, ensure_ascii=False), encoding="utf-8")
         tmp.replace(_CHAT_QUEUE_FILE)
-    except Exception:
-        pass
+        return True
+    except Exception as exc:
+        # Loud on purpose: the in-memory queue and the disk copy have diverged, so a restart
+        # from here silently replays a stale queue (or loses a just-accepted message).
+        print(f"[chat-queue] FAILED to persist {_CHAT_QUEUE_FILE}: {type(exc).__name__}: {exc}")
+        return False
 
 
 def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = None,
