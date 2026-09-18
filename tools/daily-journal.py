@@ -1057,20 +1057,31 @@ def _dotenv_value(repo_root: Path, key: str) -> str:
     return ""
 
 
-def extract_glance(body: str) -> "list[str]":
-    """Bullets of the note's FIRST section ('Day at a glance', heading localized)."""
-    out: "list[str]" = []
-    started = False
+def _section_bullets(body: str) -> "list[list[str]]":
+    """Bullets of every `## ` section, in order (headings are localized, so
+    sections are addressed by position, never by title)."""
+    sections: "list[list[str]]" = []
     for raw in body.splitlines():
         line = raw.strip()
         if line.startswith("## "):
-            if started:
-                break
-            started = True
-            continue
-        if started and line.startswith(("- ", "* ")):
-            out.append(line[2:].strip())
-    return out[:6]
+            sections.append([])
+        elif sections and line.startswith(("- ", "* ")):
+            sections[-1].append(line[2:].strip())
+    return sections
+
+
+def extract_glance(body: str) -> "list[str]":
+    """Bullets of the note's FIRST section ('Day at a glance', heading localized)."""
+    sections = _section_bullets(body)
+    return sections[0][:6] if sections else []
+
+
+def extract_open_threads(body: str) -> "list[str]":
+    """Bullets of the LAST section — 'Open threads' when the day left anything
+    open. It is optional, and the section before it (Numbers) is a table with
+    no bullets, so an empty result means 'nothing open', not a parse miss."""
+    sections = _section_bullets(body)
+    return sections[-1][:6] if len(sections) > 1 else []
 
 
 def _tg_html(text: str) -> str:
@@ -1089,7 +1100,8 @@ def build_telegram_message(day: date, numbers: DayNumbers, body: str,
     if warning:
         head += f"\n\u26a0\ufe0f {_tg_html(warning)}"
 
-    bullets = "\n".join("\u2022 " + _tg_html(b) for b in extract_glance(body))
+    done = ["\u2022 " + _tg_html(b) for b in extract_glance(body)]
+    still_open = ["\u2022 " + _tg_html(b) for b in extract_open_threads(body)]
     obsidian = "obsidian://open?file=" + quote(f"Journal/{day.isoformat()}", safe="")
     home = str(Path.home())
     shown = str(note_path)
@@ -1099,10 +1111,20 @@ def build_telegram_message(day: date, numbers: DayNumbers, body: str,
     if public_url:
         tail += f'\n<a href="{public_url}">cockpit</a>'
 
-    msg = head + ("\n\n" + bullets if bullets else "") + "\n\n" + tail
-    if len(msg) > TG_TEXT_LIMIT:
-        keep = TG_TEXT_LIMIT - len(head) - len(tail) - 16
-        msg = head + "\n\n" + bullets[:max(keep, 0)] + "\u2026\n\n" + tail
+    def assemble() -> str:
+        blocks = [head]
+        if done:
+            blocks.append("\n".join(done))
+        if still_open:
+            blocks.append("\u23f3 <b>Open</b>\n" + "\n".join(still_open))
+        return "\n\n".join(blocks + [tail])
+
+    # Over the limit: drop whole bullets (open threads first), never slice the
+    # text — a cut through a <b> tag makes Telegram reject the entire message.
+    msg = assemble()
+    while len(msg) > TG_TEXT_LIMIT and (done or still_open):
+        (still_open or done).pop()
+        msg = assemble()
     return msg
 
 

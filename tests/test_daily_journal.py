@@ -442,3 +442,44 @@ def test_telegram_message_carries_the_warning_escaped():
                                                  Path("/tmp/x.md"), "", warning="w")
     assert "⚠" not in dj.build_telegram_message(date(2026, 9, 12), numbers, "",
                                                      Path("/tmp/x.md"), "")
+
+
+_NOTE = """## Day at a glance
+- **alpha**: shipped the thing
+- beta: fixed a bug
+
+## Numbers
+| sessions | 3 |
+
+## Open threads
+- **alpha**: deploy still pending
+"""
+
+
+def test_extract_open_threads_reads_the_last_section():
+    assert dj.extract_open_threads(_NOTE) == ["**alpha**: deploy still pending"]
+
+
+def test_extract_open_threads_empty_when_numbers_is_last():
+    note = _NOTE.split("## Open threads")[0]
+    assert dj.extract_open_threads(note) == []
+    assert dj.extract_glance(note) == ["**alpha**: shipped the thing", "beta: fixed a bug"]
+
+
+def test_telegram_message_has_done_and_open():
+    numbers = dj.compute_numbers({"projects": {}, "total_ledger": dj.LedgerStats()},
+                                 "America/Los_Angeles")
+    msg = dj.build_telegram_message(date(2026, 9, 17), numbers, _NOTE, Path("/tmp/x.md"), "")
+    assert "<b>alpha</b>: shipped the thing" in msg
+    assert "Open</b>\n• <b>alpha</b>: deploy still pending" in msg
+
+
+def test_telegram_message_over_limit_drops_whole_bullets_not_tags():
+    numbers = dj.compute_numbers({"projects": {}, "total_ledger": dj.LedgerStats()},
+                                 "America/Los_Angeles")
+    long = "## Glance\n" + "".join(f"- **p{i}**: {'x' * 700}\n" for i in range(6)) \
+        + "\n## Open\n" + "".join(f"- **o{i}**: {'y' * 700}\n" for i in range(6))
+    msg = dj.build_telegram_message(date(2026, 9, 17), numbers, long, Path("/tmp/x.md"), "")
+    assert len(msg) <= dj.TG_TEXT_LIMIT
+    assert msg.count("<b>") == msg.count("</b>")
+    assert "<b>p0</b>" in msg  # the day's headline survives; open threads go first
