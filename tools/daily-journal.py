@@ -58,7 +58,12 @@ from zoneinfo import ZoneInfo
 LOG_PREFIX = "[daily-journal]"
 
 DEFAULT_TZ = "America/Los_Angeles"
-DIGEST_CHAR_BUDGET = 40_000       # hard cap on the evidence digest handed to the model
+# Hard cap on the evidence digest handed to the model. Every turn row is
+# already clipped to PROMPT_SNIPPET_CHARS + REPLY_SNIPPET_CHARS (~720 chars), so
+# a 160-turn day is ~115k chars — well inside Haiku's context. The old 40k cap
+# silently dropped the oldest 60-80% of turns on any busy day, so the note
+# described only the evening.
+DIGEST_CHAR_BUDGET = 150_000
 PROMPT_SNIPPET_CHARS = 300
 REPLY_SNIPPET_CHARS = 400
 MODEL_CALL_TIMEOUT_S = 180
@@ -1075,12 +1080,14 @@ def _tg_html(text: str) -> str:
 
 
 def build_telegram_message(day: date, numbers: DayNumbers, body: str,
-                            note_path: Path, public_url: str) -> str:
+                            note_path: Path, public_url: str, warning: str = "") -> str:
     hours, minutes = divmod(max(numbers.active_minutes, 0), 60)
     active = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
     head = (f"\U0001F4D4 <b>{day.isoformat()} ({day.strftime('%A')})</b>\n"
             f"{numbers.projects_count} projects \u00b7 {numbers.sessions} sessions \u00b7 "
             f"{active} \u00b7 {numbers.commits} commits")
+    if warning:
+        head += f"\n\u26a0\ufe0f {_tg_html(warning)}"
 
     bullets = "\n".join("\u2022 " + _tg_html(b) for b in extract_glance(body))
     obsidian = "obsidian://open?file=" + quote(f"Journal/{day.isoformat()}", safe="")
@@ -1100,7 +1107,7 @@ def build_telegram_message(day: date, numbers: DayNumbers, body: str,
 
 
 def notify_telegram(day: date, numbers: DayNumbers, body: str, note_path: Path,
-                     repo_root: Path) -> None:
+                     repo_root: Path, warning: str = "") -> None:
     """Best-effort ping; never fails the journal run."""
     token = os.environ.get("JOURNAL_TG_BOT_TOKEN") or _dotenv_value(repo_root, "BOT_TOKEN")
     chat = (os.environ.get("JOURNAL_TG_CHAT_ID")
@@ -1115,7 +1122,7 @@ def notify_telegram(day: date, numbers: DayNumbers, body: str, note_path: Path,
         "chat_id": chat,
         "parse_mode": "HTML",
         "disable_web_page_preview": "true",
-        "text": build_telegram_message(day, numbers, body, note_path, public_url),
+        "text": build_telegram_message(day, numbers, body, note_path, public_url, warning),
     }).encode()
     try:
         with urlopen(TG_SEND_URL.format(token=token), data=payload, timeout=20) as r:
@@ -1155,7 +1162,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _process_one_day(day: date, tz_name: str, data_dir: Path, vault_dir: Path,
-                      index_path: Path, args: argparse.Namespace, lang: str) -> None:
+                      index_path: Path, args: argparse.Namespace, lang: str) -> bool:
+    """Returns False when the model call failed. The day still gets a
+    digest-only note and its Telegram ping (flagged), so a lapsed login costs
+    the prose, not the whole day; the False keeps the cron's exit code red."""
     print(f"{LOG_PREFIX} gathering {day.isoformat()} ({tz_name}) from {data_dir} ...")
     gathered = gather_day(day, tz_name, data_dir)
     digest, numbers = render_digest(gathered, tz_name)
@@ -1164,11 +1174,17 @@ def _process_one_day(day: date, tz_name: str, data_dir: Path, vault_dir: Path,
         f"{numbers.turns} turn(s), digest {len(digest)} chars"
     )
 
+    warning = ""
     if args.no_model:
         body = render_fallback_body(gathered, numbers, tz_name)
     else:
         prompt = NOTE_INSTRUCTIONS.format(lang=lang) + digest
-        body = call_model(prompt, args.model, args.model_timeout)
+        try:
+            body = call_model(prompt, args.model, args.model_timeout)
+        except Exception as e:  # noqa: BLE001 — fall back to the digest-only note
+            print(f"{LOG_PREFIX} model call FAILED for {day.isoformat()}: {e}", file=sys.stderr)
+            warning = f"model call failed ({str(e)[:160]}) — digest-only note"
+            body = render_fallback_body(gathered, numbers, tz_name)
         if not body:
             print(f"{LOG_PREFIX} empty model response for {day.isoformat()} — "
                   f"falling back to the digest-only note", file=sys.stderr)
@@ -1181,7 +1197,7 @@ def _process_one_day(day: date, tz_name: str, data_dir: Path, vault_dir: Path,
         print(digest)
         print(f"{LOG_PREFIX} ── note: {day.isoformat()} ──")
         print(note)
-        return
+        return not warning
 
     vault_dir.mkdir(parents=True, exist_ok=True)
     note_path, used_fallback_path = choose_note_path(vault_dir, day)
@@ -1197,7 +1213,9 @@ def _process_one_day(day: date, tz_name: str, data_dir: Path, vault_dir: Path,
     print(f"{LOG_PREFIX} wrote {note_path}")
 
     if getattr(args, "notify_telegram", False):
-        notify_telegram(day, numbers, body, note_path, Path(__file__).resolve().parent.parent)
+        notify_telegram(day, numbers, body, note_path, Path(__file__).resolve().parent.parent,
+                        warning)
+    return not warning
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -1228,7 +1246,8 @@ def main(argv: "list[str] | None" = None) -> int:
     ok = True
     for day in days:
         try:
-            _process_one_day(day, tz_name, data_dir, vault_dir, index_path, args, lang)
+            if not _process_one_day(day, tz_name, data_dir, vault_dir, index_path, args, lang):
+                ok = False
         except Exception as e:  # noqa: BLE001 — one bad day must not sink the whole backfill
             print(f"{LOG_PREFIX} FAILED for {day.isoformat()}: {e}", file=sys.stderr)
             ok = False

@@ -372,3 +372,73 @@ def test_build_index_summary_names_busiest_project():
     pd2 = _project_day("beta", turns=[dj.Turn(ts_ms=1, prompt="b")])
     summary = dj.build_index_summary({"alpha": pd1, "beta": pd2})
     assert "alpha" in summary
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Busy days keep their morning; a failed model call still yields a note
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_render_digest_keeps_every_turn_of_a_busy_day():
+    # 160 turns at the per-row clip ceiling — a real busy day (2026-09-16 had
+    # 158). The old 40k budget dropped the oldest 128 of them.
+    base = dj.iso_to_epoch_ms(_iso(0))
+    turns = [
+        dj.Turn(ts_ms=base + i * 60_000, prompt=f"P{i:03d}" + "p" * (dj.PROMPT_SNIPPET_CHARS - 4),
+                reply="r" * dj.REPLY_SNIPPET_CHARS)
+        for i in range(160)
+    ]
+    g = {"day": date(2026, 9, 16), "projects": {"alpha": _project_day("alpha", turns=turns)},
+         "total_ledger": dj.LedgerStats(), "vault_specs_touched": []}
+    digest, _ = dj.render_digest(g, "America/Los_Angeles")
+    assert "omitted" not in digest
+    assert "P000" in digest and "P159" in digest
+
+
+def _empty_day(day):
+    return {"day": day, "projects": {}, "total_ledger": dj.LedgerStats(),
+            "vault_specs_touched": []}
+
+
+def test_model_failure_still_writes_a_note_and_flags_the_ping(tmp_path, monkeypatch):
+    day = date(2026, 9, 12)
+    monkeypatch.setattr(dj, "gather_day", lambda d, tz, data_dir: _empty_day(d))
+
+    def boom(*a, **k):
+        raise RuntimeError("Not logged in · Please run /login")
+    monkeypatch.setattr(dj, "call_model", boom)
+    pings = []
+    monkeypatch.setattr(dj, "notify_telegram",
+                        lambda d, n, body, path, root, warning="": pings.append(warning))
+
+    args = dj.build_arg_parser().parse_args(["--notify-telegram"])
+    ok = dj._process_one_day(day, "America/Los_Angeles", tmp_path, tmp_path,
+                             tmp_path / "_index.md", args, "en")
+
+    assert ok is False  # the cron's exit code must stay red
+    assert (tmp_path / "2026-09-12.md").exists()
+    assert len(pings) == 1 and "Not logged in" in pings[0]
+
+
+def test_model_success_reports_ok_with_no_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr(dj, "gather_day", lambda d, tz, data_dir: _empty_day(d))
+    monkeypatch.setattr(dj, "call_model", lambda *a, **k: "## Day\n- did things")
+    pings = []
+    monkeypatch.setattr(dj, "notify_telegram",
+                        lambda d, n, body, path, root, warning="": pings.append(warning))
+
+    args = dj.build_arg_parser().parse_args(["--notify-telegram"])
+    assert dj._process_one_day(date(2026, 9, 14), "America/Los_Angeles", tmp_path, tmp_path,
+                               tmp_path / "_index.md", args, "en") is True
+    assert pings == [""]
+
+
+def test_telegram_message_carries_the_warning_escaped():
+    numbers = dj.compute_numbers({"projects": {}, "total_ledger": dj.LedgerStats()},
+                                 "America/Los_Angeles")
+    msg = dj.build_telegram_message(date(2026, 9, 12), numbers, "", Path("/tmp/x.md"), "",
+                                    warning="model call failed (<login>)")
+    assert "model call failed (&lt;login&gt;)" in msg
+    assert "⚠" in dj.build_telegram_message(date(2026, 9, 12), numbers, "",
+                                                 Path("/tmp/x.md"), "", warning="w")
+    assert "⚠" not in dj.build_telegram_message(date(2026, 9, 12), numbers, "",
+                                                     Path("/tmp/x.md"), "")
