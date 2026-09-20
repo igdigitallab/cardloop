@@ -171,7 +171,21 @@ with `--disable-backgrounding-occluded-windows`, so `document.hidden` never goes
 a page's own pause-when-hidden logic never engages. Assume any leaked animated tab costs
 ~80 % of a core, forever.
 
+**There were two independent teardown bugs, and the second one was worse.** `close()` also
+cancelled `self._watchdog` unconditionally — but `_idle_watch` reaches close() from *inside*
+that very task (`_idle_watch -> close_session -> close`). Cancelling the current task throws
+`CancelledError` at the next `await` inside close(), and `CancelledError` is a `BaseException`,
+so the `contextlib.suppress(Exception)` blocks there never stopped it: `_teardown()` was not
+reached on ANY idle close. Every pane that simply timed out leaked its tab and its profile
+refcount. Two symptoms to recognise it by: `GET /api/browser/profile-usage` shows `sessions: {}`
+while `lifecycle.attached` still lists the project, and a pane's tab outlives the 120s idle
+grace by minutes.
+
 Rules that follow:
+
+- **Never cancel a task from code that task might be running in.** Check
+  `is not asyncio.current_task()` first. `suppress(Exception)` will not save you —
+  `CancelledError` is not an `Exception`.
 
 - **`close()` guards on `_close_ran`, never on `_closed`.** Keep those two meanings apart:
   `_closed` = "this session is dead", `_close_ran` = "close() already ran".
