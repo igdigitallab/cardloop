@@ -1683,6 +1683,35 @@ def _memory_top_offenders(cg_path: Path, top_n: int = 3) -> "list[str]":
     return [f"{kb // 1024} MB  pid {pid}  {cmd}" for kb, pid, cmd in rows[:top_n]]
 
 
+_BROWSER_SWEEP_INTERVAL_SEC = int(os.environ.get("CLOAK_ORPHAN_SWEEP_SEC", "600") or 600)
+
+
+async def _browser_orphan_sweep_loop(ctx: dict) -> None:
+    """Close browser tabs the cockpit opened and then lost track of.
+
+    A pane session that dies with its CDP connection (a Manager blip, a renderer swap)
+    cannot close its own tab: the remote Chrome keeps it, and in a SHARED profile it is
+    indistinguishable from the operator's own tabs, so only the ids we wrote down at
+    creation may be touched. On a GPU-less browser host a single stranded WebGL tab
+    renders through swiftshader at ~80% of a core forever — eight of them pinned the
+    box at ~670% CPU for hours on 2026-09-18. On a timer, not only on the next pane
+    open, because nobody opens a pane overnight. Best-effort, never raises.
+    """
+    if _BROWSER_SWEEP_INTERVAL_SEC <= 0:
+        print("[webapp] browser orphan sweeper disabled (CLOAK_ORPHAN_SWEEP_SEC=0)")
+        return
+    await asyncio.sleep(30)  # let panes from a crash-recovery reconnect first
+    while True:
+        try:
+            if _modules.is_enabled("browser"):
+                closed = await _browser_pane.sweep_orphan_tabs()
+                if closed:
+                    print(f"[webapp] browser orphan sweeper closed {closed} leaked tab(s)")
+        except Exception as e:
+            print(f"[webapp] browser orphan sweeper tick failed: {e}")
+        await asyncio.sleep(_BROWSER_SWEEP_INTERVAL_SEC)
+
+
 async def _memory_alert_loop(ctx: dict) -> None:
     """Poll cgroup memory usage every _MEMORY_ALERT_INTERVAL_SEC; at >= MEMORY_ALERT_PCT
     write a data/inbox/ alert naming the top-RSS offenders (cooldown-bounded) and log a
@@ -18209,6 +18238,9 @@ async def start(ctx: dict) -> None:
         # Spec-074: global search indexer — incremental refresh of data/search.db
         _STARTUP_BG_TASKS.append(_spawn_bg(_search_scan_loop(ctx)))
         print(f"[webapp] search indexer started (interval {_SEARCH_SCAN_INTERVAL_SEC}s)")
+        # Close browser tabs stranded by a dropped CDP connection (see the loop's docstring)
+        _STARTUP_BG_TASKS.append(_spawn_bg(_browser_orphan_sweep_loop(ctx)))
+        print(f"[webapp] browser orphan sweeper started (interval {_BROWSER_SWEEP_INTERVAL_SEC}s)")
         # Root-fix A2: cgroup memory alert — warns (with top-RSS offenders) before an OOM kill
         _STARTUP_BG_TASKS.append(_spawn_bg(_memory_alert_loop(ctx)))
         print(f"[webapp] memory alert loop started (threshold {MEMORY_ALERT_PCT}%)")

@@ -494,6 +494,14 @@ class BrowserSession:
         self.viewport = dict(VIEWPORT)
         self._started = False
         self._closed = False
+        # close() has its OWN guard. `_closed` also means "this session is dead" and is
+        # set by _on_disconnected BEFORE close() is reached, so guarding close() on it
+        # turned the disconnect path into a silent no-op — see close().
+        self._close_ran = False
+        # tab id -> CDP target id, for the tabs we OWN in a shared Cloak profile. Needed
+        # because a dropped connection makes our Playwright handles useless while the
+        # remote tabs keep running; the id is the only way to find them again.
+        self._targets: "dict[str, str]" = {}
         self._start_lock = asyncio.Lock()
         self._subs: "set[Any]" = set()       # subscriber WebSocketResponse objects
         self._busy: "set[Any]" = set()       # subscribers with an in-flight send (frame-drop gate)
@@ -551,7 +559,9 @@ class BrowserSession:
                     for p in list(self._ctx.pages):
                         self._adopt_page(p)
                 active = acq.page
-                self._adopt_page(active)
+                active_tid = self._adopt_page(active)
+                if acq.page_target_id:
+                    self._targets[active_tid] = acq.page_target_id
                 # An external/connected browser keeps its own (possibly logged-in) page;
                 # only push the branded start page when we launched a fresh one ourselves.
                 if self._owns_browser:
@@ -589,8 +599,9 @@ class BrowserSession:
             # 74 renderer processes / 4.4GB RSS over 6 days this way, eventually
             # making its CDP endpoint intermittently unreachable (502s from the
             # Manager) for every project sharing that profile.
-            close_steps = tuple((page, "close") for page in self._tabs.values()) if self._owns_page else ()
-            steps = close_steps + ((self._pw, "stop"),)
+            if self._owns_page:
+                await self._close_owned_tabs()
+            steps = ((self._pw, "stop"),)
         for obj, meth in steps:
             if obj is None:
                 continue
@@ -598,6 +609,7 @@ class BrowserSession:
                 await getattr(obj, meth)()
         self._pw = self._browser = self._ctx = self._page = self._cdp = None
         self._tabs.clear()
+        self._targets.clear()
         self._active_id = None
         # Hand the Manager profile back LAST, once our tabs are actually closed. If we
         # were its only user and we launched it, this starts the idle-stop countdown —
@@ -608,9 +620,40 @@ class BrowserSession:
             with contextlib.suppress(Exception):
                 await _backends.release_profile(profile, self.key)
 
+    async def _close_owned_tabs(self) -> None:
+        """Close every tab we own, one at a time, and un-register only the ones that
+        actually closed.
+
+        Closing them as a batch of suppressed calls hid the case that matters: when the
+        CDP connection is already dead, EVERY page.close() fails and the tabs stay alive
+        in the shared profile. Keeping those ids on disk is what lets the orphan sweeper
+        finish the job later over a fresh connection — so a failure here must not look
+        like a success."""
+        for tid, page in list(self._tabs.items()):
+            target = self._targets.get(tid, "")
+            try:
+                await page.close()
+            except Exception as e:
+                if target:
+                    _log.warning(
+                        "could not close tab %s (cwd=%s target=%s): %s — left for the orphan sweeper",
+                        tid, self.key, target, e)
+                continue
+            if target and self._profile:
+                _backends.forget_owned_page(self._profile, target)
+
     async def close(self) -> None:
-        if self._closed:
+        # Guarded by _close_ran, NEVER by _closed. `_on_disconnected` sets `_closed`
+        # (the session is dead) and only THEN routes here, so the old `if self._closed:
+        # return` made close() a no-op on exactly the path that needs it most: a dropped
+        # CDP connection skipped _teardown entirely and leaked our tab in the shared Cloak
+        # profile, the local Playwright driver process, AND the profile refcount — which
+        # in turn kept the profile pinned open, so its idle-stop never fired either.
+        # Verified 2026-09-18 22:20:52: one disconnect burst left 8 live WebGL tabs behind
+        # that pinned the GPU-less browser VM at ~670% CPU for hours.
+        if self._close_ran:
             return
+        self._close_ran = True
         self._closed = True
         if self._watchdog:
             self._watchdog.cancel()
@@ -997,7 +1040,14 @@ class BrowserSession:
                 opener = await page.opener()
             if opener is None or self._id_of(opener) is None:
                 return
-        self._adopt_page(page)
+        tid = self._adopt_page(page)
+        # A popup we adopted is ours to close, so it needs a recorded id for the same
+        # reason the first tab does — otherwise a disconnect strands it in the profile.
+        if self._owns_page and self._profile and self._ctx is not None:
+            target = await _backends.target_id_of(self._ctx, page)
+            if target:
+                self._targets[tid] = target
+                _backends.note_owned_page(self._profile, target, self.key)
         # Foreground the new tab — mirror a real browser opening target=_blank / window.open,
         # so the operator follows the agent into the page it just spawned.
         with contextlib.suppress(Exception):
@@ -1008,6 +1058,9 @@ class BrowserSession:
 
     async def _handle_tab_closed(self, tid: str) -> None:
         self._tabs.pop(tid, None)
+        target = self._targets.pop(tid, "")
+        if target and self._profile:
+            _backends.forget_owned_page(self._profile, target)
         if self._active_id == tid:
             remaining = list(self._tabs.values())
             if remaining:
@@ -1953,6 +2006,29 @@ async def close_session(key: str, sess: "BrowserSession | None" = None) -> None:
     target = sess if sess is not None else cur
     if target is not None:
         await target.close()
+
+
+def live_target_ids() -> "set[str]":
+    """CDP target ids driven by a session that is alive RIGHT NOW.
+
+    The orphan sweeper must never close these: they are the panes the operator and the
+    agents are actually using. Everything else in the on-disk registry is, by definition,
+    a tab nobody can reach any more."""
+    out: "set[str]" = set()
+    for sess in list(_SESSIONS.values()):
+        if sess._closed:
+            continue
+        out.update(t for t in sess._targets.values() if t)
+    return out
+
+
+async def sweep_orphan_tabs() -> int:
+    """Close cockpit-owned tabs left behind by a dropped connection or a hard restart.
+
+    Runs on a timer rather than only on the next pane open: a leaked WebGL tab renders
+    at full speed forever, and nobody opens a pane at 3am. Sessions in flight are
+    protected by live_target_ids()."""
+    return await _backends.sweep_orphan_pages(live_target_ids())
 
 
 async def close_all() -> None:

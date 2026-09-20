@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,10 @@ class Acquired:
     # Manager profile). Such a page must be closed on teardown — nobody else will — while
     # the browser and its cookies stay untouched.
     owns_page: bool = False
+    # CDP target id of the page we created (owns_page only). Recorded on disk so a tab
+    # orphaned by a dropped connection or a hard restart can still be found and closed
+    # later — see note_owned_page / sweep_orphan_pages.
+    page_target_id: str = ""
     # True when the underlying browser/context is shared with other projects, so page
     # adoption must be scoped to our own tab (see browser_pane).
     shared_context: bool = False
@@ -239,6 +244,16 @@ async def _acquire_cloak(cfg: dict, viewport: dict) -> Acquired:
 # ───────────────────────────── tier C: external CDP ──────────────────────────
 
 
+def _manager_cdp_headers() -> dict:
+    """Headers a raw CDP websocket to the Manager needs: it is auth-gated (Bearer) and
+    WAF-fronted (rejects a non-browser UA), exactly like the REST client."""
+    headers = {"User-Agent": _MANAGER_UA}
+    tok = manager_token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    return headers
+
+
 async def _prune_dead_targets(cdp_url: str, headers: dict) -> int:
     """Close pages whose renderer no longer answers CDP, BEFORE connecting.
 
@@ -346,7 +361,7 @@ async def _prune_dead_targets(cdp_url: str, headers: dict) -> int:
     return closed
 
 
-async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
+async def _acquire_external(cfg: dict, viewport: dict, cwd: str = "") -> Acquired:
     cdp_url = cfg.get("cdp_url") or ""
     profile = cfg.get("profile") or ""
     label = "External CDP"
@@ -359,10 +374,7 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
         label = f"Cloak Manager · {profile}"
         # The Manager's CDP endpoint is auth-gated (Bearer) and WAF-fronted (rejects a
         # non-browser UA) — connect_over_cdp must carry both, like the REST client.
-        headers["User-Agent"] = _MANAGER_UA
-        tok = manager_token()
-        if tok:
-            headers["Authorization"] = f"Bearer {tok}"
+        headers.update(_manager_cdp_headers())
     if not cdp_url:
         raise BackendError(
             "external-cdp backend selected but no cdp_url or Cloak Manager profile is configured."
@@ -414,6 +426,15 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
         owns_page = True
     else:
         page = context.pages[0]
+    # Write the tab down BEFORE anything can go wrong with it. A page we created in a
+    # SHARED profile is indistinguishable from the operator's own tabs once our handle
+    # to it is gone, so "close everything that looks like ours" is not an option — the
+    # only safe discriminator is a durable record of the ids we opened ourselves.
+    page_target_id = ""
+    if owns_page and profile:
+        page_target_id = await target_id_of(context, page)
+        if page_target_id:
+            note_owned_page(profile, page_target_id, cwd, "")
     # NO set_viewport_size here, deliberately. It sets an emulation override, and on a
     # connect_over_cdp profile the override does NOT win the layout — the profile keeps
     # laying the page out at its own window size (1920x947 on the Cloak profile) — but it
@@ -426,7 +447,8 @@ async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
     # never impose ours.
     return Acquired(pw=pw, browser=browser, context=context, page=page,
                     owns_browser=False, backend="external-cdp", label=label,
-                    owns_page=owns_page, shared_context=isolate, profile=profile)
+                    owns_page=owns_page, shared_context=isolate, profile=profile,
+                    page_target_id=page_target_id)
 
 
 # ───────────────────────────── tier A: builtin ───────────────────────────────
@@ -475,7 +497,7 @@ async def acquire(cwd: str, viewport: dict) -> Acquired:
         if backend == "cloakbrowser":
             acq = await _acquire_cloak(cfg, viewport)
         elif backend == "external-cdp":
-            acq = await _acquire_external(cfg, viewport)
+            acq = await _acquire_external(cfg, viewport, cwd)
         else:
             acq = await _acquire_builtin(viewport)
     except BackendError as e:
@@ -758,6 +780,183 @@ async def _note_launch_ownership(profile_id: str) -> None:
         async with _profile_lock():
             _PROFILE_OURS.add(profile_id)
             _save_owned()
+
+
+# ─────────────────── leaked-tab registry + orphan sweeper ────────────────────
+#
+# A tab we opened in a SHARED Cloak profile outlives its session whenever the CDP
+# connection drops: the remote Chrome keeps running, our handle does not. Playwright
+# can no longer close it, and from the outside it is indistinguishable from one of the
+# operator's own logged-in tabs — so the id has to be written down at the moment we
+# create it. Confirmed leak (2026-09-18 22:20:52): one disconnect burst left 8 live
+# WebGL tabs in profile d33e103d that pinned the GPU-less browser VM at ~670% CPU for
+# hours and fired xyOps "High CPU Load" alerts until they were closed by hand.
+_OWNED_PAGES_PATH = Path(__file__).resolve().parent / "data" / "cloak-pages-owned.json"
+_OWNED_PAGES: "dict[str, dict[str, dict]]" = {}   # profile id → target id → {cwd, at}
+_OWNED_PAGES_LOADED = False
+
+
+def _load_owned_pages() -> None:
+    """Reload the persisted tab registry once per process (survives a hard restart)."""
+    global _OWNED_PAGES_LOADED
+    if _OWNED_PAGES_LOADED:
+        return
+    _OWNED_PAGES_LOADED = True
+    with contextlib.suppress(Exception):
+        import json as _json
+        data = _json.loads(_OWNED_PAGES_PATH.read_text())
+        if isinstance(data, dict):
+            for profile, pages in data.items():
+                if isinstance(pages, dict):
+                    _OWNED_PAGES[str(profile)] = {str(t): (v if isinstance(v, dict) else {})
+                                                  for t, v in pages.items()}
+    total = sum(len(v) for v in _OWNED_PAGES.values())
+    if total:
+        _log.info("reloaded %d cockpit-owned browser tab(s) across restart", total)
+
+
+def _save_owned_pages() -> None:
+    with contextlib.suppress(Exception):
+        import json as _json
+        _OWNED_PAGES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _OWNED_PAGES_PATH.write_text(_json.dumps(_OWNED_PAGES, indent=1, sort_keys=True))
+
+
+def note_owned_page(profile: str, target_id: str, cwd: str = "", url: str = "") -> None:
+    """Record that WE opened ``target_id`` in ``profile`` — the sweeper's only licence
+    to close a tab. Never called for a page that was already in the profile."""
+    if not profile or not target_id:
+        return
+    _load_owned_pages()
+    _OWNED_PAGES.setdefault(profile, {})[target_id] = {
+        "cwd": cwd, "url": url, "at": int(time.time()),
+    }
+    _save_owned_pages()
+
+
+def forget_owned_page(profile: str, target_id: str) -> None:
+    """Drop a tab from the registry — it is closed, so it is no longer ours to close."""
+    if not profile or not target_id:
+        return
+    _load_owned_pages()
+    pages = _OWNED_PAGES.get(profile)
+    if not pages or target_id not in pages:
+        return
+    pages.pop(target_id, None)
+    if not pages:
+        _OWNED_PAGES.pop(profile, None)
+    _save_owned_pages()
+
+
+def owned_pages_status() -> dict:
+    """Snapshot for diagnostics: tabs we believe we still own, per profile."""
+    _load_owned_pages()
+    return {profile: sorted(pages) for profile, pages in _OWNED_PAGES.items()}
+
+
+async def target_id_of(context: Any, page: Any) -> str:
+    """CDP target id for a Playwright page (empty string if it cannot be resolved —
+    never fatal: a missing id only means this tab cannot be swept later)."""
+    session = None
+    try:
+        session = await context.new_cdp_session(page)
+        info = await session.send("Target.getTargetInfo")
+        return str((info.get("targetInfo") or {}).get("targetId") or "")
+    except Exception as e:
+        _log.debug("could not resolve CDP target id for page: %s", e)
+        return ""
+    finally:
+        if session is not None:
+            with contextlib.suppress(Exception):
+                await session.detach()
+
+
+async def _close_targets(cdp_url: str, headers: dict, wanted: "set[str]") -> "tuple[set[str], set[str]]":
+    """Close ``wanted`` target ids over a raw CDP websocket.
+
+    Returns ``(closed, gone)`` — ids we closed, and ids the browser does not have any
+    more (already closed by someone else). Both are dropped from the registry; anything
+    else stays, so a transient Manager failure never makes us forget a live leak.
+    Raw CDP rather than Playwright on purpose: ``connect_over_cdp`` attaches to every
+    target and would wait on the very tabs we are trying to get rid of.
+    """
+    import asyncio
+    import json as _json
+
+    import aiohttp
+
+    closed: set[str] = set()
+    gone: set[str] = set()
+    timeout = aiohttp.ClientTimeout(total=CDP_PROBE_TIMEOUT * 6, sock_connect=CDP_PROBE_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers or None) as sess:
+        async with sess.ws_connect(cdp_url, max_msg_size=0) as ws:
+            async def _call(method: str, params: dict | None = None) -> dict:
+                msg: dict[str, Any] = {"id": 1, "method": method}
+                if params:
+                    msg["params"] = params
+                await ws.send_str(_json.dumps(msg))
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + CDP_PROBE_TIMEOUT * 2
+                while loop.time() < deadline:
+                    msg_in = await asyncio.wait_for(
+                        ws.receive(), timeout=max(0.05, deadline - loop.time()))
+                    if msg_in.type is not aiohttp.WSMsgType.TEXT:
+                        break
+                    data = _json.loads(msg_in.data)
+                    if isinstance(data, dict) and data.get("id") == 1:
+                        return data
+                return {}
+
+            res = await _call("Target.getTargets")
+            open_ids = {
+                str(t.get("targetId"))
+                for t in (res.get("result", {}).get("targetInfos") or [])
+                if t.get("type") == "page"
+            }
+            gone = wanted - open_ids
+            for tid in sorted(wanted & open_ids):
+                with contextlib.suppress(Exception):
+                    await _call("Target.closeTarget", {"targetId": tid})
+                    closed.add(tid)
+    return closed, gone
+
+
+async def sweep_orphan_pages(live: "set[str] | None" = None) -> int:
+    """Close every cockpit-owned tab that no LIVE session is driving.
+
+    ``live`` is the set of target ids held by sessions alive right now (passed in by
+    browser_pane, the only place that knows) — those are legitimately open and are
+    skipped. A profile that is not running is skipped too: it renders nothing, and the
+    sweep that runs on the next acquire will catch it once it is back up.
+    """
+    _load_owned_pages()
+    if not _OWNED_PAGES or not manager_configured():
+        return 0
+    live = live or set()
+    running: set[str] = set()
+    with contextlib.suppress(Exception):
+        for prof in await list_profiles():
+            if prof["status"].lower() in ("running", "started", "active"):
+                running.add(prof["id"])
+    headers = _manager_cdp_headers()
+    total = 0
+    for profile, pages in list(_OWNED_PAGES.items()):
+        wanted = {tid for tid in pages if tid not in live}
+        if not wanted or profile not in running:
+            continue
+        try:
+            cdp_url = await profile_cdp_url(profile)
+            closed, gone = await _close_targets(cdp_url, headers, wanted)
+        except Exception as e:
+            _log.warning("orphan tab sweep failed (profile=%s): %s", profile, e)
+            continue
+        for tid in closed | gone:
+            forget_owned_page(profile, tid)
+        if closed:
+            _log.info("orphan tab sweep closed %d leaked tab(s) in profile %s",
+                      len(closed), profile)
+        total += len(closed)
+    return total
 
 
 def profile_lifecycle_status() -> dict:
