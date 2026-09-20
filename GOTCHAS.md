@@ -155,3 +155,34 @@ Projects are registered in `data/registry.json` (gitignored) or auto-scanned fro
   append findings to `/tmp/cardloop-scratch/<task-slug>.md` every ~15 tool calls (read-only
   roles via a Bash heredoc), so a capped agent still leaves its work. Never remove the cap: a
   looping agent without one burns until the 30-min TTL eviction at a growing context per turn.
+
+## Browser pane: a dropped CDP connection used to leak the tab (2026-09-19 incident)
+
+`_on_disconnected` sets `_closed = True` **before** routing to `close()`. While `close()`
+still began with `if self._closed: return`, that made it a no-op on exactly the path it
+exists for, and every dropped connection leaked three things at once: our tab in the
+shared Cloak profile, the local Playwright driver process, and the profile refcount — the
+last of which kept the profile pinned open so its idle-stop never fired either.
+
+Eight stranded WebGL tabs (fly.igdigi.com + its dev server) held the **GPU-less** browser
+VM at ~670 % CPU for four hours and set off a run of xyOps "High CPU Load" alerts. Chrome
+there runs `--use-angle=swiftshader`, so WebGL is rasterised on the CPU, and it is launched
+with `--disable-backgrounding-occluded-windows`, so `document.hidden` never goes true and
+a page's own pause-when-hidden logic never engages. Assume any leaked animated tab costs
+~80 % of a core, forever.
+
+Rules that follow:
+
+- **`close()` guards on `_close_ran`, never on `_closed`.** Keep those two meanings apart:
+  `_closed` = "this session is dead", `_close_ran` = "close() already ran".
+- **A tab that failed to close stays registered.** A dead connection cannot close a remote
+  tab; recording it as closed is what made a leak unrecoverable.
+- **Only ids we wrote down may be swept.** In a shared profile our tabs look exactly like
+  the operator's logged-in ones — `data/cloak-pages-owned.json` is the only licence to
+  close anything, and `browser_pane.live_target_ids()` protects sessions in flight.
+- Sweep on a timer (`CLOAK_ORPHAN_SWEEP_SEC`, default 600s), not only on the next pane
+  open: nobody opens a pane overnight.
+
+To inspect the profile by hand: `secret get cloak-manager-token`, then
+`GET https://cloak.coscore.us/api/profiles/<id>/cdp/json/list` (the browser runs
+`--remote-debugging-pipe`, so its local CDP port is closed — go through the Manager).
