@@ -655,8 +655,19 @@ class BrowserSession:
             return
         self._close_ran = True
         self._closed = True
-        if self._watchdog:
-            self._watchdog.cancel()
+        # NEVER cancel the task we are running IN. The idle watchdog reaches close()
+        # from inside itself (_idle_watch -> close_session -> close), so cancelling it
+        # here threw CancelledError at the next await INSIDE close() — and since
+        # CancelledError is a BaseException, `contextlib.suppress(Exception)` below did
+        # not stop it. Teardown was therefore skipped on EVERY idle close, not just on
+        # the disconnect path: the tab stayed open in the shared profile and the profile
+        # refcount was never released. Observed live 2026-09-19 — _SESSIONS was empty
+        # while the profile still listed the project as attached, and the pane's tab
+        # survived 6 minutes until the orphan sweeper closed it.
+        if self._watchdog is not None:
+            if self._watchdog is not asyncio.current_task():
+                self._watchdog.cancel()
+            self._watchdog = None
         if self._resize_task is not None:
             self._resize_task.cancel()
         if self._recapture_task is not None:

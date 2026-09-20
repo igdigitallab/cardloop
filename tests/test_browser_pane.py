@@ -2108,3 +2108,80 @@ def test_resync_restarts_the_stream_as_well_as_remeasuring():
         assert s.viewport == {"width": 1600, "height": 900}
         assert "Page.stopScreencast" in methods and "Page.startScreencast" in methods
     asyncio.run(go())
+
+
+# ── teardown must actually run (2026-09-19 tab-leak incident) ────────────────
+#
+# Both regressions below let a pane's tab survive its session in a SHARED Cloak
+# profile. On the GPU-less browser host each stranded WebGL tab rendered through
+# swiftshader at ~80 % of a core indefinitely; eight of them pinned the box at
+# ~670 % CPU for hours.
+
+
+def test_close_tears_down_when_reached_from_its_own_watchdog_task():
+    """_idle_watch calls close_session() from INSIDE itself. close() used to cancel
+    `self._watchdog` unconditionally — i.e. the task it was running in — so the next
+    await raised CancelledError (a BaseException, so `suppress(Exception)` missed it)
+    and _teardown never ran. Every idle close leaked its tab and the profile refcount."""
+    ran = []
+
+    async def scenario():
+        sess = BrowserSession("/tmp/idle-path")
+
+        async def fake_teardown():
+            await asyncio.sleep(0)     # a real teardown awaits; that is where a cancel lands
+            ran.append(1)
+
+        sess._teardown = fake_teardown
+        browser_pane._SESSIONS[sess.key] = sess
+
+        async def watchdog_body():
+            sess._watchdog = asyncio.current_task()
+            await browser_pane.close_session(sess.key, sess)
+
+        task = asyncio.create_task(watchdog_body())
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        browser_pane._SESSIONS.pop(sess.key, None)
+
+    asyncio.run(scenario())
+    assert ran == [1]
+
+
+def test_close_tears_down_after_a_disconnect_marked_the_session_dead():
+    """_on_disconnected sets _closed before routing to close(); guarding close() on
+    _closed made it a no-op on exactly that path. It must still tear down — and still
+    be idempotent."""
+    ran = []
+
+    async def scenario():
+        sess = BrowserSession("/tmp/disconnect-path")
+
+        async def fake_teardown():
+            ran.append(1)
+
+        sess._teardown = fake_teardown
+        sess._closed = True            # what _on_disconnected does before close()
+        await sess.close()
+        await sess.close()             # second call must not tear down twice
+
+    asyncio.run(scenario())
+    assert ran == [1]
+
+
+def test_live_target_ids_reports_only_sessions_that_are_alive():
+    """The orphan sweeper closes every recorded tab NOT in this set, so a live pane
+    missing from it would be closed out from under the operator."""
+    alive = BrowserSession("/tmp/alive")
+    alive._targets = {"t1": "AAA"}
+    dead = BrowserSession("/tmp/dead")
+    dead._targets = {"t1": "BBB"}
+    dead._closed = True
+    browser_pane._SESSIONS.update({alive.key: alive, dead.key: dead})
+    try:
+        assert browser_pane.live_target_ids() == {"AAA"}
+    finally:
+        browser_pane._SESSIONS.pop(alive.key, None)
+        browser_pane._SESSIONS.pop(dead.key, None)
