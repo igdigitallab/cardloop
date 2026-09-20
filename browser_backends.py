@@ -361,7 +361,7 @@ async def _prune_dead_targets(cdp_url: str, headers: dict) -> int:
     return closed
 
 
-async def _acquire_external(cfg: dict, viewport: dict, cwd: str = "") -> Acquired:
+async def _acquire_external(cfg: dict, viewport: dict) -> Acquired:
     cdp_url = cfg.get("cdp_url") or ""
     profile = cfg.get("profile") or ""
     label = "External CDP"
@@ -426,15 +426,14 @@ async def _acquire_external(cfg: dict, viewport: dict, cwd: str = "") -> Acquire
         owns_page = True
     else:
         page = context.pages[0]
-    # Write the tab down BEFORE anything can go wrong with it. A page we created in a
-    # SHARED profile is indistinguishable from the operator's own tabs once our handle
-    # to it is gone, so "close everything that looks like ours" is not an option — the
-    # only safe discriminator is a durable record of the ids we opened ourselves.
+    # Resolve the tab's CDP target id here, while the connection is healthy. A page we
+    # created in a SHARED profile is indistinguishable from the operator's own tabs once
+    # our handle to it is gone, so "close everything that looks like ours" is not an
+    # option — a durable record of the ids we opened ourselves is the only discriminator.
+    # The record itself is written by acquire(), the single point that also knows `cwd`.
     page_target_id = ""
     if owns_page and profile:
         page_target_id = await target_id_of(context, page)
-        if page_target_id:
-            note_owned_page(profile, page_target_id, cwd, "")
     # NO set_viewport_size here, deliberately. It sets an emulation override, and on a
     # connect_over_cdp profile the override does NOT win the layout — the profile keeps
     # laying the page out at its own window size (1920x947 on the Cloak profile) — but it
@@ -497,7 +496,7 @@ async def acquire(cwd: str, viewport: dict) -> Acquired:
         if backend == "cloakbrowser":
             acq = await _acquire_cloak(cfg, viewport)
         elif backend == "external-cdp":
-            acq = await _acquire_external(cfg, viewport, cwd)
+            acq = await _acquire_external(cfg, viewport)
         else:
             acq = await _acquire_builtin(viewport)
     except BackendError as e:
@@ -513,6 +512,10 @@ async def acquire(cwd: str, viewport: dict) -> Acquired:
     # Refcount the Manager profile only after a SUCCESSFUL acquire — registering a
     # failed attempt would pin a profile open with a session that never existed.
     await attach_profile(acq.profile, cwd)
+    # Write the tab down as soon as it exists: from here on it can only be found again
+    # by id, and a dropped connection takes our handle to it with no warning.
+    if acq.owns_page and acq.profile and acq.page_target_id:
+        note_owned_page(acq.profile, acq.page_target_id, cwd)
     _log.info("browser backend acquired (cwd=%s backend=%s label=%s)", cwd, backend, acq.label or acq.backend)
     return acq
 
