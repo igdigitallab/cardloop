@@ -94,7 +94,7 @@ while [[ $# -gt 0 ]]; do
 
 Профили:
   --fast    codex gpt-5.6-luna    · agy gemini-3.8-flash-high · effort medium
-  (дефолт)  codex gpt-6-astra     · agy gemini-3.1-pro-high   · effort high
+  (дефолт)  codex gpt-6-astra     · agy gemini-3.8-flash-<effort> · effort high
   --best    codex gpt-6-astra     · agy claude-opus-4-6-thinking (>120 КБ → gemini-3.1-pro-high)
             effort max · таймаут 1800 с · плюс контракт на форму ответа (цитаты, «не знаю»)
 
@@ -153,8 +153,12 @@ case "$PROFILE" in
     [[ $TIMEOUT_EXPLICIT -eq 0 ]] && TIMEOUT=1800
     ;;
   *)
+    # Дефолт (решение оператора 21.09.2026): gpt-6-astra со стороны Codex и flash-линейка
+    # 3.8 со стороны Antigravity. Pro здесь не выигрывает: потолок контекста у обоих один
+    # и тот же (~160 КБ, замерено), 3.8 — поколение новее 3.1, и оно заметно быстрее.
+    # Модель agy не задаём здесь — её соберёт строка ниже из --effort, чтобы
+    # `--effort low` реально опускал слаг, а не конфликтовал с ним.
     [[ -z "$CODEX_MODEL" ]] && CODEX_MODEL="gpt-6-astra"
-    [[ -z "$AGY_MODEL"   ]] && AGY_MODEL="gemini-3.1-pro-high"
     ;;
 esac
 # agy кодирует глубину в слаге и выше high не умеет — xhigh/max для него это high.
