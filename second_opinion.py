@@ -193,6 +193,33 @@ async def _resolve_model(alias: str) -> str:
     return static
 
 
+def _agy_stream_answer(raw: str) -> str:
+    """Final answer out of agy's stream-json output.
+
+    The answer lives in the last ``{"event":"result","result":{"response":...}}`` line.
+    Anything that is not recognisable NDJSON falls back to the old plain-stdout read, so
+    a format change degrades to "noisy but present" instead of "silently empty".
+    """
+    answer, saw_result = "", False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            msg = json.loads(line)
+        except Exception:
+            continue
+        if msg.get("event") != "result":
+            continue
+        saw_result = True
+        res = msg.get("result") or {}
+        if res.get("response"):
+            answer = res["response"]
+        elif res.get("error"):
+            answer = f"agy error: {res['error']}"
+    return answer.strip() if saw_result else _strip_noise(raw)
+
+
 async def _ask_agy(question: str, alias: str, context: str | None) -> str:
     """Run one agy print-mode call and return a human-readable answer (or a clean
     "unavailable" string the agent can read and move on from — never raises)."""
@@ -210,9 +237,22 @@ async def _ask_agy(question: str, alias: str, context: str | None) -> str:
     timeout = float(os.getenv("SECOND_OPINION_TIMEOUT", "180"))
     max_chars = int(os.getenv("SECOND_OPINION_MAX_CHARS", "6000"))
 
+    # ⚠️ The prompt goes in over STDIN, never as an argv string. A single argument is
+    # capped at MAX_ARG_STRLEN (131071 B) -- NOT the 2 MB ARG_MAX -- so passing it as
+    # `-p <prompt>` made every call above ~128 KB die with E2BIG ("failed to launch agy")
+    # *below* the 160 000-char ceiling this function advertises. agy's stdin channel is
+    # `--input-format stream-json` plus one NDJSON line; note the envelope key is "event",
+    # not the Claude-style "type" (that one is rejected outright).
+    payload = json.dumps(
+        {"event": "user",
+         "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}},
+        ensure_ascii=False,
+    ) + "\n"
     try:
         proc = await asyncio.create_subprocess_exec(
-            agy, "-p", prompt, "--model", model,
+            agy, "-p", "", "--model", model,
+            "--input-format", "stream-json", "--output-format", "stream-json",
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -220,7 +260,8 @@ async def _ask_agy(question: str, alias: str, context: str | None) -> str:
         return f"⚠️ second_opinion failed to launch agy: {e}"
 
     try:
-        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out_b, err_b = await asyncio.wait_for(
+            proc.communicate(payload.encode("utf-8")), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         try:
@@ -229,7 +270,7 @@ async def _ask_agy(question: str, alias: str, context: str | None) -> str:
             pass
         return f"⚠️ second_opinion timed out after {int(timeout)}s (model: {model})."
 
-    out = _strip_noise((out_b or b"").decode("utf-8", "replace"))
+    out = _agy_stream_answer((out_b or b"").decode("utf-8", "replace"))
     if proc.returncode and not out:
         err = _strip_noise((err_b or b"").decode("utf-8", "replace"))
         return f"⚠️ second_opinion error (exit {proc.returncode}): {err[:500] or 'no output'}"

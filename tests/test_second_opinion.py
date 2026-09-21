@@ -32,7 +32,8 @@ class FakeProc:
         self.returncode = returncode
         self.kill_called = False
 
-    async def communicate(self):
+    async def communicate(self, input=None):
+        self.stdin_payload = input
         return (self._stdout, self._stderr)
 
     def kill(self):
@@ -43,7 +44,7 @@ def make_subprocess_exec_patch(fake_proc):
     """Return an async callable that records its argv and returns fake_proc."""
     captured = {"argv": None}
 
-    async def fake_exec(*argv, stdout=None, stderr=None):
+    async def fake_exec(*argv, stdin=None, stdout=None, stderr=None):
         captured["argv"] = argv
         return fake_proc
 
@@ -264,7 +265,7 @@ async def test_ask_agy_timeout(monkeypatch):
 
     fake_proc_obj = fake_proc  # keep reference
 
-    async def fake_exec(*argv, stdout=None, stderr=None):
+    async def fake_exec(*argv, stdin=None, stdout=None, stderr=None):
         return fake_proc_obj
 
     async def raise_timeout(*_a, **_kw):
@@ -576,3 +577,54 @@ async def test_ask_panel_aggregates(monkeypatch):
     out = await second_opinion._ask_panel("q", None)
     assert "Azure/grok" in out and "Azure/deepseek" in out
     assert "ans-grok" in out and "ans-deepseek" in out
+
+
+# ---------------------------------------------------------------------------
+# 15. the prompt travels over stdin, never as an argv string
+# ---------------------------------------------------------------------------
+
+async def test_ask_agy_sends_prompt_over_stdin_not_argv(monkeypatch):
+    """A 200 KB prompt must not become an argv member.
+
+    A single argument is capped at MAX_ARG_STRLEN (131071 B), so `-p <prompt>` used to
+    blow up with E2BIG *below* the ceiling this module advertises -- the launch failed
+    instead of the gate refusing. Guarding the channel, not just the size.
+    """
+    big = "x" * 200_000
+    monkeypatch.setattr(second_opinion, "_AGY_MAX_INPUT_CHARS", 300_000, raising=False)
+    fake_proc = FakeProc(
+        b'{"event":"result","result":{"response":"streamed answer"}}\n', b"", returncode=0
+    )
+    fake_exec, captured = make_subprocess_exec_patch(fake_proc)
+    monkeypatch.setattr(second_opinion, "_resolve_agy", lambda: "/usr/bin/agy")
+    monkeypatch.setattr(second_opinion.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(second_opinion, "_catalog_cache", None, raising=False)
+
+    result = await second_opinion._ask_agy(big, "pro", None)
+
+    assert not any(len(str(a)) > 131_071 for a in captured["argv"])
+    assert "--input-format" in captured["argv"] and "stream-json" in captured["argv"]
+    assert big.encode() in (fake_proc.stdin_payload or b"")
+    assert "streamed answer" in result
+
+
+# ---------------------------------------------------------------------------
+# 16. the stream-json reader, including its plain-stdout fallback
+# ---------------------------------------------------------------------------
+
+def test_agy_stream_answer_reads_result_event():
+    raw = (
+        '{"event":"init","init":{"model":"x"}}\n'
+        '{"event":"result","result":{"response":"the answer\\n"}}\n'
+    )
+    assert second_opinion._agy_stream_answer(raw) == "the answer"
+
+
+def test_agy_stream_answer_surfaces_result_error():
+    raw = '{"event":"result","result":{"error":"no capacity"}}'
+    assert "no capacity" in second_opinion._agy_stream_answer(raw)
+
+
+def test_agy_stream_answer_falls_back_to_plain_stdout():
+    # not NDJSON at all -> keep the old behaviour rather than returning nothing
+    assert second_opinion._agy_stream_answer("just text\n") == "just text"
