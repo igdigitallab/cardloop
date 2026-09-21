@@ -62,6 +62,11 @@ _ALIAS_SLUG_RE = {
     "sonnet": re.compile(r"^claude-sonnet-[\w.-]+$"),
     "gpt":    re.compile(r"^gpt-oss-[\w.-]+$"),
 }
+# Measured 2026-09-21 with a canary marker at the END of the prompt: at ~160 000 chars
+# agy still finds it, at 200 000 it does not -- and it answers confidently anyway, exit 0.
+# A silently truncated read is indistinguishable from a good one and worse than no answer,
+# so the call is refused above this instead of warned about. Override deliberately.
+_AGY_MAX_INPUT_CHARS = int(os.getenv("SECOND_OPINION_AGY_MAX_CHARS", "160000"))
 _CATALOG_TTL_SEC = 3600.0
 _catalog_cache: tuple[float, list[tuple[str, str]]] | None = None
 _catalog_lock: asyncio.Lock | None = None
@@ -197,6 +202,11 @@ async def _ask_agy(question: str, alias: str, context: str | None) -> str:
 
     model = await _resolve_model(alias)
     prompt = question if not context else f"{question}\n\n--- CONTEXT ---\n{context}"
+    if len(prompt) > _AGY_MAX_INPUT_CHARS:
+        return (f"⚠️ second_opinion refused: {len(prompt)} chars exceeds the {_AGY_MAX_INPUT_CHARS}-char "
+                "ceiling above which Antigravity silently drops the tail of the input and answers "
+                "from the beginning only. Trim `context`, or ask an Azure model "
+                "(grok/deepseek/gpt5), which is not affected by this.")
     timeout = float(os.getenv("SECOND_OPINION_TIMEOUT", "180"))
     max_chars = int(os.getenv("SECOND_OPINION_MAX_CHARS", "6000"))
 

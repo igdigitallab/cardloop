@@ -5,11 +5,22 @@
 # Коды возврата: 0 — ответили все запрошенные; 1 — ответил не каждый; 2 — никто/ошибка вызова.
 set -uo pipefail
 
-VERSION="1.2"
+VERSION="1.3"
 AGY_MODEL="${OPINION_AGY_MODEL:-}"   # пусто → выводится из --effort (agy кодирует глубину в слаге)
 CODEX_MODEL="${OPINION_CODEX_MODEL:-}"
+# Профили. Дефолт — УМНЫЙ, а не быстрый: этот инструмент зовут на важных развилках,
+# и дешёвая модель тут стоит дороже, чем лишняя минута ожидания.
+#   --fast  дежурный прогон           --best  максимум глубины на важный вопрос
+PROFILE=normal   # fast | normal | best
+# Потолки ввода — ЗАМЕРЕНЫ, не взяты из документации (см. --limits):
+#   codex  отдаёт честную ошибку input_too_large ровно на 1 048 576 символах;
+#   agy    МОЛЧА теряет хвост промпта — на 250 КБ уже не видит конец файла,
+#          при этом отвечает уверенно и с exit 0. Вот это и есть источник
+#          «правдоподобного, но выдуманного» ответа, поэтому здесь гейт, а не варнинг.
+CODEX_MAX_CHARS="${OPINION_CODEX_MAX_CHARS:-1048576}"
+AGY_MAX_CHARS="${OPINION_AGY_MAX_CHARS:-160000}"
 TIMEOUT="${OPINION_TIMEOUT:-300}"; TIMEOUT_EXPLICIT=0
-EFFORT="${OPINION_EFFORT:-high}"
+EFFORT="${OPINION_EFFORT:-high}"; EFFORT_EXPLICIT=0
 WORKDIR="$PWD"
 WANT_AGY=1; WANT_CODEX=1; MODE=text; WRITABLE=0
 declare -a FILES=(); declare -a WORDS=()
@@ -35,9 +46,14 @@ opinion — два независимых внешних мнения одной
   -t, --timeout SEC      таймаут на каждый движок (300; промпт >50 КБ сам даёт 900)
   --agy-model M          модель Antigravity (по умолчанию gemini-3.8-flash-<effort>)
   --codex-model M        модель Codex (по умолчанию из ~/.codex/config.toml)
-  --effort L             глубина рассуждения: low|medium|high (по умолчанию high).
+  --effort L             глубина: low|medium|high|xhigh|max (по умолчанию high).
                          Codex — напрямую; Antigravity — через слаг модели, поэтому
                          при явной --agy-model на Antigravity уже не влияет.
+  --best, --max          максимум глубины: самые сильные модели, effort=max,
+                         таймаут 1800 с и контракт «цитируй или не утверждай».
+                         Для вопросов, где ошибка дорого стоит
+  --fast                 дежурный быстрый прогон (дешевле и слабее)
+  --limits               замеренные потолки контекста обоих движков и профили
   --rw                   разрешить движкам ПИСАТЬ (по умолчанию read-only)
   --json                 машинный вывод: {"agy":{...},"codex":{...}}
   --models               показать доступные модели обоих и выйти
@@ -46,6 +62,8 @@ opinion — два независимых внешних мнения одной
 Коды возврата: 0 — ответили все; 1 — ответил не каждый; 2 — никто не ответил.
 Модели: `opinion --models`. Расхождение между движками и есть полезный сигнал.
 Приложенные файлы идут через stdin, а не argv — ограничения в 128 КБ больше нет.
+Но контекст НЕ бесконечен: выше своего потолка Antigravity молча читает только начало,
+поэтому такой вызов не делается вовсе. Потолки и профили — `opinion --limits`.
 USAGE
 }
 
@@ -61,7 +79,28 @@ while [[ $# -gt 0 ]]; do
     -t|--timeout)  need "$1" $#; TIMEOUT="$2"; TIMEOUT_EXPLICIT=1; shift 2 ;;
     --agy-model)   need "$1" $#; AGY_MODEL="$2"; shift 2 ;;
     --codex-model) need "$1" $#; CODEX_MODEL="$2"; shift 2 ;;
-    --effort)      need "$1" $#; EFFORT="$2"; shift 2 ;;
+    --effort)      need "$1" $#; EFFORT="$2"; EFFORT_EXPLICIT=1; shift 2 ;;
+    --best|--max)  PROFILE=best; shift ;;
+    --fast)        PROFILE=fast; shift ;;
+    --limits)      cat <<'LIM'
+Замерено канареечным маркером в конце промпта (2026-09-21), не взято из документации:
+
+  Codex        до 1 048 576 символов ввода на один запуск. Больше — честная ошибка
+               input_too_large с точными числами. Весь уложившийся ввод читает целиком
+               (проверено на 600 КБ: маркеры начала, середины и конца — все найдены).
+  Antigravity  до ~160 000 символов читает целиком. ВЫШЕ — МОЛЧА теряет хвост и
+               отвечает уверенно по началу (на 200 КБ конец файла уже не виден,
+               на 600 КБ не видна и середина). Поэтому здесь жёсткий гейт.
+
+Профили:
+  --fast    codex gpt-5.6-luna    · agy gemini-3.8-flash-high · effort medium
+  (дефолт)  codex gpt-6-astra     · agy gemini-3.1-pro-high   · effort high
+  --best    codex gpt-6-astra     · agy claude-opus-4-6-thinking (>120 КБ → gemini-3.1-pro-high)
+            effort max · таймаут 1800 с · плюс контракт на форму ответа (цитаты, «не знаю»)
+
+Потолки перебиваются: OPINION_CODEX_MAX_CHARS / OPINION_AGY_MAX_CHARS.
+LIM
+                   exit 0 ;;
     --rw)          WRITABLE=1; shift ;;
     --json)        MODE=json; shift ;;
     --models)      echo "── Antigravity ──"; agy models 2>&1
@@ -78,7 +117,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || die "--timeout ждёт число секунд, получил «$TIMEOUT»"
-[[ "$EFFORT" =~ ^(low|medium|high)$ ]] || die "--effort ждёт low|medium|high, получил «$EFFORT»"
+# xhigh/max реально поддерживаются Codex (см. supported_reasoning_levels в
+# ~/.codex/models_cache.json); скрипт их раньше запрещал и тем самым отрезал
+# самые сильные режимы. У agy глубина живёт в слаге и выше high не идёт.
+[[ "$EFFORT" =~ ^(low|medium|high|xhigh|max)$ ]] || die "--effort ждёт low|medium|high|xhigh|max, получил «$EFFORT»"
 PROMPT="${WORDS[*]:-}"
 [[ -z "${PROMPT// }" && ! -t 0 ]] && PROMPT="$(cat)"
 [[ -z "${PROMPT// }" ]] && die "нечего спрашивать (см. --help)"
@@ -88,7 +130,36 @@ WORKDIR="$(cd "$WORKDIR" && pwd)"
 # agy кодирует глубину рассуждения в САМОМ слаге, отдельного --effort у него нет.
 # Поэтому дефолтная модель выводится из --effort; явная --agy-model перебивает её
 # целиком (и тогда --effort на Antigravity уже не влияет — он влияет на Codex).
-[[ -z "$AGY_MODEL" ]] && AGY_MODEL="gemini-3.8-flash-$EFFORT"
+# Профиль решает ТРИ вещи сразу: какая модель, какая глубина, сколько ждать.
+# Дефолт намеренно умный, а не быстрый — «второе мнение» зовут на дорогих развилках.
+case "$PROFILE" in
+  fast)
+    [[ -z "$CODEX_MODEL" ]] && CODEX_MODEL="gpt-5.6-luna"
+    [[ -z "$AGY_MODEL"   ]] && AGY_MODEL="gemini-3.8-flash-high"
+    [[ $EFFORT_EXPLICIT -eq 0 ]] && EFFORT=medium
+    ;;
+  best)
+    # gpt-6-astra — «our most capable model for complex, demanding work» по каталогу
+    # Codex; max — самая глубокая из поддерживаемых им ступеней рассуждения.
+    [[ -z "$CODEX_MODEL" ]] && CODEX_MODEL="gpt-6-astra"
+    [[ $EFFORT_EXPLICIT -eq 0 ]] && EFFORT=max
+    # У Antigravity выбор модели упирается не в «кто умнее», а в то, кто ДОЧИТАЕТ
+    # промпт: claude-opus сильнее на рассуждении, но большой ввод надёжнее держит
+    # gemini-pro. Порог замерен канарейкой, не взят из головы.
+    if [[ -z "$AGY_MODEL" ]]; then
+      if [[ ${#PROMPT} -gt 120000 ]]; then AGY_MODEL="gemini-3.1-pro-high"
+      else                                 AGY_MODEL="claude-opus-4-6-thinking"; fi
+    fi
+    [[ $TIMEOUT_EXPLICIT -eq 0 ]] && TIMEOUT=1800
+    ;;
+  *)
+    [[ -z "$CODEX_MODEL" ]] && CODEX_MODEL="gpt-6-astra"
+    [[ -z "$AGY_MODEL"   ]] && AGY_MODEL="gemini-3.1-pro-high"
+    ;;
+esac
+# agy кодирует глубину в слаге и выше high не умеет — xhigh/max для него это high.
+AGY_EFFORT="$EFFORT"; [[ "$AGY_EFFORT" =~ ^(xhigh|max)$ ]] && AGY_EFFORT=high
+[[ -z "$AGY_MODEL" ]] && AGY_MODEL="gemini-3.8-flash-$AGY_EFFORT"
 
 # файл ищем сперва как дан (относительно PWD), затем относительно -C
 for f in ${FILES[@]+"${FILES[@]}"}; do
@@ -103,6 +174,22 @@ done
 if [[ $TIMEOUT_EXPLICIT -eq 0 && ${#PROMPT} -gt 50000 ]]; then
   TIMEOUT=900
   echo "opinion: промпт ${#PROMPT} Б — таймаут поднят до ${TIMEOUT}s (перебей через -t)" >&2
+fi
+
+# --best просят под вопрос с ценой ошибки, поэтому к нему прикладывается контракт
+# на форму ответа. Без него обе модели охотно отвечают уверенно и мимо материала —
+# это и есть «правдоподобно, но выдумано».
+if [[ "$PROFILE" == best ]]; then
+  PROMPT="$PROMPT"$'\n\n--- КАК ОТВЕЧАТЬ (обязательно) ---\n'
+  PROMPT+=$'1. Есть приложенный материал или доступ к файлам — опирайся на них и ссылайся\n'
+  PROMPT+=$'   точно: файл и строка либо прямая цитата. Проверить можно — проверь, не гадай.\n'
+  PROMPT+=$'2. Материала нет — отвечай из своих знаний, это нормально, но помечай такие места\n'
+  PROMPT+=$'   («по памяти, не проверял»). Чего не знаешь — говори «не знаю». Конкретику,\n'
+  PROMPT+=$'   в которой не уверен (флаги, имена, версии, цифры, цитаты), НЕ выдумывай:\n'
+  PROMPT+=$'   лучше назвать её неизвестной, чем подставить правдоподобную.\n'
+  PROMPT+=$'3. Низкая уверенность — скажи «не уверен» и назови, чем это проверить.\n'
+  PROMPT+=$'4. Сначала вывод в 2–3 строки, потом обоснование. Без вступлений и похвал.\n'
+  PROMPT+=$'5. Ошибочная посылка в самом вопросе — скажи об этом первой строкой.\n'
 fi
 
 TMP="$(mktemp -d /tmp/opinion.XXXXXX)"
@@ -129,6 +216,14 @@ INPY
 
 run_agy() {
   local t0=$SECONDS
+  # ⚠️ ГЕЙТ, а не предупреждение. Замерено канареечным маркером в конце промпта:
+  # на 160 КБ agy находит его, на 200 КБ — уже нет, и при этом отвечает уверенно
+  # с exit 0. Ответ по молча усечённому вводу неотличим от нормального и хуже
+  # отсутствия ответа, поэтому такой вызов не делается вовсе.
+  if [[ ${#PROMPT} -gt $AGY_MAX_CHARS ]]; then
+    echo "промпт ${#PROMPT} симв. > потолка Antigravity ${AGY_MAX_CHARS}: выше него agy МОЛЧА теряет хвост ввода и отвечает по началу. Сузь материал, спроси только Codex (--codex, до ${CODEX_MAX_CHARS} симв.) или подними OPINION_AGY_MAX_CHARS осознанно." >"$TMP/agy.err"
+    echo 4 >"$TMP/agy.rc"; echo 0 >"$TMP/agy.sec"; return
+  fi
   # ⚠️ У agy НЕТ рабочего read-only: ни --sandbox, ни --mode plan, ни урезанный
   # settings.json не держат запись в print-режиме (пишет через раз — это инструкция
   # модели, а не гейт). Единственный настоящий замок — bubblewrap.
@@ -187,6 +282,12 @@ AGYPY
 
 run_codex() {
   local t0=$SECONDS
+  # Codex про это честен: на 1 048 576 символах он отдаёт input_too_large с точными
+  # числами. Ловим заранее, чтобы не жечь минуту на заведомо отбитый запрос.
+  if [[ ${#PROMPT} -gt $CODEX_MAX_CHARS ]]; then
+    echo "промпт ${#PROMPT} симв. > жёсткого лимита Codex ${CODEX_MAX_CHARS} (input_too_large). Сузь материал." >"$TMP/codex.err"
+    echo 4 >"$TMP/codex.rc"; echo 0 >"$TMP/codex.sec"; return
+  fi
   local -a sb=(-s read-only); [[ $WRITABLE -eq 1 ]] && sb=(-s danger-full-access)
   local -a mdl=(); [[ -n "$CODEX_MODEL" ]] && mdl=(-m "$CODEX_MODEL")
   # промпт — через stdin: codex exec читает его оттуда, когда позиционного нет.
@@ -217,10 +318,11 @@ read_part() {
   case "$rc" in
     124) echo "ТАЙМАУТ ${TIMEOUT}s — ответа нет" ;;
     3)   echo "НЕ ЗАПУЩЕН: $(cat "$TMP/$n.err" 2>/dev/null)" ;;
+    4)   echo "НЕ СПРОШЕН (контекст не влезает): $(cat "$TMP/$n.err" 2>/dev/null)" ;;
     0)   echo "ПУСТОЙ ОТВЕТ (движок завершился успешно, но ничего не сказал)" ;;
     *)   echo "ОШИБКА (код $rc)" ;;
   esac
-  [[ "$rc" != "3" ]] && sed -n '1,12p' "$TMP/$n.err" 2>/dev/null
+  [[ "$rc" != "3" && "$rc" != "4" ]] && sed -n '1,12p' "$TMP/$n.err" 2>/dev/null
 }
 
 want=0; good=0
@@ -245,7 +347,7 @@ print(json.dumps(o,ensure_ascii=False,indent=2))
 PY
 else
   if [[ $WANT_AGY -eq 1 ]]; then
-    printf '\n===== ANTIGRAVITY (%s, effort=%s) — %ss =====\n' "$AGY_MODEL" "$EFFORT" "$(cat "$TMP/agy.sec" 2>/dev/null || echo ?)"
+    printf '\n===== ANTIGRAVITY (%s) — %ss =====\n' "$AGY_MODEL" "$(cat "$TMP/agy.sec" 2>/dev/null || echo ?)"
     read_part agy
   fi
   if [[ $WANT_CODEX -eq 1 ]]; then
