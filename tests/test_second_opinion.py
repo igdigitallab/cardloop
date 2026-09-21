@@ -182,20 +182,73 @@ async def test_ask_agy_happy_path_pro(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 9. _ask_agy alias 'flash' uses exact model string
+# 9. _ask_agy alias 'flash' uses the model string the alias RESOLVES to
 # ---------------------------------------------------------------------------
 
 async def test_ask_agy_flash_alias_model_string(monkeypatch):
+    """No live catalog -> the static map is used, and it must name a model agy still has.
+
+    Pinning a literal here is what let "Gemini 3.5 Flash (High)" rot into a hard outage:
+    agy rejects an unknown --model with exit 1, so the alias simply stopped working. The
+    assertion is therefore against the map, not against a string typed into the test.
+    """
     fake_proc = FakeProc(b"flash answer", b"", returncode=0)
     fake_exec, captured = make_subprocess_exec_patch(fake_proc)
     monkeypatch.setattr(second_opinion, "_resolve_agy", lambda: "/usr/bin/agy")
     monkeypatch.setattr(second_opinion.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(second_opinion, "_catalog_cache", None, raising=False)
 
     result = await second_opinion._ask_agy("q", "flash", None)
 
-    # The exact model string must appear in the argv passed to subprocess
-    assert "Gemini 3.5 Flash (High)" in captured["argv"]
-    assert "Gemini 3.5 Flash (High)" in result
+    expected = second_opinion._MODEL_ALIASES["flash"]
+    assert expected in captured["argv"]
+    assert expected in result
+    # …and the flash alias must still describe a *flash* model, not whatever the map decays to
+    assert "Flash" in expected
+
+
+# ---------------------------------------------------------------------------
+# 9b. a live `agy models` catalog overrides the static map (self-healing)
+# ---------------------------------------------------------------------------
+
+async def test_resolve_model_prefers_live_catalog(monkeypatch):
+    catalog = [
+        ("gemini-9.9-flash-high", "Gemini 9.9 Flash (High)"),
+        ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+        ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
+    ]
+
+    async def fake_catalog():
+        return catalog
+
+    monkeypatch.setattr(second_opinion, "_agy_catalog", fake_catalog)
+    # newest-first: the first matching slug wins, so a new generation is picked up for free
+    assert await second_opinion._resolve_model("flash") == "Gemini 9.9 Flash (High)"
+    assert await second_opinion._resolve_model("pro") == "Gemini 3.1 Pro (High)"
+
+
+# ---------------------------------------------------------------------------
+# 9c. catalog unavailable (or alias family gone) -> static map, never a crash
+# ---------------------------------------------------------------------------
+
+async def test_resolve_model_falls_back_when_catalog_empty(monkeypatch):
+    async def empty_catalog():
+        return []
+
+    monkeypatch.setattr(second_opinion, "_agy_catalog", empty_catalog)
+    assert await second_opinion._resolve_model("opus") == second_opinion._MODEL_ALIASES["opus"]
+    # unknown alias is coerced to the default, exactly like the tool schema does
+    assert await second_opinion._resolve_model("nope") == second_opinion._MODEL_ALIASES[
+        second_opinion._DEFAULT_ALIAS
+    ]
+
+
+async def test_resolve_model_family_gone_keeps_static(monkeypatch):
+    async def catalog_without_gpt_oss():
+        return [("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")]
+
+    monkeypatch.setattr(second_opinion, "_agy_catalog", catalog_without_gpt_oss)
+    assert await second_opinion._resolve_model("gpt") == second_opinion._MODEL_ALIASES["gpt"]
 
 
 # ---------------------------------------------------------------------------

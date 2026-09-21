@@ -5,10 +5,10 @@
 # Коды возврата: 0 — ответили все запрошенные; 1 — ответил не каждый; 2 — никто/ошибка вызова.
 set -uo pipefail
 
-VERSION="1.1"
-AGY_MODEL="${OPINION_AGY_MODEL:-gemini-3.8-flash-high}"
+VERSION="1.2"
+AGY_MODEL="${OPINION_AGY_MODEL:-}"   # пусто → выводится из --effort (agy кодирует глубину в слаге)
 CODEX_MODEL="${OPINION_CODEX_MODEL:-}"
-TIMEOUT="${OPINION_TIMEOUT:-300}"
+TIMEOUT="${OPINION_TIMEOUT:-300}"; TIMEOUT_EXPLICIT=0
 EFFORT="${OPINION_EFFORT:-high}"
 WORKDIR="$PWD"
 WANT_AGY=1; WANT_CODEX=1; MODE=text; WRITABLE=0
@@ -33,9 +33,11 @@ opinion — два независимых внешних мнения одной
   -f, --file FILE        приклеить файл к вопросу (можно повторять)
   -C, --cd DIR           рабочий каталог для движков (по умолчанию текущий)
   -t, --timeout SEC      таймаут на каждый движок (по умолчанию 300)
-  --agy-model M          модель Antigravity (по умолчанию gemini-3.8-flash-high)
+  --agy-model M          модель Antigravity (по умолчанию gemini-3.8-flash-<effort>)
   --codex-model M        модель Codex (по умолчанию из ~/.codex/config.toml)
-  --effort L             глубина рассуждения обоих: low|medium|high (по умолчанию high)
+  --effort L             глубина рассуждения: low|medium|high (по умолчанию high).
+                         Codex — напрямую; Antigravity — через слаг модели, поэтому
+                         при явной --agy-model на Antigravity уже не влияет.
   --rw                   разрешить движкам ПИСАТЬ (по умолчанию read-only)
   --json                 машинный вывод: {"agy":{...},"codex":{...}}
   --models               показать доступные модели обоих и выйти
@@ -43,6 +45,7 @@ opinion — два независимых внешних мнения одной
 
 Коды возврата: 0 — ответили все; 1 — ответил не каждый; 2 — никто не ответил.
 Модели: `opinion --models`. Расхождение между движками и есть полезный сигнал.
+Приложенные файлы идут через stdin, а не argv — ограничения в 128 КБ больше нет.
 USAGE
 }
 
@@ -55,7 +58,7 @@ while [[ $# -gt 0 ]]; do
     --codex)       WANT_AGY=0; shift ;;
     -f|--file)     need "$1" $#; FILES+=("$2"); shift 2 ;;
     -C|--cd)       need "$1" $#; WORKDIR="$2"; shift 2 ;;
-    -t|--timeout)  need "$1" $#; TIMEOUT="$2"; shift 2 ;;
+    -t|--timeout)  need "$1" $#; TIMEOUT="$2"; TIMEOUT_EXPLICIT=1; shift 2 ;;
     --agy-model)   need "$1" $#; AGY_MODEL="$2"; shift 2 ;;
     --codex-model) need "$1" $#; CODEX_MODEL="$2"; shift 2 ;;
     --effort)      need "$1" $#; EFFORT="$2"; shift 2 ;;
@@ -82,12 +85,25 @@ PROMPT="${WORDS[*]:-}"
 [[ -d "$WORKDIR" ]] || die "нет каталога $WORKDIR"
 WORKDIR="$(cd "$WORKDIR" && pwd)"
 
+# agy кодирует глубину рассуждения в САМОМ слаге, отдельного --effort у него нет.
+# Поэтому дефолтная модель выводится из --effort; явная --agy-model перебивает её
+# целиком (и тогда --effort на Antigravity уже не влияет — он влияет на Codex).
+[[ -z "$AGY_MODEL" ]] && AGY_MODEL="gemini-3.8-flash-$EFFORT"
+
 # файл ищем сперва как дан (относительно PWD), затем относительно -C
 for f in ${FILES[@]+"${FILES[@]}"}; do
   p="$f"; [[ -r "$p" ]] || p="$WORKDIR/$f"
   [[ -r "$p" ]] || die "не читается файл $f"
   PROMPT+=$'\n\n--- '"$f"$' ---\n'"$(cat -- "$p")"
 done
+
+# Крупный -f — это не «тот же вопрос, только длиннее»: ответ на файл в сотни КБ идёт
+# МИНУТАМИ, и дефолтные 300 с срезали его на полпути — ровно так «Codex не ответил
+# по таймауту» и попадало в логи. Потолок поднимаем сами, если -t не задан явно.
+if [[ $TIMEOUT_EXPLICIT -eq 0 && ${#PROMPT} -gt 50000 ]]; then
+  TIMEOUT=900
+  echo "opinion: промпт ${#PROMPT} Б — таймаут поднят до ${TIMEOUT}s (перебей через -t)" >&2
+fi
 
 TMP="$(mktemp -d /tmp/opinion.XXXXXX)"
 AGY_PID=""; CODEX_PID=""
@@ -99,6 +115,17 @@ cleanup() {
   rm -rf "$TMP"
 }
 trap cleanup EXIT INT TERM
+
+# Промпт кладём на диск и скармливаем движкам через stdin — см. комментарий в run_agy.
+printf '%s' "$PROMPT" >"$TMP/prompt.txt"
+python3 - "$TMP/prompt.txt" "$TMP/agy.in" <<'INPY'
+import json, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+msg = {"event": "user",
+       "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+INPY
 
 run_agy() {
   local t0=$SECONDS
@@ -112,19 +139,62 @@ run_agy() {
          --bind "$HOME/.gemini" "$HOME/.gemini" --bind "$HOME/.cache" "$HOME/.cache"
          --die-with-parent --chdir "$WORKDIR")
   fi
-  ( cd "$WORKDIR" && timeout "$TIMEOUT" "${pre[@]}" agy --model "$AGY_MODEL" --effort "$EFFORT" \
-      --print-timeout "${TIMEOUT}s" -p "$PROMPT" ) >"$TMP/agy.out" 2>"$TMP/agy.err"
-  echo $? >"$TMP/agy.rc"; echo $((SECONDS-t0)) >"$TMP/agy.sec"
+  # ⚠️ Промпт уходит через stdin (stream-json), а НЕ аргументом: одиночный argv
+  # упирается в MAX_ARG_STRLEN (131071 Б — это НЕ ARG_MAX), поэтому любой -f крупнее
+  # ~128 КБ раньше убивал ОБА движка кодом 126 «Argument list too long».
+  # Бонус: вопрос больше не светится в общесистемном `ps`.
+  # ⚠️ --effort агенту НЕ передаём: у agy глубина зашита в сам слаг (…-low/-medium/-high),
+  # а claude-*/gpt-oss-* флага не знают вовсе — иначе «invalid model selection … conflicts».
+  local attempt rc=0
+  for attempt in 1 2; do
+    ( cd "$WORKDIR" && timeout "$TIMEOUT" "${pre[@]}" agy --model "$AGY_MODEL" \
+        --input-format stream-json --output-format stream-json \
+        --print-timeout "${TIMEOUT}s" -p "" <"$TMP/agy.in" ) >"$TMP/agy.raw" 2>"$TMP/agy.err"
+    rc=$?
+    # 503 «no capacity» agy помечает retryable — один повтор через 5 с
+    if [[ $attempt -eq 1 ]] && grep -q '"retryable":true' "$TMP/agy.raw" "$TMP/agy.err" 2>/dev/null; then
+      sleep 5; continue
+    fi
+    break
+  done
+  agy_answer "$TMP/agy.raw" >"$TMP/agy.out" 2>>"$TMP/agy.err"
+  echo $rc >"$TMP/agy.rc"; echo $((SECONDS-t0)) >"$TMP/agy.sec"
+}
+
+# из NDJSON-потока agy берём только финальный ответ (event=result)
+agy_answer() {
+  python3 - "$1" <<'AGYPY'
+import json, sys
+answer = ""
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    if msg.get("event") != "result":
+        continue
+    res = msg.get("result") or {}
+    if res.get("response"):
+        answer = res["response"]
+    elif res.get("error"):
+        print("AGY_ERROR: " + str(res["error"]), file=sys.stderr)
+sys.stdout.write(answer)
+AGYPY
 }
 
 run_codex() {
   local t0=$SECONDS
   local -a sb=(-s read-only); [[ $WRITABLE -eq 1 ]] && sb=(-s danger-full-access)
   local -a mdl=(); [[ -n "$CODEX_MODEL" ]] && mdl=(-m "$CODEX_MODEL")
+  # промпт — через stdin: codex exec читает его оттуда, когда позиционного нет.
+  # Тот же обход MAX_ARG_STRLEN, что и у agy.
   timeout "$TIMEOUT" codex exec --skip-git-repo-check --ephemeral --color never \
       -c model_reasoning_effort="$EFFORT" \
-      -C "$WORKDIR" "${sb[@]}" "${mdl[@]}" -o "$TMP/codex.out" -- "$PROMPT" \
-      >"$TMP/codex.err" 2>&1 </dev/null
+      -C "$WORKDIR" "${sb[@]}" "${mdl[@]}" -o "$TMP/codex.out" \
+      >"$TMP/codex.err" 2>&1 <"$TMP/prompt.txt"
   echo $? >"$TMP/codex.rc"; echo $((SECONDS-t0)) >"$TMP/codex.sec"
   # codex сам печатает выбранную модель — вытаскиваем, чтобы в шапке не стояло «по умолчанию»
   awk -F': *' '/^model:/{print $2; exit}' "$TMP/codex.err" >"$TMP/codex.model" 2>/dev/null

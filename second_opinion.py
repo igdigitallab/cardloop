@@ -19,8 +19,11 @@ Fully optional. If neither `agy` nor Azure is available (or SECOND_OPINION=0), n
 built and the tool simply never appears — nothing else in the engine changes.
 
 Design notes from probing the real backends:
-  * `agy` SILENTLY falls back to its default model on an unknown --model (exit 0, no error).
-    We therefore ONLY ever pass an exact, validated model string from the map below.
+  * `agy` REJECTS an unknown --model: exit 1, empty stdout, "invalid model selection" on
+    stderr (older builds fell back silently; they no longer do). A hardcoded model name
+    therefore turns into a hard outage the day Antigravity retires that model -- which is
+    exactly what happened to "Gemini 3.5 Flash (High)". Hence the alias map is a *fallback*
+    and the live `agy models` catalog is the source of truth (see _resolve_model).
   * stdout carries the clean answer; some environments interleave log noise, so we strip
     the known noise line shapes defensively.
   * an empty prompt makes `agy` print "Error: empty prompt" (exit 0) — guarded here.
@@ -41,13 +44,27 @@ from pathlib import Path
 # Alias -> exact agy model string. Keep this the single source of truth for what the
 # Antigravity backend accepts; an alias outside every map is coerced to the default.
 _MODEL_ALIASES = {
-    "flash":  "Gemini 3.5 Flash (High)",
+    "flash":  "Gemini 3.8 Flash (High)",
     "pro":    "Gemini 3.1 Pro (High)",
     "opus":   "Claude Opus 4.6 (Thinking)",
     "sonnet": "Claude Sonnet 4.6 (Thinking)",
     "gpt":    "GPT-OSS 120B (Medium)",
 }
 _DEFAULT_ALIAS = "pro"
+
+# Alias -> slug pattern, matched against the LIVE `agy models` catalog (slug<TAB>display).
+# The catalog is listed newest-first, so the first match is the current generation and the
+# map above only has to survive until the next `agy models` call succeeds.
+_ALIAS_SLUG_RE = {
+    "flash":  re.compile(r"^gemini-[\d.]+-flash-high$"),
+    "pro":    re.compile(r"^gemini-[\d.]+-pro-high$"),
+    "opus":   re.compile(r"^claude-opus-[\w.-]+$"),
+    "sonnet": re.compile(r"^claude-sonnet-[\w.-]+$"),
+    "gpt":    re.compile(r"^gpt-oss-[\w.-]+$"),
+}
+_CATALOG_TTL_SEC = 3600.0
+_catalog_cache: tuple[float, list[tuple[str, str]]] | None = None
+_catalog_lock: asyncio.Lock | None = None
 
 # --- Azure AI Foundry backend (spec-060 Phase B: a second Class-C provider) ---
 # Alias -> Foundry *deployment name*. These are the deployments on the operator's AI
@@ -117,6 +134,60 @@ def _azure_configured() -> bool:
     return bool(_azure_key() and _azure_endpoint())
 
 
+async def _agy_catalog() -> list[tuple[str, str]]:
+    """`agy models` as [(slug, display), ...], newest-first, cached for an hour.
+
+    Never raises and never blocks the loop: on any failure it returns [] and the caller
+    falls back to the static alias map.
+    """
+    global _catalog_cache, _catalog_lock
+    if _catalog_lock is None:
+        _catalog_lock = asyncio.Lock()
+    async with _catalog_lock:
+        now = asyncio.get_running_loop().time()
+        if _catalog_cache and now - _catalog_cache[0] < _CATALOG_TTL_SEC:
+            return _catalog_cache[1]
+        agy = _resolve_agy()
+        rows: list[tuple[str, str]] = []
+        if agy:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    agy, "models",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                )
+                out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+                for line in (out_b or b"").decode("utf-8", "replace").splitlines():
+                    if "\t" in line:
+                        slug, _, display = line.partition("\t")
+                        rows.append((slug.strip(), display.strip()))
+            except Exception:
+                rows = []
+        if rows:
+            _catalog_cache = (now, rows)
+        return rows
+
+
+async def _resolve_model(alias: str) -> str:
+    """Alias -> a model string `agy` accepts TODAY.
+
+    Prefers the live catalog (so a retired generation self-heals); falls back to the static
+    map when `agy models` is unavailable. Returns the default alias's model for an unknown
+    alias, matching the tool schema's own coercion.
+    """
+    static = _MODEL_ALIASES.get(alias, _MODEL_ALIASES[_DEFAULT_ALIAS])
+    pattern = _ALIAS_SLUG_RE.get(alias)
+    if pattern is None:
+        return static
+    catalog = await _agy_catalog()
+    if not catalog:
+        return static
+    for slug, display in catalog:
+        if pattern.match(slug):
+            return display or slug
+    # Alias family gone entirely (e.g. GPT-OSS pulled): static name keeps the error honest.
+    return static
+
+
 async def _ask_agy(question: str, alias: str, context: str | None) -> str:
     """Run one agy print-mode call and return a human-readable answer (or a clean
     "unavailable" string the agent can read and move on from — never raises)."""
@@ -124,7 +195,7 @@ async def _ask_agy(question: str, alias: str, context: str | None) -> str:
     if not agy:
         return "⚠️ second_opinion unavailable: the `agy` (Antigravity) binary was not found."
 
-    model = _MODEL_ALIASES.get(alias, _MODEL_ALIASES[_DEFAULT_ALIAS])
+    model = await _resolve_model(alias)
     prompt = question if not context else f"{question}\n\n--- CONTEXT ---\n{context}"
     timeout = float(os.getenv("SECOND_OPINION_TIMEOUT", "180"))
     max_chars = int(os.getenv("SECOND_OPINION_MAX_CHARS", "6000"))
