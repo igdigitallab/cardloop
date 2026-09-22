@@ -337,6 +337,19 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
           </select>
         </Row>
 
+        {/* spec-092 P3: the emergency / containment switch. Pinning the project outranks
+            every chat inside it — that is the point: "this project always runs locally" is
+            not a default a chat may quietly override. */}
+        <Row title="Inference backend"
+             hint="Cloud runs on the Claude subscription. Local (Ollama) pins EVERY turn of this project to the local box — chats in this project cannot move themselves back to the cloud, and the model is swapped to one the box actually serves.">
+          <select value={proj.backend || ''}
+                  onChange={ev => setProj({ ...proj, backend: ev.target.value || null })}
+                  aria-label="Inference backend">
+            <option value="">Cloud (Claude subscription)</option>
+            <option value="ollama">Local (Ollama)</option>
+          </select>
+        </Row>
+
         <Row title="Board provider"
              hint="Default engine for board cards. A card-level provider/model override wins. Claude remains the compatibility default.">
           <select value={proj.board_provider}

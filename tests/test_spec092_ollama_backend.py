@@ -444,3 +444,149 @@ async def test_a_parked_turn_keeps_its_auto_rotate_optin(fake_ctx):
     await _webapp._chat_queue_execute(fake_ctx, "1001:42", item)
     parked = _webapp._chat_queue_get("1001:42")
     assert len(parked) == 1 and parked[0]["auto_rotate"] is True
+
+
+# ───────────────────── project-level pin (the operator's actual ask) ──────────
+
+
+@pytest.mark.asyncio
+async def test_a_project_pinned_to_the_local_box_runs_every_chat_there(
+    aiohttp_client, fake_ctx, chats_app
+):
+    """The operator's stated use: pin a whole project to the local model so it keeps working
+    when the paid subscription is unavailable. The chat record says nothing about a backend —
+    the project pin alone must route the turn."""
+    calls: list = []
+
+    async def fake_engine(**kwargs):
+        calls.append(kwargs)
+        yield {"type": "result", "session_id": "s1"}
+
+    async def up_info():
+        return {"backend": "ollama", "enabled": True, "available": True,
+                "models": [{"value": "qwen3.8:27b-q4_K_M", "label": "qwen"}],
+                "base_url": "http://box:11434", "error": None}
+
+    fake_ctx["run_engine"] = fake_engine
+    fake_ctx["ollama_backend_info"] = up_info
+    fake_ctx["topics"]["1001:42"]["backend"] = "ollama"
+    client = await aiohttp_client(chats_app)
+    resp = await client.post("/api/projects/myproject/chat", json={"prompt": "hi"},
+                             headers=_auth(fake_ctx))
+    assert resp.status == 200
+    await resp.text()
+    assert calls and calls[0]["backend"] == "ollama"
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_project_swaps_a_cloud_model_for_one_the_box_serves(
+    aiohttp_client, fake_ctx, chats_app
+):
+    """Without this the switch is not an emergency switch: the chat still says `sonnet`, the
+    local endpoint has no such name, and the very first turn dies — so the operator would
+    have to hand-retype a model id at exactly the moment their subscription just failed."""
+    calls: list = []
+
+    async def fake_engine(**kwargs):
+        calls.append(kwargs)
+        yield {"type": "result", "session_id": "s1"}
+
+    async def up_info():
+        return {"backend": "ollama", "enabled": True, "available": True,
+                "models": [{"value": "qwen3.8:27b-q4_K_M", "label": "qwen"}],
+                "base_url": "http://box:11434", "error": None}
+
+    fake_ctx["run_engine"] = fake_engine
+    fake_ctx["ollama_backend_info"] = up_info
+    fake_ctx["topics"]["1001:42"]["backend"] = "ollama"
+    _webapp._save_chats(fake_ctx, {
+        "myproject": {"active": "aaaaaa",
+                      "chats": [{"id": "aaaaaa", "name": "Main", "provider": "claude",
+                                 "model": "sonnet"}]},
+    })
+    resp = await (await aiohttp_client(chats_app)).post(
+        "/api/projects/myproject/chat", json={"prompt": "hi", "chat_id": "aaaaaa"},
+        headers=_auth(fake_ctx))
+    assert resp.status == 200
+    await resp.text()
+    assert calls and calls[0]["model"] == "qwen3.8:27b-q4_K_M"
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_project_refuses_to_let_a_chat_move_back_to_the_cloud(
+    aiohttp_client, fake_ctx, chats_app, monkeypatch
+):
+    """The pin is containment, not a default. If a chat could override it the picker would be
+    a lie: _resolve_run_backend makes the project win at RUN time, so the row would say Codex
+    while every turn still went to the local box."""
+    monkeypatch.setattr(_webapp._codex, "codex_enabled", lambda: True)
+
+    async def codex_info():
+        return {"provider": "codex", "enabled": True, "available": True, "authenticated": True,
+                "models": [{"value": "gpt-5.6-sol", "label": "gpt"}],
+                "reasoning_levels": ["high"], "capabilities": {"plan_mode": True},
+                "error": None}
+
+    async def up_info():
+        return {"backend": "ollama", "enabled": True, "available": True,
+                "models": [{"value": "qwen3.8:27b-q4_K_M", "label": "qwen"}],
+                "base_url": "http://box:11434", "error": None}
+
+    fake_ctx["codex_provider_info"] = codex_info
+    fake_ctx["ollama_backend_info"] = up_info
+    fake_ctx["topics"]["1001:42"]["backend"] = "ollama"
+    _webapp._save_chats(fake_ctx, {
+        "myproject": {"active": "aaaaaa",
+                      "chats": [{"id": "aaaaaa", "name": "Main", "provider": "claude",
+                                 "model": "sonnet"}]},
+    })
+    client = await aiohttp_client(chats_app)
+    resp = await client.patch("/api/projects/myproject/chats/aaaaaa",
+                              json={"provider": "codex", "model": "gpt-5.6-sol"},
+                              headers=_auth(fake_ctx))
+    assert resp.status == 409
+    body = await resp.json()
+    assert body["project_pinned"] == "ollama"
+
+
+@pytest.mark.asyncio
+async def test_a_cloud_project_still_lets_one_chat_go_local(
+    aiohttp_client, fake_ctx, chats_app
+):
+    """The other direction stays open: pinning a single chat to the local box inside a cloud
+    project only ever REMOVES cloud traffic, so there is nothing to contain."""
+    calls: list = []
+
+    async def fake_engine(**kwargs):
+        calls.append(kwargs)
+        yield {"type": "result", "session_id": "s1"}
+
+    async def up_info():
+        return {"backend": "ollama", "enabled": True, "available": True,
+                "models": [{"value": "qwen3.8:27b-q4_K_M", "label": "qwen"}],
+                "base_url": "http://box:11434", "error": None}
+
+    fake_ctx["run_engine"] = fake_engine
+    fake_ctx["ollama_backend_info"] = up_info
+    _webapp._save_chats(fake_ctx, {
+        "myproject": {"active": "aaaaaa",
+                      "chats": [{"id": "aaaaaa", "name": "Local", "provider": "claude",
+                                 "backend": "ollama", "model": "qwen3.8:27b-q4_K_M"}]},
+    })
+    resp = await (await aiohttp_client(chats_app)).post(
+        "/api/projects/myproject/chat", json={"prompt": "hi", "chat_id": "aaaaaa"},
+        headers=_auth(fake_ctx))
+    assert resp.status == 200
+    await resp.text()
+    assert calls and calls[0]["backend"] == "ollama"
+
+
+def test_the_project_backend_setting_is_a_real_settings_field():
+    """A field missing from _PROJECT_SETTING_FIELDS is rejected by the settings PATCH, and
+    one missing from the project record assembly is invisible to every endpoint — the
+    selector would appear to save and change nothing."""
+    assert "backend" in _webapp._PROJECT_SETTING_FIELDS
+    src = (ROOT / "webapp.py").read_text(encoding="utf-8")
+    assert src.count('"backend": b.get("backend") or None,') == 2, (
+        "both project-record builders (bound projects and free chats) must carry the pin"
+    )

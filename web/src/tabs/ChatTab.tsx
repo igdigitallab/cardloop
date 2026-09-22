@@ -1343,7 +1343,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const effectiveChatId = activeChatId ?? ''
   const activeChat = chats.find(c => c.id === effectiveChatId)
   const activeProvider: Provider = activeChat?.provider ?? 'claude'
-  const activeModel = activeChat?.model || project.model
+  const activeModelRaw = activeChat?.model || project.model
   // spec-092: the model is a per-chat pin for EVERY provider now, so Codex gets its real
   // model list instead of the single frozen row it used to show ("pinned to this chat" was
   // literally true: there was nothing else to click). Falls back to the current value alone
@@ -1352,10 +1352,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // A local backend serves its OWN model names (`qwen3.8:27b-q4_K_M`), which have nothing to
   // do with the cloud aliases — showing the cloud list there would offer picks the server
   // rejects as "does not belong to backend 'ollama'".
-  const backendModels = activeProvider === 'claude' && (activeChat?.backend || '')
+  const effectiveBackend = project.backend || activeChat?.backend || ''
+  const backendModels = activeProvider === 'claude' && effectiveBackend
     ? providerRegistry.find(p => p.provider === 'claude')
-        ?.backends?.find(b => b.id === activeChat?.backend)?.models
+        ?.backends?.find(b => b.id === effectiveBackend)?.models
     : undefined
+  const activeModel = (backendModels?.length
+    && !backendModels.some(m => m.value === activeModelRaw))
+    ? backendModels[0].value
+    : activeModelRaw
   const activeProviderModels = backendModels?.length
     ? backendModels.map(m => ({ value: m.value, label: m.label }))
     : activeProvider === 'codex'
@@ -1383,6 +1388,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const globalActiveAccount = providerRegistry.find(p => p.provider === 'claude')
     ?.accounts?.find(a => a.active)?.id
   const inheritedAccount = project.account || globalActiveAccount || 'main'
+  // spec-092 P3: a project pinned to a backend outranks every chat in it, so the rows that
+  // would move a chat off that backend must be visibly unavailable — not merely refused on
+  // click. A greyed row with a reason is the honest UI; a clickable one that 409s is not.
+  const projectBackendPin = project.backend || ''
   const runtimeChoices: RuntimeChoice[] = React.useMemo(() => {
     const out: RuntimeChoice[] = []
     for (const p of providerRegistry) {
@@ -1400,8 +1409,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             // no error and no way to force Main from this menu. A pick is a pin.
             account: a.id,
             backend: '',
-            available: p.available && a.available,
-            reason: !a.available ? a.reason || 'this subscription cannot run' : undefined,
+            available: p.available && a.available && !projectBackendPin,
+            reason: projectBackendPin
+              ? `this project is pinned to the ${projectBackendPin} backend (Settings → Inference backend)`
+              : (!a.available ? a.reason || 'this subscription cannot run' : undefined),
             defaultModel,
           })
         }
@@ -1428,15 +1439,19 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           provider: p.provider,
           account: null,
           backend: '',
-          available: p.available && p.enabled,
-          reason: !p.available ? p.error || `${p.provider} is not available` : undefined,
+          available: p.available && p.enabled && !projectBackendPin,
+          reason: projectBackendPin
+            ? `this project is pinned to the ${projectBackendPin} backend (Settings → Inference backend)`
+            : (!p.available ? p.error || `${p.provider} is not available` : undefined),
           defaultModel,
         })
       }
     }
     return out
-  }, [providerRegistry, inheritedAccount])
-  const activeBackend = activeChat?.backend || ''
+  }, [providerRegistry, inheritedAccount, projectBackendPin])
+  // The project pin wins at run time, so it wins here too — otherwise the menu highlights
+  // the chat's own (overridden, inert) choice while every turn goes somewhere else.
+  const activeBackend = projectBackendPin || activeChat?.backend || ''
   // An unpinned chat highlights the row it actually inherits, not a hardcoded "main".
   // A local-backend chat has no account of its own — it spends no subscription — so the
   // account segment is empty there, matching how the row was built.

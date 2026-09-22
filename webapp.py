@@ -2993,6 +2993,9 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "ask_always_allow": b.get("ask_always_allow") or [],
             # Subscription pinned to this project (None = follow the global choice).
             "account": b.get("account") or None,
+            # spec-092 P3: the project's inference-endpoint pin. Omitted here it would be
+            # invisible to every endpoint and the Settings selector would silently do nothing.
+            "backend": b.get("backend") or None,
         })
     out.sort(key=lambda x: x["name"].lower())
 
@@ -3015,6 +3018,9 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "provider": "codex" if b.get("provider") == "codex" else "claude",
             "codex_model": b.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
             "account": b.get("account") or None,
+            # spec-092 P3: the project's inference-endpoint pin. Omitted here it would be
+            # invisible to every endpoint and the Settings selector would silently do nothing.
+            "backend": b.get("backend") or None,
         })
     return out
 
@@ -5867,7 +5873,7 @@ def _git_enabled(project: dict) -> bool:
 # the return values of _infer_archetype() further down this file.
 _PROJECT_ARCHETYPES = ("software", "content", "ops", "scratchpad")
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", "codex_model", "ask_always_allow", "account")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", "codex_model", "ask_always_allow", "account", "backend")
 
 # spec-051: per-project policy for resuming a run interrupted by a rate-limit.
 #   ask    — show an in-chat Yes/No prompt (default; visible, not silent)
@@ -6024,6 +6030,9 @@ def _project_settings_view(project: dict) -> dict:
         "ask_always_allow": _ask_always_allow(project),
         # Subscription pinned to this project (None = follow the global choice).
         "account": project.get("account") or None,
+        # spec-092 P3: inference endpoint pinned to this project. "" = the cloud
+        # subscription; "ollama" = every turn of this project runs on the local box.
+        "backend": project.get("backend") or "",
     }
 
 
@@ -6105,6 +6114,15 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
             if sv not in ("claude", "codex"):
                 return web.json_response({"error": "board_provider: must be claude or codex"}, status=400)
             updates[k] = sv if sv != "claude" else None
+        elif k == "backend":
+            # spec-092 P3: "" (cloud) or "ollama" (local). Stored as None for the cloud case
+            # so a project that never touched this setting and one explicitly set back to
+            # cloud are the same record — nothing downstream has to tell them apart.
+            sv = str(v or "").strip().lower()
+            if sv not in ("", runtime.OLLAMA_BACKEND):
+                return web.json_response(
+                    {"error": f"backend: must be empty or {runtime.OLLAMA_BACKEND!r}"}, status=400)
+            updates[k] = sv or None
         elif k == "codex_model":
             sv = str(v).strip()
             if not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", sv):
@@ -11434,6 +11452,22 @@ async def api_project_chats_patch(req: web.Request) -> web.Response:
                     {"error": reason, "current_revision": chat.get("runtime_revision", 0)},
                     status=status,
                 )
+            # spec-092 P3: a project pinned to the local box refuses a chat-level change
+            # that would put this chat back on the cloud. Without it the picker is a lie —
+            # `_resolve_run_backend` makes the project pin win at RUN time, so the row would
+            # say Codex while every turn still went to the local endpoint.
+            _proj_backend = str(project.get("backend") or "")
+            if _proj_backend:
+                _would_be_provider = runtime.DEFAULT_PROVIDER if new_chat.get("provider") is None \
+                    else str(new_chat.get("provider"))
+                _would_be_backend = str(new_chat.get("backend") or "")
+                if _would_be_provider != runtime.DEFAULT_PROVIDER or _would_be_backend != _proj_backend:
+                    return web.json_response(
+                        {"error": f"this project is pinned to the {_proj_backend!r} backend — "
+                                  f"change it in project Settings to move this chat off it",
+                         "project_pinned": _proj_backend},
+                        status=409,
+                    )
             idx = next(i for i, c in enumerate(entry["chats"]) if c["id"] == chat_id)
             entry["chats"][idx] = new_chat
             chat = new_chat
@@ -12694,9 +12728,41 @@ def _runtime_pin(provider: str, model: "str | None", account: "str | None",
     return pin
 
 
-async def _resolve_run_backend(ctx: dict, chat: "dict | None",
-                               provider: str) -> "tuple[str, str]":
+async def _coerce_model_for_backend(ctx: dict, backend: str,
+                                    model: "str | None") -> "tuple[str | None, str]":
+    """Make sure `model` is one the chosen endpoint actually serves.
+
+    The operator flips a project to the local box because the cloud subscription is gone or
+    because that project must stay on-premises. If the switch then demanded they ALSO go and
+    retype a model id, it would not be the emergency switch it exists to be — the chat still
+    says `sonnet`, the local endpoint has no such name, and the very first turn dies.
+
+    Returns (model, note). `note` is non-empty when a substitution happened, so the caller
+    can say so out loud rather than quietly running something else than the UI shows.
+    """
+    if backend != runtime.OLLAMA_BACKEND:
+        return model, ""
+    info_fn = ctx.get("ollama_backend_info") or _ollama.backend_info
+    try:
+        info = await info_fn()
+    except Exception:
+        return model, ""
+    names = [m.get("value") for m in (info.get("models") or []) if m.get("value")]
+    if not names or model in names:
+        return model, ""
+    return names[0], f"{model!r} is not served locally — running {names[0]!r} instead"
+
+
+async def _resolve_run_backend(ctx: dict, chat: "dict | None", provider: str,
+                               project: "dict | None" = None) -> "tuple[str, str]":
     """Which inference endpoint answers this turn: "" (the provider's own) or "ollama".
+
+    ⚠️ The PROJECT pin outranks the chat, which is the opposite of how `account` and `model`
+    inherit. Deliberate: "this project always runs locally" is a containment statement (the
+    operator pinned it because its content should not leave the box, or because the cloud
+    subscription is unavailable and this project must keep working), and an inheritance
+    default that any chat can silently override is not containment. A chat may still pin the
+    LOCAL backend inside a cloud project — that direction only ever removes cloud traffic.
 
     spec-092 P3. Returns (backend, error_message). The backend is checked LIVE, not read as
     a config flag: the GPU is shared with ComfyUI under automatic arbitration, so the box
@@ -12709,7 +12775,9 @@ async def _resolve_run_backend(ctx: dict, chat: "dict | None",
     be safe. Until those land, a clear refusal is the honest behaviour; a silent fallback to
     the cloud subscription would be the one thing an "all-local" chat must never do.
     """
-    backend = str((chat or {}).get("backend") or "") if isinstance(chat, dict) else ""
+    project_backend = str((project or {}).get("backend") or "")
+    chat_backend = str((chat or {}).get("backend") or "") if isinstance(chat, dict) else ""
+    backend = project_backend or chat_backend
     if not backend:
         return "", ""
     if provider != runtime.DEFAULT_PROVIDER:
@@ -13099,6 +13167,11 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 topic = {"cwd": _vproj.get("cwd"),
                          "project": _vproj.get("name") or _vproj.get("id"),
                          "model": _vproj.get("model"),
+                         # spec-092: account/backend are project-level runtime pins — a free
+                         # chat's synthesised topic dropped them, so a project pinned to the
+                         # local box silently ran its queued turns in the cloud.
+                         "account": _vproj.get("account"),
+                         "backend": _vproj.get("backend"),
                          "agents_config": _vproj.get("agents_config") or {}}
         if topic is None:
             print(f"[chat_queue] session_key {session_key!r} not in topics — dropping item {item['id']}")
@@ -13259,8 +13332,13 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # GPU is shared). Falling back to the cloud subscription would silently send an
         # all-local conversation to Anthropic, so the item is re-queued at the FRONT instead
         # and the operator is told — the message is neither lost nor quietly re-routed.
+        if not _q_backend:
+            # A project-level pin is not on the item and not on the chat record; resolve it
+            # here so a locally-pinned project's queued turns never reach the cloud.
+            _q_backend = str(topic.get("backend") or "")
         if _q_backend:
-            _bk, _bk_err = await _resolve_run_backend(ctx, {"backend": _q_backend}, provider)
+            _bk, _bk_err = await _resolve_run_backend(
+                ctx, {"backend": _q_backend}, provider, topic)
             if _bk_err:
                 _parked = _chat_queue_enqueue(
                     session_key, item.get("text") or "", _resolved_chat_id, _project_id,
@@ -13292,6 +13370,9 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                             parked=_parked is not None)
                 return
             _q_backend = _bk
+            model, _q_model_note = await _coerce_model_for_backend(ctx, _q_backend, model)
+            if _q_model_note:
+                print(f"[chat_queue] {session_key}: {_q_model_note}")
         if _q_account_err:
             print(f"[chat_queue] {session_key}: pinned subscription {_q_account!r} cannot run "
                   f"({_q_account_err}) — this turn falls back to the global account")
@@ -14029,10 +14110,14 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # spec-092 P3: the inference endpoint. A chat pinned to the local backend refuses here
     # when the box is down, instead of dying mid-turn — and never silently falls back to the
     # cloud subscription, which is exactly what an "all-local" chat must not do.
-    _run_backend, _run_backend_err = await _resolve_run_backend(ctx, _run_chat, _provider_for_run)
+    _run_backend, _run_backend_err = await _resolve_run_backend(
+        ctx, _run_chat, _provider_for_run, project)
     if _run_backend_err:
         return web.json_response({"error": _run_backend_err, "backend_unavailable": True},
                                  status=409)
+    model, _model_note = await _coerce_model_for_backend(ctx, _run_backend, model)
+    if _model_note:
+        print(f"[runtime] {session_key}: {_model_note}")
 
     # spec-092 item 5: a runtime that cannot honour a requested per-turn option ERRORS — it
     # never silently clears the flag (the old `_ask_mode = False for Codex` line removed the

@@ -53,6 +53,10 @@ export interface Project {
   codex_model?: string
   /** Claude subscription pinned to this project (null/undefined = follow the global choice). */
   account?: string | null
+  /** spec-092 P3: inference endpoint pinned to this project. "" / absent = the cloud
+   *  subscription; "ollama" = every turn of this project runs on the local box, and a chat
+   *  cannot move itself back to the cloud. */
+  backend?: string | null
 }
 
 export type Provider = 'claude' | 'codex'
@@ -283,6 +287,8 @@ export interface ProjectSettings {
   codex_model: string
   /** Subscription pinned to this project. null = inherit the globally selected account. */
   account?: string | null
+  /** spec-092 P3: "" = cloud subscription, "ollama" = pin every turn to the local box. */
+  backend?: string | null
 }
 
 // ─── spec-067: Autopilot ──────────────────────────────────────────────────────
