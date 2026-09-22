@@ -658,3 +658,49 @@ async def test_chat_post_ask_mode_on_claude_still_works(aiohttp_client, fake_ctx
     assert any(e.get("type") == "error" for e in events) is False
     assert claude_calls, "the direct run never reached the engine"
     assert claude_calls[0]["ask_mode"] is True
+
+
+@pytest.mark.asyncio
+async def test_resumed_codex_thread_does_not_reinject_context_pack(
+    aiohttp_client, fake_ctx, chats_app, monkeypatch
+):
+    """A Codex chat resumes by codex_thread_id, not Claude session_id.
+
+    The old freshness check looked only at session_id (always None for Codex), so every
+    message was prefixed with a new context pack and persisted that service payload into
+    the visible thread history.
+    """
+    monkeypatch.setattr(_webapp._codex, "codex_enabled", lambda: True)
+
+    def fail_context_pack(*_args, **_kwargs):
+        raise AssertionError("a resumed Codex thread is not a fresh conversation")
+
+    monkeypatch.setattr(_webapp._context_pack, "assemble", fail_context_pack)
+    codex_calls: list = []
+
+    async def fake_codex_engine(**kwargs):
+        codex_calls.append(kwargs)
+        yield {"type": "text", "text": "ok"}
+        yield {"type": "result", "thread_id": "thread-existing-9"}
+
+    fake_ctx["run_codex_engine"] = fake_codex_engine
+    _webapp._save_chats(fake_ctx, {
+        "myproject": {
+            "active": "aaaaaa",
+            "chats": [{
+                "id": "aaaaaa", "name": "Main", "provider": "codex",
+                "model": "gpt-5.6-sol", "codex_thread_id": "thread-existing-9",
+            }],
+        },
+    })
+    client = await aiohttp_client(chats_app)
+    resp = await client.post(
+        "/api/projects/myproject/chat",
+        json={"prompt": "only my message"},
+        headers=_auth(fake_ctx),
+    )
+
+    assert resp.status == 200, await resp.text()
+    await _read_sse_events(resp)
+    assert codex_calls[0]["resume_thread_id"] == "thread-existing-9"
+    assert codex_calls[0]["prompt"] == "only my message"

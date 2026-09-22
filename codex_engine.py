@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import AsyncGenerator, Iterable
@@ -17,6 +18,21 @@ DEFAULT_CODEX_MODEL = os.getenv("CODEX_MODEL", "gpt-5.6-sol")
 CODEX_REASONING_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
 _REGISTRY_TTL_SEC = 300.0
 _registry_cache: dict = {"ts": 0.0, "data": None}
+
+
+def _configured_extra_models() -> list[str]:
+    """Model ids the live Codex registry omits but this installation can run.
+
+    Some staged subscription models are accepted by ``codex exec -m`` before they are
+    advertised by the app-server ``model/list`` response.  Keep those operator-owned and
+    explicit instead of baking rollout-specific ids into the OSS model registry.
+    """
+    out: list[str] = []
+    for value in os.getenv("CODEX_EXTRA_MODELS", "").split(","):
+        model_id = value.strip()
+        if re.fullmatch(r"[A-Za-z0-9._-]{2,100}", model_id) and model_id not in out:
+            out.append(model_id)
+    return out
 
 
 class CodexUnavailableError(RuntimeError):
@@ -89,6 +105,16 @@ async def provider_info(*, force: bool = False) -> dict:
                         if effort.get("reasoningEffort")
                     ],
                 })
+            listed = {item.get("value") for item in models}
+            for model_id in _configured_extra_models():
+                if model_id not in listed:
+                    models.append({
+                        "value": model_id,
+                        "label": model_id,
+                        "default": False,
+                        "default_reasoning": None,
+                        "reasoning_levels": list(CODEX_REASONING_LEVELS),
+                    })
             data = {
                 "provider": PROVIDER,
                 "enabled": True,

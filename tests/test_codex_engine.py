@@ -106,6 +106,13 @@ class _FakeCodex:
     async def account(self):
         return _Dump({"account": {"type": "chatgpt", "planType": "team"}})
 
+    async def models(self):
+        return _Dump({"data": [{
+            "model": "gpt-listed", "displayName": "GPT Listed", "hidden": False,
+            "isDefault": True, "defaultReasoningEffort": "medium",
+            "supportedReasoningEfforts": [{"reasoningEffort": "medium"}],
+        }]})
+
     async def thread_start(self, **kwargs):
         self.started = kwargs
         self.thread = _FakeThread("thread-new-123", self.notifications)
@@ -187,3 +194,19 @@ async def test_disabled_adapter_rejects_without_importing_sdk(monkeypatch):
     assert len(events) == 1
     assert events[0]["type"] == "error"
     assert "CODEX_ENABLED=false" in str(events[0]["exc"])
+
+
+@pytest.mark.asyncio
+async def test_provider_info_adds_configured_models_missing_from_live_registry(monkeypatch):
+    monkeypatch.setenv("CODEX_ENABLED", "true")
+    monkeypatch.setenv("CODEX_EXTRA_MODELS", "gpt-6-astra, gpt-listed, invalid model")
+    monkeypatch.setattr(
+        codex_engine, "_sdk",
+        lambda: (_FakeCodex, SimpleNamespace(deny_all="deny_all"), SimpleNamespace()),
+    )
+    monkeypatch.setattr(codex_engine, "_registry_cache", {"ts": 0.0, "data": None})
+
+    info = await codex_engine.provider_info(force=True)
+
+    assert [model["value"] for model in info["models"]] == ["gpt-listed", "gpt-6-astra"]
+    assert info["models"][1]["reasoning_levels"] == list(codex_engine.CODEX_REASONING_LEVELS)

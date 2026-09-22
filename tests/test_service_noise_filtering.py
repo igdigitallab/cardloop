@@ -57,6 +57,27 @@ def test_display_prompt_empty_and_none_safe():
     assert _webapp._display_prompt(None) == ""
 
 
+def test_codex_history_strips_context_pack_but_keeps_human_prompt():
+    """Codex app-server history returns the effective prompt, including injected service
+    blocks. It must cross the same display filter as Claude JSONL history."""
+    raw = [
+        {"role": "user", "text": (
+            "<context-pack>\n## Board\ninternal state\n</context-pack>\n\n"
+            "why is the model missing?"
+        ), "tools": [], "uuid": "u1"},
+        {"role": "assistant", "text": "Checking.", "tools": [], "uuid": "a1"},
+    ]
+    assert _webapp._history_messages_for_display(raw) == [
+        {"role": "user", "text": "why is the model missing?", "tools": [], "uuid": "u1"},
+        {"role": "assistant", "text": "Checking.", "tools": [], "uuid": "a1"},
+    ]
+
+
+def test_codex_history_drops_service_only_user_turn():
+    raw = [{"role": "user", "text": "<context-pack>noise</context-pack>", "tools": []}]
+    assert _webapp._history_messages_for_display(raw) == []
+
+
 # ─────────────────────────── _session_history (a, b, c, d) ───────────────────────────
 
 

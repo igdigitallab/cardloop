@@ -12128,6 +12128,25 @@ def _display_prompt(text: "str | None") -> str:
     return _strip_service_blocks(text)
 
 
+def _history_messages_for_display(messages: list[dict]) -> list[dict]:
+    """Remove cockpit service payloads from provider-neutral history rows.
+
+    Claude history is sanitized while its JSONL is parsed. Codex history arrives from the
+    app server already normalized, so it must cross the same display boundary explicitly.
+    Assistant text is deliberately untouched: an answer that quotes a service tag is still
+    an answer and must render verbatim.
+    """
+    out: list[dict] = []
+    for message in messages:
+        if message.get("role") != "user":
+            out.append(message)
+            continue
+        cleaned = _display_prompt(message.get("text"))
+        if cleaned:
+            out.append({**message, "text": cleaned})
+    return out
+
+
 def _clean_run_start_event(event: dict) -> dict:
     """Returns `event` with a human-safe "prompt" for kind == "run_start" (see _display_prompt).
 
@@ -12420,7 +12439,7 @@ async def api_project_session_history(req: web.Request) -> web.Response:
             return web.json_response({"error": "invalid codex_thread_id"}, status=400)
         try:
             payload = await _codex.read_thread(thread_id)
-            messages = _codex.history_messages(payload)
+            messages = _history_messages_for_display(_codex.history_messages(payload))
             thread = payload.get("thread") or {}
             usage = thread.get("tokenUsage") or {}
             total = usage.get("total") or {}
@@ -14399,11 +14418,19 @@ async def api_project_chat(req: web.Request) -> web.Response:
         }
         agents_config = project.get("agents_config") or {}
         agents_kwargs = _build_agents_kwargs(ctx, agents_config)
+        # Runtime-specific continuity id. Codex has no Claude session id, so testing only
+        # resume_sid made EVERY resumed Codex turn look fresh: context-pack was re-injected
+        # on every message and then persisted as if the operator had typed it.
+        _runtime_resume_id = (_codex_resume_thread_id
+                              if _provider_for_run == "codex" else resume_sid)
         # Spec-021 Phase 4: inject handoff summary into the first turn of a fresh session.
-        # Only fires when there is no existing session (post-rotation) and a pending handoff exists.
+        # Only fires when there is no existing runtime conversation (post-rotation) and a
+        # pending handoff exists.
         effective_prompt = prompt
         try:
-            effective_prompt, _injected = _inject_pending_handoff(ctx, session_key, prompt, resume_sid)
+            effective_prompt, _injected = _inject_pending_handoff(
+                ctx, session_key, prompt, _runtime_resume_id,
+            )
             if _injected:
                 print(f"[rotation] injected handoff into first post-rotation turn for {session_key}")
         except Exception as _inj_exc:
@@ -14411,8 +14438,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
             effective_prompt = prompt
         # spec-075 Phase A: inject context pack on first turn of a fresh session.
         # Prepended BEFORE the handoff block (order: pack → handoff summary → user prompt).
-        # Gated: resume_sid is None AND global context_pack_enabled AND per-project override.
-        if resume_sid is None:
+        # Gated: the selected runtime has no continuity id AND both settings are enabled.
+        if _runtime_resume_id is None:
             try:
                 if (_get_global_setting("context_pack_enabled", True)
                         and _project_context_pack_enabled(project)):
