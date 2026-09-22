@@ -96,30 +96,29 @@ test('pinned: any own account/provider/backend is a pin; nothing is not', () => 
   assert.equal(chatIsPinned({ provider: 'claude', backend: 'ollama' }), true)
 })
 
-test('lead: the most binding ALL-model window leads; a per-model bucket never does', () => {
-  const [row] = buildRuntimeRows([claude([{ id: 'main', label: 'Main', active: true }])], {
-    limits: { five_hour: win(0.18), seven_day: win(0.15, 500_000), seven_day_fable: win(0.99, 500_000) },
-    now: NOW, account: 'main', accounts: null,
-  })
-  assert.equal(leadWindow(row, NOW)?.key, 'five_hour')
-  const [row2] = buildRuntimeRows([claude([{ id: 'main', label: 'Main', active: true }])], {
-    limits: { five_hour: win(0.05), seven_day: win(0.61, 500_000) },
-    now: NOW, account: 'main', accounts: null,
-  })
-  assert.equal(leadWindow(row2, NOW)?.key, 'seven_day')
+function mainRow(limits: Record<string, UsageLimitRow>) {
+  return buildRuntimeRows([claude([{ id: 'main', label: 'Main', active: true }])], {
+    limits, now: NOW, account: 'main', accounts: null,
+  })[0]
+}
+
+test('pill: always the 5-hour window — even when the weekly is higher', () => {
+  assert.equal(leadWindow(mainRow({ five_hour: win(0.03), seven_day: win(0.18, 500_000) }), NOW)?.key, 'five_hour')
+  assert.equal(leadWindow(mainRow({ five_hour: win(0.18), seven_day_fable: win(0.99, 500_000) }), NOW)?.key, 'five_hour')
 })
 
-test('lead: a rejected window leads; an already-reset window is ignored', () => {
-  const [row] = buildRuntimeRows([claude([{ id: 'main', label: 'Main', active: true }])], {
-    limits: { five_hour: win(0.99, -10), seven_day: win(0.2, 500_000) },
-    now: NOW, account: 'main', accounts: null,
-  })
+test('pill: a SPENT weekly limit overrides the 5-hour window (the runtime is cut off)', () => {
+  const row = mainRow({ five_hour: win(0.03), seven_day: win(1.0, 500_000, 'rejected') })
   assert.equal(leadWindow(row, NOW)?.key, 'seven_day')
-  const [row2] = buildRuntimeRows([claude([{ id: 'main', label: 'Main', active: true }])], {
-    limits: { five_hour: win(0.3), seven_day: win(0.1, 500_000, 'rejected') },
-    now: NOW, account: 'main', accounts: null,
-  })
-  assert.equal(leadWindow(row2, NOW)?.key, 'seven_day')
+  assert.equal(runtimeStats(row, NOW).cls, 'usage-red')
+  // A spent per-model bucket does not — it only bites when that model runs.
+  assert.equal(leadWindow(mainRow({ five_hour: win(0.03), seven_day_fable: win(1.0, 500_000, 'rejected') }), NOW)?.key, 'five_hour')
+})
+
+test('pill: a 5-hour window that already reset says nothing about now — no number', () => {
+  const row = mainRow({ five_hour: win(0.99, -10), seven_day: win(0.2, 500_000) })
+  assert.equal(leadWindow(row, NOW), null)
+  assert.equal(runtimeStats(row, NOW).pct, '—')
 })
 
 test('limits: multi-account block feeds each row; an aged inactive reading is stale', () => {

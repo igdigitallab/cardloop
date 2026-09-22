@@ -10,11 +10,11 @@ import { ToolBlock } from '../components/ToolBlock'
 import { OptionPicker, parseOptionsBlock } from '../components/OptionPicker'
 import { SessionSelector } from '../components/SessionSelector'
 import { UsageBadge } from '../components/UsageBadge'
-import { RuntimeLine, RuntimeTagChip } from '../components/RuntimeTag'
+import { RuntimeTagChip } from '../components/RuntimeTag'
 import {
-  useRuntimeStatus, useRuntimeProviders, useGlobalAccountId, buildRuntimeRows, effectiveRuntimeKey,
+  useRuntimeProviders, useGlobalAccountId, buildRuntimeRows, effectiveRuntimeKey,
   inheritedRuntimeKey, chatIsPinned, publishCurrentChat, clearCurrentChat, claimCurrentChat,
-  unusableAccounts, serverNow,
+  unusableAccounts,
   type RuntimeRow,
 } from '../lib/runtimeStatus'
 import {
@@ -928,8 +928,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
   model, thinkValue, disabled, onModelChange, onThinkChange, menuPlacement = 'up', models,
   ultracode, onUltracodeChange, planMode, onPlanModeChange, planLocked,
   askMode, onAskModeChange, provider = 'claude', reasoningLevels,
-  runtimes, activeRuntimeKey, onRuntimeChange, runtimeBusy, runtimeError, capabilities,
-  inheritedRuntimeKey: inheritedKeyProp, runtimePinned, projectBackendPinned, onFollowDefault,
+  capabilities, runtimeTag, runtimeLabel,
 }: {
   model: string
   thinkValue: ThinkMode
@@ -952,38 +951,16 @@ const ModelThinkButton = memo(function ModelThinkButton({
   onAskModeChange: (v: boolean) => void
   provider?: Provider
   reasoningLevels?: ThinkMode[]
-  /** spec-092: the selectable runtimes (provider x account), flattened into one list so the
-   *  menu stays a single scrollable column on a phone instead of a nested submenu. */
-  runtimes?: RuntimeChoice[]
-  /** `${provider}:${accountId}` of the chat's CURRENT runtime. */
-  activeRuntimeKey?: string
-  onRuntimeChange?: (choice: RuntimeChoice) => void
-  /** True while a PATCH is in flight — the rows stay visible but inert. */
-  runtimeBusy?: boolean
-  /** Last refusal (busy turn / stale revision / invalid combination), shown under the list. */
-  runtimeError?: string
   /** The CURRENT runtime's capability map from the live registry. Drives the per-turn
    *  toggles: hardcoding "codex has no ask_mode" would silently let the next provider
    *  without an approval hook show an ON toggle that enforces nothing. Absent = assume
    *  capable (fail-soft on a failed DISPLAY fetch, same rule as the model list). */
   capabilities?: Record<string, boolean>
-  /** spec-093: the key an unpinned chat here would run on — marked "default" in the list. */
-  inheritedRuntimeKey?: string
-  /** spec-093: this chat carries its own pin — offer "Follow default" to drop it. */
-  runtimePinned?: boolean
-  /** The project pins a backend: every chat in it must carry that backend, so "follow
-   *  default" there would WRITE a chat-level backend pin instead of dropping one — hidden. */
-  projectBackendPinned?: boolean
-  onFollowDefault?: () => void
+  /** spec-093: tag of the runtime this chat runs on, shown on the desktop pill. The runtime
+   *  itself is chosen ONLY in the usage pill — this menu is model, thinking and modes. */
+  runtimeTag?: string
+  runtimeLabel?: string
 }) {
-  // spec-093: this small component (not ChatTab) subscribes to the live percentages, so a
-  // usage poll re-renders the menu, never the whole chat.
-  const liveStatus = useRuntimeStatus()
-  const liveRows = React.useMemo(
-    () => buildRuntimeRows(liveStatus.providers, liveStatus.usage),
-    [liveStatus.providers, liveStatus.usage],
-  )
-  const now = serverNow(liveStatus)
   // Prefer the live registry; fall back to the bundled static list (offline / fetch failure).
   const modelList = (models && models.length > 0) ? models : MODELS
   // spec-092: capability-driven, not provider-name-driven.
@@ -1027,7 +1004,6 @@ const ModelThinkButton = memo(function ModelThinkButton({
   const ULTRACODE_EFFORT = 'xhigh'
   const tag = ultracode ? ULTRACODE_EFFORT : THINK_TAG[thinkValue]
   const isDown = menuPlacement === 'down'
-  const activeRuntime = runtimes?.find(r => r.key === activeRuntimeKey)
   return (
     <div className="composer-modelthink" ref={ref}>
       <button
@@ -1040,8 +1016,8 @@ const ModelThinkButton = memo(function ModelThinkButton({
       >
         {/* spec-093: the runtime tag rides on the desktop model pill so "which model on which
             subscription" is one glance; the mobile composer already has the tag pill beside it. */}
-        {isDown && activeRuntime?.row && (
-          <RuntimeTagChip tag={activeRuntime.row.tag} title={`Runs on ${activeRuntime.label}`} />
+        {isDown && runtimeTag && (
+          <RuntimeTagChip tag={runtimeTag} title={`Runs on ${runtimeLabel || runtimeTag} — change it in the usage pill`} />
         )}
         {planMode ? '🗺 ' : ''}{askMode && !planMode ? '🙋 ' : ''}{ultracode ? '⚡ ' : ''}{currentLabel}{tag ? ` · ${tag}` : ''}
       </button>
@@ -1051,52 +1027,8 @@ const ModelThinkButton = memo(function ModelThinkButton({
           role="listbox"
           style={isDown && fixedPos ? { position: 'fixed', top: fixedPos.top, right: fixedPos.right, bottom: 'auto' } : undefined}
         >
-          {/* spec-092: the runtime (which engine + which subscription answers this chat)
-              lives ABOVE the model list — picking a model only makes sense once the engine
-              is chosen, and on a phone the top of this menu is the only part above the fold. */}
-          {!!runtimes?.length && (
-            <>
-              <div className="composer-modelthink-sec">Runtime (this chat)</div>
-              {runtimes.map(rt => rt.row ? (
-                <RuntimeLine
-                  key={rt.key}
-                  row={liveRows.find(r => r.key === rt.key) ?? rt.row}
-                  now={now}
-                  selected={rt.key === activeRuntimeKey}
-                  pinnable={!runtimePinned}
-                  isDefault={rt.key === inheritedKeyProp}
-                  disabled={!rt.available || !!runtimeBusy}
-                  onPick={() => { onRuntimeChange?.(rt); setOpen(false) }}
-                />
-              ) : null)}
-              {runtimePinned && !projectBackendPinned && onFollowDefault && (
-                <div
-                  role="option"
-                  aria-selected={false}
-                  className={`rt-line rt-follow${runtimeBusy ? ' inert' : ''}`}
-                  title="Drop this chat's own pin: it will follow the project/global default, including future switches"
-                  onMouseDown={e => {
-                    e.preventDefault()
-                    if (runtimeBusy) return
-                    onFollowDefault()
-                    setOpen(false)
-                  }}
-                >
-                  <span className="rt-follow-icon">↺</span>
-                  <span className="rt-line-name">Follow default</span>
-                  <span className="rt-line-stat">
-                    {runtimes.find(r => r.key === inheritedKeyProp)?.row?.tag ?? ''}
-                  </span>
-                  <span className="rt-line-mark" />
-                </div>
-              )}
-              {runtimeError && (
-                <div className="composer-modelthink-note" style={{ color: 'var(--danger, #c33)' }}>
-                  {runtimeError}
-                </div>
-              )}
-            </>
-          )}
+          {/* spec-093: the runtime (engine x subscription) is chosen ONLY in the usage pill,
+              next to its percentages — this menu is what runs, not who pays. */}
           <div className="composer-modelthink-sec">
             {provider === 'codex' ? 'Codex model (this chat)' : t['chat.model_hint']}
           </div>
@@ -1432,7 +1364,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // would move a chat off that backend must be visibly unavailable — not merely refused on
   // click. A greyed row with a reason is the honest UI; a clickable one that 409s is not.
   const projectBackendPin = project.backend || ''
-  // Tags and availability only (no usage): percentages are joined in by ModelThinkButton.
+  // Tags and availability only (no usage): the percentages live in the usage pill.
   const runtimeRows: RuntimeRow[] = React.useMemo(
     () => buildRuntimeRows(providerRegistry, null),
     [providerRegistry],
@@ -1459,6 +1391,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // A project pinned to a logged-out account is served by the global one (accounts.resolve).
   const unusable = React.useMemo(() => unusableAccounts(providerRegistry), [providerRegistry])
   const activeRuntimeKey = effectiveRuntimeKey(activeChat, project, globalAccount, unusable)
+  const activeRuntimeChoice = runtimeChoices.find(r => r.key === activeRuntimeKey)
   const inheritedKey = inheritedRuntimeKey(project, globalAccount, unusable)
   const activeChatPinned = chatIsPinned(activeChat)
   // The backend the chat actually runs on — the project pin wins at run time, so it wins here.
@@ -4413,16 +4346,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               onAskModeChange={handleAskModeChange}
               provider={activeProvider}
               reasoningLevels={activeReasoningLevels}
-              runtimes={runtimeChoices}
-              activeRuntimeKey={activeRuntimeKey}
-              onRuntimeChange={handleRuntimeChange}
-              runtimeBusy={runtimeLocked}
-              runtimeError={runtimeError}
               capabilities={activeCapabilities}
-              inheritedRuntimeKey={inheritedKey}
-              runtimePinned={activeChatPinned}
-              projectBackendPinned={!!projectBackendPin}
-              onFollowDefault={handleFollowDefault}
+              runtimeTag={activeRuntimeChoice?.row?.tag}
+              runtimeLabel={activeRuntimeChoice?.label}
             />
           )}
           {/* Full-screen chat button — hides the left project pane (like a free chat).
@@ -5413,16 +5339,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   onAskModeChange={handleAskModeChange}
                   provider={activeProvider}
                   reasoningLevels={activeReasoningLevels}
-                  runtimes={runtimeChoices}
-                  activeRuntimeKey={activeRuntimeKey}
-                  onRuntimeChange={handleRuntimeChange}
-                  runtimeBusy={runtimeLocked}
-                  runtimeError={runtimeError}
                   capabilities={activeCapabilities}
-                  inheritedRuntimeKey={inheritedKey}
-                  runtimePinned={activeChatPinned}
-                  projectBackendPinned={!!projectBackendPin}
-                  onFollowDefault={handleFollowDefault}
+                  runtimeTag={activeRuntimeChoice?.row?.tag}
+                  runtimeLabel={activeRuntimeChoice?.label}
                 />
               </div>
             )}

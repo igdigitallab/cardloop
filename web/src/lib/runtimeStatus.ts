@@ -372,38 +372,46 @@ export function chatIsPinned(chat: Pick<Chat, 'provider' | 'account' | 'backend'
 
 // ─── Lead window ─────────────────────────────────────────────────────────────
 
-/** The windows that bind EVERY model on the runtime. Per-model weekly buckets (Fable, Opus)
- *  only bite when that model runs, so leading with one would alarm a chat that never uses it. */
-const LEAD_KEYS: Record<string, string[]> = {
+/** The pill's window: the SHORT one, always — the operator reads the pill as "how much of
+ *  this 5-hour window is gone and when does it roll over" (decision 2026-09-22). Codex's
+ *  `primary` is its short window. The weekly and per-model buckets live in the dropdown. */
+const PILL_KEY: Record<string, string> = { claude: 'five_hour', codex: 'primary' }
+
+/** Windows whose rejection actually blocks a turn. Not the per-model buckets (Fable, Opus —
+ *  they only bite when that model runs) and not Codex `credits` (the prepaid wallet, reported
+ *  "rejected" whenever it is empty, also on a healthy subscription). */
+const BLOCKING_KEYS: Record<string, string[]> = {
   claude: ['five_hour', 'seven_day'],
-  // Not `credits`: it is the prepaid wallet, reported "rejected" whenever it is empty — also on
-  // a healthy subscription. A real block shows up as a rejected primary/secondary window.
   codex: ['primary', 'secondary'],
 }
 
 /** Display order of a runtime's windows in the breakdown: the lead windows first. */
 export function windowKeys(row: RuntimeRow): string[] {
   if (!row.windows) return []
-  const lead = LEAD_KEYS[row.provider] || []
   const known = row.provider === 'claude'
-    ? ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'overage'] : lead
+    ? ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'overage']
+    : BLOCKING_KEYS[row.provider] || []
   const rest = Object.keys(row.windows).filter(k => !known.includes(k)).sort()
   return [...known, ...rest].filter(k => row.windows![k])
 }
 
 export interface Lead { key: string; d: UsageLimitRow }
 
-/** The window closest to its ceiling — the one about to bite. A rejected window always leads;
- *  a window whose reset has already passed has rolled over and says nothing about now. */
+/** What the pill shows: the short window — unless another window has actually cut the
+ *  runtime off, which then leads (a green "3%" on a subscription whose weekly limit is spent
+ *  would be the lie this pill exists to prevent). A window whose reset has passed has rolled
+ *  over and says nothing about now. */
 export function leadWindow(row: RuntimeRow, now: number): Lead | null {
   if (!row.windows) return null
-  const keys = (LEAD_KEYS[row.provider] || Object.keys(row.windows)).filter(k => row.windows![k])
-  let best: Lead | null = null
-  for (const k of keys) {
-    const d = row.windows[k]
-    if (d.resets_at != null && d.resets_at <= now) continue
-    if (d.status === 'rejected') return { key: k, d }
-    if (!best || (d.utilization ?? -1) > (best.d.utilization ?? -1)) best = { key: k, d }
+  const live = (k: string) => {
+    const d = row.windows![k]
+    return d && !(d.resets_at != null && d.resets_at <= now) ? d : null
   }
-  return best
+  for (const k of BLOCKING_KEYS[row.provider] || []) {
+    const d = live(k)
+    if (d && d.status === 'rejected') return { key: k, d }
+  }
+  const key = PILL_KEY[row.provider]
+  const d = key ? live(key) : null
+  return d ? { key, d } : null
 }
