@@ -7115,6 +7115,15 @@ async def _run_card(
     run_mode: 'worktree' | 'legacy'. wt_info: {wt_path, base_branch} or None.
     """
     provider = _effective_card_provider(card, project)
+    # spec-092 P3: a project pinned to the local backend means EVERY turn of that project —
+    # the Settings hint says so in those words, and a board card burning the cloud
+    # subscription behind that promise is the exact failure the pin exists to prevent. The
+    # pin also overrides the card's own provider: a Codex card cannot run on a local
+    # Anthropic-protocol endpoint at all, so honouring `board_provider` here would mean
+    # ignoring the pin.
+    _card_backend = str((project or {}).get("backend") or "")
+    if _card_backend:
+        provider = runtime.DEFAULT_PROVIDER
     run_engine = (ctx.get("run_codex_engine") if provider == "codex" else ctx.get("run_engine"))
     cwd = project["cwd"]
     name = project["name"]
@@ -7173,6 +7182,19 @@ async def _run_card(
         try:
             if run_engine is None:
                 raise RuntimeError("run_engine not available in ctx (old launch without F1)")
+
+            # spec-092 P3: resolved HERE, inside the card's own failure handling, so a box
+            # that is down marks the card Failed with a readable reason instead of escaping
+            # into _spawn_bg and leaving it stuck in progress. Refusing is the point: a
+            # pinned project must not fall back onto the cloud subscription it was moved off.
+            if _card_backend:
+                _bk, _bk_err = await _resolve_run_backend(ctx, None, provider, project)
+                if _bk_err:
+                    raise RuntimeError(f"local backend unavailable: {_bk_err}")
+                _card_backend = _bk
+                model, _card_note = await _coerce_model_for_backend(ctx, _card_backend, model)
+                if _card_note:
+                    print(f"[card] {card_id}: {_card_note}")
 
             # Live buffer for hydration (with the prompt, so a client that missed
             # the bus run_start reconstructs the user bubble instead of a '…').
@@ -7240,6 +7262,7 @@ async def _run_card(
                     # single scoped instruction, not a conversation to route.
                     env={**(project_secrets or {}), "CARDLOOP_RUN_MODE": "card"},
                     project_account=(project or {}).get("account"),
+                    backend=_card_backend,
                     **agents_kwargs,
                     ctx=ctx,
                     ephemeral=True,

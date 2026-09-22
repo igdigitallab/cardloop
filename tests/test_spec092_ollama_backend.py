@@ -590,3 +590,39 @@ def test_the_project_backend_setting_is_a_real_settings_field():
     assert src.count('"backend": b.get("backend") or None,') == 2, (
         "both project-record builders (bound projects and free chats) must carry the pin"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_board_card_in_a_pinned_project_runs_locally(fake_ctx, monkeypatch, tmp_path):
+    """The Settings hint promises the pin covers EVERY turn of the project. A board card
+    burning the cloud subscription behind that promise is the exact failure the pin exists to
+    prevent — and it is the path the operator watches least."""
+    calls: list = []
+
+    async def fake_engine(**kwargs):
+        calls.append(kwargs)
+        yield {"type": "text", "text": "done"}
+        yield {"type": "result", "session_id": "s-card"}
+
+    async def up_info():
+        return {"backend": "ollama", "enabled": True, "available": True,
+                "models": [{"value": "qwen3.8:27b-q4_K_M", "label": "qwen"}],
+                "base_url": "http://box:11434", "error": None}
+
+    fake_ctx["run_engine"] = fake_engine
+    fake_ctx["ollama_backend_info"] = up_info
+    fake_ctx["cwd_locks"] = {}
+    project = {"id": "myproject", "cwd": str(tmp_path), "name": "myproject",
+               "backend": "ollama", "board_provider": "codex"}
+    card = {"id": "c1", "text": "do a thing"}
+
+    monkeypatch.setattr(_webapp, "_move_card_after_run", _noop_async)
+    monkeypatch.setattr(_webapp, "_notify_operator", _noop_async)
+    await _webapp._run_card(fake_ctx, None, project, card, "1001:42")
+    assert calls, "the card must run"
+    assert calls[0]["backend"] == "ollama", "a pinned project's cards run locally"
+    assert calls[0]["model"] == "qwen3.8:27b-q4_K_M"
+
+
+async def _noop_async(*a, **kw):
+    return None

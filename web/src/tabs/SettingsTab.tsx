@@ -172,6 +172,7 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
   if (error) return <div className="error-state">⚠ {error}</div>
   if (!proj || !glob) return null
 
+  const localPin = !!proj.backend
   const e = glob.effective
   const setE = (patch: Partial<GlobalSettingsEffective>) =>
     setGlob({ ...glob, effective: { ...e, ...patch } })
@@ -306,6 +307,28 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
           </select>
         </Row>
 
+        {/* spec-092 P3: the backend pin comes FIRST and the rows it makes irrelevant are
+            dimmed and disabled below it. Leaving a live "Subscription" / "Board provider"
+            selector under a project that runs entirely on the local box reads as a setting
+            that does something — it does not, and that is worse than not showing it. */}
+        <Row title="Inference backend"
+             hint="Cloud runs on the Claude subscription. Local (Ollama) pins EVERY turn of this project — chats, board cards and TG — to the local box, swapping in a model it actually serves. Chats in this project cannot move themselves back to the cloud.">
+          <select value={proj.backend || ''}
+                  onChange={ev => setProj({ ...proj, backend: ev.target.value || null })}
+                  aria-label="Inference backend">
+            <option value="">Cloud (Claude subscription)</option>
+            <option value="ollama">Local (Ollama)</option>
+          </select>
+        </Row>
+
+        {localPin && (
+          <div style={{ fontSize: 12, color: 'var(--text2)', margin: '2px 0 10px' }}>
+            This project runs entirely on the local box. The cloud settings below are inactive
+            until you switch the backend back.
+          </div>
+        )}
+
+        <div style={localPin ? { opacity: 0.45, pointerEvents: 'none' } : undefined}>
         {accounts.length > 1 && !project.is_free && (
           <Row title="Subscription"
                hint="Which Claude account this project runs on. Inherit = whatever is selected globally in the limits badge. A pinned account applies to chat, board cards and deferred runs in this project.">
@@ -337,19 +360,6 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
           </select>
         </Row>
 
-        {/* spec-092 P3: the emergency / containment switch. Pinning the project outranks
-            every chat inside it — that is the point: "this project always runs locally" is
-            not a default a chat may quietly override. */}
-        <Row title="Inference backend"
-             hint="Cloud runs on the Claude subscription. Local (Ollama) pins EVERY turn of this project to the local box — chats in this project cannot move themselves back to the cloud, and the model is swapped to one the box actually serves.">
-          <select value={proj.backend || ''}
-                  onChange={ev => setProj({ ...proj, backend: ev.target.value || null })}
-                  aria-label="Inference backend">
-            <option value="">Cloud (Claude subscription)</option>
-            <option value="ollama">Local (Ollama)</option>
-          </select>
-        </Row>
-
         <Row title="Board provider"
              hint="Default engine for board cards. A card-level provider/model override wins. Claude remains the compatibility default.">
           <select value={proj.board_provider}
@@ -363,6 +373,8 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
           <input value={proj.codex_model} onChange={ev => setProj({ ...proj, codex_model: ev.target.value })}
                  style={{ width: 180 }} placeholder="gpt-5.6-sol" />
         </Row>
+
+        </div>
 
         <Row title="After rate-limit"
              hint="When a run is interrupted by the Claude subscription limit: Ask — show a Yes/No prompt in chat; Always continue — auto-resume silently when the window resets; Never — do nothing.">
