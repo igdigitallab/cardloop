@@ -15,6 +15,11 @@ import os
 import stat
 import sys
 
+import subprocess
+import sys as _sys
+
+import pytest
+
 import engine
 import runtime
 
@@ -84,10 +89,47 @@ def test_directory_is_not_accepted(tmp_path):
     assert runtime.resolve_cli_path(str(tmp_path)) is None
 
 
-def test_engine_exposes_the_resolved_path():
-    """engine builds every ClaudeAgentOptions with this value; it must be runtime's, not a
-    second opinion computed from a different rule."""
-    assert engine.CLI_PATH == runtime.CLI_PATH
+def test_the_path_is_resolved_per_run_not_frozen_at_import(monkeypatch, tmp_path):
+    """The whole failure mode, in miniature: bot.py imports webapp (hence runtime) BEFORE it
+    parses .env, so anything that snapshots the value at import time freezes None and the
+    escape hatch is silently inert — no error, no log line, runs keep using the bundled CLI."""
+    exe = _make_exe(tmp_path)
+    monkeypatch.delenv("CLAUDE_CLI_PATH", raising=False)
+    assert runtime.cli_path() is None                    # state at webapp-import time
+    monkeypatch.setenv("CLAUDE_CLI_PATH", str(exe))      # what _load_env() does afterwards
+    assert runtime.cli_path() == str(exe)                # the run must see it anyway
+
+
+def test_no_module_snapshots_the_path_into_a_constant():
+    """A re-introduced `CLI_PATH = ...` module constant is the bug itself, not a shortcut."""
+    for mod in (runtime, engine):
+        assert not hasattr(mod, "CLI_PATH"), (
+            f"{mod.__name__}.CLI_PATH is back — it freezes at import, before bot.py loads "
+            "                .env. Call runtime.cli_path() at the point of use instead.")
+
+
+def test_bot_import_order_lets_dotenv_reach_the_resolver():
+    """End-to-end on the real launcher: importing bot must leave CLAUDE_CLI_PATH from .env
+    visible to runtime.cli_path(). This is the only check that covers the ORDER of bot.py's
+    imports; every other test here drives the resolver directly and cannot see it."""
+    root = _ROOT
+    try:
+        dotenv = open(os.path.join(root, ".env"), encoding="utf-8").read()
+    except OSError:
+        pytest.skip("no .env in this checkout")
+    if "CLAUDE_CLI_PATH=" not in dotenv:
+        pytest.skip(".env does not set CLAUDE_CLI_PATH — nothing to observe")
+
+    env = {"HOME": os.path.expanduser("~"), "PATH": os.environ.get("PATH", "")}
+    out = subprocess.run(
+        [_sys.executable, "-c", "import bot, runtime; print('RESOLVED:', runtime.cli_path())"],
+        cwd=root, env=env, capture_output=True, text=True, timeout=180,
+    )
+    line = [ln for ln in out.stdout.splitlines() if ln.startswith("RESOLVED:")]
+    assert line, f"child produced no verdict:\nstdout={out.stdout[-2000:]}\nstderr={out.stderr[-2000:]}"
+    assert line[0] != "RESOLVED: None", (
+        ".env sets CLAUDE_CLI_PATH but the launcher resolves None — an import runs before "
+        "_load_env() again, and the override is inert on any non-systemd install.")
 
 
 def test_verifier_probes_the_active_cli_not_the_bundle(monkeypatch, tmp_path):

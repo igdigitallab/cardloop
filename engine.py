@@ -79,10 +79,11 @@ MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku", "fable": "fable"
 # Re-probe after every model release (tools/verify_model_aliases.py does it for all four):
 #   <cli> --model <alias> -p "Output only your exact model id." --output-format json
 
-# Which `claude` binary serves every run here — see runtime.resolve_cli_path (CLAUDE_CLI_PATH).
-# None = the SDK's bundled CLI. Constant for the process lifetime, so it is deliberately NOT
-# part of _compute_fingerprint: it cannot change while a live client is connected.
-CLI_PATH: "str | None" = _runtime.CLI_PATH
+# Which `claude` binary serves a run — runtime.cli_path() (CLAUDE_CLI_PATH), None = the SDK's
+# bundled CLI. Called per run, NOT snapshotted into a module constant: bot.py imports webapp
+# (hence runtime) before it parses .env, so an import-time constant would freeze None and the
+# override would be silently inert. Not in _compute_fingerprint — it does not change while the
+# process lives, so it can never split a live client.
 
 # ─────────────────────────── sub-agent roster ───────────────────────────
 # Default agents available to conductor sessions via the SDK Task tool.
@@ -2129,7 +2130,7 @@ async def rewind_conversation(
         resume_session_at=rewind_at_uuid,
         resume_drops_turn=rewind_drop_turn_uuid,
         fork_session=True,
-        cli_path=CLI_PATH,
+        cli_path=_runtime.cli_path(),
         stderr=stderr_lines.append,
     )
 
@@ -2950,7 +2951,7 @@ async def reconcile_board(
     opts = ClaudeAgentOptions(
         model=reconcile_model,
         permission_mode="bypassPermissions",
-        cli_path=CLI_PATH,
+        cli_path=_runtime.cli_path(),
         max_buffer_size=SDK_MAX_BUFFER_BYTES,
         cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
         system_prompt=_RECONCILE_SYSTEM,  # plain string — no tools, no preset
@@ -3493,8 +3494,8 @@ async def run_engine(  # type: ignore[return]
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,
-        # Which CLI binary serves this run — see CLI_PATH. None = the SDK's bundled one.
-        cli_path=CLI_PATH,
+        # Which CLI binary serves this run — see the CLAUDE_CLI_PATH note at the top.
+        cli_path=_runtime.cli_path(),
         # spec-080: plan turns connect in the CLI's native plan mode (hard read-only + its own
         # 5-phase workflow injection). permission_mode is part of the live-client fingerprint,
         # so toggling plan on/off reconnects the client with correctly-bound options.

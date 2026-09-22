@@ -15743,7 +15743,7 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
                 permission_mode="default",  # internal helper, no tools — no need to bypass
                 # Same binary as every other run (runtime.CLI_PATH): HANDOFF_MODEL may name a
                 # model the SDK's bundled CLI is too old to serve at all.
-                cli_path=runtime.CLI_PATH,
+                cli_path=runtime.cli_path(),
                 max_buffer_size=_SDK_MAX_BUFFER_BYTES,
                 cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
                 allowed_tools=[],
@@ -15974,7 +15974,7 @@ async def _build_session_title(summary: str) -> str:
         opts = _ClaudeAgentOptions(
             model=title_model,
             permission_mode="default",  # internal helper, no tools — no need to bypass
-            cli_path=runtime.CLI_PATH,   # same binary as every other run
+            cli_path=runtime.cli_path(),   # same binary as every other run
             max_buffer_size=_SDK_MAX_BUFFER_BYTES,
             cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
             allowed_tools=[],

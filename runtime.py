@@ -769,6 +769,11 @@ def ollama_env_overlay(
 def resolve_cli_path(raw: "str | None" = None) -> "str | None":
     """The CLI override, or None to let the SDK use its bundled binary.
 
+    Resolved at CALL time and never cached in a module constant. bot.py imports webapp (and
+    through it this module) BEFORE it parses .env, so a constant computed at import would
+    snapshot None and the escape hatch would be silently inert on any install that does not
+    inject the variable from outside (ops does, via the unit's EnvironmentFile=).
+
     A misconfigured value degrades to the bundle instead of breaking every run: a typo in
     .env must not take the cockpit down. Surrounding quotes are tolerated because the
     cockpit's .env loader (bot.py `_load_env`) does not strip them.
@@ -779,19 +784,30 @@ def resolve_cli_path(raw: "str | None" = None) -> "str | None":
         return None
     path = os.path.expanduser(value)
     if os.path.isfile(path) and os.access(path, os.X_OK):
+        _log_cli_path_once(f"[cli-path] external CLI in use: {path}")
         return path
-    print(f"[cli-path] CLAUDE_CLI_PATH={value!r} is not an executable file — "
-          "falling back to the SDK's bundled CLI")
+    _log_cli_path_once(f"[cli-path] CLAUDE_CLI_PATH={value!r} is not an executable file — "
+                       "falling back to the SDK's bundled CLI")
     return None
 
 
-CLI_PATH: "str | None" = resolve_cli_path()
-if CLI_PATH:
-    print(f"[cli-path] external CLI in use: {CLI_PATH}")
+_cli_path_logged: "set[str]" = set()
+
+
+def _log_cli_path_once(line: str) -> None:
+    """Every run resolves the path, so the line would otherwise repeat on every turn."""
+    if line not in _cli_path_logged:
+        _cli_path_logged.add(line)
+        print(line)
+
+
+def cli_path() -> "str | None":
+    """Alias for resolve_cli_path() with no argument — what call sites should use."""
+    return resolve_cli_path()
 
 
 __all__ = [
-    "CLI_PATH", "resolve_cli_path",
+    "cli_path", "resolve_cli_path",
     "DEFAULT_PROVIDER", "DEFAULT_BACKEND", "OLLAMA_BACKEND", "OLLAMA_ENV_VAR_NAMES",
     "ORIGIN_KINDS",
     "RuntimeResolutionError", "ProviderInfo", "ProviderStatus", "ProviderLookup",

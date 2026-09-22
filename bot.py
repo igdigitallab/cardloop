@@ -13,9 +13,6 @@ import asyncio
 import os
 from pathlib import Path
 
-import webapp          # web cockpit (webapp.py) — started alongside, state shared via ctx
-import tunnel          # spec-082 B: --tunnel / CARDLOOP_TUNNEL zero-config remote access + QR
-
 # ─────────────────────────── config ───────────────────────────
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
@@ -62,9 +59,15 @@ if CLAUDE_AUTH_MODE == "subscription":
 WEB_PORT = int(os.environ.get("WEB_PORT", "8787"))           # web cockpit port
 WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")            # passphrase for cockpit login
 
-# ── engine imported AFTER _load_env() + auth ──────────────────────────────────
-# engine.py reads env vars at module level; importing it before _load_env() would
-# cause env-dependent constants (DEFAULT_CWD, OPERATOR_NAME, …) to use defaults.
+# ── first-party modules imported AFTER _load_env() + auth ─────────────────────
+# They read env vars at module level; importing any of them before _load_env() would
+# cause env-dependent constants (DEFAULT_CWD, OPERATOR_NAME, webapp's ~39 tunables, …)
+# to use defaults. webapp used to be imported at the top of this file, which made every
+# one of its module-level os.environ reads silently ignore .env on any install that does
+# not inject the variables from outside (our unit does, via EnvironmentFile=) — found
+# 2026-09-22 when CLAUDE_CLI_PATH resolved to None in a bare `python bot.py`.
+import webapp  # noqa: E402  (web cockpit — started alongside, state shared via ctx)
+import tunnel  # noqa: E402  (spec-082 B: --tunnel / CARDLOOP_TUNNEL remote access + QR)
 import engine  # noqa: E402,F401  (after env load; re-exported for tests)
 import codex_engine  # noqa: E402  (isolated optional provider; SDK import stays lazy)
 # Re-exported from engine so `import bot; bot.X` keeps working for tests and any
