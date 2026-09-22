@@ -47,6 +47,8 @@ import accounts as _accounts
 # no aiohttp/engine import back — safe to import at module scope (unlike engine.py, which
 # imports webapp.py lazily to avoid a cycle).
 import runtime
+import ollama_backend as _ollama
+import handoff as _handoff
 
 # spec-065 Phase B: live browser pane (lazy — playwright imported only on first use)
 import browser_pane as _browser_pane
@@ -11185,10 +11187,11 @@ async def _runtime_providers(ctx: dict) -> "dict[str, runtime.ProviderInfo]":
     backends + availability, not just a bool). Mirrors GET /api/agent-providers' own
     provider/model shape so the two never disagree about what is selectable.
 
-    Claude's `backends` is deliberately left empty (→ only the native "" backend validates)
-    — the Ollama backend overlay (spec-092 P3) is not wired into any run dispatch yet, so
-    advertising it as a legal PATCH target here would accept a setting that silently does
-    nothing at run time.
+    spec-092 P3: Claude's `backends` now includes the local Ollama endpoint — but ONLY while
+    a live probe says it is answering. It is a backend of `claude`, not a provider of its
+    own (ollama serves a native Anthropic /v1/messages, so the whole agent loop rides on an
+    env overlay); `validate_runtime_change` refuses `provider="ollama"` on purpose. Its model
+    names are its own, hence `backend_models` rather than merging them into `models`.
     """
     claude_models = tuple((ctx.get("MODELS") or {}).values()) or tuple(_ALLOWED_MODELS)
     codex_info_fn = ctx.get("codex_provider_info") or _codex.provider_info
@@ -11196,9 +11199,17 @@ async def _runtime_providers(ctx: dict) -> "dict[str, runtime.ProviderInfo]":
     codex_models = tuple(
         m.get("value") for m in (codex_info.get("models") or []) if m.get("value")
     )
+    ollama_info_fn = ctx.get("ollama_backend_info") or _ollama.backend_info
+    ollama_info = await ollama_info_fn()
+    ollama_models = tuple(
+        m.get("value") for m in (ollama_info.get("models") or []) if m.get("value")
+    )
+    claude_backends = ("",) + ((runtime.OLLAMA_BACKEND,) if ollama_info.get("available") else ())
     return {
         "claude": runtime.ProviderInfo(
             provider="claude", available=True, models=claude_models,
+            backends=claude_backends,
+            backend_models={runtime.OLLAMA_BACKEND: ollama_models},
             capabilities=_CLAUDE_CAPABILITIES,
         ),
         "codex": runtime.ProviderInfo(
@@ -11440,6 +11451,112 @@ async def api_project_chats_patch(req: web.Request) -> web.Response:
     return web.json_response({"active": _effective_active_chat(entry), "chat": _chat_response(chat)})
 
 
+def _handoff_is_stale(armed: dict, provider: str, backend: str) -> bool:
+    """True when an armed handoff was written for a DIFFERENT runtime than the one running.
+
+    The case that matters: switch Claude -> Codex (block armed for Codex), change your mind
+    and switch back before sending anything. The block is now a summary of Claude's own work
+    addressed to Claude, and delivering it would tell the engine it is missing context it has
+    in full. Records armed before this field existed carry no `for_provider` and are trusted
+    as-is — they can only exist inside one deploy window, and treating them as stale would
+    silently discard an operator's edited block.
+    """
+    want_provider = armed.get("for_provider")
+    if want_provider is None:
+        return False
+    return (str(want_provider) != provider
+            or str(armed.get("for_backend") or "") != (backend or ""))
+
+
+def _drop_runtime_handoff(ctx: dict, project: dict, chat_id: "str | None") -> None:
+    """Best-effort removal of a stale armed handoff. Never raises: failing to clean up must
+    not take down the turn that noticed the staleness."""
+    if not chat_id:
+        return
+    try:
+        data = _load_chats(ctx)
+        entry = data.get(project["id"]) or {}
+        chat = next((c for c in entry.get("chats", []) if c.get("id") == chat_id), None)
+        if chat is not None and chat.pop("runtime_handoff", None) is not None:
+            _save_chats(ctx, data)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[handoff] could not drop a stale block: {exc!r}")
+
+
+async def api_project_chat_handoff(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/chats/{chat_id}/handoff
+    {messages:[{role,text,tools}], from_label, to_label, commit?: bool, text?: str}
+
+    spec-092 P2. Two modes on one endpoint because they are one operator gesture:
+      * commit=false (default) — build and RETURN the block. Nothing is stored. The operator
+        reads and edits it before it is sent anywhere; a handoff nobody checked is how a
+        wrong "standing constraint" gets carried into the next engine as fact.
+      * commit=true — ARM the (possibly edited) block on THIS chat record. It is delivered
+        as a prefix to the first prompt that runs on the new runtime and is cleared only
+        once that turn actually came back with a session/thread id.
+
+    Stored on the CHAT as `runtime_handoff`, never on the project session_key: /rotate's
+    injector keys its own `ctx["pending_handoff"]` by session_key, so a sibling chat of the
+    same project can consume one — a defect this spec explicitly refuses to inherit. The
+    distinct field name keeps the two mechanisms from ever being mistaken for each other.
+    """
+    ctx = req.app["ctx"]
+    pid = req.match_info["id"]
+    chat_id = req.match_info["chat_id"]
+    if not _valid_chat_id(chat_id):
+        return web.json_response({"error": "invalid chat_id"}, status=400)
+    project = _find_project_by_id(ctx, pid)
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "bad request"}, status=400)
+
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+    messages = [m for m in messages if isinstance(m, dict)][-200:]
+    from_label = str(body.get("from_label") or "the previous runtime")[:80]
+    to_label = str(body.get("to_label") or "this runtime")[:80]
+    built = _handoff.build_handoff(messages, from_label=from_label, to_label=to_label)
+
+    if not body.get("commit"):
+        return web.json_response({"handoff": built})
+
+    # The operator may have edited it; an empty edit means "send nothing" and is honoured.
+    text = body.get("text")
+    text = built["text"] if text is None else str(text)
+    text = text.strip()[:20000]
+    session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    async with _chats_lock():
+        chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
+        entry = chats_data[project["id"]]
+        chat = next((c for c in entry["chats"] if c["id"] == chat_id), None)
+        if chat is None:
+            return web.json_response({"error": "chat not found"}, status=404)
+        if text:
+            # The block is written FOR the runtime the chat is on right now (the picker
+            # PATCHes first, then arms). Stamping that runtime is what stops it being
+            # delivered to the engine it was written ABOUT: flip back to the old engine
+            # before the first turn and, without this, the old engine would be handed a
+            # "here is what you missed" summary of its own work.
+            chat["runtime_handoff"] = {
+                "text": text,
+                "created_at": time.time(),
+                "from_label": from_label,
+                "to_label": to_label,
+                "for_provider": _chat_provider(chat),
+                "for_backend": str(chat.get("backend") or ""),
+            }
+        else:
+            chat.pop("runtime_handoff", None)
+        _save_chats(ctx, chats_data)
+    return web.json_response({"armed": bool(text), "handoff": built})
+
+
 async def api_project_chats_delete(req: web.Request) -> web.Response:
     """DELETE /api/projects/{id}/chats/{chat_id}
     Removes the chat. Refuses if it is the last one.
@@ -11497,6 +11614,24 @@ async def api_agent_providers(req: web.Request) -> web.Response:
         }
         for a in _accounts.list_accounts()
     ]
+    # spec-092 P3: the local endpoint is a BACKEND of claude, not a third provider — the
+    # bundled CLI is the harness either way, only ANTHROPIC_BASE_URL changes. Its row is
+    # always listed (so the operator can see it exists and why it is down) but is only
+    # `available` while the live probe says the box is answering.
+    ollama_info_fn = ctx.get("ollama_backend_info") or _ollama.backend_info
+    ollama_info = await ollama_info_fn()
+    claude_backends = [
+        {"id": "", "label": "Claude subscription", "available": True,
+         "models": claude_models, "error": None},
+    ]
+    if ollama_info.get("enabled"):
+        claude_backends.append({
+            "id": runtime.OLLAMA_BACKEND,
+            "label": "Ollama (local)",
+            "available": bool(ollama_info.get("available")),
+            "models": ollama_info.get("models") or [],
+            "error": ollama_info.get("error"),
+        })
     return web.json_response({
         "default": "claude",
         "providers": [
@@ -11506,9 +11641,10 @@ async def api_agent_providers(req: web.Request) -> web.Response:
                 "reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
                 "capabilities": _CLAUDE_CAPABILITIES,
                 "accounts": claude_accounts,
+                "backends": claude_backends,
                 "error": None,
             },
-            {**codex_info, "accounts": []},
+            {**codex_info, "accounts": [], "backends": []},
         ],
     })
 
@@ -12427,6 +12563,8 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
         # subscription. Copying a None here would erase that distinction at drain time.
         if pinned_runtime.get("account"):
             item["runtime"]["account"] = pinned_runtime["account"]
+        if pinned_runtime.get("backend"):
+            item["runtime"]["backend"] = pinned_runtime["backend"]
     if front:
         lst.insert(0, item)
     else:
@@ -12450,6 +12588,42 @@ def _chat_queue_pop(session_key: str) -> "dict | None":
         _CHAT_QUEUE.pop(session_key, None)
     _chat_queue_flush()
     return item
+
+
+def _chat_queue_pop_ready(session_key: str) -> "dict | None":
+    """Pop the oldest item whose `not_before` has passed, or None.
+
+    spec-092 P3b: a turn pinned to the local backend parks itself back on the queue when the
+    GPU is handed to another stack mid-flight. A plain FIFO pop would hand that same item
+    straight back to the drain, which would park it again — a busy loop that burns CPU and
+    floods the log for as long as the box is down. Deferring it is not enough on its own
+    either: the queue is per PROJECT, so one parked local chat would otherwise block every
+    other chat's messages behind it. Hence "oldest READY item", not "oldest item".
+
+    Ordinary items carry no `not_before` and are therefore always ready — behaviour for
+    everything that predates this is byte-identical.
+    """
+    lst = _CHAT_QUEUE.get(session_key)
+    if not lst:
+        return None
+    now = time.time()
+    # Chats whose turn order must not be broken: skipping a deferred item is only safe for
+    # OTHER chats. Running a later message of the SAME chat first would let it advance that
+    # chat's session_id, and the earlier message would then resume a conversation that
+    # already contains the answer to a question it has not asked yet.
+    deferred_chats: set = set()
+    for idx, it in enumerate(lst):
+        if float(it.get("not_before") or 0) > now:
+            deferred_chats.add(it.get("chat_id"))
+            continue
+        if it.get("chat_id") in deferred_chats:
+            continue
+        item = lst.pop(idx)
+        if not lst:
+            _CHAT_QUEUE.pop(session_key, None)
+        _chat_queue_flush()
+        return item
+    return None
 
 
 def _chat_queue_take_all(session_key: str) -> list:
@@ -12504,17 +12678,54 @@ async def api_chat_queue_list(req: web.Request) -> web.Response:
     return web.json_response({"items": _chat_queue_get(session_key)})
 
 
-def _runtime_pin(provider: str, model: "str | None", account: "str | None") -> dict:
-    """The {provider, model, account?} dict a chat-queue item carries (spec-092 item 3).
+def _runtime_pin(provider: str, model: "str | None", account: "str | None",
+                 backend: str = "") -> dict:
+    """The {provider, model, account?, backend?} dict a chat-queue item carries (spec-092).
 
-    `account` is omitted rather than stored as None so an item enqueued before the account
-    dimension existed and one enqueued on the inherited project default stay byte-identical
-    — the drain's "is there a pin for this dimension" check is a key presence test.
+    `account`/`backend` are omitted rather than stored as None/"" so an item enqueued before
+    those dimensions existed and one enqueued on the plain default stay byte-identical — the
+    drain's "is there a pin for this dimension" check is a key presence test.
     """
     pin: dict = {"provider": provider, "model": model}
     if account:
         pin["account"] = account
+    if backend:
+        pin["backend"] = backend
     return pin
+
+
+async def _resolve_run_backend(ctx: dict, chat: "dict | None",
+                               provider: str) -> "tuple[str, str]":
+    """Which inference endpoint answers this turn: "" (the provider's own) or "ollama".
+
+    spec-092 P3. Returns (backend, error_message). The backend is checked LIVE, not read as
+    a config flag: the GPU is shared with ComfyUI under automatic arbitration, so the box
+    can be gone since the operator picked it. Refusing at the start of the turn is the whole
+    point — otherwise the CLI dies mid-sentence on a bare TCP refusal with the operator's
+    prompt already half-answered.
+
+    ⚠️ Parking the message as "backend evicted" and resuming when the card comes back is
+    spec-092 P3b, and it depends on the queue's pending->claimed->terminal states (P0b) to
+    be safe. Until those land, a clear refusal is the honest behaviour; a silent fallback to
+    the cloud subscription would be the one thing an "all-local" chat must never do.
+    """
+    backend = str((chat or {}).get("backend") or "") if isinstance(chat, dict) else ""
+    if not backend:
+        return "", ""
+    if provider != runtime.DEFAULT_PROVIDER:
+        return "", (f"backend {backend!r} is only available on the "
+                    f"{runtime.DEFAULT_PROVIDER} harness, not on {provider!r}")
+    if backend != runtime.OLLAMA_BACKEND:
+        return "", f"unknown inference backend {backend!r}"
+    info_fn = ctx.get("ollama_backend_info") or _ollama.backend_info
+    try:
+        info = await info_fn()
+    except Exception as exc:  # noqa: BLE001 — a probe failure is "not available", not a 500
+        return "", f"local backend probe failed: {exc!r}"
+    if not info.get("available"):
+        return "", (info.get("error")
+                    or "the local inference backend is not answering right now")
+    return backend, ""
 
 
 def _resolve_run_account(chat: "dict | None", project: "dict | None") -> "tuple[str | None, str]":
@@ -12571,10 +12782,8 @@ def _pin_chat_runtime(ctx: dict, project: dict, chat_id: "str | None") -> "dict 
     # the subscription it was accepted against. An unusable explicit account resolves to None
     # here (no pin) rather than failing the enqueue — the drain then inherits the project's.
     account, _acct_err = _resolve_run_account(chat, project)
-    pin = {"provider": provider, "model": model}
-    if account and not _acct_err:
-        pin["account"] = account
-    return pin
+    return _runtime_pin(provider, model, account if not _acct_err else None,
+                        str(chat.get("backend") or ""))
 
 
 async def api_chat_queue_add(req: web.Request) -> web.Response:
@@ -12967,6 +13176,8 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # override (pinned or freshly resolved) replaces it inside the branch below.
         _q_account = topic.get("account")
         _q_account_err = ""
+        _q_backend = ""
+        _q_armed: "dict | None" = None
         if _project_id:
             try:
                 async with _chats_lock():
@@ -12999,6 +13210,9 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                 _q_account_err = ""
                             else:
                                 _q_account, _q_account_err = _resolve_run_account(_tc, topic)
+                            _q_backend = str(_pinned_rt.get("backend")
+                                             or (_tc.get("backend") or ""))
+                            _q_armed = _tc.get("runtime_handoff")
                         else:
                             # Legacy item: enqueued before spec-092 pinning existed, or via a
                             # call site that intentionally does not pin (completion wakes,
@@ -13010,6 +13224,8 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                             if _tc.get("model"):
                                 model = _tc["model"]
                             _q_account, _q_account_err = _resolve_run_account(_tc, topic)
+                            _q_backend = str(_tc.get("backend") or "")
+                            _q_armed = _tc.get("runtime_handoff")
                             print(f"[chat_queue] {session_key}: draining item {item.get('id')} "
                                   f"with NO pinned runtime — assumed current chat state "
                                   f"(provider={provider!r})")
@@ -13039,6 +13255,43 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 _acct_ok, _acct_reason = True, f"validation skipped ({_av_exc!r})"
             if not _acct_ok:
                 _q_account_err = _acct_reason
+        # spec-092 P3: the endpoint this message was pinned to can be gone by drain time (the
+        # GPU is shared). Falling back to the cloud subscription would silently send an
+        # all-local conversation to Anthropic, so the item is re-queued at the FRONT instead
+        # and the operator is told — the message is neither lost nor quietly re-routed.
+        if _q_backend:
+            _bk, _bk_err = await _resolve_run_backend(ctx, {"backend": _q_backend}, provider)
+            if _bk_err:
+                _parked = _chat_queue_enqueue(
+                    session_key, item.get("text") or "", _resolved_chat_id, _project_id,
+                    effort=_q_effort, ultracode=_q_ultracode, plan_mode=_q_plan_mode,
+                    ask_mode=_q_ask_mode, auto_rotate=item.get("auto_rotate"),
+                    msg_id=item.get("msg_id") or "", front=True,
+                    pinned_runtime=_runtime_pin(provider, model, _q_account, _q_backend),
+                )
+                if _parked is not None:
+                    _tries = int(item.get("backend_tries") or 0) + 1
+                    _parked["backend_tries"] = _tries
+                    _parked["blocked_reason"] = f"backend evicted: {_bk_err}"[:300]
+                    _parked["blocked_since"] = item.get("blocked_since") or time.time()
+                    # The probe caches a failure for ~15s; retrying faster only re-reads the
+                    # cache. Backs off to a minute so a long eviction is quiet, not a log flood.
+                    _parked["not_before"] = time.time() + min(60.0, 15.0 * _tries)
+                    _chat_queue_flush()
+                    # Log the first park and then roughly once a minute, not every attempt.
+                    if _tries == 1 or _tries % 15 == 0:
+                        print(f"[chat_queue] {session_key}: backend {_q_backend!r} unavailable "
+                              f"({_bk_err}) — message parked, attempt {_tries}")
+                else:
+                    # Queue full: the ONE case where parking is impossible. Say so loudly —
+                    # this is the only path where a pinned local turn can be lost.
+                    print(f"[chat_queue] {session_key}: backend {_q_backend!r} unavailable AND "
+                          f"the queue is full — message NOT parked: {item.get('text','')[:80]!r}")
+                _chat_trace(session_key, "drain_backend_unavailable", chat_id=_resolved_chat_id,
+                            backend=_q_backend, reason=_bk_err[:200],
+                            parked=_parked is not None)
+                return
+            _q_backend = _bk
         if _q_account_err:
             print(f"[chat_queue] {session_key}: pinned subscription {_q_account!r} cannot run "
                   f"({_q_account_err}) — this turn falls back to the global account")
@@ -13095,6 +13348,23 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         except Exception as _q_inj_exc:
             print(f"[rotation] handoff injection failed for queued turn (continuing): {_q_inj_exc}")
             effective_prompt = prompt
+        # spec-092 P2: the RUNTIME handoff (a provider crossing) has to ride this path too.
+        # The picker refuses to switch while a turn is running, but a message typed just
+        # before the switch — or one queued behind live sub-agents — drains through here, and
+        # this used to be the first turn on the new engine: it ran with the bare prompt and
+        # the block stayed armed, gluing itself onto whatever unrelated message next took the
+        # direct path. Both halves of that (the silent loss AND the misdelivery) are the
+        # failure this phase exists to prevent.
+        if isinstance(_q_armed, dict) and _handoff_is_stale(_q_armed, provider, _q_backend):
+            print(f"[handoff] {session_key}: queued turn runs on "
+                  f"{provider!r}/{_q_backend!r}, block was armed for "
+                  f"{_q_armed.get('for_provider')!r}/{_q_armed.get('for_backend')!r} — dropping")
+            _drop_runtime_handoff(ctx, {"id": _project_id}, _resolved_chat_id)
+            _q_armed = None
+        if isinstance(_q_armed, dict) and (_q_armed.get("text") or "").strip():
+            effective_prompt = _q_armed["text"].strip() + "\n\n" + effective_prompt
+            print(f"[handoff] {session_key}: delivering {len(_q_armed['text'])} chars to a "
+                  f"queued turn ({_q_armed.get('from_label')} → {_q_armed.get('to_label')})")
 
         if _live_turns.get(session_key) is None:
             _lt = _live_turn_create(session_key, model, prompt)
@@ -13128,7 +13398,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 project_name=project_name, cwd=cwd, prompt=effective_prompt,
                 session_key=session_key, model=model,
                 resume_session_id=resume_session_id, env=project_secrets,
-                project_account=_q_account,
+                project_account=_q_account, backend=_q_backend,
                 **agents_kwargs, ctx=ctx, ephemeral=False, effort=_q_effort,
                 ultracode=bool(_q_ultracode), plan_mode=_q_plan_mode,
                 ask_mode=_q_ask_mode, chat_id=_resolved_chat_id,
@@ -13180,6 +13450,13 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                             _wc["codex_thread_id"] = _thread_id
                                         else:
                                             _wc["session_id"] = _sid
+                                        # spec-092 P2: the engine answered — only now is the
+                                        # handoff proven delivered (same rule as the direct
+                                        # path; clearing at injection time would lose it on a
+                                        # turn that died before the engine ever read it).
+                                        if _wc.pop("runtime_handoff", None) is not None:
+                                            print(f"[handoff] {session_key}: delivered on a "
+                                                  f"queued turn, cleared")
                                         _save_chats(ctx, _wd)
                                         _wrote_back = True
                                         # Keep the flat mirror in sync only for the active chat.
@@ -13265,8 +13542,10 @@ async def _chat_queue_drain_one(ctx: dict, session_key: str) -> bool:
     items = _chat_queue_get(session_key)
     if not items:
         return False
-    item = _chat_queue_pop(session_key)
+    item = _chat_queue_pop_ready(session_key)
     if item is None:
+        # Everything queued is deferred (a parked local-backend turn waiting for its GPU).
+        # Not an error and not a drop — the backstop loop retries.
         return False
     _chat_trace(session_key, "drain", msg_id=item.get("msg_id", ""),
                 chat_id=item.get("chat_id"), text=item.get("text", ""),
@@ -13747,6 +14026,13 @@ async def api_project_chat(req: web.Request) -> web.Response:
     _run_account, _run_account_err = _resolve_run_account(_run_chat, project)
     if _run_account_err:
         return web.json_response({"error": _run_account_err}, status=409)
+    # spec-092 P3: the inference endpoint. A chat pinned to the local backend refuses here
+    # when the box is down, instead of dying mid-turn — and never silently falls back to the
+    # cloud subscription, which is exactly what an "all-local" chat must not do.
+    _run_backend, _run_backend_err = await _resolve_run_backend(ctx, _run_chat, _provider_for_run)
+    if _run_backend_err:
+        return web.json_response({"error": _run_backend_err, "backend_unavailable": True},
+                                 status=409)
 
     # spec-092 item 5: a runtime that cannot honour a requested per-turn option ERRORS — it
     # never silently clears the flag (the old `_ask_mode = False for Codex` line removed the
@@ -13833,7 +14119,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                    effort=_effort_override, ultracode=_ultracode,
                                    auto_rotate=_auto_rotate, plan_mode=_plan_mode,
                                    ask_mode=_ask_mode, msg_id=_msg_id,
-                                   pinned_runtime=_runtime_pin(_provider_for_run, model, _run_account))
+                                   pinned_runtime=_runtime_pin(_provider_for_run, model, _run_account,
+                                                               _run_backend))
         if item is None:
             _chat_trace(session_key, "queue_full", msg_id=_msg_id, chat_id=_req_chat_id,
                         text=prompt, limit=_CHAT_QUEUE_MAX)
@@ -13870,7 +14157,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                    effort=_effort_override, ultracode=_ultracode,
                                    auto_rotate=_auto_rotate, plan_mode=_plan_mode,
                                    ask_mode=_ask_mode, msg_id=_msg_id,
-                                   pinned_runtime=_runtime_pin(_provider_for_run, model, _run_account))
+                                   pinned_runtime=_runtime_pin(_provider_for_run, model, _run_account,
+                                                               _run_backend))
         payload = json.dumps({
             "type": "queued",
             "item": item,
@@ -14032,6 +14320,28 @@ async def api_project_chat(req: web.Request) -> web.Response:
                         print(f"[context-pack] injected {len(_pack)} chars for {session_key}")
             except Exception as _cp_exc:
                 print(f"[context-pack] skipped (continuing): {_cp_exc}")
+        # spec-092 P2: a handoff armed by the runtime picker rides the FIRST prompt that runs
+        # after the crossing. It is NOT cleared here — only once this turn comes back with a
+        # session/thread id (see the write-back block below). Clearing at injection time is
+        # exactly the /rotate defect this design refuses to inherit: a turn that dies before
+        # the engine ever saw the block would lose it silently, and the next engine would
+        # then answer a conversation it knows nothing about with no sign anything was lost.
+        _armed_handoff = (_run_chat or {}).get("runtime_handoff") if isinstance(_run_chat, dict) else None
+        if isinstance(_armed_handoff, dict) and _handoff_is_stale(_armed_handoff,
+                                                                 _provider_for_run, _run_backend):
+            print(f"[handoff] {session_key}: armed for "
+                  f"{_armed_handoff.get('for_provider')!r}/{_armed_handoff.get('for_backend')!r} "
+                  f"but this turn runs on {_provider_for_run!r}/{_run_backend!r} — dropping it")
+            _armed_handoff = None
+            _drop_runtime_handoff(ctx, project, _active_chat_id_for_run or _req_chat_id)
+        if isinstance(_armed_handoff, dict) and (_armed_handoff.get("text") or "").strip():
+            effective_prompt = _armed_handoff["text"].strip() + "\n\n" + effective_prompt
+            _timeline_append(session_key, {"type": "runtime_handoff",
+                                           "chars": len(_armed_handoff["text"]),
+                                           "from": _armed_handoff.get("from_label"),
+                                           "to": _armed_handoff.get("to_label")})
+            print(f"[handoff] {session_key}: delivering {len(_armed_handoff['text'])} chars "
+                  f"({_armed_handoff.get('from_label')} → {_armed_handoff.get('to_label')})")
         # ephemeral=False: chat sessions share state with the project (resumable, context-tracked).
         # effort: None when think_mode is absent/unknown (preserves _DEFAULT_EFFORT); otherwise the
         # exact ladder value low|medium|high|xhigh|max passed straight through to the SDK.
@@ -14056,6 +14366,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 resume_session_id=resume_sid,
                 env=project_secrets,
                 project_account=_run_account,
+                backend=_run_backend,
                 **agents_kwargs,
                 ctx=ctx,
                 ephemeral=False,
@@ -14180,6 +14491,11 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                             _cb_chat["codex_thread_id"] = codex_thread_id
                                         else:
                                             _cb_chat["session_id"] = sid
+                                        # spec-092 P2: the engine answered and returned an
+                                        # id — that, and nothing earlier, is proof the
+                                        # handoff was actually delivered. Now it can go.
+                                        if _cb_chat.pop("runtime_handoff", None) is not None:
+                                            print(f"[handoff] {session_key}: delivered, cleared")
                                         _save_chats(ctx, _cb_data)
                                         _wrote_back = True
                                         # Mirror active chat → ctx["sessions"]
@@ -18242,6 +18558,7 @@ async def start(ctx: dict) -> None:
         app.router.add_post("/api/accounts/remove", api_accounts_remove)
         app.router.add_get("/api/models", api_models)
         app.router.add_get("/api/agent-providers", api_agent_providers)
+        app.router.add_post("/api/projects/{id}/chats/{chat_id}/handoff", api_project_chat_handoff)
         # Spec-074: global search (Cmd/Ctrl+K) over chat transcripts + timelines + boards
         app.router.add_get("/api/search", api_search)
         app.router.add_post("/api/search/reindex", api_search_reindex)

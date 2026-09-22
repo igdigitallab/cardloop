@@ -3439,6 +3439,42 @@ async def run_engine(  # type: ignore[return]
               f"(CLAUDE_CONFIG_DIR={_account_env['CLAUDE_CONFIG_DIR']})")
     _effective_env = {**(env or {}), **_memory_env_overrides(_memory_mode), **_account_env}
 
+    # spec-092 P3: the inference backend. Ollama serves a native Anthropic /v1/messages, so
+    # routing a run at it is an env overlay on the SAME harness — no second engine.
+    #
+    # ⚠️ The leak guard is the point of this block, not the overlay. `runtime.
+    # ollama_env_overlay` returns `to_unset` for EVERY non-ollama run: those names must be
+    # actively removed, not merely not-added, because a value inherited from the service's
+    # own environment (a systemd unit, a leftover export) would send subscription-billed
+    # traffic to a $0 local endpoint while looking like a perfectly normal turn. Pinned by
+    # test_ollama_env_never_leaks_into_claude_run.
+    try:
+        import runtime as _runtime_mod
+        import ollama_backend as _ollama_mod
+        _overlay = _runtime_mod.ollama_env_overlay(
+            _runtime_mod.RunContext(
+                origin_kind="chat", origin_id=session_key or "run", provider="claude",
+                backend=backend or "", model=resolved_model or "sonnet",
+                account=_account_id or "main", revision=0,
+            ),
+            base_url=_ollama_mod.base_url() if backend == _runtime_mod.OLLAMA_BACKEND else None,
+            auth_token=_ollama_mod.auth_token(),
+        )
+        for _name in _overlay.to_unset:
+            _effective_env.pop(_name, None)
+        if _overlay.to_set:
+            _effective_env.update(_overlay.to_set)
+            print(f"[runtime] {session_key}: local backend — ANTHROPIC_BASE_URL="
+                  f"{_overlay.to_set.get('ANTHROPIC_BASE_URL')} model={resolved_model}")
+    except Exception as _ov_exc:  # noqa: BLE001
+        # A failure here must FAIL CLOSED: strip the names rather than leave a half-applied
+        # overlay behind. A cloud turn with a stale base url is the expensive mistake.
+        for _name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
+                      "ANTHROPIC_DEFAULT_HAIKU_MODEL"):
+            _effective_env.pop(_name, None)
+        if backend:
+            raise RuntimeError(f"cannot route this run at backend {backend!r}: {_ov_exc}") from _ov_exc
+
     _project_plugin_cfgs: "list[dict]" = []
     for _pid in (project_plugins or []):
         _pp = _plugin_install_path(_pid)

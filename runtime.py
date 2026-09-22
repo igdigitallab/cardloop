@@ -112,6 +112,11 @@ class ProviderInfo:
     # (conventionally listed as ""). Empty tuple means "not stated" -- validation then
     # falls back to `(DEFAULT_BACKEND,)`, i.e. only the native endpoint is legal.
     backends: tuple[str, ...] = ()
+    # Models a NON-NATIVE backend serves, keyed by backend id. A local endpoint runs its own
+    # model names (`qwen3.8:27b-q4_K_M`), which have nothing to do with the provider's cloud
+    # aliases -- validating an ollama selection against `models` would reject every legal
+    # choice. A backend absent from this map falls back to `models` (the native case).
+    backend_models: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     # Per-turn options this runtime can actually honour. Absence of a key means "cannot
     # honour it" (fail-closed default), not "assume yes" -- see capability_conflicts().
     capabilities: Mapping[str, bool] = field(default_factory=dict)
@@ -507,21 +512,40 @@ def validate_runtime_change(
             return False, f"provider {provider!r} is not currently available"
 
         info = providers[provider]
-        model = resulting.get("model")
-        if model is None:
-            if "provider" in patch:
-                return False, (
-                    f"switching to provider {provider!r} leaves no model for it -- include "
-                    f"a model that belongs to {provider!r} in the same patch"
-                )
-        elif info.models and model not in info.models:
-            return False, f"model {model!r} does not belong to provider {provider!r}"
-
         backend = resulting.get("backend")
         if backend is not None:
             allowed = info.backends if info.backends else (DEFAULT_BACKEND,)
             if backend not in allowed:
                 return False, f"backend {backend!r} is not offered by provider {provider!r}"
+
+        # The model must belong to the ENDPOINT that will serve it, not to the provider in
+        # the abstract: a local backend runs its own model names. Checked after the backend
+        # so a patch that moves both dimensions at once is judged against its own result.
+        model = resulting.get("model")
+        legal_models = info.models
+        if backend:
+            # `or info.models` would be wrong here: an EMPTY entry for a non-native backend
+            # means "this endpoint's model list is unknown", and falling back to the cloud
+            # aliases would then accept `sonnet` as a legal pick for a local box that has no
+            # such model — a turn that dies on its first token. Unknown is a refusal, which
+            # is this module's fail-closed rule everywhere else.
+            backend_list = info.backend_models.get(backend)
+            if not backend_list:
+                return False, (
+                    f"no models are known for backend {backend!r} -- it cannot be selected "
+                    f"until its model list is available"
+                )
+            legal_models = backend_list
+        if model is None:
+            if "provider" in patch or ("backend" in patch and patch["backend"]):
+                where = f"backend {backend!r}" if backend else f"provider {provider!r}"
+                return False, (
+                    f"switching to {where} leaves no model for it -- include "
+                    f"a model that belongs to it in the same patch"
+                )
+        elif legal_models and model not in legal_models:
+            where = f"backend {backend!r}" if backend else f"provider {provider!r}"
+            return False, f"model {model!r} does not belong to {where}"
 
     if "account" in patch:
         account = patch["account"]

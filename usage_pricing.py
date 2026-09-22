@@ -42,9 +42,27 @@ PRICING_AS_OF = "June 2026"
 _BILLABLE_KEYWORDS = ("fable", "mythos", "opus", "sonnet", "haiku")
 
 
+def is_local_model(model: str | None) -> bool:
+    """True for a model served by a LOCAL backend (spec-092 P3) — always $0.
+
+    Identified by the `name:tag` shape every Ollama/llama.cpp style id carries
+    (`qwen3.8:27b-q4_K_M`), which no Anthropic alias or dated id ever has. This is a
+    positive test on purpose: the keyword table below matches on substrings, so a local
+    model whose name merely CONTAINS "sonnet" (a finetune, a mirror, a vanity tag) would
+    otherwise be priced at cloud Sonnet rates and quietly inflate every cost figure in the
+    dashboard. The spec named this exact trap.
+    """
+    if not model:
+        return False
+    head, sep, tail = model.partition(":")
+    return bool(sep and tail and "/" not in tail and not head.startswith("claude-"))
+
+
 def is_billable(model: str | None) -> bool:
     """True if the model name maps to a known Anthropic price (else cost = n/a)."""
     if not model:
+        return False
+    if is_local_model(model):
         return False
     m = model.lower()
     return any(k in m for k in _BILLABLE_KEYWORDS)
@@ -59,6 +77,8 @@ def get_pricing(model: str | None) -> dict[str, float] | None:
     """
     if not model:
         return None
+    if is_local_model(model):
+        return None  # a local endpoint costs nothing; never fall through to a keyword match
     if model in PRICING:
         return PRICING[model]
     for key in PRICING:

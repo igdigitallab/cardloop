@@ -80,6 +80,17 @@ export interface AgentProviderAccount {
   reason?: string
 }
 
+/** spec-092 P3: an inference endpoint this provider's harness can be pointed at.
+ *  `id: ""` is the provider's own (cloud) endpoint; `"ollama"` is the local one. Listed even
+ *  while unavailable so the operator can see it exists and read why it is down. */
+export interface AgentProviderBackend {
+  id: string
+  label: string
+  available: boolean
+  models: AgentProviderModel[] | { value: string; label: string }[]
+  error?: string | null
+}
+
 export interface AgentProviderInfo {
   provider: Provider
   enabled: boolean
@@ -91,6 +102,8 @@ export interface AgentProviderInfo {
   capabilities: Record<string, boolean>
   /** spec-092: always present (empty for providers with no account dimension). */
   accounts?: AgentProviderAccount[]
+  /** spec-092 P3: always present (empty for providers with no backend dimension). */
+  backends?: AgentProviderBackend[]
   error?: string | null
 }
 

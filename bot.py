@@ -48,6 +48,14 @@ if CLAUDE_AUTH_MODE == "subscription":
     # Remove any API key from the environment so the SDK cannot accidentally
     # fall back to API billing.  This is the money-safety guard.
     os.environ.pop("ANTHROPIC_API_KEY", None)
+    # spec-092 P3: the same hygiene for the local-backend overlay vars. engine.py removes
+    # them from each run's env dict, but the SDK merges that dict OVER the process
+    # environment — so a value exported into the service itself would survive and silently
+    # redirect every subscription turn at a local endpoint. Strip them once, at the process
+    # boundary, and let the per-run overlay be the ONLY thing that ever sets them.
+    for _leaky in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
+                   "ANTHROPIC_DEFAULT_HAIKU_MODEL"):
+        os.environ.pop(_leaky, None)
 # api_key mode: do nothing — ANTHROPIC_API_KEY stays in os.environ and the
 # SDK will pick it up automatically.
 

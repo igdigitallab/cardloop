@@ -367,6 +367,35 @@ export const api = {
       }
     ),
 
+  /** spec-092 P2: build (commit=false) or ARM (commit=true) the handoff block a runtime
+   *  crossing hands to the other engine. Deterministic server-side — no model call, so an
+   *  all-local chat's transcript never leaves the box to be summarised. */
+  chatHandoff: (
+    id: string,
+    chatId: string,
+    payload: {
+      messages: { role: string; text: string; tools?: unknown[] }[]
+      from_label: string
+      to_label: string
+      commit?: boolean
+      text?: string
+    },
+  ) =>
+    apiFetch<{
+      armed?: boolean
+      handoff: {
+        text: string
+        constraints: string[]
+        files: string[]
+        recent: { role: string; text: string }[]
+        unreplayed: number
+      }
+    }>(`/api/projects/${id}/chats/${encodeURIComponent(chatId)}/handoff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
   deleteChat: (id: string, chatId: string) =>
     apiFetch<{ ok: boolean; active: string }>(
       `/api/projects/${id}/chats/${encodeURIComponent(chatId)}`,
