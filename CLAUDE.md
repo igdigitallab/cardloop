@@ -45,6 +45,7 @@ Design history & specs: `docs/internal/specs/` (gitignored).
 - `tools/cardloop-search` — shell entry point to that index (`tools/` is on PATH). The agent's
   "have we solved this before?" lookup across ALL projects; `--stats [--cold]` prints recall
   telemetry. Re-execs under the repo venv when the stemmer is missing from the system python.
+- `web/src/lib/runtimeStatus.ts` — spec-093: the ONE source for "which runtime (engine x subscription) is this chat spending". Polls `/api/usage` + `/api/agent-providers`, builds the tagged rows (`M 18% — 1h 9m`: M/W = accounts by label, C = Codex, L = local Ollama), and `effectiveRuntimeKey()` is the chain chat → project → global → main. The visible ChatTab publishes itself so the top-bar pill shows and switches THAT chat; the pill's "Default" line is the old global switch (unpinned chats + board cards). ⚠️ A widget that fetches either endpoint on its own, or computes a chat's account without `effectiveRuntimeKey()`, reintroduces the drift this module exists to kill (before it, the menu said "work · default" for an hour after a switch to Main). Pure-logic tests: `web/src/lib/runtimeStatus.test.ts` (node:test, run command in its header).
 - `web/src/components/Lightbox.tsx` — the shared fullscreen viewer with zoom (pinch/wheel/buttons) + pan (pointer events, `touch-action:none`). Used by both chat images/videos (`ChatImage`, `video` prop) and mermaid diagrams (`svg` prop, ⤢ button + tap). Do NOT spawn a second lightbox.
 
 More detail in ARCHITECTURE.md.

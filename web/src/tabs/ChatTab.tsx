@@ -10,6 +10,13 @@ import { ToolBlock } from '../components/ToolBlock'
 import { OptionPicker, parseOptionsBlock } from '../components/OptionPicker'
 import { SessionSelector } from '../components/SessionSelector'
 import { UsageBadge } from '../components/UsageBadge'
+import { RuntimeLine, RuntimeTagChip } from '../components/RuntimeTag'
+import {
+  useRuntimeStatus, useRuntimeProviders, useGlobalAccountId, buildRuntimeRows, effectiveRuntimeKey,
+  inheritedRuntimeKey, chatIsPinned, publishCurrentChat, clearCurrentChat, claimCurrentChat,
+  unusableAccounts, serverNow,
+  type RuntimeRow,
+} from '../lib/runtimeStatus'
 import {
   Chat,
   ChatMessage,
@@ -912,6 +919,9 @@ interface RuntimeChoice {
   /** Default model for this provider, sent alongside a provider change so the resulting
    *  state validates server-side (a Codex chat pinned to a Claude alias is rejected). */
   defaultModel?: string
+  /** spec-093: the store row behind this choice (tag, percentages) — absent on the
+   *  synthetic "follow default" choice. */
+  row?: RuntimeRow
 }
 
 const ModelThinkButton = memo(function ModelThinkButton({
@@ -919,6 +929,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
   ultracode, onUltracodeChange, planMode, onPlanModeChange, planLocked,
   askMode, onAskModeChange, provider = 'claude', reasoningLevels,
   runtimes, activeRuntimeKey, onRuntimeChange, runtimeBusy, runtimeError, capabilities,
+  inheritedRuntimeKey: inheritedKeyProp, runtimePinned, projectBackendPinned, onFollowDefault,
 }: {
   model: string
   thinkValue: ThinkMode
@@ -956,7 +967,23 @@ const ModelThinkButton = memo(function ModelThinkButton({
    *  without an approval hook show an ON toggle that enforces nothing. Absent = assume
    *  capable (fail-soft on a failed DISPLAY fetch, same rule as the model list). */
   capabilities?: Record<string, boolean>
+  /** spec-093: the key an unpinned chat here would run on — marked "default" in the list. */
+  inheritedRuntimeKey?: string
+  /** spec-093: this chat carries its own pin — offer "Follow default" to drop it. */
+  runtimePinned?: boolean
+  /** The project pins a backend: every chat in it must carry that backend, so "follow
+   *  default" there would WRITE a chat-level backend pin instead of dropping one — hidden. */
+  projectBackendPinned?: boolean
+  onFollowDefault?: () => void
 }) {
+  // spec-093: this small component (not ChatTab) subscribes to the live percentages, so a
+  // usage poll re-renders the menu, never the whole chat.
+  const liveStatus = useRuntimeStatus()
+  const liveRows = React.useMemo(
+    () => buildRuntimeRows(liveStatus.providers, liveStatus.usage),
+    [liveStatus.providers, liveStatus.usage],
+  )
+  const now = serverNow(liveStatus)
   // Prefer the live registry; fall back to the bundled static list (offline / fetch failure).
   const modelList = (models && models.length > 0) ? models : MODELS
   // spec-092: capability-driven, not provider-name-driven.
@@ -1000,6 +1027,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
   const ULTRACODE_EFFORT = 'xhigh'
   const tag = ultracode ? ULTRACODE_EFFORT : THINK_TAG[thinkValue]
   const isDown = menuPlacement === 'down'
+  const activeRuntime = runtimes?.find(r => r.key === activeRuntimeKey)
   return (
     <div className="composer-modelthink" ref={ref}>
       <button
@@ -1010,6 +1038,11 @@ const ModelThinkButton = memo(function ModelThinkButton({
         aria-expanded={open}
         onClick={() => { if (!disabled) setOpen(o => !o) }}
       >
+        {/* spec-093: the runtime tag rides on the desktop model pill so "which model on which
+            subscription" is one glance; the mobile composer already has the tag pill beside it. */}
+        {isDown && activeRuntime?.row && (
+          <RuntimeTagChip tag={activeRuntime.row.tag} title={`Runs on ${activeRuntime.label}`} />
+        )}
         {planMode ? '🗺 ' : ''}{askMode && !planMode ? '🙋 ' : ''}{ultracode ? '⚡ ' : ''}{currentLabel}{tag ? ` · ${tag}` : ''}
       </button>
       {open && (
@@ -1024,29 +1057,39 @@ const ModelThinkButton = memo(function ModelThinkButton({
           {!!runtimes?.length && (
             <>
               <div className="composer-modelthink-sec">Runtime (this chat)</div>
-              {runtimes.map(rt => {
-                const inert = !rt.available || !!runtimeBusy
-                return (
-                  <div
-                    key={rt.key}
-                    role="option"
-                    aria-selected={rt.key === activeRuntimeKey}
-                    className={`chat-think-option${rt.key === activeRuntimeKey ? ' selected' : ''}`}
-                    title={rt.reason || undefined}
-                    style={inert ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
-                    onMouseDown={e => {
-                      e.preventDefault()
-                      if (inert || rt.key === activeRuntimeKey) return
-                      onRuntimeChange?.(rt)
-                      setOpen(false)
-                    }}
-                  >
-                    <span>{rt.label}</span>
-                    {!rt.available && <span className="ultracode-state">OFF</span>}
-                    {rt.key === activeRuntimeKey && <span className="ultracode-state">ON</span>}
-                  </div>
-                )
-              })}
+              {runtimes.map(rt => rt.row ? (
+                <RuntimeLine
+                  key={rt.key}
+                  row={liveRows.find(r => r.key === rt.key) ?? rt.row}
+                  now={now}
+                  selected={rt.key === activeRuntimeKey}
+                  pinnable={!runtimePinned}
+                  isDefault={rt.key === inheritedKeyProp}
+                  disabled={!rt.available || !!runtimeBusy}
+                  onPick={() => { onRuntimeChange?.(rt); setOpen(false) }}
+                />
+              ) : null)}
+              {runtimePinned && !projectBackendPinned && onFollowDefault && (
+                <div
+                  role="option"
+                  aria-selected={false}
+                  className={`rt-line rt-follow${runtimeBusy ? ' inert' : ''}`}
+                  title="Drop this chat's own pin: it will follow the project/global default, including future switches"
+                  onMouseDown={e => {
+                    e.preventDefault()
+                    if (runtimeBusy) return
+                    onFollowDefault()
+                    setOpen(false)
+                  }}
+                >
+                  <span className="rt-follow-icon">↺</span>
+                  <span className="rt-line-name">Follow default</span>
+                  <span className="rt-line-stat">
+                    {runtimes.find(r => r.key === inheritedKeyProp)?.row?.tag ?? ''}
+                  </span>
+                  <span className="rt-line-mark" />
+                </div>
+              )}
               {runtimeError && (
                 <div className="composer-modelthink-note" style={{ color: 'var(--danger, #c33)' }}>
                   {runtimeError}
@@ -1310,7 +1353,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // Rename-in-place: null when not renaming, chat id when editing
   const [renamingChatId, setRenamingChatId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  const [providerRegistry, setProviderRegistry] = useState<AgentProviderInfo[]>([])
+  // spec-093: the registry comes from the shared runtime store (polled, refetched on focus and
+  // after any switch). It used to be fetched ONCE at mount, so the menu's "default" marker kept
+  // naming the subscription that was active when the chat opened.
+  // Narrow subscriptions: the registry and the default account id only — the percentages are
+  // read by the pill and the model menu themselves, so a usage poll never re-renders this tab.
+  const providerRegistry = useRuntimeProviders()
+  const globalAccount = useGlobalAccountId()
   const [newChatOpen, setNewChatOpen] = useState(false)
   const [newChatProvider, setNewChatProvider] = useState<Provider>('claude')
   const [newChatModel, setNewChatModel] = useState('')
@@ -1321,10 +1370,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // chat of this project is in flight, 'ready' once it finished without the operator watching.
   // Fed by the activity bus (events carry chat_id) — same signal the project tab bar shows.
   const [chatActivity, setChatActivity] = useState<Record<string, 'running' | 'ready'>>({})
-
-  useEffect(() => {
-    api.agentProviders().then(res => setProviderRegistry(res.providers)).catch(() => {})
-  }, [])
 
   // Load chats on project change
   useEffect(() => {
@@ -1376,90 +1421,48 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     ? providerRegistry.find(p => p.provider === 'codex')?.models
         .find(m => m.value === activeModel)?.default_reasoning as ThinkMode | undefined
     : undefined
-  // ─── spec-092: the runtime dimension (engine x subscription) ────────────────
-  // Flattened from the live registry rather than hardcoded, so a provider added server-side
-  // (the Ollama entry of P3) appears here with no frontend change. Claude contributes one row
-  // per account — an account whose credentials are missing/expired is listed and greyed, not
-  // hidden: an invisible account is indistinguishable from one that was never set up.
-  // What a chat with NO account pin actually runs on. The chain is chat -> project ->
-  // globally active account -> main (accounts.resolve), so assuming "main" here would
-  // highlight the wrong row for any operator who pinned the project or switched the global
-  // subscription — the menu would claim Main while the turn spends Work.
-  const globalActiveAccount = providerRegistry.find(p => p.provider === 'claude')
-    ?.accounts?.find(a => a.active)?.id
-  const inheritedAccount = project.account || globalActiveAccount || 'main'
+  // ─── spec-092/093: the runtime dimension (engine x subscription) ────────────
+  // Rows come from the shared runtime store (lib/runtimeStatus), the same list the top pill
+  // renders — one key scheme, one tag per runtime, one set of percentages. Claude contributes
+  // one row per account; an account whose credentials are missing/expired is listed and
+  // greyed, not hidden: an invisible account is indistinguishable from one never set up.
+  // The chain chat -> project -> global -> main lives in effectiveRuntimeKey(): assuming
+  // "main" anywhere would highlight Main while the turn spends Work.
   // spec-092 P3: a project pinned to a backend outranks every chat in it, so the rows that
   // would move a chat off that backend must be visibly unavailable — not merely refused on
   // click. A greyed row with a reason is the honest UI; a clickable one that 409s is not.
   const projectBackendPin = project.backend || ''
-  const runtimeChoices: RuntimeChoice[] = React.useMemo(() => {
-    const out: RuntimeChoice[] = []
-    for (const p of providerRegistry) {
-      const defaultModel = p.models.find(m => m.default)?.value || p.models[0]?.value
-      const accounts = p.accounts ?? []
-      if (p.provider === 'claude' && accounts.length > 0) {
-        for (const a of accounts) {
-          out.push({
-            key: `claude:${a.id}:`,
-            label: `Claude · ${a.label}${a.id === inheritedAccount ? ' · default' : ''}`,
-            provider: 'claude',
-            // Always an EXPLICIT id, never null-as-"inherit". Sending null for the Main row
-            // meant "follow whatever the project/global says" — so on a project pinned to
-            // `work`, clicking Main changed nothing and the chat kept running on `work` with
-            // no error and no way to force Main from this menu. A pick is a pin.
-            account: a.id,
-            backend: '',
-            available: p.available && a.available && !projectBackendPin,
-            reason: projectBackendPin
-              ? `this project is pinned to the ${projectBackendPin} backend (Settings → Inference backend)`
-              : (!a.available ? a.reason || 'this subscription cannot run' : undefined),
-            defaultModel,
-          })
-        }
-        // spec-092 P3: the local endpoint is a BACKEND of the same harness, not a provider —
-        // one row, no account (it spends no subscription). Listed even while unavailable so
-        // "the GPU is busy" is visible instead of the row simply vanishing.
-        for (const b of p.backends ?? []) {
-          if (!b.id) continue
-          out.push({
-            key: `claude::${b.id}`,
-            label: b.label,
-            provider: 'claude',
-            account: null,
-            backend: b.id,
-            available: b.available,
-            reason: !b.available ? b.error || `${b.label} is not answering` : undefined,
-            defaultModel: b.models?.[0]?.value,
-          })
-        }
-      } else {
-        out.push({
-          key: `${p.provider}::`,
-          label: p.provider === 'codex' ? 'Codex (ChatGPT)' : p.provider,
-          provider: p.provider,
-          account: null,
-          backend: '',
-          available: p.available && p.enabled && !projectBackendPin,
-          reason: projectBackendPin
-            ? `this project is pinned to the ${projectBackendPin} backend (Settings → Inference backend)`
-            : (!p.available ? p.error || `${p.provider} is not available` : undefined),
-          defaultModel,
-        })
-      }
+  // Tags and availability only (no usage): percentages are joined in by ModelThinkButton.
+  const runtimeRows: RuntimeRow[] = React.useMemo(
+    () => buildRuntimeRows(providerRegistry, null),
+    [providerRegistry],
+  )
+  const runtimeChoices: RuntimeChoice[] = React.useMemo(() => runtimeRows.map(row => {
+    const offProjectBackend = !!projectBackendPin && row.key !== `claude::${projectBackendPin}`
+    return {
+      key: row.key,
+      label: row.provider === 'codex' ? 'Codex'
+        : row.backend ? row.name : `Claude · ${row.name}`,
+      provider: row.provider,
+      // Always an EXPLICIT id, never null-as-"inherit": a pick from a row is a pin. The
+      // separate "Follow default" action is the only thing that sends null.
+      account: row.account,
+      backend: row.backend,
+      available: row.available && !offProjectBackend,
+      reason: offProjectBackend
+        ? `this project is pinned to the ${projectBackendPin} backend (Settings → Inference backend)`
+        : row.reason,
+      defaultModel: row.defaultModel,
+      row,
     }
-    return out
-  }, [providerRegistry, inheritedAccount, projectBackendPin])
-  // The project pin wins at run time, so it wins here too — otherwise the menu highlights
-  // the chat's own (overridden, inert) choice while every turn goes somewhere else.
+  }), [runtimeRows, projectBackendPin])
+  // A project pinned to a logged-out account is served by the global one (accounts.resolve).
+  const unusable = React.useMemo(() => unusableAccounts(providerRegistry), [providerRegistry])
+  const activeRuntimeKey = effectiveRuntimeKey(activeChat, project, globalAccount, unusable)
+  const inheritedKey = inheritedRuntimeKey(project, globalAccount, unusable)
+  const activeChatPinned = chatIsPinned(activeChat)
+  // The backend the chat actually runs on — the project pin wins at run time, so it wins here.
   const activeBackend = projectBackendPin || activeChat?.backend || ''
-  // An unpinned chat highlights the row it actually inherits, not a hardcoded "main".
-  // A local-backend chat has no account of its own — it spends no subscription — so the
-  // account segment is empty there, matching how the row was built.
-  const activeRuntimeKey = activeProvider === 'claude'
-    ? (activeBackend
-        ? `claude::${activeBackend}`
-        : `claude:${activeChat?.account || inheritedAccount}:`)
-    : `${activeProvider}::`
   // What the CURRENT runtime can actually honour. The server refuses a turn that requests a
   // capability its runtime lacks (409), so the send must not ask for one — a flag left over
   // in localStorage from before a provider switch would otherwise make every send fail.
@@ -3561,8 +3564,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // A provider OR backend change carries a model with it: the server validates the
     // resulting state, and a cloud alias left on the local endpoint (or a Claude alias on a
     // Codex chat) is rejected as an invalid combination.
+    // `provider` rides only when it CHANGES. The server validates the resulting state, and a
+    // patch that names a provider on a chat with no model pin of its own (every project's
+    // seeded "Main" chat) is refused as "leaves no model" — so re-sending the unchanged
+    // provider made account picks and Follow-default fail on the most common chat shape.
     const patch: { provider?: Provider; model?: string | null; account?: string | null; backend?: string | null } =
-      { provider: choice.provider, account: choice.account, backend: choice.backend }
+      { account: choice.account, backend: choice.backend }
+    if (choice.provider !== prevProvider) patch.provider = choice.provider
     if (choice.provider !== prevProvider || choice.backend !== prevBackend) {
       patch.model = choice.defaultModel ?? null
     }
@@ -3643,6 +3651,79 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       },
     }])
   }, [handoffDraft, applyRuntimePatch, projectId]) // eslint-disable-line react-hooks/exhaustive-deps -- reads live refs
+
+  // ─── spec-093: follow-default + publishing this chat to the shared pill ─────
+  const runtimeChoicesRef = useRef<RuntimeChoice[]>([])
+  useEffect(() => { runtimeChoicesRef.current = runtimeChoices }, [runtimeChoices])
+  const inheritedKeyRef = useRef<string>('')
+  useEffect(() => { inheritedKeyRef.current = inheritedKey }, [inheritedKey])
+  const projectBackendPinRef = useRef<string>('')
+  useEffect(() => { projectBackendPinRef.current = projectBackendPin }, [projectBackendPin])
+  const handleRuntimeChangeRef = useRef(handleRuntimeChange)
+  useEffect(() => { handleRuntimeChangeRef.current = handleRuntimeChange }, [handleRuntimeChange])
+
+  /** Drop this chat's own pin so it follows the project/global default again. Before this a
+   *  chat picked once could never be un-picked: every row sends an explicit id, so a chat
+   *  pinned to Main kept spending Main after the operator moved everything to work. The only
+   *  place `account: null` (= inherit) is sent on purpose. */
+  const handleFollowDefault = useCallback(() => {
+    const inherited = inheritedKeyRef.current
+    const base = runtimeChoicesRef.current.find(c => c.key === inherited)
+    handleRuntimeChangeRef.current({
+      key: inherited,
+      label: base ? `${base.label} (default)` : 'default',
+      provider: 'claude',
+      account: null,
+      // A backend-pinned project refuses any chat whose backend differs from the pin, so
+      // "default" there IS the pinned backend; everywhere else it is the cloud endpoint.
+      backend: projectBackendPinRef.current,
+      available: true,
+      defaultModel: base?.defaultModel,
+    })
+  }, [])
+
+  const handlePickRuntimeKey = useCallback((key: string) => {
+    const choice = runtimeChoicesRef.current.find(c => c.key === key)
+    if (choice && choice.available) handleRuntimeChangeRef.current(choice)
+  }, [])
+
+  // ONE answer to "can the runtime change right now", shared by the pill and the model menu:
+  // a switch mid-turn is refused server-side (409 busy), so both surfaces go inert together.
+  const runtimeLocked = runtimeBusy || handoffBusy || streaming || !!run || !!handoffDraft
+  // The visible chat announces its runtime so the top-bar pill (outside this component) shows
+  // and switches THIS chat instead of the global account. Only the active project's ChatTab
+  // publishes; the slot is withdrawn when it goes inactive or unmounts.
+  // Instance-unique: two ChatTabs for one chat can overlap for a commit (the 768 px layout
+  // swap), and a chat-scoped owner let the outgoing twin's cleanup wipe the live one's slot.
+  const instanceIdRef = useRef(Math.random().toString(36).slice(2, 10))
+  const publishOwner = `${projectId}:${effectiveChatId}:${instanceIdRef.current}`
+  const publishOwnerRef = useRef(publishOwner)
+  useEffect(() => { publishOwnerRef.current = publishOwner }, [publishOwner])
+  // A free-chat split shows two chats at once; the pill follows the one last touched.
+  const claimPill = useCallback(() => claimCurrentChat(publishOwnerRef.current), [])
+  useEffect(() => {
+    if (!isActive || !effectiveChatId) return
+    publishCurrentChat({
+      owner: publishOwner,
+      projectName: project.name,
+      chatName: activeChat?.name || '',
+      runtimeKey: activeRuntimeKey,
+      inheritedKey,
+      pinned: activeChatPinned,
+      projectAccount: project.account || null,
+      projectBackend: projectBackendPin,
+      busy: runtimeLocked,
+      error: runtimeError,
+      pick: handlePickRuntimeKey,
+      followDefault: handleFollowDefault,
+    })
+  }, [isActive, effectiveChatId, publishOwner, project.name, activeChat?.name, activeRuntimeKey,
+      inheritedKey, activeChatPinned, project.account, projectBackendPin, runtimeLocked,
+      runtimeError, handlePickRuntimeKey, handleFollowDefault])
+  useEffect(() => {
+    if (!isActive) return
+    return () => clearCurrentChat(publishOwner)
+  }, [isActive, publishOwner])
 
   // The model is a PER-CHAT pin now (spec-092), not the project default it used to write.
   // A chat that has never pinned one keeps following the project's model (Settings) — this
@@ -4047,7 +4128,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   }
 
   return (
-    <div className="chat-wrap">
+    <div className="chat-wrap" onPointerDownCapture={claimPill} onFocusCapture={claimPill}>
       {/* Spec-045: merged toolbar — chat tabs (left) + session controls + right cluster in ONE row.
           Layout: [tab…] [+]  [↺] [◉ session ▾]  ·(auto)·  [▬ ctx] [♨️ cache] [◆ model ▾] [🧠 think] [⟩]
           The ⟩ collapse button renders only when onToggleCollapse is provided (desktop-split). */}
@@ -4097,9 +4178,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               ) : (
                 <span className="chat-named-tab-label">
                   {chat.name}
-                  <span style={{ marginLeft: 5, fontSize: 9, opacity: .7, textTransform: 'uppercase' }}>
-                    {chat.provider === 'codex' ? 'Codex' : 'Claude'}
-                  </span>
+                  {(() => {
+                    // spec-093: the tab names the runtime this chat ACTUALLY runs on (same chain
+                    // as the pill), not just the engine — "CLAUDE" said nothing about which
+                    // subscription paid.
+                    const k = effectiveRuntimeKey(chat, project, globalAccount, unusable)
+                    const ch = runtimeChoices.find(r => r.key === k)
+                    return ch?.row
+                      ? <RuntimeTagChip tag={ch.row.tag} className="rt-tag-tab"
+                          title={`${ch.label}${chatIsPinned(chat) ? ' — pinned to this chat' : ' — follows the default'}`} />
+                      : null
+                  })()}
                   {!isActive && chatActivity[chat.id] === 'running' && (
                     <span className="chat-named-tab-dot working" title={t['chat.tabs_working']} />
                   )}
@@ -4304,14 +4393,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               </span>
             )
           })()}
-          {/* A project pinned to a non-global subscription says so next to the model pill —
-              otherwise the only way to know which account this project spends is the
-              Settings tab, and spending the wrong one is invisible until the bill. */}
-          {project.account && (
-            <span className="chat-acct-pill" title={`This project runs on the "${project.account}" Claude subscription (Settings → Subscription)`}>
-              {project.account}
-            </span>
-          )}
           {/* Combined model + thinking pill — desktop top bar (mobile renders the same
               control in the composer bar). One popover to pick both; menu opens downward. */}
           {!isMobile && (
@@ -4335,9 +4416,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               runtimes={runtimeChoices}
               activeRuntimeKey={activeRuntimeKey}
               onRuntimeChange={handleRuntimeChange}
-              runtimeBusy={runtimeBusy || handoffBusy}
+              runtimeBusy={runtimeLocked}
               runtimeError={runtimeError}
               capabilities={activeCapabilities}
+              inheritedRuntimeKey={inheritedKey}
+              runtimePinned={activeChatPinned}
+              projectBackendPinned={!!projectBackendPin}
+              onFollowDefault={handleFollowDefault}
             />
           )}
           {/* Full-screen chat button — hides the left project pane (like a free chat).
@@ -5331,9 +5416,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   runtimes={runtimeChoices}
                   activeRuntimeKey={activeRuntimeKey}
                   onRuntimeChange={handleRuntimeChange}
-                  runtimeBusy={runtimeBusy || handoffBusy}
+                  runtimeBusy={runtimeLocked}
                   runtimeError={runtimeError}
                   capabilities={activeCapabilities}
+                  inheritedRuntimeKey={inheritedKey}
+                  runtimePinned={activeChatPinned}
+                  projectBackendPinned={!!projectBackendPin}
+                  onFollowDefault={handleFollowDefault}
                 />
               </div>
             )}

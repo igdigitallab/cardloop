@@ -10,14 +10,26 @@ export interface RawLimit {
   label?: string
 }
 
-/** Formats "in 2h 15m" or "12m". */
+/** Formats "6d 2h", "2h 15m" or "12m". A weekly window used to read "146h 11m". */
 export function fmtReset(resetsAt: number | null, now: number): string {
   if (!resetsAt) return '—'
   const delta = resetsAt - now
   if (delta <= 0) return 'soon'
-  const h = Math.floor(delta / 3600)
+  const d = Math.floor(delta / 86400)
+  const h = Math.floor((delta % 86400) / 3600)
   const m = Math.floor((delta % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
   return h > 0 ? `${h}h ${m}m` : `${m}m`
+}
+
+/** Largest unit only — "6d", "2h", "12m" — for the one-line mobile composer. */
+export function fmtResetShort(resetsAt: number | null, now: number): string {
+  if (!resetsAt) return ''
+  const delta = resetsAt - now
+  if (delta <= 0) return 'soon'
+  if (delta >= 86400) return `${Math.floor(delta / 86400)}d`
+  if (delta >= 3600) return `${Math.floor(delta / 3600)}h`
+  return `${Math.max(1, Math.floor(delta / 60))}m`
 }
 
 /** Color class by utilization: <50% green, 50–80% yellow, ≥80% red. */

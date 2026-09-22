@@ -1,82 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
-import { api, type CodexLimits, type AccountRow } from '../api'
-import { fmtReset, pickClass, fmtPct, orderedLimitKeys, limitLabel, type RawLimit } from './usageFormat'
-
-interface UsageData {
-  limits: Record<string, RawLimit>
-  codex?: CodexLimits | null
-  now: number
-  account?: string
-  accounts?: AccountRow[] | null
-}
-
-/** Account switcher — rendered inside the limits dropdown, and only when a second
- *  subscription exists. This is where the operator already looks to see how much is left,
- *  so it is where the "move to the other one" action belongs.
- *
- *  An inactive account's percentage can be missing or aged: only a running CLI refreshes
- *  that account's access token. Showing "—" is honest; inventing 0% would not be. */
-function AccountSwitcher({ accounts, now, onSwitched }: {
-  accounts: AccountRow[]
-  now: number
-  onSwitched: (msg: string) => void
-}) {
-  const [busy, setBusy] = useState<string | null>(null)
-
-  async function pick(a: AccountRow) {
-    if (a.active || busy) return
-    setBusy(a.id)
-    try {
-      const res = await api.accountActivate(a.id)
-      onSwitched(res.in_flight > 0
-        ? `New runs use ${a.label}. ${res.in_flight} run(s) already in flight stay on the old one.`
-        : `New runs use ${a.label}.`)
-    } catch (e) {
-      onSwitched(`Could not switch: ${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  return (
-    <div className="usage-accounts">
-      <div className="usage-accounts-head">Subscription</div>
-      {accounts.map(a => {
-        const lead = a.limits?.five_hour ?? a.limits?.seven_day ?? null
-        const pct = lead ? fmtPct(lead.utilization) : ''
-        const aged = a.limits_ts != null && now - a.limits_ts > 900
-        return (
-          <button
-            key={a.id}
-            className={`usage-account-row${a.active ? ' is-active' : ''}${a.ok ? '' : ' is-broken'}`}
-            disabled={!a.ok || busy != null}
-            onClick={() => pick(a)}
-            title={a.ok
-              ? (a.email || a.label) + (a.shared_ok ? '' : ' — history is NOT shared with the main account')
-              : `Unusable: ${a.reason}`}
-          >
-            <span className="usage-account-mark">{a.active ? '●' : '○'}</span>
-            <span className="usage-account-label">
-              {a.label}
-              {a.plan && <span className="usage-account-plan"> {a.plan}</span>}
-            </span>
-            <span className={`usage-account-pct ${lead ? pickClass(lead) : 'usage-dim'}`}>
-              {busy === a.id ? '…' : (pct ? (aged ? `${pct}*` : pct) : '—')}
-            </span>
-          </button>
-        )
-      })}
-      {accounts.some(a => !a.ok) && (
-        <div className="usage-accounts-foot">
-          Greyed-out account needs a login: <code>tools/claude-acct login &lt;id&gt;</code>
-        </div>
-      )}
-    </div>
-  )
-}
-
-/** A Codex snapshot older than this is shown dimmed — it predates at least one short window. */
-const CODEX_STALE_AFTER_SEC = 6 * 3600
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { api, type UsageLimits } from '../api'
+import { fmtReset, pickClass, fmtPct, limitLabel } from './usageFormat'
+import { RuntimeLine, RuntimeTagChip, runtimeStats } from './RuntimeTag'
+import {
+  useRuntimeStatus, buildRuntimeRows, globalDefaultAccount, refreshRuntimeStatus, serverNow, windowKeys,
+  type RuntimeRow,
+} from '../lib/runtimeStatus'
 
 const USAGE_URL = 'https://claude.ai/settings/usage'
 
@@ -87,217 +16,218 @@ function openUsage(e: React.MouseEvent) {
   window.open(USAGE_URL, '_blank', 'noopener,noreferrer')
 }
 
-/** Second pill: Codex subscription windows, shown only once Codex has actually reported them.
- *  Codex pushes limits mid-turn and offers no way to ask, so an idle install has nothing to
- *  show — a placeholder would be inventing a number. */
-function CodexPill({ codex, now, compact }: { codex: CodexLimits; now: number; compact: boolean }) {
-  const [hover, setHover] = useState(false)
-  const [expanded, setExpanded] = useState(false)
-  const wrapRef = useRef<HTMLDivElement>(null)
+/** spec-093: the default for everything that carries no pin of its own — unpinned chats and
+ *  board cards. This is the old "Subscription" switcher, kept as a separate, explicitly
+ *  labelled line: the rows above it now act on THIS chat, and moving every chat at once must
+ *  never be mistaken for moving one.
+ *
+ *  An inactive account's percentage can be missing or aged: only a running CLI refreshes
+ *  that account's access token. Showing "—" is honest; inventing 0% would not be. */
+function DefaultSwitch({ rows, now, projectAccount, onSwitched }: {
+  rows: RuntimeRow[]
+  now: number
+  projectAccount: string | null
+  onSwitched: (msg: string) => void
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
 
-  useEffect(() => {
-    if (!expanded) return
-    function onOut(e: MouseEvent) {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setExpanded(false)
+  async function pick(r: RuntimeRow) {
+    if (r.isGlobalDefault || busy || !r.account) return
+    setBusy(r.account)
+    try {
+      const res = await api.accountActivate(r.account)
+      onSwitched(res.in_flight > 0
+        ? `Default is now ${r.name}. ${res.in_flight} run(s) already in flight stay on the old one.`
+        : `Default is now ${r.name} — unpinned chats and board cards use it from the next turn.`)
+    } catch (e) {
+      onSwitched(`Could not switch: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(null)
+      refreshRuntimeStatus()
     }
-    document.addEventListener('mousedown', onOut)
-    return () => document.removeEventListener('mousedown', onOut)
-  }, [expanded])
-
-  const keys = Object.keys(codex.limits)
-  if (!keys.length) return null
-
-  // Lead with whichever window is closest to its ceiling — that is the one about to bite.
-  const leadKey = keys.reduce((a, b) =>
-    (codex.limits[b].utilization ?? -1) > (codex.limits[a].utilization ?? -1) ? b : a)
-  const lead = codex.limits[leadKey]
-  const ageSec = codex.ts ? now - codex.ts : null
-  const stale = ageSec != null && ageSec > CODEX_STALE_AFTER_SEC
-  const pct = fmtPct(lead.utilization)
-  const cls = stale ? 'usage-dim' : pickClass(lead)
-  const title = stale
-    ? `Codex limits as of ${fmtAge(ageSec)} ago — Codex only reports them during a run`
-    : 'Codex subscription limits'
+  }
 
   return (
-    <div
-      className={`usage-badge-wrap${compact ? ' usage-compact' : ''}`}
-      ref={wrapRef}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
-      <button
-        className={`usage-badge ${cls}`}
-        onClick={() => setExpanded(e => !e)}
-        title={title}
-        aria-expanded={expanded}
-      >
-        <span className="usage-badge-provider">gpt</span>
-        {pct && <span>{pct}</span>}
-        {!compact && pct && <span className="usage-sep">—</span>}
-        {!compact && <span>{fmtReset(lead.resets_at, now)}</span>}
-      </button>
-
-      {(hover || expanded) && (
-        <div className="usage-dropdown">
-          {keys.map(k => {
-            const d = codex.limits[k]
-            return (
-              <div key={k} className={`usage-row ${stale ? 'usage-dim' : pickClass(d)}`}>
-                <span className="usage-row-label">{limitLabel(k, d)}</span>
-                <span className="usage-row-pct">{fmtPct(d.utilization) || d.status}</span>
-                <span className="usage-row-reset">
-                  {d.resets_at ? `resets ${fmtReset(d.resets_at, now)}` : ''}
-                </span>
-              </div>
-            )
-          })}
-          <div className="usage-badge-foot">
-            {codex.plan_type ? `Codex · ${codex.plan_type}` : 'Codex'}
-            {ageSec != null && ` · seen ${fmtAge(ageSec)} ago`}
-          </div>
+    <div className="usage-accounts">
+      <div className="usage-accounts-head">Default — unpinned chats &amp; board cards</div>
+      <div className="rt-seg">
+        {rows.map(r => {
+          const s = runtimeStats(r, now, true)
+          return (
+            <button
+              key={r.key}
+              className={`rt-seg-btn${r.isGlobalDefault ? ' is-active' : ''}`}
+              disabled={!r.available || busy != null}
+              onClick={() => pick(r)}
+              title={r.available ? s.title : `Unusable: ${r.reason}`}
+            >
+              <RuntimeTagChip tag={r.tag} />
+              <span className={`rt-seg-pct ${s.cls}`}>{busy === r.account ? '…' : s.pct}</span>
+            </button>
+          )
+        })}
+      </div>
+      {projectAccount && (
+        <div className="usage-accounts-foot">
+          This project is pinned to <b>{projectAccount}</b> (Settings) — its unpinned chats follow
+          that, not this default.
+        </div>
+      )}
+      {rows.some(r => !r.available) && (
+        <div className="usage-accounts-foot">
+          Greyed-out account needs a login: <code>tools/claude-acct login &lt;id&gt;</code>
         </div>
       )}
     </div>
   )
 }
 
-/** Coarse age for the snapshot line: "12m", "3h", "2d". */
-function fmtAge(sec: number): string {
-  if (sec < 3600) return `${Math.max(1, Math.floor(sec / 60))}m`
-  if (sec < 86400) return `${Math.floor(sec / 3600)}h`
-  return `${Math.floor(sec / 86400)}d`
+/** The row to show when the registry does not list the runtime on screen (first paint, a
+ *  failed /api/agent-providers, Codex switched off, an account removed). Only the GLOBAL
+ *  account's own limits are known without the registry, and they are attached ONLY when that
+ *  is the runtime being shown — pinning them on a Codex or local chat would claim a quota that
+ *  chat does not spend, the exact drift this pill exists to remove. */
+function fallbackRow(key: string, globalKey: string, usage: UsageLimits | null, now: number): RuntimeRow {
+  const [provider, account, backend] = key.split(':')
+  const own = key === globalKey && !!usage
+  const tag = provider === 'codex' ? 'C' : backend === 'ollama' ? 'L'
+    : ((account || provider || '?')[0] || '?').toUpperCase()
+  return {
+    key, tag, name: account || backend || provider || key, plan: '',
+    provider: (provider || 'claude') as RuntimeRow['provider'], account: account || null,
+    backend: backend || '', available: own,
+    reason: own ? undefined : 'not listed by the server right now',
+    hasQuota: backend !== 'ollama', windows: own ? usage!.limits : null,
+    ts: own ? now : null, stale: false, isGlobalDefault: own,
+  }
 }
 
+/** spec-093: the runtime pill — `M 18% — 1h 9m` — for the chat on screen.
+ *
+ *  It used to show the GLOBAL account while each chat could run on its own, so the number
+ *  on screen and the subscription a turn billed could silently differ. Now it follows the
+ *  chat the visible ChatTab publishes; with no chat on screen it shows the global default.
+ *  Codex and the local backend are rows of the same list, not a second pill. */
 export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onOpen?: () => void } = {}) {
-  const [data, setData] = useState<UsageData | null>(null)
+  const status = useRuntimeStatus()
+  const { usage, providers, providersLoaded, current } = status
   const [hover, setHover] = useState(false)
   // compact (mobile): tap toggles the full breakdown instead of opening an external link.
   const [expanded, setExpanded] = useState(false)
   const [switchMsg, setSwitchMsg] = useState('')
   const wrapRef = useRef<HTMLDivElement>(null)
-  const reloadRef = useRef<() => void>(() => {})
-
+  // Mobile: the pill sits mid-composer, so an absolutely positioned panel anchored to it is
+  // either too narrow to read or runs off an edge. Pin it full-width just above the pill.
+  const [sheetBottom, setSheetBottom] = useState<number | null>(null)
   useEffect(() => {
-    if (!expanded) return
-    function onOut(e: MouseEvent) {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setExpanded(false)
+    if (!compact || !expanded) { setSheetBottom(null); return }
+    // Same coordinate space as position:fixed; re-measured while open, because the keyboard,
+    // a rotation or a growing composer all move the pill.
+    const measure = () => {
+      const r = wrapRef.current?.getBoundingClientRect()
+      if (r) setSheetBottom(Math.max(8, window.innerHeight - r.top + 6))
     }
-    document.addEventListener('mousedown', onOut)
-    return () => document.removeEventListener('mousedown', onOut)
-  }, [expanded])
+    measure()
+    const vv = window.visualViewport
+    window.addEventListener('resize', measure)
+    vv?.addEventListener('resize', measure)
+    vv?.addEventListener('scroll', measure)
+    return () => {
+      window.removeEventListener('resize', measure)
+      vv?.removeEventListener('resize', measure)
+      vv?.removeEventListener('scroll', measure)
+    }
+  }, [compact, expanded])
 
+  // Hover opens the desktop dropdown; a TOUCH "hover" (the synthetic mouseenter a tap fires)
+  // has no mouseleave to close it, so it is ignored and any outside press closes both states.
+  const showDropdown = compact ? expanded : (hover || expanded)
   useEffect(() => {
-    let cancelled = false
-    async function load() {
-      try {
-        const res = await api.usage()
-        if (!cancelled) setData(res)
-      } catch {
-        if (!cancelled) setData(null)
+    if (!showDropdown) return
+    function onOut(e: PointerEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setExpanded(false)
+        setHover(false)
       }
     }
-    load()
-    reloadRef.current = load
-    const id = setInterval(load, 30_000)
-    const onFocus = () => load()
-    window.addEventListener('focus', onFocus)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-      window.removeEventListener('focus', onFocus)
-    }
+    document.addEventListener('pointerdown', onOut)
+    return () => document.removeEventListener('pointerdown', onOut)
+  }, [showDropdown])
+
+  const rows = useMemo(() => buildRuntimeRows(providers, usage), [providers, usage])
+  // Countdowns run on the server clock advanced locally; re-render twice a minute even when a
+  // poll fails, so "resets in 9m" never freezes on screen.
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 30_000)
+    return () => clearInterval(id)
   }, [])
 
-  if (!data) return null
+  if (!usage && !providersLoaded) return null
 
-  const fiveH = data.limits.five_hour
-  const week  = data.limits.seven_day
-  const now   = data.now
+  const now = serverNow(status)
+  const globalKey = `claude:${globalDefaultAccount(providers, usage)}:`
+  const shownKey = current?.runtimeKey ?? globalKey
+  const shown: RuntimeRow = rows.find(r => r.key === shownKey) ?? fallbackRow(shownKey, globalKey, usage, now)
 
-  const codex = data.codex?.limits ? data.codex : null
-  // Only shown once a second subscription is registered; a single-account install is unchanged.
-  const accounts = data.accounts && data.accounts.length > 1 ? data.accounts : null
-  const activeAcct = accounts?.find(a => a.active) ?? null
-  // Working on anything other than the main subscription must be visible at a glance —
-  // silently spending the wrong account's quota is the failure mode worth designing against.
-  const acctTag = activeAcct && !activeAcct.is_main ? activeAcct.label : ''
+  const stats = runtimeStats(shown, now, compact)
+  const claudeAccounts = rows.filter(r => r.provider === 'claude' && r.account)
+  const scope = current ? 'this chat' : 'default (no chat on screen)'
 
   function handleSwitched(msg: string) {
     setSwitchMsg(msg)
-    reloadRef.current()
     setTimeout(() => setSwitchMsg(''), 6000)
   }
 
-  // Nothing from SDK yet — show placeholder
-  if (!fiveH && !week) {
-    return (
-      <>
-        <a
-          className="usage-badge usage-dim"
-          href={USAGE_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={openUsage}
-          title="Limits loading… (click — claude.ai/settings/usage)"
-        >
-          ⏱ —
-        </a>
-        {codex && <CodexPill codex={codex} now={now} compact={compact} />}
-      </>
-    )
-  }
-
-  // Primary indicator — 5-hour window, otherwise weekly.
-  const primary = fiveH ?? week!
-  const icon = fiveH ? '⏱' : '📅'
-  const pct = fmtPct(primary.utilization)
-
-  const showDropdown = hover || expanded
+  const pillBody = (
+    <>
+      <RuntimeTagChip tag={shown.tag} />
+      <span>{stats.pct}</span>
+      {stats.reset && !compact && <span className="usage-sep">—</span>}
+      {stats.reset && <span className={compact ? 'rt-pill-reset-short' : undefined}>{stats.reset}</span>}
+    </>
+  )
 
   return (
-    <>
     <div
       className={`usage-badge-wrap${compact ? ' usage-compact' : ''}`}
       ref={wrapRef}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onPointerEnter={e => { if (e.pointerType === 'mouse') setHover(true) }}
+      onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(false) }}
     >
       {compact ? (
         // Mobile: a button that toggles the full breakdown (no external navigation).
         <button
-          className={`usage-badge ${pickClass(primary)}`}
+          className={`usage-badge ${stats.cls}`}
           onClick={() => setExpanded(e => !e)}
-          title="Subscription limits — tap for the full breakdown"
+          title={`${stats.title} — ${scope}. Tap for every subscription`}
           aria-expanded={expanded}
         >
-          <span className="usage-icon">{icon}</span>
-          {pct && <span>{pct}</span>}
-          {acctTag && <span className="usage-acct-tag">{acctTag}</span>}
+          {pillBody}
         </button>
       ) : (
         <a
-          className={`usage-badge ${pickClass(primary)}`}
+          className={`usage-badge ${stats.cls}`}
           href={USAGE_URL}
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => { if (onOpen) { e.preventDefault(); onOpen() } else { openUsage(e) } }}
-          title={onOpen ? 'Usage & cost dashboard (hover for live limits)' : 'Claude Code subscription limits (click — claude.ai/settings/usage)'}
+          title={`${stats.title} — ${scope}. Click for Usage & cost, hover for every subscription`}
         >
-          <span className="usage-icon">{icon}</span>
-          {pct && <span>{pct}</span>}
-          {pct && <span className="usage-sep">—</span>}
-          <span>{fmtReset(primary.resets_at, now)}</span>
-          {acctTag && <span className="usage-acct-tag">{acctTag}</span>}
+          {pillBody}
         </a>
       )}
 
       {showDropdown && (
-        <div className="usage-dropdown">
-          {/* Headline action: our own usage & cost dashboard — now the badge's primary
-              destination (replaces the old claude.ai link). The desktop tab-bar badge
-              passes onOpen directly; the mobile composer badge (deep in ChatTab, no
-              handler) falls back to a window event App listens for. */}
+        <div
+          className="usage-dropdown"
+          style={compact && sheetBottom != null
+            ? { position: 'fixed', left: 8, right: 8, bottom: sheetBottom, top: 'auto', maxWidth: 'none' }
+            : undefined}
+        >
+          {/* Headline action: our own usage & cost dashboard. The desktop tab-bar badge passes
+              onOpen directly; the mobile composer badge (deep in ChatTab, no handler) falls
+              back to a window event App listens for. */}
           <button
             className="usage-dropdown-cta"
             onClick={() => {
@@ -309,20 +239,73 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
             <span>📊 Usage &amp; cost</span>
             <span className="usage-dropdown-cta-arrow">→</span>
           </button>
-          {orderedLimitKeys(data.limits).map(k => {
-            const d = data.limits[k]
-            if (!d) return null
-            const label = limitLabel(k, d)
-            return (
-              <div key={k} className={`usage-row ${pickClass(d)}`}>
-                <span className="usage-row-label">{label}</span>
-                <span className="usage-row-pct">{fmtPct(d.utilization) || d.status}</span>
-                <span className="usage-row-reset">resets {fmtReset(d.resets_at, now)}</span>
+
+          <div className="usage-accounts-head">
+            {current
+              ? `This chat · ${current.projectName}${current.chatName ? ` / ${current.chatName}` : ''}`
+              : 'Subscriptions'}
+            {current?.busy && <span className="rt-head-note"> · busy — switch after the turn</span>}
+          </div>
+          <div role="listbox" className="rt-list">
+            {rows.map(r => {
+              const offBackend = !!current?.projectBackend && r.key !== `claude::${current.projectBackend}`
+              return (
+                <RuntimeLine
+                  key={r.key}
+                  row={r}
+                  now={now}
+                  selected={r.key === shownKey}
+                  pinnable={!!current && !current.pinned}
+                  isDefault={current ? r.key === current.inheritedKey : r.isGlobalDefault}
+                  disabled={!current || !r.available || current.busy || offBackend}
+                  onPick={current ? () => current.pick(r.key) : undefined}
+                />
+              )
+            })}
+            {current?.pinned && !current.projectBackend && (
+              <div
+                role="option"
+                aria-selected={false}
+                className={`rt-line rt-follow${current.busy ? ' inert' : ''}`}
+                title="Drop this chat's own pin: it will follow the default, including future switches"
+                onMouseDown={e => { e.preventDefault(); if (!current.busy) current.followDefault() }}
+              >
+                <span className="rt-follow-icon">↺</span>
+                <span className="rt-line-name">Follow default</span>
+                <span className="rt-line-stat">{rows.find(r => r.key === current.inheritedKey)?.tag ?? ''}</span>
+                <span className="rt-line-mark" />
               </div>
-            )
-          })}
-          {accounts && (
-            <AccountSwitcher accounts={accounts} now={now} onSwitched={handleSwitched} />
+            )}
+          </div>
+          {current?.error && <div className="usage-accounts-msg rt-error">{current.error}</div>}
+
+          {/* Every window of the runtime on screen — the pill only carries the binding one. */}
+          {shown.windows ? (
+            <div className="rt-windows">
+              {windowKeys(shown).map(k => {
+                const d = shown.windows![k]
+                return (
+                  <div key={k} className={`usage-row ${shown.stale || d.utilization == null ? (d.status === 'rejected' ? 'usage-red' : 'usage-dim') : pickClass(d)}`}>
+                    <span className="usage-row-label">{shown.tag} · {limitLabel(k, d)}</span>
+                    <span className="usage-row-pct">{fmtPct(d.utilization) || d.status}</span>
+                    <span className="usage-row-reset">
+                      {d.resets_at ? `resets ${fmtReset(d.resets_at, now)}` : ''}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="usage-accounts-foot">{stats.title}</div>
+          )}
+
+          {claudeAccounts.length > 1 && (
+            <DefaultSwitch
+              rows={claudeAccounts}
+              now={now}
+              projectAccount={current?.projectAccount ?? null}
+              onSwitched={handleSwitched}
+            />
           )}
           {switchMsg && <div className="usage-accounts-msg">{switchMsg}</div>}
           <a
@@ -337,7 +320,5 @@ export function UsageBadge({ compact = false, onOpen }: { compact?: boolean; onO
         </div>
       )}
     </div>
-    {codex && <CodexPill codex={codex} now={now} compact={compact} />}
-    </>
   )
 }
