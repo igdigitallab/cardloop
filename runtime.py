@@ -525,9 +525,15 @@ def validate_runtime_change(
 
     if "account" in patch:
         account = patch["account"]
-        known_ids = {str(a.get("id")) for a in accounts_list}
-        if str(account) not in known_ids:
-            return False, f"unknown account: {account!r}"
+        # null/"" is the INHERIT marker (chat -> project -> global active), not an account id.
+        # resolve_runtime()'s own chain already reads a missing account exactly that way, and
+        # the picker needs a way to hand a pinned chat BACK to the project default -- without
+        # this branch `str(None)` was compared against the id set and every "inherit" pick was
+        # rejected as an unknown account.
+        if account not in (None, ""):
+            known_ids = {str(a.get("id")) for a in accounts_list}
+            if str(account) not in known_ids:
+                return False, f"unknown account: {account!r}"
 
     return True, ""
 

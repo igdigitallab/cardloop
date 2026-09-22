@@ -589,18 +589,21 @@ async def test_chat_post_rejects_unknown_provider_with_400(aiohttp_client, fake_
 
 
 @pytest.mark.asyncio
-async def test_chat_post_ask_mode_on_codex_downgrades_loudly_without_bricking(
+async def test_chat_post_ask_mode_on_codex_is_refused_not_downgraded(
     aiohttp_client, fake_ctx, chats_app, monkeypatch, capsys
 ):
     """Codex has no per-tool approval hook, so ask_mode cannot be honoured there.
 
-    The turn must still RUN, with the downgrade announced in the log and the flag cleared
-    before the engine sees it. Hard-failing the request (409) was implemented and then
-    reverted: the client sends ask_mode unconditionally (ChatTab.tsx gates only on
-    `askMode && !planMode`, never on the provider) while the ask-mode row renders
-    pointer-events:none for Codex — so an operator who switched a chat with ask-mode ON over
-    to Codex could neither send a message nor clear the flag. That bricks the chat. The 409
-    belongs with the frontend commit that can actually clear the flag.
+    The turn is REFUSED (409) rather than silently run with the gate removed — running the
+    tools ungated while the UI still shows an approval toggle is the original bug this whole
+    module exists to close. The refusal names the conflicting capability so a client can clear
+    exactly that flag.
+
+    This assertion replaced a staged one ("must never block the turn"): the 409 was held back
+    until the picker shipped, because a client that sends ask_mode unconditionally AND renders
+    the ask-mode row inert for Codex would leave the operator unable to either send or clear.
+    Both halves are fixed in ChatTab now (the row stays clickable while ON, the send omits a
+    capability the current runtime does not advertise, and switching off Claude clears it).
     """
     monkeypatch.setattr(_webapp._codex, "codex_enabled", lambda: True)
     codex_calls: list = []
@@ -621,14 +624,15 @@ async def test_chat_post_ask_mode_on_codex_downgrades_loudly_without_bricking(
         json={"prompt": "hi", "ask_mode": True},
         headers=_auth(fake_ctx),
     )
-    assert resp.status == 200, "an incompatible per-turn flag must never block the turn"
-    await resp.text()
-    out = capsys.readouterr().out
-    assert "[runtime]" in out and "downgrading this turn" in out and "ask_mode" in out, (
-        "the downgrade must be visible — silently clearing the flag was the original bug"
+    assert resp.status == 409, "an unhonourable capability must error, never downgrade"
+    body = await resp.json()
+    assert "ask_mode" in body["error"]
+    assert any("ask_mode" in c for c in body["conflicts"]), (
+        "the client needs to know WHICH flag to clear, not just that something conflicted"
     )
-    assert codex_calls, "the turn must still reach the engine"
-    assert codex_calls[0].get("ask_mode") in (False, None)
+    out = capsys.readouterr().out
+    assert "[runtime]" in out and "refusing the turn" in out
+    assert not codex_calls, "the engine must never be invoked for a refused turn"
 
 
 @pytest.mark.asyncio

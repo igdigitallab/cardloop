@@ -6087,10 +6087,17 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
                 return web.json_response({"error": f"{k}: expected bool"}, status=400)
             updates[k] = v
         elif k == "model":
-            sv = str(v).strip().lower()
-            if sv not in _ALLOWED_MODELS:
-                return web.json_response({"error": f"model: not in {sorted(_ALLOWED_MODELS)}"}, status=400)
-            updates[k] = sv
+            # null/"" clears the override -> the project inherits the global default, which is
+            # what every reader already assumes (`project.get("model") or DEFAULT_MODEL`).
+            # Without this branch `str(None)` became the literal "none" and 400'd the WHOLE
+            # settings save, not just this field.
+            if v in (None, ""):
+                updates[k] = None
+            else:
+                sv = str(v).strip().lower()
+                if sv not in _ALLOWED_MODELS:
+                    return web.json_response({"error": f"model: not in {sorted(_ALLOWED_MODELS)}"}, status=400)
+                updates[k] = sv
         elif k == "board_provider":
             sv = str(v).strip().lower()
             if sv not in ("claude", "codex"):
@@ -11472,6 +11479,24 @@ async def api_agent_providers(req: web.Request) -> web.Response:
         {"value": value, "label": key.title(), "reasoning_levels": ["low", "medium", "high", "xhigh", "max"]}
         for key, value in (ctx.get("MODELS") or {}).items()
     ]
+    # spec-092: the runtime picker needs the ACCOUNT dimension in the same payload as the
+    # provider and the model — it is one menu, and an account that cannot run (missing or
+    # expired credentials) must be visibly greyed rather than silently degraded to `main`
+    # by accounts.resolve(). Codex has no account dimension of its own (one ChatGPT
+    # subscription per host), so it reports an empty list rather than omitting the key —
+    # a consumer can then treat `accounts` as always present.
+    claude_accounts = [
+        {
+            "id": a.get("id"),
+            "label": a.get("label") or a.get("id"),
+            "available": bool(a.get("ok")),
+            "active": bool(a.get("active")),
+            "email": a.get("email") or "",
+            "plan": a.get("plan") or "",
+            "reason": a.get("reason") or "",
+        }
+        for a in _accounts.list_accounts()
+    ]
     return web.json_response({
         "default": "claude",
         "providers": [
@@ -11480,9 +11505,10 @@ async def api_agent_providers(req: web.Request) -> web.Response:
                 "authenticated": True, "models": claude_models,
                 "reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
                 "capabilities": _CLAUDE_CAPABILITIES,
+                "accounts": claude_accounts,
                 "error": None,
             },
-            codex_info,
+            {**codex_info, "accounts": []},
         ],
     })
 
@@ -12349,7 +12375,7 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
     whatever was already queued, not behind it. The max-depth check is unchanged (front
     does not bypass the cap, it only changes where within the cap the item lands).
 
-    spec-092 item 3: `pinned_runtime` (a plain {"provider", "model"} dict, NOT a full
+    spec-092 item 3: `pinned_runtime` (a plain {"provider", "model", "account"?} dict, NOT a full
     runtime.RunContext) freezes what this message was ACCEPTED against so a later operator
     switch cannot silently re-route it — the measured bug this closes is `_chat_queue_execute`
     re-reading the chat record at drain time, so a message typed against Claude could execute
@@ -12395,6 +12421,12 @@ def _chat_queue_enqueue(session_key: str, text: str, chat_id: "str | None" = Non
     if pinned_runtime and pinned_runtime.get("provider"):
         item["runtime"] = {"provider": pinned_runtime["provider"],
                            "model": pinned_runtime.get("model")}
+        # The account is pinned by KEY PRESENCE, not by a null value: an item accepted on
+        # the inherited project/global default must KEEP inheriting (so a later settings
+        # change still reaches it), while an explicit chat pin freezes onto its own
+        # subscription. Copying a None here would erase that distinction at drain time.
+        if pinned_runtime.get("account"):
+            item["runtime"]["account"] = pinned_runtime["account"]
     if front:
         lst.insert(0, item)
     else:
@@ -12472,9 +12504,44 @@ async def api_chat_queue_list(req: web.Request) -> web.Response:
     return web.json_response({"items": _chat_queue_get(session_key)})
 
 
+def _runtime_pin(provider: str, model: "str | None", account: "str | None") -> dict:
+    """The {provider, model, account?} dict a chat-queue item carries (spec-092 item 3).
+
+    `account` is omitted rather than stored as None so an item enqueued before the account
+    dimension existed and one enqueued on the inherited project default stay byte-identical
+    — the drain's "is there a pin for this dimension" check is a key presence test.
+    """
+    pin: dict = {"provider": provider, "model": model}
+    if account:
+        pin["account"] = account
+    return pin
+
+
+def _resolve_run_account(chat: "dict | None", project: "dict | None") -> "tuple[str | None, str]":
+    """Which Claude subscription answers this turn: chat override -> project default.
+
+    spec-092 review item 4: `accounts.resolve()` degrades to `main` when the picked account
+    is unusable. That is the RIGHT behaviour for an inherited project default (the operator
+    never asked for this account on this turn) and the WRONG one for a chat the operator
+    explicitly pinned to `work` — there the degrade spends a different subscription than the
+    one the picker shows, invisibly. So an explicit CHAT-level account validates hard and
+    returns an error string; a project-level one keeps the pre-spec-092 silent fallback.
+
+    Returns (account_id_or_None, error_message). `None` with no error means "inherit".
+    """
+    chat_acct = (chat or {}).get("account") if isinstance(chat, dict) else None
+    if chat_acct:
+        ok, reason = _accounts.validate(str(chat_acct))
+        if not ok:
+            return None, (f"this chat runs on the {str(chat_acct)!r} subscription, which "
+                          f"cannot run: {reason}")
+        return str(chat_acct), ""
+    return (project or {}).get("account"), ""
+
+
 def _pin_chat_runtime(ctx: dict, project: dict, chat_id: "str | None") -> "dict | None":
-    """Best-effort {"provider", "model"} snapshot of chat_id's CURRENT runtime, for pinning
-    onto a chat-queue item at ACCEPT time (spec-092 item 3).
+    """Best-effort {"provider", "model", "account"} snapshot of chat_id's CURRENT runtime,
+    for pinning onto a chat-queue item at ACCEPT time (spec-092 item 3).
 
     Returns None on any resolution problem (chat missing, provider unavailable/unknown) —
     callers must treat None as "no pin available", not as an error: `_chat_queue_execute`
@@ -12499,7 +12566,15 @@ def _pin_chat_runtime(ctx: dict, project: dict, chat_id: "str | None") -> "dict 
         model = project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL
     else:
         model = project.get("model") or ctx.get("DEFAULT_MODEL", "sonnet")
-    return {"provider": provider, "model": model}
+    # The account rides along for the same reason the model does: the operator can re-point
+    # the chat at another subscription while this message waits, and a queued turn must spend
+    # the subscription it was accepted against. An unusable explicit account resolves to None
+    # here (no pin) rather than failing the enqueue — the drain then inherits the project's.
+    account, _acct_err = _resolve_run_account(chat, project)
+    pin = {"provider": provider, "model": model}
+    if account and not _acct_err:
+        pin["account"] = account
+    return pin
 
 
 async def api_chat_queue_add(req: web.Request) -> web.Response:
@@ -12520,9 +12595,24 @@ async def api_chat_queue_add(req: web.Request) -> web.Response:
     if _q_chat_id and not _valid_chat_id(_q_chat_id):
         return web.json_response({"error": "invalid chat_id"}, status=400)
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
+    # spec-092 P1c: carry the caller's OWN per-turn flags onto the item. Without them the
+    # drain falls back to session-wide _last_turn_options, which is keyed by session_key and
+    # therefore shared with every other chat of this project — an unrelated Claude turn could
+    # lend its ask_mode=True to a message queued on a Codex chat. A value the client did not
+    # send stays absent (None) and keeps the documented legacy inheritance.
+    def _q_flag(name: str) -> "bool | None":
+        v = body.get(name)
+        return bool(v) if isinstance(v, bool) else None
+    _q_effort = (body.get("effort")
+                 if body.get("effort") in ("low", "medium", "high", "xhigh", "max", "ultra")
+                 else None)
     # spec-092 item 3: pin the runtime this message was accepted against.
     _pinned_rt = _pin_chat_runtime(ctx, project, _q_chat_id)
     item = _chat_queue_enqueue(session_key, text, _q_chat_id, project["id"],
+                               effort=_q_effort,
+                               ultracode=_q_flag("ultracode"),
+                               plan_mode=_q_flag("plan_mode"),
+                               ask_mode=_q_flag("ask_mode"),
                                pinned_runtime=_pinned_rt)
     if item is None:
         return web.json_response({"error": "queue full"}, status=429)
@@ -12873,6 +12963,10 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # run's events + /live buffer are always stamped and never broadcast to every tab.
         resume_session_id = None
         _resolved_entry = False
+        # Default: the project's own subscription, exactly as before spec-092. The per-chat
+        # override (pinned or freshly resolved) replaces it inside the branch below.
+        _q_account = topic.get("account")
+        _q_account_err = ""
         if _project_id:
             try:
                 async with _chats_lock():
@@ -12895,6 +12989,16 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                         if isinstance(_pinned_rt, dict) and _pinned_rt.get("provider"):
                             provider = _pinned_rt["provider"]
                             model = _pinned_rt.get("model") or model
+                            # The account is pinned by KEY PRESENCE: an item accepted on the
+                            # inherited project default carries no "account" key and must keep
+                            # inheriting (so changing the project default still reaches it),
+                            # while an item accepted on an explicit chat pin spends exactly
+                            # that subscription no matter what the chat record says now.
+                            if _pinned_rt.get("account"):
+                                _q_account = _pinned_rt["account"]
+                                _q_account_err = ""
+                            else:
+                                _q_account, _q_account_err = _resolve_run_account(_tc, topic)
                         else:
                             # Legacy item: enqueued before spec-092 pinning existed, or via a
                             # call site that intentionally does not pin (completion wakes,
@@ -12905,6 +13009,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                             provider = _chat_provider(_tc)
                             if _tc.get("model"):
                                 model = _tc["model"]
+                            _q_account, _q_account_err = _resolve_run_account(_tc, topic)
                             print(f"[chat_queue] {session_key}: draining item {item.get('id')} "
                                   f"with NO pinned runtime — assumed current chat state "
                                   f"(provider={provider!r})")
@@ -12920,6 +13025,60 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             resume_session_id = ctx["sessions"].get(session_key)
         if provider == "claude" and _q_effort == "ultra":
             _q_effort = None
+        # The account was validated when the message was ACCEPTED; by drain time the operator
+        # can have logged that subscription out or removed it. engine.py then calls
+        # _accounts.resolve(), whose documented behaviour is a SILENT fallback to the globally
+        # active account — correct for an inherited default, but here it means a message the
+        # operator explicitly pinned to `work` quietly spends something else. The message is
+        # not dropped (it was already accepted), but the substitution is never silent: it is
+        # logged and traced, exactly like the capability downgrade below it.
+        if provider == "claude" and _q_account and not _q_account_err:
+            try:
+                _acct_ok, _acct_reason = _accounts.validate(str(_q_account))
+            except Exception as _av_exc:  # never strand the queue on an inspect failure
+                _acct_ok, _acct_reason = True, f"validation skipped ({_av_exc!r})"
+            if not _acct_ok:
+                _q_account_err = _acct_reason
+        if _q_account_err:
+            print(f"[chat_queue] {session_key}: pinned subscription {_q_account!r} cannot run "
+                  f"({_q_account_err}) — this turn falls back to the global account")
+            _chat_trace(session_key, "drain_account_fallback", chat_id=_resolved_chat_id,
+                        pinned_account=_q_account, reason=_q_account_err[:200])
+            _q_account = None
+        # spec-092 P1c: the per-turn flags reaching this point are a MIX of the item's own
+        # values and session-wide inheritance from _last_turn_options — which is keyed by
+        # session_key, not by chat, so a Claude turn's ask_mode=True can ride into a Codex
+        # drain. run_codex_engine has no ask_mode parameter at all (it lands in **_ignored),
+        # so the approval gate the operator switched on would simply not exist while the UI
+        # still claims it does. Check the flags against the runtime that will ACTUALLY answer,
+        # and clear them loudly. Deliberately NOT a hard failure: unlike the direct POST path
+        # (where the operator is present and can retry), the message here was already accepted
+        # — dropping it would lose work to close a gap that clearing already closes.
+        try:
+            _q_conflicts = runtime.capability_conflicts(
+                runtime.RunContext(
+                    origin_kind="chat", origin_id=str(_project_id or session_key),
+                    provider=provider, backend="", model=model or "sonnet",
+                    account=_accounts.resolve(_q_account), revision=0,
+                    ask_mode=bool(_q_ask_mode), plan_mode=bool(_q_plan_mode),
+                    ultracode=bool(_q_ultracode),
+                ),
+                _CLAUDE_CAPABILITIES if provider == "claude" else _codex.capabilities(),
+            )
+        except Exception as _cap_exc:  # a malformed record must never strand the queue
+            print(f"[chat_queue] {session_key}: capability check skipped ({_cap_exc!r})")
+            _q_conflicts = []
+        if _q_conflicts:
+            print(f"[chat_queue] {session_key}: {'; '.join(_q_conflicts)} — clearing the "
+                  f"incompatible flag(s) for this drained turn")
+            _chat_trace(session_key, "drain_capability_downgrade", chat_id=_resolved_chat_id,
+                        provider=provider, conflicts=_q_conflicts)
+            if any("ask_mode" in c for c in _q_conflicts):
+                _q_ask_mode = False
+            if any("plan_mode" in c for c in _q_conflicts):
+                _q_plan_mode = False
+            if any("multi-agent" in c or "ultracode" in c for c in _q_conflicts):
+                _q_ultracode = False
         run_engine = (ctx.get("run_codex_engine") if provider == "codex" else ctx.get("run_engine"))
         if run_engine is None:
             raise RuntimeError(f"{provider} engine not available in ctx")
@@ -12969,7 +13128,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 project_name=project_name, cwd=cwd, prompt=effective_prompt,
                 session_key=session_key, model=model,
                 resume_session_id=resume_session_id, env=project_secrets,
-                project_account=topic.get("account"),
+                project_account=_q_account,
                 **agents_kwargs, ctx=ctx, ephemeral=False, effort=_q_effort,
                 ultracode=bool(_q_ultracode), plan_mode=_q_plan_mode,
                 ask_mode=_q_ask_mode, chat_id=_resolved_chat_id,
@@ -13582,39 +13741,43 @@ async def api_project_chat(req: web.Request) -> web.Response:
         model = _run_chat["model"]
     elif _provider_for_run == "codex":
         model = project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL
+    # spec-092: the account is the third runtime dimension and is now per-chat, not only
+    # per-project. An explicit chat pin that cannot run stops the turn here instead of
+    # quietly spending `main` (see _resolve_run_account).
+    _run_account, _run_account_err = _resolve_run_account(_run_chat, project)
+    if _run_account_err:
+        return web.json_response({"error": _run_account_err}, status=409)
 
-    # spec-092 item 5, STAGED: a runtime that cannot honour a requested per-turn option must
-    # not silently clear the flag (the old `_ask_mode = False for Codex` line removed the
-    # operator's approval gate with no visible sign). But hard-failing the turn cannot ship
-    # before the picker does, and here is the dead end it creates today:
-    #   1. operator turns ask-mode ON while the chat is on Claude
-    #   2. operator switches the chat to Codex — which this very commit made possible
-    #   3. the client sends ask_mode:true unconditionally (ChatTab.tsx:2882 gates only on
-    #      `askMode && !planMode`, never on the provider)
-    #   4. every message 409s — and the operator CANNOT clear the flag, because the ask-mode
-    #      row is rendered pointer-events:none for Codex. The chat is bricked.
-    # So until the UI can clear an incompatible flag, downgrade as before but LOUDLY: log it
-    # and tell the operator in the reply. Strictly better than the silent clear it replaces,
-    # and it does not brick a chat. The 409 lands with the frontend commit.
+    # spec-092 item 5: a runtime that cannot honour a requested per-turn option ERRORS — it
+    # never silently clears the flag (the old `_ask_mode = False for Codex` line removed the
+    # operator's approval gate with no visible sign, then ran the tools anyway).
+    #
+    # This was staged behind the picker for one reason: the dead end where the operator turns
+    # ask-mode ON, moves the chat to a runtime without an approval hook, and can neither send
+    # (409) nor clear the flag (the row was pointer-events:none for Codex). Both halves of
+    # that trap are now closed on the client — the picker clears ask-mode when it moves a chat
+    # off Claude, the send omits a flag the current runtime does not advertise, and the row
+    # stays clickable while the flag is ON so it can always be turned OFF. So the 409 here is
+    # a backstop for clients that do NOT do those things (TG, a stale tab, a script), not the
+    # operator's normal path. `conflicts` is returned so a client can say which flag to clear.
     if _ask_mode or _plan_mode or _ultracode:
         _run_capabilities = (
             _CLAUDE_CAPABILITIES if _provider_for_run == "claude" else _codex.capabilities()
         )
         _cap_probe = runtime.RunContext(
             origin_kind="chat", origin_id=project["id"], provider=_provider_for_run,
-            backend="", model=model, account=_accounts.resolve(project.get("account")),
+            backend="", model=model, account=_accounts.resolve(_run_account),
             revision=0, ask_mode=_ask_mode, plan_mode=_plan_mode, ultracode=_ultracode,
         )
         _conflicts = runtime.capability_conflicts(_cap_probe, _run_capabilities)
         if _conflicts:
-            print(f"[runtime] {session_key}: {'; '.join(_conflicts)} — downgrading this "
-                  f"turn (the UI cannot clear an incompatible flag yet)")
-            if any("ask_mode" in c for c in _conflicts):
-                _ask_mode = False
-            if any("plan_mode" in c for c in _conflicts):
-                _plan_mode = False
-            if any("ultracode" in c for c in _conflicts):
-                _ultracode = False
+            print(f"[runtime] {session_key}: {'; '.join(_conflicts)} — refusing the turn "
+                  f"(a requested capability is not available on {_provider_for_run})")
+            return web.json_response(
+                {"error": "; ".join(_conflicts), "conflicts": _conflicts,
+                 "provider": _provider_for_run},
+                status=409,
+            )
     if _provider_for_run == "claude" and _effort_override == "ultra":
         _effort_override = None
     run_engine = (ctx.get("run_codex_engine") if _provider_for_run == "codex"
@@ -13670,7 +13833,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                    effort=_effort_override, ultracode=_ultracode,
                                    auto_rotate=_auto_rotate, plan_mode=_plan_mode,
                                    ask_mode=_ask_mode, msg_id=_msg_id,
-                                   pinned_runtime={"provider": _provider_for_run, "model": model})
+                                   pinned_runtime=_runtime_pin(_provider_for_run, model, _run_account))
         if item is None:
             _chat_trace(session_key, "queue_full", msg_id=_msg_id, chat_id=_req_chat_id,
                         text=prompt, limit=_CHAT_QUEUE_MAX)
@@ -13707,7 +13870,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                    effort=_effort_override, ultracode=_ultracode,
                                    auto_rotate=_auto_rotate, plan_mode=_plan_mode,
                                    ask_mode=_ask_mode, msg_id=_msg_id,
-                                   pinned_runtime={"provider": _provider_for_run, "model": model})
+                                   pinned_runtime=_runtime_pin(_provider_for_run, model, _run_account))
         payload = json.dumps({
             "type": "queued",
             "item": item,
@@ -13892,7 +14055,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 model=model,
                 resume_session_id=resume_sid,
                 env=project_secrets,
-                project_account=(project or {}).get("account"),
+                project_account=_run_account,
                 **agents_kwargs,
                 ctx=ctx,
                 ephemeral=False,

@@ -65,6 +65,21 @@ export interface AgentProviderModel {
   reasoning_levels: string[]
 }
 
+/** spec-092: one Claude subscription selectable as a runtime dimension.
+ *  `available:false` means the credentials are missing or expired — the row must be shown
+ *  and greyed, never hidden: an invisible account looks like an account that does not exist. */
+export interface AgentProviderAccount {
+  id: string
+  label: string
+  available: boolean
+  /** True for the account a project/chat inherits when it pins none of its own. */
+  active: boolean
+  email?: string
+  plan?: string
+  /** Why it is unavailable — surfaced as the row's title attribute. */
+  reason?: string
+}
+
 export interface AgentProviderInfo {
   provider: Provider
   enabled: boolean
@@ -74,6 +89,8 @@ export interface AgentProviderInfo {
   models: AgentProviderModel[]
   reasoning_levels: string[]
   capabilities: Record<string, boolean>
+  /** spec-092: always present (empty for providers with no account dimension). */
+  accounts?: AgentProviderAccount[]
   error?: string | null
 }
 
@@ -425,6 +442,14 @@ export interface Chat {
   provider: Provider
   model: string | null
   codex_thread_id: string | null
+  /** spec-092: Claude subscription pinned to THIS chat (null = inherit the project's). */
+  account?: string | null
+  /** spec-092: inference backend ("" / absent = the provider's native one). */
+  backend?: string | null
+  /** spec-092: 'ok' | 'unavailable' | 'unknown' — whether this chat's provider can run NOW. */
+  provider_status?: 'ok' | 'unavailable' | 'unknown'
+  /** spec-092: compare-and-swap token; PATCHing the runtime must echo it back. */
+  runtime_revision?: number
 }
 
 export interface ChatsResponse {
@@ -602,7 +627,7 @@ export interface TurnMetrics {
 
 export interface ChatMessage {
   id: string
-  role: 'user' | 'assistant' | 'board' | 'model_fallback'
+  role: 'user' | 'assistant' | 'board' | 'model_fallback' | 'runtime'
   /** Accumulated text content */
   text: string
   /** Tool calls that happened during this turn */
@@ -625,6 +650,12 @@ export interface ChatMessage {
   queued?: boolean
   /** Model fallback payload — present only when role === 'model_fallback' */
   modelFallback?: { requested: string; served: string; expected?: string | null; generation?: boolean }
+  /** spec-092: runtime-switch marker — present only when role === 'runtime'.
+   *  A provider crossing starts a NEW conversation thread on the other engine: the handoff
+   *  summary (spec-092 P2) does not exist yet, so the strip must say out loud that the
+   *  history is not carried. Silent amnesia reads as a healthy continuation, which is worse
+   *  than an obvious reset. */
+  runtime?: { from: string; to: string; crossed: boolean; carried: boolean; unreplayed: number }
 }
 
 // ─── Prompt templates ─────────────────────────────────────────────────────

@@ -894,10 +894,29 @@ const CacheCountdownBadge = memo(function CacheCountdownBadge({
 // desktop (top bar, menu opens down via menuPlacement="down").
 const THINK_TAG: Record<ThinkMode, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max', ultra: 'ultra' }
 
+/** spec-092: one selectable runtime = provider x account, flattened for a single-column menu.
+ *  `key` is the identity the active-row check compares against, NOT a display string. */
+interface RuntimeChoice {
+  key: string
+  label: string
+  provider: Provider
+  /** An explicit account id for Claude rows; null for providers with no account dimension.
+   *  Never null-as-"inherit": a pick from this menu is a pin, so the highlighted row and the
+   *  subscription that actually answers can never disagree. */
+  account: string | null
+  available: boolean
+  /** Why it cannot be picked — shown as the row's tooltip. */
+  reason?: string
+  /** Default model for this provider, sent alongside a provider change so the resulting
+   *  state validates server-side (a Codex chat pinned to a Claude alias is rejected). */
+  defaultModel?: string
+}
+
 const ModelThinkButton = memo(function ModelThinkButton({
   model, thinkValue, disabled, onModelChange, onThinkChange, menuPlacement = 'up', models,
   ultracode, onUltracodeChange, planMode, onPlanModeChange, planLocked,
   askMode, onAskModeChange, provider = 'claude', reasoningLevels,
+  runtimes, activeRuntimeKey, onRuntimeChange, runtimeBusy, runtimeError, capabilities,
 }: {
   model: string
   thinkValue: ThinkMode
@@ -920,9 +939,26 @@ const ModelThinkButton = memo(function ModelThinkButton({
   onAskModeChange: (v: boolean) => void
   provider?: Provider
   reasoningLevels?: ThinkMode[]
+  /** spec-092: the selectable runtimes (provider x account), flattened into one list so the
+   *  menu stays a single scrollable column on a phone instead of a nested submenu. */
+  runtimes?: RuntimeChoice[]
+  /** `${provider}:${accountId}` of the chat's CURRENT runtime. */
+  activeRuntimeKey?: string
+  onRuntimeChange?: (choice: RuntimeChoice) => void
+  /** True while a PATCH is in flight — the rows stay visible but inert. */
+  runtimeBusy?: boolean
+  /** Last refusal (busy turn / stale revision / invalid combination), shown under the list. */
+  runtimeError?: string
+  /** The CURRENT runtime's capability map from the live registry. Drives the per-turn
+   *  toggles: hardcoding "codex has no ask_mode" would silently let the next provider
+   *  without an approval hook show an ON toggle that enforces nothing. Absent = assume
+   *  capable (fail-soft on a failed DISPLAY fetch, same rule as the model list). */
+  capabilities?: Record<string, boolean>
 }) {
   // Prefer the live registry; fall back to the bundled static list (offline / fetch failure).
   const modelList = (models && models.length > 0) ? models : MODELS
+  // spec-092: capability-driven, not provider-name-driven.
+  const askModeSupported = capabilities ? !!capabilities.ask_mode : true
   // Label for the current selection: live label first, then static modelLabel().
   const currentLabel = modelList.find(m => m.value === model)?.label ?? modelLabel(model)
   const [open, setOpen] = useState(false)
@@ -980,8 +1016,43 @@ const ModelThinkButton = memo(function ModelThinkButton({
           role="listbox"
           style={isDown && fixedPos ? { position: 'fixed', top: fixedPos.top, right: fixedPos.right, bottom: 'auto' } : undefined}
         >
+          {/* spec-092: the runtime (which engine + which subscription answers this chat)
+              lives ABOVE the model list — picking a model only makes sense once the engine
+              is chosen, and on a phone the top of this menu is the only part above the fold. */}
+          {!!runtimes?.length && (
+            <>
+              <div className="composer-modelthink-sec">Runtime (this chat)</div>
+              {runtimes.map(rt => {
+                const inert = !rt.available || !!runtimeBusy
+                return (
+                  <div
+                    key={rt.key}
+                    role="option"
+                    aria-selected={rt.key === activeRuntimeKey}
+                    className={`chat-think-option${rt.key === activeRuntimeKey ? ' selected' : ''}`}
+                    title={rt.reason || undefined}
+                    style={inert ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
+                    onMouseDown={e => {
+                      e.preventDefault()
+                      if (inert || rt.key === activeRuntimeKey) return
+                      onRuntimeChange?.(rt)
+                      setOpen(false)
+                    }}
+                  >
+                    <span>{rt.label}</span>
+                    {!rt.available && <span className="ultracode-state">OFF</span>}
+                  </div>
+                )
+              })}
+              {runtimeError && (
+                <div className="composer-modelthink-note" style={{ color: 'var(--danger, #c33)' }}>
+                  {runtimeError}
+                </div>
+              )}
+            </>
+          )}
           <div className="composer-modelthink-sec">
-            {provider === 'codex' ? 'Codex model (pinned to this chat)' : t['chat.model_hint']}
+            {provider === 'codex' ? 'Codex model (this chat)' : t['chat.model_hint']}
           </div>
           {modelList.map(m => (
             <div
@@ -989,7 +1060,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
               role="option"
               aria-selected={m.value === model}
               className={`chat-think-option${m.value === model ? ' selected' : ''}`}
-              onMouseDown={e => { e.preventDefault(); if (provider === 'claude') onModelChange(m.value); setOpen(false) }}
+              onMouseDown={e => { e.preventDefault(); onModelChange(m.value); setOpen(false) }}
             >
               {m.label}
             </div>
@@ -1036,12 +1107,19 @@ const ModelThinkButton = memo(function ModelThinkButton({
             aria-selected={askMode}
             className={`chat-think-option plan-row${askMode && !planMode ? ' selected' : ''}`}
             title={planMode ? t['chat.ask_plan_conflict']
-                   : provider === 'codex' ? t['chat.ask_codex_conflict'] : t['chat.ask_hint']}
-            style={planMode || provider === 'codex'
-              ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
+                   : !askModeSupported ? t['chat.ask_codex_conflict'] : t['chat.ask_hint']}
+            /* spec-092: a runtime that cannot honour ask-mode greys the row but must NOT make
+               it inert while the flag is ON — the picker can move a chat onto such a runtime
+               with the flag already set, and a row with pointer-events:none would leave the
+               operator no way to clear it while every send is refused. Greyed = "cannot turn
+               ON here"; turning OFF always works. */
+            style={planMode || (!askModeSupported && !askMode)
+              ? { opacity: 0.4, pointerEvents: 'none' }
+              : (!askModeSupported ? { opacity: 0.65 } : undefined)}
             onMouseDown={e => {
               e.preventDefault()
-              if (planMode || provider === 'codex') return
+              if (planMode) return
+              if (!askModeSupported && !askMode) return
               onAskModeChange(!askMode)
             }}
           >
@@ -1263,9 +1341,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const activeChat = chats.find(c => c.id === effectiveChatId)
   const activeProvider: Provider = activeChat?.provider ?? 'claude'
   const activeModel = activeChat?.model || project.model
+  // spec-092: the model is a per-chat pin for EVERY provider now, so Codex gets its real
+  // model list instead of the single frozen row it used to show ("pinned to this chat" was
+  // literally true: there was nothing else to click). Falls back to the current value alone
+  // when the registry has not loaded — an empty list would look like "no models exist".
+  const codexRegistryModels = providerRegistry.find(p => p.provider === 'codex')?.models ?? []
   const activeProviderModels = activeProvider === 'codex'
-    ? [{ value: activeModel, label: providerRegistry.find(p => p.provider === 'codex')
-        ?.models.find(m => m.value === activeModel)?.label || activeModel }]
+    ? (codexRegistryModels.length
+        ? codexRegistryModels.map(m => ({ value: m.value, label: m.label }))
+        : [{ value: activeModel, label: activeModel }])
     : models
   const activeReasoningLevels = activeProvider === 'codex'
     ? providerRegistry.find(p => p.provider === 'codex')?.models
@@ -1275,6 +1359,67 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     ? providerRegistry.find(p => p.provider === 'codex')?.models
         .find(m => m.value === activeModel)?.default_reasoning as ThinkMode | undefined
     : undefined
+  // ─── spec-092: the runtime dimension (engine x subscription) ────────────────
+  // Flattened from the live registry rather than hardcoded, so a provider added server-side
+  // (the Ollama entry of P3) appears here with no frontend change. Claude contributes one row
+  // per account — an account whose credentials are missing/expired is listed and greyed, not
+  // hidden: an invisible account is indistinguishable from one that was never set up.
+  // What a chat with NO account pin actually runs on. The chain is chat -> project ->
+  // globally active account -> main (accounts.resolve), so assuming "main" here would
+  // highlight the wrong row for any operator who pinned the project or switched the global
+  // subscription — the menu would claim Main while the turn spends Work.
+  const globalActiveAccount = providerRegistry.find(p => p.provider === 'claude')
+    ?.accounts?.find(a => a.active)?.id
+  const inheritedAccount = project.account || globalActiveAccount || 'main'
+  const runtimeChoices: RuntimeChoice[] = React.useMemo(() => {
+    const out: RuntimeChoice[] = []
+    for (const p of providerRegistry) {
+      const defaultModel = p.models.find(m => m.default)?.value || p.models[0]?.value
+      const accounts = p.accounts ?? []
+      if (p.provider === 'claude' && accounts.length > 0) {
+        for (const a of accounts) {
+          out.push({
+            key: `claude:${a.id}`,
+            label: `Claude · ${a.label}${a.id === inheritedAccount ? ' · default' : ''}`,
+            provider: 'claude',
+            // Always an EXPLICIT id, never null-as-"inherit". Sending null for the Main row
+            // meant "follow whatever the project/global says" — so on a project pinned to
+            // `work`, clicking Main changed nothing and the chat kept running on `work` with
+            // no error and no way to force Main from this menu. A pick is a pin.
+            account: a.id,
+            available: p.available && a.available,
+            reason: !a.available ? a.reason || 'this subscription cannot run' : undefined,
+            defaultModel,
+          })
+        }
+      } else {
+        out.push({
+          key: `${p.provider}:`,
+          label: p.provider === 'codex' ? 'Codex (ChatGPT)' : p.provider,
+          provider: p.provider,
+          account: null,
+          available: p.available && p.enabled,
+          reason: !p.available ? p.error || `${p.provider} is not available` : undefined,
+          defaultModel,
+        })
+      }
+    }
+    return out
+  }, [providerRegistry, inheritedAccount])
+  // An unpinned chat highlights the row it actually inherits, not a hardcoded "main".
+  const activeRuntimeKey = activeProvider === 'claude'
+    ? `claude:${activeChat?.account || inheritedAccount}`
+    : `${activeProvider}:`
+  // What the CURRENT runtime can actually honour. The server refuses a turn that requests a
+  // capability its runtime lacks (409), so the send must not ask for one — a flag left over
+  // in localStorage from before a provider switch would otherwise make every send fail.
+  // Absent registry (offline / fetch failure) = assume capable, same fail-soft as the model
+  // list: refusing to send because a DISPLAY fetch failed would be the worse bug.
+  const activeCapabilities = providerRegistry.find(p => p.provider === activeProvider)?.capabilities
+  const askModeSupportedRef = useRef<boolean>(true)
+  useEffect(() => {
+    askModeSupportedRef.current = activeCapabilities ? !!activeCapabilities.ask_mode : true
+  }, [activeCapabilities])
   const composerReady = chatsLoaded && hydratedChatId === effectiveChatId
 
   // Track the active chat's session_id via a ref so hydrateFromServer can pass it
@@ -1364,6 +1509,26 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     } catch { /* localStorage unavailable */ }
     return false
   })
+  // ─── spec-092 runtime switch: state + always-fresh mirrors ─────────────────
+  // The handlers below are memoized on `projectId` alone (they outlive a tab switch and a
+  // send), so everything else they read comes through a ref — the same stale-closure rule
+  // effectiveChatIdRef already documents a few lines up.
+  const [runtimeBusy, setRuntimeBusy] = useState(false)
+  const [runtimeError, setRuntimeError] = useState('')
+  const chatsRef = useRef<Chat[]>([])
+  const activeProviderRef = useRef<Provider>('claude')
+  const activeModelRef = useRef<string>('')
+  const askModeRef = useRef<boolean>(false)
+  useEffect(() => { chatsRef.current = chats }, [chats])
+  useEffect(() => { activeProviderRef.current = activeProvider }, [activeProvider])
+  useEffect(() => { activeModelRef.current = activeModel }, [activeModel])
+  useEffect(() => { askModeRef.current = askMode }, [askMode])
+  const providerRegistryRef = useRef<AgentProviderInfo[]>([])
+  useEffect(() => { providerRegistryRef.current = providerRegistry }, [providerRegistry])
+  // A refusal is about the pick the operator just made — drop it when the chat changes,
+  // otherwise a stale "a turn is still running" sits under a different chat's menu.
+  useEffect(() => { setRuntimeError('') }, [effectiveChatId])
+
   // spec-089 §5: 🎯 goal chip — client-side memory of the operator's last /goal <text> send
   // (see goalStorageKey's doc comment for why this can't be server-driven).
   const [goalText, setGoalText] = useState<string | null>(() => {
@@ -2879,7 +3044,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         // Spec-037: pass active chat_id so the backend writes session_id to the right chat entry
-        body: JSON.stringify({ prompt: fullPrompt, msg_id: msgId, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), ...(planMode ? { plan_mode: true } : {}), ...(askMode && !planMode ? { ask_mode: true } : {}), auto_rotate: activeProvider === 'claude' ? autoRotate : false, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
+        body: JSON.stringify({ prompt: fullPrompt, msg_id: msgId, think_mode: thinkMode, ...(ultracode ? { ultracode: true } : {}), ...(planMode ? { plan_mode: true } : {}), ...(askMode && !planMode && askModeSupportedRef.current ? { ask_mode: true } : {}), auto_rotate: activeProvider === 'claude' ? autoRotate : false, ...(effectiveChatId ? { chat_id: effectiveChatId } : {}) }),
         signal: ac.signal,
       })
 
@@ -3250,18 +3415,96 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     }, 0)
   }
 
+  // ─── spec-092: the runtime switch (provider x account x model), per chat ────
+  // Every dimension goes through the SAME compare-and-swap PATCH, because the server
+  // validates the RESULTING state, not the patch in isolation: flipping the provider without
+  // a compatible model is a 400, and two tabs racing each other is a 409 on the revision.
+  const applyRuntimePatch = useCallback(async (
+    patch: { provider?: Provider; model?: string | null; account?: string | null },
+    crossing?: { from: string; to: string },
+  ) => {
+    const chatId = effectiveChatIdRef.current
+    if (!chatId) {
+      setRuntimeError('no chat record yet — send one message first')
+      return
+    }
+    setRuntimeBusy(true)
+    setRuntimeError('')
+    try {
+      const current = chatsRef.current.find(c => c.id === chatId)
+      const res = await api.patchChat(projectId, chatId, {
+        ...patch,
+        expected_revision: current?.runtime_revision ?? 0,
+      })
+      setChats(prev => prev.map(c => (c.id === chatId ? res.chat : c)))
+      // A provider crossing starts a NEW thread on the other engine — its history store is
+      // a different one (session_id vs codex_thread_id) and no handoff summary is built yet
+      // (spec-092 P2). Say so in the feed: an engine answering as if the chat began now,
+      // with no marker, reads as a healthy continuation, which is the worse failure.
+      if (crossing && crossing.from !== crossing.to) {
+        setMessages(prev => [...prev, {
+          id: nextId(),
+          role: 'runtime' as const,
+          text: '',
+          tools: [],
+          streaming: false,
+          ts: Date.now(),
+          runtime: {
+            from: crossing.from,
+            to: crossing.to,
+            crossed: true,
+            carried: false,
+            unreplayed: prev.filter(m => m.role === 'user' || m.role === 'assistant').length,
+          },
+        }])
+      }
+    } catch (e) {
+      const err = e as { status?: number; body?: { error?: string; busy?: boolean } }
+      if (err.status === 409 && err.body?.busy) {
+        setRuntimeError('a turn is still running — switch once it finishes')
+      } else if (err.status === 409) {
+        // Stale revision: another tab (or this one, before a reload) already moved the chat.
+        // Refetch rather than retrying blind — the operator's next pick must start from the
+        // state that actually won.
+        setRuntimeError('this chat was changed elsewhere — reloaded, try again')
+        api.chats(projectId).then(r => setChats(r.chats)).catch(() => {})
+      } else {
+        setRuntimeError(err.body?.error || 'could not switch the runtime')
+      }
+    } finally {
+      setRuntimeBusy(false)
+    }
+  }, [projectId])
+
+  const handleRuntimeChange = useCallback((choice: RuntimeChoice) => {
+    const prevProvider = activeProviderRef.current
+    // A provider change carries a model with it: the server validates the resulting state,
+    // and a Claude alias left on a Codex chat would be rejected as an invalid combination.
+    const patch: { provider?: Provider; model?: string | null; account?: string | null } =
+      { provider: choice.provider, account: choice.account }
+    if (choice.provider !== prevProvider) patch.model = choice.defaultModel ?? null
+    // spec-092: clear ask-mode BEFORE the switch lands when the runtime being switched TO
+    // cannot honour it — otherwise the next send carries a flag that runtime has no hook for
+    // and is refused (409), with the toggle sitting in a greyed row. Read from the registry,
+    // not from a provider name: the rule is "no ask_mode capability", not "is Codex".
+    const targetCaps = providerRegistryRef.current
+      .find(p => p.provider === choice.provider)?.capabilities
+    if (targetCaps && !targetCaps.ask_mode && askModeRef.current) handleAskModeChange(false)
+    void applyRuntimePatch(patch, { from: prevProvider, to: choice.provider })
+  }, [applyRuntimePatch]) // eslint-disable-line react-hooks/exhaustive-deps -- reads live refs
+
+  // The model is a PER-CHAT pin now (spec-092), not the project default it used to write.
+  // A chat that has never pinned one keeps following the project's model (Settings) — this
+  // only freezes the chat the operator actually picked in.
   const handleModelChange = useCallback(async (m: ModelKey) => {
-    if (m === project.model) return
+    if (m === activeModelRef.current) return
     setChangingModel(true)
     try {
-      await api.setModel(projectId, m)
-      onProjectsReload()
-    } catch {
-      // silently ignore
+      await applyRuntimePatch({ model: m })
     } finally {
       setChangingModel(false)
     }
-  }, [project.model, projectId, onProjectsReload])
+  }, [applyRuntimePatch])
 
   // spec-089 §5: local run-state teardown shared by stopStream (full Stop) and sendUrgent
   // (interrupt + head-of-queue) — everything EXCEPT the server-side queue clear, which stays
@@ -3938,6 +4181,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               onAskModeChange={handleAskModeChange}
               provider={activeProvider}
               reasoningLevels={activeReasoningLevels}
+              runtimes={runtimeChoices}
+              activeRuntimeKey={activeRuntimeKey}
+              onRuntimeChange={handleRuntimeChange}
+              runtimeBusy={runtimeBusy}
+              runtimeError={runtimeError}
+              capabilities={activeCapabilities}
             />
           )}
           {/* Full-screen chat button — hides the left project pane (like a free chat).
@@ -4015,6 +4264,25 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   <span className="chat-board-event-icon" aria-hidden="true">⚠</span>
                   <span className="chat-board-event-body">
                     <span className="chat-board-event-title">{text}</span>
+                  </span>
+                </span>
+              </div>
+            )
+          }
+          // spec-092: runtime-switch strip. Live-only, like the model-fallback row above —
+          // it records a UI event, not a transcript message, and must not be replayed as if
+          // the engine had said it.
+          if (msg.role === 'runtime' && msg.runtime) {
+            const rt = msg.runtime
+            return (
+              <div key={msg.id} className="chat-board-event chat-board-event-warn">
+                <span className="chat-board-event-head">
+                  <span className="chat-board-event-icon" aria-hidden="true">↔</span>
+                  <span className="chat-board-event-body">
+                    <span className="chat-board-event-title">
+                      {rt.from} → {rt.to} · new thread · no handoff summary
+                      {rt.unreplayed > 0 ? ` · ${rt.unreplayed} messages not replayed` : ''}
+                    </span>
                   </span>
                 </span>
               </div>
@@ -4906,6 +5174,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   onAskModeChange={handleAskModeChange}
                   provider={activeProvider}
                   reasoningLevels={activeReasoningLevels}
+                  runtimes={runtimeChoices}
+                  activeRuntimeKey={activeRuntimeKey}
+                  onRuntimeChange={handleRuntimeChange}
+                  runtimeBusy={runtimeBusy}
+                  runtimeError={runtimeError}
+                  capabilities={activeCapabilities}
                 />
               </div>
             )}

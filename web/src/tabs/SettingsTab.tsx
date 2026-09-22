@@ -324,6 +324,19 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
           </Row>
         )}
 
+        {/* spec-092: the chat model popover now pins the model PER CHAT, so the project's
+            own default — what a new chat, a board card and a TG turn inherit — needs a home
+            of its own. This is it. */}
+        <Row title="Default model"
+             hint="Inherited by new chats, board cards and TG turns. A chat that picked its own model in the runtime menu keeps that one.">
+          <select value={proj.model ?? ''}
+                  onChange={ev => setProj({ ...proj, model: ev.target.value || null })}
+                  aria-label="Default model">
+            <option value="">Inherit global</option>
+            {modelList.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+          </select>
+        </Row>
+
         <Row title="Board provider"
              hint="Default engine for board cards. A card-level provider/model override wins. Claude remains the compatibility default.">
           <select value={proj.board_provider}

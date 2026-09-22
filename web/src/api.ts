@@ -340,7 +340,24 @@ export const api = {
       body: JSON.stringify(options ?? {}),
     }),
 
-  patchChat: (id: string, chatId: string, patch: { name?: string; active?: boolean }) =>
+  /** spec-092: `provider`/`model`/`backend`/`account` switch this chat's runtime mid-session.
+   *  They are validated against the RESULTING state server-side and applied as a
+   *  compare-and-swap on `expected_revision` — send the `runtime_revision` the UI last read,
+   *  and on 409 refetch the chat before retrying. 409 also means "busy" (a turn, a background
+   *  turn or live sub-agents), distinguished by `busy:true` in the error body. */
+  patchChat: (
+    id: string,
+    chatId: string,
+    patch: {
+      name?: string
+      active?: boolean
+      provider?: import('./types').Provider
+      model?: string | null
+      backend?: string | null
+      account?: string | null
+      expected_revision?: number
+    },
+  ) =>
     apiFetch<{ active: string; chat: import('./types').Chat }>(
       `/api/projects/${id}/chats/${encodeURIComponent(chatId)}`,
       {
