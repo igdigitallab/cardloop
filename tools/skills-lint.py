@@ -56,7 +56,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # tool prints is an approximation, labeled as such, not an exact SDK token count.
 _CHARS_PER_TOKEN = 4
 
-# current lineup (2026-09): Fable 5, Opus 5, Sonnet 5, Haiku 4.5. Anything naming an
+# current lineup (2026-09): Fable 5.1, Opus 5.5, Sonnet 5, Haiku 4.5. Anything naming an
 # older generation in a skill file is a stale reference to something that no longer runs.
 _STALE_MODEL_RE = re.compile(
     r"\bclaude-3(?:-[a-z0-9]+)*\b"

@@ -1,8 +1,9 @@
 """usage_pricing.py - Anthropic model pricing + per-turn cost estimation.
 
 Single source of truth for cost math used by the usage dashboard (usage_scanner.py)
-and its HTTP endpoints. Prices are Anthropic API list rates ($/MTok) as of June 2026
-(https://claude.com/pricing#api).
+and its HTTP endpoints. Prices are Anthropic API list rates ($/MTok) as of September 2026
+(https://platform.claude.com/docs/en/about-claude/pricing). cache_write is the 5-minute
+write; the 1-hour write costs more and is not modelled here.
 
 NOTE: these are API prices. On a Max/Pro subscription the real cost structure is
 flat (per-seat), not per-token — so the dollar figures here are a NOTIONAL, relative
@@ -18,15 +19,22 @@ from __future__ import annotations
 
 # model id -> {input, output, cache_read, cache_write} in USD per million tokens.
 PRICING: dict[str, dict[str, float]] = {
-    # Fable / Mythos — Anthropic's most capable class, priced at 2x Opus.
-    "claude-fable-5-1":  {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
+    # Fable / Mythos — Anthropic's most capable class. cache_read is 0.025x base input on the
+    # 5.1 line (a published per-model exception), 0.1x on 5 — not a typo, check the table.
+    "claude-fable-5-1":  {"input": 10.00, "output": 50.00, "cache_read": 0.25, "cache_write": 12.50},
+    "claude-mythos-5-1": {"input": 10.00, "output": 50.00, "cache_read": 0.25, "cache_write": 12.50},
     "claude-fable-5":    {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
     "claude-mythos-5":   {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
+    # Opus 5.5 is CHEAPER than Opus 5 it replaced, and its cache read is 0.05x base input.
+    "claude-opus-5-5":   {"input":  4.00, "output": 20.00, "cache_read": 0.20, "cache_write":  5.00},
+    "claude-opus-5":     {"input":  5.00, "output": 25.00, "cache_read": 0.50, "cache_write":  6.25},
     "claude-opus-4-8":   {"input":  5.00, "output": 25.00, "cache_read": 0.50, "cache_write":  6.25},
     "claude-opus-4-7":   {"input":  5.00, "output": 25.00, "cache_read": 0.50, "cache_write":  6.25},
     "claude-opus-4-6":   {"input":  5.00, "output": 25.00, "cache_read": 0.50, "cache_write":  6.25},
     "claude-opus-4-5":   {"input":  5.00, "output": 25.00, "cache_read": 0.50, "cache_write":  6.25},
-    "claude-sonnet-5":   {"input":  3.00, "output": 15.00, "cache_read": 0.30, "cache_write":  3.75},
+    # Sonnet 5's $2/$10 launch price became the standard price on 2026-09-01 (the announced
+    # rise to $3/$15 was cancelled) — the older Sonnets below stayed at $3/$15.
+    "claude-sonnet-5":   {"input":  2.00, "output": 10.00, "cache_read": 0.20, "cache_write":  2.50},
     "claude-sonnet-4-7": {"input":  3.00, "output": 15.00, "cache_read": 0.30, "cache_write":  3.75},
     "claude-sonnet-4-6": {"input":  3.00, "output": 15.00, "cache_read": 0.30, "cache_write":  3.75},
     "claude-sonnet-4-5": {"input":  3.00, "output": 15.00, "cache_read": 0.30, "cache_write":  3.75},
@@ -36,7 +44,7 @@ PRICING: dict[str, dict[str, float]] = {
 }
 
 # Pricing label surfaced in the UI footer / API payload.
-PRICING_AS_OF = "June 2026"
+PRICING_AS_OF = "September 2026"
 
 # A model is costed only if its name contains one of these keywords.
 _BILLABLE_KEYWORDS = ("fable", "mythos", "opus", "sonnet", "haiku")
@@ -72,7 +80,7 @@ def get_pricing(model: str | None) -> dict[str, float] | None:
     """Resolve a model id to its price row.
 
     Exact match first, then a startswith match (dated suffixes like
-    `claude-opus-4-8-20260115`), then a keyword fallback onto the newest member
+    `claude-opus-5-5-20260921`), then a keyword fallback onto the newest member
     of each family. Returns None for non-billable / unknown models.
     """
     if not model:
@@ -86,9 +94,9 @@ def get_pricing(model: str | None) -> dict[str, float] | None:
             return PRICING[key]
     m = model.lower()
     if "fable" in m or "mythos" in m:
-        return PRICING["claude-fable-5"]
+        return PRICING["claude-fable-5-1"]
     if "opus" in m:
-        return PRICING["claude-opus-4-8"]
+        return PRICING["claude-opus-5-5"]
     if "sonnet" in m:
         return PRICING["claude-sonnet-5"]
     if "haiku" in m:

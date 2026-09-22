@@ -48,6 +48,7 @@ import modules as _modules                # spec-065: module enable/disable regi
 import accounts as _accounts              # multi-subscription switch (CLAUDE_CONFIG_DIR per run)
 import browser_tools as _browser_tools    # spec-065: agent browser tools (built per-run)
 import roles                              # spec-091: declarative sub-agent role registry
+import runtime as _runtime               # spec-092: run context + which CLI binary serves a run
 from board import (
     board_summary,
     _load_board,
@@ -74,10 +75,14 @@ DEFAULT_CWD = os.getenv("DEFAULT_CWD", str(Path.home()))
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "fable")
 
 MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku", "fable": "fable"}
-# ⚠️ Aliases are NOT always the latest generation. Bundled CLI 2.1.191 resolves
-# `opus`→opus-4-8 and `haiku`→haiku-4-5 (current), but `sonnet`→claude-sonnet-4-6
-# — Sonnet 5 is reachable only by its explicit id. Re-probe after model releases:
-#   claude_agent_sdk/_bundled/claude --model <alias> -p "Output only your exact model id."
+# ⚠️ Aliases are NOT always the latest generation — the CLI binary below decides, not us.
+# Re-probe after every model release (tools/verify_model_aliases.py does it for all four):
+#   <cli> --model <alias> -p "Output only your exact model id." --output-format json
+
+# Which `claude` binary serves every run here — see runtime.resolve_cli_path (CLAUDE_CLI_PATH).
+# None = the SDK's bundled CLI. Constant for the process lifetime, so it is deliberately NOT
+# part of _compute_fingerprint: it cannot change while a live client is connected.
+CLI_PATH: "str | None" = _runtime.CLI_PATH
 
 # ─────────────────────────── sub-agent roster ───────────────────────────
 # Default agents available to conductor sessions via the SDK Task tool.
@@ -2124,6 +2129,7 @@ async def rewind_conversation(
         resume_session_at=rewind_at_uuid,
         resume_drops_turn=rewind_drop_turn_uuid,
         fork_session=True,
+        cli_path=CLI_PATH,
         stderr=stderr_lines.append,
     )
 
@@ -2944,6 +2950,7 @@ async def reconcile_board(
     opts = ClaudeAgentOptions(
         model=reconcile_model,
         permission_mode="bypassPermissions",
+        cli_path=CLI_PATH,
         max_buffer_size=SDK_MAX_BUFFER_BYTES,
         cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
         system_prompt=_RECONCILE_SYSTEM,  # plain string — no tools, no preset
@@ -3486,6 +3493,8 @@ async def run_engine(  # type: ignore[return]
     opts = ClaudeAgentOptions(
         model=resolved_model,
         fallback_model=fallback,
+        # Which CLI binary serves this run — see CLI_PATH. None = the SDK's bundled one.
+        cli_path=CLI_PATH,
         # spec-080: plan turns connect in the CLI's native plan mode (hard read-only + its own
         # 5-phase workflow injection). permission_mode is part of the live-client fingerprint,
         # so toggling plan on/off reconnects the client with correctly-bound options.

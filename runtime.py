@@ -46,6 +46,7 @@ Design note -- ``provider`` vs ``backend``:
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -748,7 +749,49 @@ def ollama_env_overlay(
     )
 
 
+# ─────────────────── which `claude` binary serves a run ───────────────────
+# The SDK ships its own CLI under claude_agent_sdk/_bundled/ and PREFERS it over PATH.
+# That binary owns two decisions nothing in this repo can make:
+#   1. what a bare alias resolves to (`opus` -> claude-opus-5 vs claude-opus-5-5), and
+#   2. whether the API serves the model at all — an id newer than the CLI is a hard 400:
+#      "Claude Code 2.1.276 does not support this model; version 2.1.280 or newer is
+#      required" (measured 2026-09-22 on claude-opus-5-5, released the day before).
+# So a model can ship days before any claude-agent-sdk release bundles a CLI new enough to
+# run it, and in that window the cockpit cannot reach it by alias OR by explicit id.
+# CLAUDE_CLI_PATH points the SDK at an externally installed CLI
+# (`npm i -g --prefix ~/.npm-global @anthropic-ai/claude-code@<ver>`) for exactly that
+# window. Unset, or pointing at anything that is not an executable file, means the bundled
+# binary — i.e. previous behaviour, byte for byte. It lives HERE and not in engine.py so
+# that webapp's own SDK calls (the /rotate handoff summarizer) resolve it identically
+# without importing engine, which would be circular.
+
+
+def resolve_cli_path(raw: "str | None" = None) -> "str | None":
+    """The CLI override, or None to let the SDK use its bundled binary.
+
+    A misconfigured value degrades to the bundle instead of breaking every run: a typo in
+    .env must not take the cockpit down. Surrounding quotes are tolerated because the
+    cockpit's .env loader (bot.py `_load_env`) does not strip them.
+    """
+    value = (os.getenv("CLAUDE_CLI_PATH") if raw is None else raw) or ""
+    value = value.strip().strip('"').strip("'")
+    if not value:
+        return None
+    path = os.path.expanduser(value)
+    if os.path.isfile(path) and os.access(path, os.X_OK):
+        return path
+    print(f"[cli-path] CLAUDE_CLI_PATH={value!r} is not an executable file — "
+          "falling back to the SDK's bundled CLI")
+    return None
+
+
+CLI_PATH: "str | None" = resolve_cli_path()
+if CLI_PATH:
+    print(f"[cli-path] external CLI in use: {CLI_PATH}")
+
+
 __all__ = [
+    "CLI_PATH", "resolve_cli_path",
     "DEFAULT_PROVIDER", "DEFAULT_BACKEND", "OLLAMA_BACKEND", "OLLAMA_ENV_VAR_NAMES",
     "ORIGIN_KINDS",
     "RuntimeResolutionError", "ProviderInfo", "ProviderStatus", "ProviderLookup",

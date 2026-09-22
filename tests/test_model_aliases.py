@@ -31,7 +31,7 @@ def _load_verifier():
 @pytest.mark.aliases
 def test_every_alias_runs_the_newest_model_of_its_family():
     v = _load_verifier()
-    token, cli = v._oauth_token(), v._bundled_cli()
+    token, cli = v._oauth_token(), v._active_cli()
     if not token or not cli:
         pytest.skip("no OAuth token or bundled CLI — cannot verify alias resolution")
     newest = v.fetch_newest_per_family(token)

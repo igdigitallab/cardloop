@@ -9135,7 +9135,7 @@ _MODELS_URL = "https://api.anthropic.com/v1/models?limit=50"
 _MODEL_FAMILIES: list[tuple[str, str]] = [
     ("fable", "Fable 5.1"),
     ("sonnet", "Sonnet 5"),
-    ("opus", "Opus 5"),
+    ("opus", "Opus 5.5"),
     ("haiku", "Haiku 4.5"),
 ]
 _models_cache: dict = {"data": None, "ts": 0.0}
@@ -15741,6 +15741,9 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
             opts = _ClaudeAgentOptions(
                 model=handoff_model,
                 permission_mode="default",  # internal helper, no tools — no need to bypass
+                # Same binary as every other run (runtime.CLI_PATH): HANDOFF_MODEL may name a
+                # model the SDK's bundled CLI is too old to serve at all.
+                cli_path=runtime.CLI_PATH,
                 max_buffer_size=_SDK_MAX_BUFFER_BYTES,
                 cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
                 allowed_tools=[],
@@ -15971,6 +15974,7 @@ async def _build_session_title(summary: str) -> str:
         opts = _ClaudeAgentOptions(
             model=title_model,
             permission_mode="default",  # internal helper, no tools — no need to bypass
+            cli_path=runtime.CLI_PATH,   # same binary as every other run
             max_buffer_size=_SDK_MAX_BUFFER_BYTES,
             cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
             allowed_tools=[],

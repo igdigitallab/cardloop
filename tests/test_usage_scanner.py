@@ -32,8 +32,12 @@ def test_get_pricing_resolution():
     # dated suffix → startswith
     assert usage_pricing.get_pricing("claude-haiku-4-5-20251001")["output"] == 5.00
     # keyword fallback onto newest of family
-    assert usage_pricing.get_pricing("claude-opus-9-9") == usage_pricing.PRICING["claude-opus-4-8"]
-    assert usage_pricing.get_pricing("something-sonnet-ish")["input"] == 3.00
+    assert usage_pricing.get_pricing("claude-opus-9-9") == usage_pricing.PRICING["claude-opus-5-5"]
+    assert usage_pricing.get_pricing("something-sonnet-ish")["input"] == 2.00
+    # a dated id must match its OWN generation, not the shorter prefix that is also a key:
+    # "claude-opus-5-5-20260921".startswith("claude-opus-5") is true, and Opus 5 costs 25% more.
+    assert usage_pricing.get_pricing("claude-opus-5-5-20260921") == usage_pricing.PRICING["claude-opus-5-5"]
+    assert usage_pricing.get_pricing("claude-opus-5-20260724") == usage_pricing.PRICING["claude-opus-5"]
     # unknown / local → None
     assert usage_pricing.get_pricing("llama-3") is None
     assert usage_pricing.get_pricing(None) is None

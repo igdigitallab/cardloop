@@ -328,6 +328,20 @@ def probe_versions(repo_root: Path = REPO_ROOT, run=_run, installed_version=_ins
                            remedy="venv missing or claude-agent-sdk not installed — "
                                   "pip install -r requirements.txt"))
 
+    # CLAUDE_CLI_PATH overrides the bundle for the whole cockpit (engine.CLI_PATH), so which
+    # binary is ACTIVE decides alias resolution and which model ids the API will accept.
+    cli_override_raw = _vma._cli_path_raw() if _vma else ""
+    cli_override = _vma._cli_path_override() if _vma else None
+    if cli_override:
+        ver = run([cli_override, "--version"])
+        facts.append(Fact("claude (CLAUDE_CLI_PATH, ACTIVE)",
+                          f"{ver[1] if ver and ver[0] == 0 else '?'}  {cli_override}"))
+    elif cli_override_raw:
+        facts.append(Fact("claude (CLAUDE_CLI_PATH)", f"{cli_override_raw} — not an executable file",
+                          level="warn",
+                          remedy="fix the path or unset CLAUDE_CLI_PATH; the bundled CLI is "
+                                 "serving every run in the meantime"))
+
     path_cli = run(["claude", "--version"])
     if path_cli and path_cli[0] == 0:
         facts.append(Fact("claude (PATH, fallback only)", path_cli[1], level="info"))

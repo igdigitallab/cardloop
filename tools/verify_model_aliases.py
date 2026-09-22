@@ -10,14 +10,15 @@ is_error=False — so the label and the model that actually runs silently diverg
 
 What it does:
   1. Fetch the subscription's /v1/models listing (newest-first) -> newest id per family.
-  2. For each family alias, ask the bundled CLI what it ACTUALLY runs
+  2. For each family alias, ask the CLI THAT ACTUALLY SERVES RUNS (CLAUDE_CLI_PATH when
+     set, else the SDK bundle) what it runs
      (`claude -p ... --model <alias> --output-format json` -> the modelUsage key).
   3. Compare. Any alias that runs a non-newest id of its family = mismatch.
 
 Exit codes:
   0  all aliases resolve to the newest id of their family (UI <-> reality match)
   1  MISMATCH — at least one alias runs an older model than the UI advertises
-  2  could not verify (no OAuth token / offline / bundled CLI missing)
+  2  could not verify (no OAuth token / offline / no CLI found)
 
 Run:  venv/bin/python tools/verify_model_aliases.py
 Cost: one 1-token completion per family, billed to the subscription (never the API).
@@ -55,6 +56,51 @@ def _bundled_cli() -> "str | None":
     hits = glob.glob(os.path.join(
         _REPO_ROOT, "venv/lib/python*/site-packages/claude_agent_sdk/_bundled/claude"))
     return hits[0] if hits else None
+
+
+def _cli_path_raw() -> str:
+    """The CLAUDE_CLI_PATH value as CONFIGURED, before any validation ("" when unset).
+
+    Read from the real env first, then from .env as a gap-fill — this tool runs from cron and
+    from a bare shell, neither of which loads the cockpit's .env the way bot.py does. Callers
+    that need to tell "unset" from "set but broken" (doctor) want this, not the resolved path.
+    """
+    # .env is a fallback only when the key is ABSENT from the environment — exactly bot.py's
+    # os.environ.setdefault semantics. An explicit empty value means "no override", and must
+    # not be quietly overruled by the file while the service honours it.
+    env_value = os.environ.get("CLAUDE_CLI_PATH")
+    raw = (env_value or "").strip()
+    if env_value is None and not os.getenv("COPS_NO_DOTENV"):
+        try:
+            with open(os.path.join(_REPO_ROOT, ".env"), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("CLAUDE_CLI_PATH="):
+                        raw = line.split("=", 1)[1].strip()
+                        break
+        except Exception:
+            pass
+    # Quotes are stripped LAST, for both sources: runtime.resolve_cli_path does the same, and
+    # a value quoted in the real env used to resolve here to nothing while the cockpit ran it.
+    return raw.strip('"').strip("'")
+
+
+def _cli_path_override() -> "str | None":
+    """engine.CLI_PATH, resolved with engine's exact rule (executable file or nothing)."""
+    raw = _cli_path_raw()
+    if not raw:
+        return None
+    p = os.path.expanduser(raw)
+    return p if os.path.isfile(p) and os.access(p, os.X_OK) else None
+
+
+def _active_cli() -> "str | None":
+    """The binary that ACTUALLY serves cockpit runs — the override when set, else the bundle.
+
+    Probing the bundled CLI while the service runs an external one verifies the wrong thing:
+    it would report a mismatch the operator already fixed, or miss one the override introduced.
+    """
+    return _cli_path_override() or _bundled_cli()
 
 
 def fetch_newest_per_family(token: str) -> "dict[str, dict] | None":
@@ -119,13 +165,15 @@ def resolve_alias(cli: str, alias: str) -> "str | None":
 
 def check() -> "tuple[int, list[tuple[str, str, str]]]":
     """Returns (exit_code, mismatches). mismatches = [(family, advertised_id, actual_id)]."""
-    token, cli = _oauth_token(), _bundled_cli()
+    token, cli = _oauth_token(), _active_cli()
     if not token:
         print("SKIP: no OAuth token (~/.claude/.credentials.json) — cannot verify.")
         return 2, []
     if not cli:
-        print("SKIP: bundled CLI not found under venv — cannot verify.")
+        print("SKIP: no claude CLI found (neither CLAUDE_CLI_PATH nor the venv bundle).")
         return 2, []
+    if _cli_path_override():
+        print(f"(probing the external CLI from CLAUDE_CLI_PATH: {cli})")
     newest = fetch_newest_per_family(token)
     if not newest:
         print("SKIP: could not fetch live model list — cannot verify.")
@@ -203,14 +251,17 @@ def watch() -> int:
                  for fam, exp, act in mismatches]
         print("[watch] MISMATCH after a new release:")
         print("\n".join(lines))
-        print("Fix: bump `claude-agent-sdk` in requirements.txt, recreate the venv, restart.")
+        print("Fix: bump `claude-agent-sdk` in requirements.txt, recreate the venv, restart —")
+        print("     or, while no SDK release bundles a new enough CLI yet, install the CLI")
+        print("     directly and point CLAUDE_CLI_PATH at it (see engine.CLI_PATH).")
         try:  # surface it in the cockpit the same way the deploy canary does
             inbox = os.path.join(_REPO_ROOT, "data", "inbox")
             os.makedirs(inbox, exist_ok=True)
             with open(os.path.join(inbox, "model-alias-mismatch.txt"), "w") as f:
                 f.write("🔴 Model alias mismatch after a new model release:\n"
                         + "\n".join(lines)
-                        + "\nFix: bump claude-agent-sdk in requirements.txt, recreate venv, restart.\n")
+                        + "\nFix: bump claude-agent-sdk in requirements.txt, recreate venv, restart"
+                        + " — or set CLAUDE_CLI_PATH to a newer standalone CLI (engine.CLI_PATH).\n")
         except Exception:
             pass
     return code
@@ -225,8 +276,9 @@ def main() -> int:
         for fam, exp, act in mismatches:
             print(f"   '{fam}': UI/label => {exp}   but actually runs => {act}")
         print("\nFix: bump `claude-agent-sdk` in requirements.txt (the alias->id table ships")
-        print("with the bundled CLI), recreate the venv, and restart. See memory")
-        print("`opus5-alias-staleness-2026-07-24`.")
+        print("with the bundled CLI), recreate the venv, and restart. When no SDK release")
+        print("carries a new enough CLI yet, install one (`npm i -g @anthropic-ai/claude-code`)")
+        print("and set CLAUDE_CLI_PATH to it. See memory `opus5-alias-staleness-2026-07-24`.")
     elif code == 0:
         print("\n[OK] every alias resolves to the newest model of its family (UI <-> reality match).")
     return code

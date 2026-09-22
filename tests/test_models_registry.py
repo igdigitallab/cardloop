@@ -48,7 +48,7 @@ def test_build_registry_static_fallback_when_none():
     assert reg["models"] == [
         {"value": "fable", "label": "Fable 5.1"},
         {"value": "sonnet", "label": "Sonnet 5"},
-        {"value": "opus", "label": "Opus 5"},
+        {"value": "opus", "label": "Opus 5.5"},
         {"value": "haiku", "label": "Haiku 4.5"},
     ]
 

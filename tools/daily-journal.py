@@ -957,6 +957,11 @@ async def _call_model_async(prompt: str, model: str, timeout_s: int) -> str:
 
     options = ClaudeAgentOptions(
         model=model,
+        # Same CLI the cockpit runs on (runtime.resolve_cli_path / CLAUDE_CLI_PATH): the SDK's
+        # bundled binary gates which model ids the API will serve, and this cron must not be the
+        # one place left behind on an older one. Not imported from runtime.py on purpose — this
+        # tool stays stdlib-only so it can run from cron without the repo's venv layout.
+        cli_path=_cli_path(),
         allowed_tools=[],
         max_turns=1,
         # Isolation: no CLAUDE.md / settings.json from any cwd — this is a
@@ -1043,6 +1048,21 @@ def render_fallback_body(g: dict, numbers: DayNumbers, tz_name: str) -> str:
 
 TG_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
 TG_TEXT_LIMIT = 3500          # Telegram hard limit is 4096; leave room for markup
+
+
+def _cli_path() -> "str | None":
+    """CLAUDE_CLI_PATH, resolved with runtime.resolve_cli_path's exact rule (executable file
+    or None). Mirrors it rather than importing it — cron runs this tool standalone.
+    tests/test_cli_path_override.py pins the two implementations to the same answers."""
+    env_value = os.environ.get("CLAUDE_CLI_PATH")
+    raw = (env_value or "").strip()
+    if env_value is None:  # .env fills a GAP only — mirrors bot.py's os.environ.setdefault
+        raw = _dotenv_value(Path(__file__).resolve().parent.parent, "CLAUDE_CLI_PATH")
+    raw = raw.strip().strip('"').strip("'")
+    if not raw:
+        return None
+    path = os.path.expanduser(raw)
+    return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
 
 
 def _dotenv_value(repo_root: Path, key: str) -> str:
