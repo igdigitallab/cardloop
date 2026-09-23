@@ -594,6 +594,12 @@ if _ANTIGRAVITY_MCP:
     _backends = [b for b, on in (("agy", _so_agy()), ("azure", _so_azure())) if on]
     print(f"[second_opinion] MCP tool enabled (backends: {', '.join(_backends) or 'none'})")
 
+# Options for an internal, tool-less helper call (board reconciler, handoff summary, session
+# title). An empty `allowed_tools` is dropped by the SDK and grants the full default toolset;
+# this pair is what actually yields zero tools. webapp.py and tools/daily-journal.py inline the
+# same pair (neither imports engine).
+HELPER_NO_TOOLS: dict = {"tools": [], "extra_args": {"strict-mcp-config": None}}
+
 # spec-034 L1: Board protocol block injected into system_prompt["append"] when TASKS.md exists.
 # Verbatim from spec — the cockpit owns the workflow rules, not per-project CLAUDE.md.
 BOARD_PROTOCOL = (
@@ -2955,12 +2961,17 @@ async def reconcile_board(
         max_buffer_size=SDK_MAX_BUFFER_BYTES,
         cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
         system_prompt=_RECONCILE_SYSTEM,  # plain string — no tools, no preset
-        allowed_tools=[],   # no tools — read-only classification pass
+        # No tools at all. `allowed_tools=[]` did NOT do this: the SDK drops an empty allowlist,
+        # so the CLI loaded its full default toolset plus every user/claude.ai MCP server (183
+        # tools incl. Bash/Edit/Write, mail, SMS — measured 2026-09-23) under bypassPermissions,
+        # fed with the agent reply, which can carry untrusted web text. `tools=[]` emits
+        # `--tools ""` and strict-mcp-config drops the MCP servers: 0 tools, measured.
+        **HELPER_NO_TOOLS,
         disallowed_tools=[],
-        # An internal helper must never write to a project's memory wiki. allowed_tools=[] blocks
-        # Edit/Write, but the CLI's own memory-extraction pass uses internal tooling that the
-        # allowlist does not gate — and it inherits THIS model. On 2026-06-23 a haiku helper wrote
-        # four articles into two project wikis, one of them a pure ledger. Belt and braces.
+        # An internal helper must never write to a project's memory wiki. The CLI's own
+        # memory-extraction pass uses internal tooling no tool list gates, and it inherits THIS
+        # model. On 2026-06-23 a haiku helper wrote four articles into two project wikis, one of
+        # them a pure ledger. Belt and braces.
         # Аккаунт: внутренний помощник обязан идти под тем же аккаунтом, что выбран в UI.
         # 01.09.2026 у основного аккаунта истёк refresh-токен, и reconcile падал каждые
         # несколько минут с "OAuth session expired", хотя активным был живой аккаунт —

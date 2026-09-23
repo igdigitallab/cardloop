@@ -15746,10 +15746,13 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
                 cli_path=runtime.cli_path(),
                 max_buffer_size=_SDK_MAX_BUFFER_BYTES,
                 cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
-                allowed_tools=[],
+                # Zero tools: an empty allowed_tools is dropped by the SDK and grants the full
+                # default toolset + MCP servers. Same pair as engine.HELPER_NO_TOOLS.
+                tools=[],
+                extra_args={"strict-mcp-config": None},
                 disallowed_tools=[],
-                # Internal helpers must never touch a project's memory wiki. allowed_tools=[] blocks
-                # Edit/Write, but the CLI's own memory-extraction pass is not gated by that allowlist.
+                # Internal helpers must never touch a project's memory wiki; the CLI's own
+                # memory-extraction pass is not gated by any tool list.
                 env={"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
                 effort="low",
             )
@@ -15977,7 +15980,8 @@ async def _build_session_title(summary: str) -> str:
             cli_path=runtime.cli_path(),   # same binary as every other run
             max_buffer_size=_SDK_MAX_BUFFER_BYTES,
             cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
-            allowed_tools=[],
+            tools=[],                                # zero tools — see engine.HELPER_NO_TOOLS
+            extra_args={"strict-mcp-config": None},
             disallowed_tools=[],
             env={"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},  # never let a helper write the wiki
             effort="low",

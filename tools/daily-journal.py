@@ -962,7 +962,10 @@ async def _call_model_async(prompt: str, model: str, timeout_s: int) -> str:
         # one place left behind on an older one. Not imported from runtime.py on purpose — this
         # tool stays stdlib-only so it can run from cron without the repo's venv layout.
         cli_path=_cli_path(),
-        allowed_tools=[],
+        # Zero tools: an empty allowed_tools is dropped by the SDK and grants the full default
+        # toolset plus every MCP server; this pair is what actually yields none.
+        tools=[],
+        extra_args={"strict-mcp-config": None},
         max_turns=1,
         # Isolation: no CLAUDE.md / settings.json from any cwd — this is a
         # single bounded summarization call, not an agentic session, and it

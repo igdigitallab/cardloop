@@ -24,6 +24,14 @@ Subsystem-level gotchas. Turn-1 safety guards (Auth, Restart/cgroup) live in CLA
   outranks the settings file — no inline `--settings` needed), but it is NOT consulted for a
   harmless `Bash(echo …)`: the CLI auto-approves commands it classifies as safe before the
   callback. Ask mode therefore gates mutations, not literally every tool call.
+- **`allowed_tools=[]` grants EVERY tool, it does not remove them.** The SDK only emits
+  `--allowedTools` for a non-empty list, and `allowed_tools` is an auto-approve list, not a
+  whitelist anyway. A "no tools" helper built that way got the CLI's full default toolset plus
+  every user/claude.ai MCP server (183 tools incl. Bash/Edit/Write, mail, SMS; ~18.5k schema
+  tokens per call), and the board reconciler ran it under `bypassPermissions` on text that can
+  carry untrusted web content. Zero tools = `engine.HELPER_NO_TOOLS` (`tools=[]` →
+  `--tools ""`, plus `--strict-mcp-config`); `tests/test_helper_no_tools.py` asserts the argv.
+  Found by `/claude-api prompt-audit`, 2026-09-23.
 - **The "irreversible" detector — exact substrings.** Do NOT use `-f `/`rm `/`kill ` (they catch `tail -f`, `perform`, etc.). Only `rm -rf`/`rm -f`/`git push`/`--force` and the like.
 - **Anti-traversal.** `_resolve_safe` / `_resolve_global_safe` — resolve+startswith with a trailing slash. `.env*` → 403 (except `.env.example`). `.git/venv/node_modules/dist/__pycache__` are hidden + 403.
 - **card_id is validated** by `_valid_card_id`/`_CARD_ID_RE` (prevents path injection via card_id).
