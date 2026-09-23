@@ -394,6 +394,95 @@ def test_truncate_text_cuts_at_a_word_boundary_and_notes_it():
     assert "larger max_chars" in out
 
 
+def _doc(n=300):
+    return "\n".join(f"Paragraph number {i} talks about subject {i * 7919 % 10007}." for i in range(n))
+
+
+def _screen(lo, hi):
+    return "\n".join(f"Paragraph number {i} talks about subject {i * 7919 % 10007}." for i in range(lo, hi))
+
+
+def test_lead_with_screen_keeps_text_when_screen_is_already_in_the_head():
+    from browser_pane import _lead_with_screen
+    text = _doc()
+    assert _lead_with_screen(text, _screen(0, 15), 4000) == text
+
+
+def test_lead_with_screen_prepends_when_screen_is_past_the_cut():
+    from browser_pane import _lead_with_screen
+    out = _lead_with_screen(_doc(), _screen(150, 165), 4000)
+    assert out.startswith("[On screen now]\nParagraph number 150 ")
+    assert "\n\n[Page text from the top]\nParagraph number 0 " in out
+
+
+def test_lead_with_screen_does_not_switch_off_with_a_larger_max_chars():
+    # The truncation notice tells the agent to ask for a larger max_chars; the answer
+    # must not flip back to "top of the page" when it does.
+    from browser_pane import _lead_with_screen
+    for max_chars in (4000, 20000, 60000):
+        assert _lead_with_screen(_doc(), _screen(150, 165), max_chars).startswith("[On screen now]")
+
+
+def test_lead_with_screen_sees_through_a_fixed_sidebar():
+    # 30 sidebar entries repeat the top of the page on every scroll position and
+    # outnumber the 14 content lines — the verdict must still be "scrolled".
+    from browser_pane import _lead_with_screen
+    nav = "\n".join(f"Documentation section entry {i}" for i in range(30))
+    text = nav + "\n" + _doc()
+    screen = nav + "\n" + _screen(150, 164)
+    assert _lead_with_screen(text, screen, 4000).startswith("[On screen now]")
+
+
+def test_lead_with_screen_threshold_both_ways():
+    from browser_pane import _lead_with_screen
+    text = _doc()
+    # 3 deep lines out of 43 (a cookie banner that sits at the end of the DOM): keep.
+    banner = _screen(0, 40) + "\n" + _screen(290, 293)
+    assert _lead_with_screen(text, banner, 4000) == text
+    # 8 deep lines out of 43: the screen is genuinely somewhere else — prepend.
+    mixed = _screen(0, 35) + "\n" + _screen(200, 208)
+    assert _lead_with_screen(text, mixed, 4000).startswith("[On screen now]")
+
+
+def test_lead_with_screen_matches_repeated_lines_in_document_order():
+    # "Reply …" repeats under every comment. Matched out of order, each repeat lands on
+    # its FIRST occurrence at the top and outvotes the one unique, deep line.
+    from browser_pane import _lead_with_screen
+    reply = "Reply to this comment and share it"
+    text = "\n".join(f"Comment {i} body text that is unique\n{reply}" for i in range(300))
+    screen = "Comment 200 body text that is unique\n" + "\n".join([reply] * 9)
+    assert _lead_with_screen(text, screen, 4000).startswith("[On screen now]")
+
+
+def test_lead_with_screen_ignores_case_and_whitespace_differences():
+    from browser_pane import _lead_with_screen
+    # innerText applies text-transform and joins text nodes differently than the walker.
+    text = "SIGN IN TO YOUR ACCOUNT\nsee (example.com) for details and more"
+    screen = "Sign in to your account\nsee ( example.com ) for details and more"
+    assert _lead_with_screen(text, screen, 4000) == text
+
+
+def test_lead_with_screen_ignores_a_non_string_or_short_screen():
+    from browser_pane import _lead_with_screen
+    assert _lead_with_screen("body", [{"tag": "a"}], 4000) == "body"
+    assert _lead_with_screen("body", "OK\nNext", 4000) == "body"
+    assert _lead_with_screen("body", None, 4000) == "body"
+
+
+def test_lead_with_screen_without_body_text_has_no_dangling_trailer():
+    from browser_pane import _lead_with_screen
+    out = _lead_with_screen("", "Something visible on the screen right now", 4000)
+    assert out == "[On screen now]\nSomething visible on the screen right now"
+
+
+def test_lead_with_screen_keeps_iframe_text_ahead_of_the_long_page_text():
+    from browser_pane import _lead_with_screen
+    frames = "[iframe https://challenges.example/captcha]\nI am not a robot"
+    out = _lead_with_screen(_doc(), _screen(150, 165), 4000, frames)
+    assert out.index("I am not a robot") < out.index("[Page text from the top]")
+    assert _lead_with_screen("body", None, 4000, frames) == "body\n\n" + frames
+
+
 def test_snapshot_passes_max_chars_through_to_truncation():
     s, page = _session_with_fake_page()
     page.inner_text_value = "word " * 2000

@@ -126,17 +126,54 @@ def _key_info(key: str) -> "tuple[int, str]":
 #
 # input[type=hidden] is EXCLUDED outright (never rendered, never interactable — an
 # enterprise app like PeopleSoft can stuff dozens of them, ICType/ICSID/SpMfuMax/...,
-# ahead of any real control in DOM order). Everything else still gets collected up to
-# a generous pool (400) and then SORTED visible-first before the final 60-item cap, so
-# an off-screen/collapsed element never crowds out a real, clickable one just by
-# happening to sit earlier in the document.
+# ahead of any real control in DOM order).
+#
+# Ranking is ON SCREEN first, then rendered elsewhere, then hidden. "Rendered" alone
+# was not enough: measured 2026-09-22, header/nav links rendered above the fold
+# crowded real on-screen controls out of the cap in DOM order (Amazon: 51 of 116
+# on-screen controls listed), and on a scrolled page the pool of the first 400 DOM
+# elements did not even contain what was on screen. So on-screen elements are
+# gathered from the WHOLE document before the pool is cut, and the cap stretches
+# from 60 up to ``maxCap`` when the screen itself holds more controls than that.
+#
+# Ranks are a SORT KEY, never a filter (an occluded on-screen control must not lose
+# its place to an off-screen one): 3 = on screen and reachable, 2 = on screen but
+# covered (links under a modal backdrop), 1 = rendered elsewhere or opacity:0,
+# 0 = hidden. "On screen" = the box INTERSECTS the viewport (a centre-point test lost
+# a contenteditable editor taller than the screen once it was scrolled past its
+# middle). "Reachable" = a hit test at any of three points of the VISIBLE part lands
+# on the element, on its ancestor/descendant, or on ANOTHER control — a card grid
+# puts an empty overlay <a> on top of each title link, and treating the title as
+# covered spent the whole cap on nameless overlays. Inside an iframe
+# innerWidth/innerHeight are the FRAME's, so the caller passes maxCap=60 there — no
+# stretch for an ad frame far below the fold. Form fields, editors and form submit
+# controls that lose the cut anyway (a login form below a 110-button toolbar) get a
+# reserved tail of up to 10 slots, so a login form never vanishes outright.
 _INTERACTIVE_ELEMENTS_JS = """
-() => {
-    const all = Array.from(document.querySelectorAll(
-        'input:not([type="hidden"]), button, select, textarea, a[href], [role="button"], [role="link"], ' +
+(maxCap) => {
+    const SEL = 'input:not([type="hidden"]), button, select, textarea, a[href], [role="button"], [role="link"], ' +
         '[role="option"], [role="listbox"], [role="combobox"], [role="menuitem"], ' +
-        '[role="checkbox"], [role="radio"], [contenteditable="true"]'
-    )).slice(0, 400).map(el => {
+        '[role="checkbox"], [role="radio"], [contenteditable="true"]';
+    const nodes = Array.from(document.querySelectorAll(SEL));
+    const intersects = r => r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+        r.top < innerHeight && r.left < innerWidth;
+    let hitCalls = 0;
+    const reachable = (el, r) => {
+        const l = Math.max(r.left, 0), t = Math.max(r.top, 0);
+        const w = Math.min(r.right, innerWidth) - l, h = Math.min(r.bottom, innerHeight) - t;
+        for (const [fx, fy] of [[.5, .5], [.2, .2], [.8, .8]]) {
+            hitCalls++;
+            const hit = document.elementFromPoint(l + w * fx, t + h * fy);
+            if (hit && (el.contains(hit) || hit.contains(el) || hit.closest(SEL))) return true;
+        }
+        return false;
+    };
+    const onScreen = [], elsewhere = [];
+    for (const el of nodes) {
+        if (intersects(el.getBoundingClientRect())) onScreen.push(el);
+        else if (elsewhere.length < 400) elsewhere.push(el);
+    }
+    const all = onScreen.concat(elsewhere).slice(0, 400).map(el => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
         const out = { tag: el.tagName.toLowerCase() };
@@ -151,6 +188,14 @@ _INTERACTIVE_ELEMENTS_JS = """
         const text = (el.innerText || el.value || '').trim();
         if (text) out.text = text.length > 40 ? text.slice(0, 40) + '…' : text;
         out.visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        let rank = out.visible ? 1 : 0;
+        if (rank && intersects(rect) &&
+            !(el.checkVisibility && !el.checkVisibility({checkOpacity: true, checkVisibilityCSS: true}))) {
+            rank = 3;  // on screen; the occlusion pass below may demote it to 2
+        }
+        const field = el.isContentEditable || ['textbox', 'searchbox', 'combobox'].includes(el.getAttribute('role')) ||
+            (['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName) && !['button', 'submit', 'reset', 'image'].includes(el.type)) ||
+            (!!el.form && ['submit', 'image'].includes(el.type));
         // A field the browser itself has marked invalid (failed :invalid CSS
         // validation, or aria-invalid) after a rejected submit — this is the "which
         // field is highlighted" the plain-text snapshot alone can't answer.
@@ -180,12 +225,156 @@ _INTERACTIVE_ELEMENTS_JS = """
                 if (ac !== null) out.checked = ac === 'true' ? true : (ac === 'false' ? false : ac);
             }
         }
-        return out;
+        return {out, rank, field, el, rect};
     });
-    all.sort((a, b) => (b.visible === true) - (a.visible === true));
-    return all.slice(0, 60);
+    const cap = Math.max(60, Math.min(all.filter(r => r.rank >= 2).length, maxCap || 60));
+    // Occlusion only reorders on-screen controls (ranks 3 and 2 both count toward the
+    // cap), so it matters only when they overflow the cap. elementFromPoint is slow on
+    // heavy pages (Amazon in the Cloak pane: ~0.75 ms a call, ~+200 ms per snapshot), so
+    // it runs only then, and stops after 400 calls; untested controls keep rank 3.
+    if (all.filter(r => r.rank === 3).length > cap) {
+        for (const r of all) {
+            if (hitCalls >= 400) break;
+            if (r.rank === 3 && !reachable(r.el, r.rect)) r.rank = 2;
+        }
+    }
+    all.sort((a, b) => b.rank - a.rank);  // stable: DOM order within each rank
+    const kept = all.slice(0, cap);
+    const fields = all.slice(cap).filter(r => r.rank >= 1 && r.field).slice(0, 10);
+    return kept.concat(fields).map(r => r.out);
 }
 """
+
+# ── agent snapshot: what is on screen ─────────────────────────────────────────
+# The snapshot text is body.innerText from the TOP, cut at max_chars. Once the page is
+# scrolled (by the operator, or by a click that scrolled its target into view) the
+# agent kept reading the top of the article while the screen showed its middle —
+# measured 2026-09-22 against browser-use/jev-ultrafast, whose viewport-only text
+# walker (MIT) is the idea borrowed here. Text nodes whose box intersects the viewport,
+# in document order; nodes on the same visual line are joined with a space so a link
+# inside a sentence does not shatter it into one line per text node.
+_SCREEN_TEXT_JS = """
+() => {
+    if (!document.body) return '';
+    const LIMIT = 8000;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    const inView = b => b.width > 0 && b.height > 0 && b.bottom > 0 && b.top < innerHeight &&
+        b.right > 0 && b.left < innerWidth;
+    // A single text node can be a whole log or JSON dump (<pre>): keep only the chunks
+    // whose box is in the viewport. A linear scan, not a binary search — multi-column
+    // text, RTL and runs of blank lines are not monotone in offset. Chunks that are
+    // not adjacent (the next column) are separated by a newline.
+    const visiblePart = (node, raw) => {
+        const step = Math.max(64, Math.ceil(raw.length / 30000));
+        let part = '', run = false;
+        for (let i = 0; i < raw.length && part.length < LIMIT; i += step) {
+            range.setStart(node, i);
+            range.setEnd(node, Math.min(i + step, raw.length));
+            const b = range.getBoundingClientRect();
+            if (inView(b)) {
+                let piece = raw.slice(i, i + step);
+                if (b.top < 0 || b.bottom > innerHeight || b.left < 0 || b.right > innerWidth) {
+                    // A chunk on the viewport edge: keep only its characters that are
+                    // in view (whitespace rides along once a visible run has started).
+                    piece = '';
+                    for (let k = i; k < Math.min(i + step, raw.length); k++) {
+                        if (/\\s/.test(raw[k])) {
+                            if (piece) piece += raw[k];
+                            continue;
+                        }
+                        range.setStart(node, k);
+                        range.setEnd(node, k + 1);
+                        if (inView(range.getBoundingClientRect())) piece += raw[k];
+                    }
+                }
+                part += (part && !run ? '\\n' : '') + piece;
+                run = true;
+            } else {
+                run = false;
+            }
+        }
+        return part;
+    };
+    let out = '', last = null, node;
+    while ((node = walker.nextNode()) && out.length < LIMIT) {
+        const raw = node.textContent, parent = node.parentElement;
+        if (!raw.trim() || !parent || parent.closest('script,style,noscript,template')) continue;
+        range.selectNodeContents(node);
+        const r = range.getBoundingClientRect();
+        if (!inView(r)) continue;
+        if (parent.checkVisibility && !parent.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) continue;
+        const overflows = r.top < 0 || r.bottom > innerHeight || r.left < 0 || r.right > innerWidth;
+        const value = (raw.length > 200 && overflows ? visiblePart(node, raw) : raw).trim().slice(0, LIMIT - out.length);
+        if (!value) continue;
+        range.selectNodeContents(node);
+        const rects = range.getClientRects();
+        const first = rects[0] || r, lastRect = rects[rects.length - 1] || r;
+        // Same visual line AND horizontally next to the previous piece (a link inside a
+        // sentence, in either writing direction) joins with a space; a neighbouring
+        // column at the same height does not.
+        const gap = last ? Math.max(first.left, last.left) - Math.min(first.right, last.right) : 0;
+        const sameLine = last && Math.abs(first.top - last.top) < 4 && gap < 40;
+        out += (last === null ? '' : sameLine ? ' ' : '\\n') + value;
+        last = lastRect;
+    }
+    return out;
+}
+"""
+
+
+def _squash(s: str) -> str:
+    """Whitespace-free, case-folded — innerText and a text-node walk join text
+    differently ("(openai.com)" vs "( openai.com )") and innerText applies CSS
+    text-transform, so a plain substring test between them gives false misses."""
+    return "".join((s or "").split()).lower()
+
+
+def _lead_with_screen(text: str, screen: "str | None", max_chars: int, frames: str = "") -> str:
+    """Page text for the snapshot, with what is on screen in front when the text the
+    agent would otherwise read does not reach it.
+
+    The screen is "reached" when its substantial lines (>= 20 chars) sit near the
+    start of the page text: within the part max_chars will show, and within ~2x the
+    screen's own length — the second bound keeps the verdict from flipping to "top of
+    the page" when the agent follows the truncation notice and asks for a larger
+    max_chars. It is judged by how many lines lie DEEP, not by how many are shown: a
+    sticky header or a fixed sidebar repeats the top of the page at every scroll
+    position and would outvote the content otherwise. Lines not found at all (column
+    joins, shadow DOM) are ignored rather than counted either way.
+
+    ``frames`` (text from iframes) goes right after the screen block when there is one,
+    so a CAPTCHA or Sign-In frame is not pushed past the cut by the doubled text.
+    """
+    tail = f"\n\n{frames}" if frames else ""
+    if not isinstance(screen, str) or not screen.strip():
+        return text + tail
+    if not text.strip():
+        return f"[On screen now]\n{screen.strip()}{tail}"
+    lines = [_squash(ln) for ln in screen.splitlines() if len(ln.strip()) >= 20]
+    page = _squash(text)
+    reach = min(len(_squash(text[:max_chars])), 2 * len(_squash(screen)) + 1000)
+    found: "list[tuple[int, str]]" = []
+    cursor = 0
+    for ln in lines:
+        # Whole line, searched forward from the previous match: screen and page text
+        # are both in document order, and rows that share a long prefix (log lines,
+        # mail lists) would all "match" at the first row otherwise. A line that is not
+        # found in order falls back to its LAST occurrence — the prepend-biased side,
+        # whose worst case is duplication, not reading the wrong screen.
+        pos = page.find(ln, cursor)
+        if pos < 0:
+            pos = page.rfind(ln)
+        if pos < 0 and len(ln) > 40:
+            pos = page.rfind(ln[:40])
+            ln = ln[:40]
+        if pos >= 0:
+            found.append((pos, ln))
+            cursor = pos + len(ln)
+    deep = sum(1 for pos, ln in found if pos + len(ln) > reach)
+    if not found or deep < max(1, 0.15 * len(found)):
+        return text + tail
+    return f"[On screen now]\n{screen.strip()}{tail}\n\n[Page text from the top]\n{text}"
 
 
 def _format_interactive_elements(elements: "list[dict]") -> str:
@@ -1756,7 +1945,7 @@ class BrowserSession:
         could)."""
         elements: "list[dict]" = []
         with contextlib.suppress(Exception):
-            elements = await frame.evaluate(_INTERACTIVE_ELEMENTS_JS)
+            elements = await frame.evaluate(_INTERACTIVE_ELEMENTS_JS, 60)
         text = ""
         with contextlib.suppress(Exception):
             text = await frame.inner_text("body", timeout=2000)
@@ -1775,9 +1964,12 @@ class BrowserSession:
             text = await self._page.inner_text("body", timeout=5000)
         except Exception:
             text = ""
+        screen = None
+        with contextlib.suppress(Exception):
+            screen = await asyncio.wait_for(self._page.evaluate(_SCREEN_TEXT_JS), 5)
         elements: "list[dict]" = []
         with contextlib.suppress(Exception):
-            elements = await self._page.evaluate(_INTERACTIVE_ELEMENTS_JS)
+            elements = await self._page.evaluate(_INTERACTIVE_ELEMENTS_JS, 100)
         sections: "list[str]" = [_format_interactive_elements(elements)] if elements else []
 
         # Same-/cross-origin iframes: a Google Sign-In button or a CAPTCHA checkbox
@@ -1802,8 +1994,7 @@ class BrowserSession:
             if frame_text:
                 iframe_texts.append(f"{header}\n{_snippet(frame_text, 500)}")
 
-        if iframe_texts:
-            text = (text or "") + "\n\n" + "\n\n".join(iframe_texts)
+        text = _lead_with_screen(text or "", screen, max_chars, "\n\n".join(iframe_texts))
 
         return {
             "url": url,
