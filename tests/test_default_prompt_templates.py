@@ -271,14 +271,16 @@ async def test_api_prompt_delete_non_default_does_not_touch_deleted_list(ctx, ai
 
 # ─── Executor prompt addendums ────────────────────────────────────────────────
 
-def test_executor_prompt_contains_planning_mode():
+def test_executor_prompt_checks_stack_before_framework_code():
     prompt = _bot.DEFAULT_AGENTS["executor"].prompt
-    assert "PLANNING MODE" in prompt, "Executor prompt must include PLANNING MODE addendum"
+    assert "package.json" in prompt and "official docs" in prompt
 
 
-def test_executor_prompt_contains_source_driven():
+def test_executor_prompt_dropped_planning_script_and_url_comments():
+    """Prompt audit 2026-09-23: the executor gets an already-scoped brief, so a self-planning
+    script ("Max 1 day per task") and "cite the URL in a comment" over-applied."""
     prompt = _bot.DEFAULT_AGENTS["executor"].prompt
-    assert "SOURCE-DRIVEN" in prompt, "Executor prompt must include SOURCE-DRIVEN addendum"
+    assert "PLANNING MODE" not in prompt and "Cite the URL" not in prompt
 
 
 def test_executor_prompt_contains_doubt_check():

@@ -121,14 +121,10 @@ DEFAULT_AGENTS: dict = {
             "You are an executor sub-agent. Carry out the task brief you receive completely "
             "and autonomously. Write files, run bash commands, and fix errors as needed. "
             "Report results concisely.\n\n"
-            "PLANNING MODE — read-only first. Map the dependency graph before writing any code: "
-            "schema → models → endpoints → client → UI. "
-            "Implement bottom-up. Each task: title + acceptance criteria + test signal. Max 1 day per task.\n\n"
-            "SOURCE-DRIVEN — before writing framework-specific code, state the exact stack "
-            "(read package.json / pyproject.toml / go.mod). "
-            "Fetch official docs for the relevant pattern (WebFetch / WebSearch). "
-            "Implement only what the docs describe. Cite the URL in a comment. "
-            "Training data goes stale — verify, don't assume.\n\n"
+            "Before writing framework-specific code, read the project's stack (package.json / "
+            "pyproject.toml / go.mod). When the change depends on library behaviour you are not "
+            "sure matches the installed version, check the official docs instead of relying on "
+            "memory — training data goes stale.\n\n"
             "DOUBT CHECK — before committing: is this decision non-trivial? "
             "(New branching logic? Crosses module boundary? Irreversible in production?) "
             "If YES → run the doubt cycle: Claim → Contract → Adversarial → Reconcile → Stop. "
@@ -379,11 +375,10 @@ def _build_agents_kwargs(agents_config: dict) -> dict:
 # (ultracode activates the CLI's native Workflow contract for every model — see below).
 # Kept as a module constant so it can be asserted in tests without instantiating run_engine.
 CONDUCTOR_PROMPT = (
-    "You are an orchestrator. Delegate substantial execution to sub-agents via the Task tool — "
-    "pass them a self-contained brief (no chat history; just what they need). Reserve your own "
-    "turns for planning, decision-making, and synthesising results. Do not run long code "
-    "sequences or file-editing loops yourself. "
-    "Prefer ≤3–5 concurrent sub-agents; sequence tasks rather than parallelising unnecessarily."
+    "You are an orchestrator. Delegate independent, sizeable subtasks to sub-agents via the Task "
+    "tool — pass each a self-contained brief (no chat history; just what it needs) — and launch "
+    "independent ones together so they run in parallel. Do small or strictly sequential work "
+    "directly. Use your own turns for planning, decisions, and synthesising results."
 )
 
 # spec-058 v2 (native): Ultracode now activates the CLI's NATIVE ultracode machinery via the
@@ -402,10 +397,10 @@ ULTRACODE_PROMPT = (
     "- Prefer an authored Workflow over ad-hoc Task fan-out for anything multi-step: deterministic "
     "pipelines with adversarial verification beat improvised delegation. Verify findings with "
     "independent skeptics that try to REFUTE them before you act on them.\n"
-    "- Named agent types available to Workflow (opts.agentType) and the Task tool: `executor` "
-    "(Sonnet — writes files, runs commands), `researcher` (Sonnet — read-only research), `skeptic` "
-    "(Sonnet — adversarial verifier: tries to refute a claim), `quick` (Haiku — fast cheap lookups). "
-    "Pick per stage; the default workflow subagent is also fine.\n"
+    "- Named agent types (listed on the last line) work as Workflow opts.agentType and as Task "
+    "subagents; pick per stage by their descriptions — e.g. `skeptic` to refute a finding, "
+    "`executor` to change code, `researcher` for read-only research. The default workflow "
+    "subagent is also fine.\n"
     "- Sub-agent reports live on disk (spec-089 §3): every brief you write — a Workflow agent() "
     "prompt or a Task brief — must demand `FINAL ANSWER = report file path + at most 5 lines of "
     "summary`, never the full report; you read only the summary and open the file when you need "
@@ -417,9 +412,8 @@ ULTRACODE_PROMPT = (
 
 
 def _ultracode_roster_note(effective_agents: "dict | None") -> str:
-    """I1h fix (A2-audit.md): ULTRACODE_PROMPT's own text above still illustrates the four
-    original names as a fixed example (kept verbatim on purpose — several tests pin that exact
-    string). This is the part that must stay ACCURATE: a per-call line naming the roster THIS
+    """I1h fix (A2-audit.md): ULTRACODE_PROMPT only gives examples; this line is the roster of
+    record and must stay ACCURATE: a per-call line naming the roster THIS
     turn actually resolved (registry or the DEFAULT_AGENTS fallback), so a Workflow/Task call
     routes to a name that exists instead of a stale hardcoded four. Cheap — a joined list of
     names, not a generated catalogue."""
@@ -505,9 +499,8 @@ def _browser_prompt(backend: str, agent_actions: str) -> str:
     return (
         f"A live browser pane is active (the 'browser' module, backend: {backend}). When asked to "
         "open, launch, show or use 'the browser', or to open a URL or web page, drive THIS pane with "
-        "the mcp__browser__ tools (browser_navigate, browser_snapshot, browser_click, browser_type, "
-        "browser_upload, browser_select, browser_status) — the operator watches it live in the "
-        "cockpit. A file input needs browser_upload, not browser_click/browser_type: clicking an "
+        "the mcp__browser__ tools — the operator watches it live in the cockpit. A file input "
+        "needs browser_upload, not browser_click/browser_type: clicking an "
         "upload button only opens the OS's native file picker, which is invisible to this pane. A "
         "native <select> needs browser_select, not browser_click: clicking it pops OS/browser-native "
         "list UI outside the page — a required <select> can look filled in a snapshot yet still be "
@@ -571,10 +564,9 @@ FILES_PROMPT = (
 # Appended to sub-agent prompts that produce open-ended reports — NOT "quick", whose whole point
 # is a short inline answer with no report.
 SUBAGENT_FILES_PROMPT = (
-    "If your final report would run long (detailed findings, multi-file audit, long log dump), "
-    "write the FULL report to a file and run `cockpit-file <path>` — paste the `attached file: …` "
-    "line it prints into your final reply, then summarize in 5-10 lines. Do not paste the full "
-    "report body into your final reply."
+    "To hand your report file to the operator as a download in the cockpit, run "
+    "`cockpit-file <path>` on it and put the `attached file: …` line it prints into your final "
+    "answer next to the path."
 )
 
 # AskUserQuestion = interactive prompt (no reply in TG -> agent hangs or decides on its own).
@@ -2703,17 +2695,17 @@ def _build_board_append(cwd: str) -> str:
 
 _RECONCILE_OPS_CAP = 5
 
-# System prompt for the haiku reconciler — tells the model exactly what to produce.
+# System prompt for the haiku reconciler. The output shape is enforced by _RECONCILE_SCHEMA
+# (structured output), not by prose.
 _RECONCILE_SYSTEM = (
     "You are a board reconciliation assistant. Given a user message, an agent reply, "
-    "and the current open board cards, you output ONLY a JSON array of board operations. "
-    "Nothing else — no prose, no markdown fences, just the raw JSON array.\n\n"
+    "and the current open board cards, return the board operations the turn implies.\n\n"
     "Allowed operations:\n"
     '  {"op":"create","text":"short card title","column":"review|backlog","description":"optional detail"}\n'
     '  {"op":"move","id":"card-id","to":"review|done|in_progress"}\n\n'
     "Rules:\n"
-    "- Output [] (empty array) if the turn was a question, clarification, or general chat.\n"
-    "- Output [] if all mentioned work already has a matching open card.\n"
+    "- Return no operations if the turn was a question, clarification, or general chat.\n"
+    "- Return no operations if all mentioned work already has a matching open card.\n"
     "- Use 'create' only when work was done or requested that has NO matching open card.\n"
     "- Use 'move' to mark a card done (to=done) or move to review if work just completed.\n"
     "- Default column for new work just done this turn: 'review'. For future work: 'backlog'.\n"
@@ -2722,6 +2714,33 @@ _RECONCILE_SYSTEM = (
     "rather than creating a duplicate.\n"
     "- Keep titles short (under 80 chars)."
 )
+
+_RECONCILE_SCHEMA: dict = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "ops": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op": {"type": "string", "enum": ["create", "move"]},
+                        "text": {"type": "string"},
+                        "column": {"type": "string", "enum": ["review", "backlog"]},
+                        "description": {"type": "string"},
+                        "id": {"type": "string"},
+                        "to": {"type": "string", "enum": ["review", "done", "in_progress"]},
+                    },
+                    "required": ["op"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["ops"],
+        "additionalProperties": False,
+    },
+}
 
 
 def _norm_title(text: str) -> str:
@@ -2911,7 +2930,7 @@ async def reconcile_board(
     Gates:
     - BOARD_RECONCILE env != "1" → skip entirely (no-op)
     - TASKS.md not present in cwd → skip
-    - JSON parse failure → no-op (no board change)
+    - no structured result → no-op (no board change)
     """
     # Gate: settings.json flag (overrides env when explicitly set).
     # Falls back to env BOARD_RECONCILE if the setting is unset or unreadable.
@@ -2949,8 +2968,6 @@ async def reconcile_board(
         "",
         "## Open board cards",
         summary if summary else "Board is empty.",
-        "",
-        "Output ONLY a JSON array of operations (or [] for none).",
     ]
     reconcile_prompt = "\n".join(prompt_parts)
 
@@ -2960,7 +2977,8 @@ async def reconcile_board(
         cli_path=_runtime.cli_path(),
         max_buffer_size=SDK_MAX_BUFFER_BYTES,
         cwd=_OPS_SCRATCH_CWD,  # scratch dir: transcript never pollutes project session list
-        system_prompt=_RECONCILE_SYSTEM,  # plain string — no tools, no preset
+        system_prompt=_RECONCILE_SYSTEM,  # plain string — no preset
+        output_format=_RECONCILE_SCHEMA,  # the CLI then exposes only its StructuredOutput tool
         # No tools at all. `allowed_tools=[]` did NOT do this: the SDK drops an empty allowlist,
         # so the CLI loaded its full default toolset plus every user/claude.ai MCP server (183
         # tools incl. Bash/Edit/Write, mail, SMS — measured 2026-09-23) under bypassPermissions,
@@ -2981,42 +2999,22 @@ async def reconcile_board(
         effort="low",
     )
 
-    # Collect haiku response.
     # _sdk_query (= claude_agent_sdk.query) is an async generator function — iterate directly,
     # do NOT await it first (that would raise TypeError for async generators).
-    text_parts: list[str] = []
+    structured = None
     try:
         async for msg in _sdk_query(prompt=reconcile_prompt, options=opts):
-            if isinstance(msg, AssistantMessage):
-                for blk in msg.content:
-                    if isinstance(blk, TextBlock) and blk.text.strip():
-                        text_parts.append(blk.text)
+            if isinstance(msg, ResultMessage):
+                structured = getattr(msg, "structured_output", None)
     except Exception as exc:
         print(f"[reconcile] haiku call failed: {exc!r}")
         return
 
-    raw_response = "\n".join(text_parts).strip()
-    if not raw_response:
-        return
-
-    # Parse JSON — on failure, no-op
-    try:
-        ops = json.loads(raw_response)
-        if not isinstance(ops, list):
-            print(f"[reconcile] unexpected JSON (not a list): {raw_response[:200]!r}")
-            return
-    except json.JSONDecodeError as exc:
-        # Try extracting a JSON array from prose (model sometimes wraps in markdown)
-        m = re.search(r"\[.*\]", raw_response, re.DOTALL)
-        if m:
-            try:
-                ops = json.loads(m.group(0))
-            except json.JSONDecodeError:
-                print(f"[reconcile] JSON parse failed: {exc!r} — no-op")
-                return
-        else:
-            print(f"[reconcile] JSON parse failed: {exc!r} — no-op")
-            return
+    ops = structured.get("ops") if isinstance(structured, dict) else None
+    if not isinstance(ops, list):
+        if structured is not None:
+            print(f"[reconcile] unexpected structured output: {str(structured)[:200]!r}")
+        return  # no structured result → no-op
 
     if not ops:
         return  # empty list → nothing to do

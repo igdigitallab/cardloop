@@ -805,12 +805,14 @@ def test_agents_have_max_turns():
         assert agent.maxTurns > 0, f"{name}: maxTurns must be positive"
 
 
-def test_conductor_prompt_has_fan_out_cap():
-    """CONDUCTOR_PROMPT must mention a sub-agent count cap."""
-    # Any of these phrases indicates the fan-out guidance is present.
-    assert any(phrase in bot.CONDUCTOR_PROMPT for phrase in ["3", "5", "concurrent", "paralleliz"]), (
-        f"CONDUCTOR_PROMPT must contain fan-out cap guidance: {bot.CONDUCTOR_PROMPT!r}"
-    )
+def test_conductor_prompt_has_fan_out_guidance_without_a_numeric_cap():
+    """CONDUCTOR_PROMPT (fable only) says WHEN to fan out, not how many: Fable 5.1 delegates
+    reliably in parallel, and the old "≤3–5 concurrent" cap was a prior-model guardrail
+    (prompt audit 2026-09-23)."""
+    p = bot.CONDUCTOR_PROMPT
+    assert "parallel" in p, f"CONDUCTOR_PROMPT must say independent work runs in parallel: {p!r}"
+    assert "directly" in p, f"CONDUCTOR_PROMPT must keep small work in the main loop: {p!r}"
+    assert "≤" not in p and "3–5" not in p, f"numeric fan-out cap must stay removed: {p!r}"
 
 
 @pytest.mark.asyncio

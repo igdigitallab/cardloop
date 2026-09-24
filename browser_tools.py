@@ -75,7 +75,7 @@ _SNAPSHOT_SCHEMA = {
             "type": "integer",
             "description": (
                 "Max characters of visible page text to return (default 4000). Truncation "
-                "now cuts at a clean word boundary and says explicitly how much was cut — "
+                "cuts at a word boundary and says how much was cut — "
                 "if you see '...[truncated: N of M chars shown]', call this again with a "
                 "larger max_chars instead of narrowing the page/query and re-snapshotting "
                 "repeatedly."
@@ -201,7 +201,8 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
     @tool(
         "browser_navigate",
         "Open a URL in the live browser pane (visible to the operator in the cockpit). "
-        "Use this to drive a real browser the operator can watch.",
+        "Use this to drive a real browser the operator can watch. Returns only the final URL "
+        "and page title — call browser_snapshot to read the page.",
         _NAV_SCHEMA,
     )
     async def browser_navigate(args: dict) -> dict:
@@ -214,7 +215,15 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_navigate failed: {e}"}]}
 
-    @tool("browser_click", "Click an element in the live browser by CSS selector.", _CLICK_SCHEMA)
+    @tool(
+        "browser_click",
+        "Click one element in the live browser pane. The selector takes full Playwright syntax "
+        "(see the selector field), not only CSS. Not for file inputs (use browser_upload) or "
+        "native <select> dropdowns (use browser_select): both open OS-level UI this pane cannot "
+        "see. Returns a one-line confirmation, not the resulting page — call browser_snapshot "
+        "to see what changed.",
+        _CLICK_SCHEMA,
+    )
     async def browser_click(args: dict) -> dict:
         if not _can_mutate:
             return {"content": [{"type": "text", "text": _GATE_MSG}]}
@@ -224,7 +233,14 @@ def build_browser_server(cwd: str, agent_actions: str = "read") -> dict:
         except Exception as e:
             return {"content": [{"type": "text", "text": f"⚠️ browser_click failed: {e}"}]}
 
-    @tool("browser_type", "Type text in the live browser (optionally into a field given by CSS selector).", _TYPE_SCHEMA)
+    @tool(
+        "browser_type",
+        "Type text in the live browser pane as real keystrokes — into the element named by "
+        "selector (clicked first; an existing value is replaced) or, without one, into whatever "
+        "has focus. Not for file inputs (use browser_upload). Returns 'Typed.' only — call "
+        "browser_snapshot to confirm the field's value.",
+        _TYPE_SCHEMA,
+    )
     async def browser_type(args: dict) -> dict:
         if not _can_mutate:
             return {"content": [{"type": "text", "text": _GATE_MSG}]}

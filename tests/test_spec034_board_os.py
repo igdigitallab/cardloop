@@ -176,15 +176,17 @@ def _make_haiku_mock(json_response: str):
     The mock must also be an async generator function so that
     `async for msg in _sdk_query(...)` works without a preceding `await`.
     """
-    # Import the real types so isinstance checks in reconcile_board pass.
-    from claude_agent_sdk import AssistantMessage, TextBlock  # type: ignore
+    # Import the real type so the isinstance check in reconcile_board passes. The reconciler
+    # reads structured output (output_format), so the fake carries it on a ResultMessage; a
+    # string that is not JSON stands for "no structured result".
+    from claude_agent_sdk import ResultMessage  # type: ignore
 
-    fake_text_block = MagicMock(spec=TextBlock)
-    fake_text_block.text = json_response
-
-    fake_msg = MagicMock(spec=AssistantMessage)
-    fake_msg.parent_tool_use_id = None  # spec-071: real default — engine filters parented (sub-agent) messages
-    fake_msg.content = [fake_text_block]
+    try:
+        structured = {"ops": json.loads(json_response)}
+    except json.JSONDecodeError:
+        structured = None
+    fake_msg = MagicMock(spec=ResultMessage)
+    fake_msg.structured_output = structured
 
     # Must be an async generator function (uses `yield`), NOT `async def` + `return`.
     async def _fake_sdk_query(**kwargs):
@@ -259,7 +261,7 @@ async def test_reconcile_disabled_by_env(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_reconcile_malformed_json_noop(tmp_path, monkeypatch):
-    """Scenario (d): haiku returns invalid JSON → no-op, no crash, board unchanged."""
+    """Scenario (d): no structured result → no-op, no crash, board unchanged."""
     _write_fixture_board(tmp_path)
     cwd = str(tmp_path)
     original_content = (tmp_path / "TASKS.md").read_text(encoding="utf-8")
