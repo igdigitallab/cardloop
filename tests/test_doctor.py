@@ -345,6 +345,23 @@ def test_service_memory_high_infinity_is_ok():
     assert mem_fact.level == "ok"
 
 
+def test_service_oom_policy_stop_fails_and_continue_passes():
+    """OOMPolicy=stop (the systemd default) turned one OOM-killed agent job into a full cockpit
+    restart twice on 2026-09-23; doctor must flag it with the exact fix."""
+    def facts_for(policy):
+        run = _fake_run({
+            ("systemctl", "show"): (0, "ActiveState=active\nSubState=running\n"
+                                        "MemoryHigh=infinity\nMemoryMax=8589934592\n"
+                                        f"MemoryCurrent=1000000000\nMainPID=123\nOOMPolicy={policy}", ""),
+            ("journalctl",): (0, "-- No entries --", ""),
+        })
+        return next(f for f in doctor.probe_service("cardloop", run=run) if f.label == "OOMPolicy")
+
+    stop = facts_for("stop")
+    assert stop.level == "fail" and "OOMPolicy=continue" in stop.remedy
+    assert facts_for("continue").level == "ok"
+
+
 def test_service_memory_current_warns_when_headroom_is_thin():
     """83% of MemoryMax is the state that preceded both real OOM kills on ops (2026-08-26/27):
     the unit still reports active/running, so nothing else in doctor would flag it."""

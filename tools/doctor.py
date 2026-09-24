@@ -546,7 +546,7 @@ def probe_service(service_name: str, run=_run) -> "list[Fact]":
     show = run(["systemctl", "show", service_name,
                 "-p", "ActiveState", "-p", "SubState", "-p", "MemoryHigh",
                 "-p", "MemoryMax", "-p", "MemoryCurrent", "-p", "MainPID",
-                "-p", "ControlGroup", "-p", "NRestarts"])
+                "-p", "ControlGroup", "-p", "NRestarts", "-p", "OOMPolicy"])
     if not show or show[0] != 0:
         facts.append(Fact("systemd", f"could not query unit '{service_name}' "
                                       "(systemctl unavailable, no permission, or not systemd)",
@@ -574,6 +574,21 @@ def probe_service(service_name: str, run=_run) -> "list[Fact]":
         ))
     else:
         facts.append(Fact("MemoryHigh/MemoryMax", f"{mh_raw or '(unset)'} / {mm_raw or '(unset)'}"))
+
+    # systemd's default OOMPolicy=stop turns ONE OOM-killed child (an agent's ffmpeg or python
+    # job) into a stop of the whole unit: every live chat and sub-agent dies, then Restart=
+    # brings the cockpit back as if nothing happened. Measured 2026-09-23: two such restarts in
+    # one evening, each killing ~10 live turns because one agent's job outgrew its share.
+    oom_policy = props.get("OOMPolicy")
+    if oom_policy == "stop":
+        facts.append(Fact(
+            "OOMPolicy", oom_policy, level="fail",
+            remedy="one OOM-killed agent child stops the WHOLE cockpit (all chats + sub-agents). "
+                   "Add `OOMPolicy=continue` to the [Service] section, then `systemctl daemon-reload` "
+                   "(no restart needed)",
+        ))
+    elif oom_policy:
+        facts.append(Fact("OOMPolicy", oom_policy))
 
     mc = _parse_mem_value(props.get("MemoryCurrent"))
     if mc is not None:

@@ -26,6 +26,13 @@ EnvironmentFile=__HOME__/cardloop/.env
 ExecStart=__HOME__/cardloop/venv/bin/python -u __HOME__/cardloop/bot.py
 Restart=on-failure
 RestartSec=5
+# Agents run their shell jobs (ffmpeg, data scripts) inside this unit's cgroup. When one of them
+# is OOM-killed, only that job must die: the systemd default OOMPolicy=stop would stop the whole
+# cockpit and abort every live chat and sub-agent with it.
+OOMPolicy=continue
+# Never set MemoryHigh below MemoryMax: it throttles the whole cgroup into a livelock instead of
+# OOM-killing the offender. Add a MemoryMax sized for your host if you want a hard cap.
+MemoryHigh=infinity
 
 [Install]
 WantedBy=multi-user.target
