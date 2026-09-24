@@ -367,9 +367,25 @@ read_part() {
     *)   echo "ОШИБКА (код $rc)" ;;
   esac
   if [[ "$rc" != "3" && "$rc" != "4" && "$rc" != "-" ]]; then
-    if [[ -s "$TMP/$n.err" ]]; then sed -n '1,12p' "$TMP/$n.err"
+    if [[ -s "$TMP/$n.err" ]]; then
+      # ⚠️ Причину ищем по всему логу и печатаем ПЕРВОЙ, а не голову файла: codex пишет
+      # баннер (~12 строк), потом эхом ВЕСЬ промпт, и только за ним «ERROR: …». Прежний
+      # `sed 1,12p` показывал ровно баннер — 24.09.2026 агенты видели голое «ОШИБКА (код 1)»
+      # при кончившихся кредитах воркспейса и молча уходили на Azure-панель.
+      local errs; errs="$(err_lines "$TMP/$n.err")"
+      if [[ -n "$errs" ]]; then echo "$errs"
+      else tail -n 12 "$TMP/$n.err"; fi
+      if grep -q -i -E 'out of credits|credits_depleted|usage limit|quota|RESOURCE_EXHAUSTED' "$TMP/$n.err"; then
+        echo "⚠️ ПРИЧИНА: у подписки движка кончились кредиты/лимит. Повтор сейчас не поможет — нужен пополненный баланс или сброс окна. Не подменяй этот движок молча другой моделью: в докладе прямо скажи, что его мнения не было, и чем заменил."
+      fi
     else echo "(движок не оставил ни строки в stderr)"; fi
   fi
+}
+
+# строки-причины из ХВОСТА лога движка, без повторов (codex дублирует свою ERROR-строку).
+# Только хвост: выше лежит эхо промпта, а в нём своё «Error:» легко приняло бы вид причины.
+err_lines() {
+  tail -n 40 "$1" 2>/dev/null | grep -E '^(ERROR|AGY_ERROR):' | awk '!seen[$0]++' | head -n 5 | cut -c1-400
 }
 
 want=0; good=0
@@ -390,7 +406,8 @@ def part(n,model):
     return {"model":model,"exit_code":(int(rc) if rc.lstrip("-").isdigit() else None),
             "aborted":rc=="",
             "seconds":int((rd(n+".sec") or "0").strip() or 0),
-            "ok":rc=="0" and bool(ans),"answer":ans,"stderr":rd(n+".err").strip()[:2000]}
+            # хвост, не голова: у codex причина идёт ПОСЛЕ баннера и эха промпта
+            "ok":rc=="0" and bool(ans),"answer":ans,"stderr":rd(n+".err").strip()[-2000:]}
 o={}
 if wa: o["agy"]=part("agy",am)
 if wc: o["codex"]=part("codex",(rd("codex.model").strip() or cm))

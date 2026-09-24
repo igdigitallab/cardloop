@@ -9,7 +9,12 @@ Two backends, chosen per call by the `model` alias:
   * **Antigravity (`agy` CLI)** — Google AI Pro quota: flash / pro / opus / sonnet / gpt.
     Free at point of use but occasionally flaky (may return nothing).
   * **Azure AI Foundry (HTTP)** — the operator's Azure credits: grok / deepseek / gpt5.
-    Reliable, higher quota; billed to sponsored credits. Configured via env
+    Higher quota, billed to sponsored credits — but older models than `tools/opinion` runs.
+
+This tool is the FALLBACK. The primary second-opinion path is the `opinion` CLI (Codex +
+Antigravity on their strongest models). The old description sold Azure as "reliable" and
+Google as "flaky", and agents read that as a recommendation: when Codex ran out of credits
+(2026-09-24) they switched to the Azure panel without saying so. Configured via env
     (`AZURE_FOUNDRY_KEY`, `AZURE_FOUNDRY_ENDPOINT`); absent → those aliases don't appear.
 
 A `panel` flag asks EVERY configured provider concurrently and returns all answers for the
@@ -50,7 +55,9 @@ _MODEL_ALIASES = {
     "sonnet": "Claude Sonnet 4.6 (Thinking)",
     "gpt":    "GPT-OSS 120B (Medium)",
 }
-_DEFAULT_ALIAS = "pro"
+# flash, not pro: the live catalog's newest Flash (3.8) is a newer generation than its only
+# Pro (3.1), and it is what the `opinion` CLI already defaults to — one Gemini, not two.
+_DEFAULT_ALIAS = "flash"
 
 # Alias -> slug pattern, matched against the LIVE `agy models` catalog (slug<TAB>display).
 # The catalog is listed newest-first, so the first match is the current generation and the
@@ -402,10 +409,10 @@ def _build_input_schema() -> dict:
             "model": {
                 "type": "string",
                 "enum": aliases,
-                "description": "Which model to consult. Azure credits (reliable): "
-                               "grok=xAI Grok 4.3, deepseek=DeepSeek-V4, gpt5=OpenAI GPT-5.1. "
-                               "Google quota (free, sometimes flaky): flash/pro=Gemini, "
-                               "opus/sonnet=Claude-via-Google, gpt=GPT-OSS. Default: pro.",
+                "description": "Which model to consult. Azure credits: grok=xAI Grok 4.3, "
+                               "deepseek=DeepSeek-V4, gpt5=OpenAI GPT-5.1. Google quota: "
+                               "flash=newest Gemini Flash, pro=Gemini Pro, opus/sonnet="
+                               "Claude-via-Google, gpt=GPT-OSS. Default: flash.",
             },
             "panel": {
                 "type": "boolean",
@@ -466,13 +473,14 @@ def build_antigravity_server() -> dict | None:
 
     @tool(
         "second_opinion",
-        "Consult a DIFFERENT model family for an independent second opinion, billed to a "
-        "separate pool (Azure credits or Google quota) — not the Anthropic budget. Use "
-        "SPARINGLY, only when it genuinely helps: a cross-model sanity check before a risky "
-        "or irreversible step, an ambiguous architecture fork, when stuck after ~2 attempts, "
-        "or when the operator asks. NOT for routine steps. Pick a `model` (grok/deepseek/gpt5 "
-        "= Azure, reliable; pro/flash/opus/sonnet/gpt = Google, free but flaky) or set "
-        "`panel`=true to poll every provider at once. Returns the other model's answer(s) as text.",
+        "FALLBACK second opinion from a DIFFERENT model family, billed to a separate pool "
+        "(Azure credits or Google quota) — not the Anthropic budget. If the `opinion` shell "
+        "command exists, use IT first: it asks the strongest Codex and Antigravity models in "
+        "parallel, and this tool's models are older, so they are not a like-for-like "
+        "replacement. Reach for this tool only when `opinion` is missing or its engines "
+        "failed, and then say in your report which model actually answered and that the "
+        "primary engines did not. NOT for routine steps. Pick a `model` or set `panel`=true "
+        "to poll every provider at once. Returns the other model's answer(s) as text.",
         _build_input_schema(),
     )
     async def second_opinion(args: dict) -> dict:

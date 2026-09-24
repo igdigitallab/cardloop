@@ -370,10 +370,10 @@ async def test_handler_empty_question():
 
 
 # ---------------------------------------------------------------------------
-# 17. _second_opinion_handler unknown model 'zzz' → coerced to 'pro'
+# 17. _second_opinion_handler unknown model 'zzz' → coerced to the default ('flash')
 # ---------------------------------------------------------------------------
 
-async def test_handler_unknown_model_coerced_to_pro(monkeypatch):
+async def test_handler_unknown_model_coerced_to_default(monkeypatch):
     captured = {}
 
     async def fake_ask(question, alias, context):
@@ -384,7 +384,7 @@ async def test_handler_unknown_model_coerced_to_pro(monkeypatch):
 
     await second_opinion._second_opinion_handler({"question": "hello", "model": "zzz"})
 
-    assert captured["alias"] == "pro"
+    assert captured["alias"] == second_opinion._DEFAULT_ALIAS == "flash"
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +517,7 @@ async def test_handler_routes_azure_alias(monkeypatch):
     assert r["content"][0]["text"] == "AZ"
 
 
-# 27. handler: Azure alias but Azure OFF → coerced to agy default 'pro'
+# 27. handler: Azure alias but Azure OFF → coerced to the agy default
 async def test_handler_azure_alias_but_off_falls_to_agy(monkeypatch):
     monkeypatch.delenv("AZURE_FOUNDRY_KEY", raising=False)
     monkeypatch.delenv("AZURE_FOUNDRY_ENDPOINT", raising=False)
@@ -529,7 +529,7 @@ async def test_handler_azure_alias_but_off_falls_to_agy(monkeypatch):
 
     monkeypatch.setattr(second_opinion, "_ask_agy", fake_agy)
     await second_opinion._second_opinion_handler({"question": "hi", "model": "grok"})
-    assert captured["alias"] == "pro"
+    assert captured["alias"] == second_opinion._DEFAULT_ALIAS
 
 
 # 28. handler panel=true calls _ask_panel
