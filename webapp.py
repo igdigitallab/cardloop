@@ -1685,6 +1685,62 @@ def _memory_top_offenders(cg_path: Path, top_n: int = 3) -> "list[str]":
     return [f"{kb // 1024} MB  pid {pid}  {cmd}" for kb, pid, cmd in rows[:top_n]]
 
 
+# ── OOM shield: the cockpit must be the LAST process the kernel kills ─────────
+# On a cgroup OOM the kernel kills the task with the highest badness, which is mostly RSS.
+# The cockpit's own python (~420 MB) is bigger than any single `claude` child (200-300 MB),
+# so it was the natural victim: 2026-09-24 22:24 the kernel killed bot.py itself and all
+# seven live chats died with it, one of them silently for 10 hours. OOMPolicy=continue
+# only saves the service when a CHILD dies. Raising every other process in the cgroup
+# needs no privilege (lowering our own score would), so the children are pushed up
+# instead: the kernel then takes one agent, and the live cockpit reports it in that chat.
+OOM_CHILD_SCORE_ADJ: int = int(os.getenv("OOM_CHILD_SCORE_ADJ", "500") or 0)
+_OOM_SHIELD_INTERVAL_SEC: float = float(os.getenv("OOM_SHIELD_INTERVAL_SEC", "2"))
+
+
+def _oom_raise_children(cg_path: Path, self_pid: int, target: int) -> int:
+    """Raise oom_score_adj to `target` for every process in the cgroup except `self_pid`.
+    Only raises, never lowers (an operator's own higher value stays). Returns how many
+    processes were changed. Never raises: a pid can exit between listing and writing."""
+    changed = 0
+    try:
+        pids = (cg_path / "cgroup.procs").read_text().split()
+    except Exception:
+        return 0
+    for pid_s in pids:
+        try:
+            if int(pid_s) == self_pid:
+                continue
+            f = Path(f"/proc/{pid_s}/oom_score_adj")
+            if int(f.read_text().strip()) >= target:
+                continue
+            f.write_text(str(target))
+            changed += 1
+        except Exception:
+            continue
+    return changed
+
+
+async def _oom_shield_loop(ctx: dict) -> None:
+    """Every few seconds, push new children above the cockpit in the OOM killer's order.
+    A child younger than one interval still has the cockpit's score; it is also small then."""
+    if OOM_CHILD_SCORE_ADJ <= 0:
+        print("[oom-shield] disabled (OOM_CHILD_SCORE_ADJ=0)")
+        return
+    cg = _cgroup_memory_path()
+    if cg is None:
+        print("[oom-shield] no cgroup v2 found — shield disabled")
+        return
+    me = os.getpid()
+    print(f"[oom-shield] children of {cg.name} get oom_score_adj={OOM_CHILD_SCORE_ADJ}; "
+          f"the cockpit (pid {me}) keeps its own")
+    while True:
+        try:
+            _oom_raise_children(cg, me, OOM_CHILD_SCORE_ADJ)
+        except Exception as exc:
+            print(f"[oom-shield] tick failed: {exc!r}")
+        await asyncio.sleep(_OOM_SHIELD_INTERVAL_SEC)
+
+
 _BROWSER_SWEEP_INTERVAL_SEC = int(os.environ.get("CLOAK_ORPHAN_SWEEP_SEC", "600") or 600)
 
 
@@ -18867,6 +18923,8 @@ async def start(ctx: dict) -> None:
         # Root-fix A2: cgroup memory alert — warns (with top-RSS offenders) before an OOM kill
         _STARTUP_BG_TASKS.append(_spawn_bg(_memory_alert_loop(ctx)))
         print(f"[webapp] memory alert loop started (threshold {MEMORY_ALERT_PCT}%)")
+        # On OOM the kernel must take one agent, not the cockpit and every chat with it
+        _STARTUP_BG_TASKS.append(_spawn_bg(_oom_shield_loop(ctx)))
         # SDK release watch — a stale SDK resolves model aliases to older models silently
         _STARTUP_BG_TASKS.append(_spawn_bg(_sdk_watch_loop(ctx)))
         print(f"[webapp] SDK release watch started (interval {int(_SDK_WATCH_INTERVAL_SEC)}s)")
