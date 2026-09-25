@@ -28,10 +28,16 @@ def child():
 def test_raises_children_and_spares_self(tmp_path, child):
     me = os.getpid()
     before_self = _adj(me)
+    # Run inside the live cockpit, this process already inherits the shield's raised score,
+    # so the target must sit above whatever the child started with or nothing changes.
+    inherited = _adj(child.pid)
+    if inherited >= 1000:
+        pytest.skip("child already inherits the maximum oom_score_adj; nothing left to raise")
+    target = min(1000, inherited + 100)
     (tmp_path / "cgroup.procs").write_text(f"{me}\n{child.pid}\n999999999\n")
-    changed = webapp._oom_raise_children(tmp_path, me, 500)
+    changed = webapp._oom_raise_children(tmp_path, me, target)
     assert changed == 1                       # the dead pid is skipped, not an error
-    assert _adj(child.pid) == 500
+    assert _adj(child.pid) == target
     assert _adj(me) == before_self            # the cockpit keeps its own score
 
 

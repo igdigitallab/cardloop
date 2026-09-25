@@ -10,6 +10,7 @@ import { ThemeToggle } from './ThemeToggle'
 import { VersionBadge } from './VersionBadge'
 import { ThemeValue } from '../hooks/useTheme'
 import { ActionMenu, KebabButton, ActionMenuSection, ActionMenuItem } from './ActionMenu'
+import { openProjectWindow } from '../lib/popout'
 import { SearchResults } from './SearchResults'
 
 interface Props {
@@ -846,6 +847,13 @@ export function Sidebar({
         // Section A: primary actions
         items: [
           { label: 'Open', onClick: () => onSelect(pid) },
+          // Desktop only: a phone has no second monitor to put the window on.
+          ...(window.innerWidth > 768
+            ? [{
+                label: t['popout.open_window'], icon: '⧉',
+                onClick: () => { if (!openProjectWindow(pid, 'browser')) window.alert(t['popout.blocked']) },
+              }]
+            : []),
           { label: t['sidebar.rename_project'], icon: '✏', onClick: () => onRenameProject?.(p) },
           ...(onOpenProjectSettings
             ? [{ label: 'Settings', icon: '⚙', onClick: () => onOpenProjectSettings(pid) }]

@@ -48,6 +48,11 @@ interface PushPayload {
   }
 }
 
+/** The project a pop-out window (?popout=<id>) shows, or null for a main cockpit window. */
+function popoutProjectOf(c: Client): string | null {
+  try { return new URL(c.url).searchParams.get('popout') || null } catch { return null }
+}
+
 self.addEventListener('push', (event: PushEvent) => {
   let payload: PushPayload = {}
 
@@ -90,7 +95,10 @@ self.addEventListener('push', (event: PushEvent) => {
     (async () => {
       if (!forceShow) {
         const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-        const hasVisibleClient = clients.some(c => (c as WindowClient).visibilityState === 'visible')
+        // Only a MAIN cockpit window raises the in-page alert; a pop-out (?popout=) has no
+        // notifier, so a visible pop-out alone must not swallow the push.
+        const hasVisibleClient = clients.some(c =>
+          (c as WindowClient).visibilityState === 'visible' && popoutProjectOf(c) === null)
         if (hasVisibleClient) {
           // A foreground window handles the alert locally — skip the SW notification.
           return
@@ -112,7 +120,16 @@ self.addEventListener('notificationclick', (event: NotificationEvent) => {
     (async () => {
       // Try to focus an already-open Cardloop tab rather than opening a new window.
       const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-      for (const client of allClients) {
+      // A pop-out window (?popout=<id>, one project per monitor) cannot switch projects and
+      // does not listen for notification-navigate — prefer the main cockpit window.
+      // Prefer a main window; a pop-out qualifies only when it already shows that project.
+      const usable = allClients.filter(c => {
+        const pop = popoutProjectOf(c)
+        return pop === null || (projectId != null && pop === projectId)
+      })
+      const ordered = usable.sort((a, b) =>
+        Number(popoutProjectOf(a) !== null) - Number(popoutProjectOf(b) !== null))
+      for (const client of ordered) {
         if ('focus' in client) {
           await (client as WindowClient).focus()
           // Ask the tab to navigate to the relevant project.

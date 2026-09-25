@@ -1000,3 +1000,70 @@
 .health-badge.health-badge-green  { color: var(--green);  border-color: color-mix(in srgb, var(--green) 35%, transparent); }
 .health-badge.health-badge-yellow { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 35%, transparent); }
 .health-badge.health-badge-red    { color: var(--red);    border-color: color-mix(in srgb, var(--red) 35%, transparent); }
+
+/* ── Pop-out windows (lib/popout.ts) ───────────────────────── */
+/* ⧉ in the project header: open this project in its own window */
+.popout-open-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text3);
+  font-size: 15px;
+  line-height: 1;
+  padding: 5px 8px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.popout-open-btn:hover {
+  background: var(--bg3);
+  color: var(--accent-h);
+  border-color: var(--accent);
+}
+/* A phone has no second monitor to put the window on */
+@media (max-width: 768px) {
+  .popout-open-btn { display: none; }
+}
+
+/* The pop-out window's own slim top bar (title + runtime pill) */
+.popout-bar {
+  align-items: center;
+  gap: 10px;
+  padding-left: 12px;
+}
+.popout-bar-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.popout-bar-btn {
+  flex-shrink: 0;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.popout-bar-btn:hover { border-color: var(--accent); }
+.popout-center {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--text2);
+}
+.popout-bar-warn {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--yellow);
+  cursor: help;
+  white-space: nowrap;
+}

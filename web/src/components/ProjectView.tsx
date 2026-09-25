@@ -18,6 +18,7 @@ import { BrowserTab } from '../tabs/BrowserTab'
 import { AgentsTab } from '../tabs/AgentsTab'
 import { t } from '../i18n'
 import { useModules } from '../hooks/useModules'
+import { openProjectWindow, popoutKey } from '../lib/popout'
 
 interface Tab {
   id: TabId
@@ -114,6 +115,10 @@ interface Props {
   navRequest?: SearchNavTarget | null
   /** Live model registry from /api/models; undefined → ChatTab uses the static fallback. */
   models?: { value: string; label: string }[]
+  /** Rendered inside a pop-out window (lib/popout.ts): own layout keys, no ⧉ button. */
+  popout?: boolean
+  /** Inner tab to open on mount (pop-out windows land on the browser). */
+  initialTab?: TabId
 }
 
 type GitSyncState = 'idle' | 'busy' | 'ok' | 'err'
@@ -269,8 +274,11 @@ function HeaderTestRunner({ projectId }: { projectId: string }) {
   )
 }
 
-export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject, settingsRequest, navRequest, models }: Props) {
-  const [activeTab, setActiveTab] = useState<TabId>('board')
+export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitClose, isActive, openProjectIds, onSwipeToProject, settingsRequest, navRequest, models, popout, initialTab }: Props) {
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? 'board')
+  // A pop-out keeps its divider/collapse/inner-tab state under its own keys, so resizing it
+  // never moves the main window's layout.
+  const lsKey = (key: string) => (popout ? popoutKey(key) : key)
 
   // Android back inside a project: return to the tab you came from before Back is allowed to
   // reach the app boundary. One level only, and a back-driven switch is not itself recorded —
@@ -293,14 +301,21 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
   })
   // Mobile inner tab: null = show chat (default), TabId = show that inner tab.
   // Restored from localStorage per project so reopening lands where you left off.
-  const [mobileInnerTab, setMobileInnerTab] = useState<TabId | null>(() => readMobileTab(project.id) as TabId | null)
+  const [mobileInnerTab, setMobileInnerTab] = useState<TabId | null>(() => popout ? (initialTab ?? null) : readMobileTab(project.id) as TabId | null)
   // spec-052 Phase 4a: a card the user chose to "Discuss" on the board → handed to the chat.
   const [discussCard, setDiscussCard] = useState<{ cardId: string; title: string } | null>(null)
   const git = project.health.git
   // Spec-065: module gate — github badge rendered only when the github module is enabled;
   // browser tab added to the tab list when the browser module is enabled.
-  const { isEnabled: isModEnabled } = useModules()
+  const { isEnabled: isModEnabled, loading: modulesLoading } = useModules()
   const browserEnabled = isModEnabled('browser')
+  // A pop-out asked to land on the browser of a cockpit whose browser module is off would
+  // show an empty pane — fall back to the board once the module list is known.
+  useEffect(() => {
+    if (!popout || modulesLoading || browserEnabled) return
+    if (activeTab === 'browser') setActiveTab('board')
+    if (mobileInnerTab === 'browser') setMobileInnerTab(null)
+  }, [popout, modulesLoading, browserEnabled, activeTab, mobileInnerTab])
   // Build the visible tab list: base tabs + browser tab when the module is on
   const visibleTabs: Tab[] = browserEnabled
     ? [...BASE_TABS, { id: 'browser' as const, label: t['tab.browser'] }]
@@ -419,15 +434,15 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
 
   // ── Resize / collapse state (persisted in localStorage) ──────────────────
   const [chatWidth, setChatWidth] = useState<number>(() =>
-    readLS(LS_WIDTH, CHAT_DEFAULT_PCT)
+    readLS(lsKey(LS_WIDTH), CHAT_DEFAULT_PCT)
   )
   const [collapsed, setCollapsed] = useState<boolean>(() =>
-    readLSBool(LS_COLLAPSED, false)
+    readLSBool(lsKey(LS_COLLAPSED), false)
   )
   // Full-screen chat (left project pane hidden). Opposite of `collapsed`; the two
   // never hold at once — entering either clears the other.
   const [chatMax, setChatMax] = useState<boolean>(() =>
-    readLSBool(LS_CHATMAX, false)
+    readLSBool(lsKey(LS_CHATMAX), false)
   )
   // Remember width before collapse so we can restore it
   const widthBeforeCollapse = useRef<number>(chatWidth)
@@ -442,28 +457,33 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
 
   // Persist changes
   useEffect(() => {
-    try { localStorage.setItem(LS_WIDTH, String(chatWidth)) } catch {}
+    try { localStorage.setItem(lsKey(LS_WIDTH), String(chatWidth)) } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatWidth])
   useEffect(() => {
-    try { localStorage.setItem(LS_COLLAPSED, String(collapsed)) } catch {}
+    try { localStorage.setItem(lsKey(LS_COLLAPSED), String(collapsed)) } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collapsed])
   useEffect(() => {
-    try { localStorage.setItem(LS_CHATMAX, String(chatMax)) } catch {}
+    try { localStorage.setItem(lsKey(LS_CHATMAX), String(chatMax)) } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatMax])
 
   // ── Mobile browser view: the Browser tab stacks browser (top) + chat (bottom) ──
   // No separate "Split" toggle — opening the Browser tab IS the split view. The
   // divider ratio is a per-device pref shared across projects.
-  const [mobileBrowserPct, setMobileBrowserPct] = useState<number>(() => readLS(LS_MSPLIT_PCT, MSPLIT_DEFAULT_PCT))
+  const [mobileBrowserPct, setMobileBrowserPct] = useState<number>(() => readLS(lsKey(LS_MSPLIT_PCT), MSPLIT_DEFAULT_PCT))
   // Persist the per-project mobile view so reopening restores the last inner tab.
   useEffect(() => {
+    if (popout) return  // the per-project memory belongs to the main window
     try {
       if (mobileInnerTab) localStorage.setItem(mtabKey(project.id), mobileInnerTab)
       else localStorage.removeItem(mtabKey(project.id))
     } catch {}
-  }, [mobileInnerTab, project.id])
+  }, [mobileInnerTab, project.id, popout])
   useEffect(() => {
-    try { localStorage.setItem(LS_MSPLIT_PCT, String(mobileBrowserPct)) } catch {}
+    try { localStorage.setItem(lsKey(LS_MSPLIT_PCT), String(mobileBrowserPct)) } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mobileBrowserPct])
 
   // Vertical divider drag (pointer events → works for touch + mouse). Resizes the
@@ -938,6 +958,14 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
                 <HealthRunEndRefresher refresh={refreshHealth} />
               </div>
             </div>
+            {!popout && (
+              <button
+                className="popout-open-btn"
+                onClick={() => { if (!openProjectWindow(project.id, activeTab)) window.alert(t['popout.blocked']) }}
+                title={t['popout.open_window_hint']}
+                aria-label={t['popout.open_window']}
+              >⧉</button>
+            )}
           </div>
 
           <nav className="tabs" role="tablist" aria-label={t['tab.sections_aria']}>

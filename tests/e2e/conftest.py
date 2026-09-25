@@ -37,7 +37,8 @@ VENV_PYTHON = Path(sys.executable)
 # One scripted "e2e-<name>" project per scenario keeps each Playwright test's
 # transcript pristine — no bubbles bleeding in from another scenario's run.
 E2E_PROJECT_IDS = ["e2e-text", "e2e-tool", "e2e-slow", "e2e-busy", "e2e-multiblock",
-                   "e2e-plan", "e2e-plan-reload", "e2e-hold", "e2e-hold-queue"]
+                   "e2e-plan", "e2e-plan-reload", "e2e-hold", "e2e-hold-queue",
+                   "e2e-popout-a", "e2e-popout-b"]
 
 
 def _free_port() -> int:

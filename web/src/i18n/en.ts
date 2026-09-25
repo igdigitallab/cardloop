@@ -201,6 +201,9 @@ export const en = {
 
   // ── Split view ───────────────────────────────────────────────
   'split.open_second_chat': 'Open a second chat alongside',
+  'popout.open_window': 'Open in a separate window',
+  'popout.open_window_hint': 'Open this project in its own window — drag it to another monitor. Browser and chat side by side, with the same resizable divider.',
+  'popout.blocked': 'The browser blocked the pop-out window — allow pop-ups for this address and try again.',
   'split.close_panel': 'Close this panel',
   'split.expand_chat': 'Expand chat',
   'split.collapse_chat': 'Collapse chat',
