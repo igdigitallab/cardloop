@@ -38,6 +38,12 @@ def test_get_pricing_resolution():
     # "claude-opus-5-5-20260921".startswith("claude-opus-5") is true, and Opus 5 costs 25% more.
     assert usage_pricing.get_pricing("claude-opus-5-5-20260921") == usage_pricing.PRICING["claude-opus-5-5"]
     assert usage_pricing.get_pricing("claude-opus-5-20260724") == usage_pricing.PRICING["claude-opus-5"]
+    # Sonnet 5.5 and Sonnet 5 cost the same today, so `==` would pass on a mis-ordered table;
+    # identity pins that the row actually matched is the 5.5 one.
+    assert usage_pricing.get_pricing("claude-sonnet-5-5") is usage_pricing.PRICING["claude-sonnet-5-5"]
+    assert usage_pricing.get_pricing("claude-sonnet-5-5-20260928") is usage_pricing.PRICING["claude-sonnet-5-5"]
+    assert usage_pricing.get_pricing("claude-sonnet-5-20260629") is usage_pricing.PRICING["claude-sonnet-5"]
+    assert usage_pricing.get_pricing("something-sonnet-ish") is usage_pricing.PRICING["claude-sonnet-5-5"]
     # unknown / local → None
     assert usage_pricing.get_pricing("llama-3") is None
     assert usage_pricing.get_pricing(None) is None

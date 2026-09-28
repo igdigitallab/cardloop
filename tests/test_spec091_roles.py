@@ -425,9 +425,9 @@ def test_h4_three_reviewers_on_three_different_model_tiers(builtin_roles):
         "reviewer-security": builtin_roles["reviewer-security"].model,
         "reviewer-quality": builtin_roles["reviewer-quality"].model,
     }
-    assert models["reviewer-logic"] == "claude-opus-5"
+    assert models["reviewer-logic"] == "claude-opus-5-5"
     assert models["reviewer-security"] == "claude-fable-5-1"
-    assert models["reviewer-quality"] == "claude-sonnet-5"
+    assert models["reviewer-quality"] == "claude-sonnet-5-5"
     assert len(set(models.values())) == 3
 
 
@@ -442,10 +442,10 @@ def test_h4b_remaining_four_new_roles_also_pin_explicit_model_ids(builtin_roles)
         "test-writer": builtin_roles["test-writer"].model,
         "docs-writer": builtin_roles["docs-writer"].model,
     }
-    assert models["architect"] == "claude-opus-5"
-    assert models["debugger"] == "claude-sonnet-5"
-    assert models["test-writer"] == "claude-sonnet-5"
-    assert models["docs-writer"] == "claude-sonnet-5"
+    assert models["architect"] == "claude-opus-5-5"
+    assert models["debugger"] == "claude-sonnet-5-5"
+    assert models["test-writer"] == "claude-sonnet-5-5"
+    assert models["docs-writer"] == "claude-sonnet-5-5"
     for name, model in models.items():
         assert model.startswith("claude-"), (name, model)
 
@@ -512,9 +512,9 @@ _EXPECTED_DESCRIPTIONS = {
 # involved. The role FILES pin a fixed id regardless of env; compare against that literal
 # baseline instead of the env-sensitive DEFAULT_AGENTS value.
 _DEFAULT_MODEL_BY_ROLE = {
-    "executor": "claude-sonnet-5",
-    "researcher": "claude-sonnet-5",
-    "skeptic": "claude-sonnet-5",
+    "executor": "claude-sonnet-5-5",
+    "researcher": "claude-sonnet-5-5",
+    "skeptic": "claude-sonnet-5-5",
     "quick": "haiku",
 }
 

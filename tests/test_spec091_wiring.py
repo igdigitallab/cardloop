@@ -32,9 +32,9 @@ import webapp as _webapp
 # DEFAULT_AGENTS' `model` field, and that is NOT a code bug. Compare against this literal,
 # env-independent baseline instead wherever a test asserts model equality against the registry.
 _DEFAULT_MODEL_BY_ROLE = {
-    "executor": "claude-sonnet-5",
-    "researcher": "claude-sonnet-5",
-    "skeptic": "claude-sonnet-5",
+    "executor": "claude-sonnet-5-5",
+    "researcher": "claude-sonnet-5-5",
+    "skeptic": "claude-sonnet-5-5",
     "quick": "haiku",
 }
 
@@ -545,7 +545,7 @@ async def test_e8_deleting_project_role_restores_builtin_effective(
     after = await client.get("/api/projects/myproject/roles/executor?scope=builtin", headers=h)
     after_json = await after.json()
     assert after_json["role"]["shadowed_by"] is None
-    assert after_json["role"]["model"] == "claude-sonnet-5"
+    assert after_json["role"]["model"] == "claude-sonnet-5-5"
 
 
 # ─────────────────────────── I. Safety and regressions ───────────────────────────

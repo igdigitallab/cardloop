@@ -4,7 +4,7 @@ description: Hostile logic reviewer, read-only. THE DEFAULT review pass. Use thi
 enabled: true
 tools: [Read, Grep, Glob, Bash]
 disallowedTools: [Write, Edit, NotebookEdit]
-model: claude-opus-5
+model: claude-opus-5-5
 effort: high
 maxTurns: 25
 skills: [code-review]

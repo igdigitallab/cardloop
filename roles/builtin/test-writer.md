@@ -3,7 +3,7 @@ name: test-writer
 description: Test-writing agent. Use this when acceptance criteria exist and need to become a failing-then-passing test before implementation.
 enabled: true
 tools: [Read, Write, Edit, Bash, Grep, Glob]
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 effort: medium
 maxTurns: 40
 color: lime

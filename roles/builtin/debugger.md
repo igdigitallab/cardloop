@@ -3,7 +3,7 @@ name: debugger
 description: Debugging agent. Use this when a bug is reported but not yet understood — it hypothesizes, reproduces, and bisects before touching a fix.
 enabled: true
 tools: [Bash, Read, Grep, Glob, Edit, Write]
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 effort: high
 maxTurns: 60
 color: orange

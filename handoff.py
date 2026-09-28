@@ -8,7 +8,7 @@ than an obvious reset: it will happily "fix back" work the other engine just did
 ⚠️ Deliberately NOT a model call. The spec's own review found three defects that block
 reusing the `/rotate` summariser: it parses Claude JSONL and cannot read Codex history, its
 injector keys pending summaries by the PROJECT session_key (another chat can consume one) and
-deletes the summary BEFORE delivery is confirmed, and its helper hardwires `claude-sonnet-5`
+deletes the summary BEFORE delivery is confirmed, and its helper hardwires a cloud Sonnet
 with no account or backend — so building a handoff for an all-local chat would ship that
 chat's transcript to the cloud. A deterministic extractor has none of those failure modes: no
 network, no provider, no account, nothing to leak, and no way to hallucinate a constraint

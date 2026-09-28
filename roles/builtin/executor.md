@@ -3,7 +3,7 @@ name: executor
 description: General code and infra execution agent. Use this when a task needs the repo or system actually changed: write files, edit code, run bash commands, install dependencies.
 enabled: true
 tools: [Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch]
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 maxTurns: 200
 permissionMode: bypassPermissions
 color: blue

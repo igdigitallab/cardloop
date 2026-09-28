@@ -4,7 +4,7 @@ description: Code-quality reviewer, read-only. NOT the default pass — reviewer
 enabled: true
 tools: [Read, Grep, Glob, Bash]
 disallowedTools: [Write, Edit, NotebookEdit]
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 effort: medium
 maxTurns: 20
 color: cyan

@@ -4,7 +4,7 @@ description: Architecture planning agent, read-only. Use this when a change cros
 enabled: true
 tools: [Read, Grep, Glob, Bash, WebFetch, WebSearch]
 disallowedTools: [Write, Edit, NotebookEdit]
-model: claude-opus-5
+model: claude-opus-5-5
 effort: high
 maxTurns: 40
 color: purple

@@ -71,8 +71,8 @@ async def test_off_path_unchanged(tmp_path):
     # compare the `model` field against that literal baseline instead (every other field stays
     # compared against DEFAULT_AGENTS, which is unaffected by those three vars).
     _model_baseline = {
-        "executor": "claude-sonnet-5", "researcher": "claude-sonnet-5",
-        "skeptic": "claude-sonnet-5", "quick": "haiku",
+        "executor": "claude-sonnet-5-5", "researcher": "claude-sonnet-5-5",
+        "skeptic": "claude-sonnet-5-5", "quick": "haiku",
     }
     for name, default_def in engine.DEFAULT_AGENTS.items():
         got = opts.agents[name]

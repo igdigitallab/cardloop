@@ -4,7 +4,7 @@ description: Adversarial verifier, read-only. Use this when a claim or finding n
 enabled: true
 tools: [Bash, Read, Glob, Grep, WebFetch, WebSearch]
 disallowedTools: [Write, Edit, NotebookEdit]
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 maxTurns: 80
 permissionMode: bypassPermissions
 color: gray

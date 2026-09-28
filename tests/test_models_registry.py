@@ -47,7 +47,7 @@ def test_build_registry_static_fallback_when_none():
     assert reg["source"] == "static"
     assert reg["models"] == [
         {"value": "fable", "label": "Fable 5.1"},
-        {"value": "sonnet", "label": "Sonnet 5"},
+        {"value": "sonnet", "label": "Sonnet 5.5"},
         {"value": "opus", "label": "Opus 5.5"},
         {"value": "haiku", "label": "Haiku 4.5"},
     ]
@@ -72,7 +72,7 @@ async def test_api_models_live_path(monkeypatch):
     assert by_value["haiku"] == "Haiku 4.5"
     # Families without a live match still present via static fallback.
     assert by_value["fable"] == "Fable 5.1"
-    assert by_value["sonnet"] == "Sonnet 5"
+    assert by_value["sonnet"] == "Sonnet 5.5"
     _reset_cache()
 
 
@@ -133,6 +133,45 @@ def test_static_label_spots_stay_in_sync():
     assert set(_webapp._ALLOWED_MODELS) == set(aliases), (
         f"webapp._ALLOWED_MODELS {sorted(_webapp._ALLOWED_MODELS)} != registry aliases {sorted(aliases)}"
     )
+
+
+def test_pinned_ids_follow_the_static_lineup():
+    """Shipped roles, the executor/researcher defaults and the handoff summariser pin EXPLICIT
+    ids (a bare alias means whatever the serving CLI thinks it means), so a model release has to
+    bump them by hand — and the Opus 5.5 bump bumped the labels and missed the roles: the builtin
+    reviewer-logic/architect kept running Opus 5 for a week, at 25% more per token. The static
+    labels above are bumped on every release anyway; tie every pinned id to them."""
+    import inspect
+
+    import engine as _engine
+    import roles as _roles
+
+    newest = {alias: "claude-" + re.sub(r"[ .]", "-", label.lower())
+              for alias, label in _webapp._MODEL_FAMILIES}
+    assert newest["sonnet"].startswith("claude-sonnet-"), newest
+
+    def family(model_id):
+        return next((a for a in newest if model_id.startswith(f"claude-{a}-")), None)
+
+    roles_list, errors = _roles.list_roles_report(None)
+    assert errors == []
+    pinned = {f"role {r.name}": r.model for r in roles_list
+              if r.scope == "builtin" and (r.model or "").startswith("claude-")}
+    engine_src = inspect.getsource(_engine)
+    for var in ("EXECUTOR_MODEL", "RESEARCHER_MODEL"):
+        pinned[f"engine {var}"] = re.search(
+            rf'os\.getenv\("{var}", "([^"]+)"\)', engine_src).group(1)
+    pinned["HANDOFF_MODEL"] = re.search(
+        r'os\.environ\.get\("HANDOFF_MODEL", "([^"]+)"\)',
+        inspect.getsource(_webapp._build_handoff_inner)).group(1)
+
+    assert len(pinned) >= 10, pinned  # the scan must actually find the pins it guards
+    for where, model_id in pinned.items():
+        fam = family(model_id)
+        assert fam, f"{where}: {model_id} belongs to no family in _MODEL_FAMILIES"
+        assert model_id == newest[fam], (
+            f"{where} pins {model_id}, but the lineup's newest {fam} is {newest[fam]} — "
+            "bump the pin together with the label")
 
 
 def test_ultracode_effort_label_matches_engine():

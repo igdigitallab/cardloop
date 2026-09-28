@@ -4,7 +4,7 @@ description: Read-only research agent. Use this when you need facts gathered (we
 enabled: true
 tools: [Bash, Read, Glob, Grep, WebFetch, WebSearch]
 disallowedTools: [Write, Edit, NotebookEdit]
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 maxTurns: 120
 permissionMode: bypassPermissions
 color: teal

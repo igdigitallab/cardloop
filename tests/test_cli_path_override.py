@@ -12,6 +12,7 @@ Two properties matter here:
 """
 import importlib.util
 import os
+import re
 import stat
 import sys
 
@@ -117,7 +118,10 @@ def test_bot_import_order_lets_dotenv_reach_the_resolver():
         dotenv = open(os.path.join(root, ".env"), encoding="utf-8").read()
     except OSError:
         pytest.skip("no .env in this checkout")
-    if "CLAUDE_CLI_PATH=" not in dotenv:
+    # An ACTIVE assignment only: a commented-out `# CLAUDE_CLI_PATH=...` (how the override is
+    # parked between model releases) contains the substring too, and would fail this test on
+    # a launcher that correctly resolves None.
+    if not re.search(r"^[ \t]*CLAUDE_CLI_PATH=\S", dotenv, re.MULTILINE):
         pytest.skip(".env does not set CLAUDE_CLI_PATH — nothing to observe")
 
     env = {"HOME": os.path.expanduser("~"), "PATH": os.environ.get("PATH", "")}

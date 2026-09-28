@@ -176,7 +176,7 @@ def test_prompt_forbids_inventing_hashes_and_continuing_the_transcript():
 
 
 def test_digest_model_defaults_to_sonnet_in_source():
-    """haiku at effort=low drifted into continuing a long transcript; sonnet-5 is the default.
+    """haiku at effort=low drifted into continuing a long transcript; Sonnet is the default.
 
     Assert the SOURCE default, not os.environ — reading the env with a sonnet-5 fallback would
     pass even if the code had been reverted to haiku, which is exactly the regression to catch.
@@ -184,7 +184,7 @@ def test_digest_model_defaults_to_sonnet_in_source():
     import inspect
 
     src = inspect.getsource(_webapp._build_handoff_inner)
-    assert 'os.environ.get("HANDOFF_MODEL", "claude-sonnet-5")' in src
+    assert 'os.environ.get("HANDOFF_MODEL", "claude-sonnet-5-5")' in src
 
 
 def test_session_title_does_not_read_the_digest_model_var():

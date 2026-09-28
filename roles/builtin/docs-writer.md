@@ -3,7 +3,7 @@ name: docs-writer
 description: Documentation agent, markdown only. Use this when README/CLAUDE.md/ARCHITECTURE.md/specs need writing or updating to match what the code actually does now.
 enabled: true
 tools: [Read, Write, Edit, Grep, Glob]
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 effort: medium
 maxTurns: 30
 color: pink

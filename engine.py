@@ -88,9 +88,11 @@ MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku", "fable": "fable"
 # ─────────────────────────── sub-agent roster ───────────────────────────
 # Default agents available to conductor sessions via the SDK Task tool.
 # Models are configurable via env; Phase C will add per-project overrides.
-# Explicit id, not the `sonnet` alias — the alias still resolves to Sonnet 4.6.
-_EXECUTOR_MODEL = os.getenv("EXECUTOR_MODEL", "claude-sonnet-5")
-_RESEARCHER_MODEL = os.getenv("RESEARCHER_MODEL", "claude-sonnet-5")
+# Explicit id, not the `sonnet` alias: what an alias means is decided by whichever CLI serves
+# the run, and a stale bundle silently resolves it a generation back. The cost of pinning is
+# that every model release has to bump these ids AND roles/builtin/*.md by hand.
+_EXECUTOR_MODEL = os.getenv("EXECUTOR_MODEL", "claude-sonnet-5-5")
+_RESEARCHER_MODEL = os.getenv("RESEARCHER_MODEL", "claude-sonnet-5-5")
 _QUICK_MODEL = os.getenv("QUICK_MODEL", "haiku")
 
 # Effort level for the conductor/main session.

@@ -9190,7 +9190,7 @@ _MODELS_URL = "https://api.anthropic.com/v1/models?limit=50"
 # Alias → static fallback label. Order is load-bearing (matches web/src/lib/models.ts).
 _MODEL_FAMILIES: list[tuple[str, str]] = [
     ("fable", "Fable 5.1"),
-    ("sonnet", "Sonnet 5"),
+    ("sonnet", "Sonnet 5.5"),
     ("opus", "Opus 5.5"),
     ("haiku", "Haiku 4.5"),
 ]
@@ -15789,11 +15789,11 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
         full_dialog = "\n".join(rendered_parts)
 
         if full_dialog:
-            # Default is claude-sonnet-5, not haiku: this digest is inherited as fact by the next
+            # Default is Sonnet, not haiku: this digest is inherited as fact by the next
             # session, and haiku at effort=low drifts into continuing a long transcript rather than
             # digesting it. A rotation happens once per ~280k-token session, so the extra cost is
             # noise against what it protects. HANDOFF_MODEL still overrides.
-            handoff_model = os.environ.get("HANDOFF_MODEL", "claude-sonnet-5")
+            handoff_model = os.environ.get("HANDOFF_MODEL", "claude-sonnet-5-5")
             opts = _ClaudeAgentOptions(
                 model=handoff_model,
                 permission_mode="default",  # internal helper, no tools — no need to bypass
@@ -16411,8 +16411,8 @@ async def api_project_memory_delete(req: web.Request) -> web.Response:
 
 # CHECKLIST C9: a role's `model` is validated at WRITE time, not at run time. This is
 # deliberately looser than `_ALLOWED_MODELS` (session/card models only): the shipped builtin
-# roles carry explicit ids like "claude-sonnet-5" (see engine.py:84-87 — the bare `sonnet`
-# alias still resolves to an older generation on this bundle), so a role's model is valid
+# roles carry explicit ids like "claude-sonnet-5-5" (see the _EXECUTOR_MODEL note in engine.py —
+# a bare alias resolves to whatever generation the serving CLI knows), so a role's model is valid
 # when it is either one of the four session aliases or a non-empty `claude-*` id shape. A
 # tighter, live-probed check belongs with tools/verify_model_aliases.py, not this endpoint.
 #
