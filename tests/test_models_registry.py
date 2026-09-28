@@ -135,7 +135,7 @@ def test_static_label_spots_stay_in_sync():
     )
 
 
-def test_pinned_ids_follow_the_static_lineup():
+def test_pinned_ids_follow_the_static_lineup(monkeypatch, tmp_path):
     """Shipped roles, the executor/researcher defaults and the handoff summariser pin EXPLICIT
     ids (a bare alias means whatever the serving CLI thinks it means), so a model release has to
     bump them by hand — and the Opus 5.5 bump bumped the labels and missed the roles: the builtin
@@ -153,6 +153,8 @@ def test_pinned_ids_follow_the_static_lineup():
     def family(model_id):
         return next((a for a in newest if model_id.startswith(f"claude-{a}-")), None)
 
+    # Builtin roles only — an operator's malformed global role must not turn this red.
+    monkeypatch.setenv("CARDLOOP_ROLES_DIR", str(tmp_path))
     roles_list, errors = _roles.list_roles_report(None)
     assert errors == []
     pinned = {f"role {r.name}": r.model for r in roles_list
@@ -164,12 +166,20 @@ def test_pinned_ids_follow_the_static_lineup():
     pinned["HANDOFF_MODEL"] = re.search(
         r'os\.environ\.get\("HANDOFF_MODEL", "([^"]+)"\)',
         inspect.getsource(_webapp._build_handoff_inner)).group(1)
+    # Pins outside Python: the Agents tab's new-role template (a role created from it replaces
+    # the builtin of the same name) and the cron lint scripts that call the CLI directly.
+    for rel in ("web/src/tabs/AgentsTab.tsx", "tools/claude-md-lint.sh",
+                "tools/memory-lint-semantic.sh"):
+        src = open(os.path.join(_ROOT, rel)).read()
+        for i, mid in enumerate(re.findall(r"\bclaude-(?:sonnet|opus|fable)-\d+(?:-\d+)*", src)):
+            pinned[f"{rel} #{i}"] = mid
 
-    assert len(pinned) >= 10, pinned  # the scan must actually find the pins it guards
+    assert len(pinned) >= 13, pinned  # the scan must actually find the pins it guards
     for where, model_id in pinned.items():
         fam = family(model_id)
         assert fam, f"{where}: {model_id} belongs to no family in _MODEL_FAMILIES"
-        assert model_id == newest[fam], (
+        # A dated snapshot of the newest model (claude-haiku-4-5-20251001) is still the newest.
+        assert model_id == newest[fam] or re.fullmatch(rf"{newest[fam]}-\d{{8}}", model_id), (
             f"{where} pins {model_id}, but the lineup's newest {fam} is {newest[fam]} — "
             "bump the pin together with the label")
 

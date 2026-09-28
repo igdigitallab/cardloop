@@ -176,7 +176,7 @@ echo "claude-md-lint: reading $(printf '%s' "$FILES" | wc -l) files …" >&2
 # written that to the cron report every Monday. Hence both the wider budget and the floor below.
 LLM_REPORT="$(mktemp)"
 timeout 1800 "$CLAUDE" -p "$PROMPT" \
-  --model claude-sonnet-5 \
+  --model claude-sonnet-5-5 \
   --permission-mode bypassPermissions \
   --disallowed-tools "Write,Edit,NotebookEdit" \
   > "$LLM_REPORT" 2>/dev/null

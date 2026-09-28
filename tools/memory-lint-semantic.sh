@@ -53,7 +53,7 @@ EOF
 
 echo "memory-lint-semantic: reading $DIR …" >&2
 timeout 900 "$CLAUDE" -p "$PROMPT" \
-  --model claude-sonnet-5 \
+  --model claude-sonnet-5-5 \
   --permission-mode bypassPermissions \
   --disallowed-tools "Write,Edit,NotebookEdit" \
   > "$REPORT" 2>/dev/null

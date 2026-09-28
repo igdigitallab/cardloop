@@ -45,7 +45,7 @@ name: ${slug}
 description: Use this role when ...
 enabled: true
 tools: [Read, Grep, Glob, Bash]
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 effort: medium
 maxTurns: 20
 ---

@@ -254,6 +254,8 @@ def watch() -> int:
         print("Fix: bump `claude-agent-sdk` in requirements.txt, recreate the venv, restart —")
         print("     or, while no SDK release bundles a new enough CLI yet, install the CLI")
         print("     directly and point CLAUDE_CLI_PATH at it (see engine.CLI_PATH).")
+        print("Then: static labels (_MODEL_FAMILIES + models.ts), usage_pricing, and every")
+        print("     explicit-id pin — test_pinned_ids_follow_the_static_lineup lists them.")
         try:  # surface it in the cockpit the same way the deploy canary does
             inbox = os.path.join(_REPO_ROOT, "data", "inbox")
             os.makedirs(inbox, exist_ok=True)
@@ -261,7 +263,9 @@ def watch() -> int:
                 f.write("🔴 Model alias mismatch after a new model release:\n"
                         + "\n".join(lines)
                         + "\nFix: bump claude-agent-sdk in requirements.txt, recreate venv, restart"
-                        + " — or set CLAUDE_CLI_PATH to a newer standalone CLI (engine.CLI_PATH).\n")
+                        + " — or set CLAUDE_CLI_PATH to a newer standalone CLI (engine.CLI_PATH)."
+                        + " Then bump the static labels, usage_pricing and the explicit-id pins"
+                        + " (test_pinned_ids_follow_the_static_lineup lists them).\n")
         except Exception:
             pass
     return code
@@ -279,6 +283,8 @@ def main() -> int:
         print("with the bundled CLI), recreate the venv, and restart. When no SDK release")
         print("carries a new enough CLI yet, install one (`npm i -g @anthropic-ai/claude-code`)")
         print("and set CLAUDE_CLI_PATH to it. See memory `opus5-alias-staleness-2026-07-24`.")
+        print("Then bump the static labels (_MODEL_FAMILIES + models.ts), usage_pricing and every")
+        print("explicit-id pin — test_pinned_ids_follow_the_static_lineup lists them.")
     elif code == 0:
         print("\n[OK] every alias resolves to the newest model of its family (UI <-> reality match).")
     return code

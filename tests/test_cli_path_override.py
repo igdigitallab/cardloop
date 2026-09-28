@@ -12,7 +12,6 @@ Two properties matter here:
 """
 import importlib.util
 import os
-import re
 import stat
 import sys
 
@@ -109,31 +108,34 @@ def test_no_module_snapshots_the_path_into_a_constant():
             "                .env. Call runtime.cli_path() at the point of use instead.")
 
 
-def test_bot_import_order_lets_dotenv_reach_the_resolver():
+def test_bot_import_order_lets_dotenv_reach_the_resolver(tmp_path):
     """End-to-end on the real launcher: importing bot must leave CLAUDE_CLI_PATH from .env
     visible to runtime.cli_path(). This is the only check that covers the ORDER of bot.py's
-    imports; every other test here drives the resolver directly and cannot see it."""
-    root = _ROOT
-    try:
-        dotenv = open(os.path.join(root, ".env"), encoding="utf-8").read()
-    except OSError:
-        pytest.skip("no .env in this checkout")
-    # An ACTIVE assignment only: a commented-out `# CLAUDE_CLI_PATH=...` (how the override is
-    # parked between model releases) contains the substring too, and would fail this test on
-    # a launcher that correctly resolves None.
-    if not re.search(r"^[ \t]*CLAUDE_CLI_PATH=\S", dotenv, re.MULTILINE):
-        pytest.skip(".env does not set CLAUDE_CLI_PATH — nothing to observe")
+    imports; every other test here drives the resolver directly and cannot see it.
 
+    Hermetic on purpose: it used to read the checkout's real .env and skip when that did not
+    set the override — i.e. on every install between model releases, which is exactly when
+    nobody is watching the escape hatch. The child now sees a synthetic .env instead."""
+    exe = _make_exe(tmp_path)
+    child = (
+        "import pathlib\n"
+        f"ENV = pathlib.Path({_ROOT!r}) / '.env'\n"
+        "_exists, _read = pathlib.Path.exists, pathlib.Path.read_text\n"
+        "pathlib.Path.exists = lambda self, *a, **k: True if self == ENV else _exists(self, *a, **k)\n"
+        f"pathlib.Path.read_text = lambda self, *a, **k: 'CLAUDE_CLI_PATH={exe}\\n' if self == ENV else _read(self, *a, **k)\n"
+        "import bot, runtime\n"
+        "print('RESOLVED:', runtime.cli_path())\n"
+    )
     env = {"HOME": os.path.expanduser("~"), "PATH": os.environ.get("PATH", "")}
     out = subprocess.run(
-        [_sys.executable, "-c", "import bot, runtime; print('RESOLVED:', runtime.cli_path())"],
-        cwd=root, env=env, capture_output=True, text=True, timeout=180,
+        [_sys.executable, "-c", child],
+        cwd=_ROOT, env=env, capture_output=True, text=True, timeout=180,
     )
     line = [ln for ln in out.stdout.splitlines() if ln.startswith("RESOLVED:")]
     assert line, f"child produced no verdict:\nstdout={out.stdout[-2000:]}\nstderr={out.stderr[-2000:]}"
-    assert line[0] != "RESOLVED: None", (
-        ".env sets CLAUDE_CLI_PATH but the launcher resolves None — an import runs before "
-        "_load_env() again, and the override is inert on any non-systemd install.")
+    assert line[0] == f"RESOLVED: {exe}", (
+        f"{line[0]!r}: .env sets CLAUDE_CLI_PATH but the launcher does not resolve it — an import "
+        "runs before _load_env() again, and the override is inert on any non-systemd install.")
 
 
 def test_verifier_probes_the_active_cli_not_the_bundle(monkeypatch, tmp_path):
