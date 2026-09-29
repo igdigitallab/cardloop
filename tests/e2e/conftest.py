@@ -38,7 +38,7 @@ VENV_PYTHON = Path(sys.executable)
 # transcript pristine — no bubbles bleeding in from another scenario's run.
 E2E_PROJECT_IDS = ["e2e-text", "e2e-tool", "e2e-slow", "e2e-busy", "e2e-multiblock",
                    "e2e-plan", "e2e-plan-reload", "e2e-hold", "e2e-hold-queue",
-                   "e2e-popout-a", "e2e-popout-b"]
+                   "e2e-popout-a", "e2e-popout-b", "e2e-files"]
 
 
 def _free_port() -> int:
@@ -123,9 +123,6 @@ def e2e_server(tmp_path_factory):
     app_dir = tmp_path_factory.mktemp("e2e-app")
     _build_app_copy(app_dir)
 
-    project_cwds = {pid: tmp_path_factory.mktemp(f"e2e-proj-{pid.replace('e2e-', '')}") for pid in E2E_PROJECT_IDS}
-    _seed_data(app_dir, project_cwds)
-
     # Isolated $HOME for the subprocess: webapp.py:_sdk_sessions_dir reads/writes SDK
     # conversation transcripts under Path.home()/".claude"/"projects"/<slug> — and
     # e2e_fake_engine.py writes a minimal transcript there too (see its module
@@ -133,6 +130,17 @@ def e2e_server(tmp_path_factory):
     # both the real app code and the fake engine would touch the OPERATOR'S REAL
     # ~/.claude/projects/ on whatever machine runs this suite.
     fake_home = tmp_path_factory.mktemp("e2e-home")
+
+    project_cwds = {pid: tmp_path_factory.mktemp(f"e2e-proj-{pid.replace('e2e-', '')}") for pid in E2E_PROJECT_IDS}
+    # The Files explorer scenarios need a project BELOW $HOME, so its parent folder is
+    # reachable ("go above the project") — see test_files_explorer.py.
+    files_cwd = fake_home / "work" / "e2e-files"
+    files_cwd.mkdir(parents=True)
+    project_cwds["e2e-files"] = files_cwd
+    _seed_data(app_dir, project_cwds)
+    # A scratch root standing in for /tmp (FILES_EXTRA_ROOTS defaults to the real /tmp, where
+    # pytest's own tmp dirs live, which would make every other project reachable).
+    scratch = tmp_path_factory.mktemp("e2e-scratch")
 
     port = _free_port()
     password = "e2e-" + os.urandom(8).hex()
@@ -144,6 +152,7 @@ def e2e_server(tmp_path_factory):
         "E2E_FAKE_ENGINE": "1",
         "CLAUDE_AUTH_MODE": "subscription",
         "HOME": str(fake_home),
+        "FILES_EXTRA_ROOTS": str(scratch),
     })
     env.pop("ANTHROPIC_API_KEY", None)
 
@@ -174,6 +183,8 @@ def e2e_server(tmp_path_factory):
         "password": password,
         "project_ids": E2E_PROJECT_IDS,
         "app_dir": app_dir,
+        "home": fake_home,
+        "scratch": scratch,
     }
 
     proc.terminate()

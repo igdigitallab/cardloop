@@ -136,6 +136,16 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/** Human message from an apiFetch failure: the server's {error} when there is one. */
+export function apiErrorMessage(e: unknown): string {
+  const body = (e as { body?: { error?: unknown } } | null)?.body
+  if (body && typeof body.error === 'string') return body.error
+  return e instanceof Error ? e.message : String(e)
+}
+
+const fsQuery = (path: string, project?: string) =>
+  `path=${encodeURIComponent(path)}${project ? `&project=${encodeURIComponent(project)}` : ''}`
+
 export const api = {
   health: () => apiFetch<{ ok: boolean }>('/api/health'),
 
@@ -714,6 +724,32 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content }),
       }
+    ),
+
+  // Explorer: absolute-path view shared by the project Files tab and Server files.
+  // `project` only adds that project's cwd as a reachable root.
+  fsInfo: (project?: string) =>
+    apiFetch<import('./types').FsInfo>(`/api/fs/info${project ? `?project=${encodeURIComponent(project)}` : ''}`),
+
+  fsList: (path: string, project?: string) =>
+    apiFetch<import('./types').FsListing>(`/api/fs/list?${fsQuery(path, project)}`),
+
+  fsFile: (path: string, project?: string) =>
+    apiFetch<import('./types').FsFile>(`/api/fs/file?${fsQuery(path, project)}`),
+
+  fsWrite: (path: string, content: string, baseRev: string | null, project?: string, force?: boolean) =>
+    apiFetch<{ ok: boolean; path: string; rev: string; size: number }>(
+      `/api/fs/file?${fsQuery(path, project)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, base_rev: baseRev, force: !!force }),
+      }
+    ),
+
+  fsStat: (text: string, base?: string, project?: string) =>
+    apiFetch<import('./types').FsStat>(
+      `/api/fs/stat?${fsQuery(text, project)}${base ? `&base=${encodeURIComponent(base)}` : ''}`
     ),
 
   // Prompt templates

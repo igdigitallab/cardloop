@@ -102,26 +102,32 @@ operator. Both kinds live in one store; `/plan/...` and `/decision/...` hit the 
 
 ---
 
-## Project Files
+## File Explorer (Files tab, Server files)
 
-Read-only file explorer within project `cwd`. `.env*` files (except `.env.example`) and internal dirs (`.git`, `venv`, `node_modules`, `dist`, `__pycache__`) are blocked. Anti-traversal enforced.
-
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| `GET` | `/api/projects/{id}/files` | Directory listing — `?path=<rel>` relative to project cwd | Yes |
-| `GET` | `/api/projects/{id}/file` | File contents — `?path=<rel>`, max 1MB; binary files rejected | Yes |
-
----
-
-## Global File Browser
-
-File browser rooted at `$HOME`. Same security rules as project files. Supports inline editing.
+One absolute-path view for the project Files tab and the Server-files tab. Policy lives in
+`fs_browser.py`: reachable roots are `$HOME`, `FILES_EXTRA_ROOTS` (colon-separated, default
+`/tmp`) and — with `?project=<id>` — that project's cwd. Everything is realpath'ed first;
+top-level dot entries under `$HOME` are hidden (only the native agent memory
+`~/.claude/projects/<slug>/memory/` is reachable), and `.env*`, key/credential file names and
+`.git`/`venv`/`node_modules`/… are denied at any depth. Refusals are `403`, never a partial listing.
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/api/global/files` | Directory listing — `?path=<abs or rel to $HOME>` | Yes |
-| `GET` | `/api/global/file` | Read file contents | Yes |
-| `POST` | `/api/global/file` | Write file contents — `?path=<path>`, body = raw text | Yes |
+| `GET` | `/api/fs/info` | `?project=<id>` optional → `{home, start, roots[]}`; `start` is the project cwd (or `$HOME`) | Yes |
+| `GET` | `/api/fs/list` | `?path=<abs>` → `{path, parent, crumbs[], entries[], truncated}`; `parent` is `null` at the ceiling | Yes |
+| `GET` | `/api/fs/stat` | `?path=<pasted text>&base=<abs>` → `{kind: dir\|file\|missing\|denied, path, nearest?}`; strips quotes/backticks/`file://`/`:line`, tries the text as typed first | Yes |
+| `GET` | `/api/fs/file` | `?path=<abs>` → `{path, content, lang, size, rev, editable}`; max 1 MB; binary → `error` | Yes |
+| `PUT` | `/api/fs/file` | `?path=<abs>`, body `{content, base_rev, force?}` → `{ok, rev, size}`. Existing UTF-8 text files only. `409` when `base_rev` no longer matches the disk (the agent rewrote it); `force` overwrites. Atomic; CRLF files stay CRLF | Yes |
+
+`rev` is an opaque **string** (`mtime_ns:size`) — nanosecond mtimes exceed 2^53 and do not survive a JSON number.
+
+### Legacy (still routed, no longer used by the UI)
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects/{id}/files` · `/file` | cwd-jailed listing / read, `?path=<rel>` | Yes |
+| `GET` | `/api/global/files` · `/file` | `$HOME`-jailed listing / read | Yes |
+| `POST` | `/api/global/file` | `$HOME`-jailed write (now refuses the sensitive dirs like its GET twin) | Yes |
 
 ---
 

@@ -99,7 +99,7 @@ web/src/
 │   ├── ProjectView.tsx       project container (tabs left + chat right)
 │   ├── ProjectTabBar.tsx · Sidebar.tsx (DnD)
 │   ├── ChatTab parts:        ToolBlock · SessionSelector · SessionContextPanel
-│   ├── FileExplorer.tsx      ⭐ shared for Files/GlobalFiles
+│   ├── FileExplorer.tsx      ⭐ shared for Files/GlobalFiles: tree + tabs + editor over /api/fs/* (FilePathBar · FileTabsBar · SplitHandle; state in lib/filesTabs.ts, paths in lib/fsPath.ts)
 │   ├── Modal.tsx · ConfirmModal.tsx · Toast.tsx
 │   ├── ErrorBoundary.tsx     ⭐ wraps ProjectView + each tab
 │   ├── PromptPicker · SkillPicker · UsageBadge · ProjectStructureCard

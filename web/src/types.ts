@@ -232,6 +232,49 @@ export interface FileContent {
   error?: string
 }
 
+// Explorer (absolute-path view, /api/fs/*)
+export interface FsInfo {
+  home: string
+  /** Where the explorer opens: the project's cwd, or $HOME for the server-files view. */
+  start: string
+  roots: { path: string; label: string }[]
+}
+
+export interface FsCrumb {
+  name: string
+  path: string
+  /** False above the reachable ceiling — shown as plain text, not a link. */
+  ok: boolean
+}
+
+export interface FsListing {
+  path: string
+  /** null at the ceiling: there is nothing above to go up to. */
+  parent: string | null
+  crumbs: FsCrumb[]
+  entries: FileEntry[]
+  truncated: boolean
+}
+
+export interface FsFile {
+  path: string
+  lang: string
+  size: number
+  /** Opaque on-disk revision (a string: nanosecond mtimes do not survive JSON numbers). */
+  rev: string
+  content: string
+  editable?: boolean
+  error?: string
+}
+
+export interface FsStat {
+  input: string
+  path: string | null
+  kind: 'dir' | 'file' | 'missing' | 'denied'
+  /** Deepest reachable folder above a missing path. */
+  nearest?: string
+}
+
 export type TabId = 'logs' | 'board' | 'files' | 'memory' | 'timeline' | 'settings' | 'specs' | 'browser' | 'agents'
 
 // ─── Epic-lens: Spec list (GET /api/projects/{id}/epic-specs) ─────────────────
