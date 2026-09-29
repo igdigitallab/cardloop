@@ -79,3 +79,18 @@ test('no regex lookbehind anywhere in the detector (Safari < 16.4 cannot parse i
     .filter(l => !l.trim().startsWith('*') && !l.trim().startsWith('//')).join('\n')
   assert.equal(/\(\?<[=!]/.test(code), false)
 })
+
+test('decodeFileRef never throws on a malformed reference', () => {
+  assert.equal(decodeFileRef(FILE_REF_PREFIX + encodeURIComponent('/tmp/a b.md')), '/tmp/a b.md')
+  for (const bad of [FILE_REF_PREFIX + '%E0%A4', FILE_REF_PREFIX + '%ZZ', FILE_REF_PREFIX + '%', FILE_REF_PREFIX,
+    FILE_REF_PREFIX + '%00', undefined, '', '#other', 'http://x']) {
+    assert.equal(decodeFileRef(bad), null, String(bad))
+  }
+})
+
+test('frameworks and bare file names', () => {
+  for (const no of ['node.js', 'Next.js', 'Chart.js', 'socket.io']) assert.equal(looksLikeFileRef(no), false, no)
+  assert.equal(looksLikeFileRef('src/node.js'), true)    // with a folder it is a real file
+  for (const yes of ['Dockerfile', 'Makefile', '.gitignore', 'deploy/Dockerfile']) assert.equal(looksLikeFileRef(yes), true, yes)
+  assert.equal(looksLikeFileRef('.env'), false)          // secrets are never linked
+})
