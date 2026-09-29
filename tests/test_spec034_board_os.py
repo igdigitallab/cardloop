@@ -217,6 +217,31 @@ async def test_reconcile_creates_card_on_completed_work(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_create_off_drops_creates_keeps_moves(tmp_path, monkeypatch):
+    """board_reconcile_create=False: a proposed create never reaches the board, a move still does."""
+    import webapp as webapp_module
+
+    _write_fixture_board(tmp_path)
+    cwd = str(tmp_path)
+
+    real_get = webapp_module._get_global_setting
+    monkeypatch.setattr(
+        webapp_module, "_get_global_setting",
+        lambda key, default=None: False if key == "board_reconcile_create" else real_get(key, default),
+    )
+    ops = json.dumps([
+        {"op": "create", "text": "Should never appear", "column": "backlog"},
+        {"op": "move", "id": "inprog1", "to": "review"},
+    ])
+    monkeypatch.setattr(engine, "_sdk_query", _make_haiku_mock(ops))
+    await reconcile_board(cwd=cwd, name="test-project", user_msg="Do work", agent_summary="Done.")
+
+    content = (tmp_path / "TASKS.md").read_text(encoding="utf-8")
+    assert "Should never appear" not in content
+    assert "inprog1" in content.split("## Review")[1].split("##")[0]
+
+
+@pytest.mark.asyncio
 async def test_reconcile_no_ops_on_question(tmp_path, monkeypatch):
     """Scenario (b): pure question → haiku returns [] → board unchanged."""
     _write_fixture_board(tmp_path)

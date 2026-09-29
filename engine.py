@@ -2752,13 +2752,14 @@ def _norm_title(text: str) -> str:
 
 
 async def _apply_reconcile_ops(cwd: str, name: str, ops: list, on_match: str = "done",
-                               session_key: str = "") -> None:
+                               session_key: str = "", allow_create: bool = True) -> None:
     """Apply a list of parsed reconcile ops under the board lock.
 
     Safety: no delete, cap 5, skip invalid. Audit-logs each applied op.
 
     on_match: "done" → auto-archive cards moved to done column (default);
               "review" → remap done→review so operator closes manually.
+    allow_create: False → "create" ops are dropped (moves of existing cards still apply).
 
     spec-052 Phase 2: when session_key is set, each applied op is surfaced in
     that project's chat as a board_event (kind="reconcile") AFTER the board write
@@ -2781,6 +2782,8 @@ async def _apply_reconcile_ops(cwd: str, name: str, ops: list, on_match: str = "
             op_type = op.get("op")
 
             if op_type == "create":
+                if not allow_create:
+                    continue
                 text = (op.get("text") or "").strip()
                 if not text:
                     continue
@@ -3026,10 +3029,13 @@ async def reconcile_board(
     try:
         import webapp as _wa  # noqa: F811 — already imported above in this function scope
         _on_match = _wa._get_global_setting("board_reconcile_on_match", "done") or "done"
+        _allow_create = _wa._get_global_setting("board_reconcile_create", True) is not False
     except Exception:
         _on_match = "done"
+        _allow_create = True
 
-    await _apply_reconcile_ops(cwd, name, ops, on_match=_on_match, session_key=session_key)
+    await _apply_reconcile_ops(cwd, name, ops, on_match=_on_match, session_key=session_key,
+                               allow_create=_allow_create)
 
 
 # ─────────────────────────── Resume self-healing ───────────────────────────

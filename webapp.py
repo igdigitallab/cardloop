@@ -5729,6 +5729,9 @@ _GLOBAL_SETTINGS_SPEC = {
     #   "review" → remap done→review so operator closes manually.
     "board_reconcile_enabled": ("bool", None, None),
     "board_reconcile_on_match": ("enum", ("done", "review"), None),
+    # - board_reconcile_create: when False the reconciler never creates cards; it still moves
+    #   existing ones. Default True (unchanged behaviour).
+    "board_reconcile_create": ("bool", None, None),
     # Card 43665f — model routing: default model used for board-card agent runs.
     # "" / absent → falls back to "sonnet". Does NOT affect chat runs.
     "board_card_model": ("model", None, None),
@@ -5991,6 +5994,7 @@ async def api_settings_get(req: web.Request) -> web.Response:
         # Board reconciler settings (Task A); True/done are the defaults.
         "board_reconcile_enabled": _get_global_setting("board_reconcile_enabled", True),
         "board_reconcile_on_match": _get_global_setting("board_reconcile_on_match", "done"),
+        "board_reconcile_create": _get_global_setting("board_reconcile_create", True),
         # Card 43665f: board card model default (empty string = use sonnet).
         "board_card_model": _get_global_setting("board_card_model", "") or "",
     }
