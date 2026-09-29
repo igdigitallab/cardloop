@@ -14,6 +14,7 @@ Script selection is a marker substring in the prompt (checked in order below):
   "e2e:slow"  -> two text_delta events separated by a long silent gap (tests
                  mid-run reload / re-attach; the gap is what the heartbeat pump in
                  webapp.py's chat stream is designed to survive)
+  "e2e:paths" -> a reply naming files in prose and in `code` (tests clickable paths in chat)
   "e2e:hold"  -> one delta, then the turn stays alive (running) for a long stretch
                  (tests composer/run-indicator state while a turn is genuinely in
                  flight — e.g. that Stop stays reachable)
@@ -174,6 +175,17 @@ async def run_engine(
         # Long silent tail: the turn stays running while the test asserts all three blocks survive.
         await asyncio.sleep(_SLOW_GAP_SEC)
         _append_transcript(cwd, sid, prompt, "\n".join(blocks), tool_calls=tool_calls)
+        yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
+        return
+
+    if "e2e:paths" in prompt:
+        # Paths in an agent message, three ways: absolute in prose, relative in `code`, and prose that
+        # must NOT become a link. The Files-tab e2e clicks them.
+        text = (f"Wrote {cwd}/README.md just now. Also `docs/guide.md` and `not a path` "
+                f"and and/or 1/2 stay plain.")
+        yield {"type": "text_delta", "text": text}
+        yield {"type": "text", "text": text}
+        _append_transcript(cwd, sid, prompt, text)
         yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
         return
 

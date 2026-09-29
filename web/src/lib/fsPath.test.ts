@@ -6,7 +6,9 @@
 //   node --test /tmp/fspath-test/
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ancestorsBetween, baseName, dirname, displayPath, isUnder, joinPath, looksLikePath, tabLabels } from './fsPath'
+import {
+  ancestorsBetween, baseName, dirname, displayPath, formatAgo, isUnder, joinPath, looksLikePath, resolveRelative, tabLabels,
+} from './fsPath'
 
 test('dirname / baseName / joinPath handle the root', () => {
   assert.equal(dirname('/a/b/c.md'), '/a/b')
@@ -54,4 +56,22 @@ test('looksLikePath fires on pasted paths, not on prose', () => {
   for (const no of ['', 'hello world', '/ 5 apples', '//', 'see /tmp/a.md for details', 'a/b/c', 'C:\\x', 'x  /tmp/a']) {
     assert.equal(looksLikePath(no), false, no)
   }
+})
+
+test('resolveRelative walks . and .. and never climbs past the root', () => {
+  assert.equal(resolveRelative('/a/b', 'c.png'), '/a/b/c.png')
+  assert.equal(resolveRelative('/a/b', './img/c.png'), '/a/b/img/c.png')
+  assert.equal(resolveRelative('/a/b', '../c.png'), '/a/c.png')
+  assert.equal(resolveRelative('/a/b', '../../../../c.png'), '/c.png')
+  assert.equal(resolveRelative('/a/b', 'x//y'), '/a/b/x/y')
+})
+
+test('formatAgo picks a readable unit', () => {
+  const now = 1_000_000_000_000
+  const at = (agoS: number) => formatAgo(now / 1000 - agoS, now)
+  assert.equal(at(5), 'now')
+  assert.equal(at(90), '2m')
+  assert.equal(at(3 * 3600), '3h')
+  assert.equal(at(2 * 86400), '2d')
+  assert.equal(formatAgo(now / 1000 + 100, now), 'now') // clock skew never prints a negative
 })

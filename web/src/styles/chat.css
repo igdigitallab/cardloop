@@ -2441,3 +2441,12 @@
 .chat-named-tab-dot.ready {
   background: var(--green);
 }
+
+/* A file path in an agent message that opens in the Files tab. */
+.chat-file-ref {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.chat-file-ref:hover { text-decoration-style: solid; color: var(--accent-h); }
+a.chat-file-ref { color: inherit; font-family: var(--mono); font-size: 0.92em; }

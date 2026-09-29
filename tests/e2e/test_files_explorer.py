@@ -7,8 +7,17 @@ two ways a save can go wrong (the agent rewrote the file meanwhile).
 
 Run with:  venv/bin/python -m pytest tests/e2e -m e2e
 """
+import base64
+import time
+
 import pytest
 from playwright.sync_api import expect
+
+from .conftest import send_chat
+
+# A real 1x1 PNG: the <img> must actually decode, not merely be present in the DOM.
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 
 pytestmark = pytest.mark.e2e
 
@@ -306,3 +315,117 @@ def test_a_restored_draft_against_a_file_the_agent_changed_conflicts_instead_of_
     page.get_by_role("button", name="Save", exact=True).click()
     expect(page.locator(".files-banner")).to_contain_text("Not saved")
     assert "the agent changed this" in notes.read_text()
+
+
+def test_images_and_pdfs_preview_and_everything_downloads(logged_in_page, world):
+    page = logged_in_page
+    proj = world["proj"]
+    (proj / "pic.png").write_bytes(PNG_1X1)
+    (proj / "doc.pdf").write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
+    (proj / "page.html").write_text("<script>document.title='pwned'</script>")
+    _open_files(page)
+
+    _row(page, "pic.png").click()
+    img = page.locator(".files-media-img")
+    expect(img).to_be_visible()
+    page.wait_for_function("document.querySelector('.files-media-img').naturalWidth === 1")
+    img.click()  # zoom: the shared lightbox
+    expect(page.locator(".lightbox-zoomable")).to_be_visible()
+    page.keyboard.press("Escape")
+
+    _row(page, "doc.pdf").click()
+    expect(page.locator("iframe.files-pdf")).to_have_count(1)
+    assert "/api/fs/raw" in page.locator("iframe.files-pdf").get_attribute("src")
+
+    # Download works for any type, and a page that could run script is only ever offered as a file.
+    _row(page, "page.html").click()
+    expect(page.locator(".files-viewer-body")).to_contain_text("pwned")   # shown as TEXT, source
+    href = page.locator("a[title='Download this file']").get_attribute("href")
+    resp = page.request.get(page.url.rsplit("/", 1)[0] + href)
+    assert resp.status == 200
+    assert resp.headers["content-disposition"].startswith("attachment")
+    assert "sandbox" in resp.headers["content-security-policy"]
+    assert resp.headers["content-type"].startswith("application/octet-stream")
+
+
+def test_markdown_resolves_relative_images_and_links_against_its_own_folder(logged_in_page, world):
+    page = logged_in_page
+    proj = world["proj"]
+    (proj / "docs" / "img").mkdir(exist_ok=True)
+    (proj / "docs" / "img" / "a.png").write_bytes(PNG_1X1)
+    (proj / "docs" / "spec.md").write_text("# Spec\n\n![shot](img/a.png)\n\nSee [the guide](guide.md) and [top](../README.md).\n")
+    _open_files(page)
+    page.locator(".file-tree-row[data-path$='/docs']").click()
+    _row(page, "spec.md").click()
+    expect(page.locator(".markdown-wrap h1")).to_have_text("Spec")
+    md_img = page.locator(".markdown-wrap img")
+    page.wait_for_function("document.querySelector('.markdown-wrap img').naturalWidth === 1")
+    assert "/api/fs/raw" in md_img.get_attribute("src")
+
+    page.locator(".markdown-wrap a", has_text="the guide").click()
+    expect(page.locator(".files-tab.active")).to_contain_text("guide.md")
+    expect(page.locator(".markdown-wrap h1")).to_have_text("Guide")
+    page.locator(".files-tab", has_text="spec.md").click()
+    page.locator(".markdown-wrap a", has_text="top").click()
+    expect(page.locator(".files-tab.active")).to_contain_text("README.md")
+
+
+def test_recent_lists_what_the_agent_wrote_and_what_changed_on_disk(logged_in_page, world, e2e_server):
+    import fs_browser
+    page = logged_in_page
+    proj = world["proj"]
+    (proj / "shell_made.log").write_text("made by a shell command\n")
+    fs_browser.record_touched(e2e_server["app_dir"] / "data", str(proj), "Write", {"file_path": str(world["scratch"] / "report.md")})
+    fs_browser.record_touched(e2e_server["app_dir"] / "data", str(proj), "Edit", {"file_path": str(proj / "notes.md")})
+    _open_files(page)
+
+    page.locator(".files-root-chip", has_text="Recent").click()
+    rows = page.locator(".files-recent-row")
+    expect(rows.first).to_be_visible()
+    names = [n.strip() for n in rows.locator(".files-recent-name").all_inner_texts()]
+    assert "notes.md" in names and "report.md" in names and "shell_made.log" in names
+    assert names.index("notes.md") < names.index("report.md")          # newest first
+    agent = page.locator(".files-recent-row", has_text="report.md").locator(".files-recent-meta.agent")
+    expect(agent).to_have_count(1)                                       # marked as the agent's
+    assert page.locator(".files-recent-row", has_text="shell_made.log").locator(".files-recent-meta.agent").count() == 0
+
+    # A file outside the project root (the scratch folder) opens straight from the list.
+    page.locator(".files-recent-row", has_text="report.md").click()
+    expect(page.locator(".files-tab.active")).to_contain_text("report.md")
+    expect(page.locator(".markdown-wrap h1")).to_have_text("Scratch report")
+
+    # The choice sticks across a reload.
+    page.reload()
+    page.wait_for_selector(".project-item", timeout=10_000)
+    page.click(".project-item:has-text('e2e-files')")
+    page.wait_for_selector(".chat-textarea:visible", timeout=10_000)
+    page.locator(".tab-btn", has_text="Files").click()
+    expect(page.locator(".files-recent-row").first).to_be_visible()
+
+
+def test_a_path_in_an_agent_message_opens_in_the_files_tab(logged_in_page, world):
+    page = logged_in_page
+    page.click(".project-item:has-text('e2e-files')")
+    page.wait_for_selector(".chat-textarea:visible", timeout=10_000)
+    send_chat(page, "e2e:paths")
+    page.wait_for_selector(".chat-file-ref", timeout=10_000)
+    # Exactly the two real references are links; prose that merely looks path-ish is not.
+    refs = page.locator(".chat-file-ref")
+    expect(refs).to_have_count(2)
+    assert page.locator(".chat-file-ref", has_text="not a path").count() == 0
+    assert page.locator(".chat-file-ref", has_text="and/or").count() == 0
+
+    # Board is the default tab; clicking the absolute path lands in Files on that file.
+    page.locator("a.chat-file-ref", has_text="README.md").click()
+    expect(page.locator(".files-explorer")).to_be_visible()
+    expect(page.locator(".files-tab.active")).to_contain_text("README.md")
+    expect(page.locator(".markdown-wrap h1")).to_have_text("Readme")
+
+    # A relative `code` reference resolves against the project folder.
+    page.locator(".tab-btn", has_text="Board").click()
+    page.locator("code.chat-file-ref", has_text="docs/guide.md").click()
+    expect(page.locator(".files-tab.active")).to_contain_text("guide.md")
+    expect(page.locator(".markdown-wrap h1")).to_have_text("Guide")
+
+    # Both are now open as tabs — the second click did not replace the first.
+    expect(page.locator(".files-tab")).to_have_count(2)

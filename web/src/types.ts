@@ -265,6 +265,22 @@ export interface FsFile {
   content: string
   editable?: boolean
   error?: string
+  /** Set for types the browser shows itself, from /api/fs/raw (no text content). */
+  kind?: FsMediaKind
+}
+
+export type FsMediaKind = 'image' | 'pdf' | 'video' | 'audio'
+
+/** A row of the explorer's "Recent" list. */
+export interface FsRecent {
+  path: string
+  name: string
+  /** Epoch seconds. */
+  t: number
+  /** "agent" = a Write/Edit tool call wrote it; "disk" = only its mtime says it changed. */
+  src: 'agent' | 'disk'
+  tool: string
+  size: number
 }
 
 export interface FsStat {

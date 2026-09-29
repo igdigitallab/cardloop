@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useBackDismiss } from '../hooks/useBackDismiss'
 import { Project, ProjectStructureHealth, SearchNavTarget, TabId } from '../types'
 import { api } from '../api'
+import { OpenFileContext } from '../lib/openFileContext'
 import { ProjectActivityProvider, useOnRunEnd, useProjectActivity } from '../hooks/useProjectActivity'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { Modal } from '../components/Modal'
@@ -570,6 +571,15 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
     })
   }
 
+  // A path in the chat was clicked: bring up this project's Files tab on it. Full-screen chat
+  // hides the left pane, so leave that mode first or the click would appear to do nothing.
+  const openFileFromChat = useCallback((path: string) => {
+    setChatMax(false)
+    setActiveTab('files')
+    setMobileInnerTab('files')
+    setFocusFile({ path, nonce: Date.now() })
+  }, [])
+
   // ── Inline styles for panels ──────────────────────────────────────────────
   // On narrow screens use CSS classes only (no inline flex-basis override)
   const leftStyle: React.CSSProperties = narrow || collapsed
@@ -769,6 +779,7 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
   if (narrow && !project.is_free) {
     return (
       <ProjectActivityProvider projectId={project.id} active={isActive}>
+      <OpenFileContext.Provider value={openFileFromChat}>
         <div className="main-content mobile-project-layout">
           {/* Inner tab strip — Row 2 (Row 1 = ProjectTabBar with back btn + usage badge) */}
           {/* Auto-collapse the section tabs ONLY on the Chat tab — chat has a scroll-up-to-reveal
@@ -842,12 +853,14 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
           </div>
           <HealthRunEndRefresher refresh={refreshHealth} />
         </div>
+      </OpenFileContext.Provider>
       </ProjectActivityProvider>
     )
   }
 
   return (
     <ProjectActivityProvider projectId={project.id} active={isActive}>
+    <OpenFileContext.Provider value={openFileFromChat}>
     <div className="main-content project-split-layout" ref={containerRef}>
       {/* LEFT: header + tabs + content */}
       <div className="project-left-pane" style={leftStyle}>
@@ -1040,6 +1053,7 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
         </button>
       )}
     </div>
+    </OpenFileContext.Provider>
     </ProjectActivityProvider>
   )
 }

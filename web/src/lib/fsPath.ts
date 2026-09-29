@@ -69,3 +69,23 @@ export function looksLikePath(text: string): boolean {
   if (!t || /\s{2,}/.test(t)) return false
   return /^(\/[^\s/]|~(\/|$)|\$HOME(\/|$)|file:\/\/\/)/.test(t)
 }
+
+/** Resolve `rel` against directory `dir` ("../x.png", "./a/b", "a//b") into an absolute path. */
+export function resolveRelative(dir: string, rel: string): string {
+  const out: string[] = []
+  for (const seg of `${dir}/${rel}`.split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') out.pop()
+    else out.push(seg)
+  }
+  return `/${out.join('/')}`
+}
+
+/** "3m", "2h", "5d" — how long ago `epochSec` was, as of `nowMs`. */
+export function formatAgo(epochSec: number, nowMs: number): string {
+  const s = Math.max(0, Math.round(nowMs / 1000 - epochSec))
+  if (s < 45) return 'now'
+  if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m`
+  if (s < 86400) return `${Math.round(s / 3600)}h`
+  return `${Math.round(s / 86400)}d`
+}

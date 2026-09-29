@@ -14,8 +14,11 @@
  *    the operator's next save fails with a 409 against their own previous save.
  * Tests: filesTabs.test.ts (run command in its header).
  */
+import type { FsMediaKind } from '../types'
 
 export interface DocSnapshot {
+  /** Image / PDF / video / audio: shown from the raw URL, `content` is empty. */
+  media?: FsMediaKind
   content: string
   rev: string
   editable: boolean
@@ -26,6 +29,7 @@ export interface DocSnapshot {
 }
 
 export interface OpenFile {
+  media?: FsMediaKind
   path: string
   status: 'loading' | 'ready' | 'error'
   error: string
@@ -84,7 +88,7 @@ function fromDoc(t: OpenFile, doc: DocSnapshot): OpenFile {
   if (doc.error) return { ...t, status: 'error', error: doc.error, size: doc.size, lang: doc.lang, gen: t.gen + 1 }
   return {
     ...t, status: 'ready', error: '', content: doc.content, rev: doc.rev, editable: doc.editable,
-    lang: doc.lang, size: doc.size, gen: t.gen + 1,
+    lang: doc.lang, size: doc.size, gen: t.gen + 1, media: doc.media,
   }
 }
 

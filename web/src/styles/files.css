@@ -464,3 +464,47 @@
   font-size: 13px;
   font-weight: 500;
 }
+
+/* Media previews (image / PDF / video / audio) */
+.files-media { display: flex; flex-direction: column; gap: 10px; min-height: 0; height: 100%; }
+.files-media-img {
+  max-width: 100%; max-height: calc(100% - 40px); object-fit: contain; align-self: flex-start;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: zoom-in;
+  /* a transparent PNG must not vanish into the page */
+  background: repeating-conic-gradient(var(--bg2) 0% 25%, var(--bg) 0% 50%) 50% / 16px 16px;
+}
+.files-media-video { max-width: 100%; max-height: calc(100% - 40px); background: #000; border-radius: var(--radius-sm); }
+.files-media-audio { width: 100%; max-width: 480px; }
+.files-media-pdf { gap: 6px; }
+.files-pdf { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg2); }
+.files-pdf-card {
+  padding: 16px; font-size: 13px; color: var(--text2);
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.files-media-links { display: flex; gap: 14px; flex-wrap: wrap; flex-shrink: 0; }
+.files-media-link {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--text2); text-decoration: none;
+}
+.files-media-link:hover { color: var(--text); text-decoration: underline; }
+.files-copy-btn { text-decoration: none; }
+
+/* Recent list (replaces the tree) */
+.files-recent { display: flex; flex-direction: column; padding: 0 4px; }
+.files-recent-row {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 6px; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: 12px; color: var(--text2);
+  min-height: 34px;
+}
+.files-recent-row:hover { background: var(--bg3); color: var(--text); }
+.files-recent-row.active { background: var(--accent-subtle); color: var(--text); }
+.files-recent-icon { flex-shrink: 0; color: var(--text3); }
+.files-recent-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.files-recent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.files-recent-dir {
+  font-size: 10px; color: var(--text3); font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+}
+.files-recent-meta { font-size: 10px; color: var(--text3); flex-shrink: 0; }
+.files-recent-meta.agent { color: var(--accent-h); }

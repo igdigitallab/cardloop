@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useEffect, useRef, useState } from 'react'
+import React, { memo, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { Lightbox } from '../components/Lightbox'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -17,6 +17,8 @@ import {
   unusableAccounts,
   type RuntimeRow,
 } from '../lib/runtimeStatus'
+import { FILE_REF_PREFIX, looksLikeFileRef, remarkFileRefs, stripLineSuffix } from '../lib/fileRefs'
+import { OpenFileContext } from '../lib/openFileContext'
 import {
   Chat,
   ChatMessage,
@@ -666,7 +668,55 @@ function ChatImage({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
   )
 }
 
-const _mdComponents = { ...mdComponents, img: ChatImage }
+/** Inline `code` that names a file becomes a link into the Files tab; everything else is the
+ *  shared renderer untouched (mermaid, fenced blocks, plain inline code). */
+function ChatCode(props: React.HTMLAttributes<HTMLElement> & { node?: unknown }) {
+  const open = useContext(OpenFileContext)
+  const { className, children } = props
+  const text = typeof children === 'string' ? children
+    : Array.isArray(children) && children.length === 1 && typeof children[0] === 'string' ? children[0] : null
+  if (open && !className && text !== null && !text.includes('\n') && looksLikeFileRef(text)) {
+    const path = stripLineSuffix(text.trim())
+    return (
+      <code
+        className="chat-file-ref"
+        role="link"
+        tabIndex={0}
+        title={`Open ${path} in Files`}
+        onClick={() => open(path)}
+        onKeyDown={e => { if (e.key === 'Enter') open(path) }}
+      >
+        {children}
+      </code>
+    )
+  }
+  const Base = mdComponents.code as React.ElementType
+  return <Base {...props} />
+}
+
+/** `a`: links the remarkFileRefs plugin made from loose paths open the Files tab; all other links
+ *  behave exactly as before. */
+function ChatLink({ href, children, node: _node, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) {
+  const open = useContext(OpenFileContext)
+  if (href && href.startsWith(FILE_REF_PREFIX)) {
+    const path = decodeURIComponent(href.slice(FILE_REF_PREFIX.length))
+    if (!open) return <>{children}</>
+    return (
+      <a
+        href="#"
+        className="chat-file-ref"
+        title={`Open ${path} in Files`}
+        onClick={e => { e.preventDefault(); open(path) }}
+      >
+        {children}
+      </a>
+    )
+  }
+  return <a href={href} {...rest}>{children}</a>
+}
+
+const _mdComponents = { ...mdComponents, img: ChatImage, code: ChatCode, a: ChatLink }
+const _chatRemarkPlugins = [remarkGfm, remarkFileRefs]
 
 const _IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico|svg)$/i
 
@@ -3938,7 +3988,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           <>
             {parsedOpts.prefix && (
               <div className="chat-msg-body markdown-wrap">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{parsedOpts.prefix}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{parsedOpts.prefix}</ReactMarkdown>
               </div>
             )}
             <OptionPicker
@@ -3952,7 +4002,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           <>
             {attach.body && (
               <div className="chat-msg-body markdown-wrap">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{attach.body}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{attach.body}</ReactMarkdown>
               </div>
             )}
             <div className="chat-msg-attachments">
@@ -3971,7 +4021,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           </>
         ) : msg.text ? (
           <div className="chat-msg-body markdown-wrap">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{msg.text}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{msg.text}</ReactMarkdown>
           </div>
         ) : null}
         {msg.error && (() => {
@@ -5027,7 +5077,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               <div style={{ maxHeight: '38vh', overflowY: 'auto', fontSize: 13,
                             border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px' }}>
                 {planPrompt.planText
-                  ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={_mdComponents}>{planPrompt.planText}</ReactMarkdown>
+                  ? <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{planPrompt.planText}</ReactMarkdown>
                   : <em>{t['chat.plan_card_empty']}{planPrompt.planFilePath ? ` (${planPrompt.planFilePath})` : ''}</em>}
               </div>
               {planRejecting && (

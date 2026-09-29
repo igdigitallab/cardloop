@@ -9,20 +9,23 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import React from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Check, Copy } from 'lucide-react'
+import { Check, Copy, Download } from 'lucide-react'
+import type { Components } from 'react-markdown'
 import { apiErrorMessage } from '../api'
 import { mdComponents } from './markdown'
-import { FileEntry, FsFile, FsInfo, FsListing, FsStat } from '../types'
+import { FileEntry, FsFile, FsInfo, FsListing, FsRecent, FsStat } from '../types'
 import { FsAdapter } from '../lib/fsAdapter'
 import {
   DocSnapshot, EMPTY_TABS, isDirty, parsePersisted, tabsReducer, toPersisted,
 } from '../lib/filesTabs'
 import { collectDrafts, DraftMap, parseDrafts } from '../lib/filesDrafts'
-import { ancestorsBetween, baseName, dirname, isUnder, joinPath, looksLikePath } from '../lib/fsPath'
+import { ancestorsBetween, baseName, dirname, isUnder, joinPath, looksLikePath, resolveRelative } from '../lib/fsPath'
 import { readLS, readLSString, writeLS, writeLSString } from '../lib/storage'
 import { isPopoutWindow, popoutKey } from '../lib/popout'
 import { ConfirmModal } from './ConfirmModal'
+import { FileMedia } from './FileMedia'
 import { FilePathBar } from './FilePathBar'
+import { FileRecent } from './FileRecent'
 import { FileTabsBar } from './FileTabsBar'
 import { SplitHandle } from './SplitHandle'
 import { Spinner } from './Spinner'
@@ -81,7 +84,7 @@ function formatSize(bytes: number): string {
 function toSnapshot(d: FsFile, writable: boolean): DocSnapshot {
   return {
     content: d.content, rev: d.rev, lang: d.lang, size: d.size, error: d.error,
-    editable: writable && !!d.editable,
+    editable: writable && !!d.editable, media: d.kind,
   }
 }
 
@@ -151,6 +154,7 @@ const LS_TREE_W = 'cops.files.treeWidth'
 const LS_TREE_HIDDEN = 'cops.files.treeHidden'
 const LS_TABS = 'cops.files.tabs.'
 const LS_DRAFTS = 'cops.files.drafts.'
+const LS_PANE = 'cops.files.pane'
 const TREE_W_DEFAULT = 220
 const TREE_W_MIN = 140
 const VIEWER_MIN = 240
@@ -163,6 +167,10 @@ const handledOpen = new Map<string, number>()
 
 // A pop-out keeps its own layout so resizing it does not move the main window's (popout.ts).
 const lsk = (key: string) => (isPopoutWindow() ? popoutKey(key) : key)
+
+function fsPaneInit(): 'tree' | 'recent' {
+  return readLS<string>(lsk(LS_PANE), 'tree') === 'recent' ? 'recent' : 'tree'
+}
 
 // ─── FileExplorer ─────────────────────────────────────────────────────────────
 
@@ -195,6 +203,10 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
   const [copied, setCopied] = useState(false)
   const [confirmClose, setConfirmClose] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
+  // Left pane: the folder tree, or the "Recent" list (files the agent just wrote).
+  const [pane, setPane] = useState<'tree' | 'recent'>(() => (fsPaneInit()))
+  const [recent, setRecent] = useState<FsRecent[] | null>(null)
+  const [recentError, setRecentError] = useState('')
 
   const [treeW, setTreeW] = useState<number>(() => Math.max(TREE_W_MIN, readLS(lsk(LS_TREE_W), TREE_W_DEFAULT)))
   const [treeVisible, setTreeVisible] = useState<boolean>(() => !readLS(lsk(LS_TREE_HIDDEN), false))
@@ -424,6 +436,26 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
   }, [tabs])
   useEffect(() => () => writeDraftsRef.current(), [])
 
+  // ── Recent: what the agent just wrote ─────────────────────────────────────
+
+  const paneRef = useRef(pane)
+  paneRef.current = pane
+  const loadRecent = useCallback(async () => {
+    if (!fs.recent) return
+    try {
+      setRecent(await fs.recent())
+      setRecentError('')
+    } catch (e) {
+      setRecentError(apiErrorMessage(e))
+    }
+  }, [fs])
+  useEffect(() => { writeLS(lsk(LS_PANE), pane) }, [pane])
+  useEffect(() => {
+    if (ready && pane === 'recent') void loadRecent()
+  }, [ready, pane, loadRecent])
+  // Without a Recent list (Server files) the pane can only be the tree.
+  const effectivePane = fs.recent ? pane : 'tree'
+
   // ── Refresh (run_end / focus / button) ───────────────────────────────────
 
   const refresh = useCallback(async () => {
@@ -454,6 +486,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
       }
     } catch { /* silently ignore */ }
 
+    if (paneRef.current === 'recent') void loadRecent()
     await Promise.all(tabsRef.current.tabs.map(async t => {
       const gen = t.gen  // a save/reload that lands while this read is in flight makes it stale
       try {
@@ -465,7 +498,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
         }
       }
     }))
-  }, [fs, writable])
+  }, [fs, writable, loadRecent])
 
   const refreshFnRef = useRef(refresh)
   useEffect(() => {
@@ -512,7 +545,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
     const target = openPath?.path
     if (!target || !ready || handledOpen.get(fs.scope) === openPath.nonce) return
     handledOpen.set(fs.scope, openPath.nonce)
-    const abs = target.startsWith('/') ? target : joinPath(infoRef.current?.start ?? rootPathRef.current, target)
+    const abs = /^[/~]/.test(target) ? target : joinPath(infoRef.current?.start ?? rootPathRef.current, target)
     void go(abs)
   }, [openPath?.nonce, openPath?.path, ready, go, fs.scope])
 
@@ -583,6 +616,44 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
   )
   const home = info?.home ?? ''
 
+  // Markdown inside a file: relative images and links resolve against THAT file's folder — a
+  // README's `![](docs/a.png)` and `[guide](GUIDE.md)` would otherwise point into the cockpit.
+  const activePath = activeTab?.path ?? null
+  const fileMdComponents = useMemo<Components>(() => {
+    if (!activePath) return mdComponents
+    const dir = dirname(activePath)
+    const isWeb = (u: string) => /^([a-z][a-z0-9+.-]*:|#|\/\/)/i.test(u)
+    const resolve = (u: string) => {
+      let clean = u.split('#')[0].split('?')[0]
+      try { clean = decodeURI(clean) } catch { /* keep as written */ }
+      return clean.startsWith('/') ? clean : resolveRelative(dir, clean)
+    }
+    return {
+      ...mdComponents,
+      img({ src, alt }) {
+        if (typeof src !== 'string' || (isWeb(src) && !src.startsWith('data:'))) {
+          return <img src={typeof src === 'string' ? src : undefined} alt={alt ?? ''} loading="lazy" />
+        }
+        return <img src={src.startsWith('data:') ? src : fs.rawUrl(resolve(src))} alt={alt ?? ''} loading="lazy" />
+      },
+      a({ href, children }) {
+        if (!href) return <a>{children}</a>
+        if (href.startsWith('#')) return <a href={href}>{children}</a>
+        if (isWeb(href)) return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+        const abs = resolve(href)
+        return (
+          <a
+            href="#"
+            title={abs}
+            onClick={e => { e.preventDefault(); openFile(abs) }}
+          >
+            {children}
+          </a>
+        )
+      },
+    }
+  }, [activePath, fs, openFile])
+
   // ─── Render ───────────────────────────────────────────────────────────────
 
   if (loading) return <Spinner label="Loading files..." />
@@ -630,14 +701,23 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
       <div className="files-layout" ref={layoutRef}>
         {showTree && (
           <div className="files-tree-pane" style={narrow ? undefined : { width: treeW }}>
-            {info && info.roots.length > 1 && (
+            {info && (info.roots.length > 1 || fs.recent) && (
               <div className="files-roots">
-                {info.roots.map(r => (
+                {fs.recent && (
+                  <button
+                    className={`files-root-chip${effectivePane === 'recent' ? ' active' : ''}`}
+                    title="Files the agent just wrote, and files that just changed"
+                    onClick={() => setPane('recent')}
+                  >
+                    Recent
+                  </button>
+                )}
+                {info.roots.length > 1 && info.roots.map(r => (
                   <button
                     key={r.path}
-                    className={`files-root-chip${r.path === rootPath ? ' active' : ''}`}
+                    className={`files-root-chip${effectivePane === 'tree' && r.path === rootPath ? ' active' : ''}`}
                     title={r.path}
-                    onClick={() => { void changeRoot(r.path) }}
+                    onClick={() => { setPane('tree'); void changeRoot(r.path) }}
                   >
                     {r.label}
                   </button>
@@ -645,7 +725,15 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
               </div>
             )}
             <div className="files-tree-scroll">
-              {rootNodes.length === 0 ? (
+              {effectivePane === 'recent' ? (
+                <FileRecent
+                  items={recent}
+                  error={recentError}
+                  home={home}
+                  activePath={tabs.active}
+                  onOpen={openFile}
+                />
+              ) : rootNodes.length === 0 ? (
                 <div className="no-content">Directory is empty</div>
               ) : (
                 <TreeView
@@ -655,7 +743,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
                   onDirToggle={handleDirToggle}
                 />
               )}
-              {rootListing.truncated && (
+              {effectivePane === 'tree' && rootListing.truncated && (
                 <div className="no-content">Showing the first entries only — this folder is very large.</div>
               )}
             </div>
@@ -701,6 +789,14 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
                   >
                     {copied ? <Check size={12} /> : <Copy size={12} />}
                   </button>
+                  <a
+                    className="file-edit-btn files-copy-btn"
+                    href={fs.rawUrl(activeTab.path, { download: true })}
+                    download={baseName(activeTab.path)}
+                    title="Download this file"
+                  >
+                    <Download size={12} />
+                  </a>
                   {activeTab.size > 0 && (
                     <span className="files-viewer-size">{formatSize(activeTab.size)}</span>
                   )}
@@ -761,6 +857,14 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
                 <div className={`files-viewer-body${editing ? ' files-viewer-editing' : ''}`}>
                   {activeTab.status === 'error' ? (
                     <div className="error-state">⚠ {activeTab.error}</div>
+                  ) : activeTab.media ? (
+                    <FileMedia
+                      kind={activeTab.media}
+                      name={baseName(activeTab.path)}
+                      url={fs.rawUrl(activeTab.path, { rev: activeTab.rev })}
+                      downloadUrl={fs.rawUrl(activeTab.path, { download: true })}
+                      narrow={narrow}
+                    />
                   ) : editing ? (
                     <textarea
                       key={activeTab.path}
@@ -776,7 +880,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
                     />
                   ) : activeTab.lang === 'md' ? (
                     <div className="markdown-wrap">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{activeTab.content}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={fileMdComponents}>{activeTab.content}</ReactMarkdown>
                     </div>
                   ) : (
                     <pre className="files-code-block"><code>{activeTab.content}</code></pre>

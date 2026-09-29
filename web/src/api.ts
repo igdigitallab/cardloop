@@ -146,6 +146,14 @@ export function apiErrorMessage(e: unknown): string {
 const fsQuery = (path: string, project?: string) =>
   `path=${encodeURIComponent(path)}${project ? `&project=${encodeURIComponent(project)}` : ''}`
 
+/** URL of a file's bytes (previews, downloads). A plain GET, so <img>/<video>/<iframe>/<a> can use it. */
+export function fsRawUrl(path: string, project?: string, opts?: { rev?: string; download?: boolean }): string {
+  let q = fsQuery(path, project)
+  if (opts?.download) q += '&download=1'
+  if (opts?.rev) q += `&rev=${encodeURIComponent(opts.rev)}`  // cache-buster: the agent rewrites images in place
+  return `/api/fs/raw?${q}`
+}
+
 export const api = {
   health: () => apiFetch<{ ok: boolean }>('/api/health'),
 
@@ -746,6 +754,9 @@ export const api = {
         body: JSON.stringify({ content, base_rev: baseRev, force: !!force }),
       }
     ),
+
+  fsRecent: (project: string) =>
+    apiFetch<{ items: import('./types').FsRecent[] }>(`/api/fs/recent?project=${encodeURIComponent(project)}`),
 
   fsStat: (text: string, base?: string, project?: string) =>
     apiFetch<import('./types').FsStat>(
