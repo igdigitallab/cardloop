@@ -75,6 +75,9 @@ import context_pack as _context_pack
 # webapp/engine from roles.py — see roles.py module docstring.
 import roles as _roles
 
+# The Files tab's filesystem policy (roots, deny rules, safe read/write). HTTP-free.
+import fs_browser as _fs_browser
+
 # spec-053 Phase B: Web Push (VAPID + pywebpush). Optional — degrades gracefully if absent.
 try:
     from pywebpush import webpush as _webpush, WebPushException as _WebPushException
@@ -10787,6 +10790,10 @@ async def api_global_file_write(req: web.Request) -> web.Response:
         target = _resolve_global_safe(home, rel)
     except ValueError:
         return web.json_response({"error": "invalid path"}, status=400)
+    # Reads were gated on the sensitive dirs; the write was not — it could overwrite
+    # ~/.ssh/authorized_keys. Same gate as the read.
+    if _is_global_sensitive_path(target, home):
+        return web.json_response({"error": "access denied"}, status=403)
     if _is_secret_name(target.name):
         return web.json_response({"error": "access denied"}, status=403)
     if not target.exists() or not target.is_file():
@@ -10801,6 +10808,88 @@ async def api_global_file_write(req: web.Request) -> web.Response:
     except Exception as e:
         return web.json_response({"error": f"write error: {e}"}, status=500)
     return web.json_response({"ok": True, "path": rel})
+
+
+# ── Explorer: one absolute-path view for the Files tab ──────────────────────
+# The policy (roots, deny rules, atomic write, conflict check) lives in fs_browser.py.
+
+def _fs_roots(req: web.Request) -> "_fs_browser.Roots":
+    """Roots for this request; `?project=<id>` adds that project's cwd as a root."""
+    cwd = None
+    pid = req.rel_url.query.get("project", "")
+    if pid:
+        project = _find_project_by_id(req.app["ctx"], pid)
+        if project is None:
+            raise _fs_browser.FsError(404, "project not found")
+        cwd = project.get("cwd") or None
+    return _fs_browser.Roots.build(cwd)
+
+
+def _fs_error(e: "_fs_browser.FsError") -> web.Response:
+    return web.json_response({"error": e.message}, status=e.status)
+
+
+async def api_fs_info(req: web.Request) -> web.Response:
+    """GET /api/fs/info[?project=<id>] — where the explorer starts and what it may reach."""
+    try:
+        roots = _fs_roots(req)
+    except _fs_browser.FsError as e:
+        return _fs_error(e)
+    start = roots.project_cwd if (roots.project_cwd and _fs_browser.permitted(roots.project_cwd, roots)) else roots.home
+    return web.json_response({"home": str(roots.home), "start": str(start), "roots": roots.as_list()})
+
+
+async def api_fs_list(req: web.Request) -> web.Response:
+    """GET /api/fs/list?path=<abs>[&project=<id>] — directory listing."""
+    try:
+        roots = _fs_roots(req)
+        out = await asyncio.to_thread(_fs_browser.list_dir, req.rel_url.query.get("path", ""), roots)
+    except _fs_browser.FsError as e:
+        return _fs_error(e)
+    return web.json_response(out)
+
+
+async def api_fs_stat(req: web.Request) -> web.Response:
+    """GET /api/fs/stat?path=<pasted text>[&base=<abs>][&project=<id>] — what did the operator paste?"""
+    try:
+        roots = _fs_roots(req)
+    except _fs_browser.FsError as e:
+        return _fs_error(e)
+    out = await asyncio.to_thread(
+        _fs_browser.stat_input, req.rel_url.query.get("path", ""), roots, req.rel_url.query.get("base") or None)
+    return web.json_response(out)
+
+
+async def api_fs_file(req: web.Request) -> web.Response:
+    """GET /api/fs/file?path=<abs>[&project=<id>] — text content + revision."""
+    try:
+        roots = _fs_roots(req)
+        out = await asyncio.to_thread(_fs_browser.read_file, req.rel_url.query.get("path", ""), roots)
+    except _fs_browser.FsError as e:
+        return _fs_error(e)
+    return web.json_response(out)
+
+
+async def api_fs_file_write(req: web.Request) -> web.Response:
+    """PUT /api/fs/file?path=<abs>[&project=<id>] {content, base_rev, force?} — save a text file.
+
+    409 = the file changed on disk since it was opened (the agent edits these files too);
+    the client offers reload / overwrite (`force`)."""
+    try:
+        roots = _fs_roots(req)
+        body = await req.json()
+        content = body.get("content") if isinstance(body, dict) else None
+        if not isinstance(content, str):
+            raise _fs_browser.FsError(400, "content must be a string")
+        base_rev = body.get("base_rev")
+        out = await asyncio.to_thread(
+            _fs_browser.write_file, req.rel_url.query.get("path", ""), content,
+            base_rev if isinstance(base_rev, str) else None, roots, bool(body.get("force")))
+    except _fs_browser.FsError as e:
+        return _fs_error(e)
+    except ValueError:
+        return web.json_response({"error": "bad request"}, status=400)
+    return web.json_response(out)
 
 
 async def api_card_run(req: web.Request) -> web.Response:
@@ -18787,6 +18876,12 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/global/files", api_global_files)
         app.router.add_get("/api/global/file", api_global_file)
         app.router.add_post("/api/global/file", api_global_file_write)
+        # Explorer: absolute-path view shared by the project Files tab and Server files
+        app.router.add_get("/api/fs/info", api_fs_info)
+        app.router.add_get("/api/fs/list", api_fs_list)
+        app.router.add_get("/api/fs/stat", api_fs_stat)
+        app.router.add_get("/api/fs/file", api_fs_file)
+        app.router.add_put("/api/fs/file", api_fs_file_write)
         # Session context (read: Feature A)
         app.router.add_get("/api/projects/{id}/session-context", api_project_session_context)
         # Project memory (read+write: Feature B)
