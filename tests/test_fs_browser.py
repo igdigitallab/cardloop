@@ -519,6 +519,51 @@ def test_recent_disk_scan_is_capped_and_the_log_is_trimmed(world, monkeypatch):
     assert log.exists()
 
 
+# ── the cockpit's own state ───────────────────────────────────────────────────
+
+def test_the_cockpit_data_dir_is_private_except_uploads(world, monkeypatch):
+    """Regression (security review): data/ sits inside $HOME with no dot component, so the
+    Web Push private key, the encrypted safe and the touched-file log were all reachable."""
+    data = world["home"] / "cardloop" / "data"
+    for rel in ("vault/secrets.enc", "push-vapid.json", "touched/abc.jsonl", "inbox/pic.png", "accounts.json"):
+        f = data / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x")
+    monkeypatch.setattr(fb, "DATA_DIR", data.resolve())
+    for roots in (roots_for(world), roots_for(world, cwd=world["home"] / "cardloop")):
+        for rel in ("vault/secrets.enc", "push-vapid.json", "touched/abc.jsonl", "accounts.json"):
+            assert status_of(fb.open_raw, str(data / rel), roots) == 403, rel
+            assert status_of(fb.read_file, str(data / rel), roots) == 403, rel
+        assert status_of(fb.list_dir, str(data), roots) == 403
+        assert fb.open_raw(str(data / "inbox" / "pic.png"), roots)[1] == "image/png"   # uploads stay
+        names = {e["name"] for e in fb.list_dir(str(world["home"] / "cardloop"), roots)["entries"]}
+        assert "data" not in names
+
+
+def test_a_relocated_secret_store_or_key_is_private_too(world, monkeypatch):
+    store = world["home"] / "elsewhere" / "safe.bin"
+    key = world["home"] / "elsewhere" / "safe.key"
+    store.parent.mkdir()
+    store.write_bytes(b"x")
+    key.write_bytes(b"k")
+    monkeypatch.setenv("CLAUDE_OPS_SECRET_STORE", str(store))
+    monkeypatch.setenv("CLAUDE_OPS_SECRET_KEYFILE", str(key))
+    r = roots_for(world)
+    assert status_of(fb.read_file, str(store), r) == 403
+    assert status_of(fb.open_raw, str(key), r) == 403
+
+
+def test_recent_does_not_list_a_symlink_whose_target_is_denied(world):
+    data = world["tmp"] / "data"
+    proj = world["home"] / "proj"
+    r = roots_for(world, cwd=proj)
+    (proj / "innocent-name.txt").symlink_to(world["home"] / ".ssh" / "authorized_keys")
+    (proj / "fine-link.txt").symlink_to(world["home"] / "notes.txt")
+    names = {x["name"] for x in fb.recent_files(data, str(proj), r)}
+    assert "innocent-name.txt" not in names
+    assert "notes.txt" in names           # a link to something reachable shows up as its target
+
+
 # ── routes ────────────────────────────────────────────────────────────────────
 
 def _routes_app(ctx):
@@ -650,3 +695,24 @@ async def test_recent_route_needs_a_project(aiohttp_client, http, world):
     data = await (await c.get("/api/fs/recent?project=proj", headers=auth)).json()
     assert [i["name"] for i in data["items"]][0] == "a.md"
     assert (await c.get("/api/fs/recent?project=proj")).status == 401
+
+
+async def test_raw_never_serves_a_gzip_sibling_that_the_policy_did_not_check(aiohttp_client, http, world):
+    """Regression (security review): aiohttp answers Accept-Encoding: gzip with `<file>.gz` when it
+    exists. `.env.example` is readable, `.env.example.gz` is denied by name — it must not leak."""
+    ctx, auth = http
+    from aiohttp import web
+    import webapp as W
+    app = _routes_app(ctx)
+    app.router.add_get("/api/fs/raw", W.api_fs_raw)
+    c = await aiohttp_client(app)
+    import gzip
+    (world["scratch"] / "a.png").write_bytes(b"\x89PNG-plain")
+    (world["scratch"] / "a.png.gz").write_bytes(gzip.compress(b"SECRET-IN-THE-SIBLING"))
+    r = await c.get(f"/api/fs/raw?path={world['scratch']}/a.png", headers={**auth, "Accept-Encoding": "gzip"},
+                    auto_decompress=False)
+    assert r.status == 200
+    assert r.headers.get("Content-Encoding") is None
+    assert await r.read() == b"\x89PNG-plain"
+    part = await c.get(f"/api/fs/raw?path={world['scratch']}/a.png", headers={**auth, "Accept-Encoding": "gzip", "Range": "bytes=1-3"})
+    assert part.status == 206 and await part.read() == b"PNG"

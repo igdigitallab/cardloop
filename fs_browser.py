@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -59,6 +60,34 @@ _SECRET_EXACT: frozenset[str] = frozenset({
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
 })
 _SECRET_SUFFIX: tuple[str, ...] = (".pem", ".p12", ".pfx", ".kdbx")
+
+
+# The cockpit's own state: sessions, the encrypted safe, the Web Push private key, the touched-file
+# log (which names paths the policy denies), search/usage databases. Not the operator's files, and
+# `raw` would serve any of it up to 100 MB. Only `data/inbox/` — the files the operator uploaded
+# into a chat — stays browsable. Tests move DATA_DIR.
+DATA_DIR = Path(__file__).resolve().parent / "data"
+_DATA_ALLOWED = frozenset({"inbox"})
+
+
+def _cockpit_private(p: Path) -> bool:
+    """True for the cockpit's data dir (outside `inbox`) and for a relocated secret store / key."""
+    try:
+        if p == DATA_DIR or DATA_DIR in p.parents:
+            rel = p.relative_to(DATA_DIR).parts
+            if not rel or rel[0] not in _DATA_ALLOWED:
+                return True
+    except ValueError:
+        pass
+    for var in ("CLAUDE_OPS_SECRET_STORE", "CLAUDE_OPS_SECRET_KEYFILE"):
+        raw = os.environ.get(var)
+        if raw:
+            try:
+                if p == Path(os.path.expanduser(raw)).resolve():
+                    return True
+            except (OSError, RuntimeError):
+                continue
+    return False
 
 
 class FsError(Exception):
@@ -146,6 +175,8 @@ def _home_rel_ok(parts: tuple[str, ...]) -> bool:
 
 def permitted(p: Path, roots: Roots) -> bool:
     """True when the (already resolved) path may be listed or read."""
+    if _cockpit_private(p):
+        return False
     for root in roots.plain:
         if p == root or root in p.parents:
             if not _bad_parts(p.relative_to(root).parts):
@@ -566,10 +597,15 @@ def _scan_recent(cwd: Path, roots: Roots, since: float, cap: int, budget_s: floa
                 return sorted(found, reverse=True)[:cap]
             fp = Path(dirpath) / name
             try:
-                st = fp.stat()
-            except OSError:
+                st = os.lstat(fp)
+                if stat.S_ISLNK(st.st_mode):
+                    # A link is judged by where it points: list_dir hides links that leave the roots
+                    # and so must this, or the name/size/mtime of a denied target would leak here.
+                    fp = fp.resolve()
+                    st = os.stat(fp)
+            except (OSError, RuntimeError):
                 continue
-            if st.st_mtime >= since and permitted(fp, roots) and fp.is_file():
+            if st.st_mtime >= since and stat.S_ISREG(st.st_mode) and permitted(fp, roots):
                 found.append((st.st_mtime, fp))
     return sorted(found, reverse=True)[:cap]
 

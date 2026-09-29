@@ -17,7 +17,7 @@ import {
   unusableAccounts,
   type RuntimeRow,
 } from '../lib/runtimeStatus'
-import { FILE_REF_PREFIX, looksLikeFileRef, remarkFileRefs, stripLineSuffix } from '../lib/fileRefs'
+import { decodeFileRef, FILE_REF_PREFIX, looksLikeFileRef, remarkFileRefs, stripLineSuffix } from '../lib/fileRefs'
 import { OpenFileContext } from '../lib/openFileContext'
 import {
   Chat,
@@ -683,7 +683,9 @@ function ChatCode(props: React.HTMLAttributes<HTMLElement> & { node?: unknown })
         role="link"
         tabIndex={0}
         title={`Open ${path} in Files`}
-        onClick={() => open(path)}
+        // stopPropagation/preventDefault: `[`x.md`](https://…)` nests this in a link, and one click
+        // must open the file, not also navigate away.
+        onClick={e => { e.preventDefault(); e.stopPropagation(); open(path) }}
         onKeyDown={e => { if (e.key === 'Enter') open(path) }}
       >
         {children}
@@ -699,8 +701,8 @@ function ChatCode(props: React.HTMLAttributes<HTMLElement> & { node?: unknown })
 function ChatLink({ href, children, node: _node, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) {
   const open = useContext(OpenFileContext)
   if (href && href.startsWith(FILE_REF_PREFIX)) {
-    const path = decodeURIComponent(href.slice(FILE_REF_PREFIX.length))
-    if (!open) return <>{children}</>
+    const path = decodeFileRef(href)
+    if (!open || !path) return <>{children}</>  // no Files tab here, or a malformed reference: plain text
     return (
       <a
         href="#"

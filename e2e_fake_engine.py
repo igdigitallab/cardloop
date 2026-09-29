@@ -182,7 +182,7 @@ async def run_engine(
         # Paths in an agent message, three ways: absolute in prose, relative in `code`, and prose that
         # must NOT become a link. The Files-tab e2e clicks them.
         text = (f"Wrote {cwd}/README.md just now. Also `docs/guide.md` and `not a path` "
-                f"and and/or 1/2 stay plain.")
+                f"and and/or 1/2 stay plain. Broken [ref](#cardloop-file=%E0%A4) stays text.")
         yield {"type": "text_delta", "text": text}
         yield {"type": "text", "text": text}
         _append_transcript(cwd, sid, prompt, text)

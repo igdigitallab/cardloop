@@ -6,7 +6,7 @@
 //   node --test /tmp/filerefs-test/
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { FILE_REF_PREFIX, looksLikeFileRef, remarkFileRefs, splitLoosePaths, stripLineSuffix } from './fileRefs'
+import { decodeFileRef, FILE_REF_PREFIX, looksLikeFileRef, remarkFileRefs, splitLoosePaths, stripLineSuffix } from './fileRefs'
 
 test('inline code: real file references are linked', () => {
   for (const yes of ['/home/igor/x/report.md', '~/notes.txt', 'docs/plan.md', 'web/src/FileExplorer.tsx',
@@ -18,7 +18,7 @@ test('inline code: real file references are linked', () => {
 test('inline code: commands, URLs, identifiers and prose are not', () => {
   for (const no of ['', 'npm run build', 'git push origin master', 'https://x.com/a.md', '/api/fs/raw', '/restart',
     'obj.method', 'e.g.', 'v1.2.3', 'fs_browser', '--flag.md', '@scope/pkg.json', 'a*.md', 'x = y.py',
-    'cmd | tee out.log', 'file.', '.gitignore', 'foo.bar', 'a'.repeat(400) + '.md']) {
+    'cmd | tee out.log', 'file.', '.env', 'foo.bar', 'a'.repeat(400) + '.md']) {
     assert.equal(looksLikeFileRef(no), false, no)
   }
 })
@@ -67,4 +67,15 @@ test('the remark plugin links prose paths but leaves code, links and existing li
   const strong = p.find(n => n.type === 'strong') as unknown as { children: { type: string; url?: string }[] }
   assert.ok(strong.children.some(n => n.type === 'link' && n.url?.startsWith(FILE_REF_PREFIX)))
   assert.equal((tree.children[1] as { value: string }).value, '/tmp/block.md')
+})
+
+test('no regex lookbehind anywhere in the detector (Safari < 16.4 cannot parse it)', () => {
+  // The runner's cwd is web/ by hand and the repo root under pytest — look in both.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = require('node:fs') as typeof import('node:fs')
+  const file = ['src/lib/fileRefs.ts', 'web/src/lib/fileRefs.ts'].find(f => fs.existsSync(f))
+  assert.ok(file, 'fileRefs.ts not found from ' + process.cwd())
+  const code = fs.readFileSync(file as string, 'utf8').split('\n')
+    .filter(l => !l.trim().startsWith('*') && !l.trim().startsWith('//')).join('\n')
+  assert.equal(/\(\?<[=!]/.test(code), false)
 })

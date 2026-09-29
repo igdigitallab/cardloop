@@ -119,7 +119,12 @@ top-level dot entries under `$HOME` are hidden (only the native agent memory
 | `GET` | `/api/fs/file` | `?path=<abs>` → `{path, content, lang, size, rev, editable}`; max 1 MB; binary → `error` | Yes |
 | `PUT` | `/api/fs/file` | `?path=<abs>`, body `{content, base_rev, force?}` → `{ok, rev, size}`. Existing UTF-8 text files only. `409` when `base_rev` no longer matches the disk (the agent rewrote it); `force` overwrites. Atomic; CRLF files stay CRLF | Yes |
 
-`rev` is an opaque **string** (`mtime_ns:size`) — nanosecond mtimes exceed 2^53 and do not survive a JSON number.
+| `GET` | `/api/fs/raw` | `?path=<abs>[&download=1]` → the file's bytes. Images, PDF, video and audio stream inline (Range-capable); everything else is a forced `attachment` as octet-stream. Images/media carry `Content-Security-Policy: sandbox` (an SVG opened by URL cannot run script on the cockpit origin), PDFs `X-Frame-Options: SAMEORIGIN`. Max 100 MB | Yes |
+| `GET` | `/api/fs/recent` | `?project=<id>` → `{items[]}`: files the agent's Write/Edit calls touched (recorded by the engine, incl. reports dropped in `/tmp`) merged with files changed on disk in the project in the last 48 h; `src: agent\|disk` | Yes |
+
+The cockpit's own `data/` is never browsable (the safe, the Web Push private key, the touched-file log…) except `data/inbox/` — the files uploaded into chats.
+
+`rev` is an opaque **string** (`mtime_ns:size:inode`) — nanosecond mtimes exceed 2^53 and do not survive a JSON number.
 
 ### Legacy (still routed, no longer used by the UI)
 

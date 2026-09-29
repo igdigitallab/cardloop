@@ -168,8 +168,8 @@ const handledOpen = new Map<string, number>()
 // A pop-out keeps its own layout so resizing it does not move the main window's (popout.ts).
 const lsk = (key: string) => (isPopoutWindow() ? popoutKey(key) : key)
 
-function fsPaneInit(): 'tree' | 'recent' {
-  return readLS<string>(lsk(LS_PANE), 'tree') === 'recent' ? 'recent' : 'tree'
+function fsPaneInit(scope: string): 'tree' | 'recent' {
+  return readLS<string>(lsk(`${LS_PANE}.${scope}`), 'tree') === 'recent' ? 'recent' : 'tree'
 }
 
 // ─── FileExplorer ─────────────────────────────────────────────────────────────
@@ -204,7 +204,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
   const [confirmClose, setConfirmClose] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
   // Left pane: the folder tree, or the "Recent" list (files the agent just wrote).
-  const [pane, setPane] = useState<'tree' | 'recent'>(() => (fsPaneInit()))
+  const [pane, setPane] = useState<'tree' | 'recent'>(() => fsPaneInit(fs.scope))
   const [recent, setRecent] = useState<FsRecent[] | null>(null)
   const [recentError, setRecentError] = useState('')
 
@@ -267,6 +267,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
       const l = await fs.list(path)
       if (seq !== navSeq.current) return false
       applyRoot(l)
+      setPane('tree')  // going somewhere means showing where; never leave the move behind "Recent"
       return true
     } catch (e) {
       if (seq === navSeq.current) setNote(apiErrorMessage(e))
@@ -368,6 +369,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
     ++navSeq.current
     readyRef.current = false
     setReady(false)
+    setPane(fsPaneInit(fs.scope))
     nodesRef.current = null
     setLoading(true)
     setLoadError('')
@@ -449,7 +451,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
       setRecentError(apiErrorMessage(e))
     }
   }, [fs])
-  useEffect(() => { writeLS(lsk(LS_PANE), pane) }, [pane])
+  useEffect(() => { writeLS(lsk(`${LS_PANE}.${fs.scope}`), pane) }, [pane, fs.scope])
   useEffect(() => {
     if (ready && pane === 'recent') void loadRecent()
   }, [ready, pane, loadRecent])
@@ -631,10 +633,9 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
     return {
       ...mdComponents,
       img({ src, alt }) {
-        if (typeof src !== 'string' || (isWeb(src) && !src.startsWith('data:'))) {
-          return <img src={typeof src === 'string' ? src : undefined} alt={alt ?? ''} loading="lazy" />
-        }
-        return <img src={src.startsWith('data:') ? src : fs.rawUrl(resolve(src))} alt={alt ?? ''} loading="lazy" />
+        if (typeof src !== 'string' || !src) return null
+        if (isWeb(src)) return <img src={src} alt={alt ?? ''} loading="lazy" />
+        return <img src={fs.rawUrl(resolve(src))} alt={alt ?? ''} loading="lazy" />
       },
       a({ href, children }) {
         if (!href) return <a>{children}</a>
@@ -645,14 +646,15 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
           <a
             href="#"
             title={abs}
-            onClick={e => { e.preventDefault(); openFile(abs) }}
+            // go(): a file opens as a tab, a folder ("docs/") becomes the tree root.
+            onClick={e => { e.preventDefault(); void go(abs) }}
           >
             {children}
           </a>
         )
       },
     }
-  }, [activePath, fs, openFile])
+  }, [activePath, fs, go])
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -712,7 +714,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
                     Recent
                   </button>
                 )}
-                {info.roots.length > 1 && info.roots.map(r => (
+                {(info.roots.length > 1 ? info.roots : [{ path: rootPath, label: 'Files' }]).map(r => (
                   <button
                     key={r.path}
                     className={`files-root-chip${effectivePane === 'tree' && r.path === rootPath ? ' active' : ''}`}
@@ -859,6 +861,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
                     <div className="error-state">⚠ {activeTab.error}</div>
                   ) : activeTab.media ? (
                     <FileMedia
+                      key={`${activeTab.path}@${activeTab.rev}`}
                       kind={activeTab.media}
                       name={baseName(activeTab.path)}
                       url={fs.rawUrl(activeTab.path, { rev: activeTab.rev })}

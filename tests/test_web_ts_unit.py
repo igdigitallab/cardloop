@@ -1,4 +1,4 @@
-"""Runs the frontend's pure-logic unit tests (web/src/**/*.test.ts) inside the pytest suite.
+"""Runs the frontend's pure-logic unit tests (web/src/**/*.test.ts and .test.tsx) inside the pytest suite.
 
 They are written against Node's built-in runner (no vitest/jest in web/package.json), which
 left them manual-only: nobody ran them, and a mis-named bundle made `node --test` report
@@ -18,7 +18,7 @@ import pytest
 ROOT = Path(__file__).parent.parent
 WEB = ROOT / "web"
 ESBUILD = WEB / "node_modules" / ".bin" / "esbuild"
-TEST_FILES = sorted(p.relative_to(WEB) for p in (WEB / "src").rglob("*.test.ts"))
+TEST_FILES = sorted(p.relative_to(WEB) for p in [*(WEB / "src").rglob("*.test.ts"), *(WEB / "src").rglob("*.test.tsx")])
 
 
 @pytest.mark.skipif(shutil.which("node") is None or not ESBUILD.exists(),

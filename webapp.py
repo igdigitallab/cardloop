@@ -10870,6 +10870,18 @@ async def api_fs_file(req: web.Request) -> web.Response:
     return web.json_response(out)
 
 
+class _PlainFileResponse(web.FileResponse):
+    """FileResponse that never swaps in a `<name>.gz` / `<name>.br` sibling. aiohttp does that when
+    the client accepts gzip — and the sibling's NAME never went through the explorer's policy, so
+    `.env.example` (allowed) would serve `.env.example.gz` (denied by name). Dropping
+    Accept-Encoding from the request the response is prepared against turns the lookup off."""
+
+    async def prepare(self, request):  # type: ignore[override]
+        if "Accept-Encoding" in request.headers:
+            request = request.clone(headers={k: v for k, v in request.headers.items() if k.lower() != "accept-encoding"})
+        return await super().prepare(request)
+
+
 async def api_fs_raw(req: web.Request) -> web.StreamResponse:
     """GET /api/fs/raw?path=<abs>[&project=<id>][&download=1] — the file's bytes.
 
@@ -10883,7 +10895,7 @@ async def api_fs_raw(req: web.Request) -> web.StreamResponse:
             req.rel_url.query.get("download") in ("1", "true"))
     except _fs_browser.FsError as e:
         return _fs_error(e)
-    resp = web.FileResponse(p, headers=headers)
+    resp = _PlainFileResponse(p, headers=headers)
     resp.content_type = mime
     return resp
 

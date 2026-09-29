@@ -26,19 +26,31 @@ export function stripLineSuffix(text: string): string {
   return text.replace(LINE_SUFFIX, '')
 }
 
+/** File names without a usable extension that are still files (`Makefile`, `.gitignore`). */
+const BARE_NAMES = new Set(['Dockerfile', 'Makefile', 'Procfile', '.gitignore', '.dockerignore', '.editorconfig', '.env.example'])
+
+/** `.js` names that are frameworks, not files — `node.js`, `Next.js` in prose are everywhere. */
+const NOT_FILES = new Set(['node.js', 'next.js', 'nuxt.js', 'vue.js', 'react.js', 'express.js', 'd3.js', 'three.js',
+  'chart.js', 'angular.js', 'ember.js', 'nest.js', 'deno.js', 'bun.js', 'p5.js', 'socket.io'])
+
 /** Is this inline-code text a file reference worth linking? */
 export function looksLikeFileRef(text: string): boolean {
   const t = stripLineSuffix(text.trim())
   if (!t || t.length > 300 || /\s/.test(t)) return false
   if (/[*?<>{}()|;$=&,"'`\\]/.test(t) || t.includes('://') || t.startsWith('-') || t.startsWith('@')) return false
   const name = t.slice(t.lastIndexOf('/') + 1)
+  if (BARE_NAMES.has(name)) return true
+  if (!t.includes('/') && NOT_FILES.has(name.toLowerCase())) return false
   const dot = name.lastIndexOf('.')
   if (dot <= 0 || dot === name.length - 1) return false  // no extension, or a dotfile with none
   return EXT.has(name.slice(dot + 1).toLowerCase())
 }
 
-/** Absolute-looking paths inside running text. */
-const LOOSE = /(?<![\w/.~-])(~\/|\/(?:home|tmp|var|opt|srv|mnt|usr|etc|root|data)\/)[^\s`'"<>()[\]{},;]*[^\s`'"<>()[\]{},;.:!?]/g
+/** Absolute-looking paths inside running text. No lookbehind: Safari < 16.4 cannot even parse
+ *  one, and a regex that throws when this module loads blanks the whole chat. The "must start at a
+ *  word boundary" rule is checked on the preceding character instead. */
+const LOOSE = /(~\/|\/(?:home|tmp|var|opt|srv|mnt|usr|etc|root|data)\/)[^\s`'"<>()[\]{},;]*[^\s`'"<>()[\]{},;.:!?]/g
+const NOT_A_START = /[\w/.~-]/
 
 export interface PathPiece { text: string; path?: string }
 
@@ -48,6 +60,7 @@ export function splitLoosePaths(text: string): PathPiece[] {
   let last = 0
   for (const m of text.matchAll(LOOSE)) {
     const start = m.index ?? 0
+    if (start > 0 && NOT_A_START.test(text[start - 1])) continue  // "a.b/tmp/x", "https://h/home/x"
     if (start > last) out.push({ text: text.slice(last, start) })
     out.push({ text: m[0], path: m[0] })
     last = start + m[0].length
@@ -60,6 +73,22 @@ export function splitLoosePaths(text: string): PathPiece[] {
 
 /** URL fragment the plugin puts on the links it creates; ChatTab's `a` renderer recognises it. */
 export const FILE_REF_PREFIX = '#cardloop-file='
+
+/**
+ * The path inside a `#cardloop-file=` href, or null. NEVER throws: an agent (or a scraped page it
+ * quotes) can write `[x](#cardloop-file=%ZZ)` and react-markdown keeps it verbatim, and a throw
+ * while rendering one message takes the whole chat down — again on every reload, because the
+ * message is in the history.
+ */
+export function decodeFileRef(href: string | undefined): string | null {
+  if (!href || !href.startsWith(FILE_REF_PREFIX)) return null
+  try {
+    const path = decodeURIComponent(href.slice(FILE_REF_PREFIX.length))
+    return path && !path.includes('\0') ? path : null
+  } catch {
+    return null
+  }
+}
 
 interface MdNode {
   type: string

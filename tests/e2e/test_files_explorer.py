@@ -412,6 +412,10 @@ def test_a_path_in_an_agent_message_opens_in_the_files_tab(logged_in_page, world
     # Exactly the two real references are links; prose that merely looks path-ish is not.
     refs = page.locator(".chat-file-ref")
     expect(refs).to_have_count(2)
+    # The scripted reply also carries a malformed `#cardloop-file=%E0%A4` link: the chat must
+    # have rendered it as plain text rather than crash into its error boundary.
+    expect(page.locator(".chat-msg-body", has_text="Broken ref").first).to_be_visible()
+    expect(page.locator(".error-boundary-fallback")).to_have_count(0)
     assert page.locator(".chat-file-ref", has_text="not a path").count() == 0
     assert page.locator(".chat-file-ref", has_text="and/or").count() == 0
 
@@ -429,3 +433,35 @@ def test_a_path_in_an_agent_message_opens_in_the_files_tab(logged_in_page, world
 
     # Both are now open as tabs — the second click did not replace the first.
     expect(page.locator(".files-tab")).to_have_count(2)
+
+
+def test_a_media_error_does_not_stick_to_the_next_file(logged_in_page, world):
+    """A video the browser cannot decode must not leave its 'could not play' state on the image
+    opened after it (same component, same place in the tree)."""
+    page = logged_in_page
+    proj = world["proj"]
+    (proj / "broken.mp4").write_bytes(b"this is not a video at all" * 20)
+    (proj / "ok.png").write_bytes(PNG_1X1)
+    _open_files(page)
+    _row(page, "broken.mp4").click()
+    expect(page.locator(".files-media .error-state")).to_be_visible(timeout=10_000)
+    _row(page, "ok.png").click()
+    expect(page.locator(".files-media-img")).to_be_visible()
+    expect(page.locator(".files-media .error-state")).to_have_count(0)
+
+
+def test_leaving_recent_by_navigating_shows_the_tree_again(logged_in_page, world):
+    page = logged_in_page
+    _open_files(page)
+    page.locator(".files-root-chip", has_text="Recent").click()
+    expect(page.locator(".files-recent")).to_be_visible()
+    # Up / a typed path / a chip all mean "show me there" — never leave that behind the list.
+    page.locator("button[title='Up one folder']").click()
+    expect(page.locator(".files-recent")).to_have_count(0)
+    expect(_row(page, "e2e-files")).to_be_visible()
+    page.locator(".files-root-chip", has_text="Recent").click()
+    page.locator(".files-crumb-edit").click()
+    page.locator(".files-path-input").fill(str(world["proj"] / "docs"))
+    page.locator(".files-path-input").press("Enter")
+    expect(page.locator(".files-recent")).to_have_count(0)
+    expect(_row(page, "guide.md")).to_be_visible()
