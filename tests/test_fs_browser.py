@@ -144,6 +144,14 @@ def test_project_cwd_below_home_in_a_dotdir_or_outside_home_is_its_own_root(worl
     assert fb.read_file(str(world["foreign"] / "x.txt"), r2)["content"] == "x\n"
 
 
+def test_shortcut_list_has_no_duplicate_or_dead_entries(world):
+    def paths(cwd):
+        return [r["path"] for r in roots_for(world, cwd=cwd).as_list()]
+    assert paths(world["home"] / "proj") == [str(world["home"] / "proj"), str(world["home"]), str(world["scratch"])]
+    assert paths(world["home"]) == [str(world["home"]), str(world["scratch"])]
+    assert paths(world["home"].parent) == [str(world["home"]), str(world["scratch"])]
+
+
 def test_parent_and_crumbs_stop_at_the_ceiling(world):
     r = roots_for(world)
     up = fb.list_dir(str(world["home"] / "proj"), r)
@@ -295,6 +303,68 @@ def test_write_caps_size(world, monkeypatch):
     r = roots_for(world)
     monkeypatch.setattr(fb, "MAX_TEXT_BYTES", 10)
     assert status_of(fb.write_file, str(world["scratch"] / "report.md"), "x" * 50, None, r, True) == 413
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_read_only_files_are_shown_but_never_rewritten(world):
+    r = roots_for(world)
+    p = world["scratch"] / "ro.txt"
+    p.write_text("keep\n")
+    os.chmod(p, 0o444)
+    doc = fb.read_file(str(p), r)
+    assert doc["editable"] is False and doc["content"] == "keep\n"
+    assert status_of(fb.write_file, str(p), "x", doc["rev"], r) == 403
+    assert p.read_text() == "keep\n" and (p.stat().st_mode & 0o777) == 0o444
+
+
+def test_a_failed_save_leaves_the_original_and_no_temp_file(world, monkeypatch):
+    """Regression: the in-place fallback used to catch a failed temp write too, so a full disk
+    truncated the operator's file."""
+    r = roots_for(world)
+    p = world["scratch"] / "report.md"
+    rev = fb.read_file(str(p), r)["rev"]
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(fb.os, "replace", boom)
+    assert status_of(fb.write_file, str(p), "new\n", rev, r) == 500
+    monkeypatch.undo()
+    assert p.read_text() == "r\n"
+    assert [x.name for x in world["scratch"].iterdir() if x.name.startswith(".cardloop-save-")] == []
+
+
+def test_unwritable_folder_falls_back_to_in_place_only_then(world, monkeypatch):
+    r = roots_for(world)
+    p = world["scratch"] / "report.md"
+    rev = fb.read_file(str(p), r)["rev"]
+
+    def denied(*a, **k):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(fb.tempfile, "mkstemp", denied)
+    out = fb.write_file(str(p), "in place\n", rev, r)
+    assert p.read_text() == "in place\n"
+    assert out["rev"] == fb.read_file(str(p), r)["rev"]
+
+
+def test_a_same_size_atomic_rewrite_in_the_same_tick_is_still_a_conflict(world):
+    r = roots_for(world)
+    p = world["scratch"] / "report.md"
+    st = p.stat()
+    rev = fb.read_file(str(p), r)["rev"]
+    other = world["scratch"] / "swap.tmp"
+    other.write_text("x\n")  # same size as "r\n"
+    os.utime(other, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(other, p)  # what an agent's atomic save does: new inode, same size, same mtime
+    assert p.stat().st_size == st.st_size and p.stat().st_mtime_ns == st.st_mtime_ns
+    assert status_of(fb.write_file, str(p), "mine\n", rev, r) == 409
+
+
+def test_an_extra_root_covering_home_is_ignored(world):
+    for extra in (world["home"], world["home"].parent):
+        r = fb.Roots(world["home"], [extra, world["scratch"]])
+        assert status_of(fb.resolve_checked, str(world["home"] / ".ssh" / "authorized_keys"), r) == 403
+        assert status_of(fb.write_file, str(world["home"] / ".bashrc"), "x", None, r, True) == 403
+        assert fb.read_file(str(world["scratch"] / "report.md"), r)["content"] == "r\n"
 
 
 # ── routes ────────────────────────────────────────────────────────────────────

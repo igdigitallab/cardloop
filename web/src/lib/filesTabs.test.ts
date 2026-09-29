@@ -128,3 +128,43 @@ test('persisted state round-trips and rejects garbage', () => {
   const odd = parsePersisted(JSON.stringify({ v: 1, root: '/r', active: '/gone', paths: ['/a', 5, 'rel'] }))
   assert.deepEqual(odd, { v: 1, root: '/r', active: '/a', paths: ['/a'] })
 })
+
+test('a refresh that began before a save landed is dropped (it would roll the tab back)', () => {
+  let s = run([{ type: 'open', path: '/a' }, { type: 'loaded', path: '/a', doc: doc('one', 'r1') }, { type: 'startEdit', path: '/a' },
+    { type: 'setDraft', path: '/a', text: 'two' }])
+  const genAtRefreshStart = tab(s, '/a').gen
+  s = run([{ type: 'saveStart', path: '/a' }, { type: 'saveOk', path: '/a', saved: 'two', rev: 'r2' }], s)
+  s = run([{ type: 'refreshed', path: '/a', doc: doc('one', 'r1'), gen: genAtRefreshStart }], s)
+  assert.equal(tab(s, '/a').content, 'two')
+  assert.equal(tab(s, '/a').rev, 'r2')
+  // a refresh started after the save is honoured
+  s = run([{ type: 'refreshed', path: '/a', doc: doc('agent', 'r3'), gen: tab(s, '/a').gen }], s)
+  assert.equal(tab(s, '/a').content, 'agent')
+})
+
+test('a stored draft comes back as an edit in progress', () => {
+  const s = run([{ type: 'open', path: '/a' }, { type: 'loaded', path: '/a', doc: doc('one', 'r1') },
+    { type: 'restoreDraft', path: '/a', draft: 'unsaved words', rev: 'r1' }])
+  const t = tab(s, '/a')
+  assert.equal(t.draft, 'unsaved words')
+  assert.equal(isDirty(t), true)
+  assert.equal(t.diskChanged, false)
+})
+
+test('a stored draft made against an older disk keeps the old rev, so the save conflicts', () => {
+  const s = run([{ type: 'open', path: '/a' }, { type: 'loaded', path: '/a', doc: doc('agent rewrote', 'r9') },
+    { type: 'restoreDraft', path: '/a', draft: 'my old edit', rev: 'r1' }])
+  const t = tab(s, '/a')
+  assert.equal(t.rev, 'r1')
+  assert.equal(t.content, 'agent rewrote')
+  assert.equal(t.diskChanged, true)
+})
+
+test('a stored draft equal to the disk, or for a read-only tab, is not restored', () => {
+  const same = run([{ type: 'open', path: '/a' }, { type: 'loaded', path: '/a', doc: doc('one', 'r2') },
+    { type: 'restoreDraft', path: '/a', draft: 'one', rev: 'r1' }])
+  assert.equal(tab(same, '/a').draft, null)
+  const ro = run([{ type: 'open', path: '/a' }, { type: 'loaded', path: '/a', doc: doc('one', 'r1', { editable: false }) },
+    { type: 'restoreDraft', path: '/a', draft: 'x', rev: 'r1' }])
+  assert.equal(tab(ro, '/a').draft, null)
+})

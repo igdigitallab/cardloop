@@ -254,3 +254,55 @@ def test_open_files_and_folder_come_back_after_a_reload(logged_in_page, world):
     expect(page.locator(".files-tab.active")).to_contain_text("notes.md")
     expect(_crumb(page)).to_have_text("work")
     expect(page.locator(".markdown-wrap h1")).to_have_text("Notes")
+
+
+def test_unsaved_edits_survive_leaving_the_files_tab_and_a_reload(logged_in_page, world):
+    """Switching to another project tab unmounts the explorer; the draft must come back."""
+    page = logged_in_page
+    _open_files(page)
+    notes = world["proj"] / "notes.md"
+    _row(page, "notes.md").click()
+    page.locator("button:has-text('Edit')").click()
+    page.locator(".file-edit-textarea").fill("# Notes\n\nnot saved yet\n")
+
+    page.locator(".tab-btn", has_text="Board").click()
+    page.wait_for_selector(".files-explorer", state="detached")
+    page.locator(".tab-btn", has_text="Files").click()
+    page.wait_for_selector(".files-explorer .files-tab")
+    expect(page.locator(".file-edit-textarea")).to_have_value("# Notes\n\nnot saved yet\n")
+    expect(page.locator(".files-tab.active .files-tab-dirty")).to_be_visible()
+    assert notes.read_text() == "# Notes\n\nfirst\n"  # nothing was written behind the operator's back
+
+    # ...and across a reload (drafts are flushed to storage, not held only in memory).
+    page.wait_for_timeout(600)
+    page.reload()
+    page.wait_for_selector(".project-item", timeout=10_000)
+    _open_files(page)
+    expect(page.locator(".file-edit-textarea")).to_have_value("# Notes\n\nnot saved yet\n")
+
+    # Saved for real: the stored draft is gone, so it does not resurrect later.
+    page.locator(".file-edit-textarea").press("Control+s")
+    expect(page.locator(".files-tab-dirty")).to_have_count(0)
+    page.locator(".tab-btn", has_text="Board").click()
+    page.locator(".tab-btn", has_text="Files").click()
+    page.wait_for_selector(".files-explorer .files-tab")
+    expect(page.locator(".file-edit-textarea")).to_have_count(0)
+    expect(page.locator(".markdown-wrap")).to_contain_text("not saved yet")
+
+
+def test_a_restored_draft_against_a_file_the_agent_changed_conflicts_instead_of_clobbering(logged_in_page, world):
+    page = logged_in_page
+    _open_files(page)
+    notes = world["proj"] / "notes.md"
+    _row(page, "notes.md").click()
+    page.locator("button:has-text('Edit')").click()
+    page.locator(".file-edit-textarea").fill("# Notes\n\nmy draft\n")
+    page.locator(".tab-btn", has_text="Board").click()
+    notes.write_text("# Notes\n\nthe agent changed this while I was away, and made it longer\n")
+    page.locator(".tab-btn", has_text="Files").click()
+    page.wait_for_selector(".files-explorer .files-tab")
+    expect(page.locator(".file-edit-textarea")).to_have_value("# Notes\n\nmy draft\n")
+    expect(page.locator(".files-banner")).to_contain_text("changed on disk")
+    page.get_by_role("button", name="Save", exact=True).click()
+    expect(page.locator(".files-banner")).to_contain_text("Not saved")
+    assert "the agent changed this" in notes.read_text()

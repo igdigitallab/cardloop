@@ -17,6 +17,7 @@ import { FsAdapter } from '../lib/fsAdapter'
 import {
   DocSnapshot, EMPTY_TABS, isDirty, parsePersisted, tabsReducer, toPersisted,
 } from '../lib/filesTabs'
+import { collectDrafts, DraftMap, parseDrafts } from '../lib/filesDrafts'
 import { ancestorsBetween, baseName, dirname, isUnder, joinPath, looksLikePath } from '../lib/fsPath'
 import { readLS, readLSString, writeLS, writeLSString } from '../lib/storage'
 import { isPopoutWindow, popoutKey } from '../lib/popout'
@@ -149,10 +150,16 @@ function TreeView({ nodes, selectedPath, onFileClick, onDirToggle }: TreeProps) 
 const LS_TREE_W = 'cops.files.treeWidth'
 const LS_TREE_HIDDEN = 'cops.files.treeHidden'
 const LS_TABS = 'cops.files.tabs.'
+const LS_DRAFTS = 'cops.files.drafts.'
 const TREE_W_DEFAULT = 220
 const TREE_W_MIN = 140
 const VIEWER_MIN = 240
 const NARROW_QUERY = '(max-width: 768px)'
+
+// The nonce of the last search-hit request each explorer scope has acted on. Module-level on
+// purpose: the tab unmounts on every switch to another project tab, and a ref would forget, so
+// the same old hit would re-open (and yank the tree away) on every return.
+const handledOpen = new Map<string, number>()
 
 // A pop-out keeps its own layout so resizing it does not move the main window's (popout.ts).
 const lsk = (key: string) => (isPopoutWindow() ? popoutKey(key) : key)
@@ -174,6 +181,7 @@ export interface FileExplorerProps {
 export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
   const writable = !!fs.write
   const tabsKey = lsk(LS_TABS + fs.scope)
+  const draftsKey = lsk(LS_DRAFTS + fs.scope)
 
   const [info, setInfo] = useState<FsInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -199,8 +207,9 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
   const tabsRef = useRef(tabs)
   tabsRef.current = tabs
   const navSeq = useRef(0)
+  const goSeq = useRef(0)
+  const storedDrafts = useRef<DraftMap>({})
   const readyRef = useRef(false)
-  const handledOpen = useRef<number | null>(null)
   const infoRef = useRef<FsInfo | null>(null)
   const layoutRef = useRef<HTMLDivElement>(null)
   const rootElRef = useRef<HTMLDivElement>(null)
@@ -317,13 +326,17 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
 
   // ── Tabs ──────────────────────────────────────────────────────────────────
 
-  const loadTab = useCallback(async (path: string, dropIfGone = false) => {
+  /** `restore`: this tab is being brought back after a reload / tab switch, so an unsaved draft
+   *  stored for it (see the drafts effect) is put back in the editor once the file is loaded. */
+  const loadTab = useCallback(async (path: string, restore = false) => {
     try {
       const d = await fs.read(path)
       dispatch({ type: 'loaded', path, doc: toSnapshot(d, writable) })
+      const kept = restore ? storedDrafts.current[path] : undefined
+      if (kept) dispatch({ type: 'restoreDraft', path, draft: kept.draft, rev: kept.rev })
     } catch (e) {
       const status = (e as { status?: number }).status
-      if (dropIfGone && (status === 404 || status === 403)) dispatch({ type: 'close', path })
+      if (restore && (status === 404 || status === 403)) dispatch({ type: 'close', path })
       else dispatch({ type: 'failed', path, message: apiErrorMessage(e) })
     }
   }, [fs, writable])
@@ -357,6 +370,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
         infoRef.current = inf
         setInfo(inf)
         const saved = parsePersisted(readLSString(tabsKey))
+        storedDrafts.current = parseDrafts(readLSString(draftsKey))
         let listing: FsListing
         try {
           listing = await fs.list(saved?.root || inf.start)
@@ -383,7 +397,7 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
     })()
 
     return () => { cancelled = true }
-  }, [fs, tabsKey, applyRoot, loadTab])
+  }, [fs, tabsKey, draftsKey, applyRoot, loadTab])
 
   // Remember the open files and the root (only paths/active/root — not every keystroke).
   const persistSig = JSON.stringify(toPersisted(rootPath, tabs))
@@ -391,6 +405,24 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
     if (!readyRef.current || !rootPath) return
     writeLSString(tabsKey, persistSig)
   }, [persistSig, rootPath, tabsKey])
+
+  // Unsaved edits outlive the tab: switching to another project tab unmounts this whole
+  // explorer, and a reload or crash takes the page. Debounced while typing, and flushed on
+  // unmount. Skipped while any tab is still loading — restoring is not finished, and writing
+  // "no drafts" now would erase the very drafts we are about to put back.
+  const writeDraftsRef = useRef<() => void>(() => {})
+  writeDraftsRef.current = () => {
+    if (!readyRef.current) return
+    const list = tabsRef.current.tabs
+    if (list.some(t => t.status === 'loading')) return
+    const drafts = collectDrafts(list)
+    writeLSString(draftsKey, Object.keys(drafts).length ? JSON.stringify(drafts) : null)
+  }
+  useEffect(() => {
+    const id = setTimeout(() => writeDraftsRef.current(), 400)
+    return () => clearTimeout(id)
+  }, [tabs])
+  useEffect(() => () => writeDraftsRef.current(), [])
 
   // ── Refresh (run_end / focus / button) ───────────────────────────────────
 
@@ -423,12 +455,13 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
     } catch { /* silently ignore */ }
 
     await Promise.all(tabsRef.current.tabs.map(async t => {
+      const gen = t.gen  // a save/reload that lands while this read is in flight makes it stale
       try {
         const d = await fs.read(t.path)
-        dispatch({ type: 'refreshed', path: t.path, doc: toSnapshot(d, writable) })
+        dispatch({ type: 'refreshed', path: t.path, doc: toSnapshot(d, writable), gen })
       } catch (e) {
         if ((e as { status?: number }).status === 404) {
-          dispatch({ type: 'refreshed', path: t.path, doc: { content: '', rev: '', editable: false, lang: '', size: 0, error: 'file no longer exists' } })
+          dispatch({ type: 'refreshed', path: t.path, gen, doc: { content: '', rev: '', editable: false, lang: '', size: 0, error: 'file no longer exists' } })
         }
       }
     }))
@@ -444,16 +477,17 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
 
   const go = useCallback(async (text: string) => {
     const base = rootPathRef.current
+    const seq = ++goSeq.current
     setBusy(true)
     setNote('')
     let st: FsStat
     try {
       st = await fs.stat(text, base)
     } catch (e) {
-      setNote(apiErrorMessage(e))
-      setBusy(false)
+      if (seq === goSeq.current) { setNote(apiErrorMessage(e)); setBusy(false) }
       return
     }
+    if (seq !== goSeq.current) return  // a newer paste superseded this one
     setBusy(false)
     if (st.kind === 'dir' && st.path) { await changeRoot(st.path); return }
     if (st.kind === 'file' && st.path) {
@@ -476,11 +510,11 @@ export function FileExplorer({ fs, refreshRef, openPath }: FileExplorerProps) {
   // is handled once per nonce.
   useEffect(() => {
     const target = openPath?.path
-    if (!target || !ready || handledOpen.current === openPath.nonce) return
-    handledOpen.current = openPath.nonce
+    if (!target || !ready || handledOpen.get(fs.scope) === openPath.nonce) return
+    handledOpen.set(fs.scope, openPath.nonce)
     const abs = target.startsWith('/') ? target : joinPath(infoRef.current?.start ?? rootPathRef.current, target)
     void go(abs)
-  }, [openPath?.nonce, openPath?.path, ready, go])
+  }, [openPath?.nonce, openPath?.path, ready, go, fs.scope])
 
   // ── Edit / save ───────────────────────────────────────────────────────────
 

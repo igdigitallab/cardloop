@@ -7,7 +7,11 @@
  *    that is still in flight while the operator keeps typing cannot mark the tab clean.
  *  - a background refresh never touches a tab that has unsaved edits: it only raises
  *    `diskChanged`, and the operator chooses reload or keep;
- *  - a 409 on save raises `conflict` and keeps the draft.
+ *  - a 409 on save raises `conflict` and keeps the draft;
+ *  - `gen` counts how often the on-disk baseline was replaced. A refresh carries the gen it
+ *    started from and is dropped if a save/reload landed meanwhile — otherwise a slow refresh
+ *    (run_end + window focus fire together) rolls a just-saved tab back to the old text and
+ *    the operator's next save fails with a 409 against their own previous save.
  * Tests: filesTabs.test.ts (run command in its header).
  */
 
@@ -36,6 +40,8 @@ export interface OpenFile {
   conflict: boolean
   saving: boolean
   saveError: string
+  /** Bumped every time the on-disk baseline (content/rev) is replaced. */
+  gen: number
 }
 
 export interface TabsState {
@@ -57,7 +63,8 @@ export type TabsAction =
   | { type: 'saveStart'; path: string }
   | { type: 'saveOk'; path: string; saved: string; rev: string }
   | { type: 'saveFail'; path: string; message: string; conflict: boolean }
-  | { type: 'refreshed'; path: string; doc: DocSnapshot }
+  | { type: 'refreshed'; path: string; doc: DocSnapshot; gen?: number }
+  | { type: 'restoreDraft'; path: string; draft: string; rev: string }
   | { type: 'reload'; path: string; doc: DocSnapshot }
   | { type: 'keepMine'; path: string }
   | { type: 'reset' }
@@ -69,15 +76,15 @@ export function isDirty(t: OpenFile): boolean {
 function blank(path: string): OpenFile {
   return {
     path, status: 'loading', error: '', content: '', rev: '', editable: false, lang: '', size: 0,
-    draft: null, diskChanged: false, conflict: false, saving: false, saveError: '',
+    draft: null, diskChanged: false, conflict: false, saving: false, saveError: '', gen: 0,
   }
 }
 
 function fromDoc(t: OpenFile, doc: DocSnapshot): OpenFile {
-  if (doc.error) return { ...t, status: 'error', error: doc.error, size: doc.size, lang: doc.lang }
+  if (doc.error) return { ...t, status: 'error', error: doc.error, size: doc.size, lang: doc.lang, gen: t.gen + 1 }
   return {
     ...t, status: 'ready', error: '', content: doc.content, rev: doc.rev, editable: doc.editable,
-    lang: doc.lang, size: doc.size,
+    lang: doc.lang, size: doc.size, gen: t.gen + 1,
   }
 }
 
@@ -126,7 +133,7 @@ export function tabsReducer(s: TabsState, a: TabsAction): TabsState {
     case 'saveOk':
       return patch(s, a.path, t => ({
         ...t, saving: false, saveError: '', conflict: false, diskChanged: false,
-        content: a.saved, rev: a.rev,
+        content: a.saved, rev: a.rev, gen: t.gen + 1,
         // Typed nothing since the request left: back to viewing. Typed more: still editing.
         draft: t.draft === a.saved ? null : t.draft,
       }))
@@ -134,6 +141,7 @@ export function tabsReducer(s: TabsState, a: TabsAction): TabsState {
       return patch(s, a.path, t => ({ ...t, saving: false, saveError: a.message, conflict: a.conflict }))
     case 'refreshed':
       return patch(s, a.path, t => {
+        if (a.gen !== undefined && a.gen !== t.gen) return t  // a save/reload landed since it began
         if (a.doc.error) return isDirty(t) ? t : fromDoc(t, a.doc)
         if (a.doc.rev === t.rev) return t
         // The file changed on disk. Unsaved edits win until the operator decides.
@@ -144,6 +152,12 @@ export function tabsReducer(s: TabsState, a: TabsAction): TabsState {
       return patch(s, a.path, t => ({
         ...fromDoc(t, a.doc), draft: null, diskChanged: false, conflict: false, saveError: '',
       }))
+    case 'restoreDraft':
+      // An unsaved draft that outlived its tab (tab switch, reload). If the disk moved on since
+      // the draft was made, keep the ORIGINAL rev: the save then 409s instead of silently
+      // clobbering what changed, and the banner offers reload / overwrite.
+      return patch(s, a.path, t => (t.status === 'ready' && t.editable && t.draft === null && a.draft !== t.content
+        ? { ...t, draft: a.draft, rev: a.rev, diskChanged: a.rev !== t.rev } : t))
     case 'keepMine':
       return patch(s, a.path, t => ({ ...t, diskChanged: false }))
   }

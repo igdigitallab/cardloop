@@ -79,9 +79,14 @@ class Roots:
         plain: list[Path] = []
         for p in extras:
             try:
-                plain.append(p.resolve())
+                r = p.resolve()
             except OSError:
                 continue
+            # An extra root that IS $HOME or above it would bypass the dot-entry rule (an extra
+            # root has none) and reopen .ssh — same reasoning as the project cwd below.
+            if r == self.home or r in self.home.parents:
+                continue
+            plain.append(r)
         if project_cwd is not None:
             try:
                 cwd = project_cwd.resolve()
@@ -103,7 +108,10 @@ class Roots:
 
     def as_list(self) -> list[dict]:
         out = [{"path": str(self.home), "label": "~"}]
-        if self.project_cwd is not None:
+        # A cwd that IS $HOME (or is unreachable, e.g. above it) would only add a dead or
+        # duplicate shortcut.
+        if (self.project_cwd is not None and self.project_cwd != self.home
+                and permitted(self.project_cwd, self)):
             out.insert(0, {"path": str(self.project_cwd), "label": "project"})
         for p in self.plain:
             if p != self.project_cwd:
@@ -298,8 +306,10 @@ def list_dir(path: str, roots: Roots) -> dict:
 
 def _rev(st: os.stat_result) -> str:
     """Opaque revision of a file's on-disk state. A STRING on purpose: st_mtime_ns is ~1.7e18,
-    past 2^53, so a JSON number would be rounded by JavaScript and never match again."""
-    return f"{st.st_mtime_ns}:{st.st_size}"
+    past 2^53, so a JSON number would be rounded by JavaScript and never match again. The inode
+    is in it because an atomic rewrite (ours, or an agent's) swaps it, which catches a same-size
+    rewrite inside one clock tick that mtime + size alone would miss."""
+    return f"{st.st_mtime_ns}:{st.st_size}:{st.st_ino}"
 
 
 def _snapshot(p: Path) -> tuple[bytes, os.stat_result]:
@@ -330,7 +340,7 @@ def read_file(path: str, roots: Roots) -> dict:
         return {**out, "content": "", "error": "binary file"}
     try:
         text = raw.decode("utf-8")
-        editable = True
+        editable = os.access(p, os.W_OK)  # a read-only file is shown, not offered for editing
     except UnicodeDecodeError:
         # Saving the U+FFFD-replaced text would corrupt the file: view only.
         text = raw.decode("utf-8", errors="replace")
@@ -361,25 +371,42 @@ def write_file(path: str, content: str, base_rev: Optional[str], roots: Roots,
                 raise FsError(400, "base_rev required")
             if _rev(st) != base_rev:
                 raise FsError(409, "changed on disk since it was opened")
+        if not os.access(p, os.W_OK):
+            raise FsError(403, "file is read-only")
         if b"\r\n" in old and "\r" not in content:
             data = content.replace("\n", "\r\n").encode("utf-8")
         try:
             fd, tmp = tempfile.mkstemp(prefix=".cardloop-save-", dir=str(p.parent))
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
-                os.chmod(tmp, st.st_mode & 0o7777)
-                os.replace(tmp, p)
-            except BaseException:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
         except OSError:
-            # Directory not writable but the file is: write in place instead.
+            # The FOLDER is not writable but the file is: overwrite in place. Only this case —
+            # once a temp file exists, a failure must leave the original untouched (a fallback
+            # that truncated it on ENOSPC is how a full disk used to eat the operator's file).
             try:
-                p.write_bytes(data)
+                with open(p, "r+b") as f:
+                    f.write(data)
+                    f.truncate(len(data))
+                    f.flush()
+                    new_rev = _rev(os.fstat(f.fileno()))
             except OSError as e:
                 raise FsError(500, f"write error: {e.strerror or e}")
-        return {"ok": True, "path": str(p), "rev": _rev(p.stat()), "size": len(data)}
+            return {"ok": True, "path": str(p), "rev": new_rev, "size": len(data)}
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.chmod(tmp, st.st_mode & 0o7777)
+            # A rename keeps the inode and mtime, so this is the revision the file will have.
+            new_rev = _rev(os.stat(tmp))
+            os.replace(tmp, p)
+        except OSError as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise FsError(500, f"write error: {e.strerror or e}")
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return {"ok": True, "path": str(p), "rev": new_rev, "size": len(data)}
