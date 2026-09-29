@@ -10870,6 +10870,37 @@ async def api_fs_file(req: web.Request) -> web.Response:
     return web.json_response(out)
 
 
+async def api_fs_raw(req: web.Request) -> web.StreamResponse:
+    """GET /api/fs/raw?path=<abs>[&project=<id>][&download=1] — the file's bytes.
+
+    Feeds the image / PDF / video / audio previews (inline, Range-capable) and the download
+    button (`download=1`, or any type the explorer does not preview: forced attachment).
+    Headers are part of the security story — see fs_browser.open_raw."""
+    try:
+        roots = _fs_roots(req)
+        p, mime, headers = await asyncio.to_thread(
+            _fs_browser.open_raw, req.rel_url.query.get("path", ""), roots,
+            req.rel_url.query.get("download") in ("1", "true"))
+    except _fs_browser.FsError as e:
+        return _fs_error(e)
+    resp = web.FileResponse(p, headers=headers)
+    resp.content_type = mime
+    return resp
+
+
+async def api_fs_recent(req: web.Request) -> web.Response:
+    """GET /api/fs/recent?project=<id> — files the agent just wrote + files changed on disk."""
+    try:
+        roots = _fs_roots(req)
+        if roots.project_cwd is None:
+            raise _fs_browser.FsError(400, "project required")
+        items = await asyncio.to_thread(
+            _fs_browser.recent_files, req.app["ctx"]["DATA"], str(roots.project_cwd), roots)
+    except _fs_browser.FsError as e:
+        return _fs_error(e)
+    return web.json_response({"items": items})
+
+
 async def api_fs_file_write(req: web.Request) -> web.Response:
     """PUT /api/fs/file?path=<abs>[&project=<id>] {content, base_rev, force?} — save a text file.
 
@@ -18882,6 +18913,8 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/fs/stat", api_fs_stat)
         app.router.add_get("/api/fs/file", api_fs_file)
         app.router.add_put("/api/fs/file", api_fs_file_write)
+        app.router.add_get("/api/fs/raw", api_fs_raw)
+        app.router.add_get("/api/fs/recent", api_fs_recent)
         # Session context (read: Feature A)
         app.router.add_get("/api/projects/{id}/session-context", api_project_session_context)
         # Project memory (read+write: Feature B)

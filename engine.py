@@ -49,6 +49,7 @@ import accounts as _accounts              # multi-subscription switch (CLAUDE_CO
 import browser_tools as _browser_tools    # spec-065: agent browser tools (built per-run)
 import roles                              # spec-091: declarative sub-agent role registry
 import runtime as _runtime               # spec-092: run context + which CLI binary serves a run
+import fs_browser as _fs_browser          # Files tab policy; here only its 'files the agent wrote' log
 from board import (
     board_summary,
     _load_board,
@@ -3641,6 +3642,8 @@ async def run_engine(  # type: ignore[return]
                     if isinstance(blk, TextBlock) and blk.text.strip():
                         yield {"type": "text", "text": blk.text}
                     elif isinstance(blk, ToolUseBlock):
+                        # The Files tab's "Recent" list: which files did the agent just write.
+                        _fs_browser.record_touched(DATA, cwd, blk.name, blk.input)
                         yield {"type": "tool", "name": blk.name, "input": blk.input or {}}
             elif isinstance(msg, StreamEvent):
                 # Spec-029 §1: incremental text delta for live cockpit streaming.

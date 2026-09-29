@@ -22,17 +22,25 @@ Deny rules (a request is refused unless some root permits it AND nothing below d
     rules apply, otherwise `cwd=/home/x` would reopen `.ssh`.
 Writes additionally require an existing regular UTF-8 text file <= MAX_TEXT_BYTES and an
 unchanged mtime (the agent edits the same files the operator does).
+
+Two more surfaces share the same policy: `raw` (bytes for the image / PDF / video / audio
+previews and for downloads) and `recent` (the files the agent just wrote, plus whatever changed
+on disk in the project folder). Both go through resolve_checked / permitted — nothing here has
+its own idea of what is reachable.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import tempfile
 import threading
+import time
 import unicodedata
 from pathlib import Path
 from typing import Optional
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 MAX_TEXT_BYTES = 1 * 1024 * 1024
 MAX_ENTRIES = 3000
@@ -327,6 +335,12 @@ def read_file(path: str, roots: Roots) -> dict:
     p = resolve_checked(path, roots)
     if not p.is_file():
         raise FsError(404, "not a file")
+    kind = preview_kind(p)
+    if kind is not None:
+        # Shown by the browser from /api/fs/raw — the bytes never go through the text pipeline.
+        st = p.stat()
+        return {"path": str(p), "lang": p.suffix.lstrip("."), "size": st.st_size, "rev": _rev(st),
+                "kind": kind, "content": "", "editable": False}
     raw, st = _snapshot(p)
     out = {
         "path": str(p),
@@ -410,3 +424,189 @@ def write_file(path: str, content: str, base_rev: Optional[str], roots: Roots,
                 pass
             raise
         return {"ok": True, "path": str(p), "rev": new_rev, "size": len(data)}
+
+
+# ── raw bytes: previews and downloads ─────────────────────────────────────────
+
+RAW_MAX_BYTES = 100 * 1024 * 1024
+
+# Extension -> MIME for the types the explorer previews itself. An explicit table, not the
+# system mime database: a preview must not depend on which /etc/mime.types this host has.
+_PREVIEW: dict[str, tuple[str, str]] = {
+    ".png": ("image", "image/png"), ".jpg": ("image", "image/jpeg"), ".jpeg": ("image", "image/jpeg"),
+    ".gif": ("image", "image/gif"), ".webp": ("image", "image/webp"), ".avif": ("image", "image/avif"),
+    ".bmp": ("image", "image/bmp"), ".ico": ("image", "image/x-icon"), ".svg": ("image", "image/svg+xml"),
+    ".pdf": ("pdf", "application/pdf"),
+    ".mp4": ("video", "video/mp4"), ".m4v": ("video", "video/mp4"), ".webm": ("video", "video/webm"),
+    ".mov": ("video", "video/quicktime"), ".ogv": ("video", "video/ogg"),
+    ".mp3": ("audio", "audio/mpeg"), ".wav": ("audio", "audio/wav"), ".ogg": ("audio", "audio/ogg"),
+    ".oga": ("audio", "audio/ogg"), ".m4a": ("audio", "audio/mp4"), ".flac": ("audio", "audio/flac"),
+    ".aac": ("audio", "audio/aac"),
+}
+
+
+def preview_kind(p: Path) -> Optional[str]:
+    """image | pdf | video | audio for the types the explorer can show, else None."""
+    hit = _PREVIEW.get(p.suffix.lower())
+    return hit[0] if hit else None
+
+
+def open_raw(path: str, roots: Roots, download: bool = False) -> tuple[Path, str, dict]:
+    """Resolve a file for streaming. Returns (path, mime, response headers).
+
+    Only the previewable types are ever served inline; everything else is a forced download as
+    octet-stream. The headers matter as much as the policy: an SVG opened by URL would run its
+    scripts on the cockpit's origin with the operator's cookie, so images and media carry
+    `Content-Security-Policy: sandbox`. A PDF cannot (Chrome refuses to render a PDF under a
+    sandbox CSP), and the cockpit's blanket `X-Frame-Options: DENY` would stop it being framed,
+    so it gets SAMEORIGIN instead; a PDF's own scripts run in the browser's PDF viewer, not on
+    our origin.
+    """
+    p = resolve_checked(path, roots)
+    if not p.is_file():
+        raise FsError(404, "not a file")
+    try:
+        size = p.stat().st_size
+    except OSError:
+        raise FsError(500, "stat failed")
+    if size > RAW_MAX_BYTES:
+        raise FsError(413, f"file too large to serve ({size // (1024 * 1024)} MB)")
+    kind = preview_kind(p)
+    headers = {"Cache-Control": "private, no-cache"}
+    inline = kind is not None and not download
+    mime = _PREVIEW[p.suffix.lower()][1] if inline else "application/octet-stream"
+    if inline:
+        headers["Content-Disposition"] = "inline"
+        if kind == "pdf":
+            headers["X-Frame-Options"] = "SAMEORIGIN"
+        else:
+            headers["Content-Security-Policy"] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; media-src 'self'"
+    else:
+        headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(p.name)}"
+        headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    return p, mime, headers
+
+
+# ── recent: what the agent just wrote, what just changed ──────────────────────
+
+_TOUCH_TOOLS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
+_TOUCH_KEEP = 500
+_TOUCH_LOCK = threading.Lock()
+
+
+def touched_path(tool: str, tool_input: object, cwd: str) -> Optional[str]:
+    """The absolute file a Write/Edit-style tool call is about to change, else None."""
+    key = _TOUCH_TOOLS.get(tool)
+    if not key or not isinstance(tool_input, dict):
+        return None
+    raw = tool_input.get(key)
+    if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
+        return None
+    return raw if raw.startswith("/") else os.path.join(cwd, raw)
+
+
+def _touch_file(data_dir: Path, cwd: str) -> Path:
+    try:
+        real = str(Path(cwd).resolve())
+    except OSError:
+        real = cwd
+    return data_dir / "touched" / (hashlib.sha1(real.encode()).hexdigest()[:12] + ".jsonl")
+
+
+def record_touched(data_dir: Path, cwd: str, tool: str, tool_input: object) -> None:
+    """Remember that the agent is writing a file. Best effort: never raises into the run."""
+    try:
+        p = touched_path(tool, tool_input, cwd)
+        if p is None:
+            return
+        f = _touch_file(data_dir, cwd)
+        line = json.dumps({"t": time.time(), "p": p, "tool": tool}) + "\n"
+        with _TOUCH_LOCK:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            with open(f, "a", encoding="utf-8") as fh:
+                fh.write(line)
+            # Trim occasionally (not on every write): keep the newest _TOUCH_KEEP entries.
+            if f.stat().st_size > 200_000:
+                keep = f.read_text(encoding="utf-8", errors="replace").splitlines()[-_TOUCH_KEEP:]
+                tmp = f.with_suffix(".tmp")
+                tmp.write_text("\n".join(keep) + "\n", encoding="utf-8")
+                os.replace(tmp, f)
+    except Exception:
+        pass
+
+
+def _read_touched(data_dir: Path, cwd: str) -> list[dict]:
+    f = _touch_file(data_dir, cwd)
+    out: list[dict] = []
+    try:
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                try:
+                    d = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(d, dict) and isinstance(d.get("p"), str) and isinstance(d.get("t"), (int, float)):
+                    out.append(d)
+    except OSError:
+        return []
+    return out[-_TOUCH_KEEP:]
+
+
+def _scan_recent(cwd: Path, roots: Roots, since: float, cap: int, budget_s: float) -> list[tuple[float, Path]]:
+    """Files under `cwd` changed since `since`, newest first — the ones a shell wrote, which the
+    tool log cannot know about. Bounded: prunes excluded dirs, stops at the time budget."""
+    found: list[tuple[float, Path]] = []
+    deadline = time.monotonic() + budget_s
+    scanned = 0
+    for dirpath, dirnames, filenames in os.walk(cwd):
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS and not is_secret_name(d)]
+        for name in filenames:
+            scanned += 1
+            if scanned > 40_000 or time.monotonic() > deadline:
+                return sorted(found, reverse=True)[:cap]
+            fp = Path(dirpath) / name
+            try:
+                st = fp.stat()
+            except OSError:
+                continue
+            if st.st_mtime >= since and permitted(fp, roots) and fp.is_file():
+                found.append((st.st_mtime, fp))
+    return sorted(found, reverse=True)[:cap]
+
+
+def recent_files(data_dir: Path, cwd: str, roots: Roots, limit: int = 40,
+                 window_s: float = 48 * 3600, disk_cap: int = 25, scan_budget_s: float = 1.0) -> list[dict]:
+    """Files the operator probably wants to open: the agent's Write/Edit targets (anywhere the
+    explorer may show — including a report dropped in /tmp) merged with anything that changed
+    on disk in the project folder within `window_s`. Newest first, one row per file.
+    `src` says which: "agent" (a tool wrote it) or "disk" (only its mtime says so)."""
+    rows: dict[str, dict] = {}
+    for d in _read_touched(data_dir, cwd):
+        try:
+            p = Path(d["p"]).resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not permitted(p, roots) or not p.is_file():
+            continue
+        prev = rows.get(str(p))
+        if prev is None or d["t"] > prev["t"]:
+            rows[str(p)] = {"path": str(p), "t": float(d["t"]), "src": "agent", "tool": d.get("tool", "")}
+    try:
+        base = Path(cwd).resolve()
+    except OSError:
+        base = None
+    if base is not None and base.is_dir():
+        for mtime, fp in _scan_recent(base, roots, time.time() - window_s, disk_cap, scan_budget_s):
+            key = str(fp)
+            if key in rows:
+                rows[key]["t"] = max(rows[key]["t"], mtime)
+            else:
+                rows[key] = {"path": key, "t": mtime, "src": "disk", "tool": ""}
+    out = sorted(rows.values(), key=lambda r: r["t"], reverse=True)[:limit]
+    for r in out:
+        try:
+            r["size"] = Path(r["path"]).stat().st_size
+        except OSError:
+            r["size"] = 0
+        r["name"] = os.path.basename(r["path"])
+    return out

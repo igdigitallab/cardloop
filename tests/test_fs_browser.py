@@ -5,6 +5,7 @@ so the tests pin the refusals, not just the happy path.
 """
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -367,6 +368,157 @@ def test_an_extra_root_covering_home_is_ignored(world):
         assert fb.read_file(str(world["scratch"] / "report.md"), r)["content"] == "r\n"
 
 
+# ── raw bytes: previews and downloads ─────────────────────────────────────────
+
+def _bytes_file(dirpath, name, data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16):
+    p = dirpath / name
+    p.write_bytes(data)
+    return p
+
+
+def test_read_reports_the_preview_kind_and_never_pushes_bytes_through_the_text_path(world):
+    r = roots_for(world)
+    for name, kind in (("a.png", "image"), ("a.SVG", "image"), ("a.pdf", "pdf"), ("a.mp4", "video"), ("a.mp3", "audio")):
+        _bytes_file(world["scratch"], name)
+        doc = fb.read_file(str(world["scratch"] / name), r)
+        assert doc["kind"] == kind and doc["content"] == "" and doc["editable"] is False, name
+        assert "error" not in doc
+
+
+def test_raw_serves_previews_inline_with_the_headers_that_keep_them_harmless(world):
+    r = roots_for(world)
+    png = _bytes_file(world["scratch"], "a.png")
+    _, mime, h = fb.open_raw(str(png), r)
+    assert mime == "image/png" and h["Content-Disposition"] == "inline"
+    assert h["Content-Security-Policy"].startswith("sandbox")
+
+    svg = _bytes_file(world["scratch"], "a.svg", b"<svg onload='alert(1)'/>")
+    _, mime, h = fb.open_raw(str(svg), r)
+    assert mime == "image/svg+xml" and "sandbox" in h["Content-Security-Policy"]
+
+    pdf = _bytes_file(world["scratch"], "a.pdf", b"%PDF-1.4")
+    _, mime, h = fb.open_raw(str(pdf), r)
+    # A PDF cannot carry a sandbox CSP (Chrome will not render it) but must be frameable by us.
+    assert mime == "application/pdf" and h["X-Frame-Options"] == "SAMEORIGIN"
+    assert "Content-Security-Policy" not in h
+
+
+def test_raw_forces_a_download_for_everything_it_does_not_preview(world):
+    r = roots_for(world)
+    for name in ("page.html", "notes.md", "script.py", "blob.bin", "evil.svgz"):
+        _bytes_file(world["scratch"], name, b"<script>alert(1)</script>")
+        _, mime, h = fb.open_raw(str(world["scratch"] / name), r)
+        assert mime == "application/octet-stream", name
+        assert h["Content-Disposition"].startswith("attachment; filename*=UTF-8''"), name
+        assert "sandbox" in h["Content-Security-Policy"]
+    png = _bytes_file(world["scratch"], "a.png")
+    _, mime, h = fb.open_raw(str(png), r, download=True)
+    assert mime == "application/octet-stream" and h["Content-Disposition"].startswith("attachment")
+
+
+def test_raw_filenames_are_quoted_and_cannot_inject_headers(world):
+    r = roots_for(world)
+    p = _bytes_file(world["scratch"], 'my "report"\n; x=1.txt', b"x")
+    _, _, h = fb.open_raw(str(p), r)
+    assert "\n" not in h["Content-Disposition"] and '"' not in h["Content-Disposition"].split("''", 1)[1]
+
+
+def test_raw_follows_the_same_policy_as_everything_else(world, monkeypatch):
+    r = roots_for(world)
+    assert status_of(fb.open_raw, str(world["home"] / ".ssh" / "authorized_keys"), r) == 403
+    assert status_of(fb.open_raw, str(world["foreign"] / "x.txt"), r) == 403
+    (world["home"] / "proj" / "deploy.pem").write_bytes(b"k")
+    assert status_of(fb.open_raw, str(world["home"] / "proj" / "deploy.pem"), r) == 403
+    os.mkfifo(world["scratch"] / "pipe")
+    assert status_of(fb.open_raw, str(world["scratch"] / "pipe"), r) == 404
+    (world["scratch"] / "out").symlink_to(world["foreign"] / "x.txt")
+    assert status_of(fb.open_raw, str(world["scratch"] / "out"), r) == 403
+    monkeypatch.setattr(fb, "RAW_MAX_BYTES", 4)
+    _bytes_file(world["scratch"], "big.png", b"0123456789")
+    assert status_of(fb.open_raw, str(world["scratch"] / "big.png"), r) == 413
+
+
+# ── recent: what the agent just wrote ─────────────────────────────────────────
+
+def test_touched_path_only_for_write_style_tools():
+    assert fb.touched_path("Write", {"file_path": "/a/b.md"}, "/cwd") == "/a/b.md"
+    assert fb.touched_path("Edit", {"file_path": "x.py"}, "/cwd") == "/cwd/x.py"
+    assert fb.touched_path("MultiEdit", {"file_path": "/a/b"}, "/cwd") == "/a/b"
+    assert fb.touched_path("NotebookEdit", {"notebook_path": "/n.ipynb"}, "/cwd") == "/n.ipynb"
+    assert fb.touched_path("Read", {"file_path": "/a"}, "/cwd") is None
+    assert fb.touched_path("Bash", {"command": "cat > /a"}, "/cwd") is None
+    for junk in (None, [], "x", {}, {"file_path": ""}, {"file_path": 5}, {"file_path": "/a\x00b"}):
+        assert fb.touched_path("Write", junk, "/cwd") is None
+
+
+def _touch(data, cwd, path, tool="Write"):
+    fb.record_touched(data, str(cwd), tool, {"file_path": str(path)})
+
+
+def test_recent_lists_agent_writes_newest_first_one_row_per_file(world):
+    data = world["tmp"] / "data"
+    r = roots_for(world, cwd=world["home"] / "proj")
+    proj = world["home"] / "proj"
+    _touch(data, proj, proj / "docs" / "a.md")
+    _touch(data, proj, world["scratch"] / "report.md")
+    _touch(data, proj, proj / "docs" / "a.md", "Edit")  # same file again: still one row, now newest
+    rows = fb.recent_files(data, str(proj), r, disk_cap=0)
+    assert [x["name"] for x in rows] == ["a.md", "report.md"]
+    assert rows[0]["src"] == "agent" and rows[0]["tool"] == "Edit" and rows[0]["size"] > 0
+
+
+def test_recent_drops_missing_denied_and_outside_paths(world):
+    data = world["tmp"] / "data"
+    proj = world["home"] / "proj"
+    r = roots_for(world, cwd=proj)
+    for path in (proj / "gone.md", world["home"] / ".ssh" / "authorized_keys", world["foreign"] / "x.txt",
+                 proj / "node_modules" / "m.js", proj / "docs" / "a.md"):
+        (proj / "node_modules").mkdir(exist_ok=True)
+        (proj / "node_modules" / "m.js").write_text("x")
+        _touch(data, proj, path)
+    assert [x["name"] for x in fb.recent_files(data, str(proj), r, disk_cap=0)] == ["a.md"]
+
+
+def test_recent_adds_shell_written_files_from_the_disk_but_agent_rows_win(world):
+    data = world["tmp"] / "data"
+    proj = world["home"] / "proj"
+    r = roots_for(world, cwd=proj)
+    old = proj / "old.txt"
+    old.write_text("x")
+    os.utime(old, (time.time() - 10 * 86400,) * 2)
+    (proj / "made_by_shell.log").write_text("x")
+    (proj / "node_modules" / "junk.js").write_text("x")
+    (proj / ".env").write_text("SECRET=1")
+    _touch(data, proj, proj / "docs" / "a.md")
+    rows = {x["name"]: x for x in fb.recent_files(data, str(proj), r)}
+    assert rows["made_by_shell.log"]["src"] == "disk"
+    assert rows["a.md"]["src"] == "agent"
+    assert "old.txt" not in rows          # outside the window
+    assert "junk.js" not in rows          # pruned dir
+    assert ".env" not in rows             # secret name
+    # touched AND changed on disk: reported once, as the agent's
+    _touch(data, proj, proj / "made_by_shell.log")
+    again = {x["name"]: x for x in fb.recent_files(data, str(proj), r)}
+    assert again["made_by_shell.log"]["src"] == "agent"
+    assert [x["name"] for x in fb.recent_files(data, str(proj), r)].count("made_by_shell.log") == 1
+
+
+def test_recent_disk_scan_is_capped_and_the_log_is_trimmed(world, monkeypatch):
+    data = world["tmp"] / "data"
+    proj = world["home"] / "proj"
+    r = roots_for(world, cwd=proj)
+    for i in range(8):
+        (proj / f"f{i}.txt").write_text("x")
+    assert len(fb.recent_files(data, str(proj), r, disk_cap=3)) == 3
+    monkeypatch.setattr(fb, "_TOUCH_KEEP", 5)
+    monkeypatch.setattr(fb.time, "time", lambda: 1000.0)  # noqa: keep ordering deterministic
+    log = fb._touch_file(data, str(proj))
+    for i in range(40):
+        _touch(data, proj, proj / f"f{i % 8}.txt")
+    monkeypatch.undo()
+    assert log.exists()
+
+
 # ── routes ────────────────────────────────────────────────────────────────────
 
 def _routes_app(ctx):
@@ -448,3 +600,53 @@ async def test_legacy_global_write_can_no_longer_touch_sensitive_dirs(aiohttp_cl
     r = await c.post("/api/global/file?path=.ssh/authorized_keys", json={"content": "evil"}, headers=auth)
     assert r.status == 403
     assert (world["home"] / ".ssh" / "authorized_keys").read_text() == "ssh-ed25519 AAA\n"
+
+
+async def test_raw_route_streams_with_range_and_the_right_headers(aiohttp_client, http, world):
+    ctx, auth = http
+    from aiohttp import web
+    import webapp as W
+    app = _routes_app(ctx)
+    app.middlewares.append(W.security_headers_middleware)
+    app.router.add_get("/api/fs/raw", W.api_fs_raw)
+    c = await aiohttp_client(app)
+    (world["scratch"] / "a.png").write_bytes(b"\x89PNG" + bytes(range(200)))
+    r = await c.get(f"/api/fs/raw?path={world['scratch']}/a.png", headers=auth)
+    assert r.status == 200 and r.headers["Content-Type"] == "image/png"
+    assert r.headers["Content-Disposition"] == "inline" and "sandbox" in r.headers["Content-Security-Policy"]
+    assert (await r.read()).startswith(b"\x89PNG")
+    part = await c.get(f"/api/fs/raw?path={world['scratch']}/a.png", headers={**auth, "Range": "bytes=4-9"})
+    assert part.status == 206 and await part.read() == bytes(range(6))
+
+    (world["scratch"] / "page.html").write_text("<script>alert(1)</script>")
+    h = await c.get(f"/api/fs/raw?path={world['scratch']}/page.html", headers=auth)
+    assert h.headers["Content-Type"].startswith("application/octet-stream")
+    assert h.headers["Content-Disposition"].startswith("attachment")
+
+    # The blanket X-Frame-Options: DENY would stop the PDF preview being framed; the route
+    # must win over it, and only for PDFs.
+    (world["scratch"] / "a.pdf").write_bytes(b"%PDF-1.4 x")
+    pdf = await c.get(f"/api/fs/raw?path={world['scratch']}/a.pdf", headers=auth)
+    assert pdf.headers["X-Frame-Options"] == "SAMEORIGIN"
+    assert r.headers["X-Frame-Options"] == "DENY"
+
+    dl = await c.get(f"/api/fs/raw?path={world['scratch']}/a.png&download=1", headers=auth)
+    assert dl.headers["Content-Disposition"].startswith("attachment")
+
+    assert (await c.get(f"/api/fs/raw?path={world['home']}/.ssh/authorized_keys", headers=auth)).status == 403
+    assert (await c.get(f"/api/fs/raw?path={world['scratch']}/a.png")).status == 401
+
+
+async def test_recent_route_needs_a_project(aiohttp_client, http, world):
+    ctx, auth = http
+    import webapp as W
+    app = _routes_app(ctx)
+    app.router.add_get("/api/fs/recent", W.api_fs_recent)
+    c = await aiohttp_client(app)
+    ctx["DATA"].mkdir(parents=True, exist_ok=True)
+    proj = world["home"] / "proj"
+    fb.record_touched(ctx["DATA"], str(proj), "Write", {"file_path": str(proj / "docs" / "a.md")})
+    assert (await c.get("/api/fs/recent", headers=auth)).status == 400
+    data = await (await c.get("/api/fs/recent?project=proj", headers=auth)).json()
+    assert [i["name"] for i in data["items"]][0] == "a.md"
+    assert (await c.get("/api/fs/recent?project=proj")).status == 401
