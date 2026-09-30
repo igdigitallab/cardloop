@@ -350,10 +350,13 @@ async def test_patch_rename_still_works_while_running_and_untouched_by_revision(
 
 @pytest.mark.asyncio
 async def test_patch_provider_switch_without_compatible_model_rejected_400(
-    aiohttp_client, fake_ctx, chats_app
+    aiohttp_client, fake_ctx, chats_app, monkeypatch
 ):
     """Confirms the NEW validation path (not the old hardcoded immutability) is what
     rejects this — an incompatible-model switch must fail even with codex available."""
+    # Codex must be *faked* available: without this the test only passed on a host with a
+    # real Codex subscription login (a clean CI runner answered "not currently available").
+    fake_ctx["codex_provider_info"] = _enable_codex(monkeypatch)
     client = await aiohttp_client(chats_app)
     created = await client.post(
         "/api/projects/myproject/chats", json={"model": "sonnet"}, headers=_auth(fake_ctx)

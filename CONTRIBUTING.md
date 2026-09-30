@@ -77,9 +77,10 @@ venv/bin/python -m pytest -q
 make test
 ```
 
-CI runs the same command (`venv/bin/python -m pytest tests/ -q`) on Python 3.11 and 3.12. Two
-provider-routing tests assume the optional Codex provider is switched on, so CI sets
-`CODEX_ENABLED=true`; if you run without a `.env`, do the same. Opt-in suites (browser e2e,
+CI runs the same command (`venv/bin/python -m pytest tests/ -q`) on Python 3.11 and 3.12. One
+provider-routing test (`test_codex_chat_routes_thread_without_touching_claude_session`) assumes
+the optional Codex provider flag is on, so CI sets `CODEX_ENABLED=true`; if you run without a
+`.env`, do the same. Opt-in suites (browser e2e,
 model-alias probes) are described in [CLAUDE.md](CLAUDE.md#operations).
 
 ## Python lint

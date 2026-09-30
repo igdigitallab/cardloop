@@ -42,8 +42,9 @@ jobs:
       - name: Lint (ruff)
         run: venv/bin/ruff check .
 
-      # Two provider-routing tests assume the Codex provider is switched on, which a
-      # developer's own .env does; a clean CI runner has no .env, so set it here.
+      # A provider-routing test (test_chat_sse.py::test_codex_chat_routes_thread...) assumes the
+      # Codex provider flag is on, which a developer's own .env sets; a clean CI runner has no
+      # .env, so set it here.
       - name: Run tests
         env:
           CODEX_ENABLED: "true"
