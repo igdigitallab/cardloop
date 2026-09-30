@@ -18,6 +18,7 @@ from the couch.
 
 [![CI](https://github.com/igdigitallab/cardloop/actions/workflows/ci.yml/badge.svg)](https://github.com/igdigitallab/cardloop/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](./LICENSE)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/igdigitallab/cardloop/badge)](https://scorecard.dev/viewer/?uri=github.com/igdigitallab/cardloop)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 ![Node 20+](https://img.shields.io/badge/node-20%2B-339933.svg)
 ![PWA](https://img.shields.io/badge/PWA-installable-5a0fc8.svg)
@@ -402,7 +403,7 @@ exposing it to a network.
   on your own host and uses your machine's existing git config and your local `claude login` — nothing is
   sent anywhere. Updating is a plain `git pull` from the public repo; no token, no account.
 
-Found a vulnerability? Please open a private security advisory rather than a public issue.
+Found a vulnerability? Please report it privately — see [SECURITY.md](SECURITY.md) (GitHub private advisory or security@igdigi.com), not a public issue.
 
 ---
 
@@ -451,10 +452,10 @@ Python 3.11 · aiohttp · Claude Agent SDK · React 18 · Vite · TypeScript · 
 PRs are welcome — this is an open project and the monolith is being decomposed in the open.
 
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, lint, and commit style.
-- Tests: `venv/bin/python -m pytest tests/` (2400+, should be green).
+- Tests: `venv/bin/python -m pytest tests/` (3,500+, should be green). New functionality comes with tests.
 - All new code, comments, docs, and UI strings are **English-only**; the agent's reply language is
   configurable separately via `RESPONSE_LANGUAGE`.
-- Found a bug or have an idea? Open an issue. Found a vulnerability? Open a private security advisory.
+- Found a bug or have an idea? Open an issue. Found a vulnerability? Report it privately — [SECURITY.md](SECURITY.md).
 
 ---
 

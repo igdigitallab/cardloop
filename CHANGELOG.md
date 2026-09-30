@@ -83,6 +83,11 @@ OOM kills in 4 weeks, zero auto-continue activity after any crash):
 ### Added
 - **`skeptic` sub-agent (spec-058 v2)** — read-only adversarial verifier in the default roster (Task tool + Workflow `agentType`): tries to REFUTE a claim with an evidence trail, defaults to REFUTED on inconclusive evidence — so ultracode verify stages don't rubber-stamp their own findings.
 
+## [v0.16.1] — 2026-07-05
+
+### Fixed
+- **Deploy canary (spec-072)** — the post-restart journal scan now reads only the NEW process's log lines (by `MainPID`), so shutdown noise from the previous run can no longer trigger a false rollback; the rollback's git/npm steps run as the repo owner.
+
 ## [v0.16.0] — 2026-07-05
 
 The "make the chat smarter" batch: one stream to rule the canvas, background runs as a
@@ -168,6 +173,10 @@ already updates itself.
 - **Modes/session bar wrapped to a second line; project cards too tall (card 29b29a).** `.chat-session-bar` no longer wraps (`flex-wrap:nowrap` + horizontal scroll + `nowrap` buttons); `.project-item` padding tightened 7→5px.
 - **spec-039 SIGTERM shutdown hung ~90s then SIGKILL (regression, fixed same session).** The handler flushed sessions but the process never exited: the aiohttp `AppRunner` was never cleaned up and 5 webapp background loops were never cancelled, so `asyncio.run()` waited until the systemd stop timeout. `webapp.stop()` now cancels the loops + `runner.cleanup()`, and `_amain` bounds the whole teardown with `asyncio.wait_for(12s)` + cancels lingering tasks. Verified: restart 93s→6s, clean "Deactivated successfully".
 - **Project rename lost all conversation history and Timeline.** `api_project_rename` moved the folder (`shutil.move`) and updated `topics.json`, but SDK history (`~/.claude/projects/<slug>/`) and Timeline (`data/timeline/<slug>.jsonl`) are keyed by `slug = cwd.replace('/','-')` — after changing cwd the cockpit read an empty new slug, and "all sessions appeared to disappear" (files were intact under the old slug). Added `_migrate_cwd_keyed_state(old_cwd, new_cwd, ctx)`: moves the SDK sessions directory + Timeline (+`.jsonl.1`) to the new slug, best-effort, warnings in response `warnings`. Tests: `test_rename_migrates_sdk_sessions`, `test_rename_migrates_timeline`. Already-lost projects recovered by moving orphaned directories.
+
+## [v0.8.2 – v0.12.0] — 2026-06-11 → 2026-06-23
+
+Five tags cut as stable points without an individual note each; what shipped, from the tagged commits: v0.8.2 (06-11) spec-026 phase 0+1 — login rate-limit hardening + LAN firewall; v0.9.0 (06-12) spec-026 security hardening complete, all phases deployed; v0.10.0 (06-13) spec-039 — a persistent CLI client so sessions stop being killed, plus a batch of backlog cards and the spec-040 design; v0.11.0 (06-23) board reconcile; v0.12.0 (06-23) compact, kebab-only card actions. Full detail: `git log v0.8.1..v0.12.0`.
 
 ## [v0.8.1] — 2026-06-01
 ### Fixed

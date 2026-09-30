@@ -2,6 +2,42 @@
 
 # Contributing to Cardloop
 
+## How to contribute
+
+- **Report a bug or request a feature:** open a [GitHub issue](https://github.com/igdigitallab/cardloop/issues/new/choose)
+  (there are templates for both). Search existing issues first; the issue tracker is the public,
+  searchable archive of reports and answers. We aim to reply to every new issue within 14 days —
+  the answer may be "no", or a question, but it will not be silence.
+- **Report a security vulnerability:** *not* here — follow [SECURITY.md](SECURITY.md) (private
+  reporting).
+- **Send a change:** fork the repository, make the change on a branch, and open a **pull request
+  against `master`**. A maintainer reviews it; small, focused pull requests are merged fastest.
+  (The maintainers themselves commit straight to `master`; contributions from other people arrive
+  as pull requests.)
+- **Ask a question or discuss an idea:** open an issue and say it is a question — issues and pull
+  request threads are the discussion channel (searchable, linkable, no account needed beyond
+  GitHub).
+
+### What an acceptable contribution looks like
+
+- **Tests come with the change.** Major new functionality must add tests to the automated suite
+  (`tests/` for Python — pytest; `web/src/**/*.test.ts` for frontend logic — node:test); a bug fix
+  should add a regression test that fails without the fix. This is the project's test policy, and
+  the [PR template](.github/PULL_REQUEST_TEMPLATE.md) asks for it.
+- **CI must be green:** backend tests on Python 3.11 and 3.12, `ruff check .`, and the frontend's
+  `npm run lint` + `npm run build` all run on every pull request (see
+  [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Static analysis (CodeQL) runs on every
+  push and pull request too.
+- **Coding standard:** Python is linted by `ruff` (rule set in [`ruff.toml`](ruff.toml)); the
+  frontend by ESLint + Prettier (`web/eslint.config.js`, `web/.prettierrc`), with zero warnings
+  allowed.
+- **English only:** code, comments, docstrings, log output, UI strings and docs are in English.
+- **No secrets or personal data** in tracked files — no tokens, passwords, IPs, or `/home/<user>`
+  paths (use `$HOME`, relative paths, or `.env` + a placeholder in `.env.example`).
+- **User-visible change → a line in [CHANGELOG.md](CHANGELOG.md)** under `[Unreleased]`; that file
+  is the human-readable release notes.
+- **Commit messages** follow the style in [Commit style](#commit-style) below.
+
 ## Quick Start
 
 One command does everything (venv + deps + .env + frontend build):
@@ -39,6 +75,17 @@ switch billing to API pay-per-token mode instead of using your Claude subscripti
 venv/bin/python -m pytest -q
 # or
 make test
+```
+
+CI runs the same command (`venv/bin/python -m pytest tests/ -q`) on Python 3.11 and 3.12. Two
+provider-routing tests assume the optional Codex provider is switched on, so CI sets
+`CODEX_ENABLED=true`; if you run without a `.env`, do the same. Opt-in suites (browser e2e,
+model-alias probes) are described in [CLAUDE.md](CLAUDE.md#operations).
+
+## Python lint
+
+```bash
+venv/bin/ruff check .    # rule set: ruff.toml — must report zero findings
 ```
 
 ## Troubleshooting
@@ -93,7 +140,7 @@ bot.py          — web-only launcher (loads env/auth, builds ctx, starts the co
 webapp.py       — aiohttp cockpit, 57 HTTP routes, event bus
 web/            — React + Vite SPA (build → web/dist/)
 templates/      — new-project starters (*.tpl) + vault reference copies (reference/)
-tests/          — pytest suite (2400+ tests; run via venv/bin/python -m pytest)
+tests/          — pytest suite (3,500+ tests; run via venv/bin/python -m pytest)
 data/           — runtime state (gitignored: topics.json, sessions.json, audit/, runs/)
 docs/API.md     — HTTP API reference
 tools/doctor.py — one-command cockpit diagnosis (make doctor)
