@@ -1,6 +1,7 @@
 # Dependabot: one grouped PR per ecosystem per week, so updates arrive as a short weekly
-# batch instead of a stream of single-package PRs. Security updates are separate and
-# always opened immediately for the affected package.
+# batch instead of a stream of single-package PRs. Major-version bumps are NOT proposed as
+# routine updates (a runtime major bump is a deliberate, tested change — do it by hand); a
+# vulnerability fix that exists only in a new major still arrives as a security update.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -23,10 +24,16 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       python:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   - package-ecosystem: npm
     directory: "/web"
@@ -36,10 +43,16 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "chore(web)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       web:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      web-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   - package-ecosystem: docker
     directory: "/"
@@ -49,3 +62,6 @@ updates:
     open-pull-requests-limit: 2
     commit-message:
       prefix: "chore(docker)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
