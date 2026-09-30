@@ -447,6 +447,33 @@ def looks_like_dead_connection(exc: Exception) -> bool:
     return any(marker in msg for marker in _DEAD_CONNECTION_MARKERS)
 
 
+_SCHEMES = ("http://", "https://", "about:", "data:", "file:", "chrome:", "view-source:")
+
+
+def nav_target(raw: str) -> str:
+    """What the pane's address bar (or the agent) means by ``raw``, like a real browser.
+
+    A scheme-ful string is used as is. Something that looks like a host — a dot, a port,
+    ``localhost`` — gets ``https://``. Anything else (a bare word like ``instagram``, or
+    text with spaces) is a search query: prefixing ``https://`` to it just produced
+    ``https://instagram/`` -> ERR_NAME_NOT_RESOLVED.
+    """
+    text = (raw or "").strip()
+    if not text or text.lower().startswith(_SCHEMES):
+        return text
+    host = text.split("/", 1)[0].split("?", 1)[0]
+    if " " not in text and ("." in host or ":" in host or host.lower() == "localhost" or host.startswith("[")):
+        return "https://" + text
+    from urllib.parse import quote_plus
+    return "https://www.google.com/search?q=" + quote_plus(text)
+
+
+def is_plain_nav_error(exc: Exception) -> bool:
+    """A page that simply would not load (DNS, refused, aborted): the session is healthy
+    and Chrome is already showing its own error page, so nothing should be torn down."""
+    return "net::err_" in str(exc).lower() and not looks_like_dead_connection(exc)
+
+
 def _is_strict_mode_violation(exc: Exception) -> bool:
     """True for Playwright's own "locator(...) resolved to N elements" error — the
     Locator API's built-in ambiguity guard (verified empirically: Page.click() does
@@ -1503,7 +1530,14 @@ class BrowserSession:
             elif t == "copy":
                 await self._copy(ws)
             elif t == "navigate":
-                await self.navigate(str(msg.get("url") or ""))
+                try:
+                    await self.navigate(str(msg.get("url") or ""))
+                except Exception as e:
+                    if not is_plain_nav_error(e):
+                        raise
+                    _log.info("navigate: page did not load (cwd=%s): %s", self.key, e)
+                    with contextlib.suppress(Exception):
+                        await self._broadcast_nav()
             elif t in ("back", "forward", "reload"):
                 await self._history(t)
             elif t == "zoom":
@@ -1737,10 +1771,9 @@ class BrowserSession:
     async def navigate(self, url: str) -> None:
         await self.start()
         self._touch()
+        url = nav_target(url)
         if not url:
             return
-        if not url.startswith(("http://", "https://", "about:", "data:", "file:")):
-            url = "https://" + url
         try:
             await self._page.goto(url, wait_until="domcontentloaded")
             await self._broadcast_nav()

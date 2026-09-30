@@ -2274,3 +2274,56 @@ def test_live_target_ids_reports_only_sessions_that_are_alive():
     finally:
         browser_pane._SESSIONS.pop(alive.key, None)
         browser_pane._SESSIONS.pop(dead.key, None)
+
+
+# ── address bar: a bare word is a search, and a page that will not load is not a dead session ──
+
+def test_nav_target_reads_the_address_bar_like_a_browser():
+    from browser_pane import nav_target
+    assert nav_target("https://a.test/x") == "https://a.test/x"
+    assert nav_target("about:blank") == "about:blank"
+    assert nav_target("instagram.com") == "https://instagram.com"
+    assert nav_target(" example.com/path?q=1 ") == "https://example.com/path?q=1"
+    assert nav_target("localhost:8787") == "https://localhost:8787"
+    assert nav_target("127.0.0.1:3000/x") == "https://127.0.0.1:3000/x"
+    # the bug: "instagram" became https://instagram/ -> ERR_NAME_NOT_RESOLVED
+    assert nav_target("instagram") == "https://www.google.com/search?q=instagram"
+    assert nav_target("google analytics login") == "https://www.google.com/search?q=google+analytics+login"
+    assert nav_target("") == ""
+
+
+def test_navigate_sends_a_bare_word_to_search_not_to_a_nonexistent_host():
+    s, page = _session_with_fake_page()
+    s._broadcast_nav = _async_noop
+    asyncio.run(s.navigate("google"))
+    assert page.goto_calls[0] == "https://www.google.com/search?q=google"
+
+
+def test_operator_navigate_to_unresolvable_host_keeps_the_session_alive():
+    async def go():
+        s, page = _session_with_fake_page()
+        s._cdp = object()
+        s._broadcast_nav = _async_noop
+        browser_pane._SESSIONS["k"] = s
+        page.fail_with = Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://nope.invalid/")
+        await s.handle_input({"t": "navigate", "url": "nope.invalid"})
+        assert s._closed is False
+        assert browser_pane._SESSIONS.get("k") is s
+    asyncio.run(go())
+
+
+def test_operator_navigate_still_retires_on_a_really_dead_connection():
+    async def go():
+        s, page = _session_with_fake_page()
+        s._cdp = object()
+        browser_pane._SESSIONS["k"] = s
+        page.fail_with = RuntimeError("Connection closed while reading from the driver")
+        await s.handle_input({"t": "navigate", "url": "https://x.test"})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert s._closed is True
+    asyncio.run(go())
+
+
+async def _async_noop(*a, **k):
+    return None
