@@ -7,3 +7,7 @@ pytest-aiohttp>=1.0
 # After installing: `venv/bin/python -m playwright install chromium` (one-time).
 playwright>=1.55
 pytest-playwright>=0.7
+
+# Linter run by CI (rule set: ruff.toml). Pinned exactly so a rule change cannot turn CI red
+# unannounced; Dependabot proposes bumps.
+ruff==0.16.6

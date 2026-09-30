@@ -1,0 +1,11 @@
+# Lint scope for Cardloop's Python sources (run by CI: `ruff check .`).
+#
+# Deliberately the "real bug" subset only — syntax errors (E9), invalid comparisons and
+# string-format mistakes (F63), invalid syntax constructs (F7) and undefined names (F82).
+# Broader rule sets (unused imports, module-level import order, redefinitions) still report
+# several hundred style-class findings in this codebase; they are not enforced yet, so this
+# gate stays at zero warnings instead of being ignored.
+extend-exclude = ["venv", "web/node_modules", "web/dist", "web/android", ".worktrees"]
+
+[lint]
+select = ["E9", "F63", "F7", "F82"]

@@ -5,7 +5,8 @@
 #
 # NOTE: `restart-self.sh` is systemd-only and does NOT work in a container — the
 # cockpit's "restart" affordances are no-ops here; recreate the container instead.
-FROM node:20-bookworm-slim
+# Pinned by digest (tag kept for readability); Dependabot's docker ecosystem bumps both.
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

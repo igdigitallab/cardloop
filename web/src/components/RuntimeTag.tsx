@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- `runtimeStats` is a pure helper shared with the other spec-093 surfaces; it stays next to the chip it formats */
 /** spec-093: the ONE visual vocabulary for a runtime — `M 18% — 1h 9m`.
  *  Used by the top pill, the mobile composer pill, the pill's dropdown, the chat's model
  *  menu and the chat tabs, so the same subscription never looks two different ways. */
