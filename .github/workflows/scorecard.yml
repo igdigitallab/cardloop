@@ -2,6 +2,9 @@
 # NOTE: with `publish_results: true` the Scorecard API rejects workflows that add top-level
 # env/defaults, workflow-level write permissions, or steps outside the approved action list —
 # keep this file minimal and put anything else in another workflow.
+# Results are NOT uploaded to the repo's code-scanning dashboard: that would mirror Scorecard's
+# accepted-low checks (no branch protection / code review on a direct-push repo) as open
+# "alerts" next to the real CodeQL findings. Scorecard's own viewer and API carry the result.
 name: Scorecard
 
 on:
@@ -20,7 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      security-events: write # upload to the code-scanning dashboard
       id-token: write # OIDC token needed to publish results
       contents: read
     steps:
@@ -42,8 +44,3 @@ jobs:
           name: SARIF file
           path: results.sarif
           retention-days: 5
-
-      - name: Upload to code-scanning
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
-        with:
-          sarif_file: results.sarif
