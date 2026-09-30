@@ -42,7 +42,7 @@ anyio>=4.13
 
 # Terminal QR codes for --tunnel / LAN onboarding (spec-082 B). Pure Python — ASCII/
 # Unicode rendering only, no Pillow dependency needed.
-qrcode>=8
+qrcode>=8.2
 
 # Snowball stemmers — query-side morphology for the global search index (spec-090).
 # Pure Python, no C extension. OPTIONAL at runtime: search.py degrades to literal prefix
