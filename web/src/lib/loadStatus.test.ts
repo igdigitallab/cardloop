@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  INITIAL_LOAD, reduceLoad, viewOf, litSegments, verdict, DOWN_AFTER, STALE_CLIENT_MS, STALE_SERVER_S,
+  INITIAL_LOAD, reduceLoad, viewOf, litSegments, verdict, DOWN_AFTER, OFF_AFTER, STALE_CLIENT_MS, STALE_SERVER_S,
   type LoadState,
 } from './loadStatus'
 import type { SystemLoad } from '../api'
@@ -36,9 +36,23 @@ test('before the first answer: loading, never green', () => {
   assert.equal(viewOf(ok(load({ warming_up: true, level: 'unknown' })), T0).kind, 'loading')
 })
 
-test('404 means the feature is off: the meter hides', () => {
-  const s = reduceLoad(INITIAL_LOAD, { type: 'error', status: 404 })
-  assert.equal(viewOf(s, T0).kind, 'off')
+test('one 404 is a proxy hiccup, a run of them means the feature is off', () => {
+  let s = ok(load())
+  s = reduceLoad(s, { type: 'error', status: 404 })
+  assert.notEqual(viewOf(s, T0 + 1000).kind, 'off')
+  for (let i = 1; i < OFF_AFTER; i++) s = reduceLoad(s, { type: 'error', status: 404 })
+  assert.equal(viewOf(s, T0 + 1000).kind, 'off')
+  // ...and it comes back by itself when the endpoint answers again (no page reload)
+  s = reduceLoad(s, { type: 'ok', data: load({ level: 'warn' }), at: T0 + 2000 })
+  assert.equal(viewOf(s, T0 + 2500).kind, 'warn')
+})
+
+test('a 404 in the middle of a healthy run does not accumulate', () => {
+  let s = ok(load())
+  s = reduceLoad(s, { type: 'error', status: 404 })
+  s = reduceLoad(s, { type: 'ok', data: load(), at: T0 + 10_000 })
+  s = reduceLoad(s, { type: 'error', status: 404 })
+  assert.notEqual(viewOf(s, T0 + 10_500).kind, 'off')
 })
 
 test('401 is "signed out", not "cockpit down", and does not count as a failure', () => {
@@ -78,11 +92,17 @@ test('recovery: one good answer clears down', () => {
   assert.equal(viewOf(s, T0 + 31_500).kind, 'warn')
 })
 
-test('waking from a hidden tab is not "stale": polling was paused on purpose', () => {
+test('waking after a long pause is stale until the next poll lands — never the old green', () => {
   const s = ok(load(), T0)
-  const slept = reduceLoad(s, { type: 'wake', at: T0 + 10 * 60_000 })
-  assert.equal(viewOf(slept, T0 + 10 * 60_000 + 500).kind, 'ok')
-  assert.equal(reduceLoad(INITIAL_LOAD, { type: 'wake', at: T0 }), INITIAL_LOAD)   // nothing to refresh
+  assert.equal(viewOf(s, T0 + 10 * 60_000).kind, 'stale')
+  const fresh = reduceLoad(s, { type: 'ok', data: load(), at: T0 + 10 * 60_000 + 300 })
+  assert.equal(viewOf(fresh, T0 + 10 * 60_000 + 500).kind, 'ok')
+})
+
+test('a failing server-side sampler is reported, not shown as green or "measuring"', () => {
+  const v = viewOf(ok(load({ level: 'unknown', error: 'RuntimeError: boom', signals: [] })), T0 + 1)
+  assert.equal(v.kind, 'unknown')
+  assert.match(verdict(v), /failing/i)
 })
 
 test('nothing measurable on this host is "unknown", not green', () => {

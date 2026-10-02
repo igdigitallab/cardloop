@@ -9,6 +9,7 @@ from pathlib import Path
 
 import engine as _engine
 import load_monitor as _lm
+from webapp import _spawn_bg
 from features.load_monitor.alerts import Alert, AlertState, decide
 
 SAMPLE_EVERY_S = 5.0
@@ -34,12 +35,16 @@ def _inputs(ctx: dict) -> dict:
     return {
         "live_max": _engine.LIVE_CLIENT_MAX,
         "guard": _engine.LIVE_CLIENT_MEM_GUARD if _engine.LIVE_CLIENT_MEM_GUARD > 0 else _lm.GUARD_DEFAULT,
-        "running": len(ctx.get("running") or {}),
+        "running": len([k for k in (ctx.get("running") or {}) if k not in (ctx.get("live_clients") or {})]),
         "bg_agents": bg,
         "chats_live": len(ctx.get("live_clients") or {}),
         "data_dir": ctx.get("DATA"),
         "cockpit_pid": os.getpid(),
     }
+
+
+def _first_line(body: str) -> str:
+    return ((body.splitlines() or [""])[0]).lstrip("- ")
 
 
 async def _deliver(ctx: dict, alert: Alert) -> None:
@@ -55,8 +60,9 @@ async def _deliver(ctx: dict, alert: Alert) -> None:
         pass
     if not alert.loud:
         return
+    first = _first_line(alert.body)
     try:
-        await _wa._notify_operator(ctx, "[ERROR] " + alert.title + " — " + alert.body.splitlines()[0].lstrip("- "))
+        await _wa._notify_operator(ctx, "[ERROR] " + alert.title + (" — " + first if first else ""))
     except Exception as exc:
         print(f"[load-monitor] toast failed: {exc!r}")
     try:
@@ -64,24 +70,57 @@ async def _deliver(ctx: dict, alert: Alert) -> None:
             _wa._push_ensure_vapid_keys()
             if _wa._PUSH_PRIV_KEY and _wa._PUSH_PUB_KEY:
                 await _wa._push_broadcast(json.dumps({
-                    "title": alert.title, "body": alert.body.splitlines()[0].lstrip("- "),
+                    "title": alert.title, "body": first or alert.title,
                     "icon": "/icons/icon-192.png", "tag": "load-alert", "data": {"url": "/"},
                 }))
     except Exception as exc:
         print(f"[load-monitor] push failed: {exc!r}")
 
 
+# Cooldowns survive a restart: a deploy (or a crash loop) under a persistent red level must not
+# re-send the same push every time the process comes back.
+def _state_path(ctx: dict) -> Path:
+    return Path(ctx["DATA"]) / "load_alert_state.json"
+
+
+def _load_state(ctx: dict) -> AlertState:
+    st = AlertState()
+    try:
+        d = json.loads(_state_path(ctx).read_text(encoding="utf-8"))
+        st.last_loud = float(d.get("last_loud", st.last_loud))
+        st.last_quiet = float(d.get("last_quiet", st.last_quiet))
+        st.last_loud_key = frozenset(d.get("last_loud_key", []))
+    except Exception:
+        pass
+    return st
+
+
+def _save_state(ctx: dict, st: AlertState) -> None:
+    try:
+        _state_path(ctx).write_text(json.dumps({
+            "last_loud": st.last_loud, "last_quiet": st.last_quiet,
+            "last_loud_key": sorted(st.last_loud_key),
+        }), encoding="utf-8")
+    except Exception:
+        pass
+
+
 async def _sampler_loop(ctx: dict) -> None:
     await asyncio.sleep(3)  # let the service settle
-    st = AlertState()
+    st = _load_state(ctx)
     while True:
         try:
             # /proc reads and the process walk are blocking: keep them off the loop we measure.
             snap = await asyncio.to_thread(_lm.MONITOR.sample, _inputs(ctx))
+            _lm.MONITOR.note_error(None)
             alert = decide(snap, st, time.time())
             if alert is not None:
                 print(f"[load-monitor] {'ALERT' if alert.loud else 'notice'}: {alert.title}")
-                await _deliver(ctx, alert)
+                _save_state(ctx, st)
+                # Fire-and-forget: Web Push makes blocking-ish network calls per subscriber and must
+                # not stall the sampler (a stalled sampler flips the meter to "stale" mid-incident).
+                _spawn_bg(_deliver(ctx, alert))
         except Exception as exc:
             print(f"[load-monitor] tick failed: {exc!r}")
+            _lm.MONITOR.note_error(f"{type(exc).__name__}: {exc}"[:160])
         await asyncio.sleep(SAMPLE_EVERY_S)

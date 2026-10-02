@@ -360,3 +360,139 @@ def test_feeding_from_the_loop_thread_while_sampling_never_raises(t, monkeypatch
     finally:
         stop.set()
         th.join()
+
+
+# ───────────────────────── review round 2 regressions ─────────────────────────
+
+def test_a_not_yet_sustained_spike_is_not_a_clear_sample():
+    """crit -> ok, ok, then a fresh (unsustained) warn: the signal is reading warn right now, so
+    the level may step down to warn but must never skip to ok."""
+    tr = lm._Tracker()
+    tr.update("crit", 0, (10, 0))
+    tr.update("ok", 5, (10, 0))
+    tr.update("ok", 10, (10, 0))
+    assert tr.update("warn", 15, (10, 0)) == "warn"
+    # the spike after only TWO clean samples does not even count as a third
+    tr2 = lm._Tracker()
+    tr2.update("crit", 0, (10, 0))
+    tr2.update("ok", 5, (10, 0))
+    assert tr2.update("crit", 10, (10, 0)) == "crit" and tr2._clear == 0
+
+
+def test_a_pid_reuse_cycle_does_not_hang_the_process_walk(t):
+    _healthy(t)
+    t.proc_entry(100, 1, "/venv/bin/python")
+    t.proc_entry(300, 301, "/x/_bundled/claude", cwd="/work/a")       # PID reuse mid-scan:
+    t.proc_entry(301, 300, "/x/_bundled/claude", cwd="/work/b")       # 300 <-> 301 form a loop
+    out = lm.scan_processes(t.fs, 100, lm.cgroup_dir(t.fs))
+    assert out is not None and out["claude_total"] == 2
+
+
+@pytest.mark.parametrize("argv,expected", [
+    (["/x/_bundled/claude", "--flag"], True),
+    (["claude"], True),
+    (["node", "--max-old-space-size=4096", "/usr/local/bin/claude"], True),
+    (["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"], True),
+    (["grep", "claude"], False),
+    (["which", "claude"], False),
+    (["node", "/srv/app/server.js"], False),
+    ([], False),
+])
+def test_is_claude(argv, expected):
+    assert lm._is_claude(argv) is expected
+
+
+def test_orphaned_claude_outside_the_cockpits_children_still_counts(t, monkeypatch):
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    _healthy(t)
+    t.proc_entry(100, 1, "/venv/bin/python")
+    for i in range(12):
+        t.proc_entry(200 + i, 1, "/x/_bundled/claude", cwd="/work/p")      # re-parented to init
+    clk = Clock()
+    m = lm.Monitor(now=clk)
+    inp = {"live_max": 8, "running": 0, "bg_agents": 0, "cockpit_pid": 100}
+    m.sample(inp, t.fs)
+    clk.t += 125
+    assert _lvl(m.sample(inp, t.fs)["signals"], "agents") == "warn"
+
+
+def test_a_stopped_heartbeat_is_itself_the_stall(t, monkeypatch):
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    _healthy(t)
+    clk = Clock()
+    m = lm.Monitor(now=clk)
+    m.note_loop_lag(0.001)
+    clk.t += 90                                   # the loop froze: no beat for 90 s, window long gone
+    sig = next(s for s in m.sample({"live_max": 8}, t.fs)["signals"] if s["id"] == "loop_lag")
+    assert sig["level"] == "crit"
+
+
+def test_the_guard_ceiling_is_the_smaller_of_limit_and_ram(t, monkeypatch):
+    import load_monitor
+    t.meminfo(total_gb=16)
+    t.cgroup(current=14 * GB, limit=32 * GB)                     # MemoryMax above physical RAM
+    monkeypatch.setattr(load_monitor, "DEFAULT_FS", t.fs)
+    assert lm.cgroup_working_set_fraction() == pytest.approx(14 / 16)
+
+
+def test_dirty_and_writeback_pages_are_not_reclaimable(t):
+    t.meminfo(total_gb=64)
+    t.cgroup(current=9 * GB, limit=10 * GB, inactive=8 * GB)
+    (t.cg / "memory.stat").write_text(f"inactive_file {8 * GB}\nfile_dirty {5 * GB}\nfile_writeback {1 * GB}\n")
+    m = lm.read_memory(lm.cgroup_dir(t.fs), lm.read_meminfo(t.fs))
+    assert m["ws"] == 9 * GB - 2 * GB                             # only 2 GB can be dropped for free
+
+
+def test_unlimited_cgroup_still_sees_a_loaded_host(t):
+    t.meminfo(total_gb=16, avail_gb=1)                            # other tenants ate the box
+    t.cgroup(current=1 * GB, limit="max")
+    m = lm.read_memory(lm.cgroup_dir(t.fs), lm.read_meminfo(t.fs))
+    assert m["source"] == "host" and m["frac"] == pytest.approx(15 / 16)
+
+
+def test_one_malformed_reading_does_not_blind_the_other_signals():
+    s = lm.evaluate({"guard": 0.75,
+                     "mem": {"frac": 0.8, "ws": 8 * GB, "ceiling": 10 * GB, "limited": True},
+                     "disk": {"free": 0, "total": 0},             # ramfs / some FUSE report total 0
+                     "tmp": {"free": 0, "total": 0, "path": "/tmp"},
+                     "fds": {"used": 1, "limit": 0}})
+    assert _lvl(s, "mem") == "warn" and _lvl(s, "disk") is None and _lvl(s, "fds") is None
+
+
+def test_a_tiny_mostly_empty_volume_is_not_a_permanent_emergency():
+    assert _lvl(lm.evaluate({"disk": {"free": 0.45 * GB, "total": 0.5 * GB}}), "disk") == "ok"
+    assert _lvl(lm.evaluate({"disk": {"free": 0.04 * GB, "total": 0.5 * GB}}), "disk") == "crit"
+
+
+def test_swap_signal_needs_swap(t, monkeypatch):
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    _healthy(t)                                                   # SwapTotal 0
+    assert _lvl(lm.Monitor(now=Clock()).sample({"live_max": 8}, t.fs)["signals"], "swap") is None
+    t.meminfo(swap_total_gb=8, swap_free_gb=8)
+    assert _lvl(lm.Monitor(now=Clock()).sample({"live_max": 8}, t.fs)["signals"], "swap") == "ok"
+
+
+def test_cpu_load_is_divided_by_the_cgroup_quota_not_the_host_core_count(t, monkeypatch):
+    monkeypatch.setattr(os, "cpu_count", lambda: 64)
+    monkeypatch.setattr(os, "getloadavg", lambda: (2.0, 0, 0))
+    _healthy(t)
+    (t.cg / "cpu.max").write_text("100000 100000\n")             # one core's worth of quota
+    clk = Clock()
+    m = lm.Monitor(now=clk)
+    m.sample({"live_max": 8}, t.fs)
+    clk.t += 11                                                   # warn must persist 10 s to count
+    cpu = next(s for s in m.sample({"live_max": 8}, t.fs)["signals"] if s["id"] == "cpu")
+    assert cpu["level"] == "warn"                                 # 2.0 load on 1 core, not 0.03 on 64
+
+
+def test_windows_are_monotonic_but_the_snapshot_carries_wall_time(t, monkeypatch):
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    _healthy(t)
+    snap = lm.Monitor(now=Clock(), wall=lambda: 1234.5).sample({"live_max": 8}, t.fs)
+    assert snap["at"] == 1234.5
+
+
+def test_mem_hint_only_mentions_the_guard_where_a_guard_can_act(t):
+    unl = lm.evaluate({"guard": 0.75, "mem": {"frac": 0.8, "ws": 8 * GB, "ceiling": 10 * GB, "limited": False}})
+    lim = lm.evaluate({"guard": 0.75, "mem": {"frac": 0.8, "ws": 8 * GB, "ceiling": 10 * GB, "limited": True}})
+    assert "guard" not in unl[0]["hint"] and "guard" in lim[0]["hint"]

@@ -34,6 +34,12 @@ function Detail({ v }: { v: LoadView }) {
         </div>
       )}
       {v.kind === 'signedout' && <div className="load-pop-note">Sign in again to see the load.</div>}
+      {d?.error && (
+        <div className="load-pop-note">
+          The cockpit's load sampler is failing: <code>{d.error}</code>. The numbers cannot be trusted
+          until it recovers — check the journal.
+        </div>
+      )}
       {v.kind === 'stale' && d && (
         <div className="load-pop-note">The numbers below are old; the next poll should refresh them.</div>
       )}

@@ -15,39 +15,44 @@ export type LoadView = { kind: LoadKind; data: SystemLoad | null }
 
 export interface LoadState {
   data: SystemLoad | null
-  /** Browser clock (ms) when `data` arrived or the tab last woke up. */
+  /** Browser clock (ms) when `data` arrived. */
   fetchedAt: number
   /** Consecutive failed polls that were NOT an auth/feature-off answer. */
   failures: number
   status: number | null
+  /** Consecutive 404s. One is a proxy hiccup or a deploy; only a run of them means "feature off". */
+  notFound: number
   off: boolean
 }
 
 export type LoadEvent =
   | { type: 'ok'; data: SystemLoad; at: number }
   | { type: 'error'; status: number | null }
-  | { type: 'wake'; at: number }
 
-export const INITIAL_LOAD: LoadState = { data: null, fetchedAt: 0, failures: 0, status: null, off: false }
+export const INITIAL_LOAD: LoadState = { data: null, fetchedAt: 0, failures: 0, status: null, notFound: 0, off: false }
 
 /** Two failed polls (~20 s at the default cadence) before we say "no response". */
 export const DOWN_AFTER = 2
+/** Consecutive 404s before the meter hides itself. */
+export const OFF_AFTER = 3
 /** The server says its own sampler is older than this -> the numbers are stale. */
 export const STALE_SERVER_S = 20
-/** No successful poll for this long (one missed poll tolerated) -> stale. */
+/** No successful poll for this long (one missed poll tolerated) -> stale. This also covers a tab
+ *  waking after a long pause: polling was suspended, so what we hold really IS old, and the honest
+ *  answer is "stale" until the first poll lands — never the last green reading. */
 export const STALE_CLIENT_MS = 35_000
 
 export function reduceLoad(s: LoadState, e: LoadEvent): LoadState {
   switch (e.type) {
     case 'ok':
-      return { data: e.data, fetchedAt: e.at, failures: 0, status: 200, off: false }
-    case 'wake':
-      // Polling is paused while the tab is hidden; do not call the pause "stale".
-      return s.data ? { ...s, fetchedAt: e.at } : s
+      return { data: e.data, fetchedAt: e.at, failures: 0, status: 200, notFound: 0, off: false }
     case 'error':
-      if (e.status === 404) return { ...s, off: true, failures: 0, status: 404 }   // feature disabled
-      if (e.status === 401) return { ...s, status: 401 }                            // signed out
-      return { ...s, failures: s.failures + 1, status: e.status }
+      if (e.status === 404) {
+        const notFound = s.notFound + 1
+        return { ...s, notFound, off: notFound >= OFF_AFTER, failures: 0, status: 404 }
+      }
+      if (e.status === 401) return { ...s, status: 401, notFound: 0 }                 // signed out
+      return { ...s, failures: s.failures + 1, status: e.status, notFound: 0 }
   }
 }
 
@@ -60,6 +65,7 @@ export function viewOf(s: LoadState, nowMs: number): LoadView {
   if ((d.age_s != null && d.age_s > STALE_SERVER_S) || nowMs - s.fetchedAt > STALE_CLIENT_MS) {
     return { kind: 'stale', data: d }
   }
+  if (d.error) return { kind: 'unknown', data: d }          // the sampler is failing: say so
   if (d.warming_up) return { kind: 'loading', data: d }
   return { kind: d.level, data: d }
 }
@@ -79,6 +85,7 @@ export function litSegments(kind: LoadKind, score: number): number {
 }
 
 export function verdict(v: LoadView): string {
+  if (v.data?.error && v.kind === 'unknown') return 'Load monitor is failing'
   switch (v.kind) {
     case 'ok': return 'Server load: normal'
     case 'warn': return 'Server load: elevated'
@@ -118,8 +125,13 @@ function dispatch(e: LoadEvent) {
   refreshView()
 }
 
-async function poll() {
-  if (inFlight || state.off) return
+let offTicks = 0
+
+async function poll(force = false) {
+  if (inFlight) return
+  // While the feature looks switched off keep probing, slowly (every ~60 s): re-enabling it
+  // server-side, or a proxy that answered 404 for a moment, must not need a page reload.
+  if (state.off && !force && ++offTicks % 6 !== 0) return
   inFlight = true
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), REQUEST_TIMEOUT_MS)
@@ -137,12 +149,12 @@ async function poll() {
 
 function onWake() {
   if (document.hidden) return
-  dispatch({ type: 'wake', at: Date.now() })
-  void poll()
+  refreshView()          // what we hold may be old after a pause: show that, then refresh it
+  void poll(true)
 }
 
 function start() {
-  void poll()
+  void poll(true)
   timers = [
     setInterval(() => { if (!document.hidden) void poll() }, POLL_MS),
     setInterval(refreshView, TICK_MS),          // staleness is a function of time, not of events

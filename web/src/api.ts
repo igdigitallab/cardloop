@@ -146,6 +146,8 @@ export type SystemLoad = {
   top: { kind: string; project: string; rss_mb: number }[]
   host: { os?: string; cpus?: number; mem_gb?: number | null }
   warming_up?: boolean
+  /** Set when the server's sampler is failing (the numbers cannot be trusted). */
+  error?: string
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {

@@ -127,6 +127,13 @@ def read_psi(path: Path) -> "dict[str, dict[str, float]] | None":
     return out or None
 
 
+def _working_set(cur: int, stat: "dict[str, int]") -> int:
+    """memory.current minus what the kernel can drop for free: inactive file cache that is neither
+    dirty nor under writeback (those must be flushed first, so they still count as pressure)."""
+    reclaimable = max(0, stat.get("inactive_file", 0) - stat.get("file_dirty", 0) - stat.get("file_writeback", 0))
+    return max(0, cur - reclaimable)
+
+
 def read_memory(cg: "Path | None", meminfo: "dict[str, int] | None") -> "dict[str, Any] | None":
     """Working-set memory against the detected ceiling.
 
@@ -140,12 +147,19 @@ def read_memory(cg: "Path | None", meminfo: "dict[str, int] | None") -> "dict[st
         if cur is not None:
             raw_max = _text(cg / "memory.max")
             limit = int(raw_max) if raw_max and raw_max.isdigit() else None
-            inactive = _kv(cg / "memory.stat").get("inactive_file", 0)
             ceiling = min([v for v in (limit, total) if v]) if (limit or total) else None
             if ceiling:
-                ws = max(0, cur - inactive)
-                return {"frac": ws / ceiling, "ws": ws, "ceiling": ceiling,
-                        "limited": limit is not None, "source": "cgroup"}
+                ws = _working_set(cur, _kv(cg / "memory.stat"))
+                out = {"frac": ws / ceiling, "ws": ws, "ceiling": ceiling,
+                       "limited": limit is not None, "source": "cgroup"}
+                # An unlimited cgroup says nothing about the other tenants of the machine: take the
+                # worse of "our working set" and "the host as a whole", or the meter would stay
+                # green while the box swaps.
+                if limit is None and total and (meminfo or {}).get("MemAvailable") is not None:
+                    used = total - meminfo["MemAvailable"]
+                    if used / total > out["frac"]:
+                        out.update(frac=used / total, ws=used, ceiling=total, source="host")
+                return out
     if meminfo and total and meminfo.get("MemAvailable") is not None:
         used = total - meminfo["MemAvailable"]
         return {"frac": used / total, "ws": used, "ceiling": total,
@@ -165,7 +179,11 @@ def cgroup_working_set_fraction(fs: "Fs | None" = None) -> "float | None":
     cur = _int(cg / "memory.current")
     if cur is None:
         return None
-    return max(0, cur - _kv(cg / "memory.stat").get("inactive_file", 0)) / int(raw_max)
+    ceiling = int(raw_max)
+    total = (read_meminfo(fs or DEFAULT_FS) or {}).get("MemTotal")
+    if total:                              # a limit above physical RAM protects nothing
+        ceiling = min(ceiling, total)
+    return _working_set(cur, _kv(cg / "memory.stat")) / ceiling
 
 
 def _fd_limit(fs: Fs) -> "int | None":
@@ -191,7 +209,18 @@ def _fs_type(path: str, fs: Fs) -> "str | None":
 
 
 def _is_claude(argv: "list[str]") -> bool:
-    return any(Path(a).name == "claude" for a in argv[:2] if a)
+    """The Claude Code CLI: the bundled/standalone binary (argv[0] is `claude`), or a node shim
+    `node [flags] .../claude` / `.../claude-code/cli.js`. An argument that merely says "claude"
+    (`grep claude`, `which claude`) is not an agent."""
+    if not argv or not argv[0]:
+        return False
+    first = Path(argv[0]).name
+    if first == "claude":
+        return True
+    if first in ("node", "nodejs", "bun"):
+        rest = [a for a in argv[1:4] if a and not a.startswith("-")]
+        return any(Path(a).name == "claude" or (Path(a).name == "cli.js" and "claude" in a) for a in rest)
+    return False
 
 
 def scan_processes(fs: Fs, cockpit_pid: int, cg: "Path | None") -> "dict[str, Any] | None":
@@ -242,9 +271,12 @@ def scan_processes(fs: Fs, cockpit_pid: int, cg: "Path | None") -> "dict[str, An
         children[pp].append(pid)
 
     def subtree_kb(root: int) -> int:
-        tot, stack = 0, [root]
+        tot, stack, seen = 0, [root], set()
         while stack:
             cur = stack.pop()
+            if cur in seen:               # /proc is read non-atomically: PID reuse can close a loop
+                continue
+            seen.add(cur)
             tot += info[cur][1] if cur in info else 0
             stack.extend(children.get(cur, ()))
         return tot
@@ -292,94 +324,154 @@ def _gb(n: float) -> str:
     return f"{n / _GIB:.1f} GB"
 
 
-def evaluate(raw: "dict[str, Any]") -> "list[dict[str, Any]]":
-    """raw readings -> signals. A missing key means "not measurable here": no signal is emitted."""
-    out: "list[dict[str, Any]]" = []
-    guard = float(raw.get("guard", GUARD_DEFAULT))
-    crit_mem = MEM_CRIT if guard < MEM_CRIT else min(0.98, guard + 0.05)
-
+def _ev_mem(raw):
     m = raw.get("mem")
-    if m:
-        lvl = _grade(m["frac"], guard, crit_mem)
-        scope = "service limit" if m.get("limited") else "this machine"
-        out.append(_sig("mem", lvl, _pressure(m["frac"], guard, crit_mem),
-                        f"{m['frac']:.0%}", f"Memory in use: {_gb(m['ws'])} of {_gb(m['ceiling'])} ({scope}, reclaimable cache excluded)",
-                        f"The memory guard evicts idle chats above {guard:.0%}. Raise the service memory limit, "
-                        "lower LIVE_CLIENT_MAX / LIVE_CLIENT_TTL_SEC, or stop what holds the memory."))
+    if not m:
+        return []
+    guard = min(float(raw.get("guard", GUARD_DEFAULT)), 0.93)
+    crit = MEM_CRIT if guard < MEM_CRIT else min(0.98, guard + 0.05)
+    lvl = _grade(m["frac"], guard, crit)
+    scope = "service limit" if m.get("limited") else "this machine"
+    hint = (f"The memory guard evicts idle chats above {guard:.0%}. Raise the service memory limit, "
+            "lower LIVE_CLIENT_MAX / LIVE_CLIENT_TTL_SEC, or stop what holds the memory."
+            if m.get("limited") else
+            "Free memory: lower LIVE_CLIENT_MAX / LIVE_CLIENT_TTL_SEC or stop what holds it.")
+    return [_sig("mem", lvl, _pressure(m["frac"], guard, crit), f"{m['frac']:.0%}",
+                 f"Memory in use: {_gb(m['ws'])} of {_gb(m['ceiling'])} ({scope}, reclaimable cache excluded)", hint)]
+
+
+def _ev_host_mem(raw):
     hm = raw.get("host_mem_avail_frac")
-    if hm is not None and (m or {}).get("limited"):
-        used = 1.0 - hm
-        out.append(_sig("host_mem", _grade(used, 0.90, 0.96), _pressure(used, 0.90, 0.96),
-                        f"{used:.0%}", f"Whole machine: {used:.0%} of RAM in use (other services share it)",
-                        "Something besides Cardloop is using the RAM; the service limit alone will not protect it."))
+    if hm is None or not (raw.get("mem") or {}).get("limited"):
+        return []
+    used = 1.0 - hm
+    return [_sig("host_mem", _grade(used, 0.90, 0.96), _pressure(used, 0.90, 0.96), f"{used:.0%}",
+                 f"Whole machine: {used:.0%} of RAM in use (other services share it)",
+                 "Something besides Cardloop is using the RAM; the service limit alone will not protect it.")]
+
+
+def _ev_psi(raw):
     p = raw.get("mem_psi")
-    if p is not None:
-        out.append(_sig("mem_psi", _grade(p, 1.0, 10.0), _pressure(p, 1.0, 10.0), f"{p:.1f}%",
-                        f"Tasks stalled waiting for memory: {p:.1f}% of the last 10 s",
-                        "The kernel is actively reclaiming/swapping while work waits — chats feel frozen."))
+    if p is None:
+        return []
+    return [_sig("mem_psi", _grade(p, 1.0, 10.0), _pressure(p, 1.0, 10.0), f"{p:.1f}%",
+                 f"Tasks stalled waiting for memory: {p:.1f}% of the last 10 s",
+                 "The kernel is actively reclaiming/swapping while work waits — chats feel frozen.")]
+
+
+def _ev_swap(raw):
     sw = raw.get("swap")
-    if sw is not None:
-        rate = sw["in_mb_min"]
-        occ = sw.get("occupancy")
-        occ_t = f", swap {occ:.0%} full" if occ is not None else ""
-        out.append(_sig("swap", _grade(rate, 50.0, 500.0), _pressure(rate, 50.0, 500.0),
-                        f"{rate:.0f} MB/min in", f"Swap-in rate {rate:.0f} MB/min{occ_t}" + (" (idle pages parked, not thrashing)" if rate < 50 and (occ or 0) > 0.8 else ""),
-                        "Pages are being read back from swap continuously (thrashing)."))
+    if sw is None:
+        return []
+    rate, occ = sw["in_mb_min"], sw.get("occupancy")
+    occ_t = f", swap {occ:.0%} full" if occ is not None else ""
+    idle = " (idle pages parked, not thrashing)" if rate < 50 and (occ or 0) > 0.8 else ""
+    return [_sig("swap", _grade(rate, 50.0, 500.0), _pressure(rate, 50.0, 500.0), f"{rate:.0f} MB/min in",
+                 f"Swap-in rate {rate:.0f} MB/min{occ_t}{idle}",
+                 "Pages are being read back from swap continuously (thrashing).")]
+
+
+def _ev_evictions(raw):
     ev = raw.get("evictions")
-    if ev is not None:
-        out.append(_sig("evictions", _grade(ev, 1, 5), _pressure(ev, 1, 5), str(ev),
-                        f"Memory guard evicted {ev} idle chat(s) in the last 15 min",
-                        "Each eviction makes that chat's next message a cold resume. Free memory or raise the limit."))
+    if ev is None:
+        return []
+    return [_sig("evictions", _grade(ev, 1, 5), _pressure(ev, 1, 5), str(ev),
+                 f"Memory guard evicted {ev} idle chat(s) in the last 15 min",
+                 "Each eviction makes that chat's next message a cold resume. Free memory or raise the limit.")]
+
+
+def _ev_agents(raw):
     ag = raw.get("agents")
-    if ag is not None:
-        ex = ag["excess"]
-        out.append(_sig("agents", _grade(ex, 3, 6), _pressure(ex, 3, 6), f"{ag['observed']}/{ag['allowed']}",
-                        f"{ag['observed']} agent processes running, {ag['allowed']} expected "
-                        f"(live-client cap + chats in flight)",
-                        "More agent processes than the cockpit tracks: some were orphaned. "
-                        "A restart reaps them; the top consumers below show where the memory sits."))
+    if ag is None:
+        return []
+    ex = ag["excess"]
+    return [_sig("agents", _grade(ex, 3, 6), _pressure(ex, 3, 6), f"{ag['observed']}/{ag['allowed']}",
+                 f"{ag['observed']} agent processes running, {ag['allowed']} expected (live-client cap + chats in flight)",
+                 "More agent processes than the cockpit tracks: some were orphaned. "
+                 "A restart reaps them; the top consumers below show where the memory sits.")]
+
+
+def _ev_oom(raw):
     oom = raw.get("oom")
-    if oom is not None:
-        out.append(_sig("oom", CRIT if oom >= 1 else OK, 1.0 if oom >= 1 else 0.0, str(oom),
-                        f"Kernel OOM kills in the last 15 min: {oom}",
-                        "The kernel killed a process for lack of memory — one chat probably died mid-turn."))
+    if oom is None:
+        return []
+    return [_sig("oom", CRIT if oom >= 1 else OK, 1.0 if oom >= 1 else 0.0, str(oom),
+                 f"Kernel OOM kills in the last 15 min: {oom}",
+                 "The kernel killed a process for lack of memory — one chat probably died mid-turn.")]
+
+
+def _ev_lag(raw):
     lag = raw.get("loop_lag")
-    if lag is not None:
-        out.append(_sig("loop_lag", _grade(lag, 1.0, 5.0), _pressure(lag, 1.0, 5.0), f"{lag:.2f}s",
-                        f"Cockpit event loop stalled up to {lag:.2f}s in the last minute",
-                        "The server is not keeping up — look at CPU, memory pressure and blocking calls."))
+    if lag is None:
+        return []
+    return [_sig("loop_lag", _grade(lag, 1.0, 5.0), _pressure(lag, 1.0, 5.0), f"{lag:.2f}s",
+                 f"Cockpit event loop stalled up to {lag:.2f}s in the last minute",
+                 "The server is not keeping up — look at CPU, memory pressure and blocking calls.")]
+
+
+def _ev_fds(raw):
     fd = raw.get("fds")
-    if fd:
-        fr = fd["used"] / fd["limit"]
-        out.append(_sig("fds", _grade(fr, 0.70, 0.90), _pressure(fr, 0.70, 0.90), f"{fr:.0%}",
-                        f"Open file descriptors: {fd['used']} of {fd['limit']}",
-                        "Leaked pipes/sockets. At the limit the server stops accepting connections."))
+    if not fd or fd["limit"] <= 0:
+        return []
+    fr = fd["used"] / fd["limit"]
+    return [_sig("fds", _grade(fr, 0.70, 0.90), _pressure(fr, 0.70, 0.90), f"{fr:.0%}",
+                 f"Open file descriptors: {fd['used']} of {fd['limit']}",
+                 "Leaked pipes/sockets. At the limit the server stops accepting connections.")]
+
+
+def _ev_disk(raw):
     dk = raw.get("disk")
-    if dk:
-        used_f, free = 1.0 - dk["free"] / dk["total"], dk["free"]
-        crit = used_f >= 0.97 or free < 1 * _GIB
-        warn = used_f >= 0.90 and free < 20 * _GIB
-        lvl = CRIT if crit else WARN if warn else OK
-        pr = _pressure(used_f, 0.90, 0.97) if lvl != OK else min(0.49, _pressure(used_f, 0.90, 0.97))
-        out.append(_sig("disk", lvl, 1.0 if crit else pr, f"{used_f:.0%}",
-                        f"Data disk {used_f:.0%} full, {_gb(free)} free",
-                        "Free some space — a full disk breaks writes to chats and the board."))
+    if not dk or dk["total"] <= 0:                      # ramfs / some FUSE report a zero total
+        return []
+    used_f, free = 1.0 - dk["free"] / dk["total"], dk["free"]
+    # The absolute floor only applies to a volume that is actually filling up: a tiny, mostly empty
+    # volume (a 512 MB docker volume at 10 %) is not an emergency.
+    crit = used_f >= 0.97 or (free < 1 * _GIB and used_f >= 0.90)
+    warn = used_f >= 0.90 and free < 20 * _GIB
+    lvl = CRIT if crit else WARN if warn else OK
+    pr = _pressure(used_f, 0.90, 0.97) if lvl != OK else min(0.49, _pressure(used_f, 0.90, 0.97))
+    return [_sig("disk", lvl, 1.0 if crit else pr, f"{used_f:.0%}",
+                 f"Data disk {used_f:.0%} full, {_gb(free)} free",
+                 "Free some space — a full disk breaks writes to chats and the board.")]
+
+
+def _ev_tmp(raw):
     tp = raw.get("tmp")
-    if tp:
-        u = 1.0 - tp["free"] / tp["total"]
-        out.append(_sig("tmp", _grade(u, 0.85, 0.95), _pressure(u, 0.85, 0.95), f"{u:.0%}",
-                        f"Temp dir {tp['path']} is RAM-backed (tmpfs) and {u:.0%} full — it competes with agents for RAM/swap",
-                        "Clear old scratch files in the temp dir; a full tmpfs also makes tools fail with 'No space left'."))
+    if not tp or tp["total"] <= 0:
+        return []
+    u = 1.0 - tp["free"] / tp["total"]
+    return [_sig("tmp", _grade(u, 0.85, 0.95), _pressure(u, 0.85, 0.95), f"{u:.0%}",
+                 f"Temp dir {tp['path']} is RAM-backed (tmpfs) and {u:.0%} full — it competes with agents for RAM/swap",
+                 "Clear old scratch files in the temp dir; a full tmpfs also makes tools fail with 'No space left'.")]
+
+
+def _ev_cpu(raw):
     cpu = raw.get("cpu")
-    if cpu:
-        if cpu["source"] == "psi":
-            v, w, c, val = cpu["value"], 40.0, 80.0, f"{cpu['value']:.0f}%"
-            txt = f"CPU: tasks waited for a core {cpu['value']:.0f}% of the last 10 s"
-        else:
-            v, w, c, val = cpu["value"], 1.5, 3.0, f"{cpu['value']:.1f}x"
-            txt = f"CPU load is {cpu['value']:.1f}x the core count (approximate)"
-        out.append(_sig("cpu", _grade(v, w, c), _pressure(v, w, c), val, txt,
-                        "The machine is CPU-bound; chats and the UI will lag."))
+    if not cpu:
+        return []
+    if cpu["source"] == "psi":
+        v, w, c, val = cpu["value"], 40.0, 80.0, f"{cpu['value']:.0f}%"
+        txt = f"CPU: tasks waited for a core {cpu['value']:.0f}% of the last 10 s"
+    else:
+        v, w, c, val = cpu["value"], 1.5, 3.0, f"{cpu['value']:.1f}x"
+        txt = f"CPU load is {cpu['value']:.1f}x the core count (approximate)"
+    return [_sig("cpu", _grade(v, w, c), _pressure(v, w, c), val, txt, "The machine is CPU-bound; chats and the UI will lag.")]
+
+
+_EVALUATORS = (_ev_mem, _ev_host_mem, _ev_psi, _ev_swap, _ev_evictions, _ev_agents, _ev_oom,
+               _ev_lag, _ev_fds, _ev_disk, _ev_tmp, _ev_cpu)
+
+
+def evaluate(raw: "dict[str, Any]") -> "list[dict[str, Any]]":
+    """raw readings -> signals. A missing key means "not measurable here": no signal is emitted.
+    Each signal is isolated: one malformed reading (a zero total, a missing field) drops only itself
+    instead of blinding every other signal."""
+    out: "list[dict[str, Any]]" = []
+    for fn in _EVALUATORS:
+        try:
+            out.extend(fn(raw))
+        except Exception:
+            continue
     return out
 
 
@@ -406,10 +498,17 @@ class _Tracker:
             target = CRIT
         if _RANK[target] >= _RANK[self.level]:
             self.level, self._clear = target, 0
+        elif r >= _RANK[self.level]:
+            # The raw reading is still at/above the held level; the lower target is only the
+            # sustain delay of a fresh episode, not a recovery — it must not count as "clear".
+            self._clear = 0
         else:
             self._clear += 1
             if self._clear >= _CLEAR_AFTER:
-                self.level, self._clear = target, 0
+                # Stepping DOWN needs no sustain, but never below what the signal is reading right
+                # now: crit -> (ok, ok, fresh warn) lands on warn, not on ok.
+                self.level = raw_level if _RANK[raw_level] > _RANK[target] else target
+                self._clear = 0
         return self.level
 
 
@@ -424,12 +523,17 @@ _DEFAULT_SUSTAIN = (10.0, 0.0)
 class Monitor:
     """Windows over the raw samples + per-signal trackers -> one snapshot per sample()."""
 
-    def __init__(self, now: "Any" = time.time) -> None:
+    def __init__(self, now: "Any" = time.monotonic, wall: "Any" = time.time) -> None:
+        # Windows and debounce clocks are monotonic: an NTP step or a VM resume must neither fire a
+        # "sustained" condition instantly nor read the suspend as an event-loop stall.
         self._now = now
+        self._wall = wall
+        self.error: "str | None" = None
         self._lock = threading.Lock()          # one sample() at a time
         self._feed = threading.Lock()          # loop thread appends, sampler thread windows/iterates
         self._evictions: "collections.deque[float]" = collections.deque(maxlen=1024)
         self._lag: "collections.deque[tuple[float, float]]" = collections.deque(maxlen=4096)
+        self._last_beat: "float | None" = None
         self._oom: "collections.deque[tuple[float, int]]" = collections.deque(maxlen=4096)
         self._swapin: "collections.deque[tuple[float, int]]" = collections.deque(maxlen=512)
         self._trackers: "dict[str, _Tracker]" = {}
@@ -445,10 +549,15 @@ class Monitor:
 
     def note_loop_lag(self, lag_s: float) -> None:
         with self._feed:
+            self._last_beat = self._now()
             self._lag.append((self._now(), max(0.0, lag_s)))
 
     def snapshot(self) -> "dict[str, Any] | None":
         return self._snap
+
+    def note_error(self, err: "str | None") -> None:
+        """The sampler loop reports a failing tick here so the API can say so instead of "measuring"."""
+        self.error = err
 
     # -- one sampling pass (blocking /proc reads: run it in a worker thread) --
     def sample(self, inputs: "dict[str, Any]", fs: Fs = DEFAULT_FS) -> "dict[str, Any]":
@@ -456,6 +565,10 @@ class Monitor:
         with self._lock:
             raw = self._collect(inputs, fs, now)
             sigs = evaluate(raw)
+            # A signal that vanished from this sample (reader failed once, window emptied) must not
+            # keep stale debounce state: it would show an old crit for samples after it recovered.
+            live_ids = {x["id"] for x in sigs}
+            self._trackers = {k: v for k, v in self._trackers.items() if k in live_ids}
             level = OK
             score = 0.0
             for s in sigs:
@@ -463,7 +576,8 @@ class Monitor:
                 eff = tr.update(s["level"], now, _SUSTAIN.get(s["id"], _DEFAULT_SUSTAIN))
                 if eff != s["level"]:
                     s["level"] = eff
-                    s["pressure"] = min(s["pressure"], 0.49) if eff == OK else max(s["pressure"], 0.5)
+                    s["pressure"] = (min(s["pressure"], 0.49) if eff == OK
+                                     else 1.0 if eff == CRIT else max(s["pressure"], 0.5))
                 level = level if _RANK[level] >= _RANK[eff] else eff
                 score = max(score, s["pressure"])
             sigs.sort(key=lambda s: (-_RANK[s["level"]], -s["pressure"], s["id"]))
@@ -476,7 +590,7 @@ class Monitor:
             snap = {
                 "level": level if sigs else "unknown",
                 "score": int(round(score * 100)) if sigs else 0,
-                "at": now,
+                "at": self._wall(),
                 "chats": {"live": inputs.get("chats_live", 0), "max": inputs.get("live_max", 0)},
                 "signals": sigs,
                 "top": top[:4],
@@ -504,7 +618,7 @@ class Monitor:
             raw["mem_psi"] = psi["full"].get("avg10", 0.0)
         # swap-in rate over the last minute (+ occupancy for the text)
         vm = _kv(fs.proc / "vmstat")
-        if "pswpin" in vm:
+        if "pswpin" in vm and (mi or {}).get("SwapTotal", 0) > 0:
             self._swapin.append((now, vm["pswpin"]))
             self._window(self._swapin, _SWAP_WINDOW_S, now)
             t0, p0 = self._swapin[0]
@@ -524,6 +638,11 @@ class Monitor:
             self._window(self._lag, _LAG_WINDOW_S, now)
             lag_max = max((v for _t, v in self._lag), default=0.0)
             have_lag = bool(self._lag)
+            if self._last_beat is not None:
+                # No heartbeat for longer than its period means the loop is stalled RIGHT NOW; the
+                # window above would otherwise forget a long freeze once its samples expire.
+                lag_max = max(lag_max, now - self._last_beat - 1.0)
+                have_lag = True
         # Only where the guard can act at all (a limited cgroup); elsewhere a constant 0 would
         # read as evidence of health that does not exist.
         if (raw["mem"] or {}).get("limited") or n_evictions:
@@ -563,14 +682,18 @@ class Monitor:
             raw["cpu"] = {"source": "psi", "value": psi_c["some"].get("avg10", 0.0)}
         else:
             try:
-                raw["cpu"] = {"source": "load", "value": os.getloadavg()[0] / (os.cpu_count() or 1)}
+                cores = float(os.cpu_count() or 1)
+                quota = (_text(cg / "cpu.max") or "").split() if cg else []
+                if len(quota) == 2 and quota[0].isdigit() and quota[1].isdigit() and int(quota[1]) > 0:
+                    cores = min(cores, max(0.1, int(quota[0]) / int(quota[1])))
+                raw["cpu"] = {"source": "load", "value": os.getloadavg()[0] / cores}
             except (OSError, AttributeError):
                 pass
         pid = inputs.get("cockpit_pid") or os.getpid()
         if now - self._procs_at >= _PROC_SCAN_EVERY_S or self._procs is None:
             self._procs, self._procs_at = scan_processes(fs, pid, cg), now
         if self._procs is not None:
-            observed = self._procs["claude_children"]
+            observed = self._procs["claude_total"] if cg is not None else self._procs["claude_children"]
             allowed = int(inputs.get("live_max", 0)) + int(inputs.get("running", 0)) + int(inputs.get("bg_agents", 0))
             raw["agents"] = {"observed": observed, "allowed": allowed, "excess": max(0, observed - allowed)}
         return raw
