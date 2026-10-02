@@ -124,6 +124,30 @@ export interface UsageLedger {
   by_effort?: { effort: string; turns: number; fresh_tokens: number; cost_usd: number }[]
 }
 
+/** spec-094: GET /api/system-load — how loaded this host is, judged against its own limits. */
+export type LoadSignal = {
+  id: string
+  level: 'ok' | 'warn' | 'crit'
+  /** 0..1 bar fill: 0.5 at the warn line, 1.0 at the crit line. */
+  pressure: number
+  value: string
+  text: string
+  hint: string
+}
+export type SystemLoad = {
+  level: 'ok' | 'warn' | 'crit' | 'unknown'
+  /** 0..100: the worst signal's pressure. */
+  score: number
+  at: number | null
+  /** Seconds since the sampler last ran, on the SERVER clock. */
+  age_s: number | null
+  chats: { live: number; max: number }
+  signals: LoadSignal[]
+  top: { kind: string; project: string; rss_mb: number }[]
+  host: { os?: string; cpus?: number; mem_gb?: number | null }
+  warming_up?: boolean
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { ...OPTS, ...init })
   if (!res.ok) {
@@ -660,6 +684,7 @@ export const api = {
 
   // Claude Code subscription limits (rate_limits SDK, updated passively)
   usage: () => apiFetch<UsageLimits>('/api/usage'),
+  systemLoad: (signal?: AbortSignal) => apiFetch<SystemLoad>('/api/system-load', { signal }),
 
   // Multi-subscription: list accounts, add one, switch which one new runs use.
   accounts: () => apiFetch<AccountsPayload>('/api/accounts'),

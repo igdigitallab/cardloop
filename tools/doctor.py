@@ -744,7 +744,7 @@ def probe_data(repo_root: Path = REPO_ROOT) -> "list[Fact]":
 
 # ─────────────────────────── orchestration ───────────────────────────────────────
 
-SECTIONS = ("Versions", "Auth", "Config", "Service", "Runtime", "Data")
+SECTIONS = ("Versions", "Auth", "Config", "Service", "Runtime", "Data", "Load")
 
 
 def _safe_section(name: str, fn, *args, **kwargs) -> "list[Fact]":
@@ -754,6 +754,31 @@ def _safe_section(name: str, fn, *args, **kwargs) -> "list[Fact]":
         return [Fact(name, f"probe crashed: {e}", level="warn",
                       remedy="run with a traceback to debug: python -c "
                              "\"import tools.doctor\" (or file an issue with this output)")]
+
+
+def probe_load(repo_root: Path) -> "list[Fact]":
+    """Host load as the cockpit's top-bar meter sees it (spec-094), measured once from here.
+
+    This process is not the cockpit, so the signals that need its registry (agent headcount,
+    guard evictions, loop lag) are absent; everything about the HOST — memory working set, PSI,
+    swap activity, temp dir, disk, cpu — is the same as what the meter reports."""
+    sys.path.insert(0, str(repo_root))
+    import load_monitor
+    mon = load_monitor.Monitor()
+    mon.sample({"data_dir": repo_root / "data"})
+    time.sleep(1.0)                      # rates (swap-in) need two samples
+    snap = mon.sample({"data_dir": repo_root / "data"})
+    facts: "list[Fact]" = []
+    if not snap["signals"]:
+        return [Fact("Load", "nothing measurable on this host", level="info")]
+    level = {"ok": "ok", "warn": "warn", "crit": "fail"}.get(snap["level"], "info")
+    facts.append(Fact("Load", {"ok": "normal", "warn": "elevated", "crit": "overloaded"}.get(snap["level"], snap["level"]),
+                      level=level))
+    for sig in snap["signals"]:
+        if sig["level"] != "ok":
+            facts.append(Fact(sig["id"], sig["text"], level="warn" if sig["level"] == "warn" else "fail",
+                              remedy=sig["hint"] or None))
+    return facts
 
 
 def collect(repo_root: Path = REPO_ROOT) -> "tuple[dict, list[str]]":
@@ -770,6 +795,7 @@ def collect(repo_root: Path = REPO_ROOT) -> "tuple[dict, list[str]]":
         "Service": _safe_section("Service", probe_service, service_name),
         "Runtime": _safe_section("Runtime", probe_runtime, port, repo_root),
         "Data": _safe_section("Data", probe_data, repo_root),
+        "Load": _safe_section("Load", probe_load, repo_root),
     }
 
     secrets = [env.get("ANTHROPIC_API_KEY", ""), env.get("WEB_PASSWORD", ""),

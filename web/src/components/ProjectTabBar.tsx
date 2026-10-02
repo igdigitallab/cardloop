@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react'
+import { wheelScrollDelta } from '../lib/tabWheel'
 import { Project } from '../types'
 import { UsageBadge } from './UsageBadge'
+import { LoadMeter } from './LoadMeter'
 import { t } from '../i18n'
 
 interface Props {
@@ -290,8 +292,30 @@ export function ProjectTabBar({
     activeTabRef.current?.scrollIntoView({ behavior: 'smooth', inline: 'nearest' })
   }, [activeId])
 
+  // Mouse wheel anywhere over the bar scrolls the tab strip sideways, like a browser's tab strip.
+  // A native non-passive listener: React's onWheel is passive and cannot preventDefault. It only
+  // acts when the tabs actually overflow (otherwise the wheel is left alone) and never inside the
+  // meter / usage panels, which scroll on their own.
+  const barRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const bar = barRef.current
+    if (!bar) return
+    const onWheel = (e: WheelEvent) => {
+      const list = listRef.current
+      if (!list || list.scrollWidth <= list.clientWidth) return
+      if ((e.target as Element | null)?.closest('.usage-dropdown, .load-pop')) return
+      const delta = wheelScrollDelta(e, list.clientWidth)
+      if (delta == null) return
+      e.preventDefault()
+      list.scrollBy({ left: delta })
+    }
+    bar.addEventListener('wheel', onWheel, { passive: false })
+    return () => bar.removeEventListener('wheel', onWheel)
+  }, [])
+
   return (
-    <div className="project-tabbar">
+    <div className="project-tabbar" ref={barRef}>
       {/* Hamburger — only visible on tablet/mobile (hidden on desktop via CSS) */}
       {/* On mobile project screen: acts as back-to-list. On desktop or list: opens drawer. */}
       <button
@@ -302,7 +326,7 @@ export function ProjectTabBar({
       >
         {mobileScreen === 'project' ? '‹' : '☰'}
       </button>
-      <div className="ptab-list">
+      <div className="ptab-list" ref={listRef}>
         {projects.map(p => {
           const sk = p.session_key ?? null
           const unread = sk ? (unreadBySession[sk] || 0) : 0
@@ -442,6 +466,7 @@ export function ProjectTabBar({
       {/* Global tool launchers (Terminal / Vault / Schedules / Files / Settings)
           now live in the sidebar tools row — see Sidebar.tsx. Kept off the top bar
           to declutter it and to give the launchers mobile parity (sidebar = drawer). */}
+      <LoadMeter />
       <UsageBadge onOpen={onOpenUsage} />
     </div>
   )

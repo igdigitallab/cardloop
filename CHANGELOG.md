@@ -7,6 +7,34 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Added — Load meter: a vertical LED bar for "is this server overloaded" (spec-094)
+A small vertical meter in the top-right corner, next to the rate-limit pill (and in the composer
+bar on mobile). Its height is the worst signal's pressure — green below the warn line, amber up to
+the crit line, red at it. Hover or tap for the detail: what is wrong, why it matters, what to do,
+every normal signal, and the heaviest chats. Signals: working-set memory (reclaimable page cache
+excluded), memory stalls (PSI), swap-in rate, memory-guard evictions, stray agent processes (a
+headcount against the live-client cap), OOM kills, event-loop lag, file descriptors, data disk,
+a RAM-backed temp dir, and CPU. Every threshold is relative to the limits detected on THIS host
+(cgroup `memory.max` or physical RAM, `RLIMIT_NOFILE`, free-space fractions), so it adapts to
+whatever machine Cardloop runs on; a signal that cannot be measured is omitted, never shown green.
+A cockpit that stops answering is drawn as a hollow red bar, distinct from "signed out". A red level
+that persists for two minutes sends a toast, a Web Push (where subscribed) and an inbox file, so the
+meter does not depend on anyone watching it. `GET /api/system-load`; `make doctor` gains a `Load`
+section; `LOAD_MONITOR=0` turns everything off.
+
+### Fixed — idle-TTL eviction leaked every CLI subprocess it evicted
+`_idle_waiter` awaited the evictor from inside itself and the evictor cancelled `entry.idle_task`,
+i.e. its own task; the cancel landed inside `disconnect()` and the SDK never reached its
+terminate/kill step. 21 of 21 TTL evictions left a `claude` process (+ MCP children, ~450 MB each)
+alive for a day, which held the cgroup at 97-100 % and made the memory guard evict real idle chats
+("sessions keep dropping"). The disconnect also runs shielded now, so a slow teardown outliving the
+10 s wait is no longer cancelled by it.
+
+### Fixed — the memory guard counted reclaimable page cache as pressure
+`LIVE_CLIENT_MEM_GUARD` compared raw `memory.current` to `memory.max`; on a git-heavy host the page
+cache alone fills the limit while nothing is wrong, and idle chats were evicted for it. The guard
+now uses the working set (`memory.current - inactive_file`), the same measure as the load meter.
+
 ### Added — Ask mode: per-tool approval from the phone (spec-082 A)
 A third per-chat turn mode next to normal / plan: "🙋 Ask me". Every action that changes
 something — each Bash command, edit, fetch — pins an **Allow once / Always allow here /

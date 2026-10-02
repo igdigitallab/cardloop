@@ -78,6 +78,18 @@ _BUILTIN_MODULES: list[dict[str, Any]] = [
         "provides": ["loop", "api"],
         "default_enabled": True,
     },
+    {
+        "id": "load_monitor",
+        "name": "Load indicator",
+        "description": (
+            "Top-bar meter of how loaded this host is (memory pressure, evictions, stray "
+            "agent processes, event-loop lag, disk/tmp, ...), judged against the host's own "
+            "limits, with an alert when it stays red. LOAD_MONITOR=0 turns it off."
+        ),
+        "version": "1.0.0",
+        "provides": ["loop", "api", "badge"],
+        "default_enabled": True,
+    },
 ]
 
 # Lookup by id for O(1) access.

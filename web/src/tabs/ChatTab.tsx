@@ -10,6 +10,7 @@ import { ToolBlock } from '../components/ToolBlock'
 import { OptionPicker, parseOptionsBlock } from '../components/OptionPicker'
 import { SessionSelector } from '../components/SessionSelector'
 import { UsageBadge } from '../components/UsageBadge'
+import { LoadMeter } from '../components/LoadMeter'
 import { RuntimeTagChip } from '../components/RuntimeTag'
 import {
   useRuntimeProviders, useGlobalAccountId, buildRuntimeRows, effectiveRuntimeKey,
@@ -5374,6 +5375,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                     </span>
                   )
                 })()}
+                <LoadMeter compact />
                 <UsageBadge compact />
                 <ModelThinkButton
                   model={activeModel}

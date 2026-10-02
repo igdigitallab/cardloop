@@ -33,6 +33,7 @@ Design history & specs: `docs/internal/specs/` (gitignored).
   `reviewer-logic` alone reached 9/9 at 8.1k tokens per hit. Add `reviewer-security` or
   `reviewer-quality` only for the cases their descriptions name — the payoff is the
   role+model, not the headcount.
+- `load_monitor.py` + `features/load_monitor/` — spec-094 "is this host overloaded": pure readers/evaluators over injectable `/proc` + `/sys` roots (core, stdlib-only, **shared with `engine`'s memory guard** — the guard measures the cgroup WORKING SET, not raw `memory.current`), plus the feature package (sampler + event-loop heartbeat + `GET /api/system-load` + alert policy). UI: `web/src/lib/loadStatus.ts` is the ONE store, `components/LoadMeter.tsx` the vertical LED bar beside `UsageBadge` (pop-outs do NOT mount it). ⚠️ Three rules: (1) a signal that cannot be measured on this host is omitted — unknown is never green; (2) no machine-specific number in code, thresholds are fractions of detected limits; (3) a failed poll is "not responding", a 401 is "signed out", a 404 hides the meter — never keep showing the last green reading. Swap OCCUPANCY is not a signal (a host can sit at 100 % full with nothing thrashing — measured on ops); swap-IN rate is. Details → GOTCHAS.md.
 - `search.py` — the global index (spec-074/079/090): FTS5 over five sources — `chat`,
   `board`, `timeline`, `file` and `memory`. **`memory` spans BOTH memory locations**
   (`<cwd>/.claude-ops/memory/` and the native `~/.claude/projects/<slug>/memory/`, which is

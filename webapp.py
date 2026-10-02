@@ -19018,6 +19018,8 @@ async def start(ctx: dict) -> None:
         # Deferred import for the same reason as autopilot above (IRON RULE — spec-068).
         from features.board_janitor import register as _register_janitor  # deferred import
         _register_janitor(app, ctx)
+        from features.load_monitor import register as _register_load_monitor  # deferred import
+        _register_load_monitor(app, ctx)
 
         # Static files — everything else (SPA)
         app.router.add_get("/dl/{name}", public_download)
@@ -19065,8 +19067,11 @@ async def start(ctx: dict) -> None:
         _STARTUP_BG_TASKS.append(_spawn_bg(_browser_orphan_sweep_loop(ctx)))
         print(f"[webapp] browser orphan sweeper started (interval {_BROWSER_SWEEP_INTERVAL_SEC}s)")
         # Root-fix A2: cgroup memory alert — warns (with top-RSS offenders) before an OOM kill
-        _STARTUP_BG_TASKS.append(_spawn_bg(_memory_alert_loop(ctx)))
-        print(f"[webapp] memory alert loop started (threshold {MEMORY_ALERT_PCT}%)")
+        # spec-094: the load monitor supersedes this single-threshold file alert when it is on.
+        import load_monitor as _load_monitor_mod
+        if not _load_monitor_mod.enabled():
+            _STARTUP_BG_TASKS.append(_spawn_bg(_memory_alert_loop(ctx)))
+            print(f"[webapp] memory alert loop started (threshold {MEMORY_ALERT_PCT}%)")
         # On OOM the kernel must take one agent, not the cockpit and every chat with it
         _STARTUP_BG_TASKS.append(_spawn_bg(_oom_shield_loop(ctx)))
         # SDK release watch — a stale SDK resolves model aliases to older models silently

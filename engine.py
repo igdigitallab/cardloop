@@ -49,6 +49,7 @@ import accounts as _accounts              # multi-subscription switch (CLAUDE_CO
 import browser_tools as _browser_tools    # spec-065: agent browser tools (built per-run)
 import roles                              # spec-091: declarative sub-agent role registry
 import runtime as _runtime               # spec-092: run context + which CLI binary serves a run
+import load_monitor as _load_monitor     # spec-094: shared working-set measure + eviction counter
 import fs_browser as _fs_browser          # Files tab policy; here only its 'files the agent wrote' log
 from board import (
     board_summary,
@@ -2185,7 +2186,11 @@ async def rewind_conversation(
 
 
 def _cgroup_mem_fraction() -> "float | None":
-    """Return memory.current / memory.max for this process's cgroup, or None.
+    """Return the cgroup's WORKING-SET memory / memory.max, or None.
+
+    Working set = memory.current minus reclaimable inactive page cache. Raw memory.current sits
+    near the limit on any git-heavy host while nothing is wrong, and the guard below would evict
+    idle chats for it; the cockpit's load indicator (spec-094) uses the same measure.
 
     None means "no usable signal" — not in a cgroup v2 hierarchy, no limit set
     (memory.max == "max"), or the files are unreadable. Callers must treat None as
@@ -2193,25 +2198,7 @@ def _cgroup_mem_fraction() -> "float | None":
     as before this guard existed.
     """
     try:
-        # cgroup v2: /proc/self/cgroup is a single "0::<path>" line.
-        rel = ""
-        with open("/proc/self/cgroup", encoding="utf-8") as fh:
-            for line in fh:
-                parts = line.strip().split(":", 2)
-                if len(parts) == 3 and parts[0] == "0":
-                    rel = parts[2]
-                    break
-        if not rel:
-            return None
-        base = Path("/sys/fs/cgroup") / rel.lstrip("/")
-        limit_raw = (base / "memory.max").read_text(encoding="utf-8").strip()
-        if limit_raw == "max":
-            return None
-        limit = int(limit_raw)
-        if limit <= 0:
-            return None
-        current = int((base / "memory.current").read_text(encoding="utf-8").strip())
-        return current / limit
+        return _load_monitor.cgroup_working_set_fraction()
     except Exception:
         return None
 
@@ -2238,6 +2225,7 @@ async def _enforce_memory_headroom(registry: dict, ctx: "dict | None", running_d
             return
         oldest_key = min(idle_keys, key=lambda k: registry[k].last_used)
         print(f"[live-client] memory guard: {frac:.0%} of cgroup limit — evicting idle {oldest_key}")
+        _load_monitor.note_guard_eviction()
         await _evict_live_client(oldest_key, ctx)
         new_frac = _cgroup_mem_fraction()
         # A disconnect frees memory asynchronously (the child has to actually exit), so a

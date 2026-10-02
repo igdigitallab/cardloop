@@ -115,47 +115,35 @@ async def test_guard_is_inert_when_disabled_or_unmeasurable(guard, fraction):
     assert len(registry) == 2
 
 
-def test_cgroup_fraction_reads_a_real_v2_hierarchy(tmp_path, monkeypatch):
-    """memory.current / memory.max, read through /proc/self/cgroup's 0:: line."""
-    cgroup_root = tmp_path / "sys" / "fs" / "cgroup"
-    unit = cgroup_root / "system.slice" / "cardloop.service"
+def _fake_cgroup_fs(tmp_path, monkeypatch, rel, files):
+    """Point the shared load_monitor reader at a fixture /proc + /sys tree."""
+    import load_monitor
+    proc, sysr = tmp_path / "proc", tmp_path / "sys" / "fs" / "cgroup"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self" / "cgroup").write_text(f"0::{rel}\n")
+    unit = sysr / rel.lstrip("/")
     unit.mkdir(parents=True)
-    (unit / "memory.max").write_text("10737418240\n")
-    (unit / "memory.current").write_text("8589934592\n")
-    proc_cgroup = tmp_path / "proc_self_cgroup"
-    proc_cgroup.write_text("0::/system.slice/cardloop.service\n")
+    for name, body in files.items():
+        (unit / name).write_text(body)
+    monkeypatch.setattr(load_monitor, "DEFAULT_FS", load_monitor.Fs(proc=proc, sys=sysr))
 
-    real_open = open
 
-    def _fake_open(path, *args, **kwargs):
-        if str(path) == "/proc/self/cgroup":
-            return real_open(proc_cgroup, *args, **kwargs)
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.open", _fake_open)
-    monkeypatch.setattr(engine, "Path", lambda p="": tmp_path / str(p).lstrip("/")
-                        if str(p).startswith("/sys/fs/cgroup") else Path(p))
-
+def test_cgroup_fraction_reads_a_real_v2_hierarchy(tmp_path, monkeypatch):
+    _fake_cgroup_fs(tmp_path, monkeypatch, "/system.slice/cardloop.service",
+                    {"memory.max": "10737418240\n", "memory.current": "8589934592\n"})
     assert engine._cgroup_mem_fraction() == pytest.approx(0.8)
 
 
 def test_cgroup_fraction_is_none_without_a_limit(tmp_path, monkeypatch):
-    cgroup_root = tmp_path / "sys" / "fs" / "cgroup"
-    unit = cgroup_root / "user.slice"
-    unit.mkdir(parents=True)
-    (unit / "memory.max").write_text("max\n")
-    proc_cgroup = tmp_path / "proc_self_cgroup"
-    proc_cgroup.write_text("0::/user.slice\n")
-
-    real_open = open
-
-    def _fake_open(path, *args, **kwargs):
-        if str(path) == "/proc/self/cgroup":
-            return real_open(proc_cgroup, *args, **kwargs)
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.open", _fake_open)
-    monkeypatch.setattr(engine, "Path", lambda p="": tmp_path / str(p).lstrip("/")
-                        if str(p).startswith("/sys/fs/cgroup") else Path(p))
-
+    _fake_cgroup_fs(tmp_path, monkeypatch, "/user.slice",
+                    {"memory.max": "max\n", "memory.current": "1\n"})
     assert engine._cgroup_mem_fraction() is None
+
+
+def test_guard_fraction_ignores_reclaimable_page_cache(tmp_path, monkeypatch):
+    """The point of sharing the working-set measure: a git-heavy host fills page cache up to the
+    limit while nothing is wrong, and the guard must not evict idle chats for it."""
+    _fake_cgroup_fs(tmp_path, monkeypatch, "/system.slice/cardloop.service",
+                    {"memory.max": "10737418240\n", "memory.current": "10200000000\n",
+                     "memory.stat": "anon 1\ninactive_file 8000000000\n"})
+    assert engine._cgroup_mem_fraction() == pytest.approx(0.205, abs=0.01)

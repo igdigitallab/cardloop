@@ -760,7 +760,8 @@
 
   /* Rate-limit moved OFF the project-tab row — it now lives in the composer control
      bar (see .usage-badge-mobile). Hide the tab-bar instance on mobile only. */
-  .project-tabbar > .usage-badge-wrap {
+  .project-tabbar > .usage-badge-wrap,
+  .project-tabbar > .load-meter-wrap {
     display: none;
   }
 
@@ -1067,3 +1068,79 @@
   cursor: help;
   white-space: nowrap;
 }
+
+/* Load meter (spec-094) — vertical LED bar beside the rate-limit pill, top-right of the tab strip.
+   Zones line up with the verdict: green below the warn line, amber up to crit, red at it. */
+.load-meter-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0 6px 0 10px;
+  border-left: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.load-meter {
+  background: transparent;
+  border: 0;
+  padding: 5px 3px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+.load-meter:hover { background: var(--bg3); }
+.load-led { display: flex; flex-direction: column-reverse; gap: 1px; width: 7px; }
+.load-seg { display: block; height: 3px; border-radius: 1px; background: var(--border2); }
+.load-seg.on.z-ok   { background: var(--green); }
+.load-seg.on.z-warn { background: var(--yellow); }
+.load-seg.on.z-crit { background: var(--red); }
+.load-meter.is-stale .load-seg.on { opacity: 0.4; }
+.load-meter.is-loading .load-seg,
+.load-meter.is-unknown .load-seg,
+.load-meter.is-signedout .load-seg { background: var(--bg3); }
+.load-meter.is-down .load-seg { background: transparent; box-shadow: inset 0 0 0 1px var(--red); }
+@media (prefers-reduced-motion: no-preference) {
+  .load-meter.is-down .load-led { animation: load-down-pulse 1.6s ease-in-out infinite; }
+  .load-meter.is-crit .load-seg.on.z-crit { animation: load-down-pulse 1.6s ease-in-out infinite; }
+}
+@keyframes load-down-pulse { 50% { opacity: 0.35; } }
+
+.load-pop {
+  position: absolute;
+  right: 8px;
+  top: calc(100% + 4px);
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-lg);
+  padding: 8px 10px;
+  width: 300px;
+  max-width: calc(100vw - 16px);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text2);
+}
+.load-compact .load-pop { max-height: 70vh; overflow-y: auto; }
+.load-pop-head { font-size: 12px; font-weight: 600; color: var(--text); }
+.load-pop-head.is-ok { color: var(--green); }
+.load-pop-head.is-warn { color: var(--yellow); }
+.load-pop-head.is-crit, .load-pop-head.is-down { color: var(--red); }
+.load-pop-sub { color: var(--text3); font-family: var(--mono); font-size: 10.5px; }
+.load-pop-note { color: var(--text2); line-height: 1.4; }
+.load-pop-note code { font-family: var(--mono); font-size: 10.5px; }
+.load-bad { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
+.load-row { display: flex; gap: 6px; align-items: flex-start; line-height: 1.35; }
+.load-row-dot { width: 6px; height: 6px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; background: var(--text3); }
+.load-row.is-warn .load-row-dot { background: var(--yellow); }
+.load-row.is-crit .load-row-dot { background: var(--red); }
+.load-row-text { color: var(--text); }
+.load-row-hint { margin-left: 12px; color: var(--text3); line-height: 1.35; }
+.load-sec { margin-top: 4px; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text3); }
+.load-ok-grid, .load-top { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 14px; }
+.load-ok-item { display: flex; justify-content: space-between; gap: 6px; font-family: var(--mono); font-size: 10.5px; min-width: 0; }
+.load-ok-item > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.load-ok-item > b { font-weight: 500; color: var(--text); white-space: nowrap; flex-shrink: 0; }
+.load-compact .load-meter { padding: 4px 2px; }
+.load-compact.load-meter-wrap { border-left: 0; padding: 0 4px; }
