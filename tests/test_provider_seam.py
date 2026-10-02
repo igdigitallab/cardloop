@@ -681,3 +681,24 @@ async def test_chat_post_claude_unknown_chat_id_resumes_the_flat_session_map(
         await _sse_events(resp)
     assert calls, await resp.text()
     assert calls[0]["resume_session_id"] == "FLAT-SID"
+
+
+@pytest.mark.parametrize("provider,expect_provider,sid,thread", [
+    ("codex", "codex", None, "T-FREE"),
+    ("claude", "claude", "S-FLAT", None),
+    ("vertex", "claude", "S-FLAT", None),   # an unknown free-chat provider seeds as claude
+])
+def test_ensure_chat_entry_seeds_main_chat_from_a_free_record(
+    fake_ctx, provider, expect_provider, sid, thread
+):
+    _webapp._save_free_chats(fake_ctx, {"free-seed": {
+        "label": "f", "cwd": "/tmp", "model": "m-free", "provider": provider,
+        "session_id": None, "codex_thread_id": "T-FREE", "created_at": 1,
+    }})
+    fake_ctx["sessions"]["free-seed"] = "S-FLAT"
+    data = _webapp._ensure_chat_entry(fake_ctx, "free-seed", "free-seed")
+    chat = data["free-seed"]["chats"][0]
+    assert chat["provider"] == expect_provider
+    assert chat["model"] == "m-free"
+    assert chat["session_id"] == sid
+    assert chat["codex_thread_id"] == thread
