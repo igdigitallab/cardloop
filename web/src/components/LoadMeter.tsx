@@ -22,7 +22,7 @@ function Detail({ v }: { v: LoadView }) {
   const good = d ? d.signals.filter(s => s.level === 'ok') : []
   const host = d?.host
   const hostLine = host && host.os
-    ? [host.os, host.cpus ? `${host.cpus} cores` : '', host.mem_gb ? `${host.mem_gb} GB` : ''].filter(Boolean).join(' · ')
+    ? [host.os, host.cpus ? `${host.cpus} cores` : '', host.mem_gb ? `${host.mem_gb} GiB` : ''].filter(Boolean).join(' · ')
     : ''
   return (
     <>
@@ -74,7 +74,7 @@ function Detail({ v }: { v: LoadView }) {
           <div className="load-sec">Heaviest</div>
           <div className="load-top">
             {d.top.map((t, i) => (
-              <span key={i} className="load-ok-item"><span>{t.project}</span><b>{t.rss_mb} MB</b></span>
+              <span key={i} className="load-ok-item"><span>{t.project}</span><b>{t.rss_mb} MiB</b></span>
             ))}
           </div>
         </>

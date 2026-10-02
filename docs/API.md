@@ -230,7 +230,7 @@ Global — `data/settings.json` (mtime hot-reload, wired into runtime: scan inte
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/api/system-load` | How loaded this host is, judged against its OWN limits. Returns `{level: ok\|warn\|crit\|unknown, score 0-100, at, age_s, chats:{live,max}, signals:[{id, level, pressure 0-1, value, text, hint}], top:[{kind, project, rss_mb}], host:{os, cpus, mem_gb}}`. `age_s` is the sampler's age on the SERVER clock. Process detail is redacted to project names — no command lines or paths. Before the first sample (`warming_up: true`) the level is `unknown`. 404 when the module is off (`LOAD_MONITOR=0`). | Yes |
+| `GET` | `/api/system-load` | How loaded this host is, judged against its OWN limits. Returns `{level: ok\|warn\|crit\|unknown, score 0-100, at, age_s, chats:{live,max}, signals:[{id, level, pressure 0-1, value, text, hint}], top:[{kind, project, rss_mb}], host:{os, cpus, mem_gb}}`. Sizes are binary (`mem_gb` is GiB, `rss_mb` is MiB). The `disk` signal also carries a runway (`89% · 3.7d`, text `…filling 6.0 GiB/day over the last 3 d — full in ~3.7 days`) once a day of history exists (`data/load_disk_history.json`). `age_s` is the sampler's age on the SERVER clock. Process detail is redacted to project names — no command lines or paths. Before the first sample (`warming_up: true`) the level is `unknown`. 404 when the module is off (`LOAD_MONITOR=0`). | Yes |
 
 ---
 

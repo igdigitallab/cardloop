@@ -7,6 +7,27 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Added — Load meter v2: disk runway, a journal trail for every signal
+- **Disk runway.** The `disk` signal now also says how long until the volume is full at the rate
+  that has HELD over the last 1-3 days (`89% · 3.7d`): warn under 7 days, crit under 2. It comes from
+  a persisted history (`data/load_disk_history.json`), uses whole-day baselines so nightly jobs do not
+  read as growth, takes the minimum across baselines so a one-off copy is not a trend, and starts
+  speaking after two days of history, only for a disk with less than 15 % free. A percentage alone
+  cannot tell a quiet weekend from a one-day problem.
+- **Everything goes to the journal.** `[load-monitor]` lines for every signal/level transition (and
+  recovery), every alert with its full text (it used to say only "server overloaded"), the delivery
+  outcome of each leg (inbox / toast / push, incl. "no subscribers"), event-loop stalls of 0.5 s or
+  more, and a status line every 15 minutes.
+
+### Fixed
+- The working set no longer counts reclaimable slab (dentry/inode caches): a disk walk or backup
+  inflated the meter — and the memory guard that shares it — by gigabytes of memory the kernel
+  hands back on demand.
+- `make doctor` judges the service's memory by the working set too: it used to report raw `memory.current`
+  (page cache included) and called a healthy host "88% of MemoryMax, little headroom".
+- Sizes are labelled GiB/MiB (they were always binary); the agent-process row shows the count
+  instead of a ratio whose denominator differed from the header's `chats live 3/8`.
+
 ## [v0.17.0] — 2026-10-02
 
 ### Added — Load meter: a vertical LED bar for "is this server overloaded" (spec-094)

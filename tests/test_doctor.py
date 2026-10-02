@@ -389,6 +389,49 @@ def test_service_memory_current_fails_at_ninety_percent():
     assert mem_fact.level == "fail"
 
 
+def _cgroup_with(tmp_path, current, inactive, slab=0, stat=True):
+    cg = tmp_path / "system.slice" / "cardloop.service"
+    cg.mkdir(parents=True)
+    (cg / "memory.current").write_text(str(current))
+    if stat:
+        (cg / "memory.stat").write_text(f"anon 1\ninactive_file {inactive}\nslab_reclaimable {slab}\n")
+    return tmp_path
+
+
+def _mem_run():
+    return _fake_run({
+        ("systemctl", "show"): (0, "ActiveState=active\nSubState=running\n"
+                                    "MemoryHigh=infinity\nMemoryMax=10737418240\n"
+                                    "MemoryCurrent=10200000000\nMainPID=123\n"
+                                    "ControlGroup=/system.slice/cardloop.service", ""),
+        ("journalctl",): (0, "-- No entries --", ""),
+    })
+
+
+def test_service_memory_judges_the_working_set_not_the_page_cache(tmp_path):
+    """10.2 GB of memory.current is 95% of MemoryMax, but 7 GB of it is inactive file cache and 1 GB
+    reclaimable slab: the host has plenty of headroom and doctor must not cry OOM."""
+    root = _cgroup_with(tmp_path, current=10_200_000_000, inactive=7_000_000_000, slab=1_000_000_000)
+    facts = doctor.probe_service("cardloop", run=_mem_run(), cgroup_root=root)
+    mem_fact = next(f for f in facts if f.label == "MemoryCurrent")
+    assert mem_fact.level == "ok"
+    assert "working set" in mem_fact.value and "(20% of MemoryMax)" in mem_fact.value and "raw 9727 MiB" in mem_fact.value
+
+
+def test_service_memory_still_fails_when_the_working_set_really_is_high(tmp_path):
+    root = _cgroup_with(tmp_path, current=10_200_000_000, inactive=100_000_000)
+    mem_fact = next(f for f in doctor.probe_service("cardloop", run=_mem_run(), cgroup_root=root)
+                    if f.label == "MemoryCurrent")
+    assert mem_fact.level == "fail"
+
+
+def test_service_memory_falls_back_to_the_raw_figure_when_the_cgroup_is_unreadable(tmp_path):
+    root = _cgroup_with(tmp_path, current=10_200_000_000, inactive=0, stat=False)
+    mem_fact = next(f for f in doctor.probe_service("cardloop", run=_mem_run(), cgroup_root=root)
+                    if f.label == "MemoryCurrent")
+    assert mem_fact.level == "fail" and "working set" not in mem_fact.value
+
+
 def test_service_restart_count_is_surfaced():
     """systemd silently restarting the unit is invisible in the cockpit — the operator only sees
     a chat that froze. Surface it."""

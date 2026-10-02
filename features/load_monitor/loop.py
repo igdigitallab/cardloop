@@ -10,6 +10,7 @@ from pathlib import Path
 import engine as _engine
 import load_monitor as _lm
 from webapp import _spawn_bg
+from features.load_monitor import journal as _jr
 from features.load_monitor.alerts import Alert, AlertState, decide
 
 SAMPLE_EVERY_S = 5.0
@@ -20,10 +21,15 @@ async def _heartbeat_loop() -> None:
     so a frozen loop shows up as one huge sample the moment it thaws (the monitor keeps the max
     of the last minute, not an average that would hide it)."""
     loop = asyncio.get_running_loop()
+    stalls = _jr.StallLog()
     while True:
         t0 = loop.time()
         await asyncio.sleep(1.0)
-        _lm.MONITOR.note_loop_lag(loop.time() - t0 - 1.0)
+        lag = loop.time() - t0 - 1.0
+        _lm.MONITOR.note_loop_lag(lag)
+        line = stalls.note(lag, loop.time())
+        if line:
+            _jr.say(line)
 
 
 def _inputs(ctx: dict) -> dict:
@@ -49,32 +55,53 @@ def _first_line(body: str) -> str:
 
 async def _deliver(ctx: dict, alert: Alert) -> None:
     """Toast (open cockpit tabs) + Web Push (where subscribed) + a durable inbox file. Each leg is
-    best-effort and independent: a missing push stack must not swallow the toast."""
+    best-effort and independent: a missing push stack must not swallow the toast. The outcome of
+    every leg goes to the journal in one line: "the alert fired" and "someone was told" are not the
+    same fact, and only the second one matters at 3 am."""
     import webapp as _wa
     text = f"{alert.title}\n{alert.body}"
+    out: "dict[str, str]" = {}
     try:
         inbox = Path(ctx["DATA"]) / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
-        (inbox / f"load-alert-{int(time.time())}.txt").write_text(text + "\n", encoding="utf-8")
-    except Exception:
-        pass
-    if not alert.loud:
-        return
-    first = _first_line(alert.body)
-    try:
-        await _wa._notify_operator(ctx, "[ERROR] " + alert.title + (" — " + first if first else ""))
+        f = inbox / f"load-alert-{int(time.time())}.txt"
+        f.write_text(text + "\n", encoding="utf-8")
+        out["inbox"] = f.name
     except Exception as exc:
-        print(f"[load-monitor] toast failed: {exc!r}")
-    try:
-        if _wa._PUSH_AVAILABLE:
-            _wa._push_ensure_vapid_keys()
-            if _wa._PUSH_PRIV_KEY and _wa._PUSH_PUB_KEY:
-                await _wa._push_broadcast(json.dumps({
-                    "title": alert.title, "body": first or alert.title,
-                    "icon": "/icons/icon-192.png", "tag": "load-alert", "data": {"url": "/"},
-                }))
-    except Exception as exc:
-        print(f"[load-monitor] push failed: {exc!r}")
+        out["inbox"] = f"FAILED {exc!r}"
+    if alert.loud:
+        first = _first_line(alert.body)
+        # Neither leg gives a receipt: `_notify_operator` swallows its own errors and the push helpers
+        # swallow per-device failures. So the journal says what was HANDED OVER and to how many
+        # recipients, never "delivered"/"sent" as if someone had read it.
+        try:
+            tabs = len(_wa._bus_global)             # every open cockpit tab listens on the activity stream
+            await _wa._notify_operator(ctx, "[ERROR] " + alert.title + (" — " + first if first else ""))
+            out["toast"] = f"queued for {tabs} open tab(s)" if tabs else "no open cockpit tab to show it"
+        except Exception as exc:
+            out["toast"] = f"FAILED {exc!r}"
+        try:
+            if not _wa._PUSH_AVAILABLE:
+                out["push"] = "unavailable (pywebpush not installed)"
+            else:
+                _wa._push_ensure_vapid_keys()
+                if not (_wa._PUSH_PRIV_KEY and _wa._PUSH_PUB_KEY):
+                    out["push"] = "no VAPID keys"
+                elif _wa._PUSH_LOCK is None:
+                    out["push"] = "push not initialised yet"
+                else:
+                    subs = len(_wa._load_push_subs())
+                    if subs:
+                        await _wa._push_broadcast(json.dumps({
+                            "title": alert.title, "body": first or alert.title,
+                            "icon": "/icons/icon-192.png", "tag": "load-alert", "data": {"url": "/"},
+                        }))
+                    out["push"] = (f"attempted for {subs} subscription(s), no delivery receipts"
+                                   if subs else "no subscribers")
+        except Exception as exc:
+            out["push"] = f"FAILED {exc!r}"
+    _jr.say(f"{_jr.PREFIX} delivered ({'loud' if alert.loud else 'quiet'}): "
+            + ", ".join(f"{k} {v}" for k, v in out.items()))
 
 
 # Cooldowns survive a restart: a deploy (or a crash loop) under a persistent red level must not
@@ -101,26 +128,45 @@ def _save_state(ctx: dict, st: AlertState) -> None:
             "last_loud": st.last_loud, "last_quiet": st.last_quiet,
             "last_loud_key": sorted(st.last_loud_key),
         }), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        _jr.say(f"{_jr.PREFIX} could not persist alert cooldowns: {exc!r}")
 
 
 async def _sampler_loop(ctx: dict) -> None:
     await asyncio.sleep(3)  # let the service settle
     st = _load_state(ctx)
+    try:
+        await asyncio.to_thread(_lm.MONITOR.attach_disk_history, Path(ctx["DATA"]) / "load_disk_history.json")
+    except Exception as exc:                  # the runway is optional; the meter is not
+        _jr.say(f"{_jr.PREFIX} disk history unavailable, runway disabled: {exc!r}")
+    prev: "dict[str, str] | None" = None
+    flaps = _jr.FlapGuard()
+    last_status = time.monotonic()
     while True:
         try:
             # /proc reads and the process walk are blocking: keep them off the loop we measure.
             snap = await asyncio.to_thread(_lm.MONITOR.sample, _inputs(ctx))
             _lm.MONITOR.note_error(None)
+            try:                              # writing the journal must never flip the meter to "failing"
+                lines, prev = _jr.level_changes(prev, snap)
+                for line in flaps.filter(lines, time.monotonic()):
+                    _jr.say(line)
+                if time.monotonic() - last_status >= _jr.STATUS_EVERY_S:
+                    last_status = time.monotonic()
+                    _jr.say(_jr.status_line(snap))
+            except Exception as exc:
+                _jr.say(f"{_jr.PREFIX} journal formatting failed: {exc!r}")
             alert = decide(snap, st, time.time())
             if alert is not None:
-                print(f"[load-monitor] {'ALERT' if alert.loud else 'notice'}: {alert.title}")
+                try:
+                    _jr.say(_jr.alert_line(alert.loud, alert.title, alert.body))
+                except Exception:
+                    _jr.say(f"{_jr.PREFIX} ALERT: {alert.title}")
                 _save_state(ctx, st)
                 # Fire-and-forget: Web Push makes blocking-ish network calls per subscriber and must
                 # not stall the sampler (a stalled sampler flips the meter to "stale" mid-incident).
                 _spawn_bg(_deliver(ctx, alert))
         except Exception as exc:
-            print(f"[load-monitor] tick failed: {exc!r}")
+            _jr.say(f"{_jr.PREFIX} tick failed: {exc!r}")
             _lm.MONITOR.note_error(f"{type(exc).__name__}: {exc}"[:160])
         await asyncio.sleep(SAMPLE_EVERY_S)

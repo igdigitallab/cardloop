@@ -2188,7 +2188,7 @@ async def rewind_conversation(
 def _cgroup_mem_fraction() -> "float | None":
     """Return the cgroup's WORKING-SET memory / memory.max, or None.
 
-    Working set = memory.current minus reclaimable inactive page cache. Raw memory.current sits
+    Working set = memory.current minus reclaimable inactive page cache and reclaimable slab. Raw memory.current sits
     near the limit on any git-heavy host while nothing is wrong, and the guard below would evict
     idle chats for it; the cockpit's load indicator (spec-094) uses the same measure.
 

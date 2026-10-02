@@ -14,6 +14,7 @@ Rules that shape every line below:
 from __future__ import annotations
 
 import collections
+import json
 import os
 import platform
 import shutil
@@ -36,6 +37,16 @@ _LAG_WINDOW_S = 60
 _PROC_SCAN_EVERY_S = 30
 _CLEAR_AFTER = 3              # consecutive lower samples before a level drops
 _GIB = 1024 ** 3
+# Disk runway (days until the data disk is full at the recent fill rate). A fixed "% used" line says
+# nothing about how fast the disk is filling: the same 89 % is a quiet weekend or a one-day problem.
+_DISK_POINT_EVERY_S = 600     # one history point per 10 min is plenty for a quantity that moves in hours
+_DISK_KEEP_S = 4 * 86400
+_DISK_BASE_MAX_DAYS = 3       # baselines are WHOLE days (1..3), so a nightly job lands on the same phase
+_DISK_NOISE_PER_DAY = 256 * 1024 ** 2   # below this the "rate" is churn, not a fill rate
+_DISK_TREND_FREE_FRAC = 0.15  # only a disk that is already getting tight needs a runway estimate
+_DISK_RESIZE_TOL = 0.01       # total size moving by more than this is another volume; less is fs accounting jitter
+DISK_WARN_DAYS = 7.0
+DISK_CRIT_DAYS = 2.0
 
 
 def enabled() -> bool:
@@ -129,17 +140,20 @@ def read_psi(path: Path) -> "dict[str, dict[str, float]] | None":
 
 def _working_set(cur: int, stat: "dict[str, int]") -> int:
     """memory.current minus what the kernel can drop for free: inactive file cache that is neither
-    dirty nor under writeback (those must be flushed first, so they still count as pressure)."""
+    dirty nor under writeback (those must be flushed first, so they still count as pressure), and
+    reclaimable slab (dentry/inode caches a `find` or a backup walk fills; the kernel's own
+    MemAvailable counts it as available, and it is not what the memory guard exists to protect)."""
     reclaimable = max(0, stat.get("inactive_file", 0) - stat.get("file_dirty", 0) - stat.get("file_writeback", 0))
+    reclaimable += stat.get("slab_reclaimable", 0)
     return max(0, cur - reclaimable)
 
 
 def read_memory(cg: "Path | None", meminfo: "dict[str, int] | None") -> "dict[str, Any] | None":
     """Working-set memory against the detected ceiling.
 
-    cgroup: (memory.current - inactive_file) / min(memory.max, MemTotal). Reclaimable page cache
-    is excluded on purpose — raw memory.current sits near the limit on any git-heavy host while
-    nothing is wrong (same definition the kubelet uses). No cgroup: 1 - MemAvailable/MemTotal.
+    cgroup: (memory.current - inactive_file - slab_reclaimable) / min(memory.max, MemTotal).
+    Reclaimable page cache and slab are excluded on purpose — raw memory.current sits near the limit on any git-heavy host while
+    nothing is wrong (the kubelet's working set, minus reclaimable slab). No cgroup: 1 - MemAvailable/MemTotal.
     """
     total = (meminfo or {}).get("MemTotal")
     if cg is not None:
@@ -165,6 +179,16 @@ def read_memory(cg: "Path | None", meminfo: "dict[str, int] | None") -> "dict[st
         return {"frac": used / total, "ws": used, "ceiling": total,
                 "limited": False, "source": "host"}
     return None
+
+
+def cgroup_working_set_bytes(cg: Path) -> "int | None":
+    """Working set of an explicit cgroup directory, for callers that sit OUTSIDE the service they
+    inspect (`make doctor` reads the unit's cgroup, not its own). None when the files are unreadable."""
+    cur = _int(cg / "memory.current")
+    stat = _kv(cg / "memory.stat")
+    if cur is None or not stat:
+        return None
+    return _working_set(cur, stat)
 
 
 def cgroup_working_set_fraction(fs: "Fs | None" = None) -> "float | None":
@@ -321,7 +345,7 @@ def _sig(sid: str, level: str, pressure: float, value: str, text: str, hint: str
 
 
 def _gb(n: float) -> str:
-    return f"{n / _GIB:.1f} GB"
+    return f"{n / _GIB:.1f} GiB"
 
 
 def _ev_mem(raw):
@@ -366,8 +390,8 @@ def _ev_swap(raw):
     rate, occ = sw["in_mb_min"], sw.get("occupancy")
     occ_t = f", swap {occ:.0%} full" if occ is not None else ""
     idle = " (idle pages parked, not thrashing)" if rate < 50 and (occ or 0) > 0.8 else ""
-    return [_sig("swap", _grade(rate, 50.0, 500.0), _pressure(rate, 50.0, 500.0), f"{rate:.0f} MB/min in",
-                 f"Swap-in rate {rate:.0f} MB/min{occ_t}{idle}",
+    return [_sig("swap", _grade(rate, 50.0, 500.0), _pressure(rate, 50.0, 500.0), f"{rate:.0f} MiB/min in",
+                 f"Swap-in rate {rate:.0f} MiB/min{occ_t}{idle}",
                  "Pages are being read back from swap continuously (thrashing).")]
 
 
@@ -385,7 +409,7 @@ def _ev_agents(raw):
     if ag is None:
         return []
     ex = ag["excess"]
-    return [_sig("agents", _grade(ex, 3, 6), _pressure(ex, 3, 6), f"{ag['observed']}/{ag['allowed']}",
+    return [_sig("agents", _grade(ex, 3, 6), _pressure(ex, 3, 6), str(ag["observed"]),
                  f"{ag['observed']} agent processes running, {ag['allowed']} expected (live-client cap + chats in flight)",
                  "More agent processes than the cockpit tracks: some were orphaned. "
                  "A restart reaps them; the top consumers below show where the memory sits.")]
@@ -419,6 +443,54 @@ def _ev_fds(raw):
                  "Leaked pipes/sockets. At the limit the server stops accepting connections.")]
 
 
+def _median(xs: "list[float]") -> float:
+    ys = sorted(xs)
+    n = len(ys)
+    return float(ys[n // 2]) if n % 2 else (ys[n // 2 - 1] + ys[n // 2]) / 2.0
+
+
+def disk_trend(points: "list[tuple[float, int]]", now: float) -> "dict[str, Any] | None":
+    """SUSTAINED fill rate of a volume from its history of (wall time, free bytes), or None.
+
+    For each whole-day baseline k = 1..3 the rate is `free` k days ago minus `free` now, over k days;
+    both ends are medians over a short neighbourhood, so one scratch file that appears and
+    disappears does not move them. Baselines are multiples of 24 h so a nightly job (backup,
+    rotation) sits at the same phase at both ends and reads as zero growth rather than as growth.
+
+    The reported rate is the MINIMUM over the baselines: it has to hold across all of them. That is
+    what separates a trend from a one-off step (a 100 GiB copy yesterday is 100/day over 1 d but
+    only 33/day over 3 d), and it is why a short window is NOT used to catch a sudden fill — a
+    nightly 6 GiB backup would read as 60 GiB/day at 4 am. A fill that fast is the static fullness
+    rule's job; `recent_per_day` (the 1-day rate) is returned so the text can say it is faster.
+
+    Needs two full days of history and a fresh newest point; a hole in the history at one baseline
+    just drops that baseline."""
+    if len(points) < 4:
+        return None
+    if now - points[-1][0] > 2 * 3600:                   # history is stale: do not extrapolate from it
+        return None
+    max_days = min(_DISK_BASE_MAX_DAYS, int((now - points[0][0]) // 86400))
+    end = _median([f for t, f in points if t >= now - 1800] or [points[-1][1]])
+    rates: "dict[int, float]" = {}
+    for k in range(1, max_days + 1):
+        t0 = now - k * 86400
+        start: "list[float]" = []
+        for radius in (3600, 3 * 3600):
+            start = [f for t, f in points if abs(t - t0) <= radius]
+            if start:
+                break
+        if start:
+            rates[k] = (_median(start) - end) / k
+    if len(rates) < 2:                                   # one baseline cannot tell a step from a trend
+        return None
+    return {"per_day": max(0.0, min(rates.values())), "recent_per_day": max(0.0, rates.get(1, 0.0)),
+            "base_days": max(rates)}
+
+
+def _days_text(d: float) -> str:
+    return f"{d:.1f}" if d < 10 else f"{d:.0f}"
+
+
 def _ev_disk(raw):
     dk = raw.get("disk")
     if not dk or dk["total"] <= 0:                      # ramfs / some FUSE report a zero total
@@ -430,9 +502,32 @@ def _ev_disk(raw):
     warn = used_f >= 0.90 and free < 20 * _GIB
     lvl = CRIT if crit else WARN if warn else OK
     pr = _pressure(used_f, 0.90, 0.97) if lvl != OK else min(0.49, _pressure(used_f, 0.90, 0.97))
-    return [_sig("disk", lvl, 1.0 if crit else pr, f"{used_f:.0%}",
-                 f"Data disk {used_f:.0%} full, {_gb(free)} free",
-                 "Free some space — a full disk breaks writes to chats and the board.")]
+    text = f"Data disk {used_f:.0%} full, {_gb(free)} free"
+    value = f"{used_f:.0%}"
+    hint = "Free some space — a full disk breaks writes to chats and the board."
+    tr = dk.get("trend")
+    runway_led = False
+    if tr and tr["per_day"] >= _DISK_NOISE_PER_DAY and free / dk["total"] < _DISK_TREND_FREE_FRAC:
+        days = free / tr["per_day"]
+        tlvl = CRIT if days < DISK_CRIT_DAYS else WARN if days < DISK_WARN_DAYS else OK
+        text += (f"; filling {_gb(tr['per_day'])}/day (held over the last {tr['base_days']} d)"
+                 f" — full in ~{_days_text(days)} days")
+        if tr.get("recent_per_day", 0.0) > 1.5 * tr["per_day"]:
+            text += f"; the last 24 h were faster: {_gb(tr['recent_per_day'])}/day"
+        if days < 30:
+            value += f" · {_days_text(days)}d"
+        if _RANK[tlvl] > _RANK[lvl]:
+            lvl, runway_led = tlvl, True
+        if tlvl != OK:
+            frac = (DISK_WARN_DAYS - days) / (DISK_WARN_DAYS - DISK_CRIT_DAYS)
+            pr = max(pr, 1.0 if tlvl == CRIT else min(0.99, 0.5 + 0.5 * frac))
+            hint = ("At this rate the disk fills in about "
+                    f"{_days_text(days)} days. Find what grows (du -xh --max-depth=2 / | sort -h | tail) "
+                    "or free space — a full disk breaks writes to chats and the board.")
+    sig = _sig("disk", lvl, 1.0 if crit else pr, value, text, hint)
+    if runway_led:
+        sig["_sustain"] = _RUNWAY_SUSTAIN        # private: consumed (and removed) by Monitor.sample
+    return [sig]
 
 
 def _ev_tmp(raw):
@@ -517,6 +612,11 @@ _SUSTAIN: "dict[str, tuple[float, float]]" = {
     "agents": (120.0, 120.0),     # teardown windows and short helper CLIs must not flap it
     "oom": (0.0, 0.0), "mem_psi": (10.0, 5.0), "evictions": (0.0, 0.0), "loop_lag": (0.0, 0.0),
 }
+# A level that comes from the disk RUNWAY (not the static fullness rule) is debounced harder: the
+# estimate moves with every history point, and a 10-minute run keeps one odd point quiet. The static
+# rule keeps the default, so a 97 %-full disk is crit at the first sample (and `make doctor`, which
+# samples a fresh Monitor twice a second apart, still reports it).
+_RUNWAY_SUSTAIN = (600.0, 120.0)
 _DEFAULT_SUSTAIN = (10.0, 0.0)
 
 
@@ -541,6 +641,12 @@ class Monitor:
         self._procs_at = 0.0
         self._snap: "dict[str, Any] | None" = None
         self.started_at = now()
+        # Disk history is on the WALL clock (it must survive a restart and be compared across days)
+        # and is touched only under self._lock.
+        self._disk_hist: "collections.deque[tuple[float, int]]" = collections.deque()
+        self._disk_dev: "int | None" = None                  # another device, or a resized one, = another history
+        self._disk_total: "int | None" = None
+        self._disk_path: "Path | None" = None
 
     # -- event feeds (called from the event loop; deque appends are thread-safe) --
     def note_guard_eviction(self) -> None:
@@ -573,7 +679,8 @@ class Monitor:
             score = 0.0
             for s in sigs:
                 tr = self._trackers.setdefault(s["id"], _Tracker())
-                eff = tr.update(s["level"], now, _SUSTAIN.get(s["id"], _DEFAULT_SUSTAIN))
+                sustain = s.pop("_sustain", None) or _SUSTAIN.get(s["id"], _DEFAULT_SUSTAIN)
+                eff = tr.update(s["level"], now, sustain)
                 if eff != s["level"]:
                     s["level"] = eff
                     s["pressure"] = (min(s["pressure"], 0.49) if eff == OK
@@ -599,6 +706,57 @@ class Monitor:
             }
             self._snap = snap
             return snap
+
+    # -- disk runway history (persisted so a deploy does not reset a 3-day baseline) --
+    def attach_disk_history(self, path: Path) -> None:
+        """Load the saved history (best effort) and keep writing to `path`. Blocking file I/O."""
+        with self._lock:
+            self._disk_path = path
+            try:
+                d = json.loads(path.read_text(encoding="utf-8"))
+                pts = [(float(t), int(f)) for t, f in d["points"]]
+                if d.get("v") == 1 and all(a[0] < b[0] for a, b in zip(pts, pts[1:])):
+                    self._disk_hist = collections.deque(pts)
+                    self._disk_dev, self._disk_total = int(d["dev"]), int(d["total"])
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                print(f"[load-monitor] disk history unreadable, starting fresh: {exc!r}")
+
+    def _note_disk(self, data_dir: Any, free: int, total: int) -> "dict[str, Any] | None":
+        wall = self._wall()
+        try:
+            dev = os.stat(str(data_dir)).st_dev
+        except OSError:
+            dev = 0
+        # `total` jitters on some filesystems (ZFS datasets, btrfs, NFS): only a real resize or another
+        # device starts a new history, or the runway would never accumulate and the file would be
+        # rewritten on every sample.
+        resized = self._disk_total is not None and abs(total - self._disk_total) > _DISK_RESIZE_TOL * self._disk_total
+        if dev != self._disk_dev or resized:
+            self._disk_hist.clear()
+        self._disk_dev, self._disk_total = dev, total
+        h = self._disk_hist
+        if h and wall < h[-1][0]:                 # the wall clock stepped back: older points are now "the future"
+            while h and h[-1][0] > wall:
+                h.pop()
+        if not h or wall - h[-1][0] >= _DISK_POINT_EVERY_S:
+            h.append((wall, free))
+            while h and wall - h[0][0] > _DISK_KEEP_S:
+                h.popleft()
+            self._save_disk_history()
+        return disk_trend(list(h), wall)
+
+    def _save_disk_history(self) -> None:
+        if self._disk_path is None or self._disk_dev is None or self._disk_total is None:
+            return
+        try:
+            tmp = self._disk_path.with_name(self._disk_path.name + ".tmp")
+            tmp.write_text(json.dumps({"v": 1, "dev": self._disk_dev, "total": self._disk_total,
+                                       "points": [[int(t), f] for t, f in self._disk_hist]}), encoding="utf-8")
+            os.replace(tmp, self._disk_path)
+        except Exception as exc:
+            print(f"[load-monitor] could not save disk history: {exc!r}")
 
     def _window(self, dq: "collections.deque", horizon: float, now: float) -> None:
         while dq and now - (dq[0][0] if isinstance(dq[0], tuple) else dq[0]) > horizon:
@@ -667,6 +825,10 @@ class Monitor:
             try:
                 du = shutil.disk_usage(str(data_dir))
                 raw["disk"] = {"free": du.free, "total": du.total}
+                if du.total > 0:
+                    trend = self._note_disk(data_dir, du.free, du.total)
+                    if trend is not None:
+                        raw["disk"]["trend"] = trend
             except Exception:
                 pass
         tmp = tempfile.gettempdir()

@@ -32,10 +32,10 @@ class Tree:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
 
-    def cgroup(self, current, limit="max", inactive=0, oom=0):
+    def cgroup(self, current, limit="max", inactive=0, oom=0, slab=0):
         (self.cg / "memory.current").write_text(str(current))
         (self.cg / "memory.max").write_text(str(limit))
-        (self.cg / "memory.stat").write_text(f"anon 1\ninactive_file {inactive}\n")
+        (self.cg / "memory.stat").write_text(f"anon 1\ninactive_file {inactive}\nslab_reclaimable {slab}\n")
         (self.cg / "memory.events").write_text(f"low 0\nmax 0\noom_kill {oom}\n")
 
     def meminfo(self, total_gb=16, avail_gb=8, swap_total_gb=0, swap_free_gb=0):
@@ -269,7 +269,8 @@ def test_leaked_agents_are_caught_by_headcount_after_the_sustain_time(t, monkeyp
     snap = m.sample(inp, t.fs)
     assert _lvl(snap["signals"], "agents") == "warn"
     ag = next(s for s in snap["signals"] if s["id"] == "agents")
-    assert ag["value"] == "12/8"
+    assert ag["value"] == "12"                                  # headcount only: the limit lives in the text
+    assert "8 expected" in ag["text"]
     # footprint = CLI + its MCP child, named by project only
     assert snap["top"][0]["rss_mb"] == 350 and snap["top"][0]["project"].startswith("proj")
 
@@ -496,3 +497,270 @@ def test_mem_hint_only_mentions_the_guard_where_a_guard_can_act(t):
     unl = lm.evaluate({"guard": 0.75, "mem": {"frac": 0.8, "ws": 8 * GB, "ceiling": 10 * GB, "limited": False}})
     lim = lm.evaluate({"guard": 0.75, "mem": {"frac": 0.8, "ws": 8 * GB, "ceiling": 10 * GB, "limited": True}})
     assert "guard" not in unl[0]["hint"] and "guard" in lim[0]["hint"]
+
+
+# ───────────────────────────── v2: slab, units, disk runway ─────────────────────────────
+
+def test_reclaimable_slab_is_not_working_set(t):
+    t.meminfo(total_gb=64)
+    t.cgroup(current=9 * GB, limit=10 * GB, inactive=2 * GB, slab=3 * GB)
+    m = lm.read_memory(lm.cgroup_dir(t.fs), lm.read_meminfo(t.fs))
+    assert m["ws"] == 4 * GB                                     # 9 - 2 (cache) - 3 (slab)
+    t.cgroup(current=9 * GB, limit=10 * GB, inactive=2 * GB, slab=20 * GB)   # absurd stat never goes negative
+    assert lm.read_memory(lm.cgroup_dir(t.fs), lm.read_meminfo(t.fs))["ws"] == 0
+
+
+def test_sizes_are_labelled_in_binary_units():
+    s = lm.evaluate({"disk": {"free": 22 * GB, "total": 197 * GB}, "swap": {"in_mb_min": 3.0, "occupancy": 0.4}})
+    assert next(x for x in s if x["id"] == "disk")["text"].startswith("Data disk 89% full, 22.0 GiB free")
+    assert next(x for x in s if x["id"] == "swap")["value"] == "3 MiB/min in"
+
+
+DAY = 86400.0
+H = 3600.0
+
+
+def _hist(per_day_gib, days, free_now_gib, step=600.0, now=10 * DAY):
+    """History of a volume losing `per_day_gib` a day, sampled every `step` s up to `now`."""
+    pts, t = [], now - days * DAY
+    while t <= now:
+        pts.append((t, int((free_now_gib + per_day_gib * (now - t) / DAY) * GB)))
+        t += step
+    return pts, now
+
+
+def test_trend_recovers_a_steady_fill_rate():
+    pts, now = _hist(6.0, 3.2, free_now_gib=22)
+    tr = lm.disk_trend(pts, now)
+    assert tr["base_days"] == 3 and tr["per_day"] / GB == pytest.approx(6.0, rel=0.02)
+
+
+def test_trend_needs_two_full_days_of_history_and_fresh_points():
+    for days in (0.9, 1.5):                                      # the time of day / one baseline: not a trend yet
+        pts, now = _hist(6.0, days, free_now_gib=22)
+        assert lm.disk_trend(pts, now) is None
+    pts, now = _hist(6.0, 2.1, free_now_gib=22)
+    assert lm.disk_trend(pts, now)["base_days"] == 2
+    pts, now = _hist(6.0, 3.0, free_now_gib=22)
+    assert lm.disk_trend(pts, now + 3 * H) is None               # newest point is 3 h old: stale
+    assert lm.disk_trend(pts[:3], now) is None
+
+
+def test_trend_is_silent_for_a_disk_that_is_emptying_or_flat():
+    pts, now = _hist(-5.0, 3.0, free_now_gib=22)                 # cleanup freed space
+    assert lm.disk_trend(pts, now)["per_day"] == 0.0
+    pts, now = _hist(0.0, 3.0, free_now_gib=22)
+    assert lm.disk_trend(pts, now)["per_day"] == 0.0
+
+
+def test_trend_ignores_one_odd_point_at_either_end():
+    pts, now = _hist(0.0, 3.0, free_now_gib=22)
+    odd = {i for i, (t, _f) in enumerate(pts) if abs(t - (now - 3 * DAY)) < 1} | {len(pts) - 1}
+    pts = [(t, f - 15 * GB if i in odd else f) for i, (t, f) in enumerate(pts)]   # a 15 GiB spike at both ends
+    assert lm.disk_trend(pts, now)["per_day"] / GB < 0.5
+
+
+def test_trend_baseline_is_phase_aligned_for_a_nightly_job():
+    # +10 GiB written at 02:00 every night and pruned at 03:00: no net growth, big intra-day swing.
+    now = 10 * DAY + 14 * H                                      # 14:00
+    pts = []
+    t = now - 3.4 * DAY
+    while t <= now:
+        tod = t % DAY
+        pts.append((t, int((22 - (10 if 2 * H <= tod < 3 * H else 0)) * GB)))
+        t += 600.0
+    assert lm.disk_trend(pts, now)["per_day"] / GB < 0.5
+
+
+def test_trend_falls_back_to_a_shorter_baseline_when_the_long_one_has_a_hole():
+    pts, now = _hist(6.0, 3.0, free_now_gib=22)
+    t0 = now - 3 * DAY
+    pts = [(t, f) for t, f in pts if abs(t - t0) > 4 * H]        # the host was down around the 3-day mark
+    tr = lm.disk_trend(pts, now)
+    assert tr["base_days"] == 2 and tr["per_day"] / GB == pytest.approx(6.0, rel=0.02)
+
+
+def _disk_sig(free_gib, total_gib, per_day_gib, base_days=3):
+    raw = {"disk": {"free": int(free_gib * GB), "total": int(total_gib * GB)}}
+    if per_day_gib is not None:
+        raw["disk"]["trend"] = {"per_day": per_day_gib * GB, "base_days": base_days}
+    return next(s for s in lm.evaluate(raw) if s["id"] == "disk")
+
+
+def test_runway_grades_the_days_left_not_the_percent_used():
+    s = _disk_sig(22, 197, 6.0)                                  # 89 % used, 3.7 days left
+    assert s["level"] == "warn" and "full in ~3.7 days" in s["text"] and s["value"] == "89% · 3.7d"
+    assert 0.5 <= s["pressure"] < 1.0 and "Find what grows" in s["hint"]
+    assert _disk_sig(22, 197, 15.0)["level"] == "crit"           # 1.5 days
+    ok = _disk_sig(22, 197, 1.0)                                 # 22 days: fine, but say so
+    assert ok["level"] == "ok" and ok["value"] == "89% · 22d" and ok["pressure"] < 0.5
+
+
+def test_runway_stays_quiet_where_it_has_no_business():
+    assert _disk_sig(22, 197, 0.1)["level"] == "ok"              # below the churn floor
+    assert "filling" not in _disk_sig(22, 197, 0.1)["text"]
+    assert _disk_sig(150, 400, 100.0)["level"] == "ok"           # 37 % free: not a runway problem yet
+    assert _disk_sig(22, 197, None)["value"] == "89%"            # no history yet: plain reading
+    assert _disk_sig(22, 197, 0.0)["level"] == "ok"              # shrinking
+
+
+def test_a_static_crit_is_never_softened_by_a_slow_trend():
+    s = _disk_sig(3, 100, 0.3)                                   # 97 % used: crit by the old rule
+    assert s["level"] == "crit"
+
+
+def _disk_monitor(tmp_path, monkeypatch, free_of, wall):
+    import collections
+    du = collections.namedtuple("du", "total used free")
+    monkeypatch.setattr(lm.shutil, "disk_usage", lambda p: du(197 * GB, 0, free_of()))
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    t = Tree(tmp_path / "fx")
+    m = lm.Monitor(now=Clock(), wall=wall)
+    return m, t
+
+
+def test_monitor_collects_history_and_reports_the_runway_after_a_day(tmp_path, monkeypatch):
+    w = Clock()
+    cur = {"free": 40 * GB}
+    m, t = _disk_monitor(tmp_path, monkeypatch, lambda: int(cur["free"]), w)
+    hist = tmp_path / "hist.json"
+    m.attach_disk_history(hist)
+    inp = {"data_dir": tmp_path, "live_max": 8}
+    first = m.sample(inp, t.fs)
+    assert "filling" not in next(s for s in first["signals"] if s["id"] == "disk")["text"]   # no history yet
+    for _ in range(int(2.6 * DAY // 600)):                       # 2.6 days at 6 GiB/day
+        w.t += 600
+        cur["free"] -= 6 * GB * 600 / DAY
+        snap = m.sample(inp, t.fs)
+    d = next(s for s in snap["signals"] if s["id"] == "disk")
+    import re
+    assert re.search(r"filling (5\.9|6\.0) GiB/day \(held over the last 2 d\)", d["text"]) and "faster" not in d["text"]
+    assert hist.exists()
+
+
+def test_history_survives_a_restart_and_a_swapped_volume_resets_it(tmp_path, monkeypatch):
+    w = Clock()
+    cur = {"free": 30 * GB}
+    m, t = _disk_monitor(tmp_path, monkeypatch, lambda: int(cur["free"]), w)
+    hist = tmp_path / "hist.json"
+    m.attach_disk_history(hist)
+    inp = {"data_dir": tmp_path, "live_max": 8}
+    for _ in range(5):
+        m.sample(inp, t.fs)
+        w.t += 700
+    n = len(m._disk_hist)
+    assert n == 5
+    m2 = lm.Monitor(now=Clock(), wall=w)                          # "restart"
+    m2.attach_disk_history(hist)
+    assert len(m2._disk_hist) == n
+    # same file, but the volume is now a different size: the old points describe another disk
+    monkeypatch.setattr(lm.shutil, "disk_usage",
+                        lambda p: __import__("collections").namedtuple("du", "total used free")(500 * GB, 0, 100 * GB))
+    m2.sample(inp, t.fs)
+    assert len(m2._disk_hist) == 1
+
+
+def test_a_corrupt_or_foreign_history_file_is_ignored(tmp_path, capsys):
+    p = tmp_path / "hist.json"
+    p.write_text("{not json")
+    m = lm.Monitor()
+    m.attach_disk_history(p)
+    assert len(m._disk_hist) == 0 and "unreadable" in capsys.readouterr().out
+    p.write_text('{"v": 2, "dev": 1, "total": 1, "points": [[1, 2]]}')
+    m.attach_disk_history(p)
+    assert len(m._disk_hist) == 0
+
+
+def test_a_wall_clock_step_back_drops_the_future_points(tmp_path, monkeypatch):
+    w = Clock()
+    m, t = _disk_monitor(tmp_path, monkeypatch, lambda: 30 * GB, w)
+    inp = {"data_dir": tmp_path, "live_max": 8}
+    for _ in range(4):
+        m.sample(inp, t.fs)
+        w.t += 700
+    w.t -= 3 * 700 + 5000                                         # NTP / VM resume: the clock jumps back
+    m.sample(inp, t.fs)
+    assert all(ts <= w.t for ts, _f in m._disk_hist)
+
+
+def test_the_static_disk_rule_is_not_debounced_by_the_runway_sustain(t, monkeypatch):
+    # `make doctor` samples a fresh Monitor twice, one second apart: a full disk must show at once.
+    import collections
+    du = collections.namedtuple("du", "total used free")
+    monkeypatch.setattr(lm.shutil, "disk_usage", lambda p: du(100 * GB, 0, int(0.5 * GB)))
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    clk = Clock()
+    m = lm.Monitor(now=clk)
+    snap = m.sample({"data_dir": "/tmp"}, t.fs)
+    assert _lvl(snap["signals"], "disk") == "crit"
+    assert all(not k.startswith("_") for s in snap["signals"] for k in s)     # the private hint never leaks to the API
+
+
+def test_a_runway_only_level_waits_out_its_sustain_then_holds(t, monkeypatch):
+    import collections
+    du = collections.namedtuple("du", "total used free")
+    monkeypatch.setattr(lm.shutil, "disk_usage", lambda p: du(197 * GB, 0, 22 * GB))
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    clk, wall = Clock(), Clock()
+    m = lm.Monitor(now=clk, wall=wall)
+    # three days of history at 6 GiB/day that ends at 22 GiB free: runway 3.7 d -> raw warn, 89 % -> static ok
+    m._disk_dev, m._disk_total = os.stat("/tmp").st_dev, 197 * GB
+    now = wall.t
+    m._disk_hist.extend((now - DAY * 3.2 + i * 600.0, int((22 + 6 * (3.2 * DAY - i * 600.0) / DAY) * GB))
+                        for i in range(int(3.2 * DAY / 600) + 1))
+    inp = {"data_dir": "/tmp"}
+    seen = []
+    for _ in range(14):                                                  # 14 samples, 60 s apart
+        seen.append(_lvl(m.sample(inp, t.fs)["signals"], "disk"))
+        clk.t += 60.0
+    assert seen[0] == "ok" and seen[9] == "ok"                           # < 600 s: debounced
+    assert seen[11] == "warn" and seen[13] == "warn"                     # sustained: warn, and it holds
+    snap = m.sample(inp, t.fs)
+    assert all(not k.startswith("_") for s in snap["signals"] for k in s)   # the private hint never leaks to the API
+
+
+def test_total_size_jitter_is_not_a_new_volume(tmp_path, monkeypatch):
+    import collections
+    du = collections.namedtuple("du", "total used free")
+    w = Clock()
+    n = {"i": 0}
+    # ZFS/btrfs/NFS style: `total` moves by a few KiB between samples; the history must keep growing
+    monkeypatch.setattr(lm.shutil, "disk_usage", lambda p: du(197 * GB + (n["i"] % 7) * 128 * 1024, 0, 30 * GB))
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    t = Tree(tmp_path / "fx")
+    m = lm.Monitor(now=Clock(), wall=w)
+    m.attach_disk_history(tmp_path / "hist.json")
+    for i in range(6):
+        n["i"] = i
+        m.sample({"data_dir": tmp_path}, t.fs)
+        w.t += 700
+    assert len(m._disk_hist) == 6
+
+
+def test_a_one_off_step_is_not_a_fill_rate():
+    # 100 GiB copied 2 h ago onto a volume with 150 GiB left of 1000: 100/day over 1 d, but only 33/day over 3 d
+    now = 10 * DAY
+    pts, t = [], now - 3.2 * DAY
+    while t <= now:
+        pts.append((t, int((250 if t < now - 2 * H else 150) * GB)))
+        t += 600.0
+    tr = lm.disk_trend(pts, now)
+    assert tr["per_day"] / GB == pytest.approx(100 / 3, rel=0.05) and tr["recent_per_day"] / GB == pytest.approx(100, rel=0.05)
+    # and with only 2 days of history it is 50/day, never the raw 100/day
+    two = [(t, f) for t, f in pts if t >= now - 2.1 * DAY]
+    assert lm.disk_trend(two, now)["per_day"] / GB == pytest.approx(50, rel=0.05)
+
+
+def test_a_fresh_runaway_shows_the_faster_recent_rate_but_is_graded_on_the_sustained_one():
+    s = _disk_sig(22, 197, 4.2)
+    assert "last 24 h" not in s["text"]
+    raw = {"disk": {"free": 22 * GB, "total": 197 * GB,
+                    "trend": {"per_day": 4.2 * GB, "recent_per_day": 12.5 * GB, "base_days": 3}}}
+    d = next(x for x in lm.evaluate(raw) if x["id"] == "disk")
+    assert "the last 24 h were faster: 12.5 GiB/day" in d["text"]
+    assert d["level"] == "warn"                                  # 22/4.2 = 5.2 days: graded on what has held
+
+
+def test_the_runway_only_speaks_for_a_disk_that_is_already_tight():
+    assert _disk_sig(100, 400, 40.0)["level"] == "ok"            # 25 % free, 2.5 days at that rate: plenty of room
+    assert _disk_sig(55, 400, 10.0)["level"] == "warn"           # 14 % free, 5.5 days

@@ -50,7 +50,7 @@ def _describe(snap: "dict[str, Any]", level: str) -> str:
     hint = next((s["hint"] for s in bad if s.get("hint")), "")
     top = snap.get("top") or []
     if top:
-        lines.append("Heaviest: " + ", ".join(f"{t['project']} {t['rss_mb']} MB" for t in top[:3]))
+        lines.append("Heaviest: " + ", ".join(f"{t['project']} {t['rss_mb']} MiB" for t in top[:3]))
     return "\n".join(lines + ([f"Hint: {hint}"] if hint else []))
 
 

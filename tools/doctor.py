@@ -540,7 +540,7 @@ def probe_config(env: dict, env_path: Path, env_exists: bool,
 
 # ─────────────────────────── Service ─────────────────────────────────────────────
 
-def probe_service(service_name: str, run=_run) -> "list[Fact]":
+def probe_service(service_name: str, run=_run, cgroup_root: Path = Path("/sys/fs/cgroup")) -> "list[Fact]":
     facts: "list[Fact]" = []
 
     show = run(["systemctl", "show", service_name,
@@ -596,7 +596,18 @@ def probe_service(service_name: str, run=_run) -> "list[Fact]":
         # subprocess, so a cockpit sitting at 80-90% of MemoryMax is one fan-out away from
         # having a child OOM-killed mid-turn (which the operator experiences as a frozen chat
         # or a dead browser pane, not as an error).
-        frac = (mc / mm) if mm else None
+        # Judge the WORKING SET, not memory.current: the raw figure counts reclaimable page cache and
+        # slab, so on a host that reads files (git, backups, a `find`) it sits near the limit while
+        # nothing is wrong — the same false alarm that once made the memory guard evict real chats.
+        ws = None
+        cg_rel = (props.get("ControlGroup") or "").strip()
+        if cg_rel:
+            try:
+                import load_monitor
+                ws = load_monitor.cgroup_working_set_bytes(cgroup_root / cg_rel.lstrip("/"))
+            except Exception:
+                ws = None
+        frac = ((ws if ws is not None else mc) / mm) if mm else None
         pct = f" ({frac * 100:.0f}% of MemoryMax)" if frac is not None else ""
         if frac is not None and frac >= 0.90:
             level, remedy = "fail", ("almost out of headroom — an OOM kill mid-turn is imminent. "
@@ -607,7 +618,9 @@ def probe_service(service_name: str, run=_run) -> "list[Fact]":
                                      "idle clients; if it is not, lower LIVE_CLIENT_MAX in .env")
         else:
             level, remedy = "ok", None
-        facts.append(Fact("MemoryCurrent", f"{mc // (1024 * 1024)} MB{pct}", level=level, remedy=remedy))
+        shown = (f"{ws // (1024 * 1024)} MiB working set{pct}; raw {mc // (1024 * 1024)} MiB incl. reclaimable cache"
+                 if ws is not None else f"{mc // (1024 * 1024)} MiB{pct}")
+        facts.append(Fact("MemoryCurrent", shown, level=level, remedy=remedy))
 
     # OOM history for THIS cgroup since its last start. A restart resets the counter, so a
     # non-zero value means the kernel killed a child of the currently running service — the
