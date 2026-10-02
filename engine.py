@@ -2056,6 +2056,16 @@ def _compute_fingerprint(
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
+_DISCONNECT_WAIT_SEC = 10
+_disconnects_in_flight: "set[asyncio.Future]" = set()
+
+
+def _disconnect_done(task: "asyncio.Future") -> None:
+    _disconnects_in_flight.discard(task)
+    if not task.cancelled():
+        task.exception()  # mark retrieved: the waiter already logged / gave up on it
+
+
 async def _evict_live_client(session_key: str, ctx: "dict | None") -> None:
     """Disconnect and remove a live client entry. Safe to call even if the key is absent.
 
@@ -2080,11 +2090,19 @@ async def _evict_live_client(session_key: str, ctx: "dict | None") -> None:
     # spec-071: stop the between-turns drain before disconnecting the subprocess.
     if entry.drain_task is not None and not entry.drain_task.done():
         entry.drain_task.cancel()
-    # Disconnect the subprocess.
+    # Disconnect the subprocess. Shielded: we may stop WAITING (the timeout below, or our own
+    # task being cancelled) but the teardown must run to the end — the SDK's close() escalates
+    # EOF → SIGTERM → SIGKILL over up to ~20 s, and a raw cancel (which is what wait_for's
+    # timeout delivers) skips that escalation and leaks the CLI child. The task is held in
+    # `_disconnects_in_flight` so a detached teardown cannot be garbage-collected mid-way.
+    teardown = asyncio.ensure_future(entry.client.disconnect())
+    _disconnects_in_flight.add(teardown)
+    teardown.add_done_callback(_disconnect_done)
     try:
-        await asyncio.wait_for(entry.client.disconnect(), timeout=10)
+        await asyncio.wait_for(asyncio.shield(teardown), timeout=_DISCONNECT_WAIT_SEC)
     except Exception as exc:
-        print(f"[live-client] evict {session_key}: disconnect failed ({exc!r}), force-dropping")
+        print(f"[live-client] evict {session_key}: disconnect not confirmed within "
+              f"{_DISCONNECT_WAIT_SEC}s or failed ({exc!r}); teardown continues in the background")
 
 
 async def rewind_conversation(

@@ -60,6 +60,30 @@ async def test_idle_ttl_eviction_reaps_the_subprocess(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_slow_disconnect_outliving_the_wait_is_not_abandoned(monkeypatch):
+    """The wait_for timeout is itself a raw cancel: the SDK escalation (EOF -> SIGTERM ->
+    SIGKILL) can take ~20 s, so a disconnect slower than our wait must still run to the end."""
+    monkeypatch.setattr(engine, "_DISCONNECT_WAIT_SEC", 0.01)
+
+    class _Slow:
+        reaped = False
+
+        async def disconnect(self):
+            await asyncio.sleep(0.08)
+            self.reaped = True
+
+    client = _Slow()
+    entry = engine._LiveEntry(client=client, fingerprint="fp", last_used=0.0,
+                              idle_task=None, session_key="chat:slow")
+    ctx = {"running": {}, "live_clients": {"chat:slow": entry}}
+    await engine._evict_live_client("chat:slow", ctx)      # returns after ~0.01 s
+    assert not client.reaped
+    await asyncio.sleep(0.2)
+    assert client.reaped, "a disconnect slower than the wait was cancelled - CLI child leaked"
+    assert not engine._disconnects_in_flight
+
+
+@pytest.mark.asyncio
 async def test_eviction_from_another_task_still_reaps_and_cancels_the_timer(monkeypatch):
     """The memory-guard / fingerprint shape: the evictor is NOT the idle task."""
     monkeypatch.setattr(engine, "LIVE_CLIENT_TTL_SEC", 60)
