@@ -16,6 +16,14 @@ from the couch.
 
 <div align="center">
 
+<a href="https://cardloop.igdigi.com/#watch"><img src="docs/ad-poster.jpg" width="320" alt="Cardloop — a new way to work. And to live. (80 s)" /></a>
+
+**[Watch the 80-second ad](https://cardloop.igdigi.com/#watch) — made inside Cardloop.**
+
+</div>
+
+<div align="center">
+
 [![CI](https://github.com/igdigitallab/cardloop/actions/workflows/ci.yml/badge.svg)](https://github.com/igdigitallab/cardloop/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](./LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/igdigitallab/cardloop/badge)](https://scorecard.dev/viewer/?uri=github.com/igdigitallab/cardloop)
