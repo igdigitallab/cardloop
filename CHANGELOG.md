@@ -7,6 +7,8 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+## [v0.17.0] — 2026-10-02
+
 ### Added — Load meter: a vertical LED bar for "is this server overloaded" (spec-094)
 A small vertical meter in the top-right corner, next to the rate-limit pill (and in the composer
 bar on mobile). Its height is the worst signal's pressure — green below the warn line, amber up to
