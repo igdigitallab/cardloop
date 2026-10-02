@@ -319,3 +319,44 @@ def test_enabled_flag(monkeypatch):
     assert lm.enabled() is False
     monkeypatch.setenv("LOAD_MONITOR", "1")
     assert lm.enabled() is True
+
+
+def test_a_held_level_keeps_its_hint(t, monkeypatch):
+    """After a debounce rewrite the row is non-ok but must still say what to do."""
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    _healthy(t, cur=int(6.5 * GB))                               # 81 % of the 8 GB limit -> warn
+    clk = Clock()
+    m = lm.Monitor(now=clk)
+    m.sample({"live_max": 8}, t.fs)
+    clk.t += 11
+    snap = m.sample({"live_max": 8}, t.fs)
+    mem = next(s for s in snap["signals"] if s["id"] == "mem")
+    assert mem["level"] == "warn" and mem["hint"]
+    _healthy(t, cur=2 * GB)                                      # raw drops to ok, the level is held
+    clk.t += 5
+    held = next(s for s in m.sample({"live_max": 8}, t.fs)["signals"] if s["id"] == "mem")
+    assert held["level"] == "warn" and held["hint"], "a held level lost its hint"
+
+
+def test_feeding_from_the_loop_thread_while_sampling_never_raises(t, monkeypatch):
+    """sample() runs in a worker thread while the event loop appends lag samples and guard
+    evictions: iterating a deque another thread is appending to raises RuntimeError."""
+    import threading
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    _healthy(t)
+    m = lm.Monitor()
+    stop = threading.Event()
+
+    def feeder():
+        while not stop.is_set():
+            m.note_loop_lag(0.001)
+            m.note_guard_eviction()
+
+    th = threading.Thread(target=feeder)
+    th.start()
+    try:
+        for _ in range(25):
+            m.sample({"live_max": 8}, t.fs)
+    finally:
+        stop.set()
+        th.join()

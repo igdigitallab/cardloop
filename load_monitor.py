@@ -285,7 +285,7 @@ def _pressure(v: float, warn: float, crit: float) -> float:
 
 def _sig(sid: str, level: str, pressure: float, value: str, text: str, hint: str = "") -> "dict[str, Any]":
     return {"id": sid, "level": level, "pressure": round(max(0.0, min(1.0, pressure)), 3),
-            "value": value, "text": text, "hint": hint if level != OK else ""}
+            "value": value, "text": text, "hint": hint}
 
 
 def _gb(n: float) -> str:
@@ -426,7 +426,8 @@ class Monitor:
 
     def __init__(self, now: "Any" = time.time) -> None:
         self._now = now
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()          # one sample() at a time
+        self._feed = threading.Lock()          # loop thread appends, sampler thread windows/iterates
         self._evictions: "collections.deque[float]" = collections.deque(maxlen=1024)
         self._lag: "collections.deque[tuple[float, float]]" = collections.deque(maxlen=4096)
         self._oom: "collections.deque[tuple[float, int]]" = collections.deque(maxlen=4096)
@@ -439,10 +440,12 @@ class Monitor:
 
     # -- event feeds (called from the event loop; deque appends are thread-safe) --
     def note_guard_eviction(self) -> None:
-        self._evictions.append(self._now())
+        with self._feed:
+            self._evictions.append(self._now())
 
     def note_loop_lag(self, lag_s: float) -> None:
-        self._lag.append((self._now(), max(0.0, lag_s)))
+        with self._feed:
+            self._lag.append((self._now(), max(0.0, lag_s)))
 
     def snapshot(self) -> "dict[str, Any] | None":
         return self._snap
@@ -460,8 +463,6 @@ class Monitor:
                 eff = tr.update(s["level"], now, _SUSTAIN.get(s["id"], _DEFAULT_SUSTAIN))
                 if eff != s["level"]:
                     s["level"] = eff
-                    if eff == OK:
-                        s["hint"] = ""
                     s["pressure"] = min(s["pressure"], 0.49) if eff == OK else max(s["pressure"], 0.5)
                 level = level if _RANK[level] >= _RANK[eff] else eff
                 score = max(score, s["pressure"])
@@ -517,20 +518,24 @@ class Monitor:
             if mi and mi.get("SwapTotal"):
                 occ = 1.0 - mi.get("SwapFree", 0) / mi["SwapTotal"]
             raw["swap"] = {"in_mb_min": (vm["pswpin"] - p0) * page / 1048576 * 60.0 / span, "occupancy": occ}
-        self._window(self._evictions, _EVICTION_WINDOW_S, now)
+        with self._feed:
+            self._window(self._evictions, _EVICTION_WINDOW_S, now)
+            n_evictions = len(self._evictions)
+            self._window(self._lag, _LAG_WINDOW_S, now)
+            lag_max = max((v for _t, v in self._lag), default=0.0)
+            have_lag = bool(self._lag)
         # Only where the guard can act at all (a limited cgroup); elsewhere a constant 0 would
         # read as evidence of health that does not exist.
-        if (raw["mem"] or {}).get("limited") or self._evictions:
-            raw["evictions"] = len(self._evictions)
+        if (raw["mem"] or {}).get("limited") or n_evictions:
+            raw["evictions"] = n_evictions
         if cg is not None:
             kills = _kv(cg / "memory.events").get("oom_kill")
             if kills is not None:
                 self._oom.append((now, kills))
                 self._window(self._oom, _OOM_WINDOW_S, now)
                 raw["oom"] = max(0, kills - self._oom[0][1])
-        self._window(self._lag, _LAG_WINDOW_S, now)
-        if self._lag or now - self.started_at > 10:
-            raw["loop_lag"] = max((v for _t, v in self._lag), default=0.0)
+        if have_lag or now - self.started_at > 10:
+            raw["loop_lag"] = lag_max
         used, lim = None, _fd_limit(fs)
         try:
             used = len(os.listdir(fs.proc / "self" / "fd"))
