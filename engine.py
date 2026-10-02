@@ -2069,7 +2069,13 @@ async def _evict_live_client(session_key: str, ctx: "dict | None") -> None:
     # Cancel the pending idle-eviction task.  We do NOT await it — the task is fire-and-forget
     # and its CancelledError is handled internally.  Awaiting a shielded cancelled task raises
     # CancelledError in the caller, which is never what we want here.
-    if entry.idle_task is not None and not entry.idle_task.done():
+    # ⚠️ Never cancel the CURRENT task: when the idle timer itself is the evictor, that cancel
+    # lands on the first suspension inside disconnect() below. The SDK's close() shield only
+    # defers anyio cancellation, so a raw asyncio cancel skips the terminate/kill escalation
+    # and the CLI child (+ its MCP servers, ~450 MB) lives on, with nothing logged because
+    # CancelledError is not an Exception. Measured 2026-10-01: 21/21 TTL evictions leaked.
+    if (entry.idle_task is not None and not entry.idle_task.done()
+            and entry.idle_task is not asyncio.current_task()):
         entry.idle_task.cancel()
     # spec-071: stop the between-turns drain before disconnecting the subprocess.
     if entry.drain_task is not None and not entry.drain_task.done():
