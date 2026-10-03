@@ -324,7 +324,7 @@ export function buildRuntimeRows(providers: AgentProviderInfo[], usage: UsageLim
           : p.available ? undefined : (p.error || `${name} is not available`),
         hasQuota: reports,
         ...(reports ? {} : { limitsNote: 'limits not reported' }),
-        windows: reports && codex?.limits && Object.keys(codex.limits).length ? codex.limits : null,
+        windows: codex?.limits && Object.keys(codex.limits).length ? codex.limits : null,
         ts, stale: ts != null && now - ts > CODEX_STALE_AFTER_SEC, isGlobalDefault: false,
         defaultModel,
       })
@@ -362,7 +362,7 @@ export function fallbackRuntimeRow(key: string, globalKey: string, usage: UsageL
     backend: backend || '', available: own,
     reason: own ? undefined : 'not listed by the server right now',
     hasQuota, ...(!local && !hasQuota ? { limitsNote: 'limits not reported' } : {}),
-    windows: own && hasQuota ? usage!.limits : null,
+    windows: own ? usage!.limits : null,
     ts: own ? now : null, stale: false, isGlobalDefault: own,
   }
 }

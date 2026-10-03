@@ -407,3 +407,19 @@ test('fallback row: only the global Claude account inherits the global limits; C
   assert.equal(local.hasQuota, false)
   assert.equal(local.limitsNote, undefined)
 })
+
+test('pill: a row with no quota never leads - even a Claude-keyed local row with stray windows', () => {
+  // Claude has a lead-window rule (five_hour); a LOCAL backend row is provider "claude" with
+  // hasQuota:false. Only the no-quota guard stops a stray payload from growing a bar on it.
+  const l = buildRuntimeRows(LIVE, null).find(r => r.key === 'claude::ollama')!
+  assert.equal(l.hasQuota, false)
+  assert.equal(leadWindow({ ...l, windows: { five_hour: win(0.2) } }, NOW), null)
+  // …while the same windows on a row that HAS a quota do lead
+  assert.equal(leadWindow({ ...l, hasQuota: true, windows: { five_hour: win(0.2) } }, NOW)?.key, 'five_hour')
+})
+
+test('fallback row: an unknown provider has no account dimension - it is named by its own id', () => {
+  const u = fallbackRuntimeRow('gemini:acct:', 'claude:main:', null, NOW)
+  assert.equal(u.name, 'gemini')
+  assert.equal(u.provider, 'gemini')
+})
