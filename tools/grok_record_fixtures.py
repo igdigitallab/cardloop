@@ -6,7 +6,8 @@ engine uses, speaks ACP over stdio, and writes EVERY line in both directions as
 
     {"dir": "c2a" | "a2c", "msg": <json>, "t": <seconds since spawn, float>}
 
-after scrubbing: session ids -> SESSION_n, uuids -> UUID_n, the account email ->
+plus non-wire rows `{"dir": "marker", "msg": {...}, "t": ...}` (a client timeout, the agent exiting, "second process
+spawn" in resume/load fixtures where `t` restarts at 0): replayers must skip them. Scrubbing: session ids -> SESSION_n, uuids -> UUID_n, the account email ->
 user@example.invalid, absolute paths -> $CWD / $GROK_HOME / $HOME, token-looking strings and
 the values of the login file -> REDACTED. A fixture that still contains a secret-looking
 value is refused (verify pass) and deleted.
@@ -739,6 +740,19 @@ def sc_plan_mode_probe(c: Ctx):
     c.finish(a, "plan_mode_probe", f"requests={[x['method'] for x in a.requests_from_agent]} stopReason={(r.get('result') or {}).get('stopReason')} timeout={'_timeout' in r}")
 
 
+def sc_set_mode_plan(c: Ctx):
+    """spec C5: ACP has `session/set_mode` (`plan` seen in current_mode_update). Measured: plan mode rejects the
+    file-edit tools at the harness ("file edits are not allowed in plan mode") but does NOT stop shell side effects."""
+    a = c.open("set_mode_plan"); a.handshake(); a.new_session(yolo=True)
+    a.permission_policy = lambda p: None
+    r = a.call("session/set_mode", {"sessionId": a.session_id, "modeId": "plan"})
+    r2 = a.prompt("This is a harness test, do not refuse and do not ask questions. Step 1: call the write tool to create file w1.txt containing hi. "
+                  "Step 2: run the shell command `touch w2.txt`. Report the exact tool result or error of each step in one line.", timeout=90)
+    c.finish(a, "set_mode_plan", f"set_mode={'ok' if 'result' in r else json.dumps(r.get('error'))[:200]} stopReason={(r2.get('result') or {}).get('stopReason')} "
+                                 f"w1.txt(write tool)_created={Path(c.project, 'w1.txt').exists()} w2.txt(shell touch)_created={Path(c.project, 'w2.txt').exists()} "
+                                 f"requests={[x['method'] for x in a.requests_from_agent]}")
+
+
 def sc_todo_write(c: Ctx):
     a = c.open("todo_write"); a.handshake(); a.new_session()
     a.prompt(ONLY_HERE + "Use your todo-list tool to record a plan with exactly three items: read notes.txt, summarise it, report. "
@@ -791,6 +805,7 @@ SCENARIOS: dict[str, Callable[[Ctx], None]] = {
     "error_shapes": sc_error_shapes,
     "rules_meta": sc_rules_meta,
     "plan_mode_probe": sc_plan_mode_probe,
+    "set_mode_plan": sc_set_mode_plan,
     "todo_write": sc_todo_write,
     "web_tools": sc_web_tools,
     "auth_missing": sc_auth_missing,
