@@ -13,7 +13,9 @@
 import { useSyncExternalStore } from 'react'
 import { api, type UsageLimits, type UsageLimitRow } from '../api'
 import type { AgentProviderInfo, Chat, Provider } from '../types'
-import { PROVIDER_IDS, providerLabel, providerReportsLimits, providerTag } from './providers'
+import {
+  DEFAULT_PROVIDER, PROVIDER_IDS, isAdapterProvider, isKnownProvider, providerLabel, providerReportsLimits, providerTag,
+} from './providers'
 
 /** One selectable runtime, in the unified shape every surface renders. */
 export interface RuntimeRow {
@@ -335,6 +337,34 @@ export function buildRuntimeRows(providers: AgentProviderInfo[], usage: UsageLim
   const unique = rows.filter(r => !seen.has(r.key) && !!seen.add(r.key))
   const tags = assignTags(seeds.filter((sd, i) => seeds.findIndex(o => o.key === sd.key) === i))
   return unique.map(r => ({ ...r, tag: tags[r.key] }))
+}
+
+/** The row to show when the registry does not list the runtime on screen (first paint, a
+ *  failed /api/agent-providers, a provider switched off, an account removed). Only the GLOBAL
+ *  account's own limits are known without the registry, and they are attached ONLY when that
+ *  is the runtime being shown - pinning them on a Codex or local chat would claim a quota that
+ *  chat does not spend, the exact drift the pill exists to remove. */
+export function fallbackRuntimeRow(key: string, globalKey: string, usage: UsageLimits | null, now: number): RuntimeRow {
+  const [provider, account, backend] = key.split(':')
+  const own = key === globalKey && !!usage
+  const tag = providerTag(provider) ?? (backend === 'ollama' ? 'L'
+    : ((account || provider || '?')[0] || '?').toUpperCase())
+  // Only the cockpit's own harness has an account dimension; every other provider - a known
+  // adapter or a name this build has never heard of - is its own runtime, named from the table
+  // (an unknown one by its raw id). It gets NO quota unless it is one that publishes windows:
+  // the fallback must not paint a limit the server never reported.
+  const native = !provider || (isKnownProvider(provider) && !isAdapterProvider(provider))
+  const local = backend === 'ollama'
+  const hasQuota = !local && providerReportsLimits(provider || DEFAULT_PROVIDER)
+  return {
+    key, tag, name: native ? account || backend || provider || key : providerLabel(provider), plan: '',
+    provider: (provider || DEFAULT_PROVIDER) as RuntimeRow['provider'], account: account || null,
+    backend: backend || '', available: own,
+    reason: own ? undefined : 'not listed by the server right now',
+    hasQuota, ...(!local && !hasQuota ? { limitsNote: 'limits not reported' } : {}),
+    windows: own && hasQuota ? usage!.limits : null,
+    ts: own ? now : null, stale: false, isGlobalDefault: own,
+  }
 }
 
 /** The id of the globally active Claude account, from whichever half has it. */

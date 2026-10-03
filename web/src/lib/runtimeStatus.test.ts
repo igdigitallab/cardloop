@@ -12,9 +12,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  buildRuntimeRows, effectiveRuntimeKey, inheritedRuntimeKey, chatIsPinned, leadWindow,
+  buildRuntimeRows, effectiveRuntimeKey, fallbackRuntimeRow, inheritedRuntimeKey, chatIsPinned, leadWindow,
   globalDefaultAccount, unusableAccounts, publishCurrentChat, claimCurrentChat, clearCurrentChat,
-  getRuntimeSnapshot, serverNow, type CurrentChat,
+  getRuntimeSnapshot, serverNow, windowKeys, type CurrentChat,
 } from './runtimeStatus'
 import { runtimeStats } from '../components/RuntimeTag'
 import type { AgentProviderInfo } from '../types'
@@ -257,4 +257,153 @@ test('clock: serverNow advances the frozen server time by local elapsed time', (
   } finally {
     Date.now = realNow
   }
+})
+
+// ─── spec-095: Grok as the third runtime ─────────────────────────────────────
+
+const GROK: AgentProviderInfo = {
+  provider: 'grok', enabled: true, available: true, authenticated: true,
+  models: [{ value: 'grok-build', label: 'Grok Build', default: true } as never],
+  reasoning_levels: [], capabilities: {}, accounts: [], backends: [],
+}
+
+const WITH_GROK = [...LIVE, GROK]
+
+test('grok: tag G, no account, its own runtime key; Codex keeps C', () => {
+  const rows = buildRuntimeRows(WITH_GROK, null)
+  const g = rows.find(r => r.key === 'grok::')!
+  assert.equal(g.tag, 'G')
+  assert.equal(g.name, 'Grok')
+  assert.equal(g.provider, 'grok')
+  assert.equal(g.account, null)
+  assert.equal(g.backend, '')
+  assert.equal(g.defaultModel, 'grok-build')
+  assert.equal(rows.find(r => r.key === 'codex::')!.tag, 'C')
+})
+
+test('grok: the fixed tag never moves - an account that wants G widens instead', () => {
+  const rows = buildRuntimeRows([claude([{ id: 'main', label: 'Main' }, { id: 'gam', label: 'Gamma' }]), GROK], null)
+  assert.equal(rows.find(r => r.key === 'grok::')!.tag, 'G')
+  assert.equal(rows.find(r => r.key === 'claude:gam:')!.tag, 'Ga')
+})
+
+test('grok: NO quota - muted "limits not reported", never a number, never green', () => {
+  // Even with a live Codex block in the payload the Grok row must not borrow a window.
+  const usage: UsageLimits = {
+    limits: { five_hour: win(0.1) }, now: NOW, account: 'main',
+    codex: { ts: NOW - 5, plan_type: 'plus', limit_name: null, limits: { primary: win(0.2) } },
+  }
+  const g = buildRuntimeRows(WITH_GROK, usage).find(r => r.key === 'grok::')!
+  assert.equal(g.hasQuota, false)
+  assert.equal(g.windows, null)
+  assert.equal(g.limitsNote, 'limits not reported')
+  assert.equal(g.stale, false)
+  const s = runtimeStats(g, NOW)
+  assert.equal(s.pct, '—')
+  assert.equal(s.cls, 'usage-dim')
+  assert.equal(s.reset, '')
+  assert.match(s.title, /Grok · limits not reported/)
+  assert.doesNotMatch(s.title, /local model|spends no subscription/)
+  assert.equal(leadWindow(g, NOW), null)
+  assert.deepEqual(windowKeys(g), [])
+})
+
+test('grok: a row with no quota never leads, even if a stray payload put windows on it', () => {
+  const g = buildRuntimeRows(WITH_GROK, null).find(r => r.key === 'grok::')!
+  const forged = { ...g, windows: { primary: win(0.1), five_hour: win(0.1) } }
+  assert.equal(leadWindow(forged, NOW), null)
+  const s = runtimeStats(forged, NOW)
+  assert.equal(s.pct, '—')
+  assert.equal(s.cls, 'usage-dim')
+})
+
+test('grok: a local Ollama backend is still "local" (no quota, but NOT "limits not reported")', () => {
+  const l = buildRuntimeRows(LIVE, null).find(r => r.key === 'claude::ollama')!
+  assert.equal(l.hasQuota, false)
+  assert.equal(l.limitsNote, undefined)
+  assert.equal(runtimeStats({ ...l, available: true }, NOW).pct, 'local')
+})
+
+test('grok: unavailable reads "off" with the registry\'s own reason; switched-off names itself', () => {
+  const down = { ...GROK, available: false, error: 'grok login expired' }
+  const g = buildRuntimeRows([down], null)[0]
+  assert.equal(g.available, false)
+  assert.equal(g.reason, 'grok login expired')
+  assert.equal(runtimeStats(g, NOW).pct, 'off')
+  assert.match(runtimeStats(g, NOW).title, /grok login expired/)
+  const off = buildRuntimeRows([{ ...GROK, enabled: false }], null)[0]
+  assert.match(off.reason || '', /Grok is switched off/)
+  assert.equal(off.available, false)
+})
+
+test('grok: a plan type the registry reports is shown upper-cased', () => {
+  const g = buildRuntimeRows([{ ...GROK, plan_type: 'supergrok' }], null)[0]
+  assert.equal(g.plan, 'SUPERGROK')
+})
+
+test('chain: a Grok chat is its own runtime whatever account it carries; and it is a pin', () => {
+  assert.equal(effectiveRuntimeKey({ provider: 'grok' }, {}, 'main'), 'grok::')
+  assert.equal(effectiveRuntimeKey({ provider: 'grok', account: 'work' }, { account: 'main' }, 'main'), 'grok::')
+  assert.equal(chatIsPinned({ provider: 'grok' }), true)
+  // the row the key points at exists in the unified list
+  assert.ok(buildRuntimeRows(WITH_GROK, null).some(r => r.key === effectiveRuntimeKey({ provider: 'grok' }, {}, 'main')))
+})
+
+test('unknown provider: a muted row under its own id - never green, never mislabelled Claude', () => {
+  const mystery = { ...GROK, provider: 'gemini' as never, models: [] }
+  const r = buildRuntimeRows([mystery], null)[0]
+  assert.equal(r.name, 'gemini')
+  assert.equal(r.hasQuota, false)
+  assert.equal(runtimeStats(r, NOW).cls, 'usage-dim')
+  assert.equal(r.key, 'gemini::')
+})
+
+test('codex still reports windows: only providers that publish them get a quota', () => {
+  const [c] = buildRuntimeRows([CODEX], {
+    limits: {}, now: NOW, account: 'main',
+    codex: { ts: NOW - 60, plan_type: 'plus', limit_name: null, limits: { primary: win(0.4) } },
+  })
+  assert.equal(c.hasQuota, true)
+  assert.equal(c.limitsNote, undefined)
+  assert.equal(c.plan, 'PLUS')
+  assert.equal(leadWindow(c, NOW)?.key, 'primary')
+})
+
+test('fallback row (registry does not list the runtime): Grok stays muted, named from the table', () => {
+  const usage: UsageLimits = { limits: { five_hour: win(0.5) }, now: NOW, account: 'main' }
+  const g = fallbackRuntimeRow('grok::', 'claude:main:', usage, NOW)
+  assert.equal(g.tag, 'G')
+  assert.equal(g.name, 'Grok')
+  assert.equal(g.hasQuota, false)
+  assert.equal(g.windows, null)
+  assert.equal(g.limitsNote, 'limits not reported')
+  assert.equal(g.available, false)
+  assert.equal(runtimeStats(g, NOW).cls, 'usage-dim')
+  // an unknown provider is just as muted and shows its raw id
+  const u = fallbackRuntimeRow('gemini::', 'claude:main:', usage, NOW)
+  assert.equal(u.name, 'gemini')
+  assert.equal(u.hasQuota, false)
+  assert.equal(u.windows, null)
+})
+
+test('fallback row: only the global Claude account inherits the global limits; Codex and local do not', () => {
+  const usage: UsageLimits = { limits: { five_hour: win(0.5) }, now: NOW, account: 'main' }
+  const own = fallbackRuntimeRow('claude:main:', 'claude:main:', usage, NOW)
+  assert.equal(own.windows?.five_hour.utilization, 0.5)
+  assert.equal(own.hasQuota, true)
+  assert.equal(own.name, 'main')
+  assert.equal(own.available, true)
+  const other = fallbackRuntimeRow('claude:work:', 'claude:main:', usage, NOW)
+  assert.equal(other.windows, null)
+  assert.equal(other.available, false)
+  const codex = fallbackRuntimeRow('codex::', 'claude:main:', usage, NOW)
+  assert.equal(codex.tag, 'C')
+  assert.equal(codex.name, 'Codex')
+  assert.equal(codex.hasQuota, true)
+  assert.equal(codex.limitsNote, undefined)
+  assert.equal(codex.windows, null)
+  const local = fallbackRuntimeRow('claude::ollama', 'claude:main:', usage, NOW)
+  assert.equal(local.tag, 'L')
+  assert.equal(local.hasQuota, false)
+  assert.equal(local.limitsNote, undefined)
 })
