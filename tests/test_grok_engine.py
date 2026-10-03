@@ -1531,6 +1531,12 @@ async def test_a_setup_time_mcp_or_hook_signal_refuses_the_turn_before_the_promp
     assert pid_gone(pids["leader"]) and pid_gone(pids["child"])
 
 
+async def test_the_first_signal_is_the_one_reported(env):
+    env.fake(_fixture_with(env, [_mcp_servers_updated(_SRV), _HOOK_EXEC, _MCP_READY]))
+    msg = last_error(await env.run())
+    assert "tablet" in msg and "hook" not in msg
+
+
 async def test_the_tripwire_names_the_server_but_never_its_args_or_env(env):
     env.fake(_fixture_with(env, [_mcp_servers_updated(_SRV)]))
     msg = last_error(await env.run())
@@ -1688,6 +1694,19 @@ def test_a_config_without_the_skills_switches_is_regenerated(env, stale):
     assert cfg["skills"]["disabled"] == ["resume-claude", "resume-codex", "resume-cursor"]
 
 
+@pytest.mark.parametrize("disabled", ['[]', '["resume-claude"]', '["resume-claude", "resume-codex"]',
+                                      '["resume-cursor", "resume-codex", "resume-claude", "x"]'])
+def test_a_config_with_the_right_ignore_but_a_wrong_disabled_list_is_regenerated(env, disabled):
+    env.home.mkdir(exist_ok=True)
+    (env.home / "config.toml").write_text(
+        '[cli]\nauto_update = false\n[shell_environment_policy]\ninherit = "core"\n'
+        f'[skills]\nignore = ["{env.fake_home / ".agents"}"]\ndisabled = {disabled}\n')
+    ensure_home(env.ctx)
+    cfg = tomllib.loads((env.home / "config.toml").read_text())
+    assert cfg["skills"]["ignore"] == [str(env.fake_home / ".agents")]
+    assert cfg["skills"]["disabled"] == ["resume-claude", "resume-codex", "resume-cursor"]
+
+
 @pytest.mark.parametrize("table", ["folder_trust", "mcp_servers", "disabled_mcp_servers", "compat",
                                    "hooks", "plugins", "marketplace"])
 def test_a_config_that_widens_the_tool_surface_is_regenerated(env, table):
@@ -1746,6 +1765,7 @@ def test_home_or_ancestor_predicate_is_exact(env):
     assert f(str(env.fake_home)) and f(str(env.tmp)) and f("/")
     assert not f(str(env.fake_home / "x")) and not f(str(env.cwd))
     assert not f(str(env.fake_home) + "-sibling")         # a name prefix is not an ancestor
+    assert not f(str(env.fake_home)[:-1])                 # nor is a path that is a string prefix of $HOME
 
 
 # ---- cancellationCategory: every unrequested cancel is an error, a requested one is clean ---
@@ -1779,7 +1799,7 @@ async def test_an_unrequested_cancel_without_a_category_is_still_an_error(env):
 
 
 @pytest.mark.parametrize("fixture", ["cancel_mid_tool", "permission_request_no_yolo_cancel_pending"])
-async def test_a_requested_cancel_is_a_clean_result_whatever_the_recording(env, fixture):
+async def test_a_requested_cancel_is_a_clean_result_whatever_the_recording(env, fixture, capsys):
     env.fake(fixture, permission_wait=0.3)
     seen = []
     interrupted = False
@@ -1789,6 +1809,7 @@ async def test_a_requested_cancel_is_a_clean_result_whatever_the_recording(env, 
             interrupted = True
             await env.ctx["running"]["p:1"].interrupt()
     assert interrupted and types(seen)[-1] == "result" and "error" not in types(seen)
+    assert "also reports" not in capsys.readouterr().out   # MidTurnAbort IS our stop: nothing to flag
 
 
 async def test_a_requested_stop_that_races_a_permission_rejection_stays_clean_and_is_journaled(env, capsys):
@@ -1810,10 +1831,7 @@ async def test_a_requested_stop_that_races_a_permission_rejection_stays_clean_an
     def init(self, key):
         orig(self, key)
         self.cancel_requested = True
-    grok_engine.GrokTurn.__init__ = init
-    try:
-        events = await env.run()
-    finally:
-        grok_engine.GrokTurn.__init__ = orig
+    env.mp.setattr(grok_engine.GrokTurn, "__init__", init)
+    events = await env.run()
     assert types(events)[-1] == "result" and "error" not in types(events)
     assert "cancellationCategory=PermissionRejected" in capsys.readouterr().out
