@@ -59,6 +59,15 @@ SHAPES = {
 
 
 @pytest.fixture(autouse=True)
+def _every_grok_session_exists(monkeypatch):
+    """These tests pin the kwargs/write-back of the run sites with made-up ids ("OLD-ID"); the run
+    sites now drop a resume id Grok no longer has (P3), so the existence check is stubbed true
+    here. The drop itself is tested in test_grok_p3p4_wiring.py with real session files (which
+    imports `isolate` below but not this)."""
+    monkeypatch.setattr(_webapp._grok_history, "session_exists", lambda *a, **k: True)
+
+
+@pytest.fixture(autouse=True)
 def isolate(tmp_path, monkeypatch):
     monkeypatch.delenv("GROK_ALLOW_ALL_PROJECTS", raising=False)
     old_file = _webapp._CHAT_QUEUE_FILE
@@ -627,7 +636,13 @@ async def test_free_chat_create_on_grok_follows_the_synthetic_record(
                               headers=h)
         assert r.status == 409, loose
 
+    # The opt-in alone is not enough at the default cwd ($HOME): see the home-root tests below.
     r = await client.post("/api/free", json={"provider": "grok", "grok_allowed": True}, headers=h)
+    assert r.status == 409 and (await r.json())["error"].startswith(REFUSAL)
+    assert _webapp._load_free_chats(fake_ctx) == {}
+
+    r = await client.post("/api/free", json={"provider": "grok", "grok_allowed": True,
+                                             "cwd": fake_ctx["topics"][SESSION_KEY]["cwd"]}, headers=h)
     assert r.status == 200
     body = await r.json()
     assert body["provider"] == "grok" and body["grok_allowed"] is True

@@ -68,6 +68,9 @@ import autopilot as _autopilot
 import search as _search
 import codex_engine as _codex
 import grok_engine as _grok
+import grok_history as _grok_history
+import grok_sends as _grok_sends
+import grok_usage as _grok_usage
 import providers
 
 # spec-075: context pack — deterministic project-state injection on fresh sessions
@@ -5951,7 +5954,29 @@ def _provider_gate_refusal(project: "dict | None", provider: str) -> "str | None
     `board_provider`, the queue accept) and EVERY site that launches a run (queue drain, direct
     chat POST, board card) asks this, so the rule cannot drift between them. The hook itself is
     `ProviderSpec.gate`. Strict like `providers.get`: an unregistered name raises."""
-    return providers.gate_refusal(provider, project)
+    refusal = providers.gate_refusal(provider, project)
+    if refusal:
+        _journal_gate_refusal(provider, project, refusal)
+    return refusal
+
+
+_GATE_JOURNAL_SEEN: "dict[tuple, float]" = {}
+_GATE_JOURNAL_WINDOW_SEC = 60.0
+
+
+def _journal_gate_refusal(provider: str, project: "dict | None", refusal: str) -> None:
+    """One `[<provider>]` journal line per refused decision. The same refusal for the same project
+    inside a minute is not repeated: a client that retries (or a poll that re-asks) must not turn a
+    privacy decision into log spam, while a fresh decision later still leaves its own line."""
+    now = time.monotonic()
+    key = (provider, (project or {}).get("id") or (project or {}).get("cwd") or "", refusal)
+    last = _GATE_JOURNAL_SEEN.get(key)
+    if last is not None and now - last < _GATE_JOURNAL_WINDOW_SEC:
+        return
+    if len(_GATE_JOURNAL_SEEN) > 256:
+        _GATE_JOURNAL_SEEN.clear()
+    _GATE_JOURNAL_SEEN[key] = now
+    print(f"[{provider}] privacy gate refused project {key[1]!r}: {refusal}")
 
 
 def _gated_engine(spec: "providers.ProviderSpec", ctx: dict, project: "dict | None", engine,
@@ -5975,6 +6000,33 @@ def _gated_engine(spec: "providers.ProviderSpec", ctx: dict, project: "dict | No
     async def _refused(**_kwargs):
         yield {"type": "error", "exc": ProviderGateRefused(refusal)}
     return _refused
+
+
+async def _live_resume_id(spec: "providers.ProviderSpec", ctx: dict, session_key: str, cwd: str,
+                          resume_id: "str | None") -> "str | None":
+    """`resume_id`, or None when the provider says that session no longer exists.
+
+    Grok answers an unknown resume id with a hard error on EVERY turn (a wiped GROK_HOME, a project
+    whose directory moved), which would brick the chat until someone pressed "New". Dropping the id
+    starts a new session instead — loudly: a journal line and a timeline row, because a session
+    that quietly forgets its context is the failure the handoff work exists to prevent. A check that
+    itself fails resumes the id anyway: the engine's own error is then the visible outcome."""
+    check = spec.session_exists
+    if check is None or not resume_id:
+        return resume_id
+    try:
+        alive = await asyncio.get_running_loop().run_in_executor(None, check, ctx, cwd, resume_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{spec.name}] {session_key}: could not check session {resume_id[:8]} ({exc!r}) "
+              f"— resuming it anyway")
+        return resume_id
+    if alive:
+        return resume_id
+    print(f"[{spec.name}] {session_key}: session {resume_id[:8]} no longer exists under {cwd} "
+          f"— starting a new session")
+    _timeline_append(session_key, {"type": "session_dropped", "provider": spec.name,
+                                   "session": resume_id[:8]})
+    return None
 
 
 def _gate_project(ctx: dict, project: "dict | None", project_id: "str | None" = None) -> dict:
@@ -7469,6 +7521,7 @@ async def _run_card(
                     _bus_publish(session_key, _live_ev, persist=True)
                 elif etype == "result":
                     _card_last_result_event = event  # Phase D: capture for auto-resume
+                    spec.note_send(ctx, spec.result_id(event), prompt)
                     # A card runs with nobody watching, which is exactly where a silent
                     # downgrade costs the most — and until now cards had no alert path at all.
                     _card_stale = _check_model_freshness(event.get("model_requested"),
@@ -8523,7 +8576,9 @@ async def api_free_create(req: web.Request) -> web.Response:
     # spec-095 D5: a free chat is its own synthetic project; its opt-in is the flag it is
     # created with (strictly the boolean true), so the gate is judged on exactly that record.
     _free_flags = {g: True for g in providers.gate_fields() if body.get(g) is True}
-    _refusal = _provider_gate_refusal(_free_flags, provider)
+    # The cwd is part of the judged record: a free chat defaults to $HOME, which Grok may only
+    # use under GROK_ALLOW_ALL_PROJECTS (see providers._grok_gate).
+    _refusal = _provider_gate_refusal({**_free_flags, "cwd": cwd}, provider)
     if _refusal:
         return web.json_response({"error": _refusal}, status=409)
     if not spec.is_default:
@@ -9109,6 +9164,15 @@ async def api_usage_dashboard(req: web.Request) -> web.Response:
             "cost": None,
         },
     }
+    if _grok.grok_enabled():
+        # spec-095 P4: present only while Grok is switched on. A flat subscription: the block
+        # has no cost/spend key at all (`notional_usd` is the API-list-price equivalent, labelled
+        # as such), and Grok turns never enter the Claude transcript scan above.
+        try:
+            data["providers"]["grok"] = await loop.run_in_executor(
+                None, lambda: _grok_usage.summary(ctx["DATA"], days=days))
+        except Exception:  # noqa: BLE001 - a broken Grok ledger must not take Claude's numbers down
+            logging.exception("[grok] usage summary failed")
     return web.json_response(data)
 
 
@@ -9270,6 +9334,9 @@ async def _search_scan_loop(ctx: dict) -> None:
         await asyncio.sleep(_SEARCH_SCAN_INTERVAL_SEC)
 
 
+_GROK_SEARCH_BUDGET_SEC = 2.5
+
+
 async def api_search(req: web.Request) -> web.Response:
     """GET /api/search?q=...&limit=30[&project=id] — ranked (bm25 + recency) hits
     across chat/timeline/board docs. Never 500s on a malformed query (search.py
@@ -9312,6 +9379,39 @@ async def api_search(req: web.Request) -> web.Response:
                     break
         except Exception:
             logging.exception("[search] Codex thread query failed")
+    if _grok.grok_enabled() and len(hits) < limit:
+        # spec-095 P3: Grok keeps its sessions per working directory, so this is one scan per
+        # project (Codex answers a single global query). Only projects the D5 gate lets use Grok
+        # are read, each scan is byte-bounded by the reader, and the whole pass has a wall-clock
+        # budget so a broad GROK_ALLOW_ALL_PROJECTS cannot make a keystroke search crawl.
+        try:
+            grok_home = _grok.grok_home(ctx)
+            deadline = time.monotonic() + _GROK_SEARCH_BUDGET_SEC
+            for project in _collect_projects(ctx):
+                if len(hits) >= limit:
+                    break
+                if project_id and project.get("id") != project_id:
+                    continue
+                if _provider_gate_refusal(project, "grok"):
+                    continue
+                if time.monotonic() > deadline:
+                    logging.warning("[grok] search stopped at its %.1f s budget", _GROK_SEARCH_BUDGET_SEC)
+                    break
+                rows = await loop.run_in_executor(
+                    None, lambda p=project: _grok_history.search_sessions(
+                        q, p["cwd"], limit=limit - len(hits), grok_home=grok_home))
+                for row in rows:
+                    hits.append({
+                        "project_id": project["id"], "project_name": project["name"],
+                        "source": "chat", "provider": "grok",
+                        "ts": row.get("recencyAt") or row.get("updatedAt") or 0,
+                        "snippet": (row.get("preview") or "")[:800],
+                        "ref": {"grok_session_id": row.get("id"), "provider": "grok"},
+                    })
+                    if len(hits) >= limit:
+                        break
+        except Exception:
+            logging.exception("[search] Grok session query failed")
     return web.json_response({"hits": hits})
 
 
@@ -11921,6 +12021,24 @@ def _drop_runtime_handoff(ctx: dict, project: dict, chat_id: "str | None") -> No
         print(f"[handoff] could not drop a stale block: {exc!r}")
 
 
+async def _grok_handoff_source(ctx: dict, project: dict, chat: dict, *, limit: int = 200) -> "list[dict]":
+    """The rows a handoff OUT of a Grok chat is built from: the session file, read by the server,
+    user rows tagged `verified`. Empty (never the client's rows) when the chat has no session yet
+    or the file cannot be read — a failed read must not quietly fall back to unchecked input."""
+    sid = providers.get("grok").resume_id(chat)
+    if not sid:
+        return []
+    try:
+        rows, _info = await _grok_session_messages(ctx, project["cwd"], sid, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[grok] handoff: could not read session {str(sid)[:8]}: {exc!r} — nothing carried")
+        return []
+    unverified = sum(1 for m in rows if m.get("role") == "user" and m.get("verified") is False)
+    print(f"[grok] handoff out of session {sid[:8]}: {len(rows)} message(s), "
+          f"{unverified} unverified user row(s) left out")
+    return rows
+
+
 async def api_project_chat_handoff(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/chats/{chat_id}/handoff
     {messages:[{role,text,tools}], from_label, to_label, commit?: bool, text?: str}
@@ -11959,7 +12077,18 @@ async def api_project_chat_handoff(req: web.Request) -> web.Response:
     messages = [m for m in messages if isinstance(m, dict)][-200:]
     from_label = str(body.get("from_label") or "the previous runtime")[:80]
     to_label = str(body.get("to_label") or "this runtime")[:80]
-    built = _handoff.build_handoff(messages, from_label=from_label, to_label=to_label)
+    from_file = False
+    if not body.get("commit"):
+        # The preview is built BEFORE the picker flips the chat, so the chat's current provider is
+        # the one being left. A Grok chat's transcript is a file its own model can write: the rows
+        # the client holds are not trusted for it, the server re-reads the session itself and tags
+        # each user row against the ledger of prompts this cockpit really sent (see grok_sends).
+        _hoff_chat = next((c for c in _load_chats(ctx).get(project["id"], {}).get("chats", [])
+                           if c.get("id") == chat_id), None)
+        if _hoff_chat is not None and _chat_provider(_hoff_chat) == "grok":
+            messages, from_file = await _grok_handoff_source(ctx, project, _hoff_chat), True
+    built = _handoff.build_handoff(messages, from_label=from_label, to_label=to_label,
+                                   from_file=from_file)
 
     if not body.get("commit"):
         return web.json_response({"handoff": built})
@@ -11989,6 +12118,9 @@ async def api_project_chat_handoff(req: web.Request) -> web.Response:
                 "for_provider": _chat_provider(chat),
                 "for_backend": str(chat.get("backend") or ""),
             }
+            if _chat_provider(chat) == "grok":
+                print(f"[grok] {session_key}: handoff armed for Grok "
+                      f"({from_label} → {to_label}, {len(text)} chars)")
         else:
             chat.pop("runtime_handoff", None)
         _save_chats(ctx, chats_data)
@@ -12295,6 +12427,26 @@ async def api_project_sessions(req: web.Request) -> web.Response:
             return web.json_response({"sessions": sessions, "provider": "codex"})
         except Exception as exc:
             return web.json_response({"sessions": [], "provider": "codex", "error": str(exc)})
+    if _chat_provider(active_chat) == "grok":
+        # spec-095 P3: Grok sessions are listed from their summary files (no agent process).
+        # Grok has no `turns` list, so `message_count` is the approximate counter (or null).
+        try:
+            active_grok = providers.get("grok").resume_id(active_chat)
+            rows = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: _grok_history.list_sessions(
+                    project["cwd"], limit=30, grok_home=_grok.grok_home(ctx)))
+            sessions = [{
+                "session_id": row.get("id"), "grok_session_id": row.get("id"),
+                "provider": "grok", "last_used": datetime.fromtimestamp(
+                    row.get("recencyAt") or row.get("updatedAt") or 0, tz=timezone.utc
+                ).isoformat(),
+                "preview": row.get("preview") or "", "is_active": row.get("id") == active_grok,
+                "label": row.get("name"), "message_count": row.get("message_count"),
+                "context_tokens": None,
+            } for row in rows]
+            return web.json_response({"sessions": sessions, "provider": "grok"})
+        except Exception as exc:
+            return web.json_response({"sessions": [], "provider": "grok", "error": str(exc)})
 
     _sk = (project.get("session_key") or project.get("tg_thread", ""))
     active_sid = ctx["sessions"].get(_sk)
@@ -12401,11 +12553,12 @@ async def api_project_set_session(req: web.Request) -> web.Response:
                     None,
                 )
                 if _ss_active is not None:
-                    if _session_provider == "codex":
-                        _ss_active["codex_thread_id"] = None
-                    else:
-                        _ss_active["session_id"] = None
+                    # Each provider clears ITS OWN continuity id (Claude's session_id, Codex's
+                    # thread, Grok's session) — never another provider's.
+                    _ss_active[providers.get(_session_provider).continuity_field] = None
                     _save_chats(ctx, _ss_data)
+                    if _session_provider == "grok":
+                        print(f"[grok] {_sk}: session reset — the next turn starts a new Grok session")
         if _session_provider == "claude":
             ctx["sessions"].pop(_sk, None)
             ctx["save_sessions"]()
@@ -12440,6 +12593,26 @@ async def api_project_set_session(req: web.Request) -> web.Response:
                     _sr_active["codex_thread_id"] = session_id
                     _save_chats(ctx, _sr_data)
             return web.json_response({"active": session_id, "provider": "codex"})
+        if _session_provider == "grok":
+            # spec-095 P3: the id must be a real Grok session of THIS project's directory — the
+            # engine answers an unknown resume id with a hard error on every later turn.
+            if not _grok_history.valid_session_id(session_id):
+                return web.json_response({"error": "invalid Grok session id"}, status=400)
+            _grok_home = _grok.grok_home(ctx)
+            _exists = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: _grok_history.session_exists(
+                    session_id, project["cwd"], grok_home=_grok_home))
+            if not _exists:
+                return web.json_response({"error": "session not found"}, status=400)
+            async with _chats_lock():
+                _sr_data = _load_chats(ctx)
+                _sr_proj = _sr_data.get(project["id"])
+                _sr_active = _find_chat(_sr_proj or {})
+                if _sr_active is not None:
+                    _sr_active[providers.get("grok").continuity_field] = session_id
+                    _save_chats(ctx, _sr_data)
+            print(f"[grok] {_sk}: resumed session {session_id[:8]}")
+            return web.json_response({"active": session_id, "provider": "grok"})
         # Sanitise: basename only (no / or ..) — against escaping to another .jsonl
         if session_id != Path(session_id).name or session_id in ("", ".", ".."):
             return web.json_response({"error": "invalid session_id"}, status=400)
@@ -12531,6 +12704,28 @@ def _history_messages_for_display(messages: list[dict]) -> list[dict]:
         if cleaned:
             out.append({**message, "text": cleaned})
     return out
+
+
+async def _grok_session_messages(ctx: dict, cwd: str, session_id: str, *,
+                                 limit: int = _grok_history.MAX_MESSAGES) -> "tuple[list[dict], dict]":
+    """Display-ready rows of one Grok session plus its context numbers (spec-095 P3).
+
+    The disk reads are blocking, so they run in the executor. `user` rows are tagged `verified`
+    against the cockpit's own send ledger BEFORE the display cleanup (the ledger holds the raw
+    prompts; the cleanup keeps the tag): the session file lives where the model's own shell can
+    write, so a row nobody here sent is not the operator's word. Raises ValueError for a malformed
+    id/cwd and `GrokHistoryError` for an unsafe home — the endpoints map them to 400 / 502."""
+    home = _grok.grok_home(ctx)
+    data_dir = ctx["DATA"]
+
+    def _read():
+        rows = _grok_history.history_messages(
+            session_id, cwd, grok_home=home, limit=limit, format_tool=_format_tool)
+        info = _grok_history.session_context(session_id, cwd, grok_home=home)
+        return rows, info, _grok_sends.sent_fingerprints(data_dir, session_id)
+
+    rows, info, sent = await asyncio.get_running_loop().run_in_executor(None, _read)
+    return _history_messages_for_display(_grok_sends.tag_rows(rows, sent)), info
 
 
 def _clean_run_start_event(event: dict) -> dict:
@@ -12814,6 +13009,31 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     chats_entry = _load_chats(ctx).get(project["id"], {})
     active_chat = _find_chat(chats_entry)
     explicit_codex_thread = req.rel_url.query.get("codex_thread_id", "")
+    # spec-095 P3: a Grok session is read from its files on disk (no agent process). An explicit
+    # `grok_session_id` wins, like the Codex id below; otherwise the active chat's own provider.
+    explicit_grok_session = req.rel_url.query.get("grok_session_id", "")
+    if explicit_grok_session or (not explicit_codex_thread and _chat_provider(active_chat) == "grok"):
+        grok_sid = explicit_grok_session or providers.get("grok").resume_id(active_chat)
+        if not grok_sid:
+            return web.json_response({
+                "messages": [], "session_id": None, "grok_session_id": None,
+                "provider": "grok", "context_tokens": 0,
+            })
+        if not _grok_history.valid_session_id(grok_sid):
+            return web.json_response({"error": "invalid grok_session_id"}, status=400)
+        try:
+            messages, info = await _grok_session_messages(ctx, project["cwd"], grok_sid)
+        except ValueError:
+            return web.json_response({"error": "invalid grok_session_id"}, status=400)
+        except Exception as exc:
+            return web.json_response({"error": f"Grok history unavailable: {exc}"}, status=502)
+        return web.json_response({
+            "messages": messages, "session_id": None,
+            "grok_session_id": grok_sid, "provider": "grok",
+            "context_tokens": info.get("context_tokens") or 0,
+            "context_window": info.get("context_window"),
+            "last_cache_hit_pct": None,
+        })
     if explicit_codex_thread or _chat_provider(active_chat) == "codex":
         thread_id = explicit_codex_thread or (active_chat or {}).get("codex_thread_id")
         if not thread_id:
@@ -13859,15 +14079,17 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
 
         # A queued message (typed while busy) or an auto-continue wake can be the first turn of a
         # fresh post-rotation session — it needs the handoff exactly as a direct chat turn does.
+        resume_id = await _live_resume_id(spec, ctx, session_key, cwd, resume_id)
         effective_prompt = prompt
         try:
-            # Pre-seam behaviour kept on purpose: only the default provider's session id counted
-            # here, so a resumed adapter thread still looks fresh to the rotation-handoff check
-            # (the direct POST path was fixed for this; the drain path never was).
-            effective_prompt, _injected = _inject_pending_handoff(
-                ctx, session_key, prompt, resume_id if spec.is_default else None)
-            if _injected:
-                print(f"[rotation] injected handoff into queued post-rotation turn for {session_key}")
+            # A pending rotation summary is Claude's, so only a Claude run may consume it. This
+            # used to count only the default provider's id, which let ANY adapter chat — resumed
+            # or fresh — take (and delete) a summary written for the Claude session.
+            if spec.is_default:
+                effective_prompt, _injected = _inject_pending_handoff(
+                    ctx, session_key, prompt, resume_id)
+                if _injected:
+                    print(f"[rotation] injected handoff into queued post-rotation turn for {session_key}")
         except Exception as _q_inj_exc:
             print(f"[rotation] handoff injection failed for queued turn (continuing): {_q_inj_exc}")
             effective_prompt = prompt
@@ -13951,6 +14173,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             elif etype == "result":
                 _q_final_ctx_tokens = event.get("context_tokens") or None
                 _new_id = spec.result_id(event)
+                spec.note_send(ctx, _new_id, effective_prompt)
                 if _new_id:
                     # Write the new session_id back to THIS chat's entry in chats.json (mirroring
                     # the direct /chat path), not just the flat mirror — otherwise the queued
@@ -14807,6 +15030,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             print(f"[api_project_chat] chats resolve error (falling back): {_ce}")
         resume_sid = (_chat_resume_id if _chat_resume_id is not None
                       else (ctx["sessions"].get(session_key) if _spec.is_default else None))
+        resume_sid = await _live_resume_id(_spec, ctx, session_key, cwd, resume_sid)
         # Project secrets are injected into the agent's env (values only in-process, not in the API).
         # secret: references are resolved against the built-in store; TG vars are merged after (they win).
         project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
@@ -14830,11 +15054,14 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # pending handoff exists.
         effective_prompt = prompt
         try:
-            effective_prompt, _injected = _inject_pending_handoff(
-                ctx, session_key, prompt, resume_sid,
-            )
-            if _injected:
-                print(f"[rotation] injected handoff into first post-rotation turn for {session_key}")
+            # A pending rotation summary is Claude's (an adapter chat's /rotate arms its own
+            # chat-scoped block instead), so only a Claude run may consume it.
+            if _spec.is_default:
+                effective_prompt, _injected = _inject_pending_handoff(
+                    ctx, session_key, prompt, resume_sid,
+                )
+                if _injected:
+                    print(f"[rotation] injected handoff into first post-rotation turn for {session_key}")
         except Exception as _inj_exc:
             print(f"[rotation] handoff injection failed (continuing without it): {_inj_exc}")
             effective_prompt = prompt
@@ -15007,6 +15234,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                  persist=False)
                     await _send(_stale_ev)
                 _new_id = _spec.result_id(event)
+                _spec.note_send(ctx, _new_id, effective_prompt)
                 # The public result frame names the id under the record field its provider
                 # persists it in; every other provider's field is present and null.
                 _id_fields = {f: None for f in providers.continuity_fields()}
@@ -15591,6 +15819,87 @@ async def api_project_rotate(req: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def _adapter_rotation_source(ctx: dict, project: dict, spec: "providers.ProviderSpec",
+                                   chat: dict, session_id: str) -> "list[dict] | None":
+    """The rows an adapter chat's rotation handoff is built from, or None when this provider has no
+    reader. Deterministic and local: no summariser model sees an adapter's transcript (the Claude
+    summariser is a cloud call, and Grok's own history may be private)."""
+    if spec.name == "grok":
+        rows, _info = await _grok_session_messages(ctx, project["cwd"], session_id, limit=1000)
+        return rows
+    if spec.name == "codex":
+        payload = await _codex.read_thread(session_id)
+        return _history_messages_for_display(_codex.history_messages(payload))
+    return None
+
+
+async def _rotate_adapter_chat(ctx: dict, project: dict, session_key: str, do_handoff: bool,
+                               chat: dict, spec: "providers.ProviderSpec", trigger: str,
+                               context_tokens: "int | None") -> dict:
+    """`_rotate_session_core` for an active chat on an adapter provider. The caller holds the
+    running sentinel and releases it. Returns the same result shapes as the Claude path.
+
+    Clears the PROVIDER'S OWN continuity id (never Claude's flat map, which belongs to Claude and
+    to the cards). The handoff is ARMED on this chat as its `runtime_handoff` — chat-scoped,
+    stamped for this provider, cleared only once a turn answers — and NOT written to
+    `ctx["pending_handoff"]`, whose key is the whole project: another chat (or a Claude run) could
+    consume it."""
+    session_id = spec.resume_id(chat)
+    if not session_id:
+        return {"ok": True, "reset": False, "reason": "no active session"}
+
+    text = ""
+    if do_handoff:
+        try:
+            rows = await _adapter_rotation_source(ctx, project, spec, chat, session_id)
+            if rows:
+                text = _handoff.build_handoff(
+                    rows, from_label=f"{spec.label} (previous session)",
+                    to_label=f"{spec.label} (new session)", from_file=spec.name == "grok",
+                )["text"]
+        except Exception as exc:  # noqa: BLE001 - never block the reset on a summary failure
+            print(f"[{spec.name}] rotate: handoff build failed (continuing with a blank reset): {exc!r}")
+
+    async with _chats_lock():
+        fresh = _load_chats(ctx)
+        entry = fresh.get(project["id"]) or {}
+        target = next((c for c in entry.get("chats", []) if c.get("id") == chat.get("id")), None)
+        if target is not None:
+            target[spec.continuity_field] = None
+            if text:
+                target["runtime_handoff"] = {
+                    "text": text, "created_at": time.time(),
+                    "from_label": f"{spec.label} (previous session)",
+                    "to_label": f"{spec.label} (new session)",
+                    "for_provider": spec.name, "for_backend": str(target.get("backend") or ""),
+                }
+            _save_chats(ctx, fresh)
+    stored = bool(text)
+    print(f"[{spec.name}] rotate-done {session_key}: session {session_id[:8]} cleared, handoff={stored}")
+
+    _monitors_clear(session_key)
+    _bg_continue_reset(session_key)
+    _completion_wake_pending.pop(session_key, None)
+    _completion_wake_deferred_since.pop(session_key, None)
+    _board_events_clear(session_key)
+    try:
+        _cw = ctx.get("context_warned")
+        if _cw is not None:
+            _cw.discard(session_key)
+    except Exception:
+        pass
+    try:
+        _bus_publish(session_key, {
+            "kind": "session_rotated", "source": trigger, "trigger": trigger,
+            "context_tokens": context_tokens,
+            "threshold": CONTEXT_ROTATE_AT if trigger == "auto" else None,
+            "handoff": stored,
+        }, persist=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[rotate] timeline emit failed (non-blocking): {exc!r}")
+    return {"ok": True, "reset": True, "handoff": stored}
+
+
 async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_handoff: bool,
                                trigger: str = "manual", context_tokens: "int | None" = None) -> dict:
     """Shared rotation core — used by the manual /rotate endpoint AND post-turn auto-rotation.
@@ -15624,6 +15933,7 @@ async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_ha
         _active_chat_sid: "str | None" = None
         _chats_entry: "dict | None" = None   # the project's block in chats_data
         _chats_data_snapshot: "dict | None" = None
+        _rot_chat: "dict | None" = None
         try:
             _cd = _load_chats(ctx)
             _entry = _cd.get(project["id"])
@@ -15637,8 +15947,17 @@ async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_ha
                     _active_chat_sid = _active_chat.get("session_id") or None
                     _chats_entry = _entry
                     _chats_data_snapshot = _cd
+                    _rot_chat = _active_chat
         except Exception as _ce:
             print(f"[session] rotate chats-read error for {session_key}: {_ce!r}")
+
+        # An adapter chat (Codex, Grok) keeps its conversation in its OWN store under its OWN id.
+        # The flat map and `session_id` above are Claude's: reading them here summarised the wrong
+        # session, left the adapter's id in place and still reported a reset.
+        if _rot_chat is not None and providers.is_adapter(_chat_provider(_rot_chat)):
+            return await _rotate_adapter_chat(
+                ctx, project, session_key, do_handoff, _rot_chat,
+                providers.get(_chat_provider(_rot_chat)), trigger, context_tokens)
 
         effective_sid = _layer1_sid or _active_chat_sid
 

@@ -780,10 +780,11 @@ async def _drain_once(fake_ctx, case, *, item_kwargs, pending=None):
 @pytest.mark.parametrize("provider,has_id,injected", [
     ("claude", True, False),    # resumed session: the rotation summary must not be re-injected
     ("claude", False, True),    # fresh session after a rotation: it must be
-    # Known pre-seam quirk, pinned on purpose: the drain path only ever counted Claude's id, so a
-    # RESUMED adapter thread still receives a pending rotation summary. The direct POST path was
-    # fixed for this; changing the drain is a behaviour change and belongs to its own commit.
-    ("codex", True, True),
+    # spec-095 P3 closed the pre-seam quirk this row used to pin (the drain only counted Claude's
+    # id, so a RESUMED adapter thread took a pending rotation summary): the summary is Claude's,
+    # so no adapter run — resumed or fresh — may consume it.
+    ("codex", True, False),
+    ("codex", False, False),
 ])
 async def test_queue_drain_pending_rotation_handoff_injection(
     fake_ctx, codex_on, provider, has_id, injected

@@ -31,11 +31,14 @@ This module must stay importable from `board.py`, so it never imports `webapp`.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 import codex_engine
 import grok_engine
+import grok_history
+import grok_sends
 import runtime
 
 DEFAULT: str = runtime.DEFAULT_PROVIDER
@@ -58,6 +61,11 @@ CLAUDE_CAPABILITIES: dict = {
 def _no_gate(project: Mapping[str, Any]) -> "str | None":
     """The default gate: open. A module-level function so `ProviderSpec.has_gate` can tell it
     from a real one by identity."""
+    return None
+
+
+def _no_ledger(ctx: Mapping[str, Any], session_id: str, prompt: str) -> None:
+    """The default send ledger: nothing is recorded. Module-level for the same identity test."""
     return None
 
 
@@ -87,6 +95,14 @@ class ProviderSpec:
     # Project/free-chat record field the gate reads ("" = no gate). Carried through the project
     # views and the settings writer from this one name.
     gate_field: str = ""
+    # Witness of the prompts the cockpit really sent into a session: `(ctx, session_id, prompt)`.
+    # A provider whose history lives in files its own model can write (Grok) records here so a
+    # later provider crossing can tell an operator-authored row from a forged one.
+    send_ledger: Callable[[Mapping[str, Any], str, str], None] = _no_ledger
+    # `(ctx, cwd, session_id) -> bool`: does the provider still HAVE this session? Blocking (the run
+    # sites call it in an executor). None = cannot tell. Grok answers an unknown resume id with a
+    # hard error on every turn, so its run sites drop a stale id and start a new session instead.
+    session_exists: "Callable[[Mapping[str, Any], str, str], bool] | None" = None
 
     @property
     def is_default(self) -> bool:
@@ -102,6 +118,20 @@ class ProviderSpec:
     def model_field(self) -> str:
         """Project-record field holding this provider's default model."""
         return runtime.model_field_for_provider(self.name)
+
+    @property
+    def keeps_send_ledger(self) -> bool:
+        return self.send_ledger is not _no_ledger
+
+    def note_send(self, ctx: Mapping[str, Any], session_id: "str | None", prompt: "str | None") -> None:
+        """Record that `prompt` was sent into `session_id` (called when the engine's `result` names
+        the id). A no-op for a provider without a ledger; never raises into a run."""
+        if not self.keeps_send_ledger or not session_id or not isinstance(prompt, str):
+            return
+        try:
+            self.send_ledger(ctx, session_id, prompt)
+        except Exception as exc:  # noqa: BLE001 - a ledger fault must not fail the turn
+            print(f"[{self.name}] could not record a sent prompt: {exc!r}")
 
     def engine(self, ctx: Mapping[str, Any]) -> "Callable[..., Any] | None":
         return ctx.get(self.engine_key)
@@ -225,19 +255,50 @@ register(ProviderSpec(
 ))
 
 
-# spec-095 D5. The text is an API contract: the cockpit UI classifies a 409 by it.
+# spec-095 D5. The text is an API contract: the cockpit UI classifies a 409 by its PREFIX.
 GROK_GATE_MESSAGE = "grok is not enabled for this project"
 GROK_GATE_FIELD = "grok_allowed"
+GROK_GATE_HOME_HINT = (" \u2014 a chat rooted at the home directory (or above it) can read and write every "
+                       "project there; set GROK_ALLOW_ALL_PROJECTS to allow it")
+
+
+def _covers_home(project: Mapping[str, Any]) -> bool:
+    """True when the record's `cwd` is $HOME or one of its ancestors, i.e. a working directory under
+    which the sandbox lets Grok read AND WRITE every project in the home directory.
+
+    Symlinks, `..` and trailing slashes are resolved first. A record WITHOUT a `cwd` key (a
+    flags-only record built to judge a selection) has nothing to judge; a cwd that is present but
+    empty, relative or unresolvable is judged as covering home, because where it points depends on
+    the process that happens to resolve it."""
+    if "cwd" not in project:
+        return False
+    cwd = project["cwd"]
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):  # "" and "  " are not absolute either
+        return True
+    try:
+        home = os.path.realpath(os.path.expanduser("~"))
+        real = os.path.realpath(cwd)
+    except (OSError, ValueError):
+        return True
+    return home == real or home.startswith(real.rstrip("/") + "/")
 
 
 def _grok_gate(project: Mapping[str, Any]) -> "str | None":
     """Grok sends the project's code and prompts to xAI, which cannot be recalled: OFF in every
     project until the operator sets `grok_allowed` (strictly the boolean true — a string or a
     number in a hand-edited record does not count). `GROK_ALLOW_ALL_PROJECTS` is the
-    single-tenant escape hatch, read live."""
+    single-tenant escape hatch, read live.
+
+    A record rooted at $HOME or above it passes ONLY under that hatch: a free chat defaults to
+    cwd=$HOME, so one opt-in would hand Grok every project in the home directory (client work
+    included) and defeat the per-project rule this gate exists for."""
     if grok_engine.allow_all_projects():
         return None
-    return None if project.get(GROK_GATE_FIELD) is True else GROK_GATE_MESSAGE
+    if project.get(GROK_GATE_FIELD) is not True:
+        return GROK_GATE_MESSAGE
+    if _covers_home(project):
+        return GROK_GATE_MESSAGE + GROK_GATE_HOME_HINT
+    return None
 
 
 # `grok_engine` is looked up through the module on every call (not captured), like codex_engine
@@ -255,4 +316,7 @@ register(ProviderSpec(
     capabilities=lambda: grok_engine.capabilities(),
     gate=_grok_gate,
     gate_field=GROK_GATE_FIELD,
+    send_ledger=lambda ctx, session_id, prompt: grok_sends.record(ctx.get("DATA"), session_id, prompt),
+    session_exists=lambda ctx, cwd, session_id: grok_history.session_exists(
+        session_id, cwd, grok_home=grok_engine.grok_home(ctx)),
 ))
