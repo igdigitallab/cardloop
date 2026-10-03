@@ -1,3 +1,8 @@
+// spec-095: the provider list lives in ONE table (lib/providers.ts); `Provider` is derived from
+// it, so adding an engine there widens every `Provider`-typed field below at once.
+import type { Provider } from './lib/providers'
+export type { Provider }
+
 export interface GitHealth {
   branch: string
   dirty: number
@@ -51,6 +56,11 @@ export interface Project {
   provider?: Provider
   board_provider?: Provider
   codex_model?: string
+  /** spec-095: default model for Grok board cards / new Grok chats in this project. */
+  grok_model?: string
+  /** spec-095: privacy opt-in. Grok sends project code to xAI; the server refuses (409) any
+   *  chat/card/PATCH that selects Grok in a project where this is not true. */
+  grok_allowed?: boolean
   /** Claude subscription pinned to this project (null/undefined = follow the global choice). */
   account?: string | null
   /** spec-092 P3: inference endpoint pinned to this project. "" / absent = the cloud
@@ -58,8 +68,6 @@ export interface Project {
    *  cannot move itself back to the cloud. */
   backend?: string | null
 }
-
-export type Provider = 'claude' | 'codex'
 
 export interface AgentProviderModel {
   value: string
@@ -109,6 +117,8 @@ export interface AgentProviderInfo {
   /** spec-092 P3: always present (empty for providers with no backend dimension). */
   backends?: AgentProviderBackend[]
   error?: string | null
+  /** spec-095: subscription plan the adapter reported (e.g. a Grok tier); optional. */
+  plan_type?: string | null
 }
 
 // ─── Spec-024: Project Groups ────────────────────────────────────────────────
@@ -344,6 +354,11 @@ export interface ProjectSettings {
   context_pack_enabled?: boolean | null
   board_provider: Provider
   codex_model: string
+  /** spec-095: optional so a server that predates Grok (no field echoed) still type-checks and
+   *  its settings round-trip without inventing a value. */
+  grok_model?: string
+  /** spec-095: privacy opt-in — see Project.grok_allowed. */
+  grok_allowed?: boolean
   /** Subscription pinned to this project. null = inherit the globally selected account. */
   account?: string | null
   /** spec-092 P3: "" = cloud subscription, "ollama" = pin every turn to the local box. */
@@ -520,6 +535,8 @@ export interface Chat {
   provider: Provider
   model: string | null
   codex_thread_id: string | null
+  /** spec-095: Grok's own resume id, parallel to `codex_thread_id` (absent = never ran on Grok). */
+  grok_session_id?: string | null
   /** spec-092: Claude subscription pinned to THIS chat (null = inherit the project's). */
   account?: string | null
   /** spec-092: inference backend ("" / absent = the provider's native one). */
@@ -680,6 +697,7 @@ export interface SessionHistoryResponse {
   session_id: string | null
   provider?: Provider
   codex_thread_id?: string | null
+  grok_session_id?: string | null
   context_tokens?: number
   context_window?: number
   /** Absolute cost-management thresholds (two-tier, decoupled from the window). */
@@ -1113,7 +1131,7 @@ export interface SearchHit {
     card_id?: string
     /** file hits: repo-relative path + 1-based line of the matched chunk. */
     path?: string; line?: number; tier?: 'doc' | 'code'
-    codex_thread_id?: string; provider?: Provider
+    codex_thread_id?: string; grok_session_id?: string; provider?: Provider
   }
   provider?: Provider
 }
@@ -1135,7 +1153,9 @@ export interface SessionPeekTarget {
   projectId: string
   projectName: string
   sessionId: string
-  codexThreadId?: string
+  /** The hit's resume id for a non-default provider (Codex thread, Grok session). Unset for
+   *  Claude, whose id is `sessionId`. */
+  continuityId?: string
   provider?: Provider
   uuid?: string
   /** epoch seconds (search index unit) — converted to ms before hitting the API. */

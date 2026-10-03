@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { wheelScrollDelta } from '../lib/tabWheel'
+import { isAdapterProvider, providerShort } from '../lib/providers'
 import { Project } from '../types'
 import { UsageBadge } from './UsageBadge'
 import { LoadMeter } from './LoadMeter'
@@ -138,8 +139,9 @@ function TabItem({
       ) : (
         <>
           <span className="ptab-name">{project.name}</span>
-          {project.is_free && project.provider === 'codex' && (
-            <span style={{ fontSize: 9, opacity: .7, textTransform: 'uppercase' }}>Codex</span>
+          {project.is_free && isAdapterProvider(project.provider) && (
+            <span data-provider={project.provider}
+                  style={{ fontSize: 9, opacity: .7, textTransform: 'uppercase' }}>{providerShort(project.provider)}</span>
           )}
         </>
       )}

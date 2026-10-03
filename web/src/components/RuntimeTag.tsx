@@ -21,6 +21,16 @@ export interface RuntimeStats {
 
 /** Everything a surface needs to print a runtime's status, derived one way for all of them. */
 export function runtimeStats(row: RuntimeRow, now: number, compact = false): RuntimeStats {
+  if (!row.hasQuota && row.limitsNote) {
+    // A provider that publishes no limit windows (Grok): muted, never a bar and never green -
+    // "no number" is not "plenty left". Unavailable reads as off, with the registry's reason.
+    return {
+      pct: row.available ? '—' : 'off', reset: '', cls: 'usage-dim',
+      title: row.available
+        ? `${row.name} · ${row.limitsNote}`
+        : `${row.name}: ${row.reason || 'not answering'}`,
+    }
+  }
   if (!row.hasQuota) {
     return {
       pct: row.available ? 'local' : 'off', reset: '',
@@ -77,6 +87,8 @@ export function RuntimeLine({
   return (
     <div
       role="option"
+      data-provider={row.provider}
+      data-runtime-key={row.key}
       aria-selected={!!selected}
       aria-disabled={inert}
       className={`rt-line${selected ? ' selected' : ''}${pinHere ? ' pin-here' : ''}${!row.available ? ' is-off' : ''}${inert ? ' inert' : ''}`}

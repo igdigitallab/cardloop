@@ -4,13 +4,16 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { mdComponents } from '../components/markdown'
 import { api } from '../api'
-import { ActivityEvent, Board, BoardColumn, GateResult, RichTool, RunResult, TaskCard, isIncidentCard } from '../types'
+import { ActivityEvent, Board, BoardColumn, GateResult, Provider, RichTool, RunResult, TaskCard, isIncidentCard } from '../types'
 import { Spinner } from '../components/Spinner'
 import { Modal, ModalHead } from '../components/Modal'
 import { ActionMenu, ActionMenuSection, KebabButton } from '../components/ActionMenu'
 import { useOnRunEnd, useFocusRefresh, useProjectActivity } from '../hooks/useProjectActivity'
 import { t } from '../i18n'
 import { MODELS, modelLabel } from '../lib/models'
+import { isAdapterProvider, providerLabel, providerShort, selectableProviders } from '../lib/providers'
+import { refusalReason } from '../lib/refusal'
+import { useRuntimeProviders } from '../lib/runtimeStatus'
 
 // ─── Backlog attachments ──────────────────────────────────────────────────────
 // File/image upload for new backlog cards — mirrors ChatTab's composer attachments.
@@ -163,6 +166,8 @@ function writeFailedCollapsed(v: boolean) {
 
 export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: Props) {
   const [board, setBoard] = useState<Board | null>(null)
+  // The live provider registry decides which engines the card editor offers (spec-095).
+  const providerRegistry = useRuntimeProviders()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -174,7 +179,7 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
   const [showArchive, setShowArchive] = useState(false)
   const [archive, setArchive] = useState<string | null>(null)
   // Full-task editor modal: double-click on any card → single multi-line textarea + model picker
-  const [taskEditModal, setTaskEditModal] = useState<{ id: string; text: string; provider: '' | 'claude' | 'codex'; model: string } | null>(null)
+  const [taskEditModal, setTaskEditModal] = useState<{ id: string; text: string; provider: '' | Provider; model: string } | null>(null)
 
   // Card 5e1c0a: spec modal state
   const [specModal, setSpecModal] = useState<{ cardId: string; content: string; loading: boolean; saving: boolean } | null>(null)
@@ -483,9 +488,14 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
       setBoard(b)
       schedulePoll(b)
     } catch (e) {
+      // spec-095: a deliberate refusal (the Grok privacy gate) says so in the server's words;
+      // waiting would not fix it.
+      const refused = refusalReason(e)
       // F1: 409 = project is busy
       const status = (e as { status?: number })?.status
-      if (status === 409) {
+      if (refused) {
+        setError(refused)
+      } else if (status === 409) {
         setError('⏳ Project is busy (TG or another card) — try again later')
       } else {
         setError(e instanceof Error ? e.message : String(e))
@@ -831,7 +841,7 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
             >{modelLabel(card.model)}</span>
           )}
           {card.provider && (
-            <span className="board-card-model-badge">{card.provider === 'codex' ? 'Codex' : 'Claude'}</span>
+            <span className="board-card-model-badge" data-provider={card.provider}>{providerShort(card.provider)}</span>
           )}
           {/* Card 5e1c0a: persistent spec indicator — visible without hover */}
           {card.has_spec && (
@@ -1460,18 +1470,18 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
               <label style={{ fontSize: 12, color: 'var(--text3)' }}>Provider</label>
               <select value={taskEditModal.provider}
-                onChange={e => setTaskEditModal({ ...taskEditModal, provider: e.target.value as '' | 'claude' | 'codex', model: '' })}
+                onChange={e => setTaskEditModal({ ...taskEditModal, provider: e.target.value as '' | Provider, model: '' })}
                 style={{ fontSize: 12, padding: '2px 6px' }}>
                 <option value="">Project default</option>
-                <option value="claude">Claude Code</option>
-                <option value="codex">Codex</option>
+                {selectableProviders(providerRegistry, taskEditModal.provider).map(id =>
+                  <option key={id} value={id}>{providerLabel(id)}</option>)}
               </select>
               <label style={{ fontSize: 12, color: 'var(--text3)', flexShrink: 0 }}>
                 {t['board.card_model_label']}
               </label>
-              {taskEditModal.provider === 'codex' ? <input
+              {isAdapterProvider(taskEditModal.provider) ? <input
                 value={taskEditModal.model}
-                placeholder="Project Codex model"
+                placeholder={`Project ${providerLabel(taskEditModal.provider)} model`}
                 onChange={e => setTaskEditModal({ ...taskEditModal, model: e.target.value })}
                 style={{ fontSize: 12, padding: '2px 6px', width: 150 }}
               /> : <select

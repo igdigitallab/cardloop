@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { api } from './api'
+import { api, apiErrorMessage } from './api'
 import { AgentProviderInfo, Project, Provider, SearchHit, SearchNavTarget, SessionPeekTarget } from './types'
 import { t } from './i18n'
 import { LoginScreen } from './components/LoginScreen'
@@ -20,6 +20,7 @@ import { useToast, ToastContainer } from './components/Toast'
 import { UpdatePill } from './components/UpdatePill'
 import { useBuildWatch } from './hooks/useBuildWatch'
 import { isAppBusy } from './lib/appBusy'
+import { hitThread, providerLabel, providerUnavailableReason, selectableProviders } from './lib/providers'
 import { useBackDismiss } from './hooks/useBackDismiss'
 import { useUnreadTracker } from './hooks/useUnreadTracker'
 import { useTheme } from './hooks/useTheme'
@@ -575,13 +576,14 @@ export default function App() {
   // chat → read-only transcript peek (never rebinds the live session); board/timeline →
   // select the project and ask its ProjectView to switch tab, same nonce trick as settings.
   const handleSearchPick = useCallback((hit: SearchHit) => {
-    const chatRef = hit.ref.session_id || hit.ref.codex_thread_id
-    if (hit.source === 'chat' && chatRef) {
+    const provider = hit.provider ?? hit.ref.provider
+    const thread = hitThread(hit.ref, provider)
+    if (hit.source === 'chat' && thread) {
       setPeekTarget({
         projectId: hit.project_id,
         projectName: hit.project_name,
-        sessionId: chatRef,
-        codexThreadId: hit.ref.codex_thread_id,
+        sessionId: thread.sessionId,
+        continuityId: thread.continuityId,
         provider: hit.provider,
         uuid: hit.ref.uuid,
         ts: hit.ts,
@@ -809,8 +811,9 @@ export default function App() {
       setActiveId(res.id)
       setFreeCreateOpen(false)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      showToast(`Could not create free chat: ${msg}`)
+      // spec-095: the server's own words (e.g. "grok is not enabled for this project") — the
+      // raw Error.message of a failed fetch is the whole JSON body.
+      showToast(`Could not create free chat: ${apiErrorMessage(e)}`)
     }
   }, [loadProjects, showToast, freeProvider, freeModel])
 
@@ -1017,13 +1020,14 @@ export default function App() {
           <ModalHead title="New free chat" onClose={() => setFreeCreateOpen(false)} />
           <div className="run-modal-body" style={{ display: 'grid', gap: 14 }}>
             <div style={{ display: 'flex', gap: 8 }}>
-              {(['claude', 'codex'] as Provider[]).map(provider => {
+              {selectableProviders(freeProviders).map(provider => {
                 const info = freeProviders.find(p => p.provider === provider)
-                const disabled = provider === 'codex' && (!info?.enabled || !info.available)
-                return <button key={provider} className={`btn btn-sm ${freeProvider === provider ? 'btn-primary' : 'btn-secondary'}`}
-                  disabled={disabled} title={disabled ? info?.error || 'Codex unavailable' : ''}
+                const why = providerUnavailableReason(provider, info)
+                return <button key={provider} data-provider={provider}
+                  className={`btn btn-sm ${freeProvider === provider ? 'btn-primary' : 'btn-secondary'}`}
+                  disabled={!!why} title={why}
                   onClick={() => { setFreeProvider(provider); setFreeModel(info?.models.find(m => m.default)?.value || info?.models[0]?.value || '') }}>
-                  {provider === 'codex' ? 'Codex' : 'Claude Code'}
+                  {providerLabel(provider)}
                 </button>
               })}
             </div>

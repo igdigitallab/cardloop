@@ -13,12 +13,14 @@
 import { useSyncExternalStore } from 'react'
 import { api, type UsageLimits, type UsageLimitRow } from '../api'
 import type { AgentProviderInfo, Chat, Provider } from '../types'
+import { PROVIDER_IDS, providerLabel, providerReportsLimits, providerTag } from './providers'
 
 /** One selectable runtime, in the unified shape every surface renders. */
 export interface RuntimeRow {
   /** `claude:<account>:` · `claude::<backend>` · `<provider>::` — the picker's own key scheme. */
   key: string
-  /** Short letter tag: M (main), W (work), C (Codex), L (local Ollama). */
+  /** Short letter tag: M (main), W (work), L (local Ollama), and each adapter provider's
+   *  fixed tag from the provider table (C = Codex, G = Grok). */
   tag: string
   name: string
   plan: string
@@ -29,8 +31,12 @@ export interface RuntimeRow {
   backend: string
   available: boolean
   reason?: string
-  /** False for a local backend: it spends no subscription, so there is no percentage. */
+  /** False when there is no percentage to show: a local backend (it spends no subscription)
+   *  or a provider that publishes no limit windows (Grok). `limitsNote` tells them apart. */
   hasQuota: boolean
+  /** Set on a `hasQuota:false` row that is NOT a local box: why there is no number
+   *  ("limits not reported"). Rendered muted — an unreported limit is not a healthy one. */
+  limitsNote?: string
   /** Subscription windows, or null when nothing has been read yet. */
   windows: Record<string, UsageLimitRow> | null
   /** When `windows` was read (unix sec), null if never. */
@@ -220,13 +226,20 @@ export function clearCurrentChat(owner: string) {
 
 // ─── Tags ────────────────────────────────────────────────────────────────────
 
-const FIXED_TAGS: Record<string, string> = { codex: 'C', ollama: 'L' }
+/** Tags that never move: every provider with a fixed one in the table (Codex C, Grok G) plus
+ *  the local Ollama backend (a backend, not a provider, so it is not in that table). */
+const FIXED_TAGS: Record<string, string> = {
+  ...Object.fromEntries(
+    PROVIDER_IDS.flatMap(id => { const tag = providerTag(id); return tag ? [[id, tag]] : [] }),
+  ),
+  ollama: 'L',
+}
 
 function alnum(s: string): string {
   return s.replace(/[^\p{L}\p{N}]/gu, '')
 }
 
-/** Assign short tags: first letter of the account label; Codex = C, local Ollama = L. A clash
+/** Assign short tags: first letter of the account label; fixed tags (C, G, L) never move. A clash
  *  widens the account tags involved to two letters (fixed tags never move), then numbers. */
 function assignTags(rows: { key: string; seed: string; fixed: boolean }[]): Record<string, string> {
   const out: Record<string, string> = {}
@@ -294,15 +307,22 @@ export function buildRuntimeRows(providers: AgentProviderInfo[], usage: UsageLim
       }
     } else {
       const key = `${p.provider}::`
+      const name = providerLabel(p.provider)
+      // Codex is the one adapter that publishes subscription windows (`usage.codex`, filled
+      // while a turn runs). Every other adapter - and any provider this build has never heard
+      // of - is a muted row: unknown is never green, and a bar would be invented.
+      const reports = providerReportsLimits(p.provider)
       const codex = p.provider === 'codex' ? usage?.codex ?? null : null
       const ts = codex?.ts ?? null
       rows.push({
-        key, name: p.provider === 'codex' ? 'Codex' : p.provider,
-        plan: (codex?.plan_type || '').toUpperCase(), provider: p.provider, account: null,
+        key, name,
+        plan: (codex?.plan_type || p.plan_type || '').toUpperCase(), provider: p.provider, account: null,
         backend: '', available: p.available && p.enabled,
-        reason: !p.enabled ? `${p.provider} is switched off in this install`
-          : p.available ? undefined : (p.error || `${p.provider} is not available`),
-        hasQuota: true, windows: codex?.limits && Object.keys(codex.limits).length ? codex.limits : null,
+        reason: !p.enabled ? `${name} is switched off in this install`
+          : p.available ? undefined : (p.error || `${name} is not available`),
+        hasQuota: reports,
+        ...(reports ? {} : { limitsNote: 'limits not reported' }),
+        windows: reports && codex?.limits && Object.keys(codex.limits).length ? codex.limits : null,
         ts, stale: ts != null && now - ts > CODEX_STALE_AFTER_SEC, isGlobalDefault: false,
         defaultModel,
       })
@@ -402,7 +422,9 @@ export interface Lead { key: string; d: UsageLimitRow }
  *  would be the lie this pill exists to prevent). A window whose reset has passed has rolled
  *  over and says nothing about now. */
 export function leadWindow(row: RuntimeRow, now: number): Lead | null {
-  if (!row.windows) return null
+  // No quota = no lead, whatever `windows` holds: a row the server says has no limits must
+  // never grow a bar from a stray payload (spec-094: unknown is never green).
+  if (!row.hasQuota || !row.windows) return null
   const live = (k: string) => {
     const d = row.windows![k]
     return d && !(d.resets_at != null && d.resets_at <= now) ? d : null

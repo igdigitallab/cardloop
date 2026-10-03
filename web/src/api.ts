@@ -1,3 +1,5 @@
+import { continuityQuery } from './lib/providers'
+
 const OPTS: RequestInit = { credentials: 'include' }
 
 // Usage analytics payload (GET /api/usage/dashboard) — full historical cost/usage
@@ -52,6 +54,17 @@ export interface UsageDashboard {
       turns: number; input: number; output: number; cached_input: number
       reasoning_output: number; cost: null; subscription_cost_available: false
       by_model: { model: string; turns: number; input: number; output: number; cached_input: number; reasoning_output: number }[]
+    }
+    /** spec-095: Grok subscription turns. A DIFFERENT shape from Codex on purpose (the server
+     *  names the fields `cached`/`reasoning` and keys `by_model` by model id) — read it through
+     *  `normalizeProviderUsage`, never field-by-field. `notional_usd` is an API-price
+     *  equivalent, not spend (SuperGrok is a flat subscription); `limits` is always null —
+     *  xAI reports no subscription windows. Absent when Grok is switched off. */
+    grok?: {
+      turns: number; input: number; output: number; cached: number; reasoning: number
+      by_model: Record<string, { turns: number; input: number; output: number }>
+      notional_usd?: number | null
+      limits: null
     }
   }
 }
@@ -490,12 +503,16 @@ export const api = {
   // `anchor` (spec-079) centres the returned window on a specific message instead of the
   // tail — without it the feed is capped at the last 100 messages and an older search hit
   // is unreachable. A miss on both anchors degrades to the tail, so it is always safe.
-  sessionHistory: (id: string, sessionId?: string, anchor?: { uuid?: string; ts?: number }, codexThreadId?: string) => {
+  // `continuity` (spec-095) names ONE thread of a non-default provider — a Codex thread or a
+  // Grok session — by provider + its own resume id; `continuityQuery` owns the wire names so no
+  // call site spells `codex_thread_id` / `grok_session_id` itself. Claude's id is `sessionId`.
+  sessionHistory: (id: string, sessionId?: string, anchor?: { uuid?: string; ts?: number },
+                   continuity?: { provider?: string; id?: string | null }) => {
     const p = new URLSearchParams()
     if (sessionId) p.set('session_id', sessionId)
     if (anchor?.uuid) p.set('around_uuid', anchor.uuid)
     if (anchor?.ts) p.set('around_ts', String(Math.round(anchor.ts)))
-    if (codexThreadId) p.set('codex_thread_id', codexThreadId)
+    for (const [k, v] of Object.entries(continuityQuery(continuity?.provider, continuity?.id))) p.set(k, v)
     const qs = p.toString()
     return apiFetch<import('./types').SessionHistoryResponse>(
       `/api/projects/${id}/session-history${qs ? `?${qs}` : ''}`

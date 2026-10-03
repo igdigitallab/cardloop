@@ -6,6 +6,7 @@ import {
   useRuntimeStatus, buildRuntimeRows, globalDefaultAccount, refreshRuntimeStatus, serverNow, windowKeys,
   type RuntimeRow,
 } from '../lib/runtimeStatus'
+import { isAdapterProvider, providerLabel, providerReportsLimits, providerTag } from '../lib/providers'
 
 const USAGE_URL = 'https://claude.ai/settings/usage'
 
@@ -90,14 +91,20 @@ function DefaultSwitch({ rows, now, projectAccount, onSwitched }: {
 function fallbackRow(key: string, globalKey: string, usage: UsageLimits | null, now: number): RuntimeRow {
   const [provider, account, backend] = key.split(':')
   const own = key === globalKey && !!usage
-  const tag = provider === 'codex' ? 'C' : backend === 'ollama' ? 'L'
-    : ((account || provider || '?')[0] || '?').toUpperCase()
+  const tag = providerTag(provider) ?? (backend === 'ollama' ? 'L'
+    : ((account || provider || '?')[0] || '?').toUpperCase())
+  // An adapter provider is its own runtime (no account dimension): name it from the provider
+  // table, and give it NO quota unless it is one that publishes windows - the fallback must
+  // not paint a limit the server never reported.
+  const adapter = isAdapterProvider(provider)
+  const hasQuota = backend !== 'ollama' && (!adapter || providerReportsLimits(provider))
   return {
-    key, tag, name: account || backend || provider || key, plan: '',
+    key, tag, name: adapter ? providerLabel(provider) : account || backend || provider || key, plan: '',
     provider: (provider || 'claude') as RuntimeRow['provider'], account: account || null,
     backend: backend || '', available: own,
     reason: own ? undefined : 'not listed by the server right now',
-    hasQuota: backend !== 'ollama', windows: own ? usage!.limits : null,
+    hasQuota, ...(adapter && !hasQuota ? { limitsNote: 'limits not reported' } : {}),
+    windows: own && hasQuota ? usage!.limits : null,
     ts: own ? now : null, stale: false, isGlobalDefault: own,
   }
 }
