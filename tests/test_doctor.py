@@ -821,7 +821,7 @@ class GrokBox:
         self.fake_home = tmp_path / "fakehome"
         self.fake_home.mkdir()
         self.home = tmp_path / "grok-home"          # GROK_HOME — NOT created until a test asks
-        self.data = tmp_path / "data"
+        self.data = tmp_path / "cockpit-data"       # deliberately NOT <repo_root>/data
         self.data.mkdir()
         self.secret_dir = tmp_path / "secrets"
         self.secret_dir.mkdir()
@@ -834,8 +834,10 @@ class GrokBox:
         for k in list(os.environ):
             if k.startswith(("GROK_", "FAKE_")):
                 monkeypatch.delenv(k, raising=False)
+        monkeypatch.delenv("_CARDLOOP_DATA_DIR", raising=False)   # doctor must hand the engine its OWN ctx
         for k, v in self.env.items():                # engine helpers read os.environ directly
-            monkeypatch.setenv(k, v)
+            if k != "_CARDLOOP_DATA_DIR":
+                monkeypatch.setenv(k, v)
         self.fake()
         self.write_auth()
 
@@ -1404,7 +1406,15 @@ def test_probe_unreadable_file_warns(box):
 def test_probe_file_without_a_usable_state_warns(box, payload):
     box.ensure_home()
     (box.data / "grok_sandbox_probe.json").write_text(json.dumps(payload))
-    assert probe_fact(box).level == "warn"
+    f = probe_fact(box)
+    assert f.level == "warn" and "unreadable" in f.value
+
+
+def test_probe_file_without_a_timestamp_reads_as_ancient_not_unreadable(box):
+    box.ensure_home()
+    (box.data / "grok_sandbox_probe.json").write_text(json.dumps({"state": "ok", "detail": "x"}))
+    f = probe_fact(box)
+    assert f.level == "warn" and "stale ok verdict" in f.value
 
 
 def test_probe_unknown_state_warns(box):
@@ -1576,6 +1586,7 @@ def test_compat_missing_key_is_unrecognised_never_zero_found(box, drop):
 
 
 @pytest.mark.parametrize("bad", [{"mcpServers": {"a": 1}}, {"hooks": "none"}, {"skills": ["str"]},
+                                 {"mcpServers": {}}, {"hooks": ""},
                                  {"agents": None}, {"externalCompat": []}, {"externalCompat": {"cells": {}}},
                                  {"externalCompat": {"cells": ["x"]}}, {"externalCompat": {}}])
 def test_compat_wrong_shapes_are_unrecognised(box, bad):
@@ -1839,6 +1850,8 @@ def test_env_overlay_applies_and_restores_exactly(monkeypatch):
     monkeypatch.setenv("GROK_ONLY_IN_PROCESS", "leftover")
     monkeypatch.delenv("GROK_ONLY_IN_ENV", raising=False)
     monkeypatch.setenv("UNRELATED_KEY", "keep")
+    monkeypatch.setenv("PATH", "/orig/path")
+    monkeypatch.setenv("HOME", "/orig/home-dir")
     env = {"GROK_HOME": "/dotenv/home", "GROK_ONLY_IN_ENV": "yes", "UNRELATED_KEY": "changed",
            "PATH": "/p", "HOME": "/h"}
     with doctor._env_overlay(env):
@@ -1851,6 +1864,14 @@ def test_env_overlay_applies_and_restores_exactly(monkeypatch):
     assert os.environ["GROK_ONLY_IN_PROCESS"] == "leftover"
     assert "GROK_ONLY_IN_ENV" not in os.environ
     assert os.environ["UNRELATED_KEY"] == "keep"
+    assert os.environ["PATH"] == "/orig/path" and os.environ["HOME"] == "/orig/home-dir"
+
+
+def test_env_overlay_never_unsets_path_or_home(monkeypatch):
+    monkeypatch.setenv("PATH", "/orig/path")
+    monkeypatch.setenv("HOME", "/orig/home-dir")
+    with doctor._env_overlay({"GROK_HOME": "/x"}):
+        assert os.environ["PATH"] == "/orig/path" and os.environ["HOME"] == "/orig/home-dir"
 
 
 def test_env_overlay_restores_after_an_exception(monkeypatch):
@@ -1894,7 +1915,7 @@ def test_unimportable_engine_is_a_single_warning(box, monkeypatch):
 
 
 def test_run_group_returns_output_and_exit_code(tmp_path):
-    out = doctor._run_group([sys.executable, "-c", "import sys; print('hi'); sys.stderr.write('e'); sys.exit(4)"])
+    out = doctor._run_group([sys.executable, "-c", "import sys; print('hi'); sys.stderr.write('e\\n'); sys.exit(4)"])
     assert out == (4, "hi", "e")
 
 
@@ -1975,3 +1996,133 @@ def test_a_real_run_of_every_step_is_fast(box):
     facts = box.probe(proc_root=box.tmp / "noproc")
     assert time.monotonic() - t0 < 3
     assert {f.level for f in facts.values()} <= {"ok", "info"}, {k: v.level for k, v in facts.items()}
+
+
+# ─────────────────────────── second round: gaps found by mutation testing ─────────
+
+def test_run_group_leaves_no_zombie_behind_after_a_timeout():
+    def zombie_children():
+        out = []
+        for e in os.listdir("/proc"):
+            if e.isdigit():
+                try:
+                    rest = Path(f"/proc/{e}/stat").read_text().rsplit(")", 1)[1].split()
+                except OSError:
+                    continue
+                if rest[0] == "Z" and int(rest[1]) == os.getpid():
+                    out.append(int(e))
+        return out
+    before = set(zombie_children())
+    assert doctor._run_group([sys.executable, "-c", "import time; time.sleep(300)"], timeout=0.5) is None
+    assert set(zombie_children()) <= before, "a timed-out probe must be reaped, not left as a zombie"
+
+
+def test_agents_listing_resolves_a_symlinked_home_argument(box):
+    link = box.tmp / "home-link"
+    link.symlink_to(box.home)
+    root = fake_proc(box.tmp / "procz", [agent(500, 30, box.home)])      # environ carries the REAL path
+    assert [p["pid"] for p in doctor._list_grok_agents(link, root)] == [500]
+
+
+def test_agents_listing_survives_a_missing_clock_tick_rate(box, monkeypatch):
+    def broken(name):
+        raise ValueError(name)
+    monkeypatch.setattr(os, "sysconf", broken)
+    root = fake_proc(box.tmp / "procw", [agent(500, 100, box.home)])
+    # fake_proc wrote start ticks with the host's rate; the fallback assumes the usual 100
+    (root / "500" / "stat").write_text(
+        f"500 (grok) S 1 500 500 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {int((100000.0 - 100) * 100)} 0 0\n")
+    [p] = doctor._list_grok_agents(box.home, root)
+    assert 99 <= p["age"] <= 101
+
+
+def test_compat_hook_matched_by_its_target_alone(box):
+    hook = {"event": "pre_tool_use", "target": f"\"{box.fake_home}/.claude/hooks/x.sh\"",
+            "source": {"type": "user", "path": "/somewhere/else"}}
+    f = compat(box, doc=doc_with(box, hooks=[hook]))
+    assert f.level == "warn" and "hook pre_tool_use" in f.value
+
+
+def test_compat_skill_matched_by_its_source_path_alone(box):
+    skill = {"name": "p", "target": "/elsewhere", "source": {"type": "plugin",
+                                                              "path": f"{box.fake_home}/.claude/plugins/p"}}
+    assert compat(box, doc=doc_with(box, skills=[skill])).level == "warn"
+
+
+def test_compat_active_server_without_a_name_is_still_counted(box):
+    f = compat(box, doc=doc_with(box, mcpServers=[{"transport": "stdio"}]))
+    assert f.level == "fail" and "1 active MCP server(s): ?" in f.value
+
+
+def test_compat_reports_leaked_items_and_switches_together(box):
+    cells = [{"vendor": "cursor", "surface": "rules", "enabled": True}]
+    f = compat(box, doc=doc_with(box, skills=[{"name": "s", "vendor": "claude"}],
+                                 externalCompat={"cells": cells}))
+    assert f.level == "warn" and "skill s" in f.value and "cursor/rules" in f.value and "; " in f.value
+
+
+def test_processes_many_leftovers_name_only_the_first_five(box):
+    f = procs_fact(box, [agent(500 + i, 7200 + i, box.home) for i in range(7)])
+    assert f.level == "fail" and "7 leftover" in f.value and f.value.count("pid ") == 5
+
+
+def test_processes_oldest_in_flight_is_the_maximum(box):
+    f = procs_fact(box, [agent(500, 600, box.home), agent(501, 60, box.home)])
+    assert "oldest 10m" in f.value
+
+
+def test_auth_without_a_secrets_sink_still_works(box):
+    facts = doctor.probe_grok(box.env, repo_root=box.tmp, proc_root=box.tmp / "noproc")
+    assert next(f for f in facts if f.label == "Grok auth").level == "ok"
+
+
+def test_probe_age_is_measured_from_the_recorded_timestamp(box):
+    box.ensure_home()
+    box.write_probe("ok", age=7200)
+    f = probe_fact(box)
+    assert f.level == "ok" and "2h 0m ago" in f.value
+    facts = doctor.probe_grok(box.env, repo_root=box.tmp, proc_root=box.tmp / "noproc",
+                              now=lambda: time.time() + 3 * 3600)
+    assert next(f for f in facts if f.label == "Grok sandbox (probe)").value.startswith("ok 5h 0m ago")
+
+
+def test_run_group_never_waits_on_the_terminal(tmp_path):
+    """A probe that reads stdin must see EOF at once, not block on whatever doctor inherited."""
+    r, w = os.pipe()
+    saved = os.dup(0)
+    os.dup2(r, 0)                                  # fd 0 is now a pipe that never delivers anything
+    try:
+        t0 = time.monotonic()
+        out = doctor._run_group([sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"], timeout=4)
+    finally:
+        os.dup2(saved, 0)
+        for fd in (r, w, saved):
+            os.close(fd)
+    assert out == (0, "''", "") and time.monotonic() - t0 < 3
+
+
+def test_processes_truncated_stat_line_is_skipped(box):
+    root = fake_proc(box.tmp / "procv", [agent(500, 30, box.home), agent(501, 30, box.home)])
+    (root / "501" / "stat").write_text("501 (grok) S 1 501")
+    f = box.probe(proc_root=root)["Grok processes"]
+    assert f.level == "ok" and "1 turn(s)" in f.value
+
+
+def test_compat_long_lists_show_exactly_five_names(box):
+    f = compat(box, doc=doc_with(box, mcpServers=[{"name": f"srv{i}"} for i in range(8)]))
+    assert all(f"srv{i}" in f.value for i in range(5)) and "srv5" not in f.value and "+3 more" in f.value
+
+
+def test_compat_exactly_five_names_have_no_more_suffix(box):
+    f = compat(box, doc=doc_with(box, mcpServers=[{"name": f"srv{i}"} for i in range(5)]))
+    assert "srv4" in f.value and "more" not in f.value
+
+
+def test_core_sections_always_print_even_when_empty():
+    sections = {name: [] for name in doctor.SECTIONS}
+    text = doctor.render_text(sections, [], elapsed=0.1)
+    for name in doctor.CORE_SECTIONS:
+        assert f"== {name} ==" in text
+    assert "== Grok ==" not in text
+    parsed = json.loads(doctor.render_json(sections, [], elapsed=0.1, exit_code=0))
+    assert list(parsed["sections"]) == list(doctor.CORE_SECTIONS)

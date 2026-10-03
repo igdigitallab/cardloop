@@ -815,16 +815,18 @@ def _env_overlay(env: dict):
     """Make `env` (os.environ + .env gaps, as collect() builds it) the process environment for
     the keys grok_engine reads from os.environ itself, then put everything back. The engine's
     helpers take no env parameter — this is what lets doctor resolve GROK_HOME / GROK_BIN /
-    the data dir through the engine's own code instead of a copy that could drift."""
-    keys = {k for k in set(os.environ) | set(env)
-            if k.startswith("GROK_") or k in ("_CARDLOOP_DATA_DIR", "PATH", "HOME")}
-    saved = {k: os.environ.get(k) for k in keys}
+    the deny list through the engine's own code instead of a copy that could drift."""
+    keys = {k for k in set(os.environ) | set(env) if k.startswith("GROK_")}
+    saved = {k: os.environ.get(k) for k in keys | {"PATH", "HOME"}}
     try:
-        for k in keys:
+        for k in keys:                       # GROK_*: the merged env is the whole truth
             if k in env:
                 os.environ[k] = env[k]
             else:
                 os.environ.pop(k, None)
+        for k in ("PATH", "HOME"):           # what the engine's child env and `~` read; never unset
+            if k in env:
+                os.environ[k] = env[k]
         yield
     finally:
         for k, v in saved.items():
