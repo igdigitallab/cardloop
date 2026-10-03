@@ -91,6 +91,8 @@ Subsystem-level gotchas. Turn-1 safety guards (Auth, Restart/cgroup) live in CLA
 
 Operator runbook → `docs/GROK.md`. Everything below was measured on grok 1.0.46 unless it says otherwise.
 
+- ⚠️ **`tools/grok-acct login` runs in another process and cannot reset the cockpit's registry cache.** A negative `provider_info` row is therefore re-probed after `_REGISTRY_FAIL_TTL_SEC` (15 s); only an AVAILABLE row keeps the 300 s TTL. Before this (2026-10-03) the picker said "off" for five minutes after a successful login.
+
 **Protocol (ACP over stdio)**
 - ⚠️ **An unanswered `session/request_permission` HANGS the turn** (no stopReason, no error; seen ≥ 75 s). Only OUR `session/cancel`, a `reject-once` reply, a `-32601` reply or `outcome:"cancelled"` end it, and all four end as `stopReason:"cancelled"`. `_meta.yoloMode:true` on `session/new` suppresses the request, so it is mandatory on every turn; the engine still answers `allow_once` if one arrives. A `cancelled` we did not ask for is an ERROR event, never a clean result (it would look like a truncated success); the decision is our own `cancel_requested` flag, `cancellationCategory` (`MidTurnAbort` / `PermissionRejected` / `PermissionCancelled`) is diagnostics only.
 - ⚠️ **`authenticate` HANGS without a login** (no error object). Every handshake step has its own 20 s timeout and a timed-out `authenticate` maps to "Grok sign-in expired". A scratch `GROK_HOME` without `auth.json` looks like a protocol bug.
