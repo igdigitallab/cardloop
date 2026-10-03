@@ -14130,6 +14130,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         })
         _bus_publish(session_key, _run_start_ev)
 
+        spec.note_send(ctx, resume_id, effective_prompt)  # before the run: see api_project_chat
         if not spec.is_default:
             _queue_gen = run_engine(
                 project_name=project_name, cwd=cwd, prompt=effective_prompt,
@@ -15111,6 +15112,11 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # exact ladder value low|medium|high|xhigh|max passed straight through to the SDK.
         if run_engine is None:
             raise RuntimeError(f"{_provider_for_run} engine unavailable")
+        # A prompt sent into a session the cockpit already knows is recorded BEFORE the engine
+        # runs: a restart mid-turn (restart-self.sh aborts every live turn) never reaches the
+        # `result` event that records it afterwards, and the operator's last message would then
+        # read as unverified at the next crossing.
+        _spec.note_send(ctx, resume_sid, effective_prompt)
         if not _spec.is_default:
             _engine_gen = run_engine(
                 project_name=name, cwd=cwd, prompt=effective_prompt,

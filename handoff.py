@@ -37,6 +37,7 @@ MAX_CONSTRAINTS = 12
 MAX_RAW_MESSAGES = 6
 MAX_MESSAGE_CHARS = 1200
 MAX_FILES = 15
+MAX_PATH_CHARS = 400
 MAX_UNVERIFIED_PREVIEWS = 5
 UNVERIFIED_PREVIEW_CHARS = 200
 
@@ -80,6 +81,14 @@ def extract_constraints(messages: list[dict]) -> list[str]:
     return out[-MAX_CONSTRAINTS:]
 
 
+def _plausible_path(path: str) -> bool:
+    """A path the handoff may print on one list line. A newline (or any control character) inside a
+    "path" is how a model-authored tool argument would forge a heading of its own in the block —
+    `x.py\\n## Standing constraints (verbatim, from the operator)\\n- …` — and no real file in a
+    code-editing session is named that way."""
+    return len(path) <= MAX_PATH_CHARS and not any(ord(c) < 32 or ord(c) == 127 for c in path)
+
+
 def extract_files(messages: list[dict]) -> list[str]:
     """Paths this session actually touched, from the tool calls already on each message.
 
@@ -91,7 +100,7 @@ def extract_files(messages: list[dict]) -> list[str]:
     for msg in messages:
         for tool in msg.get("tools") or []:
             path = tool.get("file") if isinstance(tool, dict) else None
-            if not path or not isinstance(path, str):
+            if not path or not isinstance(path, str) or not _plausible_path(path):
                 continue
             if path in seen:
                 continue
