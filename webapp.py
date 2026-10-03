@@ -9408,8 +9408,6 @@ async def api_search(req: web.Request) -> web.Response:
                         "snippet": (row.get("preview") or "")[:800],
                         "ref": {"grok_session_id": row.get("id"), "provider": "grok"},
                     })
-                    if len(hits) >= limit:
-                        break
         except Exception:
             logging.exception("[search] Grok session query failed")
     return web.json_response({"hits": hits})
@@ -12051,6 +12049,10 @@ async def api_project_chat_handoff(req: web.Request) -> web.Response:
         as a prefix to the first prompt that runs on the new runtime and is cleared only
         once that turn actually came back with a session/thread id.
 
+    The preview of a handoff OUT of a Grok chat ignores the posted `messages`: the server re-reads
+    the session file and verifies each user row against the cockpit's send ledger (grok_sends),
+    because the model's own shell can write that file.
+
     Stored on the CHAT as `runtime_handoff`, never on the project session_key: /rotate's
     injector keys its own `ctx["pending_handoff"]` by session_key, so a sibling chat of the
     same project can consume one — a defect this spec explicitly refuses to inherit. The
@@ -13019,11 +13021,9 @@ async def api_project_session_history(req: web.Request) -> web.Response:
                 "messages": [], "session_id": None, "grok_session_id": None,
                 "provider": "grok", "context_tokens": 0,
             })
-        if not _grok_history.valid_session_id(grok_sid):
-            return web.json_response({"error": "invalid grok_session_id"}, status=400)
         try:
             messages, info = await _grok_session_messages(ctx, project["cwd"], grok_sid)
-        except ValueError:
+        except ValueError:  # the reader validates the id's shape and the cwd before any path join
             return web.json_response({"error": "invalid grok_session_id"}, status=400)
         except Exception as exc:
             return web.json_response({"error": f"Grok history unavailable: {exc}"}, status=502)
@@ -15911,6 +15911,9 @@ async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_ha
     for named chats), optionally building a spec-042 handoff summary FIRST so the next turn resumes
     with context rather than blank.  Holds the running-sentinel for the whole op so a concurrent
     turn cannot resurrect the session via the chats-layer fallback (the dual-layer reset gotcha).
+
+    An active chat on an adapter provider (Codex, Grok) is rotated by `_rotate_adapter_chat`: its own
+    continuity id is cleared, its handoff is built locally and armed on the chat itself.
 
     Returns:
       {"ok": True, "reset": True,  "handoff": bool}  — rotated
