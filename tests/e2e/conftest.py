@@ -239,7 +239,7 @@ def e2e_grok_server(tmp_path_factory):
 
     bindir = tmp_path_factory.mktemp("e2e-grok-bin")
     wrapper = gs.write_fake_cli(bindir)
-    gs.write_login(app_dir / "data" / "grok-home")
+    gs.write_login(app_dir / "data-grok-home")      # next to data/, never inside it
 
     port = _free_port()
     password = "e2e-" + os.urandom(8).hex()

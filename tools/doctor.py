@@ -1327,8 +1327,14 @@ def _judge_project_inspect(res: "tuple[int, str, str] | None") -> "tuple[str, st
     if trusted:
         seen = [f"{label} {names(items)}" for label, items in
                 (("MCP", mcp), ("hooks", hooks), ("skills", skills)) if items]
-        return "fail", ("the folder is TRUSTED: its own MCP servers, hooks and skills start in a turn with full "
-                        "tool access" + (f" — active now: {'; '.join(seen)}" if seen else ""))
+        if seen:
+            return "fail", ("the folder is TRUSTED: its own MCP servers, hooks and skills start in a turn with "
+                            f"full tool access — active now: {'; '.join(seen)}")
+        # MEASURED on grok 1.0.46 (spec-095 P7b live run): a project that has NO config of its own reports
+        # projectTrusted=true even with an empty trust store and GROK_FOLDER_TRUST=1 pinned — there is
+        # nothing to trust, so nothing can start. It turns false the moment the project gains a
+        # .mcp.json (the pin working), and a store entry is judged by its own fact ("Grok folder trust").
+        return "ok", "isolated"
     problems = []
     if hooks:
         problems.append(f"hook(s) active under the sandbox view: {names(hooks)}")

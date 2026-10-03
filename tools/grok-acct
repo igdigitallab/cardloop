@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # grok-acct — sign the cockpit's Grok runtime in/out, under the cockpit's OWN GROK_HOME.
 #
-# Cardloop runs Grok Build against its own home (GROK_HOME, default <data>/grok-home), not the
+# Cardloop runs Grok Build against its own home (GROK_HOME, default <data>-grok-home, next to the data dir), not the
 # operator's ~/.grok: the engine owns config.toml / sandbox.toml / sessions there. Logging in is the
 # ordinary device flow with that env var set, so the credentials land in that home and ~/.grok is
 # never touched. This script never copies tokens from anywhere.
@@ -11,7 +11,7 @@
 #   tools/grok-acct logout    grok logout, in that home only
 #
 # Home resolution is the engine's own (grok_engine.grok_home): $GROK_HOME if set, else
-# <data dir>/grok-home, with the data dir from $_CARDLOOP_DATA_DIR or <repo>/data.
+# <data dir>-grok-home (a sibling of the data dir), with the data dir from $_CARDLOOP_DATA_DIR or <repo>/data.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -70,7 +70,7 @@ print(f"retention : {'—' if not f['oidc'] else ('opted out (required)' if f['r
 print(f"account   : {f['email'] or '—'}")
 trust = grok_engine._trust_store_problem(home)
 print(f"trust     : {'no folder trusted (project MCP servers/hooks stay off)' if trust is None else 'BLOCKED — ' + trust}")
-problem = grok_engine._auth_problem(f)
+problem = grok_engine._auth_problem(f, home)
 if problem is None and trust is not None:
     problem = trust
 print(f"verdict   : {'OK' if problem is None else 'BLOCKED — ' + problem}")

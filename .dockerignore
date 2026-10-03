@@ -12,3 +12,7 @@ web/dist
 data
 .env
 *.log
+data-grok-home
+data.bak*
+.env.*
+!.env.example

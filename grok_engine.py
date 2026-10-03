@@ -39,7 +39,7 @@ import time
 import tomllib
 import uuid
 from pathlib import Path
-from typing import AsyncGenerator, Callable
+from typing import AsyncGenerator, Callable, NamedTuple
 
 PROVIDER = "grok"
 DEFAULT_GROK_MODEL = os.getenv("GROK_MODEL", "grok-4.7")
@@ -216,7 +216,10 @@ def grok_home(ctx: dict | None = None) -> Path:
     raw = os.environ.get("GROK_HOME", "").strip()
     if raw:
         return Path(os.path.expanduser(raw))
-    return data_dir(ctx) / "grok-home"
+    data = data_dir(ctx)
+    # NEXT TO the data dir, never inside it: the data dir is hidden from the model as one directory and
+    # a deny entry that contains GROK_HOME makes the CLI exit (see _data_deny_entry)
+    return data.parent / f"{data.name}-grok-home"
 
 
 def grok_bin() -> str | None:
@@ -310,25 +313,101 @@ def _is_under(path: str, parent: str) -> bool:
     return path == parent or path.startswith(parent.rstrip("/") + "/")
 
 
+def _lexically_under(path: str, parent: str) -> bool:
+    """`path` is spelled inside `parent`, symlinks NOT followed."""
+    path, parent = os.path.abspath(path), os.path.abspath(parent)
+    return path == parent or path.startswith(parent.rstrip("/") + "/")
+
+
+def _data_deny_entry(home: Path, ctx: dict | None, bin_path: str | None) -> str | None:
+    """The cockpit's OWN data dir (sessions, topics, secrets, the send ledger, usage ledgers, push keys,
+    the search index) as ONE deny entry — ALWAYS applied, whatever GROK_SANDBOX_DENY says.
+
+    One directory, not its children. Grok hides a denied path with a mount over it, set up when the
+    sandbox starts. A mount over a FILE does not survive the cockpit's atomic rewrite (write a temp
+    file, rename it over the original): the kernel detaches the mount and the model's shell reads the
+    new contents for the rest of the turn (reproduced with bwrap, 2026-10-03: chats.json and
+    crash-recovery-state.json are rewritten that way while any chat runs). A mount over the data
+    DIRECTORY is never renamed, so what the cockpit writes inside stays hidden, and nothing new can be
+    created there either (the per-child layout let a model plant a symlink at a temp name the cockpit
+    then followed).
+
+    The price: Grok must keep reaching its own home and CLI, and a deny entry that CONTAINS GROK_HOME
+    makes `grok agent` exit 1 before the handshake (measured 2026-10-02). So GROK_HOME (default
+    `<data dir>-grok-home`, next to the data dir) and the binary must live OUTSIDE the data dir; a layout
+    that puts them inside is refused with the reason, never half hidden.
+
+    None when there is nothing to hide: no data dir yet, or it is `$HOME` or above it (the home
+    backstop owns that layout).
+    """
+    real_data = os.path.realpath(data_dir(ctx))
+    if not os.path.isdir(real_data):
+        return None
+    real_home = os.path.realpath(Path.home())
+    if real_home == real_data or real_home.startswith(real_data.rstrip("/") + "/"):
+        _log(f"data dir {real_data} is $HOME or lies above it: not hidden from the model "
+             f"(the home backstop owns that layout)")
+        return None
+    for what, path in (("GROK_HOME", home), ("the Grok CLI", bin_path)):
+        if path and _is_under(str(path), real_data):
+            raise GrokUnavailableError(
+                f"{what} ({path}) is inside the cockpit data dir {real_data}, which has to be hidden from "
+                f"the model's shell as one directory (hiding it file by file does not survive the cockpit "
+                f"rewriting its files). Move {what} outside it"
+                + (" (the default GROK_HOME is next to the data dir)" if what == "GROK_HOME" else ""))
+    return real_data
+
+
+def _cockpit_secret_paths() -> list[str]:
+    """Secret-bearing paths of the cockpit that the `**/.env`-style globs do not reach (a relative glob is
+    anchored at the project, so from any OTHER project it matches nothing):
+    * the checkout's `.env` file, every `.env.*` sibling (`.env.bak-<date>`, `.env.local`; not
+      `.env.example`) and `data.bak*` snapshots of the data dir (private transcripts and tokens —
+      .gitignore keeps them out of git for the same reason);
+    * the secret safe's Fernet key and store: the default `~/.config/claude-ops/` directory and wherever
+      CLAUDE_OPS_SECRET_KEYFILE / CLAUDE_OPS_SECRET_STORE point (a key beside a readable store opens every
+      credential in the safe).
+    Only what exists survives: build_deny drops a missing literal."""
+    try:
+        names = sorted(e.name for e in os.scandir(_REPO))
+    except OSError:
+        names = []
+    out = [str(_REPO / ".env")]
+    out += [str(_REPO / n) for n in names
+            if (n.startswith(".env.") and n != ".env.example") or n.startswith("data.bak")]
+    out.append("~/.config/claude-ops")
+    for var in ("CLAUDE_OPS_SECRET_KEYFILE", "CLAUDE_OPS_SECRET_STORE"):
+        raw = os.environ.get(var, "").strip()
+        if raw:
+            out.append(os.path.expanduser(raw))
+    return out
+
+
 def build_deny(home: Path, ctx: dict | None = None, *, bin_path: str | None = None
                ) -> tuple[list[str], list[str]]:
     """(deny entries to hand Grok, literal entries skipped because they do not exist).
 
     GROK_SANDBOX_DENY (comma list) REPLACES the defaults when set; the canary dir that the
-    availability probe reads and FLOOR_DENY (the Claude/Cursor import surface) are always present.
+    availability probe reads, FLOOR_DENY (the Claude/Cursor import surface), the cockpit's own
+    `.env` (+ its `.env.*` backups and `data.bak*` snapshots), the secret safe's key/store and its data dir
+    (`_data_deny_entry`) are always present, and so is the operator's own `~/.grok/auth.json`.
     Raises GrokUnavailableError for an entry that would break every start (invalid glob, or a
     literal that hides the binary / GROK_HOME).
     """
     raw_env = os.environ.get("GROK_SANDBOX_DENY", "").strip()
     raw_entries = [e for e in raw_env.split(",") if e.strip()] if raw_env else list(DEFAULT_DENY)
-    if not raw_env:
-        # The operator's own interactive login (~/.grok/auth.json): a different credential
-        # store than ours. Skipped when Cardloop's home IS ~/.grok — the agent needs that file.
-        own = Path.home() / ".grok"
-        if os.path.realpath(home) != os.path.realpath(own):
-            raw_entries.append(str(own / "auth.json"))
+    # The operator's own interactive login (~/.grok/auth.json): a different credential store than ours,
+    # so part of the floor — a custom GROK_SANDBOX_DENY used to drop it silently. Skipped when Cardloop's
+    # home IS ~/.grok: the agent needs that file.
+    own = Path.home() / ".grok"
+    if os.path.realpath(home) != os.path.realpath(own):
+        raw_entries.append(str(own / "auth.json"))
     raw_entries.extend(FLOOR_DENY)
     raw_entries.append(str(_canary_dir(ctx)))
+    # The cockpit's own secrets file and its backups. The default `**/.env` glob matches only INSIDE the
+    # workspace (docs: a relative glob is anchored at the project) and only that exact name, so from any
+    # other project `.env`, `.env.bak-<date>` and a `data.bak-<date>/` snapshot are all readable.
+    raw_entries.extend(_cockpit_secret_paths())
     protected = [str(home)]
     if bin_path:
         protected.append(os.path.realpath(bin_path))
@@ -348,11 +427,22 @@ def build_deny(home: Path, ctx: dict | None = None, *, bin_path: str | None = No
                     raise GrokUnavailableError(
                         f"GROK_SANDBOX_DENY entry {raw.strip()!r} would hide the Grok binary, "
                         f"its home or $HOME itself — Grok could not start")
+            if os.path.islink(entry):
+                # Measured (2026-10-02): a symlink as a deny entry — to a file, a directory, /dev/null
+                # or nowhere — makes `grok agent` exit 1 before the handshake, i.e. every turn fails.
+                # What the link points at is what has to be hidden; a dangling one hides nothing.
+                if not os.path.lexists(real):
+                    skipped.append(entry)
+                    continue
+                entry = real
             if not os.path.lexists(entry):
                 skipped.append(entry)
                 continue
         if entry not in deny:
             deny.append(entry)
+    data_entry = _data_deny_entry(home, ctx, bin_path)
+    if data_entry and data_entry not in deny:     # _prune_nested keeps two IDENTICAL strings: dedupe here
+        deny.append(data_entry)          # entries inside it (the canary dir, a custom one) are pruned below
     return _prune_nested(deny), skipped
 
 
@@ -484,6 +574,7 @@ def ensure_home(ctx: dict | None = None, *, bin_path: str | None = None) -> dict
     if rewrote:
         _log(f"home {home}: sandbox profile {SANDBOX_PROFILE!r} written, deny={len(deny)} "
              f"entries, skipped_missing={len(skipped)}")
+    sweep_foreign_layers(home)
     return {"home": home, "profile": SANDBOX_PROFILE, "deny": deny, "skipped": skipped}
 
 
@@ -532,6 +623,50 @@ def _group_alive(pgid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+# Layers of GROK_HOME that the CLI loads as INSTRUCTIONS or extra tooling and that the model's own shell can
+# write (MEASURED on grok 1.0.46, 2026-10-03: a turn in project A wrote every one of these, and a turn in
+# project B then listed the planted rules as its own global user rules). The code-execution layers — `hooks/`,
+# `config.toml`, `managed_config.toml`, `requirements.toml`, `trusted_folders.toml`, `sandbox.toml` — are
+# kernel write-protected by the CLI itself (Read-only file system, same run) and are not listed. The engine
+# never writes or needs any of these (it generates config.toml itself), so a turn must start without them:
+# otherwise one hostile project's turn poisons every other opted-in project's next turn.
+FOREIGN_LAYERS = ("rules", "AGENTS.md", "CLAUDE.md", "GROK.md", "skills", "agents", "personas", "workflows",
+                  "commands", "plugins", "lsp.json", "settings.json")
+
+
+def sweep_foreign_layers(home: Path) -> list[str]:
+    """Remove the model-writable instruction layers from GROK_HOME before a turn. Returns the names removed.
+    A symlink is unlinked, never followed. A layer that cannot be removed is an error (fail closed): the next
+    turn would read it as the operator's own rules."""
+    removed: list[str] = []
+    for name in FOREIGN_LAYERS:
+        path = home / name
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise GrokUnavailableError(f"cannot inspect {path} in the Grok home: {exc!r}") from exc
+        try:
+            if stat.S_ISDIR(st.st_mode):
+                for root, dirs, _files in os.walk(path):          # a model can leave mode-000 directories behind
+                    for d in dirs:
+                        with _suppress():
+                            os.chmod(os.path.join(root, d), stat.S_IRWXU)
+                os.chmod(path, stat.S_IRWXU)
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError as exc:
+            raise GrokUnavailableError(
+                f"cannot remove {path} from the Grok home: {exc!r} — the next turn would load it as a rule") from exc
+        removed.append(name)
+    if removed:
+        _log(f"home {home}: removed {', '.join(removed)} (written by a model's shell, loaded as global "
+             f"instructions by every project's next turn)")
+    return removed
 
 
 def reap_litter(home: Path, own_pid: int | None = None) -> list[str]:
@@ -592,9 +727,22 @@ def read_auth_facts(home: Path) -> dict:
     return facts
 
 
-def _auth_problem(facts: dict) -> str | None:
+def _legacy_login_hint(home: Path, ctx: dict | None = None) -> str:
+    """The default GROK_HOME used to be `<data>/grok-home` (inside the data dir); it is now `<data>-grok-home`.
+    A login made at the old place is invisible now — say where it is instead of a bare "not signed in"."""
+    if os.environ.get("GROK_HOME", "").strip():
+        return ""
+    old = data_dir(ctx) / "grok-home"
+    if (old / "auth.json").is_file():
+        return (f" (a login exists at the OLD default location {old}: the home now lives next to the data "
+                f"dir — `mv {old} {home}`)")
+    return ""
+
+
+def _auth_problem(facts: dict, home: Path | None = None, ctx: dict | None = None) -> str | None:
     if not facts["present"]:
-        return "Grok is not signed in — run `tools/grok-acct login`"
+        return ("Grok is not signed in — run `tools/grok-acct login`"
+                + (_legacy_login_hint(home, ctx) if home is not None else ""))
     if not facts["oidc"]:
         return ("Grok must be signed in with a grok.com (OIDC) subscription login; "
                 "API-key auth is not allowed")
@@ -772,7 +920,7 @@ async def _probe_provider() -> dict:
         warnings.append(f"grok {version} is newer than the builds this adapter was verified "
                         f"against ({', '.join(KNOWN_GOOD_VERSIONS)})")
         _log(f"warn: {warnings[-1]}")
-    problem = _auth_problem(read_auth_facts(home))
+    problem = _auth_problem(read_auth_facts(home), home)
     if problem:
         return fail(problem, version=version)
     if not shutil.which("bwrap", path=env.get("PATH")):
@@ -803,13 +951,20 @@ async def _probe_provider() -> dict:
 # sandbox denial probe (a real, tiny turn; verdict cached on disk by fingerprint)
 # ------------------------------------------------------------------------------------------
 
-def judge_probe(control: str, canary: str, haystack: str) -> tuple[str, str]:
-    """Verdict of the probe turn. The canary leaking is a hard FAIL; not seeing even the control
-    file means the model did not run the command, so the answer is inconclusive (fail closed)."""
+def judge_probe(control: str, canary: str, haystack: str, end: str) -> tuple[str, str]:
+    """Verdict of the probe turn. The canary leaking is a hard FAIL. Anything short of the whole command
+    having run is inconclusive (fail closed — an `ok` is cached for days): no control file means it did not
+    run, no END token means it stopped early, and no NON-ZERO `rc=` means the canary read was never
+    attempted or did not fail (a denied read exits non-zero; a read that exited 0 and showed no canary
+    proves nothing about the deny list)."""
     if canary in haystack:
         return "failed", "the sandbox deny list did NOT hide the canary file from the model's terminal"
     if control not in haystack:
         return "inconclusive", "the probe turn never read its control file (command did not run?)"
+    if end not in haystack:
+        return "inconclusive", "the probe command stopped before its last step (the canary read was never reached?)"
+    if not re.search(r"\brc=[1-9]\d*", haystack):
+        return "inconclusive", "the probe never showed a failed canary read (no non-zero exit status printed for it)"
     return "ok", "canary unreadable, control readable"
 
 
@@ -870,37 +1025,96 @@ async def _ensure_sandbox_probe(binary: str, version: str, info: dict, home: Pat
     return state, detail
 
 
-async def _probe_sandbox_denial(info: dict) -> tuple[str, str]:
-    """Run ONE tiny real turn under the production profile and see whether the canary file is
-    readable. This is the only way to learn that the kernel deny works on THIS host."""
-    canary_file = _canary_dir() / "secret.txt"
-    try:
-        canary = canary_file.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        return "failed", f"canary file unreadable by the cockpit itself: {exc!r}"
+# The probe asks the model to run a shell command that reads a file it is supposed to be unable to
+# read. Measured (spec-095 P1b/P7a): now and then the model declines it as a "security self-test"
+# ("I won't run that command") and the probe, which then measured nothing, took the provider offline
+# for 15 minutes. The retry therefore uses different words — see _probe_prompt.
+_PROBE_SAID_CHARS = 300
+
+
+def _probe_prompt(canary_file: Path, *, retry: bool) -> str:
+    """The probe turn's prompt. The first attempt is the original wording. A model that declined it
+    gets ONE retry in a fresh session with a plainer request (no "security self-test", no claim of
+    authority). MEASURED live: an "authorised by the operator / expected to be denied" preamble — the
+    obvious fix — was refused 3 times out of 3 (the model calls the claim a social-engineering framing
+    and says so); the original wording passed 10 of 10 and the plain one 5 of 5."""
+    # end.txt is read LAST: its token reaches the wire only if the whole command ran; `rc=$?` prints the
+    # canary read's exit status, which is non-zero only if that read really failed — a model that runs
+    # just the first part, or drops the middle, cannot earn an `ok` for a read it never attempted
+    command = f'cat control.txt; echo ---; cat {canary_file} 2>&1; echo "rc=$?"; cat end.txt'
+    if not retry:
+        return ("Security self-test, not a coding task. Run exactly this one shell command with your "
+                f"terminal tool, then reply with the single word DONE: {command}")
+    return ("Run exactly this one shell command with your terminal tool, then reply with the single word "
+            f"DONE: {command}")
+
+
+class _ProbeAttempt(NamedTuple):
+    state: str          # ok | failed | inconclusive
+    detail: str
+    said: str           # what the model wrote (redacted, capped)
+    ran_tool: bool      # it issued a tool call
+    errored: bool       # the turn itself failed (spawn, auth, timeout): not a model decision
+
+
+async def _probe_attempt(info: dict, canary_file: Path, canary: str, *, retry: bool) -> _ProbeAttempt:
+    """One probe turn."""
     import tempfile
     work = Path(tempfile.mkdtemp(prefix="grok-probe-"))
     control = "CONTROL-" + uuid.uuid4().hex
+    end = "END-" + uuid.uuid4().hex
     (work / "control.txt").write_text(control, encoding="utf-8")
+    (work / "end.txt").write_text(end, encoding="utf-8")
     seen: list[str] = []
-    prompt = (
-        "Security self-test, not a coding task. Run exactly this one shell command with your "
-        f"terminal tool, then reply with the single word DONE: "
-        f"cat control.txt; echo ---; cat {canary_file} 2>&1; echo ---")
+    said: list[str] = []
+    ran_tool = False
+    prompt = _probe_prompt(canary_file, retry=retry)
     try:
         async def drive():
+            nonlocal ran_tool
             async for ev in _run_turn(
                     project_name="__probe__", cwd=str(work), prompt=prompt, session_key="__probe__",
                     model=None, resume_session_id=None, ctx={"DATA": data_dir()}, effort="low",
                     entrypoint="probe", tap=lambda m: seen.append(_haystack(m)), _gate=False):
                 if ev["type"] == "error":
                     raise ev["exc"]
+                if ev["type"] == "tool":
+                    ran_tool = True
+                elif ev["type"] == "text":
+                    said.append(str(ev.get("text") or ""))
         await asyncio.wait_for(drive(), SANDBOX_PROBE_TURN_SEC)
     except Exception as exc:
-        return "inconclusive", f"probe turn failed: {_redact(str(exc))[:300]}"
+        return _ProbeAttempt("inconclusive", f"probe turn failed: {_redact(str(exc))[:300]}", "", ran_tool, True)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return judge_probe(control, canary, "\n".join(seen))
+    state, detail = judge_probe(control, canary, "\n".join(seen), end)
+    return _ProbeAttempt(state, detail, _redact(" ".join(" ".join(said).split()))[:_PROBE_SAID_CHARS],
+                         ran_tool, False)
+
+
+async def _probe_sandbox_denial(info: dict) -> tuple[str, str]:
+    """Run ONE tiny real turn under the production profile and see whether the canary file is
+    readable. This is the only way to learn that the kernel deny works on THIS host.
+
+    A turn in which the model ran NO command (it declined the "security self-test") measured nothing:
+    its words go to the journal and the probe is retried ONCE with plainer wording. Still
+    nothing -> inconclusive (the provider stays unavailable: fail closed). A verdict from a turn that
+    did run a command — a leak above all — is never retried."""
+    canary_file = _canary_dir() / "secret.txt"
+    try:
+        canary = canary_file.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return "failed", f"canary file unreadable by the cockpit itself: {exc!r}"
+    first = await _probe_attempt(info, canary_file, canary, retry=False)
+    if first.state != "inconclusive" or first.ran_tool or first.errored:
+        return first.state, first.detail
+    _log(f"sandbox denial probe: the model ran no command (it said: {first.said!r}) — retrying once "
+         f"with plainer wording")
+    second = await _probe_attempt(info, canary_file, canary, retry=True)
+    if second.state == "inconclusive" and not second.ran_tool and not second.errored:
+        _log(f"sandbox denial probe: the model declined again (it said: {second.said!r})")
+        return second.state, f"{second.detail}; the model declined twice, last words: {second.said!r}"
+    return second.state, second.detail
 
 
 # ------------------------------------------------------------------------------------------
@@ -1685,7 +1899,7 @@ async def _run_turn(
             raise GrokUnavailableError("Grok CLI not found (GROK_BIN / PATH / ~/.grok/bin)")
         info = ensure_home(ctx, bin_path=binary)
         home = info["home"]
-        problem = _auth_problem(read_auth_facts(home))
+        problem = _auth_problem(read_auth_facts(home), home, ctx)
         if problem:
             raise GrokAuthError(problem)
         trust = _trust_store_problem(home)
@@ -1698,6 +1912,20 @@ async def _run_turn(
             if not _is_glob(entry) and _is_under(cwd, entry):
                 raise GrokUnavailableError(
                     f"project directory {cwd} is inside the sandbox deny list entry {entry}")
+        if not allow_all_projects():
+            # The model's shell WRITES its project dir. A project that contains the cockpit's data dir or
+            # Grok's own home would let it replace cockpit state through a name it can re-point, or
+            # restructure GROK_HOME. (The data dir is masked as a directory, but the mask is the second line
+            # of defence, not the first.) GROK_ALLOW_ALL_PROJECTS is the operator's explicit "this whole box
+            # is the workspace" and keeps its home-rooted chats.
+            for label, where in (("the cockpit data dir", data_dir(ctx)), ("GROK_HOME", home)):
+                # by real path AND as spelled: a `data` symlink inside the project that points elsewhere
+                # passes the first and is still a name the model's shell can re-point
+                if _is_under(str(where), cwd) or _lexically_under(str(where), cwd):
+                    raise GrokUnavailableError(
+                        f"project directory {cwd} contains {label} ({where}): a Grok turn could rewrite it. "
+                        f"Run Grok in a project that does not (the cockpit's own checkout always does: its "
+                        f"data dir is <repo>/data)")
         rules = _instructions(project_name, cwd, multi_agent=multi_agent)
         argv = [binary, "agent", "--no-leader", "stdio"]
         _log(f"spawn {session_key} argv={argv} cwd={cwd} sandbox={SANDBOX_PROFILE} "

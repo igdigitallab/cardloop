@@ -172,7 +172,7 @@ def rmtree_force(path) -> None:
             func(p)
     path = str(path)
     if not os.path.lexists(path):
-        return
+        return                  # onerr would chmod the PARENT of a path that is already gone
     for root, dirs, _files in os.walk(path):
         for d in dirs:
             with contextlib.suppress(OSError):
@@ -521,6 +521,11 @@ def growth_allowance(cycles_since_baseline: int, slack_bytes: float, per_cycle_b
     return slack_bytes + per_cycle_bytes * max(0, cycles_since_baseline)
 
 
+def wait_for_next(interval: float, started: float, now: float) -> float:
+    """Seconds to sleep so that cycle STARTS are `interval` apart: the turn's own time counts."""
+    return max(0.0, interval - (now - started))
+
+
 def evaluate_cycle(m: dict, limits: dict) -> "list[str]":
     """Problems of one finished soak cycle (empty = healthy). `m` carries what was measured."""
     problems = []
@@ -702,6 +707,30 @@ def grok_version(binary: str, *, timeout: float = 20.0) -> "str | None":
         return parse_version((r.stdout or "").strip())
 
 
+def warm_login(binary: str, home, *, tries: int = 4, delay: float = 1.5, timeout: float = 30.0,
+               sleep=time.sleep) -> "tuple[bool, int, str]":
+    """Make a copied login usable before anything measures with it. The access token inside it lives a
+    few hours; the FIRST `grok models` after it expired prints "You are not authenticated." while it
+    refreshes the token (measured on grok 1.0.46 — a turn through ACP refreshes transparently), the
+    next call says "logged in with grok.com". Call it until the CLI says so, using the engine's own
+    rule for "signed in". -> (signed_in, calls made, first output line of the last call)."""
+    env = _child_env({"GROK_HOME": str(home), "GROK_DISABLE_AUTOUPDATER": "1"})
+    last = ""
+    for n in range(1, tries + 1):
+        try:
+            r = subprocess.run([binary, "models"], env=env, cwd=str(home), capture_output=True, text=True,
+                               timeout=timeout)
+            out = ((r.stdout or "") + (r.stderr or "")).strip()
+            if "logged in with grok.com" in out.lower():
+                return True, n, (out.splitlines() or [""])[0][:160]
+            last = (out.splitlines() or ["no output"])[0][:160]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            last = type(exc).__name__
+        if n < tries:
+            sleep(delay)
+    return False, tries, last
+
+
 def load_engine():
     sys.path.insert(0, str(REPO))
     import grok_engine
@@ -838,6 +867,9 @@ def cmd_check(args) -> int:
     scratch = Scratch(login, args.scratch_dir)
     gone = False
     try:
+        signed_in, calls, last = warm_login(binary, scratch.home)
+        _say(f"  login warm-up : {'signed in' if signed_in else 'NOT signed in'} after {calls} `grok models` call(s)"
+             + ("" if signed_in else f" ({last})") + (" — the first call refreshed the token" if signed_in and calls > 1 else ""))
         env_bin = {"GROK_BIN": binary}
         for name, marker, skip, test_file in (
                 ("live", MARKER_LIVE, args.skip_live, "tests/test_grok_live.py"),
@@ -847,6 +879,10 @@ def cmd_check(args) -> int:
                 steps.append(Step(name, "skip", "skipped by flag" if name != "cockpit" else "not requested",
                                   required=name != "cockpit"))
                 _say(f"  [skip] {name}")
+                continue
+            if not signed_in:
+                steps.append(Step(name, "fail", "the login copy is not usable (`grok models` is not signed in)"))
+                _say(f"  [FAIL] {name}: not run — the login copy is not usable")
                 continue
             _say(f"  [run ] {name}: pytest -m {marker} ...")
             res, summary = run_pytest([test_file, "-m", marker], scratch=scratch, env_extra=env_bin,
@@ -858,16 +894,19 @@ def cmd_check(args) -> int:
             _say(f"  [{status.upper():4}] {name}: {detail}")
             if status == "fail":
                 _say(_tail(res.out))
-        if not args.skip_fixtures:
+        if args.skip_fixtures:
+            steps.append(Step("fixtures", "skip", "skipped by flag"))
+            _say("  [skip] fixtures")
+        elif not signed_in:
+            steps.append(Step("fixtures", "fail", "not run — the login copy is not usable"))
+            _say("  [FAIL] fixtures: not run — the login copy is not usable")
+        else:
             _say("  [run ] fixtures: re-recording the wire into a temp dir ...")
             steps.append(fixture_step(args, scratch, binary, secrets))
             s = steps[-1]
             _say(f"  [{s.status.upper():4}] fixtures: {s.detail}")
             for ln in s.extra:
                 _say(ln)
-        else:
-            steps.append(Step("fixtures", "skip", "skipped by flag"))
-            _say("  [skip] fixtures")
     finally:
         _ignore_signals()
         gone = scratch.close()
@@ -1035,16 +1074,25 @@ async def soak_loop(args, scratch: Scratch, binary: str, cycles: int, interval: 
 
     data = scratch.root / "data"
     data.mkdir(mode=0o700)
-    home = data / "grok-home"
+    os.environ.pop("GROK_HOME", None)               # the engine derives <data>-grok-home, like production
+    home = load_engine().grok_home({"DATA": data})  # NEXT TO data/, never inside it
     home.mkdir(mode=0o700)
     shutil.move(str(scratch.home / "auth.json"), str(home / "auth.json"))   # the one login copy moves with it
     scratch.login_copy = home / "auth.json"
     scratch.home = home
+    signed_in, calls, last = await loop.run_in_executor(None, warm_login, binary, home)
+    _say(f"  login warm-up: {'signed in' if signed_in else 'NOT signed in'} after {calls} `grok models` call(s)"
+         + ("" if signed_in else f" ({last})") + (" — the first call refreshed the token" if signed_in and calls > 1 else ""))
+    if not signed_in:
+        pre = {"kind": "preflight", "ts": _utc(), "ok": False,
+               "detail": f"the login copy is not usable: `grok models` says {last!r} after {calls} calls"}
+        records.append(pre)
+        append_log(log_path, pre)
+        return
     project = scratch.root / "project"
     project.mkdir()
     (project / "README.md").write_text("soak scratch project\n", encoding="utf-8")
     os.environ.update({"GROK_ENABLED": "true", "_CARDLOOP_DATA_DIR": str(data), "GROK_BIN": binary})
-    os.environ.pop("GROK_HOME", None)               # the engine derives <data>/grok-home, like production
     os.environ.pop("GROK_ALLOW_ALL_PROJECTS", None)
     engine = load_engine()
     engine.reset_cache()
@@ -1100,7 +1148,7 @@ async def soak_loop(args, scratch: Scratch, binary: str, cycles: int, interval: 
              f"leftover={len(rec['leftover'])} litter={rec['litter']} home={rec['home_bytes'] / 1048576:.1f}MiB"
              + ("".join("\n      ! " + p for p in rec["problems"]) if rec["problems"] else ""))
         if n < cycles and not stop.is_set():
-            wait = max(0.0, interval - (time.monotonic() - t_start))
+            wait = wait_for_next(interval, t_start, time.monotonic())
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=wait)
 

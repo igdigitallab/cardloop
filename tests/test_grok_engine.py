@@ -80,6 +80,11 @@ class Env:
         self.fake_home.mkdir()
         self.secret_dir = tmp_path / "secrets"        # an existing deny target
         self.secret_dir.mkdir()
+        # the engine always denies the cockpit repo's own `.env`: a scratch repo without one, so no
+        # assertion below depends on whether the checkout running the suite has a `.env`
+        self.engine_repo = tmp_path / "cockpit-repo"
+        self.engine_repo.mkdir()
+        monkeypatch.setattr(grok_engine, "_REPO", self.engine_repo)
         self.dumps = tmp_path / "dumps"
         self.dumps.mkdir()
         self.ctx = {"DATA": self.data, "running": {}}
@@ -738,13 +743,22 @@ def _toml(path: Path) -> dict:
     return tomllib.loads(path.read_text())
 
 
+def covered(deny, path) -> bool:
+    """`path` is hidden by the deny list: it IS an entry or lies inside one (a bound parent hides
+    its children; the engine never lists both because bwrap cannot mount the child)."""
+    p = os.path.realpath(path)
+    return any(not grok_engine._is_glob(e) and (p == os.path.realpath(e)
+                                                or p.startswith(os.path.realpath(e).rstrip("/") + "/"))
+               for e in deny)
+
+
 def test_ensure_home_writes_a_custom_profile_and_config(env):
     os.chmod(env.home, 0o755)                      # a home someone created world-readable gets tightened
     info = ensure_home(env.ctx)
     prof = _toml(env.home / "sandbox.toml")["profiles"]["cardloop"]
     assert prof["extends"] == "workspace"
     assert str(env.secret_dir) in prof["deny"]
-    assert str(env.data / "grok-canary") in prof["deny"]          # the probe's canary is always denied
+    assert covered(prof["deny"], env.data / "grok-canary")        # the probe's canary is always denied
     assert info["deny"] == prof["deny"] and info["profile"] == "cardloop"
     cfg = _toml(env.home / "config.toml")
     assert cfg["shell_environment_policy"]["inherit"] == "core"
@@ -770,7 +784,7 @@ def test_canary_exists_before_the_deny_list_is_built(env):
     # would run against a profile that does not deny it.
     assert not (env.data / "grok-canary").exists()
     info = ensure_home(env.ctx)
-    assert str(env.data / "grok-canary") in info["deny"]
+    assert covered(info["deny"], env.data / "grok-canary")
     assert (env.data / "grok-canary" / "secret.txt").read_text().startswith("CANARY-")
 
 
@@ -784,7 +798,8 @@ def test_deny_list_drops_literals_that_do_not_exist(env, monkeypatch):
                        f"{present}, {missing}, {dangling}, **/.env, **/*.pem, /abs/**/secret.key")
     info = ensure_home(env.ctx)
     assert str(present) in info["deny"]
-    assert str(dangling) in info["deny"]                 # lexists: a dangling symlink still exists
+    # a dangling symlink hides nothing and, as a deny entry, makes `grok agent` exit 1 (measured)
+    assert str(dangling) not in info["deny"] and str(dangling) in info["skipped"]
     assert str(missing) not in info["deny"] and str(missing) in info["skipped"]
     assert "**/.env" in info["deny"] and "**/*.pem" in info["deny"]   # globs are not existence-checked
     assert "/abs/**/secret.key" in info["deny"]
@@ -807,6 +822,38 @@ def test_default_deny_list_is_home_relative_and_filtered(env, monkeypatch):
     # the operator's own interactive login is denied, the cockpit's own is not
     assert str(env.fake_home / ".grok" / "auth.json") in deny
     assert not any(e == str(env.fake_home / ".grok") for e in deny)
+
+
+def test_the_operators_own_login_is_denied_whatever_grok_sandbox_deny_says(env, monkeypatch):
+    # it used to vanish from the list as soon as the operator set GROK_SANDBOX_DENY for any other reason
+    (env.fake_home / ".grok").mkdir()
+    (env.fake_home / ".grok" / "auth.json").write_text("{}")
+    for custom in (str(env.secret_dir), "**/.env", f"{env.secret_dir},{env.tmp}/nothing"):
+        monkeypatch.setenv("GROK_SANDBOX_DENY", custom)
+        assert str(env.fake_home / ".grok" / "auth.json") in ensure_home(env.ctx)["deny"], custom
+
+
+def test_the_secret_safes_key_and_store_are_denied_wherever_they_live(env, monkeypatch):
+    # `**/*.key` is anchored at the workspace: from any other project the Fernet key was readable
+    default_dir = env.fake_home / ".config" / "claude-ops"
+    default_dir.mkdir(parents=True)
+    (default_dir / "secret.key").write_text("k")
+    moved_key = env.tmp / "moved" / "safe.key"
+    moved_store = env.tmp / "moved" / "safe.enc"
+    moved_key.parent.mkdir()
+    moved_key.write_text("k")
+    moved_store.write_text("s")
+    deny, _ = grok_engine.build_deny(env.home, env.ctx)
+    assert str(default_dir) in deny and str(moved_key) not in deny
+    monkeypatch.setenv("CLAUDE_OPS_SECRET_KEYFILE", str(moved_key))
+    monkeypatch.setenv("CLAUDE_OPS_SECRET_STORE", str(moved_store))
+    for custom in (None, str(env.secret_dir)):
+        if custom is None:
+            monkeypatch.delenv("GROK_SANDBOX_DENY")
+        else:
+            monkeypatch.setenv("GROK_SANDBOX_DENY", custom)
+        deny, _ = grok_engine.build_deny(env.home, env.ctx)
+        assert {str(default_dir), str(moved_key), str(moved_store)} <= set(deny), custom
 
 
 def test_own_home_equal_to_dot_grok_does_not_deny_its_own_login(env, monkeypatch):
@@ -1132,14 +1179,28 @@ async def test_failed_verdict_is_cached_for_a_short_while_only(env, monkeypatch)
 
 
 @pytest.mark.parametrize("control,canary,hay,want", [
-    ("C1", "K9", "xx C1 yy", "ok"),
-    ("C1", "K9", "xx C1 K9 yy", "failed"),            # the canary leaked, even next to the control
+    ("C1", "K9", "xx C1 yy rc=1 E5", "ok"),
+    ("C1", "K9", "xx C1 yy rc=13 E5", "ok"),
+    ("C1", "K9", "xx C1 K9 yy rc=0 E5", "failed"),       # the canary leaked, even next to the control
     ("C1", "K9", "xx K9", "failed"),
-    ("C1", "K9", "Permission denied", "inconclusive"),  # nothing ran: not proof of anything
+    ("C1", "K9", "xx C1 K9", "failed"),                  # leaked and the command died before its last step
+    ("C1", "K9", "xx C1 yy rc=0 E5", "inconclusive"),    # the read exited 0 and showed nothing: proves nothing
+    ("C1", "K9", "xx C1 yy E5", "inconclusive"),         # the read was never attempted (middle step dropped)
+    ("C1", "K9", "xx C1 yy rc=$? E5", "inconclusive"),   # the command TEXT is not an exit status
+    ("C1", "K9", "xx C1 yy src=1 E5", "inconclusive"),   # ... nor is a lookalike inside another word
+    ("C1", "K9", "Permission denied", "inconclusive"),   # nothing ran: not proof of anything
     ("C1", "K9", "", "inconclusive"),
+    ("C1", "K9", "xx rc=1 E5", "inconclusive"),          # the last steps without the first: not our command
+    ("C1", "K9", "xx C1 yy", "inconclusive"),            # control read, canary read never reached
 ])
 def test_probe_judge_table(control, canary, hay, want):
-    assert grok_engine.judge_probe(control, canary, hay)[0] == want
+    assert grok_engine.judge_probe(control, canary, hay, "E5")[0] == want
+
+
+def test_probe_judge_says_which_step_was_missing():
+    assert "control file" in grok_engine.judge_probe("C1", "K9", "E5", "E5")[1]
+    assert "last step" in grok_engine.judge_probe("C1", "K9", "C1", "E5")[1]
+    assert "failed canary read" in grok_engine.judge_probe("C1", "K9", "C1 E5", "E5")[1]
 
 
 def test_haystack_decodes_raw_byte_arrays_and_nested_strings():
@@ -1178,7 +1239,7 @@ def test_capabilities_exact_and_runtime_conflicts():
 
 def test_data_dir_and_home_resolution(monkeypatch, tmp_path):
     monkeypatch.delenv("GROK_HOME", raising=False)
-    assert grok_engine.grok_home({"DATA": tmp_path}) == tmp_path / "grok-home"
+    assert grok_engine.grok_home({"DATA": tmp_path / "data"}) == tmp_path / "data-grok-home"
     monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(tmp_path / "d"))
     assert grok_engine.data_dir() == tmp_path / "d"
     monkeypatch.setenv("GROK_HOME", "~/somewhere")
@@ -1354,7 +1415,7 @@ def test_grok_sandbox_deny_replaces_the_defaults(env, monkeypatch):
     monkeypatch.setenv("GROK_SANDBOX_DENY", str(env.secret_dir))
     deny = ensure_home(env.ctx)["deny"]
     assert str(env.fake_home / ".ssh") not in deny and "**/.env" not in deny
-    assert str(env.secret_dir) in deny and str(env.data / "grok-canary") in deny
+    assert str(env.secret_dir) in deny and covered(deny, env.data / "grok-canary")
     monkeypatch.delenv("GROK_SANDBOX_DENY")
     assert str(env.fake_home / ".ssh") in ensure_home(env.ctx)["deny"]
 
@@ -1935,3 +1996,572 @@ async def test_provider_info_with_an_empty_trust_store_gets_past_that_check(env)
     (env.home / "trusted_folders.toml").write_text("")
     info = await grok_engine.provider_info(force=True)
     assert "trusted_folders.toml" not in str(info["error"])
+
+
+# ------------------------------------------------------------------------------------------
+# spec-095 P7a: the cockpit's own data dir is hidden from the model's shell, always
+# ------------------------------------------------------------------------------------------
+
+def _home_in_data(env, monkeypatch, *parts) -> Path:
+    """GROK_HOME INSIDE the data dir: the layout that used to be the default and is now refused."""
+    home = env.data.joinpath(*(parts or ("grok-home",)))
+    monkeypatch.setenv("GROK_HOME", str(home))
+    env.home = home
+    env.write_auth()
+    return home
+
+
+def test_a_home_outside_the_data_dir_hides_the_whole_data_dir_with_one_entry(env):
+    (env.data / "sessions.json").write_text("{}")
+    (env.data / "grok_sent").mkdir()
+    info = ensure_home(env.ctx)
+    real = os.path.realpath(env.data)
+    assert info["deny"].count(real) == 1
+    assert not any(e.startswith(real + "/") for e in info["deny"])      # nothing nested inside it
+    assert covered(info["deny"], env.data / "grok-canary") and covered(info["deny"], env.data / "sessions.json")
+    assert real in _toml(env.home / "sandbox.toml")["profiles"]["cardloop"]["deny"]
+
+
+def test_the_data_dir_is_denied_whatever_grok_sandbox_deny_says(env, monkeypatch):
+    for custom in (str(env.secret_dir), "**/.env", f"{env.secret_dir},{env.tmp}/nothing"):
+        monkeypatch.setenv("GROK_SANDBOX_DENY", custom)
+        assert os.path.realpath(env.data) in ensure_home(env.ctx)["deny"], custom
+    monkeypatch.delenv("GROK_SANDBOX_DENY")
+    assert os.path.realpath(env.data) in ensure_home(env.ctx)["deny"]
+
+
+def test_a_data_dir_named_in_grok_sandbox_deny_is_not_listed_twice(env, monkeypatch):
+    monkeypatch.setenv("GROK_SANDBOX_DENY", f"{env.data},{env.secret_dir}")
+    deny = ensure_home(env.ctx)["deny"]
+    assert deny.count(os.path.realpath(env.data)) == 1 and str(env.secret_dir) in deny
+
+
+def test_the_root_directory_as_data_dir_is_never_hidden(env):
+    deny, _ = grok_engine.build_deny(env.home, {"DATA": Path("/")})
+    assert "/" not in deny
+
+
+def test_the_data_entry_is_one_stable_directory_whatever_appears_in_it(env, monkeypatch):
+    # a mount over a FILE is detached when the cockpit renames a temp file over it (reproduced with bwrap),
+    # and a per-child list let the model create new names: the entry is the directory, so nothing in
+    # it changes the deny list — or the probe fingerprint, which would cost a model turn
+    first = ensure_home(env.ctx)
+    for name in ("chats.json", "chats.json.tmp", "crash-recovery-state.json", "secrets.env"):
+        (env.data / name).write_text("{}")
+    (env.data / "link").symlink_to(env.secret_dir)
+    (env.data / "chat-media").mkdir()
+    second = ensure_home(env.ctx)
+    assert second["deny"] == first["deny"]
+    assert grok_engine._probe_fingerprint("1.0.46", second) == grok_engine._probe_fingerprint("1.0.46", first)
+    assert not any(e.startswith(os.path.realpath(env.data) + "/") for e in second["deny"])
+
+
+@pytest.mark.parametrize("parts", [("grok-home",), ("state", "x", "grok-home")])
+def test_a_home_inside_the_data_dir_is_refused_with_the_reason(env, monkeypatch, parts):
+    _home_in_data(env, monkeypatch, *parts)
+    with pytest.raises(GrokUnavailableError, match="GROK_HOME .* is inside the cockpit data dir"):
+        ensure_home(env.ctx)
+    info = asyncio.run(grok_engine.provider_info(force=True))
+    assert info["available"] is False and "inside the cockpit data dir" in info["error"]
+    events = asyncio.run(env.run())
+    assert "inside the cockpit data dir" in last_error(events)
+    assert not (env.dumps / "argv.json").exists()                       # no process was started
+
+
+# ---- GROK_HOME's model-writable instruction layers are swept before every turn ---------------------------
+# MEASURED live (tests/test_grok_live.py): a turn in project A writes rules/, AGENTS.md, skills/, agents/,
+# lsp.json, settings.json into GROK_HOME and a turn in project B then loads them as global user rules.
+
+def _plant(home: Path, name: str) -> None:
+    path = home / name
+    if name.endswith((".md", ".json")):
+        path.write_text("planted")
+    else:
+        (path / "nested" / "deeper").mkdir(parents=True)
+        (path / "nested" / "deeper" / "x.md").write_text("planted")
+        (path / "top.md").write_text("planted")
+
+
+def test_the_swept_names_include_everything_measured_writable_and_loaded():
+    # the six a live turn was MEASURED to write and a later turn to load (spec-095 P7), plus the documented rest
+    measured = {"rules", "AGENTS.md", "skills", "agents", "lsp.json", "settings.json"}
+    documented = {"CLAUDE.md", "GROK.md", "personas", "workflows", "commands", "plugins"}
+    assert set(grok_engine.FOREIGN_LAYERS) == measured | documented
+    # never the code layers the CLI write-protects itself, nor anything the engine/CLI needs
+    assert not set(grok_engine.FOREIGN_LAYERS) & {"hooks", "hooks-paths", "config.toml", "sandbox.toml",
+                                                  "managed_config.toml", "requirements.toml",
+                                                  "trusted_folders.toml", "auth.json", "sessions", "memory"}
+
+
+@pytest.mark.parametrize("name", sorted(["rules", "AGENTS.md", "CLAUDE.md", "GROK.md", "skills", "agents",
+                                         "personas", "workflows", "commands", "plugins", "lsp.json",
+                                         "settings.json"]))
+def test_every_foreign_layer_is_removed_before_a_turn(env, name):
+    _plant(env.home, name)
+    info = ensure_home(env.ctx)
+    assert not os.path.lexists(env.home / name), name
+    assert info["home"] == env.home
+
+
+def test_the_sweep_leaves_everything_the_engine_and_the_cli_own_alone(env):
+    for keep in ("sessions", "hooks", "memory", "logs", "installed-plugins", "bundled"):
+        (env.home / keep).mkdir()
+        (env.home / keep / "f").write_text("x")
+    (env.home / "hooks-paths").write_text("")
+    (env.home / "managed_config.toml").write_text("# fleet\n")
+    (env.home / "notes.md").write_text("x")
+    for name in grok_engine.FOREIGN_LAYERS:
+        _plant(env.home, name)
+    ensure_home(env.ctx)
+    for keep in ("sessions", "hooks", "memory", "logs", "installed-plugins", "bundled"):
+        assert (env.home / keep / "f").read_text() == "x", keep
+    assert (env.home / "hooks-paths").exists() and (env.home / "managed_config.toml").read_text() == "# fleet\n"
+    assert (env.home / "notes.md").exists() and (env.home / "auth.json").is_file()
+    assert _toml(env.home / "config.toml") and _toml(env.home / "sandbox.toml")
+
+
+def test_the_sweep_deletes_a_symlink_never_what_it_points_at(env):
+    outside = env.tmp / "operators-real-rules"
+    outside.mkdir()
+    (outside / "keep.md").write_text("mine")
+    (env.home / "rules").symlink_to(outside)
+    (env.home / "AGENTS.md").symlink_to(outside / "keep.md")
+    ensure_home(env.ctx)
+    assert not os.path.lexists(env.home / "rules") and not os.path.lexists(env.home / "AGENTS.md")
+    assert (outside / "keep.md").read_text() == "mine"
+
+
+def test_the_sweep_removes_a_layer_a_model_made_unreadable(env):
+    deep = env.home / "skills" / "a" / "b"
+    deep.mkdir(parents=True)
+    (deep / "SKILL.md").write_text("planted")
+    os.chmod(deep, 0)
+    os.chmod(env.home / "skills" / "a", 0o500)
+    ensure_home(env.ctx)
+    assert not os.path.lexists(env.home / "skills")
+
+
+def test_the_sweep_removes_a_layer_whose_top_directory_the_model_made_unreadable(env):
+    (env.home / "rules").mkdir()
+    (env.home / "rules" / "planted.md").write_text("planted")
+    os.chmod(env.home / "rules", 0)
+    ensure_home(env.ctx)
+    assert not os.path.lexists(env.home / "rules")
+
+
+def test_the_legacy_login_hint_follows_the_run_ctx_not_the_environment(env, monkeypatch):
+    # the cockpit's ctx["DATA"] and the process env can name different dirs (provider_info has no ctx)
+    other = env.tmp / "ctx-data"
+    other.mkdir()
+    (other / "grok-home").mkdir()
+    (other / "grok-home" / "auth.json").write_text("{}")
+    env.ctx["DATA"] = other
+    monkeypatch.delenv("GROK_HOME")
+    events = asyncio.run(env.run())
+    msg = last_error(events)
+    assert str(other / "grok-home") in msg and str(env.data / "grok-home") not in msg
+
+
+def test_a_layer_that_cannot_be_removed_makes_the_provider_unavailable_not_silently_loaded(env, monkeypatch):
+    _plant(env.home, "rules")
+    monkeypatch.setattr(grok_engine.shutil, "rmtree", lambda *a, **k: (_ for _ in ()).throw(PermissionError("no")))
+    with pytest.raises(GrokUnavailableError, match="cannot remove .*rules"):
+        ensure_home(env.ctx)
+    events = asyncio.run(env.run())
+    assert "cannot remove" in last_error(events)
+    assert not (env.dumps / "argv.json").exists()                  # no process was started
+
+
+def test_the_sweep_runs_again_before_every_turn_and_journals_what_it_removed(env, capsys):
+    asyncio.run(env.run())
+    for _ in range(2):                                              # a model plants between turns, twice
+        _plant(env.home, "rules")
+        _plant(env.home, "AGENTS.md")
+        events = asyncio.run(env.run())
+        assert [e for e in events if e["type"] == "result"]
+        assert not os.path.lexists(env.home / "rules") and not os.path.lexists(env.home / "AGENTS.md")
+    out = capsys.readouterr().out
+    assert out.count("removed rules, AGENTS.md") == 2 and "written by a model's shell" in out
+
+
+def test_the_data_dir_being_the_grok_home_is_refused(env, monkeypatch):
+    monkeypatch.setenv("GROK_HOME", str(env.data))
+    with pytest.raises(GrokUnavailableError, match="inside the cockpit data dir"):
+        grok_engine.build_deny(env.data, env.ctx)
+
+
+def test_the_cli_binary_inside_the_data_dir_is_refused(env):
+    (env.data / "bin").mkdir()
+    (env.data / "bin" / "grok").write_text("#!/bin/sh\n")
+    with pytest.raises(GrokUnavailableError, match=r"the Grok CLI .* is inside the cockpit data dir"):
+        ensure_home(env.ctx, bin_path=str(env.data / "bin" / "grok"))
+
+
+def test_a_login_at_the_old_default_home_is_pointed_at_not_silently_missed(env, monkeypatch):
+    # the default GROK_HOME moved from <data>/grok-home to <data>-grok-home: a bare "not signed in" would
+    # send the operator to log in again and lose the sessions next to the old login
+    monkeypatch.delenv("GROK_HOME")
+    new_home = grok_engine.grok_home(env.ctx)
+    assert new_home == env.tmp / "data-grok-home" and not new_home.exists()
+    old = env.data / "grok-home"
+    old.mkdir()
+    (old / "auth.json").write_text("{}")
+    msg = grok_engine._auth_problem(grok_engine.read_auth_facts(new_home), new_home, env.ctx)
+    assert "not signed in" in msg and str(old) in msg and f"mv {old} {new_home}" in msg
+    info = asyncio.run(grok_engine.provider_info(force=True))
+    assert info["available"] is False and str(old) in info["error"]
+    events = asyncio.run(env.run())
+    assert str(old) in last_error(events)
+    # no hint when there is nothing at the old place, when GROK_HOME is set, or without a home to point at
+    (old / "auth.json").unlink()
+    assert "OLD default" not in grok_engine._auth_problem(grok_engine.read_auth_facts(new_home), new_home, env.ctx)
+    (old / "auth.json").write_text("{}")
+    assert "OLD default" not in grok_engine._auth_problem(grok_engine.read_auth_facts(new_home))
+    monkeypatch.setenv("GROK_HOME", str(new_home))
+    assert "OLD default" not in grok_engine._auth_problem(grok_engine.read_auth_facts(new_home), new_home, env.ctx)
+
+
+def test_the_default_home_is_next_to_the_data_dir_never_inside_it(monkeypatch, tmp_path):
+    monkeypatch.delenv("GROK_HOME", raising=False)
+    data = tmp_path / "data"
+    home = grok_engine.grok_home({"DATA": data})
+    assert home == tmp_path / "data-grok-home" and not grok_engine._is_under(str(home), str(data))
+    other = tmp_path / "state" / "cardloop-data"
+    assert grok_engine.grok_home({"DATA": other}) == tmp_path / "state" / "cardloop-data-grok-home"
+
+
+def test_nothing_is_denied_when_the_data_dir_is_not_a_plain_directory(env, monkeypatch):
+    plain = env.tmp / "file-as-data"
+    plain.write_text("x")
+    dangling = env.tmp / "dangling-data"
+    dangling.symlink_to(env.tmp / "nowhere")
+    for bad in (plain, dangling, env.tmp / "absent"):
+        deny, _ = grok_engine.build_deny(env.home, {"DATA": bad})
+        assert not any(str(bad) in e for e in deny), bad
+
+
+def test_a_symlinked_data_dir_is_denied_by_its_real_path(env):
+    real = env.tmp / "real-data"
+    real.mkdir()
+    link = env.tmp / "data-link"
+    link.symlink_to(real)
+    deny, _ = grok_engine.build_deny(env.home, {"DATA": link})
+    assert os.path.realpath(real) in deny and str(link) not in deny
+
+
+def test_a_data_dir_that_is_home_or_above_it_is_not_denied(env, capsys):
+    for data in (env.fake_home, env.fake_home.parent):
+        deny, _ = grok_engine.build_deny(env.home, {"DATA": data})
+        assert os.path.realpath(data) not in deny
+    assert "not hidden from the model" in capsys.readouterr().out
+
+
+def test_a_project_that_contains_the_data_dir_or_the_home_is_refused(env, monkeypatch):
+    # the model's shell writes its project dir: it could replace cockpit state, or plant a hook in
+    # GROK_HOME that the next turn starts outside the sandbox
+    outer = env.tmp / "outer"                                             # a project holding the data dir
+    (outer / "data").mkdir(parents=True)
+    env.ctx["DATA"] = outer / "data"
+    monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(outer / "data"))
+    events = asyncio.run(env.run(cwd=str(outer)))
+    assert "contains the cockpit data dir" in last_error(events)
+    assert not (env.dumps / "argv.json").exists()
+    env.ctx["DATA"] = env.data
+    monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(env.data))
+    proj = env.tmp / "proj2"
+    proj.mkdir()
+    home = proj / "gh"                                                    # only the HOME is inside this one
+    monkeypatch.setenv("GROK_HOME", str(home))
+    env.home = home
+    env.write_auth()
+    events = asyncio.run(env.run(cwd=str(proj)))
+    assert "contains GROK_HOME" in last_error(events)
+    assert not (env.dumps / "argv.json").exists()
+
+
+def test_a_data_dir_symlink_inside_the_project_is_still_a_contained_data_dir(env, monkeypatch):
+    # the real data dir is elsewhere, but the cockpit reaches it through a NAME inside the workspace —
+    # which the model's shell can re-point at something else
+    proj = env.tmp / "proj-with-link"
+    proj.mkdir()
+    (proj / "data").symlink_to(env.data)
+    env.ctx["DATA"] = proj / "data"
+    monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(proj / "data"))
+    events = asyncio.run(env.run(cwd=str(proj)))
+    assert "contains the cockpit data dir" in last_error(events)
+    assert not (env.dumps / "argv.json").exists()
+
+
+def test_a_project_next_to_the_data_dir_and_home_runs(env):
+    events = asyncio.run(env.run(cwd=str(env.cwd)))
+    assert [e for e in events if e["type"] == "result"] and not [e for e in events if e["type"] == "error"]
+
+
+def test_allow_all_projects_keeps_its_home_rooted_chats(env, monkeypatch):
+    # GROK_ALLOW_ALL_PROJECTS is the operator's "this whole box is the workspace": the contains-check
+    # must not turn its main use (a chat rooted at $HOME, which holds the data dir) into a refusal
+    monkeypatch.setenv("GROK_ALLOW_ALL_PROJECTS", "true")
+    events = asyncio.run(env.run(cwd=str(env.tmp)))
+    assert [e for e in events if e["type"] == "result"] and not [e for e in events if e["type"] == "error"]
+
+
+def test_a_symlink_deny_entry_hides_its_target_not_the_link(env, monkeypatch):
+    target = env.tmp / "dotfiles-ssh"
+    target.mkdir()
+    link = env.tmp / "dot-ssh"
+    link.symlink_to(target)
+    monkeypatch.setenv("GROK_SANDBOX_DENY", str(link))
+    deny = ensure_home(env.ctx)["deny"]
+    assert os.path.realpath(target) in deny and str(link) not in deny
+
+
+def test_a_project_inside_the_hidden_data_dir_is_refused(env):
+    inside = env.data / "proj"
+    inside.mkdir()
+    events = asyncio.run(env.run(cwd=str(inside)))
+    assert "inside the sandbox deny list entry" in last_error(events)
+
+
+def test_the_cockpits_env_backups_and_data_snapshots_are_denied_too_but_not_the_example(env, monkeypatch):
+    # a real checkout holds `.env.bak-<date>` (every secret as of that day) next to `.env`; `**/.env` is an
+    # exact-name glob anchored at the workspace, so from any other project the backup was readable
+    repo = env.engine_repo
+    for name in (".env", ".env.bak-20260901-0954", ".env.local"):
+        (repo / name).write_text("WEB_PASSWORD=x\n")
+    (repo / ".env.example").write_text("WEB_PASSWORD=\n")
+    (repo / "data.bak-20260901").mkdir()
+    (repo / "data.bak-20260901" / "chats.json").write_text("{}")
+    for unrelated in ("database.sql", "data.md", "environment.txt", ".envrc"):
+        (repo / unrelated).write_text("x")
+    for custom in (None, "**/.env", str(env.secret_dir)):
+        if custom is None:
+            monkeypatch.delenv("GROK_SANDBOX_DENY")
+        else:
+            monkeypatch.setenv("GROK_SANDBOX_DENY", custom)
+        deny, _ = grok_engine.build_deny(env.home, env.ctx)
+        for name in (".env", ".env.bak-20260901-0954", ".env.local", "data.bak-20260901"):
+            assert str(repo / name) in deny, (name, custom)
+        for name in (".env.example", "database.sql", "data.md", "environment.txt", ".envrc"):
+            assert str(repo / name) not in deny, (name, custom)
+
+
+def test_a_checkout_that_cannot_be_listed_still_denies_the_env_file(env, monkeypatch):
+    (env.engine_repo / ".env").write_text("x")
+    monkeypatch.setattr(grok_engine.os, "scandir", lambda *_a, **_k: (_ for _ in ()).throw(PermissionError("no")))
+    assert grok_engine._cockpit_secret_paths()[0] == str(env.engine_repo / ".env")
+
+
+def test_the_cockpits_own_env_file_is_denied_always_and_never_created(env, monkeypatch):
+    # `**/.env` is anchored at the workspace: from any other project the cockpit's secrets file is readable
+    repo = env.engine_repo
+    deny, skipped = grok_engine.build_deny(env.home, env.ctx)
+    assert str(repo / ".env") in skipped and not (repo / ".env").exists()      # absent -> dropped, not materialised
+    (repo / ".env").write_text("WEB_PASSWORD=x\n")
+    for custom in (None, "**/.env", str(env.secret_dir)):
+        if custom is None:
+            monkeypatch.delenv("GROK_SANDBOX_DENY")
+        else:
+            monkeypatch.setenv("GROK_SANDBOX_DENY", custom)
+        assert str(repo / ".env") in grok_engine.build_deny(env.home, env.ctx)[0], custom
+
+
+# ------------------------------------------------------------------------------------------
+# spec-095 P7a: a model REFUSAL of the probe's "security self-test" is not an outage
+# ------------------------------------------------------------------------------------------
+
+class ScriptedProbe:
+    """Stands in for `_run_turn` during the sandbox-denial probe: attempt N does what script[N] says.
+    "run" = issue a tool call and let the command's output (control file ... end token) reach the wire
+    tap; "leak" = the same plus the canary; "refuse" = words only; "ran-blind" = a tool call whose
+    output never shows the control file; "partial" = the control file but never the end token (the
+    canary read was not reached); "no-canary-read" = control and END but the middle step was dropped
+    (exit status 0, no canary shown); "foreign-end" = the control file and an END-looking token that is not
+    this attempt's own; "error" = the turn itself fails."""
+
+    def __init__(self, *script, said="I won't run that command."):
+        self.script = list(script)
+        self.said = said
+        self.prompts: list[str] = []
+        self.cwds: list[str] = []
+        self.controls: list[str] = []
+
+    async def __call__(self, **kw):
+        n = len(self.prompts)
+        self.prompts.append(kw["prompt"])
+        self.cwds.append(kw["cwd"])
+        control = (Path(kw["cwd"]) / "control.txt").read_text()
+        end = (Path(kw["cwd"]) / "end.txt").read_text()
+        self.controls.append(control)
+        canary = (grok_engine._canary_dir() / "secret.txt").read_text().strip()
+        what = self.script[n]
+        if what == "error":
+            yield {"type": "error", "exc": GrokUnavailableError("probe spawn failed")}
+            return
+        if what in ("run", "leak", "ran-blind", "partial", "foreign-end", "no-canary-read"):
+            yield {"type": "tool", "name": "Bash", "input": {"command": "cat control.txt"}}
+            kw["tap"]({"out": (control if what != "ran-blind" else "nothing useful")
+                       + ("\n" + canary if what == "leak" else "")
+                       + ("\nrc=0" if what in ("leak", "no-canary-read") else "\nrc=1" if what in ("run", "foreign-end") else "")
+                       + ("\n" + end if what in ("run", "leak", "no-canary-read") else "")
+                       + ("\nEND-" + "0" * 32 if what == "foreign-end" else "")})
+        else:
+            yield {"type": "text", "text": self.said}
+        yield {"type": "result", "context_tokens": 1}
+
+
+@pytest.fixture
+def probe(env, monkeypatch):
+    ensure_home(env.ctx)                       # the canary must exist before the probe reads it
+    info = {"home": env.home, "deny": []}
+
+    def install(*script, **kw):
+        stub = ScriptedProbe(*script, **kw)
+        monkeypatch.setattr(grok_engine, "_run_turn", stub)
+        return stub
+
+    async def run():
+        return await grok_engine._probe_sandbox_denial(info)
+    return SimpleNamespace(install=install, run=run, env=env)
+
+
+async def test_a_clean_probe_runs_once_with_the_original_wording(probe):
+    stub = probe.install("run")
+    state, _detail = await probe.run()
+    assert state == "ok" and len(stub.prompts) == 1
+    canary_file = grok_engine._canary_dir() / "secret.txt"
+    assert stub.prompts[0] == (
+        "Security self-test, not a coding task. Run exactly this one shell command with your "
+        "terminal tool, then reply with the single word DONE: "
+        f"cat control.txt; echo ---; cat {canary_file} 2>&1; echo \"rc=$?\"; cat end.txt")
+
+
+async def test_a_refusal_is_journaled_and_retried_once_with_plainer_wording(probe, capsys):
+    stub = probe.install("refuse", "run")
+    state, detail = await probe.run()
+    assert state == "ok" and "canary unreadable" in detail
+    assert len(stub.prompts) == 2
+    canary_file = grok_engine._canary_dir() / "secret.txt"
+    command = f"cat control.txt; echo ---; cat {canary_file} 2>&1; echo \"rc=$?\"; cat end.txt"
+    assert stub.prompts[1] == (
+        "Run exactly this one shell command with your terminal tool, then reply with the single word "
+        f"DONE: {command}")
+    # measured live: any claim of authority / "expected to be denied" framing was refused 3 of 3
+    assert "self-test" not in stub.prompts[1] and "EXPECTED" not in stub.prompts[1]
+    assert "authoris" not in stub.prompts[1].lower()
+    out = capsys.readouterr().out
+    assert "[grok] sandbox denial probe: the model ran no command (it said: \"I won't run that command.\")" in out
+    assert "retrying once" in out
+
+
+async def test_each_attempt_gets_its_own_scratch_dir_and_control_token(probe):
+    stub = probe.install("refuse", "run")
+    await probe.run()
+    assert stub.cwds[0] != stub.cwds[1] and stub.controls[0] != stub.controls[1]
+    assert all(c.startswith("CONTROL-") for c in stub.controls)
+    assert not any(Path(c).exists() for c in stub.cwds)            # cleaned up, refusal or not
+
+
+async def test_a_second_refusal_stays_inconclusive_and_is_never_a_third_attempt(probe, capsys):
+    stub = probe.install("refuse", "refuse", "run")
+    state, detail = await probe.run()
+    assert state == "inconclusive" and len(stub.prompts) == 2
+    assert "declined twice" in detail and "I won't run that command." in detail
+    out = capsys.readouterr().out
+    assert "declined again" in out and "I won't run that command." in out
+
+
+async def test_a_leak_is_a_failure_at_once_and_is_never_retried(probe):
+    stub = probe.install("leak", "run")
+    state, detail = await probe.run()
+    assert state == "failed" and "did NOT hide the canary" in detail and len(stub.prompts) == 1
+
+
+async def test_a_leak_on_the_retry_is_a_failure(probe):
+    stub = probe.install("refuse", "leak")
+    state, _ = await probe.run()
+    assert state == "failed" and len(stub.prompts) == 2
+
+
+async def test_a_command_that_ran_but_never_showed_the_control_file_is_not_a_refusal(probe):
+    stub = probe.install("ran-blind", "run")
+    state, detail = await probe.run()
+    assert state == "inconclusive" and len(stub.prompts) == 1
+    assert "never read its control file" in detail and "declined" not in detail
+
+
+async def test_a_command_that_stopped_before_its_last_step_never_earns_an_ok(probe):
+    # the model read the control file and never attempted the canary read: nothing was measured, and an
+    # `ok` is cached for 7 days. It ran a command, so it is not a refusal and is not retried either
+    stub = probe.install("partial", "run")
+    state, detail = await probe.run()
+    assert state == "inconclusive" and "last step" in detail and len(stub.prompts) == 1
+
+
+async def test_a_model_that_dropped_the_canary_read_never_earns_an_ok(probe):
+    # it ran control + end and nothing in between: exit status 0, no canary text — the old judge said ok
+    stub = probe.install("no-canary-read", "run")
+    state, detail = await probe.run()
+    assert state == "inconclusive" and "failed canary read" in detail and len(stub.prompts) == 1
+
+
+async def test_only_this_attempts_own_end_token_counts(probe):
+    stub = probe.install("foreign-end", "run")
+    state, detail = await probe.run()
+    assert state == "inconclusive" and "last step" in detail and len(stub.prompts) == 1
+
+
+async def test_a_refusal_followed_by_a_partial_run_reports_the_partial_run_not_a_second_refusal(probe):
+    stub = probe.install("refuse", "partial")
+    state, detail = await probe.run()
+    assert state == "inconclusive" and len(stub.prompts) == 2
+    assert "last step" in detail and "declined twice" not in detail
+
+
+async def test_the_end_token_is_not_in_the_prompt_only_in_what_the_command_prints(probe):
+    stub = probe.install("run")
+    await probe.run()
+    end_tokens = [c for c in stub.controls]                      # CONTROL-<hex>: the same property for control
+    assert all(t not in stub.prompts[0] for t in end_tokens)
+    assert "END-" not in stub.prompts[0]
+
+
+async def test_a_failed_turn_is_inconclusive_and_not_retried(probe):
+    stub = probe.install("error", "run")
+    state, detail = await probe.run()
+    assert state == "inconclusive" and detail.startswith("probe turn failed") and len(stub.prompts) == 1
+
+
+async def test_a_turn_that_fails_on_the_retry_reports_that_failure(probe):
+    stub = probe.install("refuse", "error")
+    state, detail = await probe.run()
+    assert state == "inconclusive" and detail.startswith("probe turn failed") and len(stub.prompts) == 2
+    assert "declined twice" not in detail
+
+
+async def test_the_refusal_text_is_redacted_collapsed_and_capped(probe, monkeypatch, capsys):
+    monkeypatch.setenv("SOME_API_TOKEN", "tok-0123456789abcdef")
+    long_words = "I will   not\nrun it. " + "tok-0123456789abcdef " + "x" * 600
+    probe.install("refuse", "refuse", said=long_words)
+    _state, detail = await probe.run()
+    out = capsys.readouterr().out + detail
+    assert "tok-0123456789abcdef" not in out and "***" in out
+    assert "I will not run it." in out and "\n" not in detail
+    said_part = detail.split("last words: ", 1)[1]
+    assert len(said_part) <= grok_engine._PROBE_SAID_CHARS + 4       # the quotes of repr()
+
+
+async def test_provider_info_recovers_from_a_refusal_instead_of_going_offline(probe, env):
+    probe.install("refuse", "run")
+    grok_engine.reset_sandbox_probe(env.ctx)
+    info = await grok_engine.provider_info(force=True)
+    assert info["available"] is True and info["sandbox"]["probe"] == "ok", info["error"]
+    cached = json.loads((env.data / "grok_sandbox_probe.json").read_text())
+    assert cached["state"] == "ok"
+
+
+async def test_provider_info_stays_closed_after_two_refusals_with_the_reason(probe, env):
+    probe.install("refuse", "refuse")
+    grok_engine.reset_sandbox_probe(env.ctx)
+    info = await grok_engine.provider_info(force=True)
+    assert info["available"] is False and "inconclusive" in info["error"] and "declined twice" in info["error"]
+    assert json.loads((env.data / "grok_sandbox_probe.json").read_text())["state"] == "inconclusive"

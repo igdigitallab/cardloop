@@ -824,6 +824,11 @@ class GrokBox:
         self.home = tmp_path / "grok-home"          # GROK_HOME — NOT created until a test asks
         self.data = tmp_path / "cockpit-data"       # deliberately NOT <repo_root>/data
         self.data.mkdir()
+        # the engine always denies the cockpit repo's own `.env`: a scratch repo, so the counts below
+        # do not depend on whether the checkout running the suite happens to have one
+        self.engine_repo = tmp_path / "cockpit-repo"
+        self.engine_repo.mkdir()
+        monkeypatch.setattr(grok_engine, "_REPO", self.engine_repo)
         self.secret_dir = tmp_path / "secrets"
         self.secret_dir.mkdir()
         self.dump = tmp_path / "dump.jsonl"
@@ -899,6 +904,11 @@ sys.exit(2)
         for d in (".claude", ".claude-accounts", ".cursor"):
             (self.fake_home / d).mkdir(exist_ok=True)
         (self.fake_home / ".claude.json").write_text("{}")
+        (self.engine_repo / ".env").write_text("WEB_PASSWORD=x\n")
+        # the other always-on entries: the operator's own login and the secret safe's directory
+        (self.fake_home / ".grok").mkdir(exist_ok=True)
+        (self.fake_home / ".grok" / "auth.json").write_text("{}")
+        (self.fake_home / ".config" / "claude-ops").mkdir(parents=True, exist_ok=True)
 
     def use_acp_fake(self, **switches) -> None:
         """The engine's own fake (tests/fake_grok_acp.py): `--version` and `models` only."""
@@ -2275,11 +2285,29 @@ def test_a_trusted_project_folder_is_fail_and_names_what_would_start(box):
     assert "trusted_folders.toml" in f.remedy
 
 
-def test_a_trusted_folder_with_nothing_listed_is_still_fail(box):
+def test_a_trusted_folder_with_nothing_to_start_is_ok_not_fail(box):
+    # measured live: a project with no config of its own reports projectTrusted=true whatever the trust
+    # store says; failing it made `doctor` exit 1 for every plain opted-in project
     _fake(box, docs_by_cwd={"alpha": _doc(box, projectTrusted=True)})
     _opt_in(box, "alpha")
     f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
-    assert f.level == "fail" and "TRUSTED" in f.value
+    assert f.level == "ok" and "isolated" in f.value and "TRUSTED" not in f.value
+
+
+def test_a_trusted_folder_whose_only_items_are_disabled_is_ok_too(box):
+    doc = _doc(box, projectTrusted=True, mcpServers=[_mcp("off", disabled=True)],
+               hooks=[{"event": "session_start", "source": {"type": "project"}, "disabled": True}])
+    _fake(box, docs_by_cwd={"alpha": doc})
+    _opt_in(box, "alpha")
+    assert box.probe(proc_root=box.tmp / "noproc")[LABEL].level == "ok"
+
+
+def test_a_trusted_folder_with_one_active_skill_is_still_fail(box):
+    skill = {"name": "deploy", "source": {"type": "project"}}
+    _fake(box, docs_by_cwd={"alpha": _doc(box, projectTrusted=True, skills=[skill])})
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "fail" and "TRUSTED" in f.value and "skills deploy (project)" in f.value
 
 
 def test_an_active_hook_under_the_sandbox_view_is_warn(box):
@@ -2309,7 +2337,8 @@ def test_a_non_bundled_active_skill_is_warn_and_bundled_or_disabled_ones_are_not
 
 def test_fail_beats_warn_across_projects(box):
     hook = {"event": "session_start", "source": {"type": "plugin"}}
-    _fake(box, docs_by_cwd={"alpha": _doc(box, hooks=[hook]), "beta": _doc(box, projectTrusted=True)})
+    _fake(box, docs_by_cwd={"alpha": _doc(box, hooks=[hook]),
+                            "beta": _doc(box, projectTrusted=True, mcpServers=[_mcp("tablet")])})
     _opt_in(box, "alpha", "beta")
     f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
     assert f.level == "fail" and "alpha" in f.value and "beta" in f.value

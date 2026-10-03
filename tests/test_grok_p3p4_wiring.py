@@ -333,7 +333,7 @@ async def test_every_endpoint_finds_the_grok_home_from_the_cockpits_ctx_not_the_
 ):
     monkeypatch.delenv("GROK_HOME", raising=False)
     monkeypatch.delenv("_CARDLOOP_DATA_DIR", raising=False)
-    ctx_home = fake_ctx["DATA"] / "grok-home"
+    ctx_home = grok_engine.grok_home(fake_ctx)       # next to DATA, derived from the ctx
     (ctx_home / "sessions").mkdir(parents=True)
     put_session(ctx_home, cwd, SID1, chat=[q("never touch webapp.py"), a("ok")], summary=summ())
     put_session(ctx_home, cwd, SID2, chat=[q("flux capacitor notes")], summary=summ())

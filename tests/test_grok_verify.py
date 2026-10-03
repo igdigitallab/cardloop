@@ -139,6 +139,14 @@ def test_rmtree_force_removes_sandbox_placeholders(tmp_path):
     gv.rmtree_force(root)                                  # gone already: no error
 
 
+def test_rmtree_force_of_a_path_that_is_gone_leaves_its_parent_alone(tmp_path):
+    parent = tmp_path / "scratch-parent"
+    parent.mkdir()
+    os.chmod(parent, 0o755)
+    gv.rmtree_force(parent / "already-gone")
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o755    # onerr used to chmod the PARENT to 0700
+
+
 def test_dir_bytes_and_litter_count(tmp_path):
     (tmp_path / "a").write_bytes(b"x" * 100)
     (tmp_path / "sub").mkdir()
@@ -800,6 +808,28 @@ import sys
 if "--version" in sys.argv:
     print("grok 9.9.9 (fake) [stable]")
     sys.exit(0)
+if sys.argv[1:2] == ["models"]:
+    print("You are logged in with grok.com.")
+    sys.exit(0)
+sys.exit(3)
+'''
+
+# `grok models` on an expired access token: the FIRST call says it is not authenticated while it
+# refreshes the token (measured on grok 1.0.46), the next one says logged in. {counter} = a file the fake
+# counts its calls in (a child is handed no FAKE_* variable, so state cannot ride the environment).
+FAKE_GROK_STALE_TOKEN = '''
+import os, sys
+if "--version" in sys.argv:
+    print("grok 9.9.9 (fake) [stable]")
+    sys.exit(0)
+if sys.argv[1:2] == ["models"]:
+    n = int(open({counter!r}).read()) if os.path.exists({counter!r}) else 0
+    open({counter!r}, "w").write(str(n + 1))
+    if n < {stale_calls}:
+        print("You are not authenticated.")
+        sys.exit(1)
+    print("You are logged in with grok.com.")
+    sys.exit(0)
 sys.exit(3)
 '''
 
@@ -1087,6 +1117,9 @@ import os, sys, time
 if "--version" in sys.argv:
     print("grok 9.9.9 (fake) [stable]")
     sys.exit(0)
+if sys.argv[1:2] == ["models"]:
+    print("You are logged in with grok.com.")
+    sys.exit(0)
 open({pidfile!r}, "w").write(str(os.getpid()))     # the engine hands a child no FAKE_* variable
 time.sleep(300)
 '''
@@ -1235,3 +1268,131 @@ def test_cli_soak_preflight_failure_stops_before_any_cycle(rig):
     summary = json.loads(Path(str(log) + ".summary.json").read_text())
     assert summary["cycles_run"] == 0 and summary["preflight_ok"] is False
     assert os.listdir(rig["parent"]) == []
+
+
+# ------------------------------------------------------------------------------------------
+# login warm-up (a copied login holds an access token that may have expired) and cycle pacing
+# ------------------------------------------------------------------------------------------
+
+def _stale_grok(rig, stale_calls):
+    counter = rig["tmp"] / f"models-{stale_calls}.count"
+    return _script(rig["tmp"] / "bin" / f"grok-stale-{stale_calls}",
+                   FAKE_GROK_STALE_TOKEN.format(counter=str(counter), stale_calls=stale_calls)), counter
+
+
+def test_warm_login_signed_in_on_the_first_call_does_not_wait(rig):
+    sleeps = []
+    ok, calls, line = gv.warm_login(str(rig["grok"]), rig["tmp"], sleep=sleeps.append)
+    assert (ok, calls, sleeps) == (True, 1, [])
+    assert "logged in with grok.com" in line
+
+
+def test_warm_login_refreshes_on_the_first_call_and_succeeds_on_the_second(rig):
+    grok, counter = _stale_grok(rig, 1)
+    sleeps = []
+    ok, calls, line = gv.warm_login(str(grok), rig["tmp"], delay=0.25, sleep=sleeps.append)
+    assert (ok, calls, sleeps) == (True, 2, [0.25])
+    assert counter.read_text() == "2"                        # exactly two calls, no third once it is signed in
+
+
+def test_warm_login_gives_up_after_the_last_try_and_reports_what_the_cli_said(rig):
+    grok, counter = _stale_grok(rig, 99)
+    sleeps = []
+    ok, calls, line = gv.warm_login(str(grok), rig["tmp"], tries=3, delay=0.5, sleep=sleeps.append)
+    assert (ok, calls, line) == (False, 3, "You are not authenticated.")
+    assert sleeps == [0.5, 0.5] and counter.read_text() == "3"      # no sleep after the final try
+
+
+def test_warm_login_survives_a_missing_binary_and_a_hung_one(rig):
+    ok, calls, line = gv.warm_login(str(rig["tmp"] / "no-such-grok"), rig["tmp"], tries=2, sleep=lambda _s: None)
+    assert (ok, calls, line) == (False, 2, "FileNotFoundError")
+    hang = _script(rig["tmp"] / "bin" / "grok-sleepy", "import time\ntime.sleep(60)\n")
+    ok, calls, line = gv.warm_login(str(hang), rig["tmp"], tries=1, timeout=0.5, sleep=lambda _s: None)
+    assert (ok, calls, line) == (False, 1, "TimeoutExpired")
+
+
+def test_warm_login_runs_the_cli_in_the_given_home_without_the_operators_keys(rig, monkeypatch):
+    spy = _script(rig["tmp"] / "bin" / "grok-spy", '''
+import json, os, sys
+if sys.argv[1:2] == ["models"]:
+    json.dump({"home": os.environ.get("GROK_HOME"), "cwd": os.getcwd(), "xai": os.environ.get("XAI_API_KEY"),
+               "upd": os.environ.get("GROK_DISABLE_AUTOUPDATER")}, open(os.environ["HOME"] + "/spy.json", "w"))
+    print("You are logged in with grok.com.")
+''')
+    home = rig["tmp"] / "the-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(rig["tmp"]))
+    monkeypatch.setenv("XAI_API_KEY", "xai-must-not-leak")
+    assert gv.warm_login(str(spy), home, sleep=lambda _s: None)[0] is True
+    seen = json.loads((rig["tmp"] / "spy.json").read_text())
+    assert seen == {"home": str(home), "cwd": str(home), "xai": None, "upd": "1"}
+
+
+@pytest.mark.parametrize("interval,started,now,expected", [
+    (30.0, 100.0, 100.0, 30.0),          # no time spent: wait the whole interval
+    (30.0, 100.0, 112.5, 17.5),          # the turn's own time counts: cycle STARTS stay `interval` apart
+    (30.0, 100.0, 130.0, 0.0),
+    (30.0, 100.0, 400.0, 0.0),           # a turn longer than the interval never waits a negative time
+])
+def test_wait_for_next_keeps_cycle_starts_one_interval_apart(interval, started, now, expected):
+    assert gv.wait_for_next(interval, started, now) == expected
+
+
+def test_cli_check_with_a_login_that_needs_one_refresh_still_passes(rig):
+    grok, counter = _stale_grok(rig, 1)
+    r = run_tool(rig, ["check", "--login", str(rig["login"]), "--grok-bin", str(grok)])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "login warm-up : signed in after 2 `grok models` call(s) — the first call refreshed the token" in r.stdout
+    assert len(_fake_runs(rig)) == 2                                  # live + canary actually ran
+    assert SECRET not in r.stdout + r.stderr
+
+
+def test_cli_check_with_an_unusable_login_runs_no_model_step_and_fails_each_required_one(rig):
+    grok, _counter = _stale_grok(rig, 99)
+    r = run_tool(rig, ["check", "--login", str(rig["login"]), "--grok-bin", str(grok)])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "login warm-up : NOT signed in after 4 `grok models` call(s) (You are not authenticated.)" in r.stdout
+    assert _fake_runs(rig) == []                                      # not one pytest spawned: no turn on a dead login
+    for step in ("live", "canary", "fixtures"):
+        assert f"[FAIL] {step}: not run — the login copy is not usable" in r.stdout
+    assert "[skip] cockpit" in r.stdout and "[FAIL] cockpit" not in r.stdout    # the optional step stays a skip
+    assert "VERDICT: FAIL" in r.stdout and "removed: yes (verified)" in r.stdout
+    assert os.listdir(rig["parent"]) == [] and SECRET not in r.stdout + r.stderr
+
+
+def test_cli_check_skip_flags_win_over_an_unusable_login(rig):
+    grok, _counter = _stale_grok(rig, 99)
+    r = run_tool(rig, ["check", "--login", str(rig["login"]), "--grok-bin", str(grok), "--skip-live",
+                       "--skip-canary", "--skip-fixtures"])
+    assert "[skip] live" in r.stdout and "[skip] canary" in r.stdout and "[skip] fixtures" in r.stdout
+    assert "[FAIL] live" not in r.stdout and "[FAIL] fixtures" not in r.stdout
+
+
+def test_cli_soak_with_an_unusable_login_stops_before_the_preflight_and_any_cycle(rig):
+    grok, counter = _stale_grok(rig, 99)
+    log = rig["tmp"] / "dead-login.jsonl"
+    r = run_tool(rig, ["soak", "--login", str(rig["login"]), "--grok-bin", str(grok), "--cycles", "3",
+                       "--interval", "0.2", "--canary-every", "0", "--log", str(log)], GROK_BIN=str(grok))
+    assert r.returncode == 1, r.stdout + r.stderr
+    lines = [json.loads(x) for x in log.read_text().splitlines()]
+    assert [x["kind"] for x in lines] == ["preflight"] and lines[0]["ok"] is False
+    assert "the login copy is not usable" in lines[0]["detail"] and "not authenticated" in lines[0]["detail"]
+    assert "login warm-up: NOT signed in after 4" in r.stdout
+    assert counter.read_text() == "4"                                  # warm-up only: the engine never spawned a turn
+    summary = json.loads(Path(str(log) + ".summary.json").read_text())
+    assert summary["cycles_run"] == 0 and summary["verdict"] == "FAIL"
+    assert os.listdir(rig["parent"]) == [] and SECRET not in r.stdout + r.stderr + log.read_text()
+
+
+def test_cli_soak_ignores_an_inherited_grok_home_and_never_touches_it(rig):
+    """The soak derives its own `<scratch data>-grok-home`: an operator's GROK_HOME in the environment would
+    otherwise make it create, fill with the login copy and later delete the OPERATOR's home."""
+    grok, _counter = _stale_grok(rig, 99)
+    decoy = rig["tmp"] / "operators-real-home"
+    log = rig["tmp"] / "decoy.jsonl"
+    r = run_tool(rig, ["soak", "--login", str(rig["login"]), "--grok-bin", str(grok), "--cycles", "1",
+                       "--interval", "0.2", "--canary-every", "0", "--log", str(log)],
+                 GROK_BIN=str(grok), GROK_HOME=str(decoy))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not decoy.exists(), "the soak used the inherited GROK_HOME"
+    assert "login warm-up: NOT signed in" in r.stdout            # it did get as far as the scratch home's warm-up

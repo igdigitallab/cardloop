@@ -34,7 +34,7 @@ if not gs.webapp_serves("_grok_history.history_messages"):   # pragma: no cover 
 
 def session_dir(srv, project_id: str, session_id: str) -> Path:
     cwd = str(srv["cwds"][project_id])
-    return srv["app_dir"] / "data" / "grok-home" / "sessions" / urllib.parse.quote(cwd, safe="") / session_id
+    return srv["app_dir"] / "data-grok-home" / "sessions" / urllib.parse.quote(cwd, safe="") / session_id
 
 
 def seed_recorded_session(srv, project_id: str, session_id: str, fixture: str) -> None:

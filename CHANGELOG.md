@@ -24,7 +24,12 @@ official `grok` binary on a SuperGrok subscription — never the xAI API. Runboo
   is pinned on so a repo's own `.mcp.json` / `.grok` hooks and skills never start, with a wire
   tripwire as a second line; the sandbox is proven on the host by a self-test turn before Grok is
   offered. Cardloop's Grok login, sessions and profile live in their own `GROK_HOME`
-  (`tools/grok-acct login|status|logout`).
+  (`tools/grok-acct login|status|logout`), by default `<data dir>-grok-home` — next to the data dir,
+  never inside it. The cockpit's own data dir and `.env` are hidden from the model's shell as one
+  directory entry, and a project that contains the data dir or `GROK_HOME` is refused (so the cockpit's
+  own checkout can never be a Grok project). The model-writable instruction layers of `GROK_HOME`
+  (rules, `AGENTS.md`, skills, agents, …) are deleted before every turn, because one project's turn
+  could otherwise plant rules that every other project's next turn loads (measured with the real CLI).
 - **Per-project privacy opt-in.** Grok sends project code to xAI, so it is off in every project until
   `grok_allowed` is set (Settings toggle, strictly boolean); every selection and run site answers
   `409 grok is not enabled for this project` otherwise. A cwd at `$HOME` or above (free chats) needs

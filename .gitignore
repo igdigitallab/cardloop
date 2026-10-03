@@ -8,6 +8,7 @@
 
 # --- runtime state and data (chat IDs, sessions, logs, audit, timeline) ---
 data/
+data-grok-home/
 # data snapshots (e.g. data.bak-<date>/) carry private transcripts and tokens — never track
 data.bak*/
 *.log

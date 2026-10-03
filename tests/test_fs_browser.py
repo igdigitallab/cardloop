@@ -540,6 +540,42 @@ def test_the_cockpit_data_dir_is_private_except_uploads(world, monkeypatch):
         assert "data" not in names
 
 
+def test_the_grok_home_beside_the_data_dir_is_private_and_unlisted(world, monkeypatch):
+    """`<data>-grok-home` (grok_engine.grok_home) is a sibling of data/ inside the repo checkout: without this
+    the project Files tab listed it and `raw` served its auth.json token."""
+    repo = world["home"] / "cardloop"
+    data = repo / "data"
+    grok = repo / "data-grok-home"
+    for rel in ("auth.json", "sessions/x/chat_history.jsonl", "sandbox.toml"):
+        f = grok / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("TOKEN")
+    (repo / "data-grok-homework.md").write_text("an unrelated sibling with a similar prefix")
+    data.mkdir(exist_ok=True)
+    monkeypatch.setattr(fb, "DATA_DIR", data.resolve())
+    monkeypatch.delenv("GROK_HOME", raising=False)
+    for roots in (roots_for(world), roots_for(world, cwd=repo)):
+        for rel in ("auth.json", "sessions/x/chat_history.jsonl", "sandbox.toml"):
+            assert status_of(fb.open_raw, str(grok / rel), roots) == 403, rel
+            assert status_of(fb.read_file, str(grok / rel), roots) == 403, rel
+        assert status_of(fb.list_dir, str(grok), roots) == 403
+        names = {e["name"] for e in fb.list_dir(str(repo), roots)["entries"]}
+        assert "data-grok-home" not in names and "data-grok-homework.md" in names
+
+
+def test_a_relocated_grok_home_is_private_too(world, monkeypatch):
+    home = world["home"] / "elsewhere" / "grok-state"
+    home.mkdir(parents=True)
+    (home / "auth.json").write_text("TOKEN")
+    monkeypatch.setattr(fb, "DATA_DIR", (world["home"] / "cardloop" / "data").resolve())
+    monkeypatch.setenv("GROK_HOME", str(home))
+    r = roots_for(world)
+    assert status_of(fb.read_file, str(home / "auth.json"), r) == 403
+    assert status_of(fb.open_raw, str(home / "auth.json"), r) == 403
+    monkeypatch.delenv("GROK_HOME")
+    assert fb.read_file(str(home / "auth.json"), r)["content"] == "TOKEN"        # the rule follows the variable
+
+
 def test_a_relocated_secret_store_or_key_is_private_too(world, monkeypatch):
     store = world["home"] / "elsewhere" / "safe.bin"
     key = world["home"] / "elsewhere" / "safe.key"

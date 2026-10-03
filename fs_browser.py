@@ -70,8 +70,23 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 _DATA_ALLOWED = frozenset({"inbox"})
 
 
+def _grok_homes() -> "list[Path]":
+    """The Grok runtime's own home — its login (auth.json), sessions and generated profile. By default it
+    sits NEXT TO the data dir (`<data>-grok-home`, grok_engine.grok_home), i.e. inside the repo checkout,
+    where a project Files tab would otherwise serve its token; GROK_HOME relocates it."""
+    homes = [DATA_DIR.parent / f"{DATA_DIR.name}-grok-home"]
+    raw = os.environ.get("GROK_HOME", "").strip()
+    if raw:
+        try:
+            homes.append(Path(os.path.expanduser(raw)).resolve())
+        except (OSError, RuntimeError):
+            pass
+    return homes
+
+
 def _cockpit_private(p: Path) -> bool:
-    """True for the cockpit's data dir (outside `inbox`) and for a relocated secret store / key."""
+    """True for the cockpit's data dir (outside `inbox`), the Grok runtime's home, and for a relocated
+    secret store / key."""
     try:
         if p == DATA_DIR or DATA_DIR in p.parents:
             rel = p.relative_to(DATA_DIR).parts
@@ -79,6 +94,8 @@ def _cockpit_private(p: Path) -> bool:
                 return True
     except ValueError:
         pass
+    if any(p == home or home in p.parents for home in _grok_homes()):
+        return True
     for var in ("CLAUDE_OPS_SECRET_STORE", "CLAUDE_OPS_SECRET_KEYFILE"):
         raw = os.environ.get(var)
         if raw:

@@ -6289,6 +6289,11 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
             if not isinstance(v, bool):
                 return web.json_response({"error": f"{k}: expected bool"}, status=400)
             updates[k] = True if v else None
+        elif k == "context_pack_enabled" and v is None:
+            # GET serves null for a project that never chose ("inherit the global default", spec-075),
+            # so null on the way back in means "go back to inheriting": stored as a reset. The other
+            # two bools below have no inherit state (GET never serves them as null) and stay strict.
+            updates[k] = None
         elif k in ("git_enabled", "notify_on_error", "context_pack_enabled"):
             if not isinstance(v, bool):
                 return web.json_response({"error": f"{k}: expected bool"}, status=400)
@@ -10754,6 +10759,8 @@ async def api_card_check(req: web.Request) -> web.Response:
 _FS_EXCLUDE_DIRS: set[str] = {
     ".git", "node_modules", "venv", ".venv", "__pycache__",
     "dist", ".worktrees", ".mypy_cache", ".pytest_cache",
+    # the Grok runtime's own home sits NEXT TO data/ (grok_engine.grok_home): its auth.json is a login token
+    "data-grok-home",
 }
 
 # Files/patterns hidden from listing and reading.
@@ -12417,13 +12424,17 @@ async def api_project_sessions(req: web.Request) -> web.Response:
         try:
             active_thread = (active_chat or {}).get("codex_thread_id")
             rows = await _codex.list_threads(cwd=project["cwd"], limit=30)
+            labels = _load_session_labels(ctx)
             sessions = [{
                 "session_id": row.get("id"), "codex_thread_id": row.get("id"),
                 "provider": "codex", "last_used": datetime.fromtimestamp(
                     row.get("recencyAt") or row.get("updatedAt") or 0, tz=timezone.utc
                 ).isoformat(),
                 "preview": row.get("preview") or "", "is_active": row.get("id") == active_thread,
-                "label": row.get("name"), "message_count": len(row.get("turns") or []),
+                # the operator's own rename (the picker's ✎ writes the cockpit label store for ANY
+                # provider) wins over the CLI's title
+                "label": labels.get(row.get("id")) or row.get("name"),
+                "message_count": len(row.get("turns") or []),
                 "context_tokens": None,
             } for row in rows]
             return web.json_response({"sessions": sessions, "provider": "codex"})
@@ -12437,13 +12448,15 @@ async def api_project_sessions(req: web.Request) -> web.Response:
             rows = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: _grok_history.list_sessions(
                     project["cwd"], limit=30, grok_home=_grok.grok_home(ctx)))
+            labels = _load_session_labels(ctx)
             sessions = [{
                 "session_id": row.get("id"), "grok_session_id": row.get("id"),
                 "provider": "grok", "last_used": datetime.fromtimestamp(
                     row.get("recencyAt") or row.get("updatedAt") or 0, tz=timezone.utc
                 ).isoformat(),
                 "preview": row.get("preview") or "", "is_active": row.get("id") == active_grok,
-                "label": row.get("name"), "message_count": row.get("message_count"),
+                "label": labels.get(row.get("id")) or row.get("name"),
+                "message_count": row.get("message_count"),
                 "context_tokens": None,
             } for row in rows]
             return web.json_response({"sessions": sessions, "provider": "grok"})
@@ -15313,12 +15326,22 @@ async def api_project_chat(req: web.Request) -> web.Response:
                         _ctx_warned.add(session_key)
                 except Exception as _cw_exc:
                     print(f"[context-warn] state check failed: {_cw_exc}")
+                # An adapter engine reports the window of the model it actually ran (Grok 256K, Codex
+                # whatever app-server says), and the history endpoint serves that same number after
+                # a reload — so the live meter must not claim Claude's 1M for it. Claude is the
+                # default provider and keeps the configured window.
+                _ev_window = event.get("context_window")
+                _frame_window = (
+                    _ev_window
+                    if (not _spec.is_default and isinstance(_ev_window, int)
+                        and not isinstance(_ev_window, bool) and _ev_window > 0)
+                    else CONTEXT_WINDOW)
                 await _send({
                     "type": "result",
                     "provider": _provider_for_run,
                     **_id_fields,
                     "context_tokens": ctx_tokens,
-                    "context_window": CONTEXT_WINDOW,
+                    "context_window": _frame_window,
                     # Two-tier cost thresholds delivered to the frontend: yellow at 300K, red at 500K.
                     # Decoupled from the 1M window — fire in the real re-bill pain-zone.
                     "context_warn_at": CONTEXT_WARN_AT,
