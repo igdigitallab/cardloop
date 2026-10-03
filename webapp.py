@@ -67,6 +67,7 @@ import autopilot as _autopilot
 # spec-074: global search index (SQLite FTS5 over transcripts/timeline/boards)
 import search as _search
 import codex_engine as _codex
+import grok_engine as _grok
 import providers
 
 # spec-075: context pack — deterministic project-state injection on fresh sessions
@@ -3045,6 +3046,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "context_pack_enabled": b.get("context_pack_enabled"),
             "board_provider": providers.normalize(b.get("board_provider")),
             **{a.model_field: b.get(a.model_field) or a.fallback_model(ctx) for a in providers.adapters()},
+            # spec-095 D5: per-project privacy opt-ins (strictly true; absent = off)
+            **{g: b.get(g) is True for g in providers.gate_fields()},
             # spec-082 A: tools the ask-mode gate auto-approves in this project
             "ask_always_allow": b.get("ask_always_allow") or [],
             # Subscription pinned to this project (None = follow the global choice).
@@ -3073,6 +3076,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "favorite": fid in fav_set,
             "provider": providers.normalize(b.get("provider")),
             **{a.model_field: b.get(a.model_field) or a.fallback_model(ctx) for a in providers.adapters()},
+            # spec-095 D5: a free chat is its own synthetic project — the opt-in lives on its record
+            **{g: b.get(g) is True for g in providers.gate_fields()},
             "account": b.get("account") or None,
             # spec-092 P3: the project's inference-endpoint pin. Omitted here it would be
             # invisible to every endpoint and the Settings selector would silently do nothing.
@@ -5918,6 +5923,68 @@ def _effective_card_provider(card: dict, project: dict) -> str:
     return providers.DEFAULT
 
 
+def _card_provider_for_run(card: dict, project: dict) -> str:
+    """The provider a card ACTUALLY runs on: its effective provider, except that a project
+    pinned to the local backend runs every turn on Claude (spec-092 P3 — a Codex card cannot
+    run on a local Anthropic-protocol endpoint at all, so the pin overrides the card)."""
+    if str((project or {}).get("backend") or ""):
+        return runtime.DEFAULT_PROVIDER
+    return _effective_card_provider(card, project)
+
+
+# ───────────── spec-095 D5: per-project privacy gate — the ONE choke point ─────────────
+
+class ProviderGateRefused(RuntimeError):
+    """A run was refused because its provider is not enabled for the project (D5)."""
+
+
+def _is_registered_provider(name: object) -> bool:
+    """True for a name in the provider table. Module-level on purpose: some handlers bind a
+    local called `providers` (the live registry dict) that shadows the module."""
+    return isinstance(name, str) and name in providers.names()
+
+
+def _provider_gate_refusal(project: "dict | None", provider: str) -> "str | None":
+    """Why `project` may not use `provider`, or None when it may.
+
+    EVERY site that selects a provider (chat create, free chat, runtime PATCH, card create/edit,
+    `board_provider`, the queue accept) and EVERY site that launches a run (queue drain, direct
+    chat POST, board card) asks this, so the rule cannot drift between them. The hook itself is
+    `ProviderSpec.gate`. Strict like `providers.get`: an unregistered name raises."""
+    return providers.gate_refusal(provider, project)
+
+
+def _gated_engine(spec: "providers.ProviderSpec", project: "dict | None", engine):
+    """The engine factory a run site may call: `engine` itself when `project` may use
+    `spec`, otherwise a factory whose ONLY output is the refusal as an engine `error` event.
+
+    A run-time refusal must reach the operator through the site's own error path (the queue's
+    live ring, the card's sidecar and Failed column) and must never turn into a run on another
+    provider — the selection was accepted earlier, the project can lose the flag before the
+    drain, and silently re-binding it would send the code somewhere nobody chose."""
+    refusal = _provider_gate_refusal(project, spec.name)
+    if refusal is None:
+        return engine
+
+    async def _refused(**_kwargs):
+        yield {"type": "error", "exc": ProviderGateRefused(refusal)}
+    return _refused
+
+
+def _gate_project(ctx: dict, project: "dict | None", project_id: "str | None" = None) -> dict:
+    """The record the gate judges at RUN time: the live registry entry when there is one — a
+    flag revoked after a message was queued or a card started must count, and several callers
+    hold a record that is minutes or hours old — else the record the caller holds. A project
+    that cannot be resolved at all is judged as an empty record, which a gated provider refuses.
+    """
+    pid = project_id or (project or {}).get("id")
+    if pid:
+        live = _find_project_by_id(ctx, pid)
+        if live is not None:
+            return live
+    return project or {}
+
+
 def _git_enabled(project: dict) -> bool:
     """git_enabled per-project (topics.json). Default True (git enabled).
     False → cockpit does NOT use git: card runs are legacy, git-sync returns 409,
@@ -5931,7 +5998,7 @@ def _git_enabled(project: dict) -> bool:
 # the return values of _infer_archetype() further down this file.
 _PROJECT_ARCHETYPES = ("software", "content", "ops", "scratchpad")
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", *providers.adapter_model_fields(), "ask_always_allow", "account", "backend")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", *providers.adapter_model_fields(), *providers.gate_fields(), "ask_always_allow", "account", "backend")
 
 # spec-051: per-project policy for resuming a run interrupted by a rate-limit.
 #   ask    — show an in-chat Yes/No prompt (default; visible, not silent)
@@ -6085,6 +6152,8 @@ def _project_settings_view(project: dict) -> dict:
         "context_pack_enabled": project.get("context_pack_enabled"),
         "board_provider": providers.normalize(project.get("board_provider")),
         **{a.model_field: project.get(a.model_field) or a.fallback_model({}) for a in providers.adapters()},
+        # spec-095 D5: privacy opt-ins (strictly true; absent = off)
+        **{g: project.get(g) is True for g in providers.gate_fields()},
         # spec-082 A: tools auto-approved by the ask-mode gate in this project.
         "ask_always_allow": _ask_always_allow(project),
         # Subscription pinned to this project (None = follow the global choice).
@@ -6152,9 +6221,17 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
     for k, v in body.items():
         # `_PROJECT_SETTING_FIELDS` is fixed at import; an adapter registered later still owns its
         # `<name>_model` field, so that one is looked up live.
-        if k not in _PROJECT_SETTING_FIELDS and k not in providers.adapter_model_fields():
+        if (k not in _PROJECT_SETTING_FIELDS and k not in providers.adapter_model_fields()
+                and k not in providers.gate_fields()):
             return web.json_response({"error": f"unknown key: {k}"}, status=400)
-        if k in ("git_enabled", "notify_on_error", "context_pack_enabled"):
+        if k in providers.gate_fields():
+            # spec-095 D5: the per-project opt-in. Strictly a boolean (a string "false" must not
+            # read as truthy); off is stored as a reset so a project that never opted in and one
+            # that opted out again are the same record.
+            if not isinstance(v, bool):
+                return web.json_response({"error": f"{k}: expected bool"}, status=400)
+            updates[k] = True if v else None
+        elif k in ("git_enabled", "notify_on_error", "context_pack_enabled"):
             if not isinstance(v, bool):
                 return web.json_response({"error": f"{k}: expected bool"}, status=400)
             updates[k] = v
@@ -6300,6 +6377,31 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
                 )
             updates[k] = sv if sv else None
 
+    # spec-095 D5: a default provider that is refused is judged against the RESULTING flags, so
+    # one save can opt a project in and pick the provider (turning a flag OFF is never refused:
+    # revoking must always work — the run sites enforce it for what was already selected).
+    if updates.get("board_provider"):
+        _resulting = {**project, **{g: updates[g] is True for g in providers.gate_fields() if g in updates}}
+        _refusal = _provider_gate_refusal(_resulting, updates["board_provider"])
+        if _refusal:
+            return web.json_response({"error": _refusal}, status=409)
+
+    # spec-095 D5: a free chat's opt-in lives on its OWN record. The generic writer below matches
+    # topics by cwd, and a free chat's cwd is normally $HOME — so the flag would be granted to
+    # every real project that shares it.
+    if project.get("is_free"):
+        _free_flags = {g: updates.pop(g) for g in providers.gate_fields() if g in updates}
+        if _free_flags:
+            _free = _load_free_chats(ctx)
+            _free_rec = _free.get(project["id"])
+            if isinstance(_free_rec, dict):
+                for g, v in _free_flags.items():
+                    if v is None:
+                        _free_rec.pop(g, None)
+                    else:
+                        _free_rec[g] = v
+                _save_free_chats(ctx, _free)
+
     cwd = project["cwd"]
     changed = 0
     for b in ctx["topics"].values():
@@ -6433,6 +6535,10 @@ async def api_create_task(req: web.Request) -> web.Response:
     if provider not in (None, *providers.names()):
         return web.json_response(
             {"error": "provider: must be " + " or ".join(providers.names())}, status=400)
+    if provider:
+        _refusal = _provider_gate_refusal(project, provider)
+        if _refusal:
+            return web.json_response({"error": _refusal}, status=409)
     card_model = (body.get("model") or "").strip() or None
     if card_model and not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", card_model):
         return web.json_response({"error": "model: invalid model id"}, status=400)
@@ -7178,16 +7284,14 @@ async def _run_card(
 
     run_mode: 'worktree' | 'legacy'. wt_info: {wt_path, base_branch} or None.
     """
-    provider = _effective_card_provider(card, project)
     # spec-092 P3: a project pinned to the local backend means EVERY turn of that project —
     # the Settings hint says so in those words, and a board card burning the cloud
     # subscription behind that promise is the exact failure the pin exists to prevent. The
     # pin also overrides the card's own provider: a Codex card cannot run on a local
     # Anthropic-protocol endpoint at all, so honouring `board_provider` here would mean
-    # ignoring the pin.
+    # ignoring the pin (see _card_provider_for_run).
+    provider = _card_provider_for_run(card, project)
     _card_backend = str((project or {}).get("backend") or "")
-    if _card_backend:
-        provider = runtime.DEFAULT_PROVIDER
     spec = providers.get(provider)
     run_engine = spec.engine(ctx)
     cwd = project["cwd"]
@@ -7247,6 +7351,12 @@ async def _run_card(
         try:
             if run_engine is None:
                 raise RuntimeError("run_engine not available in ctx (old launch without F1)")
+            # spec-095 D5: judged HERE, inside the card's own failure handling (the caller has
+            # already reserved ctx["running"], so nothing before the `try` may raise), against
+            # the LIVE project record — `project` may be the stale one _drain_queue carries
+            # from the previous card. A refusal arrives as this run's own error (sidecar +
+            # Failed column), never as a run on another provider.
+            run_engine = _gated_engine(spec, _gate_project(ctx, project), run_engine)
 
             # spec-092 P3: resolved HERE, inside the card's own failure handling, so a box
             # that is down marks the card Failed with a readable reason instead of escaping
@@ -7610,6 +7720,19 @@ async def api_move_task(req: web.Request) -> web.Response:
                 _save_board(cwd, name, preamble, cols)
             return web.json_response(_board_payload_with_specs(cwd, ctx["DATA"]))
 
+        # spec-095 D5: refuse BEFORE the card moves, so it stays where it was and the operator
+        # sees why. _run_card repeats the check at run time for every other way a card starts
+        # (the card queue, autopilot) and for a flag revoked after this point.
+        try:
+            _, _, _gate_cols = _load_board(cwd)
+        except Exception:
+            _gate_cols = {}
+        _gate_card = next((c for col in _gate_cols.values() for c in col if c["id"] == card_id), None)
+        if _gate_card is not None:
+            _refusal = _provider_gate_refusal(project, _card_provider_for_run(_gate_card, project))
+            if _refusal:
+                return web.json_response({"error": _refusal}, status=409)
+
         # Use _start_card_run (race-safe: lock reserved synchronously inside)
         result = await _start_card_run(ctx, req.app, project, card_id)
         if result["started"]:
@@ -7832,6 +7955,10 @@ async def api_update_task(req: web.Request) -> web.Response:
                 {"error": "provider: must be " + ", ".join(providers.names()) + ", or empty"},
                 status=400)
         card_provider = raw_provider or None
+        if card_provider:
+            _refusal = _provider_gate_refusal(project, card_provider)
+            if _refusal:
+                return web.json_response({"error": _refusal}, status=409)
     # spec-052 Phase 5: optional spec: epic link. Empty/absent = clear the link.
     update_spec = "spec" in body
     card_spec: str | None = None
@@ -8387,6 +8514,12 @@ async def api_free_create(req: web.Request) -> web.Response:
     cwd = (body.get("cwd") or _FREE_DEFAULT_CWD).rstrip("/")
     provider = providers.normalize(body.get("provider"))
     spec = providers.get(provider)
+    # spec-095 D5: a free chat is its own synthetic project; its opt-in is the flag it is
+    # created with (strictly the boolean true), so the gate is judged on exactly that record.
+    _free_flags = {g: True for g in providers.gate_fields() if body.get(g) is True}
+    _refusal = _provider_gate_refusal(_free_flags, provider)
+    if _refusal:
+        return web.json_response({"error": _refusal}, status=409)
     if not spec.is_default:
         model = (body.get("model") or spec.fallback_model(ctx)).strip()
         if not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", model):
@@ -8409,6 +8542,7 @@ async def api_free_create(req: web.Request) -> web.Response:
         "model": model,
         "provider": provider,
         **{f: None for f in providers.continuity_fields()},
+        **_free_flags,
         "created_at": time.time(),
     }
     _save_free_chats(ctx, free)
@@ -11416,6 +11550,29 @@ def _chat_provider(chat: "dict | None") -> str:
     return lookup.value or runtime.DEFAULT_PROVIDER
 
 
+# The registry is read by the cockpit on every page load and by the runtime picker; Grok's own
+# probe can include one real model turn (the sandbox-denial check, cached on disk afterwards), so
+# a registry read must never wait for it. `grok_engine.provider_info` shields the probe, so
+# giving up here leaves it running for the next caller.
+_GROK_REGISTRY_WAIT_SEC = 4.0
+
+
+async def _grok_info(ctx: dict) -> dict:
+    """Grok's registry row from its own provider module — bounded, and never raising: a fault
+    in the optional third provider must not take down the registry that serves Claude."""
+    info_fn = ctx.get("grok_provider_info") or _grok.provider_info
+    try:
+        return await asyncio.wait_for(info_fn(), timeout=_GROK_REGISTRY_WAIT_SEC)
+    except asyncio.TimeoutError:
+        error = "Grok availability check is still running — try again shortly"
+    except Exception as exc:  # noqa: BLE001
+        print(f"[grok] provider info failed: {exc!r}")
+        error = f"Grok provider check failed: {exc}"
+    return {"provider": "grok", "enabled": True, "available": False, "authenticated": False,
+            "auth_type": None, "models": [], "reasoning_levels": list(_grok.GROK_REASONING_LEVELS),
+            "capabilities": _grok.capabilities(), "error": error}
+
+
 async def _runtime_providers(ctx: dict) -> "dict[str, runtime.ProviderInfo]":
     """The live `{provider: ProviderInfo}` registry runtime.py's validation/resolution
     functions need — the richer counterpart to `_known_agent_providers()` above (models +
@@ -11440,6 +11597,8 @@ async def _runtime_providers(ctx: dict) -> "dict[str, runtime.ProviderInfo]":
         m.get("value") for m in (ollama_info.get("models") or []) if m.get("value")
     )
     claude_backends = ("",) + ((runtime.OLLAMA_BACKEND,) if ollama_info.get("available") else ())
+    grok_info = await _grok_info(ctx)
+    grok_models = tuple(m.get("value") for m in (grok_info.get("models") or []) if m.get("value"))
     return {
         "claude": runtime.ProviderInfo(
             provider="claude", available=True, models=claude_models,
@@ -11450,6 +11609,10 @@ async def _runtime_providers(ctx: dict) -> "dict[str, runtime.ProviderInfo]":
         "codex": runtime.ProviderInfo(
             provider="codex", available=bool(codex_info.get("available")),
             models=codex_models, capabilities=codex_info.get("capabilities") or {},
+        ),
+        "grok": runtime.ProviderInfo(
+            provider="grok", available=bool(grok_info.get("available")),
+            models=grok_models, capabilities=grok_info.get("capabilities") or {},
         ),
     }
 
@@ -11471,6 +11634,9 @@ def _chat_response(chat: dict) -> dict:
         "provider_status": lookup.status.value,
         "model": chat.get("model"),
         "codex_thread_id": chat.get("codex_thread_id"),
+        # spec-095: every further adapter's own continuity id is always present (null when unset)
+        **{a.continuity_field: chat.get(a.continuity_field) for a in providers.adapters()
+           if a.continuity_field != "codex_thread_id"},
         "runtime_revision": chat.get("runtime_revision", 0),
     }
 
@@ -11551,6 +11717,9 @@ async def api_project_chats_create(req: web.Request) -> web.Response:
         name = name[:80]
     provider = providers.normalize(body.get("provider"))
     spec = providers.get(provider)
+    _refusal = _provider_gate_refusal(project, provider)
+    if _refusal:
+        return web.json_response({"error": _refusal}, status=409)
     model = (body.get("model") or "").strip() or None
     if spec.is_default:
         if model is not None and model not in _ALLOWED_MODELS:
@@ -11652,6 +11821,14 @@ async def api_project_chats_patch(req: web.Request) -> web.Response:
             return web.json_response({"error": "chat not found"}, status=404)
 
         if runtime_patch:
+            # spec-095 D5: judged on the RESULTING provider (the patched one, else the chat's
+            # own) so a model/account-only patch cannot keep a chat on a provider the project
+            # no longer allows. Before the busy check: a refusal does not depend on state.
+            _would_provider = runtime_patch.get("provider", _chat_provider(chat))
+            if _is_registered_provider(_would_provider):
+                _refusal = _provider_gate_refusal(project, _would_provider)
+                if _refusal:
+                    return web.json_response({"error": _refusal}, status=409)
             # The busy check and the apply_change() write happen under the SAME lock
             # acquisition as everything else in this branch — checking busy-ness BEFORE
             # taking the lock would leave a window where a turn starts between the check
@@ -11900,6 +12077,11 @@ async def api_agent_providers(req: web.Request) -> web.Response:
                 "error": None,
             },
             {**codex_info, "accounts": [], "backends": []},
+            # spec-095: a server with Grok switched off does not list it at all (the cockpit
+            # hides an unlisted provider), so a default install's payload is unchanged. A chat
+            # already pinned to Grok keeps its record and shows as unavailable instead.
+            *([{**await _grok_info(ctx), "accounts": [], "backends": []}]
+              if _grok.grok_enabled() else []),
         ],
     })
 
@@ -13123,6 +13305,12 @@ async def api_chat_queue_add(req: web.Request) -> web.Response:
                  else None)
     # spec-092 item 3: pin the runtime this message was accepted against.
     _pinned_rt = _pin_chat_runtime(ctx, project, _q_chat_id)
+    # spec-095 D5: a message must not be accepted onto a provider the project may not use (the
+    # drain re-checks — the project can lose the flag while the message waits).
+    if _pinned_rt:
+        _refusal = _provider_gate_refusal(project, _pinned_rt["provider"])
+        if _refusal:
+            return web.json_response({"error": _refusal}, status=409)
     item = _chat_queue_enqueue(session_key, text, _q_chat_id, project["id"],
                                effort=_q_effort,
                                ultracode=_q_flag("ultracode"),
@@ -13657,6 +13845,11 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         run_engine = spec.engine(ctx)
         if run_engine is None:
             raise RuntimeError(f"{provider} engine not available in ctx")
+        # spec-095 D5: the project can lose the flag between accept and drain (the queue pins the
+        # provider, not the permission). A refusal is delivered as this turn's own error event —
+        # visible in the chat — and the message is never re-bound to another provider.
+        run_engine = _gated_engine(
+            spec, _gate_project(ctx, topic, _project_id or None), run_engine)
         _cid = {"chat_id": _resolved_chat_id} if _resolved_chat_id else {}
 
         # A queued message (typed while busy) or an auto-continue wake can be the first turn of a
@@ -14319,6 +14512,12 @@ async def api_project_chat(req: web.Request) -> web.Response:
     _run_chat: "dict | None" = None
     try:
         _entry = _load_chats(ctx).get(project["id"], {})
+        if not _entry and project.get("is_free"):
+            # A free chat that was never listed has no chats.json entry yet, so no chat
+            # resolved here and the turn ran on Claude — with the free chat's Codex/Grok model
+            # id. Seed the entry from the free record, exactly as listing the chat does.
+            async with _chats_lock():
+                _entry = _ensure_chat_entry(ctx, project["id"], session_key).get(project["id"], {})
         _run_chat = _find_chat(_entry, _req_chat_id)
     except Exception:
         _run_chat = None
@@ -14337,6 +14536,11 @@ async def api_project_chat(req: web.Request) -> web.Response:
         )
     _provider_for_run = _provider_lookup.value
     _spec = providers.get(_provider_for_run)
+    # spec-095 D5: before the message can be run OR queued — a queue item pins this provider,
+    # and the drain would only refuse it later.
+    _refusal = _provider_gate_refusal(project, _provider_for_run)
+    if _refusal:
+        return web.json_response({"error": _refusal}, status=409)
     if _run_chat and _run_chat.get("model"):
         model = _run_chat["model"]
     elif not _spec.is_default:

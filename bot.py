@@ -70,6 +70,7 @@ import webapp  # noqa: E402  (web cockpit — started alongside, state shared vi
 import tunnel  # noqa: E402  (spec-082 B: --tunnel / CARDLOOP_TUNNEL remote access + QR)
 import engine  # noqa: E402,F401  (after env load; re-exported for tests)
 import codex_engine  # noqa: E402  (isolated optional provider; SDK import stays lazy)
+import grok_engine  # noqa: E402  (isolated optional provider; spawns the `grok` CLI only per turn)
 # Re-exported from engine so `import bot; bot.X` keeps working for tests and any
 # external caller (webapp imports engine directly and does NOT import bot).
 from engine import (  # noqa: E402,F401  (deliberate: import after env load; re-exports)
@@ -112,7 +113,42 @@ def _build_ctx() -> dict:
         print("[e2e] E2E_FAKE_ENGINE=1 — ctx['run_engine'] replaced by e2e_fake_engine.run_engine")
     ctx["run_codex_engine"] = codex_engine.run_codex_engine
     ctx["codex_provider_info"] = codex_engine.provider_info
+    # spec-095: registered unconditionally (like Codex) — the engine itself refuses a run while
+    # GROK_ENABLED is off, so a chat pinned to Grok errors instead of falling back to Claude.
+    ctx["run_grok_engine"] = grok_engine.run_grok_engine
+    ctx["grok_provider_info"] = grok_engine.provider_info
     return ctx
+
+
+async def _grok_startup_probe(ctx: dict) -> None:
+    """spec-095: warm Grok's availability cache and journal the verdict under `[grok]`.
+
+    `provider_info(force=True)` can spend ONE real model turn (the sandbox-denial probe, cached
+    on disk by CLI version + profile afterwards), so it runs as a background task AFTER the
+    cockpit is listening and never blocks boot: the deploy canary's smoke GETs retry for only
+    ~60 s and the event loop is busy for 10-15 s after listen. A fault here degrades the
+    optional provider only — it must not take the task (or the cockpit) down."""
+    try:
+        info = await grok_engine.provider_info(force=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print(f"[grok] startup probe failed; Claude remains active: {exc!r}")
+        return
+    ctx["grok_startup_info"] = info
+    if info.get("available"):
+        print(f"[grok] ready via {info.get('auth_type')} auth ({len(info.get('models', []))} models, "
+              f"CLI {info.get('version') or '?'})")
+    else:
+        print(f"[grok] unavailable; Claude remains active: {info.get('error')}")
+
+
+def _schedule_grok_startup_probe(ctx: dict) -> "asyncio.Task | None":
+    """Start the background probe when Grok is switched on; None (and no work) when it is off."""
+    if not grok_engine.grok_enabled():
+        return None
+    print("[grok] enabled — availability is being probed in the background")
+    return asyncio.create_task(_grok_startup_probe(ctx), name="grok-startup-probe")
 
 
 async def _maybe_start_tunnel(tunnel_enabled: bool) -> "str | None":
@@ -197,6 +233,9 @@ async def _amain(*, tunnel_enabled: bool = False) -> None:
             print(f"[codex] unavailable; Claude remains active: {info.get('error')}")
     await webapp.start(ctx)
     print("Cardloop started (web cockpit + kanban auto-run).")
+    # spec-095: AFTER the cockpit is listening, and as a background task (see the helper). The
+    # reference is kept: a bare create_task result can be garbage-collected mid-flight.
+    _grok_probe_task = _schedule_grok_startup_probe(ctx)
 
     # spec-082 B: zero-config remote access. Never aborts startup — a tunnel failure
     # just means the cockpit stays reachable on localhost only.
@@ -210,6 +249,8 @@ async def _amain(*, tunnel_enabled: bool = False) -> None:
         # flush below — bounded internally (QuickTunnel.stop()), so this never delays
         # shutdown, and it guarantees no orphan cloudflared process survives us.
         await tunnel.stop_tunnel()
+        if _grok_probe_task is not None and not _grok_probe_task.done():
+            _grok_probe_task.cancel()
 
         # spec-039 graceful shutdown — two-phase:
         # Phase 1 (UNBOUNDED): flush sessions + evict live clients.  Must always

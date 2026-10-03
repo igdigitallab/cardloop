@@ -149,8 +149,8 @@ class RunContext:
     inherits its PARENT RUN's context wholesale -- see `wake_context_from()`, its
     `origin_id` is that parent run's id, not a new identity of its own).
 
-    `session_id` and `codex_thread_id` are both carried regardless of which `provider` is
-    currently active -- spec-092's handoff design keeps both ids forever so that switching
+    `session_id`, `codex_thread_id` and `grok_session_id` are all carried regardless of which
+    `provider` is currently active -- spec-092's handoff design keeps both ids forever so that switching
     back to a provider this chat has used before can resume its own conversation instead of
     starting cold.
     """
@@ -163,6 +163,7 @@ class RunContext:
     revision: int
     session_id: "str | None" = None
     codex_thread_id: "str | None" = None
+    grok_session_id: "str | None" = None
     effort: "str | None" = None
     ultracode: bool = False
     plan_mode: bool = False
@@ -449,6 +450,7 @@ def resolve_runtime(
         revision=revision,
         session_id=(chat or {}).get("session_id") if chat else None,
         codex_thread_id=(chat or {}).get("codex_thread_id") if chat else None,
+        grok_session_id=(chat or {}).get("grok_session_id") if chat else None,
         effort=opts.get("effort"),
         ultracode=bool(opts.get("ultracode", False)),
         plan_mode=bool(opts.get("plan_mode", False)),

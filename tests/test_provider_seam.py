@@ -435,7 +435,8 @@ def test_effective_card_provider_matrix(card_provider, board_provider, expected)
 @pytest.mark.parametrize("enabled", [True, False])
 def test_known_agent_providers_map(monkeypatch, enabled):
     monkeypatch.setattr(_webapp._codex, "codex_enabled", lambda: enabled)
-    assert _webapp._known_agent_providers() == {"claude": True, "codex": enabled}
+    monkeypatch.setattr(_webapp._grok, "grok_enabled", lambda: False)
+    assert _webapp._known_agent_providers() == {"claude": True, "codex": enabled, "grok": False}
 
 
 def test_free_chat_continuity_writes_the_providers_own_field(fake_ctx):
@@ -581,7 +582,7 @@ async def test_card_create_and_update_provider_validation(aiohttp_client, fake_c
     r = await client.post(f"/api/projects/{PROJECT_ID}/tasks",
                           json={"text": "t", "provider": "vertex"}, headers=h)
     assert r.status == 400
-    assert (await r.json())["error"] == "provider: must be claude or codex"
+    assert (await r.json())["error"] == "provider: must be claude or codex or grok"
 
     r = await client.post(f"/api/projects/{PROJECT_ID}/tasks",
                           json={"text": "a codex card", "provider": "codex"}, headers=h)
@@ -590,7 +591,7 @@ async def test_card_create_and_update_provider_validation(aiohttp_client, fake_c
     r = await client.patch(f"/api/projects/{PROJECT_ID}/tasks/aaaaaa",
                            json={"text": "t", "provider": "vertex"}, headers=h)
     assert r.status == 400
-    assert (await r.json())["error"] == "provider: must be claude, codex, or empty"
+    assert (await r.json())["error"] == "provider: must be claude, codex, grok, or empty"
 
 
 @pytest.mark.asyncio
@@ -723,7 +724,7 @@ async def test_project_settings_board_provider_validation_and_storage(
 
     r = await client.post(url, json={"board_provider": "vertex"}, headers=h)
     assert r.status == 400
-    assert (await r.json())["error"] == "board_provider: must be claude or codex"
+    assert (await r.json())["error"] == "board_provider: must be claude or codex or grok"
 
     r = await client.post(url, json={"board_provider": " CODEX "}, headers=h)
     assert r.status == 200, await r.text()

@@ -16,6 +16,12 @@ Adapter engines receive the per-turn `effort` exactly as the cockpit sent it, in
 cockpit-only "ultra" that is cleared for Claude alone — an adapter engine must whitelist the levels
 it understands (codex_engine does).
 
+A provider that ships project code to a third party also carries a per-project privacy GATE
+(`gate`, spec-095 D5): a pure `project -> refusal text | None` hook, default open. It is the ONE
+place the rule lives; `webapp._provider_gate_refusal` is the only caller, and every site that
+selects the provider (chat create, PATCH, card, board default) or launches a run (queue drain,
+direct POST, card) asks it — a refusal is an error, never a reason to run on another engine.
+
 Deliberately NOT here: history readers, session lists, usage, rate limits, search and the
 `/api/agent-providers` rows. Those differ inherently per provider and a table would only hide it.
 Nor are the Claude-only feature gates (account pinning, ultracode, auto-rotate, reconcile): they
@@ -29,6 +35,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 import codex_engine
+import grok_engine
 import runtime
 
 DEFAULT: str = runtime.DEFAULT_PROVIDER
@@ -68,6 +75,12 @@ class ProviderSpec:
     # Cheap, synchronous "is this provider turned on" probe (no auth round trip).
     enabled: Callable[[], bool]
     capabilities: Callable[[], dict]
+    # Per-project privacy gate: the refusal text, or None when the project may use this
+    # provider. The default is open — Claude is the cockpit's own harness and Codex has no gate.
+    gate: Callable[[Mapping[str, Any]], "str | None"] = lambda project: None
+    # Project/free-chat record field the gate reads ("" = no gate). Carried through the project
+    # views and the settings writer from this one name.
+    gate_field: str = ""
 
     @property
     def is_default(self) -> bool:
@@ -160,6 +173,19 @@ def adapter_model_fields() -> "tuple[str, ...]":
     return tuple(s.model_field for s in adapters())
 
 
+def gate_fields() -> "tuple[str, ...]":
+    """The project-record flags that opt a project in to a gated provider."""
+    return tuple(s.gate_field for s in _REGISTRY.values() if s.gate_field)
+
+
+def gate_refusal(name: str, project: "Mapping[str, Any] | None") -> "str | None":
+    """Why `project` may NOT use provider `name` right now, or None when it may.
+
+    Strict like `get`: an unregistered name raises instead of passing. A missing project record
+    is judged as an empty one (which a gated provider refuses) — never as "no gate"."""
+    return get(name).gate(project or {})
+
+
 register(ProviderSpec(
     name="claude",
     label="Claude",
@@ -184,4 +210,37 @@ register(ProviderSpec(
     fallback_model=lambda ctx: codex_engine.DEFAULT_CODEX_MODEL,
     enabled=lambda: codex_engine.codex_enabled(),
     capabilities=lambda: codex_engine.capabilities(),
+))
+
+
+# spec-095 D5. The text is an API contract: the cockpit UI classifies a 409 by it.
+GROK_GATE_MESSAGE = "grok is not enabled for this project"
+GROK_GATE_FIELD = "grok_allowed"
+
+
+def _grok_gate(project: Mapping[str, Any]) -> "str | None":
+    """Grok sends the project's code and prompts to xAI, which cannot be recalled: OFF in every
+    project until the operator sets `grok_allowed` (strictly the boolean true — a string or a
+    number in a hand-edited record does not count). `GROK_ALLOW_ALL_PROJECTS` is the
+    single-tenant escape hatch, read live."""
+    if grok_engine.allow_all_projects():
+        return None
+    return None if project.get(GROK_GATE_FIELD) is True else GROK_GATE_MESSAGE
+
+
+# `grok_engine` is looked up through the module on every call (not captured), like codex_engine
+# above. `fallback_model` is a constant on purpose: `_run_card` resolves the spec before its
+# `try`, so it must never raise.
+register(ProviderSpec(
+    name="grok",
+    label="Grok",
+    engine_key="run_grok_engine",
+    continuity_field="grok_session_id",
+    resume_kwarg="resume_session_id",
+    result_key="provider_session_id",
+    fallback_model=lambda ctx: grok_engine.DEFAULT_GROK_MODEL,
+    enabled=lambda: grok_engine.grok_enabled(),
+    capabilities=lambda: grok_engine.capabilities(),
+    gate=_grok_gate,
+    gate_field=GROK_GATE_FIELD,
 ))

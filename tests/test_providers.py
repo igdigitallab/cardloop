@@ -7,15 +7,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import codex_engine
+import grok_engine
 import providers
 import runtime
 
 
-def test_registry_holds_claude_first_then_codex():
-    assert providers.names() == ("claude", "codex")
+def test_registry_holds_claude_first_then_the_adapters():
+    assert providers.names() == ("claude", "codex", "grok")
     assert providers.DEFAULT == runtime.DEFAULT_PROVIDER == "claude"
     assert providers.get("claude").is_default and not providers.get("codex").is_default
-    assert [s.name for s in providers.adapters()] == ["codex"]
+    assert [s.name for s in providers.adapters()] == ["codex", "grok"]
 
 
 def test_unknown_provider_is_an_error_never_claude():
@@ -38,8 +39,13 @@ def test_per_provider_wiring_facts():
     assert (x.engine_key, x.continuity_field, x.resume_kwarg, x.result_key) == (
         "run_codex_engine", "codex_thread_id", "resume_thread_id", "thread_id")
     assert (c.model_field, x.model_field) == ("model", "codex_model")
-    assert providers.continuity_fields() == ("session_id", "codex_thread_id")
-    assert providers.adapter_model_fields() == ("codex_model",)
+    g = providers.get("grok")
+    assert (g.engine_key, g.continuity_field, g.resume_kwarg, g.result_key) == (
+        "run_grok_engine", "grok_session_id", "resume_session_id", "provider_session_id")
+    assert g.model_field == "grok_model" and g.label == "Grok"
+    assert providers.continuity_fields() == ("session_id", "codex_thread_id", "grok_session_id")
+    assert providers.adapter_model_fields() == ("codex_model", "grok_model")
+    assert providers.gate_fields() == ("grok_allowed",)
 
 
 def test_engine_lookup_reads_the_ctx_key():
@@ -70,9 +76,10 @@ def test_project_model_prefers_the_projects_field_then_the_builtin_default():
 
 
 @pytest.mark.parametrize("on", [True, False])
-def test_known_map_follows_codex_enabled_live(monkeypatch, on):
+def test_known_map_follows_each_providers_enabled_flag_live(monkeypatch, on):
     monkeypatch.setattr(codex_engine, "codex_enabled", lambda: on)
-    assert providers.known_map() == {"claude": True, "codex": on}
+    monkeypatch.setattr(grok_engine, "grok_enabled", lambda: not on)
+    assert providers.known_map() == {"claude": True, "codex": on, "grok": not on}
 
 
 def test_claude_capabilities_is_the_one_shared_dict():
@@ -106,7 +113,8 @@ def test_register_refuses_colliding_providers(clean_registry, over, message):
 
 def test_register_accepts_a_distinct_provider_and_it_flows_through_the_table(clean_registry):
     providers.register(_spec())
-    assert providers.names() == ("claude", "codex", "x")
-    assert providers.continuity_fields() == ("session_id", "codex_thread_id", "x_id")
-    assert providers.adapter_model_fields() == ("codex_model", "x_model")
+    assert providers.names() == ("claude", "codex", "grok", "x")
+    assert providers.continuity_fields() == (
+        "session_id", "codex_thread_id", "grok_session_id", "x_id")
+    assert providers.adapter_model_fields() == ("codex_model", "grok_model", "x_model")
     assert providers.normalize("x") == "x" and providers.is_adapter("x")
