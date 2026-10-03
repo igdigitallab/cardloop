@@ -770,6 +770,8 @@ def probe_data(repo_root: Path = REPO_ROOT) -> "list[Fact]":
 GROK_CMD_TIMEOUT_SEC = 3.0               # `grok --version` / `grok inspect --json`: bounded, never a hang
 GROK_AGENT_MAX_AGE_SEC = 15 * 60         # H7: a per-turn `grok agent` must never outlive its turn
 GROK_LITTER_WARN = 20                    # §10-C7: ~2 sandbox-blocked* entries per spawn, reaped per turn
+GROK_PROJECT_INSPECT_TIMEOUT_SEC = 5.0   # one `inspect --json` per opted-in project, under the sandbox
+GROK_PROJECTS_MAX = 12                   # inspect calls per doctor run; the rest is reported as not checked
 GROK_USAGE_WARN_BYTES = 10 * 1024 * 1024         # ~300 B/turn: this is ~35k turns, or a runaway loop
 GROK_LIMIT_ERRORS_WARN_BYTES = 2 * 1024 * 1024   # rows of up to 8000 chars, only quota-shaped text
 
@@ -944,6 +946,8 @@ def probe_grok(env: dict, repo_root: Path = REPO_ROOT, run=_run_group, proc_root
                                ("auth", lambda: _grok_auth(g, secrets_out)),
                                ("sandbox", lambda: _grok_sandbox(g)),
                                ("compat", lambda: _grok_compat(g)),
+                               ("folder trust", lambda: _grok_folder_trust(g)),
+                               ("compat (projects)", lambda: _grok_compat_projects(g)),
                                ("processes", lambda: _grok_processes(g)),
                                ("usage files", lambda: _grok_usage_files(g))):
                 try:
@@ -1243,6 +1247,155 @@ def _grok_compat(g: _Grok) -> "list[Fact]":
                             "`grok inspect --json` under the engine's env and the plugin list")]
     return [Fact(name, "isolated: 0 active MCP servers, 0 Claude/Cursor hooks, skills or agents (global config, "
                        "neutral cwd — a project's own .mcp.json is not covered)")]
+
+
+def _grok_folder_trust(g: _Grok) -> "list[Fact]":
+    """Folder trust is the switch that keeps a project's own `.mcp.json` / `.grok/config.toml` MCP
+    servers, `.grok/hooks` and `.grok/skills` from starting in a Grok turn (measured live, spec-095
+    P1b: untrusted starts none, `GROK_FOLDER_TRUST=0` starts all). Two things can lift it: the env
+    switch (the engine pins it on) and an entry in the cockpit home's trust store."""
+    name = "Grok folder trust"
+    pin = g.env.get("GROK_FOLDER_TRUST")
+    if pin != "1":
+        return [Fact(name, f"GROK_FOLDER_TRUST is not pinned on in the engine's child env (it is {pin!r})",
+                     level="fail",
+                     remedy="grok_engine.D3_ENV must carry GROK_FOLDER_TRUST=1: without it a CLI default that "
+                            "changes would start every repo's own MCP servers and hooks with full tool access")]
+    problem = g.ge._trust_store_problem(g.home)
+    if problem:
+        return [Fact(name, problem, level="fail",
+                     remedy="until the file is emptied the engine refuses every Grok turn (GrokIsolationError); "
+                            "Cardloop's GROK_HOME must only ever be used by the engine and tools/grok-acct")]
+    return [Fact(name, f"no folder is trusted in {g.home / 'trusted_folders.toml'}; GROK_FOLDER_TRUST=1 pinned in "
+                       "the child env — a project's own MCP servers, hooks and skills stay off (a turn aborts "
+                       "with GrokIsolationError if one ever starts)")]
+
+
+def _grok_project_dirs(data: Path, ge, allow_all: bool) -> "list[tuple[str, str]] | None":
+    """[(project name, cwd)] of the projects Grok may run in: records of data/topics.json with
+    `grok_allowed` strictly true (every record under GROK_ALLOW_ALL_PROJECTS), existing directories,
+    one entry per real path, $HOME and its ancestors left out (the engine refuses them). None when
+    the registry cannot be read — the caller stays silent then."""
+    try:
+        records = json.loads((data / "topics.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(records, dict):
+        return None
+    found: "dict[str, str]" = {}
+    for rec in records.values():
+        if not isinstance(rec, dict) or not (allow_all or rec.get("grok_allowed") is True):
+            continue
+        cwd = rec.get("cwd")
+        if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
+            continue
+        if ge._is_home_or_ancestor(cwd):
+            continue
+        found.setdefault(os.path.realpath(cwd), str(rec.get("project") or os.path.basename(cwd)))
+    return sorted(((n, c) for c, n in found.items()), key=lambda t: (t[0].lower(), t[1]))
+
+
+def _judge_project_inspect(res: "tuple[int, str, str] | None") -> "tuple[str, str]":
+    """(level, text) for one project's `grok inspect --json` taken under the engine's sandbox profile.
+    Strict about the format: a missing or mis-typed key is 'cannot tell', never '0 found'."""
+    if res is None:
+        return "warn", (f"could not inspect (no answer within {GROK_PROJECT_INSPECT_TIMEOUT_SEC:.0f}s, "
+                        "or the CLI could not start under the sandbox)")
+    code, out, err = res
+    if code != 0:
+        return "warn", f"could not inspect (exit {code}): {(err or out)[:100]}"
+    try:
+        doc = json.loads(out)
+        trusted = doc["projectTrusted"]
+        lists = {k: doc[k] for k in ("mcpServers", "hooks", "skills")}
+        ok = (isinstance(trusted, bool)
+              and all(isinstance(v, list) and all(isinstance(r, dict) for r in v) for v in lists.values()))
+    except (ValueError, KeyError, TypeError):
+        ok = False
+    if not ok:
+        return "warn", "unrecognised `grok inspect --json` format (projectTrusted / mcpServers / hooks / skills)"
+    mcp = [str(m.get("name") or "?") for m in lists["mcpServers"] if not m.get("disabled")]
+    hooks = [f"{h.get('event') or '?'} ({(h.get('source') or {}).get('type') or '?'})"
+             for h in lists["hooks"] if not h.get("disabled")]
+    skills = [f"{r.get('name') or '?'} ({(r.get('source') or {}).get('type') or '?'})"
+              for r in lists["skills"]
+              if not r.get("disabled") and (r.get("source") or {}).get("type") != "bundled"]
+
+    def names(items: "list[str]") -> str:
+        return ", ".join(items[:4]) + (f" (+{len(items) - 4} more)" if len(items) > 4 else "")
+
+    if trusted:
+        seen = [f"{label} {names(items)}" for label, items in
+                (("MCP", mcp), ("hooks", hooks), ("skills", skills)) if items]
+        return "fail", ("the folder is TRUSTED: its own MCP servers, hooks and skills start in a turn with full "
+                        "tool access" + (f" — active now: {'; '.join(seen)}" if seen else ""))
+    problems = []
+    if hooks:
+        problems.append(f"hook(s) active under the sandbox view: {names(hooks)}")
+    if skills:
+        problems.append(f"skill(s) outside the bundled set active: {names(skills)}")
+    if problems:
+        return "warn", "; ".join(problems)
+    if mcp:
+        return "ok", (f"MCP config listed ({names(mcp)}) but gated by folder trust — not started in a turn")
+    return "ok", "isolated"
+
+
+def _grok_compat_projects(g: _Grok) -> "list[Fact]":
+    """The global `Grok compat` fact runs in a neutral cwd, so it cannot see a project's own
+    `.mcp.json`. For each project that may use Grok (grok_allowed) this runs the same bounded
+    `inspect --json` IN the project, under the sandbox profile the engine would apply and with a
+    copy of the cockpit home's folder-trust store — i.e. what a turn there would load. A project
+    MCP server listed while the folder is untrusted is gated and does not count against it; a
+    trusted folder, or an active hook or non-bundled skill, does. Silent when the registry cannot
+    be read."""
+    name = "Grok compat (projects)"
+    ge = g.ge
+    projects = _grok_project_dirs(g.data, ge, ge.allow_all_projects())
+    if projects is None:
+        return []
+    if not projects:
+        return [Fact(name, "no project has grok_allowed set — nothing to check", level="info")]
+    if not g.binary or not g.version:
+        return [Fact(name, "not checked (no usable Grok CLI)", level="info")]
+    try:
+        deny, _skipped = ge.build_deny(g.home, g.ctx, bin_path=g.binary)
+    except ge.GrokUnavailableError as exc:
+        return [Fact(name, f"not checked: the sandbox profile cannot be built ({exc})", level="warn",
+                     remedy="fix GROK_SANDBOX_DENY first (see the sandbox profile fact)")]
+    home = g.scratch / "projects-home"
+    home.mkdir(exist_ok=True)
+    (home / "sandbox.toml").write_text(ge._sandbox_toml(deny), encoding="utf-8")
+    real_cfg = g.home / "config.toml"
+    (home / "config.toml").write_text(real_cfg.read_text(encoding="utf-8") if ge._config_ok(real_cfg)
+                                      else ge._config_toml(), encoding="utf-8")
+    with contextlib.suppress(OSError):
+        shutil.copyfile(g.home / "trusted_folders.toml", home / "trusted_folders.toml")
+    env = ge.child_env(home, sandbox=True)
+    rows: "list[tuple[str, str, str]]" = []
+    for pname, cwd in projects[:GROK_PROJECTS_MAX]:
+        res = g.run([g.binary, "inspect", "--json"], timeout=GROK_PROJECT_INSPECT_TIMEOUT_SEC, env=env, cwd=cwd)
+        rows.append((pname, *_judge_project_inspect(res)))
+    skipped = len(projects) - len(rows)
+    tail = f" (+{skipped} more project(s) not checked, limit {GROK_PROJECTS_MAX})" if skipped else ""
+    bad = [r for r in rows if r[1] != "ok"]
+    notes = [f"{n}: {t}" for n, lv, t in rows if lv == "ok" and t != "isolated"]
+    if not bad:
+        value = f"{len(rows)} project(s) with grok_allowed checked under the sandbox view: isolated"
+        if notes:
+            value += " — " + "; ".join(notes[:3]) + (f" (+{len(notes) - 3} more)" if len(notes) > 3 else "")
+        return [Fact(name, value + tail)]
+    level = "fail" if any(r[1] == "fail" for r in bad) else "warn"
+    value = "; ".join(f"{n}: {t}" for n, _, t in bad[:4]) + (f" (+{len(bad) - 4} more)" if len(bad) > 4 else "")
+    if len(rows) > len(bad):
+        value += f" — {len(rows) - len(bad)} other project(s) isolated"
+    remedy = ("a trusted folder lets a repo's own MCP servers and hooks start with full tool access: empty "
+              f"{g.home / 'trusted_folders.toml'} (the engine refuses every turn until then)"
+              if level == "fail" else
+              "run `grok inspect --json` in the project under the engine's env to see where it comes from; "
+              "Claude plugins and ~/.agents skills are hidden by the engine's profile and config.toml, so a "
+              "survivor is a Grok-home hook, a project one the folder trust let through, or a changed CLI")
+    return [Fact(name, value + tail, level=level, remedy=remedy)]
 
 
 def _grok_processes(g: _Grok) -> "list[Fact]":

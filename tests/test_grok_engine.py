@@ -1835,3 +1835,66 @@ async def test_a_requested_stop_that_races_a_permission_rejection_stays_clean_an
     events = await env.run()
     assert types(events)[-1] == "result" and "error" not in types(events)
     assert "cancellationCategory=PermissionRejected" in capsys.readouterr().out
+
+
+# ---- more than two concurrent turns on ONE GROK_HOME (spec-095 P1 UNVERIFIED (b)) ------------
+
+def _litter_pids(home: Path) -> dict[int, set[str]]:
+    out: dict[int, set[str]] = {}
+    for e in home.iterdir():
+        m = grok_engine._LITTER_RE.match(e.name)
+        if m:
+            out.setdefault(int(m.group(1)), set()).add(e.name)
+    return out
+
+
+async def test_four_concurrent_turns_on_one_home_never_reap_a_live_turns_placeholders(env):
+    N = 4
+    env.fake("synthetic_cancel", litter=1, spawn_child=1)    # every turn parks mid-tool until cancelled
+    keys = [f"p:{i}" for i in range(N)]
+    dead = 999_990
+    while grok_engine._pid_alive(dead):
+        dead += 1
+    (env.home / f"sandbox-blocked.{dead}").write_text("")           # a crashed earlier spawn's leftover
+    os.chmod(env.home / f"sandbox-blocked.{dead}", 0)
+    tasks = {k: asyncio.ensure_future(_drain(run_grok_engine(**env.kwargs(session_key=k, cwd=str(env.cwd)))))
+             for k in keys}
+
+    def parked():
+        turns = [env.ctx["running"].get(k) for k in keys]
+        return all(isinstance(t, GrokTurn) and t.prompt_started for t in turns)
+    assert await wait_until(parked, timeout=15)
+    live = {env.ctx["running"][k]._acp.proc.pid for k in keys}
+    assert len(live) == N
+    assert await wait_until(lambda: live <= set(_litter_pids(env.home)), timeout=5)
+    for k in keys:
+        grok_engine.reap_litter(env.home, None)             # a stray reaper pass from "another turn"
+    held = _litter_pids(env.home)
+    assert live <= set(held) and all(len(held[p]) == 2 for p in live), held   # all 8 placeholders intact
+
+    results = {}
+    for k in keys:                                           # stop them one at a time
+        before = set(_litter_pids(env.home))
+        await env.ctx["running"][k].interrupt()
+        results[k] = await asyncio.wait_for(tasks[k], 15)
+        still = set(_litter_pids(env.home))
+        done_pid = (before - still)
+        survivors = {env.ctx["running"][o]._acp.proc.pid for o in keys
+                     if o != k and not tasks[o].done()}
+        assert survivors <= still, f"turn {k} reaped a live turn's placeholders"
+        assert dead not in still                              # the dead leftover went with the first reaper
+        assert len(done_pid) <= 1 + (dead in before)
+    for k, evs in results.items():
+        assert types(evs)[-1] == "result" and "error" not in types(evs), (k, types(evs))
+    assert _litter_pids(env.home) == {}
+    assert [p for p in live if grok_engine._pid_alive(p)] == []
+
+
+async def test_concurrent_turns_do_not_trip_over_each_others_home_files(env):
+    N = 4
+    env.fake("synthetic_text", litter=1)
+    runs = await asyncio.gather(*[env.run(session_key=f"p:{i}") for i in range(N)])
+    assert all(types(r)[-1] == "result" for r in runs)
+    assert sorted(p.name for p in env.home.iterdir() if p.name.endswith(".tmp")) == []   # no orphan temp files
+    assert tomllib.loads((env.home / "sandbox.toml").read_text())["profiles"]["cardloop"]["deny"]
+    assert _litter_pids(env.home) == {}

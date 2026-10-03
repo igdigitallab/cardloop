@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import tomllib
 import sys
 from pathlib import Path
 
@@ -777,7 +778,7 @@ def inspect_doc(home: str, **over) -> dict:
     """The shape `grok inspect --json` has on grok 1.0.46 (captured from the real CLI), minimal."""
     doc = {
         "grokVersion": "1.0.46", "channel": "unknown", "cwd": "/x", "projectRoot": None,
-        "projectInstructions": [], "plugins": [],
+        "projectTrusted": False, "projectInstructions": [], "plugins": [],
         "hooks": [{"event": "pre_tool_use", "hookType": "command", "target": f"\"{home}/.claude/hooks/g.sh\"",
                    "source": {"type": "user", "path": f"{home}/.claude"}, "vendor": "claude",
                    "disabled": True, "compatibilityStatus": "disabled"}],
@@ -843,20 +844,27 @@ class GrokBox:
 
     # --- fake binary -----------------------------------------------------------------------
     def fake(self, version: str = "grok 1.0.46 (fake) [stable]", inspect_mode: str = "ok",
-             doc: "dict | None" = None, stderr: str = "", version_mode: str = "ok", version_exit: int = 0) -> None:
+             doc: "dict | None" = None, stderr: str = "", version_mode: str = "ok", version_exit: int = 0,
+             docs_by_cwd: "dict | None" = None, per_cwd_mode: "dict | None" = None) -> None:
         cfg = {"version": version, "version_mode": version_mode, "version_exit": version_exit,
                "inspect_mode": inspect_mode, "stderr": stderr, "sleep": SLEEP,
                "doc": doc if doc is not None else inspect_doc(str(self.fake_home)),
+               "docs_by_cwd": docs_by_cwd or {}, "per_cwd_mode": per_cwd_mode or {},
                "dump": str(self.dump), "pidfile": str(self.pidfile)}
         self.bin.write_text(f"""#!{sys.executable}
 import json, os, subprocess, sys, time
 cfg = json.loads({json.dumps(json.dumps(cfg))})
 args = sys.argv[1:]
-cfg_toml = os.path.join(os.environ.get("GROK_HOME", ""), "config.toml")
+gh = os.environ.get("GROK_HOME", "")
+cfg_toml = os.path.join(gh, "config.toml")
+def slurp(name):
+    path = os.path.join(gh, name)
+    return open(path).read() if os.path.exists(path) else None
 with open(cfg["dump"], "a") as fh:
     fh.write(json.dumps({{"args": args, "home": os.environ.get("GROK_HOME"), "cwd": os.getcwd(),
                          "env": dict(os.environ),
-                         "config": open(cfg_toml).read() if os.path.exists(cfg_toml) else None}}) + "\\n")
+                         "config": open(cfg_toml).read() if os.path.exists(cfg_toml) else None,
+                         "sandbox_toml": slurp("sandbox.toml"), "trust_store": slurp("trusted_folders.toml")}}) + "\\n")
 def hang():
     gc = subprocess.Popen([cfg["sleep"], "300"])
     open(cfg["pidfile"], "w").write(str(gc.pid))
@@ -867,7 +875,8 @@ if args == ["--version"]:
     print(cfg["version"])
     sys.exit(cfg["version_exit"])
 if args == ["inspect", "--json"]:
-    m = cfg["inspect_mode"]
+    here = os.path.basename(os.getcwd())
+    m = cfg["per_cwd_mode"].get(here, cfg["inspect_mode"])
     if m == "hang":
         hang()
     if m == "exit":
@@ -876,7 +885,7 @@ if args == ["inspect", "--json"]:
     if m == "garbage":
         print("this is not json")
         sys.exit(0)
-    print(json.dumps(cfg["doc"]))
+    print(json.dumps(cfg["docs_by_cwd"].get(here, cfg["doc"])))
     sys.exit(0)
 if args[:1] == ["agent"]:
     open(cfg["pidfile"], "w").write(str(os.getpid()))
@@ -884,6 +893,12 @@ if args[:1] == ["agent"]:
 sys.exit(2)
 """)
         self.bin.chmod(0o755)
+
+    def make_import_surface(self) -> None:
+        """The engine ALWAYS denies these (FLOOR_DENY); existing ones are not counted as 'missing'."""
+        for d in (".claude", ".claude-accounts", ".cursor"):
+            (self.fake_home / d).mkdir(exist_ok=True)
+        (self.fake_home / ".claude.json").write_text("{}")
 
     def use_acp_fake(self, **switches) -> None:
         """The engine's own fake (tests/fake_grok_acp.py): `--version` and `models` only."""
@@ -1267,6 +1282,7 @@ def test_profile_generated_by_the_engine_is_ok_with_the_deny_count(box):
 def test_profile_value_names_the_listed_paths_missing_on_this_host(box, monkeypatch):
     monkeypatch.setenv("GROK_SANDBOX_DENY", f"{box.secret_dir},{box.tmp / 'does-not-exist'}")
     box.env["GROK_SANDBOX_DENY"] = os.environ["GROK_SANDBOX_DENY"]
+    box.make_import_surface()                  # the always-on floor exists here: only ONE path is missing
     box.ensure_home()
     f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (profile)"]
     assert f.level == "ok" and "1 listed path(s) missing" in f.value
@@ -2126,3 +2142,357 @@ def test_core_sections_always_print_even_when_empty():
     assert "== Grok ==" not in text
     parsed = json.loads(doctor.render_json(sections, [], elapsed=0.1, exit_code=0))
     assert list(parsed["sections"]) == list(doctor.CORE_SECTIONS)
+
+
+# ═══════════════ spec-095 P1b: folder trust + per-project compat (the .mcp.json hole) ═══════════════
+#
+# `grok inspect --json` lists a project's own `.mcp.json` servers as ACTIVE, yet a turn started none
+# of them (measured live with marker files): folder trust gates them. So the per-project fact judges
+# `projectTrusted` + what is listed, run IN the project under the engine's sandbox profile.
+
+def _topics(box, records: "dict | list") -> None:
+    (box.data / "topics.json").write_text(json.dumps(records))
+
+
+def _project(box, name: str) -> Path:
+    d = box.tmp / "projects" / name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _opt_in(box, *names: str, **flags) -> "dict[str, Path]":
+    dirs = {n: _project(box, n) for n in names}
+    _topics(box, {f"k{i}": {"project": n, "cwd": str(d), "grok_allowed": True, **flags}
+                  for i, (n, d) in enumerate(dirs.items())})
+    return dirs
+
+
+def _doc(box, **over) -> dict:
+    """What a sandboxed inspect shows once the engine's config.toml hid ~/.agents: no user skills."""
+    over.setdefault("skills", [])
+    return inspect_doc(str(box.fake_home), **over)
+
+
+def _proj_calls(box) -> "list[dict]":
+    return [c for c in box.calls() if c["args"] == ["inspect", "--json"] and "projects" in c["cwd"]]
+
+
+def _mcp(name: str, *, disabled: bool = False, kind: str = "mcpJson", path: str = "/p/.mcp.json") -> dict:
+    rec = {"name": name, "transport": "stdio", "target": "/opt/x", "source": {"type": kind, "path": path}}
+    if disabled:
+        rec.update(disabled=True, compatibilityStatus="disabled")
+    return rec
+
+
+LABEL = "Grok compat (projects)"
+
+
+def _fake(box, **kw) -> None:
+    """The fake grok, with the isolated document as the default for every project."""
+    kw.setdefault("doc", _doc(box))
+    box.fake(**kw)
+
+
+def test_projects_fact_is_silent_without_a_readable_registry(box):
+    for setup in (lambda: None, lambda: (box.data / "topics.json").write_text("{not json"),
+                  lambda: _topics(box, ["a", "list"]), lambda: _topics(box, "text")):
+        setup()
+        facts = box.probe(proc_root=box.tmp / "noproc")
+        assert LABEL not in facts
+    assert _proj_calls(box) == []
+
+
+def test_projects_fact_says_so_when_nobody_opted_in(box):
+    _topics(box, {"k": {"project": "P", "cwd": str(_project(box, "p")), "grok_allowed": False}})
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "info" and "no project has grok_allowed" in f.value
+    assert _proj_calls(box) == []
+
+
+@pytest.mark.parametrize("flag", ["true", 1, "yes", None, False, [True]])
+def test_only_a_strict_boolean_true_counts_as_an_opt_in(box, flag):
+    _fake(box)
+    _topics(box, {"k": {"project": "P", "cwd": str(_project(box, "p")), "grok_allowed": flag}})
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "info" and _proj_calls(box) == []
+
+
+def test_an_isolated_project_is_ok_and_inspected_in_its_own_dir_under_the_sandbox(box):
+    _fake(box)
+    box.make_import_surface()
+    box.ensure_home()
+    dirs = _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "ok" and "1 project(s)" in f.value and "isolated" in f.value
+    (call,) = _proj_calls(box)
+    assert call["cwd"] == str(dirs["alpha"].resolve())
+    assert call["env"]["GROK_SANDBOX"] == "cardloop"                  # the production view, not the bare one
+    assert call["env"]["GROK_FOLDER_TRUST"] == "1"
+    assert call["home"] != str(box.home) and "doctor-grok-" in call["home"]
+    toml = tomllib.loads(call["sandbox_toml"])
+    assert str(box.fake_home / ".claude") in toml["profiles"]["cardloop"]["deny"]
+    assert tomllib.loads(call["config"])["skills"]["ignore"] == [str(box.fake_home / ".agents")]
+    assert not Path(call["home"]).exists(), "the throwaway home must be gone afterwards"
+
+
+def test_the_project_view_uses_the_engines_config_even_before_it_was_generated(box):
+    _fake(box)
+    assert not (box.home / "config.toml").exists()
+    _opt_in(box, "alpha")
+    box.probe(proc_root=box.tmp / "noproc")
+    (call,) = _proj_calls(box)
+    assert tomllib.loads(call["config"])["skills"]["disabled"] == ["resume-claude", "resume-codex", "resume-cursor"]
+
+
+def test_the_real_trust_store_is_what_the_project_inspect_runs_against(box):
+    _fake(box)
+    box.ensure_home()
+    (box.home / "trusted_folders.toml").write_text("# empty\n")
+    _opt_in(box, "alpha")
+    box.probe(proc_root=box.tmp / "noproc")
+    (call,) = _proj_calls(box)
+    assert call["trust_store"] == "# empty\n"
+
+
+def test_project_mcp_listed_while_the_folder_is_untrusted_is_gated_not_a_problem(box):
+    doc = _doc(box, mcpServers=[_mcp("tablet")], projectTrusted=False)
+    _fake(box, docs_by_cwd={"alpha": doc})
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "ok" and "tablet" in f.value and "gated by folder trust" in f.value
+
+
+def test_a_trusted_project_folder_is_fail_and_names_what_would_start(box):
+    doc = _doc(box, projectTrusted=True, mcpServers=[_mcp("tablet"), _mcp("off", disabled=True)],
+               hooks=[{"event": "session_start", "source": {"type": "project", "path": "/p/.grok/hooks"}}])
+    _fake(box, docs_by_cwd={"alpha": doc})
+    _opt_in(box, "alpha", "beta")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "fail" and "alpha" in f.value and "TRUSTED" in f.value
+    assert "tablet" in f.value and "off" not in f.value.replace("tablet", "")
+    assert "session_start (project)" in f.value
+    assert "beta" not in f.value.split("other project")[0] and "1 other project(s) isolated" in f.value
+    assert "trusted_folders.toml" in f.remedy
+
+
+def test_a_trusted_folder_with_nothing_listed_is_still_fail(box):
+    _fake(box, docs_by_cwd={"alpha": _doc(box, projectTrusted=True)})
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "fail" and "TRUSTED" in f.value
+
+
+def test_an_active_hook_under_the_sandbox_view_is_warn(box):
+    hook = {"event": "session_start", "source": {"type": "plugin", "plugin_name": "x"}, "disabled": None}
+    _fake(box, docs_by_cwd={"alpha": _doc(box, hooks=[hook])})
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "warn" and "hook(s) active" in f.value and "session_start (plugin)" in f.value
+
+
+def test_a_disabled_hook_is_ignored(box):
+    hook = {"event": "session_start", "source": {"type": "user"}, "vendor": "claude", "disabled": True}
+    _fake(box, docs_by_cwd={"alpha": _doc(box, hooks=[hook])})
+    _opt_in(box, "alpha")
+    assert box.probe(proc_root=box.tmp / "noproc")[LABEL].level == "ok"
+
+
+def test_a_non_bundled_active_skill_is_warn_and_bundled_or_disabled_ones_are_not(box):
+    skills = [{"name": "mine", "source": {"type": "user", "path": "/h/.agents/skills/m"}},
+              {"name": "off", "source": {"type": "user"}, "disabled": True},
+              {"name": "review", "source": {"type": "bundled"}}]
+    _fake(box, docs_by_cwd={"alpha": _doc(box, skills=skills)})
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "warn" and "mine (user)" in f.value and "off" not in f.value and "review" not in f.value
+
+
+def test_fail_beats_warn_across_projects(box):
+    hook = {"event": "session_start", "source": {"type": "plugin"}}
+    _fake(box, docs_by_cwd={"alpha": _doc(box, hooks=[hook]), "beta": _doc(box, projectTrusted=True)})
+    _opt_in(box, "alpha", "beta")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "fail" and "alpha" in f.value and "beta" in f.value
+
+
+@pytest.mark.parametrize("drop", ["projectTrusted", "mcpServers", "hooks", "skills"])
+def test_project_inspect_missing_key_is_unrecognised_never_zero_found(box, drop):
+    doc = _doc(box)
+    del doc[drop]
+    _fake(box, docs_by_cwd={"alpha": doc})
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "warn" and "unrecognised" in f.value
+
+
+@pytest.mark.parametrize("bad", ["yes", 1, None, "false"])
+def test_project_trusted_must_be_a_real_boolean(box, bad):
+    _fake(box, docs_by_cwd={"alpha": _doc(box, projectTrusted=bad)})
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "warn" and "unrecognised" in f.value
+
+
+@pytest.mark.parametrize("mode,needle", [("garbage", "unrecognised"), ("exit", "exit 3")])
+def test_project_inspect_failures_degrade_to_a_warning(box, mode, needle):
+    _fake(box, per_cwd_mode={"alpha": mode}, stderr="boom from grok")
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "warn" and needle in f.value
+
+
+def test_a_hung_project_inspect_is_bounded_and_its_group_killed(box, monkeypatch):
+    monkeypatch.setattr(doctor, "GROK_PROJECT_INSPECT_TIMEOUT_SEC", 0.5)
+    _fake(box, per_cwd_mode={"alpha": "hang"})
+    _opt_in(box, "alpha", "beta")
+    t0 = time.monotonic()
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert time.monotonic() - t0 < 6
+    assert f.level == "warn" and "could not inspect" in f.value and "alpha" in f.value
+    assert "1 other project(s) isolated" in f.value                       # beta was still judged
+    gc = int(box.pidfile.read_text())
+    deadline = time.monotonic() + 3
+    while not pid_gone(gc) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert pid_gone(gc)
+
+
+def test_project_dirs_are_deduplicated_and_unusable_ones_skipped(box):
+    _fake(box)
+    real = _project(box, "real")
+    link = box.tmp / "projects" / "link"
+    link.symlink_to(real)
+    _topics(box, {
+        "a": {"project": "Real", "cwd": str(real), "grok_allowed": True},
+        "b": {"project": "Alias", "cwd": str(link), "grok_allowed": True},            # same real path
+        "c": {"project": "Gone", "cwd": str(box.tmp / "nope"), "grok_allowed": True},
+        "d": {"project": "Rel", "cwd": "relative/dir", "grok_allowed": True},
+        "e": {"project": "NoCwd", "grok_allowed": True},
+        "f": "not a record",
+        "g": {"project": "Home", "cwd": str(box.fake_home), "grok_allowed": True},     # engine refuses it
+        "h": {"project": "Above", "cwd": str(box.tmp), "grok_allowed": True},          # contains $HOME
+        "i": {"project": "Off", "cwd": str(_project(box, "off"))},
+    })
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "ok" and "1 project(s)" in f.value
+    assert [c["cwd"] for c in _proj_calls(box)] == [str(real.resolve())]
+
+
+def test_the_number_of_inspect_calls_is_capped_and_the_rest_reported(box, monkeypatch):
+    _fake(box)
+    monkeypatch.setattr(doctor, "GROK_PROJECTS_MAX", 3)
+    _opt_in(box, *[f"p{i:02d}" for i in range(7)])
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert len(_proj_calls(box)) == 3 and "+4 more project(s) not checked, limit 3" in f.value
+
+
+def test_allow_all_projects_checks_every_record(box):
+    _fake(box)
+    _topics(box, {"a": {"project": "A", "cwd": str(_project(box, "a"))},
+                  "b": {"project": "B", "cwd": str(_project(box, "b")), "grok_allowed": False}})
+    box.env["GROK_ALLOW_ALL_PROJECTS"] = "true"
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "ok" and "2 project(s)" in f.value
+
+
+def test_projects_fact_writes_nothing_real(box):
+    _fake(box)
+    box.ensure_home()
+    _opt_in(box, "alpha")
+    before = snapshot(box.home, box.data, box.fake_home, box.secret_dir, box.tmp / "projects")
+    box.probe(proc_root=box.tmp / "noproc")
+    assert snapshot(box.home, box.data, box.fake_home, box.secret_dir, box.tmp / "projects") == before
+
+
+def test_projects_fact_is_not_checked_without_a_usable_cli(box):
+    _fake(box)
+    box.bin.unlink()
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "info" and "no usable Grok CLI" in f.value
+
+
+def test_projects_fact_with_an_invalid_deny_list_is_not_checked(box):
+    _fake(box)
+    box.env["GROK_SANDBOX_DENY"] = "**/{x}.pem"
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "warn" and "not checked" in f.value and _proj_calls(box) == []
+
+
+def test_projects_fact_crash_is_contained(box, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("kaboom")
+    monkeypatch.setattr(doctor, "_grok_project_dirs", boom)
+    facts = box.probe(proc_root=box.tmp / "noproc")
+    assert facts[LABEL].level == "warn" and "probe crashed" in facts[LABEL].value
+    assert "Grok CLI" in facts                                            # the other facts survived
+
+
+def test_project_names_never_leak_environment_secrets(box):
+    box.env["WEB_PASSWORD"] = "pw-s3cret-web-value"
+    _fake(box, docs_by_cwd={"alpha": _doc(box, projectTrusted=True, mcpServers=[_mcp("tablet")])})
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert "pw-s3cret-web-value" not in f.value + (f.remedy or "")
+    assert "/opt/x" not in f.value                                         # the server target is never printed
+
+
+# ---- Grok folder trust ----------------------------------------------------------------------
+
+FT = "Grok folder trust"
+
+
+def test_folder_trust_ok_when_pinned_and_the_store_is_empty(box):
+    box.ensure_home()
+    f = box.probe(proc_root=box.tmp / "noproc")[FT]
+    assert f.level == "ok" and "no folder is trusted" in f.value and "GROK_FOLDER_TRUST=1" in f.value
+
+
+@pytest.mark.parametrize("body", ["", "\n", "# nothing\n"])
+def test_folder_trust_ignores_an_empty_or_comment_only_store(box, body):
+    box.ensure_home()
+    (box.home / "trusted_folders.toml").write_text(body)
+    assert box.probe(proc_root=box.tmp / "noproc")[FT].level == "ok"
+
+
+def test_folder_trust_fails_when_the_store_has_an_entry(box):
+    box.ensure_home()
+    (box.home / "trusted_folders.toml").write_text('[[folders]]\npath = "/p"\n')
+    f = box.probe(proc_root=box.tmp / "noproc")[FT]
+    assert f.level == "fail" and "folder trust is granted" in f.value
+    assert "refuses every Grok turn" in f.remedy
+
+
+def test_folder_trust_fails_when_the_pin_is_missing_from_the_child_env(box, monkeypatch):
+    monkeypatch.delitem(grok_engine.D3_ENV, "GROK_FOLDER_TRUST")
+    f = box.probe(proc_root=box.tmp / "noproc")[FT]
+    assert f.level == "fail" and "not pinned on" in f.value and "D3_ENV" in f.remedy
+
+
+def test_folder_trust_fails_when_the_pin_is_wrong(box, monkeypatch):
+    monkeypatch.setitem(grok_engine.D3_ENV, "GROK_FOLDER_TRUST", "0")
+    assert box.probe(proc_root=box.tmp / "noproc")[FT].level == "fail"
+
+
+def test_folder_trust_unreadable_store_fails_closed(box):
+    box.ensure_home()
+    path = box.home / "trusted_folders.toml"
+    path.write_text("")
+    os.chmod(path, 0)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("running as a user that ignores file modes")
+        f = box.probe(proc_root=box.tmp / "noproc")[FT]
+        assert f.level == "fail" and "unknown" in f.value
+    finally:
+        os.chmod(path, 0o600)
+
+
+def test_the_new_facts_reach_the_rendered_report_and_the_json(box, monkeypatch):
+    _fake(box)
+    _opt_in(box, "alpha")
+    facts = doctor.probe_grok(box.env, repo_root=box.tmp, proc_root=box.tmp / "noproc")
+    labels = [f.label for f in facts]
+    assert FT in labels and LABEL in labels
+    assert labels.index(FT) < labels.index(LABEL) < labels.index("Grok processes")
