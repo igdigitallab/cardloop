@@ -1196,3 +1196,30 @@ def test_unreadable_group_directory_is_an_empty_listing(home):
         assert gh.list_sessions(CWD, grok_home=home) == []
     finally:
         group.chmod(0o700)
+
+
+# ------------------------------------------------------------------------------------------
+# session_context (the two numbers api_project_session_history returns for a Codex thread)
+# ------------------------------------------------------------------------------------------
+
+def test_session_context_from_a_real_signals_file(home):
+    install_real(home, "real_edit_bash", SID)
+    assert gh.session_context(SID, CWD, grok_home=home) == {"context_tokens": 11922, "context_window": 256000}
+
+
+def test_session_context_is_none_for_whatever_is_missing_or_hostile(home):
+    assert gh.session_context(SID, CWD, grok_home=home) == {"context_tokens": None, "context_window": None}
+    put_session(home, CWD, SID, [q("x")], summary=summ())
+    assert gh.session_context(SID, CWD, grok_home=home) == {"context_tokens": None, "context_window": None}
+    for bad in (True, "5", -1, 1.5, None, [1]):
+        put_session(home, CWD, SID, None, signals={"contextTokensUsed": bad, "contextWindowTokens": bad})
+        assert gh.session_context(SID, CWD, grok_home=home) == {"context_tokens": None, "context_window": None}, bad
+    put_session(home, CWD, SID, None, signals={"contextTokensUsed": 0, "contextWindowTokens": 500000})
+    assert gh.session_context(SID, CWD, grok_home=home) == {"context_tokens": 0, "context_window": 500000}
+
+
+def test_session_context_validates_its_arguments_like_history(home):
+    with pytest.raises(ValueError):
+        gh.session_context("../x", CWD, grok_home=home)
+    with pytest.raises(ValueError):
+        gh.session_context(SID, "relative", grok_home=home)

@@ -10,5 +10,7 @@
   "modelsUsed": [
     "grok-4.7"
   ],
-  "primaryModelId": "grok-4.7"
+  "primaryModelId": "grok-4.7",
+  "contextTokensUsed": 11922,
+  "contextWindowTokens": 256000
 }

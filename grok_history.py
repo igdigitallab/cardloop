@@ -5,6 +5,7 @@ Pure logic over files, injectable root, no webapp/engine state. It returns the S
 
 * ``history_messages`` -> ``[{role, text, tools, uuid}]`` (what ``codex_engine.history_messages``
   returns; ``handoff.build_handoff`` and ``_history_messages_for_display`` run on it as is).
+* ``session_context``  -> ``{context_tokens, context_window}`` for the session-history response.
 * ``list_sessions``    -> rows shaped like ``codex_engine.list_threads`` (``id``, ``cwd``,
   ``name``, ``preview``, ``updatedAt``/``recencyAt`` as epoch SECONDS) plus a few additive keys.
 * ``search_sessions`` / ``iter_search_docs`` -> the global-search block's input.
@@ -52,6 +53,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 import grok_engine
+import grok_jsonl
 
 PROVIDER = "grok"
 
@@ -204,37 +206,14 @@ def _session_dir(session_id: str, cwd: str, home: Path) -> "Path | None":
 
 
 # ------------------------------------------------------------------------------------------
-# bounded, symlink-proof file reads
+# bounded, symlink-proof file reads (shared with grok_usage: grok_jsonl)
 # ------------------------------------------------------------------------------------------
 
-def _open_regular(path: Path):
-    """Open ``path`` for reading as a REGULAR file without following a symlink and without ever
-    blocking on a FIFO. Returns a binary file object or None."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
-            return None
-        return os.fdopen(fd, "rb")
-    except OSError:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        return None
+_open_regular = grok_jsonl.open_regular
 
 
 def _read_small(path: Path, cap: "int | None" = None) -> "bytes | None":
-    cap = MAX_SUMMARY_BYTES if cap is None else cap
-    fh = _open_regular(path)
-    if fh is None:
-        return None
-    with fh:
-        data = fh.read(cap + 1)
-    return None if len(data) > cap else data
+    return grok_jsonl.read_small(path, MAX_SUMMARY_BYTES if cap is None else cap)
 
 
 def _read_json(path: Path) -> "dict | None":
@@ -248,57 +227,10 @@ def _read_json(path: Path) -> "dict | None":
     return obj if isinstance(obj, dict) else None
 
 
-def _iter_jsonl(path: Path, *, max_bytes: "int | None" = None, max_line: "int | None" = None,
+def _iter_jsonl(path: Path, *, max_bytes: "int | None" = None,
                 from_head: bool = False) -> Iterator[tuple[int, dict]]:
-    """Yield ``(byte offset, row)`` for every parseable dict row, byte-bounded and line-bounded.
-
-    A file larger than ``max_bytes`` is read from ``size - max_bytes`` (the partial first line is
-    dropped): callers want the NEWEST rows. ``from_head`` reads the FIRST ``max_bytes`` instead
-    (a session's opening message). A malformed line (including the half-written last line of a
-    running turn) is skipped, as is any line longer than ``max_line`` - its remainder is
-    discarded chunk by chunk, never held in memory.
-    """
-    max_bytes = MAX_READ_BYTES if max_bytes is None else max_bytes
-    max_line = MAX_LINE_BYTES if max_line is None else max_line
-    fh = _open_regular(path)
-    if fh is None:
-        return
-    with fh:
-        try:
-            size = os.fstat(fh.fileno()).st_size
-        except OSError:
-            return
-        if size > max_bytes and not from_head:
-            # Land one byte early and consume through the next newline: a start that is exactly
-            # on a line boundary keeps that line, a mid-line start drops only the partial.
-            fh.seek(size - max_bytes - 1)
-            _skip_line(fh, max_line)
-        while True:
-            offset = fh.tell()
-            if from_head and offset >= max_bytes:
-                return
-            line = fh.readline(max_line + 1)
-            if not line:
-                return
-            if len(line) > max_line and not line.endswith(b"\n"):
-                _skip_line(fh, max_line)
-                continue
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except (ValueError, RecursionError):
-                continue
-            if isinstance(obj, dict):
-                yield offset, obj
-
-
-def _skip_line(fh, max_line: int) -> None:
-    while True:
-        chunk = fh.readline(max_line + 1)
-        if not chunk or chunk.endswith(b"\n"):
-            return
+    return grok_jsonl.iter_jsonl(path, max_bytes=MAX_READ_BYTES if max_bytes is None else max_bytes,
+                                 max_line=MAX_LINE_BYTES, from_head=from_head)
 
 
 # ------------------------------------------------------------------------------------------
@@ -497,6 +429,22 @@ def _count(signals: "dict | None") -> "int | None":
     if isinstance(u, int) and isinstance(a, int) and not isinstance(u, bool) and not isinstance(a, bool):
         return u + a
     return None
+
+
+def _signal_int(signals: "dict | None", key: str) -> "int | None":
+    value = signals.get(key) if signals else None  # _read_json hands back a dict or None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def session_context(session_id: str, cwd: str, *, grok_home=None) -> dict:
+    """``{context_tokens, context_window}`` of a session from its ``signals.json`` (the size of
+    the LAST request's context and the model's window), None for whatever is not recorded - the
+    two numbers ``api_project_session_history`` returns for a Codex thread. Raises like
+    ``history_messages`` for a malformed id/cwd or an unsafe home."""
+    sdir = _session_dir(session_id, cwd, _home(grok_home))
+    signals = _read_json(sdir / "signals.json") if sdir is not None else None
+    return {"context_tokens": _signal_int(signals, "contextTokensUsed"),
+            "context_window": _signal_int(signals, "contextWindowTokens")}
 
 
 def _first_query_preview(chat: Path) -> str:
