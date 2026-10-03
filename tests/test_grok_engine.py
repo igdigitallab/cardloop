@@ -40,6 +40,10 @@ SPEC_D3 = {
     "GROK_CURSOR_SKILLS_ENABLED": "0",
     "GROK_TELEMETRY_ENABLED": "0", "GROK_TELEMETRY_TRACE_UPLOAD": "0", "GROK_MEMORY": "0",
     "GROK_ASK_USER_QUESTION": "0", "GROK_AUTO_WAKE": "0", "GROK_WORKFLOWS": "0",
+    # P1b: foreign-session import off, and folder trust pinned ON (the live-measured switch that
+    # keeps a project's own .mcp.json / .grok MCP servers, hooks and skills from starting)
+    "GROK_CLAUDE_SESSIONS_ENABLED": "0", "GROK_CURSOR_SESSIONS_ENABLED": "0",
+    "GROK_CODEX_SESSIONS_ENABLED": "0", "GROK_FOLDER_TRUST": "1",
 }
 SECRETS = {
     "WEB_PASSWORD": "pw-s3cret-web-value",
@@ -1475,3 +1479,341 @@ def test_tool_inputs_survive_missing_or_non_dict_raw_input():
     assert grok_engine.map_tool("grep", "not a dict") == ("Grep", {"pattern": "", "path": ""})
     assert grok_engine.map_tool("brand_new_tool", None) == ("brand_new_tool", {})
     assert grok_engine.map_tool("", {"a": 1}) == ("?", {"a": 1})
+
+
+# ==========================================================================================
+# P1b hardening: project-scoped config, the Claude import surface, wire tripwire, backstops
+# ==========================================================================================
+
+def _fixture_with(env, notes: list[dict], *, after: str = "session/new", name: str = "injected") -> str:
+    """synthetic_text with extra agent->client notifications inserted right after the client's
+    `after` request (session/new = during setup, before the session's own response; session/prompt =
+    mid-turn). Returns the absolute fixture path FAKE_GROK_FIXTURE accepts."""
+    entries = [json.loads(line) for line in (FIXTURES / "synthetic_text.jsonl").read_text().splitlines()
+               if line.strip()]
+    pos = next(i for i, e in enumerate(entries) if e["dir"] == "c2a" and e["msg"].get("method") == after)
+    extra = [{"dir": "a2c", "msg": {"jsonrpc": "2.0", **n}} for n in notes]
+    path = env.tmp / f"{name}.jsonl"
+    path.write_text("\n".join(json.dumps(e) for e in entries[:pos + 1] + extra + entries[pos + 1:]) + "\n")
+    return str(path)
+
+
+def _mcp_servers_updated(*servers):
+    return {"method": "_x.ai/mcp/servers_updated", "params": {"mcpServers": list(servers)}}
+
+
+_SRV = {"name": "tablet", "source": "local", "type": "stdio", "command": "/opt/venv/bin/python",
+        "args": ["/opt/android-agent/tablet_mcp.py", "--token", "SECRET-ARG-VALUE"]}
+_HOOK_EXEC = {"method": "_x.ai/session_notification", "params": {"sessionId": "SESSION_1", "update": {
+    "sessionUpdate": "hook_execution", "event_name": "session_start",
+    "runs": [{"name": "project/h:session_start[0].hooks[0]", "status": {"status": "success", "elapsed_ms": 7}}]}}}
+_MCP_READY = {"method": "_x.ai/mcp_initialized", "params": {"sessionId": "SESSION_1", "mcpToolCount": 2,
+                                                            "elapsedMs": 24}}
+_MCP_TOOLS = {"method": "session/update", "params": {"sessionId": "SESSION_1", "update": {
+    "sessionUpdate": "available_commands_update", "availableCommands": [],
+    "_meta": {"tools": ["read_file", "grep", "tablet__take_screenshot"]}}}}
+
+
+@pytest.mark.parametrize("label,note", [
+    ("servers_updated", _mcp_servers_updated(_SRV)),
+    ("mcp_initialized", _MCP_READY),
+    ("hook_execution", _HOOK_EXEC),
+    ("mcp_tool_names", _MCP_TOOLS),
+])
+async def test_a_setup_time_mcp_or_hook_signal_refuses_the_turn_before_the_prompt(env, label, note):
+    env.fake(_fixture_with(env, [note]), spawn_child=1)
+    events = await env.run()
+    assert types(events) == ["error"], (label, types(events))
+    assert isinstance(events[0]["exc"], grok_engine.GrokIsolationError)
+    assert "granted none" in last_error(events) or "none is granted" in last_error(events)
+    assert env.sent("session/prompt") == []              # the model never got a prompt
+    pids = env.dump("pids")
+    assert pid_gone(pids["leader"]) and pid_gone(pids["child"])
+
+
+async def test_the_tripwire_names_the_server_but_never_its_args_or_env(env):
+    env.fake(_fixture_with(env, [_mcp_servers_updated(_SRV)]))
+    msg = last_error(await env.run())
+    assert "tablet" in msg
+    assert "SECRET-ARG-VALUE" not in msg and "tablet_mcp.py" not in msg and "/opt/venv" not in msg
+
+
+async def test_benign_mcp_notifications_do_not_trip_the_wire(env):
+    # what a clean session really sends: an EMPTY server list, zero MCP tools, no hook
+    clean = [_mcp_servers_updated(),
+             {"method": "_x.ai/mcp_initialized", "params": {"sessionId": "SESSION_1", "mcpToolCount": 0,
+                                                            "elapsedMs": 0}},
+             {"method": "session/update", "params": {"sessionId": "SESSION_1", "update": {
+                 "sessionUpdate": "available_commands_update", "availableCommands": [],
+                 "_meta": {"tools": ["read_file", "run_terminal_command", "use_tool", "search_tool"]}}}},
+             {"method": "_x.ai/session_notification", "params": {"sessionId": "SESSION_1", "update": {
+                 "sessionUpdate": "model_changed"}}}]
+    env.fake(_fixture_with(env, clean))
+    events = await env.run()
+    assert types(events)[-1] == "result" and "error" not in types(events)
+
+
+async def test_malformed_wire_notifications_never_crash_the_reader(env):
+    junk = [{"method": "_x.ai/mcp/servers_updated", "params": {"mcpServers": "nope"}},
+            {"method": "_x.ai/mcp/servers_updated", "params": None},
+            {"method": "_x.ai/mcp_initialized", "params": {"mcpToolCount": True}},
+            {"method": "_x.ai/mcp_initialized", "params": {"mcpToolCount": "3"}},
+            {"method": "_x.ai/session_notification", "params": {"update": "x"}},
+            {"method": "session/update", "params": {"update": {"sessionUpdate": "available_commands_update",
+                                                                "_meta": {"tools": "tablet__x"}}}}]
+    env.fake(_fixture_with(env, junk))
+    assert types(await env.run())[-1] == "result"
+
+
+async def test_a_mid_turn_mcp_signal_aborts_the_turn_and_yields_nothing_after_it(env):
+    env.fake(_fixture_with(env, [_MCP_READY], after="session/prompt"), spawn_child=1)
+    events = await env.run()
+    assert "result" not in types(events) and "text" not in types(events)
+    assert isinstance(only(events, "error")[-1]["exc"], grok_engine.GrokIsolationError)
+    assert len(env.sent("session/prompt")) == 1           # it WAS sent; the abort came with the signal
+    pids = env.dump("pids")
+    assert pid_gone(pids["leader"]) and pid_gone(pids["child"])
+
+
+async def test_an_isolation_violation_does_not_flip_the_registry_row(env):
+    env.fake(_fixture_with(env, [_mcp_servers_updated(_SRV)]))
+    grok_engine._registry_cache.update(ts=time.time(), data=grok_engine._info(True, True, None))
+    await env.run()
+    assert grok_engine._registry_cache["data"]["available"] is True     # a project problem, not an outage
+
+
+# ---- folder trust store ------------------------------------------------------------------
+
+async def test_a_populated_trust_store_refuses_the_turn_and_never_spawns(env):
+    (env.home / "trusted_folders.toml").write_text('[[folders]]\npath = "/somewhere/project"\n')
+    events = await env.run()
+    assert isinstance(events[-1]["exc"], grok_engine.GrokIsolationError)
+    assert "trusted_folders.toml" in last_error(events) and "/somewhere/project" not in last_error(events)
+    assert not (env.dumps / "argv.json").exists()
+
+
+async def test_an_empty_or_comment_only_trust_store_is_fine(env):
+    for body in ("", "\n\n", "# nothing trusted\n  # still nothing\n"):
+        (env.home / "trusted_folders.toml").write_text(body)
+        assert types(await env.run())[-1] == "result", repr(body)
+
+
+async def test_an_unreadable_trust_store_fails_closed(env):
+    path = env.home / "trusted_folders.toml"
+    path.write_text("")
+    os.chmod(path, 0)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("running as a user that ignores file modes")
+        events = await env.run()
+        assert isinstance(events[-1]["exc"], grok_engine.GrokIsolationError)
+        assert "unknown" in last_error(events)
+    finally:
+        os.chmod(path, 0o600)
+
+
+# ---- the Claude import surface is denied whatever GROK_SANDBOX_DENY says -------------------
+
+def _import_surface(env):
+    for d in (".claude", ".claude-accounts", ".cursor"):
+        (env.fake_home / d).mkdir()
+    (env.fake_home / ".claude.json").write_text("{}")
+
+
+def test_the_claude_import_surface_is_denied_even_with_a_custom_deny_list(env):
+    _import_surface(env)                                  # GROK_SANDBOX_DENY = secret_dir only (fixture)
+    info = ensure_home(env.ctx)
+    for d in (".claude", ".claude-accounts", ".cursor", ".claude.json"):
+        assert str(env.fake_home / d) in info["deny"], d
+    assert str(env.secret_dir) in info["deny"]
+    toml = tomllib.loads((env.home / "sandbox.toml").read_text())
+    assert str(env.fake_home / ".claude") in toml["profiles"]["cardloop"]["deny"]
+
+
+def test_the_floor_and_the_defaults_do_not_duplicate_entries(env, monkeypatch):
+    monkeypatch.delenv("GROK_SANDBOX_DENY")
+    _import_surface(env)
+    deny = ensure_home(env.ctx)["deny"]
+    for d in (".claude", ".claude-accounts", ".cursor", ".claude.json"):
+        assert deny.count(str(env.fake_home / d)) == 1, d
+
+
+def test_default_deny_covers_the_other_vendor_credential_homes(env, monkeypatch):
+    monkeypatch.delenv("GROK_SANDBOX_DENY")
+    for d in (".azure", ".oci", ".codex", ".cursor", ".claude"):
+        (env.fake_home / d).mkdir()
+    deny = ensure_home(env.ctx)["deny"]
+    for d in (".azure", ".oci", ".codex", ".cursor"):
+        assert str(env.fake_home / d) in deny, d
+    skipped = ensure_home(env.ctx)["skipped"]
+    assert str(env.fake_home / ".kube") in skipped        # absent ones are still dropped, not created
+    assert not (env.fake_home / ".kube").exists()
+
+
+def test_a_custom_list_still_replaces_the_non_floor_defaults(env):
+    (env.fake_home / ".azure").mkdir()
+    (env.fake_home / ".ssh").mkdir()
+    deny = ensure_home(env.ctx)["deny"]                   # GROK_SANDBOX_DENY = secret_dir only
+    assert str(env.fake_home / ".azure") not in deny and str(env.fake_home / ".ssh") not in deny
+
+
+def test_the_floor_never_denies_the_grok_home_directory(env):
+    _import_surface(env)
+    assert not any(e == str(env.home) or e.endswith("/.grok") for e in ensure_home(env.ctx)["deny"])
+
+
+# ---- config.toml: skills + forbidden tables -----------------------------------------------
+
+def test_config_toml_hides_agents_skills_and_disables_the_importer_skills(env):
+    ensure_home(env.ctx)
+    cfg = tomllib.loads((env.home / "config.toml").read_text())
+    assert cfg["skills"]["ignore"] == [str(env.fake_home / ".agents")]      # $HOME-relative, not hardcoded
+    assert cfg["skills"]["disabled"] == ["resume-claude", "resume-codex", "resume-cursor"]
+    assert cfg["cli"]["auto_update"] is False and cfg["shell_environment_policy"]["inherit"] == "core"
+
+
+@pytest.mark.parametrize("stale", [
+    '[cli]\nauto_update = false\n[shell_environment_policy]\ninherit = "core"\n',          # no [skills]
+    '[cli]\nauto_update = false\n[shell_environment_policy]\ninherit = "core"\n'
+    '[skills]\nignore = ["/elsewhere"]\ndisabled = ["resume-claude", "resume-codex", "resume-cursor"]\n',
+    '[cli]\nauto_update = false\n[shell_environment_policy]\ninherit = "core"\n'
+    '[skills]\nignore = []\ndisabled = []\n',
+])
+def test_a_config_without_the_skills_switches_is_regenerated(env, stale):
+    env.home.mkdir(exist_ok=True)
+    (env.home / "config.toml").write_text(stale)
+    ensure_home(env.ctx)
+    cfg = tomllib.loads((env.home / "config.toml").read_text())
+    assert cfg["skills"]["ignore"] == [str(env.fake_home / ".agents")]
+    assert cfg["skills"]["disabled"] == ["resume-claude", "resume-codex", "resume-cursor"]
+
+
+@pytest.mark.parametrize("table", ["folder_trust", "mcp_servers", "disabled_mcp_servers", "compat",
+                                   "hooks", "plugins", "marketplace"])
+def test_a_config_that_widens_the_tool_surface_is_regenerated(env, table):
+    ensure_home(env.ctx)
+    path = env.home / "config.toml"
+    path.write_text(path.read_text() + f"\n[{table}]\nenabled = false\n")
+    ensure_home(env.ctx)
+    assert table not in tomllib.loads(path.read_text())
+
+
+def test_unrelated_extra_config_keys_survive(env):
+    ensure_home(env.ctx)
+    path = env.home / "config.toml"
+    path.write_text(path.read_text() + '\n[hints]\nnew_session_worktree_mode = "never"\n')
+    ensure_home(env.ctx)
+    assert tomllib.loads(path.read_text())["hints"] == {"new_session_worktree_mode": "never"}
+
+
+# ---- the child env can never ungate folder trust -------------------------------------------
+
+def test_a_parent_folder_trust_switch_never_reaches_the_child(env):
+    for hostile in ("0", "false", "off"):
+        got = grok_engine.child_env(env.home, parent={"GROK_FOLDER_TRUST": hostile, "PATH": "/usr/bin",
+                                                       "GROK_CONFIG": '{"folder_trust": false}',
+                                                       "GROK_CLAUDE_MCPS_ENABLED": "1"})
+        assert got["GROK_FOLDER_TRUST"] == "1" and got["GROK_CLAUDE_MCPS_ENABLED"] == "0"
+        assert "GROK_CONFIG" not in got
+
+
+# ---- $HOME and its ancestors are not a project ---------------------------------------------
+
+@pytest.mark.parametrize("where", ["home", "parent", "root", "symlink-to-home"])
+async def test_a_cwd_that_is_home_or_contains_it_is_refused(env, where):
+    target = {"home": env.fake_home, "parent": env.fake_home.parent, "root": Path("/"),
+              "symlink-to-home": env.tmp / "link-home"}[where]
+    if where == "symlink-to-home":
+        target.symlink_to(env.fake_home)
+    events = await env.run(cwd=str(target))
+    assert types(events) == ["error"] and "GROK_ALLOW_ALL_PROJECTS" in last_error(events)
+    assert not (env.dumps / "argv.json").exists()
+
+
+async def test_a_subdirectory_of_home_runs(env):
+    work = env.fake_home / "projects" / "x"
+    work.mkdir(parents=True)
+    assert types(await env.run(cwd=str(work)))[-1] == "result"
+
+
+async def test_the_escape_hatch_allows_home(env, monkeypatch):
+    monkeypatch.setenv("GROK_ALLOW_ALL_PROJECTS", "true")
+    assert types(await env.run(cwd=str(env.fake_home)))[-1] == "result"
+
+
+def test_home_or_ancestor_predicate_is_exact(env):
+    f = grok_engine._is_home_or_ancestor
+    assert f(str(env.fake_home)) and f(str(env.tmp)) and f("/")
+    assert not f(str(env.fake_home / "x")) and not f(str(env.cwd))
+    assert not f(str(env.fake_home) + "-sibling")         # a name prefix is not an ancestor
+
+
+# ---- cancellationCategory: every unrequested cancel is an error, a requested one is clean ---
+
+def _prompt_complete(category: str | None, **ctx):
+    p = {"sessionId": "SESSION_1", "promptId": "UUID_3", "stopReason": "cancelled", "agentResult": None}
+    if category:
+        p["cancellationCategory"] = category
+    if ctx:
+        p["cancellationContext"] = ctx
+    return {"method": "_x.ai/session/prompt_complete", "params": p}
+
+
+@pytest.mark.parametrize("fixture,category", [
+    ("permission_request_no_yolo_reject", "PermissionRejected"),
+    ("permission_request_no_yolo_error32601", "PermissionRejected"),
+    ("permission_request_no_yolo_outcome_cancelled", "PermissionCancelled"),
+])
+async def test_every_recorded_unrequested_cancel_becomes_an_error(env, fixture, category):
+    env.fake(fixture, permission_wait=0.3)
+    events = await env.run()
+    assert "result" not in types(events)
+    msg = last_error(events)
+    assert "cancelled the turn unprompted" in msg and f"cancellationCategory={category}" in msg
+
+
+async def test_an_unrequested_cancel_without_a_category_is_still_an_error(env):
+    env.fake("synthetic_cancelled_unprompted")
+    msg = last_error(await env.run())
+    assert "cancelled the turn unprompted" in msg and "cancellationCategory" not in msg
+
+
+@pytest.mark.parametrize("fixture", ["cancel_mid_tool", "permission_request_no_yolo_cancel_pending"])
+async def test_a_requested_cancel_is_a_clean_result_whatever_the_recording(env, fixture):
+    env.fake(fixture, permission_wait=0.3)
+    seen = []
+    interrupted = False
+    async for ev in run_grok_engine(**env.kwargs()):
+        seen.append(ev)
+        if ev["type"] == "tool" and not interrupted:
+            interrupted = True
+            await env.ctx["running"]["p:1"].interrupt()
+    assert interrupted and types(seen)[-1] == "result" and "error" not in types(seen)
+
+
+async def test_a_requested_stop_that_races_a_permission_rejection_stays_clean_and_is_journaled(env, capsys):
+    path = _fixture_with(env, [], name="race")
+    entries = [json.loads(line) for line in Path(path).read_text().splitlines()]
+    # a cancelled prompt response that carries a PermissionRejected category: our Stop raced a reject
+    entries = [e for e in entries if not (e["dir"] == "a2c" and e["msg"].get("method") == "session/update"
+                                           and e["msg"]["params"]["update"].get("sessionUpdate") == "agent_message_chunk")]
+    resp = next(i for i, e in enumerate(entries) if e["dir"] == "a2c" and e["msg"].get("id") == 4)
+    entries[resp]["msg"]["result"]["stopReason"] = "cancelled"
+    entries.insert(resp, {"dir": "a2c", "msg": {"jsonrpc": "2.0", **_prompt_complete("PermissionRejected",
+                                                                                      tool_name="write")}})
+    race = env.tmp / "race2.jsonl"
+    race.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+    env.fake(str(race))
+    # the flag is set before the agent's reply could matter: emulate "operator pressed Stop first"
+    orig = grok_engine.GrokTurn.__init__
+
+    def init(self, key):
+        orig(self, key)
+        self.cancel_requested = True
+    grok_engine.GrokTurn.__init__ = init
+    try:
+        events = await env.run()
+    finally:
+        grok_engine.GrokTurn.__init__ = orig
+    assert types(events)[-1] == "result" and "error" not in types(events)
+    assert "cancellationCategory=PermissionRejected" in capsys.readouterr().out
