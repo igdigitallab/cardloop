@@ -83,6 +83,26 @@ the optional Codex provider flag is on, so CI sets `CODEX_ENABLED=true`; if you 
 `.env`, do the same. Opt-in suites (browser e2e,
 model-alias probes) are described in [CLAUDE.md](CLAUDE.md#operations).
 
+### Grok provider tests
+
+The default run needs **nothing** from Grok: no binary, no login, no network. The engine tests drive
+a fake `grok` (`tests/fake_grok_acp.py`, a real subprocess speaking ACP) that replays recorded
+fixtures — `tests/fixtures/grok/*.jsonl` (26 captured from the real CLI, plus hand-made
+`synthetic_*` ones for misbehaviours) and `tests/fixtures/grok_history/` (scrubbed real session
+files). `GROK_BIN` points at the fake, as `e2e_fake_engine` does for Claude.
+
+| What | Command | Needs |
+|---|---|---|
+| Re-record the wire fixtures after a CLI bump | `venv/bin/python tools/grok_record_fixtures.py --list` / `--scenario all` / `--scenario NAME` | the `grok` binary and a login; it copies `auth.json` mode 600 into a throwaway `GROK_HOME`, scrubs ids/paths/emails/tokens, refuses a fixture that still holds a secret-looking value, and deletes the scratch tree |
+| Real binary: isolation, sandbox, one real turn | `venv/bin/python -m pytest tests/test_grok_live.py -m grok_live` | `grok`, `bwrap`, a login in the cockpit's `GROK_HOME` (`tools/grok-acct login`); spends model turns on the subscription; skips cleanly when something is missing |
+| Egress canary (a repo with an 8 MB blob in git history, one "reply OK" turn, fail above 1 MiB per connection) | `venv/bin/python -m pytest tests/test_grok_live.py -m grok_canary` | same, plus `ss`; run by hand after every CLI update and before enabling a new project |
+| Grok against a real cockpit with the fake CLI | `venv/bin/python -m pytest tests/e2e/test_grok_*.py -m e2e` | `web/dist`, Playwright (see CLAUDE.md); `E2E_SHOTS_DIR=<dir>` also writes the visual-check screenshots |
+
+`grok_live` and `grok_canary` are excluded from the default run in `pytest.ini`, exactly like `e2e`.
+Never point either at a real repository or a login you care about: they run a model with a shell.
+A guard on the Grok path gets a test that fails when the guard is removed (a line-anchored mutation
+harness that refuses to run unless the unmodified code is green is how this wave was checked).
+
 ## Python lint
 
 ```bash
@@ -144,6 +164,7 @@ templates/      — new-project starters (*.tpl) + vault reference copies (refer
 tests/          — pytest suite (3,500+ tests; run via venv/bin/python -m pytest)
 data/           — runtime state (gitignored: topics.json, sessions.json, audit/, runs/)
 docs/API.md     — HTTP API reference
+docs/GROK.md    — Grok Build provider: operator runbook (enable, privacy opt-in, isolation, doctor)
 tools/doctor.py — one-command cockpit diagnosis (make doctor)
 tools/daily-journal.py — Haiku digest of the day's cockpit work → a vault Markdown note (README)
 ```

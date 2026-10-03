@@ -4,7 +4,7 @@
 
 Navigation guide for the codebase. Source of truth = the code; this file is the map. Changing behavior → find the right file and line here.
 
-> Cardloop — a browser IDE for managing projects via Claude Code or Codex. Claude remains the default; provider choice is pinned per web chat/card run.
+> Cardloop — a browser IDE for managing projects via Claude Code, Codex or Grok Build. Claude remains the default; provider choice is pinned per web chat/card run.
 > **Single process** (aiohttp): `bot.py` imports `webapp.py` and runs the cockpit in the same event loop. Shared `running` lock → no race condition between channels on the same cwd.
 
 ```
@@ -12,7 +12,8 @@ Navigation guide for the codebase. Source of truth = the code; this file is the 
 │                      SINGLE PYTHON PROCESS                       │
 │                                                                  │
 │  Cockpit / Kanban ─┬─► run_engine() ───────► Claude SDK         │
-│                    └─► run_codex_engine() ─► Codex SDK          │
+│                    ├─► run_codex_engine() ─► Codex SDK          │
+│                    └─► run_grok_engine() ──► grok CLI (ACP)     │
 │                                                                  │
 │  Shared state: running{} · sessions{} · topics{} (via ctx)      │
 └─────────────────────────────────────────────────────────────────┘
@@ -27,7 +28,12 @@ Navigation guide for the codebase. Source of truth = the code; this file is the 
 ### Engine (transport-independent core)
 - **`run_engine(...)` (engine.py)** — `async def -> AsyncGenerator[dict, None]`. Drives the Claude Agent SDK, yields events `{tool|text|result|rate_limit|error}`. **Transport-agnostic.** All channels are its consumers. Change agent logic → here.
 - **`run_codex_engine(...)` (codex_engine.py)** — isolated optional adapter for ChatGPT subscription-authenticated Codex threads. Handles discovery, start/resume/read/list, normalized events, usage, plan sandbox, native subagents, and interrupt. It is lazy-imported and gated by `CODEX_ENABLED`.
-- **`providers.py`** — the provider table (`ProviderSpec`, spec-095 D6): which ctx key holds a provider's engine factory, which chat-record field persists its resume id, which engine kwarg takes it, which `result` event key brings the new id back, its model field/default and capability map. Every run site resolves its provider through it (`providers.get(name)`, strict) so adding a provider is one `register(...)` plus its engine, not an edit at every `provider == "codex"` branch.
+- **`run_grok_engine(...)` (grok_engine.py)** — isolated optional adapter for the official `grok` CLI on a SuperGrok subscription (spec-095). One `grok agent --no-leader stdio` process per turn spoken to over ACP; hermetic env allowlist; a generated custom sandbox profile + login in its own `GROK_HOME` (`<data>/grok-home`); folder trust pinned; a wire tripwire for MCP/hook starts; a cached real-turn sandbox-denial probe gates availability; `GrokTurn.interrupt()` is the Stop handle. Gated by `GROK_ENABLED` and, per project, `grok_allowed`. Runbook → `docs/GROK.md`, traps → GOTCHAS.md §Grok.
+- **`grok_history.py`** — disk reader for Grok sessions under `<GROK_HOME>/sessions/<urlencoded cwd>/<id>/`: `history_messages` (display rows, 100 cap), `list_sessions`, `session_exists`, `session_context`, `search_sessions`. Blocking IO (call via `run_in_executor`); its rows are untrusted (the model's own shell can write them).
+- **`grok_usage.py`** — reader/aggregator of the engine's own ledgers `data/grok_usage.jsonl` and `data/grok_limit_errors.jsonl`; `summary()` is the `providers.grok` block of `/api/usage/dashboard` (`limits` always `null`, `notional_usd` = API-equivalent, local 5 h / 7 d counters).
+- **`grok_jsonl.py`** — shared bounded JSONL readers (`open_regular`, `read_small`, `iter_jsonl`: `O_NOFOLLOW`, regular files only, byte windows, giant/malformed lines skipped) used by `grok_history` and `grok_usage`.
+- **`grok_sends.py`** — the send ledger `data/grok_sent/<session-id>`: SHA-256 of every prompt the cockpit sent into a Grok session, written through `ProviderSpec.note_send`; `tag_rows` marks a user row `verified` only if it matches, and `handoff.build_handoff` never carries an unverified one as a constraint.
+- **`providers.py`** — the provider table (`ProviderSpec`, spec-095 D6): which ctx key holds a provider's engine factory, which chat-record field persists its resume id, which engine kwarg takes it, which `result` event key brings the new id back, its model field/default and capability map. Every run site resolves its provider through it (`providers.get(name)`, strict) so adding a provider is one `register(...)` plus its engine, not an edit at every `provider == "codex"` branch. It also carries the optional per-project privacy `gate` (Grok's `grok_allowed`; the only caller is `webapp._provider_gate_refusal`), the `send_ledger` hook and the `session_exists` hook.
 - **Engine consumers:**
   - `_run_card(...)` in **webapp.py** — card auto-run.
   - `api_project_chat` in **webapp.py** — web chat (SSE consumer).
@@ -35,7 +41,7 @@ Navigation guide for the codebase. Source of truth = the code; this file is the 
 
 ### Concurrency / state
 - **`running{key: bool}`** — per-`cwd` lock. Reserved SYNCHRONOUSLY before the first await, released in `finally`. Guards against two parallel processes on the same project.
-- **`sessions{key: session_id}`** (LAYER 2, `data/sessions.json`) — Claude-only legacy cache, cleared by `/reset`. Codex thread IDs live only in provider-pinned chat/free-chat records.
+- **`sessions{key: session_id}`** (LAYER 2, `data/sessions.json`) — Claude-only legacy cache, cleared by `/reset`. Codex thread IDs and Grok session IDs live only in provider-pinned chat/free-chat records.
 - **`topics{key: {project,cwd,model,log_cmd,...}}`** (LAYER 1, `data/topics.json`) — channel→project mapping, permanent.
 
 ### Project registry
@@ -67,8 +73,9 @@ aiohttp server. **Does NOT import `bot.py`** (would double the state!) — every
 | Chat/SSE | `api_project_chat`, `api_chat_stop`, `_sse_stream`, `api_activity_stream` | shared `_sse_stream` |
 | Files | `api_project_files`, `api_project_file`, `api_global_files`, `api_global_file` | shared `_read_file_content`; anti-traversal `_resolve_safe`/`_resolve_global_safe` |
 | Prompts | `api_prompts` (CRUD) | `data/prompts.json` |
-| Sessions | `api_project_sessions`, `api_project_set_session`, `api_project_session_history` | Routes by active provider: Claude transcripts or native Codex threads |
-| Usage | `api_usage`, `api_usage_dashboard` | Claude oauth limits plus provider-filtered Claude/Codex turn and token totals |
+| Sessions | `api_project_sessions`, `api_project_set_session`, `api_project_session_history`, `_grok_session_messages` | Routes by active provider: Claude transcripts, native Codex threads, or Grok session files (verified-tagged) |
+| Usage | `api_usage`, `api_usage_dashboard` | Claude oauth limits plus provider-filtered Claude/Codex/Grok turn and token totals (`providers.grok` only while Grok is enabled) |
+| Provider gate (spec-095) | `_provider_gate_refusal`, `_gated_engine`, `_gate_project`, `_grok_info`, `api_project_chat_handoff`, `_rotate_adapter_chat` | ONE choke point for the per-project privacy gate at every selection and run site (409 / error event); registry row for Grok (bounded 4 s wait, omitted when disabled); handoff out of Grok re-read server-side; adapter-chat rotation |
 | Project memory | `api_project_memory` (GET), `api_project_memory_write` (POST), `api_project_memory_delete` (DELETE) | Path: `<cwd>/.claude-ops/memory/` (new) + fallback to `~/.claude/projects/<cwd>/memory/` (legacy). Agent writes via normal Write. Helpers: `_project_memory_dir`, `_memory_read_all`, `_memory_write`, `_memory_delete`, `_memory_reindex`. Names validated by `_valid_memory_name` (slug-regex). |
 | **Project secrets** (Spec 007) | `api_project_secrets` (GET), `api_project_secrets_set` (POST), `api_project_secrets_delete` (DELETE) | Path: `<cwd>/.claude-ops/secrets/secrets.env` (chmod 600, gitignored). **Values are NEVER returned via API** — only key names. Helpers: `_project_secrets_path`, `_secrets_read`, `_secrets_write`, `_secrets_set`, `_secrets_delete`, `_secrets_ensure_gitignore`. Keys validated by `_SECRETS_KEY_RE = ^[A-Z_][A-Z0-9_]*$`. Limits: 8KB/value, 100 keys. |
 | **Timeline** (Spec 008) | `api_project_timeline` (GET) | Persistent event bus log. Helpers: `_timeline_init`, `_timeline_path`, `_timeline_append`, `_timeline_slug_from_cwd`, `_timeline_read_events`. Hook in `_bus_publish` — single write point. File: `data/timeline/<slug>.jsonl` (+ `.jsonl.1` backup). env field is never written. |
@@ -89,7 +96,10 @@ web/src/
 │   ├── en.ts                 UI string keys (the only locale)
 │   └── index.ts              export const t = en
 ├── lib/
-│   └── storage.ts            readLS/writeLS (localStorage)
+│   ├── storage.ts            readLS/writeLS (localStorage)
+│   ├── providers.ts          ⭐ the ONE provider table (Claude/Codex/Grok): label, tag, continuity + model field, privacy gate, reportsLimits; mirrors providers.py
+│   ├── providerUsage.ts      Codex + Grok usage blocks → one shape · refusal.ts: the server's 409 sentence vs busy/stale · settingsPayload.ts: what Settings may POST
+│   └── runtimeStatus.ts      the runtime pill's rows (Grok = muted "limits not reported")
 ├── hooks/
 │   ├── useChatStream.ts      ⭐ chat SSE stream (reader, chunk-safe parsing)
 │   ├── useAsyncLoad.ts       generic loading/error/data
@@ -148,7 +158,7 @@ Project secrets are injected into the agent's env on every `run_engine` call:
 
 ---
 
-## Tests: `tests/` (21 files, 496 passed / 6 skipped)
+## Tests: `tests/` (see CLAUDE.md for the current counts)
 
 `venv/bin/python -m pytest -q` (or `make test`). Fixtures — `conftest.py` (aiohttp client, tmp-cwd, mock ctx, `_auth_token`).
 - **Critical:** `test_board_parser` (regression = lost tasks in production), `test_security` + `test_security_regressions` (path-traversal, card_id, rate-limit), `test_board_api`, `test_run_card`, `test_chat_sse`, `test_project_rename`, `test_ingest_errors`.
@@ -160,6 +170,7 @@ Project secrets are injected into the agent's env on every `run_engine` call:
 
 - `data/topics.json` (LAYER 1, permanent; per-project settings: model/notify_on_error/log_cmd/test_cmd/git_enabled) · `data/sessions.json` (LAYER 2, `/reset` clears) · `data/settings.json` (global settings f2ba02, mtime hot-reload) · `data/prompts.json` · `data/runs/<card>.md` (sidecars) · `data/audit/` · `data/inbox/` (uploaded files) · `data/timeline/<slug>.jsonl` (Timeline Spec 008). **`data/` is in .gitignore.**
 - `.env` (secrets, not in git) · `.env.example` + `web/.env.example` (placeholders).
+- **Grok (spec-095, only with `GROK_ENABLED`)** — state in `data/`: `grok-home/` (its own login, sessions and the generated `config.toml` / `sandbox.toml`; mode 700), `grok_usage.jsonl` + `grok_limit_errors.jsonl` (engine-written ledgers, no rotation), `grok_sandbox_probe.json` (cached sandbox-denial verdict), `grok_sent/` (send ledger), `grok-canary/` (the probe's canary file). Tools: `tools/grok-acct` (`login` / `status` / `logout` under that home), `tools/grok_record_fixtures.py` (re-record `tests/fixtures/grok/*.jsonl` from the real CLI). Test kit: `tests/fake_grok_acp.py` (fake CLI replaying the fixtures), pytest markers `grok_live` / `grok_canary` (real binary, opt-in), `tests/e2e/test_grok_*.py`.
 - `cardloop.service` (systemd; unit name overridable via `CARDLOOP_SERVICE`) · **`restart-self.sh`** (THE ONLY way to restart from inside the agent — detached via systemd-run; details in CLAUDE.md).
 - `TASKS.md` (board, sessions read this) · `DONE.md` (archive, sessions do NOT read this) · `docs/API.md` · `CONTRIBUTING.md` · `LICENSE` (MIT).
 

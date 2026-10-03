@@ -7,6 +7,69 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Added — Grok Build as the third provider (spec-095)
+Off unless `GROK_ENABLED=true`; with it off nothing about Grok is visible (no registry row, no UI,
+no doctor line). A chat, free chat, board card or project default can be pinned to Grok, running the
+official `grok` binary on a SuperGrok subscription — never the xAI API. Runbook: [docs/GROK.md](docs/GROK.md).
+- **Engine (`grok_engine.py`).** One `grok agent --no-leader stdio` process per turn over ACP, in its
+  own process group that is always killed afterwards; Stop = `session/cancel`. Subscription-only and
+  fail closed: an OIDC login with `coding_data_retention_opt_out`, not API-billed, same account as
+  `auth.json`, re-checked against the agent's own report on every turn. Plan mode and "Ask me" are
+  unsupported (a visible error, not a silent downgrade); limits are not reported by Grok, so the pill
+  says "limits not reported" instead of a bar.
+- **Isolation.** The child gets an environment allowlist (never the cockpit's own env) plus switches
+  that stop Grok importing Claude/Cursor/Codex MCP servers, hooks, skills, rules and sessions; every
+  turn runs under a generated custom sandbox profile whose deny list hides credential paths (an
+  always-on floor for the Claude/Cursor surface survives a custom `GROK_SANDBOX_DENY`); folder trust
+  is pinned on so a repo's own `.mcp.json` / `.grok` hooks and skills never start, with a wire
+  tripwire as a second line; the sandbox is proven on the host by a self-test turn before Grok is
+  offered. Cardloop's Grok login, sessions and profile live in their own `GROK_HOME`
+  (`tools/grok-acct login|status|logout`).
+- **Per-project privacy opt-in.** Grok sends project code to xAI, so it is off in every project until
+  `grok_allowed` is set (Settings toggle, strictly boolean); every selection and run site answers
+  `409 grok is not enabled for this project` otherwise. A cwd at `$HOME` or above (free chats) needs
+  `GROK_ALLOW_ALL_PROJECTS`.
+- **History, sessions, search, usage, handoff.** Read from Grok's session files; `providers.grok` in
+  `/api/usage/dashboard` (tokens, turns, local 5 h / 7 d counters, `notional_usd` labelled
+  API-equivalent). Because the model's own shell can write its session file, the cockpit keeps a
+  send ledger (`data/grok_sent/`): a handoff out of Grok never carries a user row it did not send.
+- **`make doctor`** gains a Grok section (CLI/version, auth, bubblewrap, GROK_HOME, sandbox profile
+  and probe, compat, folder trust, per-project compat, leftover processes, litter, ledger sizes).
+- **Tooling and tests.** `tools/grok_record_fixtures.py` re-records the 26 fixtures in
+  `tests/fixtures/grok/` from the real CLI; `tests/fake_grok_acp.py` replays them; opt-in markers
+  `grok_live` (real binary, real turns) and `grok_canary` (egress canary); a Grok e2e suite against a
+  real cockpit with the fake CLI.
+- **Frontend.** One provider table (`web/src/lib/providers.ts`) drives every picker, label, tag and
+  usage card; Grok appears in the new-chat / free-chat / board pickers, the model menu, Settings
+  (privacy toggle, board model) and the Usage tab.
+
+### Changed — the provider seam
+- `providers.py` is the one table of what differs per engine (engine factory, continuity field,
+  resume kwarg, result id, model field, capabilities, per-project gate, send ledger); it replaced
+  dozens of `provider == "codex"` branches in `webapp.py` and `board.py`. An unknown provider on a run site
+  is now an error, never a silent run on Claude.
+- Manual `/rotate` on a Codex or Grok chat clears that provider's own session id and arms a
+  chat-scoped handoff built locally (no model call). It used to summarise the Claude session, leave
+  the adapter's id in place and report `reset: true`.
+- The settings validator accepts every adapter's `<name>_model`; provider-validation errors name
+  every registered provider; `chat.ask_codex_conflict` became `chat.ask_unsupported` in the UI.
+
+### Fixed — found while adding the third provider
+- The first POST to a free Codex chat that had never been listed ran on Claude with a Codex model id.
+- A pending rotation summary (Claude's) was consumed by Codex runs; only a Claude run takes it now.
+- Clicking a model in the model menu of a Codex chat did nothing (the handler was gated on Claude).
+- A failed history read erased the reply that had just streamed; the conversation now stays.
+- A refused runtime switch left no visible trace; a 409 was shown as "project busy" or as raw JSON
+  where the server had sent a sentence. The server's sentence is shown.
+- Project Settings could not be saved while `context_pack_enabled` was unset (the tab posted its
+  `null` back and the server answered 400).
+- The Settings tab offered a "Grok board model" row on every project even with Grok off.
+- The file-rewind button appeared on Codex and Grok history rows, where it has no checkpoint behind it.
+- A tool-call path containing a newline could print a forged heading into a handoff block.
+- Layout at 360 px: provider buttons wrapped and swallowed their row, the card editor row overflowed,
+  the privacy toggle was a 13 px checkbox, the usage card head squeezed its title, the new-chat
+  refusal was tiny inset text, and a toast covered the Create button of a phone dialog.
+
 ### Added — Load meter v2: disk runway, a journal trail for every signal
 - **Disk runway.** The `disk` signal now also says how long until the volume is full at the rate
   that has HELD over the last 1-3 days (`89% · 3.7d`): warn under 7 days, crit under 2. It comes from
