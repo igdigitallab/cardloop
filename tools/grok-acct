@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# grok-acct — sign the cockpit's Grok runtime in/out, under the cockpit's OWN GROK_HOME.
+#
+# Cardloop runs Grok Build against its own home (GROK_HOME, default <data>/grok-home), not the
+# operator's ~/.grok: the engine owns config.toml / sandbox.toml / sessions there. Logging in is the
+# ordinary device flow with that env var set, so the credentials land in that home and ~/.grok is
+# never touched. This script never copies tokens from anywhere.
+#
+#   tools/grok-acct login     grok login --device-auth   (prints a code + URL; approve it in any browser)
+#   tools/grok-acct status    which home, whether it holds a subscription login (no secret values shown)
+#   tools/grok-acct logout    grok logout, in that home only
+#
+# Home resolution is the engine's own (grok_engine.grok_home): $GROK_HOME if set, else
+# <data dir>/grok-home, with the data dir from $_CARDLOOP_DATA_DIR or <repo>/data.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY="$REPO/venv/bin/python"
+[ -x "$PY" ] || PY="python3"
+export CARDLOOP_REPO="$REPO"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+home() { "$PY" -c "import os,sys; sys.path.insert(0, os.environ['CARDLOOP_REPO']); import grok_engine; print(grok_engine.grok_home())"; }
+
+grok_bin() {
+  "$PY" -c "import os,sys; sys.path.insert(0, os.environ['CARDLOOP_REPO']); import grok_engine; print(grok_engine.grok_bin() or '')"
+}
+
+need_bin() {
+  BIN="$(grok_bin)"
+  [ -n "$BIN" ] || die "Grok CLI not found — install it (curl -fsSL https://x.ai/cli/install.sh | bash) or set GROK_BIN"
+}
+
+prepare_home() {
+  local h="$1"
+  [ ! -L "$h" ] || die "GROK_HOME $h is a symlink — refusing (Grok will not sandbox over one)"
+  mkdir -p "$h"
+  chmod 700 "$h"
+}
+
+cmd_login() {
+  need_bin
+  local h; h="$(home)"
+  prepare_home "$h"
+  echo "Signing in Grok under GROK_HOME=$h  (~/.grok is untouched)."
+  echo "A code and a URL follow — approve them in any browser signed in to the grok.com account."
+  echo
+  GROK_HOME="$h" "$BIN" login --device-auth
+  echo
+  cmd_status
+}
+
+cmd_status() {
+  local h; h="$(home)"
+  echo "GROK_HOME : $h"
+  "$PY" - "$h" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["CARDLOOP_REPO"])
+import grok_engine
+from pathlib import Path
+home = Path(sys.argv[1])
+print(f"binary    : {grok_engine.grok_bin() or 'NOT FOUND'}")
+print(f"symlink   : {'YES — refused' if home.is_symlink() else 'no'}")
+f = grok_engine.read_auth_facts(home)
+print(f"auth.json : {'present' if f['present'] else 'missing'}")
+print(f"oidc login: {'yes' if f['oidc'] else 'no'}")
+print(f"retention : {'—' if not f['oidc'] else ('opted out (required)' if f['retention_opt_out'] else 'NOT opted out — the engine will refuse to run')}")
+print(f"account   : {f['email'] or '—'}")
+problem = grok_engine._auth_problem(f)
+print(f"verdict   : {'OK' if problem is None else 'BLOCKED — ' + problem}")
+print(f"enabled   : {'yes' if grok_engine.grok_enabled() else 'no (GROK_ENABLED is not true)'}")
+sys.exit(0 if problem is None else 1)
+PY
+}
+
+cmd_logout() {
+  need_bin
+  local h; h="$(home)"
+  [ -d "$h" ] || die "no Grok home at $h — nothing to sign out"
+  [ ! -L "$h" ] || die "GROK_HOME $h is a symlink — refusing"
+  GROK_HOME="$h" "$BIN" logout
+}
+
+case "${1:-}" in
+  login)   shift; cmd_login "$@" ;;
+  status)  shift; cmd_status "$@" ;;
+  logout)  shift; cmd_logout "$@" ;;
+  *)
+    sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    exit 1 ;;
+esac
