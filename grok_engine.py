@@ -52,6 +52,9 @@ KNOWN_GOOD_VERSIONS = ("1.0.46",)
 
 SANDBOX_PROFILE = "cardloop"
 _REGISTRY_TTL_SEC = 300.0
+# A NEGATIVE row is re-probed fast: the operator fixes "not signed in" (tools/grok-acct login runs
+# in another process and cannot reset this cache) and must not stare at "off" for five minutes.
+_REGISTRY_FAIL_TTL_SEC = 15.0
 _registry_cache: dict = {"ts": 0.0, "data": None}
 _inflight: "asyncio.Future | None" = None
 
@@ -925,8 +928,11 @@ async def provider_info(*, force: bool = False) -> dict:
     if not grok_enabled():
         return _info(False, False, "Grok is disabled by GROK_ENABLED=false")
     now = time.time()
-    if not force and _registry_cache["data"] is not None and now - _registry_cache["ts"] < _REGISTRY_TTL_SEC:
-        return _registry_cache["data"]
+    cached = _registry_cache["data"]
+    if not force and cached is not None:
+        ttl = _REGISTRY_TTL_SEC if cached.get("available") else _REGISTRY_FAIL_TTL_SEC
+        if now - _registry_cache["ts"] < ttl:
+            return cached
     # Two callers asking while a probe is running (startup + a registry read) share ONE probe: it
     # can include a real model turn (the sandbox probe) and must not be paid for twice.
     global _inflight

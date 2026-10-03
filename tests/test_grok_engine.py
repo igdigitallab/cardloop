@@ -1075,6 +1075,26 @@ async def test_provider_info_is_cached_300s_and_force_reprobes(probed, monkeypat
     assert len(spawned) == 2 * n
 
 
+async def test_a_negative_row_is_reprobed_after_the_short_ttl_so_a_fresh_login_shows_up(probed):
+    # Regression (2026-10-03): `tools/grok-acct login` runs in ANOTHER process, so the cockpit's
+    # cached "not signed in" row stayed for 300 s after a successful login — the picker said off.
+    (probed.home / "auth.json").unlink()
+    first = await grok_engine.provider_info()
+    assert first["available"] is False and "not signed in" in first["error"]
+    probed.write_auth()                                           # the operator completes the login
+    assert await grok_engine.provider_info() is first             # inside the short TTL: no probe storm
+    grok_engine._registry_cache["ts"] -= grok_engine._REGISTRY_FAIL_TTL_SEC + 1
+    assert grok_engine._REGISTRY_FAIL_TTL_SEC < 60
+    again = await grok_engine.provider_info()                     # NOT force: this is the endpoint's path
+    assert again["available"] is True and again is not first
+
+
+async def test_a_positive_row_keeps_the_long_ttl(probed):
+    first = await grok_engine.provider_info(force=True)
+    grok_engine._registry_cache["ts"] -= grok_engine._REGISTRY_FAIL_TTL_SEC + 1
+    assert await grok_engine.provider_info() is first             # the short TTL is for failures only
+
+
 async def test_unknown_newer_version_warns_but_stays_available(probed, capsys):
     probed.fake("synthetic_text", version="grok 9.9.9 (abc) [stable]")
     info = await grok_engine.provider_info(force=True)
