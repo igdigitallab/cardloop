@@ -35,7 +35,10 @@ official `grok` binary on a SuperGrok subscription — never the xAI API. Runboo
   send ledger (`data/grok_sent/`): a handoff out of Grok never carries a user row it did not send.
 - **`make doctor`** gains a Grok section (CLI/version, auth, bubblewrap, GROK_HOME, sandbox profile
   and probe, compat, folder trust, per-project compat, leftover processes, litter, ledger sizes).
-- **Tooling and tests.** `tools/grok_record_fixtures.py` re-records the 26 fixtures in
+- **Tooling and tests.** `tools/grok-verify check` is the gate after every CLI update (real-binary
+  isolation tests, egress canary, fixture-skeleton drift; it prints the `KNOWN_GOOD_VERSIONS` edit and
+  never applies it) and `tools/grok-verify soak` a long run of small real turns watching processes,
+  litter, size and egress. `tools/grok_record_fixtures.py` re-records the 26 fixtures in
   `tests/fixtures/grok/` from the real CLI; `tests/fake_grok_acp.py` replays them; opt-in markers
   `grok_live` (real binary, real turns) and `grok_canary` (egress canary); a Grok e2e suite against a
   real cockpit with the fake CLI.

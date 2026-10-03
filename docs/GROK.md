@@ -20,7 +20,7 @@
 ## Enable (once)
 
 1. `.env`: `GROK_ENABLED=true`. Optional knobs are in `.env.example` (`GROK_BIN`, `GROK_HOME`, `GROK_SANDBOX_DENY`, `GROK_ALLOW_ALL_PROJECTS`, `GROK_MODEL`).
-2. `tools/grok-acct login` — the ordinary `grok login --device-auth` flow run with `GROK_HOME` set (`<DATA>/grok-home`, mode 700, must not be a symlink). Approve the printed code in any browser signed in to the grok.com account. Tokens are never copied from anywhere; your interactive `~/.grok` is untouched. `tools/grok-acct status` shows the verdict without secret values; `logout` signs out that home only.
+2. `tools/grok-acct login` — the ordinary `grok login --device-auth` flow run with `GROK_HOME` set (`<DATA>/grok-home`, mode 700, must not be a symlink). Approve the printed code in any browser signed in to the grok.com account. `tools/grok-acct` never copies tokens from anywhere (the test tools borrow a login into a throwaway home and delete it); your interactive `~/.grok` is untouched. `tools/grok-acct status` shows the verdict without secret values; `logout` signs out that home only.
 3. Restart the cockpit. A background startup probe journals `[grok] ready via oidc auth (N models, CLI <version>)` or `[grok] unavailable; Claude remains active: <reason>`. The probe includes **one real model turn** (~15k tokens, effort low) that tries to read a canary file from the model's shell; its verdict is cached on disk by CLI version + deny list + home (ok for 7 days, failed/inconclusive for 15 minutes). First start, every CLI bump and every deny-list change cost one probe turn. Until it says `ok`, Grok is unavailable.
 4. `make doctor` — the `Grok …` facts must all be ✓ (table below).
 5. Opt a project in (next section). Only then can a chat or card choose Grok there.
@@ -86,13 +86,14 @@ Also: `Grok sandbox check failed — refusing to run` = the probe verdict is `fa
 
 ## CLI bump procedure
 
-The stream format, flags and compat behaviour of a 1.0.x CLI can change under you; auto-update is off. An unknown build only **warns** (registry `warnings`, doctor ⚠) — it does not stop turns, so a bump is a deliberate procedure:
+The stream format, flags and compat behaviour of a 1.0.x CLI can change under you; auto-update is off. An unknown build only **warns** (registry `warnings`, doctor ⚠) — turns keep running — so a bump is a deliberate gate, `tools/grok-verify`:
 
-1. Install the new build yourself (`grok update` / the installer); `make doctor` shows `Grok CLI` ⚠ "not on KNOWN_GOOD_VERSIONS".
-2. Re-record the wire fixtures and read the diff of `tests/fixtures/grok/`: `venv/bin/python tools/grok_record_fixtures.py --scenario all`.
-3. Run the real-binary suite, which re-proves isolation with positive controls (project MCP/hook/skill markers, deny floor, trust store, concurrency): `venv/bin/python -m pytest tests/test_grok_live.py -m grok_live`.
-4. Run the egress canary: `... -m grok_canary` (must stay under 1 MiB per connection).
-5. Only then add the version to `KNOWN_GOOD_VERSIONS` in `grok_engine.py`. The sandbox probe fingerprint includes the CLI version, so the next provider check re-runs the self-test turn by itself.
+1. Install the new build yourself (`grok update` / the installer). `make doctor` now shows `Grok CLI` ⚠ "not on KNOWN_GOOD_VERSIONS".
+2. `tools/grok-verify check` (add `--login <GROK_HOME or auth.json>` to borrow a login other than `~/.grok`; `--dry-run` prints the plan and spends nothing). It copies that login into a scratch `GROK_HOME` (mode 600, deleted afterwards — never the cockpit's own home) and runs, in order: `grok_live` (isolation with marker-file positive controls, sandbox denial, one real turn), `grok_canary` (egress < 1 MiB per connection) and a fixture re-record into a temp dir whose event/field **skeletons** are diffed against `tests/fixtures/grok/` (ids and text ignored). `--drift removed` (default) fails when a method, field or event type disappeared or changed, `any` also fails on additions, `report` never fails. A skipped test counts as a failure (`--allow-skips`); skipping a step by flag makes the verdict PARTIAL (exit 1).
+3. Only when every step passed and the build is not yet listed does it print the one-line edit for `KNOWN_GOOD_VERSIONS` in `grok_engine.py`. It never edits a file. Apply and commit it. The sandbox probe fingerprint includes the CLI version, so the next provider check re-runs the self-test turn by itself.
+4. Optional soak: `tools/grok-verify soak` — one tiny real turn per 20 minutes for 24 h through `run_grok_engine` under the production profile (`--duration`, `--interval`, `--cycles 2 --interval 5` is the smoke run). Each cycle asserts no leftover `grok agent` process, bounded `sandbox-blocked*` litter and `GROK_HOME` growth; the egress canary runs every 12th cycle (`--canary-every`); one JSON line per cycle goes to the log. It costs subscription quota (about one turn per cycle plus one probe turn).
+
+Exit codes: 0 = everything passed, 1 = a check failed or the run was incomplete, 128+N = stopped by signal N. Output never contains the login's values. The pieces can be run by hand: `tools/grok_record_fixtures.py --scenario all`, `pytest -m grok_live`, `pytest -m grok_canary`.
 
 ## ToS posture
 
