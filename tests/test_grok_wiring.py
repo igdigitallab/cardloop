@@ -12,7 +12,8 @@ Three families, all written against the behaviour a caller can observe:
     message was accepted), never a fall back to another provider;
   * the registry — the Grok row, the disabled state, the capability errors.
 
-`test_grok_wiring_mutants.py`'s harness (tools-side, not shipped) proves each guard bites.
+Each guard here was proved to bite with a line-anchored single-branch mutation pass (the harness is
+a throwaway; the evidence lives in the P2 report).
 """
 import asyncio
 import sys
@@ -146,6 +147,7 @@ def app(fake_ctx):
     a.router.add_post("/api/projects/{id}/tasks/{card}/move", _webapp.api_move_task)
     a.router.add_get("/api/projects/{id}/settings", _webapp.api_project_settings_get)
     a.router.add_post("/api/projects/{id}/settings", _webapp.api_project_settings_post)
+    a.router.add_post("/api/projects/{id}/chat/stop", _webapp.api_project_chat_stop)
     a.router.add_get("/api/projects", _webapp.api_projects)
     a.router.add_get("/api/agent-providers", _webapp.api_agent_providers)
     return a
@@ -788,6 +790,44 @@ async def test_card_run_via_move_is_refused_before_the_card_moves(
 
 
 @pytest.mark.asyncio
+async def test_card_run_via_move_on_a_locally_pinned_project_is_judged_on_claude(
+    aiohttp_client, fake_ctx, app, engines
+):
+    """The local-backend pin overrides the card's provider at run time, so the pre-check must
+    judge what will actually run — a pinned project is not refused for a Grok card it will run
+    on Claude."""
+    cwd = fake_ctx["topics"][SESSION_KEY]["cwd"]
+    fake_ctx["topics"][SESSION_KEY]["backend"] = "ollama"
+    _webapp._save_board(cwd, "myproject", "# T", {
+        "backlog": [{"id": "aabbcc", "text": "do it", "provider": "grok"}],
+        "in_progress": [], "review": [], "failed": []})
+    started = []
+
+    async def fake_start(ctx, app_, project, card_id):
+        started.append(card_id)
+        return {"started": True, "card_id": card_id}
+
+    client = await aiohttp_client(app)
+    with patch.object(_webapp, "_start_card_run", side_effect=fake_start):
+        r = await client.post(f"/api/projects/{PROJECT_ID}/tasks/aabbcc/move",
+                              json={"to": "in_progress"}, headers=_auth(fake_ctx))
+    assert r.status == 200, await r.text()
+    assert started == ["aabbcc"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_patch_with_an_unregistered_provider_is_a_400_not_a_crash(
+    aiohttp_client, fake_ctx, app, grok_on
+):
+    _seed_chat(fake_ctx, provider="claude", model="opus")
+    client = await aiohttp_client(app)
+    r = await client.patch(f"/api/projects/{PROJECT_ID}/chats/{CHAT_ID}",
+                           json={"provider": "vertex", "model": "m", "expected_revision": 0},
+                           headers=_auth(fake_ctx))
+    assert r.status == 400 and "unknown provider" in (await r.json())["error"]
+
+
+@pytest.mark.asyncio
 async def test_card_run_via_move_judges_the_project_default_provider_too(
     aiohttp_client, fake_ctx, app, engines
 ):
@@ -865,6 +905,13 @@ async def test_settings_grok_fields_validation_view_and_preservation(
     assert (await (await client.get(url, headers=h)).json())["grok_allowed"] is False
 
 
+def test_settings_view_reads_the_flag_strictly():
+    assert _webapp._project_settings_view({"grok_allowed": True})["grok_allowed"] is True
+    for loose in ("true", 1, None):
+        assert _webapp._project_settings_view({"grok_allowed": loose})["grok_allowed"] is False
+    assert _webapp._project_settings_view({})["grok_allowed"] is False
+
+
 def test_collect_projects_exposes_the_grok_fields_strictly(fake_ctx):
     topic = fake_ctx["topics"][SESSION_KEY]
     proj = next(p for p in _webapp._collect_projects(fake_ctx) if p["id"] == PROJECT_ID)
@@ -887,6 +934,11 @@ def test_collect_projects_free_chats_carry_their_own_flag(fake_ctx):
     })
     by_id = {p["id"]: p for p in _webapp._collect_projects(fake_ctx)}
     assert by_id["free-a"]["grok_allowed"] is True and by_id["free-b"]["grok_allowed"] is False
+    free = _webapp._load_free_chats(fake_ctx)
+    free["free-b"]["grok_allowed"] = "true"           # a hand-edited, non-boolean record
+    _webapp._save_free_chats(fake_ctx, free)
+    by_id = {p["id"]: p for p in _webapp._collect_projects(fake_ctx)}
+    assert by_id["free-b"]["grok_allowed"] is False
     assert by_id["free-a"]["provider"] == "grok"
     assert by_id["free-a"]["grok_model"] == grok_engine.DEFAULT_GROK_MODEL
 
@@ -1033,6 +1085,28 @@ async def test_queue_drain_of_a_legacy_unpinned_grok_chat_is_refused_too(
 
 
 @pytest.mark.asyncio
+async def test_queue_drain_refuses_grok_for_a_project_archived_since_the_message_was_queued(
+    fake_ctx, engines, grok_on
+):
+    """The topics entry still says allowed, but the project no longer resolves in the registry:
+    a stale grant is never trusted."""
+    _allow(fake_ctx)
+    _seed_chat(fake_ctx, provider="grok", grok_session_id="OLD-ID")
+    item = _webapp._chat_queue_enqueue(SESSION_KEY, "queued text", chat_id=CHAT_ID,
+                                       project_id=PROJECT_ID,
+                                       pinned_runtime={"provider": "grok", "model": "grok-4.7"})
+    assert item is not None
+    _webapp._save_archived(fake_ctx, {PROJECT_ID})
+    with patch.object(_webapp, "_spawn_bg", side_effect=lambda coro: asyncio.ensure_future(coro)), \
+         patch.object(_webapp, "_secrets_read", return_value={}), \
+         patch.object(_webapp, "_build_agents_kwargs", return_value={}):
+        assert await _webapp._chat_queue_drain_one(fake_ctx, SESSION_KEY) is True
+        await asyncio.sleep(0.05)
+    assert _no_engine_calls(engines)
+    assert any(e.get("error") == REFUSAL for e in _live_events())
+
+
+@pytest.mark.asyncio
 async def test_queue_drain_runs_a_grok_item_under_the_allow_all_hatch(
     fake_ctx, engines, grok_on, monkeypatch
 ):
@@ -1089,13 +1163,13 @@ async def test_card_run_under_the_allow_all_hatch_runs(fake_ctx, tmp_path, engin
 
 
 @pytest.mark.asyncio
-async def test_gated_engine_wrapper_passes_the_real_engine_through_when_allowed():
+async def test_gated_engine_wrapper_passes_the_real_engine_through_when_allowed(fake_ctx):
     async def real(**_kw):
         yield {"type": "result"}
     spec = providers.get("grok")
-    assert _webapp._gated_engine(spec, {"grok_allowed": True}, real) is real
-    assert _webapp._gated_engine(providers.get("claude"), {}, real) is real
-    refused = _webapp._gated_engine(spec, {}, real)
+    assert _webapp._gated_engine(spec, fake_ctx, {"grok_allowed": True}, real) is real
+    assert _webapp._gated_engine(providers.get("claude"), fake_ctx, {}, real) is real
+    refused = _webapp._gated_engine(spec, fake_ctx, {}, real)
     assert refused is not real
     events = [e async for e in refused(anything="goes")]
     assert len(events) == 1 and events[0]["type"] == "error"
@@ -1103,12 +1177,33 @@ async def test_gated_engine_wrapper_passes_the_real_engine_through_when_allowed(
     assert str(events[0]["exc"]) == REFUSAL
 
 
-def test_gate_project_prefers_the_live_record_and_judges_an_unknown_one_as_empty(fake_ctx):
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+async def test_ungated_providers_never_pay_for_the_gate_lookup(
+    fake_ctx, engines, codex_on, provider
+):
+    """Claude and Codex runs must do exactly the work they did before the gate existed: the live
+    project lookup happens only for a provider that HAS a gate."""
+    _field, _key, model = SHAPES[provider]
+    _seed_chat(fake_ctx, provider=provider, model=model)
+
+    def boom(*_a, **_k):
+        raise AssertionError("the project registry must not be read for an ungated provider")
+
+    with patch.object(_webapp, "_find_project_by_id", side_effect=boom), \
+         patch.object(_webapp, "_collect_projects", side_effect=boom):
+        await _drain(fake_ctx, dict(chat_id=CHAT_ID, project_id=PROJECT_ID,
+                                    pinned_runtime={"provider": provider, "model": model}))
+    assert len(engines[provider]) == 1
+
+
+def test_gate_project_prefers_the_live_record_and_judges_an_unresolvable_one_as_empty(fake_ctx):
     _allow(fake_ctx)
     held = {"id": PROJECT_ID, "grok_allowed": False}
     assert _webapp._gate_project(fake_ctx, held)["grok_allowed"] is True
     gone = {"id": "no-such-project", "grok_allowed": True}
-    assert _webapp._gate_project(fake_ctx, gone) is gone, "no registry entry: the caller's record"
+    assert _webapp._gate_project(fake_ctx, gone) == {}, "named but unresolvable: never trusted"
+    assert _webapp._gate_project(fake_ctx, {"grok_allowed": True}, "no-such-project") == {}
     assert _webapp._gate_project(fake_ctx, None) == {}
     assert _webapp._gate_project(fake_ctx, {"grok_allowed": True}) == {"grok_allowed": True}
     assert _webapp._gate_project(fake_ctx, None, PROJECT_ID)["grok_allowed"] is True
@@ -1457,6 +1552,23 @@ async def test_first_post_to_a_never_listed_free_adapter_chat_runs_on_that_adapt
 
 
 @pytest.mark.asyncio
+async def test_first_post_to_a_never_listed_real_project_seeds_nothing_before_it_decides(
+    aiohttp_client, fake_ctx, app, engines
+):
+    """The seeding is for free chats only: a Claude project that was never listed keeps its
+    exact old behaviour — here a busy POST queues and returns without touching chats.json."""
+    fake_ctx["running"][SESSION_KEY] = True
+    client = await aiohttp_client(app)
+    with patch.object(_webapp, "_build_agents_kwargs", return_value={}), \
+         patch.object(_webapp, "_secrets_read", return_value={}):
+        resp = await client.post(f"/api/projects/{PROJECT_ID}/chat", json={"prompt": "queue me"},
+                                 headers=_auth(fake_ctx))
+        events = await _sse_events(resp)
+    assert any(e.get("type") == "queued" for e in events)
+    assert _webapp._load_chats(fake_ctx) == {}
+
+
+@pytest.mark.asyncio
 async def test_first_post_to_a_never_listed_free_grok_chat_without_the_flag_is_refused(
     aiohttp_client, fake_ctx, app, engines, grok_on, tmp_path
 ):
@@ -1489,6 +1601,38 @@ async def test_first_post_to_a_never_listed_free_claude_chat_is_unchanged(
     assert len(engines["claude"]) == 1
     assert engines["claude"][0]["resume_session_id"] == "FREE-FLAT"
     assert fake_ctx["sessions"][fid] == "NEW-ID"
+
+
+# ─────────────────── the Stop button ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_stop_button_reaches_a_running_grok_turn(aiohttp_client, fake_ctx, app):
+    """The engine parks a `GrokTurn` in ctx["running"]; the generic Stop route calls its
+    `interrupt()`, which asks the agent to cancel (session/cancel) and waits for the stop."""
+    sent: list = []
+
+    class FakeAcp:
+        exited = False
+
+        def __init__(self):
+            self.prompt_done = asyncio.Event()
+
+        async def notify(self, method, params):
+            sent.append((method, params))
+            self.prompt_done.set()
+
+        def kill_group(self, _sig):
+            raise AssertionError("a clean cancel must not need the kill")
+
+    turn = grok_engine.GrokTurn(SESSION_KEY)
+    turn._acp, turn.prompt_started, turn.session_id = FakeAcp(), True, "SESS-1"
+    fake_ctx["running"][SESSION_KEY] = turn
+    client = await aiohttp_client(app)
+    r = await client.post(f"/api/projects/{PROJECT_ID}/chat/stop", headers=_auth(fake_ctx))
+    assert r.status == 200 and (await r.json()) == {"ok": True, "stopped": True}
+    assert sent == [("session/cancel", {"sessionId": "SESS-1"})]
+    assert turn.cancel_requested is True
 
 
 # ─────────────────── bot.py ───────────────────────────────────────────────────
@@ -1586,6 +1730,12 @@ async def test_bot_amain_starts_the_grok_probe_only_after_the_cockpit_is_listeni
     async def noop(*_a, **_k):
         return None
 
+    async def graceful(*_a, **_k):
+        # the explicit cancel must already have happened: a model turn must not keep running
+        # through the unbounded session flush
+        await asyncio.sleep(0)
+        probe_state["cancelled_before_flush"] = probe_state["cancelled"]
+
     monkeypatch.setattr(grok_engine, "provider_info", probe)
     monkeypatch.setattr(bot, "_run_startup_migration", lambda: None)
     monkeypatch.setattr(bot, "_build_ctx", lambda: {"topics": {}})
@@ -1593,10 +1743,11 @@ async def test_bot_amain_starts_the_grok_probe_only_after_the_cockpit_is_listeni
     monkeypatch.setattr(bot.webapp, "stop", noop)
     monkeypatch.setattr(bot, "_maybe_start_tunnel", fake_tunnel)
     monkeypatch.setattr(bot.tunnel, "stop_tunnel", noop)
-    monkeypatch.setattr(bot, "_graceful_shutdown", noop)
+    monkeypatch.setattr(bot, "_graceful_shutdown", graceful)
     monkeypatch.setattr(bot.codex_engine, "codex_enabled", lambda: False)
 
     await asyncio.wait_for(bot._amain(), timeout=10)
     assert order.index("start-done") < order.index("probe-start"), order
     assert order.index("after-start") < order.index("probe-still-pending"), order
     assert probe_state["cancelled"] is True, "shutdown cancels the in-flight probe"
+    assert probe_state["cancelled_before_flush"] is True, "...before the session flush, not after"

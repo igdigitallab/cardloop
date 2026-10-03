@@ -5954,15 +5954,21 @@ def _provider_gate_refusal(project: "dict | None", provider: str) -> "str | None
     return providers.gate_refusal(provider, project)
 
 
-def _gated_engine(spec: "providers.ProviderSpec", project: "dict | None", engine):
-    """The engine factory a run site may call: `engine` itself when `project` may use
-    `spec`, otherwise a factory whose ONLY output is the refusal as an engine `error` event.
+def _gated_engine(spec: "providers.ProviderSpec", ctx: dict, project: "dict | None", engine,
+                  project_id: "str | None" = None):
+    """The engine factory a RUN site may call: `engine` itself when the project may use `spec`,
+    otherwise a factory whose ONLY output is the refusal as an engine `error` event.
 
     A run-time refusal must reach the operator through the site's own error path (the queue's
     live ring, the card's sidecar and Failed column) and must never turn into a run on another
     provider — the selection was accepted earlier, the project can lose the flag before the
-    drain, and silently re-binding it would send the code somewhere nobody chose."""
-    refusal = _provider_gate_refusal(project, spec.name)
+    drain, and silently re-binding it would send the code somewhere nobody chose.
+
+    The project is judged by its LIVE record (see `_gate_project`), looked up only for a provider
+    that has a gate: Claude and Codex runs do no extra work here."""
+    if not spec.has_gate:
+        return engine
+    refusal = _provider_gate_refusal(_gate_project(ctx, project, project_id), spec.name)
     if refusal is None:
         return engine
 
@@ -5972,16 +5978,15 @@ def _gated_engine(spec: "providers.ProviderSpec", project: "dict | None", engine
 
 
 def _gate_project(ctx: dict, project: "dict | None", project_id: "str | None" = None) -> dict:
-    """The record the gate judges at RUN time: the live registry entry when there is one — a
-    flag revoked after a message was queued or a card started must count, and several callers
-    hold a record that is minutes or hours old — else the record the caller holds. A project
-    that cannot be resolved at all is judged as an empty record, which a gated provider refuses.
-    """
+    """The record the gate judges at RUN time. A project the caller can NAME (`project_id`, or an
+    `id` on the record) is judged by its live registry entry — a flag revoked after a message was
+    queued or a card started must count, and several callers hold a record that is minutes or
+    hours old — and one that no longer resolves (archived, removed) is judged as an EMPTY record,
+    which a gated provider refuses; a stale grant is never trusted. Only a record with no id at
+    all (a legacy queue item carrying just its topics entry) is judged as it stands."""
     pid = project_id or (project or {}).get("id")
     if pid:
-        live = _find_project_by_id(ctx, pid)
-        if live is not None:
-            return live
+        return _find_project_by_id(ctx, pid) or {}
     return project or {}
 
 
@@ -5998,7 +6003,7 @@ def _git_enabled(project: dict) -> bool:
 # the return values of _infer_archetype() further down this file.
 _PROJECT_ARCHETYPES = ("software", "content", "ops", "scratchpad")
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", *providers.adapter_model_fields(), *providers.gate_fields(), "ask_always_allow", "account", "backend")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", *providers.adapter_model_fields(), "ask_always_allow", "account", "backend")
 
 # spec-051: per-project policy for resuming a run interrupted by a rate-limit.
 #   ask    — show an in-chat Yes/No prompt (default; visible, not silent)
@@ -6220,7 +6225,8 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
     updates: dict = {}
     for k, v in body.items():
         # `_PROJECT_SETTING_FIELDS` is fixed at import; an adapter registered later still owns its
-        # `<name>_model` field, so that one is looked up live.
+        # `<name>_model` field, so that one is looked up live — and a gated provider's opt-in flag
+        # is only ever looked up live.
         if (k not in _PROJECT_SETTING_FIELDS and k not in providers.adapter_model_fields()
                 and k not in providers.gate_fields()):
             return web.json_response({"error": f"unknown key: {k}"}, status=400)
@@ -7356,7 +7362,7 @@ async def _run_card(
             # the LIVE project record — `project` may be the stale one _drain_queue carries
             # from the previous card. A refusal arrives as this run's own error (sidecar +
             # Failed column), never as a run on another provider.
-            run_engine = _gated_engine(spec, _gate_project(ctx, project), run_engine)
+            run_engine = _gated_engine(spec, ctx, project, run_engine)
 
             # spec-092 P3: resolved HERE, inside the card's own failure handling, so a box
             # that is down marks the card Failed with a readable reason instead of escaping
@@ -13848,8 +13854,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # spec-095 D5: the project can lose the flag between accept and drain (the queue pins the
         # provider, not the permission). A refusal is delivered as this turn's own error event —
         # visible in the chat — and the message is never re-bound to another provider.
-        run_engine = _gated_engine(
-            spec, _gate_project(ctx, topic, _project_id or None), run_engine)
+        run_engine = _gated_engine(spec, ctx, topic, run_engine, _project_id or None)
         _cid = {"chat_id": _resolved_chat_id} if _resolved_chat_id else {}
 
         # A queued message (typed while busy) or an auto-continue wake can be the first turn of a

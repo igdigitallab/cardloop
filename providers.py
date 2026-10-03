@@ -55,6 +55,12 @@ CLAUDE_CAPABILITIES: dict = {
 }
 
 
+def _no_gate(project: Mapping[str, Any]) -> "str | None":
+    """The default gate: open. A module-level function so `ProviderSpec.has_gate` can tell it
+    from a real one by identity."""
+    return None
+
+
 @dataclass(frozen=True)
 class ProviderSpec:
     """Everything a run site needs to know that differs between providers."""
@@ -77,7 +83,7 @@ class ProviderSpec:
     capabilities: Callable[[], dict]
     # Per-project privacy gate: the refusal text, or None when the project may use this
     # provider. The default is open — Claude is the cockpit's own harness and Codex has no gate.
-    gate: Callable[[Mapping[str, Any]], "str | None"] = lambda project: None
+    gate: Callable[[Mapping[str, Any]], "str | None"] = _no_gate
     # Project/free-chat record field the gate reads ("" = no gate). Carried through the project
     # views and the settings writer from this one name.
     gate_field: str = ""
@@ -85,6 +91,12 @@ class ProviderSpec:
     @property
     def is_default(self) -> bool:
         return self.name == DEFAULT
+
+    @property
+    def has_gate(self) -> bool:
+        """False for a provider without a privacy gate: its run sites then skip the project
+        lookup entirely, so Claude and Codex runs do exactly the work they did before."""
+        return self.gate is not _no_gate
 
     @property
     def model_field(self) -> str:

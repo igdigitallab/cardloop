@@ -118,3 +118,19 @@ def test_register_accepts_a_distinct_provider_and_it_flows_through_the_table(cle
         "session_id", "codex_thread_id", "grok_session_id", "x_id")
     assert providers.adapter_model_fields() == ("codex_model", "grok_model", "x_model")
     assert providers.normalize("x") == "x" and providers.is_adapter("x")
+
+
+def test_has_gate_is_true_only_for_a_provider_with_a_real_gate(clean_registry):
+    assert [s.name for s in providers.specs() if s.has_gate] == ["grok"]
+    assert not providers.get("claude").has_gate and not providers.get("codex").has_gate
+    providers.register(_spec(gate=lambda project: "nope" if not project.get("ok") else None))
+    assert providers.get("x").has_gate
+    assert providers.gate_refusal("x", {}) == "nope" and providers.gate_refusal("x", {"ok": 1}) is None
+
+
+def test_gate_defaults_open_and_unknown_names_raise():
+    assert providers.gate_refusal("claude", None) is None
+    assert providers.gate_refusal("codex", {}) is None
+    assert providers.gate_refusal("grok", {}) == providers.GROK_GATE_MESSAGE
+    with pytest.raises(KeyError):
+        providers.gate_refusal("vertex", {"grok_allowed": True})
