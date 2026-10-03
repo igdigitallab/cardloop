@@ -30,6 +30,8 @@ Switches (env):
   FAKE_GROK_STDERR_FLOOD=<n> write n bytes to stderr at start (proves stderr never blocks)
   FAKE_GROK_STDERR_TEXT     last line written to stderr
   FAKE_GROK_SPAWN_CHILD=1   start a `sleep 300` grandchild in the same process group
+  FAKE_GROK_IGNORE_TERM=1   leader and grandchild ignore SIGTERM (only SIGKILL ends them)
+  FAKE_GROK_IGNORE_EOF=1    keep running when stdin closes (only a signal ends it)
   FAKE_GROK_PID_FILE        json {"leader": pid, "child": pid|null} written at start
   FAKE_GROK_LITTER=1        leave sandbox-blocked(-dir).<pid> placeholders in $GROK_HOME like the real one
   FAKE_GROK_AUTH_META       json merged into the authenticate result `_meta`
@@ -42,6 +44,7 @@ import json
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -170,7 +173,7 @@ class Fake:
         while True:
             msg = self.recv()
             if msg is None:
-                sys.exit(0)  # stdin EOF = graceful shutdown, like the real agent
+                self.eof()  # stdin EOF = graceful shutdown, like the real agent
             if ENV.get("FAKE_GROK_EXIT_ON") and msg.get("method") == ENV["FAKE_GROK_EXIT_ON"]:
                 self.die()
             if msg.get("method") == method:
@@ -178,6 +181,12 @@ class Fake:
                     continue
                 return msg
             self.generic(msg)
+
+    def eof(self):
+        if ENV.get("FAKE_GROK_IGNORE_EOF"):
+            while True:
+                time.sleep(3600)
+        sys.exit(0)
 
     def die(self):
         errw(ENV.get("FAKE_GROK_STDERR_TEXT", "fake grok: fatal error") + "\n")
@@ -229,7 +238,7 @@ class Fake:
         while True:
             msg = self.recv()
             if msg is None:
-                return
+                self.eof()
             self.generic(msg)
 
 
@@ -240,9 +249,12 @@ def main():
         sys.exit(run_subcommand(argv))
     dump("FAKE_GROK_ENV_DUMP", {k: v for k, v in ENV.items() if not k.startswith("FAKE_")})
     dump("FAKE_GROK_CWD_DUMP", os.getcwd())
+    if ENV.get("FAKE_GROK_IGNORE_TERM"):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     child = None
     if ENV.get("FAKE_GROK_SPAWN_CHILD"):
-        child = subprocess.Popen(["sleep", "300"])  # same session + process group as us
+        # same session + process group as us; SIG_IGN is inherited, so IGNORE_TERM covers it too
+        child = subprocess.Popen(["sleep", "300"])
     dump("FAKE_GROK_PID_FILE", {"leader": os.getpid(), "child": child.pid if child else None})
     if ENV.get("FAKE_GROK_LITTER") and ENV.get("GROK_HOME"):
         home = Path(ENV["GROK_HOME"])

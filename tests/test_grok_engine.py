@@ -95,6 +95,7 @@ class Env:
         grok_engine.reset_cache()
         grok_engine._unknown_tools_seen.clear()
         grok_engine._unknown_updates_seen.clear()
+        grok_engine._window_cache.clear()
 
     def write_auth(self, **entry):
         self.home.mkdir(parents=True, exist_ok=True)
@@ -189,8 +190,9 @@ def _fast_timeouts(monkeypatch):
 # §5.4 event mapping, row by row
 # ------------------------------------------------------------------------------------------
 
-async def test_text_chunks_stream_as_deltas_then_one_assembled_text(env):
+async def test_text_chunks_stream_as_deltas_then_one_assembled_text(env, capsys):
     events = await env.run()
+    assert "unmapped session update" not in capsys.readouterr().out   # thoughts are KNOWN noise
     assert types(events) == ["text_delta", "text_delta", "text_delta", "text", "result"]
     assert [e["text"] for e in only(events, "text_delta")] == ["Hel", "lo ", "world"]
     assert only(events, "text")[0]["text"] == "Hello world"
@@ -414,8 +416,17 @@ async def test_a_normal_big_line_under_the_limit_is_fine(env, monkeypatch):
 
 async def test_stderr_is_drained_and_never_blocks_the_turn(env):
     env.fake("synthetic_text", stderr_flood=3_000_000)   # >> a 64 KiB pipe buffer
-    events = await asyncio.wait_for(env.run(), 20)
+    turns, events = [], []
+
+    async def go():
+        async for ev in run_grok_engine(**env.kwargs()):
+            events.append(ev)
+            t = env.ctx["running"].get("p:1")
+            if isinstance(t, GrokTurn) and t not in turns:
+                turns.append(t)
+    await asyncio.wait_for(go(), 20)
     assert types(events)[-1] == "result"
+    assert 0 < len(turns[0]._acp._stderr) <= grok_engine.STDERR_RING_BYTES   # a ring, not a log
 
 
 async def test_stderr_tail_in_errors_is_capped_to_the_ring(env):
@@ -724,6 +735,7 @@ def _toml(path: Path) -> dict:
 
 
 def test_ensure_home_writes_a_custom_profile_and_config(env):
+    os.chmod(env.home, 0o755)                      # a home someone created world-readable gets tightened
     info = ensure_home(env.ctx)
     prof = _toml(env.home / "sandbox.toml")["profiles"]["cardloop"]
     assert prof["extends"] == "workspace"
@@ -740,9 +752,10 @@ def test_ensure_home_writes_a_custom_profile_and_config(env):
 
 def test_ensure_home_is_idempotent_and_repairs_config(env):
     ensure_home(env.ctx)
-    before = {n: (env.home / n).stat().st_mtime_ns for n in ("sandbox.toml", "config.toml")}
+    before = {n: (env.home / n).stat().st_ino for n in ("sandbox.toml", "config.toml")}
     ensure_home(env.ctx)
-    assert before == {n: (env.home / n).stat().st_mtime_ns for n in before}   # no rewrite
+    # a rewrite is write-tmp + rename = a NEW inode (an mtime comparison is blind inside one fs tick)
+    assert before == {n: (env.home / n).stat().st_ino for n in before}
     (env.home / "config.toml").write_text('[shell_environment_policy]\ninherit = "all"\n')
     ensure_home(env.ctx)
     assert _toml(env.home / "config.toml")["shell_environment_policy"]["inherit"] == "core"
@@ -1137,6 +1150,8 @@ def test_haystack_decodes_raw_byte_arrays_and_nested_strings():
     ("Not logged in.\n", False, None, []),
     ("You are logged in with grok.com.\nDefault model: b\nAvailable models:\n  - a\n  * b (default)\n",
      True, "b", ["a", "b"]),
+    ("You are logged in with grok.com.\nDefault model: b\nAvailable models:\n  - a\n  - b\n",
+     True, "b", ["a", "b"]),            # the `Default model:` line wins when no row carries the marker
 ])
 def test_parse_models_output(text, logged_in, default, ids):
     li, d, rows = grok_engine.parse_models_output(text)
@@ -1245,3 +1260,143 @@ def test_signal_module_is_the_only_kill_path():
     text = Path(grok_engine.__file__).read_text()
     assert "pkill" not in text and "os.system" not in text and "shell=True" not in text
     assert signal.SIGKILL
+
+
+# ------------------------------------------------------------------------------------------
+# teardown details
+# ------------------------------------------------------------------------------------------
+
+async def test_a_process_that_ignores_sigterm_is_sigkilled(env, monkeypatch):
+    monkeypatch.setattr(grok_engine, "TERM_WAIT_SEC", 0.6)
+    env.fake("synthetic_cancel", spawn_child=1, ignore_term=1, ignore_cancel=1)
+    gen = run_grok_engine(**env.kwargs())
+    async for ev in gen:
+        if ev["type"] == "tool":
+            break
+    t0 = time.monotonic()
+    await gen.aclose()
+    pids = env.dump("pids")
+    assert pid_gone(pids["leader"]) and pid_gone(pids["child"])
+    assert time.monotonic() - t0 < 4
+
+
+async def test_healthy_teardown_is_prompt_because_sigterm_comes_first(env, monkeypatch):
+    monkeypatch.setattr(grok_engine, "TERM_WAIT_SEC", 3.0)   # a missing SIGTERM would cost the full 3 s
+    t0 = time.monotonic()
+    events = await env.run()
+    assert types(events)[-1] == "result"
+    assert time.monotonic() - t0 < 2.5
+
+
+async def test_teardown_asks_the_agent_to_close_the_session(env):
+    await env.run()
+    closes = env.sent("session/close")
+    assert len(closes) == 1 and closes[0]["params"]["sessionId"].startswith("fake-session_1-")
+
+
+async def test_an_agent_that_never_answers_close_does_not_stall_teardown(env, monkeypatch):
+    monkeypatch.setattr(grok_engine, "CLOSE_WAIT_SEC", 0.4)
+    env.fake("synthetic_text", ignore_close=1)
+    t0 = time.monotonic()
+    assert types(await env.run())[-1] == "result"
+    assert time.monotonic() - t0 < 3
+
+
+async def test_history_replayed_on_resume_is_not_part_of_the_turn(env):
+    env.fake("synthetic_resume_replay")
+    events = await env.run(resume_session_id="sess-abc")
+    blob = json.dumps(events)
+    assert "REPLAYED-HISTORY" not in blob and "old" not in [e["input"].get("command") for e in only(events, "tool")]
+    assert only(events, "text")[0]["text"] == "fresh"
+
+
+async def test_interrupt_after_the_turn_finished_is_a_no_op(env):
+    turns = []
+    async for ev in run_grok_engine(**env.kwargs()):
+        turns.append(env.ctx["running"].get("p:1"))
+    turn = next(t for t in turns if isinstance(t, GrokTurn))
+    await turn.interrupt()           # must neither raise nor signal anything
+    assert turn.cancel_requested is False
+
+
+# ------------------------------------------------------------------------------------------
+# second-round additions (each one kills a mutant the first pass left alive)
+# ------------------------------------------------------------------------------------------
+
+async def test_a_missing_project_directory_is_named_not_a_spawn_error(env):
+    msg = last_error(await env.run(cwd=str(env.tmp / "gone")))
+    assert "project directory does not exist" in msg
+    assert not (env.dumps / "argv.json").exists()
+
+
+async def test_the_same_tool_call_announced_twice_is_one_row(env):
+    env.fake("synthetic_tool_dup")
+    events = await env.run()
+    assert [e["input"]["command"] for e in only(events, "tool")] == ["ls", "ls"]   # dup-1 once, dup-2
+    assert len(only(events, "tool")) == 2
+
+
+async def test_the_spawn_log_names_env_keys_only(env, capsys):
+    await env.run()
+    line = next(x for x in capsys.readouterr().out.splitlines() if "env_keys=" in x)
+    keys = eval(line.split("env_keys=", 1)[1])     # a python list literal of NAMES
+    assert isinstance(keys, list) and all(isinstance(k, str) for k in keys)
+    assert "GROK_HOME" in keys and "PATH" in keys
+    assert str(env.home) not in line.split("env_keys=", 1)[1]      # no value of the child env
+
+
+def test_grok_sandbox_deny_replaces_the_defaults(env, monkeypatch):
+    (env.fake_home / ".ssh").mkdir()
+    monkeypatch.setenv("GROK_SANDBOX_DENY", str(env.secret_dir))
+    deny = ensure_home(env.ctx)["deny"]
+    assert str(env.fake_home / ".ssh") not in deny and "**/.env" not in deny
+    assert str(env.secret_dir) in deny and str(env.data / "grok-canary") in deny
+    monkeypatch.delenv("GROK_SANDBOX_DENY")
+    assert str(env.fake_home / ".ssh") in ensure_home(env.ctx)["deny"]
+
+
+def test_default_deny_covers_credential_files_that_live_in_home_itself(env, monkeypatch):
+    # measured: the model's shell could READ these three under the first-draft default list
+    monkeypatch.delenv("GROK_SANDBOX_DENY")
+    (env.fake_home / ".grok").mkdir()
+    for name in (".claude.json", ".git-credentials", ".bash_history", ".netrc", ".npmrc"):
+        (env.fake_home / name).write_text("secret")
+    deny = ensure_home(env.ctx)["deny"]
+    for name in (".claude.json", ".git-credentials", ".bash_history", ".netrc", ".npmrc"):
+        assert str(env.fake_home / name) in deny, name
+    assert str(env.fake_home / ".grok") not in deny           # the binary lives there: never the dir
+
+
+async def test_without_sigterm_a_stubborn_agent_would_cost_the_full_grace(env, monkeypatch):
+    # the agent keeps running after stdin closes (only a signal ends it): SIGTERM must come first
+    monkeypatch.setattr(grok_engine, "TERM_WAIT_SEC", 3.0)
+    env.fake("synthetic_text", ignore_eof=1)
+    t0 = time.monotonic()
+    assert types(await env.run())[-1] == "result"
+    assert time.monotonic() - t0 < 2.0
+    pid = env.dump("pids")["leader"]
+    assert pid_gone(pid)
+
+
+async def test_two_concurrent_registry_reads_share_one_probe(env, monkeypatch):
+    calls = []
+
+    async def slow_probe(info):
+        calls.append(1)
+        await asyncio.sleep(0.4)
+        return "ok", "fine"
+    monkeypatch.setattr(grok_engine, "_probe_sandbox_denial", slow_probe)
+    a, b = await asyncio.gather(grok_engine.provider_info(force=True), grok_engine.provider_info(force=True))
+    assert a["available"] and b["available"] and len(calls) == 1
+
+
+async def test_resume_reports_the_window_remembered_from_an_earlier_session(env):
+    first = only(await env.run(), "result")[0]
+    assert first["context_window"] == 256000
+    env.fake("synthetic_resume")
+    again = only(await env.run(resume_session_id="sess-abc"), "result")[0]
+    assert again["context_window"] == 256000                    # the resume answer carries no `models`
+    grok_engine._window_cache.clear()
+    env.fake("synthetic_resume")
+    cold = only(await env.run(resume_session_id="sess-abc"), "result")[0]
+    assert cold["context_window"] is None                       # unknown stays unknown, never invented

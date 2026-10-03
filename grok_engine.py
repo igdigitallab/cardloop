@@ -53,6 +53,7 @@ KNOWN_GOOD_VERSIONS = ("1.0.46",)
 SANDBOX_PROFILE = "cardloop"
 _REGISTRY_TTL_SEC = 300.0
 _registry_cache: dict = {"ts": 0.0, "data": None}
+_inflight: "asyncio.Future | None" = None
 
 # --- timing / size knobs (module constants so tests can shrink them) ---------------------------
 HANDSHAKE_TIMEOUT_SEC = 20.0   # EACH handshake step; a missing login makes `authenticate` hang
@@ -105,6 +106,11 @@ _ENV_ALLOW_PREFIXES = ("LC_",)
 # denying it makes every start fail with EACCES.
 DEFAULT_DENY = (
     "~/.claude", "~/.claude-accounts", "~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh",
+    # Measured on this adapter (r-grok-live, 2026-10-02): with only the entries above the model's
+    # shell READ ~/.claude.json (MCP server definitions + tokens live in $HOME, not in ~/.claude),
+    # ~/.git-credentials and ~/.bash_history. The rest is the usual credential/history set.
+    "~/.claude.json", "~/.git-credentials", "~/.netrc", "~/.npmrc", "~/.pypirc", "~/.docker",
+    "~/.kube", "~/.config/gcloud", "~/.bash_history", "~/.zsh_history",
     "**/.env", "**/secrets.env", "**/*.pem", "**/*.key",
 )
 
@@ -311,8 +317,6 @@ def build_deny(home: Path, ctx: dict | None = None, *, bin_path: str | None = No
             if problem:
                 raise GrokUnavailableError(f"GROK_SANDBOX_DENY entry {raw.strip()!r}: {problem}")
         else:
-            if not entry.startswith("/"):
-                raise GrokUnavailableError(f"GROK_SANDBOX_DENY entry {raw.strip()!r} is not absolute")
             real = os.path.realpath(entry)
             for p in protected:
                 if real == os.path.realpath(p) or os.path.realpath(p).startswith(real.rstrip("/") + "/"):
@@ -646,7 +650,19 @@ async def provider_info(*, force: bool = False) -> dict:
     now = time.time()
     if not force and _registry_cache["data"] is not None and now - _registry_cache["ts"] < _REGISTRY_TTL_SEC:
         return _registry_cache["data"]
-    data = await _probe_provider()
+    # Two callers asking while a probe is running (startup + a registry read) share ONE probe: it
+    # can include a real model turn (the sandbox probe) and must not be paid for twice.
+    global _inflight
+    loop = asyncio.get_running_loop()
+    if _inflight is not None and not _inflight.done() and _inflight.get_loop() is loop:
+        return await asyncio.shield(_inflight)
+    fut = asyncio.ensure_future(_probe_provider())
+    _inflight = fut
+    try:
+        data = await asyncio.shield(fut)
+    finally:
+        if _inflight is fut and fut.done():
+            _inflight = None
     _registry_cache.update(ts=now, data=data)
     return data
 
@@ -1424,6 +1440,11 @@ def _capture_limit_error(data: Path | None, *, source: str, text: str, session_i
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
 
 
+# `session/resume` answers without a `models` block, so the window of a model seen on any earlier
+# new session of this process is remembered per model id.
+_window_cache: dict[str, int] = {}
+
+
 def _model_window(models_block, model_id: str | None) -> int | None:
     """totalContextTokens of `model_id` from a session/new|resume `models` block."""
     if not isinstance(models_block, dict):
@@ -1565,6 +1586,10 @@ async def _run_turn(
         if acp.fatal:
             raise acp.fatal
         window = _model_window(session.get("models"), selected_model)
+        if window:
+            _window_cache[selected_model] = window
+        else:
+            window = _window_cache.get(selected_model)
         acp.discard_notes()
 
         # ---- the prompt ----
