@@ -6150,7 +6150,9 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
 
     updates: dict = {}
     for k, v in body.items():
-        if k not in _PROJECT_SETTING_FIELDS:
+        # `_PROJECT_SETTING_FIELDS` is fixed at import; an adapter registered later still owns its
+        # `<name>_model` field, so that one is looked up live.
+        if k not in _PROJECT_SETTING_FIELDS and k not in providers.adapter_model_fields():
             return web.json_response({"error": f"unknown key: {k}"}, status=400)
         if k in ("git_enabled", "notify_on_error", "context_pack_enabled"):
             if not isinstance(v, bool):
@@ -6184,10 +6186,10 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
                 return web.json_response(
                     {"error": f"backend: must be empty or {runtime.OLLAMA_BACKEND!r}"}, status=400)
             updates[k] = sv or None
-        elif k == "codex_model":
+        elif k in providers.adapter_model_fields():
             sv = str(v).strip()
             if not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", sv):
-                return web.json_response({"error": "codex_model: invalid model id"}, status=400)
+                return web.json_response({"error": f"{k}: invalid model id"}, status=400)
             updates[k] = sv
         elif k == "ask_always_allow":
             # spec-082 A: the gate's always-allow list. Normally grown one entry at a time by
@@ -13480,6 +13482,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # own session. Also finalize the owning chat_id (fallback to the active chat) so the
         # run's events + /live buffer are always stamped and never broadcast to every tab.
         _resolved_entry = False
+        _resume_chat: "dict | None" = None
         # Default: the project's own subscription, exactly as before spec-092. The per-chat
         # override (pinned or freshly resolved) replaces it inside the branch below.
         _q_account = topic.get("account")
@@ -13537,14 +13540,19 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                             print(f"[chat_queue] {session_key}: draining item {item.get('id')} "
                                   f"with NO pinned runtime — assumed current chat state "
                                   f"(provider={provider!r})")
-                        resume_id = providers.get(provider).resume_id(_tc)
+                        _resume_chat = _tc
                         _resolved_entry = True
             except Exception as _ce:
                 print(f"[chat_queue] chats resolve error for {session_key} (falling back): {_ce}")
-        if not _resolved_entry:
-            # Legacy item (no project_id) or chats.json unavailable: keep the old behavior.
-            resume_id = ctx["sessions"].get(session_key)
+        # Outside the try above on purpose: a pinned provider that is not registered (a restart
+        # into a build without it) must fail with its own error, not be logged as "falling back".
         spec = providers.get(provider)
+        if _resolved_entry:
+            resume_id = spec.resume_id(_resume_chat)
+        elif spec.is_default:
+            # Legacy item (no project_id) or chats.json unavailable: keep the old behavior. The
+            # flat map holds Claude's session id, so it may only ever resume a Claude run.
+            resume_id = ctx["sessions"].get(session_key)
         if provider == "claude" and _q_effort == "ultra":
             _q_effort = None
         # The account was validated when the message was ACCEPTED; by drain time the operator

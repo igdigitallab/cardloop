@@ -79,3 +79,34 @@ def test_claude_capabilities_is_the_one_shared_dict():
     assert providers.get("claude").capabilities() is providers.CLAUDE_CAPABILITIES
     assert providers.CLAUDE_CAPABILITIES["ask_mode"] is True
     assert "ask_mode" not in providers.get("codex").capabilities()
+
+
+def _spec(**over):
+    base = dict(name="x", label="X", engine_key="run_x_engine", continuity_field="x_id",
+                resume_kwarg="resume_id", result_key="provider_session_id",
+                fallback_model=lambda ctx: "m", enabled=lambda: True, capabilities=lambda: {})
+    base.update(over)
+    return providers.ProviderSpec(**base)
+
+
+@pytest.fixture
+def clean_registry(monkeypatch):
+    monkeypatch.setattr(providers, "_REGISTRY", dict(providers._REGISTRY))
+
+
+@pytest.mark.parametrize("over,message", [
+    (dict(name="codex"), "already registered"),
+    (dict(engine_key="run_engine"), "reuses engine_key"),
+    (dict(continuity_field="session_id"), "reuses continuity_field"),
+])
+def test_register_refuses_colliding_providers(clean_registry, over, message):
+    with pytest.raises(ValueError, match=message):
+        providers.register(_spec(**over))
+
+
+def test_register_accepts_a_distinct_provider_and_it_flows_through_the_table(clean_registry):
+    providers.register(_spec())
+    assert providers.names() == ("claude", "codex", "x")
+    assert providers.continuity_fields() == ("session_id", "codex_thread_id", "x_id")
+    assert providers.adapter_model_fields() == ("codex_model", "x_model")
+    assert providers.normalize("x") == "x" and providers.is_adapter("x")

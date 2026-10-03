@@ -12,6 +12,10 @@ models through the Claude alias list and mirrors its session id into the legacy 
 ids, a `<name>_model` project field and the compact engine kwarg set — the convention
 `runtime.model_field_for_provider` already encodes.
 
+Adapter engines receive the per-turn `effort` exactly as the cockpit sent it, including the
+cockpit-only "ultra" that is cleared for Claude alone — an adapter engine must whitelist the levels
+it understands (codex_engine does).
+
 Deliberately NOT here: history readers, session lists, usage, rate limits, search and the
 `/api/agent-providers` rows. Those differ inherently per provider and a table would only hide it.
 Nor are the Claude-only feature gates (account pinning, ultracode, auto-rotate, reconcile): they
@@ -93,6 +97,16 @@ _REGISTRY: "dict[str, ProviderSpec]" = {}
 
 
 def register(spec: ProviderSpec) -> ProviderSpec:
+    """Add a provider. Names, engine keys and continuity fields must be unique: a shared
+    `continuity_field` (the natural `session_id` for another Anthropic-protocol engine) would make
+    a chat flipped back to its earlier provider resume the id the other one minted."""
+    if spec.name in _REGISTRY:
+        raise ValueError(f"provider {spec.name!r} is already registered")
+    for other in _REGISTRY.values():
+        for attr in ("engine_key", "continuity_field"):
+            if getattr(other, attr) == getattr(spec, attr):
+                raise ValueError(
+                    f"provider {spec.name!r} reuses {attr}={getattr(spec, attr)!r} of {other.name!r}")
     _REGISTRY[spec.name] = spec
     return spec
 

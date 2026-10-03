@@ -30,6 +30,7 @@ from webapp import _derive_token
 SESSION_KEY = "1001:42"
 PROJECT_ID = "myproject"
 CHAT_ID = "aaaaaa"
+CLAUDE_FLAT = "CLAUDE-FLAT-SESSION"
 
 # Exact kwarg sets. `agents_kwargs` is patched to {} in every test so these are complete.
 CLAUDE_CHAT_KEYS = {
@@ -84,7 +85,9 @@ def fake_ctx(tmp_path):
     proj.mkdir()
     ctx = {
         "topics": {SESSION_KEY: {"project": PROJECT_ID, "cwd": str(proj), "model": "sonnet"}},
-        "sessions": {},
+        # Claude's flat per-project session map is never empty: a non-Claude run that wrongly
+        # resumes it (or clobbers it) must be visible in every test.
+        "sessions": {SESSION_KEY: CLAUDE_FLAT},
         "running": {},
         "password": "testpass",
         "DATA": data,
@@ -167,10 +170,15 @@ CASES = {
 
 
 def _install_engines(ctx, case, calls):
+    other_key = "thread_id" if case["result_key"] == "session_id" else "session_id"
+
     async def fake(**kwargs):
         calls.append(kwargs)
         yield {"type": "text", "text": "answer"}
-        yield {"type": "result", case["result_key"]: "NEW-ID", "context_tokens": 7}
+        # The other provider's id key is present with a poison value: the real Codex result
+        # carries `session_id` too, and a reader that is not provider-aware must be caught.
+        yield {"type": "result", case["result_key"]: "NEW-ID", other_key: "WRONG-ID",
+               "context_tokens": 7}
 
     ctx[case["engine_key"]] = fake
     ctx[case["other_key"]] = _unused_engine
@@ -225,7 +233,7 @@ async def test_queue_drain_kwargs_and_writeback(fake_ctx, codex_on, provider):
     if provider == "claude":
         assert fake_ctx["sessions"][SESSION_KEY] == "NEW-ID", "claude mirrors to the flat map"
     else:
-        assert SESSION_KEY not in fake_ctx["sessions"], "codex never touches the claude mirror"
+        assert fake_ctx["sessions"][SESSION_KEY] == CLAUDE_FLAT, "codex never touches the claude mirror"
 
 
 @pytest.mark.asyncio
@@ -293,7 +301,7 @@ async def test_chat_post_kwargs_writeback_and_result_frame(
     if provider == "claude":
         assert fake_ctx["sessions"][SESSION_KEY] == "NEW-ID"
     else:
-        assert SESSION_KEY not in fake_ctx["sessions"]
+        assert fake_ctx["sessions"][SESSION_KEY] == CLAUDE_FLAT
 
     result = next(e for e in events if e.get("type") == "result")
     assert result["provider"] == provider
@@ -914,3 +922,147 @@ async def test_chat_create_persists_every_providers_continuity_field(
     new_id = (await r.json())["id"]
     rec = next(c for c in _webapp._load_chats(fake_ctx)[PROJECT_ID]["chats"] if c["id"] == new_id)
     assert rec["session_id"] is None and "codex_thread_id" in rec and rec["codex_thread_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_queue_drain_codex_never_inherits_claudes_flat_session_as_a_thread_id(
+    fake_ctx, codex_on
+):
+    """If resolving the chat blows up AFTER the provider was assigned (here: the account check),
+    the drain falls back to the legacy flat session map. That map holds CLAUDE's session id, so it
+    may feed a Claude run only — never be handed to Codex as a thread id (found by review)."""
+    case = CASES["codex"]
+    _seed_chat(fake_ctx, provider="codex", model=case["model"], field="codex_thread_id",
+               value="CODEX-THREAD")
+    fake_ctx["sessions"][SESSION_KEY] = "CLAUDE-FLAT-SESSION"
+
+    def boom(*_a, **_k):
+        raise RuntimeError("account inspection failed")
+
+    with patch.object(_webapp, "_resolve_run_account", side_effect=boom):
+        kw = await _drain_once(
+            fake_ctx, case,
+            item_kwargs=dict(chat_id=CHAT_ID, project_id=PROJECT_ID,
+                             pinned_runtime={"provider": "codex", "model": case["model"]}),
+        )
+    assert kw["resume_thread_id"] is None, kw["resume_thread_id"]
+    assert fake_ctx["sessions"][SESSION_KEY] == "CLAUDE-FLAT-SESSION", "codex never mirrors"
+
+
+@pytest.fixture
+def third_provider(monkeypatch):
+    """A registered third adapter — the situation the seam exists for (found by review)."""
+    import providers as _providers
+    spec = _providers.ProviderSpec(
+        name="gemini", label="Gemini", engine_key="run_gemini_engine",
+        continuity_field="gemini_session_id", resume_kwarg="resume_session_id",
+        result_key="provider_session_id", fallback_model=lambda ctx: "gemini-default",
+        enabled=lambda: True, capabilities=lambda: {"chat": True},
+    )
+    monkeypatch.setitem(_providers._REGISTRY, "gemini", spec)
+    return spec
+
+
+@pytest.mark.asyncio
+async def test_settings_accept_and_validate_a_third_adapters_model_field(
+    aiohttp_client, fake_ctx, app, third_provider
+):
+    client = await aiohttp_client(app)
+    h = _auth(fake_ctx)
+    url = f"/api/projects/{PROJECT_ID}/settings"
+    r = await client.post(url, json={"gemini_model": "bad model!"}, headers=h)
+    assert r.status == 400 and (await r.json())["error"] == "gemini_model: invalid model id"
+    r = await client.post(url, json={"gemini_model": "gemini-2.5-pro"}, headers=h)
+    assert r.status == 200, await r.text()
+    assert fake_ctx["topics"][SESSION_KEY]["gemini_model"] == "gemini-2.5-pro"
+    view = await (await client.get(url, headers=h)).json()
+    assert view["gemini_model"] == "gemini-2.5-pro"
+
+
+def test_a_third_adapter_flows_through_the_table_driven_views(fake_ctx, third_provider):
+    proj = next(p for p in _webapp._collect_projects(fake_ctx) if p["id"] == PROJECT_ID)
+    assert proj["gemini_model"] == "gemini-default"
+    assert _webapp._project_settings_view({"gemini_model": "g-x"})["gemini_model"] == "g-x"
+    assert _webapp._effective_card_provider({"provider": "gemini"}, {}) == "gemini"
+    assert _webapp._effective_card_provider({}, {"board_provider": "gemini"}) == "gemini"
+    assert _webapp._known_agent_providers()["gemini"] is True
+
+
+@pytest.mark.asyncio
+async def test_queue_drain_unregistered_pinned_provider_fails_with_its_own_error(
+    fake_ctx, capsys
+):
+    """A queue persisted before a restart into a build without that provider must not be logged
+    as 'falling back' (it does not) — the failure names the provider (found by review)."""
+    _seed_chat(fake_ctx, provider="claude", model="opus", field="session_id", value="OLD")
+    item = _webapp._chat_queue_enqueue(
+        SESSION_KEY, "pinned to a ghost", chat_id=CHAT_ID, project_id=PROJECT_ID,
+        pinned_runtime={"provider": "vertex", "model": "m"})
+    assert item is not None
+    with patch.object(_webapp, "_spawn_bg", side_effect=lambda coro: asyncio.ensure_future(coro)), \
+         patch.object(_webapp, "_secrets_read", return_value={}), \
+         patch.object(_webapp, "_build_agents_kwargs", return_value={}):
+        await _webapp._chat_queue_drain_one(fake_ctx, SESSION_KEY)
+        await asyncio.sleep(0.05)
+    out = capsys.readouterr().out
+    assert "unknown provider 'vertex'" in out
+    assert "falling back" not in out
+
+
+@pytest.mark.asyncio
+async def test_card_claude_model_ignores_the_project_chat_model(fake_ctx, tmp_path):
+    """Cards resolve their model from the card / board_card_model setting — never from the
+    project's chat model, which is for chat runs."""
+    calls = await _run_card_with(fake_ctx, tmp_path, project_extra={"model": "opus"})
+    kw = calls["claude"][0]
+    assert kw["model"] == _webapp._effective_card_model({"id": "aabbcc"})
+    assert kw["model"] != "opus"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+async def test_queue_drain_flat_map_fallback_when_the_chat_write_back_fails(
+    fake_ctx, codex_on, provider
+):
+    """If persisting the new id to chats.json fails, only a Claude run may fall back to the flat
+    session map; a Codex thread id must never overwrite Claude's session there."""
+    case = CASES[provider]
+    _seed_chat(fake_ctx, provider=provider, model=case["model"], field=case["field"],
+               value="OLD-ID")
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    with patch.object(_webapp, "_save_chats", side_effect=boom):
+        await _drain_once(
+            fake_ctx, case,
+            item_kwargs=dict(chat_id=CHAT_ID, project_id=PROJECT_ID,
+                             pinned_runtime={"provider": provider, "model": case["model"]}),
+        )
+    assert fake_ctx["sessions"][SESSION_KEY] == ("NEW-ID" if provider == "claude" else CLAUDE_FLAT)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+async def test_chat_post_flat_map_fallback_when_the_chat_write_back_fails(
+    aiohttp_client, fake_ctx, app, codex_on, provider
+):
+    case = CASES[provider]
+    _seed_chat(fake_ctx, provider=provider, model=case["model"], field=case["field"],
+               value="OLD-ID")
+    calls: list = []
+    _install_engines(fake_ctx, case, calls)
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    client = await aiohttp_client(app)
+    with patch.object(_webapp, "_build_agents_kwargs", return_value={}), \
+         patch.object(_webapp, "_secrets_read", return_value={}), \
+         patch.object(_webapp, "_save_chats", side_effect=boom):
+        resp = await client.post(f"/api/projects/{PROJECT_ID}/chat",
+                                 json={"prompt": "x", "chat_id": CHAT_ID},
+                                 headers=_auth(fake_ctx))
+        await _sse_events(resp)
+    assert calls, await resp.text()
+    assert fake_ctx["sessions"][SESSION_KEY] == ("NEW-ID" if provider == "claude" else CLAUDE_FLAT)
