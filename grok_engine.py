@@ -928,10 +928,6 @@ def _t_grep(i):
     return "Grep", {"pattern": _pick(i, "pattern", "query", "regex"), "path": _pick(i, "path", "directory")}
 
 
-def _t_glob(i):
-    return "Glob", {"pattern": _pick(i, "pattern", "glob", "glob_pattern"), "path": _pick(i, "path", "directory")}
-
-
 def _t_ls(i):
     return "LS", {"path": _pick(i, "target_directory", "path", "directory", "dir")}
 
@@ -945,7 +941,11 @@ def _t_webfetch(i):
 
 
 def _t_todo(i):
-    return "TodoWrite", {"todos": i.get("todos") or []}
+    # Claude's TodoWrite item is {content, status, activeForm}; Grok's is {id, content, status}.
+    todos = [{"content": t.get("content", ""), "status": t.get("status", "pending"),
+              "activeForm": t.get("content", "")}
+             for t in (i.get("todos") or []) if isinstance(t, dict)]
+    return "TodoWrite", {"todos": todos}
 
 
 GROK_TOOL_MAP: dict[str, Callable[[dict], tuple[str, dict]]] = {
@@ -954,7 +954,6 @@ GROK_TOOL_MAP: dict[str, Callable[[dict], tuple[str, dict]]] = {
     "write": _t_write,
     "read_file": _t_read,
     "grep": _t_grep,
-    "glob": _t_glob,
     "list_dir": _t_ls,
     "web_search": _t_websearch,
     "web_fetch": _t_webfetch,

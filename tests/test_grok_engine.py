@@ -226,7 +226,7 @@ async def test_tool_map_covers_every_d10_row_and_passes_unknown_through(env, cap
         ("Grep", {"pattern": "foo", "path": "src"}),
         ("LS", {"path": "."}),
         ("WebFetch", {"url": "https://example.com"}),
-        ("TodoWrite", {"todos": [{"id": "1", "content": "a", "status": "pending"}]}),
+        ("TodoWrite", {"todos": [{"content": "a", "status": "pending", "activeForm": "a"}]}),
         ("frobnicate", {"thing": 1}),
         ("frobnicate", {"thing": 2}),
     ]
@@ -1460,3 +1460,18 @@ async def test_a_second_cancel_during_teardown_still_kills_and_reaps(env, monkey
     pids = env.dump("pids")
     assert pid_gone(pids["leader"]) and pid_gone(pids["child"])
     assert [p.name for p in env.home.iterdir() if p.name.startswith("sandbox-blocked")] == []
+
+
+def test_todo_mapping_defaults_status_and_ignores_junk_rows():
+    name, inp = grok_engine.map_tool("todo_write", {"todos": [{"content": "x"}, "junk", None, {"id": "9"}]})
+    assert name == "TodoWrite"
+    assert inp["todos"] == [{"content": "x", "status": "pending", "activeForm": "x"},
+                            {"content": "", "status": "pending", "activeForm": ""}]
+    assert grok_engine.map_tool("todo_write", {}) == ("TodoWrite", {"todos": []})
+
+
+def test_tool_inputs_survive_missing_or_non_dict_raw_input():
+    assert grok_engine.map_tool("run_terminal_command", None) == ("Bash", {"command": "", "description": ""})
+    assert grok_engine.map_tool("grep", "not a dict") == ("Grep", {"pattern": "", "path": ""})
+    assert grok_engine.map_tool("brand_new_tool", None) == ("brand_new_tool", {})
+    assert grok_engine.map_tool("", {"a": 1}) == ("?", {"a": 1})
