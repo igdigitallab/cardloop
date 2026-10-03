@@ -46,7 +46,8 @@ cmd_login() {
   echo "Signing in Grok under GROK_HOME=$h  (~/.grok is untouched)."
   echo "A code and a URL follow — approve them in any browser signed in to the grok.com account."
   echo
-  GROK_HOME="$h" "$BIN" login --device-auth
+  # from the home itself, never from a project: a repo's own .mcp.json / .grok must not even be discovered
+  (cd "$h" && GROK_HOME="$h" "$BIN" login --device-auth)
   echo
   cmd_status
 }
@@ -67,7 +68,11 @@ print(f"auth.json : {'present' if f['present'] else 'missing'}")
 print(f"oidc login: {'yes' if f['oidc'] else 'no'}")
 print(f"retention : {'—' if not f['oidc'] else ('opted out (required)' if f['retention_opt_out'] else 'NOT opted out — the engine will refuse to run')}")
 print(f"account   : {f['email'] or '—'}")
+trust = grok_engine._trust_store_problem(home)
+print(f"trust     : {'no folder trusted (project MCP servers/hooks stay off)' if trust is None else 'BLOCKED — ' + trust}")
 problem = grok_engine._auth_problem(f)
+if problem is None and trust is not None:
+    problem = trust
 print(f"verdict   : {'OK' if problem is None else 'BLOCKED — ' + problem}")
 print(f"enabled   : {'yes' if grok_engine.grok_enabled() else 'no (GROK_ENABLED is not true)'}")
 sys.exit(0 if problem is None else 1)
@@ -79,7 +84,7 @@ cmd_logout() {
   local h; h="$(home)"
   [ -d "$h" ] || die "no Grok home at $h — nothing to sign out"
   [ ! -L "$h" ] || die "GROK_HOME $h is a symlink — refusing"
-  GROK_HOME="$h" "$BIN" logout
+  (cd "$h" && GROK_HOME="$h" "$BIN" logout)
 }
 
 case "${1:-}" in

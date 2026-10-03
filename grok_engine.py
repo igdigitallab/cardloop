@@ -756,6 +756,9 @@ async def _probe_provider() -> dict:
     except OSError as exc:
         return fail(f"cannot prepare GROK_HOME: {exc}")
     home = info["home"]
+    trust = _trust_store_problem(home)
+    if trust:   # every turn would be refused: say so in the registry instead of failing turn by turn
+        return fail(trust)
     env = child_env(home, sandbox=False)
     try:
         code, out, err = await _run_probe_cmd(binary, ["--version"], env, PROBE_TIMEOUT_SEC, cwd=str(home))

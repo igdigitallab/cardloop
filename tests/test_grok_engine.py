@@ -1898,3 +1898,40 @@ async def test_concurrent_turns_do_not_trip_over_each_others_home_files(env):
     assert sorted(p.name for p in env.home.iterdir() if p.name.endswith(".tmp")) == []   # no orphan temp files
     assert tomllib.loads((env.home / "sandbox.toml").read_text())["profiles"]["cardloop"]["deny"]
     assert _litter_pids(env.home) == {}
+
+
+# ---- tools/grok-acct status -----------------------------------------------------------------
+
+def _acct(env, *args):
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    run_env = {"PATH": os.environ["PATH"], "HOME": str(env.fake_home), "GROK_HOME": str(env.home),
+               "GROK_BIN": str(env.wrapper), "_CARDLOOP_DATA_DIR": str(env.data), "GROK_ENABLED": "true"}
+    return subprocess.run([str(root / "tools" / "grok-acct"), *args], env=run_env, capture_output=True,
+                          text=True, timeout=30)
+
+
+def test_acct_status_reports_an_empty_trust_store_as_ok(env):
+    out = _acct(env, "status")
+    assert out.returncode == 0, out.stderr
+    assert "trust     : no folder trusted" in out.stdout and "verdict   : OK" in out.stdout
+
+
+def test_acct_status_is_blocked_by_a_trusted_folder_and_never_prints_the_entry(env):
+    (env.home / "trusted_folders.toml").write_text('[[folders]]\npath = "/somewhere/secret-project"\n')
+    out = _acct(env, "status")
+    assert out.returncode == 1 and "trust     : BLOCKED" in out.stdout and "verdict   : BLOCKED" in out.stdout
+    assert "secret-project" not in out.stdout + out.stderr
+
+
+async def test_provider_info_is_unavailable_while_a_folder_is_trusted(env):
+    (env.home / "trusted_folders.toml").write_text('[[folders]]\npath = "/p"\n')
+    info = await grok_engine.provider_info(force=True)
+    assert info["available"] is False and "trusted_folders.toml" in info["error"]
+    assert not (env.dumps / "argv.json").exists()           # not even `grok --version` was run
+
+
+async def test_provider_info_with_an_empty_trust_store_gets_past_that_check(env):
+    (env.home / "trusted_folders.toml").write_text("")
+    info = await grok_engine.provider_info(force=True)
+    assert "trusted_folders.toml" not in str(info["error"])
