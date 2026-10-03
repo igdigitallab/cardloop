@@ -1223,3 +1223,55 @@ def test_session_context_validates_its_arguments_like_history(home):
         gh.session_context("../x", CWD, grok_home=home)
     with pytest.raises(ValueError):
         gh.session_context(SID, "relative", grok_home=home)
+
+
+def test_untitled_previews_and_counts_are_read_only_for_the_listed_rows(home, monkeypatch):
+    for i, sid in enumerate((SID, SID2, SID3, SID4, "01a00000-0000-7000-8000-000000000005")):
+        put_session(home, CWD, sid, [q(f"question {i}")], summary=summ(f"2026-10-0{i + 1}T00:00:00Z"),
+                    signals={"userMessageCount": 1, "assistantMessageCount": 1})
+    previews, counts = [], []
+    real_preview, real_count = gh._first_query_preview, gh._count
+    monkeypatch.setattr(gh, "_first_query_preview", lambda chat: (previews.append(chat), real_preview(chat))[1])
+    monkeypatch.setattr(gh, "_count", lambda sig: (counts.append(sig), real_count(sig))[1])
+    rows = gh.list_sessions(CWD, limit=2, grok_home=home)
+    assert [r["preview"] for r in rows] == ["question 4", "question 3"] and len(previews) == 2 and len(counts) == 2
+    assert [r["message_count"] for r in rows] == [2, 2]
+    previews.clear()
+    counts.clear()
+    list(gh.iter_search_docs(CWD, grok_home=home))
+    assert previews == [] and counts == []          # search needs neither
+
+
+def test_titled_sessions_do_not_open_their_history_for_a_preview(home, monkeypatch):
+    put_session(home, CWD, SID, [q("body")], summary=summ(session_summary="Has a title"))
+    monkeypatch.setattr(gh, "_first_query_preview", lambda chat: pytest.fail("history opened for a titled row"))
+    assert gh.list_sessions(CWD, grok_home=home)[0]["preview"] == "Has a title"
+
+
+def test_search_stops_when_its_byte_budget_is_spent(home, monkeypatch):
+    big = "x" * 1000
+    for sid, day in ((SID, "01"), (SID2, "02"), (SID3, "03"), (SID4, "04")):
+        put_session(home, CWD, sid, [q(big)], summary=summ(f"2026-10-{day}T00:00:00Z"))
+    size = (home / "sessions" / group_name(CWD) / SID / "chat_history.jsonl").stat().st_size
+    monkeypatch.setattr(gh, "SEARCH_TOTAL_BYTES", int(size * 2.5))
+    # newest first: the budget covers three files (2.5 -> 1.5 -> 0.5 -> spent), the oldest is never opened
+    assert [d["id"] for d in gh.iter_search_docs(CWD, grok_home=home)] == [SID4, SID3, SID2]
+    monkeypatch.setattr(gh, "SEARCH_TOTAL_BYTES", size * 2)             # spent EXACTLY after two files
+    assert [d["id"] for d in gh.iter_search_docs(CWD, grok_home=home)] == [SID4, SID3]
+    monkeypatch.setattr(gh, "SEARCH_TOTAL_BYTES", 1)
+    assert len(list(gh.iter_search_docs(CWD, grok_home=home))) == 1      # always at least the newest
+    monkeypatch.setattr(gh, "SEARCH_READ_BYTES", 100)                    # a per-file cap shrinks what a file costs
+    monkeypatch.setattr(gh, "SEARCH_TOTAL_BYTES", 250)
+    assert len(list(gh.iter_search_docs(CWD, grok_home=home))) == 3
+
+
+def test_search_docs_survive_a_session_whose_history_vanished(home):
+    put_session(home, CWD, SID, None, summary=summ(session_summary="Summary only"))
+    [doc] = list(gh.iter_search_docs(CWD, grok_home=home))
+    assert doc["title"] == "Summary only" and doc["text"] == ""
+    assert [r["id"] for r in gh.search_sessions("summary", CWD, grok_home=home)] == [SID]   # title still matches
+
+
+def test_default_search_budget_is_bounded():
+    assert 0 < gh.SEARCH_TOTAL_BYTES <= 64 * 1024 * 1024
+    assert gh.SEARCH_READ_BYTES <= gh.SEARCH_TOTAL_BYTES and gh.MAX_READ_BYTES <= 128 * 1024 * 1024

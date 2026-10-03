@@ -67,7 +67,8 @@ HEAD_PREVIEW_BYTES = 512 * 1024    # first-user-query lookup when a session has 
 MAX_GROUP_SCAN = 5000              # entries inspected when the direct group lookup misses
 MAX_SESSIONS_PER_CWD = 1000        # summaries read per cwd (UUIDv7 ids sort by creation time)
 MAX_ARGS_BYTES = 2 * 1024 * 1024   # a tool_call `arguments` string larger than this is not parsed
-SEARCH_READ_BYTES = 4 * 1024 * 1024
+SEARCH_READ_BYTES = 4 * 1024 * 1024    # per session
+SEARCH_TOTAL_BYTES = 32 * 1024 * 1024  # per iter_search_docs call (one project)
 SEARCH_MAX_SESSIONS = 50
 SEARCH_DOC_CHARS = 200_000
 PREVIEW_CHARS = 200
@@ -488,17 +489,27 @@ def _session_row(sdir: Path, sid: str, cwd: str) -> "dict | None":
     return {
         "id": sid, "provider": PROVIDER, "cwd": cwd,
         "name": title or None,
-        "preview": title[:PREVIEW_CHARS] if title else _first_query_preview(chat),
+        "preview": title[:PREVIEW_CHARS],
         "updatedAt": updated, "recencyAt": updated,
         "createdAt": _iso_to_epoch(summary.get("created_at")),
         "model": summary.get("current_model_id") if isinstance(summary.get("current_model_id"), str) else None,
-        "message_count": _count(_read_json(sdir / "signals.json")),
+        "message_count": None,
     }
 
 
-def _list(cwd: str, limit: int, home: Path) -> "list[tuple[dict, Path]]":
+def _decorate(row: dict, sdir: Path) -> None:
+    """The two fields that cost a second file read: the first-query preview of an untitled session
+    (up to ``HEAD_PREVIEW_BYTES``) and the message count. Filled only for rows that survived the
+    listing limit - a cockpit turn is often killed before Grok writes a title, so untitled
+    sessions are the common case and every one of them would otherwise be opened."""
+    if row["name"] is None:
+        row["preview"] = _first_query_preview(sdir / "chat_history.jsonl")
+    row["message_count"] = _count(_read_json(sdir / "signals.json"))
+
+
+def _list(cwd: str, limit: int, home: Path, *, decorate: bool) -> "list[tuple[dict, Path]]":
     """``(row, session dir)`` pairs of ``cwd``, newest first - the one scan behind both
-    ``list_sessions`` and ``iter_search_docs``."""
+    ``list_sessions`` (``decorate=True``) and ``iter_search_docs`` (which needs no preview)."""
     _check_cwd(cwd)
     root, root_real = _sessions_root(home)
     found: dict[str, tuple[dict, Path]] = {}
@@ -514,8 +525,11 @@ def _list(cwd: str, limit: int, home: Path) -> "list[tuple[dict, Path]]":
             row = _session_row(sdir, sid, cwd)
             if row is not None:
                 found[sid] = (row, sdir)
-    ranked = sorted(found.values(), key=lambda pr: pr[0]["updatedAt"], reverse=True)
-    return ranked[:limit]
+    ranked = sorted(found.values(), key=lambda pr: pr[0]["updatedAt"], reverse=True)[:limit]
+    if decorate:
+        for row, sdir in ranked:
+            _decorate(row, sdir)
+    return ranked
 
 
 def list_sessions(cwd: str, limit: int = 30, *, grok_home=None) -> list[dict]:
@@ -526,16 +540,25 @@ def list_sessions(cwd: str, limit: int = 30, *, grok_home=None) -> list[dict]:
     left out. ``updatedAt`` is epoch SECONDS like Codex's. ``message_count`` is approximate
     (``signals.json`` counters) or None.
     """
-    return [row for row, _sdir in _list(cwd, _clamp_limit(limit), _home(grok_home))]
+    return [row for row, _sdir in _list(cwd, _clamp_limit(limit), _home(grok_home), decorate=True)]
 
 
 def iter_search_docs(cwd: str, *, grok_home=None, max_sessions: int = SEARCH_MAX_SESSIONS,
                      max_chars: int = SEARCH_DOC_CHARS) -> Iterator[dict]:
     """One document per recent session of ``cwd``: ``{id, cwd, title, updatedAt, text}`` where
-    ``text`` is the user/assistant text (no tool output), newest content kept when capped."""
-    for row, sdir in _list(cwd, _clamp_limit(max_sessions), _home(grok_home)):
-        msgs = _messages(sdir / "chat_history.jsonl", row["id"], MAX_LIMIT, default_format_tool,
-                         SEARCH_READ_BYTES)
+    ``text`` is the user/assistant text (no tool output), newest content kept when capped. One
+    call reads at most ``SEARCH_TOTAL_BYTES`` in all (newest sessions first), so a query cannot
+    stall the thread that serves it."""
+    budget = SEARCH_TOTAL_BYTES
+    for row, sdir in _list(cwd, _clamp_limit(max_sessions), _home(grok_home), decorate=False):
+        if budget <= 0:
+            break
+        chat = sdir / "chat_history.jsonl"
+        try:
+            budget -= min(os.lstat(chat).st_size, SEARCH_READ_BYTES)
+        except OSError:
+            pass
+        msgs = _messages(chat, row["id"], MAX_LIMIT, default_format_tool, SEARCH_READ_BYTES)
         text = "\n".join(m["text"] for m in msgs if m["text"].strip())
         yield {"id": row["id"], "cwd": cwd, "title": row["name"] or "",
                "updatedAt": row["updatedAt"], "text": text[-max_chars:]}
