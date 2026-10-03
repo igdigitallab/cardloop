@@ -2496,3 +2496,30 @@ def test_the_new_facts_reach_the_rendered_report_and_the_json(box, monkeypatch):
     labels = [f.label for f in facts]
     assert FT in labels and LABEL in labels
     assert labels.index(FT) < labels.index(LABEL) < labels.index("Grok processes")
+
+
+def test_a_relative_cwd_is_never_resolved_against_doctors_own_directory(box, monkeypatch):
+    _fake(box)
+    (box.tmp / "rel" / "dir").mkdir(parents=True)
+    monkeypatch.chdir(box.tmp)                         # "rel/dir" EXISTS from here, but whose cwd is it?
+    _topics(box, {"a": {"project": "Rel", "cwd": "rel/dir", "grok_allowed": True}})
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "info" and _proj_calls(box) == []
+
+
+@pytest.mark.parametrize("key,bad", [("mcpServers", "tablet"), ("mcpServers", {"tablet": {}}),
+                                     ("hooks", {"a": 1}), ("skills", ["just-a-name"]),
+                                     ("mcpServers", [1, 2]), ("hooks", [None])])
+def test_project_inspect_lists_of_the_wrong_shape_are_unrecognised(box, key, bad):
+    _fake(box, docs_by_cwd={"alpha": _doc(box, **{key: bad})})
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "warn" and "unrecognised" in f.value
+
+
+def test_many_active_items_are_summarised(box):
+    servers = [_mcp(f"srv{i}") for i in range(6)]
+    _fake(box, docs_by_cwd={"alpha": _doc(box, projectTrusted=True, mcpServers=servers)})
+    _opt_in(box, "alpha")
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert "srv0" in f.value and "srv3" in f.value and "srv4" not in f.value and "(+2 more)" in f.value
