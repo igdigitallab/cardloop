@@ -45,7 +45,7 @@ def test_per_provider_wiring_facts():
     assert g.model_field == "grok_model" and g.label == "Grok"
     assert providers.continuity_fields() == ("session_id", "codex_thread_id", "grok_session_id")
     assert providers.adapter_model_fields() == ("codex_model", "grok_model")
-    assert providers.gate_fields() == ("grok_allowed",)
+    assert providers.gate_fields() == ()          # no provider is gated: choosing one IS the consent
 
 
 def test_engine_lookup_reads_the_ctx_key():
@@ -121,8 +121,8 @@ def test_register_accepts_a_distinct_provider_and_it_flows_through_the_table(cle
 
 
 def test_has_gate_is_true_only_for_a_provider_with_a_real_gate(clean_registry):
-    assert [s.name for s in providers.specs() if s.has_gate] == ["grok"]
-    assert not providers.get("claude").has_gate and not providers.get("codex").has_gate
+    assert [s.name for s in providers.specs() if s.has_gate] == []                    # none of the three is gated
+    assert not any(providers.get(n).has_gate for n in ("claude", "codex", "grok"))
     providers.register(_spec(gate=lambda project: "nope" if not project.get("ok") else None))
     assert providers.get("x").has_gate
     assert providers.gate_refusal("x", {}) == "nope" and providers.gate_refusal("x", {"ok": 1}) is None
@@ -131,6 +131,7 @@ def test_has_gate_is_true_only_for_a_provider_with_a_real_gate(clean_registry):
 def test_gate_defaults_open_and_unknown_names_raise():
     assert providers.gate_refusal("claude", None) is None
     assert providers.gate_refusal("codex", {}) is None
-    assert providers.gate_refusal("grok", {}) == providers.GROK_GATE_MESSAGE
+    assert providers.gate_refusal("grok", {}) is None and providers.gate_refusal("grok", {"cwd": "/"}) is None
+    assert not hasattr(providers, "GROK_GATE_MESSAGE") and not hasattr(providers, "_grok_gate")
     with pytest.raises(KeyError):
-        providers.gate_refusal("vertex", {"grok_allowed": True})
+        providers.gate_refusal("vertex", {})

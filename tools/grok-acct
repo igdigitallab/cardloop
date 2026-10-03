@@ -49,6 +49,21 @@ cmd_login() {
   # from the home itself, never from a project: a repo's own .mcp.json / .grok must not even be discovered
   (cd "$h" && GROK_HOME="$h" "$BIN" login --device-auth)
   echo
+  # the account this login names becomes THE account of this cockpit: a turn's shell can rewrite auth.json,
+  # so the engine refuses a different account until this command is run again
+  "$PY" - "$h" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["CARDLOOP_REPO"])
+import grok_engine
+from pathlib import Path
+f = grok_engine.read_auth_facts(Path(sys.argv[1]))
+if f["email"]:
+    grok_engine.pin_account(f["email"])
+    print(f"account pinned: {f['email']}")
+else:
+    print("note: the login names no account, so none was pinned")
+PY
+  echo
   cmd_status
 }
 
@@ -68,9 +83,13 @@ print(f"auth.json : {'present' if f['present'] else 'missing'}")
 print(f"oidc login: {'yes' if f['oidc'] else 'no'}")
 print(f"retention : {'—' if not f['oidc'] else ('opted out (required)' if f['retention_opt_out'] else 'NOT opted out — the engine will refuse to run')}")
 print(f"account   : {f['email'] or '—'}")
+pin = grok_engine.read_account_pin()
+print(f"pinned    : {pin or 'not yet (the first verified turn pins it)'}")
 trust = grok_engine._trust_store_problem(home)
 print(f"trust     : {'no folder trusted (project MCP servers/hooks stay off)' if trust is None else 'BLOCKED — ' + trust}")
 problem = grok_engine._auth_problem(f, home)
+if problem is None and pin and f["email"] and pin != f["email"].lower():
+    problem = "the login names a different account than the pinned one — run `tools/grok-acct login` to accept it"
 if problem is None and trust is not None:
     problem = trust
 print(f"verdict   : {'OK' if problem is None else 'BLOCKED — ' + problem}")
@@ -85,6 +104,8 @@ cmd_logout() {
   [ -d "$h" ] || die "no Grok home at $h — nothing to sign out"
   [ ! -L "$h" ] || die "GROK_HOME $h is a symlink — refusing"
   (cd "$h" && GROK_HOME="$h" "$BIN" logout)
+  "$PY" -c "import os,sys; sys.path.insert(0, os.environ['CARDLOOP_REPO']); import grok_engine; grok_engine.clear_account_pin()"
+  echo "account pin cleared"
 }
 
 case "${1:-}" in

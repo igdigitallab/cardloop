@@ -32,10 +32,9 @@ export interface ProviderMeta {
   continuityField: 'session_id' | 'codex_thread_id' | 'grok_session_id'
   /** Project-settings field holding this provider's default model. */
   modelField: 'model' | 'codex_model' | 'grok_model'
-  /** Per-project privacy opt-in: a provider that ships project code to a third party is OFF in
-   *  every project until the operator flips `field` (the server answers 409 otherwise).
-   *  null = no gate. `recipient` is who receives the code, named in the Settings warning. */
-  gate: { field: 'grok_allowed'; recipient: string } | null
+  /** True when the server hands EVERY project a default value in `modelField` whether or not this
+   *  provider exists on the install (Grok), so a value there says nothing about the project. */
+  servesDefaultModel: boolean
   /** The subscription the provider's turns ride on (Usage tab: "SuperGrok subscription"). */
   subscription: string
   /** Does the provider publish subscription windows the pill can show? A provider that does
@@ -46,15 +45,15 @@ export interface ProviderMeta {
 export const PROVIDERS = {
   claude: {
     label: 'Claude Code', short: 'Claude', tag: null, adapter: false,
-    continuityField: 'session_id', modelField: 'model', subscription: 'Claude', gate: null, reportsLimits: true,
+    continuityField: 'session_id', modelField: 'model', subscription: 'Claude', servesDefaultModel: false, reportsLimits: true,
   },
   codex: {
     label: 'Codex', short: 'Codex', tag: 'C', adapter: true,
-    continuityField: 'codex_thread_id', modelField: 'codex_model', subscription: 'ChatGPT', gate: null, reportsLimits: true,
+    continuityField: 'codex_thread_id', modelField: 'codex_model', subscription: 'ChatGPT', servesDefaultModel: false, reportsLimits: true,
   },
   grok: {
     label: 'Grok', short: 'Grok', tag: 'G', adapter: true,
-    continuityField: 'grok_session_id', modelField: 'grok_model', subscription: 'SuperGrok', gate: { field: 'grok_allowed', recipient: 'xAI' }, reportsLimits: false,
+    continuityField: 'grok_session_id', modelField: 'grok_model', subscription: 'SuperGrok', servesDefaultModel: true, reportsLimits: false,
   },
 } as const satisfies Record<string, ProviderMeta>
 
@@ -191,25 +190,11 @@ export function providerUnavailableReason(id: Provider, row: ProviderRowLike | u
   return row?.error || `${PROVIDERS[id].label} unavailable`
 }
 
-/** Providers whose per-project privacy gate Settings should show: gated providers the server
- *  lists, plus any whose flag is already ON in the project (so it can always be turned back
- *  off even after the server stops listing the provider). */
-export function gatedProviders(
-  registry: readonly { provider: string }[],
-  settings: object,
-): Provider[] {
-  const s = settings as Record<string, unknown>
-  return PROVIDER_IDS.filter(id => {
-    const gate = PROVIDERS[id].gate
-    return !!gate && (registry.some(r => r.provider === id) || s[gate.field] === true)
-  })
-}
-
 /** Providers that get a "<name> board model" row in Settings: adapters the server lists, or
- *  that the project is already set up for. "Set up for" is a model value for an open provider
- *  (Codex), but for a GATED provider it is the opt-in flag: the server hands every project a
- *  default `grok_model` whether or not Grok exists on this install, so "holds a value" would put a
- *  Grok row on every Settings page of a cockpit that has Grok switched off. */
+ *  that the project is already set up for — its board default IS that provider, or (for a provider
+ *  whose default model the server does not hand to every project) it names a model. A provider that
+ *  does `servesDefaultModel` (Grok) would otherwise put a row on every Settings page of a cockpit
+ *  that has it switched off. */
 export function boardModelProviders(
   registry: readonly { provider: string }[],
   settings: object,
@@ -219,7 +204,8 @@ export function boardModelProviders(
     const meta = PROVIDERS[id]
     if (!meta.adapter) return false
     if (registry.some(r => r.provider === id)) return true
-    if (meta.gate) return s[meta.gate.field] === true
+    if (s.board_provider === id) return true
+    if (meta.servesDefaultModel) return false
     return typeof s[meta.modelField] === 'string' && s[meta.modelField] !== ''
   })
 }

@@ -24,7 +24,7 @@ import webapp as _webapp  # noqa: E402
 from test_grok_history import a, put_session, q, summ  # noqa: E402,F401
 from test_grok_p3p4_wiring import SID1, SID2, SID3, home, cwd  # noqa: E402,F401 - fixtures by name
 from test_grok_wiring import (  # noqa: E402,F401 - fixtures used by name
-    CHAT_ID, PROJECT_ID, SESSION_KEY, SHAPES, _allow, _auth, _chat_record, _seed_chat, _sse_events,
+    CHAT_ID, PROJECT_ID, SESSION_KEY, SHAPES, _auth, _chat_record, _seed_chat, _sse_events,
     codex_on, engines, fake_ctx, grok_on, isolate,
 )
 
@@ -81,8 +81,6 @@ async def _result_frame(client, ctx, provider, extra):
 
 
 def _on(provider, ctx, grok_on_fixture=None):
-    if provider == "grok":
-        _allow(ctx)
     _seed_chat(ctx, provider=provider)
 
 

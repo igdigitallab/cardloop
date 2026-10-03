@@ -213,9 +213,8 @@ def e2e_server(tmp_path_factory):
 
 # Projects of the Grok-enabled cockpit. `g-*` ids double as the key the fake `grok` wrapper uses to
 # pick a recorded wire fixture (tests/e2e/grok_support.py:FIXTURE_BY_PROJECT).
-GROK_ALLOWED_PROJECTS = ["g-text", "g-tool", "g-fail", "g-board", "g-handoff", "g-hand-desktop", "g-hand-360",
-                         "g-hist", "g-new"]
-GROK_DENIED_PROJECTS = ["g-denied", "g-settings", "g-claude"]
+GROK_PROJECTS = ["g-text", "g-tool", "g-fail", "g-board", "g-handoff", "g-hand-desktop", "g-hand-360",
+                 "g-hist", "g-new", "g-plain", "g-settings", "g-claude"]
 
 
 @pytest.fixture(scope="session")
@@ -229,13 +228,13 @@ def e2e_grok_server(tmp_path_factory):
     _build_app_copy(app_dir)
     fake_home = tmp_path_factory.mktemp("e2e-grok-home")
     projects_root = tmp_path_factory.mktemp("e2e-grok-projects")
-    ids = GROK_ALLOWED_PROJECTS + GROK_DENIED_PROJECTS
+    ids = list(GROK_PROJECTS)
     project_cwds = {}
     for pid in ids:
         cwd = projects_root / pid
         cwd.mkdir()
         project_cwds[pid] = cwd
-    _seed_data(app_dir, project_cwds, extras={pid: {"grok_allowed": True} for pid in GROK_ALLOWED_PROJECTS})
+    _seed_data(app_dir, project_cwds)          # no per-project Grok flag: choosing the provider IS the consent
 
     bindir = tmp_path_factory.mktemp("e2e-grok-bin")
     wrapper = gs.write_fake_cli(bindir)
@@ -256,7 +255,7 @@ def e2e_grok_server(tmp_path_factory):
     env.update(gs.grok_env(app_dir, bindir, wrapper, tmp_path_factory.mktemp("e2e-grok-denied")))
     env.pop("ANTHROPIC_API_KEY", None)
     for k in [k for k in env if k.startswith("GROK_") and k not in ("GROK_ENABLED", "GROK_BIN", "GROK_SANDBOX_DENY")]:
-        env.pop(k)  # a developer's own GROK_HOME / GROK_ALLOW_ALL_PROJECTS must not leak in
+        env.pop(k)  # a developer's own GROK_HOME / GROK_ENABLED must not leak in
     # `~/.claude` exists on every real host and the sandbox deny list names it when it does — the
     # cockpit creates it on first run. Create it BEFORE the verdict is seeded, or the seed and the
     # server would hash two different deny lists (the cache is keyed by that fingerprint).
@@ -275,8 +274,6 @@ def e2e_grok_server(tmp_path_factory):
         "base_url": f"http://127.0.0.1:{port}",
         "password": password,
         "project_ids": ids,
-        "allowed": GROK_ALLOWED_PROJECTS,
-        "denied": GROK_DENIED_PROJECTS,
         "app_dir": app_dir,
         "home": fake_home,
         "cwds": project_cwds,

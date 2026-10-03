@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   PROVIDERS, PROVIDER_IDS, boardModelProviders, continuityField, continuityId, continuityQuery,
-  gatedProviders, hitThread, isAdapterProvider, isKnownProvider, normalizeProvider,
+  hitThread, isAdapterProvider, isKnownProvider, normalizeProvider,
   projectModelField, providerLabel, providerReportsLimits, providerShort, providerSubscription,
   providerTag, providerUnavailableReason, selectableProviders, usageSectionVisible,
 } from './providers'
@@ -139,16 +139,12 @@ test('usage filter: "all" shows every section, a provider shows only itself', ()
   assert.equal(usageSectionVisible('claude', 'codex'), false)
 })
 
-test('settings: the privacy gate row shows while Grok is listed or still ON; Codex has none', () => {
-  assert.deepEqual(gatedProviders([], {}), [])
-  assert.deepEqual(gatedProviders([{ provider: 'codex' }], {}), [])
-  assert.deepEqual(gatedProviders([{ provider: 'grok' }], {}), ['grok'])
-  // server stopped listing Grok but the project still allows it: it must stay switch-off-able
-  assert.deepEqual(gatedProviders([], { grok_allowed: true }), ['grok'])
-  assert.deepEqual(gatedProviders([], { grok_allowed: false }), [])
-  assert.deepEqual(gatedProviders([], { grok_allowed: 'yes' }), [])
-  assert.equal(PROVIDERS.grok.gate?.field, 'grok_allowed')
-  assert.equal(PROVIDERS.grok.gate?.recipient, 'xAI')
+test('no provider is gated: choosing one in the picker is the consent', () => {
+  for (const id of ['claude', 'codex', 'grok'] as const) {
+    assert.equal('gate' in PROVIDERS[id], false, id)
+  }
+  assert.equal(PROVIDERS.grok.servesDefaultModel, true)
+  assert.equal(PROVIDERS.codex.servesDefaultModel, false)
 })
 
 test('settings: a board-model row per listed adapter, or one the project already names a model for', () => {
@@ -160,10 +156,10 @@ test('settings: a board-model row per listed adapter, or one the project already
 
 test('settings: a default grok_model alone is NOT a Grok row (Grok switched off must leave Settings unchanged)', () => {
   // The server serves `grok_model: "grok-4.7"` for EVERY project, listed or not.
-  assert.deepEqual(boardModelProviders([], { grok_model: 'grok-4.7', grok_allowed: false }), [])
+  assert.deepEqual(boardModelProviders([], { grok_model: 'grok-4.7' }), [])
   assert.deepEqual(boardModelProviders([{ provider: 'claude' }], { grok_model: 'grok-4.7', codex_model: '' }), [])
-  // An opted-in project keeps its row (and so its way back) even if the server stopped listing Grok.
-  assert.deepEqual(boardModelProviders([], { grok_model: 'grok-4.7', grok_allowed: true }), ['grok'])
-  // Strictly the boolean true, like the server's own gate.
-  assert.deepEqual(boardModelProviders([], { grok_model: 'grok-4.7', grok_allowed: 'true' }), [])
+  // A project whose board default IS Grok keeps its row (and so its way back) even if the server stopped listing it.
+  assert.deepEqual(boardModelProviders([], { grok_model: 'grok-4.7', board_provider: 'grok' }), ['grok'])
+  assert.deepEqual(boardModelProviders([], { grok_model: 'grok-4.7', board_provider: 'codex' }), ['codex'])
+  assert.deepEqual(boardModelProviders([], { board_provider: 'claude' }), [])
 })

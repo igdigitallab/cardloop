@@ -9,12 +9,12 @@ import assert from 'node:assert/strict'
 import { projectSettingsPayload } from './settingsPayload'
 import type { ProjectSettings } from '../types'
 
-const base = { grok_allowed: true, model: null } as unknown as ProjectSettings
+const base = { grok_model: 'grok-4.7', model: null } as unknown as ProjectSettings
 
 test('an untouched null context_pack_enabled is not posted (the server would 400 the whole save)', () => {
   const body = projectSettingsPayload({ ...base, context_pack_enabled: null }, { context_pack_enabled: null })
   assert.equal('context_pack_enabled' in body, false)
-  assert.equal(body.grok_allowed, true)                 // the rest of the record is untouched
+  assert.equal(body.grok_model, 'grok-4.7')                 // the rest of the record is untouched
   assert.equal(body.model, null)                        // other nulls are the server's to read
   // no baseline yet (settings never loaded) behaves the same
   assert.equal('context_pack_enabled' in projectSettingsPayload({ ...base, context_pack_enabled: null }, null), false)

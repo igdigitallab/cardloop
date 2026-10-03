@@ -8578,11 +8578,9 @@ async def api_free_create(req: web.Request) -> web.Response:
     cwd = (body.get("cwd") or _FREE_DEFAULT_CWD).rstrip("/")
     provider = providers.normalize(body.get("provider"))
     spec = providers.get(provider)
-    # spec-095 D5: a free chat is its own synthetic project; its opt-in is the flag it is
-    # created with (strictly the boolean true), so the gate is judged on exactly that record.
+    # A free chat is its own synthetic project; a provider gate (none is registered today) is judged on
+    # the flags it is created with and its cwd.
     _free_flags = {g: True for g in providers.gate_fields() if body.get(g) is True}
-    # The cwd is part of the judged record: a free chat defaults to $HOME, which Grok may only
-    # use under GROK_ALLOW_ALL_PROJECTS (see providers._grok_gate).
     _refusal = _provider_gate_refusal({**_free_flags, "cwd": cwd}, provider)
     if _refusal:
         return web.json_response({"error": _refusal}, status=409)
@@ -9386,9 +9384,8 @@ async def api_search(req: web.Request) -> web.Response:
             logging.exception("[search] Codex thread query failed")
     if _grok.grok_enabled() and len(hits) < limit:
         # spec-095 P3: Grok keeps its sessions per working directory, so this is one scan per
-        # project (Codex answers a single global query). Only projects the D5 gate lets use Grok
-        # are read, each scan is byte-bounded by the reader, and the whole pass has a wall-clock
-        # budget so a broad GROK_ALLOW_ALL_PROJECTS cannot make a keystroke search crawl.
+        # project (Codex answers a single global query). Each scan is byte-bounded by the reader and the
+        # whole pass has a wall-clock budget, so a long project list cannot make a keystroke search crawl.
         try:
             grok_home = _grok.grok_home(ctx)
             deadline = time.monotonic() + _GROK_SEARCH_BUDGET_SEC

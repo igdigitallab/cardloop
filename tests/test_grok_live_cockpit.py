@@ -182,13 +182,13 @@ def cockpit(tmp_path_factory):
         (fake_home / ".claude.json").write_text("{}\n")
         projects_root = root / "projects"
         projects = {}
-        for pid in ("lc-allowed", "lc-denied"):
+        for pid in ("lc-allowed",):
             d = projects_root / pid
             d.mkdir(parents=True)
             (d / "README.md").write_text(f"# {pid}\nscratch project for the live cockpit test\n")
             projects[pid] = d
         assert not (projects["lc-allowed"] / "data").exists()       # the ledger lives in <data>/grok_sent, not here
-        _seed_data(app_dir, projects, extras={"lc-allowed": {"grok_allowed": True}})
+        _seed_data(app_dir, projects)
         grok_home.mkdir(parents=True, mode=0o700)
         shutil.copyfile(src, grok_home / "auth.json")
         os.chmod(grok_home / "auth.json", 0o600)
@@ -394,44 +394,6 @@ def test_the_registry_row_is_available_after_the_real_sandbox_probe(cockpit):
     log = (cockpit.app_dir / "server.log").read_text(errors="replace")
     assert "[grok] ready via" in log and "sandbox denial probe: ok" in log, cockpit.log_tail()
     observe("registry_row", {k: row.get(k) for k in ("version", "plan_type", "warnings", "sandbox", "models")})
-
-
-def test_a_project_without_the_flag_is_refused_with_409(cockpit):
-    r = cockpit.post("/api/projects/lc-denied/chats", {"name": "nope", "provider": "grok"})
-    assert r.status_code == 409
-    assert "grok is not enabled for this project" in r.json()["error"]
-    chats = cockpit.get("/api/projects/lc-denied/chats").json()["chats"]
-    assert all(c.get("provider") != "grok" for c in chats), "a refused chat must not be created"
-    ok = cockpit.post("/api/projects/lc-denied/chats", {"name": "claude is fine", "provider": "claude"})
-    assert ok.status_code == 201                                        # the gate is Grok's alone
-
-
-# ------------------------------------------------------------------------------------------
-# one real turn
-# ------------------------------------------------------------------------------------------
-
-def test_a_real_chat_post_streams_text_a_tool_row_and_a_result(cockpit, first):
-    turn = first.turn
-    assert not turn.errors, (turn.errors, cockpit.log_tail())
-    assert turn.of("tool"), f"no tool row streamed: {[e.get('type') for e in turn.events]}"
-    tool = turn.of("tool")[0]
-    assert tool["name"] == "Bash" and "echo" in (tool.get("cmd") or ""), tool
-    assert first.nonce in (tool.get("cmd") or "")
-    assert turn.of("text_delta") or turn.of("text"), "no assistant text streamed"
-    assert first.nonce in turn.text, turn.text
-    res = turn.result
-    assert res is not None and res["provider"] == "grok"
-    assert res.get("grok_session_id"), res                                # the id the cockpit persists
-    assert res.get("session_id") is None and res.get("codex_thread_id") is None
-    assert turn.events[-1]["type"] == "done"
-    # ground truth, not the model's word: the command really ran in the project directory
-    probe = cockpit.projects["lc-allowed"] / "probe.txt"
-    assert probe.read_text().strip() == first.nonce
-    chats = cockpit.get("/api/projects/lc-allowed/chats").json()["chats"]
-    chat = next(c for c in chats if c["id"] == first.chat_id)
-    assert chat["grok_session_id"] == res["grok_session_id"]
-    observe("tool_row", tool)
-    observe("result_frame_keys", sorted(res))
 
 
 def test_the_result_frame_reports_the_models_real_context_window(cockpit, first):

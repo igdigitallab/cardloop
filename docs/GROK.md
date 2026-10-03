@@ -19,7 +19,7 @@
 
 ## Enable (once)
 
-1. `.env`: `GROK_ENABLED=true`. Optional knobs are in `.env.example` (`GROK_BIN`, `GROK_HOME`, `GROK_SANDBOX_DENY`, `GROK_ALLOW_ALL_PROJECTS`, `GROK_MODEL`).
+1. `.env`: `GROK_ENABLED=true`. Optional knobs are in `.env.example` (`GROK_BIN`, `GROK_HOME`, `GROK_SANDBOX_DENY`, `GROK_MODEL`).
 2. `tools/grok-acct login` — the ordinary `grok login --device-auth` flow run with `GROK_HOME` set (default `<DATA>-grok-home` — next to the data dir, e.g. `<repo>/data-grok-home`; mode 700, must not be a symlink, must not be inside the data dir). Approve the printed code in any browser signed in to the grok.com account. `tools/grok-acct` never copies tokens from anywhere (the test tools borrow a login into a throwaway home and delete it); your interactive `~/.grok` is untouched. `tools/grok-acct status` shows the verdict without secret values; `logout` signs out that home only.
 3. Restart the cockpit. A background startup probe journals `[grok] ready via oidc auth (N models, CLI <version>)` or `[grok] unavailable; Claude remains active: <reason>`. The probe includes **one real model turn** (~15k tokens, effort low) that tries to read a canary file from the model's shell; its verdict is cached on disk by CLI version + deny list + home (ok for 7 days, failed/inconclusive for 15 minutes). First start, every CLI bump and every deny-list change cost one probe turn. Until it says `ok`, Grok is unavailable.
 4. `make doctor` — the `Grok …` facts must all be ✓ (table below).
@@ -27,14 +27,13 @@
 
 With `GROK_ENABLED` unset the provider is invisible: no registry row, no UI element, no doctor line, and the payloads equal a Grok-free install.
 
-## Privacy: the per-project opt-in (default OFF)
+## Privacy: choosing Grok is the consent
 
 Every Grok turn sends that project's prompts, the files and command output the model reads, and the project's `CLAUDE.md` (as session rules) to xAI. It cannot be recalled afterwards, and zero data retention is not available to individual accounts.
 
-- **Gate:** `grok_allowed: true` on the project (Settings → "Allow Grok in this project"; strictly the JSON boolean — `"true"` or `1` in a hand-edited record does not count). Without it every selection and every run is refused: HTTP **409** `{"error":"grok is not enabled for this project"}` on chat/free-chat create, runtime switch, queue accept, chat POST, card create/edit/move and the board default; a queued message or a card whose project lost the flag fails visibly (chat error / Failed column) and **never** falls back to another provider. Revoking is never refused.
-- **`GROK_ALLOW_ALL_PROJECTS=true`** skips the gate for single-tenant boxes where every project may go to xAI. Read live.
-- **Free chats are rooted at `$HOME`.** A record whose `cwd` is `$HOME` or an ancestor passes only under that hatch (the 409 then appends why): one opt-in would otherwise give Grok every project and dotfile in the home directory. The engine refuses such a `cwd` a second time as a backstop.
-- **Keep untrusted clones out.** A repo's `CLAUDE.md` rides in the *system* prompt, so a cloned third-party repo can steer the model. `grok_allowed` is the only control against that. Two measured reasons it matters: the model's shell can read Grok's own login (`<GROK_HOME>/auth.json` — the agent and its shell share one sandbox), so a prompt-injected turn could send the SuperGrok token away (`tools/grok-acct logout` + `login` if a turn did something odd); and it can write instruction files into `GROK_HOME` that every other project's next turn would load — the engine deletes those (`rules/`, `AGENTS.md`, `skills/`, `agents/`, `lsp.json`, `settings.json`, …) before every turn.
+- **No per-project switch.** Grok is chosen exactly like Codex or Claude — in the provider picker of a chat, a free chat, a board card or the board default — and then runs in whatever project that is, a chat rooted at `$HOME` and the cockpit's own checkout included. (Until 2026-10-03 a `grok_allowed` flag per project and `GROK_ALLOW_ALL_PROJECTS` gated this; both are gone. The generic gate seam in `providers.py` remains, with no provider using it.) The provider is listed only while `GROK_ENABLED=true`; without a usable login the picker shows it unavailable with the reason.
+- **One account, pinned.** The first verified login is recorded in `<DATA>/grok_account.json` (mode 600, hidden from the model); `tools/grok-acct login` re-pins on purpose, `logout` forgets it. A turn's shell can rewrite `auth.json` (measured), so a login that suddenly names another account is refused before any process starts — otherwise a prompt-injected turn could point every later turn, in every project, at someone else's xAI account.
+- **Be careful with untrusted clones.** A repo's `CLAUDE.md` rides in the *system* prompt, so a cloned third-party repo can steer the model, and there is no per-project switch any more: do not pick Grok in a project you would not hand to xAI. Two measured reasons it matters: the model's shell can read Grok's own login (`<GROK_HOME>/auth.json` — the agent and its shell share one sandbox), so a prompt-injected turn could send the SuperGrok token away (`tools/grok-acct logout` + `login` if a turn did something odd); and it can write instruction files into `GROK_HOME` that every other project's next turn would load — the engine deletes those (`rules/`, `AGENTS.md`, `skills/`, `agents/`, `lsp.json`, `settings.json`, …) before every turn.
 - **What the egress canary proves — and does not.** `pytest tests/test_grok_live.py -m grok_canary` builds a repo with an 8 MB incompressible blob in git history, sends "reply OK, use no tools", samples the connections of the Grok process group and fails above 1 MiB on any one. On grok 1.0.46: max 63.7 KB per connection. One turn on one build on one account: xAI's retention is server-side and can change without a CLI update, and the canary measures upload volume, not what xAI keeps. Re-run it after **every** CLI update and before enabling a new project. The engine's own `coding_data_retention_opt_out` check relies on xAI's flag.
 
 ## Isolation model in plain words
@@ -54,13 +53,13 @@ Switching a chat to or from Grok goes through the spec-092 handoff (the preview 
 
 - **A Grok session file is not evidence of what you said.** The model's own shell can write under `GROK_HOME` (measured: it appended a forged `<user_query>` row to its own history). So the cockpit keeps a ledger, `<DATA>/grok_sent/<session-id>` (SHA-256 of every prompt it sent, including context pack and handoff block; dir 0700, files 0600), and a user row is **verified** only if it matches. Handoff **out of** a Grok chat is built by the server from the session file, ignoring the rows the browser holds; unverified user rows are never carried as "Standing constraints" and the block says `## Warning: N unverified user row(s) left out` (previews go to you only, never into the block). Assistant lines are framed as that model's output.
 - Fails closed: sessions that predate the ledger, and turns that died before a new session's id was known, show their user rows as unverified.
-- A project whose own directory **contains** the cockpit's data dir or `GROK_HOME` (the cockpit repo itself) is refused outright — the shell would be able to write cockpit state — so the cockpit's own checkout can never be a Grok project (`GROK_ALLOW_ALL_PROJECTS` lifts only that check).
+- A project whose own directory **contains** the cockpit's data dir or `GROK_HOME` (the cockpit repo itself, a chat rooted at `$HOME`) runs like any other: measured with the real CLI, the data dir and `.env` are then unreadable, unwritable and cannot be renamed or removed, and the CLI pins the home's parents. Only a data dir or home reached through a SYMLINK inside the workspace is refused (the model could re-point it).
 - Manual rotate on a Grok chat clears Grok's own session id and arms a chat-scoped handoff built locally from Grok's history (no model call; the Claude summariser is a cloud call). A resume id Grok no longer has is dropped at the run site: new session, journal line `[grok] … no longer exists`.
 
 ## History, search, usage
 
 - **History / session list / switch** read the session files (`<GROK_HOME>/sessions/<urlencoded cwd>/<id>/`) with no agent process, also with Grok off. Rows have no timestamps; the rewind button is hidden; at most 100 messages by default. User rows carry `verified`.
-- **Search** scans Grok sessions live, one project at a time, only for projects the gate allows (2.5 s wall-clock budget, 32 MiB byte budget). Not in the FTS index.
+- **Search** scans Grok sessions live, one project at a time, across every project (2.5 s wall-clock budget, 32 MiB byte budget). Not in the FTS index.
 - **Usage:** `providers.grok` in `GET /api/usage/dashboard`, built from the engine's own ledger `<DATA>/grok_usage.jsonl`. `notional_usd` is the API-list-price equivalent, never spend. Session files and `signals.json` are model-writable, so usage is **never** read from them.
 
 ## Troubleshooting (keyed by `make doctor`)
@@ -77,12 +76,12 @@ Switching a chat to or from Grok goes through the spec-092 handoff (the preview 
 | `Grok sandbox (probe)` ⚠ | no verdict, `inconclusive` (model refused / never ran the command), or stale | self-heals (retry after ~15 min); `journalctl -u cardloop \| grep '\[grok\]'` has the reason |
 | `Grok compat` ✗ | an MCP server is active in the global config | read the named source; the compat env switches should hide it |
 | `Grok folder trust` ✗ | trust store non-empty or `GROK_FOLDER_TRUST` not pinned | empty `<GROK_HOME>/trusted_folders.toml` |
-| `Grok compat (projects)` ✗ / ⚠ | a gated project's folder is trusted, or a hook/skill is active | same fix; `grok inspect --json` in the project under the engine env |
+| `Grok compat (projects)` ✗ / ⚠ | a project that uses Grok has a trusted folder, or a hook/skill is active | same fix; `grok inspect --json` in the project under the engine env |
 | `Grok processes` ✗ | `grok agent` older than 15 min | `kill -TERM -- -<pgid>` (the remedy prints it) |
 | `Grok litter` ⚠ | > 20 `sandbox-blocked*` entries | the printed `reap_litter` one-liner |
 | `Grok usage files` ⚠ | `grok_usage.jsonl` > 10 MiB or limit-error file > 2 MiB (no rotation) | archive them |
 
-Also: `Grok sandbox check failed — refusing to run` = the probe verdict is `failed`; `Grok sign-in expired — run tools/grok-acct login` = a handshake step timed out (a missing login makes `authenticate` hang, not error); `refusing to run Grok in <dir>` = the cwd is `$HOME` or an ancestor.
+Also: `Grok login names a different account` = the pinned account differs from `auth.json` (re-run `tools/grok-acct login` if you changed it on purpose); `Grok sandbox check failed — refusing to run` = the probe verdict is `failed`; `Grok sign-in expired — run tools/grok-acct login` = a handshake step timed out (a missing login makes `authenticate` hang, not error); `refusing to run Grok in <dir>` = the cwd is `$HOME` or an ancestor.
 
 ## CLI bump procedure
 

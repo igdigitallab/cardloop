@@ -57,10 +57,10 @@ Source of truth: `TASKS.md` in the project root. Sections `## Backlog / In Progr
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/api/projects/{id}/tasks` | Parse `TASKS.md` → return all cards grouped by column | Yes |
-| `POST` | `/api/projects/{id}/tasks` | Create new card in Backlog — `{"text":"...","provider":"claude\|codex\|grok"?,"model":"..."?}`. `provider:"grok"` in a project without `grok_allowed` → `409` (see [Grok](#grok-spec-095)) | Yes |
+| `POST` | `/api/projects/{id}/tasks` | Create new card in Backlog — `{"text":"...","provider":"claude\|codex\|grok"?,"model":"..."?}`. `provider:"grok"` needs no per-project flag (see [Grok](#grok-spec-095)) | Yes |
 | `GET` | `/api/projects/{id}/tasks/done` | Read archived cards from `DONE.md` | Yes |
 | `POST` | `/api/projects/{id}/tasks/{card}/move` | Move card to another column — `{"to":"Backlog\|In Progress\|Review\|Failed\|done"}`. Moving to **In Progress** auto-starts `run_engine`; moving to `done` archives to `DONE.md`. A Grok card whose project is not opted in is refused (`409`) before it moves; if the flag is revoked later the run ends in **Failed** with the reason in the sidecar — never on another provider | Yes |
-| `PATCH` | `/api/projects/{id}/tasks/{card}` | Edit card text and optional provider/model override. Run precedence: card provider → project `board_provider` → Claude. Choosing Grok is gated like card creation (`409`) | Yes |
+| `PATCH` | `/api/projects/{id}/tasks/{card}` | Edit card text and optional provider/model override. Run precedence: card provider → project `board_provider` → Claude. Choosing Grok needs no per-project flag | Yes |
 | `DELETE` | `/api/projects/{id}/tasks/{card}` | Delete card from `TASKS.md` | Yes |
 | `GET` | `/api/projects/{id}/tasks/{card}/run` | Get sidecar result of a card auto-run from `data/runs/<card>.md`. Also returns `meta` field (mode, has_changes, applied, discarded) from JSON sidecar | Yes |
 | `POST` | `/api/projects/{id}/tasks/{card}/apply` | **C2-gate**: merge worktree branch `card-<id>` into base branch via `git merge --no-ff`. Moves card Review→Done. 400 if legacy/no meta; 409 if merge conflict (abort is automatic, worktree stays). Requires worktree mode | Yes |
@@ -75,12 +75,12 @@ Chats are provider-pinned at creation. Missing `provider` in legacy records mean
 Claude continuity is stored in `session_id`; Codex continuity is stored separately in
 `codex_thread_id`; Grok's in `grok_session_id` (always present on a chat, `null` when unset).
 `CODEX_ENABLED=false` / `GROK_ENABLED=false` preserve those records but reject their runs
-(`provider_status:"unavailable"`, never a fallback to Claude). Grok alone carries a per-project
-privacy gate and is documented in its own [section](#grok-spec-095) below.
+(`provider_status:"unavailable"`, never a fallback to Claude). Grok is documented in its own
+[section](#grok-spec-095) below.
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `POST` | `/api/projects/{id}/chat` | Start agent task — returns `text/event-stream` SSE stream of `{type:"tool\|text\|result\|error", ...}`. Shared session + lock with board auto-runs. 409 if project is busy, or if the chat's provider is refused (Grok gate, "temporarily unavailable", plan/ask mode on a provider without it). The final `result` frame carries `provider`, the three continuity ids (`session_id`, `codex_thread_id`, `grok_session_id`) and `context_tokens` / `context_window` | Yes |
+| `POST` | `/api/projects/{id}/chat` | Start agent task — returns `text/event-stream` SSE stream of `{type:"tool\|text\|result\|error", ...}`. Shared session + lock with board auto-runs. 409 if project is busy, or if the chat's provider is refused ("temporarily unavailable", plan/ask mode on a provider without it). The final `result` frame carries `provider`, the three continuity ids (`session_id`, `codex_thread_id`, `grok_session_id`) and `context_tokens` / `context_window` | Yes |
 | `POST` | `/api/projects/{id}/chat/stop` | Interrupt the current agent run (`client.interrupt()`). Note: server-side generator runs to completion; only client fetch is disconnected | Yes |
 | `POST` | `/api/projects/{id}/agents/stop` | spec-089 §1: stop every running Workflow/sub-agent monitor row. Flips targets to `stopping` immediately, then steers (or queues) a synthetic instruction asking the model to call `TaskStop` for each — there is no server-side kill for a sub-agent task. A row still `stopping` after 60s is flipped to `stopped` without waking the orchestrator. No running rows → no-op. Returns `{ok, stopped:[ids], via:"steer"\|"queue"\|"none"}` | Yes |
 | `GET` | `/api/projects/{id}/monitors/{mid}/tail?n=20` | spec-089 §7: last `n` (clamped 1-200, default 20) steps of one monitor row, for the panel's click-to-expand transcript peek. Agent rows tail the SDK transcript; Workflow rows summarise `journal.jsonl` instead (no transcript of their own). Returns `{kind, status, path, lines:[...]}`. 404 `{"error":"project not found"}` / `{"error":"monitor not found"}` / `{"error":"no transcript"}` (stream-only row, nothing ever written) | Yes |
@@ -89,7 +89,7 @@ privacy gate and is documented in its own [section](#grok-spec-095) below.
 | `GET` | `/api/activity-stream` | SSE stream of ALL projects' bus events (for unread indicators in sidebar) | Yes |
 | `GET` | `/api/agent-providers` | Provider availability, subscription auth status, discovered models, reasoning levels, and capabilities. The Grok row is listed **only while `GROK_ENABLED=true`** (a default install's payload is unchanged); its extras are `version`, `warnings[]` and `sandbox:{profile, deny_count, bwrap, probe}`, `plan_type` is the subscription tier. While the sandbox probe runs the row is `available:false` with an explanatory `error` (the call waits at most 4 s, never fails) | Yes |
 | `GET` | `/api/projects/{id}/chats` | List provider-pinned chats, including `provider`, `provider_status`, `model`, `session_id`, `codex_thread_id` and `grok_session_id` | Yes |
-| `POST` | `/api/projects/{id}/chats` | Create chat — optional `{"name":"...","provider":"claude\|codex\|grok","model":"..."}`; defaults to Claude. `409` for a Grok chat in a project that is not opted in | Yes |
+| `POST` | `/api/projects/{id}/chats` | Create chat — optional `{"name":"...","provider":"claude\|codex\|grok","model":"..."}`; defaults to Claude | Yes |
 | `PATCH` | `/api/projects/{id}/chats/{chat_id}` | Rename or activate a chat, or switch its runtime — `{name?, active?, provider?, model?, backend?, account?, expected_revision?}`. The switch is validated against the RESULTING state and applied as a compare-and-swap on `runtime_revision`: `409` while a turn is in flight or on a stale revision, `400` for an invalid combination, and `409` when the resulting provider is Grok in a project that is not opted in (a model-only patch cannot keep a chat on a provider the project no longer allows; moving off Grok is always allowed) | Yes |
 | `DELETE` | `/api/projects/{id}/chats/{chat_id}` | Delete a non-final chat; provider threads/sessions are not deleted | Yes |
 | `POST` | `/api/projects/{id}/chats/{chat_id}/handoff` | spec-092 runtime handoff — `{messages:[{role,text,tools}], from_label, to_label, commit?, text?}`. `commit` false/absent previews `{handoff:{text, ...}}` and stores nothing; `commit:true` arms the (possibly edited) `text` on the chat as `runtime_handoff`, answered `{armed, handoff}`. When the chat being left is on **Grok** the server ignores the posted `messages`, re-reads the session file and builds from it: user rows not matching the send ledger are left out, the text carries `## Warning: N unverified user row(s) left out`, and the response `handoff.unverified` holds up to 5 previews (≤ 200 chars) for the operator only | Yes |
@@ -108,8 +108,8 @@ operator. Both kinds live in one store; `/plan/...` and `/decision/...` hit the 
 
 Off unless `GROK_ENABLED=true` (then the `/api/agent-providers` row exists and `grok` is a valid `provider` everywhere). Operator runbook → [GROK.md](GROK.md).
 
-- **Privacy gate (per project, default off).** Any selection or run of `grok` in a project whose `grok_allowed` is not strictly `true` answers **`409 {"error":"grok is not enabled for this project"}`** — chat create, free-chat create, runtime PATCH, queue accept, chat POST, card create/edit/move, settings `board_provider`. The cockpit UI shows that sentence verbatim, so the prefix is a contract. A record rooted at `$HOME` or above it (free chats default to it) gets the same text plus ` — a chat rooted at the home directory (or above it) can read and write every project there; set GROK_ALLOW_ALL_PROJECTS to allow it`. `GROK_ALLOW_ALL_PROJECTS=true` lifts the gate. A queued message or card whose project lost the flag after acceptance fails visibly (chat error / Failed card), never on another provider.
-- **Fields.** Projects (`GET /api/projects`, settings): `grok_allowed` (bool), `grok_model`. Chats and free chats: `grok_session_id`. Cards: `provider:"grok"`; `board_provider:"grok"`. The registry model list comes from `grok models`; `reasoning_levels` are `low|medium|high|xhigh`.
+- **No privacy gate.** Choosing Grok is the consent, exactly as for Codex and Claude: chat create, free-chat create, runtime PATCH, queue accept, chat POST, card create/edit/move and settings `board_provider` accept `grok` in any project, a chat rooted at `$HOME` included. (The former `409 grok is not enabled for this project`, the `grok_allowed` field and `GROK_ALLOW_ALL_PROJECTS` were removed 2026-10-03; a `grok_allowed` key in a settings POST is now an unknown key, `400`.) A run that cannot start (disabled, not signed in, login names a different account than the pinned one, sandbox check failed) is an `error` event / Failed card, never a run on another provider.
+- **Fields.** Projects (`GET /api/projects`, settings): `grok_model`. Chats and free chats: `grok_session_id`. Cards: `provider:"grok"`; `board_provider:"grok"`. The registry model list comes from `grok models`; `reasoning_levels` are `low|medium|high|xhigh`.
 - **Capabilities.** `chat, board, history, search, usage, interrupt, multi_agent` are true; `ask_mode, plan_mode, skills, plugins` are `false`. Plan or ask mode on a Grok chat is the usual capability conflict (`409` on the chat POST, cleared loudly at a queue drain) — never a silent downgrade.
 - **Ledger and `verified`.** Grok's session file is writable by its own model, so the cockpit records a SHA-256 of every prompt it sends into `<DATA>/grok_sent/<session-id>`; a history row is `verified:true` only if its text matches. Assistant rows carry no tag. A handoff out of a Grok chat leaves unverified user rows out (see the handoff row above).
 - **Errors on the run path** arrive as SSE `error` events: `Grok sandbox check failed — refusing to run: …` (probe verdict `failed`; the registry row is `available:false`), `Grok sign-in expired — run tools/grok-acct login`, `refusing to run Grok in <dir>` (cwd is `$HOME` or above), `Grok does not support plan mode …`.
@@ -223,14 +223,14 @@ Event schema: `{ts, session_key, kind, source?, run_id?, prompt?, text?, tool?, 
 
 ## Settings (card f2ba02)
 
-Global — `data/settings.json` (mtime hot-reload, wired into runtime: scan interval, default model, watchdog). Per-project — fields in `topics.json` (`git_enabled`, `model`, `notify_on_error`, `log_cmd`, `test_cmd`, `board_provider`, `codex_model`, `grok_model`, `grok_allowed`). `git_enabled=false` → cockpit does not use git (legacy cards, git-sync returns 409, health does not require .git).
+Global — `data/settings.json` (mtime hot-reload, wired into runtime: scan interval, default model, watchdog). Per-project — fields in `topics.json` (`git_enabled`, `model`, `notify_on_error`, `log_cmd`, `test_cmd`, `board_provider`, `codex_model`, `grok_model`). `git_enabled=false` → cockpit does not use git (legacy cards, git-sync returns 409, health does not require .git).
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/api/settings` | Global settings: `{stored, effective, spec}`. `effective` = active values (override or env default), `spec` = types/ranges. | Yes |
 | `POST` | `/api/settings` | Partial update of global settings (validated against spec). `null`/`""` for a key resets it to default. 400 on unknown key/type/range. | Yes |
-| `GET` | `/api/projects/{id}/settings` | Per-project settings: `{git_enabled, model, notify_on_error, log_cmd, test_cmd, board_provider, codex_model, grok_model, grok_allowed, ...}`. `grok_allowed` is strictly `true`/`false`; `grok_model` falls back to the built-in default (`GROK_MODEL`, `grok-4.7`) | Yes |
-| `POST` | `/api/projects/{id}/settings` | Partial update of per-project settings (writes to topics.json for all entries with this cwd). Type/model validation. Returns `{ok, topics_updated, settings}`. 400 on unknown key/type. `grok_allowed` must be a JSON bool (`400 grok_allowed: expected bool`): `true` opts the project in, `false` stores a reset (opted-out and never-opted are the same record). `grok_model` takes a provider-native id (`[A-Za-z0-9._-]{2,100}`). `board_provider:"grok"` is judged on the resulting flags, so one save can opt in and pick Grok; revoking is never refused. On a free-chat id the flag is written to that free record, never to topics. | Yes |
+| `GET` | `/api/projects/{id}/settings` | Per-project settings: `{git_enabled, model, notify_on_error, log_cmd, test_cmd, board_provider, codex_model, grok_model, ...}`. `grok_model` falls back to the built-in default (`GROK_MODEL`, `grok-4.7`) | Yes |
+| `POST` | `/api/projects/{id}/settings` | Partial update of per-project settings (writes to topics.json for all entries with this cwd). Type/model validation. Returns `{ok, topics_updated, settings}`. 400 on unknown key/type. `grok_model` takes a provider-native id (`[A-Za-z0-9._-]{2,100}`). | Yes |
 
 ---
 
@@ -280,7 +280,7 @@ Free-form chats not tied to a project (`cwd=$HOME`). Shown in tab bar, hidden fr
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `POST` | `/api/free` | Create a free chat — optional `provider`, provider-native `model`, `cwd` (default `$HOME`) and `grok_allowed:true`; returns every continuity-id field. A Grok free chat rooted at `$HOME` or above passes only under `GROK_ALLOW_ALL_PROJECTS` (`409`, wording below) | Yes |
+| `POST` | `/api/free` | Create a free chat — optional `provider`, provider-native `model` and `cwd` (default `$HOME`); returns every continuity-id field | Yes |
 | `POST` | `/api/free/{id}/rename` | Rename free chat — `{"label":"..."}` | Yes |
 | `DELETE` | `/api/free/{id}` | Delete free chat | Yes |
 

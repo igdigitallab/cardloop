@@ -166,7 +166,7 @@ templates/      — new-project starters (*.tpl) + vault reference copies (refer
 tests/          — pytest suite (3,500+ tests; run via venv/bin/python -m pytest)
 data/           — runtime state (gitignored: topics.json, sessions.json, audit/, runs/)
 docs/API.md     — HTTP API reference
-docs/GROK.md    — Grok Build provider: operator runbook (enable, privacy opt-in, isolation, doctor)
+docs/GROK.md    — Grok Build provider: operator runbook (enable, privacy, isolation, doctor)
 tools/doctor.py — one-command cockpit diagnosis (make doctor)
 tools/daily-journal.py — Haiku digest of the day's cockpit work → a vault Markdown note (README)
 ```

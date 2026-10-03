@@ -1,8 +1,8 @@
 /** spec-095: telling a DELIBERATE server refusal apart from the other things a 409 means.
  *
  *  The server answers 409 for unrelated reasons: "a turn is running" (busy), a stale
- *  compare-and-swap revision, a backend that is not answering - and, since Grok, a privacy
- *  gate ("grok is not enabled for this project"). Two call sites used to read every 409 as
+ *  compare-and-swap revision, a backend that is not answering - and a deliberate refusal
+ *  ("this project is pinned to another backend"). Two call sites used to read every 409 as
  *  the first thing they knew (the board: "project is busy"; the runtime picker: "changed
  *  elsewhere, reloaded"), which would have told the operator to wait or retry on a refusal no
  *  amount of waiting fixes. This returns the server's own sentence for a refusal and null for

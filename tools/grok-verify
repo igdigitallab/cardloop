@@ -1093,7 +1093,6 @@ async def soak_loop(args, scratch: Scratch, binary: str, cycles: int, interval: 
     project.mkdir()
     (project / "README.md").write_text("soak scratch project\n", encoding="utf-8")
     os.environ.update({"GROK_ENABLED": "true", "_CARDLOOP_DATA_DIR": str(data), "GROK_BIN": binary})
-    os.environ.pop("GROK_ALLOW_ALL_PROJECTS", None)
     engine = load_engine()
     engine.reset_cache()
     ctx = {"DATA": data, "running": {}}

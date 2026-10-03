@@ -1271,25 +1271,34 @@ def _grok_folder_trust(g: _Grok) -> "list[Fact]":
                        "with GrokIsolationError if one ever starts)")]
 
 
-def _grok_project_dirs(data: Path, ge, allow_all: bool) -> "list[tuple[str, str]] | None":
-    """[(project name, cwd)] of the projects Grok may run in: records of data/topics.json with
-    `grok_allowed` strictly true (every record under GROK_ALLOW_ALL_PROJECTS), existing directories,
-    one entry per real path, $HOME and its ancestors left out (the engine refuses them). None when
-    the registry cannot be read — the caller stays silent then."""
+def _grok_project_dirs(data: Path) -> "list[tuple[str, str]] | None":
+    """[(project name, cwd)] of the projects that USE Grok: a record of data/topics.json whose board default is
+    Grok or that names a `grok_model`, or a project with a Grok chat in data/chats.json. Existing absolute
+    directories only, one entry per real path. None when the registry cannot be read — the caller stays
+    silent then."""
     try:
         records = json.loads((data / "topics.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(records, dict):
         return None
+    chat_projects: "set[str]" = set()
+    try:
+        chats = json.loads((data / "chats.json").read_text(encoding="utf-8"))
+        for pid, entry in (chats.items() if isinstance(chats, dict) else []):
+            items = entry.get("chats") if isinstance(entry, dict) else None
+            if any(isinstance(c, dict) and c.get("provider") == "grok" for c in (items or [])):
+                chat_projects.add(str(pid))
+    except (OSError, ValueError):
+        pass
     found: "dict[str, str]" = {}
     for rec in records.values():
-        if not isinstance(rec, dict) or not (allow_all or rec.get("grok_allowed") is True):
+        if not isinstance(rec, dict):
             continue
+        uses = (rec.get("board_provider") == "grok" or bool(rec.get("grok_model"))
+                or str(rec.get("project")) in chat_projects)
         cwd = rec.get("cwd")
-        if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
-            continue
-        if ge._is_home_or_ancestor(cwd):
+        if not uses or not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
             continue
         found.setdefault(os.path.realpath(cwd), str(rec.get("project") or os.path.basename(cwd)))
     return sorted(((n, c) for c, n in found.items()), key=lambda t: (t[0].lower(), t[1]))
@@ -1349,7 +1358,7 @@ def _judge_project_inspect(res: "tuple[int, str, str] | None") -> "tuple[str, st
 
 def _grok_compat_projects(g: _Grok) -> "list[Fact]":
     """The global `Grok compat` fact runs in a neutral cwd, so it cannot see a project's own
-    `.mcp.json`. For each project that may use Grok (grok_allowed) this runs the same bounded
+    `.mcp.json`. For each project that uses Grok (board default, `grok_model` or a Grok chat) this runs the same bounded
     `inspect --json` IN the project, under the sandbox profile the engine would apply and with a
     copy of the cockpit home's folder-trust store — i.e. what a turn there would load. A project
     MCP server listed while the folder is untrusted is gated and does not count against it; a
@@ -1357,11 +1366,11 @@ def _grok_compat_projects(g: _Grok) -> "list[Fact]":
     be read."""
     name = "Grok compat (projects)"
     ge = g.ge
-    projects = _grok_project_dirs(g.data, ge, ge.allow_all_projects())
+    projects = _grok_project_dirs(g.data)
     if projects is None:
         return []
     if not projects:
-        return [Fact(name, "no project has grok_allowed set — nothing to check", level="info")]
+        return [Fact(name, "no project uses Grok yet — nothing to check", level="info")]
     if not g.binary or not g.version:
         return [Fact(name, "not checked (no usable Grok CLI)", level="info")]
     try:
@@ -1387,7 +1396,7 @@ def _grok_compat_projects(g: _Grok) -> "list[Fact]":
     bad = [r for r in rows if r[1] != "ok"]
     notes = [f"{n}: {t}" for n, lv, t in rows if lv == "ok" and t != "isolated"]
     if not bad:
-        value = f"{len(rows)} project(s) with grok_allowed checked under the sandbox view: isolated"
+        value = f"{len(rows)} project(s) that use Grok checked under the sandbox view: isolated"
         if notes:
             value += " — " + "; ".join(notes[:3]) + (f" (+{len(notes) - 3} more)" if len(notes) > 3 else "")
         return [Fact(name, value + tail)]

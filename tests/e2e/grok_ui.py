@@ -2,7 +2,6 @@
 import json
 
 
-GATE_SENTENCE = "grok is not enabled for this project"
 
 
 def api(page, server, path, method="GET", body=None):

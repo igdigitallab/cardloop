@@ -16,11 +16,12 @@ Adapter engines receive the per-turn `effort` exactly as the cockpit sent it, in
 cockpit-only "ultra" that is cleared for Claude alone — an adapter engine must whitelist the levels
 it understands (codex_engine does).
 
-A provider that ships project code to a third party also carries a per-project privacy GATE
-(`gate`, spec-095 D5): a pure `project -> refusal text | None` hook, default open. It is the ONE
-place the rule lives; `webapp._provider_gate_refusal` is the only caller, and every site that
-selects the provider (chat create, PATCH, card, board default) or launches a run (queue drain,
-direct POST, card) asks it — a refusal is an error, never a reason to run on another engine.
+A provider may carry a per-project privacy GATE (`gate`): a pure `project -> refusal text | None`
+hook, default open. It is the ONE place such a rule lives; `webapp._provider_gate_refusal` is the only
+caller, and every site that selects the provider (chat create, PATCH, card, board default) or launches
+a run (queue drain, direct POST, card) asks it — a refusal is an error, never a reason to run on
+another engine. NO registered provider uses it: Grok was gated per project (spec-095 D5) until the
+operator decided that choosing a provider in the picker IS the consent, as it is for Codex and Claude.
 
 Deliberately NOT here: history readers, session lists, usage, rate limits, search and the
 `/api/agent-providers` rows. Those differ inherently per provider and a table would only hide it.
@@ -31,7 +32,6 @@ This module must stay importable from `board.py`, so it never imports `webapp`.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -255,52 +255,6 @@ register(ProviderSpec(
 ))
 
 
-# spec-095 D5. The text is an API contract: the cockpit UI classifies a 409 by its PREFIX.
-GROK_GATE_MESSAGE = "grok is not enabled for this project"
-GROK_GATE_FIELD = "grok_allowed"
-GROK_GATE_HOME_HINT = (" \u2014 a chat rooted at the home directory (or above it) can read and write every "
-                       "project there; set GROK_ALLOW_ALL_PROJECTS to allow it")
-
-
-def _covers_home(project: Mapping[str, Any]) -> bool:
-    """True when the record's `cwd` is $HOME or one of its ancestors, i.e. a working directory under
-    which the sandbox lets Grok read AND WRITE every project in the home directory.
-
-    Symlinks, `..` and trailing slashes are resolved first. A record WITHOUT a `cwd` key (a
-    flags-only record built to judge a selection) has nothing to judge; a cwd that is present but
-    empty, relative or unresolvable is judged as covering home, because where it points depends on
-    the process that happens to resolve it."""
-    if "cwd" not in project:
-        return False
-    cwd = project["cwd"]
-    if not isinstance(cwd, str) or not os.path.isabs(cwd):  # "" and "  " are not absolute either
-        return True
-    try:
-        home = os.path.realpath(os.path.expanduser("~"))
-        real = os.path.realpath(cwd)
-    except (OSError, ValueError):
-        return True
-    return home == real or home.startswith(real.rstrip("/") + "/")
-
-
-def _grok_gate(project: Mapping[str, Any]) -> "str | None":
-    """Grok sends the project's code and prompts to xAI, which cannot be recalled: OFF in every
-    project until the operator sets `grok_allowed` (strictly the boolean true — a string or a
-    number in a hand-edited record does not count). `GROK_ALLOW_ALL_PROJECTS` is the
-    single-tenant escape hatch, read live.
-
-    A record rooted at $HOME or above it passes ONLY under that hatch: a free chat defaults to
-    cwd=$HOME, so one opt-in would hand Grok every project in the home directory (client work
-    included) and defeat the per-project rule this gate exists for."""
-    if grok_engine.allow_all_projects():
-        return None
-    if project.get(GROK_GATE_FIELD) is not True:
-        return GROK_GATE_MESSAGE
-    if _covers_home(project):
-        return GROK_GATE_MESSAGE + GROK_GATE_HOME_HINT
-    return None
-
-
 # `grok_engine` is looked up through the module on every call (not captured), like codex_engine
 # above. `fallback_model` is a constant on purpose: `_run_card` resolves the spec before its
 # `try`, so it must never raise.
@@ -314,8 +268,6 @@ register(ProviderSpec(
     fallback_model=lambda ctx: grok_engine.DEFAULT_GROK_MODEL,
     enabled=lambda: grok_engine.grok_enabled(),
     capabilities=lambda: grok_engine.capabilities(),
-    gate=_grok_gate,
-    gate_field=GROK_GATE_FIELD,
     send_ledger=lambda ctx, session_id, prompt: grok_sends.record(ctx.get("DATA"), session_id, prompt),
     session_exists=lambda ctx, cwd, session_id: grok_history.session_exists(
         session_id, cwd, grok_home=grok_engine.grok_home(ctx)),

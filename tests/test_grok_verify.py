@@ -754,13 +754,13 @@ def test_run_cmd_kills_the_whole_group_of_a_finished_leader(tmp_path):
 
 def test_child_env_drops_secrets_and_every_grok_variable(monkeypatch):
     for k in ("XAI_API_KEY", "ANTHROPIC_API_KEY", "WEB_PASSWORD", "WEB_COOKIE_SALT", "VAPID_PRIVATE_KEY",
-              "GROK_ALLOW_ALL_PROJECTS", "GROK_SANDBOX_DENY"):
+              "GROK_MODEL", "GROK_SANDBOX_DENY"):
         monkeypatch.setenv(k, "v")
     monkeypatch.setenv("HARMLESS_VAR", "keep")
     env = gv._child_env({"GROK_HOME": "/h"})
     assert env["GROK_HOME"] == "/h" and env["HARMLESS_VAR"] == "keep" and "PATH" in env
     for k in ("XAI_API_KEY", "ANTHROPIC_API_KEY", "WEB_PASSWORD", "WEB_COOKIE_SALT", "VAPID_PRIVATE_KEY",
-              "GROK_ALLOW_ALL_PROJECTS", "GROK_SANDBOX_DENY"):
+              "GROK_MODEL", "GROK_SANDBOX_DENY"):
         assert k not in env, k
 
 
@@ -843,7 +843,7 @@ auth = os.path.join(home, "auth.json")
 rec = {"marker": marker, "home_login": os.path.isfile(auth),
        "mode": oct(os.stat(auth).st_mode & 0o777) if os.path.isfile(auth) else None,
        "grok_bin": os.environ.get("GROK_BIN"), "xai": os.environ.get("XAI_API_KEY"),
-       "allow_all": os.environ.get("GROK_ALLOW_ALL_PROJECTS"), "web_pw": os.environ.get("WEB_PASSWORD"),
+       "grok_model": os.environ.get("GROK_MODEL"), "web_pw": os.environ.get("WEB_PASSWORD"),
        "has_addopts_off": "addopts=" in args, "basetemp": [a for a in args if a.startswith("--basetemp=")]}
 open(os.environ["FAKE_LOG"], "a").write(json.dumps(rec) + "\\n")
 print("SECRET " + os.environ["FAKE_SECRET"])
@@ -927,7 +927,7 @@ def _env(rig, **extra):
         "FAKE_LOG": str(rig["log"]), "FAKE_PIDFILE": str(rig["pid"]), "FAKE_SECRET": SECRET,
         "FAKE_GRACEFUL": str(rig["graceful"]),
         "FAKE_REC_SRC": str(FIXTURES),
-        "XAI_API_KEY": "xai-must-not-leak", "WEB_PASSWORD": "pw-must-not-leak", "GROK_ALLOW_ALL_PROJECTS": "true",
+        "XAI_API_KEY": "xai-must-not-leak", "WEB_PASSWORD": "pw-must-not-leak", "GROK_MODEL": "true",
     })
     env.update(extra)
     return env
@@ -992,7 +992,7 @@ def test_cli_green_run_prints_the_edit_never_makes_it_and_cleans_up(rig):
     for x in runs:
         assert x["home_login"] and x["mode"] == "0o600"                                   # the login copy was there
         assert x["grok_bin"] == str(rig["grok"]) and x["has_addopts_off"] and x["basetemp"]
-        assert x["xai"] is None and x["allow_all"] is None and x["web_pw"] is None        # nothing leaks to a child
+        assert x["xai"] is None and x["grok_model"] is None and x["web_pw"] is None        # nothing leaks to a child
     assert len({x["basetemp"][0] for x in runs}) == 1                                     # one scratch basetemp
 
 

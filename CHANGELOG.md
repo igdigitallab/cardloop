@@ -26,14 +26,17 @@ official `grok` binary on a SuperGrok subscription — never the xAI API. Runboo
   offered. Cardloop's Grok login, sessions and profile live in their own `GROK_HOME`
   (`tools/grok-acct login|status|logout`), by default `<data dir>-grok-home` — next to the data dir,
   never inside it. The cockpit's own data dir and `.env` are hidden from the model's shell as one
-  directory entry, and a project that contains the data dir or `GROK_HOME` is refused (so the cockpit's
-  own checkout can never be a Grok project). The model-writable instruction layers of `GROK_HOME`
+  directory entry (measured with the real CLI: unreadable, unwritable, cannot be renamed or removed,
+  also when the project contains it); only a data dir or home reached through a symlink in the
+  workspace is refused. The model-writable instruction layers of `GROK_HOME`
   (rules, `AGENTS.md`, skills, agents, …) are deleted before every turn, because one project's turn
   could otherwise plant rules that every other project's next turn loads (measured with the real CLI).
-- **Per-project privacy opt-in.** Grok sends project code to xAI, so it is off in every project until
-  `grok_allowed` is set (Settings toggle, strictly boolean); every selection and run site answers
-  `409 grok is not enabled for this project` otherwise. A cwd at `$HOME` or above (free chats) needs
-  `GROK_ALLOW_ALL_PROJECTS`.
+- **Choosing Grok is the consent.** Like Codex and Claude, Grok is picked in the provider menu of a chat,
+  free chat, board card or board default and runs in any project (a chat rooted at `$HOME` and the
+  cockpit's own checkout included): no per-project switch, no `grok_allowed`, no
+  `GROK_ALLOW_ALL_PROJECTS`. It is listed only while `GROK_ENABLED=true`. Because a turn's shell can
+  rewrite `auth.json` (measured), the first verified login is pinned in `<data>/grok_account.json` and
+  a login naming another account is refused (`tools/grok-acct login` re-pins on purpose).
 - **History, sessions, search, usage, handoff.** Read from Grok's session files; `providers.grok` in
   `/api/usage/dashboard` (tokens, turns, local 5 h / 7 d counters, `notional_usd` labelled
   API-equivalent). Because the model's own shell can write its session file, the cockpit keeps a

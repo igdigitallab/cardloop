@@ -4,7 +4,7 @@
  *  (null) — yet `GET .../settings` returns null for every project that never chose, and the
  *  Settings tab posts the whole record back. An untouched project therefore 400'd the WHOLE save
  *  ("context_pack_enabled: expected bool"), so nothing on the page could be saved on a default
- *  project — including the Grok privacy opt-in (`grok_allowed`).
+ *  project.
  *
  *  A null the operator did not touch is left out. A null they DID choose (On/Off -> Inherit) is
  *  still sent, so the server's answer tells them it cannot be stored rather than the choice being

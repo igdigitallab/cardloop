@@ -2171,8 +2171,9 @@ def _project(box, name: str) -> Path:
 
 
 def _opt_in(box, *names: str, **flags) -> "dict[str, Path]":
+    """Projects that USE Grok: their board default is Grok (the doctor checks where Grok actually runs)."""
     dirs = {n: _project(box, n) for n in names}
-    _topics(box, {f"k{i}": {"project": n, "cwd": str(d), "grok_allowed": True, **flags}
+    _topics(box, {f"k{i}": {"project": n, "cwd": str(d), "board_provider": "grok", **flags}
                   for i, (n, d) in enumerate(dirs.items())})
     return dirs
 
@@ -2212,17 +2213,46 @@ def test_projects_fact_is_silent_without_a_readable_registry(box):
     assert _proj_calls(box) == []
 
 
-def test_projects_fact_says_so_when_nobody_opted_in(box):
-    _topics(box, {"k": {"project": "P", "cwd": str(_project(box, "p")), "grok_allowed": False}})
+def test_projects_fact_says_so_when_no_project_uses_grok(box):
+    _topics(box, {"k": {"project": "P", "cwd": str(_project(box, "p")), "board_provider": "claude"}})
     f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
-    assert f.level == "info" and "no project has grok_allowed" in f.value
+    assert f.level == "info" and "no project uses Grok yet" in f.value
     assert _proj_calls(box) == []
 
 
-@pytest.mark.parametrize("flag", ["true", 1, "yes", None, False, [True]])
-def test_only_a_strict_boolean_true_counts_as_an_opt_in(box, flag):
+@pytest.mark.parametrize("rec", [{"board_provider": "grok"}, {"grok_model": "grok-4.7"}])
+def test_a_project_counts_as_using_grok_by_its_board_default_or_its_model(box, rec):
     _fake(box)
-    _topics(box, {"k": {"project": "P", "cwd": str(_project(box, "p")), "grok_allowed": flag}})
+    _topics(box, {"k": {"project": "P", "cwd": str(_project(box, "p")), **rec}})
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "ok" and "1 project(s) that use Grok" in f.value and len(_proj_calls(box)) == 1
+
+
+@pytest.mark.parametrize("rec", [{}, {"board_provider": "codex"}, {"grok_model": ""}, {"grok_model": None}])
+def test_a_project_without_any_sign_of_grok_is_not_inspected(box, rec):
+    _fake(box)
+    _topics(box, {"k": {"project": "P", "cwd": str(_project(box, "p")), **rec}})
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "info" and _proj_calls(box) == []
+
+
+def test_a_project_with_a_grok_chat_counts_as_using_grok(box):
+    _fake(box)
+    _topics(box, {"a": {"project": "WithChat", "cwd": str(_project(box, "wc"))},
+                  "b": {"project": "Other", "cwd": str(_project(box, "ot"))}})
+    (box.data / "chats.json").write_text(json.dumps({
+        "WithChat": {"active": "c1", "chats": [{"id": "c0", "provider": "claude"}, {"id": "c1", "provider": "grok"}]},
+        "Other": {"active": "c2", "chats": [{"id": "c2", "provider": "codex"}]}}))
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "ok" and "1 project(s)" in f.value
+    assert [Path(c["cwd"]).name for c in _proj_calls(box)] == ["wc"]
+
+
+@pytest.mark.parametrize("raw", ["{not json", "[]", '{"P": "x"}', '{"P": {"chats": "no"}}', '{"P": {"chats": ["x", 3]}}'])
+def test_an_unreadable_or_odd_chat_store_never_breaks_the_check(box, raw):
+    _fake(box)
+    _topics(box, {"k": {"project": "P", "cwd": str(_project(box, "p"))}})
+    (box.data / "chats.json").write_text(raw)
     f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
     assert f.level == "info" and _proj_calls(box) == []
 
@@ -2391,15 +2421,14 @@ def test_project_dirs_are_deduplicated_and_unusable_ones_skipped(box):
     real = _project(box, "real")
     link = box.tmp / "projects" / "link"
     link.symlink_to(real)
+    G = {"board_provider": "grok"}
     _topics(box, {
-        "a": {"project": "Real", "cwd": str(real), "grok_allowed": True},
-        "b": {"project": "Alias", "cwd": str(link), "grok_allowed": True},            # same real path
-        "c": {"project": "Gone", "cwd": str(box.tmp / "nope"), "grok_allowed": True},
-        "d": {"project": "Rel", "cwd": "relative/dir", "grok_allowed": True},
-        "e": {"project": "NoCwd", "grok_allowed": True},
+        "a": {"project": "Real", "cwd": str(real), **G},
+        "b": {"project": "Alias", "cwd": str(link), **G},                            # same real path
+        "c": {"project": "Gone", "cwd": str(box.tmp / "nope"), **G},
+        "d": {"project": "Rel", "cwd": "relative/dir", **G},
+        "e": {"project": "NoCwd", **G},
         "f": "not a record",
-        "g": {"project": "Home", "cwd": str(box.fake_home), "grok_allowed": True},     # engine refuses it
-        "h": {"project": "Above", "cwd": str(box.tmp), "grok_allowed": True},          # contains $HOME
         "i": {"project": "Off", "cwd": str(_project(box, "off"))},
     })
     f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
@@ -2413,15 +2442,6 @@ def test_the_number_of_inspect_calls_is_capped_and_the_rest_reported(box, monkey
     _opt_in(box, *[f"p{i:02d}" for i in range(7)])
     f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
     assert len(_proj_calls(box)) == 3 and "+4 more project(s) not checked, limit 3" in f.value
-
-
-def test_allow_all_projects_checks_every_record(box):
-    _fake(box)
-    _topics(box, {"a": {"project": "A", "cwd": str(_project(box, "a"))},
-                  "b": {"project": "B", "cwd": str(_project(box, "b")), "grok_allowed": False}})
-    box.env["GROK_ALLOW_ALL_PROJECTS"] = "true"
-    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
-    assert f.level == "ok" and "2 project(s)" in f.value
 
 
 def test_projects_fact_writes_nothing_real(box):
@@ -2531,7 +2551,7 @@ def test_a_relative_cwd_is_never_resolved_against_doctors_own_directory(box, mon
     _fake(box)
     (box.tmp / "rel" / "dir").mkdir(parents=True)
     monkeypatch.chdir(box.tmp)                         # "rel/dir" EXISTS from here, but whose cwd is it?
-    _topics(box, {"a": {"project": "Rel", "cwd": "rel/dir", "grok_allowed": True}})
+    _topics(box, {"a": {"project": "Rel", "cwd": "rel/dir", "board_provider": "grok"}})
     f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
     assert f.level == "info" and _proj_calls(box) == []
 

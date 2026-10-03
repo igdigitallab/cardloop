@@ -17,12 +17,11 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect
 
-from .conftest import GROK_ALLOWED_PROJECTS  # noqa: F401  (documents which projects exist)
+from .conftest import GROK_PROJECTS  # noqa: F401  (documents which projects exist)
 
 pytestmark = pytest.mark.e2e
 
 SIZES = [("desktop", 1440, 900), ("360", 360, 800)]
-GATE_SENTENCE = "grok is not enabled for this project"
 MIN_TAP = 40
 
 
@@ -121,24 +120,6 @@ def test_picker_with_grok(view):
 
 # ── Settings ───────────────────────────────────────────────────────────────────────────────────
 
-def test_settings_toggle_and_warning(view):
-    page = view.page
-    open_project(view, "g-settings")
-    open_tab(view, "Settings")
-    toggle = page.locator("[data-testid=grok-allowed]")
-    toggle.scroll_into_view_if_needed()
-    expect(toggle).to_be_visible()
-    warning = page.locator("text=Allow Grok in this project").first.locator("xpath=../..")
-    inside_viewport(view, warning, "privacy warning row")
-    assert "xAI" in warning.inner_text()
-    # The control itself is a tap target on a phone: either the box or the row around it.
-    if view.phone:
-        box = toggle.bounding_box()
-        row = warning.bounding_box()
-        assert (box["width"] >= MIN_TAP and box["height"] >= MIN_TAP) or row["height"] >= MIN_TAP, (box, row)
-        assert box["x"] + box["width"] <= view.w, box
-    no_h_overflow(view)
-    shot(view, "settings")
 
 
 # ── Board: card modal + badge ──────────────────────────────────────────────────────────────────
@@ -216,59 +197,10 @@ def test_muted_pill_and_menu(view):
 
 # ── the refusals ───────────────────────────────────────────────────────────────────────────────
 
-def test_refusal_in_the_new_chat_dialog(view):
-    page = view.page
-    open_project(view, "g-denied")
-    page.locator(".chat-named-tab-new").first.click()
-    page.click("button[data-provider=grok]")
-    page.click("button:has-text('Create chat')")
-    alert = page.locator("[role=alert]").first
-    expect(alert).to_contain_text(GATE_SENTENCE)
-    inside_viewport(view, alert, "refusal alert")
-    no_h_overflow(view)
-    shot(view, "refusal-dialog")
-    # As wide as the fields above it (the shared .error-state caps at 500px).
-    field = page.locator("input[placeholder^='e.g. Math']").bounding_box()
-    assert abs(alert.bounding_box()["width"] - field["width"]) <= 2, (alert.bounding_box(), field)
 
 
-def test_refusal_banner_after_a_refused_switch(view):
-    """A provider switch the server refuses must leave a visible sentence behind (the dialog that
-    asked for it has closed, and the pill dropdown is only open while hovered)."""
-    page = view.page
-    open_project(view, "g-denied")
-    if view.phone:
-        page.locator(".usage-compact .usage-badge").first.click()
-    else:
-        page.locator(".usage-badge").first.hover()
-    page.locator(".usage-dropdown .rt-line[data-provider=grok]").dispatch_event("mousedown")
-    page.wait_for_selector("text=Switch to Grok")
-    page.click("button:has-text('Switch without it')")
-    banner = page.locator(".chat-error-banner")
-    expect(banner).to_contain_text(GATE_SENTENCE)
-    inside_viewport(view, banner, "refusal banner")
-    no_h_overflow(view)
-    shot(view, "refusal-banner")
 
 
-def test_refusal_toast_for_a_free_chat(view):
-    page = view.page
-    open_project(view, "g-text")          # on a phone the tab bar (and its "+") shows with a project open
-    page.locator(".ptab-new").first.click()
-    page.wait_for_selector("text=New free chat")
-    page.click("button[data-provider=grok]")
-    shot(view, "free-chat-dialog")
-    page.get_by_role("button", name="Create chat").click()
-    toast = page.locator(".toast")
-    expect(toast).to_contain_text(GATE_SENTENCE)
-    inside_viewport(view, toast, "refusal toast")
-    no_h_overflow(view)
-    shot(view, "refusal-toast")
-    # The toast must not cover the dialog's own Create button (a phone dialog is a bottom sheet).
-    t, b = toast.bounding_box(), page.get_by_role("button", name="Create chat").bounding_box()
-    overlap = not (t["y"] + t["height"] <= b["y"] or b["y"] + b["height"] <= t["y"]
-                   or t["x"] + t["width"] <= b["x"] or b["x"] + b["width"] <= t["x"])
-    assert not overlap, f"toast {t} covers the Create chat button {b}"
 
 
 # ── handoff marker ─────────────────────────────────────────────────────────────────────────────

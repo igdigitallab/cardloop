@@ -33,7 +33,7 @@ import webapp as _webapp
 
 from test_grok_history import a, call, jl, put_session, q, summ
 from test_grok_wiring import (  # noqa: F401 - fixtures used by name
-    CHAT_ID, PROJECT_ID, REFUSAL, SESSION_KEY, _allow, _auth, _chat_record, _drain, _seed_chat,
+    CHAT_ID, PROJECT_ID, REFUSAL, SESSION_KEY, _auth, _chat_record, _drain, _seed_chat,
     _sse_events, codex_on, engines, fake_ctx, grok_on, isolate,
 )
 
@@ -337,7 +337,6 @@ async def test_every_endpoint_finds_the_grok_home_from_the_cockpits_ctx_not_the_
     (ctx_home / "sessions").mkdir(parents=True)
     put_session(ctx_home, cwd, SID1, chat=[q("never touch webapp.py"), a("ok")], summary=summ())
     put_session(ctx_home, cwd, SID2, chat=[q("flux capacitor notes")], summary=summ())
-    _allow(fake_ctx)
     _seed_chat(fake_ctx, provider="grok", grok_session_id=SID1)
 
     async def noop(ctx):
@@ -451,7 +450,6 @@ def search_stubs(monkeypatch):
 async def test_search_finds_grok_sessions_of_gated_projects(
     aiohttp_client, fake_ctx, app, home, cwd, grok_on, search_stubs
 ):
-    _allow(fake_ctx)
     put_session(home, cwd, SID1, chat=[q("where is the flux capacitor wired?"), a("in flux.py")],
                 summary=summ("2026-10-02T10:00:00Z"))
     client = await aiohttp_client(app)
@@ -463,23 +461,9 @@ async def test_search_finds_grok_sessions_of_gated_projects(
     assert hit["ts"] == pytest.approx(1790935200.0, abs=86400 * 30)
 
 
-async def test_search_skips_projects_the_grok_gate_refuses_and_reads_nothing_there(
-    aiohttp_client, fake_ctx, app, home, cwd, grok_on, search_stubs, monkeypatch
-):
-    put_session(home, cwd, SID1, chat=[q("a secret flux plan")], summary=summ())
-    scanned = []
-    real = grok_history.search_sessions
-    monkeypatch.setattr(grok_history, "search_sessions",
-                        lambda *a, **k: scanned.append(a) or real(*a, **k))
-    client = await aiohttp_client(app)
-    resp = await client.get("/api/search?q=flux", headers=_auth(fake_ctx))
-    assert (await resp.json())["hits"] == [] and scanned == []
-
-
 async def test_search_does_not_touch_grok_when_it_is_switched_off(
     aiohttp_client, fake_ctx, app, home, cwd, search_stubs, monkeypatch
 ):
-    _allow(fake_ctx)
     put_session(home, cwd, SID1, chat=[q("flux")], summary=summ())
     monkeypatch.setattr(grok_history, "search_sessions",
                         lambda *a, **k: pytest.fail("a disabled Grok must not be scanned"))
@@ -491,11 +475,9 @@ async def test_search_does_not_touch_grok_when_it_is_switched_off(
 async def test_search_respects_the_project_filter_the_limit_and_the_index_hits(
     aiohttp_client, fake_ctx, app, home, cwd, grok_on, monkeypatch
 ):
-    _allow(fake_ctx)
     other = Path(cwd).parent / "second"
     other.mkdir()
-    fake_ctx["topics"]["1001:43"] = {"project": "second", "cwd": str(other), "model": "sonnet",
-                                     "grok_allowed": True}
+    fake_ctx["topics"]["1001:43"] = {"project": "second", "cwd": str(other), "model": "sonnet"}
     for c, sid in ((cwd, SID1), (str(other), SID2)):
         put_session(home, c, sid, chat=[q("needle one"), a("needle two")], summary=summ())
 
@@ -519,7 +501,6 @@ async def test_search_respects_the_project_filter_the_limit_and_the_index_hits(
 async def test_search_asks_the_reader_only_for_the_slots_that_are_left(
     aiohttp_client, fake_ctx, app, home, cwd, grok_on, monkeypatch
 ):
-    _allow(fake_ctx)
     for sid in (SID1, SID2, SID3):
         put_session(home, cwd, sid, chat=[q("needle in this one")], summary=summ())
 
@@ -536,11 +517,10 @@ async def test_search_asks_the_reader_only_for_the_slots_that_are_left(
 async def test_search_ignores_a_home_rooted_free_chat_and_survives_a_reader_failure(
     aiohttp_client, fake_ctx, app, home, cwd, grok_on, search_stubs, monkeypatch, tmp_path
 ):
-    _allow(fake_ctx)
     monkeypatch.setenv("HOME", str(tmp_path))
     _webapp._save_free_chats(fake_ctx, {"free-home0001": {
         "label": "f", "cwd": str(tmp_path), "model": "grok-4.7", "provider": "grok",
-        "grok_allowed": True, "created_at": 1}})
+        "created_at": 1}})
     seen = []
 
     def spy(q_, c, **k):
@@ -558,7 +538,6 @@ async def test_search_caps_the_snippet_and_reads_off_the_event_loop(
     aiohttp_client, fake_ctx, app, home, cwd, grok_on, search_stubs, monkeypatch
 ):
     import threading
-    _allow(fake_ctx)
     seen = []
 
     def spy(q_, c, **k):
@@ -574,7 +553,6 @@ async def test_search_caps_the_snippet_and_reads_off_the_event_loop(
 async def test_search_stops_at_its_wall_clock_budget(
     aiohttp_client, fake_ctx, app, home, cwd, grok_on, search_stubs, monkeypatch
 ):
-    _allow(fake_ctx)
     monkeypatch.setattr(_webapp, "_GROK_SEARCH_BUDGET_SEC", -1.0)
     monkeypatch.setattr(grok_history, "search_sessions",
                         lambda *a, **k: pytest.fail("the budget is spent before the first scan"))
@@ -1087,7 +1065,6 @@ def _ledger(ctx, sid):
 async def test_the_direct_post_records_the_prompt_it_sent_into_the_session_it_got_back(
     aiohttp_client, fake_ctx, app, home, cwd, grok_on, quiet_run
 ):
-    _allow(fake_ctx)
     _seed_chat(fake_ctx, provider="grok")
     calls = []
     fake_ctx["run_grok_engine"] = _file_writing_grok_engine(calls, home, cwd, SID1)
@@ -1099,7 +1076,6 @@ async def test_the_direct_post_records_the_prompt_it_sent_into_the_session_it_go
 
 
 async def test_the_queue_drain_records_the_prompt_too(fake_ctx, home, cwd, grok_on):
-    _allow(fake_ctx)
     _seed_chat(fake_ctx, provider="grok")
     calls = []
     fake_ctx["run_grok_engine"] = _file_writing_grok_engine(calls, home, cwd, SID2)
@@ -1111,7 +1087,6 @@ async def test_the_queue_drain_records_the_prompt_too(fake_ctx, home, cwd, grok_
 async def test_the_drain_records_the_prompt_the_engine_got_not_the_bare_message(
     fake_ctx, home, cwd, grok_on
 ):
-    _allow(fake_ctx)
     _seed_chat(fake_ctx, provider="grok", runtime_handoff={
         "text": "# Handoff: Claude → Grok\nBLOCK", "for_provider": "grok", "for_backend": "",
         "from_label": "Claude", "to_label": "Grok"})
@@ -1130,7 +1105,6 @@ async def test_a_resumed_session_gets_the_prompt_recorded_before_the_engine_runs
 ):
     """restart-self.sh aborts every live turn: the `result` event never arrives, and the operator's
     last message to an existing session must still verify at the next crossing."""
-    _allow(fake_ctx)
     put_session(home, cwd, SID1, chat=[q("earlier")], summary=summ())
     _seed_chat(fake_ctx, provider="grok", grok_session_id=SID1, runtime_handoff={"text": "# Handoff: Claude → Grok\nBLOCK", "for_provider": "grok", "for_backend": "",
                             "from_label": "Claude", "to_label": "Grok"})
@@ -1151,7 +1125,6 @@ async def test_a_resumed_session_gets_the_prompt_recorded_before_the_engine_runs
 async def test_a_fresh_session_has_nothing_to_record_until_its_id_exists(
     aiohttp_client, fake_ctx, app, home, grok_on, quiet_run
 ):
-    _allow(fake_ctx)
     _seed_chat(fake_ctx, provider="grok")
 
     async def dies(**kw):
@@ -1164,7 +1137,6 @@ async def test_a_fresh_session_has_nothing_to_record_until_its_id_exists(
 
 
 async def test_the_drain_records_before_the_run_for_a_resumed_session_too(fake_ctx, home, cwd, grok_on):
-    _allow(fake_ctx)
     put_session(home, cwd, SID2, chat=[q("earlier")], summary=summ())
     _seed_chat(fake_ctx, provider="grok", grok_session_id=SID2, runtime_handoff={"text": "# Handoff: Claude → Grok\nBLOCK", "for_provider": "grok", "for_backend": "",
                             "from_label": "Claude", "to_label": "Grok"})
@@ -1185,8 +1157,7 @@ async def test_a_board_card_run_records_its_prompt_too(fake_ctx, tmp_path, home,
     from test_grok_wiring import _run_card_with
     calls = []
     fake_ctx["run_grok_engine"] = _file_writing_grok_engine(calls, home, cwd, SID3)
-    await _run_card_with(fake_ctx, tmp_path, project_extra={"grok_allowed": True},
-                         card_extra={"provider": "grok"})
+    await _run_card_with(fake_ctx, tmp_path, card_extra={"provider": "grok"})
     assert calls and grok_sends.fingerprint(calls[0]["prompt"]) in _ledger(fake_ctx, SID3)
 
 
@@ -1204,7 +1175,6 @@ async def test_claude_and_codex_runs_write_no_ledger(
 async def test_a_turn_that_never_answers_with_an_id_records_nothing(
     aiohttp_client, fake_ctx, app, home, grok_on, quiet_run
 ):
-    _allow(fake_ctx)
     _seed_chat(fake_ctx, provider="grok")
 
     async def silent(**kw):
@@ -1231,7 +1201,6 @@ async def test_round_trip_claude_grok_codex_grok_carries_a_marker_and_what_chang
     labelled from the provider table, prefixed onto the first prompt of the engine ENTERED and
     cleared once it answered. The return to Grok resumes Grok's OLD session (turns the other
     engines made in between are NOT in it), so the block is the only thing that tells it."""
-    _allow(fake_ctx)
     _seed_chat(fake_ctx, provider="claude", model="opus", session_id="CLAUDE-1")
     grok_calls = []
     fake_ctx["run_grok_engine"] = _file_writing_grok_engine(grok_calls, home, cwd, SID1, tool_file="b.py")
@@ -1305,7 +1274,6 @@ async def test_round_trip_claude_grok_codex_grok_carries_a_marker_and_what_chang
 async def test_a_failed_turn_keeps_a_grok_handoff_armed(
     aiohttp_client, fake_ctx, app, home, grok_on, quiet_run
 ):
-    _allow(fake_ctx)
     _seed_chat(fake_ctx, provider="grok", runtime_handoff={
         "text": "BLOCK", "for_provider": "grok", "for_backend": "", "from_label": "Claude", "to_label": "Grok"})
 
@@ -1330,7 +1298,6 @@ def real_exists(monkeypatch):
 async def test_the_direct_post_drops_a_resume_id_grok_no_longer_has_and_says_so(
     aiohttp_client, fake_ctx, app, home, cwd, grok_on, quiet_run, engines, real_exists, capsys
 ):
-    _allow(fake_ctx)
     _seed_chat(fake_ctx, provider="grok", grok_session_id=SID3)
     client = await aiohttp_client(app)
     await _chat(client, fake_ctx, "x")
@@ -1344,7 +1311,6 @@ async def test_the_existence_check_runs_off_the_event_loop_and_the_drop_leaves_a
     aiohttp_client, fake_ctx, app, home, grok_on, quiet_run, engines, monkeypatch
 ):
     import threading
-    _allow(fake_ctx)
     seen, rows = [], []
 
     def spy(*a, **k):
@@ -1363,7 +1329,6 @@ async def test_the_existence_check_runs_off_the_event_loop_and_the_drop_leaves_a
 async def test_the_direct_post_resumes_a_session_that_exists(
     aiohttp_client, fake_ctx, app, home, cwd, grok_on, quiet_run, engines, real_exists
 ):
-    _allow(fake_ctx)
     put_session(home, cwd, SID1, chat=[q("earlier")], summary=summ())
     _seed_chat(fake_ctx, provider="grok", grok_session_id=SID1)
     client = await aiohttp_client(app)
@@ -1372,7 +1337,6 @@ async def test_the_direct_post_resumes_a_session_that_exists(
 
 
 async def test_the_queue_drain_drops_a_stale_resume_id_too(fake_ctx, home, grok_on, engines, real_exists):
-    _allow(fake_ctx)
     _seed_chat(fake_ctx, provider="grok", grok_session_id=SID3)
     pinned = _webapp._pin_chat_runtime(fake_ctx, {"id": PROJECT_ID}, CHAT_ID)
     await _drain(fake_ctx, dict(chat_id=CHAT_ID, project_id=PROJECT_ID, pinned_runtime=pinned))
@@ -1382,7 +1346,6 @@ async def test_the_queue_drain_drops_a_stale_resume_id_too(fake_ctx, home, grok_
 async def test_a_failing_existence_check_resumes_the_id_anyway(
     aiohttp_client, fake_ctx, app, home, grok_on, quiet_run, engines, monkeypatch, capsys
 ):
-    _allow(fake_ctx)
 
     def boom(*a, **k):
         raise OSError("io")
@@ -1429,7 +1392,6 @@ async def test_a_claude_run_consumes_the_rotation_summary_only_on_a_fresh_sessio
 async def test_an_adapter_run_never_consumes_the_claude_rotation_summary(
     aiohttp_client, fake_ctx, app, grok_on, codex_on, quiet_run, engines, provider, has_id
 ):
-    _allow(fake_ctx)
     field = providers.get(provider).continuity_field
     _seed_chat(fake_ctx, provider=provider, **({field: "OLD-ID"} if has_id else {}))
     fake_ctx["pending_handoff"] = {SESSION_KEY: "CLAUDE-ROTATION-SUMMARY"}
@@ -1530,7 +1492,6 @@ async def test_the_next_turn_after_a_grok_rotate_starts_fresh_with_the_block_onc
     aiohttp_client, rotate_ctx, app, home, cwd, grok_on, quiet_run, engines
 ):
     ctx = rotate_ctx
-    _allow(ctx)
     put_session(home, cwd, SID1, chat=[q("never touch webapp.py"), a("ok")])
     grok_sends.record(ctx["DATA"], SID1, "never touch webapp.py")
     _seed_chat(ctx, provider="grok", grok_session_id=SID1)
@@ -1653,156 +1614,10 @@ def _gate(**project):
     return providers.gate_refusal("grok", project)
 
 
-@pytest.mark.parametrize("cwd_form,covers", [
-    ("{h}", True), ("{h}/", True), ("{h}//", True), ("{h}/.", True), ("{h}/projects/..", True),
-    ("{h}/projects/client-a/../..", True), ("{p}", True), ("{p}/", True), ("/", True), ("//", True),
-    ("{h}/projects", False), ("{h}/projects/client-a", False), ("{h}/projects/client-a/", False),
-    ("{h}-sibling", False), ("{h}x", False), ("{hd}", False),
-    ("", True), (".", True), ("projects", True), ("~", True), ("   ", True), (None, True), (5, True),
-])
-def test_the_gate_refuses_a_cwd_that_is_home_or_above_it(tmp_path, fake_home, cwd_form, covers):
-    raw = (cwd_form.format(h=fake_home, p=fake_home.parent, hd=str(fake_home)[:-1])
-           if isinstance(cwd_form, str) else cwd_form)
-    refusal = _gate(grok_allowed=True, cwd=raw)
-    if covers:
-        assert refusal and refusal.startswith(REFUSAL) and refusal != REFUSAL
-    else:
-        assert refusal is None, raw
-
-
-def test_the_gate_resolves_symlinks_and_dot_dot(tmp_path, fake_home):
-    (tmp_path / "alias").symlink_to(fake_home)
-    (fake_home / "projects" / "to-home").symlink_to(fake_home)
-    (tmp_path / "elsewhere").mkdir()
-    (fake_home / "projects" / "to-elsewhere").symlink_to(tmp_path / "elsewhere")
-    assert _gate(grok_allowed=True, cwd=str(tmp_path / "alias")) != None  # noqa: E711
-    assert _gate(grok_allowed=True, cwd=str(fake_home / "projects" / "to-home")) != None  # noqa: E711
-    assert _gate(grok_allowed=True, cwd=str(tmp_path / "alias" / "projects" / "client-a")) is None
-    assert _gate(grok_allowed=True, cwd=str(fake_home / "projects" / "to-elsewhere")) is None
-
-
-def test_a_home_that_is_itself_a_symlink_is_resolved_before_comparing(tmp_path, monkeypatch):
-    real = tmp_path / "homereal"
-    (real / "projects").mkdir(parents=True)
-    link = tmp_path / "homelink"
-    link.symlink_to(real)
-    monkeypatch.setenv("HOME", str(link))
-    assert _gate(grok_allowed=True, cwd=str(real)).startswith(REFUSAL)
-    assert _gate(grok_allowed=True, cwd=str(link)).startswith(REFUSAL)
-    assert _gate(grok_allowed=True, cwd=str(real / "projects")) is None
-    assert _gate(grok_allowed=True, cwd=str(link / "projects")) is None
-
-
-def test_a_record_without_a_cwd_key_is_not_judged_on_it_and_the_flag_is_still_required(fake_home):
-    assert _gate(grok_allowed=True) is None
-    assert _gate(cwd=str(fake_home)) == REFUSAL
-    assert _gate(grok_allowed=False, cwd=str(fake_home)) == REFUSAL, "no flag: the plain refusal, no hint"
-    assert _gate(grok_allowed="true", cwd=str(fake_home / "projects")) == REFUSAL
-
-
-def test_the_hatch_opens_a_home_rooted_record_and_the_message_keeps_its_contract(fake_home, monkeypatch):
-    refusal = _gate(grok_allowed=True, cwd=str(fake_home))
-    assert refusal.startswith("grok is not enabled for this project")
-    assert "GROK_ALLOW_ALL_PROJECTS" in refusal and "busy" not in refusal.lower()
-    for value in ("true", "1", "yes", "on"):
-        monkeypatch.setenv("GROK_ALLOW_ALL_PROJECTS", value)
-        assert _gate(grok_allowed=False, cwd=str(fake_home)) is None
-        assert _gate(cwd="/") is None
-    monkeypatch.setenv("GROK_ALLOW_ALL_PROJECTS", "false")
-    assert _gate(grok_allowed=True, cwd=str(fake_home)) == refusal
-
-
-def test_a_nul_in_the_cwd_is_judged_as_covering_home(fake_home):
-    assert _gate(grok_allowed=True, cwd=str(fake_home / "p\x00q")).startswith(REFUSAL)
-
-
-async def test_a_free_chat_at_the_default_cwd_cannot_be_opted_in_to_grok(
-    aiohttp_client, fake_ctx, app, grok_on, fake_home, monkeypatch
-):
-    monkeypatch.setattr(_webapp, "_FREE_DEFAULT_CWD", str(fake_home))
-    client = await aiohttp_client(app)
-    h = _auth(fake_ctx)
-    r = await client.post("/api/free", json={"provider": "grok", "grok_allowed": True}, headers=h)
-    assert r.status == 409 and (await r.json())["error"].startswith(REFUSAL)
-    r = await client.post("/api/free", json={"provider": "grok", "grok_allowed": True, "cwd": "/"}, headers=h)
-    assert r.status == 409
-    r = await client.post("/api/free", json={"provider": "grok", "grok_allowed": True,
-                                             "cwd": str(fake_home / "projects" / "client-a")}, headers=h)
-    assert r.status == 200
-    r = await client.post("/api/free", json={"provider": "claude"}, headers=h)
-    assert r.status == 200, "Claude is never gated"
-    monkeypatch.setenv("GROK_ALLOW_ALL_PROJECTS", "true")
-    r = await client.post("/api/free", json={"provider": "grok"}, headers=h)
-    assert r.status == 200
-
-
 def _home_rooted_project(ctx, monkeypatch):
-    """The registered project whose working directory IS the home directory, opted in: the
-    process' HOME is pointed at the project's own directory."""
+    """The registered project whose working directory IS the home directory: the process' HOME is
+    pointed at the project's own directory."""
     monkeypatch.setenv("HOME", ctx["topics"][SESSION_KEY]["cwd"])
-    ctx["topics"][SESSION_KEY]["grok_allowed"] = True
-
-
-async def test_every_selection_site_refuses_a_home_rooted_project_even_when_opted_in(
-    aiohttp_client, fake_ctx, app, grok_on, monkeypatch
-):
-    _home_rooted_project(fake_ctx, monkeypatch)
-    h = _auth(fake_ctx)
-    client = await aiohttp_client(app)
-    _seed_chat(fake_ctx, provider="claude", model="opus")
-
-    async def refused(resp):
-        assert resp.status == 409, await resp.text()
-        assert (await resp.json())["error"].startswith(REFUSAL)
-
-    await refused(await client.post(f"/api/projects/{PROJECT_ID}/chats", json={"provider": "grok"}, headers=h))
-    await refused(await client.patch(f"/api/projects/{PROJECT_ID}/chats/{CHAT_ID}", headers=h, json={
-        "provider": "grok", "model": "grok-4.7", "expected_revision": 0}))
-    await refused(await client.post(f"/api/projects/{PROJECT_ID}/settings", json={"board_provider": "grok"},
-                                    headers=h))
-    await refused(await client.post(f"/api/projects/{PROJECT_ID}/tasks", headers=h,
-                                    json={"text": "t", "provider": "grok"}))
-    assert _chat_record(fake_ctx)["provider"] == "claude"
-
-
-async def test_every_run_site_refuses_a_home_rooted_chat_and_never_reroutes(
-    aiohttp_client, fake_ctx, app, grok_on, monkeypatch, quiet_run, engines
-):
-    _home_rooted_project(fake_ctx, monkeypatch)
-    _seed_chat(fake_ctx, provider="grok")
-    client = await aiohttp_client(app)
-    h = _auth(fake_ctx)
-    resp, _ = await _chat(client, fake_ctx, "x")
-    assert resp.status == 409 and (await resp.json())["error"].startswith(REFUSAL)
-    r = await client.post(f"/api/projects/{PROJECT_ID}/chat/queue", json={"text": "x", "chat_id": CHAT_ID},
-                          headers=h)
-    assert r.status == 409
-    pinned = {"provider": "grok", "model": "grok-4.7"}
-    await _drain(fake_ctx, dict(chat_id=CHAT_ID, project_id=PROJECT_ID, pinned_runtime=pinned))
-    assert not any(engines.values()), "refused, and never run on another provider"
-    errors = [e for e in _webapp._live_turns.get(SESSION_KEY, {}).get("events", []) if e.get("type") == "error"]
-    assert errors and "grok is not enabled for this project" in json.dumps(errors)
-
-
-async def test_a_card_on_a_home_rooted_project_fails_with_the_reason_and_never_runs(
-    fake_ctx, tmp_path, grok_on, monkeypatch, engines
-):
-    from test_grok_wiring import _card_project, _no_engine_calls
-    project = _card_project(tmp_path, grok_allowed=True)
-    monkeypatch.setenv("HOME", project["cwd"])
-    _webapp._save_board(project["cwd"], "myproject", "# T", {
-        "backlog": [], "in_progress": [{"id": "aabbcc", "text": "Build", "provider": "grok"}],
-        "review": [], "failed": []})
-    card = {"id": "aabbcc", "text": "Build", "provider": "grok", "description": None}
-    fake_ctx["running"][SESSION_KEY] = True
-    with patch.object(_webapp, "_build_agents_kwargs", return_value={}), \
-         patch.object(_webapp, "_secrets_read", return_value={}):
-        await _webapp._run_card(fake_ctx, None, project, card, SESSION_KEY, run_mode="legacy")
-    assert _no_engine_calls(engines)
-    _, _pre, cols = _webapp._load_board(project["cwd"])
-    assert [c["id"] for c in cols["failed"]] == ["aabbcc"] and not cols["review"]
-    sidecar = (fake_ctx["DATA"] / "runs" / "aabbcc.md").read_text()
-    assert "Outcome:** fail" in sidecar and REFUSAL in sidecar and "GROK_ALLOW_ALL_PROJECTS" in sidecar
 
 
 async def test_the_hatch_lets_a_home_rooted_chat_run(
@@ -1810,68 +1625,10 @@ async def test_the_hatch_lets_a_home_rooted_chat_run(
 ):
     _home_rooted_project(fake_ctx, monkeypatch)
     _seed_chat(fake_ctx, provider="grok")
-    monkeypatch.setenv("GROK_ALLOW_ALL_PROJECTS", "true")
     client = await aiohttp_client(app)
-    resp, _ = await _chat(client, fake_ctx, "x")
-    assert resp.status == 200 and len(engines["grok"]) == 1
-
-
-async def test_the_flag_still_gates_an_ordinary_project_under_home(
-    aiohttp_client, fake_ctx, app, grok_on, tmp_path, monkeypatch, quiet_run, engines
-):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    _seed_chat(fake_ctx, provider="grok")
-    client = await aiohttp_client(app)
-    resp, _ = await _chat(client, fake_ctx, "x")
-    assert resp.status == 409 and await resp.json() == {"error": REFUSAL}
-    _allow(fake_ctx)
     resp, _ = await _chat(client, fake_ctx, "x")
     assert resp.status == 200 and len(engines["grok"]) == 1
 
 
 # ═════════════════════════ the [grok] journal ═════════════════════════════════
 
-
-async def test_a_refusal_is_journaled_once_per_decision_not_per_retry(
-    aiohttp_client, fake_ctx, app, grok_on, capsys, monkeypatch
-):
-    _webapp._GATE_JOURNAL_SEEN.clear()
-    _seed_chat(fake_ctx, provider="claude", model="opus")
-    client = await aiohttp_client(app)
-    url = f"/api/projects/{PROJECT_ID}/chats/{CHAT_ID}"
-    body = {"provider": "grok", "model": "grok-4.7", "expected_revision": 0}
-    capsys.readouterr()
-    for _ in range(3):
-        r = await client.patch(url, json=body, headers=_auth(fake_ctx))
-        assert r.status == 409
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if "[grok] privacy gate refused" in ln]
-    assert lines == [f"[grok] privacy gate refused project {PROJECT_ID!r}: {REFUSAL}"]
-
-    clock = [_webapp.time.monotonic() + _webapp._GATE_JOURNAL_WINDOW_SEC + 1]
-    monkeypatch.setattr(_webapp.time, "monotonic", lambda: clock[0])
-    await client.patch(url, json=body, headers=_auth(fake_ctx))
-    assert "[grok] privacy gate refused" in capsys.readouterr().out, "a fresh decision later is logged again"
-
-
-def test_the_same_project_refused_for_a_new_reason_is_journaled_again(capsys):
-    _webapp._GATE_JOURNAL_SEEN.clear()
-    _webapp._provider_gate_refusal({"id": "p"}, "grok")
-    _webapp._provider_gate_refusal({"id": "p", "grok_allowed": True, "cwd": "/"}, "grok")
-    out = capsys.readouterr().out
-    assert out.count("privacy gate refused project 'p'") == 2 and "GROK_ALLOW_ALL_PROJECTS" in out
-
-
-def test_the_gate_journal_is_per_project_and_bounded(capsys):
-    _webapp._GATE_JOURNAL_SEEN.clear()
-    for pid in ("a", "b", "a", "b"):
-        _webapp._provider_gate_refusal({"id": pid}, "grok")
-    out = capsys.readouterr().out
-    assert out.count("privacy gate refused project 'a'") == 1 and out.count("project 'b'") == 1
-    for i in range(300):
-        _webapp._provider_gate_refusal({"id": f"p{i}"}, "grok")
-    assert len(_webapp._GATE_JOURNAL_SEEN) <= 257
-    capsys.readouterr()
-    assert _webapp._provider_gate_refusal({"id": "x", "grok_allowed": True}, "grok") is None
-    assert capsys.readouterr().out == "", "an allowed project is never journaled"
-    assert _webapp._provider_gate_refusal({"id": "x"}, "claude") is None
-    assert capsys.readouterr().out == ""

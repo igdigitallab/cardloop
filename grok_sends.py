@@ -10,11 +10,10 @@ operator's credentials) in the operator's voice.
 The witness: one file per session, `<data>/grok_sent/<session-id>`, holding a SHA-256
 fingerprint of every prompt the cockpit actually sent into that session. A `user` row read from
 the session file is operator-authored only if its text matches one of them. The directory sits
-beside GROK_HOME, not inside it: with the project directory as the working directory the
-sandbox lets the shell write the project and /tmp but not the cockpit's data dir (measured: a
-`touch` next to GROK_HOME was refused). The one hole is a project whose own directory CONTAINS
-the data dir (the cockpit's own repo opted in to Grok) — keep that project out of
-`grok_allowed`, or deny the data dir in `GROK_SANDBOX_DENY`.
+beside GROK_HOME, not inside it, and the engine hides the whole data dir from the model's shell as ONE
+directory (grok_engine._data_deny_entry): it cannot read, write, rename or remove it — measured with the
+real CLI, also when the project's own directory contains the data dir (the cockpit's own checkout, a chat
+rooted at $HOME).
 
 What is recorded is the RAW prompt handed to the engine (context pack and handoff block
 included), whitespace-normalised: the CLI wraps it in `<user_query>`, and the reader returns

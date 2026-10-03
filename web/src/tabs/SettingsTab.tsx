@@ -4,7 +4,7 @@ import { Project, ProjectSettings, GlobalSettings, GlobalSettingsEffective, Agen
 import { Spinner } from '../components/Spinner'
 import { SecretsTab } from './SecretsTab'
 import { MODELS } from '../lib/models'
-import { PROVIDERS, boardModelProviders, gatedProviders, providerLabel, selectableProviders } from '../lib/providers'
+import { PROVIDERS, boardModelProviders, providerLabel, selectableProviders } from '../lib/providers'
 import { useRuntimeProviders } from '../lib/runtimeStatus'
 import { projectSettingsPayload } from '../lib/settingsPayload'
 import { ProjectStructureCardFull } from '../components/ProjectStructureCard'
@@ -379,25 +379,6 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
               <option key={id} value={id}>{providerLabel(id)}</option>)}
           </select>
         </Row>
-
-        {/* spec-095 D5: privacy opt-in, one row per gated provider the server lists (or the
-            project already has switched on, so it can always be turned back off). */}
-        {gatedProviders(providerRegistry, proj).map(id => {
-          const gate = PROVIDERS[id].gate!
-          const name = providerLabel(id)
-          return (
-            <Row key={id} title={`Allow ${name} in this project`}
-                 hint={`${name} sends this project's code and prompts to ${gate.recipient}. Off by default: chats and board cards cannot use ${name} here until you turn it on. Turning it off later does not recall anything already sent.`}>
-              {/* The label is the tap target: a bare 13px checkbox is a miss on a phone, and this
-                  is the one switch that lets project code leave the machine. */}
-              <label className="settings-check-hit">
-                <input type="checkbox" checked={proj[gate.field] === true} data-testid={`${id}-allowed`}
-                       onChange={ev => setProj({ ...proj, [gate.field]: ev.target.checked })}
-                       aria-label={`Allow ${name} in this project`} />
-              </label>
-            </Row>
-          )
-        })}
 
         {/* One board-model row per adapter provider the server lists (or the project already
             names a model for), bound through the provider table's project field. */}

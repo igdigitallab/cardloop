@@ -58,9 +58,6 @@ export interface Project {
   codex_model?: string
   /** spec-095: default model for Grok board cards / new Grok chats in this project. */
   grok_model?: string
-  /** spec-095: privacy opt-in. Grok sends project code to xAI; the server refuses (409) any
-   *  chat/card/PATCH that selects Grok in a project where this is not true. */
-  grok_allowed?: boolean
   /** Claude subscription pinned to this project (null/undefined = follow the global choice). */
   account?: string | null
   /** spec-092 P3: inference endpoint pinned to this project. "" / absent = the cloud
@@ -362,8 +359,6 @@ export interface ProjectSettings {
   /** spec-095: optional so a server that predates Grok (no field echoed) still type-checks and
    *  its settings round-trip without inventing a value. */
   grok_model?: string
-  /** spec-095: privacy opt-in — see Project.grok_allowed. */
-  grok_allowed?: boolean
   /** Subscription pinned to this project. null = inherit the globally selected account. */
   account?: string | null
   /** spec-092 P3: "" = cloud subscription, "ollama" = pin every turn to the local box. */

@@ -197,11 +197,6 @@ def grok_enabled() -> bool:
     return _truthy(os.getenv("GROK_ENABLED", "false"))
 
 
-def allow_all_projects() -> bool:
-    """Escape hatch for the per-project opt-in gate (D5): single-tenant boxes only."""
-    return _truthy(os.getenv("GROK_ALLOW_ALL_PROJECTS", "false"))
-
-
 def data_dir(ctx: dict | None = None) -> Path:
     """The cockpit data dir: ctx["DATA"], else the convention modules.py/accounts.py use."""
     d = (ctx or {}).get("DATA")
@@ -313,10 +308,19 @@ def _is_under(path: str, parent: str) -> bool:
     return path == parent or path.startswith(parent.rstrip("/") + "/")
 
 
-def _lexically_under(path: str, parent: str) -> bool:
-    """`path` is spelled inside `parent`, symlinks NOT followed."""
-    path, parent = os.path.abspath(path), os.path.abspath(parent)
-    return path == parent or path.startswith(parent.rstrip("/") + "/")
+def _reached_through_workspace_symlink(path: str, cwd: str) -> bool:
+    """`path` is spelled inside `cwd` and a symlink lies on the way to it. The model's shell can rewrite names
+    in its workspace, so such a symlink can be re-pointed at something the cockpit would then follow. A real
+    directory inside the workspace is not this case."""
+    lex, root = os.path.abspath(path), os.path.abspath(cwd)
+    if lex != root and not lex.startswith(root.rstrip("/") + "/"):
+        return False
+    current = root
+    for part in Path(lex).relative_to(root).parts:
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            return True
+    return False
 
 
 def _data_deny_entry(home: Path, ctx: dict | None, bin_path: str | None) -> str | None:
@@ -739,6 +743,59 @@ def _legacy_login_hint(home: Path, ctx: dict | None = None) -> str:
     return ""
 
 
+ACCOUNT_PIN_FILE = "grok_account.json"
+
+
+def _account_pin_path(ctx: dict | None = None) -> Path:
+    return data_dir(ctx) / ACCOUNT_PIN_FILE
+
+
+def read_account_pin(ctx: dict | None = None) -> str | None:
+    """The account (lower-cased e-mail) this cockpit's Grok login was set up with, or None."""
+    try:
+        data = json.loads(_account_pin_path(ctx).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    email = data.get("email") if isinstance(data, dict) else None
+    return email.lower() if isinstance(email, str) and email else None
+
+
+def pin_account(email: str, ctx: dict | None = None) -> None:
+    path = _account_pin_path(ctx)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, json.dumps({"email": email.lower()}) + "\n", 0o600)
+
+
+def clear_account_pin(ctx: dict | None = None) -> None:
+    with _suppress():
+        _account_pin_path(ctx).unlink()
+
+
+def _account_pin_problem(facts: dict, ctx: dict | None = None) -> str | None:
+    """`auth.json` is WRITABLE by the model's shell (measured on grok 1.0.46: an append from a turn landed on
+    the host). A prompt-injected turn could therefore swap in another account's login, after which every later
+    turn — in every project — would send its code to that account. The account is pinned OUT of the model's
+    reach (the data dir is hidden from its shell): the first verified login is recorded, a different one is
+    refused until the operator runs `tools/grok-acct login`, which re-pins on purpose."""
+    email = facts.get("email")
+    pin = read_account_pin(ctx)
+    if not isinstance(email, str) or not email:
+        return ("the Grok login names no account, so it cannot be checked against the one this cockpit was set "
+                "up with — run `tools/grok-acct login`") if pin else None
+    if pin is None:
+        try:
+            pin_account(email, ctx)
+        except OSError as exc:
+            return f"cannot record the Grok account this cockpit is set up with ({exc!r})"
+        _log("account pinned (first verified login)")
+        return None
+    if pin != email.lower():
+        return ("the Grok login in GROK_HOME now names a different account than the one this cockpit was set up "
+                "with (a turn's shell can rewrite auth.json). If you changed the account on purpose run "
+                "`tools/grok-acct login`; otherwise `tools/grok-acct logout` and sign in again")
+    return None
+
+
 def _auth_problem(facts: dict, home: Path | None = None, ctx: dict | None = None) -> str | None:
     if not facts["present"]:
         return ("Grok is not signed in — run `tools/grok-acct login`"
@@ -920,7 +977,8 @@ async def _probe_provider() -> dict:
         warnings.append(f"grok {version} is newer than the builds this adapter was verified "
                         f"against ({', '.join(KNOWN_GOOD_VERSIONS)})")
         _log(f"warn: {warnings[-1]}")
-    problem = _auth_problem(read_auth_facts(home), home)
+    facts = read_auth_facts(home)
+    problem = _auth_problem(facts, home) or _account_pin_problem(facts)
     if problem:
         return fail(problem, version=version)
     if not shutil.which("bwrap", path=env.get("PATH")):
@@ -1786,13 +1844,6 @@ def _capture_limit_error(data: Path | None, *, source: str, text: str, session_i
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
 
 
-def _is_home_or_ancestor(cwd: str) -> bool:
-    """True when `cwd` IS $HOME or a directory that contains it (after symlink resolution)."""
-    real = os.path.realpath(cwd)
-    home = os.path.realpath(Path.home())
-    return home == real or home.startswith(real.rstrip("/") + "/")
-
-
 def _trust_store_problem(home: Path) -> str | None:
     """Folder trust is what keeps a project's own MCP servers/hooks/skills from starting. The store
     lives in OUR GROK_HOME and must stay empty: an entry means something (an interactive `grok`
@@ -1878,15 +1929,6 @@ async def _run_turn(
     if not os.path.isdir(cwd):
         yield {"type": "error", "exc": GrokUnavailableError(f"project directory does not exist: {cwd}")}
         return
-    if not allow_all_projects() and _is_home_or_ancestor(cwd):
-        # A free chat's cwd is $HOME: every project, every dotfile and the whole box would be the
-        # model's workspace and xAI's context. The privacy gate (D5) refuses it first; this is the
-        # backstop for a caller that never asked the gate.
-        yield {"type": "error", "exc": GrokUnavailableError(
-            f"refusing to run Grok in {cwd}: it is $HOME or contains it, so every project and dotfile "
-            f"would be the model's workspace and xAI's context. Use a project directory, or set "
-            f"GROK_ALLOW_ALL_PROJECTS=true on a single-tenant box")}
-        return
 
     data = data_dir(ctx)
     turn = GrokTurn(session_key)
@@ -1899,7 +1941,8 @@ async def _run_turn(
             raise GrokUnavailableError("Grok CLI not found (GROK_BIN / PATH / ~/.grok/bin)")
         info = ensure_home(ctx, bin_path=binary)
         home = info["home"]
-        problem = _auth_problem(read_auth_facts(home), home, ctx)
+        facts = read_auth_facts(home)
+        problem = _auth_problem(facts, home, ctx) or _account_pin_problem(facts, ctx)
         if problem:
             raise GrokAuthError(problem)
         trust = _trust_store_problem(home)
@@ -1912,20 +1955,18 @@ async def _run_turn(
             if not _is_glob(entry) and _is_under(cwd, entry):
                 raise GrokUnavailableError(
                     f"project directory {cwd} is inside the sandbox deny list entry {entry}")
-        if not allow_all_projects():
-            # The model's shell WRITES its project dir. A project that contains the cockpit's data dir or
-            # Grok's own home would let it replace cockpit state through a name it can re-point, or
-            # restructure GROK_HOME. (The data dir is masked as a directory, but the mask is the second line
-            # of defence, not the first.) GROK_ALLOW_ALL_PROJECTS is the operator's explicit "this whole box
-            # is the workspace" and keeps its home-rooted chats.
-            for label, where in (("the cockpit data dir", data_dir(ctx)), ("GROK_HOME", home)):
-                # by real path AND as spelled: a `data` symlink inside the project that points elsewhere
-                # passes the first and is still a name the model's shell can re-point
-                if _is_under(str(where), cwd) or _lexically_under(str(where), cwd):
-                    raise GrokUnavailableError(
-                        f"project directory {cwd} contains {label} ({where}): a Grok turn could rewrite it. "
-                        f"Run Grok in a project that does not (the cockpit's own checkout always does: its "
-                        f"data dir is <repo>/data)")
+        if _is_under(cwd, str(home)):
+            raise GrokUnavailableError(f"project directory {cwd} is inside GROK_HOME ({home})")
+        # The model's shell WRITES its project dir, so the cockpit's data dir or Grok's home may sit inside it
+        # (the cockpit's own checkout, a chat rooted at $HOME) only as REAL directories: MEASURED with the
+        # real CLI, the data dir and `.env` are then unreadable, unwritable and cannot be renamed or removed
+        # (a mount over a directory), and the CLI pins the home's parents. What the model CAN do in its
+        # workspace is re-point a SYMLINK that the cockpit follows — refused.
+        for label, where in (("the cockpit data dir", data_dir(ctx)), ("GROK_HOME", home)):
+            if _reached_through_workspace_symlink(str(where), cwd):
+                raise GrokUnavailableError(
+                    f"project directory {cwd} reaches {label} ({where}) through a symlink the model's shell "
+                    f"could re-point: replace the symlink with the real directory")
         rules = _instructions(project_name, cwd, multi_agent=multi_agent)
         argv = [binary, "agent", "--no-leader", "stdio"]
         _log(f"spawn {session_key} argv={argv} cwd={cwd} sandbox={SANDBOX_PROFILE} "

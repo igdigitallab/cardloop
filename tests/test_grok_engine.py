@@ -496,8 +496,6 @@ async def test_running_slot_is_not_clobbered_when_someone_else_owns_it(env):
 def test_enabled_flag_parsing(monkeypatch, raw, want):
     monkeypatch.setenv("GROK_ENABLED", raw)
     assert grok_engine.grok_enabled() is want
-    monkeypatch.setenv("GROK_ALLOW_ALL_PROJECTS", raw)
-    assert grok_engine.allow_all_projects() is want
 
 
 def test_disabled_by_default(monkeypatch):
@@ -1797,36 +1795,22 @@ def test_a_parent_folder_trust_switch_never_reaches_the_child(env):
         assert "GROK_CONFIG" not in got
 
 
-# ---- $HOME and its ancestors are not a project ---------------------------------------------
+# ---- $HOME and its ancestors are a workspace like any other (no per-project gate) ------------
 
-@pytest.mark.parametrize("where", ["home", "parent", "root", "symlink-to-home"])
-async def test_a_cwd_that_is_home_or_contains_it_is_refused(env, where):
-    target = {"home": env.fake_home, "parent": env.fake_home.parent, "root": Path("/"),
-              "symlink-to-home": env.tmp / "link-home"}[where]
+@pytest.mark.parametrize("where", ["home", "parent", "symlink-to-home"])
+async def test_a_chat_rooted_at_home_or_above_runs_like_any_other_project(env, where):
+    # choosing Grok in the picker IS the consent, as for Codex and Claude: a free chat (cwd = $HOME) works
+    target = {"home": env.fake_home, "parent": env.tmp, "symlink-to-home": env.tmp / "link-home"}[where]
     if where == "symlink-to-home":
         target.symlink_to(env.fake_home)
     events = await env.run(cwd=str(target))
-    assert types(events) == ["error"] and "GROK_ALLOW_ALL_PROJECTS" in last_error(events)
-    assert not (env.dumps / "argv.json").exists()
+    assert types(events)[-1] == "result" and not only(events, "error"), where
 
 
-async def test_a_subdirectory_of_home_runs(env):
-    work = env.fake_home / "projects" / "x"
-    work.mkdir(parents=True)
-    assert types(await env.run(cwd=str(work)))[-1] == "result"
-
-
-async def test_the_escape_hatch_allows_home(env, monkeypatch):
-    monkeypatch.setenv("GROK_ALLOW_ALL_PROJECTS", "true")
+async def test_the_old_allow_all_knob_is_gone(env, monkeypatch):
+    assert not hasattr(grok_engine, "allow_all_projects") and not hasattr(grok_engine, "_is_home_or_ancestor")
+    monkeypatch.setenv("GROK_ALLOW_ALL_PROJECTS", "false")             # a stale .env line changes nothing
     assert types(await env.run(cwd=str(env.fake_home)))[-1] == "result"
-
-
-def test_home_or_ancestor_predicate_is_exact(env):
-    f = grok_engine._is_home_or_ancestor
-    assert f(str(env.fake_home)) and f(str(env.tmp)) and f("/")
-    assert not f(str(env.fake_home / "x")) and not f(str(env.cwd))
-    assert not f(str(env.fake_home) + "-sibling")         # a name prefix is not an ancestor
-    assert not f(str(env.fake_home)[:-1])                 # nor is a path that is a string prefix of $HOME
 
 
 # ---- cancellationCategory: every unrequested cancel is an error, a requested one is clean ---
@@ -2184,6 +2168,99 @@ def test_the_sweep_runs_again_before_every_turn_and_journals_what_it_removed(env
     assert out.count("removed rules, AGENTS.md") == 2 and "written by a model's shell" in out
 
 
+# ---- the account pin: auth.json is writable by the model's shell, so the account is kept out of its reach ----
+
+def test_the_first_verified_run_pins_the_account_outside_the_model_writable_home(env):
+    assert grok_engine.read_account_pin(env.ctx) is None
+    events = asyncio.run(env.run())
+    assert types(events)[-1] == "result"
+    pin = env.data / grok_engine.ACCOUNT_PIN_FILE
+    assert json.loads(pin.read_text()) == {"email": "user@example.invalid"}
+    assert stat.S_IMODE(pin.stat().st_mode) == 0o600
+    assert grok_engine.read_account_pin(env.ctx) == "user@example.invalid"
+    assert not grok_engine._is_under(str(pin), str(env.home))             # never inside the writable home
+
+
+def test_a_login_swapped_for_another_account_is_refused_before_any_process_starts(env):
+    asyncio.run(env.run())
+    (env.dumps / "argv.json").unlink(missing_ok=True)
+    env.write_auth(email="attacker@example.invalid")                      # what a prompt-injected turn could do
+    events = asyncio.run(env.run())
+    assert types(events) == ["error"]
+    msg = last_error(events)
+    assert "different account" in msg and "tools/grok-acct login" in msg
+    assert "attacker@example.invalid" not in msg and "user@example.invalid" not in msg   # no identity in errors
+    assert not (env.dumps / "argv.json").exists()
+    # the agent reads the same swapped file, so only the PIN can tell the registry something is wrong
+    env.fake("synthetic_text", auth_meta=json.dumps({"email": "attacker@example.invalid"}))
+    grok_engine.reset_cache()                                            # a REAL probe, not the run's cached verdict
+    info = asyncio.run(grok_engine.provider_info(force=True))
+    # the registry says so BEFORE it spends a sandbox-probe turn on a login nobody vouches for
+    assert info["available"] is False
+    assert info["error"].startswith("the Grok login in GROK_HOME now names a different account"), info["error"]
+
+
+def test_the_pin_is_stored_and_read_in_lower_case(env):
+    grok_engine.pin_account("MiXed@Example.Invalid", env.ctx)
+    assert json.loads((env.data / grok_engine.ACCOUNT_PIN_FILE).read_text()) == {"email": "mixed@example.invalid"}
+    (env.data / grok_engine.ACCOUNT_PIN_FILE).write_text(json.dumps({"email": "HAND@Edited.Invalid"}))
+    assert grok_engine.read_account_pin(env.ctx) == "hand@edited.invalid"
+
+
+def test_the_pin_lives_in_the_run_ctxs_data_dir_not_the_environments(env, monkeypatch):
+    other = env.tmp / "ctx-data-for-pin"
+    other.mkdir()
+    env.ctx["DATA"] = other                                              # provider_info has no ctx: env.data stays
+    assert types(asyncio.run(env.run()))[-1] == "result"
+    assert (other / grok_engine.ACCOUNT_PIN_FILE).is_file()
+    assert not (env.data / grok_engine.ACCOUNT_PIN_FILE).exists()
+
+
+def test_the_same_account_in_another_letter_case_is_the_same_account(env):
+    asyncio.run(env.run())
+    env.write_auth(email="USER@Example.Invalid")
+    assert types(asyncio.run(env.run()))[-1] == "result"
+
+
+def test_logging_in_again_repins_on_purpose_and_logging_out_forgets_it(env):
+    asyncio.run(env.run())
+    env.write_auth(email="new-account@example.invalid")
+    env.fake("synthetic_text", auth_meta=json.dumps({"email": "new-account@example.invalid"}))   # the agent reads the same file
+    assert "different account" in last_error(asyncio.run(env.run()))
+    grok_engine.pin_account("new-account@example.invalid", env.ctx)       # what `tools/grok-acct login` does
+    assert types(asyncio.run(env.run()))[-1] == "result"
+    grok_engine.clear_account_pin(env.ctx)
+    assert grok_engine.read_account_pin(env.ctx) is None
+    env.write_auth(email="third@example.invalid")
+    env.fake("synthetic_text", auth_meta=json.dumps({"email": "third@example.invalid"}))
+    assert types(asyncio.run(env.run()))[-1] == "result"                  # no pin: the next verified login is pinned
+    assert grok_engine.read_account_pin(env.ctx) == "third@example.invalid"
+
+
+def test_a_pinned_cockpit_refuses_a_login_that_names_no_account(env):
+    asyncio.run(env.run())
+    env.write_auth(email=None)
+    msg = last_error(asyncio.run(env.run()))
+    assert "names no account" in msg
+    # without a pin a nameless login is not an account problem (the engine's other checks still apply)
+    grok_engine.clear_account_pin(env.ctx)
+    assert types(asyncio.run(env.run()))[-1] == "result"
+
+
+def test_an_unwritable_pin_fails_closed_with_the_reason(env, monkeypatch):
+    monkeypatch.setattr(grok_engine, "pin_account", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
+    msg = last_error(asyncio.run(env.run()))
+    assert "cannot record the Grok account" in msg
+    assert grok_engine.read_account_pin(env.ctx) is None
+
+
+def test_a_corrupt_pin_file_reads_as_no_pin_and_is_replaced_by_the_verified_login(env):
+    (env.data / grok_engine.ACCOUNT_PIN_FILE).write_text("{not json")
+    assert grok_engine.read_account_pin(env.ctx) is None
+    assert types(asyncio.run(env.run()))[-1] == "result"
+    assert grok_engine.read_account_pin(env.ctx) == "user@example.invalid"
+
+
 def test_the_data_dir_being_the_grok_home_is_refused(env, monkeypatch):
     monkeypatch.setenv("GROK_HOME", str(env.data))
     with pytest.raises(GrokUnavailableError, match="inside the cockpit data dir"):
@@ -2256,30 +2333,23 @@ def test_a_data_dir_that_is_home_or_above_it_is_not_denied(env, capsys):
     assert "not hidden from the model" in capsys.readouterr().out
 
 
-def test_a_project_that_contains_the_data_dir_or_the_home_is_refused(env, monkeypatch):
-    # the model's shell writes its project dir: it could replace cockpit state, or plant a hook in
-    # GROK_HOME that the next turn starts outside the sandbox
-    outer = env.tmp / "outer"                                             # a project holding the data dir
+def test_a_project_that_holds_the_data_dir_and_home_as_real_directories_runs(env, monkeypatch):
+    # the cockpit's own checkout, or a chat rooted at $HOME: MEASURED with the real CLI (tests/test_grok_live.py),
+    # the data dir is then unreadable, unwritable and cannot be renamed or removed, and the home's parents are pinned
+    outer = env.tmp / "outer"
     (outer / "data").mkdir(parents=True)
     env.ctx["DATA"] = outer / "data"
     monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(outer / "data"))
-    events = asyncio.run(env.run(cwd=str(outer)))
-    assert "contains the cockpit data dir" in last_error(events)
-    assert not (env.dumps / "argv.json").exists()
-    env.ctx["DATA"] = env.data
-    monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(env.data))
-    proj = env.tmp / "proj2"
-    proj.mkdir()
-    home = proj / "gh"                                                    # only the HOME is inside this one
+    home = outer / "data-grok-home"                                       # the default layout, inside the project
     monkeypatch.setenv("GROK_HOME", str(home))
     env.home = home
     env.write_auth()
-    events = asyncio.run(env.run(cwd=str(proj)))
-    assert "contains GROK_HOME" in last_error(events)
-    assert not (env.dumps / "argv.json").exists()
+    events = asyncio.run(env.run(cwd=str(outer)))
+    assert types(events)[-1] == "result" and not only(events, "error")
+    assert os.path.realpath(outer / "data") in ensure_home(env.ctx)["deny"]      # still masked as one directory
 
 
-def test_a_data_dir_symlink_inside_the_project_is_still_a_contained_data_dir(env, monkeypatch):
+def test_a_data_dir_reached_through_a_symlink_in_the_workspace_is_refused(env, monkeypatch):
     # the real data dir is elsewhere, but the cockpit reaches it through a NAME inside the workspace —
     # which the model's shell can re-point at something else
     proj = env.tmp / "proj-with-link"
@@ -2288,20 +2358,56 @@ def test_a_data_dir_symlink_inside_the_project_is_still_a_contained_data_dir(env
     env.ctx["DATA"] = proj / "data"
     monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(proj / "data"))
     events = asyncio.run(env.run(cwd=str(proj)))
-    assert "contains the cockpit data dir" in last_error(events)
+    assert "through a symlink" in last_error(events) and "the cockpit data dir" in last_error(events)
+    assert not (env.dumps / "argv.json").exists()
+
+
+def test_a_home_reached_through_a_symlink_in_the_workspace_is_refused(env, monkeypatch):
+    # the home itself is a real directory, but a symlink sits on the way to it inside the workspace
+    proj = env.tmp / "proj-with-home-link"
+    proj.mkdir()
+    (proj / "link").symlink_to(env.tmp / "real-parent")
+    (env.tmp / "real-parent").mkdir()
+    home = proj / "link" / "gh"
+    monkeypatch.setenv("GROK_HOME", str(home))
+    env.home = home
+    env.write_auth()
+    events = asyncio.run(env.run(cwd=str(proj)))
+    assert "through a symlink" in last_error(events) and "GROK_HOME" in last_error(events)
+    assert not (env.dumps / "argv.json").exists()
+
+
+@pytest.mark.parametrize("path,cwd,expected", [
+    ("{t}/p/data", "{t}/p", False),                       # a real directory in the workspace
+    ("{t}/p/a/b/data", "{t}/p", False),
+    ("{t}/p/link/data", "{t}/p", True),                   # a symlink on the way
+    ("{t}/p/data-link", "{t}/p", True),                   # the last component is the symlink
+    ("{t}/elsewhere/data", "{t}/p", False),               # outside the workspace
+    ("{t}/p", "{t}/p", False),                            # the workspace itself
+    ("{t}/p-sibling/link/data", "{t}/p", False),          # a name prefix is not containment
+])
+def test_the_workspace_symlink_predicate(tmp_path, path, cwd, expected):
+    (tmp_path / "p" / "a" / "b" / "data").mkdir(parents=True)
+    (tmp_path / "p" / "data").mkdir(exist_ok=True)
+    (tmp_path / "elsewhere" / "data").mkdir(parents=True)
+    (tmp_path / "p" / "link").symlink_to(tmp_path / "elsewhere")
+    (tmp_path / "p" / "data-link").symlink_to(tmp_path / "elsewhere" / "data")
+    (tmp_path / "p-sibling").mkdir()
+    (tmp_path / "p-sibling" / "link").symlink_to(tmp_path / "elsewhere")
+    fmt = lambda s: s.format(t=tmp_path)
+    assert grok_engine._reached_through_workspace_symlink(fmt(path), fmt(cwd)) is expected
+
+
+def test_a_project_inside_the_grok_home_is_refused(env):
+    inside = env.home / "somewhere"
+    inside.mkdir()
+    events = asyncio.run(env.run(cwd=str(inside)))
+    assert "inside GROK_HOME" in last_error(events)
     assert not (env.dumps / "argv.json").exists()
 
 
 def test_a_project_next_to_the_data_dir_and_home_runs(env):
     events = asyncio.run(env.run(cwd=str(env.cwd)))
-    assert [e for e in events if e["type"] == "result"] and not [e for e in events if e["type"] == "error"]
-
-
-def test_allow_all_projects_keeps_its_home_rooted_chats(env, monkeypatch):
-    # GROK_ALLOW_ALL_PROJECTS is the operator's "this whole box is the workspace": the contains-check
-    # must not turn its main use (a chat rooted at $HOME, which holds the data dir) into a refusal
-    monkeypatch.setenv("GROK_ALLOW_ALL_PROJECTS", "true")
-    events = asyncio.run(env.run(cwd=str(env.tmp)))
     assert [e for e in events if e["type"] == "result"] and not [e for e in events if e["type"] == "error"]
 
 

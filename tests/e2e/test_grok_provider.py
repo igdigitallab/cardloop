@@ -7,12 +7,12 @@ turn" below is the whole production path with only the model missing.
 
 What each test pins (every one fails when its feature is removed — mutation record in
 /tmp/cardloop-scratch/p5b-grok-e2e.md):
-  a  Grok is offered; a project WITH `grok_allowed` runs a turn on it; the G tag renders
-  b  a project WITHOUT the flag: the 409 is a visible sentence on every surface, nothing ran
+  a  Grok is offered; any project runs a turn on it (no per-project flag); the G tag renders
+  b  nothing configures a project for Grok: a plain project, a free chat and Settings need no opt-in
   c  "Ask me" / plan are greyed for Grok, with the reason
   d  the runtime pill row for Grok is the muted "limits not reported" state, never a bar
   e  board: the card editor offers Grok and the card badge shows it
-  f  Settings: the privacy toggle persists across a reload and carries the warning
+  f  Settings: there is no per-project privacy toggle (choosing the provider is the consent)
   j  a failed Grok turn is a visible error, k  a Grok tool call renders, l  provider handoff marker
 
 Not asserted here: what the chat shows AFTER a turn finishes (that is the history endpoint's job;
@@ -26,7 +26,7 @@ import pytest
 from playwright.sync_api import expect
 
 from .conftest import open_project, send_chat
-from .grok_ui import (GATE_SENTENCE, api, chats_of, claude_transcripts, create_chat, open_model_menu,
+from .grok_ui import (api, chats_of, claude_transcripts, create_chat, open_model_menu,
                       open_new_chat_dialog, open_tab, usage_rows, wait_seen, watch_text)
 
 pytestmark = pytest.mark.e2e
@@ -37,7 +37,7 @@ COLOURED = re.compile(r"usage-(green|yellow|red)")
 
 # ── (a) picker + a scripted turn ───────────────────────────────────────────────────────────────
 
-def test_grok_is_offered_and_a_project_with_the_flag_runs_a_turn(e2e_grok_server, grok_page):
+def test_grok_is_offered_and_a_project_runs_a_turn(e2e_grok_server, grok_page):
     page, srv = grok_page, e2e_grok_server
     open_project(page, "g-text")
     before = len(usage_rows(srv))
@@ -109,78 +109,62 @@ def test_a_failed_grok_turn_is_a_visible_error(e2e_grok_server, grok_page):
     wait_seen(page, "e2e scripted grok failure")
 
 
-# ── (b) the privacy gate refuses, visibly ──────────────────────────────────────────────────────
+# ── (b) no opt-in anywhere: choosing Grok in the picker is the consent ──────────────────────────────────────────────────────
 
-def test_a_project_without_the_flag_refuses_grok_in_the_servers_words(e2e_grok_server, grok_page):
+def test_a_project_nobody_configured_for_grok_takes_a_chat_and_runs_a_turn(e2e_grok_server, grok_page):
     page, srv = grok_page, e2e_grok_server
-    open_project(page, "g-denied")
-    before_rows = len(usage_rows(srv))
-    before_chats = [c["id"] for c in chats_of(page, srv, "g-denied")]
+    open_project(page, "g-plain")                    # no flag of any kind on this project record
+    before = len(usage_rows(srv))
+    create_chat(page, "grok", "plain lane")
+    watch_text(page, "Hello world")
+    send_chat(page, "say hello")
+    wait_seen(page, "Hello world")
+    mine = [c for c in chats_of(page, srv, "g-plain") if c["name"] == "plain lane"]
+    assert len(mine) == 1 and mine[0]["provider"] == "grok" and mine[0]["grok_session_id"], mine
+    assert len(usage_rows(srv)) == before + 1 and claude_transcripts(srv, "g-plain") == []
 
-    open_new_chat_dialog(page)
+
+def test_the_api_accepts_grok_on_every_selection_path_without_any_flag(e2e_grok_server, grok_page):
+    page, srv = grok_page, e2e_grok_server
+    status, body = api(page, srv, "/api/projects/g-plain/chats", "POST", {"provider": "grok", "name": "api lane"})
+    assert status in (200, 201), (status, body)
+    status, body = api(page, srv, "/api/projects/g-plain/tasks", "POST", {"text": "a grok card", "provider": "grok"})
+    assert status in (200, 201), (status, body)
+    status, body = api(page, srv, "/api/projects/g-plain/settings", "POST", {"board_provider": "grok"})
+    assert status == 200, (status, body)
+    status, body = api(page, srv, "/api/projects/g-plain/settings", "POST", {"board_provider": "claude"})
+    assert status == 200, (status, body)
+
+
+def test_a_free_chat_can_be_started_on_grok(e2e_grok_server, grok_page):
+    """A free chat is rooted at $HOME: it used to be refused. Choosing Grok in the dialog is the consent now."""
+    page, srv = grok_page, e2e_grok_server
+    page.click(".ptab-new")
+    page.wait_for_selector("text=New free chat")
     page.click("button[data-provider=grok]")
-    page.fill("input[placeholder^='e.g. Math']", "should not exist")
-    page.click("button:has-text('Create chat')")
-
-    alert = page.locator("[role=alert]").first
-    expect(alert).to_have_text(re.compile(rf"^⚠ {GATE_SENTENCE}$"))   # the server's sentence, verbatim
-    expect(page.locator("text=New agent chat")).to_be_visible()   # the dialog stays: nothing happened
-    # Nothing was created and nothing ran — on Grok or on anything else.
-    assert [c["id"] for c in chats_of(page, srv, "g-denied")] == before_chats
-    assert len(usage_rows(srv)) == before_rows
-    assert claude_transcripts(srv, "g-denied") == []
+    page.get_by_role("button", name="Create chat").click()
+    expect(page.locator(".toast")).to_have_count(0)                                # nothing was refused
+    expect(page.locator(".chat-named-tab.active .rt-tag-tab")).to_have_text("G")      # the new free chat is a Grok chat
+    expect(page.locator(".composer-modelthink-btn .rt-tag").first).to_have_text("G")
 
 
-def test_the_refusal_is_a_409_with_that_sentence_on_every_selection_path(e2e_grok_server, grok_page):
-    """The API half of (b): what the UI prints is exactly what the server sent."""
-    page, srv = grok_page, e2e_grok_server
-    status, body = api(page, srv, "/api/projects/g-denied/chats", "POST", {"provider": "grok"})
-    assert (status, body) == (409, {"error": GATE_SENTENCE})
-    status, body = api(page, srv, "/api/projects/g-denied/tasks", "POST", {"text": "needs grok", "provider": "grok"})
-    assert status == 409 and body.get("error") == GATE_SENTENCE, (status, body)
-    status, body = api(page, srv, "/api/projects/g-denied/settings", "POST", {"board_provider": "grok"})
-    assert status == 409 and body.get("error") == GATE_SENTENCE, (status, body)
+def test_settings_offers_the_board_model_for_grok_but_no_privacy_toggle(e2e_grok_server, grok_page):
+    page = grok_page
+    open_project(page, "g-settings")
+    open_tab(page, "Settings")
+    page.wait_for_selector("[data-testid=board-provider]")
+    expect(page.locator("[data-testid=grok-allowed]")).to_have_count(0)
+    expect(page.locator("text=Allow Grok in this project")).to_have_count(0)
+    expect(page.locator("[data-testid=grok-board-model]")).to_be_visible()      # the model row stays
+    opts = page.locator("[data-testid=board-provider] option").evaluate_all("els => els.map(e => e.value)")
+    assert "grok" in opts, opts
 
 
-def test_a_card_refused_by_the_gate_says_so_on_the_board(e2e_grok_server, grok_page):
-    page, srv = grok_page, e2e_grok_server
-    open_project(page, "g-denied")
-    open_tab(page, "Board")
-    box = page.locator("textarea[placeholder^='New task']")
-    box.fill("card that wants grok")
-    box.press("Enter")
-    page.wait_for_selector(".board-card:has-text('card that wants grok')")
-    page.locator(".board-card:has-text('card that wants grok') .board-card-text").dblclick()
-    page.wait_for_selector("text=Provider")
-    page.select_option("select:near(:text('Provider'))", "grok")
-    page.get_by_role("button", name="Save", exact=True).click()
-    expect(page.locator(".error-state")).to_contain_text(GATE_SENTENCE)
-    # The card kept no provider: no badge, and the board on disk says the same.
-    assert page.locator(".board-card-model-badge[data-provider=grok]").count() == 0
 
 
-def test_a_chat_pinned_to_grok_whose_flag_was_revoked_refuses_the_send(e2e_grok_server, grok_page):
-    """The flag is read at RUN time, not only when the chat was made: revoking it later must stop the
-    next turn, loudly, and must not fall back to another engine."""
-    page, srv = grok_page, e2e_grok_server
-    pid = "g-settings"
-    st, _ = api(page, srv, f"/api/projects/{pid}/settings", "POST", {"grok_allowed": True})
-    assert st == 200
-    st, chat = api(page, srv, f"/api/projects/{pid}/chats", "POST", {"provider": "grok", "name": "revoked"})
-    assert st in (200, 201), chat
-    api(page, srv, f"/api/projects/{pid}/chats/{chat['id']}", "PATCH", {"active": True})
-    st, _ = api(page, srv, f"/api/projects/{pid}/settings", "POST", {"grok_allowed": False})
-    assert st == 200
-    before_rows = len(usage_rows(srv))
 
-    open_project(page, pid)
-    page.wait_for_selector(".chat-named-tab.active:has-text('revoked')")
-    watch_text(page, GATE_SENTENCE)
-    send_chat(page, "try anyway")
-    wait_seen(page, GATE_SENTENCE)
-    assert len(usage_rows(srv)) == before_rows
-    assert claude_transcripts(srv, pid) == []
-    api(page, srv, f"/api/projects/{pid}/chats/{chat['id']}", "DELETE")
+
+
 
 
 # ── (c) capabilities ───────────────────────────────────────────────────────────────────────────
@@ -282,53 +266,6 @@ def test_a_board_card_can_be_pinned_to_grok_and_shows_the_badge(e2e_grok_server,
 
 # ── (f) Settings: the privacy toggle ───────────────────────────────────────────────────────────
 
-def test_the_settings_toggle_persists_and_carries_the_privacy_warning(e2e_grok_server, grok_page):
-    page, srv = grok_page, e2e_grok_server
-    pid = "g-settings"
-    api(page, srv, f"/api/projects/{pid}/settings", "POST", {"grok_allowed": False})   # known start
-    open_project(page, pid)
-    open_tab(page, "Settings")
-    page.wait_for_selector("[data-testid=board-provider]")
-    toggle = page.locator("[data-testid=grok-allowed]")
-    expect(toggle).to_be_visible()
-    expect(toggle).not_to_be_checked()
-    # The warning names the recipient and says it cannot be recalled.
-    warning = page.locator("text=Allow Grok in this project").first.locator("xpath=../..").inner_text()
-    assert "sends this project's code and prompts to xAI" in warning, warning
-    assert "does not recall anything already sent" in warning, warning
-    # Board provider has not been given the option of Grok yet... it is listed, but the gate refuses
-    # it until the flag is on: the server is the authority.
-    toggle.check()
-    page.locator("button.doc-btn.primary").first.click()
-    expect(page.locator("text=Saved ✓").first).to_be_visible()
-
-    page.reload()
-    page.wait_for_selector(".project-item", timeout=10_000)
-    open_project(page, pid)
-    open_tab(page, "Settings")
-    page.wait_for_selector("[data-testid=board-provider]")
-    expect(page.locator("[data-testid=grok-allowed]")).to_be_checked()
-    _, body = api(page, srv, "/api/projects")
-    assert [p for p in body["projects"] if p["id"] == pid][0]["grok_allowed"] is True
-
-    # The model row shows the project's Grok model; the registry's default is its placeholder.
-    model = page.locator("[data-testid=grok-board-model]")
-    expect(model).to_have_value("grok-4.7")
-    model.fill("grok-4.6")
-    page.locator("select[data-testid=board-provider]").select_option("grok")
-    page.locator("button.doc-btn.primary").first.click()
-    expect(page.locator("text=Saved ✓").first).to_be_visible()
-    _, body = api(page, srv, f"/api/projects/{pid}/settings")
-    settings = body.get("settings", body)
-    assert settings["grok_model"] == "grok-4.6" and settings["board_provider"] == "grok", settings
-
-    # Opted in: the very same Grok chat that was refused is created.
-    st, chat = api(page, srv, f"/api/projects/{pid}/chats", "POST", {"provider": "grok", "name": "now allowed"})
-    assert st in (200, 201), (st, chat)
-    api(page, srv, f"/api/projects/{pid}/chats/{chat['id']}", "DELETE")
-    # Put it back so the other tests in this module still see a closed project.
-    api(page, srv, f"/api/projects/{pid}/settings", "POST", {"board_provider": "claude"})
-    api(page, srv, f"/api/projects/{pid}/settings", "POST", {"grok_allowed": False})
 
 
 # ── (l) switching a chat to Grok: the handoff and its marker ───────────────────────────────────
@@ -356,30 +293,8 @@ def test_switching_a_claude_chat_to_grok_passes_a_handoff_and_leaves_a_marker(e2
     expect(page.locator(".usage-badge").first).to_contain_text("G")
 
 
-def test_a_refused_provider_switch_leaves_a_visible_sentence(e2e_grok_server, grok_page):
-    """The switch is confirmed in a dialog that has closed by the time the 409 lands, and the pill
-    dropdown is only open while hovered: without the banner the pick looked like a silent no-op."""
-    page, srv = grok_page, e2e_grok_server
-    open_project(page, "g-denied")
-    page.locator(".usage-badge").first.hover()
-    page.locator(".usage-dropdown .rt-line[data-provider=grok]").dispatch_event("mousedown")
-    page.wait_for_selector("text=Switch to Grok")
-    page.click("button:has-text('Switch without it')")
-    expect(page.locator(".chat-error-banner")).to_contain_text(GATE_SENTENCE)
-    assert all(c["provider"] != "grok" for c in chats_of(page, srv, "g-denied"))
-    assert claude_transcripts(srv, "g-denied") == []
 
 
-def test_a_free_chat_cannot_opt_in_so_grok_there_is_refused_in_a_toast(e2e_grok_server, grok_page):
-    """The gate lives on the project record; a free chat is created in one POST with no way to set
-    it (and its cwd is $HOME), so the dialog's Grok choice is answered by the server's sentence."""
-    page, srv = grok_page, e2e_grok_server
-    page.click(".ptab-new")
-    page.wait_for_selector("text=New free chat")
-    page.click("button[data-provider=grok]")
-    page.get_by_role("button", name="Create chat").click()
-    expect(page.locator(".toast")).to_contain_text(f"Could not create free chat: {GATE_SENTENCE}")
-    expect(page.locator("text=New free chat")).to_be_visible()
 
 
 # ── a failed history read must not erase the canvas ────────────────────────────────────────────
