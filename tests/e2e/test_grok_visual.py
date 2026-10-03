@@ -227,6 +227,9 @@ def test_refusal_in_the_new_chat_dialog(view):
     inside_viewport(view, alert, "refusal alert")
     no_h_overflow(view)
     shot(view, "refusal-dialog")
+    # As wide as the fields above it (the shared .error-state caps at 500px).
+    field = page.locator("input[placeholder^='e.g. Math']").bounding_box()
+    assert abs(alert.bounding_box()["width"] - field["width"]) <= 2, (alert.bounding_box(), field)
 
 
 def test_refusal_banner_after_a_refused_switch(view):
@@ -261,6 +264,11 @@ def test_refusal_toast_for_a_free_chat(view):
     inside_viewport(view, toast, "refusal toast")
     no_h_overflow(view)
     shot(view, "refusal-toast")
+    # The toast must not cover the dialog's own Create button (a phone dialog is a bottom sheet).
+    t, b = toast.bounding_box(), page.get_by_role("button", name="Create chat").bounding_box()
+    overlap = not (t["y"] + t["height"] <= b["y"] or b["y"] + b["height"] <= t["y"]
+                   or t["x"] + t["width"] <= b["x"] or b["x"] + b["width"] <= t["x"])
+    assert not overlap, f"toast {t} covers the Create chat button {b}"
 
 
 # ── handoff marker ─────────────────────────────────────────────────────────────────────────────

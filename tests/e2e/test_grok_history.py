@@ -152,7 +152,11 @@ def test_a_search_hit_on_a_grok_session_opens_it(e2e_grok_server, grok_page):
 
     page.fill("input[placeholder^='Search projects']", needle)
     page.locator(".search-result-row").first.click()
-    expect(page.locator("body")).to_contain_text("Found it in db/", timeout=10_000)
+    # The peek (not the result row, whose snippet already holds the text) loads the thread through
+    # `?provider=grok&grok_session_id=...` and renders it message by message.
+    peek = page.locator(".session-peek-modal")
+    expect(peek.locator(".session-peek-user")).to_contain_text(needle, timeout=10_000)
+    expect(peek.locator(".session-peek-assistant")).to_contain_text("Found it in db/")
 
 
 # ── Grok -> Claude: the handoff trusts only what this cockpit really sent ──────────────────────

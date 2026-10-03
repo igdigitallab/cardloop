@@ -5599,7 +5599,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               This is the chat's starting runtime. You can move it to another engine or
               subscription later from the model menu — a provider change offers a handoff first.
             </div>
-            {newChatError && <div className="error-state" role="alert">⚠ {newChatError}</div>}
+            {newChatError && <div className="error-state" role="alert" style={{ maxWidth: 'none' }}>⚠ {newChatError}</div>}
             <button className="btn-primary" onClick={confirmCreateChat} disabled={!newChatModel}>Create chat</button>
           </div>
         </Modal>

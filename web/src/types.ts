@@ -119,6 +119,11 @@ export interface AgentProviderInfo {
   error?: string | null
   /** spec-095: subscription plan the adapter reported (e.g. a Grok tier); optional. */
   plan_type?: string | null
+  /** spec-095: extras the Grok row carries beyond Codex's (CLI build, advisories, sandbox facts).
+   *  Declared so a reader sees the whole payload; no surface renders them yet. */
+  version?: string | null
+  warnings?: string[]
+  sandbox?: { profile?: string; deny_count?: number; bwrap?: boolean; probe?: string }
 }
 
 // ─── Spec-024: Project Groups ────────────────────────────────────────────────
@@ -602,6 +607,11 @@ export type ChatEventTool = RichTool & { type: 'tool'; seq?: number }
 
 export interface ChatEventResult {
   type: 'result'
+  /** The engine that ran the turn, and ITS resume id (the other two are null for it). */
+  provider?: Provider
+  session_id?: string | null
+  codex_thread_id?: string | null
+  grok_session_id?: string | null
   context_tokens?: number
   context_window?: number
   cache_read_tokens?: number | null

@@ -249,6 +249,13 @@
     left: 12px;
     max-width: 100%;
   }
+  /* A phone dialog is a bottom sheet: a toast over it hid the very button the operator just
+     pressed (the free-chat dialog's refusal covered "Create chat"). While one is open, toasts go
+     to the top edge instead. */
+  body:has(.run-modal-overlay) .toast-container {
+    bottom: auto;
+    top: max(12px, env(safe-area-inset-top));
+  }
 }
 
 /* A checkbox row that must be easy to hit on a phone (Settings: the Grok privacy opt-in). */
