@@ -26,17 +26,26 @@ Design notes:
   - Every probe takes its collaborators (subprocess runner, repo root, ...) as
     parameters with real defaults, so tests can drive the findings logic with fake
     data — no test needs systemd, the network, or a live cockpit.
+  - The "Grok" section (spec-095 §5.9) exists only when GROK_ENABLED is on and is hidden
+    when empty, so a cockpit without Grok prints exactly what it always did. It asks
+    grok_engine for every fact it can (home, env, deny list, probe fingerprint) so the
+    two cannot drift, and it NEVER runs a model turn: the sandbox-denial verdict is read
+    from the engine's on-disk cache, never produced here.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.metadata
 import json
 import os
 import re
+import shutil
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -755,9 +764,558 @@ def probe_data(repo_root: Path = REPO_ROOT) -> "list[Fact]":
     return facts
 
 
+# ─────────────────────────── Grok (spec-095 §5.9) ────────────────────────────────
+
+# Thresholds live here (not inline) so a test can name them and the report can quote them.
+GROK_CMD_TIMEOUT_SEC = 3.0               # `grok --version` / `grok inspect --json`: bounded, never a hang
+GROK_AGENT_MAX_AGE_SEC = 15 * 60         # H7: a per-turn `grok agent` must never outlive its turn
+GROK_LITTER_WARN = 20                    # §10-C7: ~2 sandbox-blocked* entries per spawn, reaped per turn
+GROK_USAGE_WARN_BYTES = 10 * 1024 * 1024         # ~300 B/turn: this is ~35k turns, or a runaway loop
+GROK_LIMIT_ERRORS_WARN_BYTES = 2 * 1024 * 1024   # rows of up to 8000 chars, only quota-shaped text
+
+_GROK_GUARDED_VENDORS = ("claude", "cursor")
+
+
+def _env_truthy(value: "str | None") -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _kill_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _run_group(cmd: "list[str]", timeout: float = GROK_CMD_TIMEOUT_SEC, env: "dict | None" = None,
+               cwd: "str | None" = None) -> "tuple[int, str, str] | None":
+    """`_run` for a CLI that may fork helpers: its own process group, and the WHOLE group is
+    killed on timeout and afterwards, so a hung probe can neither stall doctor (an orphan
+    holding the pipe open would block `communicate()`) nor outlive it. None = could not
+    finish (missing, timeout, permission denied...)."""
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, errors="replace", env=env,
+                                cwd=cwd, start_new_session=True)
+    except Exception:
+        return None
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, (out or "").strip(), (err or "").strip()
+    except Exception:
+        return None
+    finally:
+        _kill_group(proc.pid)
+        with contextlib.suppress(Exception):
+            proc.communicate(timeout=1.0)
+
+
+@contextlib.contextmanager
+def _env_overlay(env: dict):
+    """Make `env` (os.environ + .env gaps, as collect() builds it) the process environment for
+    the keys grok_engine reads from os.environ itself, then put everything back. The engine's
+    helpers take no env parameter — this is what lets doctor resolve GROK_HOME / GROK_BIN /
+    the data dir through the engine's own code instead of a copy that could drift."""
+    keys = {k for k in set(os.environ) | set(env)
+            if k.startswith("GROK_") or k in ("_CARDLOOP_DATA_DIR", "PATH", "HOME")}
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        for k in keys:
+            if k in env:
+                os.environ[k] = env[k]
+            else:
+                os.environ.pop(k, None)
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _fmt_age(sec: float) -> str:
+    sec = max(0, int(sec))
+    if sec < 90:
+        return f"{sec}s"
+    if sec < 5400:
+        return f"{sec // 60}m"
+    return f"{sec // 3600}h {sec % 3600 // 60}m"
+
+
+def _list_grok_agents(home: Path, proc_root: Path = Path("/proc")) -> "list[dict]":
+    """Live `grok agent --no-leader stdio` processes that belong to THIS cockpit's GROK_HOME:
+    [{pid, pgid, age}] (age = seconds since start, None when /proc/uptime is unreadable).
+
+    The engine always spawns that exact argv with GROK_HOME in the child env, so the home is
+    what tells the cockpit's turns apart from an operator's own `grok agent` (an editor
+    integration, say). A process whose environ cannot be read is counted: when whose it is
+    cannot be told, "leftover" is the safe guess. Linux only (/proc), [] elsewhere."""
+    if not proc_root.is_dir():
+        return []
+    try:
+        uptime: "float | None" = float((proc_root / "uptime").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        uptime = None
+    try:
+        tck = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError, AttributeError):
+        tck = 100
+    want = os.path.realpath(home)
+    found: "list[dict]" = []
+    for entry in os.listdir(proc_root):
+        if not entry.isdigit():
+            continue
+        base = proc_root / entry
+        try:
+            argv = (base / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if not (b"agent" in argv and b"--no-leader" in argv and b"stdio" in argv):
+            continue
+        try:
+            envs: "list[bytes] | None" = (base / "environ").read_bytes().split(b"\0")
+        except OSError:
+            envs = None
+        if envs is not None:
+            owner = next((e[len(b"GROK_HOME="):] for e in envs if e.startswith(b"GROK_HOME=")), None)
+            if owner is None or os.path.realpath(owner.decode("utf-8", "replace")) != want:
+                continue
+        try:
+            raw = (base / "stat").read_text()
+            rest = raw[raw.rindex(")") + 2:].split()
+            state, pgid, start = rest[0], int(rest[2]), int(rest[19])
+        except (OSError, ValueError, IndexError):
+            continue
+        if state == "Z":
+            continue
+        found.append({"pid": int(entry), "pgid": pgid,
+                      "age": (uptime - start / tck) if uptime is not None else None})
+    return found
+
+
+@dataclass
+class _Grok:
+    """What every Grok probe needs, resolved ONCE through the engine's own helpers."""
+    ge: object
+    home: Path
+    data: Path
+    ctx: dict
+    env: dict                      # the engine's child env without the sandbox var (as its probes use)
+    run: object
+    now: object
+    proc_root: Path
+    scratch: Path                  # throwaway dir: the CLI writes into GROK_HOME even for --version/inspect
+    binary: "str | None" = None
+    version: "str | None" = None
+
+    def scratch_env(self) -> dict:
+        """The engine's child env, but pointed at a throwaway GROK_HOME: `grok --version` creates a
+        missing home and `grok inspect` rewrites <home>/docs on every run, and doctor is read-only."""
+        return self.ge.child_env(self.scratch / "home", sandbox=False)
+
+
+def probe_grok(env: dict, repo_root: Path = REPO_ROOT, run=_run_group, proc_root: Path = Path("/proc"),
+               now=time.time, secrets_out: "list | None" = None) -> "list[Fact]":
+    """Facts about the optional Grok provider. [] (silent) unless GROK_ENABLED is on.
+
+    Never starts a model turn and never writes: the sandbox-denial probe is the engine's, it
+    costs a real turn, and doctor only reads its cached verdict. `secrets_out` receives the
+    values this probe learned that must never print (the account email), for render-time scrub."""
+    if not _env_truthy(env.get("GROK_ENABLED")):
+        return []
+    with _env_overlay(env):
+        try:
+            import grok_engine as ge
+        except Exception as exc:  # noqa: BLE001 — py < 3.11 (tomllib), a broken module, ...
+            return [Fact("Grok", f"GROK_ENABLED=true but grok_engine cannot be imported ({exc})",
+                         level="warn", remedy="run via venv/bin/python (make doctor), not the system python")]
+        data = Path(env.get("_CARDLOOP_DATA_DIR") or (repo_root / "data"))
+        ctx = {"DATA": data}
+        home = ge.grok_home(ctx)
+        facts: "list[Fact]" = []
+        with tempfile.TemporaryDirectory(prefix="doctor-grok-") as scratch:
+            (Path(scratch) / "cwd").mkdir()
+            g = _Grok(ge=ge, home=home, data=data, ctx=ctx, env=ge.child_env(home, sandbox=False),
+                      run=run, now=now, proc_root=proc_root, scratch=Path(scratch), binary=ge.grok_bin())
+            for name, step in (("CLI", lambda: _grok_cli(g)),
+                               ("auth", lambda: _grok_auth(g, secrets_out)),
+                               ("sandbox", lambda: _grok_sandbox(g)),
+                               ("compat", lambda: _grok_compat(g)),
+                               ("processes", lambda: _grok_processes(g)),
+                               ("usage files", lambda: _grok_usage_files(g))):
+                try:
+                    facts.extend(step())
+                except Exception as exc:  # noqa: BLE001 — one crashing step must not hide the others
+                    facts.append(Fact(f"Grok {name}", f"probe crashed: {exc}", level="warn",
+                                      remedy="file an issue with this output (doctor is read-only; nothing "
+                                             "was changed)"))
+        return facts
+
+
+def _read_toml(path: Path) -> "dict | None":
+    import tomllib
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _grok_cli(g: _Grok) -> "list[Fact]":
+    ge = g.ge
+    if not g.binary:
+        raw = os.environ.get("GROK_BIN", "").strip()
+        value = (f"GROK_BIN={raw} is not an executable file" if raw else
+                 "not found (GROK_BIN unset, no `grok` on PATH, no ~/.grok/bin/grok)")
+        return [Fact("Grok CLI", value, level="fail",
+                     remedy="install it (curl -fsSL https://x.ai/cli/install.sh | bash) or point GROK_BIN "
+                            "in .env at the binary — until then every Grok turn is refused")]
+    facts: "list[Fact]" = []
+    res = g.run([g.binary, "--version"], timeout=GROK_CMD_TIMEOUT_SEC, env=g.scratch_env(),
+                cwd=str(g.scratch / "cwd"))
+    m = None
+    if res is None:
+        facts.append(Fact("Grok CLI", f"`{g.binary} --version` did not finish in {GROK_CMD_TIMEOUT_SEC:.0f}s "
+                                      "(or could not start)", level="warn",
+                          remedy="run it by hand; a hung or non-executable binary refuses every Grok turn"))
+    else:
+        code, out, err = res
+        m = ge._VERSION_RE.match(out.strip())
+        if code != 0 or not m:
+            facts.append(Fact("Grok CLI", f"{g.binary}: unrecognised `--version` output (exit {code})",
+                              level="fail",
+                              remedy="the engine only accepts `grok X.Y.Z …`; reinstall the CLI or fix GROK_BIN"))
+            m = None
+    if m:
+        g.version = m.group(1)
+        known = ", ".join(ge.KNOWN_GOOD_VERSIONS)
+        if g.version in ge.KNOWN_GOOD_VERSIONS:
+            facts.append(Fact("Grok CLI", f"{g.version} (known-good) — {g.binary}"))
+        else:
+            facts.append(Fact(
+                "Grok CLI", f"{g.version} is not on the known-good list ({known}) — {g.binary}", level="warn",
+                remedy=f"the adapter was verified against {known} only and the stream format can drift. Run "
+                       "`venv/bin/python -m pytest tests/test_grok_live.py -m 'grok_live or grok_canary'` "
+                       f"against this build, then add {g.version} to KNOWN_GOOD_VERSIONS in grok_engine.py "
+                       "(the binary changed under us: e.g. an interactive `grok` auto-updating ~/.grok)"))
+    facts.append(_grok_autoupdate(g))
+    return facts
+
+
+def _grok_autoupdate(g: _Grok) -> Fact:
+    env_off = g.env.get("GROK_DISABLE_AUTOUPDATER") == "1"
+    cfg = _read_toml(g.home / "config.toml")
+    cfg_val = (cfg.get("cli") or {}).get("auto_update") if isinstance(cfg, dict) else None
+    if not env_off:
+        return Fact("Grok auto-update", "NOT disabled for engine turns (GROK_DISABLE_AUTOUPDATER is not in "
+                                         "the child env)", level="warn",
+                    remedy="a turn could swap the binary under a running cockpit — D3 in grok_engine.py must "
+                           "carry GROK_DISABLE_AUTOUPDATER=1")
+    if cfg_val is True:
+        return Fact("Grok auto-update", f"off for engine turns, but {g.home / 'config.toml'} sets "
+                                         "auto_update = true", level="warn",
+                    remedy="the engine rewrites config.toml on the next turn; until then a `grok` run "
+                           "with this GROK_HOME (e.g. tools/grok-acct login) may replace the shared binary")
+    if cfg_val is False:
+        note = "config.toml: auto_update = false"
+    elif (g.home / "config.toml").exists():
+        note = "config.toml unreadable or without a [cli] auto_update setting — rewritten on the next turn"
+    else:
+        note = "config.toml not generated yet"
+    return Fact("Grok auto-update", f"off (GROK_DISABLE_AUTOUPDATER=1 in the child env; {note})")
+
+
+def _grok_auth(g: _Grok, secrets_out: "list | None") -> "list[Fact]":
+    a = g.ge.read_auth_facts(g.home)
+    if a["email"] and secrets_out is not None:
+        secrets_out.append(a["email"])
+    login = "tools/grok-acct login"
+    if not a["present"]:
+        return [Fact("Grok auth", f"no login under {g.home} (auth.json missing or unreadable)", level="fail",
+                     remedy=login)]
+    if not a["oidc"]:
+        return [Fact("Grok auth", "login is not a grok.com (OIDC) subscription login — API-key auth is refused",
+                     level="fail", remedy=login)]
+    if not a["retention_opt_out"]:
+        return [Fact("Grok auth", "oidc login, but coding_data_retention_opt_out is not true — the engine "
+                                  "refuses to send code to xAI", level="fail",
+                     remedy="opt out of coding-data retention in the Grok account settings (grok.com), "
+                            f"then `{login}`")]
+    who = f" as {_redact(a['email'])}" if a["email"] else ""
+    return [Fact("Grok auth", f"signed in{who} (oidc), coding-data retention opt-out: yes")]
+
+
+def _grok_sandbox(g: _Grok) -> "list[Fact]":
+    ge = g.ge
+    facts: "list[Fact]" = []
+
+    bwrap = shutil.which("bwrap", path=g.env.get("PATH"))
+    if bwrap:
+        facts.append(Fact("Grok sandbox (bwrap)", bwrap))
+    else:
+        facts.append(Fact("Grok sandbox (bwrap)", "bubblewrap not found on PATH", level="fail",
+                          remedy="apt install bubblewrap — Grok turns are refused without the sandbox "
+                                 "(no unsandboxed fallback exists)"))
+
+    home = g.home
+    if home.is_symlink():
+        facts.append(Fact("Grok sandbox (GROK_HOME)", f"{home} is a symlink", level="fail",
+                          remedy="point GROK_HOME at a real directory (Grok and the engine both refuse a "
+                                 "symlinked home), then `tools/grok-acct login`"))
+    elif home.exists() and not home.is_dir():
+        facts.append(Fact("Grok sandbox (GROK_HOME)", f"{home} exists and is not a directory", level="fail",
+                          remedy="move it away or point GROK_HOME elsewhere"))
+    elif not home.exists():
+        facts.append(Fact("Grok sandbox (GROK_HOME)", f"{home} does not exist yet (created by the first login)",
+                          level="info"))
+    else:
+        facts.append(Fact("Grok sandbox (GROK_HOME)", str(home)))
+
+    deny = None
+    skipped: "list[str]" = []
+    try:
+        deny, skipped = ge.build_deny(home, g.ctx, bin_path=g.binary)
+    except ge.GrokUnavailableError as exc:
+        facts.append(Fact("Grok sandbox (profile)", f"deny list invalid: {exc}", level="fail",
+                          remedy="fix GROK_SANDBOX_DENY in .env — the engine refuses every turn with this list"))
+    else:
+        facts.append(_grok_profile_fact(g, deny, skipped))
+
+    fp = None
+    if g.version and deny is not None:
+        fp = ge._probe_fingerprint(g.version, {"deny": deny, "home": home})
+    facts.append(_grok_probe_fact(g, fp))
+    return facts
+
+
+def _grok_profile_fact(g: _Grok, deny: "list[str]", skipped: "list[str]") -> Fact:
+    ge = g.ge
+    path = g.home / "sandbox.toml"
+    name = "Grok sandbox (profile)"
+    try:
+        on_disk = path.read_text(encoding="utf-8")
+    except OSError:
+        return Fact(name, f"{path} not generated yet", level="warn",
+                    remedy="written by the first Grok turn or the cockpit's startup provider probe "
+                           "(grok_engine.ensure_home); doctor never writes it")
+    if on_disk == ge._sandbox_toml(deny):
+        gap = f", {len(skipped)} listed path(s) missing on this host and skipped" if skipped else ""
+        return Fact(name, f"profile '{ge.SANDBOX_PROFILE}' (extends workspace), {len(deny)} deny entries{gap}")
+    cfg = _read_toml(path)
+    try:
+        n = len(cfg["profiles"][ge.SANDBOX_PROFILE]["deny"])
+    except (TypeError, KeyError):
+        return Fact(name, f"{path} is unreadable or has no [profiles.{ge.SANDBOX_PROFILE}]", level="warn",
+                    remedy="rewritten by the engine on the next turn")
+    return Fact(name, f"{n} deny entries on disk, the engine would write {len(deny)} now (GROK_SANDBOX_DENY, "
+                      "$HOME or the CLI path changed since the last turn)", level="warn",
+                remedy="rewritten on the next turn; the cached sandbox probe is judged against the NEW list "
+                       "and will be re-run (one small model turn)")
+
+
+def _grok_probe_fact(g: _Grok, fp: "str | None") -> Fact:
+    """The engine's cached sandbox-denial verdict. Doctor must not produce one: it costs a model turn."""
+    ge = g.ge
+    name = "Grok sandbox (probe)"
+    path = g.data / "grok_sandbox_probe.json"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return Fact(name, "no verdict recorded — the sandbox denial has never been proven on this host",
+                    level="warn",
+                    remedy="the cockpit's startup provider probe records one (it spends one small model turn); "
+                           "until then every Grok turn is refused. Doctor never runs a model turn itself")
+    try:
+        cached = json.loads(raw)
+        state = cached["state"]
+        ts = float(cached.get("ts", 0))
+        if not isinstance(state, str):
+            raise TypeError("state")
+    except (ValueError, KeyError, TypeError):
+        return Fact(name, f"{path} is unreadable", level="warn",
+                    remedy="the engine re-runs the probe when the cockpit next checks the provider")
+    detail = str(cached.get("detail") or "")[:200]
+    age = g.now() - ts
+    fp_match = None if fp is None else (cached.get("fingerprint") == fp)
+    when = f"{_fmt_age(age)} ago"
+    if state == "failed":
+        if fp_match is False:
+            return Fact(name, f"stale FAILED verdict ({when}) for a different CLI/deny list/home — "
+                              "will be re-probed", level="warn",
+                        remedy="the engine re-runs the probe (one small model turn) at the next provider check")
+        return Fact(name, f"FAILED {when}: {detail}", level="fail",
+                    remedy="the kernel deny list did NOT hide the canary file from the model's shell, so "
+                           "Grok turns are refused. Check bubblewrap/Landlock on this host, then delete "
+                           f"{path} and restart the cockpit to re-probe")
+    if state == "ok":
+        if fp_match is True and age < ge.SANDBOX_PROBE_OK_TTL_SEC:
+            return Fact(name, f"ok {when}: {detail}")
+        why = ("recorded for a different CLI version / deny list / home" if fp_match is False else
+               "older than the cache TTL" if age >= ge.SANDBOX_PROBE_OK_TTL_SEC else
+               "CLI version unknown, freshness cannot be checked")
+        return Fact(name, f"stale ok verdict ({when}): {why}", level="warn",
+                    remedy="the engine re-runs the probe (one small model turn) at the next provider check")
+    if state == "inconclusive":
+        return Fact(name, f"inconclusive {when}: {detail}", level="warn",
+                    remedy="the engine fails closed (turns refused) and retries after ~15 min; check the login "
+                           "and the network, `journalctl -u cardloop | grep '\\[grok\\]'` has the reason")
+    return Fact(name, f"unrecognised verdict {state!r}", level="warn",
+                remedy=f"delete {path}; the engine writes a fresh one")
+
+
+def _grok_compat(g: _Grok) -> "list[Fact]":
+    """H1: under the engine's env, `grok inspect --json` must show none of OUR Claude/Cursor
+    surface. Strict about the format — a CLI that renames a key must read as 'cannot tell',
+    never as '0 found'. Runs in a neutral cwd against a throwaway home that carries only the
+    cockpit home's config.toml, so the result does not depend on where GROK_HOME lives (the
+    default is inside the repo, which has its own .mcp.json) and nothing real is written."""
+    name = "Grok compat"
+    if not g.binary or not g.version:
+        return [Fact(name, "not checked (no usable Grok CLI)", level="info")]
+    scratch_home = g.scratch / "home"
+    scratch_home.mkdir(exist_ok=True)
+    with contextlib.suppress(OSError):
+        shutil.copyfile(g.home / "config.toml", scratch_home / "config.toml")
+    res = g.run([g.binary, "inspect", "--json"], timeout=GROK_CMD_TIMEOUT_SEC, env=g.scratch_env(),
+                cwd=str(g.scratch / "cwd"))
+    if res is None:
+        return [Fact(name, f"could not inspect (no answer within {GROK_CMD_TIMEOUT_SEC:.0f}s, or the "
+                           "CLI could not start)", level="warn",
+                     remedy="run `grok inspect --json` by hand under the engine's env; until it answers the "
+                            "no-Claude-config guarantee is unverified")]
+    code, out, err = res
+    if code != 0:
+        return [Fact(name, f"could not inspect (exit {code}): {(err or out)[:120]}", level="warn",
+                     remedy="the no-Claude-config guarantee is unverified until `grok inspect --json` works")]
+    try:
+        doc = json.loads(out)
+        lists = {k: doc[k] for k in ("mcpServers", "hooks", "skills", "agents")}
+        cells = doc["externalCompat"]["cells"]
+        ok = (all(isinstance(v, list) and all(isinstance(r, dict) for r in v) for v in lists.values())
+              and isinstance(cells, list) and all(isinstance(c, dict) for c in cells))
+    except (ValueError, KeyError, TypeError):
+        ok = False
+    if not ok:
+        return [Fact(name, "unrecognised `grok inspect --json` format (a key is missing or has another shape)",
+                     level="warn",
+                     remedy="the CLI changed its output (H8): the compat check cannot judge it. Re-record the "
+                            "fixtures and update this check before trusting the engine on this build")]
+
+    home_dir = os.path.expanduser("~")
+    foreign_roots = [f"{home_dir}/{d}/" for d in (".claude", ".claude-accounts", ".cursor")]
+
+    def foreign(rec: dict) -> bool:
+        """Claude/Cursor origin: tagged so, sourced from their config, or loaded from their tree (a
+        Claude PLUGIN carries no vendor tag but lives under ~/.claude*, and the D3 switches skip it)."""
+        texts = [str((rec.get("source") or {}).get("path") or ""), str(rec.get("target") or "")]
+        return (rec.get("vendor") in _GROK_GUARDED_VENDORS
+                or (rec.get("source") or {}).get("type") in ("claude", "claudeJson")
+                or any(root in t for root in foreign_roots for t in texts))
+
+    active_mcp = [m.get("name") or "?" for m in lists["mcpServers"] if not m.get("disabled")]
+    leaked = [f"{kind[:-1]} {r.get('name') or r.get('event') or '?'}"
+              for kind in ("hooks", "skills", "agents") for r in lists[kind]
+              if not r.get("disabled") and foreign(r)]
+    cells_on = sorted(f"{c.get('vendor')}/{c.get('surface')}" for c in cells
+                      if c.get("vendor") in _GROK_GUARDED_VENDORS and c.get("enabled")
+                      and c.get("surface") in ("skills", "rules", "hooks", "mcps", "mcp", "agents"))
+
+    def names(items: "list[str]") -> str:
+        return ", ".join(items[:5]) + (f" (+{len(items) - 5} more)" if len(items) > 5 else "")
+
+    if active_mcp:
+        return [Fact(name, f"{len(active_mcp)} active MCP server(s): {names(active_mcp)}", level="fail",
+                     remedy="H1: MCP servers (mail, drive, devices...) reach Grok turns that run with full tool "
+                            "access, and the D3 switches (grok_engine.D3_ENV) are not stopping them — a CLI "
+                            "update that ignores GROK_CLAUDE_MCPS_ENABLED, or servers declared in the Grok "
+                            "home's own config.toml. Set GROK_ENABLED=false until fixed")]
+    if leaked or cells_on:
+        parts = []
+        if leaked:
+            parts.append(f"Claude/Cursor config still active: {names(leaked)}")
+        if cells_on:
+            parts.append(f"compat switches on: {names(cells_on)}")
+        return [Fact(name, "; ".join(parts), level="warn",
+                     remedy="the D3 env block turns the Claude/Cursor scans off but not Claude PLUGINS (hooks and "
+                            "skills loaded from ~/.claude*/plugins), and a newer CLI may rename a switch: check "
+                            "`grok inspect --json` under the engine's env and the plugin list")]
+    return [Fact(name, "isolated: 0 active MCP servers, 0 Claude/Cursor hooks, skills or agents (global config, "
+                       "neutral cwd — a project's own .mcp.json is not covered)")]
+
+
+def _grok_processes(g: _Grok) -> "list[Fact]":
+    facts: "list[Fact]" = []
+    procs = _list_grok_agents(g.home, g.proc_root)
+    unknown = [p for p in procs if p["age"] is None]
+    old = [p for p in procs if p["age"] is not None and p["age"] >= GROK_AGENT_MAX_AGE_SEC]
+    limit = _fmt_age(GROK_AGENT_MAX_AGE_SEC)
+    if old:
+        shown = ", ".join(f"pid {p['pid']} ({_fmt_age(p['age'])})" for p in old[:5])
+        facts.append(Fact(
+            "Grok processes", f"{len(old)} leftover `grok agent` process(es) older than {limit}: {shown}",
+            level="fail",
+            remedy="a per-turn process must never outlive its turn (H7: leaked CLIs once cost ~10 GB). Kill the "
+                   f"group: kill -TERM -- -{old[0]['pgid']} (SIGKILL if it stays), then find the turn that "
+                   "skipped its teardown: `journalctl -u cardloop | grep '\\[grok\\]'`"))
+    elif unknown:
+        facts.append(Fact("Grok processes", f"{len(unknown)} `grok agent` process(es), age unreadable "
+                                            "(no /proc/uptime)", level="warn",
+                          remedy=f"cannot tell whether any is older than {limit}; check `ps -o pid,etime,args -C grok`"))
+    elif procs:
+        oldest = max(p["age"] for p in procs)
+        facts.append(Fact("Grok processes", f"{len(procs)} turn(s) in flight, oldest {_fmt_age(oldest)} "
+                                            f"(limit {limit})"))
+    else:
+        facts.append(Fact("Grok processes", "no `grok agent` processes running"))
+
+    try:
+        litter = sum(1 for e in os.scandir(g.home) if e.name.startswith("sandbox-blocked"))
+    except OSError:
+        litter = 0
+    if litter > GROK_LITTER_WARN:
+        facts.append(Fact(
+            "Grok litter", f"{litter} sandbox-blocked* placeholders in {g.home} (limit {GROK_LITTER_WARN})",
+            level="warn",
+            remedy="every sandboxed spawn leaves ~2 (mode 000) and the per-turn reaper removes the dead ones, "
+                   "so a pile means turns die before cleanup or something spawns grok with this home outside "
+                   "the engine. Clean now: venv/bin/python -c \"import grok_engine as g, pathlib; "
+                   f"print(len(g.reap_litter(pathlib.Path({str(g.home)!r}))))\""))
+    else:
+        facts.append(Fact("Grok litter", f"{litter} sandbox-blocked* placeholders (limit {GROK_LITTER_WARN})"))
+    return facts
+
+
+def _grok_usage_files(g: _Grok) -> "list[Fact]":
+    rows = []
+    big = []
+    for fname, limit in (("grok_usage.jsonl", GROK_USAGE_WARN_BYTES),
+                         ("grok_limit_errors.jsonl", GROK_LIMIT_ERRORS_WARN_BYTES)):
+        try:
+            size = (g.data / fname).stat().st_size
+        except OSError:
+            continue
+        rows.append(f"{fname} {_human_bytes(size)}")
+        if size > limit:
+            big.append(f"{fname} (> {_human_bytes(limit)})")
+    if not rows:
+        return []
+    if big:
+        return [Fact("Grok usage files", "; ".join(rows) + f" — too large: {', '.join(big)}", level="warn",
+                     remedy="append-only ledgers with no rotation: archive the file (mv) while the cockpit is "
+                            "idle, or look for a loop that appends on every event")]
+    return [Fact("Grok usage files", "; ".join(rows))]
+
+
 # ─────────────────────────── orchestration ───────────────────────────────────────
 
-SECTIONS = ("Versions", "Auth", "Config", "Service", "Runtime", "Data", "Load")
+CORE_SECTIONS = ("Versions", "Auth", "Config", "Service", "Runtime", "Data", "Load")
+# Optional sections are shown only when they hold facts, so a feature that is switched off
+# leaves the report (text and JSON) exactly as it was before the feature existed.
+SECTIONS = CORE_SECTIONS + ("Grok",)
+
+
+def _visible(sections: dict) -> "list[str]":
+    return [n for n in SECTIONS if n in CORE_SECTIONS or sections.get(n)]
 
 
 def _safe_section(name: str, fn, *args, **kwargs) -> "list[Fact]":
@@ -799,6 +1357,7 @@ def collect(repo_root: Path = REPO_ROOT) -> "tuple[dict, list[str]]":
     env, env_path, env_exists = _load_dotenv_merged(repo_root)
     service_name = env.get("CARDLOOP_SERVICE") or "cardloop"
     port = env.get("WEB_PORT") or "8787"
+    grok_secrets: "list[str]" = []        # filled by probe_grok (the account email) for render-time scrub
 
     sections = {
         "Versions": _safe_section("Versions", probe_versions, repo_root),
@@ -809,10 +1368,11 @@ def collect(repo_root: Path = REPO_ROOT) -> "tuple[dict, list[str]]":
         "Runtime": _safe_section("Runtime", probe_runtime, port, repo_root),
         "Data": _safe_section("Data", probe_data, repo_root),
         "Load": _safe_section("Load", probe_load, repo_root),
+        "Grok": _safe_section("Grok", probe_grok, env, repo_root, secrets_out=grok_secrets),
     }
 
     secrets = [env.get("ANTHROPIC_API_KEY", ""), env.get("WEB_PASSWORD", ""),
-               env.get("WEB_COOKIE_SALT", "")]
+               env.get("WEB_COOKIE_SALT", "")] + grok_secrets
     return sections, [s for s in secrets if s]
 
 
@@ -826,7 +1386,7 @@ def _icon(level: str) -> str:
 
 def render_text(sections: dict, secrets: "list[str]", elapsed: float) -> str:
     lines: "list[str]" = []
-    for name in SECTIONS:
+    for name in _visible(sections):
         lines.append(f"== {name} ==")
         for f in sections.get(name, []):
             value = _scrub(f.value, secrets)
@@ -860,7 +1420,7 @@ def render_json(sections: dict, secrets: "list[str]", elapsed: float, exit_code:
 
     verdict = _verdict(sections)
     payload = {
-        "sections": {name: [fact_dict(f) for f in sections.get(name, [])] for name in SECTIONS},
+        "sections": {name: [fact_dict(f) for f in sections.get(name, [])] for name in _visible(sections)},
         "verdict": {
             "ok": not verdict,
             "exit_code": exit_code,

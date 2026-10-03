@@ -749,3 +749,1229 @@ def test_main_text_mode_exit_code_reflects_failures(monkeypatch, capsys):
     assert code == 1
     assert "web/dist" in out
     assert "no problems found" not in out
+
+
+# ═══════════════════════════ Grok (spec-095 §5.9) ════════════════════════════════
+#
+# Every test drives probe_grok against a throwaway install: a tiny fake `grok` script (own
+# `--version` / `inspect --json` switches, tests/fake_grok_acp.py for the engine's own fake), a
+# fake bwrap, a fake /proc tree, temp dirs. Never the real binary, never the network, never a
+# model turn.
+
+import os
+import shutil
+import subprocess
+import time
+
+import grok_engine
+
+FAKE_ACP = Path(__file__).resolve().parent / "fake_grok_acp.py"
+SLEEP = shutil.which("sleep") or "/bin/sleep"
+TOKEN_ACCESS = "ACCESS-TOKEN-VALUE-abcdef123456"
+TOKEN_REFRESH = "REFRESH-TOKEN-VALUE-abcdef123456"
+PLANTED_EMAIL = "planted.person@example.invalid"
+CLK = os.sysconf("SC_CLK_TCK")
+
+
+def inspect_doc(home: str, **over) -> dict:
+    """The shape `grok inspect --json` has on grok 1.0.46 (captured from the real CLI), minimal."""
+    doc = {
+        "grokVersion": "1.0.46", "channel": "unknown", "cwd": "/x", "projectRoot": None,
+        "projectInstructions": [], "plugins": [],
+        "hooks": [{"event": "pre_tool_use", "hookType": "command", "target": f"\"{home}/.claude/hooks/g.sh\"",
+                   "source": {"type": "user", "path": f"{home}/.claude"}, "vendor": "claude",
+                   "disabled": True, "compatibilityStatus": "disabled"}],
+        "skills": [{"name": "agents-skill", "source": {"type": "user",
+                                                       "path": f"{home}/.agents/skills/a/SKILL.md"},
+                    "userInvocable": True}],
+        "agents": [{"name": "general-purpose", "source": {"type": "builtin"}}],
+        "mcpServers": [{"name": "mail", "transport": "stdio", "target": "/x",
+                        "source": {"type": "claudeJson", "path": f"{home}/.claude.json"},
+                        "disabled": True, "compatibilityStatus": "disabled", "vendor": "claude"}],
+        "externalCompat": {"remoteSettingsLoaded": False, "cells": [
+            {"vendor": "claude", "surface": "mcps", "enabled": False, "source": "env"},
+            {"vendor": "claude", "surface": "skills", "enabled": False, "source": "env"},
+            {"vendor": "cursor", "surface": "hooks", "enabled": False, "source": "env"},
+            {"vendor": "claude", "surface": "sessions", "enabled": True, "source": "default"},
+            {"vendor": "codex", "surface": "sessions", "enabled": True, "source": "default"}]},
+    }
+    doc.update(over)
+    return doc
+
+
+def pid_gone(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return True
+    return state == "Z"
+
+
+class GrokBox:
+    """One isolated Grok install + the env dict probe_grok is handed."""
+
+    def __init__(self, tmp_path: Path, monkeypatch):
+        self.tmp = tmp_path
+        self.mp = monkeypatch
+        self.bindir = tmp_path / "bin"
+        self.bindir.mkdir()
+        bwrap = self.bindir / "bwrap"
+        bwrap.write_text("#!/bin/sh\nexit 0\n")
+        bwrap.chmod(0o755)
+        self.fake_home = tmp_path / "fakehome"
+        self.fake_home.mkdir()
+        self.home = tmp_path / "grok-home"          # GROK_HOME — NOT created until a test asks
+        self.data = tmp_path / "data"
+        self.data.mkdir()
+        self.secret_dir = tmp_path / "secrets"
+        self.secret_dir.mkdir()
+        self.dump = tmp_path / "dump.jsonl"
+        self.pidfile = tmp_path / "grandchild.pid"
+        self.bin = tmp_path / "grok"
+        self.env = {"GROK_ENABLED": "true", "GROK_BIN": str(self.bin), "GROK_HOME": str(self.home),
+                    "_CARDLOOP_DATA_DIR": str(self.data), "HOME": str(self.fake_home),
+                    "PATH": str(self.bindir), "GROK_SANDBOX_DENY": str(self.secret_dir)}
+        for k in list(os.environ):
+            if k.startswith(("GROK_", "FAKE_")):
+                monkeypatch.delenv(k, raising=False)
+        for k, v in self.env.items():                # engine helpers read os.environ directly
+            monkeypatch.setenv(k, v)
+        self.fake()
+        self.write_auth()
+
+    # --- fake binary -----------------------------------------------------------------------
+    def fake(self, version: str = "grok 1.0.46 (fake) [stable]", inspect_mode: str = "ok",
+             doc: "dict | None" = None, stderr: str = "", version_mode: str = "ok", version_exit: int = 0) -> None:
+        cfg = {"version": version, "version_mode": version_mode, "version_exit": version_exit,
+               "inspect_mode": inspect_mode, "stderr": stderr, "sleep": SLEEP,
+               "doc": doc if doc is not None else inspect_doc(str(self.fake_home)),
+               "dump": str(self.dump), "pidfile": str(self.pidfile)}
+        self.bin.write_text(f"""#!{sys.executable}
+import json, os, subprocess, sys, time
+cfg = json.loads({json.dumps(json.dumps(cfg))})
+args = sys.argv[1:]
+cfg_toml = os.path.join(os.environ.get("GROK_HOME", ""), "config.toml")
+with open(cfg["dump"], "a") as fh:
+    fh.write(json.dumps({{"args": args, "home": os.environ.get("GROK_HOME"), "cwd": os.getcwd(),
+                         "env": dict(os.environ),
+                         "config": open(cfg_toml).read() if os.path.exists(cfg_toml) else None}}) + "\\n")
+def hang():
+    gc = subprocess.Popen([cfg["sleep"], "300"])
+    open(cfg["pidfile"], "w").write(str(gc.pid))
+    time.sleep(300)
+if args == ["--version"]:
+    if cfg["version_mode"] == "hang":
+        hang()
+    print(cfg["version"])
+    sys.exit(cfg["version_exit"])
+if args == ["inspect", "--json"]:
+    m = cfg["inspect_mode"]
+    if m == "hang":
+        hang()
+    if m == "exit":
+        sys.stderr.write(cfg["stderr"])
+        sys.exit(3)
+    if m == "garbage":
+        print("this is not json")
+        sys.exit(0)
+    print(json.dumps(cfg["doc"]))
+    sys.exit(0)
+if args[:1] == ["agent"]:
+    open(cfg["pidfile"], "w").write(str(os.getpid()))
+    time.sleep(300)
+sys.exit(2)
+""")
+        self.bin.chmod(0o755)
+
+    def use_acp_fake(self, **switches) -> None:
+        """The engine's own fake (tests/fake_grok_acp.py): `--version` and `models` only."""
+        env = {f"FAKE_GROK_{k.upper()}": str(v) for k, v in switches.items()}
+        self.bin.write_text(f"#!{sys.executable}\nimport os, sys\nos.environ.update({env!r})\n"
+                            f"os.execv({sys.executable!r}, [{sys.executable!r}, {str(FAKE_ACP)!r}, *sys.argv[1:]])\n")
+        self.bin.chmod(0o755)
+
+    def calls(self) -> "list[dict]":
+        if not self.dump.exists():
+            return []
+        return [json.loads(line) for line in self.dump.read_text().splitlines() if line.strip()]
+
+    # --- state the probes read -------------------------------------------------------------
+    def write_auth(self, **entry) -> None:
+        self.home.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.home, 0o700)
+        body = {"auth_mode": "oidc", "coding_data_retention_opt_out": True, "email": PLANTED_EMAIL,
+                "key": TOKEN_ACCESS, "refresh_token": TOKEN_REFRESH, "expires_at": "2099-01-01T00:00:00Z"}
+        body.update(entry)
+        body = {k: v for k, v in body.items() if v is not None}
+        (self.home / "auth.json").write_text(json.dumps({"https://auth.x.ai::client-id": body}))
+
+    def ensure_home(self) -> dict:
+        return grok_engine.ensure_home({"DATA": self.data}, bin_path=str(self.bin))
+
+    def write_probe(self, state: str, *, age: float = 60.0, detail: str = "canary unreadable, control readable",
+                    fingerprint: str = "auto", version: str = "1.0.46") -> None:
+        if fingerprint == "auto":
+            deny, _ = grok_engine.build_deny(self.home, {"DATA": self.data}, bin_path=str(self.bin))
+            fingerprint = grok_engine._probe_fingerprint(version, {"deny": deny, "home": self.home})
+        (self.data / "grok_sandbox_probe.json").write_text(json.dumps(
+            {"fingerprint": fingerprint, "state": state, "detail": detail, "ts": time.time() - age}))
+
+    def probe(self, **kw) -> "dict[str, doctor.Fact]":
+        secrets = kw.setdefault("secrets_out", [])
+        facts = doctor.probe_grok(self.env, repo_root=self.tmp, **kw)
+        by = {f.label: f for f in facts}
+        assert len(by) == len(facts), "duplicate Grok fact labels"
+        self.secrets = secrets
+        return by
+
+
+@pytest.fixture
+def box(tmp_path, monkeypatch):
+    return GrokBox(tmp_path, monkeypatch)
+
+
+def snapshot(*roots: Path) -> dict:
+    """name -> (size, mtime_ns) of everything under the roots: proves doctor wrote nothing."""
+    out = {}
+    for root in roots:
+        for p in [root, *root.rglob("*")]:
+            try:
+                st = p.lstat()
+            except OSError:
+                continue
+            out[str(p)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+def fake_proc(root: Path, procs: "list[dict]", uptime: float = 100000.0) -> Path:
+    """A /proc tree: each proc = {pid, argv, environ (dict|None=unreadable), age, state, pgid}."""
+    root.mkdir(exist_ok=True)
+    (root / "uptime").write_text(f"{uptime} 0.00\n")
+    for p in procs:
+        d = root / str(p["pid"])
+        d.mkdir()
+        (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in p["argv"]) + b"\0")
+        if p.get("environ") is not None:
+            (d / "environ").write_bytes(b"\0".join(f"{k}={v}".encode() for k, v in p["environ"].items()) + b"\0")
+        pgid = p.get("pgid", p["pid"])
+        start = int((uptime - p["age"]) * CLK)
+        (d / "stat").write_text(f"{p['pid']} (grok) {p.get('state', 'S')} 1 {pgid} {pgid} 0 -1 4194560 "
+                                f"0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0\n")
+    return root
+
+
+AGENT_ARGV = ["/home/u/.grok/bin/grok", "agent", "--no-leader", "stdio"]
+
+
+# ─────────────────────────── silent unless enabled ───────────────────────────────
+
+@pytest.mark.parametrize("value", [None, "", "false", "0", "no", "off", "garbage"])
+def test_grok_is_silent_when_disabled(box, value):
+    env = dict(box.env)
+    if value is None:
+        env.pop("GROK_ENABLED")
+    else:
+        env["GROK_ENABLED"] = value
+
+    def boom(*a, **k):
+        raise AssertionError("a disabled Grok must not run anything")
+    assert doctor.probe_grok(env, repo_root=box.tmp, run=boom, proc_root=box.tmp / "nope") == []
+    assert box.calls() == []
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " true "])
+def test_grok_runs_for_every_truthy_spelling(box, value):
+    box.env["GROK_ENABLED"] = value
+    assert "Grok CLI" in box.probe(proc_root=box.tmp / "noproc")
+
+
+def test_grok_enabled_only_through_dotenv_is_honoured_by_collect(box, monkeypatch):
+    """Enabled in .env only (not exported): the cockpit loads .env itself, so doctor must too —
+    otherwise it would call a Grok-enabled cockpit clean without looking."""
+    monkeypatch.delenv("GROK_ENABLED")
+    (box.tmp / ".env").write_text("GROK_ENABLED=true\n")
+    monkeypatch.delenv("COPS_NO_DOTENV", raising=False)
+    for name in ("probe_versions", "probe_auth", "probe_config", "probe_service", "probe_runtime",
+                 "probe_data", "probe_load"):
+        monkeypatch.setattr(doctor, name, lambda *a, **k: [])
+    real = doctor.probe_grok
+    monkeypatch.setattr(doctor, "probe_grok", lambda env, repo_root, **kw: real(
+        env, repo_root, proc_root=box.tmp / "noproc", **kw))
+    sections, secrets = doctor.collect(box.tmp)
+    assert any(f.label == "Grok CLI" for f in sections["Grok"])
+    assert os.environ.get("GROK_ENABLED") is None          # the overlay put it back
+    assert PLANTED_EMAIL in secrets                         # the account email is scrubbed everywhere
+
+
+def test_collect_reports_an_empty_grok_section_when_disabled(box, monkeypatch):
+    monkeypatch.setenv("GROK_ENABLED", "false")
+    for name in ("probe_versions", "probe_auth", "probe_config", "probe_service", "probe_runtime",
+                 "probe_data", "probe_load"):
+        monkeypatch.setattr(doctor, name, lambda *a, **k: [])
+    sections, secrets = doctor.collect(box.tmp)
+    assert sections["Grok"] == []
+    assert PLANTED_EMAIL not in secrets
+
+
+# ─────────────────────────── Grok CLI ────────────────────────────────────────────
+
+def test_cli_known_good_version_is_ok(box):
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok CLI"]
+    assert f.level == "ok" and "1.0.46" in f.value and "known-good" in f.value and str(box.bin) in f.value
+
+
+def test_cli_unknown_version_warns_never_fails(box):
+    box.fake(version="grok 1.0.99 (abc123)")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok CLI"]
+    assert f.level == "warn"
+    assert "1.0.99" in f.value and "1.0.46" in f.value
+    assert "KNOWN_GOOD_VERSIONS" in f.remedy and "grok_live" in f.remedy
+
+
+def test_cli_with_the_engines_own_fake_binary(box):
+    box.use_acp_fake()
+    assert box.probe(proc_root=box.tmp / "noproc")["Grok CLI"].level == "ok"
+    box.use_acp_fake(version="grok 2.0.0 (fake)")
+    assert box.probe(proc_root=box.tmp / "noproc")["Grok CLI"].level == "warn"
+
+
+def test_cli_missing_binary_with_grok_bin_set_is_fail(box):
+    box.env["GROK_BIN"] = str(box.tmp / "nope")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok CLI"]
+    assert f.level == "fail" and "GROK_BIN" in f.value and "install" in f.remedy
+
+
+def test_cli_missing_binary_without_grok_bin_is_fail(box):
+    box.env.pop("GROK_BIN")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok CLI"]
+    assert f.level == "fail" and "not found" in f.value and "GROK_BIN" in f.value
+
+
+def test_cli_garbage_version_output_is_fail(box):
+    box.fake(version="hello world")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok CLI"]
+    assert f.level == "fail" and "unrecognised" in f.value
+
+
+def test_cli_nonzero_exit_is_fail(box):
+    box.fake(version_exit=2)
+    assert box.probe(proc_root=box.tmp / "noproc")["Grok CLI"].level == "fail"
+
+
+def test_cli_that_cannot_answer_is_a_warning_not_a_hang(box):
+    seen = []
+
+    def run(cmd, timeout=3.0, env=None, cwd=None):
+        seen.append((cmd, timeout))
+        return None
+    f = box.probe(run=run, proc_root=box.tmp / "noproc")["Grok CLI"]
+    assert f.level == "warn" and "did not finish" in f.value
+    assert seen[0][0] == [str(box.bin), "--version"] and seen[0][1] == doctor.GROK_CMD_TIMEOUT_SEC
+
+
+def test_cli_hang_is_bounded_and_leaves_no_process(box, monkeypatch):
+    monkeypatch.setattr(doctor, "GROK_CMD_TIMEOUT_SEC", 0.6)
+    box.fake(version_mode="hang")
+    t0 = time.monotonic()
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok CLI"]
+    assert time.monotonic() - t0 < 5
+    assert f.level == "warn"
+    gc = int(box.pidfile.read_text())
+    deadline = time.monotonic() + 3
+    while not pid_gone(gc) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert pid_gone(gc), "the grandchild of a timed-out probe must be killed with its group"
+
+
+def test_cli_and_inspect_run_in_a_throwaway_home_and_write_nothing_real(box):
+    """`grok --version` creates a missing GROK_HOME and `grok inspect` rewrites <home>/docs: neither
+    may touch the cockpit's real home (doctor is read-only)."""
+    box.home.rmdir() if not any(box.home.iterdir()) else None
+    shutil.rmtree(box.home)                      # the real home does not exist at all
+    before = snapshot(box.data, box.fake_home, box.secret_dir)
+    box.probe(proc_root=box.tmp / "noproc")
+    assert not box.home.exists()
+    assert snapshot(box.data, box.fake_home, box.secret_dir) == before
+    runs = box.calls()
+    assert [c["args"] for c in runs] == [["--version"], ["inspect", "--json"]]
+    for c in runs:
+        assert c["home"] != str(box.home) and "doctor-grok-" in c["home"]
+        assert "doctor-grok-" in c["cwd"] and c["cwd"].endswith("cwd")
+        assert not Path(c["home"]).parent.exists(), "the throwaway dir must be gone afterwards"
+
+
+def test_commands_run_under_the_engines_child_env(box):
+    box.env["WEB_PASSWORD"] = "pw-s3cret-web-value"       # must not reach the child (allowlist)
+    box.env["ANTHROPIC_API_KEY"] = "sk-ant-s3cret-value"
+    box.probe(proc_root=box.tmp / "noproc")
+    for c in box.calls():
+        for k, v in grok_engine.D3_ENV.items():
+            assert c["env"].get(k) == v, k
+        assert "WEB_PASSWORD" not in c["env"] and "ANTHROPIC_API_KEY" not in c["env"]
+        assert "GROK_SANDBOX" not in c["env"]            # the engine's probes run unsandboxed too
+
+
+# ─────────────────────────── Grok auto-update ────────────────────────────────────
+
+def test_autoupdate_off_with_generated_config_is_ok(box):
+    box.ensure_home()
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auto-update"]
+    assert f.level == "ok" and "auto_update = false" in f.value
+
+
+def test_autoupdate_without_a_generated_config_is_ok_but_says_so(box):
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auto-update"]
+    assert f.level == "ok" and "not generated yet" in f.value
+
+
+def test_autoupdate_unreadable_config_says_so(box):
+    (box.home / "config.toml").write_text("this is [not toml")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auto-update"]
+    assert f.level == "ok" and "unreadable" in f.value
+
+
+def test_autoupdate_enabled_in_config_warns(box):
+    box.ensure_home()
+    (box.home / "config.toml").write_text("[cli]\nauto_update = true\n")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auto-update"]
+    assert f.level == "warn" and "auto_update = true" in f.value and "grok-acct" in f.remedy
+
+
+def test_autoupdate_switch_missing_from_the_child_env_warns(box, monkeypatch):
+    monkeypatch.delitem(grok_engine.D3_ENV, "GROK_DISABLE_AUTOUPDATER")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auto-update"]
+    assert f.level == "warn" and "NOT disabled" in f.value and "D3" in f.remedy
+
+
+# ─────────────────────────── Grok auth ───────────────────────────────────────────
+
+def test_auth_signed_in_is_ok_and_redacts_the_email(box):
+    by = box.probe(proc_root=box.tmp / "noproc")
+    f = by["Grok auth"]
+    assert f.level == "ok" and "oidc" in f.value and "opt-out: yes" in f.value
+    assert PLANTED_EMAIL not in f.value
+    assert f.value.count("…") == 1 and "as " in f.value              # the doctor `_redact` shape
+    assert box.secrets == [PLANTED_EMAIL]
+
+
+def test_auth_without_an_email_has_no_as_clause(box):
+    box.write_auth(email=None)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
+    assert f.level == "ok" and " as " not in f.value and box.secrets == []
+
+
+def test_auth_missing_login_is_fail_with_the_login_command(box):
+    (box.home / "auth.json").unlink()
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
+    assert f.level == "fail" and f.remedy == "tools/grok-acct login" and str(box.home) in f.value
+
+
+def test_auth_unparsable_login_file_is_fail(box):
+    (box.home / "auth.json").write_text("{not json")
+    assert box.probe(proc_root=box.tmp / "noproc")["Grok auth"].level == "fail"
+
+
+def test_auth_non_oidc_login_is_fail(box):
+    box.write_auth(auth_mode="api_key")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
+    assert f.level == "fail" and "OIDC" in f.value and f.remedy == "tools/grok-acct login"
+
+
+@pytest.mark.parametrize("opt_out", [False, None, "true", 1])
+def test_auth_retention_opt_out_not_strictly_true_is_fail(box, opt_out):
+    box.write_auth(coding_data_retention_opt_out=opt_out)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
+    assert f.level == "fail" and "retention" in f.value and "grok-acct login" in f.remedy
+
+
+def test_auth_never_prints_tokens_or_the_email_in_any_render(box):
+    box.fake(inspect_mode="exit", stderr=f"denied for {PLANTED_EMAIL} token {TOKEN_ACCESS}")
+    facts = doctor.probe_grok(box.env, repo_root=box.tmp, proc_root=box.tmp / "noproc",
+                              secrets_out=(secrets := []))
+    sections = {n: [] for n in doctor.SECTIONS} | {"Grok": facts}
+    secrets += [TOKEN_ACCESS, TOKEN_REFRESH]                           # what a render would also know
+    text = doctor.render_text(sections, secrets, elapsed=0.1)
+    raw = doctor.render_json(sections, secrets, elapsed=0.1, exit_code=0)
+    for blob in (text, raw):
+        assert PLANTED_EMAIL not in blob
+        assert TOKEN_ACCESS not in blob and TOKEN_REFRESH not in blob
+    assert "could not inspect" in text                                  # the leaking fact IS rendered
+
+
+def test_auth_secret_email_scrubs_even_when_the_probe_text_carries_it(box):
+    box.fake(inspect_mode="exit", stderr=f"user {PLANTED_EMAIL} rejected")
+    facts = doctor.probe_grok(box.env, repo_root=box.tmp, proc_root=box.tmp / "noproc",
+                              secrets_out=(secrets := []))
+    compat = next(f for f in facts if f.label == "Grok compat")
+    assert PLANTED_EMAIL in compat.value                                # the raw fact leaks ...
+    assert PLANTED_EMAIL not in doctor._scrub(compat.value, secrets)    # ... and the plumbing scrubs it
+
+
+# ─────────────────────────── Grok sandbox: bwrap / GROK_HOME ─────────────────────
+
+def test_bwrap_present_is_ok(box):
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (bwrap)"]
+    assert f.level == "ok" and f.value == str(box.bindir / "bwrap")
+
+
+def test_bwrap_missing_is_fail(box):
+    (box.bindir / "bwrap").unlink()
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (bwrap)"]
+    assert f.level == "fail" and "bubblewrap" in f.value and "bubblewrap" in f.remedy
+
+
+def test_home_plain_directory_is_ok(box):
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (GROK_HOME)"]
+    assert f.level == "ok" and f.value == str(box.home)
+
+
+def test_home_symlink_is_fail(box):
+    real = box.tmp / "real-home"
+    real.mkdir()
+    shutil.rmtree(box.home)
+    box.home.symlink_to(real)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (GROK_HOME)"]
+    assert f.level == "fail" and "symlink" in f.value
+
+
+def test_home_that_is_a_file_is_fail(box):
+    shutil.rmtree(box.home)
+    box.home.write_text("x")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (GROK_HOME)"]
+    assert f.level == "fail" and "not a directory" in f.value
+
+
+def test_home_missing_is_info_not_a_verdict(box):
+    shutil.rmtree(box.home)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (GROK_HOME)"]
+    assert f.level == "info" and "does not exist" in f.value
+
+
+# ─────────────────────────── Grok sandbox: profile ───────────────────────────────
+
+def test_profile_not_generated_yet_warns(box):
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (profile)"]
+    assert f.level == "warn" and "not generated" in f.value and "ensure_home" in f.remedy
+
+
+def test_profile_generated_by_the_engine_is_ok_with_the_deny_count(box):
+    info = box.ensure_home()
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (profile)"]
+    assert f.level == "ok"
+    assert f"{len(info['deny'])} deny entries" in f.value and "'cardloop'" in f.value
+    assert str(box.secret_dir) in (box.home / "sandbox.toml").read_text()
+
+
+def test_profile_value_names_the_listed_paths_missing_on_this_host(box, monkeypatch):
+    monkeypatch.setenv("GROK_SANDBOX_DENY", f"{box.secret_dir},{box.tmp / 'does-not-exist'}")
+    box.env["GROK_SANDBOX_DENY"] = os.environ["GROK_SANDBOX_DENY"]
+    box.ensure_home()
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (profile)"]
+    assert f.level == "ok" and "1 listed path(s) missing" in f.value
+
+
+def test_profile_that_differs_from_what_the_engine_would_write_warns(box):
+    box.ensure_home()
+    other = box.tmp / "other-secret"
+    other.mkdir()
+    box.env["GROK_SANDBOX_DENY"] = f"{box.secret_dir},{other}"      # env changed since the last turn
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (profile)"]
+    assert f.level == "warn" and "would write" in f.value and "re-run" in f.remedy
+
+
+def test_profile_that_is_not_toml_warns(box):
+    box.ensure_home()
+    (box.home / "sandbox.toml").write_text("not [valid toml")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (profile)"]
+    assert f.level == "warn" and "unreadable" in f.value
+
+
+def test_profile_without_the_cardloop_table_warns(box):
+    box.ensure_home()
+    (box.home / "sandbox.toml").write_text('[profiles.other]\nextends = "workspace"\ndeny = []\n')
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (profile)"]
+    assert f.level == "warn" and "no [profiles.cardloop]" in f.value
+
+
+def test_invalid_deny_list_is_fail(box):
+    box.env["GROK_SANDBOX_DENY"] = "**/{x}.pem"           # brace alternation: Grok refuses to start on it
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (profile)"]
+    assert f.level == "fail" and "deny list invalid" in f.value and "GROK_SANDBOX_DENY" in f.remedy
+
+
+def test_deny_list_that_hides_the_home_is_fail(box):
+    box.env["GROK_SANDBOX_DENY"] = str(box.fake_home)               # $HOME itself: Grok could not start
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (profile)"]
+    assert f.level == "fail"
+
+
+# ─────────────────────────── Grok sandbox: cached probe verdict ──────────────────
+
+def probe_fact(box, **kw):
+    return box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (probe)"]
+
+
+def test_probe_absent_warns_and_says_doctor_will_not_run_one(box):
+    box.ensure_home()
+    f = probe_fact(box)
+    assert f.level == "warn" and "no verdict" in f.value and "never runs a model turn" in f.remedy
+
+
+def test_probe_ok_and_fresh_is_ok(box):
+    box.ensure_home()
+    box.write_probe("ok")
+    f = probe_fact(box)
+    assert f.level == "ok" and f.value.startswith("ok ") and "canary unreadable" in f.value
+
+
+def test_probe_ok_older_than_the_cache_ttl_is_stale_warn(box):
+    box.ensure_home()
+    box.write_probe("ok", age=grok_engine.SANDBOX_PROBE_OK_TTL_SEC + 60)
+    f = probe_fact(box)
+    assert f.level == "warn" and "stale" in f.value and "TTL" in f.value
+
+
+def test_probe_ok_just_inside_the_ttl_is_ok(box):
+    box.ensure_home()
+    box.write_probe("ok", age=grok_engine.SANDBOX_PROBE_OK_TTL_SEC - 3600)
+    assert probe_fact(box).level == "ok"
+
+
+def test_probe_ok_for_another_fingerprint_is_stale_warn(box):
+    box.ensure_home()
+    box.write_probe("ok", fingerprint="0" * 24)
+    f = probe_fact(box)
+    assert f.level == "warn" and "different CLI version" in f.value
+
+
+def test_probe_ok_for_another_cli_version_is_stale_warn(box):
+    box.ensure_home()
+    box.write_probe("ok", version="1.0.45")
+    assert probe_fact(box).level == "warn"
+
+
+def test_probe_ok_when_the_cli_version_is_unknown_cannot_be_trusted_fresh(box):
+    box.ensure_home()
+    box.write_probe("ok")
+    box.fake(version="garbage")                                      # no version -> no fingerprint to compare
+    f = probe_fact(box)
+    assert f.level == "warn" and "cannot be checked" in f.value
+
+
+def test_probe_failed_is_fail(box):
+    box.ensure_home()
+    box.write_probe("failed", detail="the sandbox deny list did NOT hide the canary file")
+    f = probe_fact(box)
+    assert f.level == "fail" and "FAILED" in f.value and "did NOT hide" in f.value
+    assert str(box.data / "grok_sandbox_probe.json") in f.remedy
+
+
+def test_probe_failed_stays_fail_however_old(box):
+    box.ensure_home()
+    box.write_probe("failed", age=30 * 86400)
+    assert probe_fact(box).level == "fail"
+
+
+def test_probe_failed_for_another_fingerprint_is_only_stale(box):
+    box.ensure_home()
+    box.write_probe("failed", fingerprint="f" * 24)
+    f = probe_fact(box)
+    assert f.level == "warn" and "stale FAILED" in f.value
+
+
+def test_probe_failed_when_freshness_cannot_be_judged_is_still_fail(box):
+    box.ensure_home()
+    box.write_probe("failed")
+    box.fake(version="garbage")
+    assert probe_fact(box).level == "fail"
+
+
+def test_probe_inconclusive_warns_fail_closed(box):
+    box.ensure_home()
+    box.write_probe("inconclusive", detail="the probe turn never read its control file")
+    f = probe_fact(box)
+    assert f.level == "warn" and "inconclusive" in f.value and "fails closed" in f.remedy
+
+
+def test_probe_unreadable_file_warns(box):
+    box.ensure_home()
+    (box.data / "grok_sandbox_probe.json").write_text("{nope")
+    f = probe_fact(box)
+    assert f.level == "warn" and "unreadable" in f.value
+
+
+@pytest.mark.parametrize("payload", [{"fingerprint": "x"}, {"state": 7, "ts": 1}, [], "str"])
+def test_probe_file_without_a_usable_state_warns(box, payload):
+    box.ensure_home()
+    (box.data / "grok_sandbox_probe.json").write_text(json.dumps(payload))
+    assert probe_fact(box).level == "warn"
+
+
+def test_probe_unknown_state_warns(box):
+    box.ensure_home()
+    box.write_probe("maybe")
+    f = probe_fact(box)
+    assert f.level == "warn" and "unrecognised" in f.value
+
+
+def test_probe_detail_is_truncated(box):
+    box.ensure_home()
+    box.write_probe("inconclusive", detail="x" * 5000)
+    assert len(probe_fact(box).value) < 400
+
+
+def test_doctor_never_runs_a_model_turn_or_the_engine_probe(box, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("doctor must not call the engine's turn/probe machinery")
+    for name in ("run_grok_engine", "_run_turn", "_probe_sandbox_denial", "_ensure_sandbox_probe",
+                 "provider_info", "_probe_provider", "ensure_home", "reap_litter", "reset_sandbox_probe"):
+        monkeypatch.setattr(grok_engine, name, boom)
+    facts = box.probe(proc_root=box.tmp / "noproc")
+    assert "Grok sandbox (probe)" in facts and not [f for f in facts.values() if "crashed" in f.value]
+
+
+def test_doctor_is_read_only_against_a_fully_prepared_install(box):
+    box.ensure_home()
+    box.write_probe("ok")
+    (box.home / "sandbox-blocked.99999999").write_text("")
+    (box.data / "grok_usage.jsonl").write_text("{}\n")
+    before = snapshot(box.home, box.data, box.fake_home, box.secret_dir)
+    box.probe(proc_root=box.tmp / "noproc")
+    assert snapshot(box.home, box.data, box.fake_home, box.secret_dir) == before
+
+
+# ─────────────────────────── Grok compat ─────────────────────────────────────────
+
+def compat(box, **fake) -> "doctor.Fact":
+    box.fake(**fake)
+    return box.probe(proc_root=box.tmp / "noproc")["Grok compat"]
+
+
+def doc_with(box, **over):
+    return inspect_doc(str(box.fake_home), **over)
+
+
+def test_compat_isolated_is_ok(box):
+    f = compat(box)
+    assert f.level == "ok" and "isolated" in f.value and "0 active MCP servers" in f.value
+
+
+def test_compat_runs_inspect_under_the_neutral_dir_with_the_homes_config_only(box):
+    box.ensure_home()
+    (box.home / "config.toml").write_text("[cli]\nauto_update = false\n# marker\n")
+    (box.home / "auth.json").write_text("SHOULD-NOT-BE-COPIED")
+    compat(box)
+    run = [c for c in box.calls() if c["args"] == ["inspect", "--json"]][0]
+    assert run["config"].endswith("# marker\n")                   # the cockpit's config rides along
+    assert "doctor-grok-" in run["home"] and str(box.home) != run["home"]
+
+
+def test_compat_active_mcp_server_is_fail_with_its_name(box):
+    mcp = [{"name": "mail", "disabled": True}, {"name": "tablet", "transport": "stdio",
+                                                "source": {"type": "mcpJson", "path": "/x/.mcp.json"}}]
+    f = compat(box, doc=doc_with(box, mcpServers=mcp))
+    assert f.level == "fail" and "1 active MCP server(s): tablet" in f.value and "mail" not in f.value
+    assert "GROK_ENABLED=false" in f.remedy
+
+
+def test_compat_many_active_mcp_servers_are_summarised(box):
+    mcp = [{"name": f"srv{i}"} for i in range(8)]
+    f = compat(box, doc=doc_with(box, mcpServers=mcp))
+    assert f.level == "fail" and "8 active" in f.value and "+3 more" in f.value and "srv7" not in f.value
+
+
+def test_compat_all_servers_disabled_is_ok(box):
+    mcp = [{"name": "a", "disabled": True}, {"name": "b", "disabled": True}]
+    assert compat(box, doc=doc_with(box, mcpServers=mcp)).level == "ok"
+
+
+def test_compat_mcp_beats_hooks_in_the_verdict(box):
+    f = compat(box, doc=doc_with(box, mcpServers=[{"name": "x"}],
+                                 hooks=[{"event": "e", "vendor": "claude"}]))
+    assert f.level == "fail"
+
+
+def test_compat_active_claude_hook_is_warn(box):
+    f = compat(box, doc=doc_with(box, hooks=[{"event": "session_start", "vendor": "claude"}]))
+    assert f.level == "warn" and "hook session_start" in f.value and "PLUGINS" in f.remedy
+
+
+def test_compat_disabled_claude_hook_is_ok(box):
+    assert compat(box, doc=doc_with(box, hooks=[{"event": "e", "vendor": "claude", "disabled": True}])).level == "ok"
+
+
+def test_compat_plugin_hook_from_claudes_tree_is_warn_even_without_a_vendor_tag(box):
+    hook = {"event": "(plugin)", "hookType": "file", "matcher": None,
+            "target": f"{box.fake_home}/.claude-accounts/work/plugins/cache/p/hooks/hooks.json",
+            "source": {"type": "plugin", "plugin_name": "p", "path": f"{box.fake_home}/.claude-accounts/work"}}
+    f = compat(box, doc=doc_with(box, hooks=[hook]))
+    assert f.level == "warn" and "hook (plugin)" in f.value
+
+
+def test_compat_plugin_skill_loaded_from_dot_claude_is_warn(box):
+    skill = {"name": "brainstorming", "source": {"type": "plugin",
+                                                  "path": f"{box.fake_home}/.claude/plugins/x/SKILL.md"}}
+    f = compat(box, doc=doc_with(box, skills=[skill]))
+    assert f.level == "warn" and "skill brainstorming" in f.value
+
+
+def test_compat_cursor_origin_by_path_is_warn(box):
+    skill = {"name": "cs", "source": {"type": "user", "path": f"{box.fake_home}/.cursor/skills/cs/SKILL.md"}}
+    assert compat(box, doc=doc_with(box, skills=[skill])).level == "warn"
+
+
+def test_compat_the_agents_dir_skills_that_stay_on_by_design_are_not_flagged(box):
+    """§L10: ~/.agents/skills has no off switch; they are neither Claude's nor Cursor's."""
+    skills = [{"name": f"s{i}", "source": {"type": "user", "path": f"{box.fake_home}/.agents/skills/s{i}/SKILL.md"}}
+              for i in range(15)]
+    assert compat(box, doc=doc_with(box, skills=skills)).level == "ok"
+
+
+def test_compat_a_sibling_directory_named_like_dot_claude_is_not_foreign(box):
+    skill = {"name": "x", "source": {"type": "user", "path": f"{box.fake_home}/.claude-notes/x/SKILL.md"}}
+    assert compat(box, doc=doc_with(box, skills=[skill])).level == "ok"
+
+
+def test_compat_claude_vendor_skill_and_agent_are_warn(box):
+    f = compat(box, doc=doc_with(box, skills=[{"name": "s", "vendor": "claude"}],
+                                 agents=[{"name": "a", "vendor": "cursor"}]))
+    assert f.level == "warn" and "skill s" in f.value and "agent a" in f.value
+
+
+def test_compat_claude_json_sourced_agent_is_warn(box):
+    f = compat(box, doc=doc_with(box, agents=[{"name": "a", "source": {"type": "claudeJson"}}]))
+    assert f.level == "warn" and "agent a" in f.value
+
+
+def test_compat_disabled_claude_skill_is_ok(box):
+    assert compat(box, doc=doc_with(box, skills=[{"name": "s", "vendor": "claude", "disabled": True}])).level == "ok"
+
+
+@pytest.mark.parametrize("surface", ["skills", "rules", "hooks", "mcps", "mcp", "agents"])
+def test_compat_a_claude_compat_switch_left_on_is_warn(box, surface):
+    cells = [{"vendor": "claude", "surface": surface, "enabled": True, "source": "default"}]
+    f = compat(box, doc=doc_with(box, externalCompat={"cells": cells}))
+    assert f.level == "warn" and f"claude/{surface}" in f.value
+
+
+def test_compat_session_import_cells_and_other_vendors_are_not_flagged(box):
+    cells = [{"vendor": "claude", "surface": "sessions", "enabled": True},
+             {"vendor": "codex", "surface": "skills", "enabled": True},
+             {"vendor": "cursor", "surface": "skills", "enabled": False}]
+    assert compat(box, doc=doc_with(box, externalCompat={"cells": cells})).level == "ok"
+
+
+def test_compat_leaked_items_are_summarised(box):
+    skills = [{"name": f"s{i}", "vendor": "claude"} for i in range(8)]
+    f = compat(box, doc=doc_with(box, skills=skills))
+    assert "+3 more" in f.value and "s7" not in f.value
+
+
+@pytest.mark.parametrize("drop", ["mcpServers", "hooks", "skills", "agents", "externalCompat"])
+def test_compat_missing_key_is_unrecognised_never_zero_found(box, drop):
+    doc = doc_with(box)
+    doc.pop(drop)
+    f = compat(box, doc=doc)
+    assert f.level == "warn" and "unrecognised" in f.value
+
+
+@pytest.mark.parametrize("bad", [{"mcpServers": {"a": 1}}, {"hooks": "none"}, {"skills": ["str"]},
+                                 {"agents": None}, {"externalCompat": []}, {"externalCompat": {"cells": {}}},
+                                 {"externalCompat": {"cells": ["x"]}}, {"externalCompat": {}}])
+def test_compat_wrong_shapes_are_unrecognised(box, bad):
+    f = compat(box, doc=doc_with(box, **bad))
+    assert f.level == "warn" and "unrecognised" in f.value
+
+
+def test_compat_non_dict_document_is_unrecognised(box):
+    f = compat(box, doc=["a", "list"])
+    assert f.level == "warn" and "unrecognised" in f.value
+
+
+def test_compat_garbage_output_is_unrecognised(box):
+    f = compat(box, inspect_mode="garbage")
+    assert f.level == "warn" and "unrecognised" in f.value
+
+
+def test_compat_nonzero_exit_warns_with_a_stderr_snippet(box):
+    f = compat(box, inspect_mode="exit", stderr="boom: something broke")
+    assert f.level == "warn" and "exit 3" in f.value and "boom: something broke" in f.value
+
+
+def test_compat_hang_degrades_to_a_bounded_warning_and_kills_the_group(box, monkeypatch):
+    monkeypatch.setattr(doctor, "GROK_CMD_TIMEOUT_SEC", 0.6)
+    t0 = time.monotonic()
+    f = compat(box, inspect_mode="hang")
+    assert time.monotonic() - t0 < 5
+    assert f.level == "warn" and "could not inspect" in f.value
+    gc = int(box.pidfile.read_text())
+    deadline = time.monotonic() + 3
+    while not pid_gone(gc) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert pid_gone(gc)
+
+
+def test_compat_with_the_engines_own_fake_degrades_to_warn(box):
+    """tests/fake_grok_acp.py has no `inspect`: exit 2 must read as 'could not inspect'."""
+    box.use_acp_fake()
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok compat"]
+    assert f.level == "warn" and "could not inspect (exit 2)" in f.value
+
+
+def test_compat_is_not_checked_without_a_usable_cli(box):
+    box.fake(version="garbage")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok compat"]
+    assert f.level == "info" and "no usable Grok CLI" in f.value
+    assert [c["args"] for c in box.calls()] == [["--version"]]
+
+
+def test_compat_does_not_need_a_real_home(box):
+    shutil.rmtree(box.home)
+    assert box.probe(proc_root=box.tmp / "noproc")["Grok compat"].level == "ok"
+
+
+# ─────────────────────────── Grok processes ──────────────────────────────────────
+
+def agent(pid, age, home, **kw):
+    return {"pid": pid, "argv": kw.pop("argv", AGENT_ARGV), "age": age,
+            "environ": kw.pop("environ", {"GROK_HOME": str(home), "PATH": "/bin"}), **kw}
+
+
+def procs_fact(box, procs, **kw):
+    root = fake_proc(box.tmp / f"proc{len(list(box.tmp.glob('proc*')))}", procs, **kw)
+    return box.probe(proc_root=root)["Grok processes"]
+
+
+def test_processes_none_is_ok(box):
+    f = procs_fact(box, [])
+    assert f.level == "ok" and "no `grok agent`" in f.value
+
+
+def test_processes_young_turns_are_in_flight_not_a_problem(box):
+    f = procs_fact(box, [agent(500, 30, box.home), agent(501, 14 * 60, box.home)])
+    assert f.level == "ok" and "2 turn(s) in flight" in f.value and "oldest 14m" in f.value
+
+
+def test_processes_leftover_older_than_15_minutes_is_fail(box):
+    f = procs_fact(box, [agent(500, 3 * 3600 + 120, box.home, pgid=4242)])
+    assert f.level == "fail" and "pid 500" in f.value and "3h 2m" in f.value
+    assert "kill -TERM -- -4242" in f.remedy and "journalctl" in f.remedy
+
+
+def test_processes_boundary_is_exactly_fifteen_minutes(box):
+    assert procs_fact(box, [agent(500, doctor.GROK_AGENT_MAX_AGE_SEC - 1, box.home)]).level == "ok"
+    assert procs_fact(box, [agent(500, doctor.GROK_AGENT_MAX_AGE_SEC, box.home)]).level == "fail"
+
+
+def test_processes_one_old_among_young_is_fail_and_names_only_the_old(box):
+    f = procs_fact(box, [agent(500, 40, box.home), agent(501, 7200, box.home)])
+    assert f.level == "fail" and "1 leftover" in f.value and "pid 501" in f.value and "pid 500" not in f.value
+
+
+def test_processes_of_another_grok_home_are_not_ours(box):
+    f = procs_fact(box, [agent(500, 7200, box.tmp / "operator-home")])
+    assert f.level == "ok"
+
+
+def test_processes_without_a_grok_home_in_their_environ_are_not_ours(box):
+    f = procs_fact(box, [agent(500, 7200, box.home, environ={"PATH": "/bin"})])
+    assert f.level == "ok"
+
+
+def test_processes_home_is_compared_after_resolving_symlinks(box):
+    link = box.tmp / "home-link"
+    link.symlink_to(box.home)
+    assert procs_fact(box, [agent(500, 7200, link)]).level == "fail"
+
+
+def test_processes_with_an_unreadable_environ_are_counted(box):
+    f = procs_fact(box, [agent(500, 7200, box.home, environ=None)])
+    assert f.level == "fail"
+
+
+def test_processes_that_are_not_the_engines_argv_are_ignored(box):
+    for argv in (["grok", "agent", "stdio"], ["grok", "--no-leader", "stdio"], ["grok", "agent", "--no-leader"],
+                 ["grok"], ["vim", "notes.txt"]):
+        assert procs_fact(box, [agent(500, 7200, box.home, argv=argv)]).level == "ok", argv
+
+
+def test_processes_zombies_are_ignored(box):
+    assert procs_fact(box, [agent(500, 7200, box.home, state="Z")]).level == "ok"
+
+
+def test_processes_age_unreadable_warns(box):
+    root = fake_proc(box.tmp / "procx", [agent(500, 30, box.home)])
+    (root / "uptime").unlink()
+    f = box.probe(proc_root=root)["Grok processes"]
+    assert f.level == "warn" and "age unreadable" in f.value
+
+
+def test_processes_non_numeric_entries_and_broken_stat_are_skipped(box):
+    root = fake_proc(box.tmp / "procy", [agent(500, 30, box.home), agent(501, 30, box.home)])
+    (root / "self").mkdir()
+    (root / "501" / "stat").write_text("garbage")
+    f = box.probe(proc_root=root)["Grok processes"]
+    assert f.level == "ok" and "1 turn(s)" in f.value
+
+
+def test_processes_real_proc_real_child_age_arithmetic(box, monkeypatch):
+    """The /proc parsing against a real process: start-time ticks vs uptime."""
+    env = {**os.environ, "GROK_HOME": str(box.home)}
+    child = subprocess.Popen([str(box.bin), "agent", "--no-leader", "stdio"], env=env,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        while not box.pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(1.2)
+        found = doctor._list_grok_agents(box.home)
+        mine = [p for p in found if p["pid"] == child.pid]
+        assert mine and 1.0 <= mine[0]["age"] < 30 and mine[0]["pgid"] == child.pid
+        assert doctor._list_grok_agents(box.tmp / "another-home") == []
+        f = box.probe(proc_root=Path("/proc"))["Grok processes"]
+        assert f.level == "ok" and "1 turn(s) in flight" in f.value
+        monkeypatch.setattr(doctor, "GROK_AGENT_MAX_AGE_SEC", 1.0)
+        assert box.probe(proc_root=Path("/proc"))["Grok processes"].level == "fail"
+    finally:
+        os.killpg(child.pid, 9)
+        child.wait()
+
+
+def test_processes_missing_proc_root_means_none(box):
+    assert box.probe(proc_root=box.tmp / "no-such-proc")["Grok processes"].level == "ok"
+
+
+# ─────────────────────────── Grok litter ─────────────────────────────────────────
+
+def litter_fact(box, n, *, prefix="sandbox-blocked"):
+    box.home.mkdir(exist_ok=True)
+    for i in range(n):
+        (box.home / f"{prefix}.{9000 + i}").write_text("")
+    return box.probe(proc_root=box.tmp / "noproc")["Grok litter"]
+
+
+def test_litter_none_is_ok(box):
+    f = litter_fact(box, 0)
+    assert f.level == "ok" and f.value.startswith("0 ")
+
+
+def test_litter_at_the_limit_is_ok(box):
+    assert litter_fact(box, doctor.GROK_LITTER_WARN).level == "ok"
+
+
+def test_litter_over_the_limit_warns_with_the_cleanup_command(box):
+    f = litter_fact(box, doctor.GROK_LITTER_WARN + 1)
+    assert f.level == "warn" and f"{doctor.GROK_LITTER_WARN + 1} sandbox-blocked*" in f.value
+    assert "reap_litter" in f.remedy and repr(str(box.home)) in f.remedy
+
+
+def test_litter_counts_the_dir_variant_too_and_ignores_other_files(box):
+    box.home.mkdir(exist_ok=True)
+    for i in range(doctor.GROK_LITTER_WARN + 1):
+        (box.home / f"sandbox-blocked-dir.{i}").mkdir()
+    (box.home / "sessions").mkdir()
+    (box.home / "auth.json").write_text("{}")
+    assert box.probe(proc_root=box.tmp / "noproc")["Grok litter"].level == "warn"
+
+
+def test_litter_unrelated_files_do_not_count(box):
+    box.home.mkdir(exist_ok=True)
+    for i in range(doctor.GROK_LITTER_WARN + 5):
+        (box.home / f"other.{i}").write_text("")
+    assert box.probe(proc_root=box.tmp / "noproc")["Grok litter"].level == "ok"
+
+
+def test_litter_in_a_missing_home_is_zero(box):
+    shutil.rmtree(box.home)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok litter"]
+    assert f.level == "ok" and f.value.startswith("0 ")
+
+
+# ─────────────────────────── Grok usage files ────────────────────────────────────
+
+def test_usage_files_absent_is_silent(box):
+    assert "Grok usage files" not in box.probe(proc_root=box.tmp / "noproc")
+
+
+def test_usage_files_small_are_informational_ok(box):
+    (box.data / "grok_usage.jsonl").write_text("x" * 2048)
+    (box.data / "grok_limit_errors.jsonl").write_text("y" * 100)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok usage files"]
+    assert f.level == "ok" and "grok_usage.jsonl 2.0KB" in f.value and "grok_limit_errors.jsonl 100B" in f.value
+
+
+def test_usage_files_only_one_present(box):
+    (box.data / "grok_limit_errors.jsonl").write_text("y" * 100)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok usage files"]
+    assert f.level == "ok" and "grok_usage" not in f.value
+
+
+def test_usage_file_over_its_limit_warns(box, monkeypatch):
+    monkeypatch.setattr(doctor, "GROK_USAGE_WARN_BYTES", 1000)
+    (box.data / "grok_usage.jsonl").write_text("x" * 1001)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok usage files"]
+    assert f.level == "warn" and "too large: grok_usage.jsonl" in f.value and "archive" in f.remedy
+
+
+def test_usage_file_exactly_at_its_limit_is_ok(box, monkeypatch):
+    monkeypatch.setattr(doctor, "GROK_USAGE_WARN_BYTES", 1000)
+    (box.data / "grok_usage.jsonl").write_text("x" * 1000)
+    assert box.probe(proc_root=box.tmp / "noproc")["Grok usage files"].level == "ok"
+
+
+def test_limit_errors_file_has_its_own_smaller_limit(box, monkeypatch):
+    monkeypatch.setattr(doctor, "GROK_LIMIT_ERRORS_WARN_BYTES", 500)
+    (box.data / "grok_usage.jsonl").write_text("x" * 1001)           # fine for the usage limit
+    (box.data / "grok_limit_errors.jsonl").write_text("y" * 501)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok usage files"]
+    assert f.level == "warn" and "grok_limit_errors.jsonl" in f.value.split("too large:")[1]
+    assert "grok_usage.jsonl" not in f.value.split("too large:")[1]
+
+
+def test_default_usage_limits_are_sane():
+    assert doctor.GROK_USAGE_WARN_BYTES >= 1024 * 1024 and doctor.GROK_LIMIT_ERRORS_WARN_BYTES >= 256 * 1024
+
+
+# ─────────────────────────── plumbing: overlay, isolation, import failure, render ─
+
+def test_env_overlay_applies_and_restores_exactly(monkeypatch):
+    monkeypatch.setenv("GROK_HOME", "/orig/home")
+    monkeypatch.setenv("GROK_ONLY_IN_PROCESS", "leftover")
+    monkeypatch.delenv("GROK_ONLY_IN_ENV", raising=False)
+    monkeypatch.setenv("UNRELATED_KEY", "keep")
+    env = {"GROK_HOME": "/dotenv/home", "GROK_ONLY_IN_ENV": "yes", "UNRELATED_KEY": "changed",
+           "PATH": "/p", "HOME": "/h"}
+    with doctor._env_overlay(env):
+        assert os.environ["GROK_HOME"] == "/dotenv/home"
+        assert os.environ["GROK_ONLY_IN_ENV"] == "yes"
+        assert "GROK_ONLY_IN_PROCESS" not in os.environ              # env is authoritative for GROK_*
+        assert os.environ["UNRELATED_KEY"] == "keep"                 # only the keys the engine reads
+        assert os.environ["PATH"] == "/p" and os.environ["HOME"] == "/h"
+    assert os.environ["GROK_HOME"] == "/orig/home"
+    assert os.environ["GROK_ONLY_IN_PROCESS"] == "leftover"
+    assert "GROK_ONLY_IN_ENV" not in os.environ
+    assert os.environ["UNRELATED_KEY"] == "keep"
+
+
+def test_env_overlay_restores_after_an_exception(monkeypatch):
+    monkeypatch.setenv("GROK_HOME", "/orig/home")
+    with pytest.raises(RuntimeError):
+        with doctor._env_overlay({"GROK_HOME": "/other"}):
+            raise RuntimeError("boom")
+    assert os.environ["GROK_HOME"] == "/orig/home"
+
+
+def test_probe_uses_the_env_it_is_given_not_the_process_env(box, monkeypatch):
+    other = box.tmp / "elsewhere-home"
+    other.mkdir()
+    monkeypatch.setenv("GROK_HOME", str(other))                      # the process says "elsewhere" ...
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (GROK_HOME)"]
+    assert f.value == str(box.home)                                  # ... the merged env wins
+    assert os.environ["GROK_HOME"] == str(other)
+
+
+def test_data_dir_defaults_to_the_repo_data_dir(box):
+    box.env.pop("_CARDLOOP_DATA_DIR")
+    (box.tmp / "data").mkdir(exist_ok=True)
+    (box.tmp / "data" / "grok_usage.jsonl").write_text("x")
+    assert "Grok usage files" in box.probe(proc_root=box.tmp / "noproc")
+
+
+def test_one_crashing_step_does_not_hide_the_others(box, monkeypatch):
+    def boom(g):
+        raise RuntimeError("kaboom")
+    monkeypatch.setattr(doctor, "_grok_usage_files", boom)
+    by = box.probe(proc_root=box.tmp / "noproc")
+    assert by["Grok usage files"].level == "warn" and "kaboom" in by["Grok usage files"].value
+    assert "Grok CLI" in by and "Grok auth" in by and "Grok processes" in by
+
+
+def test_unimportable_engine_is_a_single_warning(box, monkeypatch):
+    monkeypatch.setitem(sys.modules, "grok_engine", None)            # `import grok_engine` -> ImportError
+    facts = doctor.probe_grok(box.env, repo_root=box.tmp, proc_root=box.tmp / "noproc")
+    assert [f.label for f in facts] == ["Grok"] and facts[0].level == "warn"
+    assert "cannot be imported" in facts[0].value and os.environ["GROK_HOME"] == str(box.home)
+
+
+def test_run_group_returns_output_and_exit_code(tmp_path):
+    out = doctor._run_group([sys.executable, "-c", "import sys; print('hi'); sys.stderr.write('e'); sys.exit(4)"])
+    assert out == (4, "hi", "e")
+
+
+def test_run_group_missing_binary_is_none():
+    assert doctor._run_group(["/nonexistent/definitely-not-here"]) is None
+
+
+def test_run_group_timeout_is_none_and_the_whole_group_dies(tmp_path):
+    pidfile = tmp_path / "gc.pid"
+    code = ("import subprocess, sys, time\n"
+            f"p = subprocess.Popen([{SLEEP!r}, '300'])\nopen({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+            "time.sleep(300)\n")
+    t0 = time.monotonic()
+    assert doctor._run_group([sys.executable, "-c", code], timeout=0.8) is None
+    assert time.monotonic() - t0 < 5
+    gc = int(pidfile.read_text())
+    deadline = time.monotonic() + 3
+    while not pid_gone(gc) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert pid_gone(gc)
+
+
+def test_run_group_kills_a_straggler_even_after_a_clean_exit(tmp_path):
+    pidfile = tmp_path / "gc.pid"
+    code = ("import subprocess, sys\n"
+            f"p = subprocess.Popen([{SLEEP!r}, '300'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            f"open({str(pidfile)!r}, 'w').write(str(p.pid))\nprint('done')\n")
+    assert doctor._run_group([sys.executable, "-c", code], timeout=5) == (0, "done", "")
+    gc = int(pidfile.read_text())
+    deadline = time.monotonic() + 3
+    while not pid_gone(gc) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert pid_gone(gc)
+
+
+@pytest.mark.parametrize("sec,text", [(5, "5s"), (89, "89s"), (90, "1m"), (600, "10m"), (5399, "89m"),
+                                      (5400, "1h 30m"), (3 * 3600 + 120, "3h 2m"), (-5, "0s")])
+def test_fmt_age(sec, text):
+    assert doctor._fmt_age(sec) == text
+
+
+def test_the_grok_section_is_hidden_when_empty_and_the_output_is_unchanged():
+    sections = {name: [doctor.Fact("x", "v")] for name in doctor.CORE_SECTIONS} | {"Grok": []}
+    text = doctor.render_text(sections, [], elapsed=0.1)
+    assert "== Grok ==" not in text
+    assert [l for l in text.splitlines() if l.startswith("== ")] == [f"== {n} ==" for n in doctor.CORE_SECTIONS] + ["== Verdict =="]
+    parsed = json.loads(doctor.render_json(sections, [], elapsed=0.1, exit_code=0))
+    assert list(parsed["sections"]) == list(doctor.CORE_SECTIONS)
+
+
+def test_the_grok_section_shows_between_load_and_the_verdict_when_it_has_facts():
+    sections = {name: [doctor.Fact("x", "v")] for name in doctor.CORE_SECTIONS}
+    sections["Grok"] = [doctor.Fact("Grok CLI", "1.0.46"), doctor.Fact("Grok auth", "no login", level="fail",
+                                                                     remedy="tools/grok-acct login")]
+    text = doctor.render_text(sections, [], elapsed=0.1)
+    assert text.index("== Load ==") < text.index("== Grok ==") < text.index("== Verdict ==")
+    assert "✗ [Grok] Grok auth: no login" in text and "-> tools/grok-acct login" in text
+    parsed = json.loads(doctor.render_json(sections, [], elapsed=0.1, exit_code=1))
+    assert list(parsed["sections"]) == list(doctor.CORE_SECTIONS) + ["Grok"]
+    assert parsed["sections"]["Grok"][1] == {"label": "Grok auth", "value": "no login", "level": "fail",
+                                              "remedy": "tools/grok-acct login"}
+    finding = parsed["verdict"]["findings"][0]
+    assert finding["section"] == "Grok" and finding["level"] == "fail"
+
+
+def test_a_grok_failure_drives_the_exit_code(monkeypatch, capsys):
+    sections = {name: [] for name in doctor.SECTIONS}
+    sections["Grok"] = [doctor.Fact("Grok sandbox (probe)", "FAILED", level="fail")]
+    monkeypatch.setattr(doctor, "collect", lambda repo_root: (sections, []))
+    assert doctor.main(["--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["verdict"]["exit_code"] == 1
+
+
+def test_a_real_run_of_every_step_is_fast(box):
+    t0 = time.monotonic()
+    box.ensure_home()
+    box.write_probe("ok")
+    facts = box.probe(proc_root=box.tmp / "noproc")
+    assert time.monotonic() - t0 < 3
+    assert {f.level for f in facts.values()} <= {"ok", "info"}, {k: v.level for k, v in facts.items()}
