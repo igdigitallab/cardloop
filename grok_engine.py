@@ -328,7 +328,29 @@ def build_deny(home: Path, ctx: dict | None = None, *, bin_path: str | None = No
                 continue
         if entry not in deny:
             deny.append(entry)
-    return deny, skipped
+    return _prune_nested(deny), skipped
+
+
+def _prune_nested(deny: list[str]) -> list[str]:
+    """Drop a literal entry that lies INSIDE another literal entry.
+
+    bwrap binds each deny path over the host path; once a parent is bound the child's mount point
+    cannot be created inside it, and the sandbox refuses to start ("Can't create file ...:
+    Read-only file system") — measured with `~/.config` + `~/.config/gcloud` on this host. The
+    parent already hides the child, so dropping it loses nothing. Globs are left alone."""
+    real = {e: os.path.realpath(e) for e in deny if not _is_glob(e)}
+    kept = []
+    for e in deny:
+        if e in real:
+            r = real[e]
+            inside = any(o != e and (r == real[o] and deny.index(o) < deny.index(e)
+                                     or r.startswith(real[o].rstrip("/") + "/"))
+                         for o in real)
+            if inside:
+                _log(f"deny entry {e} is inside another deny entry (or a duplicate): dropped")
+                continue
+        kept.append(e)
+    return kept
 
 
 def _atomic_write(path: Path, text: str, mode: int = 0o600) -> bool:
@@ -686,7 +708,7 @@ async def _probe_provider() -> dict:
     home = info["home"]
     env = child_env(home, sandbox=False)
     try:
-        code, out, err = await _run_probe_cmd(binary, ["--version"], env, PROBE_TIMEOUT_SEC)
+        code, out, err = await _run_probe_cmd(binary, ["--version"], env, PROBE_TIMEOUT_SEC, cwd=str(home))
     except Exception as exc:
         return fail(f"`grok --version` failed: {exc!r}")
     m = _VERSION_RE.match(out.strip())
@@ -704,7 +726,7 @@ async def _probe_provider() -> dict:
         return fail("bubblewrap (bwrap) is required for the Grok sandbox and was not found on PATH",
                     version=version)
     try:
-        code, out, err = await _run_probe_cmd(binary, ["models"], env, PROBE_TIMEOUT_SEC)
+        code, out, err = await _run_probe_cmd(binary, ["models"], env, PROBE_TIMEOUT_SEC, cwd=str(home))
     except Exception as exc:
         return fail(f"`grok models` failed: {exc!r}", version=version)
     logged_in, default, models = parse_models_output(out)
@@ -1539,7 +1561,7 @@ async def _run_turn(
         acp = _Acp(proc)
         turn._acp = acp
         if ctx is not None:
-            ctx["running"][session_key] = turn
+            ctx.setdefault("running", {})[session_key] = turn
 
         # ---- handshake: every step has its own timeout (a missing login HANGS authenticate) ----
         t0 = time.monotonic()
@@ -1582,7 +1604,7 @@ async def _run_turn(
         except _AcpExit as exc:
             if turn.cancel_requested:
                 raise _Stopped() from exc
-            raise _exit_error(acp, "during startup") from exc
+            raise await _exit_error(acp, "during startup") from exc
         if acp.fatal:
             raise acp.fatal
         window = _model_window(session.get("models"), selected_model)
@@ -1601,7 +1623,7 @@ async def _run_turn(
         except _AcpExit as exc:
             if turn.cancel_requested:
                 raise _Stopped() from exc
-            raise _exit_error(acp, "before the prompt was accepted") from exc
+            raise await _exit_error(acp, "before the prompt was accepted") from exc
         turn.prompt_started = True
         response: dict | None = None
         while True:
@@ -1626,7 +1648,7 @@ async def _run_turn(
                 text = acp.stderr_tail()
                 _capture_limit_error(data, source="exit", text=text, session_id=session_id,
                                      project_name=project_name, model=selected_model)
-                raise _exit_error(acp, "before answering the prompt")
+                raise await _exit_error(acp, "before answering the prompt")
             for ev in mapper.finish():
                 yield ev
             yield _result_event(session_id, selected_model, int(1000 * (time.monotonic() - prompt_t0)),
@@ -1674,10 +1696,13 @@ async def _run_turn(
             # arriving request still observes the slot as occupied (same as Codex).
             ctx["running"][session_key] = True
         if acp is not None:
-            await acp.teardown(turn.session_id)
-            if home is not None:
-                removed = reap_litter(home, acp.proc.pid)
-                _log(f"teardown {session_key}: exit={acp.proc.returncode} litter_removed={len(removed)}")
+            try:
+                await acp.teardown(turn.session_id)
+            finally:
+                # also when teardown re-raises a cancellation: the placeholders must not pile up
+                if home is not None:
+                    removed = reap_litter(home, acp.proc.pid)
+                    _log(f"teardown {session_key}: exit={acp.proc.returncode} litter_removed={len(removed)}")
 
 
 def _check_auth_meta(meta, facts: dict) -> None:
@@ -1715,7 +1740,16 @@ async def _apply_config(acp: _Acp, session: dict, session_id: str, model: str, e
             raise GrokUnavailableError(f"Grok rejected {config_id} {value!r}: {exc}") from exc
 
 
-def _exit_error(acp: _Acp, when: str) -> Exception:
+async def _exit_error(acp: _Acp, when: str) -> Exception:
+    """The error for a Grok process that went away: exit code + the tail of its stderr.
+
+    stdout closing and the process being reaped / stderr being drained are three separate events;
+    wait (bounded) for the last two so the message carries the code and the final stderr line."""
+    for waiter in (acp.proc.wait(), asyncio.wait({acp._err_task}, timeout=1.0)):
+        try:
+            await asyncio.wait_for(waiter, 1.0)
+        except Exception:
+            pass
     code = acp.proc.returncode
     tail = acp.stderr_tail()
     tail_txt = f": {tail[-1500:]}" if tail else ""

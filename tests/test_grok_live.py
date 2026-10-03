@@ -89,11 +89,17 @@ async def real_turn(live, cwd: Path, prompt: str, *, key: str = "live:1", resume
     hay: list[str] = []
     tools: list[str] = []
 
+    live.outputs = outputs = []      # completed tool outputs only (the command text is not in them)
+
     def tap(msg: dict) -> None:
         hay.append(grok_engine._haystack(msg))
         upd = (msg.get("params") or {}).get("update") or {}
         if upd.get("sessionUpdate") == "available_commands_update":
             tools.extend((upd.get("_meta") or {}).get("tools") or [])
+        if upd.get("sessionUpdate") == "tool_call_update" and upd.get("status") == "completed":
+            raw = upd.get("rawOutput")
+            if isinstance(raw, dict) and isinstance(raw.get("output_for_prompt"), str):
+                outputs.append(raw["output_for_prompt"])
 
     async def drive():
         async for ev in grok_engine._run_turn(
@@ -198,8 +204,13 @@ async def test_sandbox_denies_listed_paths_allows_cwd_write_and_git(live, monkey
         assert "cwd-write-ok" in hay, "writing inside the project directory failed"
         assert "live-test-commit" in hay, "git did not work inside the sandbox"
         assert "home-write-exit=0" not in hay and not outside.exists(), "a write to $HOME succeeded"
-        for p, names in real_dirs:   # bind-over deny: the real directory listing must not show through
-            assert not any(n in hay.split(f"LS-{p.name}:")[-1].split("LS-")[0] for n in names if len(n) > 3), p
+        out = "\n".join(live.outputs)
+        assert out, "no tool output was captured"
+        for p, names in real_dirs:   # the denied directory must not list its real contents
+            seg = out.split(f"LS-{p.name}:")[1].split("LS-")[0]
+            shown = [n for n in names if len(n) > 3 and re.search(rf"(?m)^{re.escape(n)}$", seg)]
+            assert not shown, f"{p} listed real entries through the deny: {shown}\n{seg[:300]}"
+            assert "Permission denied" in seg or not seg.strip(), f"{p}: unexpected listing {seg[:200]!r}"
     finally:
         outside.unlink(missing_ok=True)
 

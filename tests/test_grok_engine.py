@@ -1400,3 +1400,63 @@ async def test_resume_reports_the_window_remembered_from_an_earlier_session(env)
     env.fake("synthetic_resume")
     cold = only(await env.run(resume_session_id="sess-abc"), "result")[0]
     assert cold["context_window"] is None                       # unknown stays unknown, never invented
+
+
+def test_a_deny_entry_inside_another_is_dropped_because_bwrap_cannot_mount_it(env, monkeypatch):
+    # measured live: `~/.config` + `~/.config/gcloud` makes bwrap fail with
+    # "Can't create file ...: Read-only file system" and takes every turn down with it
+    parent = env.tmp / "cfg"
+    (parent / "gcloud").mkdir(parents=True)
+    (parent / "gh").mkdir()
+    other = env.tmp / "other"
+    other.mkdir()
+    alias = env.tmp / "alias-of-other"
+    alias.symlink_to(other)
+    monkeypatch.setenv("GROK_SANDBOX_DENY", f"{parent}/gcloud,{parent},{parent}/gh,{other},{alias},**/.env")
+    deny = ensure_home(env.ctx)["deny"]
+    assert str(parent) in deny and str(other) in deny and "**/.env" in deny
+    assert f"{parent}/gcloud" not in deny and f"{parent}/gh" not in deny
+    assert str(alias) not in deny                       # same realpath as `other`: one entry is enough
+
+
+async def test_a_ctx_without_a_running_map_still_runs(env):
+    ctx = {"DATA": env.data}
+    events = [e async for e in run_grok_engine(**env.kwargs(ctx=ctx))]
+    assert types(events)[-1] == "result" and ctx["running"]["p:1"] is True
+
+
+async def test_litter_is_reaped_even_when_the_task_is_cancelled(env):
+    env.fake("synthetic_cancel", litter=1, spawn_child=1)
+    task = asyncio.ensure_future(_drain(run_grok_engine(**env.kwargs())))
+    assert await wait_until(lambda: any(p.name.startswith("sandbox-blocked") for p in env.home.iterdir()))
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [p.name for p in env.home.iterdir() if p.name.startswith("sandbox-blocked")] == []
+
+
+async def test_probe_commands_run_in_the_grok_home_not_the_cockpit_cwd(probed):
+    seen = []
+    real = grok_engine._run_probe_cmd
+
+    async def spy(binary, args, env, timeout, cwd=None):
+        seen.append(cwd)
+        return await real(binary, args, env, timeout, cwd=cwd)
+    probed.mp.setattr(grok_engine, "_run_probe_cmd", spy)
+    await grok_engine.provider_info(force=True)
+    assert seen == [str(probed.home)] * 2
+
+
+async def test_a_second_cancel_during_teardown_still_kills_and_reaps(env, monkeypatch):
+    monkeypatch.setattr(grok_engine, "TERM_WAIT_SEC", 1.0)
+    env.fake("synthetic_cancel", litter=1, spawn_child=1, ignore_term=1, ignore_eof=1)
+    task = asyncio.ensure_future(_drain(run_grok_engine(**env.kwargs())))
+    assert await wait_until(lambda: any(p.name.startswith("sandbox-blocked") for p in env.home.iterdir()))
+    task.cancel()
+    await asyncio.sleep(0.3)           # teardown is now waiting out the SIGTERM grace
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    pids = env.dump("pids")
+    assert pid_gone(pids["leader"]) and pid_gone(pids["child"])
+    assert [p.name for p in env.home.iterdir() if p.name.startswith("sandbox-blocked")] == []
