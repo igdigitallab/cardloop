@@ -1,0 +1,1284 @@
+#!/usr/bin/env python3
+"""grok-verify — the gate to run after every `grok` CLI update, and the long-run soak (spec-095 P7).
+
+    tools/grok-verify check [--login PATH] [--grok-bin PATH] [--with-cockpit] [--dry-run] ...
+    tools/grok-verify soak  [--login PATH] [--duration 24h] [--interval 20m] [--cycles N] [--dry-run] ...
+
+`check` is the CLI-bump gate. It prints `grok --version` and whether that build is on
+`grok_engine.KNOWN_GOOD_VERSIONS`, then runs, against a SCRATCH GROK_HOME seeded with a copy of a
+login you point it at (`--login`, env GROK_VERIFY_LOGIN, default ~/.grok):
+
+  live      pytest -m grok_live     compat isolation, sandbox denial, the marker-file checks (a repo's
+                                    own MCP server / hook / skill must start nothing), one real turn
+  canary    pytest -m grok_canary   egress canary: a repo with a multi-MB blob in its git history, one
+                                    "reply OK" turn, no connection may send more than 1 MiB
+  cockpit   pytest -m grok_live_cockpit   (only with --with-cockpit) the whole wired cockpit driven
+                                    over HTTP with the real binary
+  fixtures  re-record the wire fixtures into a TEMP dir (tools/grok_record_fixtures.py) and diff the
+            event TYPE / field-shape skeletons against tests/fixtures/grok/ — ids and text are
+            ignored; added and removed methods and fields are listed
+
+Only when EVERY step passed (and none was skipped by a flag) and the build is not already listed does
+it print the exact one-line edit for KNOWN_GOOD_VERSIONS. It never edits a file itself.
+
+`soak` is the long run: N cycles over a duration (default 24 h, one cycle every 20 min). Each cycle is
+one tiny real turn through `grok_engine.run_grok_engine` in a scratch project under the production
+sandbox profile, then asserts: no `grok agent` process of that GROK_HOME left over, the sandbox
+litter count and the GROK_HOME size growth stay bounded; every K cycles it runs the egress canary.
+One JSON line per cycle goes to the log file, a summary is written at the end, SIGTERM/SIGINT stop it
+cleanly (the engine kills its process group, the scratch tree and the login copy are removed).
+Model turns cost subscription quota: about one per cycle + one sandbox probe + one canary per K cycles.
+`--cycles 2 --interval 5` is the smoke run.
+
+`--dry-run` prints what would happen and spends nothing (it still runs `grok --version`).
+
+Exit status: 0 = everything passed; 1 = a check failed, or the run was incomplete (a step skipped by
+a flag is NOT a pass); 128+N = stopped by signal N. Output never contains the login's values.
+
+Everything is a flag or an environment variable (nothing machine specific is in this file):
+GROK_BIN, GROK_VERIFY_LOGIN, GROK_VERIFY_LOG, GROK_VERIFY_SCRATCH (parent of the scratch tree,
+default $TMPDIR), GROK_VERIFY_PYTEST (test runner command, default `<python> -m pytest`),
+GROK_VERIFY_RECORDER (fixture recorder command, default tools/grok_record_fixtures.py).
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import datetime
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+DEFAULT_DURATION = "24h"
+DEFAULT_INTERVAL = "20m"
+DEFAULT_CANARY_EVERY = 12            # soak: egress canary every K cycles (0 = never)
+DEFAULT_LITTER_MAX = 4               # sandbox-blocked* placeholders left in GROK_HOME after a turn
+DEFAULT_GROWTH_SLACK_MB = 16.0       # GROK_HOME growth allowed on top of the per-cycle allowance
+DEFAULT_GROWTH_PER_CYCLE_MB = 2.0    # ... per cycle after the baseline cycle
+DEFAULT_TURN_TIMEOUT = 180.0
+DEFAULT_STEP_TIMEOUT = 1800.0
+LEFTOVER_GRACE_SEC = 3.0             # how long a finished turn's process may take to disappear
+DRIFT_MODES = ("report", "removed", "any")
+
+VERSION_RE = re.compile(r"^\s*grok\s+(\d+\.\d+\.\d+)\b")
+_DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.I)
+_UNIT = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+_LITTER_RE = re.compile(r"^sandbox-blocked(?:-dir)?\.\d+$")
+_EGRESS_RE = re.compile(r"bytes_sent max\):\s*(\d+)")
+# only these markers are ever handed to pytest by this tool
+MARKER_LIVE, MARKER_CANARY, MARKER_COCKPIT = "grok_live", "grok_canary", "grok_live_cockpit"
+
+# env that must never reach a child: another account's keys, the cockpit's own secrets
+_ENV_DROP_EXACT = ("XAI_API_KEY", "ANTHROPIC_API_KEY", "WEB_PASSWORD", "WEB_COOKIE_SALT")
+_ENV_DROP_PREFIX = ("GROK_", "VAPID_")
+
+
+class UsageError(Exception):
+    """A bad flag or a missing prerequisite (exit 1, message on stderr)."""
+
+
+class Terminated(BaseException):
+    """SIGTERM/SIGINT/SIGHUP delivered to the main thread: unwind through every finally."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+# ---------------------------------------------------------------------------------------------
+# pure helpers (unit-tested without a CLI: tests/test_grok_verify.py)
+# ---------------------------------------------------------------------------------------------
+
+def parse_duration(text, *, what: str = "duration") -> float:
+    """`24h`, `20m`, `90s`, `1.5h`, `5` (plain numbers are seconds) -> seconds. Rejects 0 and junk."""
+    m = _DURATION_RE.match(str(text))
+    if not m:
+        raise UsageError(f"{what} {text!r} is not a duration (use 5, 90s, 20m, 24h, 2d)")
+    seconds = float(m.group(1)) * _UNIT[m.group(2).lower()]
+    if seconds <= 0:
+        raise UsageError(f"{what} must be positive, got {text!r}")
+    return seconds
+
+
+def plan_cycles(duration_sec: float, interval_sec: float, cycles: "int | None") -> int:
+    """`--cycles` wins; otherwise as many whole intervals as fit in the duration, at least one."""
+    if cycles is not None:
+        if cycles < 1:
+            raise UsageError("--cycles must be at least 1")
+        return cycles
+    return max(1, int(duration_sec // interval_sec))
+
+
+def parse_version(text: str) -> "str | None":
+    m = VERSION_RE.match(text or "")
+    return m.group(1) if m else None
+
+
+def edit_line(known, version: str) -> str:
+    """The new `KNOWN_GOOD_VERSIONS = (...)` source line with `version` appended (never duplicated)."""
+    versions = [v for v in known if v != version] + [version]
+    inner = ", ".join(json.dumps(v) for v in versions)
+    return f"KNOWN_GOOD_VERSIONS = ({inner}{',' if len(versions) == 1 else ''})"
+
+
+def redact(text: str, secrets) -> str:
+    for s in sorted({s for s in secrets if isinstance(s, str) and len(s) >= 8}, key=len, reverse=True):
+        text = text.replace(s, "REDACTED")
+    return text
+
+
+def secret_values(auth_path: Path) -> "list[str]":
+    """Every long string value in the login file — loaded ONLY to be scrubbed from output."""
+    try:
+        doc = json.loads(Path(auth_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out: "list[str]" = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+        elif isinstance(node, str) and len(node) >= 16:
+            out.append(node)
+    walk(doc)
+    return out
+
+
+def rmtree_force(path) -> None:
+    """rmtree that survives the mode-000 sandbox placeholders a sandboxed Grok spawn leaves."""
+    def onerr(func, p, _exc):
+        with contextlib.suppress(OSError):
+            os.chmod(os.path.dirname(p) or ".", stat.S_IRWXU)
+            os.chmod(p, stat.S_IRWXU)
+        with contextlib.suppress(OSError):
+            func(p)
+    path = str(path)
+    if not os.path.lexists(path):
+        return
+    for root, dirs, _files in os.walk(path):
+        for d in dirs:
+            with contextlib.suppress(OSError):
+                os.chmod(os.path.join(root, d), stat.S_IRWXU)
+    shutil.rmtree(path, onerror=onerr)
+
+
+def dir_bytes(path) -> int:
+    """Total size of the regular files under `path` (unreadable entries are skipped)."""
+    total = 0
+    for root, _dirs, files in os.walk(path, onerror=lambda _e: None):
+        for name in files:
+            with contextlib.suppress(OSError):
+                total += os.lstat(os.path.join(root, name)).st_size
+    return total
+
+
+def litter_count(home) -> int:
+    try:
+        return sum(1 for e in os.listdir(home) if _LITTER_RE.match(e))
+    except OSError:
+        return 0
+
+
+def find_agents(home, proc_root="/proc") -> "list[dict]":
+    """Live `grok agent --no-leader stdio` processes whose environment says GROK_HOME == `home`:
+    [{pid, pgid, age}]. A process whose environ cannot be read is counted (when whose it is cannot
+    be told, "leftover" is the safe guess). Zombies are not live."""
+    proc_root = Path(proc_root)
+    if not proc_root.is_dir():
+        return []
+    try:
+        uptime: "float | None" = float((proc_root / "uptime").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        uptime = None
+    try:
+        tck = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError, AttributeError):
+        tck = 100
+    want = os.path.realpath(str(home))
+    found: "list[dict]" = []
+    for entry in os.listdir(proc_root):
+        if not entry.isdigit():
+            continue
+        base = proc_root / entry
+        try:
+            argv = (base / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if not (b"agent" in argv and b"--no-leader" in argv and b"stdio" in argv):
+            continue
+        try:
+            envs: "list[bytes] | None" = (base / "environ").read_bytes().split(b"\0")
+        except OSError:
+            envs = None
+        if envs is not None:
+            owner = next((e[len(b"GROK_HOME="):] for e in envs if e.startswith(b"GROK_HOME=")), None)
+            if owner is None or os.path.realpath(owner.decode("utf-8", "replace")) != want:
+                continue
+        try:
+            raw = (base / "stat").read_text()
+            rest = raw[raw.rindex(")") + 2:].split()
+            state, pgid, start = rest[0], int(rest[2]), int(rest[19])
+        except (OSError, ValueError, IndexError):
+            continue
+        if state == "Z":
+            continue
+        found.append({"pid": int(entry), "pgid": pgid,
+                      "age": (uptime - start / tck) if uptime is not None else None})
+    return found
+
+
+def kill_agents(home, proc_root="/proc") -> int:
+    """SIGKILL the process groups of every agent of OUR scratch home. Last resort of the cleanup."""
+    n = 0
+    for a in find_agents(home, proc_root):
+        for target, fn in ((a["pgid"], os.killpg), (a["pid"], os.kill)):
+            with contextlib.suppress(OSError):
+                fn(target, signal.SIGKILL)
+        n += 1
+    return n
+
+
+# ----- verdict --------------------------------------------------------------------------------
+
+class Step:
+    """One check. status: pass | fail | skip. `required` steps must pass for a green verdict."""
+
+    def __init__(self, name: str, status: str, detail: str = "", *, required: bool = True):
+        if status not in ("pass", "fail", "skip"):
+            raise ValueError(status)
+        self.name, self.status, self.detail, self.required = name, status, detail, required
+        self.extra: "list[str]" = []        # printed under the step line (drift entries, a log tail)
+
+    def as_dict(self) -> dict:
+        return {"name": self.name, "status": self.status, "detail": self.detail, "required": self.required}
+
+
+def verdict(steps, version: "str | None", known) -> dict:
+    """Combine the steps. ok only when every required step passed; `edit` is the new
+    KNOWN_GOOD_VERSIONS line, offered only for a COMPLETE green run of an unlisted build."""
+    failed = [s for s in steps if s.status == "fail"]
+    skipped = [s for s in steps if s.status == "skip" and s.required]
+    ran = [s for s in steps if s.status != "skip"]
+    ok = bool(version) and bool(ran) and not failed and not skipped
+    edit = None
+    if ok and version not in known:
+        edit = edit_line(known, version)
+    if failed:
+        text = "FAIL — " + ", ".join(s.name for s in failed)
+    elif skipped:
+        text = "PARTIAL — not a gate (skipped: " + ", ".join(s.name for s in skipped) + ")"
+    elif not version:
+        text = "FAIL — the CLI version could not be read"
+    elif not ran:
+        text = "FAIL — nothing ran"
+    elif version in known:
+        text = f"PASS — {version} was already on KNOWN_GOOD_VERSIONS, nothing to edit"
+    else:
+        text = f"PASS — {version} verified"
+    return {"ok": ok, "text": text, "edit": edit, "failed": [s.name for s in failed],
+            "skipped": [s.name for s in skipped]}
+
+
+def parse_junit(path) -> dict:
+    """Counts and names out of a pytest --junitxml file. {} when it is missing or not XML."""
+    try:
+        root = ET.parse(str(path)).getroot()
+    except (OSError, ET.ParseError):
+        return {}
+    out = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0, "failed_names": [], "skipped_names": []}
+    for case in root.iter("testcase"):
+        name = case.get("name", "?")
+        if case.find("failure") is not None:
+            out["failed"] += 1
+            out["failed_names"].append(name)
+        elif case.find("error") is not None:
+            out["errors"] += 1
+            out["failed_names"].append(name)
+        elif (sk := case.find("skipped")) is not None:
+            out["skipped"] += 1
+            out["skipped_names"].append(f"{name}: {(sk.get('message') or '')[:140]}")
+        else:
+            out["passed"] += 1
+    return out
+
+
+def judge_pytest(summary: dict, rc: "int | None", *, allow_skips: bool = False,
+                 timed_out: bool = False) -> "tuple[str, str]":
+    """(status, detail) of one pytest invocation. A run that measured nothing is not a pass: no
+    tests, a skipped test (the skips here are "no binary/login/model refused" = inconclusive), a
+    crash or a timeout all fail the gate."""
+    if timed_out:
+        return "fail", "timed out"
+    total = sum(summary.get(k, 0) for k in ("passed", "failed", "errors", "skipped")) if summary else 0
+    if not summary or total == 0:
+        return "fail", f"no tests ran (pytest exit {rc})"
+    p, f, e, s = (summary[k] for k in ("passed", "failed", "errors", "skipped"))
+    head = f"{p} passed, {f} failed, {e} errors, {s} skipped"
+    if f or e:
+        return "fail", head + " — " + "; ".join(summary["failed_names"][:6])
+    if s and not allow_skips:
+        return "fail", head + " — a skipped test measured nothing: " + "; ".join(summary["skipped_names"][:4])
+    if rc not in (0, None):
+        return "fail", head + f" — pytest exit {rc}"
+    return "pass", head
+
+
+# ----- wire skeletons (fixture drift) ---------------------------------------------------------
+
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_PLACEHOLDER = re.compile(r"^(SESSION|UUID|BLOB)_\d+$")
+_HEXID = re.compile(r"^[0-9a-fA-F]{16,}$")
+# dict values that carry model-authored or user data, not wire schema: the KEY is part of the
+# skeleton, what is inside is not (the tool arguments and results differ run to run).
+OPAQUE_KEYS = frozenset({"rawInput", "rawOutput", "input", "arguments", "output", "stdout", "stderr"})
+# dict keys that are data (a model id, a session id), not field names
+FREE_KEY_PARENTS = frozenset({"modelUsage"})
+
+
+def _type_name(v) -> str:
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, (int, float)):
+        return "number"
+    if isinstance(v, str):
+        return "string"
+    if isinstance(v, list):
+        return "array"
+    return "object"
+
+
+def _norm_key(key: str, parent: str) -> str:
+    if parent in FREE_KEY_PARENTS or _UUID.match(key) or _PLACEHOLDER.match(key) or key.isdigit() \
+            or _HEXID.match(key):
+        return "<id>"
+    return key
+
+
+def _walk(node, path: str, out: dict, opaque: frozenset) -> None:
+    out.setdefault(path, set()).add(_type_name(node))
+    if isinstance(node, dict):
+        leaf = path.rsplit(".", 1)[-1].rstrip("[]")
+        for k, v in node.items():
+            k = str(k)
+            if leaf in opaque:
+                continue
+            _walk(v, f"{path}.{_norm_key(k, leaf)}", out, opaque)
+    elif isinstance(node, list):
+        for item in node:
+            _walk(item, path + "[]", out, opaque)
+
+
+def message_kind(msg: dict, direction: str, methods: dict) -> "str | None":
+    """The event TYPE of one wire message, e.g. `a2c session/update:tool_call`, `c2a session/prompt`,
+    `a2c result session/prompt`. `methods` maps request id -> method per direction of the request."""
+    if not isinstance(msg, dict):
+        return None
+    method = msg.get("method")
+    if isinstance(method, str):
+        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        if method.startswith(("session/update", "_x.ai/session_notification", "_x.ai/session/update")):
+            update = params.get("update") if isinstance(params.get("update"), dict) else params
+            sub = update.get("sessionUpdate") if isinstance(update, dict) else None
+            if isinstance(sub, str):
+                method = f"{method}:{sub}"
+        if "id" in msg:
+            methods[(direction, msg["id"])] = method
+            return f"{direction} request {method}"
+        return f"{direction} notification {method}"
+    if "result" in msg or "error" in msg:
+        other = "a2c" if direction == "c2a" else "c2a"
+        req = methods.get((other, msg.get("id")), "?")
+        return f"{direction} {'error' if 'error' in msg else 'result'} {req}"
+    return None
+
+
+def skeleton(rows, opaque: frozenset = OPAQUE_KEYS) -> dict:
+    """{event kind: {field path: sorted types}} over recorded rows `{"dir","msg"}` (marker rows and
+    junk are skipped). Ids, text and numbers are not part of it; only presence and type of fields."""
+    kinds: dict = {}
+    methods: dict = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("dir") not in ("c2a", "a2c"):
+            continue
+        msg = row.get("msg")
+        kind = message_kind(msg, row["dir"], methods)
+        if kind is None:
+            continue
+        fields = kinds.setdefault(kind, {})
+        shape: dict = {}
+        _walk(msg, "", shape, opaque)
+        for path, types in shape.items():
+            fields.setdefault(path, set()).update(types)
+    return {k: {p: sorted(t) for p, t in v.items()} for k, v in kinds.items()}
+
+
+def merge_skeletons(skels) -> dict:
+    merged: dict = {}
+    for sk in skels:
+        for kind, fields in sk.items():
+            tgt = merged.setdefault(kind, {})
+            for path, types in fields.items():
+                tgt.setdefault(path, set()).update(types)
+    return {k: {p: sorted(t) for p, t in v.items()} for k, v in merged.items()}
+
+
+def diff_skeletons(old: dict, new: dict) -> dict:
+    """What changed from the recorded fixtures (`old`) to a fresh recording (`new`):
+    methods_added / methods_removed (event kinds), fields_added / fields_removed / types_changed
+    as `kind path` strings. A type set that merely gained or lost `null` is not a change."""
+    out = {"methods_added": sorted(set(new) - set(old)), "methods_removed": sorted(set(old) - set(new)),
+           "fields_added": [], "fields_removed": [], "types_changed": []}
+    for kind in sorted(set(old) & set(new)):
+        o, n = old[kind], new[kind]
+        for path in sorted(set(n) - set(o)):
+            out["fields_added"].append(f"{kind} {path or '.'}")
+        for path in sorted(set(o) - set(n)):
+            out["fields_removed"].append(f"{kind} {path or '.'}")
+        for path in sorted(set(o) & set(n)):
+            ot, nt = set(o[path]) - {"null"}, set(n[path]) - {"null"}
+            if ot and nt and ot.isdisjoint(nt):
+                out["types_changed"].append(f"{kind} {path or '.'}: {'/'.join(sorted(ot))} -> {'/'.join(sorted(nt))}")
+    return out
+
+
+def judge_drift(diff: dict, mode: str = "removed") -> "tuple[str, str]":
+    """report: never fails; removed (default): a removed method/field or a changed type fails
+    (the engine may read it), additions are only listed; any: additions fail too."""
+    if mode not in DRIFT_MODES:
+        raise UsageError(f"--drift must be one of {', '.join(DRIFT_MODES)}")
+    breaking = len(diff["methods_removed"]) + len(diff["fields_removed"]) + len(diff["types_changed"])
+    additive = len(diff["methods_added"]) + len(diff["fields_added"])
+    head = (f"{breaking} removed/changed, {additive} added "
+            f"(methods -{len(diff['methods_removed'])}/+{len(diff['methods_added'])}, "
+            f"fields -{len(diff['fields_removed'])}/+{len(diff['fields_added'])}, "
+            f"types ~{len(diff['types_changed'])})")
+    if mode == "report":
+        return "pass", head + " [report only]"
+    if breaking or (mode == "any" and additive):
+        return "fail", head
+    return "pass", head
+
+
+def render_drift(diff: dict, limit: int = 12) -> "list[str]":
+    lines = []
+    for key, label in (("methods_removed", "REMOVED method"), ("fields_removed", "REMOVED field"),
+                       ("types_changed", "CHANGED type"), ("methods_added", "added method"),
+                       ("fields_added", "added field")):
+        items = diff[key]
+        for it in items[:limit]:
+            lines.append(f"    {label}: {it}")
+        if len(items) > limit:
+            lines.append(f"    ... {len(items) - limit} more {label} entries")
+    return lines
+
+
+def load_jsonl_rows(path) -> "list[dict]":
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                with contextlib.suppress(ValueError):
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        rows.append(row)
+    except OSError:
+        pass
+    return rows
+
+
+def skeleton_of_dir(directory, names=None) -> dict:
+    """Merged skeleton of the recorded fixtures `names` (stems) in `directory`; every non-synthetic
+    fixture when None."""
+    d = Path(directory)
+    files = sorted(d.glob("*.jsonl"))
+    picked = [f for f in files if (f.stem in names if names is not None else not f.stem.startswith("synthetic_"))]
+    return merge_skeletons(skeleton(load_jsonl_rows(f)) for f in picked)
+
+
+# ----- soak: one cycle's verdict, growth allowance, summary ----------------------------------
+
+def growth_allowance(cycles_since_baseline: int, slack_bytes: float, per_cycle_bytes: float) -> float:
+    return slack_bytes + per_cycle_bytes * max(0, cycles_since_baseline)
+
+
+def evaluate_cycle(m: dict, limits: dict) -> "list[str]":
+    """Problems of one finished soak cycle (empty = healthy). `m` carries what was measured."""
+    problems = []
+    if m.get("timed_out"):
+        problems.append(f"turn timed out after {limits.get('turn_timeout')}s")
+    elif m.get("error"):
+        problems.append(f"turn error: {m['error']}")
+    elif not m.get("result"):
+        problems.append("the turn ended without a result event")
+    leftover = m.get("leftover") or []
+    if leftover:
+        oldest = max((a.get("age") or 0) for a in leftover)
+        problems.append(f"{len(leftover)} grok agent process(es) of this GROK_HOME survived the turn "
+                        f"(oldest {int(oldest)}s)")
+    if m.get("litter", 0) > limits["litter_max"]:
+        problems.append(f"{m['litter']} sandbox-blocked* placeholders in GROK_HOME (max {limits['litter_max']})")
+    growth = m.get("growth_bytes")
+    allowed = m.get("growth_allowed")
+    if growth is not None and allowed is not None and growth > allowed:
+        problems.append(f"GROK_HOME grew {growth / 1048576:.1f} MiB since the baseline "
+                        f"(allowed {allowed / 1048576:.1f} MiB)")
+    canary = m.get("canary")
+    if canary and not canary.get("ok"):
+        problems.append("egress canary failed: " + str(canary.get("detail", ""))[:200])
+    return problems
+
+
+def summarize(records: "list[dict]", meta: dict) -> dict:
+    cycles = [r for r in records if r.get("kind") == "cycle"]
+    canaries = [r["canary"] for r in cycles if r.get("canary")]
+    sizes = [r["home_bytes"] for r in cycles if r.get("home_bytes") is not None]
+    failed = [r["cycle"] for r in cycles if not r.get("ok")]
+    pre_failed = any(r.get("kind") == "preflight" and not r.get("ok") for r in records)
+    interrupted = bool(meta.get("interrupted"))
+    if interrupted:
+        text = "INTERRUPTED"
+    elif pre_failed or failed or not cycles or any(not c.get("ok") for c in canaries):
+        text = "FAIL"
+    elif len(cycles) < meta.get("cycles_planned", 0):
+        text = "FAIL"
+    else:
+        text = "PASS"
+    return {
+        **meta,
+        "cycles_run": len(cycles),
+        "cycles_ok": sum(1 for r in cycles if r.get("ok")),
+        "cycles_failed": failed,
+        "max_leftover_agents": max((len(r.get("leftover") or []) for r in cycles), default=0),
+        "max_litter": max((r.get("litter", 0) for r in cycles), default=0),
+        "home_bytes_first": sizes[0] if sizes else None,
+        "home_bytes_last": sizes[-1] if sizes else None,
+        "canary_runs": len(canaries),
+        "canary_failed": sum(1 for c in canaries if not c.get("ok")),
+        "canary_max_sent": max((c.get("max_sent") or 0 for c in canaries), default=0),
+        "preflight_ok": not pre_failed,
+        "verdict": text,
+    }
+
+
+# ---------------------------------------------------------------------------------------------
+# process helpers
+# ---------------------------------------------------------------------------------------------
+
+def _child_env(extra: "dict | None" = None) -> dict:
+    env = {k: v for k, v in os.environ.items()
+           if k not in _ENV_DROP_EXACT and not k.startswith(_ENV_DROP_PREFIX)}
+    env.update(extra or {})
+    return env
+
+
+def kill_group(proc: "subprocess.Popen", *, grace: float = 20.0) -> None:
+    """Stop a child and everything in its session. SIGINT first (pytest unwinds its finalizers, which
+    is what lets the engine kill ITS process groups), then SIGTERM, then SIGKILL."""
+    for sig, wait in ((signal.SIGINT, grace), (signal.SIGTERM, 5.0), (signal.SIGKILL, 5.0)):
+        if proc.poll() is not None and not _group_alive(proc.pid):
+            return
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, sig)
+        end = time.monotonic() + wait
+        while time.monotonic() < end:
+            if proc.poll() is not None and not _group_alive(proc.pid):
+                return
+            time.sleep(0.1)
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        proc.wait(timeout=2)
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class CmdResult:
+    def __init__(self, rc, out, timed_out):
+        self.rc, self.out, self.timed_out = rc, out, timed_out
+
+
+_ACTIVE: "set[subprocess.Popen]" = set()      # children a signal handler must be able to stop
+
+
+def run_cmd(cmd, *, env: dict, cwd, timeout: float, secrets=()) -> CmdResult:
+    """Run `cmd` in its own session with merged stdout/stderr; the whole group dies on timeout, on
+    an exception, or on a signal delivered to this tool. Output is redacted."""
+    proc = subprocess.Popen(cmd, env=env, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace", start_new_session=True)
+    timed_out = False
+    out = ""
+    _ACTIVE.add(proc)
+    try:
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            kill_group(proc)
+            out, _ = proc.communicate()
+    except BaseException:
+        kill_group(proc)
+        raise
+    finally:
+        _ACTIVE.discard(proc)
+        if _group_alive(proc.pid):          # the leader is gone; stragglers of its group are not wanted
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+    return CmdResult(proc.returncode, redact(out or "", secrets), timed_out)
+
+
+def pytest_cmd() -> "list[str]":
+    raw = os.environ.get("GROK_VERIFY_PYTEST", "").strip()
+    return shlex.split(raw) if raw else [sys.executable, "-m", "pytest"]
+
+
+def recorder_cmd() -> "list[str]":
+    raw = os.environ.get("GROK_VERIFY_RECORDER", "").strip()
+    return shlex.split(raw) if raw else [sys.executable, str(REPO / "tools" / "grok_record_fixtures.py")]
+
+
+# ---------------------------------------------------------------------------------------------
+# environment: login, scratch tree
+# ---------------------------------------------------------------------------------------------
+
+def resolve_login(arg: "str | None") -> Path:
+    """The auth.json to copy: `--login` / GROK_VERIFY_LOGIN (a GROK_HOME directory or the file
+    itself), default ~/.grok."""
+    raw = arg or os.environ.get("GROK_VERIFY_LOGIN") or os.path.join("~", ".grok")
+    p = Path(os.path.expanduser(raw))
+    if p.is_dir():
+        p = p / "auth.json"
+    if not p.exists():
+        raise UsageError(f"no login found at {p} (sign in with `tools/grok-acct login`, or point --login at one)")
+    if p.name != "auth.json" or not p.is_file():
+        raise UsageError(f"--login must be a GROK_HOME directory or an auth.json file, got {raw!r}")
+    return p
+
+
+def resolve_binary(arg: "str | None") -> str:
+    raw = arg or os.environ.get("GROK_BIN", "").strip()
+    candidates = [raw] if raw else ["grok", os.path.join("~", ".grok", "bin", "grok")]
+    for cand in candidates:
+        found = shutil.which(os.path.expanduser(cand))
+        if found:
+            return found
+    raise UsageError("grok binary not found (--grok-bin / GROK_BIN / PATH / ~/.grok/bin/grok)")
+
+
+def grok_version(binary: str, *, timeout: float = 20.0) -> "str | None":
+    """`grok --version` against a throwaway GROK_HOME (the CLI creates a missing home)."""
+    with tempfile.TemporaryDirectory(prefix="grok-verify-ver-") as td:
+        env = _child_env({"GROK_HOME": td, "GROK_DISABLE_AUTOUPDATER": "1"})
+        try:
+            r = subprocess.run([binary, "--version"], env=env, capture_output=True, text=True,
+                               timeout=timeout, cwd=td)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return parse_version((r.stdout or "").strip())
+
+
+def load_engine():
+    sys.path.insert(0, str(REPO))
+    import grok_engine
+    return grok_engine
+
+
+def known_good():
+    try:
+        return tuple(load_engine().KNOWN_GOOD_VERSIONS)
+    except Exception:  # noqa: BLE001 — a broken engine import is reported by the steps themselves
+        return ()
+
+
+def known_good_line() -> "tuple[int, str] | None":
+    """(line number, text) of the KNOWN_GOOD_VERSIONS assignment in grok_engine.py, read from the
+    file so the hint names the line as it is today."""
+    try:
+        for n, line in enumerate((REPO / "grok_engine.py").read_text(encoding="utf-8").splitlines(), 1):
+            if line.startswith("KNOWN_GOOD_VERSIONS"):
+                return n, line
+    except OSError:
+        pass
+    return None
+
+
+class Scratch:
+    """A scratch tree (parent: $GROK_VERIFY_SCRATCH / --scratch-dir / $TMPDIR) holding a COPY of the
+    login in `home/auth.json` (chmod 600). `close()` removes it all, kills anything still using the
+    home, and VERIFIES it is gone."""
+
+    def __init__(self, login: Path, parent: "str | None" = None):
+        base = parent or os.environ.get("GROK_VERIFY_SCRATCH") or None
+        self.root = Path(tempfile.mkdtemp(prefix="grok-verify-", dir=base))
+        os.chmod(self.root, 0o700)
+        self.home = self.root / "home"
+        self.home.mkdir(mode=0o700)
+        self.login_copy = self.home / "auth.json"
+        self.closed = False
+        try:
+            shutil.copyfile(login, self.login_copy)
+            os.chmod(self.login_copy, 0o600)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> bool:
+        """True when the tree (and with it the login copy) is verified gone."""
+        if self.closed:
+            return not os.path.lexists(self.root)
+        self.closed = True
+        kill_agents(self.home)
+        with contextlib.suppress(OSError):
+            os.unlink(self.login_copy)
+        rmtree_force(self.root)
+        return not os.path.lexists(self.root)
+
+
+def run_pytest(args: "list[str]", *, scratch: Scratch, env_extra: dict, junit: Path, secrets, timeout: float,
+               cwd=REPO, home: "Path | None" = None) -> "tuple[CmdResult, dict]":
+    cmd = pytest_cmd() + args + ["-q", "-p", "no:cacheprovider", "-o", "addopts=",
+                                 f"--junitxml={junit}", f"--basetemp={scratch.root / 'pytest'}"]
+    env = _child_env({"GROK_HOME": str(home or scratch.home), **env_extra})
+    res = run_cmd(cmd, env=env, cwd=cwd, timeout=timeout, secrets=secrets)
+    return res, parse_junit(junit)
+
+
+def _tail(text: str, n: int = 25) -> str:
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    return "\n".join("      | " + ln[:200] for ln in lines[-n:])
+
+
+# ---------------------------------------------------------------------------------------------
+# check
+# ---------------------------------------------------------------------------------------------
+
+def _say(msg: str = "") -> None:
+    print(msg, flush=True)
+
+
+def check_plan(args, binary: str, version: "str | None", known, login: Path) -> "list[str]":
+    """The lines `check --dry-run` prints. Pure over its arguments (no files are touched)."""
+    py = " ".join(pytest_cmd())
+    lines = [
+        "grok-verify check — DRY RUN (no model is touched, nothing is written)",
+        f"  binary        : {binary}",
+        f"  version       : {version or 'UNREADABLE'}  (on KNOWN_GOOD_VERSIONS: "
+        f"{'yes' if version in known else 'NO'}; list = {', '.join(known) or 'unreadable'})",
+        f"  login source  : {login}  -> a chmod-600 COPY goes into a scratch GROK_HOME and is deleted afterwards",
+        "  steps:",
+    ]
+    if not args.skip_live:
+        lines.append(f"    live      {py} tests/test_grok_live.py -m {MARKER_LIVE}   (~8 real turns)")
+    else:
+        lines.append("    live      SKIPPED by --skip-live (verdict will be PARTIAL)")
+    if not args.skip_canary:
+        lines.append(f"    canary    {py} tests/test_grok_live.py -m {MARKER_CANARY}   (1 real turn, 8 MB git blob)")
+    else:
+        lines.append("    canary    SKIPPED by --skip-canary (verdict will be PARTIAL)")
+    if args.with_cockpit:
+        lines.append(f"    cockpit   {py} tests/test_grok_live_cockpit.py -m {MARKER_COCKPIT}   (~6 real turns + a real cockpit)")
+    else:
+        lines.append("    cockpit   not requested (add --with-cockpit)")
+    if not args.skip_fixtures:
+        scen = ", ".join(args.fixture_scenario) if args.fixture_scenario else "all scenarios (~26 real turns)"
+        lines.append(f"    fixtures  tools/grok_record_fixtures.py -> TEMP dir, skeleton diff vs tests/fixtures/grok "
+                     f"[{scen}]; drift mode: {args.drift}")
+    else:
+        lines.append("    fixtures  SKIPPED by --skip-fixtures (verdict will be PARTIAL)")
+    lines.append("  The verdict prints the KNOWN_GOOD_VERSIONS edit only after a complete green run; "
+                 "this tool never edits files.")
+    return lines
+
+
+def cmd_check(args) -> int:
+    login = resolve_login(args.login)
+    binary = resolve_binary(args.grok_bin)
+    version = grok_version(binary)
+    known = known_good()
+    if args.dry_run:
+        for ln in check_plan(args, binary, version, known, login):
+            _say(ln)
+        return 0 if version else 1
+
+    _say(f"grok-verify check — {binary}")
+    _say(f"  grok --version : {version or 'UNREADABLE'}")
+    _say(f"  KNOWN_GOOD_VERSIONS: {', '.join(known) or '(unreadable)'} -> "
+         f"{'listed' if version in known else 'NOT listed'}")
+    if not version:
+        _say("FAIL — the CLI version could not be read; nothing else was run")
+        return 1
+
+    secrets = secret_values(login)
+    steps: "list[Step]" = []
+    scratch = Scratch(login, args.scratch_dir)
+    gone = False
+    try:
+        env_bin = {"GROK_BIN": binary}
+        for name, marker, skip, test_file in (
+                ("live", MARKER_LIVE, args.skip_live, "tests/test_grok_live.py"),
+                ("canary", MARKER_CANARY, args.skip_canary, "tests/test_grok_live.py"),
+                ("cockpit", MARKER_COCKPIT, not args.with_cockpit, "tests/test_grok_live_cockpit.py")):
+            if skip:
+                steps.append(Step(name, "skip", "skipped by flag" if name != "cockpit" else "not requested",
+                                  required=name != "cockpit"))
+                _say(f"  [skip] {name}")
+                continue
+            _say(f"  [run ] {name}: pytest -m {marker} ...")
+            res, summary = run_pytest([test_file, "-m", marker], scratch=scratch, env_extra=env_bin,
+                                      junit=scratch.root / f"{name}.xml", secrets=secrets,
+                                      timeout=args.step_timeout)
+            status, detail = judge_pytest(summary, res.rc, allow_skips=args.allow_skips,
+                                          timed_out=res.timed_out)
+            steps.append(Step(name, status, detail))
+            _say(f"  [{status.upper():4}] {name}: {detail}")
+            if status == "fail":
+                _say(_tail(res.out))
+        if not args.skip_fixtures:
+            _say("  [run ] fixtures: re-recording the wire into a temp dir ...")
+            steps.append(fixture_step(args, scratch, binary, secrets))
+            s = steps[-1]
+            _say(f"  [{s.status.upper():4}] fixtures: {s.detail}")
+            for ln in s.extra:
+                _say(ln)
+        else:
+            steps.append(Step("fixtures", "skip", "skipped by flag"))
+            _say("  [skip] fixtures")
+    finally:
+        _ignore_signals()
+        gone = scratch.close()
+    _say(f"  scratch tree + login copy removed: {'yes (verified)' if gone else 'NO — REMOVE ' + str(scratch.root) + ' BY HAND'}")
+    if not gone:
+        steps.append(Step("cleanup", "fail", f"could not remove {scratch.root}"))
+
+    v = verdict(steps, version, known)
+    _say("")
+    _say(f"VERDICT: {v['text']}")
+    if v["edit"]:
+        loc = known_good_line()
+        where = f"grok_engine.py line {loc[0]}" if loc else "grok_engine.py"
+        _say(f"To record this build as verified, change {where}:")
+        if loc:
+            _say(f"    - {loc[1]}")
+        _say(f"    + {v['edit']}")
+        _say("(this tool never edits files; make the edit, run the default test suite, commit)")
+    return 0 if v["ok"] else 1
+
+
+def fixture_step(args, scratch: Scratch, binary: str, secrets) -> Step:
+    rec = scratch.root / "rec"
+    out_dir = rec / "fixtures"
+    work = rec / "work"
+    work.mkdir(parents=True)
+    cmd = recorder_cmd() + ["--out-dir", str(out_dir), "--scratch-dir", str(work),
+                            "--auth-src", str(scratch.login_copy), "--grok-bin", binary]
+    for sc in (args.fixture_scenario or ["all"]):
+        cmd += ["--scenario", sc]
+    res = run_cmd(cmd, env=_child_env(), cwd=REPO, timeout=args.step_timeout, secrets=secrets)
+    if res.timed_out:
+        return Step("fixtures", "fail", "the recorder timed out")
+    recorded = sorted(p.stem for p in out_dir.glob("*.jsonl")) if out_dir.is_dir() else []
+    if res.rc not in (0,) or not recorded:
+        step = Step("fixtures", "fail", f"the recorder exited {res.rc} and produced {len(recorded)} fixture(s)")
+        step.extra = [_tail(res.out, 12)]
+        return step
+    committed_dir = REPO / "tests" / "fixtures" / "grok"
+    names = [n for n in recorded if (committed_dir / f"{n}.jsonl").is_file()]
+    missing = [n for n in recorded if n not in names]
+    old = skeleton_of_dir(committed_dir, names)
+    new = skeleton_of_dir(out_dir, names)
+    diff = diff_skeletons(old, new)
+    status, detail = judge_drift(diff, args.drift)
+    detail = f"{len(names)} fixture(s) compared; " + detail
+    step = Step("fixtures", status, detail)
+    step.extra = render_drift(diff)
+    if missing:
+        step.extra.append(f"    note: no committed fixture for {', '.join(missing)} (not compared)")
+    return step
+
+
+# ---------------------------------------------------------------------------------------------
+# soak
+# ---------------------------------------------------------------------------------------------
+
+def soak_plan(args, binary, version, known, login, cycles: int, interval: float) -> "list[str]":
+    canaries = (cycles // args.canary_every) if args.canary_every else 0
+    return [
+        "grok-verify soak — DRY RUN (no model is touched, nothing is written)",
+        f"  binary        : {binary}",
+        f"  version       : {version or 'UNREADABLE'}  (on KNOWN_GOOD_VERSIONS: {'yes' if version in known else 'NO'})",
+        f"  login source  : {login}  -> a chmod-600 COPY goes into a scratch data dir and is deleted afterwards",
+        f"  cycles        : {cycles}, one every {interval:g}s (about {cycles * interval / 3600:.2f} h)",
+        f"  per cycle     : 1 tiny real turn through run_grok_engine in a scratch project (production sandbox), "
+        f"then: no leftover `grok agent` of that GROK_HOME, litter <= {args.litter_max}, GROK_HOME growth "
+        f"<= {args.growth_slack_mb:g} MiB + {args.growth_per_cycle_mb:g} MiB/cycle",
+        f"  egress canary : {'every ' + str(args.canary_every) + ' cycles (' + str(canaries) + ' run(s))' if args.canary_every else 'off'}",
+        f"  model turns   : about {cycles + (0 if args.no_preflight else 1) + canaries} "
+        f"({cycles} cycles + {0 if args.no_preflight else 1} sandbox probe + {canaries} canary)",
+        f"  log           : {args.log or '$GROK_VERIFY_LOG or <tmp>/grok-soak-<UTC timestamp>.jsonl'} (+ .summary.json)",
+    ]
+
+
+def _utc() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def default_log_path(arg: "str | None") -> Path:
+    raw = arg or os.environ.get("GROK_VERIFY_LOG")
+    if raw:
+        return Path(os.path.expanduser(raw))
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Path(tempfile.gettempdir()) / f"grok-soak-{stamp}.jsonl"
+
+
+def append_log(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def cmd_soak(args) -> int:
+    duration = parse_duration(args.duration, what="--duration")
+    interval = parse_duration(args.interval, what="--interval")
+    cycles = plan_cycles(duration, interval, args.cycles)
+    if args.canary_every < 0:
+        raise UsageError("--canary-every must be >= 0")
+    login = resolve_login(args.login)
+    binary = resolve_binary(args.grok_bin)
+    version = grok_version(binary)
+    known = known_good()
+    if args.dry_run:
+        for ln in soak_plan(args, binary, version, known, login, cycles, interval):
+            _say(ln)
+        return 0 if version else 1
+    if not version:
+        _say("FAIL — the CLI version could not be read; nothing was run")
+        return 1
+    log_path = default_log_path(args.log)
+    summary_path = log_path.with_name(log_path.name + ".summary.json")
+    secrets = secret_values(login)
+    scratch = Scratch(login, args.scratch_dir)
+    meta = {"started": _utc(), "version": version, "known_good": version in known,
+            "cycles_planned": cycles, "interval_sec": interval, "log": str(log_path),
+            "interrupted": False, "signal": None}
+    records: "list[dict]" = []
+    _say(f"grok-verify soak — {binary} {version} ({'listed' if version in known else 'NOT on KNOWN_GOOD_VERSIONS'})")
+    _say(f"  {cycles} cycle(s), one every {interval:g}s; log {log_path}")
+    gone = False
+    try:
+        try:
+            asyncio.run(soak_loop(args, scratch, binary, cycles, interval, log_path, secrets, records, meta))
+        except Terminated as t:
+            meta["interrupted"], meta["signal"] = True, t.signum
+    finally:
+        _ignore_signals()                    # asyncio.run restored the default disposition on exit
+        gone = scratch.close()
+        meta["ended"] = _utc()
+        meta["scratch_removed"] = gone
+        summary = summarize(records, meta)
+        with contextlib.suppress(OSError):
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _say("")
+    _say(f"scratch tree + login copy removed: {'yes (verified)' if gone else 'NO — REMOVE ' + str(scratch.root) + ' BY HAND'}")
+    _say(f"SUMMARY: {summary['verdict']} — {summary['cycles_ok']}/{summary['cycles_run']} cycles ok "
+         f"(planned {cycles}), max leftover agents {summary['max_leftover_agents']}, "
+         f"max litter {summary['max_litter']}, canary runs {summary['canary_runs']} "
+         f"(failed {summary['canary_failed']}, max bytes sent {summary['canary_max_sent']})")
+    _say(f"  log     : {log_path}")
+    _say(f"  summary : {summary_path}")
+    if meta["interrupted"]:
+        return 128 + int(meta["signal"] or 15)
+    return 0 if summary["verdict"] == "PASS" and gone else 1
+
+
+async def soak_loop(args, scratch: Scratch, binary: str, cycles: int, interval: float, log_path: Path,
+                    secrets, records: list, meta: dict) -> None:
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    current: "list[asyncio.Task]" = []
+
+    def on_signal(signum: int) -> None:
+        meta["interrupted"], meta["signal"] = True, signum
+        stop.set()
+        for t in current:
+            t.cancel()
+        for proc in list(_ACTIVE):          # a canary running in the executor thread must not outlive us
+            threading.Thread(target=kill_group, args=(proc,), daemon=True).start()
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        loop.add_signal_handler(sig, on_signal, int(sig))
+
+    data = scratch.root / "data"
+    data.mkdir(mode=0o700)
+    home = data / "grok-home"
+    home.mkdir(mode=0o700)
+    shutil.move(str(scratch.home / "auth.json"), str(home / "auth.json"))   # the one login copy moves with it
+    scratch.login_copy = home / "auth.json"
+    scratch.home = home
+    project = scratch.root / "project"
+    project.mkdir()
+    (project / "README.md").write_text("soak scratch project\n", encoding="utf-8")
+    os.environ.update({"GROK_ENABLED": "true", "_CARDLOOP_DATA_DIR": str(data), "GROK_BIN": binary})
+    os.environ.pop("GROK_HOME", None)               # the engine derives <data>/grok-home, like production
+    os.environ.pop("GROK_ALLOW_ALL_PROJECTS", None)
+    engine = load_engine()
+    engine.reset_cache()
+    ctx = {"DATA": data, "running": {}}
+    limits = {"litter_max": args.litter_max, "turn_timeout": args.turn_timeout}
+    slack = args.growth_slack_mb * 1048576
+    per_cycle = args.growth_per_cycle_mb * 1048576
+    baseline: "int | None" = None
+
+    async def guarded(coro):
+        task = asyncio.ensure_future(coro)
+        current.append(task)
+        try:
+            return await task
+        finally:
+            current.remove(task)
+
+    if not args.no_preflight and not stop.is_set():
+        pre = await guarded(preflight(engine))
+        records.append(pre)
+        append_log(log_path, pre)
+        _say(f"  [{_hms()}] preflight: {'ok' if pre['ok'] else 'FAILED'} — {pre.get('detail', '')}")
+        if not pre["ok"]:
+            return
+    for n in range(1, cycles + 1):
+        if stop.is_set():
+            break
+        t_start = time.monotonic()
+        try:
+            rec = await guarded(run_cycle(engine, ctx, project, n, args.turn_timeout, args.model))
+        except asyncio.CancelledError:
+            break
+        rec["home_bytes"] = dir_bytes(home)
+        rec["litter"] = litter_count(home)
+        if baseline is None:
+            baseline = rec["home_bytes"]                 # first-start copies ~500 bundled files; not growth
+            rec["growth_bytes"], rec["growth_allowed"] = 0, None
+        else:
+            rec["growth_bytes"] = rec["home_bytes"] - baseline
+            rec["growth_allowed"] = growth_allowance(n - 1, slack, per_cycle)
+        if args.canary_every and n % args.canary_every == 0 and not stop.is_set():
+            _say(f"  [{_hms()}] egress canary ...")
+            try:
+                rec["canary"] = await guarded(run_canary_async(scratch, binary, secrets, args.step_timeout))
+            except asyncio.CancelledError:
+                rec["canary"] = {"ok": False, "detail": "interrupted"}
+        rec["problems"] = evaluate_cycle(rec, limits)
+        rec["ok"] = not rec["problems"]
+        records.append(rec)
+        append_log(log_path, rec)
+        _say(f"  [{_hms()}] cycle {n}/{cycles} {'ok' if rec['ok'] else 'FAIL'} "
+             f"turn={rec['duration_ms'] / 1000:.1f}s tools={rec['events'].get('tool', 0)} "
+             f"leftover={len(rec['leftover'])} litter={rec['litter']} home={rec['home_bytes'] / 1048576:.1f}MiB"
+             + ("".join("\n      ! " + p for p in rec["problems"]) if rec["problems"] else ""))
+        if n < cycles and not stop.is_set():
+            wait = max(0.0, interval - (time.monotonic() - t_start))
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=wait)
+
+
+def _hms() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+async def preflight(engine) -> dict:
+    """Availability + the sandbox-denial probe (one real turn) before the first cycle."""
+    t0 = time.time()
+    try:
+        info = await engine.provider_info(force=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"kind": "preflight", "ts": _utc(), "ok": False, "detail": f"provider_info raised {exc!r}"[:300]}
+    sandbox = info.get("sandbox") or {}
+    detail = (f"available={info.get('available')} version={info.get('version')} "
+              f"probe={sandbox.get('probe')} warnings={len(info.get('warnings') or [])}")
+    if not info.get("available"):
+        detail += f" error={str(info.get('error'))[:200]}"
+    return {"kind": "preflight", "ts": _utc(), "ok": bool(info.get("available")), "detail": detail,
+            "duration_ms": int((time.time() - t0) * 1000)}
+
+
+async def run_cycle(engine, ctx: dict, project: Path, n: int, turn_timeout: float, model: "str | None") -> dict:
+    marker = f"SOAK_{n}_{os.urandom(3).hex()}"
+    prompt = (f"Run exactly this shell command with your terminal tool: echo {marker}\n"
+              f"Then reply with its output and nothing else.")
+    counts = {"text": 0, "tool": 0, "result": 0, "error": 0}
+    state = {"error": None, "timed_out": False}
+    key = f"soak:{n}"
+    t0 = time.monotonic()
+
+    async def drive():
+        async for ev in engine.run_grok_engine(project_name="soak", cwd=str(project), prompt=prompt,
+                                               session_key=key, ctx=ctx, effort="low", entrypoint="soak",
+                                               model=model):
+            kind = ev.get("type")
+            if kind in ("text", "tool", "result", "error"):
+                counts[kind] += 1
+            if kind == "error":
+                state["error"] = str(ev.get("exc"))[:300]
+    try:
+        await asyncio.wait_for(drive(), turn_timeout)
+    except asyncio.TimeoutError:
+        state["timed_out"] = True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        state["error"] = f"{type(exc).__name__}: {exc}"[:300]
+    finally:
+        ctx["running"].pop(key, None)
+    home = engine.grok_home(ctx)
+    leftover = find_agents(home)
+    end = time.monotonic() + LEFTOVER_GRACE_SEC
+    while leftover and time.monotonic() < end:
+        await asyncio.sleep(0.25)
+        leftover = find_agents(home)
+    return {"kind": "cycle", "cycle": n, "ts": _utc(), "duration_ms": int((time.monotonic() - t0) * 1000),
+            "events": counts, "result": counts["result"] > 0, "error": state["error"],
+            "timed_out": state["timed_out"], "leftover": leftover}
+
+
+async def run_canary_async(scratch: Scratch, binary: str, secrets, timeout: float) -> dict:
+    """The egress canary as a pytest subprocess (the same test `check` runs), off the event loop."""
+    def work():
+        # its own home: the live tests rewrite config.toml/sandbox.toml of the home they run in, and the
+        # soak's profile must not change under it
+        home = scratch.root / "canary-home"
+        home.mkdir(mode=0o700)
+        try:
+            shutil.copyfile(scratch.login_copy, home / "auth.json")
+            os.chmod(home / "auth.json", 0o600)
+            res, summary = run_pytest(["tests/test_grok_live.py", "-m", MARKER_CANARY, "-s"], scratch=scratch,
+                                      env_extra={"GROK_BIN": binary}, home=home,
+                                      junit=scratch.root / "canary.xml", secrets=secrets, timeout=timeout)
+        finally:
+            kill_agents(home)
+            rmtree_force(home)
+        status, detail = judge_pytest(summary, res.rc, timed_out=res.timed_out)
+        m = _EGRESS_RE.search(res.out)
+        return {"ok": status == "pass", "detail": detail, "max_sent": int(m.group(1)) if m else None}
+    return await asyncio.get_running_loop().run_in_executor(None, work)
+
+
+# ---------------------------------------------------------------------------------------------
+# cli
+# ---------------------------------------------------------------------------------------------
+
+def _common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--login", help="GROK_HOME dir or auth.json to COPY the login from "
+                                   "(env GROK_VERIFY_LOGIN, default ~/.grok)")
+    p.add_argument("--grok-bin", help="the grok binary (env GROK_BIN, else PATH, else ~/.grok/bin/grok)")
+    p.add_argument("--scratch-dir", help="parent of the scratch tree (env GROK_VERIFY_SCRATCH, default $TMPDIR)")
+    p.add_argument("--dry-run", action="store_true", help="print what would happen; no model turn, no files")
+    p.add_argument("--step-timeout", type=float, default=DEFAULT_STEP_TIMEOUT,
+                   help=f"seconds one pytest/recorder step may take (default {DEFAULT_STEP_TIMEOUT:g})")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="grok-verify", description=__doc__.split("\n\n")[0],
+                                 epilog="Run `grok-verify <command> --help` for the flags of one command.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("check", help="the CLI-bump gate (live + canary + fixture drift)",
+                       description=__doc__)
+    _common(c)
+    c.add_argument("--with-cockpit", action="store_true",
+                   help=f"also run pytest -m {MARKER_COCKPIT} (the whole cockpit over HTTP with the real binary)")
+    c.add_argument("--skip-live", action="store_true", help="do not run the grok_live tests (verdict: PARTIAL)")
+    c.add_argument("--skip-canary", action="store_true", help="do not run the egress canary (verdict: PARTIAL)")
+    c.add_argument("--skip-fixtures", action="store_true", help="do not re-record/diff the fixtures (verdict: PARTIAL)")
+    c.add_argument("--fixture-scenario", action="append", default=[], metavar="NAME",
+                   help="re-record only this scenario (repeatable; default all)")
+    c.add_argument("--drift", choices=DRIFT_MODES, default="removed",
+                   help="fixture drift policy: report (never fail), removed (a removed/changed method, "
+                        "field or type fails; default), any (additions fail too)")
+    c.add_argument("--allow-skips", action="store_true",
+                   help="a skipped test does not fail its step (default: a skip measured nothing = fail)")
+    s = sub.add_parser("soak", help="the long run: N tiny real turns, process/litter/size/egress watch",
+                       description=__doc__)
+    _common(s)
+    s.add_argument("--duration", default=DEFAULT_DURATION, help=f"total length (default {DEFAULT_DURATION}; 90s, 20m, 24h)")
+    s.add_argument("--interval", default=DEFAULT_INTERVAL,
+                   help=f"time between cycle STARTS (default {DEFAULT_INTERVAL}; a bare number is seconds)")
+    s.add_argument("--cycles", type=int, help="exact number of cycles (overrides --duration)")
+    s.add_argument("--canary-every", type=int, default=DEFAULT_CANARY_EVERY, metavar="K",
+                   help=f"run the egress canary every K cycles (default {DEFAULT_CANARY_EVERY}; 0 = never)")
+    s.add_argument("--log", help="JSON-lines log, one line per cycle (env GROK_VERIFY_LOG, default <tmp>/grok-soak-<ts>.jsonl)")
+    s.add_argument("--litter-max", type=int, default=DEFAULT_LITTER_MAX,
+                   help=f"max sandbox-blocked* placeholders left after a turn (default {DEFAULT_LITTER_MAX})")
+    s.add_argument("--growth-slack-mb", type=float, default=DEFAULT_GROWTH_SLACK_MB,
+                   help=f"GROK_HOME growth allowed beyond the per-cycle allowance, MiB (default {DEFAULT_GROWTH_SLACK_MB:g})")
+    s.add_argument("--growth-per-cycle-mb", type=float, default=DEFAULT_GROWTH_PER_CYCLE_MB,
+                   help=f"GROK_HOME growth allowed per cycle after the first, MiB (default {DEFAULT_GROWTH_PER_CYCLE_MB:g})")
+    s.add_argument("--turn-timeout", type=float, default=DEFAULT_TURN_TIMEOUT,
+                   help=f"seconds one turn may take (default {DEFAULT_TURN_TIMEOUT:g})")
+    s.add_argument("--no-preflight", action="store_true", help="skip provider_info + the sandbox probe turn")
+    s.add_argument("--model", help="Grok model id for the soak turns (default: the engine's default)")
+    return ap
+
+
+def _ignore_signals() -> None:
+    """The cleanup (scratch tree, login copy) must finish: nothing interrupts it."""
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_IGN)
+
+
+def _install_signal_handlers() -> None:
+    def handler(signum, _frame):
+        raise Terminated(signum)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, handler)
+
+
+def _reexec_in_venv() -> None:
+    vpy = REPO / "venv" / "bin" / "python"
+    if os.environ.get("GROK_VERIFY_NO_REEXEC") == "1" or not vpy.exists():
+        return
+    if os.path.realpath(sys.prefix) == os.path.realpath(REPO / "venv"):
+        return
+    os.execv(str(vpy), [str(vpy), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    args = build_parser().parse_args(argv)
+    _install_signal_handlers()
+    try:
+        if args.cmd == "check":
+            return cmd_check(args)
+        return cmd_soak(args)
+    except UsageError as exc:
+        print(f"grok-verify: {exc}", file=sys.stderr)
+        return 1
+    except Terminated as t:
+        print(f"grok-verify: stopped by signal {t.signum}", file=sys.stderr)
+        return 128 + t.signum
+
+
+if __name__ == "__main__":
+    _reexec_in_venv()
+    sys.exit(main())
