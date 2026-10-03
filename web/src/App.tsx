@@ -1019,7 +1019,7 @@ export default function App() {
         <Modal onClose={() => setFreeCreateOpen(false)}>
           <ModalHead title="New free chat" onClose={() => setFreeCreateOpen(false)} />
           <div className="run-modal-body" style={{ display: 'grid', gap: 14 }}>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="provider-pick">
               {selectableProviders(freeProviders).map(provider => {
                 const info = freeProviders.find(p => p.provider === provider)
                 const why = providerUnavailableReason(provider, info)

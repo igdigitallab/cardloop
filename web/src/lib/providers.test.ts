@@ -154,7 +154,16 @@ test('settings: the privacy gate row shows while Grok is listed or still ON; Cod
 test('settings: a board-model row per listed adapter, or one the project already names a model for', () => {
   assert.deepEqual(boardModelProviders([], {}), [])
   assert.deepEqual(boardModelProviders([{ provider: 'codex' }, { provider: 'grok' }], {}), ['codex', 'grok'])
-  assert.deepEqual(boardModelProviders([], { grok_model: 'grok-build' }), ['grok'])
   assert.deepEqual(boardModelProviders([], { grok_model: '', codex_model: 'gpt' }), ['codex'])
   assert.deepEqual(boardModelProviders([{ provider: 'claude' }], {}), [])
+})
+
+test('settings: a default grok_model alone is NOT a Grok row (Grok switched off must leave Settings unchanged)', () => {
+  // The server serves `grok_model: "grok-4.7"` for EVERY project, listed or not.
+  assert.deepEqual(boardModelProviders([], { grok_model: 'grok-4.7', grok_allowed: false }), [])
+  assert.deepEqual(boardModelProviders([{ provider: 'claude' }], { grok_model: 'grok-4.7', codex_model: '' }), [])
+  // An opted-in project keeps its row (and so its way back) even if the server stopped listing Grok.
+  assert.deepEqual(boardModelProviders([], { grok_model: 'grok-4.7', grok_allowed: true }), ['grok'])
+  // Strictly the boolean true, like the server's own gate.
+  assert.deepEqual(boardModelProviders([], { grok_model: 'grok-4.7', grok_allowed: 'true' }), [])
 })

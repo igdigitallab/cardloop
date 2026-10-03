@@ -84,7 +84,7 @@ def _build_app_copy(dest: Path) -> None:
     (dest / "web" / "dist").symlink_to(dist_src, target_is_directory=True)
 
 
-def _seed_data(dest: Path, project_cwds: dict) -> None:
+def _seed_data(dest: Path, project_cwds: dict, extras: "dict | None" = None) -> None:
     """Writes data/topics.json directly — this (not data/registry.json) is what
     _collect_projects()/api_projects reads to populate the sidebar and resolve a
     project id to a cwd+session_key (see webapp.py:_collect_projects). registry.json
@@ -94,7 +94,8 @@ def _seed_data(dest: Path, project_cwds: dict) -> None:
     data_dir = dest / "data"
     data_dir.mkdir(exist_ok=True)
     topics = {
-        pid: {"project": pid, "cwd": str(cwd), "model": "sonnet", "git_enabled": False}
+        pid: {"project": pid, "cwd": str(cwd), "model": "sonnet", "git_enabled": False,
+              **((extras or {}).get(pid) or {})}
         for pid, cwd in project_cwds.items()
     }
     (data_dir / "topics.json").write_text(json.dumps(topics, indent=2))
@@ -113,6 +114,47 @@ def _wait_for_health(base_url: str, timeout: float = 20.0) -> None:
             last_err = exc
         time.sleep(0.2)
     raise RuntimeError(f"e2e cockpit never became healthy at {base_url}: {last_err!r}")
+
+
+def _cockpit_process(app_dir: Path, env: dict, port: int, info: dict):
+    """Starts `bot.py` from `app_dir`, waits for /api/health, yields `info`, then stops it.
+    Shared by the plain cockpit (`e2e_server`) and the Grok-enabled one (`e2e_grok_server`)."""
+    log_path = app_dir / "server.log"
+    log_f = open(log_path, "w")
+    proc = subprocess.Popen(
+        [str(VENV_PYTHON), str(app_dir / "bot.py")],
+        cwd=str(app_dir),
+        env=env,
+        stdout=log_f,
+        stderr=subprocess.STDOUT,
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_health(base_url)
+    except Exception:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log_f.close()
+        log_text = log_path.read_text(errors="replace")
+        pytest.fail(f"e2e cockpit failed to start.\n--- server.log ---\n{log_text}", pytrace=False)
+
+    try:
+        yield info() if callable(info) else info
+    finally:
+        _stop(proc, log_f)
+
+
+def _stop(proc, log_f) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    log_f.close()
 
 
 @pytest.fixture(scope="session")
@@ -155,45 +197,109 @@ def e2e_server(tmp_path_factory):
         "FILES_EXTRA_ROOTS": str(scratch),
     })
     env.pop("ANTHROPIC_API_KEY", None)
+    # This cockpit is the "Grok switched OFF" half of the suite: a developer's own GROK_* must not turn it on.
+    for k in [k for k in env if k.startswith("GROK_")]:
+        env.pop(k)
 
-    log_path = app_dir / "server.log"
-    log_f = open(log_path, "w")
-    proc = subprocess.Popen(
-        [str(VENV_PYTHON), str(app_dir / "bot.py")],
-        cwd=str(app_dir),
-        env=env,
-        stdout=log_f,
-        stderr=subprocess.STDOUT,
-    )
-    base_url = f"http://127.0.0.1:{port}"
-    try:
-        _wait_for_health(base_url)
-    except Exception:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        log_f.close()
-        log_text = log_path.read_text(errors="replace")
-        pytest.fail(f"e2e cockpit failed to start.\n--- server.log ---\n{log_text}", pytrace=False)
-
-    yield {
-        "base_url": base_url,
+    yield from _cockpit_process(app_dir, env, port, {
+        "base_url": f"http://127.0.0.1:{port}",
         "password": password,
         "project_ids": E2E_PROJECT_IDS,
         "app_dir": app_dir,
         "home": fake_home,
         "scratch": scratch,
-    }
+    })
 
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=5)
-    log_f.close()
+
+# Projects of the Grok-enabled cockpit. `g-*` ids double as the key the fake `grok` wrapper uses to
+# pick a recorded wire fixture (tests/e2e/grok_support.py:FIXTURE_BY_PROJECT).
+GROK_ALLOWED_PROJECTS = ["g-text", "g-tool", "g-fail", "g-board", "g-handoff", "g-hand-desktop", "g-hand-360",
+                         "g-hist", "g-new"]
+GROK_DENIED_PROJECTS = ["g-denied", "g-settings", "g-claude"]
+
+
+@pytest.fixture(scope="session")
+def e2e_grok_server(tmp_path_factory):
+    """A SECOND cockpit with GROK_ENABLED=true (spec-095 P5b): the real grok_engine against the
+    fake `grok` CLI (tests/fake_grok_acp.py). The plain `e2e_server` keeps GROK_ENABLED unset on
+    purpose — it is the "nothing changes when the feature is off" half of the suite."""
+    from . import grok_support as gs
+
+    app_dir = tmp_path_factory.mktemp("e2e-grok-app")
+    _build_app_copy(app_dir)
+    fake_home = tmp_path_factory.mktemp("e2e-grok-home")
+    projects_root = tmp_path_factory.mktemp("e2e-grok-projects")
+    ids = GROK_ALLOWED_PROJECTS + GROK_DENIED_PROJECTS
+    project_cwds = {}
+    for pid in ids:
+        cwd = projects_root / pid
+        cwd.mkdir()
+        project_cwds[pid] = cwd
+    _seed_data(app_dir, project_cwds, extras={pid: {"grok_allowed": True} for pid in GROK_ALLOWED_PROJECTS})
+
+    bindir = tmp_path_factory.mktemp("e2e-grok-bin")
+    wrapper = gs.write_fake_cli(bindir)
+    gs.write_login(app_dir / "data" / "grok-home")
+
+    port = _free_port()
+    password = "e2e-" + os.urandom(8).hex()
+    env = dict(os.environ)
+    env.update({
+        "COPS_NO_DOTENV": "1",
+        "WEB_PORT": str(port),
+        "WEB_PASSWORD": password,
+        "E2E_FAKE_ENGINE": "1",
+        "CLAUDE_AUTH_MODE": "subscription",
+        "HOME": str(fake_home),
+        "PYTHONUNBUFFERED": "1",   # server.log is read live (the Grok startup verdict) and on a failed boot
+    })
+    env.update(gs.grok_env(app_dir, bindir, wrapper, tmp_path_factory.mktemp("e2e-grok-denied")))
+    env.pop("ANTHROPIC_API_KEY", None)
+    for k in [k for k in env if k.startswith("GROK_") and k not in ("GROK_ENABLED", "GROK_BIN", "GROK_SANDBOX_DENY")]:
+        env.pop(k)  # a developer's own GROK_HOME / GROK_ALLOW_ALL_PROJECTS must not leak in
+    # `~/.claude` exists on every real host and the sandbox deny list names it when it does — the
+    # cockpit creates it on first run. Create it BEFORE the verdict is seeded, or the seed and the
+    # server would hash two different deny lists (the cache is keyed by that fingerprint).
+    (fake_home / ".claude").mkdir(exist_ok=True)
+    gs.seed_availability(app_dir, env)
+    gs.seed_usage_rows(app_dir / "data", [
+        gs.usage_row(session_id="seed-1", project="g-text", input=12000, output=3000, cached=4000,
+                     reasoning=900, age_sec=3600),
+        gs.usage_row(session_id="seed-2", project="g-tool", model="grok-4.6", input=8000, output=1500,
+                     cached=2000, reasoning=300, age_sec=7200),
+    ])
+
+    def info_factory():
+        gs.wait_until_available(app_dir / "server.log")
+        return {
+        "base_url": f"http://127.0.0.1:{port}",
+        "password": password,
+        "project_ids": ids,
+        "allowed": GROK_ALLOWED_PROJECTS,
+        "denied": GROK_DENIED_PROJECTS,
+        "app_dir": app_dir,
+        "home": fake_home,
+        "cwds": project_cwds,
+        }
+
+    yield from _cockpit_process(app_dir, env, port, info_factory)
+
+
+def _login(page, server: dict):
+    ui_state_path = server["app_dir"] / "data" / "ui_state.json"
+    ui_state_path.unlink(missing_ok=True)
+    page.goto(server["base_url"])
+    page.fill("#password", server["password"])
+    page.click("button.btn-primary[type=submit]")
+    page.wait_for_selector(".project-item", timeout=10_000)
+    return page
+
+
+@pytest.fixture
+def grok_page(e2e_grok_server, page):
+    """A Playwright page logged in to the Grok-enabled cockpit."""
+    page.set_default_timeout(10_000)
+    return _login(page, e2e_grok_server)
 
 
 @pytest.fixture

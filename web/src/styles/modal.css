@@ -183,3 +183,18 @@
     width: min(340px, calc(100vw - 32px));
   }
 }
+
+/* ── Provider chooser (New agent chat, New free chat) ───────────────────────────────────────
+   One equal segment per provider. `.btn-primary` is width:100%, so without this the SELECTED
+   provider swallowed the row and the others shrank to their text ("Claude Code" wrapped to two
+   lines); with a third provider the jump on every click was obvious. */
+.provider-pick { display: flex; gap: 8px; }
+.provider-pick > .btn {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  min-height: 40px;           /* tap target on a phone */
+  padding-left: 8px;          /* .btn-primary and .btn-secondary pad differently; flex-basis 0 would carry */
+  padding-right: 8px;         /* that difference into the widths */
+  white-space: nowrap;
+}

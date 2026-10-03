@@ -63,7 +63,7 @@
 
 /* ── Card (chart / table wrapper) ── */
 .usage-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
-.usage-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.usage-card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 14px; }
 .usage-card-title { font-size: 12px; font-weight: 650; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em; }
 .usage-legend { display: flex; gap: 12px; flex-wrap: wrap; }
 .usage-legend span { font-size: 11px; color: var(--text3); display: inline-flex; align-items: center; gap: 5px; }

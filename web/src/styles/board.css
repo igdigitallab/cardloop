@@ -833,3 +833,14 @@
 }
 .board-card-hover-btn:hover:not(:disabled) { background: var(--bg4); color: var(--text); }
 .board-card-hover-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Card editor: provider + model row ─────────────────────────────────────────────────────
+   Wraps instead of overflowing: on a phone "Provider [select] Model [150px input]" is wider than
+   the sheet. The free-text model input (adapter providers) takes the rest of the line. */
+.board-edit-runtime { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.board-edit-model-input { flex: 1 1 140px; min-width: 0; max-width: 220px; }
+@media (max-width: 640px) {
+  .board-edit-runtime select,
+  .board-edit-runtime input { min-height: 40px; font-size: 16px !important; }   /* tap target + no iOS zoom */
+  .board-edit-model-input { max-width: none; }
+}

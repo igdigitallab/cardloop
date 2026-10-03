@@ -1467,7 +1467,7 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
               style={{ width: '100%', resize: 'vertical', fontFamily: 'monospace', fontSize: 13 }}
             />
             {/* Card 43665f: per-card model override — (Default) means use board_card_model / sonnet */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+            <div className="board-edit-runtime">
               <label style={{ fontSize: 12, color: 'var(--text3)' }}>Provider</label>
               <select value={taskEditModal.provider}
                 onChange={e => setTaskEditModal({ ...taskEditModal, provider: e.target.value as '' | Provider, model: '' })}
@@ -1483,7 +1483,8 @@ export function BoardTab({ projectId, isActive = true, onDiscuss, focusCard }: P
                 value={taskEditModal.model}
                 placeholder={`Project ${providerLabel(taskEditModal.provider)} model`}
                 onChange={e => setTaskEditModal({ ...taskEditModal, model: e.target.value })}
-                style={{ fontSize: 12, padding: '2px 6px', width: 150 }}
+                className="board-edit-model-input"
+                style={{ fontSize: 12, padding: '2px 6px' }}
               /> : <select
                 value={taskEditModal.model}
                 onChange={e => setTaskEditModal({ ...taskEditModal, model: e.target.value })}

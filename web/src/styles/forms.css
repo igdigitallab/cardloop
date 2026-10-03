@@ -250,3 +250,10 @@
     max-width: 100%;
   }
 }
+
+/* A checkbox row that must be easy to hit on a phone (Settings: the Grok privacy opt-in). */
+.settings-check-hit { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+@media (max-width: 640px) {
+  .settings-check-hit { min-width: 44px; min-height: 44px; margin: -12px -8px -12px 0; }
+  .settings-check-hit input { width: 22px; height: 22px; }
+}

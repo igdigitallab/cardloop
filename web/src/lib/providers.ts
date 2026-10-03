@@ -206,16 +206,22 @@ export function gatedProviders(
 }
 
 /** Providers that get a "<name> board model" row in Settings: adapters the server lists, or
- *  whose model field the project already holds a value for. */
+ *  that the project is already set up for. "Set up for" is a model value for an open provider
+ *  (Codex), but for a GATED provider it is the opt-in flag: the server hands every project a
+ *  default `grok_model` whether or not Grok exists on this install, so "holds a value" would put a
+ *  Grok row on every Settings page of a cockpit that has Grok switched off. */
 export function boardModelProviders(
   registry: readonly { provider: string }[],
   settings: object,
 ): Provider[] {
   const s = settings as Record<string, unknown>
-  return PROVIDER_IDS.filter(id => PROVIDERS[id].adapter && (
-    registry.some(r => r.provider === id)
-    || (typeof s[PROVIDERS[id].modelField] === 'string' && s[PROVIDERS[id].modelField] !== '')
-  ))
+  return PROVIDER_IDS.filter(id => {
+    const meta = PROVIDERS[id]
+    if (!meta.adapter) return false
+    if (registry.some(r => r.provider === id)) return true
+    if (meta.gate) return s[meta.gate.field] === true
+    return typeof s[meta.modelField] === 'string' && s[meta.modelField] !== ''
+  })
 }
 
 /** Usage-tab provider filter: 'all' shows every section, otherwise only the chosen one. */

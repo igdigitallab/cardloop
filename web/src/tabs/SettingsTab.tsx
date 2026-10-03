@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { api, apiErrorMessage, type AccountRow } from '../api'
 import { Project, ProjectSettings, GlobalSettings, GlobalSettingsEffective, AgentsConfig, ProjectStructureHealth, AutopilotStatus } from '../types'
 import { Spinner } from '../components/Spinner'
@@ -6,6 +6,7 @@ import { SecretsTab } from './SecretsTab'
 import { MODELS } from '../lib/models'
 import { PROVIDERS, boardModelProviders, gatedProviders, providerLabel, selectableProviders } from '../lib/providers'
 import { useRuntimeProviders } from '../lib/runtimeStatus'
+import { projectSettingsPayload } from '../lib/settingsPayload'
 import { ProjectStructureCardFull } from '../components/ProjectStructureCard'
 import { t } from '../i18n'
 
@@ -70,6 +71,8 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
   // spec-095: which engines the server lists decides which provider rows Settings shows.
   const providerRegistry = useRuntimeProviders()
   const [proj, setProj] = useState<ProjectSettings | null>(null)
+  // The settings as the server last returned them: what `projectSettingsPayload` diffs against.
+  const savedProjRef = useRef<ProjectSettings | null>(null)
   // Multiple Claude subscriptions. Empty/one → the row is hidden entirely.
   const [accounts, setAccounts] = useState<AccountRow[]>([])
   const [globalAccount, setGlobalAccount] = useState('')
@@ -114,6 +117,7 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
     Promise.all([api.projectSettings(projectId), api.settings(), api.autopilotStatus().catch(() => null)])
       .then(([p, g, ap]) => {
         if (!cancelled) {
+          savedProjRef.current = p
           setProj(p); setGlob(g); setLoading(false)
           if (ap) {
             setAutopilotStatus(ap)
@@ -151,7 +155,9 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
       if (rawCfg.researcher_model) cleanCfg.researcher_model = rawCfg.researcher_model
       if (rawCfg.quick_model)      cleanCfg.quick_model      = rawCfg.quick_model
       if (rawCfg.conductor_prompt !== undefined) cleanCfg.conductor_prompt = rawCfg.conductor_prompt
-      const r = await api.saveProjectSettings(projectId, { ...proj, agents_config: cleanCfg })
+      const r = await api.saveProjectSettings(
+        projectId, projectSettingsPayload({ ...proj, agents_config: cleanCfg }, savedProjRef.current))
+      savedProjRef.current = r.settings
       setProj(r.settings); setProjMsg('Saved ✓')
     } catch (e) { setProjMsg('⚠ ' + errMsg(e)) }
     finally { setSavingProj(false) }
@@ -382,9 +388,13 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
           return (
             <Row key={id} title={`Allow ${name} in this project`}
                  hint={`${name} sends this project's code and prompts to ${gate.recipient}. Off by default: chats and board cards cannot use ${name} here until you turn it on. Turning it off later does not recall anything already sent.`}>
-              <input type="checkbox" checked={proj[gate.field] === true} data-testid={`${id}-allowed`}
-                     onChange={ev => setProj({ ...proj, [gate.field]: ev.target.checked })}
-                     aria-label={`Allow ${name} in this project`} />
+              {/* The label is the tap target: a bare 13px checkbox is a miss on a phone, and this
+                  is the one switch that lets project code leave the machine. */}
+              <label className="settings-check-hit">
+                <input type="checkbox" checked={proj[gate.field] === true} data-testid={`${id}-allowed`}
+                       onChange={ev => setProj({ ...proj, [gate.field]: ev.target.checked })}
+                       aria-label={`Allow ${name} in this project`} />
+              </label>
             </Row>
           )
         })}

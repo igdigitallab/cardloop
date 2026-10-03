@@ -1029,6 +1029,9 @@ const ModelThinkButton = memo(function ModelThinkButton({
   const multiAgentSupported = capabilities ? !!capabilities.multi_agent : true
   const adapter = isAdapterProvider(provider)
   const providerName = providerLabel(provider)
+  // The row's hover text and the note under the menu say the same thing. The Claude ultracode
+  // paragraph ("the agent authors multi-agent Workflows ...") is false for an adapter.
+  const adapterMultiAgentHint = `Native ${providerName} subagents may split independent work and report lifecycle events here.`
   // An adapter whose registry model lists no reasoning levels has no thinking control at all:
   // drop the section (and the effort suffix on the pill) rather than show a Claude ladder that
   // maps to nothing. Registry not loaded yet (undefined) stays fail-soft, as before.
@@ -1138,6 +1141,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
             role="option"
             aria-selected={planMode}
             className={`chat-think-option plan-row${planMode ? ' selected' : ''}`}
+            data-testid="plan-row"
             title={planLocked ? t['chat.plan_locked_hint']
                    : !planModeSupported ? t['chat.plan_unsupported'].replace('{provider}', providerName)
                    : t['chat.plan_hint']}
@@ -1163,6 +1167,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
             role="option"
             aria-selected={askMode}
             className={`chat-think-option plan-row${askMode && !planMode ? ' selected' : ''}`}
+            data-testid="ask-row"
             title={planMode ? t['chat.ask_plan_conflict']
                    : !askModeSupported ? t['chat.ask_unsupported'].replace('{provider}', providerName) : t['chat.ask_hint']}
             /* spec-092: a runtime that cannot honour ask-mode greys the row but must NOT make
@@ -1191,9 +1196,10 @@ const ModelThinkButton = memo(function ModelThinkButton({
             role="option"
             aria-selected={ultracode}
             className={`chat-think-option ultracode-row${ultracode ? ' selected' : ''}`}
+            data-testid="multi-agent-row"
             title={planMode ? t['chat.plan_ultracode_conflict']
                    : !multiAgentSupported ? t['chat.multi_agent_unsupported'].replace('{provider}', providerName)
-                   : t['chat.ultracode_hint']}
+                   : adapter ? adapterMultiAgentHint : t['chat.ultracode_hint']}
             style={planMode || (!multiAgentSupported && !ultracode) ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
             onMouseDown={e => {
               e.preventDefault()
@@ -1206,9 +1212,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
             <span className="ultracode-state">{ultracode ? 'ON' : 'OFF'}</span>
           </div>
           <div className="composer-modelthink-note">
-            {planMode ? t['chat.plan_hint'] : (adapter
-              ? `Native ${providerName} subagents may split independent work and report lifecycle events here.`
-              : t['chat.ultracode_hint'])}
+            {planMode ? t['chat.plan_hint'] : (adapter ? adapterMultiAgentHint : t['chat.ultracode_hint'])}
           </div>
         </div>
       )}
@@ -1409,6 +1413,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const effectiveChatId = activeChatId ?? ''
   const activeChat = chats.find(c => c.id === effectiveChatId)
   const activeProvider: Provider = activeChat?.provider ?? 'claude'
+  // File rewind is the Claude SDK's checkpointing. An adapter's history rows also carry a `uuid`
+  // (search anchors need a stable id) but there is no checkpoint behind it: the button could only fail.
+  const canRewindFiles = !isAdapterProvider(activeProvider)
   const activeModelRaw = activeChat?.model || project.model
   // spec-092: the model is a per-chat pin for EVERY provider now, so an adapter (Codex, Grok)
   // gets its real model list instead of the single frozen row it used to show ("pinned to this chat" was
@@ -2333,7 +2340,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // Clear any stale error banner left over from a prior aborted stream so
       // the operator sees the recovered content, not an old error.
       setError('')
-    }).catch(() => { if (!isCancelled()) { setMessages([]); setError('') } })
+    }).catch(() => {
+      // A failed read of history must not erase what is on screen. This runs as the post-turn
+      // reconcile too, where the canvas holds the live-streamed reply: wiping it on a 4xx/5xx
+      // (a provider whose history reader is down, a transient network error) made a finished
+      // answer vanish the moment the turn ended. A chat switch / reset already cleared the
+      // canvas before it hydrates, so keeping it is the same as the old reset there.
+      if (!isCancelled()) setError('')
+    })
   }, [projectId, effectiveChatId, seedCursor])
 
   // spec-071: verify-then-hydrate after a live-rendered turn completes. The completion hydrate
@@ -3571,7 +3585,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       } else if (refused) {
         // A deliberate refusal (the Grok privacy gate, a project pinned to a backend): the
         // server's own sentence. Retrying or reloading would not change the answer.
+        // Also on the chat's error banner: a provider switch is confirmed in a dialog that has
+        // closed by now, and the pill dropdown (where runtimeError lives) is only open while
+        // hovered — without this the refusal was invisible and the pick looked like a no-op.
         setRuntimeError(refused)
+        setError(refused)
       } else if (err.status === 409) {
         // Stale revision: another tab (or this one, before a reload) already moved the chat.
         // Refetch rather than retrying blind — the operator's next pick must start from the
@@ -4756,7 +4774,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 {renderFragmentContent(msg, idx)}
                 {/* Meta row: timestamp (always visible) sits inline with the file-rewind
                     action (hover-revealed). One row, so the time never adds an extra line. */}
-                {(msg.ts != null || msg.uuid) && (
+                {(msg.ts != null || (msg.uuid && canRewindFiles)) && (
                   <div className="msg-meta">
                     {msg.ts != null && (
                       <span className="msg-time" title={new Date(msg.ts).toLocaleString()}>
@@ -4765,7 +4783,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                     )}
                     {/* spec-073: file undo — user messages loaded from history carry the
                         checkpoint uuid; rewind restores files to before this message ran. */}
-                    {msg.uuid && (
+                    {msg.uuid && canRewindFiles && (
                       <div className="msg-actions">
                         <RewindButton projectId={project.id} messageUuid={msg.uuid} />
                       </div>
@@ -5538,7 +5556,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           <div className="run-modal-body" style={{ display: 'grid', gap: 14 }}>
             <div>
               <div style={{ fontSize: 12, color: 'var(--text2)', marginBottom: 6 }}>Provider</div>
-              <div style={{ display: 'flex', gap: 8 }}>
+              <div className="provider-pick">
                 {selectableProviders(providerRegistry).map(provider => {
                   const info = providerRegistry.find(p => p.provider === provider)
                   const why = providerUnavailableReason(provider, info)
@@ -5581,7 +5599,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               This is the chat's starting runtime. You can move it to another engine or
               subscription later from the model menu — a provider change offers a handoff first.
             </div>
-            {newChatError && <div className="usage-accounts-msg rt-error" role="alert">{newChatError}</div>}
+            {newChatError && <div className="error-state" role="alert">⚠ {newChatError}</div>}
             <button className="btn-primary" onClick={confirmCreateChat} disabled={!newChatModel}>Create chat</button>
           </div>
         </Modal>
