@@ -1,0 +1,20 @@
+{
+  "info": {
+    "id": "00000000-0000-4000-8000-000000000008",
+    "cwd": "/scratch/project"
+  },
+  "session_summary": "Create perm_test.txt with terminal touch",
+  "created_at": "2026-10-02T23:14:26.202683491Z",
+  "updated_at": "2026-10-02T23:16:06.389966558Z",
+  "num_messages": 17,
+  "num_chat_messages": 16,
+  "current_model_id": "grok-4.7",
+  "next_trace_turn": 3,
+  "chat_format_version": 1,
+  "grok_home": "/home/user/.grok",
+  "last_active_at": "2026-10-02T23:16:06.389966558Z",
+  "generated_title": "Create perm_test.txt with terminal touch",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off",
+  "reasoning_effort": "high"
+}

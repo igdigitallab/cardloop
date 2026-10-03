@@ -1,0 +1,21 @@
+{
+  "info": {
+    "id": "00000000-0000-4000-8000-000000000006",
+    "cwd": "/scratch/project"
+  },
+  "session_summary": "Create hello.txt with ok then ls",
+  "created_at": "2026-10-02T22:59:54.468485360Z",
+  "updated_at": "2026-10-02T23:00:17.968630601Z",
+  "num_messages": 17,
+  "num_chat_messages": 15,
+  "current_model_id": "grok-4.7",
+  "next_trace_turn": 2,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "grok_home": "/home/user/.grok",
+  "last_active_at": "2026-10-02T23:00:17.968630601Z",
+  "generated_title": "Create hello.txt with ok then ls",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off",
+  "reasoning_effort": "high"
+}

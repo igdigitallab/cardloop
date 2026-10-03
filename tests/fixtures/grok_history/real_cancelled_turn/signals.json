@@ -1,0 +1,13 @@
+{
+  "turnCount": 2,
+  "userMessageCount": 2,
+  "assistantMessageCount": 3,
+  "toolCallCount": 1,
+  "toolsUsed": [
+    "run_terminal_command"
+  ],
+  "modelsUsed": [
+    "grok-4.7"
+  ],
+  "primaryModelId": "grok-4.7"
+}
