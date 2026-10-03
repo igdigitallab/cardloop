@@ -115,6 +115,7 @@ class Scrubber:
                 self.words.append((re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(word) + r"(?![A-Za-z0-9_-])"), repl))
         self.sessions: dict[str, str] = {}
         self.uuids: dict[str, str] = {}
+        self.blobs: dict[str, str] = {}
 
     def register_session(self, sid: str) -> str:
         if sid not in self.sessions:
@@ -143,8 +144,17 @@ class Scrubber:
         s = _EMAIL.sub(lambda m: m.group(0) if m.group(0).endswith("@example.invalid") else "user@example.invalid", s)
         s = _JWT.sub("REDACTED", s)
         s = _PREFIXED.sub("REDACTED", s)
-        s = _BLOB.sub(lambda m: "REDACTED" if _looks_secret_blob(m.group(0)) else m.group(0), s)
+        s = _BLOB.sub(self._blob, s)
         return s
+
+    def _blob(self, m: re.Match) -> str:
+        tok = m.group(0)
+        if not _looks_secret_blob(tok):
+            return tok
+        # consistent per token, so ids that appear in a request and its updates still correlate
+        if tok not in self.blobs:
+            self.blobs[tok] = f"REDACTED_{len(self.blobs) + 1}"
+        return self.blobs[tok]
 
     def obj(self, x: Any) -> Any:
         if isinstance(x, str):
@@ -270,7 +280,7 @@ class Acp:
         self.argv = [grok_bin, "agent", "--no-leader", "stdio"]
         self.proc = subprocess.Popen(self.argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, start_new_session=True)
-        self.q: "queue.Queue[Optional[bytes]]" = queue.Queue()
+        self.q: "queue.Queue[Optional[tuple]]" = queue.Queue()  # (arrival monotonic, raw line) | None
         self.stderr_tail: collections.deque = collections.deque(maxlen=80)
         self.rows: list[dict] = []
         self._id = 0
@@ -286,15 +296,19 @@ class Acp:
     # -- plumbing
     def _read_out(self):
         for line in self.proc.stdout:
-            self.q.put(line)
+            self.q.put((time.monotonic(), line))  # stamp on arrival, not when the pump gets to it
         self.q.put(None)
 
     def _read_err(self):
         for line in self.proc.stderr:
             self.stderr_tail.append(line.decode("utf-8", "replace").rstrip())
 
-    def _log(self, direction: str, msg: Any):
-        self.rows.append({"dir": direction, "msg": msg, "t": round(time.monotonic() - self.t0, 4)})
+    def _log(self, direction: str, msg: Any, at: Optional[float] = None):
+        self.rows.append({"dir": direction, "msg": msg, "t": round((at or time.monotonic()) - self.t0, 4)})
+
+    def mark(self, **info):
+        """A non-wire row (`dir: marker`) explaining what the client did, e.g. a timeout; fake servers skip it."""
+        self._log("marker", info)
 
     def register_session(self, sid: str):
         self.session_id = sid
@@ -321,19 +335,23 @@ class Acp:
         while True:
             left = end - time.monotonic()
             if left <= 0:
+                self.mark(client_timeout_s=timeout, waiting_for_id=want_id)
                 return {"_timeout": True}
             try:
                 line = self.q.get(timeout=min(left, 1.0))
             except queue.Empty:
                 if self.proc.poll() is not None and self.q.empty():
+                    self.mark(agent_exited=self.proc.returncode)
                     return {"_exit": self.proc.returncode}
                 continue
             if line is None:
+                self.mark(agent_exited=self.proc.poll())
                 return {"_exit": self.proc.poll()}
+            arrived, line = line
             try:
                 m = json.loads(line)
             except ValueError:
-                self._log("a2c", {"_nonjson": line.decode("utf-8", "replace")[:500]})
+                self._log("a2c", {"_nonjson": line.decode("utf-8", "replace")[:500]}, arrived)
                 continue
             # learn session ids BEFORE logging so they are scrubbed from the very first line
             res = m.get("result")
@@ -342,7 +360,7 @@ class Acp:
             params = m.get("params")
             if isinstance(params, dict) and isinstance(params.get("sessionId"), str):
                 self.scrub.register_session(params["sessionId"])
-            self._log("a2c", m)
+            self._log("a2c", m, arrived)
             if "method" in m and "id" in m:
                 self._answer_agent_request(m)
             elif m.get("method") == "session/update":
@@ -492,41 +510,106 @@ def sc_tool_write_yolo(c: Ctx):
     c.finish(a, "tool_write_yolo", f"file created: {ok}")
 
 
+def reject_policy(params: dict) -> dict:
+    opts = params.get("options") or []
+    pick = next((o for o in opts if str(o.get("kind", "")).startswith("reject")), opts[-1] if opts else {})
+    return {"outcome": {"outcome": "selected", "optionId": pick.get("optionId")}}
+
+
+def _perm_variant(c: Ctx, fixture: str, filename: str, *, policy, timeout: float, cancel_after: Optional[float] = None):
+    """One no-yolo write turn; `policy` answers (or not) the session/request_permission."""
+    a = c.open(fixture); a.handshake(); a.new_session(yolo=False)
+    a.permission_policy = policy
+    if cancel_after is not None:
+        orig = a._answer_agent_request  # fire the cancel from a timer thread once the permission request is pending
+
+        def answer(m):
+            orig(m)
+            if m["method"] == "session/request_permission":
+                threading.Timer(cancel_after, lambda: a.notify("session/cancel", {"sessionId": a.session_id})).start()
+        a._answer_agent_request = answer
+    t = time.monotonic()
+    r = a.prompt(ONLY_HERE + f"Create a file named {filename} containing the text hello-perm. Then reply DONE.", timeout=timeout)
+    ok = Path(c.project, filename).exists()
+    stop = (r.get("result") or {}).get("stopReason")
+    err = r.get("error")
+    c.finish(a, fixture, f"requests={len(a.requests_from_agent)} stopReason={stop} error={json.dumps(err)[:160] if err else None} "
+                         f"timeout={'_timeout' in r} turn_s={time.monotonic()-t:.1f} file_created={ok}")
+
+
 def sc_permission_unanswered(c: Ctx):
-    a = c.open("permission_request_no_yolo_unanswered"); a.handshake(); a.new_session(yolo=False)
-    a.permission_policy = lambda params: None
-    r = a.prompt(ONLY_HERE + "Create a file named perm.txt containing the text hello-perm. Then reply DONE.", timeout=60)
-    ok = Path(c.project, "perm.txt").exists()
-    c.finish(a, "permission_request_no_yolo_unanswered",
-             f"requests={len(a.requests_from_agent)} stopReason={(r.get('result') or {}).get('stopReason')} resp_keys={list(r)[:4]} file_created={ok}")
+    _perm_variant(c, "permission_request_no_yolo_unanswered", "perm.txt", policy=lambda p: None, timeout=75)
 
 
 def sc_permission_allow(c: Ctx):
-    a = c.open("permission_request_no_yolo_allow"); a.handshake(); a.new_session(yolo=False)
+    _perm_variant(c, "permission_request_no_yolo_allow", "perm2.txt", policy=allow_policy, timeout=90)
+
+
+def sc_permission_reject(c: Ctx):
+    _perm_variant(c, "permission_request_no_yolo_reject", "perm3.txt", policy=reject_policy, timeout=90)
+
+
+def sc_permission_error(c: Ctx):
+    """JSON-RPC -32601 reply to the permission request (what a client that does not implement it sends)."""
+    a = c.open("permission_request_no_yolo_error32601"); a.handshake(); a.new_session(yolo=False)
+    orig = a._answer_agent_request
+
+    def answer(m):  # the generic unknown-method branch already replies -32601; make that explicit for this method too
+        a.requests_from_agent.append(m)
+        a._write({"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": "method not supported by client"}})
+    a._answer_agent_request = answer
+    t = time.monotonic()
+    r = a.prompt(ONLY_HERE + "Create a file named perm4.txt containing the text hello-perm. Then reply DONE.", timeout=90)
+    c.finish(a, "permission_request_no_yolo_error32601",
+             f"stopReason={(r.get('result') or {}).get('stopReason')} timeout={'_timeout' in r} turn_s={time.monotonic()-t:.1f} "
+             f"file_created={Path(c.project, 'perm4.txt').exists()}")
+
+
+def sc_permission_outcome_cancelled(c: Ctx):
+    _perm_variant(c, "permission_request_no_yolo_outcome_cancelled", "perm5.txt",
+                  policy=lambda p: {"outcome": {"outcome": "cancelled"}}, timeout=90)
+
+
+def sc_permission_cancel_pending(c: Ctx):
+    """Request left unanswered, then session/cancel: does the pending turn end, and how?"""
+    _perm_variant(c, "permission_request_no_yolo_cancel_pending", "perm6.txt", policy=lambda p: None, timeout=60, cancel_after=6.0)
+
+
+def sc_permission_bash(c: Ctx):
+    a = c.open("permission_bash_no_yolo"); a.handshake(); a.new_session(yolo=False)
     a.permission_policy = allow_policy
-    r = a.prompt(ONLY_HERE + "Create a file named perm2.txt containing the text hello-allow. Then reply DONE.", timeout=90)
-    ok = Path(c.project, "perm2.txt").exists()
-    c.finish(a, "permission_request_no_yolo_allow",
-             f"requests={len(a.requests_from_agent)} stopReason={(r.get('result') or {}).get('stopReason')} file_created={ok}")
+    a.prompt(ONLY_HERE + "Run these shell commands one at a time: `ls`, then `touch touched.txt`, then `rm touched.txt`, then `git init -q`. Then reply DONE.", timeout=120)
+    c.finish(a, "permission_bash_no_yolo",
+             f"requests={len(a.requests_from_agent)} titles={[ (r['params'].get('toolCall') or {}).get('title') for r in a.requests_from_agent]} "
+             f"git_init_done={Path(c.project, '.git').exists()}")
 
 
 def sc_cancel_mid_tool(c: Ctx):
     a = c.open("cancel_mid_tool"); a.handshake(); a.new_session()
-    state = {"cancelled": False}
+    state = {"cancelled": False, "t_cancel": None}
+
+    def fire():
+        state["t_cancel"] = time.monotonic()
+        a.notify("session/cancel", {"sessionId": a.session_id})
 
     def on_update(u):
         if state["cancelled"] or u.get("sessionUpdate") not in ("tool_call", "tool_call_update"):
             return
-        blob = json.dumps(u)
-        if "sleep" in blob and u.get("status") in ("in_progress", "pending", None, "running"):
-            time.sleep(1.0)  # let the command actually start
+        if "sleep" in json.dumps(u) and u.get("status") in ("in_progress", None):
             state["cancelled"] = True
-            a.notify("session/cancel", {"sessionId": a.session_id})
+            threading.Timer(1.5, fire).start()  # let the command really start; never sleep in the reader
 
     a.on_update = on_update
-    t = time.monotonic()
     r = a.prompt(ONLY_HERE + "Run the shell command `sleep 40` and then reply DONE.", timeout=90)
-    c.finish(a, "cancel_mid_tool", f"cancel_sent={state['cancelled']} stopReason={(r.get('result') or {}).get('stopReason')} turn_s={time.monotonic()-t:.1f}")
+    dt = time.monotonic() - state["t_cancel"] if state["t_cancel"] else None
+    # is the sleep still running right after the cancel? (grandchild of the sandboxed agent)
+    alive = subprocess.run(["pgrep", "-fc", "sleep 40"], capture_output=True, text=True).stdout.strip()
+    # the session must stay usable after a cancel
+    a.mark(note="follow-up prompt on the same session after the cancel")
+    r2 = a.prompt("Reply with exactly the single word OK. Use no tools.", timeout=90)
+    c.finish(a, "cancel_mid_tool", f"cancel_sent={state['cancelled']} stopReason={(r.get('result') or {}).get('stopReason')} "
+                                   f"cancel_to_response_s={dt if dt is None else round(dt,3)} sleeps_alive_after_cancel(pgrep -fc incl. self)={alive} "
+                                   f"followup_stopReason={(r2.get('result') or {}).get('stopReason')} followup_text={a.agent_text()[-20:]!r}")
 
 
 def sc_resume_turn(c: Ctx):
@@ -535,15 +618,29 @@ def sc_resume_turn(c: Ctx):
     sid = a.session_id
     a.close()
     # a SECOND process resumes the session: this is what the cockpit does every turn (one process per turn)
-    scrub = a.scrub
-    b = Acp(grok_bin=c.grok_bin, env=build_env(c.grok_bin, c.grok_home), cwd=c.project, scrub=scrub, out_path=a.out_path)
-    b.rows = a.rows  # one continuous fixture; `t` restarts at the second spawn, marked below
-    b.rows.append({"dir": "marker", "msg": {"second_process_spawn": True}, "t": 0.0})
+    b = Acp(grok_bin=c.grok_bin, env=build_env(c.grok_bin, c.grok_home), cwd=c.project, scrub=a.scrub, out_path=a.out_path)
+    b.rows = a.rows  # one continuous fixture; a `marker` row flags the second spawn (its `t` restarts at 0)
+    b.mark(second_process_spawn=True)
     b.handshake()
     r = b.resume_session(sid)
     b.prompt("What was the secret word I asked you to remember? Reply with just the word.")
     txt = b.agent_text()
     c.finish(b, "resume_turn", f"resume_ok={'result' in r} remembered={'MANGO-7' in txt}")
+
+
+def sc_session_load(c: Ctx):
+    """History replay: session/load re-streams the stored conversation (spec D7 reads the disk instead)."""
+    a = c.open("session_load"); a.handshake(); a.new_session()
+    a.prompt(ONLY_HERE + "Read notes.txt with a tool and reply with its first line only.")
+    sid = a.session_id
+    a.close()
+    b = Acp(grok_bin=c.grok_bin, env=build_env(c.grok_bin, c.grok_home), cwd=c.project, scrub=a.scrub, out_path=a.out_path)
+    b.rows = a.rows
+    b.mark(second_process_spawn=True)
+    b.handshake()
+    r = b.call("session/load", {"sessionId": sid, "cwd": c.project, "mcpServers": []}, 30)
+    kinds = collections.Counter(u.get("sessionUpdate") for u in b.updates)
+    c.finish(b, "session_load", f"load_ok={'result' in r} replay_kinds={dict(kinds)}")
 
 
 def sc_subagent_turn(c: Ctx):
@@ -568,22 +665,24 @@ def sc_model_effort_switch(c: Ctx):
     models = next((o for o in opts if o.get("id") == "model"), {})
     efforts = next((o for o in opts if o.get("id") in ("reasoning_effort", "effort")), {})
     sid = a.session_id
+    eff_id = efforts.get("id", "reasoning_effort")
+
     def first_other(o):
         cur = o.get("currentValue")
         return next((x.get("value") for x in (o.get("options") or []) if x.get("value") != cur), None)
-    other_model = first_other(models)
-    other_effort = first_other(efforts)
+
+    other_model, other_effort = first_other(models), first_other(efforts)
     if other_model:
         a.call("session/set_config_option", {"sessionId": sid, "configId": "model", "value": other_model})
-    if other_effort:
-        a.call("session/set_config_option", {"sessionId": sid, "configId": efforts.get("id", "reasoning_effort"), "value": other_effort})
+    a.call("session/set_config_option", {"sessionId": sid, "configId": eff_id, "value": "low"})
     a.call("session/set_config_option", {"sessionId": sid, "configId": "model", "value": "grok-does-not-exist"})
-    a.call("session/set_config_option", {"sessionId": sid, "configId": efforts.get("id", "reasoning_effort"), "value": "ultra"})
+    a.call("session/set_config_option", {"sessionId": sid, "configId": eff_id, "value": "ultra"})
     a.call("session/set_config_option", {"sessionId": sid, "configId": "no_such_option", "value": "x"})
-    if other_model:
-        a.call("session/set_config_option", {"sessionId": sid, "configId": "model", "value": models.get("currentValue")})
+    a.call("session/set_config_option", {"sessionId": "00000000-0000-0000-0000-000000000000", "configId": "model", "value": other_model or "x"})
+    # the turn runs under the switched model + effort: the response must name them
     a.prompt("Reply with exactly the single word OK. Use no tools.", timeout=120)
-    c.finish(a, "model_effort_switch", f"model_options={[x.get('value') for x in models.get('options', [])]} effort_options={[x.get('value') for x in efforts.get('options', [])]}")
+    c.finish(a, "model_effort_switch", f"model_options={[x.get('value') for x in models.get('options', [])]} "
+                                       f"effort_options={[x.get('value') for x in efforts.get('options', [])]} ran_on={other_model}/low")
 
 
 def sc_session_list(c: Ctx):
@@ -592,7 +691,52 @@ def sc_session_list(c: Ctx):
     a.call("session/list", {"cwd": c.project})
     a.call("session/list", {})
     a.call("session/list", {"cwd": os.path.join(c.project, "does-not-exist")})
+    a.call("session/close", {"sessionId": a.session_id})
     c.finish(a, "session_list")
+
+
+def sc_error_shapes(c: Ctx):
+    a = c.open("error_shapes"); a.handshake()
+    ghost = "11111111-2222-3333-4444-555555555555"
+    a.call("session/prompt", {"sessionId": ghost, "prompt": [{"type": "text", "text": "hi"}]})
+    a.call("session/resume", {"sessionId": ghost, "cwd": c.project, "mcpServers": []})
+    a.call("session/load", {"sessionId": ghost, "cwd": c.project, "mcpServers": []})
+    a.call("session/new", {"cwd": os.path.join(c.project, "no-such-dir"), "mcpServers": []})
+    a.call("session/new", {"mcpServers": []})  # missing cwd
+    a.call("no/such_method", {})
+    a.notify("session/cancel", {"sessionId": ghost})
+    a.call("session/close", {"sessionId": ghost})
+    a.call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})  # second initialize
+    c.finish(a, "error_shapes")
+
+
+def sc_rules_meta(c: Ctx):
+    a = c.open("rules_meta"); a.handshake()
+    a.new_session(rules="Always answer in UPPER CASE letters only, whatever you are asked.")
+    a.prompt("Say hello in one short sentence. Use no tools.", timeout=90)
+    c.finish(a, "rules_meta", f"text={a.agent_text()[:80]!r}")
+
+
+def sc_tool_grep_edit(c: Ctx):
+    a = c.open("tool_grep_edit"); a.handshake(); a.new_session()
+    a.prompt(ONLY_HERE + "Use the grep tool to search for the word hello in src/. Then use the edit (search and replace) tool to change "
+             'the string "hello" in src/hello.py to "hi" (both the quotes content only). Then reply DONE.', timeout=150)
+    c.finish(a, "tool_grep_edit", f"hello.py={Path(c.project, 'src', 'hello.py').read_text()!r}")
+
+
+def sc_tool_error(c: Ctx):
+    a = c.open("tool_error"); a.handshake(); a.new_session()
+    a.prompt(ONLY_HERE + "Read the file does-not-exist.txt with the read tool, then run the shell command `ls no-such-dir` "
+             "and `exit 3`, then tell me in one sentence what happened.", timeout=150)
+    c.finish(a, "tool_error")
+
+
+def sc_plan_mode_probe(c: Ctx):
+    """H5: does a turn that calls enter_plan_mode / scheduler_* hang or ask the client under the hermetic env?"""
+    a = c.open("plan_mode_probe"); a.handshake(); a.new_session(yolo=True)
+    a.permission_policy = lambda p: None
+    r = a.prompt(ONLY_HERE + "Call your enter_plan_mode tool right now (do not ask me anything first), then reply READY.", timeout=60)
+    c.finish(a, "plan_mode_probe", f"requests={[x['method'] for x in a.requests_from_agent]} stopReason={(r.get('result') or {}).get('stopReason')} timeout={'_timeout' in r}")
 
 
 def sc_todo_write(c: Ctx):
@@ -609,20 +753,47 @@ def sc_web_tools(c: Ctx):
     c.finish(a, "web_tools")
 
 
+def sc_auth_missing(c: Ctx):
+    """spec §10-C2: an empty GROK_HOME makes `authenticate` hang instead of erroring."""
+    empty = os.path.join(os.path.dirname(c.grok_home), "empty-home")
+    os.makedirs(empty, mode=0o700, exist_ok=True)
+    shutil.copyfile(os.path.join(c.grok_home, "sandbox.toml"), os.path.join(empty, "sandbox.toml"))
+    scrub = Scrubber(cwd=c.project, grok_home=empty, home=os.path.expanduser("~"), secrets=c.secrets, email=c.email)
+    a = Acp(grok_bin=c.grok_bin, env=build_env(c.grok_bin, empty), cwd=c.project, scrub=scrub, out_path=c.out_dir / "auth_missing.jsonl")
+    r = a.call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+    t = time.monotonic()
+    r2 = a.call("authenticate", {"methodId": "cached_token"}, timeout=20)
+    note = f"authenticate_after_s={time.monotonic()-t:.1f} resp={'timeout' if '_timeout' in r2 else json.dumps(r2)[:200]}"
+    c.finish(a, "auth_missing", note)
+    rmtree_force(empty)
+
+
 SCENARIOS: dict[str, Callable[[Ctx], None]] = {
     "simple_text": sc_simple_text,
     "tool_read": sc_tool_read,
     "tool_write_yolo": sc_tool_write_yolo,
+    "tool_grep_edit": sc_tool_grep_edit,
+    "tool_error": sc_tool_error,
     "permission_request_no_yolo_unanswered": sc_permission_unanswered,
     "permission_request_no_yolo_allow": sc_permission_allow,
+    "permission_request_no_yolo_reject": sc_permission_reject,
+    "permission_request_no_yolo_error32601": sc_permission_error,
+    "permission_request_no_yolo_outcome_cancelled": sc_permission_outcome_cancelled,
+    "permission_request_no_yolo_cancel_pending": sc_permission_cancel_pending,
+    "permission_bash_no_yolo": sc_permission_bash,
     "cancel_mid_tool": sc_cancel_mid_tool,
     "resume_turn": sc_resume_turn,
+    "session_load": sc_session_load,
     "subagent_turn": sc_subagent_turn,
     "multi_message_turn": sc_multi_message_turn,
     "model_effort_switch": sc_model_effort_switch,
     "session_list": sc_session_list,
+    "error_shapes": sc_error_shapes,
+    "rules_meta": sc_rules_meta,
+    "plan_mode_probe": sc_plan_mode_probe,
     "todo_write": sc_todo_write,
     "web_tools": sc_web_tools,
+    "auth_missing": sc_auth_missing,
 }
 
 
