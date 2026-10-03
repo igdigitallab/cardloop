@@ -32,6 +32,12 @@ export interface ProviderMeta {
   continuityField: 'session_id' | 'codex_thread_id' | 'grok_session_id'
   /** Project-settings field holding this provider's default model. */
   modelField: 'model' | 'codex_model' | 'grok_model'
+  /** Per-project privacy opt-in: a provider that ships project code to a third party is OFF in
+   *  every project until the operator flips `field` (the server answers 409 otherwise).
+   *  null = no gate. `recipient` is who receives the code, named in the Settings warning. */
+  gate: { field: 'grok_allowed'; recipient: string } | null
+  /** The subscription the provider's turns ride on (Usage tab: "SuperGrok subscription"). */
+  subscription: string
   /** Does the provider publish subscription windows the pill can show? A provider that does
    *  not is rendered muted ("limits not reported") — unknown is never green. */
   reportsLimits: boolean
@@ -40,15 +46,15 @@ export interface ProviderMeta {
 export const PROVIDERS = {
   claude: {
     label: 'Claude Code', short: 'Claude', tag: null, adapter: false,
-    continuityField: 'session_id', modelField: 'model', reportsLimits: true,
+    continuityField: 'session_id', modelField: 'model', subscription: 'Claude', gate: null, reportsLimits: true,
   },
   codex: {
     label: 'Codex', short: 'Codex', tag: 'C', adapter: true,
-    continuityField: 'codex_thread_id', modelField: 'codex_model', reportsLimits: true,
+    continuityField: 'codex_thread_id', modelField: 'codex_model', subscription: 'ChatGPT', gate: null, reportsLimits: true,
   },
   grok: {
     label: 'Grok', short: 'Grok', tag: 'G', adapter: true,
-    continuityField: 'grok_session_id', modelField: 'grok_model', reportsLimits: false,
+    continuityField: 'grok_session_id', modelField: 'grok_model', subscription: 'SuperGrok', gate: { field: 'grok_allowed', recipient: 'xAI' }, reportsLimits: false,
   },
 } as const satisfies Record<string, ProviderMeta>
 
@@ -100,6 +106,11 @@ export function isAdapterProvider(x: unknown): boolean {
 /** Can this provider's subscription windows drive the pill? Unknown = no (muted, not green). */
 export function providerReportsLimits(x: unknown): boolean {
   return isKnownProvider(x) && PROVIDERS[x].reportsLimits
+}
+
+/** "SuperGrok" / "ChatGPT" / "Claude"; an unknown provider has no known subscription name. */
+export function providerSubscription(x: unknown): string {
+  return isKnownProvider(x) ? PROVIDERS[x].subscription : 'subscription'
 }
 
 /** Name of the chat-record field that holds this provider's resume id; null if unknown. */
@@ -178,6 +189,33 @@ export function providerUnavailableReason(id: Provider, row: ProviderRowLike | u
   if (!PROVIDERS[id].adapter) return ''
   if (row && row.enabled && row.available) return ''
   return row?.error || `${PROVIDERS[id].label} unavailable`
+}
+
+/** Providers whose per-project privacy gate Settings should show: gated providers the server
+ *  lists, plus any whose flag is already ON in the project (so it can always be turned back
+ *  off even after the server stops listing the provider). */
+export function gatedProviders(
+  registry: readonly { provider: string }[],
+  settings: object,
+): Provider[] {
+  const s = settings as Record<string, unknown>
+  return PROVIDER_IDS.filter(id => {
+    const gate = PROVIDERS[id].gate
+    return !!gate && (registry.some(r => r.provider === id) || s[gate.field] === true)
+  })
+}
+
+/** Providers that get a "<name> board model" row in Settings: adapters the server lists, or
+ *  whose model field the project already holds a value for. */
+export function boardModelProviders(
+  registry: readonly { provider: string }[],
+  settings: object,
+): Provider[] {
+  const s = settings as Record<string, unknown>
+  return PROVIDER_IDS.filter(id => PROVIDERS[id].adapter && (
+    registry.some(r => r.provider === id)
+    || (typeof s[PROVIDERS[id].modelField] === 'string' && s[PROVIDERS[id].modelField] !== '')
+  ))
 }
 
 /** Usage-tab provider filter: 'all' shows every section, otherwise only the chosen one. */

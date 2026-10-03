@@ -29,3 +29,15 @@ export function refusalReason(e: unknown): string | null {
   if (/\bbusy\b/i.test(b.error)) return null
   return b.error
 }
+
+/** The sentence inside a failed response body: `{"error":"…"}` → the error text, anything else
+ *  (HTML from a proxy, an empty body, plain text) unchanged. A raw fetch of the chat POST
+ *  rethrows the whole body as the Error message, which put a JSON blob in the chat feed. */
+export function errorTextFromBody(text: string): string {
+  try {
+    const parsed: unknown = JSON.parse(text)
+    const err = (parsed as { error?: unknown } | null)?.error
+    if (typeof err === 'string' && err) return err
+  } catch { /* not JSON */ }
+  return text
+}

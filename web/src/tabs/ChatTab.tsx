@@ -3,7 +3,7 @@ import { Lightbox } from '../components/Lightbox'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { mdComponents } from '../components/markdown'
-import { api } from '../api'
+import { api, apiErrorMessage } from '../api'
 import { PromptPicker } from '../components/PromptPicker'
 import { SkillPicker } from '../components/SkillPicker'
 import { ToolBlock } from '../components/ToolBlock'
@@ -40,6 +40,10 @@ import { useMonitors } from '../hooks/useMonitors'
 import { MonitorsPanel } from '../components/MonitorsPanel'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
+import {
+  isAdapterProvider, providerLabel, providerUnavailableReason, selectableProviders,
+} from '../lib/providers'
+import { errorTextFromBody, refusalReason } from '../lib/refusal'
 import { playChime } from '../lib/chime'
 import { t } from '../i18n'
 import { setAppBusy } from '../lib/appBusy'
@@ -1018,6 +1022,17 @@ const ModelThinkButton = memo(function ModelThinkButton({
   const modelList = (models && models.length > 0) ? models : MODELS
   // spec-092: capability-driven, not provider-name-driven.
   const askModeSupported = capabilities ? !!capabilities.ask_mode : true
+  // Same rule for the other two per-turn options a provider may lack: Grok ships without plan
+  // mode (a read-only sandbox is not deliverable there), and the server refuses a plan turn on a
+  // runtime that cannot honour it. The row says so up front instead of failing at send.
+  const planModeSupported = capabilities ? !!capabilities.plan_mode : true
+  const multiAgentSupported = capabilities ? !!capabilities.multi_agent : true
+  const adapter = isAdapterProvider(provider)
+  const providerName = providerLabel(provider)
+  // An adapter whose registry model lists no reasoning levels has no thinking control at all:
+  // drop the section (and the effort suffix on the pill) rather than show a Claude ladder that
+  // maps to nothing. Registry not loaded yet (undefined) stays fail-soft, as before.
+  const hasThinkControl = !adapter || !reasoningLevels || reasoningLevels.length > 0
   // Label for the current selection: live label first, then static modelLabel().
   const currentLabel = modelList.find(m => m.value === model)?.label ?? modelLabel(model)
   const [open, setOpen] = useState(false)
@@ -1055,7 +1070,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
   // says "ultracode: xhigh + dynamic workflow orchestration"). Must mirror engine.ULTRACODE_EFFORT,
   // asserted by test_ultracode_effort_label_matches_engine.
   const ULTRACODE_EFFORT = 'xhigh'
-  const tag = ultracode ? ULTRACODE_EFFORT : THINK_TAG[thinkValue]
+  const tag = ultracode ? ULTRACODE_EFFORT : hasThinkControl ? THINK_TAG[thinkValue] : ''
   const isDown = menuPlacement === 'down'
   return (
     <div className="composer-modelthink" ref={ref}>
@@ -1083,7 +1098,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
           {/* spec-093: the runtime (engine x subscription) is chosen ONLY in the usage pill,
               next to its percentages — this menu is what runs, not who pays. */}
           <div className="composer-modelthink-sec">
-            {provider === 'codex' ? 'Codex model (this chat)' : t['chat.model_hint']}
+            {adapter ? `${providerName} model (this chat)` : t['chat.model_hint']}
           </div>
           {modelList.map(m => (
             <div
@@ -1096,8 +1111,8 @@ const ModelThinkButton = memo(function ModelThinkButton({
               {m.label}
             </div>
           ))}
-          <div className="composer-modelthink-sec">{t['chat.think_mode_label']}</div>
-          {(provider === 'codex'
+          {hasThinkControl && <div className="composer-modelthink-sec">{t['chat.think_mode_label']}</div>}
+          {(!hasThinkControl ? [] : adapter
             ? THINK_MODES.filter(m => !reasoningLevels || reasoningLevels.includes(m.value))
             : THINK_MODES.filter(m => m.value !== 'ultra')).map(m => {
             // Ultracode pins effort to xhigh — grey out the manual ladder while it's on.
@@ -1123,9 +1138,20 @@ const ModelThinkButton = memo(function ModelThinkButton({
             role="option"
             aria-selected={planMode}
             className={`chat-think-option plan-row${planMode ? ' selected' : ''}`}
-            title={planLocked ? t['chat.plan_locked_hint'] : t['chat.plan_hint']}
-            style={planLocked ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
-            onMouseDown={e => { e.preventDefault(); if (planLocked) return; onPlanModeChange(!planMode) }}
+            title={planLocked ? t['chat.plan_locked_hint']
+                   : !planModeSupported ? t['chat.plan_unsupported'].replace('{provider}', providerName)
+                   : t['chat.plan_hint']}
+            /* Same shape as the ask row: greyed = "cannot turn ON here"; a flag that is already
+               ON (carried over from another runtime) can always be turned OFF, otherwise every
+               send would be refused with no way to clear it. */
+            style={planLocked || (!planModeSupported && !planMode) ? { opacity: 0.4, pointerEvents: 'none' }
+              : !planModeSupported ? { opacity: 0.65 } : undefined}
+            onMouseDown={e => {
+              e.preventDefault()
+              if (planLocked) return
+              if (!planModeSupported && !planMode) return
+              onPlanModeChange(!planMode)
+            }}
           >
             <span>🗺 {t['chat.plan_toggle']}</span>
             <span className="ultracode-state">{planMode ? 'ON' : 'OFF'}</span>
@@ -1138,7 +1164,7 @@ const ModelThinkButton = memo(function ModelThinkButton({
             aria-selected={askMode}
             className={`chat-think-option plan-row${askMode && !planMode ? ' selected' : ''}`}
             title={planMode ? t['chat.ask_plan_conflict']
-                   : !askModeSupported ? t['chat.ask_codex_conflict'] : t['chat.ask_hint']}
+                   : !askModeSupported ? t['chat.ask_unsupported'].replace('{provider}', providerName) : t['chat.ask_hint']}
             /* spec-092: a runtime that cannot honour ask-mode greys the row but must NOT make
                it inert while the flag is ON — the picker can move a chat onto such a runtime
                with the flag already set, and a row with pointer-events:none would leave the
@@ -1160,21 +1186,28 @@ const ModelThinkButton = memo(function ModelThinkButton({
           {/* spec-058: Ultracode mode toggle — xhigh effort + sub-agent fan-out.
               spec-080 C4: mutually exclusive with plan mode (plan wins server-side) —
               grey it out while planning so the conflict is visible, not silent. */}
-          <div className="composer-modelthink-sec">{provider === 'codex' ? 'Codex multi-agent' : t['chat.ultracode_label']}</div>
+          <div className="composer-modelthink-sec">{adapter ? `${providerName} multi-agent` : t['chat.ultracode_label']}</div>
           <div
             role="option"
             aria-selected={ultracode}
             className={`chat-think-option ultracode-row${ultracode ? ' selected' : ''}`}
-            title={planMode ? t['chat.plan_ultracode_conflict'] : t['chat.ultracode_hint']}
-            style={planMode ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
-            onMouseDown={e => { e.preventDefault(); if (planMode) return; onUltracodeChange(!ultracode) }}
+            title={planMode ? t['chat.plan_ultracode_conflict']
+                   : !multiAgentSupported ? t['chat.multi_agent_unsupported'].replace('{provider}', providerName)
+                   : t['chat.ultracode_hint']}
+            style={planMode || (!multiAgentSupported && !ultracode) ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
+            onMouseDown={e => {
+              e.preventDefault()
+              if (planMode) return
+              if (!multiAgentSupported && !ultracode) return
+              onUltracodeChange(!ultracode)
+            }}
           >
-            <span>⚡ {provider === 'codex' ? 'Multi-agent mode' : t['chat.ultracode_toggle']}</span>
+            <span>⚡ {adapter ? 'Multi-agent mode' : t['chat.ultracode_toggle']}</span>
             <span className="ultracode-state">{ultracode ? 'ON' : 'OFF'}</span>
           </div>
           <div className="composer-modelthink-note">
-            {planMode ? t['chat.plan_hint'] : (provider === 'codex'
-              ? 'Native Codex subagents may split independent work and report lifecycle events here.'
+            {planMode ? t['chat.plan_hint'] : (adapter
+              ? `Native ${providerName} subagents may split independent work and report lifecycle events here.`
               : t['chat.ultracode_hint'])}
           </div>
         </div>
@@ -1348,6 +1381,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const [newChatOpen, setNewChatOpen] = useState(false)
   const [newChatProvider, setNewChatProvider] = useState<Provider>('claude')
   const [newChatModel, setNewChatModel] = useState('')
+  // The server's refusal of a create (e.g. "grok is not enabled for this project"), shown in
+  // the dialog it belongs to instead of being swallowed.
+  const [newChatError, setNewChatError] = useState('')
   const [chatsLoaded, setChatsLoaded] = useState(false)
   const [hydratedChatId, setHydratedChatId] = useState<string | null>(null)
   const [newChatName, setNewChatName] = useState('')
@@ -1374,11 +1410,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const activeChat = chats.find(c => c.id === effectiveChatId)
   const activeProvider: Provider = activeChat?.provider ?? 'claude'
   const activeModelRaw = activeChat?.model || project.model
-  // spec-092: the model is a per-chat pin for EVERY provider now, so Codex gets its real
-  // model list instead of the single frozen row it used to show ("pinned to this chat" was
+  // spec-092: the model is a per-chat pin for EVERY provider now, so an adapter (Codex, Grok)
+  // gets its real model list instead of the single frozen row it used to show ("pinned to this chat" was
   // literally true: there was nothing else to click). Falls back to the current value alone
   // when the registry has not loaded — an empty list would look like "no models exist".
-  const codexRegistryModels = providerRegistry.find(p => p.provider === 'codex')?.models ?? []
+  const activeRegistryRow = providerRegistry.find(p => p.provider === activeProvider)
+  const activeRegistryModels = activeRegistryRow?.models ?? []
   // A local backend serves its OWN model names (`qwen3.8:27b-q4_K_M`), which have nothing to
   // do with the cloud aliases — showing the cloud list there would offer picks the server
   // rejects as "does not belong to backend 'ollama'".
@@ -1393,18 +1430,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     : activeModelRaw
   const activeProviderModels = backendModels?.length
     ? backendModels.map(m => ({ value: m.value, label: m.label }))
-    : activeProvider === 'codex'
-      ? (codexRegistryModels.length
-          ? codexRegistryModels.map(m => ({ value: m.value, label: m.label }))
+    : isAdapterProvider(activeProvider)
+      ? (activeRegistryModels.length
+          ? activeRegistryModels.map(m => ({ value: m.value, label: m.label }))
           : [{ value: activeModel, label: activeModel }])
       : models
-  const activeReasoningLevels = activeProvider === 'codex'
-    ? providerRegistry.find(p => p.provider === 'codex')?.models
-        .find(m => m.value === activeModel)?.reasoning_levels as ThinkMode[] | undefined
+  // Reasoning levels are per-model rows of the live registry for EVERY adapter provider.
+  const activeReasoningLevels = isAdapterProvider(activeProvider)
+    ? activeRegistryModels.find(m => m.value === activeModel)?.reasoning_levels as ThinkMode[] | undefined
     : undefined
-  const activeDefaultReasoning = activeProvider === 'codex'
-    ? providerRegistry.find(p => p.provider === 'codex')?.models
-        .find(m => m.value === activeModel)?.default_reasoning as ThinkMode | undefined
+  const activeDefaultReasoning = isAdapterProvider(activeProvider)
+    ? activeRegistryModels.find(m => m.value === activeModel)?.default_reasoning as ThinkMode | undefined
     : undefined
   // ─── spec-092/093: the runtime dimension (engine x subscription) ────────────
   // Rows come from the shared runtime store (lib/runtimeStatus), the same list the top pill
@@ -1426,7 +1462,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     const offProjectBackend = !!projectBackendPin && row.key !== `claude::${projectBackendPin}`
     return {
       key: row.key,
-      label: row.provider === 'codex' ? 'Codex'
+      // The strip and the handoff marker name runtimes by this label, so an adapter's comes
+      // from the provider table (never a per-provider literal here).
+      label: isAdapterProvider(row.provider) ? providerLabel(row.provider)
         : row.backend ? row.name : `Claude · ${row.name}`,
       provider: row.provider,
       // Always an EXPLICIT id, never null-as-"inherit": a pick from a row is a pin. The
@@ -1512,7 +1550,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     return DEFAULT_THINK_MODE
   })
   useEffect(() => {
-    if (activeProvider !== 'codex' || !activeReasoningLevels?.length) return
+    if (!isAdapterProvider(activeProvider) || !activeReasoningLevels?.length) return
     if (!activeReasoningLevels.includes(thinkMode)) {
       setThinkMode(activeDefaultReasoning && activeReasoningLevels.includes(activeDefaultReasoning)
         ? activeDefaultReasoning
@@ -3107,7 +3145,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
       if (!res.ok || !res.body) {
         const errText = await res.text().catch(() => res.statusText)
-        throw new Error(errText)
+        // The server's sentence, not the JSON around it ("grok is not enabled for this project").
+        throw new Error(errorTextFromBody(errText))
       }
 
       await readSseStream(
@@ -3495,7 +3534,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       })
       setChats(prev => prev.map(c => (c.id === chatId ? res.chat : c)))
       // A provider crossing starts a NEW thread on the other engine — its history store is
-      // a different one (session_id vs codex_thread_id) and no handoff summary is built yet
+      // a different one (each provider keeps its own resume id) and no handoff summary is built yet
       // (spec-092 P2). Say so in the feed: an engine answering as if the chat began now,
       // with no marker, reads as a healthy continuation, which is the worse failure.
       if (crossing && crossing.from !== crossing.to) {
@@ -3510,7 +3549,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             from: crossing.from,
             to: crossing.to,
             // A PROVIDER crossing changes which store holds the history (session_id vs
-            // codex_thread_id), so the other engine starts cold. A BACKEND switch keeps the
+            // per-provider resume id), so the other engine starts cold. A BACKEND switch keeps the
             // same harness and the same session — different endpoint, same thread — so
             // claiming "new thread" there would be a lie in the other direction.
             crossed: crossing.newThread,
@@ -3524,10 +3563,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       return true
     } catch (e) {
       const err = e as { status?: number; body?: { error?: string; busy?: boolean; backend_unavailable?: boolean } }
+      const refused = refusalReason(e)
       if (err.status === 409 && err.body?.busy) {
         setRuntimeError('a turn is still running — switch once it finishes')
       } else if (err.status === 409 && err.body?.backend_unavailable) {
         setRuntimeError(err.body.error || 'that backend is not answering right now')
+      } else if (refused) {
+        // A deliberate refusal (the Grok privacy gate, a project pinned to a backend): the
+        // server's own sentence. Retrying or reloading would not change the answer.
+        setRuntimeError(refused)
       } else if (err.status === 409) {
         // Stale revision: another tab (or this one, before a reload) already moved the chat.
         // Refetch rather than retrying blind — the operator's next pick must start from the
@@ -3892,6 +3936,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     setNewChatProvider('claude')
     setNewChatModel(claude?.models[0]?.value || project.model)
     setNewChatName('')
+    setNewChatError('')
     setNewChatOpen(true)
   }
 
@@ -3907,7 +3952,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       const res = await api.patchChat(projectId, newChat.id, { active: true })
       setActiveChatId(res.active)
       setNewChatOpen(false)
-    } catch { /* non-critical */ }
+    } catch (e) {
+      // A create the server refused (the Grok privacy gate) must say so: closing the dialog or
+      // staying silent reads as "nothing happened".
+      setNewChatError(refusalReason(e) ?? apiErrorMessage(e))
+    }
   }
 
   async function handleDeleteChat(chatId: string) {
@@ -4386,7 +4435,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               model={activeModel}
               thinkValue={thinkMode}
               disabled={changingModel || streaming}
-              onModelChange={m => { if (activeProvider === 'claude') handleModelChange(m as ModelKey) }}
+              onModelChange={m => { handleModelChange(m as ModelKey) }}
               onThinkChange={handleThinkModeChange}
               menuPlacement="down"
               models={activeProviderModels}
@@ -5381,7 +5430,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                   model={activeModel}
                   thinkValue={thinkMode}
                   disabled={changingModel || streaming}
-                  onModelChange={m => { if (activeProvider === 'claude') handleModelChange(m as ModelKey) }}
+                  onModelChange={m => { handleModelChange(m as ModelKey) }}
                   onThinkChange={handleThinkModeChange}
                   models={activeProviderModels}
                   ultracode={ultracode}
@@ -5490,18 +5539,20 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             <div>
               <div style={{ fontSize: 12, color: 'var(--text2)', marginBottom: 6 }}>Provider</div>
               <div style={{ display: 'flex', gap: 8 }}>
-                {(['claude', 'codex'] as Provider[]).map(provider => {
+                {selectableProviders(providerRegistry).map(provider => {
                   const info = providerRegistry.find(p => p.provider === provider)
-                  const disabled = provider === 'codex' && (!info?.enabled || !info.available)
+                  const why = providerUnavailableReason(provider, info)
                   return (
-                    <button key={provider} className={`btn btn-sm ${newChatProvider === provider ? 'btn-primary' : 'btn-secondary'}`}
-                      disabled={disabled}
-                      title={disabled ? (info?.error || 'Codex unavailable') : `Create a provider-pinned ${provider} chat`}
+                    <button key={provider} data-provider={provider}
+                      className={`btn btn-sm ${newChatProvider === provider ? 'btn-primary' : 'btn-secondary'}`}
+                      disabled={!!why}
+                      title={why || `Create a provider-pinned ${providerLabel(provider)} chat`}
                       onClick={() => {
                         setNewChatProvider(provider)
                         setNewChatModel(info?.models.find(m => m.default)?.value || info?.models[0]?.value || '')
+                        setNewChatError('')
                       }}>
-                      {provider === 'codex' ? 'Codex' : 'Claude Code'}
+                      {providerLabel(provider)}
                     </button>
                   )
                 })}
@@ -5530,6 +5581,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
               This is the chat's starting runtime. You can move it to another engine or
               subscription later from the model menu — a provider change offers a handoff first.
             </div>
+            {newChatError && <div className="usage-accounts-msg rt-error" role="alert">{newChatError}</div>}
             <button className="btn-primary" onClick={confirmCreateChat} disabled={!newChatModel}>Create chat</button>
           </div>
         </Modal>

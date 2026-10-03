@@ -1,9 +1,11 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { api, type AccountRow } from '../api'
+import { api, apiErrorMessage, type AccountRow } from '../api'
 import { Project, ProjectSettings, GlobalSettings, GlobalSettingsEffective, AgentsConfig, ProjectStructureHealth, AutopilotStatus } from '../types'
 import { Spinner } from '../components/Spinner'
 import { SecretsTab } from './SecretsTab'
 import { MODELS } from '../lib/models'
+import { PROVIDERS, boardModelProviders, gatedProviders, providerLabel, selectableProviders } from '../lib/providers'
+import { useRuntimeProviders } from '../lib/runtimeStatus'
 import { ProjectStructureCardFull } from '../components/ProjectStructureCard'
 import { t } from '../i18n'
 
@@ -44,8 +46,9 @@ interface Props {
   onProjectsReload?: () => void
 }
 
+// The server's own sentence ("grok is not enabled for this project"), not the JSON around it.
 function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+  return apiErrorMessage(e)
 }
 
 // Label + control row with a hint
@@ -64,6 +67,8 @@ function Row({ title, hint, children }: { title: string; hint?: string; children
 export function SettingsTab({ projectId, project, health, refreshHealth, models, onProjectsReload }: Props) {
   // Prefer the live model registry (GET /api/models); fall back to the bundled static list.
   const modelList = models?.length ? models : MODELS
+  // spec-095: which engines the server lists decides which provider rows Settings shows.
+  const providerRegistry = useRuntimeProviders()
   const [proj, setProj] = useState<ProjectSettings | null>(null)
   // Multiple Claude subscriptions. Empty/one → the row is hidden entirely.
   const [accounts, setAccounts] = useState<AccountRow[]>([])
@@ -362,17 +367,40 @@ export function SettingsTab({ projectId, project, health, refreshHealth, models,
 
         <Row title="Board provider"
              hint="Default engine for board cards. A card-level provider/model override wins. Claude remains the compatibility default.">
-          <select value={proj.board_provider}
+          <select value={proj.board_provider} data-testid="board-provider"
                   onChange={ev => setProj({ ...proj, board_provider: ev.target.value as ProjectSettings['board_provider'] })}>
-            <option value="claude">Claude Code</option>
-            <option value="codex">Codex</option>
+            {selectableProviders(providerRegistry, proj.board_provider).map(id =>
+              <option key={id} value={id}>{providerLabel(id)}</option>)}
           </select>
         </Row>
 
-        <Row title="Codex board model" hint="Provider-native model id used when a board card resolves to Codex.">
-          <input value={proj.codex_model} onChange={ev => setProj({ ...proj, codex_model: ev.target.value })}
-                 style={{ width: 180 }} placeholder="gpt-5.6-sol" />
-        </Row>
+        {/* spec-095 D5: privacy opt-in, one row per gated provider the server lists (or the
+            project already has switched on, so it can always be turned back off). */}
+        {gatedProviders(providerRegistry, proj).map(id => {
+          const gate = PROVIDERS[id].gate!
+          const name = providerLabel(id)
+          return (
+            <Row key={id} title={`Allow ${name} in this project`}
+                 hint={`${name} sends this project's code and prompts to ${gate.recipient}. Off by default: chats and board cards cannot use ${name} here until you turn it on. Turning it off later does not recall anything already sent.`}>
+              <input type="checkbox" checked={proj[gate.field] === true} data-testid={`${id}-allowed`}
+                     onChange={ev => setProj({ ...proj, [gate.field]: ev.target.checked })}
+                     aria-label={`Allow ${name} in this project`} />
+            </Row>
+          )
+        })}
+
+        {/* One board-model row per adapter provider the server lists (or the project already
+            names a model for), bound through the provider table's project field. */}
+        {boardModelProviders(providerRegistry, proj).map(id => (
+          <Row key={id} title={`${providerLabel(id)} board model`}
+               hint={`Provider-native model id used when a board card resolves to ${providerLabel(id)}.`}>
+            <input value={(proj[PROVIDERS[id].modelField as keyof ProjectSettings] as string | undefined) ?? ''}
+                   data-testid={`${id}-board-model`}
+                   onChange={ev => setProj({ ...proj, [PROVIDERS[id].modelField]: ev.target.value })}
+                   style={{ width: 180 }}
+                   placeholder={providerRegistry.find(p => p.provider === id)?.models.find(m => m.default)?.value ?? ''} />
+          </Row>
+        ))}
 
         </div>
 

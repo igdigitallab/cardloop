@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { api, UsageDashboard, UsageLimits, UsageLedger } from '../api'
 import { fmtReset, pickClass, fmtPct, orderedLimitKeys, limitLabel } from '../components/usageFormat'
+import {
+  PROVIDER_IDS, isAdapterProvider, providerLabel, providerShort, providerSubscription, usageSectionVisible,
+  type Provider, type UsageFilter,
+} from '../lib/providers'
+import { normalizeProviderUsage, type ProviderUsage } from '../lib/providerUsage'
 
 // Full historical cost/usage dashboard over ALL ~/.claude transcripts (CLI +
 // Cardloop + sub-agents), indexed by usage_scanner.py. Hand-rolled CSS/SVG-free
@@ -266,6 +271,65 @@ function LedgerPanel({ data }: { data: UsageLedger }) {
   )
 }
 
+/** One adapter provider's subscription usage. Same card for every adapter: its turns ride a flat
+ *  subscription, so there is no spend - and where the server prices the tokens at API list
+ *  prices (`notionalUsd`) the figure is labelled "API-equivalent", never as a cost. */
+function ProviderUsageCard({ provider, usage }: { provider: Provider; usage: ProviderUsage }) {
+  const name = providerLabel(provider)
+  return (
+    <div className="usage-card" data-provider={provider}>
+      <div className="usage-card-head">
+        <span className="usage-card-title">{name} subscription usage</span>
+        <span className="usage-note">cost unavailable for subscription-authenticated turns</span>
+      </div>
+      <div className="usage-stats">
+        <div className="usage-stat accent">
+          <div className="lbl">Turns</div>
+          <div className="val">{fmtNum(usage.turns)}</div>
+          <div className="sub">on {name}</div>
+        </div>
+        <div className="usage-stat">
+          <div className="lbl">Output tokens</div>
+          <div className="val">{fmtTok(usage.output)}</div>
+          <div className="sub">in {fmtTok(usage.input)}</div>
+        </div>
+        <div className="usage-stat">
+          <div className="lbl">Cached input</div>
+          <div className="val">{fmtTok(usage.cached)}</div>
+          <div className="sub">reasoning {fmtTok(usage.reasoning)}</div>
+        </div>
+        {usage.notionalUsd != null ? (
+          <div className="usage-stat">
+            <div className="lbl">API-equivalent</div>
+            <div className="val">{fmtCost(usage.notionalUsd)}</div>
+            <div className="sub">not spend · {providerSubscription(provider)} subscription</div>
+          </div>
+        ) : (
+          <div className="usage-stat">
+            <div className="lbl">Cost</div>
+            <div className="val">—</div>
+            <div className="sub">{providerSubscription(provider)} subscription</div>
+          </div>
+        )}
+      </div>
+      <div className="usage-table-wrap">
+        <table className="usage-table">
+          <thead><tr><th>Model</th><th className="num">Turns</th><th className="num">Input</th><th className="num">Output</th></tr></thead>
+          <tbody>
+            {usage.byModel.map(row => (
+              <tr key={row.model}>
+                <td className="strong">{row.model}</td><td className="num">{fmtNum(row.turns)}</td>
+                <td className="num">{fmtTok(row.input)}</td><td className="num">{fmtTok(row.output)}</td>
+              </tr>
+            ))}
+            {!usage.byModel.length && <tr><td colSpan={4} className="usage-empty">No {name} turns in this range.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 export function UsageTab() {
   const [data, setData] = useState<UsageDashboard | null>(null)
   const [liveLimits, setLiveLimits] = useState<UsageLimits | null>(null)
@@ -273,7 +337,7 @@ export function UsageTab() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [days, setDays] = useState<number | 'all'>(30)
-  const [provider, setProvider] = useState<'all' | 'claude' | 'codex'>('all')
+  const [provider, setProvider] = useState<UsageFilter>('all')
   // null = no filter (all models); otherwise the selected subset.
   const [models, setModels] = useState<Set<string> | null>(null)
   const [modelPanel, setModelPanel] = useState(false)
@@ -349,6 +413,13 @@ export function UsageTab() {
   }, [days, models])
 
   const ov = data?.overview
+  // Adapter providers (Codex, Grok) arrive in different shapes; one normalizer, one card.
+  const adapterUsage: Partial<Record<Provider, ProviderUsage>> = {}
+  for (const id of PROVIDER_IDS) {
+    if (!isAdapterProvider(id)) continue
+    const u = normalizeProviderUsage((data?.providers as Record<string, unknown> | undefined)?.[id])
+    if (u) adapterUsage[id] = u
+  }
   const allModels = data?.all_models ?? []
   const modelLabel = !models || models.size === allModels.length
     ? 'All models'
@@ -367,9 +438,9 @@ export function UsageTab() {
           ))}
         </div>
         <div className="usage-seg" aria-label="Provider filter">
-          {(['all', 'claude', 'codex'] as const).map(p => (
-            <button key={p} className={provider === p ? 'active' : ''} onClick={() => setProvider(p)}>
-              {p === 'all' ? 'All providers' : p === 'claude' ? 'Claude' : 'Codex'}
+          {(['all', ...PROVIDER_IDS.filter(id => !isAdapterProvider(id) || adapterUsage[id])] as UsageFilter[]).map(p => (
+            <button key={p} data-provider={p} className={provider === p ? 'active' : ''} onClick={() => setProvider(p)}>
+              {p === 'all' ? 'All providers' : providerShort(p)}
             </button>
           ))}
         </div>
@@ -408,58 +479,17 @@ export function UsageTab() {
       {loading && !data && <div className="usage-empty">Loading usage…</div>}
       {error && !data && <div className="usage-empty">Failed to load: {error}</div>}
 
-      {data && !data.ready && provider !== 'codex' && (
+      {data && !data.ready && usageSectionVisible(provider, 'claude') && (
         <div className="usage-empty">
           No usage indexed yet.{data.scanning ? ' Indexing transcripts — this can take ~30s on the first run…' : ''}
         </div>
       )}
 
-      {data?.providers?.codex && provider !== 'claude' && (
-        <div className="usage-card">
-          <div className="usage-card-head">
-            <span className="usage-card-title">Codex subscription usage</span>
-            <span className="usage-note">cost unavailable for subscription-authenticated turns</span>
-          </div>
-          <div className="usage-stats">
-            <div className="usage-stat accent">
-              <div className="lbl">Turns</div>
-              <div className="val">{fmtNum(data.providers.codex.turns)}</div>
-              <div className="sub">Codex threads</div>
-            </div>
-            <div className="usage-stat">
-              <div className="lbl">Output tokens</div>
-              <div className="val">{fmtTok(data.providers.codex.output)}</div>
-              <div className="sub">in {fmtTok(data.providers.codex.input)}</div>
-            </div>
-            <div className="usage-stat">
-              <div className="lbl">Cached input</div>
-              <div className="val">{fmtTok(data.providers.codex.cached_input)}</div>
-              <div className="sub">reasoning {fmtTok(data.providers.codex.reasoning_output)}</div>
-            </div>
-            <div className="usage-stat">
-              <div className="lbl">Cost</div>
-              <div className="val">—</div>
-              <div className="sub">ChatGPT subscription</div>
-            </div>
-          </div>
-          <div className="usage-table-wrap">
-            <table className="usage-table">
-              <thead><tr><th>Model</th><th className="num">Turns</th><th className="num">Input</th><th className="num">Output</th></tr></thead>
-              <tbody>
-                {data.providers.codex.by_model.map(row => (
-                  <tr key={row.model}>
-                    <td className="strong">{row.model}</td><td className="num">{fmtNum(row.turns)}</td>
-                    <td className="num">{fmtTok(row.input)}</td><td className="num">{fmtTok(row.output)}</td>
-                  </tr>
-                ))}
-                {!data.providers.codex.by_model.length && <tr><td colSpan={4} className="usage-empty">No Codex turns in this range.</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {PROVIDER_IDS.filter(isAdapterProvider).map(id => adapterUsage[id] && usageSectionVisible(provider, id) && (
+        <ProviderUsageCard key={id} provider={id} usage={adapterUsage[id]!} />
+      ))}
 
-      {ov && data?.ready && provider !== 'codex' && (
+      {ov && data?.ready && usageSectionVisible(provider, 'claude') && (
         <>
           {/* ── Overview stat cards ── */}
           <div className="usage-stats">
