@@ -27,6 +27,7 @@ Navigation guide for the codebase. Source of truth = the code; this file is the 
 ### Engine (transport-independent core)
 - **`run_engine(...)` (engine.py)** — `async def -> AsyncGenerator[dict, None]`. Drives the Claude Agent SDK, yields events `{tool|text|result|rate_limit|error}`. **Transport-agnostic.** All channels are its consumers. Change agent logic → here.
 - **`run_codex_engine(...)` (codex_engine.py)** — isolated optional adapter for ChatGPT subscription-authenticated Codex threads. Handles discovery, start/resume/read/list, normalized events, usage, plan sandbox, native subagents, and interrupt. It is lazy-imported and gated by `CODEX_ENABLED`.
+- **`providers.py`** — the provider table (`ProviderSpec`, spec-095 D6): which ctx key holds a provider's engine factory, which chat-record field persists its resume id, which engine kwarg takes it, which `result` event key brings the new id back, its model field/default and capability map. Every run site resolves its provider through it (`providers.get(name)`, strict) so adding a provider is one `register(...)` plus its engine, not an edit at every `provider == "codex"` branch.
 - **Engine consumers:**
   - `_run_card(...)` in **webapp.py** — card auto-run.
   - `api_project_chat` in **webapp.py** — web chat (SSE consumer).

@@ -433,19 +433,19 @@ def test_known_agent_providers_map(monkeypatch, enabled):
 def test_free_chat_continuity_writes_the_providers_own_field(fake_ctx):
     _webapp._save_free_chats(fake_ctx, {"free-1": {"provider": "claude", "session_id": None,
                                                    "codex_thread_id": None}})
-    _webapp._save_free_chat_continuity(fake_ctx, "free-1", provider="claude", session_id="S1")
+    _webapp._save_free_chat_continuity(fake_ctx, "free-1", provider="claude", continuity_id="S1")
     rec = _webapp._load_free_chats(fake_ctx)["free-1"]
     assert rec["session_id"] == "S1" and rec["codex_thread_id"] is None
-    _webapp._save_free_chat_continuity(fake_ctx, "free-1", provider="codex", codex_thread_id="T1")
+    _webapp._save_free_chat_continuity(fake_ctx, "free-1", provider="codex", continuity_id="T1")
     rec = _webapp._load_free_chats(fake_ctx)["free-1"]
     assert rec["session_id"] == "S1" and rec["codex_thread_id"] == "T1"
 
 
 def test_free_chat_continuity_ignores_real_projects_and_missing_records(fake_ctx):
     _webapp._save_free_chats(fake_ctx, {})
-    _webapp._save_free_chat_continuity(fake_ctx, "myproject", provider="claude", session_id="S")
-    _webapp._save_free_chat_continuity(fake_ctx, None, provider="claude", session_id="S")
-    _webapp._save_free_chat_continuity(fake_ctx, "free-gone", provider="claude", session_id="S")
+    _webapp._save_free_chat_continuity(fake_ctx, "myproject", provider="claude", continuity_id="S")
+    _webapp._save_free_chat_continuity(fake_ctx, None, provider="claude", continuity_id="S")
+    _webapp._save_free_chat_continuity(fake_ctx, "free-gone", provider="claude", continuity_id="S")
     assert _webapp._load_free_chats(fake_ctx) == {}
 
 
@@ -702,3 +702,215 @@ def test_ensure_chat_entry_seeds_main_chat_from_a_free_record(
     assert chat["model"] == "m-free"
     assert chat["session_id"] == sid
     assert chat["codex_thread_id"] == thread
+
+
+@pytest.mark.asyncio
+async def test_project_settings_board_provider_validation_and_storage(
+    aiohttp_client, fake_ctx, app
+):
+    client = await aiohttp_client(app)
+    h = _auth(fake_ctx)
+    url = f"/api/projects/{PROJECT_ID}/settings"
+    topic = fake_ctx["topics"][SESSION_KEY]
+
+    r = await client.post(url, json={"board_provider": "vertex"}, headers=h)
+    assert r.status == 400
+    assert (await r.json())["error"] == "board_provider: must be claude or codex"
+
+    r = await client.post(url, json={"board_provider": " CODEX "}, headers=h)
+    assert r.status == 200, await r.text()
+    assert topic["board_provider"] == "codex"
+
+    r = await client.post(url, json={"board_provider": "claude"}, headers=h)
+    assert r.status == 200, await r.text()
+    assert topic.get("board_provider") is None, "claude is stored as 'unset', not as a value"
+    view = await (await client.get(url, headers=h)).json()
+    assert view["board_provider"] == "claude"
+
+
+def _entry(active, *chats):
+    return {"active": active, "chats": [{"id": cid, "provider": prov} for cid, prov in chats]}
+
+
+@pytest.mark.parametrize("codex_enabled,active,chats,expected", [
+    (True, "x1", [("c1", "claude"), ("x1", "codex")], "x1"),
+    (True, "c1", [("c1", "claude"), ("x1", "codex")], "c1"),
+    (False, "c1", [("c1", "claude"), ("x1", "codex")], "c1"),
+    (False, "c1", [("c1", "claude"), ("c2", "claude")], "c1"),   # a visible active chat stays
+    (False, "x1", [("c1", "claude"), ("x1", "codex"), ("c2", "claude")], "c2"),
+    (False, "x1", [("x1", "codex"), ("x2", "codex")], "x1"),
+    (False, "x1", [("c1", "claude"), ("x1", "codex")], "c1"),
+])
+def test_effective_active_chat_hides_a_disabled_provider(
+    monkeypatch, codex_enabled, active, chats, expected
+):
+    monkeypatch.setattr(_webapp._codex, "codex_enabled", lambda: codex_enabled)
+    assert _webapp._effective_active_chat(_entry(active, *chats)) == expected
+
+
+# ─────────────────────────── gaps found by the post-seam mutation pass ────────
+
+
+async def _drain_once(fake_ctx, case, *, item_kwargs, pending=None):
+    if pending is not None:
+        fake_ctx["pending_handoff"] = {SESSION_KEY: pending}
+    item = _webapp._chat_queue_enqueue(SESSION_KEY, "queued text", **item_kwargs)
+    assert item is not None
+    calls: list = []
+    _install_engines(fake_ctx, case, calls)
+    with patch.object(_webapp, "_spawn_bg", side_effect=lambda coro: asyncio.ensure_future(coro)), \
+         patch.object(_webapp, "_secrets_read", return_value={}), \
+         patch.object(_webapp, "_build_agents_kwargs", return_value={}):
+        assert await _webapp._chat_queue_drain_one(fake_ctx, SESSION_KEY) is True
+        await asyncio.sleep(0.05)
+    assert len(calls) == 1
+    return calls[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,has_id,injected", [
+    ("claude", True, False),    # resumed session: the rotation summary must not be re-injected
+    ("claude", False, True),    # fresh session after a rotation: it must be
+    # Known pre-seam quirk, pinned on purpose: the drain path only ever counted Claude's id, so a
+    # RESUMED adapter thread still receives a pending rotation summary. The direct POST path was
+    # fixed for this; changing the drain is a behaviour change and belongs to its own commit.
+    ("codex", True, True),
+])
+async def test_queue_drain_pending_rotation_handoff_injection(
+    fake_ctx, codex_on, provider, has_id, injected
+):
+    case = CASES[provider]
+    _seed_chat(fake_ctx, provider=provider, model=case["model"], field=case["field"],
+               value="OLD-ID" if has_id else None)
+    kw = await _drain_once(
+        fake_ctx, case, pending="ROTATION-SUMMARY",
+        item_kwargs=dict(chat_id=CHAT_ID, project_id=PROJECT_ID,
+                         pinned_runtime={"provider": provider, "model": case["model"]}),
+    )
+    assert ("ROTATION-SUMMARY" in kw["prompt"]) is injected
+    assert ("ROTATION-SUMMARY" in str(fake_ctx["pending_handoff"].get(SESSION_KEY))) is (not injected)
+
+
+@pytest.mark.asyncio
+async def test_queue_drain_legacy_item_without_project_uses_and_updates_the_flat_map(fake_ctx):
+    case = CASES["claude"]
+    fake_ctx["sessions"][SESSION_KEY] = "FLAT-OLD"
+    kw = await _drain_once(fake_ctx, case, item_kwargs={})
+    assert kw["resume_session_id"] == "FLAT-OLD"
+    assert fake_ctx["sessions"][SESSION_KEY] == "NEW-ID"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,has_id,pack_expected", [
+    ("claude", False, True), ("claude", True, False),
+    ("codex", False, True), ("codex", True, False),
+])
+async def test_chat_post_context_pack_only_on_a_fresh_conversation(
+    aiohttp_client, fake_ctx, app, codex_on, monkeypatch, provider, has_id, pack_expected
+):
+    """The pack is for a conversation with no continuity id — judged with the id of the provider
+    that will actually answer (a Codex thread counts; the old check only looked at Claude's)."""
+    case = CASES[provider]
+    packs: list = []
+
+    def fake_assemble(*_a, **_k):
+        packs.append(1)
+        return "THE-PACK"
+
+    monkeypatch.setattr(_webapp._context_pack, "assemble", fake_assemble)
+    _seed_chat(fake_ctx, provider=provider, model=case["model"], field=case["field"],
+               value="OLD-ID" if has_id else None)
+    calls: list = []
+    _install_engines(fake_ctx, case, calls)
+    client = await aiohttp_client(app)
+    with patch.object(_webapp, "_build_agents_kwargs", return_value={}), \
+         patch.object(_webapp, "_secrets_read", return_value={}):
+        resp = await client.post(f"/api/projects/{PROJECT_ID}/chat",
+                                 json={"prompt": "hello"}, headers=_auth(fake_ctx))
+        await _sse_events(resp)
+    assert calls, await resp.text()
+    assert bool(packs) is pack_expected
+    assert ("THE-PACK" in calls[0]["prompt"]) is pack_expected
+
+
+@pytest.mark.asyncio
+async def test_chat_post_unknown_chat_id_writes_the_new_session_to_the_flat_map(
+    aiohttp_client, fake_ctx, app
+):
+    case = CASES["claude"]
+    _seed_chat(fake_ctx, provider="claude", model="opus", field=None, value=None)
+    calls: list = []
+    _install_engines(fake_ctx, case, calls)
+    client = await aiohttp_client(app)
+    with patch.object(_webapp, "_build_agents_kwargs", return_value={}), \
+         patch.object(_webapp, "_secrets_read", return_value={}):
+        resp = await client.post(f"/api/projects/{PROJECT_ID}/chat",
+                                 json={"prompt": "x", "chat_id": "bbbbbb"},
+                                 headers=_auth(fake_ctx))
+        await _sse_events(resp)
+    assert calls, await resp.text()
+    assert fake_ctx["sessions"][SESSION_KEY] == "NEW-ID"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+async def test_free_chat_post_label_is_inherited_by_claude_sessions_only(
+    aiohttp_client, fake_ctx, app, codex_on, provider
+):
+    case = CASES[provider]
+    fid = "free-lbl01"
+    _webapp._save_free_chats(fake_ctx, {fid: {
+        "label": "My free tab", "cwd": str(Path(fake_ctx["DATA"]).parent), "model": case["model"],
+        "provider": provider, "session_id": None, "codex_thread_id": None, "created_at": 1,
+    }})
+    # The UI lists a chat's tabs before it sends, and that listing seeds the chat entry from the
+    # free record. (POSTing to a never-listed free Codex chat resolves no chat → runs on Claude;
+    # a latent bug older than the seam, reported separately and deliberately not pinned here.)
+    _webapp._ensure_chat_entry(fake_ctx, fid, fid)
+    calls: list = []
+    _install_engines(fake_ctx, case, calls)
+    client = await aiohttp_client(app)
+    with patch.object(_webapp, "_build_agents_kwargs", return_value={}), \
+         patch.object(_webapp, "_secrets_read", return_value={}):
+        resp = await client.post(f"/api/projects/{fid}/chat", json={"prompt": "hi"},
+                                 headers=_auth(fake_ctx))
+        await _sse_events(resp)
+    assert calls, await resp.text()
+    labels = _webapp._load_session_labels(fake_ctx)
+    assert (labels.get("NEW-ID") == "My free tab") is (provider == "claude")
+    rec = _webapp._load_free_chats(fake_ctx)[fid]
+    assert rec[case["field"]] == "NEW-ID", "free-chat record keeps the provider's own id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,cleared", [("claude", False), ("codex", True)])
+async def test_queue_drain_clears_flags_the_answering_runtime_cannot_honour(
+    fake_ctx, codex_on, capsys, provider, cleared
+):
+    """A queued turn was already accepted, so an unhonourable flag is cleared (loudly) rather
+    than failing the turn — judged against the capabilities of the provider that will answer."""
+    case = CASES[provider]
+    _seed_chat(fake_ctx, provider=provider, model=case["model"], field=case["field"],
+               value="OLD-ID")
+    kw = await _drain_once(
+        fake_ctx, case,
+        item_kwargs=dict(chat_id=CHAT_ID, project_id=PROJECT_ID, ask_mode=True,
+                         pinned_runtime={"provider": provider, "model": case["model"]}),
+    )
+    out = capsys.readouterr().out
+    assert ("clearing the incompatible flag(s)" in out) is cleared
+    if provider == "claude":
+        assert kw["ask_mode"] is True, "Claude keeps its real approval gate"
+
+
+@pytest.mark.asyncio
+async def test_chat_create_persists_every_providers_continuity_field(
+    aiohttp_client, fake_ctx, app
+):
+    client = await aiohttp_client(app)
+    r = await client.post(f"/api/projects/{PROJECT_ID}/chats", json={"provider": "claude"},
+                          headers=_auth(fake_ctx))
+    assert r.status == 201
+    new_id = (await r.json())["id"]
+    rec = next(c for c in _webapp._load_chats(fake_ctx)[PROJECT_ID]["chats"] if c["id"] == new_id)
+    assert rec["session_id"] is None and "codex_thread_id" in rec and rec["codex_thread_id"] is None

@@ -291,6 +291,10 @@ def _model_field_for_provider(provider: str) -> str:
     return "model" if provider == DEFAULT_PROVIDER else f"{provider}_model"
 
 
+# Public name: providers.py needs the same convention and must not reach for a private helper.
+model_field_for_provider = _model_field_for_provider
+
+
 def _resolve_provider(
     chat: "Mapping[str, Any] | None",
     global_defaults: "Mapping[str, Any] | None",
@@ -814,5 +818,5 @@ __all__ = [
     "RunContext", "wake_context_from",
     "available_providers", "chat_provider", "resolve_runtime",
     "validate_runtime_change", "capability_conflicts", "apply_change",
-    "EnvOverlay", "ollama_env_overlay",
+    "EnvOverlay", "ollama_env_overlay", "model_field_for_provider",
 ]

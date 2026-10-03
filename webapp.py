@@ -67,6 +67,7 @@ import autopilot as _autopilot
 # spec-074: global search index (SQLite FTS5 over transcripts/timeline/boards)
 import search as _search
 import codex_engine as _codex
+import providers
 
 # spec-075: context pack — deterministic project-state injection on fresh sessions
 import context_pack as _context_pack
@@ -2955,8 +2956,7 @@ def _save_free_chats(ctx: dict, data: dict) -> None:
 
 
 def _save_free_chat_continuity(
-    ctx: dict, project_id: str | None, *, provider: str,
-    session_id: str | None = None, codex_thread_id: str | None = None,
+    ctx: dict, project_id: str | None, *, provider: str, continuity_id: str | None,
 ) -> None:
     """Persist the provider-native continuity id for a virtual free chat."""
     if not project_id or not project_id.startswith("free-"):
@@ -2965,10 +2965,7 @@ def _save_free_chat_continuity(
     record = free.get(project_id)
     if not isinstance(record, dict):
         return
-    if provider == "codex":
-        record["codex_thread_id"] = codex_thread_id
-    else:
-        record["session_id"] = session_id
+    record[providers.get(provider).continuity_field] = continuity_id
     _save_free_chats(ctx, free)
 
 
@@ -3046,8 +3043,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "autopilot": _autopilot.get_project_mode(b),
             # spec-075: per-project context-pack override (None = inherit global true)
             "context_pack_enabled": b.get("context_pack_enabled"),
-            "board_provider": "codex" if b.get("board_provider") == "codex" else "claude",
-            "codex_model": b.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
+            "board_provider": providers.normalize(b.get("board_provider")),
+            **{a.model_field: b.get(a.model_field) or a.fallback_model(ctx) for a in providers.adapters()},
             # spec-082 A: tools the ask-mode gate auto-approves in this project
             "ask_always_allow": b.get("ask_always_allow") or [],
             # Subscription pinned to this project (None = follow the global choice).
@@ -3074,8 +3071,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             "ask_always_allow": b.get("ask_always_allow") or [],
             "group": raw_free_group if raw_free_group in valid_groups else None,
             "favorite": fid in fav_set,
-            "provider": "codex" if b.get("provider") == "codex" else "claude",
-            "codex_model": b.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
+            "provider": providers.normalize(b.get("provider")),
+            **{a.model_field: b.get(a.model_field) or a.fallback_model(ctx) for a in providers.adapters()},
             "account": b.get("account") or None,
             # spec-092 P3: the project's inference-endpoint pin. Omitted here it would be
             # invisible to every endpoint and the Settings selector would silently do nothing.
@@ -5915,11 +5912,10 @@ def _onboarding_model(ctx: dict) -> str:
 
 def _effective_card_provider(card: dict, project: dict) -> str:
     """Card override → project board default → Claude compatibility default."""
-    if card.get("provider") == "codex":
-        return "codex"
-    if card.get("provider") == "claude":
-        return "claude"
-    return "codex" if project.get("board_provider") == "codex" else "claude"
+    for raw in (card.get("provider"), project.get("board_provider")):
+        if raw in providers.names():
+            return raw
+    return providers.DEFAULT
 
 
 def _git_enabled(project: dict) -> bool:
@@ -5935,7 +5931,7 @@ def _git_enabled(project: dict) -> bool:
 # the return values of _infer_archetype() further down this file.
 _PROJECT_ARCHETYPES = ("software", "content", "ops", "scratchpad")
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", "codex_model", "ask_always_allow", "account", "backend")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", *providers.adapter_model_fields(), "ask_always_allow", "account", "backend")
 
 # spec-051: per-project policy for resuming a run interrupted by a rate-limit.
 #   ask    — show an in-chat Yes/No prompt (default; visible, not silent)
@@ -6087,8 +6083,8 @@ def _project_settings_view(project: dict) -> dict:
         "autopilot": _autopilot.get_project_mode(project),
         # spec-075: per-project context-pack override (None = inherit global)
         "context_pack_enabled": project.get("context_pack_enabled"),
-        "board_provider": "codex" if project.get("board_provider") == "codex" else "claude",
-        "codex_model": project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL,
+        "board_provider": providers.normalize(project.get("board_provider")),
+        **{a.model_field: project.get(a.model_field) or a.fallback_model({}) for a in providers.adapters()},
         # spec-082 A: tools auto-approved by the ask-mode gate in this project.
         "ask_always_allow": _ask_always_allow(project),
         # Subscription pinned to this project (None = follow the global choice).
@@ -6174,9 +6170,11 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
                 updates[k] = sv
         elif k == "board_provider":
             sv = str(v).strip().lower()
-            if sv not in ("claude", "codex"):
-                return web.json_response({"error": "board_provider: must be claude or codex"}, status=400)
-            updates[k] = sv if sv != "claude" else None
+            if sv not in providers.names():
+                return web.json_response(
+                    {"error": "board_provider: must be " + " or ".join(providers.names())},
+                    status=400)
+            updates[k] = sv if sv != providers.DEFAULT else None
         elif k == "backend":
             # spec-092 P3: "" (cloud) or "ollama" (local). Stored as None for the cloud case
             # so a project that never touched this setting and one explicitly set back to
@@ -6430,8 +6428,9 @@ async def api_create_task(req: web.Request) -> web.Response:
     if description is not None:
         description = str(description).strip() or None
     provider = (body.get("provider") or "").strip().lower() or None
-    if provider not in (None, "claude", "codex"):
-        return web.json_response({"error": "provider: must be claude or codex"}, status=400)
+    if provider not in (None, *providers.names()):
+        return web.json_response(
+            {"error": "provider: must be " + " or ".join(providers.names())}, status=400)
     card_model = (body.get("model") or "").strip() or None
     if card_model and not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", card_model):
         return web.json_response({"error": "model: invalid model id"}, status=400)
@@ -7187,13 +7186,14 @@ async def _run_card(
     _card_backend = str((project or {}).get("backend") or "")
     if _card_backend:
         provider = runtime.DEFAULT_PROVIDER
-    run_engine = (ctx.get("run_codex_engine") if provider == "codex" else ctx.get("run_engine"))
+    spec = providers.get(provider)
+    run_engine = spec.engine(ctx)
     cwd = project["cwd"]
     name = project["name"]
     # Card 43665f: model resolution — card override → board_card_model setting → sonnet.
     # Deliberately does NOT use the project model (that is for chat runs).
-    if provider == "codex":
-        model = (card.get("model") or project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL)
+    if not spec.is_default:
+        model = card.get("model") or spec.project_model(project, ctx)
     else:
         model = _effective_card_model(card)
     prompt = card["text"]
@@ -7304,10 +7304,10 @@ async def _run_card(
             # from the shared chat session (different cwd, synthetic session key).
             # Spec-029 item 3: request structured output only when STRUCTURED_CARDS=1.
             _card_output_fmt = _CARD_OUTPUT_SCHEMA if STRUCTURED_CARDS else None
-            if provider == "codex":
+            if not spec.is_default:
                 _card_gen = run_engine(
                     project_name=name, cwd=effective_cwd, prompt=prompt,
-                    session_key=session_key, model=model, resume_thread_id=None,
+                    session_key=session_key, model=model, **{spec.resume_kwarg: None},
                     ctx=ctx, ephemeral=True, effort=None, plan_mode=False,
                     multi_agent=False, entrypoint="card",
                 )
@@ -7825,8 +7825,10 @@ async def api_update_task(req: web.Request) -> web.Response:
     card_provider: str | None = None
     if update_provider:
         raw_provider = (body.get("provider") or "").strip().lower()
-        if raw_provider and raw_provider not in ("claude", "codex"):
-            return web.json_response({"error": "provider: must be claude, codex, or empty"}, status=400)
+        if raw_provider and raw_provider not in providers.names():
+            return web.json_response(
+                {"error": "provider: must be " + ", ".join(providers.names()) + ", or empty"},
+                status=400)
         card_provider = raw_provider or None
     # spec-052 Phase 5: optional spec: epic link. Empty/absent = clear the link.
     update_spec = "spec" in body
@@ -8381,11 +8383,12 @@ async def api_free_create(req: web.Request) -> web.Response:
     except Exception:
         body = {}
     cwd = (body.get("cwd") or _FREE_DEFAULT_CWD).rstrip("/")
-    provider = "codex" if body.get("provider") == "codex" else "claude"
-    if provider == "codex":
-        model = (body.get("model") or _codex.DEFAULT_CODEX_MODEL).strip()
+    provider = providers.normalize(body.get("provider"))
+    spec = providers.get(provider)
+    if not spec.is_default:
+        model = (body.get("model") or spec.fallback_model(ctx)).strip()
         if not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", model):
-            return web.json_response({"error": "invalid Codex model"}, status=400)
+            return web.json_response({"error": f"invalid {spec.label} model"}, status=400)
     else:
         model = (body.get("model") or _effective_default_model(ctx)).strip().lower()
         if model not in _ALLOWED_MODELS:
@@ -8403,8 +8406,7 @@ async def api_free_create(req: web.Request) -> web.Response:
         "cwd": cwd,
         "model": model,
         "provider": provider,
-        "session_id": None,
-        "codex_thread_id": None,
+        **{f: None for f in providers.continuity_fields()},
         "created_at": time.time(),
     }
     _save_free_chats(ctx, free)
@@ -11332,7 +11334,11 @@ def _ensure_chat_entry(ctx: dict, project_id: str, session_key: str) -> dict:
     # Migration: seed "Main" from the existing live session_id (zero context loss).
     existing_sid = ctx["sessions"].get(session_key) or None
     free_record = _load_free_chats(ctx).get(project_id, {}) if project_id.startswith("free-") else {}
-    seeded_provider = "codex" if free_record.get("provider") == "codex" else "claude"
+    seeded = providers.get(providers.normalize(free_record.get("provider")))
+    seeded_provider = seeded.name
+    continuity = {f: None for f in providers.continuity_fields()}
+    continuity[seeded.continuity_field] = (
+        existing_sid if seeded.is_default else free_record.get(seeded.continuity_field))
     chat_id = _new_chat_id()
     chats_data[project_id] = {
         "active": chat_id,
@@ -11342,8 +11348,7 @@ def _ensure_chat_entry(ctx: dict, project_id: str, session_key: str) -> dict:
                 "name": "Main",
                 "provider": seeded_provider,
                 "model": free_record.get("model"),
-                "session_id": existing_sid if seeded_provider == "claude" else None,
-                "codex_thread_id": free_record.get("codex_thread_id") if seeded_provider == "codex" else None,
+                **continuity,
                 "created_at": time.time(),
             }
         ],
@@ -11359,12 +11364,7 @@ def _ensure_chat_entry(ctx: dict, project_id: str, session_key: str) -> dict:
 # and deliberately has NO ask_mode key — it has no per-tool approval hook at all, which is
 # exactly the gap runtime.capability_conflicts exists to fail loudly on instead of silently
 # clearing the flag (the old bug this module replaces).
-_CLAUDE_CAPABILITIES: dict = {
-    "chat": True, "board": True, "history": True, "search": True,
-    "usage": True, "plan_mode": True, "multi_agent": True,
-    "skills": True, "plugins": True, "interrupt": True,
-    "ask_mode": True,
-}
+_CLAUDE_CAPABILITIES: dict = providers.CLAUDE_CAPABILITIES
 
 
 def _known_agent_providers() -> dict:
@@ -11378,7 +11378,7 @@ def _known_agent_providers() -> dict:
     richer registry (models/backends/capabilities) runtime.validate_runtime_change and
     capability_conflicts need; see _runtime_providers() for that.
     """
-    return {"claude": True, "codex": _codex.codex_enabled()}
+    return providers.known_map()
 
 
 def _chat_provider_lookup(chat: "dict | None") -> "runtime.ProviderLookup":
@@ -11474,15 +11474,16 @@ def _chat_response(chat: dict) -> dict:
 
 
 def _effective_active_chat(entry: dict) -> "str | None":
-    """Hide disabled Codex selection in UI while preserving it on disk."""
+    """Hide a disabled provider's selection in UI while preserving it on disk."""
     active = entry.get("active")
-    if _codex.codex_enabled():
+    on = providers.known_map()
+    if all(on.values()):
         return active
     active_chat = next((c for c in entry.get("chats", []) if c.get("id") == active), None)
-    if _chat_provider(active_chat) == "claude":
+    if on.get(_chat_provider(active_chat)):
         return active
-    claude_chats = [c for c in entry.get("chats", []) if _chat_provider(c) == "claude"]
-    return claude_chats[-1].get("id") if claude_chats else active
+    visible = [c for c in entry.get("chats", []) if on.get(_chat_provider(c))]
+    return visible[-1].get("id") if visible else active
 
 
 def _find_chat(entry: dict, chat_id: "str | None" = None) -> "dict | None":
@@ -11546,14 +11547,17 @@ async def api_project_chats_create(req: web.Request) -> web.Response:
     name = (body.get("name") or "").strip() or "Chat"
     if len(name) > 80:
         name = name[:80]
-    provider = "codex" if body.get("provider") == "codex" else "claude"
+    provider = providers.normalize(body.get("provider"))
+    spec = providers.get(provider)
     model = (body.get("model") or "").strip() or None
-    if provider == "claude" and model is not None and model not in _ALLOWED_MODELS:
-        return web.json_response({"error": "invalid Claude model"}, status=400)
-    if provider == "codex" and model is None:
-        model = _codex.DEFAULT_CODEX_MODEL
-    if provider == "codex" and not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", model or ""):
-        return web.json_response({"error": "invalid Codex model"}, status=400)
+    if spec.is_default:
+        if model is not None and model not in _ALLOWED_MODELS:
+            return web.json_response({"error": f"invalid {spec.label} model"}, status=400)
+    else:
+        if model is None:
+            model = spec.fallback_model(ctx)
+        if not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", model or ""):
+            return web.json_response({"error": f"invalid {spec.label} model"}, status=400)
     session_key = (project.get("session_key") or project.get("tg_thread", ""))
     async with _chats_lock():
         chats_data = _ensure_chat_entry(ctx, project["id"], session_key)
@@ -11561,7 +11565,7 @@ async def api_project_chats_create(req: web.Request) -> web.Response:
         chat_id = _new_chat_id()
         new_chat = {
             "id": chat_id, "name": name, "provider": provider, "model": model,
-            "session_id": None, "codex_thread_id": None, "created_at": time.time(),
+            **{f: None for f in providers.continuity_fields()}, "created_at": time.time(),
         }
         entry["chats"].append(new_chat)
         _save_chats(ctx, chats_data)
@@ -13075,10 +13079,8 @@ def _pin_chat_runtime(ctx: dict, project: dict, chat_id: "str | None") -> "dict 
     provider = lookup.value
     if chat.get("model"):
         model = chat["model"]
-    elif provider == "codex":
-        model = project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL
     else:
-        model = project.get("model") or ctx.get("DEFAULT_MODEL", "sonnet")
+        model = providers.get(provider).project_model(project, ctx)
     # The account rides along for the same reason the model does: the operator can re-point
     # the chat at another subscription while this message waits, and a queued turn must spend
     # the subscription it was accepted against. An unusable explicit account resolves to None
@@ -13386,7 +13388,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
     _resolved_chat_id = _q_chat_id  # finalized (fallback to active chat) in the resolution block below
     _cid: dict = {"chat_id": _q_chat_id} if _q_chat_id else {}
     provider = "claude"
-    resume_thread_id: "str | None" = None
+    resume_id: "str | None" = None
     outcome = "fail"
     _q_final_ctx_tokens: "int | None" = None  # captured from the result event for post-turn auto-rotate
     try:
@@ -13477,7 +13479,6 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # and its output surfaced in the main tab. Reading per-chat keeps queued runs in their
         # own session. Also finalize the owning chat_id (fallback to the active chat) so the
         # run's events + /live buffer are always stamped and never broadcast to every tab.
-        resume_session_id = None
         _resolved_entry = False
         # Default: the project's own subscription, exactly as before spec-092. The per-chat
         # override (pinned or freshly resolved) replaces it inside the branch below.
@@ -13536,16 +13537,14 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                             print(f"[chat_queue] {session_key}: draining item {item.get('id')} "
                                   f"with NO pinned runtime — assumed current chat state "
                                   f"(provider={provider!r})")
-                        if provider == "codex":
-                            resume_thread_id = _tc.get("codex_thread_id") or None
-                        else:
-                            resume_session_id = _tc.get("session_id") or None
+                        resume_id = providers.get(provider).resume_id(_tc)
                         _resolved_entry = True
             except Exception as _ce:
                 print(f"[chat_queue] chats resolve error for {session_key} (falling back): {_ce}")
         if not _resolved_entry:
             # Legacy item (no project_id) or chats.json unavailable: keep the old behavior.
-            resume_session_id = ctx["sessions"].get(session_key)
+            resume_id = ctx["sessions"].get(session_key)
+        spec = providers.get(provider)
         if provider == "claude" and _q_effort == "ultra":
             _q_effort = None
         # The account was validated when the message was ACCEPTED; by drain time the operator
@@ -13631,7 +13630,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                     ask_mode=bool(_q_ask_mode), plan_mode=bool(_q_plan_mode),
                     ultracode=bool(_q_ultracode),
                 ),
-                _CLAUDE_CAPABILITIES if provider == "claude" else _codex.capabilities(),
+                spec.capabilities(),
             )
         except Exception as _cap_exc:  # a malformed record must never strand the queue
             print(f"[chat_queue] {session_key}: capability check skipped ({_cap_exc!r})")
@@ -13647,7 +13646,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 _q_plan_mode = False
             if any("multi-agent" in c or "ultracode" in c for c in _q_conflicts):
                 _q_ultracode = False
-        run_engine = (ctx.get("run_codex_engine") if provider == "codex" else ctx.get("run_engine"))
+        run_engine = spec.engine(ctx)
         if run_engine is None:
             raise RuntimeError(f"{provider} engine not available in ctx")
         _cid = {"chat_id": _resolved_chat_id} if _resolved_chat_id else {}
@@ -13656,8 +13655,11 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # fresh post-rotation session — it needs the handoff exactly as a direct chat turn does.
         effective_prompt = prompt
         try:
+            # Pre-seam behaviour kept on purpose: only the default provider's session id counted
+            # here, so a resumed adapter thread still looks fresh to the rotation-handoff check
+            # (the direct POST path was fixed for this; the drain path never was).
             effective_prompt, _injected = _inject_pending_handoff(
-                ctx, session_key, prompt, resume_session_id)
+                ctx, session_key, prompt, resume_id if spec.is_default else None)
             if _injected:
                 print(f"[rotation] injected handoff into queued post-rotation turn for {session_key}")
         except Exception as _q_inj_exc:
@@ -13700,10 +13702,10 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         })
         _bus_publish(session_key, _run_start_ev)
 
-        if provider == "codex":
+        if not spec.is_default:
             _queue_gen = run_engine(
                 project_name=project_name, cwd=cwd, prompt=effective_prompt,
-                session_key=session_key, model=model, resume_thread_id=resume_thread_id,
+                session_key=session_key, model=model, **{spec.resume_kwarg: resume_id},
                 ctx=ctx, ephemeral=False, effort=_q_effort,
                 multi_agent=bool(_q_ultracode), plan_mode=_q_plan_mode,
                 chat_id=_resolved_chat_id, entrypoint="chat",
@@ -13712,7 +13714,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             _queue_gen = run_engine(
                 project_name=project_name, cwd=cwd, prompt=effective_prompt,
                 session_key=session_key, model=model,
-                resume_session_id=resume_session_id, env=project_secrets,
+                resume_session_id=resume_id, env=project_secrets,
                 project_account=_q_account, backend=_q_backend,
                 **agents_kwargs, ctx=ctx, ephemeral=False, effort=_q_effort,
                 ultracode=bool(_q_ultracode), plan_mode=_q_plan_mode,
@@ -13742,9 +13744,8 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 _timeline_append(session_key, {"kind": "text", "text": event["text"], "run_id": run_id, **_cid})
             elif etype == "result":
                 _q_final_ctx_tokens = event.get("context_tokens") or None
-                _sid = event.get("session_id") if provider == "claude" else None
-                _thread_id = event.get("thread_id") if provider == "codex" else None
-                if _sid or _thread_id:
+                _new_id = spec.result_id(event)
+                if _new_id:
                     # Write the new session_id back to THIS chat's entry in chats.json (mirroring
                     # the direct /chat path), not just the flat mirror — otherwise the queued
                     # chat's own continuity is lost (its chats.json session_id stays null and the
@@ -13761,10 +13762,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                         None,
                                     )
                                     if _wc is not None:
-                                        if provider == "codex":
-                                            _wc["codex_thread_id"] = _thread_id
-                                        else:
-                                            _wc["session_id"] = _sid
+                                        _wc[spec.continuity_field] = _new_id
                                         # spec-092 P2: the engine answered — only now is the
                                         # handoff proven delivered (same rule as the direct
                                         # path; clearing at injection time would lose it on a
@@ -13775,20 +13773,19 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                         _save_chats(ctx, _wd)
                                         _wrote_back = True
                                         # Keep the flat mirror in sync only for the active chat.
-                                        if provider == "claude" and _wp.get("active") == _resolved_chat_id:
-                                            ctx["sessions"][session_key] = _sid
+                                        if spec.is_default and _wp.get("active") == _resolved_chat_id:
+                                            ctx["sessions"][session_key] = _new_id
                                             try:
                                                 ctx["save_sessions"]()
                                             except Exception:
                                                 pass
                         except Exception as _wbx:
                             print(f"[chat_queue] session_id write-back error for {session_key}: {_wbx}")
-                    if not _wrote_back and _sid:
-                        ctx["sessions"][session_key] = _sid
+                    if not _wrote_back and spec.is_default:
+                        ctx["sessions"][session_key] = _new_id
                         ctx["save_sessions"]()
                     _save_free_chat_continuity(
-                        ctx, _project_id, provider=provider,
-                        session_id=_sid, codex_thread_id=_thread_id,
+                        ctx, _project_id, provider=provider, continuity_id=_new_id,
                     )
             elif etype == "error":
                 raise event["exc"]
@@ -14331,10 +14328,11 @@ async def api_project_chat(req: web.Request) -> web.Response:
             status=400,
         )
     _provider_for_run = _provider_lookup.value
+    _spec = providers.get(_provider_for_run)
     if _run_chat and _run_chat.get("model"):
         model = _run_chat["model"]
-    elif _provider_for_run == "codex":
-        model = project.get("codex_model") or _codex.DEFAULT_CODEX_MODEL
+    elif not _spec.is_default:
+        model = _spec.project_model(project, ctx)
     # spec-092: the account is the third runtime dimension and is now per-chat, not only
     # per-project. An explicit chat pin that cannot run stops the turn here instead of
     # quietly spending `main` (see _resolve_run_account).
@@ -14367,7 +14365,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # operator's normal path. `conflicts` is returned so a client can say which flag to clear.
     if _ask_mode or _plan_mode or _ultracode:
         _run_capabilities = (
-            _CLAUDE_CAPABILITIES if _provider_for_run == "claude" else _codex.capabilities()
+            _spec.capabilities()
         )
         _cap_probe = runtime.RunContext(
             origin_kind="chat", origin_id=project["id"], provider=_provider_for_run,
@@ -14385,8 +14383,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             )
     if _provider_for_run == "claude" and _effort_override == "ultra":
         _effort_override = None
-    run_engine = (ctx.get("run_codex_engine") if _provider_for_run == "codex"
-                  else ctx.get("run_engine"))
+    run_engine = _spec.engine(ctx)
 
     # Lock check (SYNCHRONOUSLY — before first await, against race)
     # Spec-041 A3: enqueue on busy instead of returning an error — backend drains it.
@@ -14568,8 +14565,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # Spec-037: resolve session_id from the active chat (or explicitly requested chat).
         # Falls back to ctx["sessions"] so existing code paths are unaffected if chats.json
         # does not yet exist (migration seeds it on first access, but guard anyway).
-        _chat_resume_sid: "str | None" = None
-        _codex_resume_thread_id: "str | None" = None
+        _chat_resume_id: "str | None" = None
         try:
             async with _chats_lock():
                 _chat_entry = _ensure_chat_entry(ctx, project["id"], session_key)
@@ -14581,21 +14577,19 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 )
                 if _target_chat is not None:
                     _active_chat_id_for_run = _target_chat["id"]
-                    if _provider_for_run == "codex":
-                        _codex_resume_thread_id = _target_chat.get("codex_thread_id") or None
-                    else:
-                        _chat_resume_sid = _target_chat.get("session_id") or None
-                        # Keep ctx["sessions"] in sync only for Claude. Codex
+                    _chat_resume_id = _spec.resume_id(_target_chat)
+                    if _spec.is_default:
+                        # Keep ctx["sessions"] in sync only for Claude. An adapter
                         # selection must leave the legacy Claude cache untouched.
-                        if _chat_resume_sid:
-                            print(f"[session] chat-resume-write {session_key} sid={_chat_resume_sid}")
-                            ctx["sessions"][session_key] = _chat_resume_sid
+                        if _chat_resume_id:
+                            print(f"[session] chat-resume-write {session_key} sid={_chat_resume_id}")
+                            ctx["sessions"][session_key] = _chat_resume_id
                         else:
                             ctx["sessions"].pop(session_key, None)
         except Exception as _ce:
             print(f"[api_project_chat] chats resolve error (falling back): {_ce}")
-        resume_sid = (_chat_resume_sid if _chat_resume_sid is not None
-                      else (ctx["sessions"].get(session_key) if _provider_for_run == "claude" else None))
+        resume_sid = (_chat_resume_id if _chat_resume_id is not None
+                      else (ctx["sessions"].get(session_key) if _spec.is_default else None))
         # Project secrets are injected into the agent's env (values only in-process, not in the API).
         # secret: references are resolved against the built-in store; TG vars are merged after (they win).
         project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
@@ -14610,18 +14604,17 @@ async def api_project_chat(req: web.Request) -> web.Response:
         }
         agents_config = project.get("agents_config") or {}
         agents_kwargs = _build_agents_kwargs(ctx, agents_config)
-        # Runtime-specific continuity id. Codex has no Claude session id, so testing only
-        # resume_sid made EVERY resumed Codex turn look fresh: context-pack was re-injected
-        # on every message and then persisted as if the operator had typed it.
-        _runtime_resume_id = (_codex_resume_thread_id
-                              if _provider_for_run == "codex" else resume_sid)
+        # `resume_sid` is the selected provider's own continuity id (the chat's id, plus the
+        # legacy flat-map fallback for Claude only). Testing only Claude's id used to make EVERY
+        # resumed Codex turn look fresh: context-pack was re-injected on every message and then
+        # persisted as if the operator had typed it.
         # Spec-021 Phase 4: inject handoff summary into the first turn of a fresh session.
         # Only fires when there is no existing runtime conversation (post-rotation) and a
         # pending handoff exists.
         effective_prompt = prompt
         try:
             effective_prompt, _injected = _inject_pending_handoff(
-                ctx, session_key, prompt, _runtime_resume_id,
+                ctx, session_key, prompt, resume_sid,
             )
             if _injected:
                 print(f"[rotation] injected handoff into first post-rotation turn for {session_key}")
@@ -14631,7 +14624,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # spec-075 Phase A: inject context pack on first turn of a fresh session.
         # Prepended BEFORE the handoff block (order: pack → handoff summary → user prompt).
         # Gated: the selected runtime has no continuity id AND both settings are enabled.
-        if _runtime_resume_id is None:
+        if resume_sid is None:
             try:
                 if (_get_global_setting("context_pack_enabled", True)
                         and _project_context_pack_enabled(project)):
@@ -14674,11 +14667,11 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # exact ladder value low|medium|high|xhigh|max passed straight through to the SDK.
         if run_engine is None:
             raise RuntimeError(f"{_provider_for_run} engine unavailable")
-        if _provider_for_run == "codex":
+        if not _spec.is_default:
             _engine_gen = run_engine(
                 project_name=name, cwd=cwd, prompt=effective_prompt,
                 session_key=session_key, model=model,
-                resume_thread_id=_codex_resume_thread_id,
+                **{_spec.resume_kwarg: resume_sid},
                 ctx=ctx, ephemeral=False, effort=_effort_override,
                 plan_mode=_plan_mode, multi_agent=_ultracode,
                 chat_id=_active_chat_id_for_run, entrypoint="chat",
@@ -14796,9 +14789,12 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                                if _active_chat_id_for_run else _stale_ev),
                                  persist=False)
                     await _send(_stale_ev)
-                sid = event.get("session_id") if _provider_for_run == "claude" else None
-                codex_thread_id = event.get("thread_id") if _provider_for_run == "codex" else None
-                if sid or codex_thread_id:
+                _new_id = _spec.result_id(event)
+                # The public result frame names the id under the record field its provider
+                # persists it in; every other provider's field is present and null.
+                _id_fields = {f: None for f in providers.continuity_fields()}
+                _id_fields[_spec.continuity_field] = _new_id
+                if _new_id:
                     # Spec-037: write session_id back to the specific chat entry (atomic).
                     # Also mirrors to ctx["sessions"] as derived cache so TG/cards still work.
                     _wrote_back = False
@@ -14814,10 +14810,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                         None,
                                     )
                                     if _cb_chat is not None:
-                                        if _provider_for_run == "codex":
-                                            _cb_chat["codex_thread_id"] = codex_thread_id
-                                        else:
-                                            _cb_chat["session_id"] = sid
+                                        _cb_chat[_spec.continuity_field] = _new_id
                                         # spec-092 P2: the engine answered and returned an
                                         # id — that, and nothing earlier, is proof the
                                         # handoff was actually delivered. Now it can go.
@@ -14826,24 +14819,24 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                         _save_chats(ctx, _cb_data)
                                         _wrote_back = True
                                         # Mirror active chat → ctx["sessions"]
-                                        if (_provider_for_run == "claude"
+                                        if (_spec.is_default
                                                 and _cb_proj.get("active") == _active_chat_id_for_run):
-                                            ctx["sessions"][session_key] = sid
+                                            ctx["sessions"][session_key] = _new_id
                                             try:
                                                 ctx["save_sessions"]()
                                             except Exception:
                                                 pass
                         except Exception as _wb_exc:
                             print(f"[api_project_chat] session_id write-back error: {_wb_exc}")
-                    if not _wrote_back and sid:
+                    if not _wrote_back and _spec.is_default:
                         # Fallback: legacy flat-map path (no chats entry yet or error)
-                        ctx["sessions"][session_key] = sid
+                        ctx["sessions"][session_key] = _new_id
                         ctx["save_sessions"]()
-                    if sid:
-                        _inherit_label_from_free_chat(ctx, session_key, sid)
+                    if _spec.is_default:
+                        _inherit_label_from_free_chat(ctx, session_key, _new_id)
                     _save_free_chat_continuity(
                         ctx, project.get("id"), provider=_provider_for_run,
-                        session_id=sid, codex_thread_id=codex_thread_id,
+                        continuity_id=_new_id,
                     )
                 ctx_tokens = event.get("context_tokens", 0)
                 _chat_final_ctx_tokens = ctx_tokens  # captured for post-turn auto-rotate (finally)
@@ -14872,8 +14865,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 await _send({
                     "type": "result",
                     "provider": _provider_for_run,
-                    "session_id": sid,
-                    "codex_thread_id": codex_thread_id,
+                    **_id_fields,
                     "context_tokens": ctx_tokens,
                     "context_window": CONTEXT_WINDOW,
                     # Two-tier cost thresholds delivered to the frontend: yellow at 300K, red at 500K.

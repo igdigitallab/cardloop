@@ -14,6 +14,8 @@ import re
 import secrets
 from pathlib import Path
 
+import providers
+
 # ─────────────────────────── board columns ───────────────────────────
 #
 # Spec=Kanban=2 files. TASKS.md (sections = columns) — the only file sessions read.
@@ -78,7 +80,7 @@ def _parse_marker_meta(meta_str: str | None) -> dict:
     for part in meta_str.split():
         if "=" in part:
             k, _, v = part.partition("=")
-            if k == "provider" and v in ("claude", "codex"):
+            if k == "provider" and v in providers.names():
                 result["provider"] = v
             elif k == "model" and _MODEL_ID_RE.fullmatch(v):
                 raw_model = v
@@ -86,7 +88,7 @@ def _parse_marker_meta(meta_str: str | None) -> dict:
                 result["spec"] = v
             elif k == "rt" and _RT_RE.fullmatch(v):
                 result["rt"] = int(v)
-    if raw_model and (raw_model in _ALLOWED_CARD_MODELS or result.get("provider") == "codex"):
+    if raw_model and (raw_model in _ALLOWED_CARD_MODELS or providers.is_adapter(result.get("provider"))):
         result["model"] = raw_model
     return result
 
@@ -238,7 +240,7 @@ def _serialize_tasks(preamble: str, cols: dict, project_name: str) -> str:
             # Append optional metadata to the ops marker when set (model, spec link).
             card_model = card.get("model") or ""
             card_provider = card.get("provider") or ""
-            marker_meta = f" provider={card_provider}" if card_provider in ("claude", "codex") else ""
+            marker_meta = f" provider={card_provider}" if card_provider in providers.names() else ""
             if card_model and _MODEL_ID_RE.fullmatch(card_model):
                 marker_meta += f" model={card_model}"
             card_spec = card.get("spec") or ""
