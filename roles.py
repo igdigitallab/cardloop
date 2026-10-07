@@ -14,16 +14,16 @@ No new third-party dependency: the frontmatter parser below is hand-rolled (~sma
 the two existing precedents in this repo (`webapp.py` `_parse_skill_frontmatter`,
 `spec_mirror.py` `_frontmatter_body_span`). No `pyyaml`.
 """
-import contextlib
 import hashlib
 import os
 import re
-import tempfile
 from dataclasses import dataclass, field
 from typing import get_args
 
 from claude_agent_sdk import AgentDefinition
 from claude_agent_sdk.types import PermissionMode as _SDK_PermissionMode
+
+import fsutil
 
 # ─────────────────────────── constants ───────────────────────────
 
@@ -446,20 +446,10 @@ def role_path(cwd: "str | None", name: str, scope: str) -> str:
 
 
 def _atomic_write(path: str, content: str) -> None:
-    """tmp file in the same dir, fsync, os.replace — no partially written file on a crash."""
-    dir_path = os.path.dirname(path)
-    os.makedirs(dir_path, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".tmp-role-", suffix=".md")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.remove(tmp_path)
-        raise
+    """tmp file in the same dir, fsync, os.replace — no partially written file on a crash.
+
+    The writer itself is `fsutil.atomic_write` (the one shared by every secret file)."""
+    fsutil.atomic_write(path, content, 0o600, prefix=".tmp-role-", suffix=".md")
 
 
 def write_role(cwd: "str | None", name: str, scope: str, content: str, *, overwrite: bool = False) -> Role:

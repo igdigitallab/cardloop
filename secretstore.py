@@ -32,6 +32,7 @@ NEVER log or print secret values anywhere in this module.
 """
 
 import json
+import logging
 import os
 import re
 import stat
@@ -40,6 +41,10 @@ from pathlib import Path
 from typing import Optional
 
 from cryptography.fernet import Fernet, InvalidToken
+
+import fsutil
+
+_log = logging.getLogger(__name__)
 
 # ─────────────────────────── name validation ──────────────────────────────────
 
@@ -121,9 +126,24 @@ def init_key(force: bool = False) -> str:
     new_key = Fernet.generate_key()
     # Create parent directories with restricted permissions
     kf.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    kf.write_bytes(new_key)
-    kf.chmod(0o600)
+    _warn_if_parent_open(kf.parent)
+    # mkstemp in the target dir: 0600 from the moment the key exists, never a readable window
+    fsutil.atomic_write(kf, new_key, 0o600)
     return str(kf)
+
+
+def _warn_if_parent_open(parent: Path) -> None:
+    """mkdir(mode=0o700, exist_ok=True) does NOT fix a directory that already exists: a keyfile
+    in a 0755 directory is 0600 itself, but whoever can write there can swap it out."""
+    try:
+        mode = parent.stat().st_mode & 0o777
+    except OSError:
+        return
+    if mode & 0o077:
+        _log.warning(
+            "Secret store: key directory %s is accessible to group/other (mode %04o). "
+            "The key file itself is 0600, but anyone with write access to the directory can "
+            "replace it. Fix: chmod 700 %s", parent, mode, parent)
 
 
 # ─────────────────────────── store I/O ────────────────────────────────────────
@@ -156,17 +176,8 @@ def _write_store(data: dict) -> None:
     f = Fernet(key)
     encrypted = f.encrypt(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
-    # Write atomically via a temp file in the same directory
-    tmp = path.with_suffix(".tmp")
-    try:
-        tmp.write_bytes(encrypted)
-        tmp.chmod(0o600)
-        tmp.replace(path)
-    except Exception:
-        # Clean up the temp file on failure
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
-        raise
+    # Atomic and 0600 from creation (tmp in the same dir -> os.replace)
+    fsutil.atomic_write(path, encrypted, 0o600)
 
 
 # ─────────────────────────── public API ───────────────────────────────────────

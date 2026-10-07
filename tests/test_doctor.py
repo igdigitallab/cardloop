@@ -612,6 +612,27 @@ def test_data_board_counts_never_leak_card_text(tmp_path):
     assert "Backlog=1" in board_fact.value
 
 
+def test_data_dir_open_to_group_or_other_is_a_warning(tmp_path):
+    """spec-096 P2: ops had data/ at 0775. A warning with a remedy — never a failure, and
+    doctor must not chmod it (a backup job or another user may legitimately read it)."""
+    data = tmp_path / "data"
+    data.mkdir()
+    os.chmod(data, 0o775)
+    facts = doctor.probe_data(repo_root=tmp_path)
+    perm = next(f for f in facts if f.label == "data/ permissions")
+    assert perm.level == "warn"
+    assert "0775" in perm.value and "chmod 700" in perm.remedy
+    assert (data.stat().st_mode & 0o777) == 0o775
+
+
+def test_data_dir_owner_only_is_ok(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    os.chmod(data, 0o700)
+    perm = next(f for f in doctor.probe_data(repo_root=tmp_path) if f.label == "data/ permissions")
+    assert perm.level == "ok" and "0700" in perm.value
+
+
 def test_data_registry_optional_and_absent(tmp_path):
     data = tmp_path / "data"
     data.mkdir()

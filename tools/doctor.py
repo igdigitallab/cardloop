@@ -730,6 +730,22 @@ def probe_runtime(port: str, repo_root: Path = REPO_ROOT, http_get=_http_get_jso
 
 # ─────────────────────────── Data ────────────────────────────────────────────────
 
+def _data_permissions_fact(data_dir: Path) -> Fact:
+    """spec-096 P2: data/ holds chat history, tokens' metadata and the Web Push private key.
+    Secret files inside are 0600 on their own; a group/other-accessible directory still lets a
+    second local user list names and read every file that is not. Warn only — making data/ 0700
+    is the operator's call (a backup job or another user may legitimately read it)."""
+    try:
+        mode = data_dir.stat().st_mode & 0o777
+    except OSError as e:
+        return Fact("data/ permissions", f"unreadable ({e})", level="info")
+    if mode & 0o077:
+        return Fact("data/ permissions", f"{mode:04o} (group/other can enter it)", level="warn",
+                    remedy=f"chmod 700 {data_dir} — after checking that no backup job or other "
+                           "user reads it (secret files inside are 0600 regardless)")
+    return Fact("data/ permissions", f"{mode:04o} (owner only)")
+
+
 def probe_data(repo_root: Path = REPO_ROOT) -> "list[Fact]":
     facts: "list[Fact]" = []
     data_dir = repo_root / "data"
@@ -739,6 +755,7 @@ def probe_data(repo_root: Path = REPO_ROOT) -> "list[Fact]":
         return facts
 
     facts.append(Fact("data/ size", _dir_size(data_dir)))
+    facts.append(_data_permissions_fact(data_dir))
 
     topics = _count_json_entries(data_dir / "topics.json")
     sessions = _count_json_entries(data_dir / "sessions.json")

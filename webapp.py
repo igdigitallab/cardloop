@@ -42,6 +42,8 @@ import schedules as _schedules
 import modules as _modules
 # Multi-subscription switch: which credentials every new run uses.
 import accounts as _accounts
+# spec-096 P2: the ONE atomic writer for every secret file (mkstemp = 0600 from creation).
+import fsutil as _fsutil
 
 # spec-092: the single place a run's provider x account x model gets decided. Pure logic,
 # no aiohttp/engine import back — safe to import at module scope (unlike engine.py, which
@@ -345,6 +347,8 @@ def _push_ensure_vapid_keys() -> None:
             data = json.loads(_PUSH_VAPID_FILE.read_text(encoding="utf-8"))
             _PUSH_PRIV_KEY = data["private_key"]
             _PUSH_PUB_KEY = data["public_key"]
+            # Installs from before spec-096 P2 wrote this private key world-readable (0644).
+            _fsutil.tighten(_PUSH_VAPID_FILE)
             return
         except Exception:
             pass  # corrupt file — regenerate below
@@ -361,9 +365,10 @@ def _push_ensure_vapid_keys() -> None:
         # Uncompressed P-256 public key (65 bytes) → base64url, no padding.
         pub_raw = public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
         pub_b64 = _b64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode()
-        _PUSH_VAPID_FILE.write_text(
+        _fsutil.atomic_write(
+            _PUSH_VAPID_FILE,
             json.dumps({"private_key": priv_b64, "public_key": pub_b64}, indent=2),
-            encoding="utf-8",
+            0o600,
         )
         _PUSH_PRIV_KEY = priv_b64
         _PUSH_PUB_KEY = pub_b64
@@ -17845,7 +17850,7 @@ def _secrets_ensure_gitignore(cwd: str) -> None:
 
 
 def _secrets_write(cwd: str, data: dict) -> None:
-    """Atomically writes secrets.env (tmp+replace), chmod 600, mkdir.
+    """Atomically writes secrets.env (0600 from creation, tmp+replace), mkdir.
     Ensures .claude-ops/secrets/ is in .gitignore."""
     path = _project_secrets_path(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -17854,23 +17859,8 @@ def _secrets_write(cwd: str, data: dict) -> None:
     for k, v in sorted(data.items()):
         lines.append(f"{k}={v}\n")
 
-    tmp = path.with_suffix(".tmp")
-    try:
-        tmp.write_text("".join(lines), encoding="utf-8")
-        tmp.chmod(0o600)
-        tmp.replace(path)
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except Exception:
-                pass
-
-    # chmod 600 on final file (in case replace didn't preserve permissions on some FS)
-    try:
-        path.chmod(0o600)
-    except Exception:
-        pass
+    # mkstemp in the target dir: 0600 from creation (no readable window), then os.replace
+    _fsutil.atomic_write(path, "".join(lines), 0o600)
 
     _secrets_ensure_gitignore(cwd)
 

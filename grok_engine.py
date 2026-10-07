@@ -41,6 +41,8 @@ import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Callable, NamedTuple
 
+import fsutil
+
 PROVIDER = "grok"
 DEFAULT_GROK_MODEL = os.getenv("GROK_MODEL", "grok-4.7")
 # The levels Grok's `reasoning_effort` option offers. The cockpit passes its own "ultra"/"max"
@@ -482,10 +484,7 @@ def _atomic_write(path: Path, text: str, mode: int = 0o600) -> bool:
             return False
     except OSError:
         pass
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    fsutil.atomic_write(path, text, mode)
     return True
 
 

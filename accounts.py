@@ -28,6 +28,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import fsutil
+
 _HERE = Path(__file__).resolve().parent
 
 # The always-present, never-registered account: whatever ~/.claude holds today.
@@ -219,17 +221,10 @@ def _merge_key(dst_path: Path, src: dict, key: str, *, mirror: bool) -> bool:
     if merged == have:
         return False
     dst[key] = merged
-    tmp = dst_path.with_name(dst_path.name + ".tmp")
     try:
-        tmp.write_text(json.dumps(dst, indent=2), encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, dst_path)
+        fsutil.atomic_write(dst_path, json.dumps(dst, indent=2), 0o600)
     except Exception as exc:
         print(f"[accounts] could not sync {key} into {dst_path}: {exc!r}")
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
         return False
     return True
 
