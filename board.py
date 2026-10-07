@@ -42,13 +42,22 @@ def _get_board_lock(cwd: str) -> asyncio.Lock:
     return _board_locks[cwd]
 
 
-_CARD_RE = re.compile(r"^\s*[-*]\s*\[(.)\]\s*(.*)$")
+# spec-096 P2b: the three patterns below are written so that no two adjacent parts can match the
+# same character (CodeQL py/polynomial-redos). The old `\s*(.*)$` / `\s+(?!\[)(.+)$` /
+# `\s*<!--...` forms went quadratic on long whitespace runs; tests/test_board_regex_redos.py
+# keeps the old patterns and proves the new ones parse exactly the same things.
+_CARD_RE = re.compile(r"^\s*[-*]\s*\[(.)\]\s*(\S.*|)$")
 # Lines like "- text" without a checkbox — agents often write this way.
 # Inside a column section we treat these as Backlog cards (default status).
-_PLAIN_CARD_RE = re.compile(r"^\s*[-*]\s+(?!\[)(.+)$")
+# "- [x" with ONE space is not a card but "-  [x" (two or more) is, exactly as before: the
+# lookbehind asks for two whitespace chars (the last one not a newline, which `.` never matched)
+# when the text starts with "[".
+_PLAIN_CARD_RE = re.compile(r"^\s*[-*]\s+(?:(?!\[)|(?<=\s[^\S\n]))(\S.*)$")
 # Marker format: <!--ops:ID--> or <!--ops:ID key=val key2=val2-->
 # The extra key=val pairs carry optional per-card metadata (e.g. model=haiku).
-_MARKER_RE = re.compile(r"\s*<!--\s*ops:([\w-]+)(\s[^>]*)?\s*-->")
+# No leading `\s*` and no `\s*` before `-->` (group 2's `[^>]*` already takes trailing blanks):
+# use _strip_markers() to remove a marker together with the blanks before it.
+_MARKER_RE = re.compile(r"<!--\s*ops:([\w-]+)(\s[^>]*)?-->")
 # Description lines: '  > text' (2 spaces + '>') immediately following a card
 _DESC_LINE_RE = re.compile(r"^  > (.*)$")
 
@@ -93,25 +102,67 @@ def _parse_marker_meta(meta_str: str | None) -> dict:
     return result
 
 
+def _iter_markers(text: str):
+    """Yield exactly the matches `_MARKER_RE.finditer(text)` yields, in linear time.
+
+    A marker ends at the FIRST `>` after its start (nothing inside it can contain one), so that
+    `>` must be the end of a `-->`; when it is not, no start before it can match and the scan
+    jumps past it. Bare finditer retried `[^>]*` to the end of the text from every `<!--`:
+    100 KB of `<!--ops:a <!--ops:a ...` cost 10 s. Use this, not `_MARKER_RE.finditer/search`."""
+    pos = 0
+    gt = -1
+    while True:
+        i = text.find("<!--", pos)
+        if i < 0:
+            return
+        if gt < i:                       # reuse the next `>` while it is still ahead of the start
+            gt = text.find(">", i)
+            if gt < 0:
+                return
+        if text[gt - 2:gt + 1] != "-->":
+            pos = gt + 1
+            continue
+        m = _MARKER_RE.match(text, i, gt + 1)
+        if m:
+            yield m
+            pos = m.end()
+        else:
+            pos = i + 1
+
+
+def _strip_markers(text: str) -> str:
+    """Remove every ops marker together with the whitespace run directly before it.
+
+    That run used to be the marker pattern's leading `\\s*`, which made an unanchored
+    finditer/sub quadratic on a long run of blanks; the blanks are now trimmed in code."""
+    out: list[str] = []
+    pos = 0
+    for m in _iter_markers(text):
+        out.append(text[pos:m.start()].rstrip())
+        pos = m.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def _extract_id_and_text(rest: str) -> tuple[str, str]:
     """Extract ID and strip ALL ops markers from text. First marker = canonical ID."""
-    matches = list(_MARKER_RE.finditer(rest))
+    matches = list(_iter_markers(rest))
     if not matches:
         return _new_card_id(), rest.strip()
     cid = matches[0].group(1)
-    clean = _MARKER_RE.sub("", rest).strip()
+    clean = _strip_markers(rest).strip()
     return cid, clean
 
 
 def _extract_id_text_and_meta(rest: str) -> tuple[str, str, dict]:
     """Like _extract_id_and_text but also returns parsed metadata dict."""
-    matches = list(_MARKER_RE.finditer(rest))
+    matches = list(_iter_markers(rest))
     if not matches:
         return _new_card_id(), rest.strip(), {}
     m0 = matches[0]
     cid = m0.group(1)
     meta = _parse_marker_meta(m0.group(2))
-    clean = _MARKER_RE.sub("", rest).strip()
+    clean = _strip_markers(rest).strip()
     return cid, clean, meta
 
 
