@@ -38,7 +38,7 @@ VENV_PYTHON = Path(sys.executable)
 # transcript pristine — no bubbles bleeding in from another scenario's run.
 E2E_PROJECT_IDS = ["e2e-text", "e2e-tool", "e2e-slow", "e2e-busy", "e2e-multiblock",
                    "e2e-plan", "e2e-plan-reload", "e2e-hold", "e2e-hold-queue",
-                   "e2e-popout-a", "e2e-popout-b", "e2e-files"]
+                   "e2e-popout-a", "e2e-popout-b", "e2e-files", "e2e-mermaid"]
 
 
 def _free_port() -> int:

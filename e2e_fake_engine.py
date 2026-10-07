@@ -15,6 +15,8 @@ Script selection is a marker substring in the prompt (checked in order below):
                  mid-run reload / re-attach; the gap is what the heartbeat pump in
                  webapp.py's chat stream is designed to survive)
   "e2e:paths" -> a reply naming files in prose and in `code` (tests clickable paths in chat)
+  "e2e:mermaid" -> a reply with two ```mermaid blocks, one with a $$math$$ label (tests that
+                 mermaid + katex + dompurify render in the shipped bundle)
   "e2e:hold"  -> one delta, then the turn stays alive (running) for a long stretch
                  (tests composer/run-indicator state while a turn is genuinely in
                  flight — e.g. that Stop stays reachable)
@@ -175,6 +177,28 @@ async def run_engine(
         # Long silent tail: the turn stays running while the test asserts all three blocks survive.
         await asyncio.sleep(_SLOW_GAP_SEC)
         _append_transcript(cwd, sid, prompt, "\n".join(blocks), tool_calls=tool_calls)
+        yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
+        return
+
+    if "e2e:mermaid" in prompt:
+        # A flowchart whose label carries KaTeX math, and a sequence diagram: the two paths through
+        # the bundled mermaid (+ its katex and dompurify). The Mermaid e2e asserts both become SVG.
+        text = (
+            "Diagrams:\n\n"
+            "```mermaid\n"
+            "flowchart LR\n"
+            "  A[\"Start\"] --> B[\"Pythagoras: $$x^2 + y^2 = z^2$$\"]\n"
+            "  B --> C[\"Done\"]\n"
+            "```\n\n"
+            "```mermaid\n"
+            "sequenceDiagram\n"
+            "  Operator->>Cockpit: send\n"
+            "  Cockpit-->>Operator: render\n"
+            "```\n"
+        )
+        yield {"type": "text_delta", "text": text}
+        yield {"type": "text", "text": text}
+        _append_transcript(cwd, sid, prompt, text)
         yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
         return
 
