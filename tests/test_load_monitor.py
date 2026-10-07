@@ -738,17 +738,17 @@ def test_total_size_jitter_is_not_a_new_volume(tmp_path, monkeypatch):
 
 
 def test_a_one_off_step_is_not_a_fill_rate():
-    # 100 GiB copied 2 h ago onto a volume with 150 GiB left of 1000: 100/day over 1 d, but only 33/day over 3 d
+    # 100 GiB copied 2 h ago onto a volume with 150 GiB left of 1000: the last day moved 100 GiB, the two
+    # days before it moved nothing. That is a step, not a sustained rate -> 0, however it is windowed.
     now = 10 * DAY
     pts, t = [], now - 3.2 * DAY
     while t <= now:
         pts.append((t, int((250 if t < now - 2 * H else 150) * GB)))
         t += 600.0
     tr = lm.disk_trend(pts, now)
-    assert tr["per_day"] / GB == pytest.approx(100 / 3, rel=0.05) and tr["recent_per_day"] / GB == pytest.approx(100, rel=0.05)
-    # and with only 2 days of history it is 50/day, never the raw 100/day
+    assert tr["per_day"] == 0.0 and tr["recent_per_day"] / GB == pytest.approx(100, rel=0.05)
     two = [(t, f) for t, f in pts if t >= now - 2.1 * DAY]
-    assert lm.disk_trend(two, now)["per_day"] / GB == pytest.approx(50, rel=0.05)
+    assert lm.disk_trend(two, now)["per_day"] == 0.0
 
 
 def test_a_fresh_runaway_shows_the_faster_recent_rate_but_is_graded_on_the_sustained_one():
@@ -764,3 +764,217 @@ def test_a_fresh_runaway_shows_the_faster_recent_rate_but_is_graded_on_the_susta
 def test_the_runway_only_speaks_for_a_disk_that_is_already_tight():
     assert _disk_sig(100, 400, 40.0)["level"] == "ok"            # 25 % free, 2.5 days at that rate: plenty of room
     assert _disk_sig(55, 400, 10.0)["level"] == "warn"           # 14 % free, 5.5 days
+
+
+# ───────────────────── spec-096 P8b: findings of the hostile review of load meter v2 ─────────────────────
+
+def _step_history(free_before_gib, free_after_gib, step_age_h, hist_days, now=10 * DAY, every=600.0):
+    """Flat history with ONE jump `step_age_h` hours ago (a copy / restore / download)."""
+    pts, t = [], now - hist_days * DAY
+    while t <= now:
+        pts.append((t, int((free_before_gib if t < now - step_age_h * H else free_after_gib) * GB)))
+        t += every
+    return pts, now
+
+
+@pytest.mark.parametrize("hist_days", [2.1, 3.2])
+@pytest.mark.parametrize("age_h", [2, 12, 23, 25, 40, 60])
+def test_a_one_off_step_of_any_age_is_never_a_runway(age_h, hist_days):
+    # 1000 GiB volume flat at 250 GiB free, one 200 GiB copy `age_h` ago -> 50 GiB (5 %) free, static rule ok.
+    pts, now = _step_history(250, 50, age_h, hist_days)
+    tr = lm.disk_trend(pts, now)
+    assert tr is None or tr["per_day"] == 0.0                       # a step is not a trend
+    raw = {"disk": {"free": 50 * GB, "total": 1000 * GB}}
+    if tr is not None:
+        raw["disk"]["trend"] = tr
+    s = next(x for x in lm.evaluate(raw) if x["id"] == "disk")
+    assert s["level"] == "ok" and "filling" not in s["text"]
+
+
+@pytest.mark.parametrize("direction", [-1, +1])
+def test_a_step_never_reads_as_a_rate_at_any_moment_of_its_life(direction):
+    # The step slides through every segment boundary as `now` advances (once a day, for an hour). A
+    # boundary value that AVERAGES the two sides of the step used to split it into two half-size
+    # segments and graded 100 GiB/day for ten minutes at the one-day mark. Sweep every sample time.
+    import random
+    rnd = random.Random(3 if direction < 0 else 4)
+    t_step = 10 * DAY
+    series, tt = [], t_step - 3.5 * DAY
+    while tt <= t_step + 3.2 * DAY:
+        series.append((tt, int((250 if (tt < t_step) == (direction < 0) else 50) * GB)))
+        tt += 600.0 + rnd.uniform(0, 40)
+    checked = worst = 0
+    for i, (now, _f) in enumerate(series):
+        if now < t_step + 600.0:
+            continue
+        pts = [(t, f) for t, f in series[:i + 1] if t >= now - 4 * DAY]
+        tr = lm.disk_trend(pts, now)
+        checked += 1
+        worst = max(worst, (tr or {}).get("per_day", 0.0))
+    assert checked > 400
+    assert worst < lm._DISK_NOISE_PER_DAY   # -1: 200 GiB written once; +1: 200 GiB freed once. Neither is a fill
+
+
+def test_two_lumps_on_different_days_are_graded_at_their_average_not_at_the_larger():
+    # 100 GiB written 2.5 d ago and again 0.5 d ago, nothing in between: 200 GiB over 3 days = 67/day
+    now = 10 * DAY
+    pts, tt = [], now - 3.2 * DAY
+    while tt <= now:
+        pts.append((tt, int((340 - (100 if tt >= now - 2.5 * DAY else 0) - (100 if tt >= now - 0.5 * DAY else 0)) * GB)))
+        tt += 600.0
+    tr = lm.disk_trend(pts, now)
+    assert tr["per_day"] / GB == pytest.approx(200 / 3, rel=0.05)
+    s = next(x for x in lm.evaluate({"disk": {"free": 140 * GB, "total": 1000 * GB, "trend": tr}}) if x["id"] == "disk")
+    assert s["level"] == "warn" and "full in ~2.1 days" in s["text"]          # real growth, but not a crit on a lump
+
+
+def test_a_one_off_step_never_alerts_through_the_monitor(t, monkeypatch):
+    import collections
+    from features.load_monitor.alerts import AlertState, decide
+    du = collections.namedtuple("du", "total used free")
+    monkeypatch.setattr(lm.shutil, "disk_usage", lambda p: du(1000 * GB, 0, 50 * GB))
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    clk, wall = Clock(), Clock()
+    m = lm.Monitor(now=clk, wall=wall)
+    m._disk_dev, m._disk_total = os.stat("/tmp").st_dev, 1000 * GB
+    pts, _ = _step_history(250, 50, 2, 3.2, now=wall.t)
+    m._disk_hist.extend(pts)
+    st, levels = AlertState(), set()
+    for _ in range(40):                                              # 40 x 60 s: well past every sustain
+        snap = m.sample({"data_dir": "/tmp"}, t.fs)
+        levels.add(_lvl(snap["signals"], "disk"))
+        assert decide(snap, st, wall.t) is None
+        clk.t += 60.0
+        wall.t += 60.0
+    assert levels == {"ok"}
+
+
+def test_a_steady_fill_is_still_graded_with_noise_and_a_nightly_job():
+    import random
+    rnd = random.Random(11)
+    now = 10 * DAY + 14 * H
+    pts, tt = [], now - 3.4 * DAY
+    while tt <= now:
+        tod = tt % DAY
+        free = 85 + 30.0 * (now - tt) / DAY - (10 if 2 * H <= tod < 3 * H else 0) + rnd.uniform(-0.5, 0.5)
+        pts.append((tt, int(free * GB)))
+        tt += 600.0 + rnd.uniform(0, 40)
+    tr = lm.disk_trend(pts, now)
+    assert tr["per_day"] / GB == pytest.approx(30.0, rel=0.06) and tr["base_days"] == 3
+    s = next(x for x in lm.evaluate({"disk": {"free": 85 * GB, "total": 1000 * GB, "trend": tr}}) if x["id"] == "disk")
+    assert s["level"] == "warn" and ("full in ~2.8 days" in s["text"] or "full in ~2.9 days" in s["text"])   # 85 / 30
+
+
+def test_a_cleanup_inside_the_window_does_not_mask_a_real_fill():
+    # 100 GiB freed 2.5 d ago, then a steady 30 GiB/day: 85 GiB free of 1000 now -> ~2.8 days, WARN
+    now = 10 * DAY
+
+    def free_at(tt):
+        return 60 * GB if tt < now - 2.5 * DAY else int(160 * GB - 30 * GB * (tt - (now - 2.5 * DAY)) / DAY)
+
+    pts, tt = [], now - 3.5 * DAY
+    while tt <= now:
+        pts.append((tt, free_at(tt)))
+        tt += 600.0
+    tr = lm.disk_trend(pts, now)
+    assert tr is not None and tr["per_day"] / GB == pytest.approx(30.0, rel=0.06)
+    s = next(x for x in lm.evaluate({"disk": {"free": free_at(now), "total": 1000 * GB, "trend": tr}}) if x["id"] == "disk")
+    assert s["level"] == "warn" and "filling" in s["text"]
+
+
+def test_a_history_that_cannot_support_a_slope_is_unknown_not_zero():
+    # only 2 days of history and the older of them contains a cleanup: one clean day cannot be a trend
+    now = 10 * DAY
+    cleanup_at = now - 1.5 * DAY
+
+    def free_at(tt):
+        return 60 * GB if tt < cleanup_at else int(160 * GB - 30 * GB * (tt - cleanup_at) / DAY)
+
+    pts, tt = [], now - 2.1 * DAY
+    while tt <= now:
+        pts.append((tt, free_at(tt)))
+        tt += 600.0
+    assert lm.disk_trend(pts, now) is None                           # unknown: no "0 GiB/day", no green claim
+    # ...whereas a disk that only ever emptied or stayed flat has an honest zero
+    emptied, _ = _hist(-5.0, 3.0, free_now_gib=22)
+    assert lm.disk_trend(emptied, 10 * DAY)["per_day"] == 0.0
+
+
+def test_a_phantom_scratch_file_does_not_move_the_end_of_a_realistic_history():
+    # production spacing is 600 s + sampler jitter, so a 30-minute end window holds only 2-3 points
+    import random
+    rnd = random.Random(5)
+    now0 = 10 * DAY
+    pts, tt = [], now0 - 3.5 * DAY
+    while tt <= now0:
+        pts.append((tt, 10 * GB))
+        tt += 600.0 + rnd.uniform(0, 40)
+    pts[-2] = (pts[-2][0], 2 * GB)                                    # an 8 GiB file seen at one sample, gone at the next
+    worst = 0.0
+    for dt in range(0, 600, 5):
+        tr = lm.disk_trend(pts, pts[-1][0] + dt)
+        worst = max(worst, (tr or {}).get("per_day", 0.0))
+    assert worst < lm._DISK_NOISE_PER_DAY                              # never a phantom fill rate
+
+
+@pytest.mark.parametrize("hh,mm", [(2, 10), (2, 40), (2, 59), (3, 5), (3, 20)])
+def test_a_nightly_job_reads_as_zero_growth_even_when_the_sample_lands_inside_it(hh, mm):
+    # +10 GiB written 02:00-03:00 every night: evaluated at 02:40 the newest hour lies INSIDE the job,
+    # and so does the same hour of every earlier day, so it must cancel instead of reading as growth.
+    import random
+    rnd = random.Random(hh * 100 + mm)
+    now = 10 * DAY + hh * H + mm * 60.0
+    pts, tt = [], now - 3.4 * DAY
+    while tt <= now:
+        tod = tt % DAY
+        pts.append((tt, int((22 - (10 if 2 * H <= tod < 3 * H else 0)) * GB)))
+        tt += 600.0 + rnd.uniform(0, 30)
+    tr = lm.disk_trend(pts, now)
+    assert tr["per_day"] / GB < 0.5
+
+
+def _static_warn_runway_crit_monitor(monkeypatch):
+    import collections
+    du = collections.namedtuple("du", "total used free")
+    monkeypatch.setattr(lm.shutil, "disk_usage", lambda p: du(200 * GB, 0, 15 * GB))   # 92.5 % used, 15 GiB free
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0, 0))
+    clk, wall = Clock(), Clock()
+    m = lm.Monitor(now=clk, wall=wall)
+    m._disk_dev, m._disk_total = os.stat("/tmp").st_dev, 200 * GB
+    # a genuine 15 GiB/day fill for 3.2 days that ends at 15 GiB free: runway 1 day -> raw crit
+    m._disk_hist.extend((wall.t - 3.2 * DAY + i * 600.0, int((15 + 15 * (3.2 * DAY - i * 600.0) / DAY) * GB))
+                        for i in range(int(3.2 * DAY / 600) + 1))
+    return m, clk, wall
+
+
+def test_a_static_warn_is_not_delayed_by_a_worse_runway_after_a_restart(t, monkeypatch):
+    m, clk, wall = _static_warn_runway_crit_monitor(monkeypatch)
+    seen = {}
+    for i in range(30):                                              # 5 s samples, 150 s
+        snap = m.sample({"data_dir": "/tmp"}, t.fs)
+        seen[i * 5] = _lvl(snap["signals"], "disk")
+        if seen[i * 5] == "warn":
+            assert snap["score"] < 100                               # an amber meter is never a full bar
+        clk.t += 5.0
+        wall.t += 5.0
+    assert seen[0] == "ok" and seen[10] == "warn"                    # the static rule: its own 10 s debounce
+    assert all(seen[s] == "warn" for s in range(10, 115, 5))         # never green while the runway is still debouncing
+    assert seen[120] == "crit" and seen[145] == "crit"               # the runway crit lands after ITS sustain
+    assert all(not k.startswith("_") for s in snap["signals"] for k in s)
+
+
+def test_a_runway_that_disappears_hands_back_to_the_static_rule(t, monkeypatch):
+    m, clk, wall = _static_warn_runway_crit_monitor(monkeypatch)
+    for _ in range(30):
+        snap = m.sample({"data_dir": "/tmp"}, t.fs)
+        clk.t += 5.0
+        wall.t += 5.0
+    assert _lvl(snap["signals"], "disk") == "crit"
+    m._disk_hist.clear()                                              # history gone (volume swapped): no runway any more
+    m._disk_dev = None                                                # (a device change is what clears it in production)
+    for _ in range(6):
+        snap = m.sample({"data_dir": "/tmp"}, t.fs)
+        clk.t += 5.0
+        wall.t += 5.0
+    assert _lvl(snap["signals"], "disk") == "warn"                    # the static warn remains; the crit is not held
+    assert not any(k.endswith(":runway") for k in m._trackers)

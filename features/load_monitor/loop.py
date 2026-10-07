@@ -61,12 +61,14 @@ async def _deliver(ctx: dict, alert: Alert) -> None:
     import webapp as _wa
     text = f"{alert.title}\n{alert.body}"
     out: "dict[str, str]" = {}
+    reached = {"inbox": False, "toast": False, "push": False}     # did this leg hand the alert to anything?
     try:
         inbox = Path(ctx["DATA"]) / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
         f = inbox / f"load-alert-{int(time.time())}.txt"
         f.write_text(text + "\n", encoding="utf-8")
         out["inbox"] = f.name
+        reached["inbox"] = True
     except Exception as exc:
         out["inbox"] = f"FAILED {exc!r}"
     if alert.loud:
@@ -78,6 +80,7 @@ async def _deliver(ctx: dict, alert: Alert) -> None:
             tabs = len(_wa._bus_global)             # every open cockpit tab listens on the activity stream
             await _wa._notify_operator(ctx, "[ERROR] " + alert.title + (" — " + first if first else ""))
             out["toast"] = f"queued for {tabs} open tab(s)" if tabs else "no open cockpit tab to show it"
+            reached["toast"] = bool(tabs)
         except Exception as exc:
             out["toast"] = f"FAILED {exc!r}"
         try:
@@ -98,9 +101,14 @@ async def _deliver(ctx: dict, alert: Alert) -> None:
                         }))
                     out["push"] = (f"attempted for {subs} subscription(s), no delivery receipts"
                                    if subs else "no subscribers")
+                    reached["push"] = bool(subs)
         except Exception as exc:
             out["push"] = f"FAILED {exc!r}"
-    _jr.say(f"{_jr.PREFIX} delivered ({'loud' if alert.loud else 'quiet'}): "
+    # The headline is the OBSERVED outcome. A loud alert exists to tell a person, so only a toast that
+    # was queued for an open tab or a push attempted for a subscriber counts (a file in the inbox is the
+    # record, not the notification); the quiet notice's only channel IS the inbox file.
+    ok = (reached["toast"] or reached["push"]) if alert.loud else reached["inbox"]
+    _jr.say(f"{_jr.PREFIX} {'delivered' if ok else 'NOT delivered to anyone'} ({'loud' if alert.loud else 'quiet'}): "
             + ", ".join(f"{k} {v}" for k, v in out.items()))
 
 

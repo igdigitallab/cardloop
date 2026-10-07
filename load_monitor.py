@@ -41,7 +41,8 @@ _GIB = 1024 ** 3
 # nothing about how fast the disk is filling: the same 89 % is a quiet weekend or a one-day problem.
 _DISK_POINT_EVERY_S = 600     # one history point per 10 min is plenty for a quantity that moves in hours
 _DISK_KEEP_S = 4 * 86400
-_DISK_BASE_MAX_DAYS = 3       # baselines are WHOLE days (1..3), so a nightly job lands on the same phase
+_DISK_BASE_MAX_DAYS = 3       # segments are WHOLE days (up to 3), so a nightly job lands on the same phase
+_DISK_BOUNDARY_S = 3600       # a boundary value is the median of the hour trailing it: 5-6 points even with sampler jitter
 _DISK_NOISE_PER_DAY = 256 * 1024 ** 2   # below this the "rate" is churn, not a fill rate
 _DISK_TREND_FREE_FRAC = 0.15  # only a disk that is already getting tight needs a runway estimate
 _DISK_RESIZE_TOL = 0.01       # total size moving by more than this is another volume; less is fs accounting jitter
@@ -444,47 +445,75 @@ def _ev_fds(raw):
 
 
 def _median(xs: "list[float]") -> float:
+    """The LOWER median: always a value that was actually observed. The usual average of the two middle
+    values of an even-sized set invents a level between the two sides of a step, so a step that lands
+    inside a boundary window half-and-half would be split into TWO half-size segments (and the
+    median over segments would then read a one-off step as a sustained rate for ten minutes)."""
     ys = sorted(xs)
-    n = len(ys)
-    return float(ys[n // 2]) if n % 2 else (ys[n // 2 - 1] + ys[n // 2]) / 2.0
+    return float(ys[(len(ys) - 1) // 2])
 
 
 def disk_trend(points: "list[tuple[float, int]]", now: float) -> "dict[str, Any] | None":
     """SUSTAINED fill rate of a volume from its history of (wall time, free bytes), or None.
 
-    For each whole-day baseline k = 1..3 the rate is `free` k days ago minus `free` now, over k days;
-    both ends are medians over a short neighbourhood, so one scratch file that appears and
-    disappears does not move them. Baselines are multiples of 24 h so a nightly job (backup,
-    rotation) sits at the same phase at both ends and reads as zero growth rather than as growth.
+    The window (up to 3 whole days back from `now`) is cut into whole-day SEGMENTS. Each segment has
+    a rate: `free` at its older boundary minus `free` at its newer one, per day; boundaries are
+    medians over the hour trailing them, so one scratch file that appears and disappears does not
+    move them, and whole days keep a nightly job (backup, rotation) at the same phase at both ends.
 
-    The reported rate is the MINIMUM over the baselines: it has to hold across all of them. That is
-    what separates a trend from a one-off step (a 100 GiB copy yesterday is 100/day over 1 d but
-    only 33/day over 3 d), and it is why a short window is NOT used to catch a sudden fill — a
-    nightly 6 GiB backup would read as 60 GiB/day at 4 am. A fill that fast is the static fullness
-    rule's job; `recent_per_day` (the 1-day rate) is returned so the text can say it is faster.
+    The reported rate is the (lower) MEDIAN of the segment rates: a fill has to show up in most of
+    the window, so a ONE-OFF STEP (a 200 GiB copy two hours ago: 200/day in the last segment, 0 in the
+    others) reads as zero however large it is, and a step is never extrapolated into "full in 0.8
+    days". It is also why a short window is NOT used to catch a sudden fill: a nightly 6 GiB backup
+    would read as 60 GiB/day at 4 am. A fill that fast is the static fullness rule's job, and
+    `recent_per_day` (the newest segment's rate) is returned so the text can say it is faster.
 
-    Needs two full days of history and a fresh newest point; a hole in the history at one baseline
-    just drops that baseline."""
+    A segment that FREED space (rate below minus the noise floor) is a cleanup: it says nothing about
+    how fast the disk fills, so it is dropped instead of voting (a cleanup 2.5 days ago must not hide
+    a real fill since). If fewer than two informative segments remain, the history cannot support a
+    slope and the answer is None (unknown), never a zero. A window in which NO segment fills the disk
+    (flat, or only emptying) is a real zero.
+
+    Needs two full days of history and a fresh newest point; a hole in the history at one boundary
+    just merges its two segments."""
     if len(points) < 4:
         return None
     if now - points[-1][0] > 2 * 3600:                   # history is stale: do not extrapolate from it
         return None
     max_days = min(_DISK_BASE_MAX_DAYS, int((now - points[0][0]) // 86400))
-    end = _median([f for t, f in points if t >= now - 1800] or [points[-1][1]])
-    rates: "dict[int, float]" = {}
-    for k in range(1, max_days + 1):
-        t0 = now - k * 86400
-        start: "list[float]" = []
-        for radius in (3600, 3 * 3600):
-            start = [f for t, f in points if abs(t - t0) <= radius]
-            if start:
-                break
-        if start:
-            rates[k] = (_median(start) - end) / k
-    if len(rates) < 2:                                   # one baseline cannot tell a step from a trend
+    if max_days < 2:                                     # one day is one segment: a step and a trend look alike
         return None
-    return {"per_day": max(0.0, min(rates.values())), "recent_per_day": max(0.0, rates.get(1, 0.0)),
-            "base_days": max(rates)}
+    # Every boundary is read through the SAME window shape, the hour TRAILING it (the newest boundary
+    # cannot look ahead), so the two ends of a segment see a nightly job at exactly the same phase and
+    # the half-hour the trailing window lags cancels out. A hole widens the window; each boundary
+    # carries the mean time of the points it used, so a widened one is still timed correctly.
+    bound: "dict[int, tuple[float, float]]" = {}         # days back from now -> (mean time, median free)
+    for j in range(0, max_days + 1):
+        t0 = now - j * 86400
+        for width in (_DISK_BOUNDARY_S, 3 * _DISK_BOUNDARY_S):
+            near = [(t, f) for t, f in points if t0 - width <= t <= t0]
+            if near:
+                bound[j] = (sum(t for t, _f in near) / len(near), _median([f for _t, f in near]))
+                break
+    if 0 not in bound:
+        return None
+    known = sorted(bound)
+    segs = [(a, b, (bound[b][1] - bound[a][1]) / ((bound[a][0] - bound[b][0]) / 86400.0))
+            for a, b in zip(known, known[1:])]
+    if len(segs) < 2:
+        return None
+    noise = _DISK_NOISE_PER_DAY
+    recent = max(0.0, segs[0][2]) if (segs[0][0], segs[0][1]) == (0, 1) else 0.0
+    if not any(r >= noise for _a, _b, r in segs):
+        return {"per_day": 0.0, "recent_per_day": recent, "base_days": segs[-1][1]}
+    kept = [(b, r) for _a, b, r in segs if r > -noise]
+    if len(kept) < 2:
+        return None
+    rates = sorted(r for _b, r in kept)
+    # The lower median, and never more than the plain average: two lumps on different days
+    # (100, 0, 100) are 67 GiB/day over the window, not 100.
+    sustained = min(rates[(len(rates) - 1) // 2], sum(rates) / len(rates))
+    return {"per_day": max(0.0, sustained), "recent_per_day": recent, "base_days": max(b for b, _r in kept)}
 
 
 def _days_text(d: float) -> str:
@@ -506,7 +535,7 @@ def _ev_disk(raw):
     value = f"{used_f:.0%}"
     hint = "Free some space — a full disk breaks writes to chats and the board."
     tr = dk.get("trend")
-    runway_led = False
+    static_lvl, runway_lvl = lvl, None
     if tr and tr["per_day"] >= _DISK_NOISE_PER_DAY and free / dk["total"] < _DISK_TREND_FREE_FRAC:
         days = free / tr["per_day"]
         tlvl = CRIT if days < DISK_CRIT_DAYS else WARN if days < DISK_WARN_DAYS else OK
@@ -516,8 +545,9 @@ def _ev_disk(raw):
             text += f"; the last 24 h were faster: {_gb(tr['recent_per_day'])}/day"
         if days < 30:
             value += f" · {_days_text(days)}d"
+        runway_lvl = tlvl
         if _RANK[tlvl] > _RANK[lvl]:
-            lvl, runway_led = tlvl, True
+            lvl = tlvl
         if tlvl != OK:
             frac = (DISK_WARN_DAYS - days) / (DISK_WARN_DAYS - DISK_CRIT_DAYS)
             pr = max(pr, 1.0 if tlvl == CRIT else min(0.99, 0.5 + 0.5 * frac))
@@ -525,8 +555,10 @@ def _ev_disk(raw):
                     f"{_days_text(days)} days. Find what grows (du -xh --max-depth=2 / | sort -h | tail) "
                     "or free space — a full disk breaks writes to chats and the board.")
     sig = _sig("disk", lvl, 1.0 if crit else pr, value, text, hint)
-    if runway_led:
-        sig["_sustain"] = _RUNWAY_SUSTAIN        # private: consumed (and removed) by Monitor.sample
+    if runway_lvl is not None:
+        # private, consumed (and removed) by Monitor.sample: the two readings are debounced SEPARATELY,
+        # so the runway's long sustain can never delay what the static fullness rule already says.
+        sig["_static"], sig["_runway"] = static_lvl, runway_lvl
     return [sig]
 
 
@@ -612,10 +644,12 @@ _SUSTAIN: "dict[str, tuple[float, float]]" = {
     "agents": (120.0, 120.0),     # teardown windows and short helper CLIs must not flap it
     "oom": (0.0, 0.0), "mem_psi": (10.0, 5.0), "evictions": (0.0, 0.0), "loop_lag": (0.0, 0.0),
 }
-# A level that comes from the disk RUNWAY (not the static fullness rule) is debounced harder: the
-# estimate moves with every history point, and a 10-minute run keeps one odd point quiet. The static
-# rule keeps the default, so a 97 %-full disk is crit at the first sample (and `make doctor`, which
-# samples a fresh Monitor twice a second apart, still reports it).
+# The disk RUNWAY reading is debounced harder than the static fullness rule: the estimate moves with
+# every history point, and a 10-minute run keeps one odd point quiet. The two are separate trackers
+# (`disk` for the static rule, `disk:runway` for the runway) and the signal shows the worse of the
+# two, so a 97 %-full disk is crit at the first sample (and `make doctor`, which samples a fresh
+# Monitor twice a second apart, still reports it) and a static warn is never hidden while the runway
+# reading waits out its own sustain.
 _RUNWAY_SUSTAIN = (600.0, 120.0)
 _DEFAULT_SUSTAIN = (10.0, 0.0)
 
@@ -673,18 +707,25 @@ class Monitor:
             sigs = evaluate(raw)
             # A signal that vanished from this sample (reader failed once, window emptied) must not
             # keep stale debounce state: it would show an old crit for samples after it recovered.
-            live_ids = {x["id"] for x in sigs}
+            live_ids = {x["id"] for x in sigs} | {x["id"] + ":runway" for x in sigs if "_runway" in x}
             self._trackers = {k: v for k, v in self._trackers.items() if k in live_ids}
             level = OK
             score = 0.0
             for s in sigs:
                 tr = self._trackers.setdefault(s["id"], _Tracker())
-                sustain = s.pop("_sustain", None) or _SUSTAIN.get(s["id"], _DEFAULT_SUSTAIN)
-                eff = tr.update(s["level"], now, sustain)
+                sustain = _SUSTAIN.get(s["id"], _DEFAULT_SUSTAIN)
+                static_raw, runway_raw = s.pop("_static", None), s.pop("_runway", None)
+                if runway_raw is None:
+                    eff = tr.update(s["level"], now, sustain)
+                else:
+                    eff = tr.update(static_raw, now, sustain)
+                    rw = self._trackers.setdefault(s["id"] + ":runway", _Tracker()).update(
+                        runway_raw, now, _RUNWAY_SUSTAIN)
+                    eff = eff if _RANK[eff] >= _RANK[rw] else rw
                 if eff != s["level"]:
                     s["level"] = eff
                     s["pressure"] = (min(s["pressure"], 0.49) if eff == OK
-                                     else 1.0 if eff == CRIT else max(s["pressure"], 0.5))
+                                     else 1.0 if eff == CRIT else min(0.99, max(s["pressure"], 0.5)))
                 level = level if _RANK[level] >= _RANK[eff] else eff
                 score = max(score, s["pressure"])
             sigs.sort(key=lambda s: (-_RANK[s["level"]], -s["pressure"], s["id"]))

@@ -16,6 +16,10 @@ STALL_GAP_S = 10.0           # at most one stall line per this many seconds: a s
 STALL_ALWAYS_S = 2.0         # ...except a real freeze, which is always written when it happens
 FLAP_MAX_LINES = 8           # transition lines per key per window before it is declared flapping
 FLAP_WINDOW_S = 600.0
+# A muted key with no change for this long has settled. Longer than the slowest flap that can mute a
+# key (FLAP_WINDOW_S / FLAP_MAX_LINES = 75 s per change), so a signal that is still flapping never
+# produces a "settled" line between two of its changes.
+FLAP_SETTLE_S = 120.0
 
 
 def say(line: str) -> None:
@@ -28,12 +32,15 @@ def say(line: str) -> None:
 
 
 class Line(str):
-    """A journal line that remembers which signal ("" = the overall level) it is about."""
+    """A journal line that remembers which signal ("" = the overall level) it is about, the level it
+    moved TO and what the line said about it (so a muted line can be summarised later)."""
     key: str = ""
+    level: str = ""
+    detail: str = ""
 
-    def __new__(cls, text: str, key: str = "") -> "Line":
+    def __new__(cls, text: str, key: str = "", level: str = "", detail: str = "") -> "Line":
         obj = super().__new__(cls, text)
-        obj.key = key
+        obj.key, obj.level, obj.detail = key, level, detail
         return obj
 
 _RANK = {"ok": 0, "warn": 1, "crit": 2}
@@ -59,7 +66,8 @@ def level_changes(prev: "dict[str, str] | None", snap: "dict[str, Any]") -> "tup
     if before.get("", "start") != overall:
         bad = sorted((i for i, s in sigs.items() if s["level"] != "ok"),
                      key=lambda i: (-_RANK.get(sigs[i]["level"], 0), i))
-        lines.append(Line(f"{PREFIX} level {before.get('', 'start')} -> {overall}" + (f" ({', '.join(bad)})" if bad else ""), ""))
+        lines.append(Line(f"{PREFIX} level {before.get('', 'start')} -> {overall}" + (f" ({', '.join(bad)})" if bad else ""),
+                          "", overall, f"signals: {', '.join(bad)}" if bad else ""))
     for i in sorted(cur):
         if i == "":
             continue
@@ -68,9 +76,10 @@ def level_changes(prev: "dict[str, str] | None", snap: "dict[str, Any]") -> "tup
             continue
         s = sigs[i]
         was = old or ("start" if prev is None else "new")
-        lines.append(Line(f"{PREFIX} signal {i}: {was} -> {cur[i]} | {s.get('text', '')} (value {s.get('value', '?')})", i))
+        detail = f"{s.get('text', '')} (value {s.get('value', '?')})"
+        lines.append(Line(f"{PREFIX} signal {i}: {was} -> {cur[i]} | {detail}", i, cur[i], detail))
     for i in sorted(set(before) - set(cur) - {""}):
-        lines.append(Line(f"{PREFIX} signal {i}: {before[i]} -> not measurable", i))
+        lines.append(Line(f"{PREFIX} signal {i}: {before[i]} -> not measurable", i, "not measurable"))
     return lines, cur
 
 
@@ -112,27 +121,50 @@ class FlapGuard:
     """Caps transition lines per key: a signal hovering on a threshold would otherwise write
     thousands of lines a day and bury the alert lines this log exists for. After FLAP_MAX_LINES in
     FLAP_WINDOW_S it writes ONE "flapping" line and stays quiet until the key has been calm for a
-    whole window. Only the transition lines go through it — alerts and status lines never do."""
+    whole window. Only the transition lines go through it — alerts and status lines never do.
+
+    The line that ENDS a flap is the one a post-mortem needs most (a signal that flaps and then
+    settles at crit must not leave the journal saying ok), so it is never lost: the last muted change
+    of each key is remembered, and once the key has been quiet for FLAP_SETTLE_S (or before the next
+    ordinary line of that key) a "settled at <level>" line says where it ended up. Call `filter` on
+    every sample, with an empty list when nothing changed, or the quiet period is never noticed."""
 
     def __init__(self) -> None:
         self._seen: "dict[str, list[float]]" = {}
         self._muted: "set[str]" = set()
+        self._pending: "dict[str, tuple[float, Line]]" = {}      # key -> (when, last MUTED change)
+
+    @staticmethod
+    def _what(key: str) -> str:
+        return f"signal {key}" if key else "the overall level"
+
+    def _settled(self, key: str, ln: "Line") -> str:
+        level = getattr(ln, "level", "") or "unknown"
+        detail = getattr(ln, "detail", "")
+        return (f"{PREFIX} {self._what(key)} settled at {level} (changes were muted while it flapped)"
+                + (f" | {detail}" if detail else ""))
 
     def filter(self, lines: "list[Line]", now: float) -> "list[str]":
         out: "list[str]" = []
+        for key in sorted(self._pending):
+            at, ln = self._pending[key]
+            if now - at >= FLAP_SETTLE_S:
+                out.append(self._settled(key, ln))
+                del self._pending[key]
         for ln in lines:
             key = getattr(ln, "key", "")
             ts = [t for t in self._seen.get(key, []) if now - t < FLAP_WINDOW_S]
             if len(ts) >= FLAP_MAX_LINES:
                 if key not in self._muted:
                     self._muted.add(key)
-                    what = f"signal {key}" if key else "the overall level"
-                    out.append(f"{PREFIX} {what} is changing level often ({FLAP_MAX_LINES}+ lines in "
+                    out.append(f"{PREFIX} {self._what(key)} is changing level often ({FLAP_MAX_LINES}+ lines in "
                                f"{FLAP_WINDOW_S / 60:.0f} min); further changes are not logged until it settles")
                 ts.append(now)                      # the window stays full for as long as it keeps flapping
+                self._pending[key] = (now, ln)
             else:
                 self._muted.discard(key)
                 ts.append(now)
                 out.append(str(ln))
+                self._pending.pop(key, None)        # an ordinary line states the level itself
             self._seen[key] = ts
         return out

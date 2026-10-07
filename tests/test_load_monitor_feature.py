@@ -250,14 +250,96 @@ def test_stall_lines_are_thresholded_rate_limited_and_a_real_freeze_is_never_swa
 
 def test_a_flapping_signal_is_capped_and_resumes_after_it_settles():
     g = jr.FlapGuard()
-    mk = lambda i: [jr.Line(f"[load-monitor] signal cpu: x{i}", "cpu")]
+    mk = lambda i: [jr.Line(f"[load-monitor] signal cpu: x{i}", "cpu", f"x{i}")]
     out = []
     for i in range(20):                                              # 20 changes in 20 s
         out += g.filter(mk(i), float(i))
     assert len(out) == jr.FLAP_MAX_LINES + 1 and "signal cpu is changing level often" in out[-1]
     assert g.filter([jr.Line("[load-monitor] signal mem: y", "mem")], 21.0) == ["[load-monitor] signal mem: y"]   # per key
     assert g.filter(mk(99), 100.0) == []                             # still inside the window: still quiet
-    assert g.filter(mk(100), 100.0 + jr.FLAP_WINDOW_S + 21) == [str(mk(100)[0])]   # calm for a whole window: back
+    back = g.filter(mk(100), 100.0 + jr.FLAP_WINDOW_S + 21)                      # calm for a whole window: back
+    assert len(back) == 2 and back[0].startswith("[load-monitor] signal cpu settled at x99") and back[1] == str(mk(100)[0])
+
+
+def _flap_then_settle(settle_level, flips=6):
+    """level_changes + FlapGuard, one sample per 5 s: `flips` ok/warn pairs, then it settles."""
+    prev, g, out, now = None, jr.FlapGuard(), [], 0.0
+    levels = ["ok", "warn"] * flips + [settle_level]
+    for l in levels:
+        snap = {"level": l, "signals": [{"id": "mem", "level": l, "text": "mem text", "value": "v"}]}
+        lines, prev = jr.level_changes(prev, snap)
+        out += g.filter(lines, now)
+        now += 5.0
+    return g, out, now
+
+
+def test_the_transition_that_ends_a_flap_is_written_as_settled_at_the_final_level():
+    g, out, now = _flap_then_settle("crit")
+    assert any("is changing level often" in x for x in out) and not any("-> crit" in x for x in out)   # muted
+    last = now - 5.0                                                            # the last (muted) change
+    assert g.filter([], last + jr.FLAP_SETTLE_S - 1) == []                      # still inside the quiet period
+    done = g.filter([], last + jr.FLAP_SETTLE_S + 1)
+    assert any(x.startswith("[load-monitor] signal mem settled at crit") and "mem text" in x for x in done)
+    assert any(x.startswith("[load-monitor] the overall level settled at crit") for x in done)
+    assert g.filter([], last + 5 * jr.FLAP_SETTLE_S) == []                      # said once, not on every tick
+
+
+def test_a_key_that_keeps_flapping_never_claims_to_have_settled():
+    prev, g, out, now = None, jr.FlapGuard(), [], 0.0
+    for i in range(80):                                                         # a change every 30 s for 40 min
+        l = "warn" if i % 2 else "ok"
+        snap = {"level": l, "signals": [{"id": "mem", "level": l, "text": "t", "value": "v"}]}
+        lines, prev = jr.level_changes(prev, snap)
+        out += g.filter(lines, now)
+        now += 30.0
+    assert not any("settled" in x for x in out)
+    assert sum("is changing level often" in x for x in out) >= 1
+    assert len(out) < 40                                                         # still a cap, not 160 lines
+
+
+def test_a_pending_settle_is_flushed_before_the_next_ordinary_line():
+    g, out, now = _flap_then_settle("warn")
+    later = now + jr.FLAP_WINDOW_S + 50
+    line = jr.Line("[load-monitor] signal mem: warn -> crit", "mem", "crit")
+    got = g.filter([line], later)                                                # nobody called filter() in between
+    assert any("signal mem settled at warn" in x for x in got[:-1]) and got[-1] == str(line)   # the ordinary line comes last
+
+
+async def test_the_sampler_loop_writes_where_a_flapping_signal_ended_up(tmp_path, monkeypatch, capsys):
+    import asyncio
+    from features.load_monitor import loop as lp
+    levels = ["ok", "warn"] * 6 + ["crit"] * 60
+    snaps = [jsnap(l, mem=(l, "v")) for l in levels]
+    it = iter(snaps)
+    monkeypatch.setattr(lp._lm.MONITOR, "sample", lambda inputs: next(it))
+    monkeypatch.setattr(lp._lm.MONITOR, "attach_disk_history", lambda path: None)
+    monkeypatch.setattr(lp, "_inputs", lambda ctx: {})
+    monkeypatch.setattr(lp, "_spawn_bg", lambda coro: coro.close())
+    clock = {"m": 0.0}
+
+    class FakeTime:
+        @staticmethod
+        def monotonic():
+            return clock["m"]
+
+        @staticmethod
+        def time():
+            return 1_700_000_000.0 + clock["m"]
+
+    monkeypatch.setattr(lp, "time", FakeTime)
+
+    async def fake_sleep(sec):
+        clock["m"] += 5.0
+        if clock["m"] > 5.0 * len(snaps):
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(lp.asyncio, "sleep", fake_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await lp._sampler_loop({"DATA": tmp_path})
+    out = capsys.readouterr().out.splitlines()
+    assert any("signal mem is changing level often" in l for l in out)
+    assert not any(l.startswith("[load-monitor] signal mem: warn -> crit") for l in out)        # that line IS muted...
+    assert any(l.startswith("[load-monitor] signal mem settled at crit") for l in out)         # ...but the end is told
 
 
 def test_level_changes_lines_carry_their_key_for_the_flap_guard():
@@ -325,6 +407,50 @@ async def test_delivery_outcome_is_journaled_for_every_leg(tmp_path, monkeypatch
     await lp._deliver(ctx, al.Alert(False, "t", "- b"))
     out = capsys.readouterr().out
     assert "delivered (quiet): inbox load-alert-" in out and "toast" not in out and "push" not in out
+
+
+async def test_a_delivery_where_every_leg_failed_is_not_journaled_as_delivered(tmp_path, monkeypatch, capsys):
+    import webapp as wa
+    from features.load_monitor import loop as lp
+
+    async def boom(ctx, text):
+        raise RuntimeError("bus down")
+
+    async def push_boom(payload):
+        raise RuntimeError("push down")
+
+    monkeypatch.setattr(wa, "_notify_operator", boom)
+    monkeypatch.setattr(wa, "_push_broadcast", push_boom)
+    monkeypatch.setattr(wa, "_push_ensure_vapid_keys", lambda: None)
+    monkeypatch.setattr(wa, "_PUSH_AVAILABLE", True)
+    monkeypatch.setattr(wa, "_PUSH_LOCK", object())
+    monkeypatch.setattr(wa, "_bus_global", {object()})
+    monkeypatch.setattr(wa, "_PUSH_PRIV_KEY", "k", raising=False)
+    monkeypatch.setattr(wa, "_PUSH_PUB_KEY", "k", raising=False)
+    monkeypatch.setattr(wa, "_load_push_subs", lambda: [{"endpoint": "a"}])
+    (tmp_path / "inbox").write_text("a file where the directory should be")
+    ctx = {"DATA": tmp_path}
+    await lp._deliver(ctx, al.Alert(True, "t", "- b"))
+    out = capsys.readouterr().out
+    assert "NOT delivered to anyone (loud)" in out and "delivered (loud)" not in out.replace("NOT delivered to anyone (loud)", "")
+    assert "inbox FAILED" in out and "toast FAILED RuntimeError('bus down')" in out and "push FAILED RuntimeError('push down')" in out
+    # nobody to tell is the same outcome: the file is written, but no human was reached
+    monkeypatch.setattr(wa, "_bus_global", set())
+    monkeypatch.setattr(wa, "_load_push_subs", lambda: [])
+    monkeypatch.setattr(wa, "_notify_operator", lambda ctx, text: _noop())
+    (tmp_path / "inbox").unlink()
+    await lp._deliver(ctx, al.Alert(True, "t", "- b"))
+    out = capsys.readouterr().out
+    assert "NOT delivered to anyone (loud): inbox load-alert-" in out and "no open cockpit tab to show it" in out and "push no subscribers" in out
+    # one leg that reached somebody is enough to call it delivered, and the other legs are still listed
+    monkeypatch.setattr(wa, "_bus_global", {object()})
+    await lp._deliver(ctx, al.Alert(True, "t", "- b"))
+    out = capsys.readouterr().out
+    assert "[load-monitor] delivered (loud): inbox load-alert-" in out and "toast queued for 1 open tab(s)" in out
+
+
+async def _noop():
+    return None
 
 
 async def test_sampler_loop_journals_transitions_status_and_alerts(tmp_path, monkeypatch, capsys):
