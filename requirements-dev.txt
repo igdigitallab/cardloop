@@ -10,4 +10,4 @@ pytest-playwright>=0.7
 
 # Linter run by CI (rule set: ruff.toml). Pinned exactly so a rule change cannot turn CI red
 # unannounced; Dependabot proposes bumps.
-ruff==0.16.6
+ruff==0.16.10

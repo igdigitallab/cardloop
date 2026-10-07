@@ -19,14 +19,14 @@ claude-agent-sdk>=0.2.164
 # matching pinned Codex app-server/CLI runtime, so the adapter and protocol
 # models cannot drift independently. The import remains lazy and Codex stays
 # disabled unless CODEX_ENABLED=true.
-openai-codex==0.144.4
-openai-codex-cli-bin==0.144.4
+openai-codex==0.160.0
+openai-codex-cli-bin==0.160.0
 
 # aiohttp cockpit (web server + SSE).
-aiohttp==3.13.5
+aiohttp==3.14.3
 
 # Cron/interval scheduling for the autorun board.
-APScheduler==3.11.2
+APScheduler==3.11.3
 
 # Encrypted secret store (Fernet) + auth crypto.
 cryptography>=48
