@@ -1214,7 +1214,16 @@ async def test_bot_amain_starts_the_grok_probe_only_after_the_cockpit_is_listeni
     monkeypatch.setattr(bot, "_graceful_shutdown", graceful)
     monkeypatch.setattr(bot.codex_engine, "codex_enabled", lambda: False)
 
-    await asyncio.wait_for(bot._amain(), timeout=10)
+    # Drive _amain IN THIS TASK, the way main() does with asyncio.run(_amain()): its last shutdown
+    # phase cancels every task except its own, and `asyncio.wait_for(coro)` runs `coro` in a CHILD
+    # task on Python 3.11 (inline only from 3.12), which made this test task a "lingering" sibling
+    # that _amain cancelled out from under itself. The watchdog replaces wait_for's hang guard:
+    # a stuck _amain cancels this task, so the test fails instead of hanging.
+    watchdog = loop.call_later(10, asyncio.current_task().cancel)
+    try:
+        await bot._amain()
+    finally:
+        watchdog.cancel()
     assert order.index("start-done") < order.index("probe-start"), order
     assert order.index("after-start") < order.index("probe-still-pending"), order
     assert probe_state["cancelled"] is True, "shutdown cancels the in-flight probe"
