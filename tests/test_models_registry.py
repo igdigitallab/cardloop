@@ -39,7 +39,7 @@ def test_build_registry_live_maps_display_names_and_aliases():
     assert by_value["sonnet"] == "Sonnet 4.6"
     assert by_value["opus"] == "Opus 4.8"
     # Missing family → static fallback.
-    assert by_value["haiku"] == "Haiku 4.5"
+    assert by_value["haiku"] == "Haiku 5.5"
 
 
 def test_build_registry_static_fallback_when_none():
@@ -49,7 +49,7 @@ def test_build_registry_static_fallback_when_none():
         {"value": "fable", "label": "Fable 5.1"},
         {"value": "sonnet", "label": "Sonnet 5.5"},
         {"value": "opus", "label": "Opus 5.5"},
-        {"value": "haiku", "label": "Haiku 4.5"},
+        {"value": "haiku", "label": "Haiku 5.5"},
     ]
 
 

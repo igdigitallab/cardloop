@@ -297,7 +297,8 @@ def test_config_web_password_set_never_shows_value(tmp_path):
     assert pw_fact.value == "set"
 
 
-def test_config_env_missing_is_fail(tmp_path):
+def test_config_env_missing_is_fail(tmp_path, monkeypatch):
+    monkeypatch.delenv("COPS_NO_DOTENV", raising=False)  # conftest sets it suite-wide
     facts = doctor.probe_config({}, tmp_path / ".env", False, totp_status=lambda repo_root: (None, ""))
     env_fact = next(f for f in facts if f.label == ".env")
     assert env_fact.level == "fail"

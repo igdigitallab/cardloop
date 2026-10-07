@@ -43,6 +43,13 @@ def test_get_pricing_resolution():
     assert usage_pricing.get_pricing("claude-sonnet-5-5") is usage_pricing.PRICING["claude-sonnet-5-5"]
     assert usage_pricing.get_pricing("claude-sonnet-5-5-20260928") is usage_pricing.PRICING["claude-sonnet-5-5"]
     assert usage_pricing.get_pricing("claude-sonnet-5-20260629") is usage_pricing.PRICING["claude-sonnet-5"]
+    # Haiku 5.5 is 10x cheaper than 4.5 (short-prompt tier), so a fallback still pointing at
+    # 4.5 would inflate every unknown Haiku id tenfold.
+    assert usage_pricing.get_pricing("claude-haiku-5-5") is usage_pricing.PRICING["claude-haiku-5-5"]
+    assert usage_pricing.get_pricing("claude-haiku-5-5-20261007") is usage_pricing.PRICING["claude-haiku-5-5"]
+    assert usage_pricing.get_pricing("claude-haiku-4-5-20251001") is usage_pricing.PRICING["claude-haiku-4-5"]
+    assert usage_pricing.get_pricing("claude-haiku-9") is usage_pricing.PRICING["claude-haiku-5-5"]
+    assert usage_pricing.PRICING["claude-haiku-5-5"]["input"] == 0.10
     assert usage_pricing.get_pricing("something-sonnet-ish") is usage_pricing.PRICING["claude-sonnet-5-5"]
     # unknown / local → None
     assert usage_pricing.get_pricing("llama-3") is None

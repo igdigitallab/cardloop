@@ -7,6 +7,14 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Changed — Haiku 5.5
+- `haiku` now runs Claude Haiku 5.5 (`claude-haiku-5-5`, released 2026-10-07): static labels, the
+  pricing row (short-prompt tier $0.10/$0.50 per MTok, 10x below Haiku 4.5; prompts over 100k tokens
+  cost 5x more and are not modelled) and the keyword fallback for unknown Haiku ids. No SDK release
+  bundles a CLI that resolves the alias yet (0.2.164 bundles 2.1.292, still Haiku 4.5), so
+  `CLAUDE_CLI_PATH` points at CLI 2.1.293 until one does. `claude-agent-sdk` floor raised to 0.2.164.
+- `tools/skills-lint.py` flags `claude-haiku-4*` / `haiku-4*` as a stale model reference.
+
 ### Added — Grok Build as the third provider (spec-095)
 Off unless `GROK_ENABLED=true`; with it off nothing about Grok is visible (no registry row, no UI,
 no doctor line). A chat, free chat, board card or project default can be pinned to Grok, running the

@@ -13,7 +13,7 @@
 # 0.2.127 — bumped for bundle parity per the model-alias gotcha.
 # 0.2.161 bundles CLI 2.1.284, the first to resolve "sonnet"->Sonnet 5.5 (released
 # 2026-09-28) and new enough to serve Opus 5.5 without the CLAUDE_CLI_PATH override.
-claude-agent-sdk>=0.2.161
+claude-agent-sdk>=0.2.164
 
 # Codex Python SDK (beta). Exact pin is deliberate: published builds carry a
 # matching pinned Codex app-server/CLI runtime, so the adapter and protocol

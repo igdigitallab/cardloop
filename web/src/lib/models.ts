@@ -6,7 +6,7 @@ export const MODELS = [
   { value: 'fable',  label: 'Fable 5.1'  },
   { value: 'sonnet', label: 'Sonnet 5.5' },
   { value: 'opus',   label: 'Opus 5.5'   },
-  { value: 'haiku',  label: 'Haiku 4.5'  },
+  { value: 'haiku',  label: 'Haiku 5.5'  },
 ] as const
 
 export type ModelValue = (typeof MODELS)[number]['value']

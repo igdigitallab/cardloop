@@ -23,6 +23,15 @@ os.environ.pop("WEB_COOKIE_SECURE", None)
 # The three tests that exercise the feature monkeypatch the constant directly.
 os.environ.pop("CROSS_SESSION_INBOUND", None)
 
+# GROK_ENABLED is read live by grok_engine.grok_enabled(), and the operator's .env reached the
+# suite twice: an agent shell inside the cockpit inherits the service env, and any test that
+# imports bot.py ran its _load_env() against the real .env. With Grok switched on there, four
+# "Grok off" tests went red on that machine only (2026-10-07). COPS_NO_DOTENV is bot.py's own
+# opt-out (the e2e harness already sets it); the tests that exercise the .env merge delenv it.
+# Tests that need Grok on set it with monkeypatch.
+os.environ["COPS_NO_DOTENV"] = "1"
+os.environ.pop("GROK_ENABLED", None)
+
 # The SDK release watch is the one component that would reach the network from a test.
 # Force it off for the whole suite; the tests that exercise it flip _SDK_CHECK_ENABLED
 # back on and monkeypatch the fetch, so no test can ever actually call PyPI.

@@ -1,7 +1,7 @@
 """usage_pricing.py - Anthropic model pricing + per-turn cost estimation.
 
 Single source of truth for cost math used by the usage dashboard (usage_scanner.py)
-and its HTTP endpoints. Prices are Anthropic API list rates ($/MTok) as of September 2026
+and its HTTP endpoints. Prices are Anthropic API list rates ($/MTok) as of October 2026
 (https://platform.claude.com/docs/en/about-claude/pricing). cache_write is the 5-minute
 write; the 1-hour write costs more and is not modelled here.
 
@@ -41,13 +41,19 @@ PRICING: dict[str, dict[str, float]] = {
     "claude-sonnet-4-7": {"input":  3.00, "output": 15.00, "cache_read": 0.30, "cache_write":  3.75},
     "claude-sonnet-4-6": {"input":  3.00, "output": 15.00, "cache_read": 0.30, "cache_write":  3.75},
     "claude-sonnet-4-5": {"input":  3.00, "output": 15.00, "cache_read": 0.30, "cache_write":  3.75},
+    # Haiku 5.5 (2026-10-07) is priced by PROMPT length: up to 100k tokens $0.10/$0.50, over
+    # 100k $0.50/$2.50 (cache multipliers unchanged). Only the short-prompt row is modelled:
+    # calc_cost runs on SQL aggregates, so a turn's prompt length is gone by then, and over the
+    # 30 days before release 0 of 3610 Haiku turns went past 100k. A turn that does is costed
+    # 5x low.
+    "claude-haiku-5-5":  {"input":  0.10, "output":  0.50, "cache_read": 0.01, "cache_write":  0.125},
     "claude-haiku-4-7":  {"input":  1.00, "output":  5.00, "cache_read": 0.10, "cache_write":  1.25},
     "claude-haiku-4-6":  {"input":  1.00, "output":  5.00, "cache_read": 0.10, "cache_write":  1.25},
     "claude-haiku-4-5":  {"input":  1.00, "output":  5.00, "cache_read": 0.10, "cache_write":  1.25},
 }
 
 # Pricing label surfaced in the UI footer / API payload.
-PRICING_AS_OF = "September 2026"
+PRICING_AS_OF = "October 2026"
 
 # A model is costed only if its name contains one of these keywords.
 _BILLABLE_KEYWORDS = ("fable", "mythos", "opus", "sonnet", "haiku")
@@ -103,7 +109,7 @@ def get_pricing(model: str | None) -> dict[str, float] | None:
     if "sonnet" in m:
         return PRICING["claude-sonnet-5-5"]
     if "haiku" in m:
-        return PRICING["claude-haiku-4-5"]
+        return PRICING["claude-haiku-5-5"]
     return None
 
 

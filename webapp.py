@@ -9443,7 +9443,7 @@ _MODEL_FAMILIES: list[tuple[str, str]] = [
     ("fable", "Fable 5.1"),
     ("sonnet", "Sonnet 5.5"),
     ("opus", "Opus 5.5"),
-    ("haiku", "Haiku 4.5"),
+    ("haiku", "Haiku 5.5"),
 ]
 _models_cache: dict = {"data": None, "ts": 0.0}
 _MODELS_TTL = 6 * 3600.0  # 6 hours
