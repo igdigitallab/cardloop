@@ -2487,7 +2487,44 @@ def test_check_auth_meta_compares_the_agent_email_with_the_pin(env):
     with pytest.raises(GrokAuthError, match="different account"):
         grok_engine._check_auth_meta({"email": "attacker@example.invalid"}, facts, env.ctx)
     grok_engine._check_auth_meta({"email": "USER@example.invalid"}, {**facts, "email": "user@example.invalid"}, env.ctx)
-    grok_engine._check_auth_meta({}, facts, env.ctx)                     # an agent that names no account: unchanged
+    # spec-096 P9 B: with a pin, an agent that names no account is REFUSED (it used to pass: the pin was
+    # only compared when the agent volunteered an e-mail, so the one fact the model cannot forge was skipped)
+    with pytest.raises(GrokAuthError, match="names no account"):
+        grok_engine._check_auth_meta({}, facts, env.ctx)
+
+
+@pytest.mark.parametrize("meta", [None, "not-a-dict", {}, {"auth_mode": "oidc"}, {"email": None},
+                                  {"email": 7}, {"email": ["user@example.invalid"]}])
+def test_an_agent_that_reports_no_usable_email_is_refused_when_an_account_is_pinned(env, meta):
+    grok_engine.pin_account("user@example.invalid", env.ctx)
+    facts = {"present": True, "oidc": True, "retention_opt_out": True, "email": "user@example.invalid"}
+    with pytest.raises(GrokAuthError, match="names no account"):
+        grok_engine._check_auth_meta(meta, facts, env.ctx)
+
+
+def test_an_empty_email_is_refused_too(env):
+    grok_engine.pin_account("user@example.invalid", env.ctx)
+    facts = {"present": True, "oidc": True, "retention_opt_out": True, "email": "user@example.invalid"}
+    with pytest.raises(GrokAuthError):
+        grok_engine._check_auth_meta({"email": ""}, facts, env.ctx)
+
+
+def test_without_a_pin_an_agent_that_reports_no_email_is_not_refused(env):
+    # nothing to compare against: the pre-spawn check pins the first verified login before this runs
+    assert grok_engine.read_account_pin(env.ctx) is None
+    facts = {"present": True, "oidc": True, "retention_opt_out": True, "email": "user@example.invalid"}
+    grok_engine._check_auth_meta({}, facts, env.ctx)
+    grok_engine._check_auth_meta(None, facts, env.ctx)
+
+
+def test_a_turn_whose_authenticate_reply_names_no_email_is_refused_end_to_end(env):
+    asyncio.run(env.run())                                               # pins user@example.invalid
+    assert grok_engine.read_account_pin(env.ctx) == "user@example.invalid"
+    env.fake("synthetic_text", auth_meta=json.dumps({"email": None}))
+    events = asyncio.run(env.run())
+    assert "result" not in types(events), types(events)
+    assert isinstance(only(events, "error")[0]["exc"], GrokAuthError)
+    assert "names no account" in last_error(events)
 
 
 def test_a_corrupt_pin_file_reads_as_no_pin_and_is_replaced_by_the_verified_login(env):
