@@ -71,7 +71,7 @@ def _done_ids(cwd: str) -> set[str]:
     except OSError:
         return set()
     # The marker pattern anchors on the closing '-->' so it doesn't over-capture (group 1 = id).
-    return {m.group(1) for m in _iter_markers(text)}
+    return {m.id for m in _iter_markers(text)}
 
 
 def _done_cards_for_spec(cwd: str, spec_id: str) -> dict:
@@ -90,11 +90,11 @@ def _done_cards_for_spec(cwd: str, spec_id: str) -> dict:
         m = next(_iter_markers(line), None)
         if not m:
             continue
-        meta = _parse_marker_meta(m.group(2))
+        meta = _parse_marker_meta(m.meta)
         if meta.get("spec") != spec_id:
             continue
         tm = re.match(r"^\s*[-*]\s*\[.\]\s*(.*?)\s*<!--", line)
-        out[m.group(1)] = (tm.group(1).strip() if tm and tm.group(1).strip() else m.group(1))
+        out[m.id] = (tm.group(1).strip() if tm and tm.group(1).strip() else m.id)
     return out
 
 

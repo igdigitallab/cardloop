@@ -13,6 +13,7 @@ import asyncio
 import re
 import secrets
 from pathlib import Path
+from typing import NamedTuple
 
 import providers
 
@@ -55,9 +56,14 @@ _CARD_RE = re.compile(r"^\s*[-*]\s*\[(.)\]\s*(\S.*|)$")
 _PLAIN_CARD_RE = re.compile(r"^\s*[-*]\s+(?:(?!\[)|(?<=\s[^\S\n]))(\S.*)$")
 # Marker format: <!--ops:ID--> or <!--ops:ID key=val key2=val2-->
 # The extra key=val pairs carry optional per-card metadata (e.g. model=haiku).
-# No leading `\s*` and no `\s*` before `-->` (group 2's `[^>]*` already takes trailing blanks):
-# use _strip_markers() to remove a marker together with the blanks before it.
+# `_MARKER_RE` is the REFERENCE pattern: no leading `\s*`, no `\s*` before `-->` (group 2's
+# `[^>]*` already takes trailing blanks). Nothing at run time executes it on card text — a bare
+# finditer/search retries `[^>]*` from every `<!--` start (100 KB of `<!--ops:a <!--ops:a ...` =
+# 10 s) and CodeQL cannot see a guard around it. `_iter_markers` below does the same job in linear
+# time; tests/test_board_regex_redos.py proves the two agree on every string it can generate.
 _MARKER_RE = re.compile(r"<!--\s*ops:([\w-]+)(\s[^>]*)?-->")
+# The only regex `_iter_markers` runs: the head of a marker, with one `\s*` behind a literal.
+_MARKER_HEAD_RE = re.compile(r"<!--\s*ops:([\w-]+)")
 # Description lines: '  > text' (2 spaces + '>') immediately following a card
 _DESC_LINE_RE = re.compile(r"^  > (.*)$")
 
@@ -102,13 +108,24 @@ def _parse_marker_meta(meta_str: str | None) -> dict:
     return result
 
 
+class Marker(NamedTuple):
+    """One `<!--ops:ID ...-->` marker: `meta` is the text after the id with its leading blank
+    (`_MARKER_RE`'s group 2) or None; `start`/`end` span the marker only, not the blanks before it."""
+    id: str
+    meta: str | None
+    start: int
+    end: int
+
+
 def _iter_markers(text: str):
-    """Yield exactly the matches `_MARKER_RE.finditer(text)` yields, in linear time.
+    """Yield exactly what `_MARKER_RE.finditer(text)` matches, as `Marker`s, in linear time.
 
     A marker ends at the FIRST `>` after its start (nothing inside it can contain one), so that
-    `>` must be the end of a `-->`; when it is not, no start before it can match and the scan
-    jumps past it. Bare finditer retried `[^>]*` to the end of the text from every `<!--`:
-    100 KB of `<!--ops:a <!--ops:a ...` cost 10 s. Use this, not `_MARKER_RE.finditer/search`."""
+    `>` must close a `-->`; when it does not, no start before it can match and the scan jumps past
+    it. That leaves only the head `<!--\\s*ops:ID` to match with a regex. The tail is decided by
+    hand: the id is the longest `[\\w-]+` run that lets the rest match, and since a blank can never
+    sit inside the run, either a blank follows the whole run (the rest is META up to `-->`), or the
+    run swallowed the `--` of `-->` and the id is what precedes it."""
     pos = 0
     gt = -1
     while True:
@@ -122,12 +139,19 @@ def _iter_markers(text: str):
         if text[gt - 2:gt + 1] != "-->":
             pos = gt + 1
             continue
-        m = _MARKER_RE.match(text, i, gt + 1)
-        if m:
-            yield m
-            pos = m.end()
-        else:
-            pos = i + 1
+        head = _MARKER_HEAD_RE.match(text, i)
+        if head:
+            run_end = head.end()
+            if run_end < gt:               # something other than `[\w-]` ends the run (the dashes
+                if text[run_end].isspace():  # before `>` are in the class, so this is before them)
+                    yield Marker(head.group(1), text[run_end:gt - 2], i, gt + 1)
+                    pos = gt + 1
+                    continue
+            elif gt - 2 > head.start(1):   # the run reached `>`: it ate "--", the id keeps the rest
+                yield Marker(text[head.start(1):gt - 2], None, i, gt + 1)
+                pos = gt + 1
+                continue
+        pos = i + 1
 
 
 def _strip_markers(text: str) -> str:
@@ -138,8 +162,8 @@ def _strip_markers(text: str) -> str:
     out: list[str] = []
     pos = 0
     for m in _iter_markers(text):
-        out.append(text[pos:m.start()].rstrip())
-        pos = m.end()
+        out.append(text[pos:m.start].rstrip())
+        pos = m.end
     out.append(text[pos:])
     return "".join(out)
 
@@ -149,7 +173,7 @@ def _extract_id_and_text(rest: str) -> tuple[str, str]:
     matches = list(_iter_markers(rest))
     if not matches:
         return _new_card_id(), rest.strip()
-    cid = matches[0].group(1)
+    cid = matches[0].id
     clean = _strip_markers(rest).strip()
     return cid, clean
 
@@ -160,8 +184,8 @@ def _extract_id_text_and_meta(rest: str) -> tuple[str, str, dict]:
     if not matches:
         return _new_card_id(), rest.strip(), {}
     m0 = matches[0]
-    cid = m0.group(1)
-    meta = _parse_marker_meta(m0.group(2))
+    cid = m0.id
+    meta = _parse_marker_meta(m0.meta)
     clean = _strip_markers(rest).strip()
     return cid, clean, meta
 

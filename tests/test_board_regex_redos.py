@@ -53,6 +53,10 @@ def old_extract_id_text_and_meta(rest):
     return cid, clean, meta
 
 
+def old_iter_markers(text):
+    return (board.Marker(m.group(1), m.group(2), m.start(), m.end()) for m in OLD_MARKER_RE.finditer(text))
+
+
 @pytest.fixture
 def fixed_card_ids(monkeypatch):
     monkeypatch.setattr(board, "_new_card_id", lambda: "NEWID")
@@ -68,8 +72,8 @@ def snapshot(text: str) -> dict:
         "search_cards": list(search._iter_card_lines(text)),
         # webapp/board `done_count` counts these
         "card_line_count": sum(1 for ln in lines if board._CARD_RE.match(ln)),
-        "mirror_ids": {m.group(1) for m in spec_mirror._iter_markers(text)},
-        "mirror_lines": [(m.group(1), board._parse_marker_meta(m.group(2)))
+        "mirror_ids": {m.id for m in spec_mirror._iter_markers(text)},
+        "mirror_lines": [(m.id, board._parse_marker_meta(m.meta))
                          for m in (next(spec_mirror._iter_markers(ln), None) for ln in lines) if m],
         "extract": [(board._extract_id_and_text(ln), board._extract_id_text_and_meta(ln)) for ln in lines],
     }
@@ -83,9 +87,9 @@ def snapshots_old_and_new(text, monkeypatch):
         mp.setattr(board, "_MARKER_RE", OLD_MARKER_RE)
         mp.setattr(board, "_extract_id_and_text", old_extract_id_and_text)
         mp.setattr(board, "_extract_id_text_and_meta", old_extract_id_text_and_meta)
-        mp.setattr(board, "_iter_markers", OLD_MARKER_RE.finditer)
+        mp.setattr(board, "_iter_markers", old_iter_markers)
         mp.setattr(board, "_strip_markers", lambda t: OLD_MARKER_RE.sub("", t))
-        mp.setattr(spec_mirror, "_iter_markers", OLD_MARKER_RE.finditer)
+        mp.setattr(spec_mirror, "_iter_markers", old_iter_markers)
         old = snapshot(text)
     return old, new
 
@@ -108,9 +112,9 @@ def assert_regexes_agree(s: str):
     om = [(m.group(1), m.group(2)) for m in OLD_MARKER_RE.finditer(s)]
     nm = [(m.group(1), m.group(2)) for m in board._MARKER_RE.finditer(s)]
     assert om == nm, f"_MARKER_RE markers differ on {s!r}"
-    # the linear iterator yields the same markers as plain finditer (text, span of the marker itself)
+    # the linear iterator yields the same markers as the reference pattern's finditer
     fm = [(m.group(0), m.group(1), m.group(2)) for m in board._MARKER_RE.finditer(s)]
-    im = [(m.group(0), m.group(1), m.group(2)) for m in board._iter_markers(s)]
+    im = [(s[m.start:m.end], m.id, m.meta) for m in board._iter_markers(s)]
     assert fm == im, f"_iter_markers differs from finditer on {s!r}"
     assert OLD_MARKER_RE.sub("", s) == board._strip_markers(s), f"marker stripping differs on {s!r}"
 
@@ -144,7 +148,7 @@ def test_synthetic_fixture_is_not_vacuous(fixed_card_ids):
 
 _TOKENS = ["-", "*", "[", "]", " ", "  ", "\t", "\n", "x", "a", "?", "!", "~", "<!--", "-->", "->", ">",
            "ops:", "ops:abc", "ops:-", "id-9", " model=haiku", " spec=096", " rt=1790000000", "=",
-           " ", " ", "　", "\x0b", "\r", "é", "<", "!"]
+           "\u00a0", "\u2003", "\u3000", "\x0b", "\x1c", "\x85", "\u2028", "\r", "é", "<", "!"]
 
 
 def _random_strings(n: int, seed: int):
@@ -208,12 +212,13 @@ def test_iter_markers_equals_finditer_on_marker_soup():
     of marker fragments (unterminated starts, stray `>`, `--`, dashes in ids, nested starts)."""
     rng = random.Random(4242)
     frags = ["<!--", "<!--", "ops:", "ops:a", "ops:-", "ops:a-b", " ", " ", "\t", "\n", ">", "->", "-->",
-             "-->", "--", "-", "x", "k=v", "<", "!", "<!-- ", "<!--ops:a-->", "<!--ops:b k=1-->"]
+             "-->", "--", "-", "x", "k=v", "<", "!", "<!-- ", "<!--ops:a-->", "<!--ops:b k=1-->",
+             "\x85", "\u2028", "\u00a0", "_", "é", "9", "#"]
     hits = 0
     for _ in range(120_000):
         text = "".join(rng.choice(frags) for _ in range(rng.randint(0, 14)))
         want = [(m.span(), m.groups()) for m in board._MARKER_RE.finditer(text)]
-        got = [(m.span(), m.groups()) for m in board._iter_markers(text)]
+        got = [((m.start, m.end), (m.id, m.meta)) for m in board._iter_markers(text)]
         assert got == want, repr(text)
         hits += bool(want)
     assert hits > 10_000, hits                       # the soup reaches real markers
