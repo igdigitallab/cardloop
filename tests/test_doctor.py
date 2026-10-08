@@ -991,7 +991,9 @@ sys.exit(2)
                     fingerprint: str = "auto", version: str = "1.0.46") -> None:
         if fingerprint == "auto":
             deny, _ = grok_engine.build_deny(self.home, {"DATA": self.data}, bin_path=str(self.bin))
-            fingerprint = grok_engine._probe_fingerprint(version, {"deny": deny, "home": self.home})
+            fingerprint = grok_engine._probe_fingerprint(version, {
+                "deny": deny, "home": self.home,
+                "project_deny": grok_engine._project_secret_paths({"DATA": self.data})})   # as ensure_home hands it
         (self.data / "grok_sandbox_probe.json").write_text(json.dumps(
             {"fingerprint": fingerprint, "state": state, "detail": detail, "ts": time.time() - age}))
 
@@ -1261,6 +1263,58 @@ def test_auth_retention_opt_out_not_strictly_true_is_fail(box, opt_out):
     box.write_auth(coding_data_retention_opt_out=opt_out)
     f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
     assert f.level == "fail" and "retention" in f.value and "grok-acct login" in f.remedy
+
+
+def _pin(box, email):
+    grok_engine.pin_account(email, {"DATA": box.data})
+
+
+def test_auth_matching_the_pin_says_so(box):
+    _pin(box, PLANTED_EMAIL)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
+    assert f.level == "ok" and "pinned" in f.value and PLANTED_EMAIL not in f.value
+
+
+def test_auth_with_no_pin_yet_says_so_instead_of_claiming_a_verified_account(box):
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
+    assert f.level == "ok" and "not pinned yet" in f.value and "pinned)" not in f.value.replace("not pinned yet", ""), f
+
+
+def test_auth_naming_another_account_than_the_pin_is_fail(box):
+    # review-spec095-readers F6: the engine refuses EVERY turn here, and doctor said "signed in" in green
+    _pin(box, "pinned-owner@example.invalid")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
+    assert f.level == "fail" and "different account" in f.value and "grok-acct login" in f.remedy
+    assert "pinned-owner@example.invalid" not in f.value and PLANTED_EMAIL not in f.value
+    assert grok_engine.read_account_pin({"DATA": box.data}) == "pinned-owner@example.invalid"   # read-only: no re-pin
+
+
+def test_auth_naming_no_account_while_a_pin_exists_is_fail(box):
+    _pin(box, PLANTED_EMAIL)
+    box.write_auth(email=None)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
+    assert f.level == "fail" and "no account" in f.value
+
+
+def test_auth_with_several_oidc_logins_is_fail(box):
+    body = {"auth_mode": "oidc", "coding_data_retention_opt_out": True, "key": TOKEN_ACCESS}
+    (box.home / "auth.json").write_text(json.dumps({"https://auth.x.ai::a": {**body, "email": PLANTED_EMAIL},
+                                                    "https://auth.x.ai::b": {**body, "email": "b@example.invalid"}}))
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
+    assert f.level == "fail" and "more than one" in f.value
+
+
+def test_auth_with_an_unreadable_pin_file_is_warn_and_never_rewrites_it(box):
+    pin = box.data / grok_engine.ACCOUNT_PIN_FILE
+    pin.write_text("{not json")
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok auth"]
+    assert f.level == "warn" and "pin" in f.value
+    assert pin.read_text() == "{not json"
+
+
+def test_auth_check_does_not_create_the_pin(box):
+    box.probe(proc_root=box.tmp / "noproc")
+    assert not (box.data / grok_engine.ACCOUNT_PIN_FILE).exists()
 
 
 def test_auth_never_prints_tokens_or_the_email_in_any_render(box):
@@ -1542,6 +1596,27 @@ def doc_with(box, **over):
 def test_compat_isolated_is_ok(box):
     f = compat(box)
     assert f.level == "ok" and "isolated" in f.value and "0 active MCP servers" in f.value
+
+
+def test_compat_ok_line_names_what_it_actually_measured(box):
+    # review-spec095-readers-2 F10: a scratch home carrying config.toml only - the line must not claim the whole home
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok compat"]
+    assert f.level == "ok" and "config.toml" in f.value and "sweeps" in f.value, f.value
+
+
+def test_the_sandbox_probe_fingerprint_doctor_judges_is_the_engines_when_projects_have_secret_stores(box):
+    # the engine leaves the registered projects' secret-store entries out of the fingerprint; doctor must too, or a
+    # healthy verdict reads "stale" the day any project gets a .env
+    proj = box.tmp / "some-project"
+    proj.mkdir()
+    (proj / ".env").write_text("K=v")
+    (box.data / "topics.json").write_text(json.dumps({"-1:1": {"project": "P", "cwd": str(proj)}}))
+    box.make_import_surface()
+    box.write_probe("ok")
+    info = box.ensure_home()
+    assert str(proj / ".env") in info["deny"]
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (probe)"]
+    assert f.level == "ok", f
 
 
 def test_compat_runs_inspect_under_the_neutral_dir_with_the_homes_config_only(box):
@@ -1826,8 +1901,11 @@ def test_processes_real_proc_real_child_age_arithmetic(box, monkeypatch):
         child.wait()
 
 
-def test_processes_missing_proc_root_means_none(box):
-    assert box.probe(proc_root=box.tmp / "no-such-proc")["Grok processes"].level == "ok"
+def test_processes_missing_proc_root_is_unknown_not_none(box):
+    # review-spec095-readers-2 F9: without procfs nothing was measured - "no processes" would be a green guess
+    f = box.probe(proc_root=box.tmp / "no-such-proc")["Grok processes"]
+    assert f.level == "warn" and "cannot" in f.value and "no `grok agent` processes" not in f.value
+    assert "ps" in f.remedy
 
 
 # ─────────────────────────── Grok litter ─────────────────────────────────────────
@@ -1868,6 +1946,18 @@ def test_litter_unrelated_files_do_not_count(box):
     for i in range(doctor.GROK_LITTER_WARN + 5):
         (box.home / f"other.{i}").write_text("")
     assert box.probe(proc_root=box.tmp / "noproc")["Grok litter"].level == "ok"
+
+
+def test_litter_in_an_unreadable_home_is_unknown_not_zero(box):
+    # review-spec095-readers-2 F8: a home that exists but cannot be scanned used to read "0 placeholders" in green
+    box.home.mkdir(exist_ok=True)
+    (box.home / "sandbox-blocked.1").write_text("")
+    os.chmod(box.home, 0)
+    try:
+        f = box.probe(proc_root=box.tmp / "noproc")["Grok litter"]
+    finally:
+        os.chmod(box.home, 0o700)
+    assert f.level == "warn" and "cannot" in f.value and not f.value.startswith("0 "), f
 
 
 def test_litter_in_a_missing_home_is_zero(box):
@@ -2071,7 +2161,7 @@ def test_a_real_run_of_every_step_is_fast(box):
     t0 = time.monotonic()
     box.ensure_home()
     box.write_probe("ok")
-    facts = box.probe(proc_root=box.tmp / "noproc")
+    facts = box.probe(proc_root=fake_proc(box.tmp / "proc-real", []))   # a readable procfs with no agent in it
     assert time.monotonic() - t0 < 3
     assert {f.level for f in facts.values()} <= {"ok", "info"}, {k: v.level for k, v in facts.items()}
 
@@ -2493,7 +2583,21 @@ def test_the_number_of_inspect_calls_is_capped_and_the_rest_reported(box, monkey
     monkeypatch.setattr(doctor, "GROK_PROJECTS_MAX", 3)
     _opt_in(box, *[f"p{i:02d}" for i in range(7)])
     f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
-    assert len(_proj_calls(box)) == 3 and "+4 more project(s) not checked, limit 3" in f.value
+    assert len(_proj_calls(box)) == 3 and "+4 more project(s) not checked today, limit 3" in f.value
+    # review-spec095-readers-2 F7: projects nobody looked at are not "isolated" - never a green line
+    assert f.level == "warn" and f.remedy
+
+
+def test_the_unchecked_projects_rotate_so_every_project_is_inspected_within_a_few_days(box, monkeypatch):
+    _fake(box)
+    monkeypatch.setattr(doctor, "GROK_PROJECTS_MAX", 3)
+    _opt_in(box, *[f"p{i:02d}" for i in range(7)])
+    seen: "set[str]" = set()
+    for day in range(3):
+        box.dump.unlink(missing_ok=True)
+        box.probe(proc_root=box.tmp / "noproc", now=lambda d=day: 1_000_000 + d * 86400)
+        seen |= {Path(c["cwd"]).name for c in _proj_calls(box)}
+    assert seen == {f"p{i:02d}" for i in range(7)}
 
 
 def test_projects_fact_writes_nothing_real(box):

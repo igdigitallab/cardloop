@@ -1127,13 +1127,38 @@ def _grok_auth(g: _Grok, secrets_out: "list | None") -> "list[Fact]":
     if not a["oidc"]:
         return [Fact("Grok auth", "login is not a grok.com (OIDC) subscription login — API-key auth is refused",
                      level="fail", remedy=login)]
+    if a.get("oidc_logins", 1) > 1:
+        return [Fact("Grok auth", "auth.json holds more than one OIDC login — the engine refuses it (a turn's shell "
+                                  "can rewrite the file, so which account the CLI uses is not certain)",
+                     level="fail", remedy=f"`tools/grok-acct logout`, then `{login}`")]
     if not a["retention_opt_out"]:
         return [Fact("Grok auth", "oidc login, but coding_data_retention_opt_out is not true — the engine "
                                   "refuses to send code to xAI", level="fail",
                      remedy="opt out of coding-data retention in the Grok account settings (grok.com), "
                             f"then `{login}`")]
     who = f" as {_redact(a['email'])}" if a["email"] else ""
-    return [Fact("Grok auth", f"signed in{who} (oidc), coding-data retention opt-out: yes")]
+    # The account pin (grok_engine._account_pin_problem refuses every turn on a mismatch). READ-ONLY here: that
+    # function WRITES the pin when none exists, and doctor never writes.
+    pin = g.ge.read_account_pin(g.ctx)
+    if pin is None:
+        if os.path.lexists(g.ge._account_pin_path(g.ctx)):
+            return [Fact("Grok auth", f"signed in{who} (oidc), but the account pin file is unreadable — the next "
+                                      "turn re-pins from whatever auth.json names now", level="warn",
+                         remedy=f"if the login is the one you expect, `{login}` rewrites the pin on purpose; "
+                                "otherwise `tools/grok-acct logout` first")]
+        return [Fact("Grok auth", f"signed in{who} (oidc), coding-data retention opt-out: yes; account not "
+                                  "pinned yet (the first verified turn pins it)")]
+    if not a["email"]:
+        return [Fact("Grok auth", "the login names no account while this cockpit was set up with one — the "
+                                  "engine refuses every turn", level="fail",
+                     remedy=f"`{login}` (a nameless login cannot be checked against the pin)")]
+    if a["email"].lower() != pin:
+        return [Fact("Grok auth", "the login names a different account than the one this cockpit was set up "
+                                  "with — the engine refuses every turn (a turn's shell can rewrite auth.json)",
+                     level="fail",
+                     remedy=f"if you changed the account on purpose run `{login}`; otherwise "
+                            "`tools/grok-acct logout` and sign in again")]
+    return [Fact("Grok auth", f"signed in{who} (oidc), coding-data retention opt-out: yes, account pinned")]
 
 
 def _grok_sandbox(g: _Grok) -> "list[Fact]":
@@ -1174,7 +1199,8 @@ def _grok_sandbox(g: _Grok) -> "list[Fact]":
 
     fp = None
     if g.version and deny is not None:
-        fp = ge._probe_fingerprint(g.version, {"deny": deny, "home": home})
+        fp = ge._probe_fingerprint(g.version, {"deny": deny, "home": home,
+                                               "project_deny": ge._project_secret_paths(g.ctx)})
     facts.append(_grok_probe_fact(g, fp))
     return facts
 
@@ -1330,8 +1356,9 @@ def _grok_compat(g: _Grok) -> "list[Fact]":
                      remedy="the D3 env block turns the Claude/Cursor scans off but not Claude PLUGINS (hooks and "
                             "skills loaded from ~/.claude*/plugins), and a newer CLI may rename a switch: check "
                             "`grok inspect --json` under the engine's env and the plugin list")]
-    return [Fact(name, "isolated: 0 active MCP servers, 0 Claude/Cursor hooks, skills or agents (global config, "
-                       "neutral cwd — a project's own .mcp.json is not covered)")]
+    return [Fact(name, "isolated: 0 active MCP servers, 0 Claude/Cursor hooks, skills or agents (the Grok home's "
+                       "config.toml only, neutral cwd — a project's own .mcp.json is not covered, and the other "
+                       "home layers are not inspected here: the engine sweeps them before every turn)")]
 
 
 def _grok_folder_trust(g: _Grok) -> "list[Fact]":
@@ -1473,18 +1500,26 @@ def _grok_compat_projects(g: _Grok) -> "list[Fact]":
         shutil.copyfile(g.home / "trusted_folders.toml", home / "trusted_folders.toml")
     env = ge.child_env(home, sandbox=True)
     rows: "list[tuple[str, str, str]]" = []
-    for pname, cwd in projects[:GROK_PROJECTS_MAX]:
+    # More projects than the cap: the window advances by its own width each day, so no project is skipped forever
+    start = (int(g.now() // 86400) * GROK_PROJECTS_MAX) % len(projects) if len(projects) > GROK_PROJECTS_MAX else 0
+    window = (projects[start:] + projects[:start])[:GROK_PROJECTS_MAX]
+    for pname, cwd in window:
         res = g.run([g.binary, "inspect", "--json"], timeout=GROK_PROJECT_INSPECT_TIMEOUT_SEC, env=env, cwd=cwd)
         rows.append((pname, *_judge_project_inspect(res)))
     skipped = len(projects) - len(rows)
-    tail = f" (+{skipped} more project(s) not checked, limit {GROK_PROJECTS_MAX})" if skipped else ""
+    tail = (f" (+{skipped} more project(s) not checked today, limit {GROK_PROJECTS_MAX}; the window moves daily)"
+            if skipped else "")
     bad = [r for r in rows if r[1] != "ok"]
     notes = [f"{n}: {t}" for n, lv, t in rows if lv == "ok" and t != "isolated"]
     if not bad:
         value = f"{len(rows)} project(s) that use Grok checked under the sandbox view: isolated"
         if notes:
             value += " — " + "; ".join(notes[:3]) + (f" (+{len(notes) - 3} more)" if len(notes) > 3 else "")
-        return [Fact(name, value + tail)]
+        if skipped:      # projects nobody looked at are not isolated: never a green line (readers-2 F7)
+            return [Fact(name, value + tail, level="warn",
+                         remedy="the unchecked projects are inspected on the following days; raise "
+                                "GROK_PROJECTS_MAX in tools/doctor.py to check all of them in one run")]
+        return [Fact(name, value)]
     level = "fail" if any(r[1] == "fail" for r in bad) else "warn"
     value = "; ".join(f"{n}: {t}" for n, _, t in bad[:4]) + (f" (+{len(bad) - 4} more)" if len(bad) > 4 else "")
     if len(rows) > len(bad):
@@ -1504,7 +1539,12 @@ def _grok_processes(g: _Grok) -> "list[Fact]":
     unknown = [p for p in procs if p["age"] is None]
     old = [p for p in procs if p["age"] is not None and p["age"] >= GROK_AGENT_MAX_AGE_SEC]
     limit = _fmt_age(GROK_AGENT_MAX_AGE_SEC)
-    if old:
+    if not g.proc_root.is_dir():
+        # nothing was measured: "no processes" would be a green guess (review-spec095-readers-2 F9)
+        facts.append(Fact("Grok processes", f"cannot check: {g.proc_root} is not a directory (no procfs)",
+                          level="warn",
+                          remedy="look for leftovers by hand: `ps -o pid,etime,args -C grok`"))
+    elif old:
         shown = ", ".join(f"pid {p['pid']} ({_fmt_age(p['age'])})" for p in old[:5])
         facts.append(Fact(
             "Grok processes", f"{len(old)} leftover `grok agent` process(es) older than {limit}: {shown}",
@@ -1525,8 +1565,13 @@ def _grok_processes(g: _Grok) -> "list[Fact]":
 
     try:
         litter = sum(1 for e in os.scandir(g.home) if e.name.startswith("sandbox-blocked"))
-    except OSError:
-        litter = 0
+    except FileNotFoundError:
+        litter = 0           # no home yet: nothing has ever been spawned in it
+    except OSError as exc:
+        # a home that exists but cannot be scanned is not a clean one (review-spec095-readers-2 F8)
+        facts.append(Fact("Grok litter", f"cannot scan {g.home} for sandbox-blocked* placeholders ({exc.strerror or exc})",
+                          level="warn", remedy="fix the permissions of GROK_HOME (mode 700, owned by the cockpit's user)"))
+        return facts
     if litter > GROK_LITTER_WARN:
         facts.append(Fact(
             "Grok litter", f"{litter} sandbox-blocked* placeholders in {g.home} (limit {GROK_LITTER_WARN})",
