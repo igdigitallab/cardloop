@@ -12282,6 +12282,25 @@ def _handoff_is_stale(armed: dict, provider: str, backend: str) -> bool:
             or str(armed.get("for_backend") or "") != (backend or ""))
 
 
+def _pop_delivered_handoff(chat: dict, delivered: "dict | None") -> bool:
+    """Clear the chat's armed `runtime_handoff` iff it is the block a turn actually DELIVERED
+    (same `created_at` stamp and text); True when it was cleared.
+
+    The turn's write-back used to pop whatever block the chat held at that moment. The operator
+    can switch runtime while a turn runs, which arms a block for the OTHER engine; that block was
+    never delivered and must survive until its own turn. A record without a stamp (armed before
+    the field existed) compares by text alone."""
+    if not isinstance(delivered, dict) or not isinstance(chat, dict):
+        return False
+    stored = chat.get("runtime_handoff")
+    if (isinstance(stored, dict)
+            and stored.get("created_at") == delivered.get("created_at")
+            and stored.get("text") == delivered.get("text")):
+        chat.pop("runtime_handoff", None)
+        return True
+    return False
+
+
 def _drop_runtime_handoff(ctx: dict, project: dict, chat_id: "str | None") -> None:
     """Best-effort removal of a stale armed handoff. Never raises: failing to clean up must
     not take down the turn that noticed the staleness."""
@@ -14534,7 +14553,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                         # Only a block THIS turn carried: one kept for the
                                         # chat's other runtime (above), or armed since the
                                         # drain began, is still waiting for its own turn.
-                                        if _q_handoff_sent and _wc.pop("runtime_handoff", None) is not None:
+                                        if _q_handoff_sent and _pop_delivered_handoff(_wc, _q_armed):
                                             print(f"[handoff] {session_key}: delivered on a "
                                                   f"queued turn, cleared")
                                         _save_chats(ctx, _wd)
@@ -15433,7 +15452,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
                   f"but this turn runs on {_provider_for_run!r}/{_run_backend!r} — dropping it")
             _armed_handoff = None
             _drop_runtime_handoff(ctx, project, _active_chat_id_for_run or _req_chat_id)
+        _delivered_handoff = None      # the block THIS turn puts in front of its prompt (cleared by identity)
         if isinstance(_armed_handoff, dict) and (_armed_handoff.get("text") or "").strip():
+            _delivered_handoff = _armed_handoff
             effective_prompt = _armed_handoff["text"].strip() + "\n\n" + effective_prompt
             _timeline_append(session_key, {"type": "runtime_handoff",
                                            "chars": len(_armed_handoff["text"]),
@@ -15599,7 +15620,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                         # spec-092 P2: the engine answered and returned an
                                         # id — that, and nothing earlier, is proof the
                                         # handoff was actually delivered. Now it can go.
-                                        if _cb_chat.pop("runtime_handoff", None) is not None:
+                                        if _pop_delivered_handoff(_cb_chat, _delivered_handoff):
                                             print(f"[handoff] {session_key}: delivered, cleared")
                                         _save_chats(ctx, _cb_data)
                                         _wrote_back = True
