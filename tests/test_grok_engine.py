@@ -2264,6 +2264,31 @@ def test_the_sweep_never_follows_a_symlink_nested_inside_a_layer(env, depth):
     assert (victim / "keep.md").read_text() == "mine"
 
 
+def test_the_unlock_walk_works_in_the_non_dumpable_cockpit(tmp_path):
+    # spec-096 P3b makes bot.py non-dumpable (PR_SET_DUMPABLE=0), which turns /proc/self/* root-owned. glibc's
+    # chmod(follow_symlinks=False) may go through /proc/self/fd on an older kernel: prove the sweep helper still
+    # opens a mode-000 tree in such a process (and still leaves a planted link's target alone)
+    import subprocess
+    script = (
+        "import ctypes, os, shutil, stat, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "assert ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0) == 0\n"
+        "import grok_engine\n"
+        "top, victim = sys.argv[2], sys.argv[3]\n"
+        "os.makedirs(top + '/a/b'); open(top + '/a/b/f', 'w').write('x')\n"
+        "os.symlink(victim, top + '/a/link')\n"
+        "os.chmod(top + '/a/b', 0); os.chmod(top + '/a', 0o500)\n"
+        "grok_engine._unlock_tree(top)\n"
+        "shutil.rmtree(top)\n"
+        "print('OK' if not os.path.exists(top) and stat.S_IMODE(os.stat(victim).st_mode) == 0o755 else 'BAD')\n")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    os.chmod(victim, 0o755)
+    out = subprocess.run([sys.executable, "-I", "-c", script, str(Path(__file__).resolve().parent.parent),
+                          str(tmp_path / "layer"), str(victim)], capture_output=True, text=True, timeout=60)
+    assert out.stdout.strip() == "OK", (out.stdout, out.stderr)
+
+
 def test_the_sweep_leaves_a_mode_000_target_of_a_nested_symlink_locked(env):
     victim = env.tmp / "operators-private-dir"
     victim.mkdir()
