@@ -197,6 +197,7 @@ def e2e_server(tmp_path_factory):
         "FILES_EXTRA_ROOTS": str(scratch),
     })
     env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("WEB_COOKIE_SALT", None)   # a developer's real salt must not leak in (spec-096 P3.1 test)
     # This cockpit is the "Grok switched OFF" half of the suite: a developer's own GROK_* must not turn it on.
     for k in [k for k in env if k.startswith("GROK_")]:
         env.pop(k)

@@ -39,6 +39,7 @@ it to any network.
 In scope:
 - Authentication / session bypass (web password + optional TOTP).
 - Login rate-limit / IP-trust bypass (`TRUSTED_PROXIES`).
+- WebSocket Origin check bypass (terminal / browser pane upgrade from a foreign origin).
 - Path traversal in the file/project APIs.
 - Secret-vault disclosure beyond an authenticated session.
 - Command injection via configurable commands (e.g. `log_cmd`).

@@ -406,6 +406,9 @@ exposing it to a network.
 - **Put it behind HTTPS.** Set `WEB_COOKIE_SECURE=true` whenever you're not on `localhost`. Behind a
   reverse proxy, set `TRUSTED_PROXIES` (CSV of proxy IPs/CIDRs) so the login rate-limiter sees real
   client IPs instead of the proxy's.
+- **WebSockets check `Origin`.** The terminal (a PTY shell) and the browser pane refuse a browser upgrade
+  whose `Origin` is not the cockpit's own, because `SameSite=Lax` does not stop another page on the same
+  host from riding your cookie. Extra origins go in `WS_ALLOWED_ORIGINS`; scripts that send no `Origin` work as before.
 - **Rate-limit state is in-memory** and resets on restart.
 - **No third-party login.** Cardloop never asks for your GitHub or Anthropic account credentials. It runs
   on your own host and uses your machine's existing git config and your local `claude login` — nothing is
@@ -422,9 +425,10 @@ Set in `.env` (scaffolded by `install.sh`):
 | Variable | Purpose |
 |---|---|
 | `WEB_PASSWORD` | Cockpit login password (**required**) |
-| `WEB_COOKIE_SALT` | Session-cookie salt (auto-generated on install) |
+| `WEB_COOKIE_SALT` | Session-cookie salt. Leave blank: a private one is generated on first start and stored in `data/cookie_salt` (`install.sh` sets one in `.env`) |
 | `WEB_COOKIE_SECURE` | Set `true` when not on `localhost` (HTTPS) |
 | `TRUSTED_PROXIES` | CSV of proxy IPs/CIDRs behind a reverse proxy |
+| `WS_ALLOWED_ORIGINS` | Extra origins (CSV of `scheme://host[:port]`) allowed to open the terminal / browser-pane WebSockets; the cockpit's own origin is always allowed |
 | `OPERATOR_NAME` / `RESPONSE_LANGUAGE` | Operator name and the agent's reply language |
 | `CLAUDE_AUTH_MODE` | `api_key` (recommended; required for teams/commercial) or `subscription` (personal use) |
 | `ANTHROPIC_API_KEY` | Claude Console key — required when `CLAUDE_AUTH_MODE=api_key` |

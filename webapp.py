@@ -31,6 +31,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Optional, TypedDict
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -2509,6 +2510,89 @@ def _client_ip(req) -> str:
         if xff:
             return xff
     return remote
+
+
+# ── WebSocket Origin check (spec-096 P3.3) ───────────────────────────────────────
+#
+# The session cookie is SameSite=Lax: that stops a cross-SITE page, not a same-SITE one (another
+# service on the same host over https, a sibling subdomain with an XSS), and a WebSocket upgrade
+# carries ambient cookies. /api/terminal/ws is a PTY shell, so every WS route calls
+# _ws_origin_refusal() BEFORE ws.prepare(). Browsers always send Origin on the handshake and page
+# script cannot forge it; non-browser clients (tools/pane-press-hold.py, curl) send none.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _split_origin(value: str) -> "Optional[tuple[str, str, int]]":
+    """'https://Host:8443' -> ('https', 'host', 8443); None when it is not a plain http(s) origin."""
+    try:
+        u = urlsplit(value.strip())
+        scheme = u.scheme.lower()
+        if scheme not in _DEFAULT_PORTS or not u.hostname or u.path not in ("", "/") \
+                or u.query or u.fragment or u.username or u.password:
+            return None
+        return scheme, u.hostname.lower(), u.port or _DEFAULT_PORTS[scheme]
+    except ValueError:
+        return None
+
+
+def _ws_extra_origins() -> "set[tuple[str, str, int]]":
+    """WS_ALLOWED_ORIGINS: CSV of extra full origins (scheme://host[:port]). Read per call."""
+    out: "set[tuple[str, str, int]]" = set()
+    for part in os.environ.get("WS_ALLOWED_ORIGINS", "").split(","):
+        if part.strip():
+            parsed = _split_origin(part)
+            if parsed:
+                out.add(parsed)
+    return out
+
+
+def _ws_origin_allowed(req: web.Request) -> bool:
+    raw = req.headers.getall("Origin", [])
+    if not raw:
+        return True                       # not a browser: nothing ambient to protect
+    if len(raw) != 1:
+        return False
+    origin = _split_origin(raw[0])        # "null" (sandboxed frame), garbage, non-http(s) -> refused
+    if origin is None:
+        return False
+    scheme, host, port = origin
+    if origin in _ws_extra_origins():
+        return True
+
+    # The request's own host. Forwarded headers count ONLY from a configured trusted proxy
+    # (TRUSTED_PROXIES) - the same rule _client_ip() applies; no second trust rule.
+    own_hosts = [req.headers.get("Host") or req.host or ""]
+    forwarded_proto = ""
+    if _peer_is_trusted_proxy(req.remote or ""):
+        xfh = (req.headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
+        if xfh:
+            own_hosts.append(xfh)
+        forwarded_proto = (req.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+    # A trusted proxy that states the scheme must agree with the Origin's scheme. Otherwise the
+    # hop to us is often plain http behind a TLS-terminating proxy or tunnel, so both schemes pass.
+    if forwarded_proto in _DEFAULT_PORTS and forwarded_proto != scheme:
+        return False
+    for own in own_hosts:
+        try:
+            u = urlsplit("//" + own.strip())
+            own_host, own_port = (u.hostname or "").lower(), u.port
+        except ValueError:
+            continue
+        # A Host without a port means the default port of the scheme the browser used.
+        if own_host == host and (own_port or _DEFAULT_PORTS[scheme]) == port:
+            return True
+    return False
+
+
+def _ws_origin_refusal(req: web.Request) -> "Optional[web.Response]":
+    """None when the WebSocket upgrade may proceed, else a 403 to return BEFORE ws.prepare()."""
+    if _ws_origin_allowed(req):
+        return None
+    logging.warning("[ws-origin] refused %s from Origin %.200r (Host %.200r). Same-origin pages are "
+                    "always allowed; list other origins in WS_ALLOWED_ORIGINS, and set TRUSTED_PROXIES "
+                    "when a reverse proxy rewrites Host.",
+                    req.path, req.headers.get("Origin", ""), req.headers.get("Host", ""))
+    return web.json_response({"error": "origin not allowed"}, status=403)
 
 
 def _check_rate_limit(ip: str) -> tuple[bool, int]:
@@ -17568,6 +17652,9 @@ async def api_terminal_ws(req: web.Request) -> web.WebSocketResponse:
     # long no-output stretch (e.g. agy/antigravity "thinking" for >~100s) lets the Cloudflare
     # tunnel / reverse proxy drop the idle WebSocket — the loop below ends, `finally` kills the
     # PTY child, and the running session dies. Server pings every 30s (browsers auto-pong).
+    refused = _ws_origin_refusal(req)      # spec-096 P3.3: BEFORE the upgrade (this is a shell)
+    if refused is not None:
+        return refused
     ws = web.WebSocketResponse(heartbeat=30.0)
     await ws.prepare(req)
 
@@ -19204,6 +19291,9 @@ async def api_browser_ws(req: web.Request) -> web.WebSocketResponse:
     Heartbeat keeps the connection alive through idle (same lesson as the PTY WS,
     card 9976b6) — Chromium "thinking"/static pages emit no frames for long stretches.
     """
+    refused = _ws_origin_refusal(req)      # spec-096 P3.3
+    if refused is not None:
+        return refused
     ws = web.WebSocketResponse(heartbeat=30.0)
     await ws.prepare(req)
 
@@ -19248,6 +19338,9 @@ async def api_browser_input_ws(req: web.Request) -> web.WebSocketResponse:
     {t:'copy'} request — handle_input._copy() replies on whichever ws sent the
     request, which for the pane's own frontend is now always this socket.
     """
+    refused = _ws_origin_refusal(req)      # spec-096 P3.3
+    if refused is not None:
+        return refused
     ws = web.WebSocketResponse(heartbeat=30.0)
     await ws.prepare(req)
 
