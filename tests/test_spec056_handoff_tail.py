@@ -7,7 +7,8 @@ Covers:
        "Last instruction (operator): ..."
        "Where we stopped (agent's last message):\n..."
   2. With empty history the two lines are absent and no exception is raised.
-  3. Long user/assistant texts are truncated to the spec limits (1000 / 1200 chars).
+  3. Long user/assistant texts pass whole up to their caps; over a cap the head and the END
+     survive and only the middle is elided (the open question sits at the end).
   4. Interleaved history: only the LAST user and LAST assistant messages are used.
 """
 import sys
@@ -120,24 +121,73 @@ async def test_deterministic_tail_empty_history(tmp_path):
     )
 
 
-# ─────────────────────────── 3. Truncation limits ────────────────────────────
+# ─────────────────────────── 3. Verbatim caps ───────────────────────────────
 
-async def test_deterministic_tail_truncation(tmp_path):
-    """User text truncated at 1000 chars; assistant text truncated at 1200 chars."""
-    long_user = "U" * 1500
-    long_asst = "A" * 1800
+async def test_long_last_agent_message_passes_whole(tmp_path):
+    """A long status report reaches the next session whole, closing question included.
+
+    Regression: the 1200-char cap cut a report mid-table (2026-10-08) and the question that
+    was waiting on the operator never reached the new session."""
+    report = ("| item | fix |\n|---|---|\n" + "| row | detail |\n" * 300
+              + "Pick one: (1) fix all ten fields, (2) hand over, (3) show texts first?")
+    assert len(report) > 5000
+    history = [
+        {"role": "user",      "text": "are we ready?", "tools": []},
+        {"role": "assistant", "text": report,          "tools": []},
+    ]
+
+    result = await _run_build_handoff_inner(tmp_path, "sess-003", history)
+
+    assert "Where we stopped (agent's last message):\n" + report in result
+
+
+async def test_over_cap_keeps_head_and_end(tmp_path):
+    """Over the cap only the middle goes: the start and the very end both survive."""
+    cap_u = _webapp._HANDOFF_LAST_USER_CHARS
+    cap_a = _webapp._HANDOFF_LAST_AGENT_CHARS
+    long_user = "HEADU" + "u" * (cap_u * 2) + "ENDU"
+    long_asst = "HEADA" + "a" * (cap_a * 2) + "QUESTION?"
     history = [
         {"role": "user",      "text": long_user, "tools": []},
         {"role": "assistant", "text": long_asst, "tools": []},
     ]
 
-    result = await _run_build_handoff_inner(tmp_path, "sess-003", history)
+    result = await _run_build_handoff_inner(tmp_path, "sess-003b", history)
 
-    # Exact truncation: spec says ~1000 and ~1200
-    assert "U" * 1001 not in result, "User text must be truncated to 1000 chars"
-    assert "U" * 1000 in result,     "User text up to 1000 chars must appear"
-    assert "A" * 1201 not in result, "Assistant text must be truncated to 1200 chars"
-    assert "A" * 1200 in result,     "Assistant text up to 1200 chars must appear"
+    assert "Last instruction (operator): HEADU" in result
+    assert "ENDU" in result
+    assert "Where we stopped (agent's last message):\nHEADA" in result
+    assert result.rstrip().endswith("QUESTION?")
+    assert f"[… {len(long_asst) - cap_a} characters omitted …]" in result
+    # Bounded: neither block may carry the whole oversized text.
+    assert "a" * (cap_a + 1) not in result
+    assert "u" * (cap_u + 1) not in result
+
+
+async def test_unanswered_last_instruction_is_flagged(tmp_path):
+    """When the operator spoke last, the agent's message is labelled as an earlier reply."""
+    history = [
+        {"role": "user",      "text": "Fix the login page.",       "tools": []},
+        {"role": "assistant", "text": "Login page fixed.",         "tools": []},
+        {"role": "user",      "text": "Now ship it to prod.",      "tools": []},
+    ]
+
+    result = await _run_build_handoff_inner(tmp_path, "sess-003c", history)
+
+    assert "Last instruction (operator): Now ship it to prod." in result
+    assert "never answered this instruction" in result
+    assert "reply to an EARLIER turn" in result
+
+
+async def test_answered_last_instruction_is_not_flagged(tmp_path):
+    history = [
+        {"role": "user",      "text": "Now ship it to prod.", "tools": []},
+        {"role": "assistant", "text": "Shipped.",             "tools": []},
+    ]
+
+    result = await _run_build_handoff_inner(tmp_path, "sess-003d", history)
+
+    assert "never answered" not in result
 
 
 # ─────────────────────────── 4. Only LAST user/assistant taken ───────────────

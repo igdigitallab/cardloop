@@ -16618,6 +16618,23 @@ _HANDOFF_MAX_NARRATIVE_CHARS = 8_000
 _HANDOFF_ECHO_MARKER = "[tool]: {"
 # Emitted into the transcript by the CLI when the operator hits Stop.
 _HANDOFF_INTERRUPT_MARKER = "[Request interrupted by user]"
+# Verbatim tail caps (spec-056). The agent's last message is where the open question and the
+# options waiting on the operator live — usually at its END. At 1200 chars a status report with
+# a table was cut mid-row and the next session never saw the question (2026-10-08).
+_HANDOFF_LAST_USER_CHARS = 4_000
+_HANDOFF_LAST_AGENT_CHARS = 12_000
+
+
+def _handoff_verbatim(text: str, cap: int) -> str:
+    """Return `text` whole, or its head and END with the middle elided when over `cap`.
+
+    A plain head slice drops exactly what the next session needs most: a closing question or
+    a list of options sits at the end of the message, not the start."""
+    if len(text) <= cap:
+        return text
+    head = cap // 4
+    tail = cap - head
+    return (text[:head] + f"\n[… {len(text) - cap} characters omitted …]\n" + text[-tail:])
 # Per-message JSON buffer cap for the SDK reader, mirroring engine.SDK_MAX_BUFFER_BYTES.
 # Read from env directly rather than imported: engine imports webapp, so a top-level
 # `from engine import ...` here would be circular (same precedent as _MEMORY_MODES).
@@ -17048,18 +17065,26 @@ async def _build_handoff_inner(ctx: dict, session_key: str, cwd: str, session_id
     try:
         last_user_text = ""
         last_assistant_text = ""
-        for entry in history:
+        last_user_idx = last_assistant_idx = -1
+        for i, entry in enumerate(history):
             role = entry.get("role", "")
             text = (entry.get("text") or "").strip()
             if role == "user" and text:
-                last_user_text = text
+                last_user_text, last_user_idx = text, i
             elif role == "assistant" and text:
-                last_assistant_text = text
+                last_assistant_text, last_assistant_idx = text, i
         if last_user_text:
-            fact_lines.append("Last instruction (operator): " + last_user_text[:1000])
+            fact_lines.append("Last instruction (operator): "
+                              + _handoff_verbatim(last_user_text, _HANDOFF_LAST_USER_CHARS))
+            if last_user_idx > last_assistant_idx:
+                fact_lines.append(
+                    "⚠️ The agent never answered this instruction — the session ended first."
+                    + (" The message below is its reply to an EARLIER turn."
+                       if last_assistant_text else ""))
         if last_assistant_text:
             fact_lines.append(
-                "Where we stopped (agent's last message):\n" + last_assistant_text[:1200]
+                "Where we stopped (agent's last message):\n"
+                + _handoff_verbatim(last_assistant_text, _HANDOFF_LAST_AGENT_CHARS)
             )
     except Exception as _tail_exc:
         print(f"[handoff] deterministic tail extraction failed (non-blocking): {_tail_exc!r}")
