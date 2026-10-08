@@ -10,8 +10,9 @@ Rules, in order:
 1. An explicitly configured salt (non-blank, not a `CHANGE_ME...` placeholder) is used byte for
    byte as before — existing cookies stay valid.
 2. Otherwise the salt lives in a private file in the data dir (`cookie_salt`, 0600): read it when
-   it is there, generate one with `secrets` and persist it atomically when it is not. The value is
-   never printed or logged.
+   it is there, generate one with `secrets` and publish it with an EXCLUSIVE create when it is not
+   (`fsutil.create_exclusive`: of two racing starts exactly one creates the file, the other reads
+   the winner's, so both sign with the salt that is on disk). The value is never printed or logged.
 3. If the data dir cannot be used at all, fall back to a per-process random salt (safe, but every
    restart signs everyone out) and say so — still without the value.
 
@@ -59,19 +60,23 @@ def resolve(env_value: "str | None", data_dir: "str | os.PathLike[str] | None") 
 
     if data_dir is not None:
         path = Path(data_dir) / SALT_FILENAME
-        existing = _read_persisted(path)
-        if existing is not None:
-            fsutil.tighten(path)                    # a file copied around with 0644 is made private
-            return existing
         try:
-            fresh = secrets.token_hex(32)
-            fsutil.atomic_write(path, fresh, 0o600)
-            # Read back what is on disk (not what we generated) so two racing starts agree.
-            persisted = _read_persisted(path)
-            if persisted is not None:
-                log.warning("auth: WEB_COOKIE_SALT is blank or a placeholder; generated a salt "
-                            "and stored it in %s", path)
-                return persisted
+            # Up to three rounds: read the winner; else create EXCLUSIVELY (two racing starts both
+            # saw no file - exactly one creates it, the other adopts it); a file that exists but is
+            # damaged is removed so the next round can replace it.
+            for _ in range(3):
+                existing = _read_persisted(path)
+                if existing is not None:
+                    fsutil.tighten(path)            # a file copied around with 0644 is made private
+                    return existing
+                if fsutil.create_exclusive(path, secrets.token_hex(32), 0o600):
+                    persisted = _read_persisted(path)     # what is on disk, not what we generated
+                    if persisted is not None:
+                        log.warning("auth: WEB_COOKIE_SALT is blank or a placeholder; generated a salt "
+                                    "and stored it in %s", path)
+                        return persisted
+                elif _read_persisted(path) is None:
+                    path.unlink(missing_ok=True)    # damaged (short/empty/unreadable): replace it
         except OSError as exc:
             log.warning("auth: cannot persist the cookie salt in %s (%s)", path, exc.__class__.__name__)
 

@@ -147,8 +147,10 @@ def test_tighten_only_narrows(tmp_path):
 
 
 def test_roles_atomic_write_delegates_and_keeps_its_temp_names(tmp_path, mode_spy):
+    # spec-096 P9: a role is not a secret - it keeps the readable 0644 the old write_text gave it (a role
+    # shared through group read must stay readable), so unlike the secret files it is NOT private-throughout.
     roles._atomic_write(str(tmp_path / "r.md"), "---\nname: r\n---\n")
-    assert_private_throughout(mode_spy, tmp_path / "r.md")
+    assert _mode(tmp_path / "r.md") == 0o644
     assert any(os.path.basename(w).startswith(".tmp-role-") and w.endswith(".md")
                for k, w, _ in mode_spy if k == "replace")
 

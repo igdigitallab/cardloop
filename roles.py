@@ -448,8 +448,10 @@ def role_path(cwd: "str | None", name: str, scope: str) -> str:
 def _atomic_write(path: str, content: str) -> None:
     """tmp file in the same dir, fsync, os.replace — no partially written file on a crash.
 
-    The writer itself is `fsutil.atomic_write` (the one shared by every secret file)."""
-    fsutil.atomic_write(path, content, 0o600, prefix=".tmp-role-", suffix=".md")
+    The writer itself is `fsutil.atomic_write` (the one shared by every secret file). A role is
+    NOT a secret: it keeps the readable 0644 the old `write_text` gave it under the usual umask
+    (spec-096 P9 — 0600 made a role shared through group read unreadable to the others)."""
+    fsutil.atomic_write(path, content, 0o644, prefix=".tmp-role-", suffix=".md")
 
 
 def write_role(cwd: "str | None", name: str, scope: str, content: str, *, overwrite: bool = False) -> Role:

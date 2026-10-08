@@ -3869,9 +3869,15 @@ def _twofa_state_unreadable(ip: str, what: str, exc: BaseException) -> web.Respo
     the attempt counts against the rate limiter. Only the exception CLASS is logged, never its
     text, so nothing the vault code put in a message can reach the journal."""
     _record_attempt(ip, False)
+    try:
+        store = str(_secretstore._store_path())
+    except Exception:           # noqa: BLE001 - a journal line must never fail the refusal itself
+        store = "the vault store (data/vault/secrets.enc by default)"
     logging.error("[auth] login refused: 2FA state unreadable (%s, %s). Fix the vault key/store, or "
-                  "turn 2FA off on purpose from the host shell: `secret rm __totp_secret__`.",
-                  what, type(exc).__name__)
+                  "turn 2FA off on purpose from the host shell: `secret rm __totp_secret__` (works only "
+                  "while the vault is readable). If the KEY is lost that cannot work: move the store "
+                  "aside (%s; this empties the vault), log in with the password alone and re-enrol 2FA.",
+                  what, type(exc).__name__, store)
     return web.json_response({"error": "2fa_state_unreadable"}, status=503)
 
 

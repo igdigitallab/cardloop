@@ -30,6 +30,12 @@ def atomic_write(path: "str | os.PathLike[str]", data: "bytes | str", mode: int 
     `str` data is written as UTF-8 without newline translation. The temp file is removed on
     any failure; the parent directory is created if missing (default permissions — a caller
     that needs a private parent creates it first).
+
+    A symlink at `path` is REPLACED by the new file, not followed (`os.replace` renames over the
+    link itself). That is deliberate for a secret file in a directory the model can write: the
+    bytes can never be steered through a planted link into another file. The flip side is that a
+    link the operator made on purpose (a role or secrets.env symlinked to a shared file) is cut
+    loose on the next save.
     """
     path = os.fspath(path)
     dir_path = os.path.dirname(path) or "."
@@ -49,6 +55,51 @@ def atomic_write(path: "str | os.PathLike[str]", data: "bytes | str", mode: int 
         with contextlib.suppress(OSError):
             os.remove(tmp_path)
         raise
+
+
+def create_exclusive(path: "str | os.PathLike[str]", data: "bytes | str", mode: int = 0o600) -> bool:
+    """Publish `data` at `path` ONLY if nothing is there yet. True: this call created the file;
+    False: something already existed (a file, or a symlink — never followed) and is untouched.
+
+    The content is written to a private temp file first and then published with `os.link`, which
+    fails with EEXIST instead of replacing: a concurrent reader sees either no file or the
+    complete one, and of two racing creators exactly one wins (the loser reads the winner's file
+    — `atomic_write` would let the second silently replace the first). On a filesystem without
+    hard links it falls back to `O_CREAT|O_EXCL|O_NOFOLLOW`, which is still exclusive but lets a
+    reader catch the file half-written.
+    """
+    path = os.fspath(path)
+    dir_path = os.path.dirname(path) or "."
+    os.makedirs(dir_path, exist_ok=True)
+    payload = data.encode("utf-8") if isinstance(data, str) else data
+    fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=f".{os.path.basename(path)}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp_path, path)
+            return True
+        except FileExistsError:
+            return False
+        except OSError:
+            pass                                    # no hard links here: exclusive create instead
+        try:
+            fd2 = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                          | getattr(os, "O_CLOEXEC", 0), mode)
+        except FileExistsError:
+            return False
+        with os.fdopen(fd2, "wb") as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        return True
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
 
 
 def tighten(path: "str | os.PathLike[str]", mode: int = 0o600) -> bool:

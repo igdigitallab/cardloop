@@ -567,9 +567,11 @@ def _prune_nested(deny: list[str]) -> list[str]:
 
 
 def _atomic_write(path: Path, text: str, mode: int = 0o600) -> bool:
-    """Write `text` to `path` unless it already holds exactly that. True if rewritten."""
+    """Write `text` to `path` unless it already holds exactly that. True if rewritten. An unchanged file
+    is still tightened to `mode`: skipping the write must not leave a pre-existing 0644 file readable."""
     try:
         if path.read_text(encoding="utf-8") == text:
+            fsutil.tighten(path, mode)
             return False
     except OSError:
         pass
