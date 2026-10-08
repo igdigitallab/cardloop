@@ -66,6 +66,8 @@ def _every_grok_session_exists(monkeypatch):
     here. The drop itself is tested in test_grok_p3p4_wiring.py with real session files (which
     imports `isolate` below but not this)."""
     monkeypatch.setattr(_webapp._grok_history, "session_exists", lambda *a, **k: True)
+    # the run sites ask `resumable` (exists AND vouched for this cwd, spec-096 P9): made-up ids have no witness
+    monkeypatch.setattr(_webapp._grok_history, "resumable", lambda *a, **k: True)
 
 
 @pytest.fixture(autouse=True)

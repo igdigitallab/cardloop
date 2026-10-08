@@ -269,6 +269,8 @@ register(ProviderSpec(
     enabled=lambda: grok_engine.grok_enabled(),
     capabilities=lambda: grok_engine.capabilities(),
     send_ledger=lambda ctx, session_id, prompt: grok_sends.record(ctx.get("DATA"), session_id, prompt),
-    session_exists=lambda ctx, cwd, session_id: grok_history.session_exists(
-        session_id, cwd, grok_home=grok_engine.grok_home(ctx)),
+    # a resume is allowed only for a session the cockpit vouches for in this cwd (spec-096 P9): an id that
+    # merely exists on disk may be a plant, and the engine would bind it on the first resume
+    session_exists=lambda ctx, cwd, session_id: grok_history.resumable(
+        session_id, cwd, grok_home=grok_engine.grok_home(ctx), data_dir=(ctx or {}).get("DATA")),
 ))

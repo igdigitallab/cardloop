@@ -433,6 +433,16 @@ def session_exists(session_id: str, cwd: str, *, grok_home=None) -> bool:
     return False
 
 
+def resumable(session_id: str, cwd: str, *, grok_home=None, data_dir=None) -> bool:
+    """May the cockpit RESUME ``session_id`` as a session of ``cwd``? On disk (``session_exists``) AND vouched for
+    (``vouched``). ``session_exists`` alone is not enough: GROK_HOME is writable by the model's shell, so a turn can
+    drop a session directory under another project's group, and the engine records a binding for whatever it
+    resumes - which would vouch for the plant for good (spec-096 P9). Like its two parts it does not raise for a
+    missing, malformed or unreadable session (that is just ``False``); an unexpected fault propagates, and the run
+    sites treat a check that itself fails as "resume the id anyway" (``webapp._live_resume_id``)."""
+    return session_exists(session_id, cwd, grok_home=grok_home) and vouched(session_id, cwd, data_dir)
+
+
 def _iso_to_epoch(value) -> "float | None":
     if not isinstance(value, str):
         return None

@@ -12896,8 +12896,8 @@ async def api_project_set_session(req: web.Request) -> web.Response:
                 return web.json_response({"error": "invalid Grok session id"}, status=400)
             _grok_home = _grok.grok_home(ctx)
             _exists = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: _grok_history.session_exists(
-                    session_id, project["cwd"], grok_home=_grok_home))
+                None, lambda: _grok_history.resumable(
+                    session_id, project["cwd"], grok_home=_grok_home, data_dir=ctx["DATA"]))
             if not _exists:
                 return web.json_response({"error": "session not found"}, status=400)
             async with _chats_lock():
