@@ -97,3 +97,75 @@ def test_tiny_files_and_windows(tmp_path, size):
     path.write_bytes(b'{"n": 1}\n'[:size])
     assert len(rows(path)) == (1 if size == 9 else 0)
     assert rows(path, max_bytes=1) == []
+
+
+def _row(n):
+    return json.dumps({"n": n}).encode() + b"\n"
+
+
+@pytest.mark.parametrize("from_head", [False, True])
+def test_a_file_that_grows_during_the_read_is_not_read_past_the_size_measured_at_open(tmp_path, from_head):
+    # review-spec095-readers-2 F1 (confirmed): the loop ran to the CURRENT end of file, so a model appending in a
+    # loop (`while :; do echo '{}' >> session.jsonl; done`) kept an executor thread reading forever
+    path = tmp_path / "f.jsonl"
+    path.write_bytes(b"".join(_row(i) for i in range(100)))
+    seen = []
+    for _off, row in gj.iter_jsonl(path, max_bytes=1 << 20, max_line=1 << 16, from_head=from_head):
+        seen.append(row["n"])
+        if len(seen) == 1:
+            with open(path, "ab") as out:
+                out.write(b"".join(_row(1000 + i) for i in range(1000)))
+    assert seen == list(range(100))
+
+
+def test_a_tail_window_is_not_extended_by_growth(tmp_path):
+    path = tmp_path / "f.jsonl"
+    path.write_bytes(b"".join(_row(i) for i in range(100)))
+    got = []
+    for _off, row in gj.iter_jsonl(path, max_bytes=50, max_line=1 << 16):
+        got.append(row["n"])
+        if len(got) == 1:
+            with open(path, "ab") as out:
+                out.write(b"".join(_row(1000 + i) for i in range(1000)))
+    assert got and max(got) == 99 and len(got) <= 6
+
+
+def test_an_endless_unterminated_line_is_not_chased_past_the_size_measured_at_open(tmp_path, monkeypatch):
+    # _skip_line discards an over-long line chunk by chunk until its newline - a file that keeps growing without
+    # one must not keep it going
+    path = tmp_path / "f.jsonl"
+    path.write_bytes(b'{"n": 1}\n' + b"x" * 200)
+    real = gj._skip_line
+    grown = []
+
+    def growing_skip(fh, max_line, *rest):
+        if not grown:
+            grown.append(1)
+            with open(path, "ab") as out:
+                out.write(b"y" * 200_000)
+        return real(fh, max_line, *rest)
+    monkeypatch.setattr(gj, "_skip_line", growing_skip)
+    reads = []
+
+    class Counting:
+        def __init__(self, fh):
+            self.fh = fh
+
+        def __getattr__(self, name):
+            return getattr(self.fh, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self.fh.__exit__(*exc)
+
+        def readline(self, limit=-1):
+            data = self.fh.readline(limit)
+            reads.append(len(data))
+            return data
+    real_open = gj.open_regular
+    monkeypatch.setattr(gj, "open_regular", lambda p: Counting(real_open(p)))
+    got = list(gj.iter_jsonl(path, max_bytes=1 << 20, max_line=64))
+    assert [r["n"] for _o, r in got] == [1]
+    assert sum(reads) <= 9 + 200 + 64 + 1       # the bytes present at open (+ one line's slack), not the 200 KB appended

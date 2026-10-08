@@ -67,20 +67,22 @@ def iter_jsonl(path: Path, *, max_bytes: int, max_line: int,
             size = os.fstat(fh.fileno()).st_size
         except OSError:
             return
+        # Every read below is bounded by `size`, the length MEASURED AT OPEN: the file is written by the
+        # model's own shell, and one that appends in a loop must not keep this (executor) thread reading.
         if size > max_bytes and not from_head:
             # Land one byte early and consume through the next newline: a start that is exactly
             # on a line boundary keeps that line, a mid-line start drops only the partial.
             fh.seek(size - max_bytes - 1)
-            _skip_line(fh, max_line)
+            _skip_line(fh, max_line, size)
         while True:
             offset = fh.tell()
-            if from_head and offset >= max_bytes:
+            if offset >= size or (from_head and offset >= max_bytes):
                 return
-            line = fh.readline(max_line + 1)
+            line = fh.readline(min(max_line + 1, size - offset))
             if not line:
                 return
             if len(line) > max_line and not line.endswith(b"\n"):
-                _skip_line(fh, max_line)
+                _skip_line(fh, max_line, size)
                 continue
             line = line.strip()
             if not line:
@@ -93,8 +95,12 @@ def iter_jsonl(path: Path, *, max_bytes: int, max_line: int,
                 yield offset, obj
 
 
-def _skip_line(fh, max_line: int) -> None:
+def _skip_line(fh, max_line: int, end: int) -> None:
+    """Discard the rest of the current line, never reading at or past byte ``end``."""
     while True:
-        chunk = fh.readline(max_line + 1)
+        pos = fh.tell()
+        if pos >= end:
+            return
+        chunk = fh.readline(min(max_line + 1, end - pos))
         if not chunk or chunk.endswith(b"\n"):
             return
