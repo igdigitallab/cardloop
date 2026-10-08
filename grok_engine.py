@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import AsyncGenerator, Callable, NamedTuple
 
 import fsutil
+import runtime_secrets as _rs
 
 PROVIDER = "grok"
 DEFAULT_GROK_MODEL = os.getenv("GROK_MODEL", "grok-4.7")
@@ -175,6 +176,9 @@ def _secret_values() -> list[str]:
     for k, v in os.environ.items():
         if v and len(v) >= 8 and _SECRET_NAME_RE.search(k):
             out.append(v)
+    # spec-096 P3b: the cockpit's own secrets are scrubbed out of os.environ at start; redact
+    # their values from the snapshot or the journal would stop masking exactly the ones that matter.
+    out.extend(_rs.secret_values(min_len=8))
     return sorted(set(out), key=len, reverse=True)
 
 

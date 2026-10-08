@@ -50,6 +50,7 @@ import browser_tools as _browser_tools    # spec-065: agent browser tools (built
 import roles                              # spec-091: declarative sub-agent role registry
 import runtime as _runtime               # spec-092: run context + which CLI binary serves a run
 import load_monitor as _load_monitor     # spec-094: shared working-set measure + eviction counter
+import runtime_secrets as _rs             # spec-096 P3b: startup snapshot of the secrets scrubbed from os.environ
 import fs_browser as _fs_browser          # Files tab policy; here only its 'files the agent wrote' log
 from board import (
     board_summary,
@@ -4101,7 +4102,7 @@ def _build_ctx(*, web_port: int = None, web_password: str = None) -> dict:
                                running_stream_agents=_webapp._running_stream_agents)
 
     _web_port = web_port if web_port is not None else int(os.getenv("WEB_PORT", "8787"))
-    _web_password = web_password if web_password is not None else os.getenv("WEB_PASSWORD", "")
+    _web_password = web_password if web_password is not None else _rs.get("WEB_PASSWORD", "")
 
     return {
         "port": _web_port,

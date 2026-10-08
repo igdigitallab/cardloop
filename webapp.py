@@ -46,6 +46,7 @@ import accounts as _accounts
 # spec-096 P2: the ONE atomic writer for every secret file (mkstemp = 0600 from creation).
 import fsutil as _fsutil
 import auth_salt as _auth_salt
+import runtime_secrets as _rs  # spec-096 P3b: secrets scrubbed from os.environ at start live here
 
 # spec-092: the single place a run's provider x account x model gets decided. Pure logic,
 # no aiohttp/engine import back — safe to import at module scope (unlike engine.py, which
@@ -2426,7 +2427,7 @@ _incident_push_history: dict[str, list[float]] = {}
 # from a private file in the data dir (auth_salt.py: read it, or generate + persist it), because the
 # data dir is only known at runtime. Until start() runs (import time, unit tests that never boot the
 # server) a per-process random salt keeps _derive_token usable. The salt value is never printed.
-_AUTH_SALT_ENV = os.environ.get("WEB_COOKIE_SALT", "")
+_AUTH_SALT_ENV = _rs.get("WEB_COOKIE_SALT", "")
 AUTH_SALT: bytes = (_AUTH_SALT_ENV.encode() if not _auth_salt.is_placeholder(_AUTH_SALT_ENV)
                     else secrets.token_hex(32).encode())
 
@@ -2439,7 +2440,7 @@ def _init_auth_salt(ctx: dict) -> None:
     import-time line produced, so existing cookies stay valid; a blank/placeholder one becomes
     the persisted private salt (auth_salt.resolve)."""
     global AUTH_SALT
-    AUTH_SALT = _auth_salt.resolve(os.environ.get("WEB_COOKIE_SALT", ""), ctx.get("DATA"))
+    AUTH_SALT = _auth_salt.resolve(_rs.get("WEB_COOKIE_SALT", ""), ctx.get("DATA"))
 
 
 def _derive_token(password: str) -> str:

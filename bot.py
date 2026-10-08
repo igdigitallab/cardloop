@@ -9,9 +9,19 @@ and starts the aiohttp web cockpit (webapp.py) + engine on a single asyncio loop
 The transport-neutral engine block (run_engine, state dicts, audit, reconcile_board,
 etc.) lives in engine.py.
 """
-import asyncio
 import os
-from pathlib import Path
+import runtime_secrets  # stdlib only; imported first so the hardening below precedes everything else
+
+# spec-096 P3b: only the real cockpit process hardens itself. A library import (tests, tools) must
+# never flip the whole interpreter non-dumpable or empty its environment.
+_COCKPIT_PROCESS = __name__ == "__main__"
+if _COCKPIT_PROCESS:
+    # prctl(PR_SET_DUMPABLE, 0): /proc/<pid>/{environ,mem,maps,fd,...} become root-owned and a
+    # same-uid process can no longer ptrace us. Children are dumpable again after exec.
+    runtime_secrets.harden_process()
+
+import asyncio  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 # ─────────────────────────── config ───────────────────────────
 HERE = Path(__file__).resolve().parent
@@ -56,8 +66,20 @@ if CLAUDE_AUTH_MODE == "subscription":
 # api_key mode: do nothing — ANTHROPIC_API_KEY stays in os.environ and the
 # SDK will pick it up automatically.
 
+# spec-096 P3b: from here on the cockpit's secrets live only in runtime_secrets' snapshot. Without
+# this every child (the Claude CLI merges os.environ; Codex; terminals; test runners) inherits
+# WEB_PASSWORD, BOT_TOKEN, ... and a model-run `printenv` puts them into the transcript. Runs
+# BEFORE the first-party imports below so no module can capture a secret from the environment at
+# import time; in-process readers go through runtime_secrets.get().
+if _COCKPIT_PROCESS:
+    _scrubbed = runtime_secrets.scrub()
+    if _scrubbed:
+        print(f"[security] {len(_scrubbed)} secret variable(s) removed from the process environment "
+              f"(children no longer inherit them): {', '.join(_scrubbed)}. "
+              f"Keep one visible to agents with AGENT_ENV_PASSTHROUGH=NAME[,NAME].", flush=True)
+
 WEB_PORT = int(os.environ.get("WEB_PORT", "8787"))           # web cockpit port
-WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")            # passphrase for cockpit login
+WEB_PASSWORD = runtime_secrets.get("WEB_PASSWORD", "")       # passphrase for cockpit login
 
 # ── first-party modules imported AFTER _load_env() + auth ─────────────────────
 # They read env vars at module level; importing any of them before _load_env() would

@@ -570,7 +570,50 @@ def probe_config(env: dict, env_path: Path, env_exists: bool,
 
 # ─────────────────────────── Service ─────────────────────────────────────────────
 
-def probe_service(service_name: str, run=_run, cgroup_root: Path = Path("/sys/fs/cgroup")) -> "list[Fact]":
+def probe_process_hardening(pid: int, proc_root: Path = Path("/proc"),
+                            yama: Path = Path("/proc/sys/kernel/yama/ptrace_scope")) -> "list[Fact]":
+    """Is the running cockpit non-dumpable (spec-096 P3b)? Judged from FILE OWNERS, not by reading:
+    the kernel makes `/proc/<pid>/environ` root-owned for a non-dumpable process while the
+    `/proc/<pid>` directory keeps the process's own uid, and `stat` needs no ptrace permission —
+    so the verdict is the same whether doctor runs as the service user or as root. Anything that
+    cannot be measured says so (info); unknown is never green."""
+    facts: "list[Fact]" = []
+    label = "Process hardening"
+    try:
+        dir_uid = os.stat(proc_root / str(pid)).st_uid
+        env_uid = os.stat(proc_root / str(pid) / "environ").st_uid
+    except OSError as e:
+        facts.append(Fact(label, f"not measurable (pid {pid}: {e.__class__.__name__})", level="info"))
+    else:
+        if dir_uid == 0:
+            facts.append(Fact(label, "not measurable (the cockpit runs as root, so every /proc entry is root-owned)",
+                              level="info"))
+        elif env_uid != dir_uid:
+            facts.append(Fact(label, f"non-dumpable: /proc/{pid}/environ is root-owned, a same-user process "
+                                     "cannot read the cockpit's environment or ptrace it"))
+        else:
+            facts.append(Fact(
+                label, f"DUMPABLE: any process of the same user can read /proc/{pid}/environ and ptrace the cockpit",
+                level="warn",
+                remedy="restart the service on a build that includes spec-096 P3b (bot.py sets "
+                       "prctl(PR_SET_DUMPABLE, 0) at start); secrets in .env are exposed until then"))
+    try:
+        scope = int(yama.read_text().strip())
+    except (OSError, ValueError):
+        scope = None                                    # no Yama LSM on this kernel: nothing to report
+    if scope is not None:
+        if scope == 0:
+            facts.append(Fact("kernel.yama.ptrace_scope", "0 (a process may ptrace any other process of its user)",
+                              level="info",
+                              remedy="optional host hardening: `sysctl -w kernel.yama.ptrace_scope=1` "
+                                     "(persist in /etc/sysctl.d/); a debugger then attaches to descendants only"))
+        else:
+            facts.append(Fact("kernel.yama.ptrace_scope", str(scope)))
+    return facts
+
+
+def probe_service(service_name: str, run=_run, cgroup_root: Path = Path("/sys/fs/cgroup"),
+                  proc_root: Path = Path("/proc")) -> "list[Fact]":
     facts: "list[Fact]" = []
 
     show = run(["systemctl", "show", service_name,
@@ -592,6 +635,10 @@ def probe_service(service_name: str, run=_run, cgroup_root: Path = Path("/sys/fs
     else:
         level, remedy = "fail", f"unit is {active}/{sub} — check `journalctl -u {service_name} -n 50`"
     facts.append(Fact("systemd unit", f"{service_name}: {active}/{sub}", level=level, remedy=remedy))
+
+    main_pid = props.get("MainPID", "")
+    if active == "active" and main_pid.isdigit() and int(main_pid) > 0:
+        facts.extend(probe_process_hardening(int(main_pid), proc_root))
 
     mh_raw, mm_raw = props.get("MemoryHigh"), props.get("MemoryMax")
     mh, mm = _parse_mem_value(mh_raw), _parse_mem_value(mm_raw)

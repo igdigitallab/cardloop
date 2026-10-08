@@ -46,6 +46,8 @@ import re
 import shutil
 from pathlib import Path
 
+import runtime_secrets as _rs  # spec-096 P3b: the cockpit scrubs secrets out of os.environ at start
+
 # Alias -> exact agy model string. Keep this the single source of truth for what the
 # Antigravity backend accepts; an alias outside every map is coerced to the default.
 _MODEL_ALIASES = {
@@ -121,7 +123,7 @@ def _strip_noise(text: str) -> str:
 # --- Azure config helpers -----------------------------------------------------
 
 def _azure_key() -> str | None:
-    return (os.getenv("AZURE_FOUNDRY_KEY") or "").strip() or None
+    return (_rs.get("AZURE_FOUNDRY_KEY") or "").strip() or None
 
 
 def _azure_endpoint() -> str | None:

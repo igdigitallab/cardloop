@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import runtime_secrets as _rs  # spec-096 P3b: the cockpit scrubs secrets out of os.environ at start
+
 log = logging.getLogger(__name__)
 
 # ── Module-level state (set by _schedules_init) ───────────────────────────────
@@ -710,7 +712,7 @@ async def _collect_coolify(ctx: dict) -> list[dict]:
     or the constant from CLAUDE.md).
     """
     records: list[dict] = []
-    token = os.environ.get("COOLIFY_API_TOKEN", "").strip()
+    token = _rs.get("COOLIFY_API_TOKEN", "").strip()
     if not token:
         log.debug("[schedules] COOLIFY_API_TOKEN not set — coolify source skipped")
         return records
@@ -771,7 +773,7 @@ async def _collect_n8n(ctx: dict) -> list[dict]:
     0 active workflows → 0 records (correct, not an error).
     """
     records: list[dict] = []
-    api_key = os.environ.get("N8N_API_KEY", "").strip()
+    api_key = _rs.get("N8N_API_KEY", "").strip()
     host = os.environ.get("N8N_HOST", "localhost:5678")
     # Determine scheme
     if not host.startswith(("http://", "https://")):

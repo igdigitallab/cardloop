@@ -43,6 +43,7 @@ from typing import Optional
 from cryptography.fernet import Fernet, InvalidToken
 
 import fsutil
+import runtime_secrets as _rs  # spec-096 P3b: the cockpit scrubs secrets out of os.environ at start
 
 _log = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ def _keyfile_path() -> Path:
 def _load_key() -> bytes:
     """Return the Fernet key bytes.  Raises RuntimeError with guidance if absent."""
     # Priority 1: environment variable
-    env_key = os.environ.get("CLAUDE_OPS_SECRET_KEY", "")
+    env_key = _rs.get("CLAUDE_OPS_SECRET_KEY", "")
     if env_key:
         return env_key.encode()
 

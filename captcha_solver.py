@@ -29,6 +29,8 @@ import os
 import time
 from typing import Any
 
+import runtime_secrets as _rs  # spec-096 P3b: the cockpit scrubs secrets out of os.environ at start
+
 try:  # optional — the safe is present in this deployment, not necessarily in a fork
     import secretstore as _secretstore
 except Exception:  # pragma: no cover - import guard
@@ -66,7 +68,7 @@ def api_key() -> "str | None":
     Env-first keeps a fork/OSS install working with nothing but ``.env`` (see
     ``.env.example``), while this deployment keeps the real value in the safe only.
     """
-    env = (os.environ.get(API_KEY_ENV) or "").strip()
+    env = (_rs.get(API_KEY_ENV) or "").strip()
     if env:
         return env
     if _secretstore is not None:

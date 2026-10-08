@@ -28,6 +28,8 @@ import time
 import urllib.error
 import urllib.request
 
+import runtime_secrets as _rs  # spec-096 P3b: the cockpit scrubs secrets out of os.environ at start
+
 BACKEND = "ollama"
 
 # How long a successful probe is trusted. Short on purpose: the backend can vanish between
@@ -54,7 +56,7 @@ def base_url() -> str:
 
 def auth_token() -> str:
     """Ollama ignores it, but the CLI refuses to start without SOME credential."""
-    return (os.environ.get("OLLAMA_AUTH_TOKEN", "") or "local").strip() or "local"
+    return (_rs.get("OLLAMA_AUTH_TOKEN", "") or "local").strip() or "local"
 
 
 def _fetch_tags(url: str) -> list[dict]:
