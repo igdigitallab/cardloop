@@ -5147,8 +5147,10 @@ def _incident_title(err: dict) -> str:
 # ── R1: diagnostic-command allowlist (log_cmd / test_cmd) ────────────────────
 # log_cmd is a UI-controlled string exec'd by the background scanner and the
 # /logs route. Even with shlex.split + exec (no shell), an unrestricted value is
-# arbitrary command execution. Restrict to a small set of read-only diagnostic
-# tools and forbid any shell metacharacters.
+# arbitrary command execution. Restrict to a fixed set of programs and forbid any
+# shell metacharacters. The set is NOT read-only: it holds interpreters and `docker`
+# by design (a test runner needs `python`), so this is a guard against sloppy or
+# injected values, not a sandbox - the authenticated operator already has a shell.
 _DIAG_CMD_FORBIDDEN = set(";|&$`><(){}\n\r")
 _DIAG_CMD_ALLOWED = {
     "journalctl", "docker", "tail", "head", "cat", "grep",
@@ -5200,14 +5202,40 @@ def _is_trusted_diag_script(token: str) -> bool:
     return False
 
 
+def _is_allowlisted_diag_program(token: str) -> bool:
+    """True if the first token of a diagnostic command really IS an allowlisted program.
+
+    spec-096 P3.5: this used to test only `os.path.basename(token)`, but the command is exec'd
+    with the FULL token, so `/tmp/tail -f x` passed on the strength of its file name. The token
+    now has to be one of:
+      - a bare allowlisted name (`tail`): exec resolves it through PATH;
+      - an ABSOLUTE path to the very file that bare name resolves to (`/usr/bin/tail`; compared
+        by realpath so `/bin/tail` on a merged-/usr host still works);
+      - a PROJECT-RELATIVE path with no `..` and an allowlisted basename
+        (`venv/bin/python -m pytest`, `.venv/bin/pytest`): it is resolved against the project (or
+        the cockpit) directory, i.e. code the operator already runs.
+    Anything else (an absolute path elsewhere, `../x/tail`) fails; wrapper scripts under
+    DIAG_CMD_ALLOW_DIRS are accepted separately by `_is_trusted_diag_script`.
+    """
+    name = os.path.basename(token)
+    if name not in _DIAG_CMD_ALLOWED:
+        return False
+    if "/" not in token:
+        return True
+    if os.path.isabs(token):
+        resolved = shutil.which(name)
+        return bool(resolved) and os.path.realpath(token) == os.path.realpath(resolved)
+    return ".." not in token.split("/")
+
+
 def _validate_diag_cmd(cmd: str) -> bool:
     """True if `cmd` is a safe diagnostic command (log_cmd / test_cmd).
 
     Empty → True (unset). Otherwise: a trailing benign stderr redirect is
     stripped, no shell metacharacters may remain, and the first token must
-    either be a known-safe tool by basename (e.g. `journalctl -u <unit>`,
-    `tail -f <file>`, `venv/bin/python -m pytest`) OR an operator-trusted
-    wrapper script under `DIAG_CMD_ALLOW_DIRS`.
+    either be an allowlisted program (`_is_allowlisted_diag_program`: e.g.
+    `journalctl -u <unit>`, `tail -f <file>`, `venv/bin/python -m pytest`) OR an
+    operator-trusted wrapper script under `DIAG_CMD_ALLOW_DIRS`.
     """
     if not cmd or not cmd.strip():
         return True
@@ -5222,7 +5250,7 @@ def _validate_diag_cmd(cmd: str) -> bool:
         return False
     if not parts:
         return False
-    if os.path.basename(parts[0]) in _DIAG_CMD_ALLOWED:
+    if _is_allowlisted_diag_program(parts[0]):
         return True
     return _is_trusted_diag_script(parts[0])
 

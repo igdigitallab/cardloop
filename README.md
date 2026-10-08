@@ -400,8 +400,13 @@ exposing it to a network.
   per-user isolation.
 - **An authenticated session can read the decrypted secret vault.** By design — the vault's
   confidentiality reduces to your login (password + TOTP) and the session cookie.
-- **`log_cmd` is allowlisted.** Diagnostic commands are restricted to a safe set (journalctl/docker/tail/…)
-  with shell metacharacters rejected — no arbitrary command execution through settings.
+- **`log_cmd` / `test_cmd` are allowlisted, not sandboxed.** They run without a shell (shell metacharacters
+  are rejected) and only for a fixed list of programs (journalctl, docker, tail, head, cat, grep, pytest,
+  python, npm, make, cargo, go), given as a bare name, as the full path of the same file the bare name
+  resolves to, or as a project-relative path such as `venv/bin/python`; wrapper scripts only from
+  directories you list in `DIAG_CMD_ALLOW_DIRS`. The list includes interpreters and `docker` on purpose, so
+  this guards against mistakes and injected values — it is not a boundary: the authenticated operator
+  already has a shell.
 - **The global file browser excludes** `~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.config/claude-ops`, and `.env*`.
 - **Put it behind HTTPS.** Set `WEB_COOKIE_SECURE=true` whenever you're not on `localhost`. Behind a
   reverse proxy, set `TRUSTED_PROXIES` (CSV of proxy IPs/CIDRs) so the login rate-limiter sees real
