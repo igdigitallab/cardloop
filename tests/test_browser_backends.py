@@ -705,3 +705,48 @@ async def test_the_probe_is_a_no_op_when_every_page_answers(monkeypatch):
         assert await _backends._prune_dead_targets(f"http://127.0.0.1:{port}/cdp", {}) == 0
     finally:
         await runner.cleanup()
+
+
+# ─────────────── CodeQL py/partial-ssrf: a profile id is ONE path segment ───────────────
+#
+# default_profile / per_project_profile are operator-editable config and every Manager
+# request carries the bearer token. A raw id with "../" or "?" re-aims the request
+# (the HTTP client normalises dot-segments and a "?" turns the rest into a query).
+
+def _record_manager_paths(monkeypatch):
+    seen = []
+
+    async def fake_req(method, path):
+        seen.append((method, path))
+        return {}
+    monkeypatch.setattr(_backends, "_manager_request", fake_req)
+    return seen
+
+
+async def test_profile_id_cannot_leave_its_path_segment(monkeypatch):
+    seen = _record_manager_paths(monkeypatch)
+    await _backends.launch_profile("a/../../admin?x=1#frag")
+    await _backends.stop_profile("a b/c")
+    assert seen == [
+        ("POST", "/api/profiles/a%2F..%2F..%2Fadmin%3Fx%3D1%23frag/launch"),
+        ("POST", "/api/profiles/a%20b%2Fc/stop"),
+    ]
+
+
+@pytest.mark.parametrize("bad", ["", ".", ".."])
+async def test_dot_segment_profile_ids_are_refused(monkeypatch, bad):
+    seen = _record_manager_paths(monkeypatch)
+    for call in (_backends.launch_profile, _backends.stop_profile, _backends.profile_cdp_url):
+        with pytest.raises(_backends.BackendError):
+            await call(bad)
+    assert seen == []  # nothing reached the Manager
+
+
+async def test_ordinary_profile_ids_are_unchanged(monkeypatch):
+    seen = _record_manager_paths(monkeypatch)
+    await _backends.launch_profile("google-id")
+    await _backends.launch_profile("3f2b8c1e-0d4a-4e8b-9a77-5c1d2e3f4a5b")
+    assert [p for _, p in seen] == [
+        "/api/profiles/google-id/launch",
+        "/api/profiles/3f2b8c1e-0d4a-4e8b-9a77-5c1d2e3f4a5b/launch",
+    ]

@@ -28,6 +28,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import modules as _modules
 
@@ -594,12 +595,28 @@ async def list_profiles() -> list[dict]:
     return [p for p in out if p["id"]]
 
 
+def _profile_path(profile_id: str, action: str) -> str:
+    """``/api/profiles/<id>/<action>`` with the id held to ONE path segment.
+
+    The id comes from operator-editable config (``default_profile`` /
+    ``per_project_profile``), and every Manager request carries its bearer token. Left raw,
+    an id such as ``../x`` is normalised away by the HTTP client and ``a?b=1`` swallows the
+    rest of the path into a query, so the request lands on a Manager endpoint nobody picked.
+    Quoting keeps ``/ ? #`` inside the segment (a legitimate id is unchanged); ``.`` and
+    ``..`` survive quoting as dot-segments, so they are refused outright.
+    """
+    pid = str(profile_id)
+    if pid in ("", ".", ".."):
+        raise BackendError(f"Invalid Cloak Manager profile id {pid!r}.")
+    return f"/api/profiles/{quote(pid, safe='')}/{action}"
+
+
 async def launch_profile(profile_id: str) -> dict:
-    return await _manager_request("POST", f"/api/profiles/{profile_id}/launch")
+    return await _manager_request("POST", _profile_path(profile_id, "launch"))
 
 
 async def stop_profile(profile_id: str) -> dict:
-    return await _manager_request("POST", f"/api/profiles/{profile_id}/stop")
+    return await _manager_request("POST", _profile_path(profile_id, "stop"))
 
 
 async def profile_cdp_url(profile_id: str) -> str:
@@ -609,7 +626,7 @@ async def profile_cdp_url(profile_id: str) -> str:
     the CDP host (``manager_cdp_base()``) so Playwright gets an absolute endpoint."""
     with contextlib.suppress(BackendError):
         await launch_profile(profile_id)
-    data = await _manager_request("GET", f"/api/profiles/{profile_id}/cdp")
+    data = await _manager_request("GET", _profile_path(profile_id, "cdp"))
     url = ""
     if isinstance(data, dict):
         url = data.get("cdp_url") or data.get("url") or data.get("webSocketDebuggerUrl") or ""
