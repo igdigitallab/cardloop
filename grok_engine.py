@@ -407,8 +407,8 @@ def _cockpit_secret_paths() -> list[str]:
 
 
 def _project_secret_paths(ctx: dict | None = None) -> list[str]:
-    """Secret stores of EVERY registered project (the `cwd` of each record in data/topics.json): its `.env` and its
-    `.claude-ops/secrets/` directory, those that exist. `**/.env` and `**/secrets.env` are anchored at the
+    """Secret stores of EVERY registered project (the `cwd` of each record in data/topics.json): its `.env`, its
+    `.env.*` variants (not `.env.example`) and its `.claude-ops/secrets/` directory, those that exist. `**/.env` and `**/secrets.env` are anchored at the
     workspace, so from a chat in project A the secrets of project B — and, in a chat rooted at `$HOME`, of every
     project — were readable (review-spec095-security #4). A project's own stores are listed too: the profile has
     no cwd, and the globs already hide them from their own project.
@@ -445,6 +445,17 @@ def _project_secret_paths(ctx: dict | None = None) -> list[str]:
             if _is_glob(path) or any(os.path.islink(step) for step in steps) or not os.path.lexists(path):
                 continue
             out.append(path)
+        # `.env.local`, `.env.production`, `.env.bak-<date>`: as secret as `.env`, and `**/.env` does not match
+        # them. Regular files only (a symlink is the planted-target case above); `.env.example` ships in git.
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for n in names:
+            path = os.path.join(root, n)
+            if (n.startswith(".env.") and n != ".env.example" and not _is_glob(path)
+                    and not os.path.islink(path) and os.path.isfile(path)):
+                out.append(path)
     return out
 
 

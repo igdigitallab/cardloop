@@ -2753,6 +2753,24 @@ def test_every_registered_projects_secret_stores_are_denied_from_every_other_pro
     assert str(a / ".env") in info["deny"]
 
 
+def test_a_registered_projects_dotenv_variants_are_denied_but_not_its_example(env):
+    # spec-096: `.env.local` / `.env.production` / `.env.bak-<date>` of another project are as secret as its
+    # `.env`; `.env.example` is a template that ships in git. A symlinked variant is skipped (a model could
+    # plant `.env.local -> $HOME`).
+    a = env.tmp / "proj-a"
+    a.mkdir()
+    for name in (".env.local", ".env.production", ".env.bak-2026-10-01", ".env.example"):
+        (a / name).write_text("X=1")
+    (a / ".env.planted").symlink_to(env.tmp)
+    (a / ".env.dir").mkdir()
+    _register_projects(env, A=a)
+    deny, _ = grok_engine.build_deny(env.home, env.ctx)
+    for name in (".env.local", ".env.production", ".env.bak-2026-10-01"):
+        assert str(a / name) in deny, name
+    for name in (".env.example", ".env.planted", ".env.dir"):
+        assert str(a / name) not in deny, name
+
+
 async def test_a_project_still_runs_with_its_own_secret_stores_on_the_deny_list(env):
     # the profile has no cwd: A's own .env is on it too (as `**/.env` always was) and must not refuse A's turn
     (env.cwd / ".env").write_text("A=1")
