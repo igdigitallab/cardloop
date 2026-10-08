@@ -62,6 +62,7 @@ async def _deliver(ctx: dict, alert: Alert) -> None:
     text = f"{alert.title}\n{alert.body}"
     out: "dict[str, str]" = {}
     reached = {"inbox": False, "toast": False, "push": False}     # did this leg hand the alert to anything?
+    push_subs = 0
     try:
         inbox = Path(ctx["DATA"]) / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
@@ -102,13 +103,24 @@ async def _deliver(ctx: dict, alert: Alert) -> None:
                     out["push"] = (f"attempted for {subs} subscription(s), no delivery receipts"
                                    if subs else "no subscribers")
                     reached["push"] = bool(subs)
+                    push_subs = subs
         except Exception as exc:
             out["push"] = f"FAILED {exc!r}"
     # The headline is the OBSERVED outcome. A loud alert exists to tell a person, so only a toast that
-    # was queued for an open tab or a push attempted for a subscriber counts (a file in the inbox is the
-    # record, not the notification); the quiet notice's only channel IS the inbox file.
-    ok = (reached["toast"] or reached["push"]) if alert.loud else reached["inbox"]
-    _jr.say(f"{_jr.PREFIX} {'delivered' if ok else 'NOT delivered to anyone'} ({'loud' if alert.loud else 'quiet'}): "
+    # was queued for an open tab or a push handed to a subscriber counts as an attempt to reach one (a
+    # file in the inbox is the record, not the notification); the quiet notice's only channel IS the
+    # inbox file. "Delivered" is claimed only for the toast, which is queued onto a connection that is
+    # open right now; a push has no receipt (the service swallows per-device failures, and a dead
+    # subscription looks exactly like a live one), so it is reported as sent, not as delivered.
+    if not alert.loud:
+        headline = "delivered" if reached["inbox"] else "NOT delivered to anyone"
+    elif reached["toast"]:
+        headline = "delivered"
+    elif reached["push"]:
+        headline = f"push sent to {push_subs} subscriber(s), delivery not confirmed"
+    else:
+        headline = "NOT delivered to anyone"
+    _jr.say(f"{_jr.PREFIX} {headline} ({'loud' if alert.loud else 'quiet'}): "
             + ", ".join(f"{k} {v}" for k, v in out.items()))
 
 
