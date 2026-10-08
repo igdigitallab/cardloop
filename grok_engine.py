@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import AsyncGenerator, Callable, NamedTuple
 
 import fsutil
+import grok_jsonl
 import runtime_secrets as _rs
 
 PROVIDER = "grok"
@@ -73,6 +74,7 @@ SANDBOX_PROBE_FAIL_TTL_SEC = 15 * 60.0
 STREAM_LIMIT = 16 * 1024 * 1024  # asyncio's 64 KiB default dies on one big tool-output line
 STDERR_RING_BYTES = 4096
 RULES_MAX_BYTES = 24 * 1024
+AUTH_MAX_BYTES = 256 * 1024    # a real auth.json is < 4 KiB; the model's shell can write the file, so it is capped
 LIMIT_ERROR_MAX_CHARS = 8000
 
 _AUTH_HINT = "Grok sign-in expired — run `tools/grok-acct login`"
@@ -737,9 +739,14 @@ def reap_litter(home: Path, own_pid: int | None = None) -> list[str]:
 def read_auth_facts(home: Path) -> dict:
     """{present, oidc, retention_opt_out, email} from <home>/auth.json. Secrets never leave."""
     facts = {"present": False, "oidc": False, "retention_opt_out": False, "email": None}
+    # auth.json sits in the model-writable home: a capped, O_NOFOLLOW, regular-file-only read (a multi-GB file
+    # or a FIFO planted under the name would otherwise OOM / hang the cockpit). Unreadable = not signed in.
+    raw = grok_jsonl.read_small(home / "auth.json", AUTH_MAX_BYTES)
+    if raw is None:
+        return facts
     try:
-        data = json.loads((home / "auth.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
         return facts
     if not isinstance(data, dict):
         return facts

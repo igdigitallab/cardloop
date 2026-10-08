@@ -1019,6 +1019,39 @@ def test_read_auth_facts_survives_garbage(env, content):
     assert facts["oidc"] is False and facts["retention_opt_out"] is False
 
 
+def test_read_auth_facts_refuses_an_oversize_auth_json(env):
+    # review-spec095-security #3: auth.json is writable by the model's shell and was slurped uncapped on every
+    # turn / probe / doctor run. Valid JSON one byte past the cap reads as "unreadable", never as a login.
+    cap = grok_engine.AUTH_MAX_BYTES
+    body = json.dumps({"https://auth.x.ai::c": {"auth_mode": "oidc", "coding_data_retention_opt_out": True,
+                                                 "email": "user@example.invalid"}})
+    (env.home / "auth.json").write_text(body + " " * (cap + 1 - len(body)))
+    assert (env.home / "auth.json").stat().st_size == cap + 1
+    assert grok_engine.read_auth_facts(env.home)["present"] is False
+    (env.home / "auth.json").write_text(body + " " * (cap - len(body)))          # exactly the cap: still fine
+    assert grok_engine.read_auth_facts(env.home)["oidc"] is True
+
+
+def test_read_auth_facts_never_follows_a_symlink(env):
+    real = env.tmp / "elsewhere.json"
+    real.write_text((env.home / "auth.json").read_text())
+    (env.home / "auth.json").unlink()
+    (env.home / "auth.json").symlink_to(real)
+    assert grok_engine.read_auth_facts(env.home)["present"] is False
+
+
+def test_read_auth_facts_does_not_block_on_a_fifo_planted_as_auth_json(env):
+    import threading
+    (env.home / "auth.json").unlink()
+    os.mkfifo(env.home / "auth.json")
+    out = []
+    t = threading.Thread(target=lambda: out.append(grok_engine.read_auth_facts(env.home)), daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "read_auth_facts blocked on a FIFO (it runs on the cockpit's event loop)"
+    assert out[0]["present"] is False
+
+
 # ------------------------------------------------------------------------------------------
 # provider_info / capabilities
 # ------------------------------------------------------------------------------------------
