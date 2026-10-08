@@ -105,7 +105,12 @@ def test_get_without_any_scrub_is_plain_environ(monkeypatch):
 
 @pytest.fixture
 def scrubbed(monkeypatch):
-    """The real os.environ carrying a value for every secret, then scrubbed like bot.py does."""
+    """The real os.environ carrying a value for every secret, then scrubbed like bot.py does. Secret-looking
+    names the runner itself carries (an agent shell started by an older cockpit inherits its secrets) are
+    removed first, so `removed` is exactly LISTED wherever the suite runs."""
+    for name in list(os.environ):
+        if rs.is_secret_name(name):
+            monkeypatch.delenv(name)
     for name, value in LISTED.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv(rs.PASSTHROUGH_VAR, raising=False)
