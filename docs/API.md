@@ -2,6 +2,11 @@
 
 # Cardloop HTTP API Reference
 
+> This guide covers the main flows by hand. **The complete route index — every method and path the
+> server registers, with its auth requirement and handler — is [API-routes.md](API-routes.md)**,
+> generated from the live router (`venv/bin/python tools/gen_route_index.py`) and checked by a test,
+> so it cannot drift.
+
 Backend: `aiohttp`, port `WEB_PORT` (default `8787`).
 
 **Auth:** All `/api/*` endpoints require a valid `cops_auth` cookie (scrypt-derived from `WEB_PASSWORD`)

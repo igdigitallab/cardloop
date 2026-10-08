@@ -455,7 +455,8 @@ manual steps → [CONTRIBUTING.md](CONTRIBUTING.md).
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Code map: where to find what, flow diagram |
 | [CLAUDE.md](CLAUDE.md) | Working rules and gotchas for agents |
-| [docs/API.md](docs/API.md) | HTTP API reference |
+| [docs/API.md](docs/API.md) | HTTP API reference — the main flows, written by hand |
+| [docs/API-routes.md](docs/API-routes.md) | Complete HTTP route index (every method + path, auth, handler) — generated from the live router, drift-tested |
 | [docs/notifications.md](docs/notifications.md) | Run-finished notifications (in-app + Web Push) — setup & troubleshooting |
 | [docs/browser.md](docs/browser.md) | Live browser pane — backends (built-in / CloakBrowser / Cloak Manager), co-control, safety gate |
 | [docs/remote-access.md](docs/remote-access.md) | `--tunnel` quick tunnel vs. Tailscale vs. named Cloudflare Tunnel — which to use when |
