@@ -9570,7 +9570,7 @@ async def api_search(req: web.Request) -> web.Response:
                     break
                 rows = await loop.run_in_executor(
                     None, lambda p=project: _grok_history.search_sessions(
-                        q, p["cwd"], limit=limit - len(hits), grok_home=grok_home))
+                        q, p["cwd"], limit=limit - len(hits), grok_home=grok_home, data_dir=ctx["DATA"]))
                 for row in rows:
                     hits.append({
                         "project_id": project["id"], "project_name": project["name"],
@@ -12631,7 +12631,7 @@ async def api_project_sessions(req: web.Request) -> web.Response:
             active_grok = providers.get("grok").resume_id(active_chat)
             rows = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: _grok_history.list_sessions(
-                    project["cwd"], limit=30, grok_home=_grok.grok_home(ctx)))
+                    project["cwd"], limit=30, grok_home=_grok.grok_home(ctx), data_dir=ctx["DATA"]))
             labels = _load_session_labels(ctx)
             sessions = [{
                 "session_id": row.get("id"), "grok_session_id": row.get("id"),
@@ -12926,7 +12926,7 @@ async def _grok_session_messages(ctx: dict, cwd: str, session_id: str, *,
 
     def _read():
         rows = _grok_history.history_messages(
-            session_id, cwd, grok_home=home, limit=limit, format_tool=_format_tool)
+            session_id, cwd, grok_home=home, limit=limit, format_tool=_format_tool, data_dir=data_dir)
         info = _grok_history.session_context(session_id, cwd, grok_home=home)
         return rows, info, _grok_sends.sent_fingerprints(data_dir, session_id)
 

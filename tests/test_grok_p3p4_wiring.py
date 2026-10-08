@@ -336,16 +336,18 @@ async def test_every_endpoint_finds_the_grok_home_from_the_cockpits_ctx_not_the_
     aiohttp_client, fake_ctx, app, cwd, grok_on, monkeypatch
 ):
     monkeypatch.delenv("GROK_HOME", raising=False)
-    # the HOME must come from the ctx, so the environment's data dir is a DIFFERENT one (it only carries the
-    # session->cwd records the readers look up by convention: webapp passes no data_dir)
+    # the HOME must come from the ctx, so the environment's data dir is a DIFFERENT one. The session->cwd records
+    # live where the ENGINE writes them (ctx["DATA"]) and webapp hands that same dir to the readers.
     other = fake_ctx["DATA"].parent / "env-data"
     other.mkdir()
     monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(other))
     ctx_home = grok_engine.grok_home(fake_ctx)       # next to DATA, derived from the ctx
     assert ctx_home != grok_engine.grok_home()
     (ctx_home / "sessions").mkdir(parents=True)
-    put_session(ctx_home, cwd, SID1, chat=[q("never touch webapp.py"), a("ok")], summary=summ())
-    put_session(ctx_home, cwd, SID2, chat=[q("flux capacitor notes")], summary=summ())
+    put_session(ctx_home, cwd, SID1, chat=[q("never touch webapp.py"), a("ok")], summary=summ(), bound=False)
+    put_session(ctx_home, cwd, SID2, chat=[q("flux capacitor notes")], summary=summ(), bound=False)
+    for sid in (SID1, SID2):
+        assert grok_engine.record_session_binding(fake_ctx["DATA"], sid, cwd)
     _seed_chat(fake_ctx, provider="grok", grok_session_id=SID1)
 
     async def noop(ctx):
