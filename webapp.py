@@ -14108,6 +14108,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         _q_backend = ""
         _q_armed: "dict | None" = None
         _chat_seen = False   # the chat record was found (even if a later step then failed)
+        _chat_now: "tuple[str, str] | None" = None   # the chat's CURRENT (provider, backend)
         if _project_id:
             try:
                 async with _chats_lock():
@@ -14118,6 +14119,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                     if _tc is not None:
                         _resolved_chat_id = _tc["id"]
                         _chat_seen = True
+                        _chat_now = (_chat_provider(_tc), str(_tc.get("backend") or ""))
                         # spec-092 item 3: an item enqueued with a pinned runtime executes
                         # on THAT provider/model, not whatever the chat record says NOW — the
                         # measured bug this replaces is exactly this re-read: the chat's
@@ -14329,13 +14331,23 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # direct path. Both halves of that (the silent loss AND the misdelivery) are the
         # failure this phase exists to prevent.
         if isinstance(_q_armed, dict) and _handoff_is_stale(_q_armed, provider, _q_backend):
-            print(f"[handoff] {session_key}: queued turn runs on "
-                  f"{provider!r}/{_q_backend!r}, block was armed for "
-                  f"{_q_armed.get('for_provider')!r}/{_q_armed.get('for_backend')!r} — dropping")
-            _drop_runtime_handoff(ctx, {"id": _project_id}, _resolved_chat_id)
+            # Not for THIS run. Whether it is dead depends on the CHAT, not on the run: a pinned
+            # message of the OLD provider can drain after the operator switched the chat and armed
+            # a block for the NEW one, and that block is waiting for the next matching turn.
+            if _chat_now is None or _handoff_is_stale(_q_armed, *_chat_now):
+                print(f"[handoff] {session_key}: queued turn runs on "
+                      f"{provider!r}/{_q_backend!r}, block was armed for "
+                      f"{_q_armed.get('for_provider')!r}/{_q_armed.get('for_backend')!r} — dropping")
+                _drop_runtime_handoff(ctx, {"id": _project_id}, _resolved_chat_id)
+            else:
+                print(f"[handoff] {session_key}: queued turn runs on "
+                      f"{provider!r}/{_q_backend!r}; the block armed for "
+                      f"{_q_armed.get('for_provider')!r} is for the chat's current runtime — kept")
             _q_armed = None
+        _q_handoff_sent = False
         if isinstance(_q_armed, dict) and (_q_armed.get("text") or "").strip():
             effective_prompt = _q_armed["text"].strip() + "\n\n" + effective_prompt
+            _q_handoff_sent = True
             print(f"[handoff] {session_key}: delivering {len(_q_armed['text'])} chars to a "
                   f"queued turn ({_q_armed.get('from_label')} → {_q_armed.get('to_label')})")
 
@@ -14425,7 +14437,10 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                         # handoff proven delivered (same rule as the direct
                                         # path; clearing at injection time would lose it on a
                                         # turn that died before the engine ever read it).
-                                        if _wc.pop("runtime_handoff", None) is not None:
+                                        # Only a block THIS turn carried: one kept for the
+                                        # chat's other runtime (above), or armed since the
+                                        # drain began, is still waiting for its own turn.
+                                        if _q_handoff_sent and _wc.pop("runtime_handoff", None) is not None:
                                             print(f"[handoff] {session_key}: delivered on a "
                                                   f"queued turn, cleared")
                                         _save_chats(ctx, _wd)

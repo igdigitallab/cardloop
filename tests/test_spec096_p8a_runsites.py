@@ -374,3 +374,69 @@ async def test_the_same_card_runs_on_the_gated_provider_once_the_gate_is_open(
     cols = await _run_gated_card(fake_ctx, tmp_path, gate_open=True)
     assert _runs(engines) == {**NOTHING, "gated": 1}
     assert not cols["failed"]
+
+
+# ═════════════════════════ item 13a: a pinned old-provider drain and the armed handoff ═══════
+
+
+def _armed(for_provider, text="BLOCK"):
+    return {"text": text, "for_provider": for_provider, "for_backend": "",
+            "from_label": "A", "to_label": "B"}
+
+
+async def _grok_pinned_item_after_the_chat_moved_to(fake_ctx, new_provider, *, armed_for):
+    """A message accepted on a Grok chat; before it drains the operator switches the chat to
+    `new_provider` and commits a handoff armed for `armed_for`."""
+    _seed_chat(fake_ctx, provider="grok", grok_session_id="GROK-OLD")
+    pinned = _webapp._pin_chat_runtime(fake_ctx, {"id": PROJECT_ID}, CHAT_ID)
+    assert pinned["provider"] == "grok"
+    _seed_chat(fake_ctx, provider=new_provider, model="opus" if new_provider == "claude" else "gpt-5.6-sol",
+               grok_session_id="GROK-OLD", session_id="CLAUDE-OWN",
+               runtime_handoff=_armed(armed_for, "BLOCK-FOR-" + armed_for.upper()))
+    await _drain_item(fake_ctx, chat_id=CHAT_ID, project_id=PROJECT_ID, pinned_runtime=pinned)
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_old_provider_drain_leaves_the_handoff_armed_for_the_chats_new_provider(
+    fake_ctx, engines, grok_on
+):
+    await _grok_pinned_item_after_the_chat_moved_to(fake_ctx, "claude", armed_for="claude")
+
+    assert [len(engines[k]) for k in ("claude", "codex", "grok")] == [0, 0, 1], "the pin ran on Grok"
+    assert "BLOCK-FOR-CLAUDE" not in engines["grok"][0]["prompt"], "a block for Claude is not Grok's"
+    rec = _chat_record(fake_ctx)
+    assert rec["runtime_handoff"]["text"] == "BLOCK-FOR-CLAUDE", "the NEW provider's block was lost"
+    assert rec["runtime_handoff"]["for_provider"] == "claude"
+    assert rec["grok_session_id"] == "NEW-ID" and rec["provider"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_drain_still_drops_a_block_that_is_stale_for_the_chat_itself(
+    fake_ctx, engines, grok_on, codex_on
+):
+    """Control: a block armed for neither the pinned run nor the chat's current runtime (the
+    operator flipped away and back before sending) is dead and goes."""
+    await _grok_pinned_item_after_the_chat_moved_to(fake_ctx, "claude", armed_for="codex")
+    assert [len(engines[k]) for k in ("claude", "codex", "grok")] == [0, 0, 1]
+    assert "BLOCK-FOR-CODEX" not in engines["grok"][0]["prompt"]
+    assert "runtime_handoff" not in _chat_record(fake_ctx)
+
+
+@pytest.mark.asyncio
+async def test_a_drain_never_clears_a_block_it_did_not_deliver(fake_ctx, engines, grok_on):
+    """A block armed while the turn was already running (nothing was armed at drain start) is for
+    the NEXT turn: answering this one must not delete it."""
+    _seed_chat(fake_ctx, provider="grok", grok_session_id="GROK-OLD")
+    inner = fake_ctx["run_grok_engine"]
+
+    async def engine(**kw):
+        data = _webapp._load_chats(fake_ctx)
+        data[PROJECT_ID]["chats"][0]["runtime_handoff"] = _armed("grok", "ARMED-MID-TURN")
+        _webapp._save_chats(fake_ctx, data)
+        async for ev in inner(**kw):
+            yield ev
+
+    fake_ctx["run_grok_engine"] = engine
+    await _drain_item(fake_ctx, chat_id=CHAT_ID, project_id=PROJECT_ID,
+                      pinned_runtime={"provider": "grok", "model": "grok-4.7"})
+    assert _chat_record(fake_ctx)["runtime_handoff"]["text"] == "ARMED-MID-TURN"
