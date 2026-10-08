@@ -60,11 +60,22 @@ def group_name(cwd: str) -> str:
     return urllib.parse.quote(cwd, safe="")
 
 
+def bind(sid: str, cwd: str) -> None:
+    """What the engine does at the handshake: record the cwd the session was started in. The readers only show
+    sessions the cockpit vouches for, so every builder below binds, into the data dir the fixtures point
+    `_CARDLOOP_DATA_DIR` at (no env var: nothing is written, so a test can never touch the real data dir)."""
+    data = os.environ.get("_CARDLOOP_DATA_DIR")
+    if data:
+        assert grok_engine.record_session_binding(Path(data), sid, cwd)
+
+
 def put_session(home: Path, cwd: str, sid: str, chat: "bytes | list | None" = None, *,
                 summary: "dict | None" = None, signals: "dict | None" = None,
-                group: "str | None" = None) -> Path:
+                group: "str | None" = None, bound: bool = True) -> Path:
     sdir = home / "sessions" / (group or group_name(cwd)) / sid
     sdir.mkdir(parents=True, exist_ok=True)
+    if bound:
+        bind(sid, cwd)
     if chat is not None:
         (sdir / "chat_history.jsonl").write_bytes(chat if isinstance(chat, bytes) else jl(*chat))
     if summary is not None:
@@ -83,15 +94,19 @@ def msgs(home, sid=SID, cwd=CWD, **kw):
 
 
 @pytest.fixture
-def home(tmp_path) -> Path:
+def home(tmp_path, monkeypatch) -> Path:
     h = tmp_path / "grokhome"
     (h / "sessions").mkdir(parents=True)
+    data = tmp_path / "data"
+    data.mkdir(exist_ok=True)
+    monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(data))
     return h
 
 
 def install_real(home: Path, name: str, sid: str, cwd: str = CWD) -> Path:
     sdir = home / "sessions" / group_name(cwd) / sid
     shutil.copytree(FIXTURES / name, sdir)
+    bind(sid, cwd)
     return sdir
 
 
@@ -739,6 +754,8 @@ def test_missing_home_or_sessions_dir_is_empty(tmp_path):
 def test_default_home_follows_the_engines_grok_home(tmp_path, monkeypatch):
     h = tmp_path / "engine-home"
     (h / "sessions").mkdir(parents=True)
+    (tmp_path / "data").mkdir()
+    monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(tmp_path / "data"))
     put_session(h, CWD, SID, [q("via engine home")])
     monkeypatch.setenv("GROK_HOME", str(h))
     assert [m["text"] for m in gh.history_messages(SID, CWD)] == ["via engine home"]
@@ -1275,3 +1292,74 @@ def test_search_docs_survive_a_session_whose_history_vanished(home):
 def test_default_search_budget_is_bounded():
     assert 0 < gh.SEARCH_TOTAL_BYTES <= 64 * 1024 * 1024
     assert gh.SEARCH_READ_BYTES <= gh.SEARCH_TOTAL_BYTES and gh.MAX_READ_BYTES <= 128 * 1024 * 1024
+
+
+# ------------------------------------------------------------------------------------------
+# spec-096 P8 (review-spec095-readers F3): GROK_HOME is writable by the model's shell, so a turn in project B can
+# plant a session under project A's group. A session is shown for a cwd only if the COCKPIT vouches for it.
+# ------------------------------------------------------------------------------------------
+
+CWD_A = "/scratch/projA"
+CWD_B = "/scratch/projB"
+PLANT = "01ffffff-ffff-7fff-8fff-ffffffffffff"          # sorts above every real UUIDv7: pinned to the top
+
+
+@pytest.fixture
+def vouched(home, tmp_path):
+    """The data dir the readers resolve by convention (as webapp's call sites do), and the send ledger."""
+    import grok_sends
+    return tmp_path / "data", grok_sends
+
+
+def _planted(home, cwd, sid, text="planted by a shell in another project"):
+    put_session(home, cwd, sid, [q(text), a("I am the history now")], summary=summ(session_summary=text), bound=False)
+
+
+def test_a_session_nobody_vouches_for_is_not_listed_searched_or_read_for_a_project(home, vouched):
+    data, sends = vouched
+    put_session(home, CWD_A, SID, [q("real question"), a("real answer")], summary=summ(session_summary="real"))
+    assert sends.record(data, SID, "real question")                              # the cockpit sent a prompt into it
+    _planted(home, CWD_A, PLANT)
+    ids = [r["id"] for r in gh.list_sessions(CWD_A, grok_home=home)]
+    assert ids == [SID]
+    assert [d["id"] for d in gh.iter_search_docs(CWD_A, grok_home=home)] == [SID]
+    assert [r["id"] for r in gh.search_sessions("planted", CWD_A, grok_home=home)] == []
+    assert gh.history_messages(PLANT, CWD_A, grok_home=home) == []
+    assert [m["role"] for m in gh.history_messages(SID, CWD_A, grok_home=home)] == ["user", "assistant"]
+
+
+def test_the_copy_of_another_projects_real_session_is_not_that_projects_history(home, vouched):
+    data, sends = vouched
+    import grok_engine
+    put_session(home, CWD_B, SID, [q("B secret plan"), a("B answer")], summary=summ(session_summary="B work"))
+    assert grok_engine.record_session_binding(data, SID, CWD_B)                  # the engine saw it born in B
+    sends.record(data, SID, "B secret plan")
+    _planted(home, CWD_A, SID, text="forged tale filed under A")                 # the SAME id, copied under A's group
+    assert [r["id"] for r in gh.list_sessions(CWD_B, grok_home=home)] == [SID]
+    assert gh.list_sessions(CWD_A, grok_home=home) == []
+    assert gh.history_messages(SID, CWD_A, grok_home=home) == []
+    assert gh.search_sessions("forged", CWD_A, grok_home=home) == []
+    assert gh.history_messages(SID, CWD_B, grok_home=home)[0]["text"] == "B secret plan"
+
+
+def test_planted_sessions_cannot_push_real_ones_out_of_the_listing_window(home, vouched, monkeypatch):
+    data, sends = vouched
+    monkeypatch.setattr(gh, "MAX_SESSIONS_PER_CWD", 3)
+    put_session(home, CWD_A, SID, [q("mine"), a("yes")], summary=summ())
+    for i in range(10):                                                         # ten future-dated plants
+        _planted(home, CWD_A, f"01fffff{i}-ffff-7fff-8fff-ffffffffffff")
+    assert [r["id"] for r in gh.list_sessions(CWD_A, grok_home=home)] == [SID]
+
+
+def test_a_session_that_predates_the_binding_is_vouched_for_by_the_send_ledger(home, vouched):
+    data, sends = vouched
+    put_session(home, CWD_A, SID2, [q("old"), a("old")], summary=summ(), bound=False)
+    assert gh.list_sessions(CWD_A, grok_home=home) == []                        # no witness at all: hidden
+    sends.record(data, SID2, "old")
+    assert [r["id"] for r in gh.list_sessions(CWD_A, grok_home=home)] == [SID2]  # pre-binding era: the ledger counts
+
+
+def test_session_exists_is_not_filtered_by_the_witness(home, vouched):
+    # the run sites use it to decide whether to RESUME: a stale-id drop must not follow a missing witness
+    put_session(home, CWD_A, SID3, [q("x"), a("y")], summary=summ(), bound=False)
+    assert gh.session_exists(SID3, CWD_A, grok_home=home) is True

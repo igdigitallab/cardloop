@@ -925,6 +925,80 @@ def _auth_problem(facts: dict, home: Path | None = None, ctx: dict | None = None
 
 
 # ------------------------------------------------------------------------------------------
+# session -> cwd binding (spec-096 P8: which project a session was really born in)
+# ------------------------------------------------------------------------------------------
+# GROK_HOME (and with it `sessions/<encoded cwd>/<id>/`) is writable by the model's shell, so a turn in project B
+# can create a session directory under project A's group - or copy B's own real one there - and A's list,
+# search and history would show it. The cockpit therefore records, in its own data dir (hidden from the shell),
+# the cwd every session was started or resumed in: `<DATA>/grok_sessions/<session-id>`, one JSON line
+# `{"cwd": ...}` per cwd. `grok_history` shows a session for a cwd only when this record (or, for a session
+# older than the record, the send ledger) vouches for it.
+SESSION_BINDINGS_DIR = "grok_sessions"
+BINDING_MAX_BYTES = 64 * 1024
+BINDING_MAX_CWDS = 64
+_SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_bindings_written: set = set()
+
+
+def _binding_path(data, session_id) -> "Path | None":
+    if not data or not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+        return None          # the strict UUID shape is also what keeps a hostile id out of the path
+    return Path(data) / SESSION_BINDINGS_DIR / session_id
+
+
+def _cwd_spellings(cwd: str) -> list[str]:
+    """The cwd as given plus its normalised and symlink-resolved forms (the readers match on any of them)."""
+    out = [cwd]
+    for alt in (os.path.normpath(cwd), os.path.realpath(cwd)):
+        if alt not in out:
+            out.append(alt)
+    return out
+
+
+def session_bound_cwds(data, session_id) -> frozenset:
+    """The cwds the cockpit started or resumed `session_id` in (empty: unknown, unreadable or malformed)."""
+    path = _binding_path(data, session_id)
+    if path is None:
+        return frozenset()
+    out: set = set()
+    for _off, row in grok_jsonl.iter_jsonl(path, max_bytes=BINDING_MAX_BYTES, max_line=8192, from_head=True):
+        cwd = row.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            out.add(cwd)
+        if len(out) >= BINDING_MAX_CWDS:
+            break
+    return frozenset(out)
+
+
+def record_session_binding(data, session_id, cwd) -> bool:
+    """Record that `session_id` was started or resumed in `cwd`. True when it is on disk afterwards. Blocking
+    IO (call from an executor); never raises. The write path is the send ledger's: O_NOFOLLOW|O_APPEND, dir 0700,
+    file 0600, strict UUID path component."""
+    try:
+        path = _binding_path(data, session_id)
+        if path is None or not isinstance(cwd, str) or not cwd or "\x00" in cwd:
+            return False
+        spellings = _cwd_spellings(cwd)
+        key = (str(data), session_id, cwd)
+        if key in _bindings_written:
+            return True
+        known = session_bound_cwds(data, session_id)
+        missing = [c for c in spellings if c not in known]
+        if missing:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                         | getattr(os, "O_CLOEXEC", 0), 0o600)
+            try:
+                os.write(fd, "".join(json.dumps({"cwd": c}) + "\n" for c in missing).encode("utf-8"))
+            finally:
+                os.close(fd)
+        _bindings_written.add(key)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+# ------------------------------------------------------------------------------------------
 # capabilities / provider_info
 # ------------------------------------------------------------------------------------------
 
@@ -2133,6 +2207,7 @@ async def _run_turn(
             if not session_id:
                 raise GrokProtocolError("session/new returned no sessionId")
             turn.session_id = session_id
+            await asyncio.get_running_loop().run_in_executor(None, record_session_binding, data, session_id, cwd)
             _log(f"handshake session {1000 * (time.monotonic() - t0):.0f} ms id={session_id}")
             await _apply_config(acp, session, session_id, selected_model, selected_effort)
         except _AcpTimeout as exc:

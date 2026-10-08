@@ -2695,6 +2695,44 @@ async def test_a_home_rooted_turn_says_so_in_the_journal(env, capsys):
     assert "exposure=home_rooted" not in capsys.readouterr().out
 
 
+SESSION_UUID = "01a00000-0000-7000-8000-00000000b0b0"
+
+
+async def test_the_engine_records_which_cwd_a_session_was_resumed_in(env):
+    # the readers show a session only for the cwd the COCKPIT started or resumed it in (grok_history.vouched)
+    env.fake("synthetic_resume")
+    await env.run(resume_session_id=SESSION_UUID)
+    assert grok_engine.session_bound_cwds(env.data, SESSION_UUID) == {str(env.cwd), os.path.realpath(env.cwd)}
+    assert stat.S_IMODE((env.data / grok_engine.SESSION_BINDINGS_DIR / SESSION_UUID).stat().st_mode) == 0o600
+    other = env.tmp / "another-project"
+    other.mkdir()
+    await env.run(resume_session_id=SESSION_UUID, cwd=str(other))
+    assert str(other) in grok_engine.session_bound_cwds(env.data, SESSION_UUID)
+    before = (env.data / grok_engine.SESSION_BINDINGS_DIR / SESSION_UUID).read_text()
+    await env.run(resume_session_id=SESSION_UUID)                                # a repeat adds nothing
+    assert (env.data / grok_engine.SESSION_BINDINGS_DIR / SESSION_UUID).read_text() == before
+
+
+def test_the_session_binding_refuses_hostile_ids_and_paths(env):
+    for bad in ("../x", "a/b", "", "fake-session_1", SESSION_UUID.upper(), None, 7):
+        assert grok_engine.record_session_binding(env.data, bad, "/p") is False
+        assert grok_engine.session_bound_cwds(env.data, bad) == frozenset()
+    assert grok_engine.record_session_binding(env.data, SESSION_UUID, "relative-is-fine-but-nul\x00") is False
+    assert not (env.data / grok_engine.SESSION_BINDINGS_DIR).exists() or not list(
+        (env.data / grok_engine.SESSION_BINDINGS_DIR).iterdir())
+    victim = env.tmp / "victim"
+    victim.write_text("keep")
+    (env.data / grok_engine.SESSION_BINDINGS_DIR).mkdir(exist_ok=True)
+    (env.data / grok_engine.SESSION_BINDINGS_DIR / SESSION_UUID).symlink_to(victim)
+    assert grok_engine.record_session_binding(env.data, SESSION_UUID, "/p") is False   # O_NOFOLLOW
+    assert victim.read_text() == "keep"
+
+
+def test_the_binding_id_pattern_is_the_history_readers(env):
+    import grok_history
+    assert grok_engine._SESSION_ID_RE.pattern == grok_history.SESSION_ID_RE.pattern
+
+
 def test_a_symlinked_secret_store_in_a_model_writable_project_is_skipped_not_resolved(env, monkeypatch):
     # build_deny resolves a symlink entry to its TARGET. A project dir is writable by the model's shell, so
     # `.env -> $HOME` (or -> GROK_HOME, or a dir with the binary) would make every later turn of every project

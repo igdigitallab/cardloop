@@ -51,6 +51,10 @@ def home(tmp_path, monkeypatch) -> Path:
     h = tmp_path / "grokhome"
     (h / "sessions").mkdir(parents=True)
     monkeypatch.setenv("GROK_HOME", str(h))
+    # the readers resolve the cockpit's data dir by convention (webapp's call sites pass none) and show only the
+    # sessions it vouches for: point the convention at this test's ctx["DATA"] (see fake_ctx: tmp_path/"data")
+    (tmp_path / "data").mkdir(exist_ok=True)
+    monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(tmp_path / "data"))
     return h
 
 
@@ -332,8 +336,13 @@ async def test_every_endpoint_finds_the_grok_home_from_the_cockpits_ctx_not_the_
     aiohttp_client, fake_ctx, app, cwd, grok_on, monkeypatch
 ):
     monkeypatch.delenv("GROK_HOME", raising=False)
-    monkeypatch.delenv("_CARDLOOP_DATA_DIR", raising=False)
+    # the HOME must come from the ctx, so the environment's data dir is a DIFFERENT one (it only carries the
+    # session->cwd records the readers look up by convention: webapp passes no data_dir)
+    other = fake_ctx["DATA"].parent / "env-data"
+    other.mkdir()
+    monkeypatch.setenv("_CARDLOOP_DATA_DIR", str(other))
     ctx_home = grok_engine.grok_home(fake_ctx)       # next to DATA, derived from the ctx
+    assert ctx_home != grok_engine.grok_home()
     (ctx_home / "sessions").mkdir(parents=True)
     put_session(ctx_home, cwd, SID1, chat=[q("never touch webapp.py"), a("ok")], summary=summ())
     put_session(ctx_home, cwd, SID2, chat=[q("flux capacitor notes")], summary=summ())

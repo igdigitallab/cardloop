@@ -37,8 +37,21 @@ def session_dir(srv, project_id: str, session_id: str) -> Path:
     return srv["app_dir"] / "data-grok-home" / "sessions" / urllib.parse.quote(cwd, safe="") / session_id
 
 
+def vouch(srv, project_id: str, session_id: str) -> None:
+    """What the engine records when it starts or resumes a session in this project's directory
+    (`<data>/grok_sessions/<id>`): the history readers list a session only for the cwd the cockpit vouches for.
+    A session born in a real turn (`run_turn`) already has it; the extra ones seeded here stand for sessions an
+    earlier turn of this project created."""
+    cwd = str(srv["cwds"][project_id])
+    out = srv["app_dir"] / "data" / "grok_sessions"
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / session_id, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"cwd": cwd}) + "\n")
+
+
 def seed_recorded_session(srv, project_id: str, session_id: str, fixture: str) -> None:
     """A recorded real session, re-addressed to this project's directory and id."""
+    vouch(srv, project_id, session_id)
     cwd = str(srv["cwds"][project_id])
     out = session_dir(srv, project_id, session_id)
     out.mkdir(parents=True, exist_ok=True)
@@ -53,6 +66,7 @@ def seed_recorded_session(srv, project_id: str, session_id: str, fixture: str) -
 
 def seed_simple_session(srv, project_id: str, session_id: str, turns: list[tuple[str, str]], title: str) -> None:
     """`turns` = [(user text, assistant text), ...] in the real file shape."""
+    vouch(srv, project_id, session_id)
     cwd = str(srv["cwds"][project_id])
     out = session_dir(srv, project_id, session_id)
     out.mkdir(parents=True, exist_ok=True)

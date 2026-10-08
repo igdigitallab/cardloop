@@ -152,6 +152,30 @@ def _is_real_dir(path: Path) -> bool:
         return False
 
 
+def _data(data_dir) -> Path:
+    """The cockpit data dir the ledgers live in: the caller's, else the one `provider_info` and `webapp` agree on by
+    convention (`_CARDLOOP_DATA_DIR`, else `<repo>/data`)."""
+    return Path(data_dir) if data_dir is not None else grok_engine.data_dir(None)
+
+
+def vouched(session_id: str, cwd: str, data_dir=None) -> bool:
+    """Does the COCKPIT vouch for ``session_id`` as a session of ``cwd``? ``GROK_HOME`` is writable by the model's
+    shell, so a session directory under a project's group proves nothing by itself: a turn in another project
+    can create one, or copy that project's own real session there (review-spec095-readers F3).
+
+    * the engine's own record ``<data>/grok_sessions/<id>`` names the cwds the session was started or resumed
+      in - the session shows only for one of them;
+    * a session older than that record is vouched for by the send ledger (the cockpit sent a prompt into it)
+      ONLY while the record knows nothing of it.
+    Both live in the data dir, which the model's shell cannot reach."""
+    data = _data(data_dir)
+    bound = grok_engine.session_bound_cwds(data, session_id)
+    if bound:
+        return any(v in bound for v in _cwd_variants(cwd))
+    import grok_sends   # lazy: grok_sends imports this module
+    return bool(grok_sends.sent_fingerprints(data, session_id))
+
+
 def _group_dirs(root: Path, root_real: Path, cwd: str) -> list[Path]:
     """Every group directory under ``root`` that belongs to ``cwd`` (usually zero or one)."""
     variants = _cwd_variants(cwd)
@@ -376,18 +400,18 @@ def _clamp_limit(limit) -> int:
 
 def history_messages(session_id: str, cwd: str, *, grok_home=None, limit: int = MAX_MESSAGES,
                      format_tool: "Callable[[str, dict], dict] | None" = None,
-                     max_bytes: "int | None" = None) -> list[dict]:
+                     max_bytes: "int | None" = None, data_dir=None) -> list[dict]:
     """``[{role, text, tools, uuid}]`` of one Grok session, oldest first, newest ``limit`` kept.
 
     Raises ``ValueError`` for a malformed session id / cwd (the caller maps it to a 400) and
-    ``GrokHistoryError`` for an unsafe home; an absent session is ``[]``. ``format_tool`` turns a
+    ``GrokHistoryError`` for an unsafe home; an absent or unvouched session is ``[]`` (``vouched``). ``format_tool`` turns a
     mapped ``(name, input)`` into the display row (pass ``webapp._format_tool``); the default is a
     parity-tested copy.
     """
     home = _home(grok_home)
     sdir = _session_dir(session_id, cwd, home)
-    if sdir is None:
-        return []
+    if sdir is None or not vouched(session_id, cwd, data_dir):
+        return []     # absent, or a directory the cockpit never made for this cwd (see ``vouched``)
     return _messages(sdir / "chat_history.jsonl", session_id, _clamp_limit(limit),
                      format_tool or default_format_tool, max_bytes)
 
@@ -507,9 +531,11 @@ def _decorate(row: dict, sdir: Path) -> None:
     row["message_count"] = _count(_read_json(sdir / "signals.json"))
 
 
-def _list(cwd: str, limit: int, home: Path, *, decorate: bool) -> "list[tuple[dict, Path]]":
+def _list(cwd: str, limit: int, home: Path, *, decorate: bool, data_dir=None) -> "list[tuple[dict, Path]]":
     """``(row, session dir)`` pairs of ``cwd``, newest first - the one scan behind both
-    ``list_sessions`` (``decorate=True``) and ``iter_search_docs`` (which needs no preview)."""
+    ``list_sessions`` (``decorate=True``) and ``iter_search_docs`` (which needs no preview). Only sessions the
+    cockpit vouches for are listed (``vouched``); the per-cwd window counts vouched ones, so planted
+    directories with future-dated ids cannot push the real sessions out of it."""
     _check_cwd(cwd)
     root, root_real = _sessions_root(home)
     found: dict[str, tuple[dict, Path]] = {}
@@ -518,10 +544,16 @@ def _list(cwd: str, limit: int, home: Path, *, decorate: bool) -> "list[tuple[di
             names = sorted((e.name for e in os.scandir(group) if valid_session_id(e.name)), reverse=True)
         except OSError:
             continue
-        for sid in names[:MAX_SESSIONS_PER_CWD]:
+        taken = 0
+        for sid in names[:MAX_GROUP_SCAN]:
+            if taken >= MAX_SESSIONS_PER_CWD:
+                break
             sdir = group / sid
             if sid in found or not _is_real_dir(sdir) or not _inside(sdir, root_real):
                 continue
+            if not vouched(sid, cwd, data_dir):
+                continue
+            taken += 1
             row = _session_row(sdir, sid, cwd)
             if row is not None:
                 found[sid] = (row, sdir)
@@ -532,7 +564,7 @@ def _list(cwd: str, limit: int, home: Path, *, decorate: bool) -> "list[tuple[di
     return ranked
 
 
-def list_sessions(cwd: str, limit: int = 30, *, grok_home=None) -> list[dict]:
+def list_sessions(cwd: str, limit: int = 30, *, grok_home=None, data_dir=None) -> list[dict]:
     """Sessions of ``cwd``, newest first, shaped like ``codex_engine.list_threads`` rows.
 
     Title / ``updatedAt`` come from each session's ``summary.json`` (the on-disk equivalent of
@@ -540,17 +572,18 @@ def list_sessions(cwd: str, limit: int = 30, *, grok_home=None) -> list[dict]:
     left out. ``updatedAt`` is epoch SECONDS like Codex's. ``message_count`` is approximate
     (``signals.json`` counters) or None.
     """
-    return [row for row, _sdir in _list(cwd, _clamp_limit(limit), _home(grok_home), decorate=True)]
+    return [row for row, _sdir in _list(cwd, _clamp_limit(limit), _home(grok_home), decorate=True,
+                                        data_dir=data_dir)]
 
 
 def iter_search_docs(cwd: str, *, grok_home=None, max_sessions: int = SEARCH_MAX_SESSIONS,
-                     max_chars: int = SEARCH_DOC_CHARS) -> Iterator[dict]:
+                     max_chars: int = SEARCH_DOC_CHARS, data_dir=None) -> Iterator[dict]:
     """One document per recent session of ``cwd``: ``{id, cwd, title, updatedAt, text}`` where
     ``text`` is the user/assistant text (no tool output), newest content kept when capped. One
     call reads at most ``SEARCH_TOTAL_BYTES`` in all (newest sessions first), so a query cannot
     stall the thread that serves it."""
     budget = SEARCH_TOTAL_BYTES
-    for row, sdir in _list(cwd, _clamp_limit(max_sessions), _home(grok_home), decorate=False):
+    for row, sdir in _list(cwd, _clamp_limit(max_sessions), _home(grok_home), decorate=False, data_dir=data_dir):
         if budget <= 0:
             break
         chat = sdir / "chat_history.jsonl"
@@ -575,7 +608,7 @@ def _snippet(title: str, text: str, terms: list[str]) -> str:
     return flat[start:start + SNIPPET_CHARS]
 
 
-def search_sessions(query: str, cwd: str, *, limit: int = 30, grok_home=None) -> list[dict]:
+def search_sessions(query: str, cwd: str, *, limit: int = 30, grok_home=None, data_dir=None) -> list[dict]:
     """Sessions of ``cwd`` whose title or text contain EVERY whitespace-separated term of
     ``query`` (case-insensitive), as ``list_threads``-shaped rows with ``preview`` = the snippet
     around the first hit - what ``api_search`` builds its Codex hits from."""
@@ -583,7 +616,7 @@ def search_sessions(query: str, cwd: str, *, limit: int = 30, grok_home=None) ->
     if not terms:
         return []
     out: list[dict] = []
-    for doc in iter_search_docs(cwd, grok_home=grok_home):
+    for doc in iter_search_docs(cwd, grok_home=grok_home, data_dir=data_dir):
         hay = f"{doc['title']}\n{doc['text']}".casefold()
         if all(t in hay for t in terms):
             out.append({"id": doc["id"], "provider": PROVIDER, "cwd": cwd,
