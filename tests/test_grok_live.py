@@ -763,7 +763,8 @@ async def test_a_data_dir_and_env_file_outside_the_project_are_unreachable_too(l
     assert (scene.repo / ".env").read_text() == "WEB_PASSWORD=" + scene.secret + "\n"
     names = {p.name for p in scene.data.iterdir()}
     # the engine adds its canary + usage ledger itself; everything else is what the model could add
-    assert names <= {"sessions.json", "grok_sent", "grok-canary", "grok_usage.jsonl"}, names
+    assert names <= {"sessions.json", "grok_sent", "grok-canary", "grok_usage.jsonl",
+                     "grok_account.json", "grok_sessions"}, names   # all written by the ENGINE, never the model
     assert not Path(f"{scene.data}-moved").exists()
     for tag in ("w-append", "w-new", "w-mkdir", "w-mvdata", "w-env"):
         assert f"{tag}=0" not in out, f"{tag} succeeded"
@@ -1021,7 +1022,7 @@ async def test_a_project_that_contains_the_data_dir_and_home_cannot_reach_or_unm
         assert not (scene.project / "data-grok-home-moved").exists() and scene.home.is_dir()
         names = {p.name for p in scene.data.iterdir()}
         assert names <= {"sessions.json", "handoff.json", "grok_sent", "grok-canary", "grok_usage.jsonl",
-                         "grok_sandbox_probe.json", "grok_account.json"}, names
+                         "grok_sandbox_probe.json", "grok_account.json", "grok_sessions"}, names
         for tag in ("w-append", "w-new", "w-mkdir", "w-rm", "w-mvdata", "w-rmrf", "w-env", "w-rmenv", "w-mvenv",
                     "w-mvhome"):
             assert f"{tag}=0" not in out, f"{tag} succeeded"

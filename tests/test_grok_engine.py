@@ -2751,8 +2751,24 @@ def test_the_docker_socket_is_on_the_default_deny_list_and_never_created(env, mo
     monkeypatch.delenv("GROK_SANDBOX_DENY")
     deny, skipped = grok_engine.build_deny(env.home, env.ctx)
     for sock in ("/var/run/docker.sock", "/run/docker.sock"):
-        assert sock in deny or sock in skipped or os.path.realpath(sock) in {os.path.realpath(d) for d in deny
-                                                                              if not grok_engine._is_glob(d)}, sock
+        assert sock in skipped or os.path.realpath(sock) in deny, sock
+    # the real CLI refuses an entry reached through a symlinked parent: every literal entry is canonical
+    for d in deny:
+        if not grok_engine._is_glob(d):
+            assert os.path.realpath(d) == d, d
+
+
+def test_a_deny_entry_under_a_symlinked_parent_is_handed_over_canonical(env, monkeypatch):
+    # spec-096 (measured with grok 1.0.x): `/var/run/docker.sock` with /var/run -> /run made `grok agent` exit 1
+    # ("... is not the mountpoint for its visible mount"); the resolved path works
+    real_dir = env.tmp / "run-real"
+    real_dir.mkdir()
+    (real_dir / "thing.sock").write_text("x")
+    (env.tmp / "var-run").symlink_to(real_dir)
+    monkeypatch.setenv("GROK_SANDBOX_DENY", str(env.tmp / "var-run" / "thing.sock"))
+    deny, skipped = grok_engine.build_deny(env.home, env.ctx)
+    assert str(real_dir / "thing.sock") in deny
+    assert str(env.tmp / "var-run" / "thing.sock") not in deny and str(env.tmp / "var-run" / "thing.sock") not in skipped
 
 
 def _register_projects(env, **cwds):

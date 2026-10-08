@@ -136,8 +136,10 @@ DEFAULT_DENY = (
     # spec-096 P8 (review-spec095-security #4): the Docker daemon's socket. A member of the `docker` group
     # (the operator on this install) is root through it - `docker run -v /:/host` - and a socket is not a
     # file the `**/` globs or the credential homes above would ever name. /var/run is a symlink to /run on
-    # a current distro: both spellings are listed, build_deny keeps the first and drops the duplicate. A mount
-    # over a unix socket stops connect() through either spelling (tests/test_grok_mask_kernel.py).
+    # a current distro: both spellings are listed and build_deny canonicalises every literal entry (the real CLI
+    # refuses to start on an entry reached through a symlinked parent), so they collapse into /run/docker.sock.
+    # A mount over a unix socket stops connect() through either spelling (tests/test_grok_mask_kernel.py), and
+    # the real CLI starts with it (grok_live, 2026-10-07).
     "/var/run/docker.sock", "/run/docker.sock",
     "**/.env", "**/secrets.env", "**/*.pem", "**/*.key",
 )
@@ -525,10 +527,13 @@ def build_deny(home: Path, ctx: dict | None = None, *, bin_path: str | None = No
                     raise GrokUnavailableError(
                         f"GROK_SANDBOX_DENY entry {raw.strip()!r} would hide the Grok binary, "
                         f"its home or $HOME itself — Grok could not start")
-            if os.path.islink(entry):
+            if os.path.islink(entry) or real != os.path.abspath(entry):
                 # Measured (2026-10-02): a symlink as a deny entry — to a file, a directory, /dev/null
                 # or nowhere — makes `grok agent` exit 1 before the handshake, i.e. every turn fails.
-                # What the link points at is what has to be hidden; a dangling one hides nothing.
+                # Measured again (2026-10-07, spec-096): so does a symlink in a PARENT component —
+                # `/var/run/docker.sock` with /var/run -> /run fails with "... is not the mountpoint for
+                # its visible mount". What the path resolves to is what has to be hidden; a dangling
+                # one hides nothing.
                 if not os.path.lexists(real):
                     skipped.append(entry)
                     continue
