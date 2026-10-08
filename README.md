@@ -106,7 +106,7 @@ Three things make Cardloop different from the dozen other agent kanbans:
 - **CLI-style chat** — SSE stream, tool rendering (Bash / Edit / Read / Write with diffs), on-the-fly model
   switch, message queue, prompt library, real interrupt.
 - **Production-grade internals** — 2400+ tests, per-project secrets vault (`.claude-ops/secrets/secrets.env`,
-  chmod 600), C2 destructive-command gate, double path-traversal defence, single-operator auth (web
+  chmod 600), a deny list for a few host-wide irreversible commands (see the Security model), double path-traversal defence, single-operator auth (web
   password + optional TOTP 2FA).
 - **Always-on self-hosted service** — systemd or Docker, accessible over HTTPS / Cloudflare Tunnel.
 
@@ -394,8 +394,13 @@ exposing it to a network.
 
 - **Agents run with `bypassPermissions` — full host access by design.** They edit files, run git, and
   deploy without per-action prompts. Run Cardloop only on a host you're comfortable handing to an
-  autonomous agent. A C2-style gate guards the most destructive commands (`rm -rf`, `git push --force`,
-  …), but the model is "trusted operator," not "sandboxed."
+  autonomous agent. Only a short, fixed deny list of host-wide irreversible Bash shapes is blocked
+  before it runs: `rm -rf` aimed at `/` or `$HOME` (the bare path or a glob right under it), `chmod -R`
+  opening up `/` or `$HOME`, a forced `git push` to master/main (or with no branch named),
+  `git reset --hard`, writes or deletes under `~/.ssh`, `docker system prune`, `mkfs`, `dd` onto a raw
+  device, a fork bomb, plus any regex you add in `DENY_COMMANDS_EXTRA`. It matches the command text
+  only: deleting a project directory, force-pushing any other branch, and anything a script or
+  interpreter does inside is **not** gated. The model is "trusted operator," not "sandboxed."
 - **Single-user, not multi-tenant.** Cockpit auth is a web password + optional TOTP 2FA. There is no
   per-user isolation.
 - **An authenticated session can read the decrypted secret vault.** By design — the vault's
