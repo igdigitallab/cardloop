@@ -10710,6 +10710,58 @@ async def api_project_git_sync(req: web.Request) -> web.Response:
 # POST /api/projects/{id}/test → auto-detect test command, run, output to cockpit.
 # Detection in decreasing specificity: pytest-cfg/tests/ → npm test → make test.
 
+# spec-096 P9: a project's test command is PROJECT code (conftest.py, Makefile, package.json
+# scripts, venv/bin/pytest) that the cockpit would run on the host, unsandboxed, same uid, with
+# the project's secrets in the env. Grok's model can edit exactly those files inside its sandbox,
+# so a host-side test run as the verdict for Grok work is a sandbox escape. Providers named here
+# never get a host-side test verdict (their run is judged by the operator, not by executing it).
+GROK_NO_HOST_TEST = "no test signal: Grok work is not executed on the host"
+_HOST_UNTRUSTED_PROVIDERS = frozenset({"grok"})
+
+
+def _grok_host_test_refusal(ctx: dict, project: dict, *, card_id: "str | None" = None) -> str:
+    """Why the host must NOT execute `project`'s tests to judge a card, or "" when it may.
+
+    Decided from the RUN RECORDS (`data/runs/<card>.json` -> `provider`), never from the project
+    default alone; a record from before the provider field existed falls back to the card's own
+    effective provider. Conservative reading for a MIXED project: the tests run in the project
+    TREE, which Grok may have edited in place, so ANY live Grok work blocks the host run for every
+    card of the project - a Grok card that is in progress / in Review / Failed, or a chat that is
+    on Grok or that ever held a Grok session. Already-archived Grok cards leave no trace and are
+    not detectable (documented in GOTCHAS.md). An unreadable board fails closed.
+    """
+    data = ctx.get("DATA")
+    cards: list = []
+    if card_id:
+        cards.append({"id": card_id})
+    try:
+        _, _, cols = _load_board(project.get("cwd") or "")
+        for col in ("in_progress", "review", "failed"):
+            cards.extend(c for c in (cols.get(col) or []) if isinstance(c, dict))
+    except Exception:
+        return GROK_NO_HOST_TEST
+    for card in cards:
+        cid = card.get("id")
+        meta = _read_run_meta(data, cid) if (cid and data is not None) else None
+        prov = meta.get("provider") if isinstance(meta, dict) else None
+        if not (isinstance(prov, str) and prov):
+            prov = _card_provider_for_run(card, project)
+        if prov in _HOST_UNTRUSTED_PROVIDERS:
+            return GROK_NO_HOST_TEST
+    try:
+        chat_entry = _load_chats(ctx).get(project.get("id") or "") or {}
+        for chat in chat_entry.get("chats") or []:
+            if not isinstance(chat, dict):
+                continue
+            if _chat_provider(chat) in _HOST_UNTRUSTED_PROVIDERS:
+                return GROK_NO_HOST_TEST
+            if any(providers.get(p).resume_id(chat) for p in _HOST_UNTRUSTED_PROVIDERS):
+                return GROK_NO_HOST_TEST
+    except Exception:
+        return GROK_NO_HOST_TEST
+    return ""
+
+
 def _detect_test_cmd(cwd: str):
     """Returns (cmd:list[str], human:str) or None if no test method found."""
     p = Path(cwd)
@@ -10913,9 +10965,22 @@ async def api_card_check(req: web.Request) -> web.Response:
 
     # Inject project secrets (tests may need keys)
     cwd = project["cwd"]
-    project_secrets = _secrets_read(cwd)
 
-    result = await _run_quality_gate(wt_path, env=project_secrets or None)
+    # spec-096 P9: Grok work is never executed on the host (see _grok_host_test_refusal).
+    # Verdict "unknown" - the same "we did not check" the gate gives a project with no tests -
+    # and never "safe".
+    if _grok_host_test_refusal(ctx, project, card_id=card_id):
+        result = {
+            "verdict": "unknown",
+            "tests": {
+                "detected": False, "ok": False, "cmd": None, "exit_code": None,
+                "output": GROK_NO_HOST_TEST, "timed_out": False,
+            },
+            "lint": None,
+        }
+    else:
+        project_secrets = _secrets_read(cwd)
+        result = await _run_quality_gate(wt_path, env=project_secrets or None)
 
     # Write gate result to meta sidecar
     gate_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

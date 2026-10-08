@@ -757,7 +757,7 @@ async def test_test_signal_configured_failing(tmp_path, this_interpreter_first_o
     """A configured, allowlisted test_cmd that FAILS → (True, 'failed…')."""
     (tmp_path / "test_x.py").write_text("def test_fail():\n    assert 1 == 2\n")
     proj = {"cwd": str(tmp_path), "test_cmd": _PYTEST_CMD}
-    failing, summary = await _ap_loop._autopilot_test_signal(proj)
+    failing, summary = await _ap_loop._autopilot_test_signal(proj, {"DATA": tmp_path})
     assert failing is True
     assert "failed" in summary
 
@@ -767,15 +767,15 @@ async def test_test_signal_configured_passing(tmp_path, this_interpreter_first_o
     """A configured, allowlisted test_cmd that PASSES → (False, 'passed…')."""
     (tmp_path / "test_x.py").write_text("def test_ok():\n    assert 1 == 1\n")
     proj = {"cwd": str(tmp_path), "test_cmd": _PYTEST_CMD}
-    failing, summary = await _ap_loop._autopilot_test_signal(proj)
+    failing, summary = await _ap_loop._autopilot_test_signal(proj, {"DATA": tmp_path})
     assert failing is False
     assert "passed" in summary
 
 
 @pytest.mark.asyncio
-async def test_test_signal_not_allowlisted_is_none():
+async def test_test_signal_not_allowlisted_is_none(tmp_path):
     """A non-allowlisted test_cmd is refused (None) — never executed."""
-    proj = {"cwd": "/tmp", "test_cmd": "rm -rf /"}
-    failing, summary = await _ap_loop._autopilot_test_signal(proj)
+    proj = {"cwd": str(tmp_path), "test_cmd": "rm -rf /"}
+    failing, summary = await _ap_loop._autopilot_test_signal(proj, {"DATA": tmp_path})
     assert failing is None
     assert "allowlist" in summary

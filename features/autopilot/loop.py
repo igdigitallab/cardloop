@@ -26,6 +26,8 @@ from webapp import (
     _git_enabled,
     _validate_diag_cmd,
     _run_quality_gate,
+    _grok_host_test_refusal,
+    GROK_NO_HOST_TEST,
 )
 
 from features.autopilot import logic as _autopilot
@@ -35,14 +37,19 @@ from features.autopilot import logic as _autopilot
 # Test-signal helper (READ-ONLY)
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _autopilot_test_signal(project: dict) -> "tuple[bool | None, str]":
+async def _autopilot_test_signal(project: dict, ctx: dict) -> "tuple[bool | None, str]":
     """Shadow test signal (READ-ONLY): is this project's test suite failing?
 
     Prefers the operator-configured ``test_cmd`` (authoritative + allowlist-validated);
     falls back to auto-detection via ``_run_quality_gate`` when none is configured.
     Returns ``(tests_failing, summary)``: True = failing, False = passing,
     None = no/unsafe/unknown signal. Runs the tests only — mutates nothing.
+
+    spec-096 P9: a project with Grok work in it is never tested on the host (the tests are
+    project code a sandboxed Grok could have edited) — that is "no signal", not a pass.
     """
+    if _grok_host_test_refusal(ctx, project):
+        return None, GROK_NO_HOST_TEST
     cwd = project.get("cwd") or ""
     cmd_str = (project.get("test_cmd") or "").strip()
     if cmd_str:
@@ -129,7 +136,7 @@ async def _autopilot_tick_once(ctx: dict) -> list[dict]:
         # 1. Test signal (READ-ONLY): prefer the operator-configured test_cmd
         #    (authoritative), fall back to auto-detection. Runs tests only —
         #    never mutates the repo.
-        tests_failing, test_summary = await _autopilot_test_signal(project)
+        tests_failing, test_summary = await _autopilot_test_signal(project, ctx)
 
         # 2. Count backlog cards (read-only board read)
         backlog_n = 0

@@ -128,6 +128,7 @@ def decide_card(
     mode: "str | None" = None,
     accept_after_h: "float | None" = None,
     digest_after_h: "float | None" = None,
+    no_signal_reason: "str | None" = None,
 ) -> "tuple[str, str]":
     """Decide what to do with one Review card: ('accept'|'digest'|'hold', reason).
 
@@ -136,6 +137,10 @@ def decide_card(
     explicit True can authorise archiving; "no tests configured" must never read
     as "safe to close", which is the failure mode that makes autonomy dangerous
     on the 20-odd projects that have no test suite at all.
+
+    *no_signal_reason* names WHY there is no signal when the cause is a refusal rather than an
+    absence (spec-096 P9: Grok work is never executed on the host); it only changes the words
+    the operator reads, never the decision.
     """
     m = (mode or MODE).strip().lower()
     if m == "off":
@@ -152,7 +157,8 @@ def decide_card(
         if settled and tests_green is True:
             return "accept", f"{why}, tests green, {age:.0f}h in review"
         blocker = why if not settled else (
-            "tests failing" if tests_green is False else "no trustworthy test signal"
+            "tests failing" if tests_green is False
+            else (no_signal_reason or "no trustworthy test signal")
         )
         if age >= dig_h:
             return "digest", blocker

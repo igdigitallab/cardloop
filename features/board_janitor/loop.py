@@ -30,6 +30,7 @@ from webapp import (
     _read_run_meta,
     _validate_diag_cmd,
     _emit_board_event,
+    _grok_host_test_refusal,
 )
 
 from features.board_janitor import logic as _logic
@@ -128,14 +129,20 @@ async def _janitor_tick_once(ctx: dict) -> dict:
                 and (_logic.card_age_hours(c, now) or 0) >= _logic.ACCEPT_AFTER_H
                 for c in candidates
             )
-            tests_green = await _test_signal(project) if wants_gate else None
+            # spec-096 P9: never judge Grok work by executing the project's code on the host.
+            # "No signal" is the answer (and the reason the digest shows), not a quiet skip.
+            host_refusal = _grok_host_test_refusal(ctx, project) if wants_gate else ""
+            tests_green = (
+                await _test_signal(project) if (wants_gate and not host_refusal) else None
+            )
 
             # ── pass 2: decide and apply ──
             async with _get_board_lock(cwd):
                 _, preamble, cols = _load_board(cwd)
                 for card in list(cols.get("review") or []):
                     run_meta = _read_run_meta(ctx["DATA"], card["id"])
-                    action, reason = _logic.decide_card(card, run_meta, tests_green, now)
+                    action, reason = _logic.decide_card(
+                        card, run_meta, tests_green, now, no_signal_reason=host_refusal or None)
                     if action == "hold":
                         continue
                     entry = {

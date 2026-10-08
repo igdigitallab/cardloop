@@ -153,7 +153,7 @@ async def _run_director(ctx: dict, project: dict) -> dict:
 
         # ── Gather read-only context ──────────────────────────────────────────
         board_summary = _board_summary_text(cwd)
-        tests_failing, test_summary = await _autopilot_test_signal(project)
+        tests_failing, test_summary = await _autopilot_test_signal(project, ctx)
         notebook = _autopilot.read_notebook(DATA, project_id)
 
         prompt = _autopilot.build_director_input(name, board_summary, test_summary, notebook)
