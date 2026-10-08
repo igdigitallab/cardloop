@@ -74,6 +74,8 @@ SANDBOX_PROBE_FAIL_TTL_SEC = 15 * 60.0
 STREAM_LIMIT = 16 * 1024 * 1024  # asyncio's 64 KiB default dies on one big tool-output line
 STDERR_RING_BYTES = 4096
 RULES_MAX_BYTES = 24 * 1024
+REGISTRY_MAX_BYTES = 8 * 1024 * 1024   # topics.json (the project registry) is read for the secret-store deny entries
+PROJECT_DENY_MAX = 256                 # registered projects whose secret stores are listed (a bwrap argv is finite)
 AUTH_MAX_BYTES = 256 * 1024    # a real auth.json is < 4 KiB; the model's shell can write the file, so it is capped
 LIMIT_ERROR_MAX_CHARS = 8000
 
@@ -131,6 +133,12 @@ DEFAULT_DENY = (
     "~/.kube", "~/.config/gcloud", "~/.bash_history", "~/.zsh_history",
     # Measured by r-grok-live, deferred in the spec, added in P1b: other vendors' credential homes.
     "~/.azure", "~/.oci", "~/.codex", "~/.cursor",
+    # spec-096 P8 (review-spec095-security #4): the Docker daemon's socket. A member of the `docker` group
+    # (the operator on this install) is root through it - `docker run -v /:/host` - and a socket is not a
+    # file the `**/` globs or the credential homes above would ever name. /var/run is a symlink to /run on
+    # a current distro: both spellings are listed, build_deny keeps the first and drops the duplicate. A mount
+    # over a unix socket stops connect() through either spelling (tests/test_grok_mask_kernel.py).
+    "/var/run/docker.sock", "/run/docker.sock",
     "**/.env", "**/secrets.env", "**/*.pem", "**/*.key",
 )
 # The Claude/Cursor IMPORT surface. Always denied, whatever GROK_SANDBOX_DENY says: measured live
@@ -398,6 +406,69 @@ def _cockpit_secret_paths() -> list[str]:
     return out
 
 
+def _project_secret_paths(ctx: dict | None = None) -> list[str]:
+    """Secret stores of EVERY registered project (the `cwd` of each record in data/topics.json): its `.env` and its
+    `.claude-ops/secrets/` directory, those that exist. `**/.env` and `**/secrets.env` are anchored at the
+    workspace, so from a chat in project A the secrets of project B — and, in a chat rooted at `$HOME`, of every
+    project — were readable (review-spec095-security #4). A project's own stores are listed too: the profile has
+    no cwd, and the globs already hide them from their own project.
+
+    A project directory is writable by the model's shell, so its names are not trusted: a store that is itself
+    a symlink, or sits behind a symlinked `.claude-ops`, is skipped — `build_deny` resolves a symlink entry to
+    its target, and a model could plant `.env -> $HOME` to make every later turn of every project refuse to
+    start. Directories, not their files, where there is a choice (a mount over a file is detached when the
+    owner renames a new file over it; `.env` is the one file we cannot wrap in a directory)."""
+    raw = grok_jsonl.read_small(data_dir(ctx) / "topics.json", REGISTRY_MAX_BYTES)
+    if raw is None:
+        return []
+    try:
+        records = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return []
+    if not isinstance(records, dict):
+        return []
+    roots: set[str] = set()
+    for rec in records.values():
+        cwd = rec.get("cwd") if isinstance(rec, dict) else None
+        if isinstance(cwd, str) and os.path.isabs(cwd) and "\0" not in cwd:
+            roots.add(os.path.realpath(cwd))
+    ordered = sorted(roots)
+    if len(ordered) > PROJECT_DENY_MAX:
+        _log(f"deny: {len(ordered)} registered projects, only the first {PROJECT_DENY_MAX} get their secret stores listed")
+    out: list[str] = []
+    for root in ordered[:PROJECT_DENY_MAX]:
+        if not os.path.isdir(root):
+            continue
+        for rel in ((".env",), (".claude-ops", "secrets")):
+            steps = [os.path.join(root, *rel[:i + 1]) for i in range(len(rel))]
+            path = steps[-1]
+            if _is_glob(path) or any(os.path.islink(step) for step in steps) or not os.path.lexists(path):
+                continue
+            out.append(path)
+    return out
+
+
+def exposure_notice(cwd) -> "dict | None":
+    """`{"home_rooted": True, "warning": str}` for a chat whose directory is `$HOME` or contains it, else None.
+
+    Choosing Grok in the picker is the consent, but a chat rooted at the home directory sends whatever the model
+    reads there to xAI: every other project's source and every credential store nobody listed. The picker
+    (web/src/lib/providers.ts, via the endpoint that already lists the providers) shows `warning` louder than
+    the ordinary notice. Pure: no I/O besides resolving the two paths."""
+    if not isinstance(cwd, str) or not cwd.strip():
+        return None
+    try:
+        rooted = _is_under(str(Path.home()), cwd)
+    except (OSError, ValueError):
+        return None
+    if not rooted:
+        return None
+    return {"home_rooted": True,
+            "warning": ("This chat is rooted at your home directory. A Grok turn can read everything under it "
+                        "that is not on the sandbox deny list - every other project's source and any credential "
+                        "store nobody listed - and sends what it reads to xAI. Pick a project directory instead.")}
+
+
 def build_deny(home: Path, ctx: dict | None = None, *, bin_path: str | None = None
                ) -> tuple[list[str], list[str]]:
     """(deny entries to hand Grok, literal entries skipped because they do not exist).
@@ -423,6 +494,7 @@ def build_deny(home: Path, ctx: dict | None = None, *, bin_path: str | None = No
     # workspace (docs: a relative glob is anchored at the project) and only that exact name, so from any
     # other project `.env`, `.env.bak-<date>` and a `data.bak-<date>/` snapshot are all readable.
     raw_entries.extend(_cockpit_secret_paths())
+    raw_entries.extend(_project_secret_paths(ctx))     # always: a custom GROK_SANDBOX_DENY must not drop them
     protected = [str(home)]
     if bin_path:
         protected.append(os.path.realpath(bin_path))
@@ -587,7 +659,11 @@ def ensure_home(ctx: dict | None = None, *, bin_path: str | None = None) -> dict
         _log(f"home {home}: sandbox profile {SANDBOX_PROFILE!r} written, deny={len(deny)} "
              f"entries, skipped_missing={len(skipped)}")
     sweep_foreign_layers(home)
-    return {"home": home, "profile": SANDBOX_PROFILE, "deny": deny, "skipped": skipped}
+    # the entries that follow the project registry (and the model-writable project dirs): not part of the
+    # probe's fingerprint, or every `.env` created in any project would cost a model turn and could flap the row
+    project_deny = [e for e in _project_secret_paths(ctx) if e in deny]
+    return {"home": home, "profile": SANDBOX_PROFILE, "deny": deny, "skipped": skipped,
+            "project_deny": project_deny}
 
 
 _LITTER_RE = re.compile(r"^sandbox-blocked(?:-dir)?\.(\d+)$")
@@ -1091,7 +1167,8 @@ def _haystack(msg: dict) -> str:
 def _probe_fingerprint(version: str, info: dict) -> str:
     h = hashlib.sha256()
     h.update(version.encode())
-    h.update(_sandbox_toml(info["deny"]).encode())
+    project = set(info.get("project_deny") or ())
+    h.update(_sandbox_toml([e for e in info["deny"] if e not in project]).encode())
     h.update(str(info["home"]).encode())
     return h.hexdigest()[:24]
 
@@ -2013,7 +2090,8 @@ async def _run_turn(
         argv = [binary, "agent", "--no-leader", "stdio"]
         _log(f"spawn {session_key} argv={argv} cwd={cwd} sandbox={SANDBOX_PROFILE} "
              f"deny={len(info['deny'])} resume={'yes' if resume_session_id else 'no'} "
-             f"model={selected_model} effort={selected_effort} env_keys={sorted(env)}")
+             f"model={selected_model} effort={selected_effort} env_keys={sorted(env)}"
+             + (" exposure=home_rooted" if exposure_notice(cwd) else ""))
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=STREAM_LIMIT)

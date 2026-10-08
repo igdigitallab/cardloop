@@ -91,3 +91,40 @@ def test_a_mount_over_a_directory_survives_every_write_the_cockpit_makes_underne
     assert "before=[]" in out and "after=[]" in out and "NEW-SECRET" not in out, out
     assert "mkdir=0" not in out and "write=0" not in out and "mv=0" not in out, out
     assert not (data.parent / "data-moved").exists() and (data / "chats.json").read_text() == "NEW-SECRET"
+
+
+def test_a_mount_over_a_unix_socket_stops_a_connect_through_either_spelling_of_its_path(tmp_path):
+    # spec-096 P8: /var/run/docker.sock (root-equivalent for a member of the docker group) joins the default
+    # deny list. /var/run is a symlink to /run, so the entry and the real path are two spellings of one socket
+    # and one mount must hide both. Measured with a throwaway socket, never the real daemon's.
+    import socket
+    real_dir = tmp_path / "run"
+    real_dir.mkdir()
+    (tmp_path / "var-run").symlink_to(real_dir)
+    sock_path = real_dir / "d.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(sock_path))
+    srv.listen(8)
+    probe = ('import socket,sys\ns=socket.socket(socket.AF_UNIX)\n'
+             'try:\n s.connect(sys.argv[1]); print("CONNECTED")\nexcept OSError as e:\n print("DENIED", e.errno)\n')
+    prog = tmp_path / "probe.py"
+    prog.write_text(probe)
+    python = shutil.which("python3") or "python3"
+
+    def connect(*mask):
+        out = subprocess.run(
+            [BWRAP, "--dev-bind", "/", "/", *mask, python, str(prog), str(sock_path)],
+            capture_output=True, text=True, timeout=20).stdout
+        out2 = subprocess.run(
+            [BWRAP, "--dev-bind", "/", "/", *mask, python, str(prog), str(tmp_path / "var-run" / "d.sock")],
+            capture_output=True, text=True, timeout=20).stdout
+        return out.strip(), out2.strip()
+
+    try:
+        assert connect() == ("CONNECTED", "CONNECTED")                               # positive control
+        # masked through the SYMLINKED spelling, probed through both
+        assert connect("--ro-bind", "/dev/null", str(tmp_path / "var-run" / "d.sock"))[0].startswith("DENIED")
+        assert connect("--ro-bind", "/dev/null", str(tmp_path / "var-run" / "d.sock"))[1].startswith("DENIED")
+        assert connect("--ro-bind", "/dev/null", str(sock_path))[1].startswith("DENIED")
+    finally:
+        srv.close()

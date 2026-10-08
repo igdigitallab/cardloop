@@ -2607,6 +2607,142 @@ def test_the_cockpits_own_env_file_is_denied_always_and_never_created(env, monke
         assert str(repo / ".env") in grok_engine.build_deny(env.home, env.ctx)[0], custom
 
 
+def test_the_docker_socket_is_on_the_default_deny_list_and_never_created(env, monkeypatch):
+    # review-spec095-security #4: an operator in the docker group is root through this socket. /var/run is a
+    # symlink to /run on a current distro; both spellings are listed and build_deny keeps the first it can.
+    assert {"/var/run/docker.sock", "/run/docker.sock"} <= set(grok_engine.DEFAULT_DENY)
+    monkeypatch.delenv("GROK_SANDBOX_DENY")
+    deny, skipped = grok_engine.build_deny(env.home, env.ctx)
+    for sock in ("/var/run/docker.sock", "/run/docker.sock"):
+        assert sock in deny or sock in skipped or os.path.realpath(sock) in {os.path.realpath(d) for d in deny
+                                                                              if not grok_engine._is_glob(d)}, sock
+
+
+def _register_projects(env, **cwds):
+    (env.data / "topics.json").write_text(json.dumps(
+        {f"-100:{i}": {"project": name, "cwd": str(cwd), "model": "sonnet"}
+         for i, (name, cwd) in enumerate(cwds.items())}))
+
+
+def test_every_registered_projects_secret_stores_are_denied_from_every_other_project(env, monkeypatch):
+    # review-spec095-security #4: `**/.env` and `**/secrets.env` are anchored at the WORKSPACE, so from a chat in
+    # project A the secrets of project B (and of a home-rooted chat: all of them) were readable
+    a, b, c = (env.tmp / n for n in ("proj-a", "proj-b", "proj-c"))
+    for d in (a, b, c):
+        d.mkdir()
+    (a / ".env").write_text("A=1")
+    (a / ".claude-ops" / "secrets").mkdir(parents=True)
+    (a / ".claude-ops" / "secrets" / "secrets.env").write_text("K=v")
+    (b / ".claude-ops" / "secrets").mkdir(parents=True)                    # a store, no .env
+    # c has neither: nothing may be listed (an entry that does not exist is created ON THE HOST as an empty file)
+    _register_projects(env, A=a, B=b, C=c, GONE=env.tmp / "deleted", REL="relative/dir", JUNK=7)
+    for custom in (None, str(env.secret_dir)):                             # always: a custom list cannot drop them
+        if custom is None:
+            monkeypatch.delenv("GROK_SANDBOX_DENY", raising=False)
+        else:
+            monkeypatch.setenv("GROK_SANDBOX_DENY", custom)
+        deny, _ = grok_engine.build_deny(env.home, env.ctx)
+        assert str(a / ".env") in deny, custom
+        assert str(a / ".claude-ops" / "secrets") in deny and str(b / ".claude-ops" / "secrets") in deny, custom
+        assert str(b / ".env") not in deny and str(c / ".env") not in deny, custom
+        assert str(c / ".claude-ops" / "secrets") not in deny, custom
+    assert not (b / ".env").exists() and not (c / ".claude-ops").exists()      # nothing was materialised
+    info = ensure_home(env.ctx)
+    sandbox = tomllib.loads((env.home / "sandbox.toml").read_text())
+    assert str(a / ".env") in sandbox["profiles"][grok_engine.SANDBOX_PROFILE]["deny"]
+    assert str(a / ".env") in info["deny"]
+
+
+async def test_a_project_still_runs_with_its_own_secret_stores_on_the_deny_list(env):
+    # the profile has no cwd: A's own .env is on it too (as `**/.env` always was) and must not refuse A's turn
+    (env.cwd / ".env").write_text("A=1")
+    (env.cwd / ".claude-ops" / "secrets").mkdir(parents=True)
+    _register_projects(env, A=env.cwd)
+    events = await env.run()
+    assert types(events)[-1] == "result", last_error(events) if "error" in types(events) else types(events)
+    assert str(env.cwd / ".claude-ops" / "secrets") in grok_engine.ensure_home(env.ctx)["deny"]
+
+
+def test_a_project_nested_inside_another_does_not_nest_deny_entries(env):
+    outer, inner = env.tmp / "outer", env.tmp / "outer" / "inner"
+    inner.mkdir(parents=True)
+    for d in (outer, inner):
+        (d / ".claude-ops" / "secrets").mkdir(parents=True)
+        (d / ".env").write_text("x")
+    _register_projects(env, O=outer, I=inner)
+    deny, _ = grok_engine.build_deny(env.home, env.ctx)
+    for d in (outer, inner):
+        assert str(d / ".env") in deny and str(d / ".claude-ops" / "secrets") in deny
+
+
+def test_an_unreadable_or_huge_project_registry_adds_nothing_and_breaks_nothing(env):
+    (env.data / "topics.json").write_text("{not json")
+    assert grok_engine._project_secret_paths(env.ctx) == []
+    (env.data / "topics.json").write_text("[1, 2]")
+    assert grok_engine._project_secret_paths(env.ctx) == []
+    (env.data / "topics.json").unlink()
+    assert grok_engine._project_secret_paths(env.ctx) == []
+    (env.data / "topics.json").write_text(" " * (grok_engine.REGISTRY_MAX_BYTES + 1))
+    assert grok_engine._project_secret_paths(env.ctx) == []
+    grok_engine.build_deny(env.home, env.ctx)                                     # and the list still builds
+
+
+async def test_a_home_rooted_turn_says_so_in_the_journal(env, capsys):
+    events = await env.run(cwd=str(env.fake_home))
+    assert types(events)[-1] == "result", types(events)
+    assert "exposure=home_rooted" in capsys.readouterr().out
+    await env.run()
+    assert "exposure=home_rooted" not in capsys.readouterr().out
+
+
+def test_a_symlinked_secret_store_in_a_model_writable_project_is_skipped_not_resolved(env, monkeypatch):
+    # build_deny resolves a symlink entry to its TARGET. A project dir is writable by the model's shell, so
+    # `.env -> $HOME` (or -> GROK_HOME, or a dir with the binary) would make every later turn of every project
+    # refuse to start ("would hide the Grok binary, its home or $HOME itself")
+    monkeypatch.delenv("GROK_SANDBOX_DENY")
+    a, b, c = (env.tmp / n for n in ("a", "b", "c"))
+    for d in (a, b, c):
+        d.mkdir()
+    (a / ".env").symlink_to(env.fake_home)                                  # -> $HOME
+    (b / ".env").symlink_to(env.home)                                       # -> GROK_HOME
+    (c / ".claude-ops").symlink_to(env.fake_home)                           # .claude-ops -> $HOME, secrets "inside" it
+    (env.fake_home / "secrets").mkdir()
+    _register_projects(env, A=a, B=b, C=c)
+    assert grok_engine._project_secret_paths(env.ctx) == []
+    deny, _ = grok_engine.build_deny(env.home, env.ctx)                     # and it does not raise
+    assert not any(str(d).startswith(str(env.tmp / "a")) for d in deny)
+    assert ensure_home(env.ctx)["project_deny"] == []
+
+
+def test_project_secret_stores_do_not_change_the_sandbox_probe_fingerprint(env):
+    # a new `.env` in any project must not cost a real model turn (and may not flap the provider row)
+    _register_projects(env, A=env.cwd)
+    before_info = ensure_home(env.ctx)
+    before = grok_engine._probe_fingerprint("1.0.46", before_info)
+    (env.cwd / ".env").write_text("A=1")
+    (env.cwd / ".claude-ops" / "secrets").mkdir(parents=True)
+    after_info = ensure_home(env.ctx)
+    assert str(env.cwd / ".env") in after_info["deny"] and after_info["deny"] != before_info["deny"]
+    assert grok_engine._probe_fingerprint("1.0.46", after_info) == before
+    (env.secret_dir / "x").write_text("")                                   # ... while a real list change still counts
+    other = {**after_info, "deny": after_info["deny"] + [str(env.tmp / "elsewhere")]}
+    assert grok_engine._probe_fingerprint("1.0.46", other) != before
+
+
+def test_a_home_rooted_chat_is_flagged_so_the_picker_can_warn_louder(env):
+    home = env.fake_home
+    notice = grok_engine.exposure_notice(str(home))
+    assert notice and notice["home_rooted"] is True and "home directory" in notice["warning"]
+    assert grok_engine.exposure_notice(str(home) + "/")["home_rooted"] is True
+    assert grok_engine.exposure_notice(str(env.cwd)) is None                      # an ordinary project: no notice
+    assert grok_engine.exposure_notice(str(home / "projects")) is None            # below the home: still a project
+    assert grok_engine.exposure_notice(str(env.tmp))["home_rooted"] is True       # a directory that CONTAINS the home
+    assert grok_engine.exposure_notice("") is None and grok_engine.exposure_notice(None) is None
+    link = env.tmp / "home-link"
+    link.symlink_to(home)
+    assert grok_engine.exposure_notice(str(link))["home_rooted"] is True          # the same directory by another name
+
+
 # ------------------------------------------------------------------------------------------
 # spec-095 P7a: a model REFUSAL of the probe's "security self-test" is not an outage
 # ------------------------------------------------------------------------------------------
