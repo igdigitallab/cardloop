@@ -27,6 +27,7 @@ from the couch.
 [![CI](https://github.com/igdigitallab/cardloop/actions/workflows/ci.yml/badge.svg)](https://github.com/igdigitallab/cardloop/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](./LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/igdigitallab/cardloop/badge)](https://scorecard.dev/viewer/?uri=github.com/igdigitallab/cardloop)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15287/badge)](https://www.bestpractices.dev/projects/15287)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 ![Node 20+](https://img.shields.io/badge/node-20%2B-339933.svg)
 ![PWA](https://img.shields.io/badge/PWA-installable-5a0fc8.svg)
