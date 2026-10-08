@@ -14243,6 +14243,16 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                         # drain one after another, and each must resume the id the PRECEDING
                         # item just advanced, not the id that was current at accept time.
                         _pinned_rt = item.get("runtime")
+                        if (not _q_chat_id and isinstance(_pinned_rt, dict) and _pinned_rt.get("provider")
+                                and str(_pinned_rt["provider"]) != _chat_now[0]):
+                            # spec-096 P9: an item with NO chat id of its own is routed to the visible chat
+                            # (`_effective_active_chat`). Its pin names the engine it was accepted against; if
+                            # that is not the engine the chat runs, the chat is not the one it was meant for.
+                            # Running it anyway would drive the wrong engine over this conversation and write
+                            # that engine's session id (a Grok one) onto a chat of another provider.
+                            _q_refusal = (f"this queued message is pinned to {_pinned_rt['provider']!r} and has "
+                                          f"no chat of its own, but the visible chat runs {_chat_now[0]!r} "
+                                          f"- refusing instead of running it against the wrong chat")
                         if isinstance(_pinned_rt, dict) and _pinned_rt.get("provider"):
                             provider = _pinned_rt["provider"]
                             model = _pinned_rt.get("model") or model
