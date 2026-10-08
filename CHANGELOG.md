@@ -7,6 +7,25 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Security — login hardening (spec-096 P3a)
+- **Cookie salt.** A blank or `CHANGE_ME...` `WEB_COOKIE_SALT` (what a plain `cp .env.example .env`
+  left behind: a salt published in the repo) is now replaced by a random salt generated on first start
+  and kept in `data/cookie_salt` (0600), never printed. A salt you set yourself is used unchanged, so
+  existing sessions stay valid; an install that was running on the placeholder signs everyone out once.
+  `.env.example` ships it blank, `doctor` warns on the placeholder.
+- **2FA fails closed.** When the vault cannot be read (lost key, corrupt store) the login answers
+  `503 2fa_state_unreadable` instead of letting the password alone in; the same for the recovery-code
+  list. Break-glass from the host shell is in SECURITY.md.
+- **WebSocket `Origin` check.** The terminal and the browser pane refuse an upgrade from a foreign
+  origin (another page on the same host rides the `SameSite=Lax` cookie). Clients that send no `Origin`
+  are unaffected. New `WS_ALLOWED_ORIGINS` adds extra origins; a proxy that rewrites `Host` needs
+  `X-Forwarded-Host` (with `TRUSTED_PROXIES`) or that list — see docs/remote-access.md.
+- **`log_cmd` / `test_cmd`.** `/tmp/tail` no longer passes on its file name: the program must be a bare
+  allowlisted name, the path of the file that name resolves to, or a project-relative path such as
+  `venv/bin/python`. An absolute path to a venv interpreter now needs `DIAG_CMD_ALLOW_DIRS`.
+- `push-subscriptions.json` is written 0600 and atomically; the DONE.md title extraction is linear.
+- README states what the command deny list covers (and what it does not).
+
 ### Changed — Haiku 5.5
 - `haiku` now runs Claude Haiku 5.5 (`claude-haiku-5-5`, released 2026-10-07): static labels, the
   pricing row (short-prompt tier $0.10/$0.50 per MTok, 10x below Haiku 4.5; prompts over 100k tokens
