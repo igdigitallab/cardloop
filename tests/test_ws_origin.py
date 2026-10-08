@@ -132,11 +132,22 @@ def test_forwarded_host_from_an_untrusted_peer_is_ignored(monkeypatch):
     assert not allowed(hdrs, remote="")                   # unknown peer is not trusted either
 
 
-def test_trusted_proxy_forwarded_proto_blocks_a_scheme_downgrade(monkeypatch):
+def test_trusted_proxy_saying_https_blocks_an_http_origin(monkeypatch):
     monkeypatch.setenv("TRUSTED_PROXIES", "127.0.0.1")
     hdrs = {"Host": "cockpit.example", "X-Forwarded-Proto": "https", "Origin": "http://cockpit.example"}
     assert not allowed(hdrs, remote="127.0.0.1")          # http page on the same host vs https cockpit
     assert allowed({**hdrs, "Origin": "https://cockpit.example"}, remote="127.0.0.1")
+
+
+def test_trusted_proxy_saying_http_does_not_block_an_https_origin(monkeypatch):
+    """The ops Caddy (https://<tailscale-ip>/) states X-Forwarded-Proto: http on purpose so the
+    cookie does not turn Secure on the plain-http fallback entrance; the operator's terminal and
+    browser pane must keep working through it."""
+    monkeypatch.setenv("TRUSTED_PROXIES", "127.0.0.1,10.0.0.0/8,172.16.0.0/12")
+    hdrs = {"Host": "100.104.133.60", "X-Forwarded-Host": "100.104.133.60", "X-Forwarded-Proto": "http",
+            "Origin": "https://100.104.133.60"}
+    assert allowed(hdrs, remote="172.18.0.2")
+    assert not allowed({**hdrs, "Origin": "https://100.104.133.61"}, remote="172.18.0.2")
 
 
 def test_forwarded_proto_from_an_untrusted_peer_is_ignored(monkeypatch):

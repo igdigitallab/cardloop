@@ -50,3 +50,13 @@ Both give you a **stable** address instead of a random one, at the cost of a one
 
 Setup steps for both live in the main [README → Access from anywhere](../README.md#access-from-anywhere-your-own-domain).
 This doc only covers the tradeoff; it does not replace those instructions.
+
+## Your own reverse proxy and the WebSockets
+
+The terminal and the browser pane are WebSockets, and the cockpit only accepts one whose `Origin`
+is its own: the `Host` the browser used (or `X-Forwarded-Host` when the proxy is listed in
+`TRUSTED_PROXIES`). `--tunnel`, a named Cloudflare Tunnel and a proxy that keeps the `Host` header
+(Caddy's `reverse_proxy` and Traefik do) need nothing. A proxy that rewrites `Host` to the upstream
+address (nginx's default `proxy_pass` does) should add `proxy_set_header Host $host;`, or you list the
+public origin in `WS_ALLOWED_ORIGINS` (for example `https://cockpit.example.com`). A refused upgrade
+logs `[ws-origin] refused ...` with the Origin and Host it saw.

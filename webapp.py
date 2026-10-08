@@ -2570,9 +2570,12 @@ def _ws_origin_allowed(req: web.Request) -> bool:
         if xfh:
             own_hosts.append(xfh)
         forwarded_proto = (req.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
-    # A trusted proxy that states the scheme must agree with the Origin's scheme. Otherwise the
-    # hop to us is often plain http behind a TLS-terminating proxy or tunnel, so both schemes pass.
-    if forwarded_proto in _DEFAULT_PORTS and forwarded_proto != scheme:
+    # The scheme is compared in ONE direction only: a trusted proxy that says the request came in
+    # over https means an http:// page cannot be the caller (an injected page on the plain-http
+    # sibling of the same hostname). "http" says nothing: the hop to us is plain http behind any
+    # TLS-terminating proxy or tunnel, and a proxy may state http on purpose (the ops Caddy does,
+    # so the cookie does not turn Secure on its fallback entrance) - an https Origin must pass then.
+    if forwarded_proto == "https" and scheme != "https":
         return False
     for own in own_hosts:
         try:
