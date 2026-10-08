@@ -20,7 +20,7 @@ Covers:
     - GET /api/autopilot/decisions?limit=N
 """
 
-import shlex
+import os
 import sys
 import time
 from pathlib import Path
@@ -741,11 +741,19 @@ async def test_decisions_endpoint_requires_auth(aiohttp_client, shadow_app):
 # a bare `python3` is the system interpreter, which on a CI runner has no pytest at
 # all. That made the "passing" case below report a failure (module not found) and
 # turned CI red on every push while staying green on a dev box.
-_PYTEST_CMD = f"{shlex.quote(sys.executable)} -m pytest -q test_x.py"
+# spec-096 P3.5: an ABSOLUTE interpreter path is no longer allowlisted on the strength of its
+# basename (it must be what the bare name resolves to), so the command names `python3` and the
+# fixture puts this interpreter's directory first on PATH - the bare name now IS this interpreter.
+_PYTEST_CMD = "python3 -m pytest -q test_x.py"
+
+
+@pytest.fixture
+def this_interpreter_first_on_path(monkeypatch):
+    monkeypatch.setenv("PATH", os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", ""))
 
 
 @pytest.mark.asyncio
-async def test_test_signal_configured_failing(tmp_path):
+async def test_test_signal_configured_failing(tmp_path, this_interpreter_first_on_path):
     """A configured, allowlisted test_cmd that FAILS → (True, 'failed…')."""
     (tmp_path / "test_x.py").write_text("def test_fail():\n    assert 1 == 2\n")
     proj = {"cwd": str(tmp_path), "test_cmd": _PYTEST_CMD}
@@ -755,7 +763,7 @@ async def test_test_signal_configured_failing(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_test_signal_configured_passing(tmp_path):
+async def test_test_signal_configured_passing(tmp_path, this_interpreter_first_on_path):
     """A configured, allowlisted test_cmd that PASSES → (False, 'passed…')."""
     (tmp_path / "test_x.py").write_text("def test_ok():\n    assert 1 == 1\n")
     proj = {"cwd": str(tmp_path), "test_cmd": _PYTEST_CMD}
