@@ -12935,9 +12935,9 @@ async def api_project_set_session(req: web.Request) -> web.Response:
         return web.json_response({"error": "action must be 'new' or 'resume'"}, status=400)
 
 
+# One list with handoff.py (spec-096 P9): the display strips what the handoff reader must not mine.
 _SERVICE_BLOCK_RE = re.compile(
-    r"<(?P<tag>task-notification|prior-session-summary|context-pack|system-reminder"
-    r"|command-name|command-message|command-args)"
+    r"<(?P<tag>" + "|".join(_handoff.SERVICE_TAGS) + r")"
     r"[^>]*>.*?</(?P=tag)>",
     re.DOTALL | re.IGNORECASE,
 )

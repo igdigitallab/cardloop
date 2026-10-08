@@ -42,11 +42,53 @@ BLOCK_END = "---"
 CONSTRAINTS_HEADING = "## Standing constraints (verbatim, from the operator)"
 _TEMPLATE_OPENING = "This conversation was running on"
 _RAW_TAIL_LABELS = ("[previous engine]", "[operator]")
-# Service blocks the cockpit prefixes onto a prompt too (webapp strips them before display; a
-# caller holding raw text must not mine them either).
-_SERVICE_BLOCK_RE = re.compile(
-    r"<(?P<tag>context-pack|prior-session-summary)\b[^>]*>.*?</(?P=tag)>",
-    re.DOTALL | re.IGNORECASE)
+# Service blocks the cockpit (or the SDK it drives) prefixes onto a prompt too. The first
+# tuple is the ONE list the display stripper in webapp derives its regex from; the second holds
+# wrappers that are not the operator's words either but that the display keeps on purpose (a
+# teammate's report is real content to READ, never an instruction to carry forward).
+SERVICE_TAGS = (
+    "task-notification", "prior-session-summary", "context-pack", "system-reminder",
+    "command-name", "command-message", "command-args",
+)
+_FOREIGN_TAGS = (
+    "agent-message", "teammate-message",
+    "local-command-caveat", "local-command-stdout", "local-command-stderr",
+)
+# A whole row that starts with one of these was written by the cockpit (a completion wake, the
+# Stop-agents instruction), never typed: webapp's `_display_prompt` drops it whole as well.
+SYNTHETIC_PREFIXES = ("[auto-continue]", "[agent-stop]")
+_ALL_TAGS = SERVICE_TAGS + _FOREIGN_TAGS
+_OPEN_TAG_RE = re.compile(
+    r"<(?P<tag>" + "|".join(re.escape(t) for t in _ALL_TAGS) + r")\b[^>]*(?:>|\Z)", re.IGNORECASE)
+
+
+def _drop_service_blocks(text: str) -> str:
+    """`text` without any service block. A CLOSED block goes wherever it sits; an UNCLOSED one
+    that opens its own line is dropped to the end of the text - fail closed, like the handoff
+    block: whatever follows an opener nobody closed is not known to be the operator's. An
+    unclosed tag mentioned mid-sentence ("don't strip the <system-reminder> tags") is operator
+    prose and is left alone."""
+    out: list[str] = []
+    pos = 0
+    while True:
+        m = _OPEN_TAG_RE.search(text, pos)
+        if m is None:
+            out.append(text[pos:])
+            break
+        close = re.compile(r"</" + re.escape(m.group("tag")) + r"\s*>", re.IGNORECASE).search(text, m.end())
+        if close is not None:
+            out.append(text[pos:m.start()])
+            pos = close.end()
+            continue
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        if text[line_start:m.start()].strip():      # mid-sentence mention, not a block opener
+            out.append(text[pos:m.end()])
+            pos = m.end()
+            continue
+        out.append(text[pos:m.start()])
+        break
+    return "".join(out)
+
 
 MAX_CONSTRAINTS = 12
 MAX_RAW_MESSAGES = 6
@@ -76,6 +118,19 @@ def _carried_ok(line: str) -> bool:
         and not line.startswith(_TEMPLATE_OPENING)
 
 
+def _opens_block(lines: "list[str]", i: int) -> bool:
+    """True when `lines[i]` opens a block THE COCKPIT WROTE: the `# Handoff:` header followed
+    (past blank lines) by the template sentence `build_handoff` always emits next. A line that
+    merely starts with `# Handoff:` is the operator's own heading and must not swallow the rest
+    of their message when no closing rule follows."""
+    if not lines[i].startswith(BLOCK_HEADER):
+        return False
+    for nxt in lines[i + 1:]:
+        if nxt.strip():
+            return nxt.strip().startswith(_TEMPLATE_OPENING)
+    return False
+
+
 def split_user_text(text: "str | None") -> "tuple[str, list[str]]":
     """`(operator_text, carried_constraints)` of one user row.
 
@@ -85,9 +140,11 @@ def split_user_text(text: "str | None") -> "tuple[str, list[str]]":
     "Last messages" section holds the PREVIOUS ENGINE'S output, so mining the row for constraints
     promoted model text to "verbatim, from the operator" on the next crossing (spec-096 P8a).
 
-    `operator_text` is the row with every such block removed: a `# Handoff:` line through the
-    next `---` line (an unterminated block is dropped to the end - fail closed), the service
-    blocks, and any stray `[previous engine]` / `[operator]` raw-tail line (the operator may
+    `operator_text` is the row with every such block removed: a `# Handoff:` header that the
+    cockpit generated (the template sentence follows it) through the next `---` line (an
+    unterminated block is dropped to the end - fail closed), the service blocks (closed ones
+    wherever they sit, an unclosed one that opens a line to the end of the text - see
+    `_drop_service_blocks`), a row that IS a synthetic wake (`SYNTHETIC_PREFIXES`), and any stray `[previous engine]` / `[operator]` raw-tail line (the operator may
     have edited the header away before arming the block). `carried_constraints` are the lines of
     the block's own "Standing constraints" section: the cockpit built those from operator rows
     only, and the multi-hop chain (Claude -> Grok -> Codex) loses them if they are dropped too.
@@ -96,7 +153,10 @@ def split_user_text(text: "str | None") -> "tuple[str, list[str]]":
     own: list[str] = []
     carried: list[str] = []
     in_block = in_constraints = False
-    for raw in _SERVICE_BLOCK_RE.sub("", text or "").splitlines():
+    if (text or "").lstrip().startswith(SYNTHETIC_PREFIXES):
+        return "", carried
+    lines = _drop_service_blocks(text or "").splitlines()
+    for i, raw in enumerate(lines):
         line = raw.strip()
         if in_block:
             if line == BLOCK_END:
@@ -106,7 +166,7 @@ def split_user_text(text: "str | None") -> "tuple[str, list[str]]":
             elif in_constraints and line.startswith("- ") and _carried_ok(line[2:].strip()):
                 carried.append(line[2:].strip())
             continue
-        if raw.startswith(BLOCK_HEADER):
+        if _opens_block(lines, i):
             in_block = True
             continue
         if line.startswith(_RAW_TAIL_LABELS):
