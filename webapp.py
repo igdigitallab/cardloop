@@ -2590,6 +2590,22 @@ def _ws_origin_allowed(req: web.Request) -> bool:
     return False
 
 
+_LOG_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _log_safe(value: object) -> str:
+    """A request-derived value rendered for ONE log line.
+
+    ``request.path`` is percent-DECODED, so ``%0A`` arrives as a real newline. Logged raw,
+    it ends the current entry and lets the caller write the next one (a forged
+    ``UNHANDLED exc_class=... path=...`` line is turned into a card by the incident
+    scanner). CR/LF and the other control or line-separator characters are escaped; an
+    ordinary path, including non-ASCII letters, comes out unchanged.
+    """
+    text = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    return _LOG_CTRL_RE.sub(lambda m: m.group().encode("unicode_escape").decode("ascii"), text)
+
+
 def _ws_origin_refusal(req: web.Request) -> "Optional[web.Response]":
     """None when the WebSocket upgrade may proceed, else a 403 to return BEFORE ws.prepare()."""
     if _ws_origin_allowed(req):
@@ -2597,7 +2613,7 @@ def _ws_origin_refusal(req: web.Request) -> "Optional[web.Response]":
     logging.warning("[ws-origin] refused %s from Origin %.200r (Host %.200r). Same-origin pages are "
                     "always allowed; list other origins in WS_ALLOWED_ORIGINS, and set TRUSTED_PROXIES "
                     "when a reverse proxy rewrites Host.",
-                    req.path, req.headers.get("Origin", ""), req.headers.get("Host", ""))
+                    _log_safe(req.path), req.headers.get("Origin", ""), req.headers.get("Host", ""))
     return web.json_response({"error": "origin not allowed"}, status=403)
 
 
@@ -2666,11 +2682,16 @@ async def error_middleware(request: web.Request, handler):
         raise
     except Exception as exc:
         request_id = _uuid.uuid4().hex[:8]
-        logging.exception("UNHANDLED exc_class=%s path=%s request_id=%s", type(exc).__name__, request.path, request_id)
+        # The path is client-chosen. Log the percent-ENCODED form (no line break, no space can
+        # be in it: the scanner reads `path=(\S+)` and a decoded space would let a client
+        # write a second `UNHANDLED exc_class=` token into this line) and use that one value
+        # for the log line AND the incident card, so both keep the same dedup hash.
+        path = _log_safe(request.rel_url.raw_path)
+        logging.exception("UNHANDLED exc_class=%s path=%s request_id=%s", type(exc).__name__, path, request_id)
         # Spec-012 Ph1: cockpit's own error → in-process card, immediately (no round-trip
         # through the log scanner). Fire-and-forget; hash dedup prevents the scanner from doubling it.
         try:
-            _spawn_bg(_report_incident(request.app["ctx"], type(exc).__name__, request.path))
+            _spawn_bg(_report_incident(request.app["ctx"], type(exc).__name__, path))
         except Exception:
             pass
         return web.json_response(
