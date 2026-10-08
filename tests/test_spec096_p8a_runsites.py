@@ -233,3 +233,144 @@ async def test_a_pin_to_an_unregistered_provider_is_a_visible_error_too(fake_ctx
     assert _nothing_ran(engines)
     errors = _error_texts()
     assert errors and "vertex" in errors[0], errors
+
+
+# ═════════════════════════ item 12: a provider gate bites at all three run sites ═════════════
+#
+# No registered provider has a gate any more (Grok's was removed 2026-10-03), so nothing exercised
+# `_gated_engine` / the POST refusal: both could be deleted with the suite green, and the first
+# provider that ships a real gate would have started on an untested choke point. These tests
+# register a gated provider of their own (undone by monkeypatch) and drive the three run sites.
+
+GATE_REFUSAL = "gated is off for this project"
+
+
+@pytest.fixture
+def gated_provider(monkeypatch, fake_ctx, engines):
+    spec = providers.ProviderSpec(
+        name="gated", label="Gated", engine_key="run_gated_engine",
+        continuity_field="gated_session_id", resume_kwarg="resume_session_id",
+        result_key="gated_id", fallback_model=lambda ctx: "gx", enabled=lambda: True,
+        capabilities=lambda: {"chat": True},
+        gate=lambda project: None if project.get("gated_ok") is True else GATE_REFUSAL,
+        gate_field="gated_ok",
+    )
+    monkeypatch.setitem(providers._REGISTRY, "gated", spec)
+    engines["gated"] = []
+
+    async def engine(**kw):
+        engines["gated"].append(kw)
+        yield {"type": "text", "text": "answer"}
+        yield {"type": "result", "gated_id": "NEW-GATED", "context_tokens": 3}
+
+    fake_ctx["run_gated_engine"] = engine
+    return spec
+
+
+def _open_the_gate(ctx):
+    ctx["topics"][SESSION_KEY]["gated_ok"] = True
+
+
+def _runs(engines):
+    return {k: len(v) for k, v in engines.items()}
+
+
+NOTHING = {"claude": 0, "codex": 0, "grok": 0, "gated": 0}
+
+
+def test_the_test_provider_really_is_gated(gated_provider):
+    assert gated_provider.has_gate
+    assert _webapp._provider_gate_refusal({}, "gated") == GATE_REFUSAL
+    assert _webapp._provider_gate_refusal({"gated_ok": True}, "gated") is None
+
+
+@pytest.mark.asyncio
+async def test_a_gated_provider_is_refused_at_the_queue_drain_and_runs_nowhere(
+    fake_ctx, engines, gated_provider
+):
+    _seed_chat(fake_ctx, provider="gated", model="gx", gated_session_id="OLD-GATED")
+    # accepted while the project could use it ...
+    _open_the_gate(fake_ctx)
+    pinned = _webapp._pin_chat_runtime(fake_ctx, {"id": PROJECT_ID}, CHAT_ID)
+    assert pinned["provider"] == "gated"
+    # ... and revoked before the drain
+    fake_ctx["topics"][SESSION_KEY].pop("gated_ok")
+    await _drain_item(fake_ctx, chat_id=CHAT_ID, project_id=PROJECT_ID, pinned_runtime=pinned)
+
+    assert _runs(engines) == NOTHING, "the refused message ran on an engine"
+    assert GATE_REFUSAL in _error_texts(), "the refusal must be an error on the turn"
+    assert any(e.get("kind") == "run_end" and e.get("outcome") == "fail" for e in _live_events())
+    assert fake_ctx["sessions"][SESSION_KEY] == "CLAUDE-FLAT-SESSION"
+    assert _chat_record(fake_ctx)["gated_session_id"] == "OLD-GATED"
+    assert not fake_ctx["running"].get(SESSION_KEY)
+
+
+@pytest.mark.asyncio
+async def test_the_same_drain_runs_on_the_gated_provider_once_the_gate_is_open(
+    fake_ctx, engines, gated_provider
+):
+    """Control: the refusal above is the gate's, not a harness that cannot run this provider."""
+    _seed_chat(fake_ctx, provider="gated", model="gx", gated_session_id="OLD-GATED")
+    _open_the_gate(fake_ctx)
+    pinned = _webapp._pin_chat_runtime(fake_ctx, {"id": PROJECT_ID}, CHAT_ID)
+    await _drain_item(fake_ctx, chat_id=CHAT_ID, project_id=PROJECT_ID, pinned_runtime=pinned)
+    assert _runs(engines) == {**NOTHING, "gated": 1}
+    assert _chat_record(fake_ctx)["gated_session_id"] == "NEW-GATED"
+    assert not _error_texts()
+
+
+@pytest.mark.asyncio
+async def test_a_gated_provider_is_refused_by_the_direct_post_and_runs_nowhere(
+    aiohttp_client, fake_ctx, app, engines, gated_provider
+):
+    _seed_chat(fake_ctx, provider="gated", model="gx", gated_session_id="OLD-GATED")
+    client = await aiohttp_client(app)
+    with patch.object(_webapp, "_build_agents_kwargs", return_value={}), \
+         patch.object(_webapp, "_secrets_read", return_value={}):
+        resp = await client.post(f"/api/projects/{PROJECT_ID}/chat",
+                                 json={"prompt": "hello", "chat_id": CHAT_ID}, headers=_auth(fake_ctx))
+    assert resp.status == 409 and await resp.json() == {"error": GATE_REFUSAL}
+    assert _runs(engines) == NOTHING
+    assert fake_ctx["sessions"][SESSION_KEY] == "CLAUDE-FLAT-SESSION"
+    assert _chat_record(fake_ctx)["gated_session_id"] == "OLD-GATED"
+
+    _open_the_gate(fake_ctx)                                       # control
+    resp, events = await _post_chat(client, fake_ctx)
+    assert resp.status == 200 and _runs(engines) == {**NOTHING, "gated": 1}
+    assert _chat_record(fake_ctx)["gated_session_id"] == "NEW-GATED"
+
+
+async def _run_gated_card(fake_ctx, tmp_path, *, gate_open):
+    project = {"name": "myproject", "cwd": str(tmp_path / "cardproj"), "session_key": SESSION_KEY,
+               "model": "sonnet", **({"gated_ok": True} if gate_open else {})}
+    Path(project["cwd"]).mkdir(exist_ok=True)
+    _webapp._save_board(project["cwd"], "myproject", "# T", {
+        "backlog": [], "in_progress": [{"id": "aabbcc", "text": "Build", "provider": "gated"}],
+        "review": [], "failed": []})
+    card = {"id": "aabbcc", "text": "Build", "provider": "gated", "description": None}
+    fake_ctx["running"][SESSION_KEY] = True
+    with patch.object(_webapp, "_build_agents_kwargs", return_value={}), \
+         patch.object(_webapp, "_secrets_read", return_value={}):
+        await _webapp._run_card(fake_ctx, None, project, card, SESSION_KEY, run_mode="legacy")
+    return _webapp._load_board(project["cwd"])[2]
+
+
+@pytest.mark.asyncio
+async def test_a_gated_provider_is_refused_for_a_board_card_and_the_card_fails_with_the_reason(
+    fake_ctx, tmp_path, engines, gated_provider
+):
+    cols = await _run_gated_card(fake_ctx, tmp_path, gate_open=False)
+    assert _runs(engines) == NOTHING, "no engine ran - in particular not Claude's"
+    assert [c["id"] for c in cols["failed"]] == ["aabbcc"] and not cols["review"]
+    sidecar = (fake_ctx["DATA"] / "runs" / "aabbcc.md").read_text()
+    assert "Outcome:** fail" in sidecar and GATE_REFUSAL in sidecar
+    assert SESSION_KEY not in fake_ctx["running"], "the run lock is released"
+
+
+@pytest.mark.asyncio
+async def test_the_same_card_runs_on_the_gated_provider_once_the_gate_is_open(
+    fake_ctx, tmp_path, engines, gated_provider
+):
+    cols = await _run_gated_card(fake_ctx, tmp_path, gate_open=True)
+    assert _runs(engines) == {**NOTHING, "gated": 1}
+    assert not cols["failed"]

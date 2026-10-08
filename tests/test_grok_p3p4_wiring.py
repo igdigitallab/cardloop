@@ -1639,27 +1639,20 @@ async def test_rotate_still_refuses_a_busy_adapter_project(aiohttp_client, rotat
 # ═════════════════════════ gap A: a home-rooted Grok chat ═════════════════════
 
 
-@pytest.fixture
-def fake_home(tmp_path, monkeypatch) -> Path:
-    h = tmp_path / "homedir"
-    (h / "projects" / "client-a").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(h))
-    return h
-
-
-def _gate(**project):
-    return providers.gate_refusal("grok", project)
-
-
 def _home_rooted_project(ctx, monkeypatch):
     """The registered project whose working directory IS the home directory: the process' HOME is
     pointed at the project's own directory."""
     monkeypatch.setenv("HOME", ctx["topics"][SESSION_KEY]["cwd"])
 
 
-async def test_the_hatch_lets_a_home_rooted_chat_run(
+async def test_a_home_rooted_grok_chat_is_an_ordinary_chat_nothing_in_the_run_path_refuses_it(
     aiohttp_client, fake_ctx, app, grok_on, quiet_run, engines, monkeypatch
 ):
+    """There is no per-project gate and no hatch any more (removed 2026-10-03: choosing Grok is the
+    consent). What this still pins is the wiring: a Grok chat rooted at $HOME reaches the engine like
+    any other, so a home-based refusal re-added to the run path fails here. (It used to be called
+    `..._the_hatch_lets_...` and could not fail for that reason - there is nothing to open.) The
+    gate seam itself is covered by `test_spec096_p8a_runsites.py` with a test-registered provider."""
     _home_rooted_project(fake_ctx, monkeypatch)
     _seed_chat(fake_ctx, provider="grok")
     client = await aiohttp_client(app)
