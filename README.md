@@ -408,7 +408,8 @@ exposing it to a network.
 - **`log_cmd` / `test_cmd` are allowlisted, not sandboxed.** They run without a shell (shell metacharacters
   are rejected) and only for a fixed list of programs (journalctl, docker, tail, head, cat, grep, pytest,
   python, npm, make, cargo, go), given as a bare name, as the full path of the same file the bare name
-  resolves to, or as a project-relative path such as `venv/bin/python`; wrapper scripts only from
+  resolves to, or as a project-relative path such as `venv/bin/python`; wrapper scripts, and an absolute path
+  to an interpreter elsewhere (e.g. `/srv/app/venv/bin/python`), only from
   directories you list in `DIAG_CMD_ALLOW_DIRS`. The list includes interpreters and `docker` on purpose, so
   this guards against mistakes and injected values — it is not a boundary: the authenticated operator
   already has a shell.

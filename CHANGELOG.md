@@ -7,6 +7,51 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Upgrade notes — spec-096 hardening (read before updating)
+Things that can surprise an existing install; each is deliberate.
+- **An absolute path to an allowlisted program in `log_cmd` / `test_cmd`** (for example
+  `/srv/app/venv/bin/python -m pytest`) is no longer accepted on the strength of its file name: it must be
+  the file the bare name resolves to under the service's `PATH`, or live in a directory listed in
+  **`DIAG_CMD_ALLOW_DIRS`** (add the venv's `bin/`). Until then the command yields nothing: the board
+  janitor has no test signal and Review cards stop auto-archiving (a rejected `log_cmd` logs
+  `log_cmd rejected by allowlist`; a rejected `test_cmd` is silent, so look at any project whose cards
+  stopped leaving Review). A project-relative `venv/bin/python` and a bare `python3` keep working.
+- **A vault key that exists ONLY in the environment** (`CLAUDE_OPS_SECRET_KEY` in `.env`, no key file) is no
+  longer inherited by agents, so the `secret` CLI they run cannot decrypt the vault. Add
+  `CLAUDE_OPS_SECRET_KEY` to **`AGENT_ENV_PASSTHROUGH`**, or use a key file (`CLAUDE_OPS_SECRET_KEYFILE`).
+  Installs with a key file are unaffected.
+- **A blank or placeholder `WEB_COOKIE_SALT`** is replaced by a generated salt in `data/cookie_salt`: every
+  browser signed in on the old placeholder is signed out ONCE. A salt you set yourself changes nothing.
+- **A symlink in place of a secret file is replaced, not followed.** Files written through the shared atomic
+  writer (the vault key and store, per-project `secrets.env`, the push key and subscriptions, account and
+  Grok config, role files) are swapped in with a rename, so a link you made on purpose (a role or
+  `secrets.env` symlinked to a shared file) is cut loose on the next save; keep such a file as a real file.
+- **Grok work gets no host-side test verdict.** The janitor's `test_cmd`, the card quality gate and the
+  autopilot signal would execute the project's own test code (conftest.py, Makefile, package.json
+  scripts, `venv/bin/pytest`) on the host, unsandboxed — which a Grok-edited tree turns into a sandbox
+  escape. A card whose run record says Grok, and (conservatively) every card of a project with live Grok
+  work (a Grok card in progress / Review / Failed, or a chat on Grok), now reads `no test signal: Grok work
+  is not executed on the host`: the gate answers `unknown`, the janitor never auto-archives it (accept
+  it yourself). The manual "Run tests" button is unchanged.
+
+### Security — final-review fixes (spec-096 P9)
+- A Grok agent that names no account in its `authenticate` reply is refused while an account is pinned
+  (it used to be waved through, skipping the one check the model's shell cannot forge).
+- Resuming a Grok session — the Resume action and every run site — requires the cockpit's witness for that
+  directory (`grok_history.resumable`): a session directory planted by another project's turn can no longer be
+  made permanent by resuming it. A stored id nobody vouches for is dropped with a timeline row and a new
+  session starts.
+- The handoff reader drops only blocks the cockpit wrote: an operator line that starts with `# Handoff:`
+  no longer swallows the rest of the message, and every service wrapper the display strips
+  (`<task-notification>`, `<system-reminder>`, agent/teammate messages, wake rows) is also kept out of
+  "Standing constraints"; an unclosed service block fails closed.
+- A turn clears only the handoff block it delivered (a block armed for the other engine mid-turn survives);
+  a pinned queued message with no chat of its own is refused when the visible chat runs another provider.
+- Two racing starts agree on one cookie salt; role files keep mode 0644; the `2fa_state_unreadable` journal
+  line names the store to move aside when the key is lost; Grok's config writer tightens a loose file; the
+  load-alert journal says `push sent to N subscriber(s), delivery not confirmed` instead of `delivered`
+  when only a push (no receipt) went out.
+
 ### Security — secrets out of reach of children and same-user processes (spec-096 P3b)
 - **No inherited secrets.** At start the cockpit moves every secret (`WEB_PASSWORD`, `WEB_COOKIE_SALT`,
   `BOT_TOKEN`, `COOLIFY_API_TOKEN`, `AZURE_FOUNDRY_KEY`, `N8N_API_KEY`, `TWOCAPTCHA_API_KEY`,
