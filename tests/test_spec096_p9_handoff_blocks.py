@@ -134,3 +134,14 @@ def test_the_tag_and_prefix_sets_match_what_the_display_strips():
     assert shown == set(handoff.SERVICE_TAGS)
     assert webapp._BG_CONTINUE_PREFIX in handoff.SYNTHETIC_PREFIXES
     assert webapp._AGENT_STOP_PREFIX in handoff.SYNTHETIC_PREFIXES
+
+
+def test_thousands_of_unclosed_mentions_stay_linear():
+    """Rows can be model-written (a Grok session file): a hostile row full of unclosed openers must not
+    make the reader quadratic."""
+    import time
+    text = ("see the <system-reminder> tag; " * 20000) + "\nnever touch prod"
+    t0 = time.monotonic()
+    own = handoff.split_user_text(text)[0]
+    assert time.monotonic() - t0 < 2.0
+    assert "never touch prod" in own

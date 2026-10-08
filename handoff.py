@@ -62,6 +62,9 @@ _OPEN_TAG_RE = re.compile(
     r"<(?P<tag>" + "|".join(re.escape(t) for t in _ALL_TAGS) + r")\b[^>]*(?:>|\Z)", re.IGNORECASE)
 
 
+_CLOSE_TAG_RES = {t: re.compile(r"</" + re.escape(t) + r"\s*>", re.IGNORECASE) for t in _ALL_TAGS}
+
+
 def _drop_service_blocks(text: str) -> str:
     """`text` without any service block. A CLOSED block goes wherever it sits; an UNCLOSED one
     that opens its own line is dropped to the end of the text - fail closed, like the handoff
@@ -70,18 +73,22 @@ def _drop_service_blocks(text: str) -> str:
     prose and is left alone."""
     out: list[str] = []
     pos = 0
+    closeless: set[str] = set()     # a tag with no closer after one point has none after any later point
     while True:
         m = _OPEN_TAG_RE.search(text, pos)
         if m is None:
             out.append(text[pos:])
             break
-        close = re.compile(r"</" + re.escape(m.group("tag")) + r"\s*>", re.IGNORECASE).search(text, m.end())
+        tag = m.group("tag").lower()
+        close = None if tag in closeless else _CLOSE_TAG_RES[tag].search(text, m.end())
+        if close is None:
+            closeless.add(tag)
         if close is not None:
             out.append(text[pos:m.start()])
             pos = close.end()
             continue
-        line_start = text.rfind("\n", 0, m.start()) + 1
-        if text[line_start:m.start()].strip():      # mid-sentence mention, not a block opener
+        before = text[max(0, m.start() - 200):m.start()].rsplit("\n", 1)[-1]     # bounded look-back: linear
+        if before.strip():                          # mid-sentence mention, not a block opener
             out.append(text[pos:m.end()])
             pos = m.end()
             continue
