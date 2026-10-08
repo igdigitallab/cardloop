@@ -6184,6 +6184,20 @@ async def _live_resume_id(spec: "providers.ProviderSpec", ctx: dict, session_key
     return None
 
 
+async def _note_send(spec: "providers.ProviderSpec", ctx: dict, session_id: "str | None",
+                     prompt: "str | None") -> None:
+    """`spec.note_send`, off the event loop.
+
+    The send ledger is blocking file IO (open, fstat, read up to 1 MiB, hash, mkdir, append); on a
+    slow or stuck data-dir filesystem a call on the loop thread froze the whole cockpit (spec-096
+    P8a). Awaited, never fire-and-forget: the pre-run record has to be on disk before the engine
+    starts, because a restart mid-turn never reaches the `result` event that records it afterwards.
+    A provider without a ledger (Claude, Codex) never pays for the executor hop. Never raises."""
+    if not spec.keeps_send_ledger or not session_id or not isinstance(prompt, str):
+        return
+    await asyncio.get_running_loop().run_in_executor(None, spec.note_send, ctx, session_id, prompt)
+
+
 def _gate_project(ctx: dict, project: "dict | None", project_id: "str | None" = None) -> dict:
     """The record the gate judges at RUN time. A project the caller can NAME (`project_id`, or an
     `id` on the record) is judged by its live registry entry — a flag revoked after a message was
@@ -7681,7 +7695,7 @@ async def _run_card(
                     _bus_publish(session_key, _live_ev, persist=True)
                 elif etype == "result":
                     _card_last_result_event = event  # Phase D: capture for auto-resume
-                    spec.note_send(ctx, spec.result_id(event), prompt)
+                    await _note_send(spec, ctx, spec.result_id(event), prompt)
                     # A card runs with nobody watching, which is exactly where a silent
                     # downgrade costs the most — and until now cards had no alert path at all.
                     _card_stale = _check_model_freshness(event.get("model_requested"),
@@ -14295,7 +14309,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         })
         _bus_publish(session_key, _run_start_ev)
 
-        spec.note_send(ctx, resume_id, effective_prompt)  # before the run: see api_project_chat
+        await _note_send(spec, ctx, resume_id, effective_prompt)  # before the run: see api_project_chat
         if not spec.is_default:
             _queue_gen = run_engine(
                 project_name=project_name, cwd=cwd, prompt=effective_prompt,
@@ -14339,7 +14353,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             elif etype == "result":
                 _q_final_ctx_tokens = event.get("context_tokens") or None
                 _new_id = spec.result_id(event)
-                spec.note_send(ctx, _new_id, effective_prompt)
+                await _note_send(spec, ctx, _new_id, effective_prompt)
                 if _new_id:
                     # Write the new session_id back to THIS chat's entry in chats.json (mirroring
                     # the direct /chat path), not just the flat mirror — otherwise the queued
@@ -15281,7 +15295,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
         # runs: a restart mid-turn (restart-self.sh aborts every live turn) never reaches the
         # `result` event that records it afterwards, and the operator's last message would then
         # read as unverified at the next crossing.
-        _spec.note_send(ctx, resume_sid, effective_prompt)
+        await _note_send(_spec, ctx, resume_sid, effective_prompt)
         if not _spec.is_default:
             _engine_gen = run_engine(
                 project_name=name, cwd=cwd, prompt=effective_prompt,
@@ -15405,7 +15419,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                  persist=False)
                     await _send(_stale_ev)
                 _new_id = _spec.result_id(event)
-                _spec.note_send(ctx, _new_id, effective_prompt)
+                await _note_send(_spec, ctx, _new_id, effective_prompt)
                 # The public result frame names the id under the record field its provider
                 # persists it in; every other provider's field is present and null.
                 _id_fields = {f: None for f in providers.continuity_fields()}
