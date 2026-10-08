@@ -56,7 +56,7 @@ Prefer the manual steps? They are equivalent to what `install.sh` runs:
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt -r requirements-dev.txt   # runtime + dev
-cp .env.example .env       # set WEB_PASSWORD; WEB_COOKIE_SALT auto-generates if blank
+cp .env.example .env       # set WEB_PASSWORD; a blank WEB_COOKIE_SALT is generated and stored in data/cookie_salt
 cd web && npm ci && npm run build && cd ..
 venv/bin/python bot.py
 ```

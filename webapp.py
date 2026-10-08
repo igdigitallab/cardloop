@@ -44,6 +44,7 @@ import modules as _modules
 import accounts as _accounts
 # spec-096 P2: the ONE atomic writer for every secret file (mkstemp = 0600 from creation).
 import fsutil as _fsutil
+import auth_salt as _auth_salt
 
 # spec-092: the single place a run's provider x account x model gets decided. Pure logic,
 # no aiohttp/engine import back — safe to import at module scope (unlike engine.py, which
@@ -2381,7 +2382,8 @@ def _cookie_secure(req: web.Request) -> bool:
 # ─────────────────────────── auth ───────────────────────────
 #
 # Scheme: cookie cops_auth = hex(scrypt(password, salt=AUTH_SALT, n=2^14, r=8, p=1)).
-# Salt — AUTH_SALT from env (first run → auto-generated and printed to stderr).
+# Salt — AUTH_SALT from env WEB_COOKIE_SALT; blank/placeholder → generated once and persisted in
+# data/cookie_salt (0600), never printed (see auth_salt.py).
 # Comparison — hmac.compare_digest (constant-time).
 # Rate-limit: ≥5 failed attempts from one IP in 5 min → 429 for 5 min.
 
@@ -2416,10 +2418,25 @@ _incident_ip_history: dict[str, list[float]] = {}
 # {project_id: [timestamp, ...]} — history of successful calls
 _incident_push_history: dict[str, list[float]] = {}
 
-# scrypt salt: taken from env WEB_COOKIE_SALT or auto-generated at startup.
-AUTH_SALT: bytes = os.environ.get("WEB_COOKIE_SALT", "").encode() or (
-    lambda s: (print(f"[auth] generated WEB_COOKIE_SALT={s} — add to .env", flush=True), s.encode())[1]
-)(secrets.token_hex(16))
+# scrypt salt (spec-096 P3.1). An explicitly configured WEB_COOKIE_SALT is used verbatim. A blank or
+# `CHANGE_ME...` placeholder value (what `cp .env.example .env` leaves behind) is resolved in start()
+# from a private file in the data dir (auth_salt.py: read it, or generate + persist it), because the
+# data dir is only known at runtime. Until start() runs (import time, unit tests that never boot the
+# server) a per-process random salt keeps _derive_token usable. The salt value is never printed.
+_AUTH_SALT_ENV = os.environ.get("WEB_COOKIE_SALT", "")
+AUTH_SALT: bytes = (_AUTH_SALT_ENV.encode() if not _auth_salt.is_placeholder(_AUTH_SALT_ENV)
+                    else secrets.token_hex(32).encode())
+
+
+def _init_auth_salt(ctx: dict) -> None:
+    """Settle AUTH_SALT for this run (called from start(), before the first token is derived).
+
+    Re-reads WEB_COOKIE_SALT at call time (a manual run may load .env after this module is
+    imported) and takes the data dir from ctx. An explicit salt gives exactly the bytes the
+    import-time line produced, so existing cookies stay valid; a blank/placeholder one becomes
+    the persisted private salt (auth_salt.resolve)."""
+    global AUTH_SALT
+    AUTH_SALT = _auth_salt.resolve(os.environ.get("WEB_COOKIE_SALT", ""), ctx.get("DATA"))
 
 
 def _derive_token(password: str) -> str:
@@ -19258,6 +19275,7 @@ async def start(ctx: dict) -> None:
     _WEBAPP_CTX = ctx
     port = ctx["port"]
     try:
+        _init_auth_salt(ctx)   # BEFORE the first _derive_token: the data dir is known only now
         # Derive token once at startup (scrypt is slow — not per-request)
         ctx["_auth_token"] = _derive_token(ctx["password"])
 

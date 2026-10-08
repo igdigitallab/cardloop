@@ -64,6 +64,11 @@ except Exception:
     _vma = None
 
 try:
+    import auth_salt as _auth_salt  # auth_salt.py — stdlib-only; the ONE placeholder predicate (spec-096 P3.1)
+except Exception:
+    _auth_salt = None
+
+try:
     import board as _board  # board.py — stdlib-only (asyncio/re/secrets/pathlib), no side effects
 except Exception:
     _board = None
@@ -533,6 +538,22 @@ def probe_config(env: dict, env_path: Path, env_exists: bool,
                            remedy="set a real password in .env — bot.py refuses to start with the placeholder"))
     else:
         facts.append(Fact("WEB_PASSWORD", "set"))
+
+    # spec-096 P3.1: the runtime ignores a blank/placeholder salt and uses a generated one stored in
+    # data/cookie_salt, so this is a notice, not a failure. The value is never echoed.
+    salt = env.get("WEB_COOKIE_SALT", "")
+    salt_is_placeholder = (_auth_salt.is_placeholder(salt) if _auth_salt
+                           else salt.strip().lower().startswith("change_me"))
+    if salt.strip() and not salt_is_placeholder:
+        facts.append(Fact("WEB_COOKIE_SALT", "set"))
+    elif salt.strip():
+        facts.append(Fact("WEB_COOKIE_SALT", "a placeholder — ignored, a generated salt is used instead",
+                           level="warn",
+                           remedy="blank the value in .env (the cockpit then generates a private salt in "
+                                  "data/cookie_salt), or set your own long random string"))
+    else:
+        facts.append(Fact("WEB_COOKIE_SALT", "blank — a private salt is generated and stored in data/cookie_salt",
+                           level="info"))
 
     enabled, note = totp_status(repo_root=repo_root)
     if enabled is None:

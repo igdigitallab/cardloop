@@ -58,8 +58,11 @@ standard library — nothing is implemented by hand:
 - **Secret vault:** Fernet (AES-128-CBC + HMAC-SHA256, authenticated), key generated with
   `Fernet.generate_key()` and stored `chmod 600`.
 - **Cockpit login:** the operator's password is turned into a session token with `scrypt`
-  (n=2^14, r=8, p=1, 32-byte output) and a random per-installation salt (`WEB_COOKIE_SALT`,
-  auto-generated); tokens are compared in constant time. There is a single operator and no user
+  (n=2^14, r=8, p=1, 32-byte output) and a random per-installation salt. A salt set in
+  `WEB_COOKIE_SALT` is used as given; a blank value, or a `CHANGE_ME...` placeholder such as the
+  one an old `.env.example` shipped, is ignored and replaced by a random salt generated on first
+  start and kept in `data/cookie_salt` (mode 0600, never printed or logged). Tokens are compared
+  in constant time. There is a single operator and no user
   table, so no password hashes are stored; the password itself lives in the operator's own
   `.env`.
 - **TOTP (optional 2FA):** HMAC-SHA1 as specified by RFC 6238, because authenticator apps

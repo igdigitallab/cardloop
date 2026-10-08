@@ -297,6 +297,36 @@ def test_config_web_password_set_never_shows_value(tmp_path):
     assert pw_fact.value == "set"
 
 
+def _salt_fact(tmp_path, value):
+    env = {"WEB_PASSWORD": "real-password"}
+    if value is not None:
+        env["WEB_COOKIE_SALT"] = value
+    facts = doctor.probe_config(env, tmp_path / ".env", True, totp_status=lambda repo_root: (None, ""))
+    return next(f for f in facts if f.label == "WEB_COOKIE_SALT")
+
+
+def test_config_cookie_salt_placeholder_warns_and_is_not_echoed(tmp_path):
+    # spec-096 P3.1: the runtime ignores a placeholder salt, so this is a notice, never a fail
+    for placeholder in ("CHANGE_ME_RANDOM", "change_me", "  Change_Me_Too "):
+        fact = _salt_fact(tmp_path, placeholder)
+        assert fact.level == "warn"
+        assert "placeholder" in fact.value
+        assert placeholder.strip() not in fact.value and placeholder.strip() not in (fact.remedy or "")
+
+
+def test_config_cookie_salt_blank_or_unset_is_info(tmp_path):
+    for value in ("", None, "  "):
+        fact = _salt_fact(tmp_path, value)
+        assert fact.level == "info"
+        assert "cookie_salt" in fact.value
+
+
+def test_config_cookie_salt_explicit_value_is_set_and_never_shown(tmp_path):
+    fact = _salt_fact(tmp_path, "a-real-long-random-salt-value")
+    assert fact.level == "ok"
+    assert fact.value == "set"
+
+
 def test_config_env_missing_is_fail(tmp_path, monkeypatch):
     monkeypatch.delenv("COPS_NO_DOTENV", raising=False)  # conftest sets it suite-wide
     facts = doctor.probe_config({}, tmp_path / ".env", False, totp_status=lambda repo_root: (None, ""))
