@@ -73,6 +73,24 @@ standard library — nothing is implemented by hand:
   used only for retry jitter.
 - **TLS:** terminated by your reverse proxy or tunnel, not by Cardloop.
 
+## Two-factor login: failure behaviour and break-glass
+
+2FA is on exactly when an active TOTP secret is stored in the vault. The login handler tells
+"not enrolled" apart from "cannot tell": if the vault answers that there is no secret, the password
+alone logs in (nothing is enrolled yet); if the vault cannot be read at all (lost or wrong key,
+corrupt store) the login **fails closed** — `503 {"error": "2fa_state_unreadable"}`, a
+`[auth] login refused: 2FA state unreadable` line in the journal, and the attempt counts against
+the login rate limit. The same holds for reading the recovery-code hashes and for saving a consumed
+recovery code (a code that cannot be marked used is not accepted).
+
+Break-glass, from a shell on the host (the operator already has one; nothing here weakens that):
+
+- the vault key or store is damaged: restore the key file (`CLAUDE_OPS_SECRET_KEYFILE`,
+  `CLAUDE_OPS_SECRET_KEY`) or the store, and log in as usual; or
+- you accept losing the vault contents and want 2FA off: `secret rm __totp_secret__` (works only if
+  the vault is readable — otherwise move the unreadable store (`data/vault/secrets.enc` by default) aside, which empties the vault),
+  then log in with the password alone and re-enrol under Settings.
+
 ## Supported versions
 
 This is a young project; security fixes land on `master` and, from there, in the next tagged

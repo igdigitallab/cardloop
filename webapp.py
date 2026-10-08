@@ -3752,6 +3752,17 @@ async def api_update(req: web.Request) -> web.Response:
     return web.json_response({"status": "updating"}, status=202)
 
 
+def _twofa_state_unreadable(ip: str, what: str, exc: BaseException) -> web.Response:
+    """Fail CLOSED when the 2FA state cannot be read (spec-096 P3.2): 503, one journal line, and
+    the attempt counts against the rate limiter. Only the exception CLASS is logged, never its
+    text, so nothing the vault code put in a message can reach the journal."""
+    _record_attempt(ip, False)
+    logging.error("[auth] login refused: 2FA state unreadable (%s, %s). Fix the vault key/store, or "
+                  "turn 2FA off on purpose from the host shell: `secret rm __totp_secret__`.",
+                  what, type(exc).__name__)
+    return web.json_response({"error": "2fa_state_unreadable"}, status=503)
+
+
 async def api_login(req: web.Request) -> web.Response:
     ctx = req.app["ctx"]
     # Rate-limit by real client IP (respects CF-Connecting-IP / X-Forwarded-For)
@@ -3775,10 +3786,14 @@ async def api_login(req: web.Request) -> web.Response:
     # SAFETY: only required when an ACTIVE secret is already enrolled.
     # Until the operator enrolls and activates 2FA this block is a no-op —
     # deploying this code cannot lock anyone out.
+    # spec-096 P3.2: "not enrolled" (get() returns None) is NOT "cannot tell". An unreadable
+    # vault (lost key, corrupt file) used to read as "no 2FA" and let the password alone in; it now
+    # refuses the login. Break-glass is the host shell (SECURITY.md): fix the key file, or
+    # `secret rm __totp_secret__` to turn 2FA off on purpose.
     try:
         active_secret = _secretstore.get("__totp_secret__")
-    except Exception:
-        active_secret = None
+    except Exception as exc:
+        return _twofa_state_unreadable(ip, "secret", exc)
 
     if active_secret:
         # 2FA is active — require a TOTP code (or a recovery code)
@@ -3796,20 +3811,20 @@ async def api_login(req: web.Request) -> web.Response:
             try:
                 hashes_json = _secretstore.get("__totp_recovery__")
                 hashes = json.loads(hashes_json) if hashes_json else []
-            except Exception:
-                hashes = []
+            except Exception as exc:
+                return _twofa_state_unreadable(ip, "recovery", exc)
 
             ok, remaining = _totp.verify_and_consume(totp_code, hashes)
             if ok:
-                # Consumed one recovery hash — persist the updated list
+                # Consumed one recovery hash — it MUST be persisted, or the same code works again.
                 try:
                     _secretstore.set(
                         "__totp_recovery__",
                         json.dumps(remaining),
                         category="totp",
                     )
-                except Exception:
-                    pass  # persist best-effort; still grant login
+                except Exception as exc:
+                    return _twofa_state_unreadable(ip, "recovery-write", exc)
             else:
                 _record_attempt(ip, False)
                 return web.json_response({"error": "totp_invalid"}, status=401)

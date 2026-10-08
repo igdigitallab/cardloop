@@ -54,6 +54,9 @@ export function LoginScreen({ onLogin }: Props) {
         // Stay in 2FA step, show inline error
         setError(t['login.error_totp_invalid'])
         setTotpCode('')
+      } else if (apiErr.status === 503 && apiErr.body?.error === '2fa_state_unreadable') {
+        // The server refused to guess: the 2FA state could not be read (fail closed)
+        setError(t['login.error_2fa_unreadable'])
       } else {
         setError(t['login.error_wrong_password'])
       }
