@@ -33,7 +33,9 @@ export interface ProviderMeta {
   /** Project-settings field holding this provider's default model. */
   modelField: 'model' | 'codex_model' | 'grok_model'
   /** True when the server hands EVERY project a default value in `modelField` whether or not this
-   *  provider exists on the install (Grok), so a value there says nothing about the project. */
+   *  provider exists on the install, so a value there says nothing about the project. The server
+   *  does that for every registered adapter (`_project_settings_view`), so it is true for each of
+   *  them - a new adapter row says `true` too (tests/test_spec096_p8a_runsites.py checks the pair). */
   servesDefaultModel: boolean
   /** The subscription the provider's turns ride on (Usage tab: "SuperGrok subscription"). */
   subscription: string
@@ -49,7 +51,7 @@ export const PROVIDERS = {
   },
   codex: {
     label: 'Codex', short: 'Codex', tag: 'C', adapter: true,
-    continuityField: 'codex_thread_id', modelField: 'codex_model', subscription: 'ChatGPT', servesDefaultModel: false, reportsLimits: true,
+    continuityField: 'codex_thread_id', modelField: 'codex_model', subscription: 'ChatGPT', servesDefaultModel: true, reportsLimits: true,
   },
   grok: {
     label: 'Grok', short: 'Grok', tag: 'G', adapter: true,
@@ -193,8 +195,8 @@ export function providerUnavailableReason(id: Provider, row: ProviderRowLike | u
 /** Providers that get a "<name> board model" row in Settings: adapters the server lists, or
  *  that the project is already set up for — its board default IS that provider, or (for a provider
  *  whose default model the server does not hand to every project) it names a model. A provider that
- *  does `servesDefaultModel` (Grok) would otherwise put a row on every Settings page of a cockpit
- *  that has it switched off. */
+ *  does `servesDefaultModel` (Codex and Grok today) would otherwise put a row on every Settings
+ *  page of a cockpit that has it switched off. */
 export function boardModelProviders(
   registry: readonly { provider: string }[],
   settings: object,

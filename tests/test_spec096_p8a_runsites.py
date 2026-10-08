@@ -593,3 +593,32 @@ async def test_a_chat_less_queue_item_runs_in_the_chat_the_ui_shows_not_a_hidden
     assert [len(engines[k]) for k in ("claude", "codex", "grok")] == [1, 0, 0]
     assert engines["claude"][0]["resume_session_id"] == "CLAUDE-C-OLD"
     assert not _error_texts()
+
+
+# ═════════════════════════ item 13c: Settings board-model rows vs what the server serves ═════
+
+
+def _ts_serves_default_model():
+    """{provider: bool} read from the `servesDefaultModel` column of web/src/lib/providers.ts."""
+    import re
+    src = (ROOT / "web" / "src" / "lib" / "providers.ts").read_text(encoding="utf-8")
+    table = src.split("export const PROVIDERS = {", 1)[1].split("} as const satisfies", 1)[0]
+    return {m.group(1): m.group(2) == "true"
+            for m in re.finditer(r"^  (\w+): \{.*?servesDefaultModel: (true|false)", table,
+                                 re.DOTALL | re.MULTILINE)}
+
+
+def test_every_adapter_the_server_fills_a_default_model_for_is_marked_so_in_the_ui_table():
+    """`_project_settings_view` hands EVERY registered adapter's default model to EVERY project,
+    whether or not that adapter is switched on. The UI table's `servesDefaultModel` is the mirror
+    of that fact (it keeps the board-model row off Settings when the provider is off); Codex was
+    marked false, so a Codex-less cockpit showed a "Codex board model" row on every project."""
+    view = _webapp._project_settings_view({})
+    flags = _ts_serves_default_model()
+    assert set(flags) == set(providers.names())
+    for spec in providers.adapters():
+        assert view[spec.model_field], f"the server stopped serving a default for {spec.name}"
+        assert flags[spec.name] is True, (
+            f"{spec.name}: the server serves {spec.model_field}={view[spec.model_field]!r} to every "
+            f"project, so web/src/lib/providers.ts must say servesDefaultModel: true")
+    assert flags["claude"] is False

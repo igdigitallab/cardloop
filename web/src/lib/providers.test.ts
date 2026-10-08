@@ -144,14 +144,23 @@ test('no provider is gated: choosing one in the picker is the consent', () => {
     assert.equal('gate' in PROVIDERS[id], false, id)
   }
   assert.equal(PROVIDERS.grok.servesDefaultModel, true)
-  assert.equal(PROVIDERS.codex.servesDefaultModel, false)
+  assert.equal(PROVIDERS.codex.servesDefaultModel, true)
 })
 
 test('settings: a board-model row per listed adapter, or one the project already names a model for', () => {
   assert.deepEqual(boardModelProviders([], {}), [])
   assert.deepEqual(boardModelProviders([{ provider: 'codex' }, { provider: 'grok' }], {}), ['codex', 'grok'])
-  assert.deepEqual(boardModelProviders([], { grok_model: '', codex_model: 'gpt' }), ['codex'])
+  assert.deepEqual(boardModelProviders([{ provider: 'codex' }], { grok_model: '', codex_model: 'gpt' }), ['codex'])
   assert.deepEqual(boardModelProviders([{ provider: 'claude' }], {}), [])
+})
+
+test('settings: the defaults the server serves to EVERY project are never rows (Codex and Grok both off)', () => {
+  // The exact payload of a cockpit with neither adapter switched on (spec-096 P8a: Codex used to show up here).
+  assert.deepEqual(boardModelProviders([], { codex_model: 'gpt-5.6-sol', grok_model: 'grok-4.7' }), [])
+  assert.deepEqual(boardModelProviders([{ provider: 'claude' }],
+    { codex_model: 'gpt-5.6-sol', grok_model: 'grok-4.7', board_provider: 'claude' }), [])
+  // A project whose board default IS Codex keeps its row (and so its way back).
+  assert.deepEqual(boardModelProviders([], { codex_model: 'gpt-5.6-sol', board_provider: 'codex' }), ['codex'])
 })
 
 test('settings: a default grok_model alone is NOT a Grok row (Grok switched off must leave Settings unchanged)', () => {
