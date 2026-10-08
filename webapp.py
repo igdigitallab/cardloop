@@ -11804,6 +11804,24 @@ def _chat_provider_lookup(chat: "dict | None") -> "runtime.ProviderLookup":
     return runtime.chat_provider(chat, known_providers=_known_agent_providers())
 
 
+def _chat_provider_refusal(lookup: "runtime.ProviderLookup") -> str:
+    """Why a chat record's provider cannot RUN ("" when it can): the one wording the direct POST
+    and the queue drain share, so the two run sites cannot disagree about it."""
+    if lookup.status is runtime.ProviderStatus.UNAVAILABLE:
+        return (f"chat provider {lookup.value!r} is temporarily unavailable "
+                f"— retry once it is back")
+    if lookup.status is runtime.ProviderStatus.UNKNOWN:
+        return (f"chat provider {lookup.value!r} is not a registered provider "
+                f"— this chat's selection is stale")
+    return ""
+
+
+class _QueueRunRefused(RuntimeError):
+    """A drained queue item that cannot run on the engine it was meant for. The drain turns it
+    into an error event on the turn's own live ring (the operator sees WHY), never into a run on
+    another engine."""
+
+
 def _chat_provider(chat: "dict | None") -> str:
     """Best-effort provider LABEL for the many read-only call sites (filtering, session-
     mirroring, display) that need some string back and have no error path of their own.
@@ -13983,6 +14001,13 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
     _resolved_chat_id = _q_chat_id  # finalized (fallback to active chat) in the resolution block below
     _cid: dict = {"chat_id": _q_chat_id} if _q_chat_id else {}
     provider = "claude"
+    # A pin names its provider whether or not the chat it was accepted on still resolves: the
+    # chat can be deleted, or chats.json unreadable, between accept and drain, and "the chat did
+    # not resolve" must never turn a Grok/Codex message into a Claude run (spec-096 P8a).
+    _pin_rt = item.get("runtime")
+    if isinstance(_pin_rt, dict) and _pin_rt.get("provider"):
+        provider = _pin_rt["provider"]
+    _q_refusal = ""
     resume_id: "str | None" = None
     outcome = "fail"
     _q_final_ctx_tokens: "int | None" = None  # captured from the result event for post-turn auto-rotate
@@ -14082,6 +14107,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         _q_account_err = ""
         _q_backend = ""
         _q_armed: "dict | None" = None
+        _chat_seen = False   # the chat record was found (even if a later step then failed)
         if _project_id:
             try:
                 async with _chats_lock():
@@ -14091,6 +14117,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                     _tc = next((c for c in _cp.get("chats", []) if c["id"] == _tid), None)
                     if _tc is not None:
                         _resolved_chat_id = _tc["id"]
+                        _chat_seen = True
                         # spec-092 item 3: an item enqueued with a pinned runtime executes
                         # on THAT provider/model, not whatever the chat record says NOW — the
                         # measured bug this replaces is exactly this re-read: the chat's
@@ -14124,7 +14151,14 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                             # guess silently — the old re-resolve-at-drain behaviour is kept,
                             # but is now visible in the trace/log instead of indistinguishable
                             # from a pinned drain.
-                            provider = _chat_provider(_tc)
+                            # A RUN decision: judged exactly like the direct POST (fail closed),
+                            # never by the permissive `_chat_provider` label, which maps an
+                            # unregistered name to Claude.
+                            _lookup = _chat_provider_lookup(_tc)
+                            if _lookup.status is runtime.ProviderStatus.OK:
+                                provider = _lookup.value
+                            else:
+                                _q_refusal = _chat_provider_refusal(_lookup)
                             if _tc.get("model"):
                                 model = _tc["model"]
                             _q_account, _q_account_err = _resolve_run_account(_tc, topic)
@@ -14132,14 +14166,29 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                             _q_armed = _tc.get("runtime_handoff")
                             print(f"[chat_queue] {session_key}: draining item {item.get('id')} "
                                   f"with NO pinned runtime — assumed current chat state "
-                                  f"(provider={provider!r})")
+                                  f"(provider={_lookup.value!r})")
                         _resume_chat = _tc
                         _resolved_entry = True
             except Exception as _ce:
                 print(f"[chat_queue] chats resolve error for {session_key} (falling back): {_ce}")
         # Outside the try above on purpose: a pinned provider that is not registered (a restart
         # into a build without it) must fail with its own error, not be logged as "falling back".
-        spec = providers.get(provider)
+        # Every refusal below is a VISIBLE error on this turn (see `_QueueRunRefused`), and none
+        # of them may end in a run on another engine.
+        if _q_refusal:
+            raise _QueueRunRefused(_q_refusal)
+        try:
+            spec = providers.get(provider)
+        except KeyError as _unk:
+            raise _QueueRunRefused(_unk.args[0] if _unk.args else f"unknown provider {provider!r}") from None
+        if not _chat_seen and not spec.is_default:
+            # Only Claude has a flat-map continuity to fall back on; an adapter run with no chat
+            # record would be a fresh session nobody can resume, for a conversation that is gone
+            # (deleted) or cannot be read (chats.json). A chat that WAS found but failed a later
+            # step keeps its pin: that path runs fresh and never touches Claude's flat id.
+            raise _QueueRunRefused(
+                f"this message was queued for {spec.label} on chat {_q_chat_id or '(active)'!s}, "
+                f"which can no longer be resolved - it was not run on another engine")
         if _resolved_entry:
             resume_id = spec.resume_id(_resume_chat)
         elif spec.is_default:
@@ -14410,6 +14459,11 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
 
     except Exception as e:
         print(f"[chat_queue] execute error for {session_key} item {item['id']}: {e}")
+        if isinstance(e, _QueueRunRefused):
+            # The engine never ran, so no engine `error` event exists: put the reason on the
+            # turn's own ring, or the operator sees a message that silently produced nothing.
+            _refusal_ev = _live_turn_append(session_key, _error_event_payload(e))
+            _bus_publish(session_key, ({**_refusal_ev, **_cid} if _cid else _refusal_ev), persist=False)
         _live_turn_finish(session_key, "error")
         _run_end_ev = _live_turn_append(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id, "provider": locals().get("provider", "claude"), **_cid})
         _bus_publish(session_key, _run_end_ev)
@@ -14931,17 +14985,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
         _run_chat = None
     _provider_lookup = _chat_provider_lookup(_run_chat)
     if _provider_lookup.status is runtime.ProviderStatus.UNAVAILABLE:
-        return web.json_response(
-            {"error": f"chat provider {_provider_lookup.value!r} is temporarily "
-                      f"unavailable — retry once it is back"},
-            status=409,
-        )
+        return web.json_response({"error": _chat_provider_refusal(_provider_lookup)}, status=409)
     if _provider_lookup.status is runtime.ProviderStatus.UNKNOWN:
-        return web.json_response(
-            {"error": f"chat provider {_provider_lookup.value!r} is not a registered "
-                      f"provider — this chat's selection is stale"},
-            status=400,
-        )
+        return web.json_response({"error": _chat_provider_refusal(_provider_lookup)}, status=400)
     _provider_for_run = _provider_lookup.value
     _spec = providers.get(_provider_for_run)
     # spec-095 D5: before the message can be run OR queued — a queue item pins this provider,
