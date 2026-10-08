@@ -393,8 +393,10 @@ def _save_push_subs(subs: list[dict]) -> None:
     """Persists the push subscription list atomically."""
     if _PUSH_SUBS_FILE is None:
         return
-    _PUSH_SUBS_FILE.write_text(
-        json.dumps(subs, ensure_ascii=False, indent=2), encoding="utf-8"
+    # Subscriber endpoints and keys: written 0600 from creation and swapped in atomically
+    # (spec-096 P2 helper), not write_text() under the process umask.
+    _fsutil.atomic_write(
+        _PUSH_SUBS_FILE, json.dumps(subs, ensure_ascii=False, indent=2), 0o600
     )
 
 

@@ -74,6 +74,24 @@ def _done_ids(cwd: str) -> set[str]:
     return {m.id for m in _iter_markers(text)}
 
 
+# "- [x] " (or "* [ ] ") at the start of an archive line; the card text follows it.
+_DONE_LINE_HEAD_RE = re.compile(r"\s*[-*]\s*\[.\]\s*")
+
+
+def _done_line_title(line: str) -> str:
+    r"""The card text of one DONE.md line: what sits between the checkbox and the first `<!--`,
+    stripped; "" when the line has no checkbox, no `<!--`, or nothing between them.
+
+    This replaces `re.match(r"^\s*[-*]\s*\[.\]\s*(.*?)\s*<!--", line)`, whose lazy group
+    followed by `\s*` is quadratic on a long whitespace run that is not followed by `<!--`
+    (CodeQL py/polynomial-redos, spec-096 P2): the same cut, found with str.find."""
+    head = _DONE_LINE_HEAD_RE.match(line)
+    if not head:
+        return ""
+    cut = line.find("<!--", head.end())
+    return line[head.end():cut].strip() if cut >= 0 else ""
+
+
 def _done_cards_for_spec(cwd: str, spec_id: str) -> dict:
     """{id: title} for cards in DONE.md whose marker carries spec=<spec_id>.
     Robust: lets a done card be tracked even if it was never mirrored while open
@@ -93,8 +111,7 @@ def _done_cards_for_spec(cwd: str, spec_id: str) -> dict:
         meta = _parse_marker_meta(m.meta)
         if meta.get("spec") != spec_id:
             continue
-        tm = re.match(r"^\s*[-*]\s*\[.\]\s*(.*?)\s*<!--", line)
-        out[m.id] = (tm.group(1).strip() if tm and tm.group(1).strip() else m.id)
+        out[m.id] = _done_line_title(line) or m.id
     return out
 
 
