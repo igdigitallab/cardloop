@@ -7,6 +7,21 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Security — secrets out of reach of children and same-user processes (spec-096 P3b)
+- **No inherited secrets.** At start the cockpit moves every secret (`WEB_PASSWORD`, `WEB_COOKIE_SALT`,
+  `BOT_TOKEN`, `COOLIFY_API_TOKEN`, `AZURE_FOUNDRY_KEY`, `N8N_API_KEY`, `TWOCAPTCHA_API_KEY`,
+  `OLLAMA_AUTH_TOKEN`, `CLAUDE_OPS_SECRET_KEY`, `JOURNAL_TG_BOT_TOKEN`, and any `*_PASSWORD` / `*_SALT` /
+  `*_TOKEN` / `*_SECRET` / `*_API_KEY`) out of `os.environ` into a private snapshot (`runtime_secrets.py`),
+  so no agent, terminal or test runner it spawns inherits them. `ANTHROPIC_*` and
+  `CLAUDE_CODE_OAUTH_TOKEN` are left alone. **Behaviour change:** a variable such as `GITHUB_TOKEN` in
+  `.env` is no longer visible to agents; list it in the new `AGENT_ENV_PASSTHROUGH` to keep it. The
+  startup journal line names what was removed (never a value).
+- **Non-dumpable process.** `prctl(PR_SET_DUMPABLE, 0)` at the first line of `bot.py`: `/proc/<pid>/environ`
+  (the systemd `EnvironmentFile=` block the scrub cannot clear), `mem`, `maps` and `fd/` are no longer
+  readable by other processes of the same user, and a same-user ptrace attach is refused. Debugging the
+  cockpit with `py-spy`/`gdb` now needs `sudo`. `doctor` reports it as "Process hardening" and notes the
+  host's `kernel.yama.ptrace_scope`.
+
 ### Security — login hardening (spec-096 P3a)
 - **Cookie salt.** A blank or `CHANGE_ME...` `WEB_COOKIE_SALT` (what a plain `cp .env.example .env`
   left behind: a salt published in the repo) is now replaced by a random salt generated on first start

@@ -92,6 +92,53 @@ Break-glass, from a shell on the host (the operator already has one; nothing her
   the vault is readable — otherwise move the unreadable store (`data/vault/secrets.enc` by default) aside, which empties the vault),
   then log in with the password alone and re-enrol under Settings.
 
+## Secrets in the environment and in /proc
+
+The cockpit gets its secrets (`WEB_PASSWORD`, `WEB_COOKIE_SALT`, `BOT_TOKEN`, `COOLIFY_API_TOKEN`,
+`AZURE_FOUNDRY_KEY`, `N8N_API_KEY`, `TWOCAPTCHA_API_KEY`, `OLLAMA_AUTH_TOKEN`,
+`CLAUDE_OPS_SECRET_KEY`, `JOURNAL_TG_BOT_TOKEN`, and any variable named `*_PASSWORD`, `*_SALT`,
+`*_TOKEN`, `*_SECRET` or `*_API_KEY`) from `.env`, or from the service's `EnvironmentFile=`. Left in
+the environment they leak by accident through two channels, and two measures close them
+([`runtime_secrets.py`](runtime_secrets.py), applied once at start by `bot.py`):
+
+1. **Scrub.** Right after the environment is loaded, those variables are moved out of `os.environ`
+   into a private in-process snapshot. In-process code reads them from the snapshot; nothing the
+   cockpit spawns (the Claude CLI, Codex, Grok, terminals, test runners) inherits them, so an agent
+   running `env` or `printenv` no longer puts the web password into its transcript. Not scrubbed:
+   `ANTHROPIC_*` (handled by `CLAUDE_AUTH_MODE`) and `CLAUDE_CODE_OAUTH_TOKEN` (the Claude CLI's own
+   credential), and any plain configuration. `AGENT_ENV_PASSTHROUGH=NAME,NAME` in `.env` keeps the
+   names you want children to see (for example a `GITHUB_TOKEN` for `gh`).
+2. **Non-dumpable process.** `prctl(PR_SET_DUMPABLE, 0)` is the first thing `bot.py` does. Under
+   systemd, `EnvironmentFile=` puts the values into the process's initial environment block, which
+   unsetting a variable in Python does not clear; that block is what `/proc/<pid>/environ` shows to
+   every process of the same user. A non-dumpable process makes `/proc/<pid>/environ`, `mem`,
+   `maps`, `fd/` and `cwd` root-owned and refuses a ptrace attach from a same-user process. Children
+   are dumpable again after `exec`, so agents, shells and the OOM shield behave as before. Linux
+   only; if the call fails the cockpit logs one `[security] WARNING` line and starts anyway.
+   `make doctor` shows the result as "Process hardening" for the running service.
+
+What this is **not**:
+
+- Not a boundary against the agents the product runs. Claude and Codex agents run as the same user
+  with full host access by design (see the threat model above) and can still read `.env`,
+  `~/.claude/.credentials.json` and the vault key file from disk. The scrub removes the accidental
+  channel (a dumped environment in a transcript or a log, a child that inherits a token it never
+  needed), not a deliberate read.
+- For Grok it closes a channel the file deny list could not: its sandbox mounts a host procfs, so
+  a shell inside it could open `/proc/<cockpit pid>/environ`; for a non-dumpable process that open
+  is refused. The deny list still has to cover `.env` and the data directory on disk.
+- Root can read everything, and a forked child that has not yet called `exec` is still
+  non-dumpable. Side effects of the non-dumpable flag: no core dump of the cockpit, and attaching
+  `py-spy`, `gdb` or `strace` to it needs `sudo`.
+- If the vault key lives only in the `CLAUDE_OPS_SECRET_KEY` variable (no key file), the `secret`
+  CLI an agent runs no longer finds it; add the name to `AGENT_ENV_PASSTHROUGH` or use the key file.
+
+Operator note (host setting, not changed by Cardloop): set `kernel.yama.ptrace_scope=1`
+(`sysctl -w kernel.yama.ptrace_scope=1`, persisted in `/etc/sysctl.d/`). With `0`, which some
+distributions ship by default, any process may ptrace any other process of the same user, so one
+agent could read the memory of another agent's CLI or of any other service running as that user; `1`
+limits ptrace to a process's own descendants. `make doctor` prints the current value.
+
 ## Supported versions
 
 This is a young project; security fixes land on `master` and, from there, in the next tagged

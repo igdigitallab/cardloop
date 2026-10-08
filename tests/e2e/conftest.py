@@ -186,6 +186,7 @@ def e2e_server(tmp_path_factory):
 
     port = _free_port()
     password = "e2e-" + os.urandom(8).hex()
+    sentinel = "sentinel-" + os.urandom(8).hex()
     env = dict(os.environ)
     env.update({
         "COPS_NO_DOTENV": "1",
@@ -195,6 +196,8 @@ def e2e_server(tmp_path_factory):
         "CLAUDE_AUTH_MODE": "subscription",
         "HOME": str(fake_home),
         "FILES_EXTRA_ROOTS": str(scratch),
+        # spec-096 P3b: a secret-shaped variable the cockpit must NOT hand to its terminal/agents.
+        "E2E_SENTINEL_TOKEN": sentinel,
     })
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("WEB_COOKIE_SALT", None)   # a developer's real salt must not leak in (spec-096 P3.1 test)
@@ -209,6 +212,7 @@ def e2e_server(tmp_path_factory):
         "app_dir": app_dir,
         "home": fake_home,
         "scratch": scratch,
+        "sentinel": sentinel,
     })
 
 

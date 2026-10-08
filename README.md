@@ -439,6 +439,7 @@ Set in `.env` (scaffolded by `install.sh`):
 | `WEB_COOKIE_SECURE` | Set `true` when not on `localhost` (HTTPS) |
 | `TRUSTED_PROXIES` | CSV of proxy IPs/CIDRs behind a reverse proxy |
 | `WS_ALLOWED_ORIGINS` | Extra origins (CSV of `scheme://host[:port]`) allowed to open the terminal / browser-pane WebSockets; the cockpit's own origin is always allowed |
+| `AGENT_ENV_PASSTHROUGH` | CSV of variable names that agents and terminals should still inherit. By default the cockpit removes every secret (`*_PASSWORD`, `*_SALT`, `*_TOKEN`, `*_SECRET`, `*_API_KEY`, plus a fixed list; not `ANTHROPIC_*`) from its own environment at start; list one here only if a tool the agent runs needs it (e.g. `GITHUB_TOKEN`). See [SECURITY.md](SECURITY.md#secrets-in-the-environment-and-in-proc) |
 | `OPERATOR_NAME` / `RESPONSE_LANGUAGE` | Operator name and the agent's reply language |
 | `CLAUDE_AUTH_MODE` | `api_key` (recommended; required for teams/commercial) or `subscription` (personal use) |
 | `ANTHROPIC_API_KEY` | Claude Console key — required when `CLAUDE_AUTH_MODE=api_key` |
