@@ -175,12 +175,19 @@ def _guide_descriptions() -> "dict[tuple[str, str], str]":
 
 
 def _tidy(line: str) -> str:
-    line = line.replace("|", "\\|").replace("`", "'")
+    """One docstring line -> one safe table cell: truncated, pipes escaped, code spans kept
+    balanced, and raw ``<id>`` / ``*`` outside code spans neutralised (they would render as
+    an HTML tag or emphasis)."""
     if line[:1].islower():
         line = line[0].upper() + line[1:]
     if len(line) > _DESC_MAX:
         line = line[:_DESC_MAX - 1].rstrip() + "…"
-    return line
+    if line.count("`") % 2:
+        line += "`"
+    parts = line.split("`")
+    for i in range(0, len(parts), 2):  # even index = outside a code span
+        parts[i] = parts[i].replace("<", "&lt;").replace(">", "&gt;").replace("*", "\\*")
+    return "`".join(parts).replace("|", "\\|")
 
 
 def _describe(handler) -> str:

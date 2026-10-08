@@ -34,10 +34,10 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 
 | Method | Path | Auth | Handler | Description |
 |--------|------|------|---------|-------------|
-| `GET` | `/api/accounts` | cookie | `api_accounts` | All selectable accounts: '{id,label,is_main,active,ok,reason,email,plan,shared_ok,shared_broken}' + 'active', 'accounts_root', 'login_hint' |
-| `POST` | `/api/accounts` | cookie | `api_accounts_create` | '{id,label?}' → scaffold '~/.claude-accounts/<id>' with shared symlinks and register it. Returns 'linked[]' and 'next_step' (the login command). Not… |
-| `POST` | `/api/accounts/active` | cookie | `api_accounts_activate` | '{id}' → every SUBSEQUENT run uses that subscription. '400' + reason if the account has no readable credentials. Response 'in_flight' = runs still ex… |
-| `POST` | `/api/accounts/remove` | cookie | `api_accounts_remove` | '{id}' → forget the account (files on disk are left untouched); active falls back to 'main' |
+| `GET` | `/api/accounts` | cookie | `api_accounts` | All selectable accounts: `{id,label,is_main,active,ok,reason,email,plan,shared_ok,shared_broken}` + `active`, `accounts_root`, `login_hint` |
+| `POST` | `/api/accounts` | cookie | `api_accounts_create` | `{id,label?}` → scaffold `~/.claude-accounts/<id>` with shared symlinks and register it. Returns `linked[]` and `next_step` (the login command). Not… |
+| `POST` | `/api/accounts/active` | cookie | `api_accounts_activate` | `{id}` → every SUBSEQUENT run uses that subscription. `400` + reason if the account has no readable credentials. Response `in_flight` = runs still ex… |
+| `POST` | `/api/accounts/remove` | cookie | `api_accounts_remove` | `{id}` → forget the account (files on disk are left untouched); active falls back to `main` |
 | `GET` | `/api/activity-stream` | cookie | `api_activity_stream_all` | Unified stream of ALL bus events (unread indicators in sidebar). |
 | `GET` | `/api/agent-providers` | cookie | `api_agent_providers` | Live provider/auth/model capabilities. |
 | `DELETE` | `/api/auth/totp` | cookie | `api_totp_disable` | Disable TOTP (authenticated break-glass via cockpit). |
@@ -63,31 +63,31 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `GET` | `/api/browser/profiles` | cookie | `api_browser_profiles` | List Cloak Manager profiles (empty if unconfigured). |
 | `POST` | `/api/browser/profiles/{id}/{action}` | cookie | `api_browser_profile_action` | Launch \| stop a Manager profile. |
 | `GET` | `/api/browser/ws` | cookie | `api_browser_ws` | Live browser screencast over WebSocket. |
-| `GET` | `/api/build` | none | `api_build` | (unauthenticated) — {"bundle": "index-<hash>.js"} of the served build. |
+| `GET` | `/api/build` | none | `api_build` | (unauthenticated) — {"bundle": "index-&lt;hash&gt;.js"} of the served build. |
 | `GET` | `/api/chat-trace` | cookie | `api_chat_trace` | The message-lifecycle log. |
 | `GET` | `/api/deferred` | cookie | `api_deferred_list` | List deferred runs with optional filters. |
 | `POST` | `/api/deferred` | cookie | `api_deferred_create` | Queue a deferred run. |
 | `PATCH` | `/api/deferred/{id}` | cookie | `api_deferred_update` | Edit a pending deferred run (prompt and/or trigger). |
 | `DELETE` | `/api/deferred/{id}` | cookie | `api_deferred_delete` | Cancel a pending deferred run. |
 | `POST` | `/api/deferred/{id}/confirm` | cookie | `api_deferred_confirm` | Spec-051: resolve an awaiting_confirmation |
-| `POST` | `/api/free` | cookie | `api_free_create` | Create a free chat — optional 'provider', provider-native 'model' and 'cwd' (default '$HOME'); returns every continuity-id field |
+| `POST` | `/api/free` | cookie | `api_free_create` | Create a free chat — optional `provider`, provider-native `model` and `cwd` (default `$HOME`); returns every continuity-id field |
 | `DELETE` | `/api/free/{id}` | cookie | `api_free_delete` | Delete free chat |
-| `POST` | `/api/free/{id}/rename` | cookie | `api_free_rename` | Rename free chat — '{"label":"..."}' |
+| `POST` | `/api/free/{id}/rename` | cookie | `api_free_rename` | Rename free chat — `{"label":"..."}` |
 | `GET` | `/api/fs/file` | cookie | `api_fs_file` | Text content + revision. |
 | `PUT` | `/api/fs/file` | cookie | `api_fs_file_write` | {content, base_rev, force?} — save a text file. |
 | `GET` | `/api/fs/info` | cookie | `api_fs_info` | Where the explorer starts and what it may reach. |
 | `GET` | `/api/fs/list` | cookie | `api_fs_list` | Directory listing. |
 | `GET` | `/api/fs/raw` | cookie | `api_fs_raw` | The file's bytes. |
 | `GET` | `/api/fs/recent` | cookie | `api_fs_recent` | Files the agent just wrote + files changed on disk. |
-| `GET` | `/api/fs/stat` | cookie | `api_fs_stat` | Text>[&base=<abs>][&project=<id>] — what did the operator paste? |
+| `GET` | `/api/fs/stat` | cookie | `api_fs_stat` | Text&gt;[&base=&lt;abs&gt;][&project=&lt;id&gt;] — what did the operator paste? |
 | `GET` | `/api/global/claude-md` | cookie | `api_global_claude_md` | Read the global (home) agent-rules CLAUDE.md. |
 | `POST` | `/api/global/claude-md` | cookie | `api_global_claude_md_write` | Overwrite the global (home) agent-rules CLAUDE.md. |
 | `GET` | `/api/global/file` | cookie | `api_global_file` | File contents from $HOME. |
 | `POST` | `/api/global/file` | cookie | `api_global_file_write` | Write file contents. |
 | `GET` | `/api/global/files` | cookie | `api_global_files` | Directory listing from $HOME. |
 | `GET` | `/api/health` | none | `api_health` | (unauthenticated — see auth_middleware exempt list). |
-| `POST` | `/api/login` | none | `api_login` | Authenticate with '{"password":"..."}', sets 'cops_auth' cookie |
-| `POST` | `/api/logout` | cookie | `api_logout` | Clear 'cops_auth' cookie |
+| `POST` | `/api/login` | none | `api_login` | Authenticate with `{"password":"..."}`, sets `cops_auth` cookie |
+| `POST` | `/api/logout` | cookie | `api_logout` | Clear `cops_auth` cookie |
 | `GET` | `/api/me` | cookie | `api_me` | Current auth status |
 | `GET` | `/api/models` | cookie | `api_models` | Live model registry (cached ~6h). Fully best-effort → static fallback on any error. |
 | `GET` | `/api/modules` | cookie | `api_modules_list` | List all built-in modules with their enabled state. |
@@ -98,7 +98,7 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `POST` | `/api/project-groups/delete` | cookie | `api_project_groups_delete` | Body: {name} |
 | `POST` | `/api/project-groups/rename` | cookie | `api_project_groups_rename` | Body: {from, to} |
 | `POST` | `/api/project-groups/reorder` | cookie | `api_project_groups_reorder` | Body: {order: [...]} |
-| `GET` | `/api/projects` | cookie | `api_projects` | List all projects (from 'data/topics.json', deduped by cwd) |
+| `GET` | `/api/projects` | cookie | `api_projects` | List all projects (from `data/topics.json`, deduped by cwd) |
 | `GET` | `/api/projects/archived` | cookie | `api_projects_archived` | — |
 | `POST` | `/api/projects/new` | cookie | `api_new_project` | Creates a new project folder with starter templates and |
 | `GET` | `/api/projects/{id}/activity` | cookie | `api_project_activity` | Recent activity log for the project |
@@ -111,7 +111,7 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `POST` | `/api/projects/{id}/cards/run-batch` | cookie | `api_run_batch` | Queues multiple cards. |
 | `GET` | `/api/projects/{id}/cards/{card}/spec` | cookie | `api_card_spec_get` | Read card spec sidecar. |
 | `PUT` | `/api/projects/{id}/cards/{card}/spec` | cookie | `api_card_spec_put` | Write (or delete) card spec sidecar. |
-| `POST` | `/api/projects/{id}/chat` | cookie | `api_project_chat` | Start agent task — returns 'text/event-stream' SSE stream of '{type:"tool\|text\|result\|error", ...}'. Shared session + lock with board auto-runs. 4… |
+| `POST` | `/api/projects/{id}/chat` | cookie | `api_project_chat` | Start agent task — returns `text/event-stream` SSE stream of `{type:"tool\|text\|result\|error", ...}`. Shared session + lock with board auto-runs. 409… |
 | `GET` | `/api/projects/{id}/chat/queue` | cookie | `api_chat_queue_list` | Return pending queued messages. |
 | `POST` | `/api/projects/{id}/chat/queue` | cookie | `api_chat_queue_add` | Enqueue a message (called when project is busy). |
 | `PATCH` | `/api/projects/{id}/chat/queue/{msg_id}` | cookie | `api_chat_queue_edit` | Edit queued message text. |
@@ -120,10 +120,10 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `POST` | `/api/projects/{id}/chat/stop` | cookie | `api_project_chat_stop` | Interrupts the current agent run. |
 | `GET` | `/api/projects/{id}/chats` | cookie | `api_project_chats_list` | → {active, chats:[{id,name,session_id,created_at}]} |
 | `POST` | `/api/projects/{id}/chats` | cookie | `api_project_chats_create` | {name?} → created chat entry |
-| `PATCH` | `/api/projects/{id}/chats/{chat_id}` | cookie | `api_project_chats_patch` | Rename or activate a chat, or switch its runtime — '{name?, active?, provider?, model?, backend?, account?, expected_revision?}'. The switch is valid… |
+| `PATCH` | `/api/projects/{id}/chats/{chat_id}` | cookie | `api_project_chats_patch` | Rename or activate a chat, or switch its runtime — `{name?, active?, provider?, model?, backend?, account?, expected_revision?}`. The switch is valid… |
 | `DELETE` | `/api/projects/{id}/chats/{chat_id}` | cookie | `api_project_chats_delete` | Delete a non-final chat; provider threads/sessions are not deleted |
-| `POST` | `/api/projects/{id}/chats/{chat_id}/handoff` | cookie | `api_project_chat_handoff` | Spec-092 runtime handoff — '{messages:[{role,text,tools}], from_label, to_label, commit?, text?}'. 'commit' false/absent previews '{handoff:{text, ..… |
-| `GET` | `/api/projects/{id}/claude-md` | cookie | `api_project_claude_md` | Read project 'CLAUDE.md' |
+| `POST` | `/api/projects/{id}/chats/{chat_id}/handoff` | cookie | `api_project_chat_handoff` | Spec-092 runtime handoff — `{messages:[{role,text,tools}], from_label, to_label, commit?, text?}`. `commit` false/absent previews `{handoff:{text, ..…` |
+| `GET` | `/api/projects/{id}/claude-md` | cookie | `api_project_claude_md` | Read project `CLAUDE.md` |
 | `POST` | `/api/projects/{id}/claude-md` | cookie | `api_project_claude_md_write` | Overwrite CLAUDE.md. |
 | `GET` | `/api/projects/{id}/context-pack` | cookie | `api_project_context_pack` | Preview the context pack that would be injected. |
 | `GET` | `/api/projects/{id}/decision/{decision_id}` | cookie | `api_plan_get` | Full decision record (card render + reload). |
@@ -144,17 +144,17 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `GET` | `/api/projects/{id}/live` | cookie | `api_project_live` | Snapshot of the current (or last) LiveTurn buffer. |
 | `GET` | `/api/projects/{id}/logs` | cookie | `api_project_logs` | Runtime logs via log_cmd from topics.json. |
 | `GET` | `/api/projects/{id}/media/{filename}` | cookie | `api_project_media` | Serve agent screenshot to the cockpit. |
-| `GET` | `/api/projects/{id}/memory` | cookie | `api_project_memory` | Read all memory files. Reads '.claude-ops/memory/'; fallback to old '~/.claude/projects/<cwd>/memory/' if new path absent. Returns '{files, exists}'. |
-| `POST` | `/api/projects/{id}/memory/{name}` | cookie | `api_project_memory_write` | Create or update a memory entry. Body: '{"content":"..."}'. Validates slug, checks size limit, atomic write, auto-reindexes 'MEMORY.md'. Returns upda… |
-| `DELETE` | `/api/projects/{id}/memory/{name}` | cookie | `api_project_memory_delete` | Delete a memory entry. Auto-reindexes 'MEMORY.md'. Returns updated '{files, exists}'. Cannot delete 'MEMORY.md' directly (400). 404 if entry not foun… |
-| `POST` | `/api/projects/{id}/model` | cookie | `api_project_set_model` | Set active model for next request — '{"model":"sonnet\|opus\|haiku"}' |
+| `GET` | `/api/projects/{id}/memory` | cookie | `api_project_memory` | Read all memory files. Reads `.claude-ops/memory/`; fallback to old `~/.claude/projects/<cwd>/memory/` if new path absent. Returns `{files, exists}`. |
+| `POST` | `/api/projects/{id}/memory/{name}` | cookie | `api_project_memory_write` | Create or update a memory entry. Body: `{"content":"..."}`. Validates slug, checks size limit, atomic write, auto-reindexes `MEMORY.md`. Returns upda… |
+| `DELETE` | `/api/projects/{id}/memory/{name}` | cookie | `api_project_memory_delete` | Delete a memory entry. Auto-reindexes `MEMORY.md`. Returns updated `{files, exists}`. Cannot delete `MEMORY.md` directly (400). 404 if entry not foun… |
+| `POST` | `/api/projects/{id}/model` | cookie | `api_project_set_model` | Set active model for next request — `{"model":"sonnet\|opus\|haiku"}` |
 | `GET` | `/api/projects/{id}/monitors` | cookie | `api_project_monitors` | Snapshot of the session's background-task monitors. |
 | `DELETE` | `/api/projects/{id}/monitors/{mid}` | cookie | `api_project_monitor_dismiss` | Operator dismisses a monitor row. |
 | `GET` | `/api/projects/{id}/monitors/{mid}/tail` | cookie | `api_project_monitor_tail` | Spec-089 §7: last N steps of a sub-agent |
 | `POST` | `/api/projects/{id}/notify-on-error` | cookie | `api_project_notify_toggle` | {enabled: bool} — TG notifications on new errors. |
 | `GET` | `/api/projects/{id}/plan/{plan_id}` | cookie | `api_plan_get` | Full decision record (card render + reload). |
 | `POST` | `/api/projects/{id}/plan/{plan_id}/decide` | cookie | `api_plan_decide` | {decision: approve\|reject, feedback?} |
-| `GET` | `/api/projects/{id}/readme` | cookie | `api_project_readme` | Read project 'README.md' |
+| `GET` | `/api/projects/{id}/readme` | cookie | `api_project_readme` | Read project `README.md` |
 | `POST` | `/api/projects/{id}/readme` | cookie | `api_project_readme_write` | Overwrite existing README (or create README.md). |
 | `POST` | `/api/projects/{id}/rename` | cookie | `api_project_rename` | {slug: str} |
 | `POST` | `/api/projects/{id}/rewind` | cookie | `api_project_rewind` | Body {"message_uuid": "..."}. |
@@ -181,24 +181,24 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `GET` | `/api/projects/{id}/skills` | cookie | `api_project_skills` | → {global: [...], project: [...]}. |
 | `GET` | `/api/projects/{id}/specs` | cookie | `api_project_specs` | List spec files in project |
 | `GET` | `/api/projects/{id}/specs/{name}` | cookie | `api_project_spec_content` | Read a specific spec file by name |
-| `GET` | `/api/projects/{id}/tasks` | cookie | `api_project_tasks` | Parse 'TASKS.md' → return all cards grouped by column |
-| `POST` | `/api/projects/{id}/tasks` | cookie | `api_create_task` | Create new card in Backlog — '{"text":"...","provider":"claude\|codex\|grok"?,"model":"..."?}'. 'provider:"grok"' needs no per-project flag (see [Gro… |
+| `GET` | `/api/projects/{id}/tasks` | cookie | `api_project_tasks` | Parse `TASKS.md` → return all cards grouped by column |
+| `POST` | `/api/projects/{id}/tasks` | cookie | `api_create_task` | Create new card in Backlog — `{"text":"...","provider":"claude\|codex\|grok"?,"model":"..."?}`. `provider:"grok"` needs no per-project flag (see [Grok]… |
 | `GET` | `/api/projects/{id}/tasks/done` | cookie | `api_tasks_done` | Contents of the DONE.md archive — loaded on demand (sessions don't read it). |
-| `PATCH` | `/api/projects/{id}/tasks/{card}` | cookie | `api_update_task` | Edit card text and optional provider/model override. Run precedence: card provider → project 'board_provider' → Claude. Choosing Grok needs no per-pr… |
-| `DELETE` | `/api/projects/{id}/tasks/{card}` | cookie | `api_delete_task` | Delete card from 'TASKS.md' |
+| `PATCH` | `/api/projects/{id}/tasks/{card}` | cookie | `api_update_task` | Edit card text and optional provider/model override. Run precedence: card provider → project `board_provider` → Claude. Choosing Grok needs no per-pr… |
+| `DELETE` | `/api/projects/{id}/tasks/{card}` | cookie | `api_delete_task` | Delete card from `TASKS.md` |
 | `POST` | `/api/projects/{id}/tasks/{card}/apply` | cookie | `api_card_apply` | Apply worktree branch (merge --no-ff) into the main tree. |
 | `POST` | `/api/projects/{id}/tasks/{card}/check` | cookie | `api_card_check` | Run quality gate in card worktree. |
 | `POST` | `/api/projects/{id}/tasks/{card}/discard` | cookie | `api_card_discard` | Discard worktree card (branch deleted). |
-| `POST` | `/api/projects/{id}/tasks/{card}/move` | cookie | `api_move_task` | Move card to another column — '{"to":"Backlog\|In Progress\|Review\|Failed\|done"}'. Moving to **In Progress** auto-starts 'run_engine'; moving to 'd… |
-| `GET` | `/api/projects/{id}/tasks/{card}/run` | cookie | `api_card_run` | Sidecar from DATA/runs/<card>.md (404-safe). |
+| `POST` | `/api/projects/{id}/tasks/{card}/move` | cookie | `api_move_task` | Move card to another column — `{"to":"Backlog\|In Progress\|Review\|Failed\|done"}`. Moving to \*\*In Progress\*\* auto-starts `run_engine`; moving to `done`… |
+| `GET` | `/api/projects/{id}/tasks/{card}/run` | cookie | `api_card_run` | Sidecar from DATA/runs/&lt;card&gt;.md (404-safe). |
 | `POST` | `/api/projects/{id}/test` | cookie | `api_project_test` | Run tests (auto-detects pytest / npm test / make test) |
 | `GET` | `/api/projects/{id}/timeline` | cookie | `api_project_timeline` | Project event history. |
 | `POST` | `/api/projects/{id}/unarchive` | cookie | `api_project_unarchive` | — |
 | `POST` | `/api/projects/{id}/upgrade` | cookie | `api_project_upgrade` | '🔧 Bring up to standard' card: supplements CLAUDE.md/TASKS.md/README/.gitignore from templates without overwriting existing content. |
 | `POST` | `/api/projects/{id}/upload` | cookie | `api_project_upload` | Multipart file → data/inbox/ → {path, name, size}. |
 | `GET` | `/api/projects/{id}/upload/{filename}` | cookie | `api_project_upload_file` | Serve a user-uploaded inbox file. |
-| `GET` | `/api/prompts` | cookie | `api_prompts_list` | List all prompts '[{id, title, category, text}, ...]' |
-| `POST` | `/api/prompts` | cookie | `api_prompt_create` | Create prompt — '{"title":"...", "category":"...", "text":"..."}' |
+| `GET` | `/api/prompts` | cookie | `api_prompts_list` | List all prompts `[{id, title, category, text}, ...]` |
+| `POST` | `/api/prompts` | cookie | `api_prompt_create` | Create prompt — `{"title":"...", "category":"...", "text":"..."}` |
 | `PATCH` | `/api/prompts/{id}` | cookie | `api_prompt_update` | Update prompt fields |
 | `DELETE` | `/api/prompts/{id}` | cookie | `api_prompt_delete` | Delete prompt |
 | `POST` | `/api/push/subscribe` | cookie | `api_push_subscribe` | Store a PushSubscription (deduplicated by endpoint). |
@@ -216,15 +216,15 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `DELETE` | `/api/secrets/{name}` | cookie | `api_vault_delete` | Remove a secret. |
 | `GET` | `/api/settings` | cookie | `api_settings_get` | Global settings: stored + effective values + spec. |
 | `POST` | `/api/settings` | cookie | `api_settings_post` | Partial update of global settings (validated). |
-| `GET` | `/api/system-load` | cookie | `api_system_load` (feature: load_monitor) | How loaded this host is, judged against its OWN limits. Returns '{level: ok\|warn\|crit\|unknown, score 0-100, at, age_s, chats:{live,max}, signals:[… |
+| `GET` | `/api/system-load` | cookie | `api_system_load` (feature: load_monitor) | How loaded this host is, judged against its OWN limits. Returns `{level: ok\|warn\|crit\|unknown, score 0-100, at, age_s, chats:{live,max}, signals:[{id…` |
 | `GET` | `/api/terminal/ws` | cookie | `api_terminal_ws` | Bidirectional PTY terminal over WebSocket. |
 | `GET` | `/api/trash` | cookie | `api_trash_list` | List trashed projects. |
 | `POST` | `/api/trash/{entry}/restore` | cookie | `api_trash_restore` | Move folder back, rebind topics.json. |
 | `GET` | `/api/ui-state` | cookie | `api_ui_state_get` | → {state: {...}} — cockpit layout for this user. |
 | `PUT` | `/api/ui-state` | cookie | `api_ui_state_put` | {state: {...}} — save layout. Body is an opaque |
 | `POST` | `/api/update` | cookie | `api_update` | — |
-| `GET` | `/api/usage` | cookie | `api_usage` | Subscription usage — 5h and 7-day limits with utilisation 0–1 and 'resets_at'. Source: 'GET https://api.anthropic.com/api/oauth/usage' (cached 60s).… |
-| `GET` | `/api/usage/dashboard` | cookie | `api_usage_dashboard` | Token/turn dashboard ('?days=30\|all', '?models='). 'providers.claude' / 'providers.codex' as before, and **'providers.grok' only while 'GROK_ENABLED… |
+| `GET` | `/api/usage` | cookie | `api_usage` | Subscription usage — 5h and 7-day limits with utilisation 0–1 and `resets_at`. Source: `GET https://api.anthropic.com/api/oauth/usage` (cached 60s).… |
+| `GET` | `/api/usage/dashboard` | cookie | `api_usage_dashboard` | Token/turn dashboard (`?days=30\|all`, `?models=`). `providers.claude` / `providers.codex` as before, and \*\*`providers.grok` only while `GROK_ENABLED=…` |
 | `GET` | `/api/usage/export.csv` | cookie | `api_usage_export` | — |
 | `GET` | `/api/usage/ledger` | cookie | `api_usage_ledger` | — |
 | `POST` | `/api/usage/scan` | cookie | `api_usage_scan` | Force an immediate (awaited) incremental scan and return its stats. |
