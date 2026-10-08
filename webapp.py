@@ -12712,6 +12712,14 @@ async def api_project_session_label(req: web.Request) -> web.Response:
     return web.json_response({"ok": True, "session_id": sid, "label": label or None})
 
 
+def _active_chat_changed_response() -> web.Response:
+    """The chat a session switch validated against is no longer the active one's provider (the
+    runtime picker ran between the validation and the write): nothing is written."""
+    return web.json_response(
+        {"error": "the active chat's runtime changed while the session was being switched - retry"},
+        status=409)
+
+
 async def api_project_set_session(req: web.Request) -> web.Response:
     """POST /api/projects/{id}/session — switch or reset session."""
     ctx = req.app["ctx"]
@@ -12739,25 +12747,26 @@ async def api_project_set_session(req: web.Request) -> web.Response:
     _session_chat = _find_chat(_session_entry)
     _session_provider = _chat_provider(_session_chat)
 
+    # The chat every branch below acts on is `_find_chat` - the one the UI shows as active, which
+    # hides a switched-off provider's chat. It used to be read twice, by two different rules
+    # (here, the effective chat; in the write, the raw `active` id), and the provider outside the
+    # lock that guards the write: a hidden active chat made "New" reset a chat nobody was looking
+    # at, and a PATCH between the read and the lock wrote one provider's id onto another's chat.
+    # So the provider is (re)read inside the lock, from the very record that is written.
     if action == "new":
         # Spec-037: reset the ACTIVE chat's session_id (not all sessions).
         # Also mirror into ctx["sessions"] as derived cache.
         async with _chats_lock():
             _ss_data = _load_chats(ctx)
-            _ss_proj = _ss_data.get(project["id"])
-            if _ss_proj:
-                _ss_active_id = _ss_proj.get("active")
-                _ss_active = next(
-                    (c for c in _ss_proj.get("chats", []) if c["id"] == _ss_active_id),
-                    None,
-                )
-                if _ss_active is not None:
-                    # Each provider clears ITS OWN continuity id (Claude's session_id, Codex's
-                    # thread, Grok's session) — never another provider's.
-                    _ss_active[providers.get(_session_provider).continuity_field] = None
-                    _save_chats(ctx, _ss_data)
-                    if _session_provider == "grok":
-                        print(f"[grok] {_sk}: session reset — the next turn starts a new Grok session")
+            _ss_active = _find_chat(_ss_data.get(project["id"]) or {})
+            if _ss_active is not None:
+                _session_provider = _chat_provider(_ss_active)
+                # Each provider clears ITS OWN continuity id (Claude's session_id, Codex's
+                # thread, Grok's session) — never another provider's.
+                _ss_active[providers.get(_session_provider).continuity_field] = None
+                _save_chats(ctx, _ss_data)
+                if _session_provider == "grok":
+                    print(f"[grok] {_sk}: session reset — the next turn starts a new Grok session")
         if _session_provider == "claude":
             ctx["sessions"].pop(_sk, None)
             ctx["save_sessions"]()
@@ -12786,8 +12795,9 @@ async def api_project_set_session(req: web.Request) -> web.Response:
                 return web.json_response({"error": "invalid Codex thread id"}, status=400)
             async with _chats_lock():
                 _sr_data = _load_chats(ctx)
-                _sr_proj = _sr_data.get(project["id"])
-                _sr_active = _find_chat(_sr_proj or {})
+                _sr_active = _find_chat(_sr_data.get(project["id"]) or {})
+                if _sr_active is not None and _chat_provider(_sr_active) != _session_provider:
+                    return _active_chat_changed_response()
                 if _sr_active is not None:
                     _sr_active["codex_thread_id"] = session_id
                     _save_chats(ctx, _sr_data)
@@ -12805,8 +12815,9 @@ async def api_project_set_session(req: web.Request) -> web.Response:
                 return web.json_response({"error": "session not found"}, status=400)
             async with _chats_lock():
                 _sr_data = _load_chats(ctx)
-                _sr_proj = _sr_data.get(project["id"])
-                _sr_active = _find_chat(_sr_proj or {})
+                _sr_active = _find_chat(_sr_data.get(project["id"]) or {})
+                if _sr_active is not None and _chat_provider(_sr_active) != _session_provider:
+                    return _active_chat_changed_response()
                 if _sr_active is not None:
                     _sr_active[providers.get("grok").continuity_field] = session_id
                     _save_chats(ctx, _sr_data)
@@ -12823,16 +12834,12 @@ async def api_project_set_session(req: web.Request) -> web.Response:
         # Spec-037: write session_id to the active chat entry + mirror to ctx["sessions"].
         async with _chats_lock():
             _sr_data = _load_chats(ctx)
-            _sr_proj = _sr_data.get(project["id"])
-            if _sr_proj:
-                _sr_active_id = _sr_proj.get("active")
-                _sr_active = next(
-                    (c for c in _sr_proj.get("chats", []) if c["id"] == _sr_active_id),
-                    None,
-                )
-                if _sr_active is not None:
-                    _sr_active["session_id"] = session_id
-                    _save_chats(ctx, _sr_data)
+            _sr_active = _find_chat(_sr_data.get(project["id"]) or {})
+            if _sr_active is not None and _chat_provider(_sr_active) != _session_provider:
+                return _active_chat_changed_response()
+            if _sr_active is not None:
+                _sr_active["session_id"] = session_id
+                _save_chats(ctx, _sr_data)
         ctx["sessions"][_sk] = session_id
         ctx["save_sessions"]()
         return web.json_response({"active": session_id})
@@ -14114,7 +14121,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 async with _chats_lock():
                     _cd = _ensure_chat_entry(ctx, _project_id, session_key)
                     _cp = _cd.get(_project_id, {})
-                    _tid = _q_chat_id or _cp.get("active")
+                    _tid = _q_chat_id or _effective_active_chat(_cp)
                     _tc = next((c for c in _cp.get("chats", []) if c["id"] == _tid), None)
                     if _tc is not None:
                         _resolved_chat_id = _tc["id"]

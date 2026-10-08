@@ -29,6 +29,13 @@ from test_grok_wiring import (  # noqa: F401 - fixtures used by name
 )
 
 
+@pytest.fixture(autouse=True)
+def _fresh_chats_lock(monkeypatch):
+    """The chats lock is a module global that binds to the first loop that CONTENDS it; these
+    tests hold it on purpose, so each gets a lock of its own loop."""
+    monkeypatch.setattr(_webapp, "_CHATS_LOCK", None)
+
+
 @pytest.fixture
 def app(fake_ctx):
     from aiohttp import web
@@ -36,6 +43,7 @@ def app(fake_ctx):
     ap = web.Application(middlewares=[_webapp.auth_middleware])
     ap["ctx"] = fake_ctx
     ap.router.add_post("/api/projects/{id}/chat", _webapp.api_project_chat)
+    ap.router.add_post("/api/projects/{id}/session", _webapp.api_project_set_session)
     return ap
 
 
@@ -440,3 +448,148 @@ async def test_a_drain_never_clears_a_block_it_did_not_deliver(fake_ctx, engines
     await _drain_item(fake_ctx, chat_id=CHAT_ID, project_id=PROJECT_ID,
                       pinned_runtime={"provider": "grok", "model": "grok-4.7"})
     assert _chat_record(fake_ctx)["runtime_handoff"]["text"] == "ARMED-MID-TURN"
+
+
+# ═════════════════════════ item 13b: one active chat for the UI and for session New / Resume ════
+
+
+def _two_chats(ctx, *, active, grok_provider="grok"):
+    """G (a Grok chat) and C (a Claude chat); `active` is the id stored on disk."""
+    _webapp._save_chats(ctx, {PROJECT_ID: {"active": active, "chats": [
+        {"id": "gggggg", "name": "G", "provider": grok_provider, "model": "grok-4.7",
+         "grok_session_id": "GROK-G", "session_id": "G-LEFTOVER"},
+        {"id": "cccccc", "name": "C", "provider": "claude", "model": "opus",
+         "session_id": "CLAUDE-C-OLD"}]}})
+
+
+def _chats_by_id(ctx):
+    return {c["id"]: c for c in _webapp._load_chats(ctx)[PROJECT_ID]["chats"]}
+
+
+@pytest.mark.asyncio
+async def test_session_new_resets_the_chat_the_ui_shows_when_a_disabled_providers_chat_is_active_on_disk(
+    aiohttp_client, fake_ctx, app
+):
+    """Grok is switched off: the UI shows C as active, the disk still says G."""
+    _two_chats(fake_ctx, active="gggggg")
+    assert _webapp._effective_active_chat(_webapp._load_chats(fake_ctx)[PROJECT_ID]) == "cccccc"
+    client = await aiohttp_client(app)
+    resp = await client.post(f"/api/projects/{PROJECT_ID}/session", json={"action": "new"},
+                            headers=_auth(fake_ctx))
+    assert resp.status == 200, await resp.text()
+    chats = _chats_by_id(fake_ctx)
+    assert chats["cccccc"]["session_id"] is None, "'New' did not reset the chat the operator sees"
+    assert chats["gggggg"]["session_id"] == "G-LEFTOVER" and chats["gggggg"]["grok_session_id"] == "GROK-G"
+    assert SESSION_KEY not in fake_ctx["sessions"]
+
+
+@pytest.mark.asyncio
+async def test_session_resume_targets_the_chat_the_ui_shows_when_a_disabled_providers_chat_is_active_on_disk(
+    aiohttp_client, fake_ctx, app, tmp_path
+):
+    _two_chats(fake_ctx, active="gggggg")
+    sdk = tmp_path / "sdk"
+    sdk.mkdir()
+    (sdk / "SESS-1.jsonl").write_text("{}\n")
+    client = await aiohttp_client(app)
+    with patch.object(_webapp, "_sdk_sessions_dir", return_value=sdk):
+        resp = await client.post(f"/api/projects/{PROJECT_ID}/session",
+                                json={"action": "resume", "session_id": "SESS-1"}, headers=_auth(fake_ctx))
+    assert resp.status == 200, await resp.text()
+    chats = _chats_by_id(fake_ctx)
+    assert chats["cccccc"]["session_id"] == "SESS-1"
+    assert chats["gggggg"]["session_id"] == "G-LEFTOVER", "a hidden chat received the resumed id"
+
+
+async def _post_while_the_picker_runs(client, ctx, body, flip):
+    """Hold the chats lock, start the request, let it queue on the lock, run `flip` (what a
+    runtime-picker PATCH does), release."""
+    async with _webapp._chats_lock():
+        task = asyncio.ensure_future(client.post(
+            f"/api/projects/{PROJECT_ID}/session", json=body, headers=_auth(ctx)))
+        await asyncio.sleep(0.15)
+        assert not task.done(), "the request must be waiting for the lock"
+        flip()
+    return await task
+
+
+@pytest.mark.asyncio
+async def test_session_resume_does_not_write_claudes_id_onto_a_chat_that_became_grok_meanwhile(
+    aiohttp_client, fake_ctx, app, tmp_path
+):
+    _two_chats(fake_ctx, active="cccccc")
+    sdk = tmp_path / "sdk"
+    sdk.mkdir()
+    (sdk / "SESS-1.jsonl").write_text("{}\n")
+
+    def flip():
+        data = _webapp._load_chats(fake_ctx)
+        c = next(c for c in data[PROJECT_ID]["chats"] if c["id"] == "cccccc")
+        c.update(provider="grok", model="grok-4.7", grok_session_id="GROK-C")
+        _webapp._save_chats(fake_ctx, data)
+
+    client = await aiohttp_client(app)
+    with patch.object(_webapp, "_sdk_sessions_dir", return_value=sdk):
+        resp = await _post_while_the_picker_runs(
+            client, fake_ctx, {"action": "resume", "session_id": "SESS-1"}, flip)
+    assert resp.status == 409, await resp.text()
+    chats = _chats_by_id(fake_ctx)
+    assert chats["cccccc"]["session_id"] == "CLAUDE-C-OLD", "Claude's id was written onto a Grok chat"
+    assert fake_ctx["sessions"][SESSION_KEY] == "CLAUDE-FLAT-SESSION"
+
+
+@pytest.mark.asyncio
+async def test_session_new_clears_the_provider_the_chat_has_when_the_lock_is_taken_not_the_one_read_before(
+    aiohttp_client, fake_ctx, app
+):
+    _two_chats(fake_ctx, active="cccccc")
+
+    def flip():
+        data = _webapp._load_chats(fake_ctx)
+        c = next(c for c in data[PROJECT_ID]["chats"] if c["id"] == "cccccc")
+        c.update(provider="grok", model="grok-4.7", grok_session_id="GROK-C")
+        _webapp._save_chats(fake_ctx, data)
+
+    client = await aiohttp_client(app)
+    resp = await _post_while_the_picker_runs(client, fake_ctx, {"action": "new"}, flip)
+    assert resp.status == 200, await resp.text()
+    c = _chats_by_id(fake_ctx)["cccccc"]
+    assert c["grok_session_id"] is None, "the chat is a Grok chat now: its Grok session is what resets"
+    assert c["session_id"] == "CLAUDE-C-OLD"
+    assert fake_ctx["sessions"][SESSION_KEY] == "CLAUDE-FLAT-SESSION", "Grok's reset never touches Claude's mirror"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,field,session_id", [
+    ("grok", "grok_session_id", "01a00000-0000-7000-8000-0000000000c1"),
+    ("codex", "codex_thread_id", "thread-abcdef12"),
+])
+async def test_session_resume_of_an_adapter_chat_does_not_write_onto_a_chat_that_became_claude_meanwhile(
+    aiohttp_client, fake_ctx, app, grok_on, codex_on, provider, field, session_id
+):
+    _webapp._save_chats(fake_ctx, {PROJECT_ID: {"active": "xxxxxx", "chats": [
+        {"id": "xxxxxx", "name": "X", "provider": provider, "model": "m", field: "OLD-ID"}]}})
+
+    def flip():
+        data = _webapp._load_chats(fake_ctx)
+        data[PROJECT_ID]["chats"][0].update(provider="claude", model="opus")
+        _webapp._save_chats(fake_ctx, data)
+
+    client = await aiohttp_client(app)
+    resp = await _post_while_the_picker_runs(
+        client, fake_ctx, {"action": "resume", "session_id": session_id}, flip)
+    assert resp.status == 409, await resp.text()
+    assert _webapp._load_chats(fake_ctx)[PROJECT_ID]["chats"][0][field] == "OLD-ID"
+
+
+@pytest.mark.asyncio
+async def test_a_chat_less_queue_item_runs_in_the_chat_the_ui_shows_not_a_hidden_disabled_one(
+    fake_ctx, engines
+):
+    """Wakes and Telegram messages carry no chat id: they follow the ACTIVE chat. With Grok
+    switched off that is the chat the UI shows (C), exactly as for the direct POST."""
+    _two_chats(fake_ctx, active="gggggg")
+    await _drain_item(fake_ctx, project_id=PROJECT_ID)             # no chat_id, no pin
+    assert [len(engines[k]) for k in ("claude", "codex", "grok")] == [1, 0, 0]
+    assert engines["claude"][0]["resume_session_id"] == "CLAUDE-C-OLD"
+    assert not _error_texts()
