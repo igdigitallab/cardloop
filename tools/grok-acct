@@ -57,7 +57,10 @@ sys.path.insert(0, os.environ["CARDLOOP_REPO"])
 import grok_engine
 from pathlib import Path
 f = grok_engine.read_auth_facts(Path(sys.argv[1]))
-if f["email"]:
+if f.get("oidc_logins", 1) > 1:
+    print("note: auth.json holds more than one OIDC login, so no account was pinned and the engine will "
+          "refuse to run — run `tools/grok-acct logout`, then `login` again")
+elif f["email"]:
     grok_engine.pin_account(f["email"])
     print(f"account pinned: {f['email']}")
 else:

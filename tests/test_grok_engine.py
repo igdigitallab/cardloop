@@ -1008,7 +1008,8 @@ async def test_no_secret_value_reaches_a_log_line_or_an_event(env, monkeypatch, 
 
 def test_read_auth_facts_never_returns_a_secret(env):
     facts = grok_engine.read_auth_facts(env.home)
-    assert facts == {"present": True, "oidc": True, "retention_opt_out": True, "email": "user@example.invalid"}
+    assert facts == {"present": True, "oidc": True, "retention_opt_out": True, "email": "user@example.invalid",
+                     "oidc_logins": 1}
     assert TOKEN_ACCESS not in json.dumps(facts) and TOKEN_REFRESH not in json.dumps(facts)
 
 
@@ -2339,6 +2340,54 @@ def test_an_unwritable_pin_fails_closed_with_the_reason(env, monkeypatch):
     msg = last_error(asyncio.run(env.run()))
     assert "cannot record the Grok account" in msg
     assert grok_engine.read_account_pin(env.ctx) is None
+
+
+def _two_oidc_logins(env, first, second):
+    body = {"auth_mode": "oidc", "coding_data_retention_opt_out": True, "key": TOKEN_ACCESS}
+    (env.home / "auth.json").write_text(json.dumps({
+        "https://auth.x.ai::decoy": {**body, "email": first},
+        "https://auth.x.ai::active": {**body, "email": second}}))
+
+
+def test_an_auth_json_with_several_oidc_logins_is_refused(env):
+    # review-spec095-security #5: read_auth_facts used to take the FIRST oidc entry; auth.json is
+    # model-writable, so a decoy naming the pinned account in front of the login the CLI really uses passed.
+    asyncio.run(env.run())                                               # pins user@example.invalid
+    (env.dumps / "argv.json").unlink(missing_ok=True)
+    _two_oidc_logins(env, "user@example.invalid", "attacker@example.invalid")
+    events = asyncio.run(env.run())
+    assert types(events) == ["error"] and "more than one" in last_error(events)
+    assert not (env.dumps / "argv.json").exists()                        # no process started
+    grok_engine.reset_cache()
+    info = asyncio.run(grok_engine.provider_info(force=True))
+    assert info["available"] is False and "more than one" in info["error"]
+    assert grok_engine.read_auth_facts(env.home)["oidc_logins"] == 2
+
+
+def test_the_agent_reported_account_is_checked_against_the_pin_not_only_against_auth_json(env, monkeypatch):
+    # The file is read twice (before the spawn, after `authenticate`); a turn's shell that swaps the login in
+    # between makes the second read agree with the agent. Only the pin, which it cannot reach, still says no.
+    asyncio.run(env.run())
+    real = grok_engine._trust_store_problem
+
+    def swap_then_check(home):
+        env.write_auth(email="attacker@example.invalid")                 # lands after the pin check passed
+        return real(home)
+    monkeypatch.setattr(grok_engine, "_trust_store_problem", swap_then_check)
+    env.fake("synthetic_text", auth_meta=json.dumps({"email": "attacker@example.invalid"}))
+    events = asyncio.run(env.run())
+    assert "result" not in types(events), types(events)
+    assert isinstance(only(events, "error")[0]["exc"], GrokAuthError)
+    assert "different account" in last_error(events)
+
+
+def test_check_auth_meta_compares_the_agent_email_with_the_pin(env):
+    grok_engine.pin_account("user@example.invalid", env.ctx)
+    facts = {"present": True, "oidc": True, "retention_opt_out": True, "email": "attacker@example.invalid"}
+    with pytest.raises(GrokAuthError, match="different account"):
+        grok_engine._check_auth_meta({"email": "attacker@example.invalid"}, facts, env.ctx)
+    grok_engine._check_auth_meta({"email": "USER@example.invalid"}, {**facts, "email": "user@example.invalid"}, env.ctx)
+    grok_engine._check_auth_meta({}, facts, env.ctx)                     # an agent that names no account: unchanged
 
 
 def test_a_corrupt_pin_file_reads_as_no_pin_and_is_replaced_by_the_verified_login(env):

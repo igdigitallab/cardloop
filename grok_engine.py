@@ -737,8 +737,10 @@ def reap_litter(home: Path, own_pid: int | None = None) -> list[str]:
 # ------------------------------------------------------------------------------------------
 
 def read_auth_facts(home: Path) -> dict:
-    """{present, oidc, retention_opt_out, email} from <home>/auth.json. Secrets never leave."""
-    facts = {"present": False, "oidc": False, "retention_opt_out": False, "email": None}
+    """{present, oidc, retention_opt_out, email, oidc_logins} from <home>/auth.json. Secrets never leave.
+    `oidc_logins` counts the OIDC entries: the facts describe the FIRST one, and a file with several is
+    refused by `_auth_problem` (the model's shell can prepend a decoy that the CLI does not use)."""
+    facts = {"present": False, "oidc": False, "retention_opt_out": False, "email": None, "oidc_logins": 0}
     # auth.json sits in the model-writable home: a capped, O_NOFOLLOW, regular-file-only read (a multi-GB file
     # or a FIFO planted under the name would otherwise OOM / hang the cockpit). Unreadable = not signed in.
     raw = grok_jsonl.read_small(home / "auth.json", AUTH_MAX_BYTES)
@@ -755,11 +757,13 @@ def read_auth_facts(home: Path) -> dict:
         if not isinstance(entry, dict):
             continue
         if str(entry.get("auth_mode", "")).lower() == "oidc":
+            facts["oidc_logins"] += 1
+            if facts["oidc"]:
+                continue
             facts["oidc"] = True
             facts["retention_opt_out"] = entry.get("coding_data_retention_opt_out") is True
             email = entry.get("email")
             facts["email"] = email if isinstance(email, str) else None
-            break
     return facts
 
 
@@ -835,6 +839,9 @@ def _auth_problem(facts: dict, home: Path | None = None, ctx: dict | None = None
     if not facts["oidc"]:
         return ("Grok must be signed in with a grok.com (OIDC) subscription login; "
                 "API-key auth is not allowed")
+    if facts.get("oidc_logins", 1) > 1:
+        return ("auth.json holds more than one OIDC login, so it is not certain which account the CLI will use "
+                "(a turn's shell can rewrite the file) — run `tools/grok-acct logout` and `tools/grok-acct login`")
     if not facts["retention_opt_out"]:
         return ("this Grok account has not opted out of coding-data retention "
                 "(coding_data_retention_opt_out is not true) — refusing to send code to xAI")
@@ -2030,7 +2037,11 @@ async def _run_turn(
             except (_AcpTimeout, _AcpError) as exc:
                 raise GrokAuthError(_AUTH_HINT) from exc
             _log(f"handshake authenticate {1000 * (time.monotonic() - t0):.0f} ms")
-            _check_auth_meta(auth.get("_meta"), read_auth_facts(home))
+            fresh = read_auth_facts(home)          # re-read: the file is model-writable, the spawn took time
+            problem = _auth_problem(fresh, home, ctx)
+            if problem:
+                raise GrokAuthError(problem)
+            _check_auth_meta(auth.get("_meta"), fresh, ctx)
             session_params = {"cwd": cwd, "mcpServers": [], "_meta": {"yoloMode": True, "rules": rules}}
             t0 = time.monotonic()
             if resume_session_id:
@@ -2167,8 +2178,10 @@ async def _run_turn(
                     _log(f"teardown {session_key}: exit={acp.proc.returncode} litter_removed={len(removed)}")
 
 
-def _check_auth_meta(meta, facts: dict) -> None:
-    """Re-verify, from what the AGENT reports, the two facts we checked in auth.json."""
+def _check_auth_meta(meta, facts: dict, ctx: dict | None = None) -> None:
+    """Re-verify, from what the AGENT reports, the facts we checked in auth.json — and the account against
+    the PIN, which a turn's shell cannot reach (auth.json is read twice, before the spawn and after
+    `authenticate`; a swap in between makes the second read agree with the agent)."""
     if not isinstance(meta, dict):
         _log("warn: authenticate returned no _meta; relying on the auth.json check")
         return
@@ -2183,6 +2196,10 @@ def _check_auth_meta(meta, facts: dict) -> None:
     email, want = meta.get("email"), facts.get("email")
     if isinstance(email, str) and isinstance(want, str) and email.lower() != want.lower():
         raise GrokAuthError("the Grok agent is signed in as a different account than this home's login")
+    pin = read_account_pin(ctx)
+    if isinstance(email, str) and email and pin is not None and email.lower() != pin:
+        raise GrokAuthError("the Grok agent is signed in as a different account than the one this cockpit was "
+                            "set up with — run `tools/grok-acct login` if you changed it on purpose")
 
 
 async def _apply_config(acp: _Acp, session: dict, session_id: str, model: str, effort: str | None) -> None:
