@@ -33,6 +33,21 @@ _CONSTRAINT_PATTERNS = (
 )
 _CONSTRAINT_RE = re.compile("|".join(_CONSTRAINT_PATTERNS), re.IGNORECASE)
 
+# The cockpit's own markers inside a block it built (see `build_handoff`). A block is injected
+# in front of the operator's words and read back later as part of a USER row, so everything
+# between these markers is the cockpit's text, and the "[previous engine]" lines in it are a
+# MODEL's output: none of it is an operator word.
+BLOCK_HEADER = "# Handoff:"
+BLOCK_END = "---"
+CONSTRAINTS_HEADING = "## Standing constraints (verbatim, from the operator)"
+_TEMPLATE_OPENING = "This conversation was running on"
+_RAW_TAIL_LABELS = ("[previous engine]", "[operator]")
+# Service blocks the cockpit prefixes onto a prompt too (webapp strips them before display; a
+# caller holding raw text must not mine them either).
+_SERVICE_BLOCK_RE = re.compile(
+    r"<(?P<tag>context-pack|prior-session-summary)\b[^>]*>.*?</(?P=tag)>",
+    re.DOTALL | re.IGNORECASE)
+
 MAX_CONSTRAINTS = 12
 MAX_RAW_MESSAGES = 6
 MAX_MESSAGE_CHARS = 1200
@@ -53,20 +68,68 @@ def _clean(text: str) -> str:
     return " ".join((text or "").split())
 
 
+def _carried_ok(line: str) -> bool:
+    """A line of an earlier block's constraints section that may be carried on. A block built
+    before the fix could hold a promoted `[previous engine]` line or its own template sentence
+    there; neither was ever an operator word."""
+    return bool(line) and not line.startswith(_RAW_TAIL_LABELS) \
+        and not line.startswith(_TEMPLATE_OPENING)
+
+
+def split_user_text(text: "str | None") -> "tuple[str, list[str]]":
+    """`(operator_text, carried_constraints)` of one user row.
+
+    A user row is NOT always the operator's own words: on the first turn after a crossing the
+    cockpit prefixes the handoff block (and, on a fresh session, a context pack or a rotation
+    summary), and the engine's session file keeps that whole prompt as one user row. The block's
+    "Last messages" section holds the PREVIOUS ENGINE'S output, so mining the row for constraints
+    promoted model text to "verbatim, from the operator" on the next crossing (spec-096 P8a).
+
+    `operator_text` is the row with every such block removed: a `# Handoff:` line through the
+    next `---` line (an unterminated block is dropped to the end - fail closed), the service
+    blocks, and any stray `[previous engine]` / `[operator]` raw-tail line (the operator may
+    have edited the header away before arming the block). `carried_constraints` are the lines of
+    the block's own "Standing constraints" section: the cockpit built those from operator rows
+    only, and the multi-hop chain (Claude -> Grok -> Codex) loses them if they are dropped too.
+    Callers must trust them only from a row whose block is attested - a Claude/Codex row, or a
+    Grok row verified against the send ledger (the ledger fingerprints the whole prompt)."""
+    own: list[str] = []
+    carried: list[str] = []
+    in_block = in_constraints = False
+    for raw in _SERVICE_BLOCK_RE.sub("", text or "").splitlines():
+        line = raw.strip()
+        if in_block:
+            if line == BLOCK_END:
+                in_block = in_constraints = False
+            elif line.startswith("## "):
+                in_constraints = line == CONSTRAINTS_HEADING
+            elif in_constraints and line.startswith("- ") and _carried_ok(line[2:].strip()):
+                carried.append(line[2:].strip())
+            continue
+        if raw.startswith(BLOCK_HEADER):
+            in_block = True
+            continue
+        if line.startswith(_RAW_TAIL_LABELS):
+            continue
+        own.append(raw)
+    return "\n".join(own).strip(), carried
+
+
 def extract_constraints(messages: list[dict]) -> list[str]:
     """Verbatim operator lines that read as standing instructions, newest LAST.
 
     Line-level, not message-level: a constraint usually lives in one sentence of a long
     message, and carrying the whole message would blow the budget on prose the other engine
     does not need. Deduplicated on the cleaned text so a rule the operator repeated three
-    times does not eat three slots.
+    times does not eat three slots. Only the operator's own text counts: see `split_user_text`.
     """
     out: list[str] = []
     seen: set[str] = set()
     for msg in messages:
         if (msg.get("role") or "") != "user" or _is_unverified(msg):
             continue
-        for raw_line in (msg.get("text") or "").splitlines():
+        own, carried = split_user_text(msg.get("text"))
+        for raw_line in [*carried, *own.splitlines()]:
             line = _clean(raw_line)
             # Too short to be a rule, too long to be quoted verbatim without cost.
             if len(line) < 8 or len(line) > 300:
@@ -116,7 +179,9 @@ def recent_messages(messages: list[dict], limit: int = MAX_RAW_MESSAGES) -> list
              if (m.get("role") or "") in ("user", "assistant") and not _is_unverified(m)]
     out = []
     for m in convo[-limit:]:
-        text = _clean(m.get("text") or "")
+        # A user row that opens with an earlier block must not re-quote it under `[operator]`.
+        raw = split_user_text(m.get("text"))[0] if m.get("role") == "user" else (m.get("text") or "")
+        text = _clean(raw)
         if len(text) > MAX_MESSAGE_CHARS:
             text = text[:MAX_MESSAGE_CHARS] + " […truncated]"
         if not text:
@@ -165,7 +230,7 @@ def build_handoff(
     dropped = sum(1 for m in messages if _is_unverified(m))
 
     lines: list[str] = []
-    lines.append(f"# Handoff: {from_label} → {to_label}")
+    lines.append(f"{BLOCK_HEADER} {from_label} → {to_label}")
     lines.append("")
     lines.append(
         f"This conversation was running on {from_label} and continues here. You do NOT have "
@@ -191,7 +256,7 @@ def build_handoff(
         )
     if constraints:
         lines.append("")
-        lines.append("## Standing constraints (verbatim, from the operator)")
+        lines.append(CONSTRAINTS_HEADING)
         lines.extend(f"- {c}" for c in constraints)
     if files:
         lines.append("")
@@ -204,7 +269,7 @@ def build_handoff(
             who = "operator" if m["role"] == "user" else "previous engine"
             lines.append(f"[{who}] {m['text']}")
     lines.append("")
-    lines.append("---")
+    lines.append(BLOCK_END)
     built = {
         "text": "\n".join(lines),
         "constraints": constraints,

@@ -20,6 +20,12 @@ included), whitespace-normalised: the CLI wraps it in `<user_query>`, and the re
 exactly the wrapped text, so equality survives that round trip. Everything here is best-effort
 and never raises into a run: a failed write only means a later crossing shows that one message
 as unverified.
+
+⚠️ `verified` therefore means "the cockpit sent exactly this prompt", NOT "every line of it is the
+operator's": the prefixed handoff block carries the PREVIOUS engine's output. Whole-prompt equality
+is kept on purpose - it is what lets the block's own (vetted) constraints section be trusted - and the
+operator's words are separated from the cockpit's blocks at the one place that mines them,
+`handoff.split_user_text` (spec-096 P8a). Never read constraints out of a verified row any other way.
 """
 from __future__ import annotations
 
