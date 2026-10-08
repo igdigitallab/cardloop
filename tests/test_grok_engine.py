@@ -952,10 +952,85 @@ async def test_a_usage_row_is_appended_per_turn(env):
     assert row["session_id"].startswith("fake-session_1-") and isinstance(row["duration_ms"], int)
 
 
-async def test_a_failed_turn_writes_no_usage_row(env):
-    env.fake("synthetic_text", stop_reason="refusal")
+def _usage_rows(env) -> list[dict]:
+    path = env.data / "grok_usage.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+async def test_a_turn_that_fails_before_the_model_ran_writes_no_usage_row(env):
+    env.fake("synthetic_text", exit_on="session/prompt", stderr_text="fatal: disk on fire")
     await env.run()
-    assert not (env.data / "grok_usage.jsonl").exists()
+    assert _usage_rows(env) == []
+
+
+def _fixture_without_the_prompt_response(env) -> str:
+    """synthetic_text minus the answer to session/prompt: the model ran (usage notifications) and the process
+    then goes silent - the test ends it (the fake stays alive after its fixture, like the real agent)."""
+    lines = (FIXTURES / "synthetic_text.jsonl").read_text().splitlines()
+    kept = [line for line in lines if not (json.loads(line)["dir"] == "a2c"
+                                           and json.loads(line)["msg"].get("id") == 4)]
+    assert len(kept) == len(lines) - 1
+    out = env.tmp / "silent_after_work.jsonl"
+    out.write_text("\n".join(kept) + "\n")
+    return str(out)
+
+
+async def _run_and_end_the_process(env, how) -> list[dict]:
+    """Run the silent-after-work fixture and end the process at the first text: `kill` = it dies, `stop` = the
+    operator presses Stop and the (deaf) process is killed by the engine."""
+    env.fake(_fixture_without_the_prompt_response(env), ignore_cancel=1)
+    events, ended = [], False
+    async for ev in run_grok_engine(**env.kwargs()):
+        events.append(ev)
+        if ev["type"] == "text_delta" and not ended:
+            ended = True
+            turn = env.ctx["running"]["p:1"]
+            if how == "kill":
+                os.kill(turn._acp.proc.pid, signal.SIGKILL)
+            else:
+                await turn.interrupt()
+    return events
+
+
+@pytest.mark.parametrize("scenario,total", [
+    ("refusal", 2300),             # stopReason other than end_turn: the response's own aggregate
+    ("max_tokens", 2300),
+    ("rpc_error", 1600),           # no aggregate: the per-call response_completed usage
+    ("eof_after_work", 1600),
+    ("unprompted_cancel", 2300),
+])
+async def test_a_turn_that_fails_after_the_model_ran_still_records_the_usage_it_spent(env, scenario, total):
+    # review-spec095-seam F3 / readers: these turns used to leave no ledger row, so the 5 h / 7 d burn hint
+    # under-counted exactly the failure-heavy periods (permission hangs, limit errors)
+    if scenario in ("refusal", "max_tokens"):
+        env.fake("synthetic_text", stop_reason=scenario)
+        events = await env.run()
+    elif scenario == "rpc_error":
+        env.fake("synthetic_text", prompt_error=json.dumps({"code": -32000, "message": "boom"}))
+        events = await env.run()
+    elif scenario == "eof_after_work":
+        events = await _run_and_end_the_process(env, "kill")
+    else:
+        env.fake("synthetic_cancelled_unprompted")
+        events = await env.run()
+    assert "error" in types(events), types(events)
+    rows = _usage_rows(env)
+    assert len(rows) == 1, rows
+    assert rows[0]["total"] == total and rows[0]["project"] == "proj" and rows[0]["provider"] == "grok"
+    assert rows[0]["session_id"] and isinstance(rows[0]["duration_ms"], int)
+
+
+async def test_a_clean_turn_is_written_once_not_twice(env):
+    await env.run()
+    assert len(_usage_rows(env)) == 1
+
+
+async def test_an_operator_stop_that_ends_the_process_before_a_response_records_what_was_spent(env, monkeypatch):
+    monkeypatch.setattr(grok_engine, "INTERRUPT_WAIT_SEC", 0.3)
+    events = await _run_and_end_the_process(env, "stop")
+    assert types(events)[-1] == "result"                    # an operator stop is never an error
+    rows = _usage_rows(env)
+    assert len(rows) == 1 and rows[0]["total"] == 1600
 
 
 async def test_a_stopped_turn_still_records_its_usage(env):

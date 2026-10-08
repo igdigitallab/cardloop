@@ -2128,6 +2128,10 @@ async def _run_turn(
     acp: _Acp | None = None
     home: Path | None = None
     t_start = time.monotonic()
+    mapper: "_Mapper | None" = None      # set once the prompt is on the wire: from there on the model may spend
+    prompt_t0: "float | None" = None
+    final_meta: dict = {}                # the prompt response's own `_meta` (the aggregate usage), when it came
+    usage_written = False
     try:
         binary = grok_bin()
         if not binary:
@@ -2284,6 +2288,7 @@ async def _run_turn(
         result = response.get("result") or {}
         stop = result.get("stopReason")
         meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
+        final_meta = meta
         _log(f"{session_key}: stopReason={stop!r} cancel_requested={turn.cancel_requested} "
              f"permission_requests={acp.permission_requests}")
         for ev in mapper.finish():
@@ -2304,6 +2309,7 @@ async def _run_turn(
         _append_usage(data, session_id=session_id, model=selected_model, project_name=project_name,
                       session_key=session_key, entrypoint=entrypoint, usage=usage,
                       duration_ms=duration_ms)
+        usage_written = True
         yield _result_event(session_id, selected_model, duration_ms, usage,
                             mapper.context_tokens(meta), window)
     except _Stopped:
@@ -2317,6 +2323,15 @@ async def _run_turn(
     except Exception as exc:
         yield {"type": "error", "exc": exc}
     finally:
+        if mapper is not None and not usage_written:
+            # The model ran, then the turn ended some other way: rpc error, an unprompted cancel, max_tokens /
+            # refusal, EOF, an operator stop with no response. The tokens were spent all the same, and the 5 h /
+            # 7 d burn hint is built from this ledger (review-spec095-seam F3).
+            spent = mapper.usage_from(final_meta)
+            if spent["total"] or spent["input"] or spent["output"]:
+                _append_usage(data, session_id=turn.session_id, model=selected_model, project_name=project_name,
+                              session_key=session_key, entrypoint=entrypoint, usage=spent,
+                              duration_ms=int(1000 * (time.monotonic() - (prompt_t0 or t_start))))
         if ctx is not None and ctx.get("running", {}).get(session_key) is turn:
             # The web handler owns final lock removal. Restore its sentinel so a concurrently
             # arriving request still observes the slot as occupied (same as Codex).
