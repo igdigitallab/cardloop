@@ -1363,3 +1363,26 @@ def test_session_exists_is_not_filtered_by_the_witness(home, vouched):
     # the run sites use it to decide whether to RESUME: a stale-id drop must not follow a missing witness
     put_session(home, CWD_A, SID3, [q("x"), a("y")], summary=summ(), bound=False)
     assert gh.session_exists(SID3, CWD_A, grok_home=home) is True
+
+
+@pytest.mark.parametrize("prefix", ["Straße ", "ﬃ ", "İstanbul ", "ǰ "])     # casefold() makes each of these LONGER
+def test_the_snippet_window_survives_characters_that_change_length_when_case_folded(prefix):
+    # review-spec095-readers (confirmed): the hit index came from the casefolded string but sliced the original,
+    # so many "Straße" before the hit shifted the window past the hit (or the end of the text) -> a wrong preview
+    text = prefix * 200 + "NEEDLE and what follows it"          # the shift outgrows the whole preview window
+    snippet = gh._snippet("a title", text, ["needle"])
+    assert "NEEDLE" in snippet and snippet.index("NEEDLE") <= gh.SNIPPET_CHARS // 4
+
+
+def test_the_snippet_still_falls_back_to_the_title_and_cuts_at_the_front():
+    assert gh._snippet("the title", "nothing here", ["zzz"]) == "the title"
+    assert gh._snippet("t", "NEEDLE at the start", ["needle"]).startswith("NEEDLE")
+    long = "x" * 1000 + " NEEDLE " + "y" * 1000
+    assert "NEEDLE" in gh._snippet("t", long, ["needle"])
+
+
+def test_search_sessions_preview_points_at_the_hit_after_length_changing_characters(home, vouched):
+    data, sends = vouched
+    put_session(home, CWD_A, SID, [q("Straße " * 200 + "ZEBRA crossing"), a("ok")], summary=summ())
+    rows = gh.search_sessions("zebra", CWD_A, grok_home=home)
+    assert [r["id"] for r in rows] == [SID] and "ZEBRA" in rows[0]["preview"]

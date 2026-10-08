@@ -600,8 +600,16 @@ def iter_search_docs(cwd: str, *, grok_home=None, max_sessions: int = SEARCH_MAX
 def _snippet(title: str, text: str, terms: list[str]) -> str:
     """Around the first term found in the conversation text, else the title."""
     flat = " ".join(text.split())
-    low = flat.casefold()
-    hits = [p for p in (low.find(t) for t in terms) if p >= 0]
+    # casefold() is not length-preserving ("ß" -> "ss", "ﬃ" -> "ffi"): a hit found in the folded text is mapped
+    # back to the original through a per-character index, never used as an offset into `flat` directly
+    folded: list[str] = []
+    origin: list[int] = []
+    for i, ch in enumerate(flat):
+        piece = ch.casefold()
+        folded.append(piece)
+        origin.extend([i] * len(piece))
+    low = "".join(folded)
+    hits = [origin[p] for p in (low.find(t) for t in terms) if p >= 0]
     if not hits:
         return title[:SNIPPET_CHARS]
     start = max(0, min(hits) - SNIPPET_CHARS // 4)
