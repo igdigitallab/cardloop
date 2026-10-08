@@ -2613,7 +2613,8 @@ def _ws_origin_refusal(req: web.Request) -> "Optional[web.Response]":
     logging.warning("[ws-origin] refused %s from Origin %.200r (Host %.200r). Same-origin pages are "
                     "always allowed; list other origins in WS_ALLOWED_ORIGINS, and set TRUSTED_PROXIES "
                     "when a reverse proxy rewrites Host.",
-                    _log_safe(req.path), req.headers.get("Origin", ""), req.headers.get("Host", ""))
+                    _log_safe(req.path), _log_safe(req.headers.get("Origin", "")),
+                    _log_safe(req.headers.get("Host", "")))
     return web.json_response({"error": "origin not allowed"}, status=403)
 
 
@@ -17712,7 +17713,7 @@ async def api_vault_get(req: web.Request) -> web.Response:
         return web.json_response({"error": "secret not found"}, status=404)
 
     # Audit: log the reveal (name only — never log the value)
-    _log.info("vault reveal: name=%r (value not logged)", name)
+    _log.info("vault reveal: name=%r (value not logged)", _log_safe(name))
 
     return web.json_response({
         "name": entry["name"],

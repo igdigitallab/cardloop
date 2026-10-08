@@ -750,3 +750,19 @@ async def test_ordinary_profile_ids_are_unchanged(monkeypatch):
         "/api/profiles/google-id/launch",
         "/api/profiles/3f2b8c1e-0d4a-4e8b-9a77-5c1d2e3f4a5b/launch",
     ]
+
+
+async def test_profile_action_endpoint_cannot_be_aimed_at_another_manager_path(aiohttp_client, monkeypatch):
+    """The real entry point: match_info['id'] is percent-DECODED, so an encoded '../' in the
+    URL arrives as '../' in the handler - it must still stay inside /api/profiles/<id>/."""
+    import webapp
+    from aiohttp import web
+
+    seen = _record_manager_paths(monkeypatch)
+    app = web.Application()
+    app.router.add_post("/api/browser/profiles/{id}/{action}", webapp.api_browser_profile_action)
+    client = await aiohttp_client(app)
+
+    resp = await client.post("/api/browser/profiles/x%2F..%2F..%2Fadmin%3Fq%3D1/launch")
+    assert resp.status == 200
+    assert seen == [("POST", "/api/profiles/x%2F..%2F..%2Fadmin%3Fq%3D1/launch")]
