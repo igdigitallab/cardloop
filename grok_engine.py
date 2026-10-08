@@ -646,6 +646,29 @@ FOREIGN_LAYERS = ("rules", "AGENTS.md", "CLAUDE.md", "GROK.md", "skills", "agent
                   "commands", "plugins", "lsp.json", "settings.json")
 
 
+def _unlock_tree(top: str) -> None:
+    """`chmod u+rwx` on `top` and every REAL directory below it, so that `shutil.rmtree` can list them.
+
+    Never follows a symlink, at any depth: GROK_HOME is writable by the model's shell and this runs in the
+    cockpit, unsandboxed. `os.walk` lists a symlinked directory in `dirs` and `os.chmod` follows it, so a link
+    planted inside `rules/` used to get its TARGET chmod'ed (spec-096 P8 / review-spec095-security #2). A
+    directory is entered only if `scandir` says it is one WITHOUT following links, and the chmod itself is
+    `follow_symlinks=False` (the kernel refuses a link with NotImplementedError — also when the entry was
+    swapped for a link after the scan). A link is left alone here; `rmtree` unlinks it, never descends."""
+    stack = [top]
+    while stack:
+        cur = stack.pop()
+        try:
+            os.chmod(cur, stat.S_IRWXU, follow_symlinks=False)
+        except (NotImplementedError, OSError):
+            continue          # a link (or gone, or no nofollow chmod on this libc): leave it, rmtree decides
+        try:
+            with os.scandir(cur) as it:
+                stack.extend(e.path for e in it if e.is_dir(follow_symlinks=False))
+        except OSError:
+            continue
+
+
 def sweep_foreign_layers(home: Path) -> list[str]:
     """Remove the model-writable instruction layers from GROK_HOME before a turn. Returns the names removed.
     A symlink is unlinked, never followed. A layer that cannot be removed is an error (fail closed): the next
@@ -661,11 +684,7 @@ def sweep_foreign_layers(home: Path) -> list[str]:
             raise GrokUnavailableError(f"cannot inspect {path} in the Grok home: {exc!r}") from exc
         try:
             if stat.S_ISDIR(st.st_mode):
-                for root, dirs, _files in os.walk(path):          # a model can leave mode-000 directories behind
-                    for d in dirs:
-                        with _suppress():
-                            os.chmod(os.path.join(root, d), stat.S_IRWXU)
-                os.chmod(path, stat.S_IRWXU)
+                _unlock_tree(str(path))                           # a model can leave mode-000 directories behind
                 shutil.rmtree(path)
             else:
                 path.unlink()

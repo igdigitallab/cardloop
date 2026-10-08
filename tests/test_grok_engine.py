@@ -2135,6 +2135,40 @@ def test_the_sweep_deletes_a_symlink_never_what_it_points_at(env):
     assert (outside / "keep.md").read_text() == "mine"
 
 
+@pytest.mark.parametrize("depth", [1, 2, 3])
+def test_the_sweep_never_follows_a_symlink_nested_inside_a_layer(env, depth):
+    # review-spec095-security #2 (confirmed): os.walk lists a symlinked directory in `dirs` and os.chmod follows
+    # it, so a link a model planted INSIDE rules/ got its TARGET chmod'ed by the (unsandboxed) cockpit
+    victim = env.tmp / "operators-real-dir"
+    victim.mkdir()
+    (victim / "keep.md").write_text("mine")
+    os.chmod(victim, 0o755)
+    nest = env.home / "rules"
+    for i in range(depth - 1):
+        nest = nest / f"d{i}"
+    nest.mkdir(parents=True)
+    (nest / "link").symlink_to(victim)
+    (nest / "filelink").symlink_to(victim / "keep.md")
+    ensure_home(env.ctx)
+    assert not os.path.lexists(env.home / "rules")
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o755
+    assert (victim / "keep.md").read_text() == "mine"
+
+
+def test_the_sweep_leaves_a_mode_000_target_of_a_nested_symlink_locked(env):
+    victim = env.tmp / "operators-private-dir"
+    victim.mkdir()
+    os.chmod(victim, 0)
+    try:
+        (env.home / "skills" / "a").mkdir(parents=True)
+        (env.home / "skills" / "a" / "link").symlink_to(victim)
+        ensure_home(env.ctx)
+        assert not os.path.lexists(env.home / "skills")
+        assert stat.S_IMODE(victim.stat().st_mode) == 0
+    finally:
+        os.chmod(victim, 0o700)
+
+
 def test_the_sweep_removes_a_layer_a_model_made_unreadable(env):
     deep = env.home / "skills" / "a" / "b"
     deep.mkdir(parents=True)
