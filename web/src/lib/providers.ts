@@ -203,7 +203,9 @@ export function boardModelProviders(
 ): Provider[] {
   const s = settings as Record<string, unknown>
   return PROVIDER_IDS.filter(id => {
-    const meta = PROVIDERS[id]
+    // Widened to the interface: with every adapter serving its default model today, the literal
+    // type narrows to `never` after the servesDefaultModel check (a 4th provider may not).
+    const meta: ProviderMeta = PROVIDERS[id]
     if (!meta.adapter) return false
     if (registry.some(r => r.provider === id)) return true
     if (s.board_provider === id) return true
