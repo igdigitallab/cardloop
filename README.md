@@ -2,10 +2,10 @@
 
 ### Run Claude agents on a kanban board — and watch them work from your phone.
 
-Cardloop is a **self-hosted, mobile-first cockpit** where every kanban card *is* a Claude agent run.
-Drop a card, and your home server ships the code, docs, or ops task autonomously — powered by the
+Cardloop is a **self-hosted, mobile-first cockpit** where every kanban card *is* an agent run.
+Drop a card, and your home server ships the code, docs, or ops task autonomously — by default on the
 **official Claude Code engine** with your own Anthropic account (API key, or your personal Claude
-login for individual use). Install it to your phone's home screen as a PWA and steer your projects
+login for individual use), optionally on OpenAI Codex or xAI Grok Build. Install it to your phone's home screen as a PWA and steer your projects
 from the couch.
 
 <div align="center">
@@ -41,7 +41,8 @@ from the couch.
 
 ## What it is, in 5 seconds
 
-- **What:** a kanban board where each card auto-runs a Claude coding/ops agent to completion — full-auto.
+- **What:** a kanban board where each card auto-runs a coding/ops agent to completion — full-auto. Claude
+  by default; OpenAI Codex and xAI Grok Build are optional providers.
 - **Who:** one operator running many projects (software, content, ops) who isn't always at a desk.
 - **Why:** the board *is* the agent's memory. Work lives on a board the agent keeps honest, not in a
   chat log that scrolls away. You write the ticket; Claude does the work; you watch it happen — on your phone.
@@ -383,8 +384,11 @@ the personal cockpit you run at home and operate from your phone.
 | **Always-on self-hosted service** | ✅ systemd / Docker / HTTPS | ❌ launch from terminal | ✅ |
 | **Multi-project structured cockpit** | ✅ explicit projects + sessions | ⚠️ per-repo | ✅ |
 
-Trade-offs, stated plainly: it's **Claude-only** by design (that's what makes the deep Claude Code
-integration possible), and `webapp.py` is a large monolith we're decomposing in the open. PRs welcome.
+Trade-offs, stated plainly: it's **Claude-first**. Claude Code is the default engine and the deepest
+integration (per-tool approval in ask mode and several subscriptions in one cockpit exist only for
+Claude); OpenAI Codex and xAI Grok Build are optional providers, off by default
+(`CODEX_ENABLED` / `GROK_ENABLED`), each on its own subscription. And `webapp.py` is a large monolith
+we're decomposing in the open. PRs welcome.
 
 ---
 
