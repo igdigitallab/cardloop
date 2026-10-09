@@ -1,12 +1,16 @@
 # Cardloop
 
-### Run Claude agents on a kanban board — and watch them work from your phone.
+### Your AI dev team on your own server — steered from your phone.
 
-Cardloop is a **self-hosted, mobile-first cockpit** where every kanban card *is* an agent run.
-Drop a card, and your home server ships the code, docs, or ops task autonomously — by default on the
-**official Claude Code engine** with your own Anthropic account (API key, or your personal Claude
-login for individual use), optionally on OpenAI Codex or xAI Grok Build. Install it to your phone's home screen as a PWA and steer your projects
-from the couch.
+Drop a card on the board. An agent picks it up in its own git worktree, writes the code, and parks it
+in Review: one tap runs your tests, one tap merges or discards it. It keeps working while your laptop
+sleeps.
+
+- **Runs 24/7 on your box** — systemd or Docker, not a desktop app.
+- **Phone-first** — an installable PWA that pushes a notification when a run finishes.
+- **Claude Code by default**, OpenAI Codex and xAI Grok Build optional — on your own accounts.
+- **Built with itself** — over 80% of its commits are co-authored by AI agents · 5,400+ tests ·
+  [OpenSSF Best Practices: passing](https://www.bestpractices.dev/projects/15287).
 
 <div align="center">
 
@@ -56,7 +60,7 @@ Three things make Cardloop different from the dozen other agent kanbans:
    **official Claude Code CLI / Agent SDK** on your own host, with your own Anthropic account:
    a Claude Console **API key** (recommended, and required for teams/commercial use) or your
    personal `claude login` for individual use — the same auth you'd use running Claude Code by hand.
-   No SaaS in the middle, no per-seat markup, nothing sent anywhere.
+   No SaaS in the middle, no per-seat markup, nothing sent anywhere but to the model provider you chose.
 3. 🗂️ **Cards that code — safely.** A card's task text *becomes* the agent prompt. Moving a card to In
    Progress runs the engine in an isolated **git worktree**, attaches the diff, and lands the card in
    Review behind a **Check / Apply / Discard** gate — your working copy is never touched until you merge.
