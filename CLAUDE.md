@@ -43,6 +43,9 @@ Design history & specs: `docs/internal/specs/` (gitignored).
   one-line to set); `agents_config.memory="project"` means the native MEMORY.md is NOT loaded, so it is not
   judged; (4) `project_settings_untrusted` prints key names, never env values or hook commands, and its
   acknowledge (`data/project_health_ack.json`) is a sha256 that goes stale the moment the file changes.
+  ⚠️ Source that needs zero-width characters (the scanner, its tests) must spell them as `\uXXXX` escapes: an
+  agent's file-write tool decodes a typed `​` into the REAL character, and the first draft of this package
+  shipped raw invisible characters that its own scanner would have flagged — grep the diff after writing.
   `api_project_health` imports `logic.env_exposed` inside its body (IRON RULE) so the `.env exposed` pill and the
   check cannot disagree; the health pill hides `env_exposed` itself to avoid showing it twice. Tests:
   `tests/test_project_health.py`, `tests/test_project_health_routes.py`, `tests/e2e/test_project_health.py`,
