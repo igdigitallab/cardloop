@@ -103,6 +103,10 @@ async def sweep_once(ctx: dict) -> dict:
     return fleet_snapshot()
 
 
+def _today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
 def _load_state(data: Path) -> dict:
     try:
         raw = json.loads((data / STATE_FILE).read_text(encoding="utf-8"))
@@ -116,7 +120,7 @@ async def _write_digest(ctx: dict, results: list) -> None:
     try:
         data: Path = ctx["DATA"]
         sick = [r for r in results if r.get("findings")]
-        day = time.strftime("%Y-%m-%d")
+        day = _today()
         if sick:
             inbox = data / "inbox"
             inbox.mkdir(parents=True, exist_ok=True)
