@@ -494,6 +494,27 @@ export const en = {
   'agents.tools_suffix': 'tools',
   'agents.model_none': '—',
 
+  // ── Policy rules panel (Agents tab; docs/RULES.md) ──
+  'rules.title': 'Policy rules',
+  'rules.hint': 'Markdown files checked before every tool call of a Claude run. Edit them in the Files tab. Hit counts reset when the cockpit restarts.',
+  'rules.loading': 'Loading policy rules…',
+  'rules.unavailable': 'Policy rules are not available on this server.',
+  'rules.empty': 'No rule files. Add a .md file to {dir} (this project) or {globalDir} (every project) — format in docs/RULES.md.',
+  'rules.refresh': 'Refresh',
+  'rules.scope_pack': 'pack',
+  'rules.action_block': 'block',
+  'rules.action_warn': 'warn',
+  'rules.status_disabled': 'disabled',
+  'rules.status_untrusted': 'not trusted',
+  'rules.status_shadowed': 'overridden',
+  'rules.status_invalid': 'invalid',
+  'rules.hits_one': '1 hit',
+  'rules.hits_other': '{n} hits',
+  'rules.last_hit': 'last hit',
+  'rules.trust_label': 'Trust rule files that the repository tracks in this project',
+  'rules.trust_hint': 'Off by default: a cloned repository must not install policy on its own. Turn on only for repositories you wrote or reviewed.',
+  'rules.trust_failed': 'Could not change the setting',
+
   // ── Secrets tab (Spec 007) ───────────────────────────────────
   'secrets.loading': 'Loading secrets...',
   'secrets.empty_title': 'No secrets',

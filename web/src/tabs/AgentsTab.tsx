@@ -6,6 +6,7 @@ import { Spinner } from '../components/Spinner'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { Modal, ModalHead } from '../components/Modal'
 import { EditableMarkdown } from '../components/EditableMarkdown'
+import { PolicyRulesPanel } from '../components/PolicyRulesPanel'
 import { useToast, ToastContainer } from '../components/Toast'
 import { useOnRunEnd, useFocusRefresh } from '../hooks/useProjectActivity'
 import { t } from '../i18n'
@@ -593,6 +594,9 @@ export function AgentsTab({ projectId }: Props) {
           </div>
         )}
       </section>
+
+      {/* Policy rules (docs/RULES.md): read-only list + hit counts; edited as files. */}
+      <PolicyRulesPanel projectId={projectId} />
 
       {editor && (
         <RoleEditorModal
