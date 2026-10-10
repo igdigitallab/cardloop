@@ -46,7 +46,8 @@ MAX_CHARS = 262_144       # above this the lexer is not even started
 MAX_DEPTH = 24            # nesting of $( ), backticks and re-parsed payloads (bash -c "...")
 WORK_FACTOR = 8           # chars lexed over ALL nested programs <= WORK_FACTOR * len + 20_000
 _CRUDE_WINDOW = 64        # tokens looked at after a trigger word in the fallback scan
-_CRUDE_TRIGGERS = 4000    # trigger words examined per fallback scan
+_CRUDE_TRIGGERS = 4000    # trigger words that get the full window; later ones get the short one
+_CRUDE_TAIL_WINDOW = 12
 
 
 class Finding(NamedTuple):
@@ -71,13 +72,15 @@ RULES = {
     "dd-block-device": "dd writing to a raw block device can overwrite the host disk",
     "git-skip-hooks":
         "skipping git hooks (--no-verify, or -n on commit/am) bypasses the pre-commit secret "
-        "scan, the last barrier before a credential lands in the public history",
+        "scan, the last barrier before a credential lands in the public history "
+        "(a scan false positive goes into .secretscanignore)",
     "git-hookspath":
         "overriding core.hooksPath turns off the repository's git hooks, including the "
-        "pre-commit secret scan",
+        "pre-commit secret scan (a scan false positive goes into .secretscanignore)",
     "skip-secret-scan":
         "SKIP_SECRET_SCAN switches off the pre-commit secret scan, the last barrier before a "
-        "credential lands in the public history",
+        "credential lands in the public history (a scan false positive goes into "
+        ".secretscanignore)",
 }
 
 
@@ -693,9 +696,9 @@ _GIT_GLOBAL_VALUE = frozenset({"-C", "--git-dir", "--work-tree", "--namespace", 
 # Subcommands that take --no-verify (git 2.47 `git <sub> -h`; cherry-pick does not today, but
 # a hook-skipping flag there could only ever be an attempt, so it is denied too).
 _NOVERIFY_SUBS = frozenset({"commit", "push", "merge", "am", "cherry-pick", "rebase"})
-# `-n` IS --no-verify only for these two (push -n = --dry-run, merge/rebase -n = --no-stat,
-# cherry-pick -n = --no-commit).  The brief asked for `commit` only; `git am -n` is verified
-# `bypass pre-applypatch and applypatch-msg hooks` in `git am -h`, so it is denied as well.
+# `-n` IS --no-verify only for these two: `git commit -n` and `git am -n` ("bypass pre-applypatch
+# and applypatch-msg hooks", see `git am -h`). Everywhere else it is something harmless:
+# push -n = --dry-run, merge/rebase -n = --no-stat, cherry-pick -n = --no-commit.
 _N_IS_NOVERIFY = frozenset({"commit", "am"})
 # per subcommand: (long options taking a separate value, short options taking a value,
 #                  short options whose value is optional and must be stuck to the flag)
@@ -1241,14 +1244,14 @@ _HANDLERS = {
     "docker": _simple(_h_docker),
     "dd": _simple(_h_dd),
     "sed": _simple(_h_sed),
-    "rmdir": _simple(_h_ssh_verb), "mv": _simple(_h_ssh_verb), "shred": _simple(_h_ssh_verb),
-    "truncate": _simple(_h_ssh_verb), "chown": _simple(_h_ssh_verb), "tee": _simple(_h_ssh_verb),
     "export": _simple(_h_declare), "declare": _simple(_h_declare), "typeset": _simple(_h_declare),
     "readonly": _simple(_h_declare), "local": _simple(_h_declare),
     "eval": _h_eval, "ssh": _h_ssh, "su": _h_su, "runuser": _h_runuser, "find": _h_find,
 }
 for _sh in _SHELLS:
     _HANDLERS[_sh] = _h_shell
+for _verb in _SSH_VERBS - {"rm"}:             # rm has its own handler (which also runs this check)
+    _HANDLERS[_verb] = _simple(_h_ssh_verb)
 _KNOWN_NAMES = frozenset(_HANDLERS) | frozenset(_WRAPPERS)
 
 
@@ -1347,8 +1350,8 @@ def _clean(t: str) -> str:
 
 def _crude(command: str) -> "Optional[Finding]":
     """Fallback for input the lexer could not or may not process: keyword windows, no quoting,
-    no heredocs.  Linear: split once, then at most `_CRUDE_WINDOW` tokens after each of at most
-    `_CRUDE_TRIGGERS` trigger words."""
+    no heredocs.  Linear: split once, then `_CRUDE_WINDOW` tokens after each of the first
+    `_CRUDE_TRIGGERS` trigger words and `_CRUDE_TAIL_WINDOW` after every later one."""
     f = _forkbomb(command, [])
     if f:
         return f
@@ -1378,11 +1381,12 @@ def _crude(command: str) -> "Optional[Finding]":
             if name in _SHELLS or name in ("eval", "ssh", "su", "runuser", "find"):
                 continue                     # interpreters need real quoting; not in the coarse scan
             triggers += 1
-            if triggers > _CRUDE_TRIGGERS:
-                return None
             if name.startswith("mkfs"):
                 return _f("mkfs")
-            args = toks[i + 1:i + 1 + _CRUDE_WINDOW]
+            # past the cap only the next few words are read (every deny shape is decided within
+            # a handful of them), so the cost stays bounded and nothing is skipped
+            width = _CRUDE_WINDOW if triggers <= _CRUDE_TRIGGERS else _CRUDE_TAIL_WINDOW
+            args = toks[i + 1:i + 1 + width]
             f = h(args, None, None)
             if f:
                 return f

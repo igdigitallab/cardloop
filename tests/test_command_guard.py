@@ -167,6 +167,9 @@ DENY = [
     ("git --bare reset --hard", RESET),
     ("git -c core.pager=cat reset --hard", RESET),
     ("git -C /a -C b reset --hard", RESET),
+    ("git --git-dir /x/.git reset --hard", RESET),                  # separate-word form
+    ("git push -f origin 2>&1", PUSH),                              # `2` is a file descriptor
+    ("git push --force origin 2>/dev/null", PUSH),
     ("git reset HEAD~1 --hard", RESET),
     ("git reset --ha", RESET),
     ("git reset --har HEAD", RESET),
@@ -370,6 +373,7 @@ ALLOW = [
     "git commit -m --no-verify",
     "git commit -F msg.txt",
     "git commit -F - < msg.txt",
+    "git commit -m x -- --no-verify",       # after `--` it is a path
     "git commit -mn",                       # `n` is the message, not a flag
     "git commit -tn -m msg",                # `n` is the template path
     "git commit -uno -m msg",               # -u<mode>
@@ -429,6 +433,9 @@ ALLOW = [
     "git config core.hooksPath",
     "git config --get core.hooksPath",
     "git config --global --unset core.hooksPath",
+    "git config --unset core.hooksPath ^/old$",                    # removing it is the repair
+    "git config --unset-all core.hooksPath /old/path",
+    "git config --get-regexp core.hooksPath x",
     "git config user.name igor",
     "git config --list",
     "git -c user.name=a -c core.pager=cat commit -m x",
@@ -457,6 +464,7 @@ ALLOW = [
     "git push --force origin HEAD",
     "git push --delete origin old-branch",
     "git push -o -f origin feature",                               # -f is the push option's value
+    "git push -o -f origin master",
     "git -C /tmp/x reset --soft HEAD~1",
     "git -C /tmp/x reset HEAD file",
     "git --git-dir=/x/.git status",
@@ -672,10 +680,29 @@ def test_oversized_input_falls_back_to_the_narrow_scan():
     assert time.perf_counter() - t < 1.5
 
 
+def test_fallback_scan_stays_bounded_past_the_trigger_cap():
+    # >256 KiB made of trigger words: every later trigger still gets a short window, so the
+    # scan is fast AND a deny shape at the very end is still found
+    for unit, tail, expected in [("rm ", "-rf /", RM), ("git ", "reset --hard", RESET),
+                                 ("git push ", "--force origin master", PUSH),
+                                 ("chmod ", "-R 777 /", "chmod-root")]:
+        body = unit * (cg.MAX_CHARS // len(unit) + 100)
+        assert len(body) > cg.MAX_CHARS
+        t = time.perf_counter()
+        assert rule_of(body) is None                                     # no complete shape yet
+        assert rule_of(body + tail) == expected
+        assert time.perf_counter() - t < 3.0
+
+
 def test_nesting_deeper_than_the_limit_falls_back():
     deep = "echo " + "$(" * 120 + "git push --no-verify" + ")" * 120
     assert rule_of(deep) == SKIP
     assert rule_of("echo " + "$(" * 120 + "ls" + ")" * 120) is None
+    # the limit is where the lexer stops and the coarse scan (no notion of data) takes over:
+    # a quoted mention is data at depth 20 and a (documented) false positive at depth 30
+    mention = "echo 'git reset --hard'"
+    assert rule_of("echo " + "$(" * 20 + mention + ")" * 20) is None
+    assert rule_of("echo " + "$(" * (cg.MAX_DEPTH + 6) + mention + ")" * (cg.MAX_DEPTH + 6)) == RESET
     # programs inside programs: a shell fed a heredoc that feeds a shell ... (linear text)
     def layered(levels, inner):
         text = inner + "\n"
@@ -780,6 +807,10 @@ def test_audit_command_is_cut_and_flattened(audit_log):
     command_part = text.split(": ", 1)[1]
     assert len(command_part) <= 200 and "\n" not in text
     assert command_part.endswith("…")
+    # a short multi-line command: one audit line, whitespace collapsed
+    audit_log.clear()
+    asyncio.run(hook(_hook_input("echo start\ngit reset --hard\t HEAD~1\n"), None, None))
+    assert audit_log == [("p", "DENY", "git-hard-reset: echo start git reset --hard HEAD~1")]
 
 
 def test_hook_without_project_uses_the_cwd(audit_log):
