@@ -52,6 +52,7 @@ import runtime as _runtime               # spec-092: run context + which CLI bin
 import load_monitor as _load_monitor     # spec-094: shared working-set measure + eviction counter
 import runtime_secrets as _rs             # spec-096 P3b: startup snapshot of the secrets scrubbed from os.environ
 import fs_browser as _fs_browser          # Files tab policy; here only its 'files the agent wrote' log
+import policy_rules as _policy_rules      # declarative Markdown policy rules (PreToolUse, docs/RULES.md)
 from board import (
     board_summary,
     _load_board,
@@ -3344,6 +3345,10 @@ async def run_engine(  # type: ignore[return]
     # flag is OFF because the hook only fires if a PreCompact SDK event is emitted.
     _pre_compact_hook = _make_pre_compact_hook(project_name, session_key)
 
+    # Declarative policy rules (docs/RULES.md): looked up per tool call from an mtime-keyed
+    # cache, so editing a rule file applies to an already-connected live client too.
+    _policy_rules_hook = _policy_rules.make_hook(project_name, cwd, ctx, audit_fn=audit)
+
     # Spec-029 §1: live streaming — emit text_delta events for incremental cockpit display.
     # STREAM_PARTIAL=0 disables without code changes (e.g. for debugging or regression isolation).
     # Default ON: clean reconciliation (the final {type:"text"} remains authoritative, deltas are
@@ -3562,7 +3567,7 @@ async def run_engine(  # type: ignore[return]
             "PreToolUse": [HookMatcher(
                 matcher="Bash",
                 hooks=[_bundle_grep_guard_hook, _dangerous_command_guard_hook],
-            )],
+            ), HookMatcher(hooks=[_policy_rules_hook])],  # no matcher: every tool, incl. mcp__*
             "PostToolUse": [HookMatcher(hooks=[_post_tool_hook])],
             "PreCompact": [HookMatcher(hooks=[_pre_compact_hook])],
         },
