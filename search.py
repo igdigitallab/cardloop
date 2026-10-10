@@ -36,6 +36,7 @@ from datetime import datetime
 from pathlib import Path
 
 import board as _board  # reuse card-line regex + ops-marker stripping — no re-implementation
+import memory_status as _memory_status
 
 # ─────────────────────────── tunables ───────────────────────────
 
@@ -683,7 +684,7 @@ def index_project_files(conn: sqlite3.Connection, project_id: str, project_name:
     roots = [Path(r) for r in (root if isinstance(root, (list, tuple)) else [root])]
     exclude_dirs = exclude_dirs if exclude_dirs is not None else set()
     is_secret = is_secret or (lambda _n: False)
-    stats = {"files": 0, "docs": 0, "removed": 0, "code_skipped": False}
+    stats = {"files": 0, "docs": 0, "removed": 0, "code_skipped": False, "inactive": 0}
     live_roots = [r for r in roots if r.is_dir()]
     if not live_roots:
         return stats
@@ -725,6 +726,14 @@ def index_project_files(conn: sqlite3.Connection, project_id: str, project_name:
             continue
         if "\x00" in text[:8192]:
             continue  # binary despite the extension
+        if source_kind == "memory" and _memory_status.is_inactive(text):
+            # A superseded/rejected article stays readable in the Memory tab but must not be
+            # recalled: memory outranks every other source. Drop rows it had while active and
+            # remember the file state so an unchanged file is not re-read every scan.
+            _delete_docs_for_path(conn, key)
+            _save_file_state(conn, key, stat.st_mtime, stat.st_size, 0)
+            stats["inactive"] += 1
+            continue
 
         base = root_of.get(key, live_roots[0])
         rel = str(path.relative_to(base)) if path.is_relative_to(base) else path.name

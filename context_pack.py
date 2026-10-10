@@ -21,6 +21,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import memory_status as _memory_status
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public constants
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,7 +78,7 @@ def _read_memory(cwd: str) -> tuple[str, list[dict[str, str]]]:
                 continue
             if fpath.name == "MEMORY.md":
                 index_text = text
-            else:
+            elif not _memory_status.is_inactive(text):  # superseded/rejected: never recalled
                 others.append({"name": fpath.name, "body": text})
     except Exception:
         pass

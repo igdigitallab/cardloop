@@ -36,6 +36,11 @@ import sys
 import time
 from pathlib import Path
 
+# Standalone script (also run by memory-lint-all.sh under the system python): make the repo
+# root importable for the one shared, stdlib-only helper.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import memory_status  # noqa: E402
+
 
 # ── index parsing ────────────────────────────────────────────────────────────
 
@@ -203,8 +208,11 @@ def lint(dir_path: Path, index_name: str, *, repo: Path | None,
             continue
         size = len(body.encode("utf-8"))
         age_days = int((now - p.stat().st_mtime) / 86400)
+        fields = memory_status.frontmatter_fields(body)
         entries.append({
             "name": p.name,
+            "status": fields.get("status", ""),
+            "superseded_by": fields.get("superseded_by", ""),
             "bytes": size,
             "age_days": age_days,
             "title_words": _title_words(p.name, body),
@@ -227,6 +235,22 @@ def lint(dir_path: Path, index_name: str, *, repo: Path | None,
     present = {p.name for p in files} | {index_name}
     dead_links = sorted([l for l in linked if l not in present] + broken_external)
 
+    # A superseded article must name a successor that exists and is itself live — otherwise
+    # recall drops the old article and nothing replaces it. Rejected needs no successor.
+    status_of = {e["name"]: e["status"] for e in entries}
+    no_successor = []
+    for e in entries:
+        if e["status"] != "superseded":
+            continue
+        succ = e["superseded_by"].strip().strip("[]")
+        succ_file = succ if succ.endswith(".md") else f"{succ}.md"
+        if not succ:
+            no_successor.append({"name": e["name"], "why": "no superseded_by"})
+        elif succ_file not in present:
+            no_successor.append({"name": e["name"], "why": f"{succ_file} does not exist"})
+        elif status_of.get(succ_file) in memory_status.INACTIVE_STATUSES:
+            no_successor.append({"name": e["name"], "why": f"{succ_file} is itself {status_of[succ_file]}"})
+
     for e in entries:
         e.pop("title_words", None)  # not serialisable / not needed downstream
 
@@ -241,6 +265,8 @@ def lint(dir_path: Path, index_name: str, *, repo: Path | None,
         "stale_by_age": [{"name": e["name"], "age_days": e["age_days"]} for e in entries if e["stale_age"]],
         "stale_refs": [{"name": e["name"], "missing": e["stale_refs"]} for e in entries if e["stale_refs"]],
         "near_duplicates": dups,
+        "inactive": [e["name"] for e in entries if e["status"] in memory_status.INACTIVE_STATUSES],
+        "superseded_without_successor": no_successor,
         "oversized_entries": _oversized_entries(index_path, max_entry_chars),
         "index_budget": _index_budget(index_path),
         # The method's second special file: an append-only chronology of ingests / lints / queries.
@@ -257,7 +283,8 @@ def _render(report: dict) -> str:
     n_issues = (len(report["orphans"]) + len(report["dead_index_links"])
                 + len(report["oversized"]) + len(report["stale_by_age"])
                 + len(report["stale_refs"]) + len(report["near_duplicates"])
-                + len(report["oversized_entries"]))
+                + len(report["oversized_entries"])
+                + len(report.get("superseded_without_successor", [])))
     L.append(f"- flagged: **{n_issues}** (nothing was deleted — curate manually)")
     b = report.get("index_budget") or {}
     if b:
@@ -286,6 +313,11 @@ def _render(report: dict) -> str:
             [f"{d['a']} ≈ {d['b']} ({d['similarity']})" for d in report["near_duplicates"]])
     section("Oversized index entries — summaries, not pointers (paid every bootstrap)",
             [f"L{e['line']} — {e['chars']} chars — {e['text']}" for e in report["oversized_entries"]])
+    section("Superseded without a live successor — recall drops it and nothing replaces it",
+            [f"{s['name']} — {s['why']}" for s in report.get("superseded_without_successor", [])])
+    if report.get("inactive"):
+        L.append(f"_Not recalled (superseded/rejected): {', '.join(report['inactive'])}_")
+        L.append("")
     return "\n".join(L)
 
 

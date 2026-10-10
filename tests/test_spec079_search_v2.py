@@ -394,7 +394,7 @@ class TestProjectFiles:
     def test_missing_root_is_a_noop(self, conn, tmp_path):
         r = S.index_project_files(conn, "p", "P", tmp_path / "nope",
                                   exclude_dirs=_EXCLUDE, is_secret=_is_secret)
-        assert r == {"files": 0, "docs": 0, "removed": 0, "code_skipped": False}
+        assert r == {"files": 0, "docs": 0, "removed": 0, "code_skipped": False, "inactive": 0}
 
     def test_scan_all_accepts_file_sources(self, conn, tmp_path):
         _mkproject(tmp_path)

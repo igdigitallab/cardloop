@@ -106,6 +106,11 @@ Rules that keep it lean:
 - **Merge, don't blind-delete.** A "progress" note often hides a real gotcha; read before removing,
   and repoint inbound `[[wiki-links]]`.
 - **Fix stale bodies.** A wrong memory is worse than none — it is loaded and believed.
+- **Retire, don't delete:** `status: superseded` + `superseded_by: <name>` (or `status: rejected`) in an
+  article's frontmatter keeps it in the Memory tab but out of search and the context pack
+  (`memory_status.py`); memory-lint flags a superseded article whose successor is missing or retired.
+- **Index budget:** keep MEMORY.md ≤ 18 KB, English hooks (Cyrillic costs 2 bytes/char); merge small
+  related articles into one rather than adding lines (originals → `memory/_archive/`).
 - ⚠️ **Never `sed -i` across the whole memory dir.** `sed -i` rewrites every file it opens, match or
   not, so a bulk link-repoint stamps today's mtime on all of them and blinds the lint's
   `stale_by_age` check. Edit only the files that actually contain the pattern (`grep -l … | xargs sed -i`),
