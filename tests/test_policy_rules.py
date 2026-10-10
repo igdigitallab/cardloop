@@ -1111,3 +1111,23 @@ def test_k3_docs_name_the_same_limits_as_the_code():
     for needle in (str(pr.MAX_FILE_BYTES // 1024) + " KB", str(pr.MAX_RULES), str(pr.MAX_PATTERN_CHARS),
                    "rules_trust_tracked", "mcp__mail__send", "CARDLOOP_RULES_DIR", "permissionDecision"):
         assert needle in doc, needle
+
+
+def test_k4_the_worked_examples_in_the_docs_are_real_rules(env):
+    import re as _re
+    doc = (ROOT / "docs" / "RULES.md").read_text(encoding="utf-8")
+    blocks = [b for b in _re.findall(r"```markdown\n(.*?)```", doc, _re.S)
+              if "name: block-mail-send" in b or "name: warn-rm-client-files" in b]
+    assert len(blocks) == 2
+    env.g.mkdir()
+    for idx, text in enumerate(blocks):
+        (env.g / f"example-{idx}.md").write_text(text, encoding="utf-8")
+    rs = pr.load_ruleset(None)
+    assert {e.name: e.status for e in rs.entries} == {"block-mail-send": "active", "warn-rm-client-files": "active"}
+    m = fire(rs, "mcp__mail__send", {"to": "x@y.z"})
+    assert [(x.name, x.action) for x in m] == [("block-mail-send", "block")]
+    assert not fire(rs, "mcp__mail__read", {})
+    m = fire(rs, "Bash", {"command": "rm -rf /srv/client-files/old"})
+    assert [(x.name, x.action) for x in m] == [("warn-rm-client-files", "warn")]
+    assert not fire(rs, "Bash", {"command": "rm -rf /tmp/scratch"})
+    assert not fire(rs, "Bash", {"command": "ls /srv/client-files"})

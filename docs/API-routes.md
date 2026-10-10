@@ -11,7 +11,7 @@
 venv/bin/python tools/gen_route_index.py
 ```
 
-196 routes on 168 paths (191 need the session cookie, 5 do not). Methods and paths are exact; the description is the first line of the handler's docstring, or the matching [API.md](API.md) row when the handler has no docstring (a dash means neither has one). Request and response shapes for the main flows are in [API.md](API.md); for the rest, the handler named in the table is the reference.
+197 routes on 169 paths (192 need the session cookie, 5 do not). Methods and paths are exact; the description is the first line of the handler's docstring, or the matching [API.md](API.md) row when the handler has no docstring (a dash means neither has one). Request and response shapes for the main flows are in [API.md](API.md); for the rest, the handler named in the table is the reference.
 
 ## Authentication
 
@@ -165,6 +165,7 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `DELETE` | `/api/projects/{id}/roles/{name}` | cookie | `api_project_role_delete` | — |
 | `POST` | `/api/projects/{id}/roles/{name}/enabled` | cookie | `api_project_role_enabled` | — |
 | `POST` | `/api/projects/{id}/rotate` | cookie | `api_project_rotate` | Cockpit "Wrap & reset" button. |
+| `GET` | `/api/projects/{id}/rules` | cookie | `api_project_rules` | The policy rules (docs/RULES.md) this project runs under. |
 | `GET` | `/api/projects/{id}/running` | cookie | `api_project_running` | Whether an agent run is active for this project. |
 | `POST` | `/api/projects/{id}/scan-errors` | cookie | `api_project_scan_errors` | Manual scanner run for one project. |
 | `GET` | `/api/projects/{id}/secrets` | cookie | `api_project_secrets` | List of key NAMES (no values). |
@@ -233,5 +234,5 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 
 ## Not listed one by one
 
-- **HEAD**: aiohttp registers a HEAD twin for every GET route (88 of them). It has the same path, auth and handler as its GET.
+- **HEAD**: aiohttp registers a HEAD twin for every GET route (89 of them). It has the same path, auth and handler as its GET.
 - **`/{path_info}` (any method)**: the SPA fallback. It serves the built web UI (`web/dist`) for every path that no route above matched. It is outside `/api/`, so the auth middleware does not guard it.

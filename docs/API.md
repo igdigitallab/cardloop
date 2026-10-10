@@ -200,6 +200,16 @@ File names: `^[a-z0-9][a-z0-9-]{0,60}\.md$` or `MEMORY.md`. Max size per file: 2
 
 ---
 
+## Policy rules
+
+Declarative Markdown rules (`block` / `warn`) evaluated before every tool call of a Claude run. Files are edited as files (Files tab); the API is read-only. Format, tiers, trust rule, limits → [RULES.md](RULES.md).
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects/{id}/rules` | One row per rule file across the project / global / pack tiers: `{rules:[{name, tier, path, enabled, trusted, status, action, event, match, message, hits, last_hit, diagnostics:[...]}], diagnostics:[...], trust_tracked, global_dir, project_dir, limits}`. `status` = `active\|disabled\|untrusted\|shadowed\|invalid`; `trusted:false` = a project file that git tracks while `rules_trust_tracked` is off (not read, not enforced); `hits`/`last_hit` count in memory since the cockpit started; top-level `diagnostics` = directory-level problems (symlinked dir, git could not answer). 404 if the project is unknown. | Yes |
+
+---
+
 ## Project Secrets (Spec 007)
 
 Project-scoped secrets stored in `<cwd>/.claude-ops/secrets/secrets.env` (chmod 600, gitignored).
@@ -235,7 +245,7 @@ Global — `data/settings.json` (mtime hot-reload, wired into runtime: scan inte
 | `GET` | `/api/settings` | Global settings: `{stored, effective, spec}`. `effective` = active values (override or env default), `spec` = types/ranges. | Yes |
 | `POST` | `/api/settings` | Partial update of global settings (validated against spec). `null`/`""` for a key resets it to default. 400 on unknown key/type/range. | Yes |
 | `GET` | `/api/projects/{id}/settings` | Per-project settings: `{git_enabled, model, notify_on_error, log_cmd, test_cmd, board_provider, codex_model, grok_model, ...}`. `grok_model` falls back to the built-in default (`GROK_MODEL`, `grok-4.7`) | Yes |
-| `POST` | `/api/projects/{id}/settings` | Partial update of per-project settings (writes to topics.json for all entries with this cwd). Type/model validation. Returns `{ok, topics_updated, settings}`. 400 on unknown key/type. `grok_model` takes a provider-native id (`[A-Za-z0-9._-]{2,100}`). | Yes |
+| `POST` | `/api/projects/{id}/settings` | Partial update of per-project settings (writes to topics.json for all entries with this cwd). Type/model validation. Returns `{ok, topics_updated, settings}`. 400 on unknown key/type. `grok_model` takes a provider-native id (`[A-Za-z0-9._-]{2,100}`). `rules_trust_tracked` is a strict bool (`false` resets it; 400 for a free chat): the opt-in to git-tracked policy rule files, see [RULES.md](RULES.md). | Yes |
 
 ---
 
