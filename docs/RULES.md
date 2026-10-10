@@ -22,6 +22,12 @@ a symlink, a different tool) is not stopped. Pair rules with the permission mode
 built-in dangerous-command guard; do not rely on a regex as the only wall around something that
 must never happen.
 
+**Rule files are ordinary files.** An agent with Bash or Write can edit or delete them, and a
+project file with the same name as a global rule overrides it (including `enabled: false`). Where
+a rule must hold against the agent itself, keep it in a directory the cockpit's user cannot write
+(a pack dir owned by another user, mode `0555`) — but note a project file can still override it by
+name: a non-overridable ("locked") tier is not part of v1.
+
 ## Where rule files live
 
 | Tier | Directory | Notes |

@@ -360,6 +360,14 @@ def test_c6_cwd_equal_to_the_global_dir_is_loaded_once_as_global(env, monkeypatc
     assert [(e.tier, e.name) for e in rs.entries] == [("global", "r")]
 
 
+def test_c9_only_plain_md_files_directly_in_the_dir_are_rules(env):
+    put(env.g, "real", f"{BLOCK_BASH}pattern: rm")
+    put(env.g, ".hidden", f"{BLOCK_BASH}pattern: rm")
+    (env.g / "notes.txt").write_text(rule_text(f"{BLOCK_BASH}pattern: rm"), encoding="utf-8")
+    put(env.g / "nested", "deep", f"{BLOCK_BASH}pattern: rm")
+    assert [e.name for e in pr.load_ruleset(None).entries] == ["real"]
+
+
 def test_c7_missing_dirs_are_not_errors_and_not_created(env):
     rs = pr.load_ruleset(env.cwd)
     assert rs.entries == [] and rs.diagnostics == []
@@ -389,6 +397,21 @@ def test_d1_a_tracked_project_rule_is_disabled_and_untracked_siblings_load(env):
     assert fire(rs, "Bash", {"command": "curl x"})
     untrusted = [e for e in rs.entries if e.name == "tracked"][0]
     assert not untrusted.trusted and "rules_trust_tracked" in untrusted.untrusted_reason
+
+
+@NEEDS_GIT
+def test_d1b_the_trust_check_ignores_git_variables_inherited_from_the_cockpits_env(env, monkeypatch):
+    git(env.cwd, "init", "-q")
+    put(env.p, "tracked", f"{BLOCK_BASH}pattern: rm")
+    git(env.cwd, "add", "-A")
+    git(env.cwd, "commit", "-qm", "rule")
+    other = env.tmp / "other-repo"
+    other.mkdir()
+    git(other, "init", "-q")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))              # would answer "nothing is tracked"
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(env.tmp / "no-such-index"))
+    assert pr.load_ruleset(env.cwd).entries[0].status == "untrusted"
 
 
 @NEEDS_GIT
@@ -493,6 +516,14 @@ def test_d12_symlinked_project_rules_dir_is_refused(env):
     assert rs.entries == [] and any("symbolic link" in d for d in rs.diagnostics)
 
 
+def test_d12b_a_symlinked_parent_of_the_rules_dir_is_refused_too(env):
+    target = env.tmp / "elsewhere" / ".claude-ops"
+    put(target / "rules", "r", f"{BLOCK_BASH}pattern: rm")
+    os.symlink(target, Path(env.cwd) / ".claude-ops")
+    rs = pr.load_ruleset(env.cwd)
+    assert rs.entries == [] and any("symbolic link" in d for d in rs.diagnostics)
+
+
 def test_d13_symlinked_global_rule_file_is_allowed(env):
     real = env.tmp / "vault-rule.md"
     real.write_text(rule_text(f"name: lnk\n{BLOCK_BASH}pattern: rm"), encoding="utf-8")
@@ -530,6 +561,31 @@ def test_e1_oversized_file_is_skipped_with_a_diagnostic(env):
     assert e.status == "invalid" and "larger than 64 KB" in e.error
 
 
+def test_e1b_an_oversized_file_is_refused_before_a_single_byte_is_read(env):
+    env.g.mkdir()
+    big = env.g / "big.md"
+    big.write_bytes(b"x" * (pr.MAX_FILE_BYTES + 1))
+    with patch.object(pr.os, "read", side_effect=AssertionError("must not read an oversized file")):
+        text, err = pr._read_rule_text(str(big), follow_symlinks=True)
+    assert text is None and "larger than 64 KB" in err
+
+
+def test_e1c_a_file_that_grows_after_the_size_check_is_still_bounded(env):
+    """The stat said small, the file is big (it grew while being read): the bounded read catches it."""
+    import stat as _s
+    env.g.mkdir()
+    big = env.g / "grew.md"
+    big.write_bytes(b"x" * (pr.MAX_FILE_BYTES * 3))
+    lying = SimpleNamespace(st_mode=_s.S_IFREG | 0o644, st_size=10)
+    reads = []
+    real_read = os.read
+    with patch.object(pr.os, "fstat", return_value=lying), \
+            patch.object(pr.os, "read", side_effect=lambda fd, n: (reads.append(n), real_read(fd, n))[1]):
+        text, err = pr._read_rule_text(str(big), follow_symlinks=True)
+    assert text is None and "larger than 64 KB" in err
+    assert sum(reads) <= pr.MAX_FILE_BYTES + 1 + 1                 # never asked for more than limit + 1
+
+
 def test_e2_a_file_at_the_limit_is_still_read(env):
     env.g.mkdir()
     head = "---\nname: edge\npattern: x\n---\n"
@@ -562,7 +618,7 @@ def test_e4_overlong_patterns_are_rejected_everywhere(env):
 
 @pytest.mark.parametrize("pattern", [
     "(a+)+", "(.*)*", "(a*)*b", "(a+)*", "([a-z]+)+$", "(\\w+\\s*)*x", "(?:a+){2,}", "(a|aa)+", "(a|a?)*b",
-    "(a+){3}", "((a+)b)+", "(x+x+)+y", "(?:a|)+",
+    "(a+){3}", "((a+)b)+", "(x+x+)+y", "(?:a|)+", "(ab|ac|b)+x",
 ])
 def test_e5_catastrophic_shapes_are_rejected(pattern):
     why = pr.unsafe_regex_reason(pattern)
@@ -607,6 +663,16 @@ def test_e10_a_match_beyond_64kb_is_still_found(env):
     assert not fire(rs, "Bash", {"command": pad})
 
 
+@pytest.mark.parametrize("offset", [3 * pr.MATCH_WINDOW_CHARS, 10 * pr.MATCH_WINDOW_CHARS,
+                                    pr.MAX_SCAN_CHARS - 100])
+def test_e10b_a_match_deep_inside_the_scan_range_is_found_in_a_later_window(env, offset):
+    put(env.g, "deep", f"{BLOCK_BASH}pattern: 'FORBIDDEN_TOKEN'")
+    rs = pr.load_ruleset(None)
+    cmd = "x" * offset + "FORBIDDEN_TOKEN" + "y" * 50
+    matches = fire(rs, "Bash", {"command": cmd})
+    assert [(m.name, m.unverified) for m in matches] == [("deep", False)]
+
+
 def test_e11_a_match_straddling_a_window_boundary_is_found(env):
     put(env.g, "straddle", f"{BLOCK_BASH}pattern: 'FORBIDDEN_TOKEN'")
     rs = pr.load_ruleset(None)
@@ -648,12 +714,20 @@ def test_e14_a_runaway_regex_is_interrupted_and_the_block_rule_fails_closed(env)
 
 def test_e15_the_watchdog_restores_the_previous_signal_handler_and_timer():
     import signal
-    before = signal.getsignal(signal.SIGALRM)
-    with pr._watchdog(5.0) as armed:
-        assert armed is True
-        assert signal.getitimer(signal.ITIMER_REAL)[0] > 0
-    assert signal.getsignal(signal.SIGALRM) == before
-    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+    def sentinel(signum, frame):  # pragma: no cover - never fires
+        pass
+
+    original = signal.signal(signal.SIGALRM, sentinel)
+    try:
+        with pr._watchdog(5.0) as armed:
+            assert armed is True
+            assert signal.getitimer(signal.ITIMER_REAL)[0] > 0
+            assert signal.getsignal(signal.SIGALRM) is not sentinel
+        assert signal.getsignal(signal.SIGALRM) is sentinel
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    finally:
+        signal.signal(signal.SIGALRM, original)
 
 
 def test_e16_the_watchdog_stands_down_when_a_timer_is_already_running():
@@ -690,9 +764,13 @@ def test_e17_off_the_main_thread_the_windows_shrink_instead(env):
 def test_e18_a_fifo_with_a_rule_name_is_rejected_without_blocking(env):
     env.g.mkdir()
     os.mkfifo(env.g / "pipe.md")
-    t0 = time.monotonic()
-    e = pr.load_ruleset(None).entries[0]
-    assert time.monotonic() - t0 < 2 and e.status == "invalid" and "not a regular file" in e.error
+    out = {}
+    th = threading.Thread(target=lambda: out.update(rs=pr.load_ruleset(None)), daemon=True)
+    th.start()
+    th.join(5)                                  # a blocking open() would hang here, not return
+    assert not th.is_alive(), "opening a FIFO blocked the loader"
+    e = out["rs"].entries[0]
+    assert e.status == "invalid" and "not a regular file" in e.error
 
 
 def test_e19_non_utf8_and_unreadable_files_do_not_break_loading(env):
@@ -766,8 +844,19 @@ async def test_f5_no_match_and_no_rules_return_an_empty_dict(env):
 
 async def test_f6_zero_rules_never_reaches_the_evaluator(env):
     hook = make(env)
-    with patch.object(pr, "evaluate", side_effect=AssertionError("must not run")):
+    seen = []
+    with patch.object(pr, "evaluate", side_effect=lambda *a, **k: seen.append(a) or ([], [])):
         assert await call(hook, "Bash", {"command": "rm -rf /"}) == {}
+    assert seen == []                           # not even an empty evaluation
+
+
+def test_f6b_a_spent_evaluation_budget_fails_a_block_rule_closed_and_a_warn_rule_open(env):
+    put(env.g, "blk", f"{BLOCK_BASH}pattern: rm")
+    put(env.g, "wrn", "event: bash\naction: warn\npattern: rm")
+    rs = pr.load_ruleset(None)
+    matches, problems = pr.evaluate(rs, "Bash", {"command": "ls"}, budget_s=-1.0)
+    assert [(m.name, m.unverified) for m in matches] == [("blk", True)]
+    assert ("blk", "evaluation budget spent") in problems and ("wrn", "evaluation budget spent") in problems
 
 
 async def test_f7_garbage_input_never_raises(env):
@@ -973,6 +1062,28 @@ async def test_i1_run_engine_registers_the_rules_hook_for_every_tool_next_to_the
     assert await every.hooks[0]({"tool_name": "mcp__x__y", "tool_input": {}}, None, None) == {}
 
 
+@NEEDS_GIT
+async def test_i3_the_wired_hook_reads_the_trust_opt_in_from_the_runs_ctx(env):
+    import bot
+    import engine
+    git(env.cwd, "init", "-q")
+    put(env.p, "tracked", f"{BLOCK_BASH}pattern: rm", "no rm here")
+    git(env.cwd, "add", "-A")
+    git(env.cwd, "commit", "-qm", "r")
+    ctx = {"topics": {"1:1": {"cwd": env.cwd, "project": "t"}}}
+    with patch.object(engine, "ClaudeSDKClient", _FakeClient), \
+            patch.object(engine, "running", {}), \
+            patch.object(engine, "audit", lambda *a: None):
+        async for _ in bot.run_engine(project_name="t", cwd=env.cwd, prompt="hi", session_key="pr:t3",
+                                      model="sonnet", ctx=ctx):
+            pass
+        hook = _FakeClient.captured.hooks["PreToolUse"][1].hooks[0]
+        assert await hook({"tool_name": "Bash", "tool_input": {"command": "rm x"}}, None, None) == {}
+        ctx["topics"]["1:1"]["rules_trust_tracked"] = True
+        out = await hook({"tool_name": "Bash", "tool_input": {"command": "rm x"}}, None, None)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 async def test_i2_the_wired_hook_audits_through_the_engines_audit_function(env):
     import bot
     import engine
@@ -1047,6 +1158,18 @@ async def test_j1_rules_endpoint_lists_rules_with_hits_and_diagnostics(aiohttp_c
     assert data["global_dir"] == str(env.g) and data["project_dir"] == str(env.p)
 
 
+async def test_j1b_hits_belong_to_the_active_row_not_to_the_overridden_one(aiohttp_client, api_app, api_ctx, env):
+    put(env.g, "no-rm", f"{BLOCK_BASH}pattern: rm", "global")
+    put(env.p, "no-rm", f"{BLOCK_BASH}pattern: rm", "project")
+    await pr.make_hook("myproject", env.cwd, api_ctx)({"tool_name": "Bash", "tool_input": {"command": "rm x"}}, None, None)
+    client = await aiohttp_client(api_app)
+    data = await (await client.get("/api/projects/myproject/rules", headers=_h(api_ctx))).json()
+    by_tier = {r["tier"]: r for r in data["rules"]}
+    assert by_tier["project"]["hits"] == 1 and by_tier["project"]["status"] == "active"
+    assert by_tier["global"]["hits"] == 0 and by_tier["global"]["status"] == "shadowed"
+    assert "overridden" in by_tier["global"]["diagnostics"][0]
+
+
 @NEEDS_GIT
 async def test_j2_untrusted_rows_and_the_opt_in_flow(aiohttp_client, api_app, api_ctx, env):
     git(env.cwd, "init", "-q")
@@ -1111,6 +1234,16 @@ def test_k3_docs_name_the_same_limits_as_the_code():
     for needle in (str(pr.MAX_FILE_BYTES // 1024) + " KB", str(pr.MAX_RULES), str(pr.MAX_PATTERN_CHARS),
                    "rules_trust_tracked", "mcp__mail__send", "CARDLOOP_RULES_DIR", "permissionDecision"):
         assert needle in doc, needle
+
+
+def test_k5_the_real_router_registers_the_rules_route():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gen_route_index", ROOT / "tools" / "gen_route_index.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    app, _wa, _features = tool.build_app()
+    routes = {(r.method, r.resource.canonical) for r in app.router.routes() if r.resource is not None}
+    assert ("GET", "/api/projects/{id}/rules") in routes
 
 
 def test_k4_the_worked_examples_in_the_docs_are_real_rules(env):
