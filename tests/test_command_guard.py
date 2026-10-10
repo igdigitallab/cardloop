@@ -831,8 +831,8 @@ def test_audit_command_is_cut_and_flattened(audit_log):
 def test_project_label_comes_from_the_run_or_the_cwd(audit_log):
     # the hook input has a cwd but no project name: run_engine registers cwd -> project, the
     # Bash tool keeps its `cd`, so a subdirectory (or a card worktree) resolves to the project
+    engine._guard_remember_project("/srv/apps/shop/.worktrees/card-7", "shop-card")   # longer root FIRST
     engine._guard_remember_project("/srv/apps/shop", "shop")
-    engine._guard_remember_project("/srv/apps/shop/.worktrees/card-7", "shop-card")
     assert engine._GUARD_PROJECTS == {"/srv/apps/shop": "shop", "/srv/apps/shop/.worktrees/card-7": "shop-card"}
     for cwd in ("/srv/apps/shop/", "/srv/apps/shop/web/src", "/srv/apps/shop/.worktrees/card-7/x"):
         _run_hook(_hook_input("rm -rf /", cwd=cwd))
