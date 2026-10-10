@@ -22,7 +22,9 @@ def _truthy(v: "str | None") -> bool:
 
 
 async def api_project_health_check(req: web.Request) -> web.Response:
-    """GET /api/projects/{id}/health-check — findings for one project.
+    """Health-check findings for one project (real, actionable ailments only; [] when healthy).
+
+    GET /api/projects/{id}/health-check.
 
     Default: reuse a result younger than ~5 min (project open: one cheap GET, typically < 100 ms
     when it has to run).  ?fresh=1 always re-runs (the Tests button, the modal's Re-check).
@@ -38,7 +40,9 @@ async def api_project_health_check(req: web.Request) -> web.Response:
 
 
 async def api_project_health_ack(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/health-check/ack {check_id, sha256} — silence an acknowledged finding.
+    """Acknowledge a project-settings finding: silent until the file changes.
+
+    POST /api/projects/{id}/health-check/ack {check_id, sha256}.
 
     The hash must be that of a project settings file AS IT IS NOW: acknowledging a stale hash
     would bless content nobody has seen.  The finding reappears as soon as the file changes.
@@ -72,7 +76,7 @@ async def api_project_health_ack(req: web.Request) -> web.Response:
 
 
 async def api_health_check_fleet(req: web.Request) -> web.Response:
-    """GET /api/health-check — what the last fleet sweep found (projects with findings only)."""
+    """What the last fleet sweep found (projects with findings only)."""
     return web.json_response(_loop.fleet_snapshot())
 
 

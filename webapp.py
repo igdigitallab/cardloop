@@ -18982,10 +18982,10 @@ async def api_project_health(req: web.Request) -> web.Response:
 
     # Capability: secrets — software/ops only.  The rule lives in the project-health feature so the
     # header pill and the health check can never disagree (deferred import: IRON RULE, spec-068).
+    from features.project_health import logic as _health_logic  # deferred import
     exposed = False
     if is_software_ops:
-        from features.project_health.logic import env_exposed as _env_exposed
-        exposed = _env_exposed(cwd, _git_enabled(project))
+        exposed = _health_logic.env_exposed(cwd, _git_enabled(project))
         capabilities.append({
             "key": "secrets",
             "label": "Secrets safe",
@@ -18994,10 +18994,7 @@ async def api_project_health(req: web.Request) -> web.Response:
         })
 
     security_warn = is_software_ops and exposed
-    security_hint = None
-    if security_warn:
-        from features.project_health.logic import ENV_EXPOSED_HINT as _env_hint
-        security_hint = _env_hint
+    security_hint = _health_logic.ENV_EXPOSED_HINT if security_warn else None
 
     return web.json_response({
         "archetype": archetype,

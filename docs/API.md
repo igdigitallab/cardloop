@@ -256,6 +256,26 @@ Global — `data/settings.json` (mtime hot-reload, wired into runtime: scan inte
 
 ---
 
+## Project health check (feature `project_health`)
+
+Read-only checks for real, actionable ailments — never a score; a healthy project returns `findings: []`
+and the UI shows nothing. Checks: `memory_index_near_cap`, `context_floor`, `no_test_cmd`, `stale_work`,
+`orphan_worktrees`, `env_exposed`, `project_settings_untrusted`, `invisible_unicode`. Software-only checks
+(`no_test_cmd`, `stale_work`, `env_exposed`) skip `content` / `scratchpad` projects. Separate from the
+Tests verdict: `POST /api/projects/{id}/test` is unchanged. 404 on all three routes when the module is off.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/projects/{id}/health-check` | Findings for one project: `{project_id, name, findings:[{id, severity:"warn"\|"crit", title, detail, fix_hint, subject, ackable?, ack_sha256?}], checked_at, took_ms, errors, skipped}`. Cached ~5 min; `?fresh=1` re-runs (the Tests button and the modal's Re-check use it). One project finishes in under 3 s; checks past the budget land in `skipped`, a crashing check in `errors` — never in `findings`. Free chats always return `[]` | Yes |
+| `POST` | `/api/projects/{id}/health-check/ack` | `{"check_id":"project_settings_untrusted","sha256":"<64 hex>"}` — stores the settings file's hash in `data/project_health_ack.json`; the finding stays silent until the file's hash changes. 400 on a bad body or a check that cannot be acknowledged; 409 (with the fresh result) when the hash is not one of the files as they are now. Returns `{ok:true, ...fresh result}` | Yes |
+| `GET` | `/api/health-check` | Fleet view of the last daily sweep: `{mode, interval_sec, last_sweep_at, projects:[<per-project result, only those with findings>], counts:{projects, crit, warn}}` | Yes |
+
+The sweep (`HEALTH_CHECK_MODE=on`, every `HEALTH_CHECK_INTERVAL_SEC`) writes ONE digest `data/inbox/project-health-<day>.md`
+and pushes at most once a day, only for findings it has not announced before (`data/project_health_state.json`).
+Knobs: `HEALTH_CHECK_MODE`, `HEALTH_CHECK_INTERVAL_SEC`, `HEALTH_CONTEXT_FLOOR_WARN_TOKENS`, `HEALTH_STALE_WORK_DAYS` (see `.env.example`).
+
+---
+
 ## Accounts (multiple subscriptions)
 
 An extra Claude subscription is a separate `CLAUDE_CONFIG_DIR` under `~/.claude-accounts/<id>/`

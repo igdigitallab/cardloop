@@ -7,6 +7,15 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Added — project health check
+- The project's **Tests** button also runs a read-only health check (and one sweep a day covers every project):
+  memory index near the CLI's 200-line / 25,000-byte cap, heavy context floor, `test_cmd` missing while tests
+  exist, work left uncommitted/unpushed, orphan card worktrees, `.env` exposed, project settings that run code
+  (hooks, `ANTHROPIC_*` env, `Bash` allow — acknowledgeable until the file changes), invisible characters in
+  CLAUDE.md / memory / roles. No score: a finding is a real, actionable risk with a one-line fix, and a healthy
+  project shows nothing. A compact `⚠ N` pill opens the findings; the Tests verdict itself is unchanged.
+  `GET /api/projects/{id}/health-check`, `POST .../ack`, `GET /api/health-check`; knobs `HEALTH_CHECK_*` in `.env.example`.
+
 ## [v0.18.0] — 2026-10-07
 
 ### Security — vulnerable dependencies fixed (spec-096 P1)
