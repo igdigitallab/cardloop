@@ -43,6 +43,7 @@ E2E_PROJECT_IDS = ["e2e-text", "e2e-tool", "e2e-slow", "e2e-busy", "e2e-multiblo
 # The project-health pill scenarios (test_project_health.py) own one project.
 E2E_PROJECT_IDS.append("e2e-health")
 
+
 def _free_port() -> int:
     """Binds to port 0 to let the OS pick a free one, then releases it. Small
     TOCTOU race (another process could grab it before we launch) — acceptable for
