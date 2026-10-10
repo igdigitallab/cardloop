@@ -108,6 +108,7 @@ _DQRUN = re.compile(r'[^"\\$`]+')
 _PARAMRUN = re.compile(r"""[^}{\\'"$`]+""")
 _ANSI_END = re.compile(r"(?:\\.|[^'\\])*'", re.S)
 _BT_END = re.compile(r"(?:\\.|[^`\\])*`", re.S)
+_ARITH_RUN = re.compile(r"""[^()$`'";\n\\]+""")
 _BT_ESC = re.compile(r"\\([$`\\])")
 _EXPANSION = re.compile(r"\\[\s\S]|\$\(|`")
 _ANSI_ESC = re.compile(r"\\(x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|[0-7]{1,3}|[\s\S])")
@@ -162,12 +163,60 @@ class _Lexer:
         self.heredocs = heredocs if heredocs is not None else []   # waiting for their body
 
     # -- nested constructs ---------------------------------------------------------------------
-    def sub(self, pos: int) -> int:
-        """Lex a `$(`, `<(` or `>(` region in place; returns the index after its `)`."""
+    def sub(self, pos: int, dollar: bool = True) -> int:
+        """Lex a `$(`, `<(` or `>(` region in place; returns the index after its `)`.
+        `$((` is arithmetic when it closes with `))` (its `<<` is a shift, not a heredoc)."""
         if self.depth >= MAX_DEPTH:
             raise _Unparseable("nesting too deep")
+        if dollar and self.s.startswith("(", pos):
+            end = self.arith(pos + 1, False)
+            if end >= 0:
+                return end
         child = _Lexer(self.s, self.out, self.bud, self.depth + 1, self.spans, self.heredocs)
         return child.run(pos, True)
+
+    def arith(self, pos: int, semis: bool) -> int:
+        """`$(( ... ))` / `(( ... ))`: `pos` is just after the opening pair. Returns the index
+        after the closing `))`, or -1 when the text is not arithmetic (then it is parsed as
+        nested subshells). Commands inside `$(...)` / backticks in the expression still run."""
+        s, n = self.s, self.n
+        i, depth = pos, 2
+        while i < n:
+            m = _ARITH_RUN.match(s, i)
+            if m:
+                i = m.end()
+                if i >= n:
+                    return -1
+            c = s[i]
+            if c == "(":
+                depth += 1
+                i += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 1:                      # first of the closing pair
+                    return i + 2 if s.startswith(")", i + 1) else -1
+                i += 1
+            elif c == "$":
+                if s.startswith("$(", i):
+                    i = self.sub(i + 2)
+                elif s.startswith("${", i):
+                    _t, i = self.param(i)
+                else:
+                    i += 1
+            elif c == "`":
+                i = self.backtick(i)
+            elif c == "'" or c == '"':
+                j = s.find(c, i + 1)
+                if j < 0:
+                    return -1
+                i = j + 1
+            elif c == "\\":
+                i += 2
+            elif c == ";" and semis:
+                i += 1
+            else:                                   # newline, or `;` in `$(( ))`
+                return -1
+        return -1
 
     def backtick(self, pos: int) -> int:
         m = _BT_END.match(self.s, pos + 1)
@@ -484,7 +533,7 @@ class _Lexer:
             elif c == "<" or c == ">":
                 nx = s[pos + 1:pos + 2]
                 if nx == "(":                              # process substitution
-                    pos = self.sub(pos + 2)
+                    pos = self.sub(pos + 2, False)
                     parts.append("<()")
                     inword = True
                     continue
@@ -519,6 +568,11 @@ class _Lexer:
                 cmd.redirs.append(pending)
             elif c == "(":
                 flush_word()
+                if s.startswith("((", pos) and not cmd.words and not cmd.redirs:
+                    end = self.arith(pos + 2, True)     # `(( i < 5 ))`, `(( x = 1 << 3 ))`
+                    if end >= 0:
+                        pos = end
+                        continue
                 if not (cases and cases[-1] == "pattern"):
                     end_cmd()
                     paren += 1
@@ -1015,12 +1069,17 @@ _WRAPPERS = {
 
 
 # -- interpreters: the text they are given is a program ----------------------------------------
+_PIPE_HOPS = 8
+_ECHO_FLAG = re.compile(r"-[neE]+")
+_PRINT_ESC = re.compile(r"\\([nt\\])")
+
+
 def _pipe_sources(cmd: "Optional[_Cmd]", ctx: "_Ctx") -> "list[str]":
     """Text that reaches a shell's stdin: its own heredocs / here-strings, and what the previous
     pipeline stage prints (a heredoc, a here-string, or the arguments of echo / printf)."""
     srcs: "list[str]" = []
     stage = cmd
-    for hop in range(2):
+    for hop in range(_PIPE_HOPS):            # `printf ... | tee f | bash`: walk back through the pipe
         if stage is None:
             break
         for r in stage.redirs:
@@ -1028,15 +1087,19 @@ def _pipe_sources(cmd: "Optional[_Cmd]", ctx: "_Ctx") -> "list[str]":
                 srcs.append(r[1])
             elif (r[0] == "<<" or r[0] == "<<-") and r[2] is not None:
                 srcs.append(r[2])
-        if hop == 0:
-            stage = stage.pipe_from
-            if stage is not None and stage.words:
-                w = _strip_prefix(stage.words)
-                if w and _cmd_name(w[0]) in ("echo", "printf"):
-                    args = w[1:]
-                    if args and _cmd_name(w[0]) == "printf" and "%" in args[0]:
-                        args = args[1:]
-                    srcs.append("\n".join(args))
+        if hop:
+            w = _strip_prefix(stage.words)
+            if w and _cmd_name(w[0]) in ("echo", "printf"):
+                args = w[1:]
+                while args and _ECHO_FLAG.fullmatch(args[0]):
+                    args = args[1:]
+                if args and _cmd_name(w[0]) == "printf" and "%" in args[0]:
+                    args = args[1:]
+                # printf (and echo -e) turn \n and \t into line breaks: the shell sees them
+                srcs.append(_PRINT_ESC.sub(lambda m: "\n" if m.group(1) == "n" else
+                                           "\t" if m.group(1) == "t" else m.group(1),
+                                           "\n".join(args)))
+        stage = stage.pipe_from
     return srcs
 
 
@@ -1172,6 +1235,7 @@ _HANDLERS = {
 }
 for _sh in _SHELLS:
     _HANDLERS[_sh] = _h_shell
+_KNOWN_NAMES = frozenset(_HANDLERS) | frozenset(_WRAPPERS)
 
 
 class _Ctx:
@@ -1203,12 +1267,19 @@ class _Ctx:
 
 
 def _check_cmd(cmd: _Cmd, ctx: _Ctx) -> "Optional[Finding]":
-    for r in cmd.redirs:
-        if r[0] in _WRITE_REDIRS and r[1] and _SSH_PATH.search(r[1]):
-            return _f("ssh-dir-mutation")
-    if not cmd.words:
+    if cmd.redirs:
+        for r in cmd.redirs:
+            if r[0] in _WRITE_REDIRS and r[1] and _SSH_PATH.search(r[1]):
+                return _f("ssh-dir-mutation")
+    words = cmd.words
+    if not words:
         return None
-    return _check_words(cmd.words, cmd, ctx)
+    w = words[0]
+    if "=" not in w:                       # not an assignment: skip names no rule looks at
+        name = w.rpartition("/")[2]
+        if name not in _KNOWN_NAMES and name[:4] != "mkfs":
+            return None
+    return _check_words(words, cmd, ctx)
 
 
 def _check_words(words: "list[str]", cmd: "Optional[_Cmd]", ctx: _Ctx) -> "Optional[Finding]":
