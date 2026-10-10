@@ -28,6 +28,32 @@ export interface ProjectStructureHealth {
   security_hint: string | null
 }
 
+/** One real, actionable ailment found by the project health check (features/project_health). */
+export interface HealthFinding {
+  id: string
+  severity: 'warn' | 'crit'
+  title: string
+  detail: string
+  fix_hint: string
+  /** Tells apart several findings of one check (e.g. which memory index, which settings file). */
+  subject: string
+  /** Only `project_settings_untrusted`: the operator may acknowledge it. */
+  ackable?: boolean
+  /** sha256 of the file the finding is about; posted back to acknowledge exactly that content. */
+  ack_sha256?: string
+}
+
+/** GET /api/projects/{id}/health-check — an empty `findings` list means healthy (the pill is hidden). */
+export interface ProjectHealthCheck {
+  project_id: string
+  name: string
+  findings: HealthFinding[]
+  checked_at: number | null
+  took_ms: number
+  errors: string[]
+  skipped: string[]
+}
+
 export interface Project {
   id: string
   name: string

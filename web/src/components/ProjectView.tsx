@@ -19,6 +19,8 @@ import { BrowserTab } from '../tabs/BrowserTab'
 import { AgentsTab } from '../tabs/AgentsTab'
 import { t } from '../i18n'
 import { useModules } from '../hooks/useModules'
+import { useProjectHealthCheck } from '../hooks/useProjectHealthCheck'
+import { HealthCheckPill } from '../components/HealthCheckPill'
 import { openProjectWindow, popoutKey } from '../lib/popout'
 
 interface Tab {
@@ -195,13 +197,16 @@ function HealthRunEndRefresher({ refresh }: { refresh: () => void }) {
 // Runs test_cmd on demand. Shows a summary (passed/failed + exit code);
 // click on summary → modal with full output (which tests failed). No inline output
 // in the button — otherwise failure details are invisible.
-function HeaderTestRunner({ projectId }: { projectId: string }) {
+// `onRun` fires when a run starts: the header uses it to re-run the project health check beside the
+// tests. It is a separate result with its own pill, so the tests verdict below stays pure test signal.
+function HeaderTestRunner({ projectId, onRun }: { projectId: string; onRun?: () => void }) {
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState<TestResult | null>(null)
   const [showOutput, setShowOutput] = useState(false)
 
   async function run() {
     if (running) return
+    onRun?.()
     setRunning(true); setResult(null); setShowOutput(false)
     try {
       const res = await api.runTests(projectId)
@@ -396,6 +401,9 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
   useEffect(() => {
     refreshHealth()
   }, [refreshHealth])
+
+  // Project health check (real ailments; separate from the structure/capabilities health above)
+  const projectHealth = useProjectHealthCheck(project.id)
 
   // ── Git sync (commit + push in one button) ───────────────────────────────
   const [syncState, setSyncState] = useState<GitSyncState>('idle')
@@ -787,6 +795,8 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
               their own container with no reveal path, so a collapsed nav would strand the user with
               no way back to Chat. Always keep the nav expanded off the Chat tab. */}
           <nav className={`mobile-inner-tabs${navCollapsed && mobileInnerTab === null ? ' collapsed' : ''}`} aria-label={t['tab.sections_aria']}>
+            {/* Project health: no header on a phone, so the pill leads the tab strip (nothing while healthy) */}
+            <HealthCheckPill health={projectHealth} />
             <button
               className={`mobile-inner-tab-btn ${mobileInnerTab === null ? 'active' : ''}`}
               onClick={() => setMobileInnerTab(null)}
@@ -966,7 +976,9 @@ export function ProjectView({ project, onProjectsReload, onSplitCreate, onSplitC
                 )}
                 {/* Agent running indicator + test runner — inside provider */}
                 <AgentRunningChip projectId={project.id} />
-                <HeaderTestRunner projectId={project.id} />
+                <HeaderTestRunner projectId={project.id} onRun={projectHealth.recheck} />
+                {/* Project health: nothing while healthy, ⚠ N when a real ailment was found */}
+                <HealthCheckPill health={projectHealth} />
                 {/* Always-mounted: single run_end→refreshHealth path */}
                 <HealthRunEndRefresher refresh={refreshHealth} />
               </div>

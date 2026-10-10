@@ -152,21 +152,6 @@ async def test_cache_expires_after_its_ttl(aiohttp_client, app, ctx, project_dir
     assert (await (await client.get(url, headers=_h(ctx))).json())["findings"] == []   # re-ran, not served stale
 
 
-async def test_cached_only_never_runs_the_checks(aiohttp_client, app, ctx, project_dir, monkeypatch):
-    (native_memory(project_dir) / "MEMORY.md").write_text("\n".join(["x"] * 198) + "\n")
-    calls = []
-    real = L.run_checks
-    monkeypatch.setattr(L, "run_checks", lambda *a, **k: calls.append(1) or real(*a, **k))
-    client = await aiohttp_client(app)
-    url = "/api/projects/myproject/health-check?cached=1"
-    empty = await (await client.get(url, headers=_h(ctx))).json()
-    assert empty["findings"] == [] and empty["checked_at"] is None and calls == []
-    await client.get("/api/projects/myproject/health-check", headers=_h(ctx))
-    assert calls == [1]
-    warm = await (await client.get(url, headers=_h(ctx))).json()
-    assert ids(warm) == ["memory_index_near_cap"] and calls == [1]
-
-
 async def test_checks_run_off_the_event_loop_thread(aiohttp_client, app, ctx, monkeypatch):
     seen = []
     real = L.run_checks

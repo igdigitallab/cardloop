@@ -57,14 +57,6 @@ async def check_project(ctx: dict, record: dict, fresh: bool = False) -> dict:
     return result
 
 
-def cached_result(pid: str) -> "dict | None":
-    """Last known result without running anything: the cache (even if stale), else the sweep."""
-    hit = _cache.get(pid)
-    if hit:
-        return hit[1]
-    return _last_sweep["results"].get(pid)
-
-
 def forget(pid: str) -> None:
     _cache.pop(pid, None)
 

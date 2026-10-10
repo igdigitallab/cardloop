@@ -24,8 +24,8 @@ def _truthy(v: "str | None") -> bool:
 async def api_project_health_check(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/health-check — findings for one project.
 
-    Default: reuse a result younger than ~5 min.  ?fresh=1 always re-runs (the Tests button).
-    ?cached=1 never runs anything and returns the last known result (project open: one cheap GET).
+    Default: reuse a result younger than ~5 min (project open: one cheap GET, typically < 100 ms
+    when it has to run).  ?fresh=1 always re-runs (the Tests button, the modal's Re-check).
     """
     ctx = req.app["ctx"]
     project = _find_project_by_id(ctx, req.match_info["id"])
@@ -33,8 +33,6 @@ async def api_project_health_check(req: web.Request) -> web.Response:
         return web.json_response({"error": "project not found"}, status=404)
     if project.get("is_free") or not project.get("cwd"):
         return web.json_response(_loop.empty_result(project))
-    if _truthy(req.query.get("cached")):
-        return web.json_response(_loop.cached_result(project["id"]) or _loop.empty_result(project))
     result = await _loop.check_project(ctx, project, fresh=_truthy(req.query.get("fresh")))
     return web.json_response(result)
 
