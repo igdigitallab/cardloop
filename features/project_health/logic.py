@@ -47,7 +47,6 @@ def _env_num(name: str, default: float, cast=float):
 
 # HEALTH_CHECK_MODE: off | on.  `off` stops the daily sweep; the on-demand check still works.
 MODE: str = (os.environ.get("HEALTH_CHECK_MODE", "on") or "on").strip().lower()
-MODES: tuple[str, ...] = ("off", "on")
 # Seconds between fleet sweeps.
 INTERVAL_SEC: int = _env_num("HEALTH_CHECK_INTERVAL_SEC", 86400, int)
 # `context_floor` warns above this many approximate tokens loaded before any work.
@@ -794,6 +793,3 @@ def new_finding_keys(results: list, notified: set) -> set:
     current = {finding_key(r["project_id"], f) for r in results for f in r.get("findings", [])}
     return current - notified
 
-
-def valid_mode(m: object) -> bool:
-    return isinstance(m, str) and m in MODES
