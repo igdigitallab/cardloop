@@ -645,6 +645,10 @@ export const api = {
   roles: (id: string) =>
     apiFetch<import('./types').ProjectRoles>(`/api/projects/${id}/roles`),
 
+  // Policy rules (docs/RULES.md): read-only list with hit counts; rules are edited as files.
+  rules: (id: string) =>
+    apiFetch<import('./types').ProjectRules>(`/api/projects/${id}/rules`),
+
   role: (id: string, name: string, scope: import('./types').RoleScope) =>
     apiFetch<import('./types').RoleFile>(
       `/api/projects/${id}/roles/${encodeURIComponent(name)}?scope=${encodeURIComponent(scope)}`

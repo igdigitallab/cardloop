@@ -7,6 +7,15 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Added — policy rules in Markdown (`docs/RULES.md`)
+- Declarative `block` / `warn` rules in `*.md` files (project `.claude-ops/rules/`, global `~/.claude-ops/rules/`
+  or `$CARDLOOP_RULES_DIR`, plus pack directories), evaluated by one PreToolUse hook before every tool call of a
+  Claude run, with no code change or restart. Hit counts, status and diagnostics per rule in the Agents tab and
+  `GET /api/projects/{id}/rules`. Claude engine only.
+- A project rule file that git tracks is ignored until the project opts in (`rules_trust_tracked`): a cloned
+  repository cannot install policy. Regex work runs under a SIGALRM watchdog; a block rule fails closed on input
+  it cannot inspect.
+
 ## [v0.18.0] — 2026-10-07
 
 ### Security — vulnerable dependencies fixed (spec-096 P1)

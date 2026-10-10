@@ -85,6 +85,9 @@ import context_pack as _context_pack
 # webapp/engine from roles.py — see roles.py module docstring.
 import roles as _roles
 
+# Declarative Markdown policy rules (docs/RULES.md). Same hygiene: no import back to webapp/engine.
+import policy_rules as _policy_rules
+
 # The Files tab's filesystem policy (roots, deny rules, safe read/write). HTTP-free.
 import fs_browser as _fs_browser
 
@@ -3187,6 +3190,8 @@ def _collect_projects(ctx: dict) -> list[dict]:
             **{g: b.get(g) is True for g in providers.gate_fields()},
             # spec-082 A: tools the ask-mode gate auto-approves in this project
             "ask_always_allow": b.get("ask_always_allow") or [],
+            # Policy rules: opt-in to project rule files that version control tracks (docs/RULES.md)
+            "rules_trust_tracked": b.get("rules_trust_tracked") is True,
             # Subscription pinned to this project (None = follow the global choice).
             "account": b.get("account") or None,
             # spec-092 P3: the project's inference-endpoint pin. Omitted here it would be
@@ -6252,7 +6257,7 @@ def _git_enabled(project: dict) -> bool:
 # the return values of _infer_archetype() further down this file.
 _PROJECT_ARCHETYPES = ("software", "content", "ops", "scratchpad")
 
-_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", *providers.adapter_model_fields(), "ask_always_allow", "account", "backend")
+_PROJECT_SETTING_FIELDS = ("git_enabled", "model", "notify_on_error", "log_cmd", "test_cmd", "agents_config", "type", "self_heal", "auto_resume_mode", "autopilot", "context_pack_enabled", "board_provider", *providers.adapter_model_fields(), "ask_always_allow", "account", "backend", "rules_trust_tracked")
 
 # spec-051: per-project policy for resuming a run interrupted by a rate-limit.
 #   ask    — show an in-chat Yes/No prompt (default; visible, not silent)
@@ -6415,6 +6420,9 @@ def _project_settings_view(project: dict) -> dict:
         # spec-092 P3: inference endpoint pinned to this project. "" = the cloud
         # subscription; "ollama" = every turn of this project runs on the local box.
         "backend": project.get("backend") or "",
+        # Policy rules (docs/RULES.md): load project rule files that version control tracks. Off =
+        # they are ignored, so opening a cloned repo cannot install policy. Strictly true; absent = off.
+        "rules_trust_tracked": project.get("rules_trust_tracked") is True,
     }
 
 
@@ -6528,6 +6536,14 @@ async def api_project_settings_post(req: web.Request) -> web.Response:
             if not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", sv):
                 return web.json_response({"error": f"{k}: invalid model id"}, status=400)
             updates[k] = sv
+        elif k == "rules_trust_tracked":
+            # Policy rules: opt in to tracked project rule files. Strictly a bool; off is
+            # stored as a reset. Free chats have no topics record to carry it.
+            if not isinstance(v, bool):
+                return web.json_response({"error": f"{k}: expected bool"}, status=400)
+            if project.get("is_free"):
+                return web.json_response({"error": f"{k}: not available for free chats"}, status=400)
+            updates[k] = True if v else None
         elif k == "ask_always_allow":
             # spec-082 A: the gate's always-allow list. Normally grown one entry at a time by
             # the "Always allow <tool> here" button; exposed here so the operator can review
@@ -17705,6 +17721,24 @@ async def api_project_role_enabled(req: web.Request) -> web.Response:
     return web.json_response({"role": _role_to_json(role, all_roles)})
 
 
+async def api_project_rules(req: web.Request) -> web.Response:
+    """GET /api/projects/{id}/rules — the policy rules (docs/RULES.md) this project runs under.
+
+    Read-only: rules are edited as files (Files tab). One row per rule FILE across the
+    project / global / pack tiers, with status (active|disabled|untrusted|shadowed|invalid),
+    in-process hit counts and per-file diagnostics; directory-level problems in `diagnostics`."""
+    ctx = req.app["ctx"]
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return web.json_response({"error": "project not found"}, status=404)
+    cwd = project["cwd"]
+    trust = _policy_rules.trust_tracked_for(ctx, cwd)
+    # The rebuild can shell out to the VCS; keep it off the event loop.
+    report = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: _policy_rules.build_report(cwd, trust_tracked=trust))
+    return web.json_response(report)
+
+
 # ─────────────────────────── Project secrets (secrets) ──────────────────────────────────────
 #
 # Storage: <cwd>/.claude-ops/secrets/secrets.env (chmod 600, not in git)
@@ -19881,6 +19915,8 @@ async def start(ctx: dict) -> None:
         app.router.add_post("/api/projects/{id}/roles/{name}", api_project_role_write)
         app.router.add_delete("/api/projects/{id}/roles/{name}", api_project_role_delete)
         app.router.add_post("/api/projects/{id}/roles/{name}/enabled", api_project_role_enabled)
+        # Policy rules: declarative Markdown rules evaluated before every tool call (read-only)
+        app.router.add_get("/api/projects/{id}/rules", api_project_rules)
         # Project secrets (Spec 007): names only in API, values — agent via env only
         app.router.add_get("/api/projects/{id}/secrets", api_project_secrets)
         app.router.add_post("/api/projects/{id}/secrets/{key}", api_project_secrets_set)

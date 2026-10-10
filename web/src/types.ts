@@ -363,6 +363,9 @@ export interface ProjectSettings {
   account?: string | null
   /** spec-092 P3: "" = cloud subscription, "ollama" = pin every turn to the local box. */
   backend?: string | null
+  /** Policy rules (docs/RULES.md): load project rule files that version control tracks.
+   *  Optional so an older server (field not echoed) still type-checks. */
+  rules_trust_tracked?: boolean
 }
 
 // ─── spec-067: Autopilot ──────────────────────────────────────────────────────
@@ -522,6 +525,41 @@ export interface RoleFile {
   role: RoleJSON | null
   content: string
   error: string | null
+}
+
+// ─── Policy rules (docs/RULES.md): GET /api/projects/{id}/rules ─────────────
+
+export type PolicyRuleTier = 'project' | 'global' | 'pack'
+export type PolicyRuleStatus = 'active' | 'disabled' | 'untrusted' | 'shadowed' | 'invalid'
+
+/** One rule FILE. `action`/`event` are null when the file did not parse. */
+export interface PolicyRule {
+  name: string
+  tier: PolicyRuleTier
+  path: string
+  enabled: boolean
+  /** false = a project file that version control tracks while the trust opt-in is off. */
+  trusted: boolean
+  status: PolicyRuleStatus
+  action: 'block' | 'warn' | null
+  event: 'bash' | 'file' | 'mcp' | 'all' | null
+  /** One-line summary of what the rule matches. */
+  match: string
+  message: string
+  /** In-memory count since the cockpit started. */
+  hits: number
+  last_hit: number | null
+  diagnostics: string[]
+}
+
+export interface ProjectRules {
+  rules: PolicyRule[]
+  /** Directory-level problems (symlinked rules dir, the VCS could not answer). */
+  diagnostics: string[]
+  trust_tracked: boolean
+  global_dir: string
+  project_dir: string | null
+  limits: { max_rules: number; max_file_kb: number; max_pattern_chars: number }
 }
 
 // ─── Spec-037: Multi-chat per project ─────────────────────────────────────
