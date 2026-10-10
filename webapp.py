@@ -18980,29 +18980,12 @@ async def api_project_health(req: web.Request) -> web.Response:
             "hint": "Set test_cmd to enable the Run tests button and the quality gate.",
         })
 
-    # Capability: secrets — software/ops only
+    # Capability: secrets — software/ops only.  The rule lives in the project-health feature so the
+    # header pill and the health check can never disagree (deferred import: IRON RULE, spec-068).
     exposed = False
     if is_software_ops:
-        git_repo = _git_enabled(project) and (cwd / ".git").exists()
-
-        env_present = False
-        try:
-            env_present = any(
-                f.is_file() and (f.name == ".env" or f.name.startswith(".env."))
-                for f in cwd.iterdir()
-            )
-        except OSError:
-            pass
-
-        gitignore_covers = False
-        try:
-            gi = cwd / ".gitignore"
-            if gi.is_file():
-                gitignore_covers = ".env" in gi.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-
-        exposed = git_repo and env_present and not gitignore_covers
+        from features.project_health.logic import env_exposed as _env_exposed
+        exposed = _env_exposed(cwd, _git_enabled(project))
         capabilities.append({
             "key": "secrets",
             "label": "Secrets safe",
@@ -19011,10 +18994,10 @@ async def api_project_health(req: web.Request) -> web.Response:
         })
 
     security_warn = is_software_ops and exposed
-    security_hint = (
-        "A .env file exists but is not covered by .gitignore — secrets may be committed to git."
-        if security_warn else None
-    )
+    security_hint = None
+    if security_warn:
+        from features.project_health.logic import ENV_EXPOSED_HINT as _env_hint
+        security_hint = _env_hint
 
     return web.json_response({
         "archetype": archetype,
@@ -19958,6 +19941,8 @@ async def start(ctx: dict) -> None:
         _register_janitor(app, ctx)
         from features.load_monitor import register as _register_load_monitor  # deferred import
         _register_load_monitor(app, ctx)
+        from features.project_health import register as _register_project_health  # deferred import
+        _register_project_health(app, ctx)
 
         # Static files — everything else (SPA)
         app.router.add_get("/dl/{name}", public_download)

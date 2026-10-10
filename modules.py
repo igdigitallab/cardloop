@@ -90,6 +90,19 @@ _BUILTIN_MODULES: list[dict[str, Any]] = [
         "provides": ["loop", "api", "badge"],
         "default_enabled": True,
     },
+    {
+        "id": "project_health",
+        "name": "Project health",
+        "description": (
+            "Checks each project for real, actionable ailments (memory index near its cap, a heavy "
+            "context floor, work left uncommitted, project settings that run code, hidden characters "
+            "in agent instructions). Runs with the Tests button and once a day; silent when healthy. "
+            "HEALTH_CHECK_MODE=off|on."
+        ),
+        "version": "1.0.0",
+        "provides": ["loop", "api", "badge"],
+        "default_enabled": True,
+    },
 ]
 
 # Lookup by id for O(1) access.
