@@ -305,21 +305,49 @@ def test_stale_work_newest_file_decides(tmp_path, env):
     assert only(p, env, "stale_work") == []
 
 
-def test_stale_work_ignores_board_and_cockpit_state(tmp_path, env):
+def test_stale_work_ignores_the_board_files(tmp_path, env):
     p = make_project(tmp_path)
     cwd = Path(p.cwd)
     init_repo(cwd)
-    (cwd / "TASKS.md").write_text("board")
-    (cwd / "DONE.md").write_text("done")
-    for sub in (".worktrees/card-x", ".claude-ops/scan", ".claude-ops/secrets"):
-        d = cwd / sub
-        d.mkdir(parents=True)
-        (d / "f").write_text("s")
-        age_file(d / "f", 30)
-        age_file(d, 30)
-    for f in (cwd / "TASKS.md", cwd / "DONE.md"):
-        age_file(f, 30)
+    for name in ("TASKS.md", "DONE.md"):
+        (cwd / name).write_text("board")
+        age_file(cwd / name, 30)
     assert only(p, env, "stale_work") == []
+    (cwd / "real.txt").write_text("work")
+    age_file(cwd / "real.txt", 30)                       # control: the same age on a real file does count
+    assert "1 uncommitted" in only(p, env, "stale_work")[0]["detail"]
+
+
+@pytest.mark.parametrize("sub", [".worktrees/card-x", ".claude/worktrees/agent-1",
+                                 ".claude-ops/scan", ".claude-ops/secrets"])
+def test_stale_work_ignores_cockpit_runtime_state(tmp_path, env, sub):
+    """Every level is aged 30 days, so only the exclusion (not a fresh parent mtime) keeps it silent."""
+    p = make_project(tmp_path)
+    cwd = Path(p.cwd)
+    init_repo(cwd)
+    d = cwd / sub
+    d.mkdir(parents=True)
+    (d / "f").write_text("s")
+    for path in [d / "f", d, *d.parents]:
+        if cwd in path.parents or path == d:
+            age_file(path, 30)
+    assert only(p, env, "stale_work") == []
+    (cwd / "real.txt").write_text("work")
+    age_file(cwd / "real.txt", 30)                       # control
+    assert "1 uncommitted" in only(p, env, "stale_work")[0]["detail"]
+
+
+def test_stale_work_names_individual_files_inside_untracked_directories(tmp_path, env):
+    p = make_project(tmp_path)
+    cwd = Path(p.cwd)
+    init_repo(cwd)
+    (cwd / "notes").mkdir()
+    for i in range(4):
+        (cwd / "notes" / f"n{i}.md").write_text("x")
+        age_file(cwd / "notes" / f"n{i}.md", 5)
+    age_file(cwd / "notes", 5)
+    f = only(p, env, "stale_work")
+    assert "4 uncommitted file(s) (4 untracked: notes/n0.md" in f[0]["detail"] and ", ..." in f[0]["detail"]
 
 
 def test_stale_work_deleted_file_has_no_age_so_stays_silent(tmp_path, env):
@@ -472,6 +500,7 @@ def test_orphan_worktree_err_card_ids_and_listing_cap(tmp_path, env):
         make_wt(cwd, f"zz{i}000")
     f = only(p, env, "orphan_worktrees")
     assert "8 worktree(s)" in f[0]["detail"] and "(+3 more)" in f[0]["detail"]
+    assert f[0]["detail"].count("card-zz") == 5          # only five are named
 
 
 def test_orphan_worktree_unreadable_board_means_unknown_not_orphan(tmp_path, env):
@@ -646,7 +675,7 @@ def claude_md(project, text):
 
 def test_unicode_zero_width_space_is_reported_with_file_and_line(tmp_path, env):
     p = make_project(tmp_path)
-    claude_md(p, "line one\nline two\nhid​den\n")
+    claude_md(p, "line one\nline two\nhid\u200bden\n")
     f = only(p, env, "invisible_unicode")
     assert ids(f) == ["invisible_unicode"] and f[0]["severity"] == "warn"
     assert "CLAUDE.md:3 (U+200B)" in f[0]["detail"]
@@ -661,47 +690,47 @@ def test_unicode_each_listed_code_point_is_caught(tmp_path, env, cp):
 
 def test_unicode_bidi_and_tag_characters_are_critical(tmp_path, env):
     p = make_project(tmp_path)
-    claude_md(p, "safe‮text\n")
+    claude_md(p, "safe\u202etext\n")
     assert only(p, env, "invisible_unicode")[0]["severity"] == "crit"
     claude_md(p, "plain \U000e0041\U000e0042 smuggled\n")
     assert only(p, env, "invisible_unicode")[0]["severity"] == "crit"
-    claude_md(p, "mild​one\n")
+    claude_md(p, "mild\u200bone\n")
     assert only(p, env, "invisible_unicode")[0]["severity"] == "warn"
 
 
 def test_unicode_zwj_between_emoji_is_benign_between_letters_is_not(tmp_path, env):
     p = make_project(tmp_path)
-    claude_md(p, "family \U0001F468‍\U0001F469‍\U0001F467 and "
-                 "❤️‍\U0001F525 and \U0001F9D1\U0001F3FD‍\U0001F4BB\n")
+    claude_md(p, "family \U0001F468\u200d\U0001F469\u200d\U0001F467 and "
+                 "❤\ufe0f\u200d\U0001F525 and \U0001F9D1\U0001F3FD\u200d\U0001F4BB\n")
     assert only(p, env, "invisible_unicode") == []
-    claude_md(p, "ab‍cd\n")
+    claude_md(p, "ab\u200dcd\n")
     assert len(only(p, env, "invisible_unicode")) == 1
-    claude_md(p, "emoji \U0001F468‍ then letters\n")      # ZWJ before a non-emoji
+    claude_md(p, "emoji \U0001F468\u200d then letters\n")      # ZWJ before a non-emoji
     assert len(only(p, env, "invisible_unicode")) == 1
 
 
 def test_unicode_zwsp_before_a_code_fence_is_benign(tmp_path, env):
     p = make_project(tmp_path)
-    claude_md(p, "example:\n​```bash\nls\n​```\n")
+    claude_md(p, "example:\n\u200b```bash\nls\n\u200b```\n")
     assert only(p, env, "invisible_unicode") == []
-    claude_md(p, "text​``not a fence\n")
+    claude_md(p, "text\u200b``not a fence\n")
     assert len(only(p, env, "invisible_unicode")) == 1
 
 
 def test_unicode_zwsp_inside_a_glob_is_benign(tmp_path, env):
-    """Measured on a live project: an agent writes `content/*/​*_card.dart` to dodge a comment marker."""
+    """Measured on a live project: an agent writes `content/*/\u200b*_card.dart` to dodge a comment marker."""
     p = make_project(tmp_path)
-    claude_md(p, "files (`content/*/​*_card.dart`) and `a*​/b`\n")
+    claude_md(p, "files (`content/*/\u200b*_card.dart`) and `a*\u200b/b`\n")
     assert only(p, env, "invisible_unicode") == []
-    claude_md(p, "word​*not-a-slash\n")
+    claude_md(p, "word\u200b*not-a-slash\n")
     assert len(only(p, env, "invisible_unicode")) == 1
 
 
 def test_unicode_bom_only_benign_at_file_start(tmp_path, env):
     p = make_project(tmp_path)
-    claude_md(p, "﻿# Title\nbody\n")
+    claude_md(p, "\ufeff# Title\nbody\n")
     assert only(p, env, "invisible_unicode") == []
-    claude_md(p, "# Title\nbo﻿dy\n")
+    claude_md(p, "# Title\nbo\ufeffdy\n")
     assert len(only(p, env, "invisible_unicode")) == 1
 
 
@@ -714,35 +743,35 @@ def test_unicode_flag_emoji_tag_sequence_is_benign(tmp_path, env):
 
 def test_unicode_emoji_variation_selector_is_not_listed(tmp_path, env):
     p = make_project(tmp_path)
-    claude_md(p, "warning ⚠️ and ✅\n")
+    claude_md(p, "warning ⚠\ufe0f and ✅\n")
     assert only(p, env, "invisible_unicode") == []
 
 
 def test_unicode_scans_memory_articles_in_both_dirs_and_roles(tmp_path, env):
     p = make_project(tmp_path)
-    (curated_dir(env, p) / "a.md").write_text("one\ntwo​\n")
-    (native_dir(env, p) / "b.md").write_text("x​\n")
+    (curated_dir(env, p) / "a.md").write_text("one\ntwo\u200b\n")
+    (native_dir(env, p) / "b.md").write_text("x\u200b\n")
     roles = Path(p.cwd) / ".claude-ops" / "roles"
     roles.mkdir(parents=True)
-    (roles / "r.md").write_text("role​\n")
+    (roles / "r.md").write_text("role\u200b\n")
     detail = only(p, env, "invisible_unicode")[0]["detail"]
     assert ".claude-ops/memory/a.md:2" in detail
     assert "native memory/b.md:1" in detail
     assert ".claude-ops/roles/r.md:1" in detail
     # a non-markdown file is not scanned
-    (curated_dir(env, p) / "ignored.txt").write_text("z​")
+    (curated_dir(env, p) / "ignored.txt").write_text("z\u200b")
     assert "ignored.txt" not in only(p, env, "invisible_unicode")[0]["detail"]
 
 
 def test_unicode_native_memory_skipped_in_project_mode(tmp_path, env):
     p = make_project(tmp_path, memory_mode="project")
-    (native_dir(env, p) / "b.md").write_text("x​\n")
+    (native_dir(env, p) / "b.md").write_text("x\u200b\n")
     assert only(p, env, "invisible_unicode") == []
 
 
 def test_unicode_caps_locations_and_counts_the_rest(tmp_path, env):
     p = make_project(tmp_path)
-    claude_md(p, "".join(f"line{i}​\n" for i in range(25)))
+    claude_md(p, "".join(f"line{i}\u200b\n" for i in range(25)))
     detail = only(p, env, "invisible_unicode")[0]["detail"]
     assert detail.count("CLAUDE.md:") == 10
     assert "25 line(s)" in detail and "(+15 more)" in detail
@@ -750,7 +779,7 @@ def test_unicode_caps_locations_and_counts_the_rest(tmp_path, env):
 
 def test_unicode_one_line_with_many_characters_is_one_location(tmp_path, env):
     p = make_project(tmp_path)
-    claude_md(p, "a​b​c​d\n")
+    claude_md(p, "a\u200bb\u200bc\u200bd\n")
     assert "1 line(s)" in only(p, env, "invisible_unicode")[0]["detail"]
 
 
@@ -796,7 +825,7 @@ def test_content_project_is_graded_by_no_software_check(tmp_path, env):
 def test_content_project_still_gets_the_universal_checks(tmp_path, env):
     p = make_project(tmp_path, archetype="content")
     write_index(native_dir(env, p) / "MEMORY.md", 199)
-    claude_md(p, "hid​den\n")
+    claude_md(p, "hid\u200bden\n")
     got = ids(L.run_checks(p, env)["findings"])
     assert sorted(got) == ["invisible_unicode", "memory_index_near_cap"]
 
@@ -813,7 +842,7 @@ def test_every_finding_has_the_full_shape(tmp_path, env):
     env.detect_test_cmd = detect_pytest
     p = make_project(tmp_path)
     write_index(native_dir(env, p) / "MEMORY.md", 199)
-    claude_md(p, "x​y\n")
+    claude_md(p, "x\u200by\n")
     put_settings(Path(p.cwd), ".claude/settings.json", {"hooks": {"Stop": [1]}})
     for f in L.run_checks(p, env)["findings"]:
         assert set(f) >= {"id", "severity", "title", "detail", "fix_hint", "subject"}
@@ -854,9 +883,14 @@ def test_budget_skips_remaining_checks_instead_of_overrunning(tmp_path, env):
     assert res["findings"] == [] and res["skipped"] == L.check_ids()
 
 
-def test_missing_project_dir_yields_nothing(tmp_path, env):
+def test_missing_project_dir_runs_no_check_at_all(tmp_path, env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(L, "_CHECKS", [("probe", lambda project, env: calls.append(1) or [])])
     ghost = L.Project(id="g", name="g", cwd=str(tmp_path / "does-not-exist"))
-    assert L.run_checks(ghost, env)["findings"] == []
+    res = L.run_checks(ghost, env)
+    assert res["findings"] == [] and calls == []
+    L.run_checks(make_project(tmp_path), env)
+    assert calls == [1]                                   # control: a real dir does run it
 
 
 def test_from_record_maps_the_cockpit_project_dict():

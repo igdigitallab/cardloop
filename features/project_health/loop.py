@@ -57,10 +57,6 @@ async def check_project(ctx: dict, record: dict, fresh: bool = False) -> dict:
     return result
 
 
-def forget(pid: str) -> None:
-    _cache.pop(pid, None)
-
-
 def empty_result(record: dict) -> dict:
     return {"project_id": record["id"], "name": record.get("name") or record["id"], "findings": [],
             "checked_at": None, "took_ms": 0, "errors": [], "skipped": []}

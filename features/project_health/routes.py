@@ -66,11 +66,9 @@ async def api_project_health_ack(req: web.Request) -> web.Response:
     current = await asyncio.get_running_loop().run_in_executor(
         None, _logic.settings_hashes, project.get("cwd") or "")
     if digest not in current.values():
-        _loop.forget(project["id"])
         fresh = await _loop.check_project(ctx, project, fresh=True)
         return web.json_response({**fresh, "error": "the file changed since it was listed"}, status=409)
     _logic.ack_add(ctx["DATA"], project["id"], check_id, digest)
-    _loop.forget(project["id"])
     result = await _loop.check_project(ctx, project, fresh=True)
     return web.json_response({"ok": True, **result})
 

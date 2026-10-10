@@ -401,8 +401,15 @@ def _git(cwd: str, args: list, env: Env) -> Optional[str]:
 
 
 def _dirty_entries(cwd: str, env: Env) -> Optional[list]:
-    """[(status code, path)] from `git status`; None when git failed."""
-    out = _git(cwd, ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=normal"], env)
+    """[(status code, path)] from `git status`; None when git failed.
+
+    Untracked files are listed one by one (`all`): the collapsed form names a whole directory,
+    so "which file is newest" and "is this just cockpit state" would both be guesses.  Cockpit
+    runtime state is excluded by pathspec before git ever lists it.
+    """
+    excludes = [f":(exclude){p.rstrip('/')}" for p in COCKPIT_STATE_PREFIXES]
+    out = _git(cwd, ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all",
+                     "--", ".", *excludes], env)
     if out is None:
         return None
     return [(e[:2], e[3:]) for e in out.split("\0") if len(e) > 3]
@@ -424,8 +431,7 @@ def check_stale_work(project: Project, env: Env) -> list:
     parts: list = []
 
     entries = _dirty_entries(cwd, env)
-    real = [(code, rel) for code, rel in (entries or [])
-            if rel not in BOARD_ONLY_FILES and not rel.startswith(COCKPIT_STATE_PREFIXES)]
+    real = [(code, rel) for code, rel in (entries or []) if rel not in BOARD_ONLY_FILES]
     newest = 0.0
     for _, rel in real:
         try:
@@ -631,8 +637,8 @@ MAX_INVISIBLE_LOCATIONS = 10
 # model (list: ECC check-unicode-safety.js, plus the bidi isolates and Tag block it also flags).
 # Variation selectors (U+FE0F is in every emoji) are deliberately NOT listed.
 _INVISIBLE_RE = re.compile(
-    "[​-‍⁠﻿‪-‮⁡-⁤⁦-⁩"
-    "ᅟᅠㅤ᠎\U000e0000-\U000e007f]"
+    "[\u200b-\u200d\u2060\ufeff\u202a-\u202e\u2061-\u2064\u2066-\u2069"
+    "\u115f\u1160\u3164\u180e\U000e0000-\U000e007f]"
 )
 _BIDI = set(range(0x202A, 0x202F)) | set(range(0x2066, 0x206A))
 
@@ -651,7 +657,7 @@ def _is_benign_invisible(text: str, i: int) -> bool:
     cp = ord(ch)
     if cp == 0x200D:   # ZWJ glues emoji into one glyph (family, profession, heart-on-fire)
         j = i - 1
-        while j >= 0 and text[j] == "️":
+        while j >= 0 and text[j] == "\ufe0f":
             j -= 1
         return j >= 0 and _is_emoji(text[j]) and bool(nxt) and _is_emoji(nxt)
     if cp == 0x200B:

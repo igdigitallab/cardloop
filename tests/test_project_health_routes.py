@@ -162,10 +162,17 @@ async def test_checks_run_off_the_event_loop_thread(aiohttp_client, app, ctx, mo
 
 
 async def test_free_chat_is_never_checked(aiohttp_client, app, ctx, tmp_path):
-    (ctx["DATA"] / "free_chats.json").write_text(json.dumps({"free-abc": {"label": "scratch", "created_at": 1}}))
+    """A free chat's cwd is a plain folder; even with a real finding inside it, nothing is reported."""
+    free_cwd = tmp_path / "home" / "scratch-dir"
+    free_cwd.mkdir()
+    (free_cwd / "CLAUDE.md").write_text("hid\u200bden\n")      # would be an invisible_unicode finding
+    (ctx["DATA"] / "free_chats.json").write_text(json.dumps(
+        {"free-abc": {"label": "scratch", "cwd": str(free_cwd), "created_at": 1}}))
     client = await aiohttp_client(app)
-    resp = await client.get("/api/projects/free-abc/health-check", headers=_h(ctx))
+    resp = await client.get("/api/projects/free-abc/health-check?fresh=1", headers=_h(ctx))
     assert resp.status == 200 and (await resp.json())["findings"] == []
+    await LP.sweep_once(ctx)
+    assert "free-abc" not in LP._last_sweep["results"]
 
 
 # ─────────────────────────── acknowledge flow ───────────────────────────
