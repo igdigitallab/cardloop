@@ -57,6 +57,8 @@ STALE_WORK_DAYS: float = _env_num("HEALTH_STALE_WORK_DAYS", 2.0, float)
 
 # One project must finish within this many seconds; checks left over are skipped, not failed.
 CHECK_BUDGET_SEC = 3.0
+# A single subprocess call may take this long (also bounded by what is left of the project's budget).
+GIT_TIMEOUT_SEC = 2.0
 # Files larger than this are skipped (a multi-MB "CLAUDE.md" is not worth reading on a timer).
 MAX_FILE_BYTES = 2 * 1024 * 1024
 
@@ -141,7 +143,8 @@ class Env:
     # time.monotonic() value after which remaining work is skipped (set by run_checks).
     deadline: Optional[float] = None
 
-    def remaining(self, cap: float = CHECK_BUDGET_SEC) -> float:
+    def remaining(self, cap: Optional[float] = None) -> float:
+        cap = CHECK_BUDGET_SEC if cap is None else cap
         if self.deadline is None:
             return cap
         return max(0.0, min(cap, self.deadline - time.monotonic()))
@@ -178,7 +181,7 @@ def check_ids() -> list:
     return [i for i, _ in _CHECKS]
 
 
-def run_checks(project: Project, env: Env, budget_sec: float = CHECK_BUDGET_SEC) -> dict:
+def run_checks(project: Project, env: Env, budget_sec: Optional[float] = None) -> dict:
     """Run every registered check on one project.  Never raises.
 
     A check that throws is reported in `errors` (so a bug is visible in the API) but never
@@ -186,7 +189,7 @@ def run_checks(project: Project, env: Env, budget_sec: float = CHECK_BUDGET_SEC)
     feature must not make.  Checks left when the budget runs out land in `skipped`.
     """
     t0 = time.monotonic()
-    env.deadline = t0 + budget_sec
+    env.deadline = t0 + (CHECK_BUDGET_SEC if budget_sec is None else budget_sec)
     findings: list = []
     errors: list = []
     skipped: list = []
@@ -385,7 +388,7 @@ def _git(cwd: str, args: list, env: Env) -> Optional[str]:
     GIT_OPTIONAL_LOCKS=0 keeps `git status` from taking index.lock (it would otherwise race the
     operator's own commit); core.fsmonitor=false stops a repo-local config from running a program.
     """
-    budget = env.remaining(2.0)
+    budget = env.remaining(GIT_TIMEOUT_SEC)
     if budget <= 0.05:
         return None
     genv = {k: v for k, v in os.environ.items() if k in _GIT_ENV_KEEP}

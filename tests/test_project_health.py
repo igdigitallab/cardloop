@@ -19,6 +19,15 @@ sys.path.insert(0, str(ROOT))
 from features.project_health import logic as L  # noqa: E402
 
 DAY = 86400
+REAL_BUDGET_SEC = L.CHECK_BUDGET_SEC     # the contract: one project in under 3 s
+
+
+@pytest.fixture(autouse=True)
+def _loose_budgets(monkeypatch):
+    """The budgets are a production contract; a busy host must not turn them into test flakes.
+    (The one test that asserts the real contract measures against REAL_BUDGET_SEC.)"""
+    monkeypatch.setattr(L, "CHECK_BUDGET_SEC", 60.0)
+    monkeypatch.setattr(L, "GIT_TIMEOUT_SEC", 30.0)
 
 
 # ─────────────────────────── fixtures / helpers ───────────────────────────
@@ -434,6 +443,22 @@ def test_stale_work_skips_non_repos_disabled_git_and_content(tmp_path, env):
     (Path(content.cwd) / "a.txt").write_text("c")
     age_file(Path(content.cwd) / "a.txt", 9)
     assert only(content, env, "stale_work") == []
+
+
+def test_stale_work_slow_git_is_cut_off_and_silent(tmp_path, env, monkeypatch):
+    p = make_project(tmp_path)
+    init_repo(Path(p.cwd))
+    (Path(p.cwd) / "w.txt").write_text("w")
+    age_file(Path(p.cwd) / "w.txt", 9)
+    seen = []
+
+    def slow(cmd, **kw):
+        seen.append(kw["timeout"])
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+    monkeypatch.setattr(L.subprocess, "run", slow)
+    monkeypatch.setattr(L, "GIT_TIMEOUT_SEC", 1.5)
+    assert only(p, env, "stale_work") == []
+    assert seen and all(t <= 1.5 for t in seen)           # every call carries a bounded timeout
 
 
 def test_stale_work_git_failure_is_silent(tmp_path, env):
@@ -912,7 +937,7 @@ def test_a_single_project_check_finishes_well_inside_the_budget(tmp_path, env):
     write_board(cwd, review=["aaa111"])
     t = time.monotonic()
     L.run_checks(p, env)
-    assert time.monotonic() - t < L.CHECK_BUDGET_SEC
+    assert time.monotonic() - t < REAL_BUDGET_SEC
 
 
 # ─────────────────────────── digest ───────────────────────────

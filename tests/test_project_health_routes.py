@@ -20,6 +20,12 @@ from features.project_health import loop as LP  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _loose_budgets(monkeypatch):
+    monkeypatch.setattr(L, "CHECK_BUDGET_SEC", 60.0)     # production budgets must not make tests flaky
+    monkeypatch.setattr(L, "GIT_TIMEOUT_SEC", 30.0)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_state():
     LP._cache.clear()
     LP._last_sweep.update({"at": None, "results": {}})
