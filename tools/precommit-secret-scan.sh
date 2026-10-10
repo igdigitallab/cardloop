@@ -12,9 +12,13 @@
 # Exit 1 = a match was found; commit is blocked with a "file:line: reason" report.
 #
 # Escape hatches:
-#   SKIP_SECRET_SCAN=1   bypasses the whole scan (for a confirmed false positive).
+#   SKIP_SECRET_SCAN=1   bypasses the whole scan (for a confirmed false positive). For a human at a
+#                         terminal only: the cockpit's Bash guard (command_guard.py) permanently
+#                         denies this variable, `git commit --no-verify`/`-n` and
+#                         `-c core.hooksPath` in agent sessions.
 #   .secretscanignore    repo-root file, one shell glob per line ('#' comments allowed),
 #                         matched against the staged file path — whole file is skipped.
+#                         This is the escape hatch for agents.
 set -euo pipefail
 
 if [[ "${SKIP_SECRET_SCAN:-}" == "1" ]]; then

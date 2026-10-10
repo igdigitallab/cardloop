@@ -25,6 +25,18 @@ Versions follow semver-like conventions (0.x while the project is under active d
   project shows nothing. A compact `⚠ N` pill opens the findings; the Tests verdict itself is unchanged.
   `GET /api/projects/{id}/health-check`, `POST .../ack`, `GET /api/health-check`; knobs `HEALTH_CHECK_*` in `.env.example`.
 
+### Security — the last-resort Bash deny guard reads commands, not text
+- `command_guard.py` replaces the regex-over-text matcher with a shell tokenizer (quotes, `$(...)`,
+  backticks, heredocs, env prefixes, separators) and per-command argv rules. A quoted mention of a
+  denied shape is data and passes; `bash -c`, `eval`, `ssh host "<cmd>"`, `sudo`/`env`/`xargs`/`timeout`
+  payloads and heredocs fed to a shell are parsed as programs. Linear time with a hard budget (the old
+  matcher needed 2.7 s for 24 KB of `dd `; now ~25 ms for 72 KB) and a coarse keyword fallback.
+- New denies: skipping git hooks (`--no-verify` and its prefixes, `-n` on `git commit`/`git am`,
+  `-c core.hooksPath=...`, `git config core.hooksPath`, `SKIP_SECRET_SCAN=...`), plus-refspec force
+  pushes into master/main (`git push origin +master`), and `git reset --hard` / force pushes behind
+  git global options (`git -C <path> ...`).
+- Every deny is audited (`[project] DENY: <rule-id>: <command>`). See GOTCHAS.md, Security (5).
+
 ## [v0.18.0] — 2026-10-07
 
 ### Security — vulnerable dependencies fixed (spec-096 P1)
