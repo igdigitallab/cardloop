@@ -783,19 +783,24 @@ def test_extra_deny_patterns_still_apply(monkeypatch):
 def audit_log(monkeypatch):
     calls = []
     monkeypatch.setattr(engine, "audit", lambda project, kind, text: calls.append((project, kind, text)))
+    monkeypatch.setattr(engine, "_GUARD_PROJECTS", {})
     return calls
 
 
-def _hook_input(command, cwd=None):
+def _hook_input(command, cwd="/srv/apps/myproj"):
     out = {"tool_name": "Bash", "tool_input": {"command": command}}
     if cwd:
         out["cwd"] = cwd
     return out
 
 
+def _run_hook(payload):
+    return asyncio.run(engine._dangerous_command_guard_hook(payload, None, None))
+
+
 def test_every_deny_is_audited_with_rule_id_and_project(audit_log):
-    hook = engine._make_dangerous_command_guard_hook("myproj")
-    out = asyncio.run(hook(_hook_input("git commit --no-verify -m x"), None, None))
+    engine._guard_remember_project("/srv/apps/myproj", "myproj")
+    out = _run_hook(_hook_input("git commit --no-verify -m x"))
     spec = out["hookSpecificOutput"]
     assert spec["permissionDecision"] == "deny"
     assert "git-skip-hooks" in spec["permissionDecisionReason"]
@@ -803,17 +808,15 @@ def test_every_deny_is_audited_with_rule_id_and_project(audit_log):
 
 
 def test_allow_writes_no_audit_line(audit_log):
-    hook = engine._make_dangerous_command_guard_hook("myproj")
-    assert asyncio.run(hook(_hook_input("git commit -m 'fix: --no-verify'"), None, None)) == {}
-    assert asyncio.run(hook(_hook_input("ls -la"), None, None)) == {}
-    assert asyncio.run(hook(_hook_input(""), None, None)) == {}
+    assert _run_hook(_hook_input("git commit -m 'fix: --no-verify'")) == {}
+    assert _run_hook(_hook_input("ls -la")) == {}
+    assert _run_hook(_hook_input("")) == {}
     assert audit_log == []
 
 
 def test_audit_command_is_cut_and_flattened(audit_log):
-    hook = engine._make_dangerous_command_guard_hook("p")
     long_cmd = "git reset --hard " + "x" * 500 + "\nsecond line"
-    asyncio.run(hook(_hook_input(long_cmd), None, None))
+    _run_hook(_hook_input(long_cmd))
     (_project, kind, text), = audit_log
     assert kind == "DENY" and text.startswith("git-hard-reset: git reset --hard xxx")
     command_part = text.split(": ", 1)[1]
@@ -821,19 +824,39 @@ def test_audit_command_is_cut_and_flattened(audit_log):
     assert command_part.endswith("…")
     # a short multi-line command: one audit line, whitespace collapsed
     audit_log.clear()
-    asyncio.run(hook(_hook_input("echo start\ngit reset --hard\t HEAD~1\n"), None, None))
+    _run_hook(_hook_input("echo start\ngit reset --hard\t HEAD~1\n", cwd="/x/p"))
     assert audit_log == [("p", "DENY", "git-hard-reset: echo start git reset --hard HEAD~1")]
 
 
-def test_hook_without_project_uses_the_cwd(audit_log):
-    asyncio.run(engine._dangerous_command_guard_hook(_hook_input("rm -rf /", cwd="/srv/apps/shop/"), None, None))
-    asyncio.run(engine._dangerous_command_guard_hook(_hook_input("rm -rf /"), None, None))
-    assert [a[0] for a in audit_log] == ["shop", "unknown"]
+def test_project_label_comes_from_the_run_or_the_cwd(audit_log):
+    # the hook input has a cwd but no project name: run_engine registers cwd -> project, the
+    # Bash tool keeps its `cd`, so a subdirectory (or a card worktree) resolves to the project
+    engine._guard_remember_project("/srv/apps/shop", "shop")
+    engine._guard_remember_project("/srv/apps/shop/.worktrees/card-7", "shop-card")
+    assert engine._GUARD_PROJECTS == {"/srv/apps/shop": "shop", "/srv/apps/shop/.worktrees/card-7": "shop-card"}
+    for cwd in ("/srv/apps/shop/", "/srv/apps/shop/web/src", "/srv/apps/shop/.worktrees/card-7/x"):
+        _run_hook(_hook_input("rm -rf /", cwd=cwd))
+    _run_hook(_hook_input("rm -rf /", cwd="/srv/apps/shopping"))        # not inside /srv/apps/shop
+    _run_hook(_hook_input("rm -rf /", cwd="/other/place/"))              # unregistered: directory name
+    _run_hook(_hook_input("rm -rf /", cwd=None))                         # nothing to go on
+    assert [a[0] for a in audit_log] == ["shop", "shop", "shop-card", "shopping", "place", "unknown"]
     assert all(a[1] == "DENY" and a[2].startswith("rm-root-home: ") for a in audit_log)
 
 
+def test_project_registry_is_bounded(monkeypatch):
+    monkeypatch.setattr(engine, "_GUARD_PROJECTS", {})
+    for i in range(engine._GUARD_PROJECTS_MAX + 50):
+        engine._guard_remember_project(f"/w/card-{i}", f"p{i}")
+    assert len(engine._GUARD_PROJECTS) == engine._GUARD_PROJECTS_MAX
+    assert "/w/card-0" not in engine._GUARD_PROJECTS
+    assert f"/w/card-{engine._GUARD_PROJECTS_MAX + 49}" in engine._GUARD_PROJECTS
+    engine._guard_remember_project("", "x")
+    engine._guard_remember_project("/w/z", "")
+    assert "" not in engine._GUARD_PROJECTS and "/w/z" not in engine._GUARD_PROJECTS
+
+
 def test_hook_reason_says_a_retry_will_not_pass():
-    out = asyncio.run(engine._dangerous_command_guard_hook(_hook_input("SKIP_SECRET_SCAN=1 git commit -m x"), None, None))
+    out = _run_hook(_hook_input("SKIP_SECRET_SCAN=1 git commit -m x"))
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert "skip-secret-scan" in reason and "denied again" in reason
 
@@ -841,12 +864,17 @@ def test_hook_reason_says_a_retry_will_not_pass():
 def test_hook_handles_a_large_command_off_the_event_loop(audit_log):
     big = "echo hello\n" * 5000 + "git push origin +master"
     assert len(big) > engine._GUARD_OFFLOAD_CHARS
-    out = asyncio.run(engine._make_dangerous_command_guard_hook("p")(_hook_input(big), None, None))
+    out = _run_hook(_hook_input(big))
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert audit_log and audit_log[0][2].startswith("git-force-push-protected: ")
 
 
-def test_hook_is_registered_per_run_with_the_project():
+def test_hook_never_raises_on_garbage():
+    for junk in ({}, {"tool_input": None}, {"tool_input": {"command": 5}}, "not a dict", None):
+        assert asyncio.run(engine._dangerous_command_guard_hook(junk, None, None)) == {}
+
+
+def test_run_engine_registers_the_one_hook_and_tells_it_the_project():
     src = (ROOT / "engine.py").read_text()
-    assert "_make_dangerous_command_guard_hook(project_name)" in src
-    assert "hooks=[_bundle_grep_guard_hook, _bash_deny_hook]" in src
+    assert "hooks=[_bundle_grep_guard_hook, _dangerous_command_guard_hook]" in src
+    assert "_guard_remember_project(cwd, project_name)" in src

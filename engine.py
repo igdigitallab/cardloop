@@ -1844,7 +1844,39 @@ def _guard_audit_command(command: str) -> str:
     return one if len(one) <= 200 else one[:199] + "…"
 
 
-def _make_dangerous_command_guard_hook(project_name: str = ""):
+# cwd -> project name, filled by run_engine. The PreToolUse input carries the session's cwd but
+# no project name, and the hook stays ONE module-level function (not a per-run closure), so
+# its registration is the same object on every run.
+_GUARD_PROJECTS: "dict[str, str]" = {}
+_GUARD_PROJECTS_MAX = 512
+
+
+def _guard_remember_project(cwd, project_name: str) -> None:
+    if not cwd or not project_name:
+        return
+    if len(_GUARD_PROJECTS) >= _GUARD_PROJECTS_MAX:       # card worktrees come and go
+        _GUARD_PROJECTS.pop(next(iter(_GUARD_PROJECTS)), None)
+    _GUARD_PROJECTS[str(cwd).rstrip("/")] = project_name
+
+
+def _guard_project_for(cwd) -> str:
+    """Project label for an audit line: the registered project whose cwd contains `cwd` (the
+    Bash tool keeps its `cd`, so the hook may see a subdirectory), else the directory name."""
+    if not cwd:
+        return "unknown"
+    cwd = str(cwd).rstrip("/")
+    best = ""
+    for root in _GUARD_PROJECTS:
+        if (cwd == root or cwd.startswith(root + "/")) and len(root) > len(best):
+            best = root
+    return _GUARD_PROJECTS[best] if best else (os.path.basename(cwd) or "unknown")
+
+
+async def _dangerous_command_guard_hook(
+    hook_input: dict,
+    tool_use_id: "str | None",
+    context: "HookContext",
+) -> dict:
     """PreToolUse guard for Bash: deny the hard-coded deny list (rm -rf on / or $HOME, a force
     push into master/main, git reset --hard, ~/.ssh writes, docker system prune, mkfs, dd onto a
     raw device, a fork bomb, and every way of skipping git hooks) even under
@@ -1852,48 +1884,35 @@ def _make_dangerous_command_guard_hook(project_name: str = ""):
 
     A deny is permanent: there is no human in the loop to retry with, and the same command
     will be denied again. Every deny is written to the audit log as
-    ``[project] DENY: <rule-id>: <command>``. `project_name` comes from the run (closed over,
-    like the PostToolUse/PreCompact hooks); with none, the hook input's cwd names the project.
-    Never raises; anything unexpected falls through to allow."""
-    async def _dangerous_command_guard_hook(
-        hook_input: dict,
-        tool_use_id: "str | None",
-        context: "HookContext",
-    ) -> dict:
-        try:
-            tool_input = hook_input.get("tool_input") if isinstance(hook_input, dict) else None
-            command = (tool_input or {}).get("command", "") if isinstance(tool_input, dict) else ""
-            if command and isinstance(command, str):
-                if len(command) > _GUARD_OFFLOAD_CHARS:
-                    hit = await asyncio.to_thread(_classify_dangerous_command_rule, command)
-                else:
-                    hit = _classify_dangerous_command_rule(command)
-                if hit:
-                    rule, reason = hit
-                    project = project_name
-                    if not project:
-                        cwd = hook_input.get("cwd") if isinstance(hook_input, dict) else None
-                        project = os.path.basename(str(cwd).rstrip("/")) if cwd else "unknown"
-                    audit(project, "DENY", f"{rule}: {_guard_audit_command(command)}")
-                    return {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": (
-                                f"Blocked [{rule}]: {reason}. This shape is on the Bash deny list "
-                                "and cannot run even in full-auto mode; retrying the same command "
-                                "will be denied again."
-                            ),
-                        }
+    ``[project] DENY: <rule-id>: <command>``; the project is looked up from the hook input's
+    cwd (see `_guard_remember_project`). Never raises; anything unexpected falls through to
+    allow."""
+    try:
+        tool_input = hook_input.get("tool_input") if isinstance(hook_input, dict) else None
+        command = (tool_input or {}).get("command", "") if isinstance(tool_input, dict) else ""
+        if command and isinstance(command, str):
+            if len(command) > _GUARD_OFFLOAD_CHARS:
+                hit = await asyncio.to_thread(_classify_dangerous_command_rule, command)
+            else:
+                hit = _classify_dangerous_command_rule(command)
+            if hit:
+                rule, reason = hit
+                audit(_guard_project_for(hook_input.get("cwd")), "DENY",
+                      f"{rule}: {_guard_audit_command(command)}")
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": (
+                            f"Blocked [{rule}]: {reason}. This shape is on the Bash deny list "
+                            "and cannot run even in full-auto mode; retrying the same command "
+                            "will be denied again."
+                        ),
                     }
-        except Exception:
-            pass
-        return {}
-    return _dangerous_command_guard_hook
-
-
-# Context-free instance (no project name): what the unit tests call, and the fallback shape.
-_dangerous_command_guard_hook = _make_dangerous_command_guard_hook()
+                }
+    except Exception:
+        pass
+    return {}
 
 
 # ─────────────────────────── Spec-039: PreCompact observe hook ─────────────────────────────────
@@ -3303,9 +3322,6 @@ async def run_engine(  # type: ignore[return]
     # flag is OFF because the hook only fires if a PreCompact SDK event is emitted.
     _pre_compact_hook = _make_pre_compact_hook(project_name, session_key)
 
-    # Last-resort Bash deny list; the factory closes over the project so every deny is audited.
-    _bash_deny_hook = _make_dangerous_command_guard_hook(project_name)
-
     # Spec-029 §1: live streaming — emit text_delta events for incremental cockpit display.
     # STREAM_PARTIAL=0 disables without code changes (e.g. for debugging or regression isolation).
     # Default ON: clean reconciliation (the final {type:"text"} remains authoritative, deltas are
@@ -3523,7 +3539,7 @@ async def run_engine(  # type: ignore[return]
         hooks={
             "PreToolUse": [HookMatcher(
                 matcher="Bash",
-                hooks=[_bundle_grep_guard_hook, _bash_deny_hook],
+                hooks=[_bundle_grep_guard_hook, _dangerous_command_guard_hook],
             )],
             "PostToolUse": [HookMatcher(hooks=[_post_tool_hook])],
             "PreCompact": [HookMatcher(hooks=[_pre_compact_hook])],
@@ -3538,6 +3554,8 @@ async def run_engine(  # type: ignore[return]
     )
 
     audit(project_name, "TASK", short(prompt, 300))
+    # the Bash deny hook (one module-level function) labels its audit lines from this
+    _guard_remember_project(cwd, project_name)
 
     # Spec-028 Phase 1: resolve which running-dict to use.
     # ctx is provided by call sites that have a context dict (run_agent, api_project_chat,
