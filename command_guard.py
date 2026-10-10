@@ -178,15 +178,29 @@ class _Lexer:
     def arith(self, pos: int, semis: bool) -> int:
         """`$(( ... ))` / `(( ... ))`: `pos` is just after the opening pair. Returns the index
         after the closing `))`, or -1 when the text is not arithmetic (then it is parsed as
-        nested subshells). Commands inside `$(...)` / backticks in the expression still run."""
+        nested subshells). Two phases keep the work linear: a flat scan decides whether the
+        text IS arithmetic (no recursion, so a failed guess costs one pass); only then are the
+        commands inside `$(...)` / backticks lexed, with `<` and `>` as plain characters."""
+        end = self._arith_end(pos, semis)
+        if end < 0:
+            return -1
+        content = self.s[pos:end - 2]
+        if self.depth >= MAX_DEPTH:
+            raise _Unparseable("nesting too deep")
+        self.bud.spend(len(content) + 1)
+        _Lexer(content, self.out, self.bud, self.depth + 1).run(0, False, True)
+        return end
+
+    def _arith_end(self, pos: int, semis: bool) -> int:
         s, n = self.s, self.n
         i, depth = pos, 2
+        result = -1
         while i < n:
             m = _ARITH_RUN.match(s, i)
             if m:
                 i = m.end()
                 if i >= n:
-                    return -1
+                    break
             c = s[i]
             if c == "(":
                 depth += 1
@@ -194,29 +208,30 @@ class _Lexer:
             elif c == ")":
                 depth -= 1
                 if depth == 1:                      # first of the closing pair
-                    return i + 2 if s.startswith(")", i + 1) else -1
+                    if s.startswith(")", i + 1):
+                        result = i + 2
+                    break
                 i += 1
             elif c == "$":
-                if s.startswith("$(", i):
-                    i = self.sub(i + 2)
-                elif s.startswith("${", i):
-                    _t, i = self.param(i)
-                else:
-                    i += 1
+                i += 1
             elif c == "`":
-                i = self.backtick(i)
+                j = s.find("`", i + 1)
+                if j < 0:
+                    break
+                i = j + 1
             elif c == "'" or c == '"':
                 j = s.find(c, i + 1)
                 if j < 0:
-                    return -1
+                    break
                 i = j + 1
             elif c == "\\":
                 i += 2
             elif c == ";" and semis:
                 i += 1
             else:                                   # newline, or `;` in `$(( ))`
-                return -1
-        return -1
+                break
+        self.bud.spend(min(i, n) - pos + 1)
+        return result
 
     def backtick(self, pos: int) -> int:
         m = _BT_END.match(self.s, pos + 1)
@@ -356,7 +371,7 @@ class _Lexer:
                 pos = m.end()
 
     # -- the main loop -------------------------------------------------------------------------
-    def run(self, pos: int, until_paren: bool) -> int:
+    def run(self, pos: int, until_paren: bool, arith: bool = False) -> int:
         s, n, out = self.s, self.n, self.out
         spans, heredocs = self.spans, self.heredocs
         parts: "list[str]" = []
@@ -530,6 +545,10 @@ class _Lexer:
                 else:
                     pos += 1
                     end_cmd()
+            elif (c == "<" or c == ">") and arith:       # arithmetic: shifts and comparisons
+                parts.append(c)
+                inword = True
+                pos += 1
             elif c == "<" or c == ">":
                 nx = s[pos + 1:pos + 2]
                 if nx == "(":                              # process substitution
@@ -1011,13 +1030,8 @@ def _w_env(words, i, ctx):
             return ctx.program(" ".join([first] + words[j + 1:]))
         elif len(t) > 1 and t[0] == "-":
             j += 1
-        elif _ASSIGN.match(t):
-            f = _check_assignment(t)
-            if f:
-                return f
-            j += 1
         else:
-            break
+            break               # NAME=value operands and the command: _check_words reads them
     return j if j < n else None
 
 

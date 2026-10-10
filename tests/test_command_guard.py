@@ -415,6 +415,7 @@ ALLOW = [
     "(( i < 5 )) && echo yes",
     "x=$((a+b*2)); echo $x",
     "echo hi # git reset --hard\nls",
+    "ls # don't run git reset --hard\nls",                          # a comment may hold a lone quote
     "case $x in a) ls;; b) echo git reset --hard;; esac",
     "cat <<'EOF'\n$(git reset --hard)\nEOF",                      # quoted delimiter: no expansion
     "cat <<EOF\n\\$(git reset --hard)\nEOF",                       # escaped
@@ -627,6 +628,14 @@ def test_pathological_shapes_are_bounded():
     _timed("git -c " * 12000 + "status", 1.0)
     _timed("env " * 18000 + "ls", 1.0)
     _timed("sudo " * 14000 + "ls", 1.0)
+    # arithmetic guesses must never be re-tried at every nesting level (2**depth work)
+    _timed("((" * 30000, 1.0)
+    _timed("$((" * 20000, 1.0)
+    _timed("$(( " * 15000, 1.0)
+    _timed("$((" * 24 + "1" + "))" * 24, 1.0)
+    _timed("$((" * 23 + "1;" + ")" * 23, 1.0)
+    _timed("$(( $((" * 12 + "1" + ")) ;" * 12, 1.0)
+    _timed("echo $(( " * 4000 + "x" + " ))" * 4000, 1.0)
 
 
 def test_unbalanced_quotes_fall_back_to_the_narrow_scan():
