@@ -53,8 +53,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Rough heuristic (no tokenizer dependency available offline) — every cost figure this
-# tool prints is an approximation, labeled as such, not an exact SDK token count.
-_CHARS_PER_TOKEN = 4
+# tool prints is an approximation, labeled as such, not an exact SDK token count.  The
+# conversion lives in the repo-root token_estimate.py, shared with the project health check.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from token_estimate import approx_tokens  # noqa: E402
 
 # current lineup (2026-10): Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5. Anything naming an
 # older generation in a skill file is a stale reference to something that no longer runs.
@@ -445,10 +448,6 @@ def scan_stale(entries: "list[SkillEntry]") -> "list[dict]":
 
 
 # ─────────────────────────── check 6: cost ────────────────────────────────────
-
-def approx_tokens(chars: int) -> int:
-    return chars // _CHARS_PER_TOKEN if chars else 0
-
 
 def compute_cost(entries: "list[SkillEntry]", core_allow, topics: dict) -> "list[dict]":
     by_name = {e.name: e for e in entries if e.ok}

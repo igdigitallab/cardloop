@@ -11,7 +11,7 @@
 venv/bin/python tools/gen_route_index.py
 ```
 
-197 routes on 169 paths (192 need the session cookie, 5 do not). Methods and paths are exact; the description is the first line of the handler's docstring, or the matching [API.md](API.md) row when the handler has no docstring (a dash means neither has one). Request and response shapes for the main flows are in [API.md](API.md); for the rest, the handler named in the table is the reference.
+200 routes on 172 paths (195 need the session cookie, 5 do not). Methods and paths are exact; the description is the first line of the handler's docstring, or the matching [API.md](API.md) row when the handler has no docstring (a dash means neither has one). Request and response shapes for the main flows are in [API.md](API.md); for the rest, the handler named in the table is the reference.
 
 ## Authentication
 
@@ -86,6 +86,7 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `POST` | `/api/global/file` | cookie | `api_global_file_write` | Write file contents. |
 | `GET` | `/api/global/files` | cookie | `api_global_files` | Directory listing from $HOME. |
 | `GET` | `/api/health` | none | `api_health` | (unauthenticated — see auth_middleware exempt list). |
+| `GET` | `/api/health-check` | cookie | `api_health_check_fleet` (feature: project_health) | What the last fleet sweep found (projects with findings only). |
 | `POST` | `/api/login` | none | `api_login` | Authenticate with `{"password":"..."}`, sets `cops_auth` cookie |
 | `POST` | `/api/logout` | cookie | `api_logout` | Clear `cops_auth` cookie |
 | `GET` | `/api/me` | cookie | `api_me` | Current auth status |
@@ -138,6 +139,8 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `POST` | `/api/projects/{id}/git/sync` | cookie | `api_project_git_sync` | Commit dirty files + push (one-button sync) |
 | `POST` | `/api/projects/{id}/group` | cookie | `api_project_group_set` | — |
 | `GET` | `/api/projects/{id}/health` | cookie | `api_project_health` | Connected capabilities and security check. |
+| `GET` | `/api/projects/{id}/health-check` | cookie | `api_project_health_check` (feature: project_health) | Health-check findings for one project (real, actionable ailments only; [] when healthy). |
+| `POST` | `/api/projects/{id}/health-check/ack` | cookie | `api_project_health_ack` (feature: project_health) | Acknowledge a project-settings finding: silent until the file changes. |
 | `POST` | `/api/projects/{id}/incident` | none | `api_project_incident` | Spec-012 Ph3: optional incident push. |
 | `GET` | `/api/projects/{id}/incidents` | cookie | `api_project_incidents` | Count of active incidents (for sidebar badge). |
 | `POST` | `/api/projects/{id}/label` | cookie | `api_project_label` | {name: str} |
@@ -234,5 +237,5 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 
 ## Not listed one by one
 
-- **HEAD**: aiohttp registers a HEAD twin for every GET route (89 of them). It has the same path, auth and handler as its GET.
+- **HEAD**: aiohttp registers a HEAD twin for every GET route (91 of them). It has the same path, auth and handler as its GET.
 - **`/{path_info}` (any method)**: the SPA fallback. It serves the built web UI (`web/dist`) for every path that no route above matched. It is outside `/api/`, so the auth middleware does not guard it.

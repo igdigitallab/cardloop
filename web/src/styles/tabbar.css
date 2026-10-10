@@ -1002,6 +1002,32 @@
 .health-badge.health-badge-yellow { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 35%, transparent); }
 .health-badge.health-badge-red    { color: var(--red);    border-color: color-mix(in srgb, var(--red) 35%, transparent); }
 
+/* ── Project health check pill + findings modal (HealthCheckPill) ──
+   Hidden entirely while healthy. Critical is the same pill, just louder: red, bold, tinted. */
+.health-check-pill { font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.4; }
+.health-check-pill.health-badge-yellow { background: color-mix(in srgb, var(--yellow) 8%, var(--bg3)); }
+.health-check-pill.health-check-pill-crit {
+  color: var(--red); font-weight: 800;
+  border-color: color-mix(in srgb, var(--red) 55%, transparent);
+  background: color-mix(in srgb, var(--red) 14%, var(--bg3));
+}
+.health-check-modal { max-width: 640px; }
+.health-check-list { padding: 4px 14px 10px; }
+.health-check-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.health-check-item:last-of-type { border-bottom: none; }
+.health-check-title { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; flex-wrap: wrap; }
+.health-check-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--yellow); flex-shrink: 0; }
+.health-check-crit .health-check-dot { background: var(--red); }
+.health-check-sev { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--red); }
+.health-check-actions { margin-top: 6px; display: flex; justify-content: flex-end; }
+.health-check-ack { font-size: 11px; padding: 2px 10px; }
+.health-check-detail { margin-top: 3px; font-size: 12px; line-height: 1.45; color: var(--text2); overflow-wrap: anywhere; }
+.health-check-fix { margin-top: 3px; font-size: 12px; line-height: 1.45; color: var(--text3); overflow-wrap: anywhere; }
+.health-check-fix b { color: var(--text2); font-weight: 600; }
+.health-check-note { margin-top: 4px; font-size: 11px; color: var(--yellow); }
+.health-check-empty { padding: 14px 0; font-size: 12px; color: var(--text3); }
+.health-check-foot { padding-top: 8px; font-size: 11px; color: var(--text3); text-align: right; }
+
 /* ── Pop-out windows (lib/popout.ts) ───────────────────────── */
 /* ⧉ in the project header: open this project in its own window */
 .popout-open-btn {

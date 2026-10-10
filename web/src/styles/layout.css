@@ -508,6 +508,8 @@
     border-bottom-color: var(--accent);
   }
   .mobile-inner-tab-btn:hover { color: var(--text); }
+  /* Project health pill leads the strip (no project header on a phone); hidden while healthy */
+  .mobile-inner-tabs .health-check-pill { align-self: center; flex-shrink: 0; margin: 0 2px 0 8px; }
 
   .mobile-project-content {
     flex: 1;

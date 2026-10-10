@@ -836,6 +836,19 @@ export const api = {
   projectHealth: (id: string) =>
     apiFetch<import('./types').ProjectStructureHealth>(`/api/projects/${id}/health`),
 
+  // Project health check (features/project_health): real ailments only, [] when healthy.
+  // fresh=true bypasses the ~5 min server cache (the Tests button / Re-check).
+  projectHealthCheck: (id: string, fresh = false) =>
+    apiFetch<import('./types').ProjectHealthCheck>(
+      `/api/projects/${id}/health-check${fresh ? '?fresh=1' : ''}`),
+
+  ackHealthFinding: (id: string, checkId: string, sha256: string) =>
+    apiFetch<import('./types').ProjectHealthCheck>(`/api/projects/${id}/health-check/ack`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ check_id: checkId, sha256 }),
+    }),
+
   renameProject: (id: string, slug: string) =>
     apiFetch<{ ok: boolean; new_id: string; new_cwd: string; new_name?: string }>(
       `/api/projects/${id}/rename`,

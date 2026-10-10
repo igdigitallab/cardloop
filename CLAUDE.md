@@ -31,6 +31,25 @@ Design history & specs: `docs/internal/specs/` (gitignored).
   `routes.py` serves `POST /api/projects/{id}/cards/accept-review` (manual bulk accept) and
   `GET|POST /api/board/janitor[/run]`. Cards carry an `rt=<unix>` marker stamped when they enter
   Review — the board keeps no history otherwise. Knobs: `BOARD_JANITOR_MODE=off|digest|accept`.
+- `features/project_health/` — "is this project quietly unwell?": eight read-only checks (`logic.py`, a small
+  `register_check` registry, every input injectable) run by the Tests button (`?fresh=1`) and once a day
+  (`loop.py`, one digest in `data/inbox/`, push only for NEW findings, at most once a day). UI: `HealthCheckPill`
+  in the desktop header next to Tests and, on a phone (no project header), leading the tab strip.
+  ⚠️ Four rules: (1) NO score — a finding is a real, actionable risk with a one-line fix, a healthy project is
+  silent (the June 2026 "X/8" badge went red on 92 % of projects and was removed); (2) the Tests verdict stays pure
+  — `api_project_test`, the janitor's `_test_signal` and autopilot's signal never read health, it is a separate
+  result; (3) software-only checks (`no_test_cmd`, `stale_work`, `env_exposed`) skip `content`/`scratchpad`
+  projects, and `no_test_cmd` fires only when a test command is detectable (a suite-less project has nothing
+  one-line to set); `agents_config.memory="project"` means the native MEMORY.md is NOT loaded, so it is not
+  judged; (4) `project_settings_untrusted` prints key names, never env values or hook commands, and its
+  acknowledge (`data/project_health_ack.json`) is a sha256 that goes stale the moment the file changes.
+  ⚠️ Source that needs zero-width characters (the scanner, its tests) must spell them as `\uXXXX` escapes: an
+  agent's file-write tool decodes a typed `​` into the REAL character, and the first draft of this package
+  shipped raw invisible characters that its own scanner would have flagged — grep the diff after writing.
+  `api_project_health` imports `logic.env_exposed` inside its body (IRON RULE) so the `.env exposed` pill and the
+  check cannot disagree; the health pill hides `env_exposed` itself to avoid showing it twice. Tests:
+  `tests/test_project_health.py`, `tests/test_project_health_routes.py`, `tests/e2e/test_project_health.py`,
+  `web/src/lib/healthFindings.test.ts`.
 - `captcha_solver.py` — the 2captcha bridge behind `browser_solve_captcha`. Knows nothing about Playwright (page-side detection/injection lives in `browser_pane.solve_captcha`). Off unless `TWOCAPTCHA_API_KEY` / the safe's `twocaptcha_api_key` is set, and gated behind `agent_actions=full`. ⚠️ Only solves captcha **widgets** — a full-page Cloudflare interstitial is refused on purpose (IP-bound token); don't "fix" that by removing the guard, it would just burn balance on tokens Cloudflare rejects.
 - `roles.py` + `roles/builtin/*.md` — spec-091 declarative sub-agent roles: a three-tier file registry (builtin ships in git → global `$CARDLOOP_ROLES_DIR`/`~/.claude-ops/roles` → project `<cwd>/.claude-ops/roles`), whole-file override by name, cockpit-editable via the Agents tab. `engine.py` compiles it into the Task/Workflow roster; `DEFAULT_AGENTS` there is only the broken-install fallback when zero role files resolve.
   ⚠️ **Review default: ONE `reviewer-logic` pass, not a panel.** Measured on a sealed
