@@ -465,6 +465,8 @@ ALLOW = [
     "git push --delete origin old-branch",
     "git push -o -f origin feature",                               # -f is the push option's value
     "git push -o -f origin master",
+    "git push --force --repo=origin feature",                      # --repo names the remote
+    "git push --repo origin --force feature",
     "git -C /tmp/x reset --soft HEAD~1",
     "git -C /tmp/x reset HEAD file",
     "git --git-dir=/x/.git status",
@@ -680,18 +682,27 @@ def test_oversized_input_falls_back_to_the_narrow_scan():
     assert time.perf_counter() - t < 1.5
 
 
-def test_fallback_scan_stays_bounded_past_the_trigger_cap():
-    # >256 KiB made of trigger words: every later trigger still gets a short window, so the
-    # scan is fast AND a deny shape at the very end is still found
+def test_fallback_scan_keeps_finding_shapes_past_the_trigger_cap():
+    # >256 KiB made of trigger words: later triggers get a short window, but a deny shape at
+    # the very end of the input is still found (the scan never gives up)
     for unit, tail, expected in [("rm ", "-rf /", RM), ("git ", "reset --hard", RESET),
                                  ("git push ", "--force origin master", PUSH),
                                  ("chmod ", "-R 777 /", "chmod-root")]:
         body = unit * (cg.MAX_CHARS // len(unit) + 100)
         assert len(body) > cg.MAX_CHARS
-        t = time.perf_counter()
         assert rule_of(body) is None                                     # no complete shape yet
         assert rule_of(body + tail) == expected
-        assert time.perf_counter() - t < 3.0
+
+
+def test_fallback_scan_window_shrinks_past_the_trigger_cap(monkeypatch):
+    # deterministic cost bound (no stopwatch): count how many words each handler call is given
+    widths = []
+    real = cg._HANDLERS["rm"]
+    monkeypatch.setitem(cg._HANDLERS, "rm", lambda a, c, x: widths.append(len(a)) or real(a, c, x))
+    assert cg.classify_command("rm " * (cg.MAX_CHARS // 3 + 100)) is None
+    assert len(widths) > cg._CRUDE_TRIGGERS + 1000
+    assert widths[0] == cg._CRUDE_WINDOW
+    assert max(widths[cg._CRUDE_TRIGGERS:]) <= cg._CRUDE_TAIL_WINDOW < cg._CRUDE_WINDOW
 
 
 def test_nesting_deeper_than_the_limit_falls_back():
@@ -702,7 +713,8 @@ def test_nesting_deeper_than_the_limit_falls_back():
     # a quoted mention is data at depth 20 and a (documented) false positive at depth 30
     mention = "echo 'git reset --hard'"
     assert rule_of("echo " + "$(" * 20 + mention + ")" * 20) is None
-    assert rule_of("echo " + "$(" * (cg.MAX_DEPTH + 6) + mention + ")" * (cg.MAX_DEPTH + 6)) == RESET
+    assert cg.MAX_DEPTH <= 28
+    assert rule_of("echo " + "$(" * 30 + mention + ")" * 30) == RESET
     # programs inside programs: a shell fed a heredoc that feeds a shell ... (linear text)
     def layered(levels, inner):
         text = inner + "\n"

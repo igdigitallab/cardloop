@@ -128,13 +128,12 @@ _WRITE_REDIRS = frozenset({">", ">>", ">|", ">&", "&>", "&>>", "<>"})
 class _Cmd:
     """One simple command: its words (quotes removed, variables NOT expanded), its redirects
     ``[op, word, heredoc_body, delimiter_was_quoted]`` and the previous stage of its pipeline."""
-    __slots__ = ("words", "redirs", "pipe_from", "skip")
+    __slots__ = ("words", "redirs", "pipe_from")
 
     def __init__(self, pipe_from: "Optional[_Cmd]" = None) -> None:
         self.words: "list[str]" = []
         self.redirs: "list[list]" = []
         self.pipe_from = pipe_from
-        self.skip = False          # a `for`/`case` header: its words are a list, not a command
 
 
 @functools.lru_cache(maxsize=64)
@@ -413,11 +412,9 @@ class _Lexer:
                 if w == "function":
                     fn_name_next = True
                     return
-                if w == "for" or w == "select":
-                    cmd.skip = True
-                elif w == "case":
-                    cmd.skip = True
-                    cases.append("subject")
+                if w == "case":
+                    cases.append("subject")      # `for x in a b` / `case x in` headers: their
+                                                 # first word (`for`, `case`) is no known command
             elif cases and cases[-1] == "subject" and w == "in" and not q:
                 cases[-1] = "pattern"
             words.append(w)
@@ -428,10 +425,9 @@ class _Lexer:
             pending = None
             nxt = None
             if cmd.words or cmd.redirs:
-                if not cmd.skip:
-                    out.append(cmd)
-                    if pipe:
-                        nxt = cmd
+                out.append(cmd)
+                if pipe:
+                    nxt = cmd
             cmd = _Cmd(nxt)
 
         while pos < n:
