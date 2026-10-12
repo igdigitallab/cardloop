@@ -3259,3 +3259,171 @@ async def test_provider_info_stays_closed_after_two_refusals_with_the_reason(pro
     info = await grok_engine.provider_info(force=True)
     assert info["available"] is False and "inconclusive" in info["error"] and "declined twice" in info["error"]
     assert json.loads((env.data / "grok_sandbox_probe.json").read_text())["state"] == "inconclusive"
+
+
+# ------------------------------------------------------------------------------------------
+# full access (GROK_ACCESS=full): the rights a Claude turn has
+# ------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw,want", [("full", True), (" FULL ", True), ("Full", True), ("isolated", False),
+                                      ("", False), ("ful", False), ("yes", False), ("1", False)])
+def test_full_access_is_on_only_for_the_word_full(monkeypatch, raw, want):
+    monkeypatch.setenv("GROK_ACCESS", raw)
+    assert grok_engine.full_access() is want
+
+
+def test_full_access_is_off_by_default(monkeypatch):
+    monkeypatch.delenv("GROK_ACCESS", raising=False)
+    assert grok_engine.full_access() is False
+
+
+def test_full_child_env_inherits_the_parent_and_the_project_minus_grok_and_api_key_names(tmp_path):
+    parent = {"PATH": "/usr/bin", "HOME": "/h", "SSH_AUTH_SOCK": "/run/agent.sock", "DENY_COMMANDS_EXTRA": "x",
+              "GROK_SANDBOX": "cardloop", "GROK_MODEL": "grok-x", "XAI_API_KEY": "xai-parent"}
+    project = {"TELEGRAM_BOT_TOKEN": "tg-tok", "GROK_CLAUDE_HOOKS_ENABLED": "0", "XAI_API_KEY": "xai-proj",
+               "GROK_FOLDER_TRUST": "0"}
+    env = grok_engine.child_env(tmp_path, parent=parent, full=True, extra=project)
+    assert env["SSH_AUTH_SOCK"] == "/run/agent.sock" and env["DENY_COMMANDS_EXTRA"] == "x"
+    assert env["TELEGRAM_BOT_TOKEN"] == "tg-tok"
+    assert "XAI_API_KEY" not in env and "GROK_MODEL" not in env and "GROK_SANDBOX" not in env
+    for key, value in D3_ENV.items():
+        assert env[key] == value, key                # a project cannot loosen the switches
+    # Grok's own Claude-hook import stays off: it silently skips a quoted hook command (measured); the guard
+    # hook script runs the operator's hooks instead
+    assert env["GROK_CLAUDE_HOOKS_ENABLED"] == "0" and env["GROK_FOLDER_TRUST"] == "1"
+    assert env["GROK_HOME"] == str(tmp_path)
+
+
+def test_isolated_child_env_ignores_the_project_env(tmp_path):
+    env = grok_engine.child_env(tmp_path, parent={"PATH": "/x", "SSH_AUTH_SOCK": "/s"}, full=False,
+                                extra={"TELEGRAM_BOT_TOKEN": "tg-tok"})
+    assert "TELEGRAM_BOT_TOKEN" not in env and "SSH_AUTH_SOCK" not in env
+    assert env["GROK_SANDBOX"] == "cardloop" and env["GROK_CLAUDE_HOOKS_ENABLED"] == "0"
+
+
+def test_child_env_follows_grok_access_when_not_told(tmp_path, monkeypatch):
+    monkeypatch.setenv("GROK_ACCESS", "full")
+    monkeypatch.setenv("SOME_PARENT_VAR", "kept")
+    env = grok_engine.child_env(tmp_path, sandbox=False)
+    assert env["SOME_PARENT_VAR"] == "kept" and "GROK_SANDBOX" not in env
+    monkeypatch.setenv("GROK_ACCESS", "isolated")
+    assert "SOME_PARENT_VAR" not in grok_engine.child_env(tmp_path, sandbox=False)
+
+
+def test_full_config_round_trips_and_each_mode_rejects_the_other(tmp_path):
+    cmd = "/venv/bin/python /repo/tools/grok_guard_hook.py --audit-dir /data/audit"
+    full_path, iso_path = tmp_path / "full.toml", tmp_path / "iso.toml"
+    full_path.write_text(grok_engine._config_toml(True, cmd))
+    iso_path.write_text(grok_engine._config_toml(False))
+    cfg = tomllib.loads(full_path.read_text())
+    assert cfg["shell_environment_policy"]["inherit"] == "all"
+    assert cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == cmd
+    assert grok_engine._config_ok(full_path, True, cmd)
+    assert grok_engine._config_ok(iso_path, False)
+    assert not grok_engine._config_ok(full_path, False)                    # hooks are forbidden there
+    assert not grok_engine._config_ok(iso_path, True, cmd)                 # no guard hook, core policy
+    assert not grok_engine._config_ok(full_path, True, cmd + " --other")   # someone else's hook command
+
+
+def test_a_full_config_with_an_extra_hook_or_a_missing_one_is_rewritten(tmp_path):
+    cmd = "/venv/bin/python /repo/tools/grok_guard_hook.py --audit-dir /d"
+    path = tmp_path / "config.toml"
+    path.write_text(grok_engine._config_toml(True, cmd)
+                    + '\n[[hooks.SessionStart]]\n  [[hooks.SessionStart.hooks]]\n  type = "command"\n'
+                      '  command = "/tmp/planted.sh"\n')
+    assert not grok_engine._config_ok(path, True, cmd)
+    no_hook = grok_engine._config_toml(True, cmd).split("# The guards of a Claude Bash call")[0]
+    path.write_text(no_hook)
+    assert not grok_engine._config_ok(path, True, cmd)
+
+
+def test_the_guard_hook_command_runs_the_repo_script_and_audits_into_the_data_dir(tmp_path):
+    import shlex
+    argv = shlex.split(grok_engine._guard_hook_command({"DATA": tmp_path / "my data"}))
+    assert argv[0] == sys.executable
+    assert argv[1].endswith("/tools/grok_guard_hook.py")
+    assert argv[2:] == ["--audit-dir", str(tmp_path / "my data" / "audit")]
+
+
+def test_ensure_home_writes_the_config_of_the_current_mode_and_switches_back(env, monkeypatch):
+    monkeypatch.setenv("GROK_ACCESS", "full")
+    ensure_home(env.ctx)
+    cfg = tomllib.loads((env.home / "config.toml").read_text())
+    assert cfg["shell_environment_policy"]["inherit"] == "all"
+    assert cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == grok_engine._guard_hook_command(env.ctx)
+    monkeypatch.setenv("GROK_ACCESS", "isolated")
+    ensure_home(env.ctx)
+    cfg = tomllib.loads((env.home / "config.toml").read_text())
+    assert cfg["shell_environment_policy"]["inherit"] == "core" and "hooks" not in cfg
+
+
+def test_hooks_pass_the_tripwire_only_when_granted_and_mcp_never_does():
+    assert grok_engine._isolation_signal(_HOOK_EXEC) is not None
+    assert grok_engine._isolation_signal(_HOOK_EXEC, hooks_granted=True) is None
+    for note in (_mcp_servers_updated(_SRV), _MCP_READY, _MCP_TOOLS):
+        assert grok_engine._isolation_signal(note, hooks_granted=True) is not None
+
+
+def test_full_instructions_point_at_the_global_rules_and_carry_the_media_hint(tmp_path):
+    full = grok_engine._instructions("p", str(tmp_path), multi_agent=False, full=True, media="MEDIA-HINT")
+    assert "$HOME/CLAUDE.md" in full and "MEDIA-HINT" in full
+    iso = grok_engine._instructions("p", str(tmp_path), multi_agent=False)
+    assert "$HOME/CLAUDE.md" not in iso
+
+
+async def test_a_full_access_turn_gets_the_project_env_and_no_sandbox(env, monkeypatch):
+    monkeypatch.setenv("GROK_ACCESS", "full")
+    monkeypatch.setenv("XAI_API_KEY", "xai-parent-value")
+    media = env.tmp / "media"
+    events = await env.run(env={"TELEGRAM_BOT_TOKEN": "tg-tok", "COPS_MEDIA_DIR": str(media),
+                                "COPS_PROJECT_ID": "proj"})
+    assert types(events)[-1] == "result", types(events)
+    child = env.dump("env")
+    assert child["TELEGRAM_BOT_TOKEN"] == "tg-tok" and child["COPS_PROJECT_ID"] == "proj"
+    assert "GROK_SANDBOX" not in child and "XAI_API_KEY" not in child
+    for key, value in SPEC_D3.items():
+        assert child[key] == value, key
+    import adapter_env
+    assert child["PATH"].split(os.pathsep)[0] == adapter_env.TOOLS_DIR
+    rules = env.sent("session/new")[0]["params"]["_meta"]["rules"]
+    assert "$HOME/CLAUDE.md" in rules and "cockpit-img" in rules
+
+
+async def test_an_isolated_turn_never_gets_the_project_env(env):
+    events = await env.run(env={"TELEGRAM_BOT_TOKEN": "tg-tok"})
+    assert types(events)[-1] == "result"
+    child = env.dump("env")
+    assert "TELEGRAM_BOT_TOKEN" not in child and child["GROK_SANDBOX"] == "cardloop"
+    assert "$HOME/CLAUDE.md" not in env.sent("session/new")[0]["params"]["_meta"]["rules"]
+
+
+async def test_full_access_runs_without_bwrap_and_past_a_failed_sandbox_verdict(env, monkeypatch):
+    monkeypatch.setenv("GROK_ACCESS", "full")
+    (env.bindir / "bwrap").unlink()
+    monkeypatch.setenv("PATH", str(env.bindir))     # the host's own bwrap must not be found either
+    grok_engine._sandbox_verdict.update(state="failed", detail="canary leaked")
+    events = await env.run()
+    assert types(events)[-1] == "result", types(events)
+
+
+async def test_a_hook_run_does_not_abort_a_full_access_turn_but_an_mcp_server_still_does(env, monkeypatch):
+    monkeypatch.setenv("GROK_ACCESS", "full")
+    env.fake(_fixture_with(env, [_HOOK_EXEC]))
+    assert types(await env.run())[-1] == "result"
+    env.fake(_fixture_with(env, [_mcp_servers_updated(_SRV)], name="mcp"))
+    events = await env.run()
+    assert isinstance(events[-1]["exc"], grok_engine.GrokIsolationError)
+
+
+async def test_full_access_provider_info_skips_the_sandbox_probe_and_bwrap(env, monkeypatch):
+    monkeypatch.setenv("GROK_ACCESS", "full")
+    (env.bindir / "bwrap").unlink()
+    monkeypatch.setenv("PATH", str(env.bindir))     # the host's own bwrap must not be found either
+
+    async def no_probe(*_a, **_k):
+        raise AssertionError("the sandbox denial probe must not run under full access")
+    monkeypatch.setattr(grok_engine, "_ensure_sandbox_probe", no_probe)
+    info = await grok_engine.provider_info(force=True)
+    assert info["available"] is True, info.get("error")
+    assert info["sandbox"] == {"profile": "off", "access": "full"}
+    assert grok_engine._sandbox_verdict["state"] == "off"

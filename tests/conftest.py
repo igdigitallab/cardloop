@@ -31,6 +31,9 @@ os.environ.pop("CROSS_SESSION_INBOUND", None)
 # Tests that need Grok on set it with monkeypatch.
 os.environ["COPS_NO_DOTENV"] = "1"
 os.environ.pop("GROK_ENABLED", None)
+# Same leak for GROK_ACCESS (read live by grok_engine.full_access()): the suite pins the isolated
+# default; the tests of full access set it with monkeypatch.
+os.environ.pop("GROK_ACCESS", None)
 
 # The SDK release watch is the one component that would reach the network from a test.
 # Force it off for the whole suite; the tests that exercise it flip _SDK_CHECK_ENABLED

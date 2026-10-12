@@ -41,11 +41,11 @@ REFUSAL = "grok is not enabled for this project"
 
 GROK_CHAT_KEYS = {
     "project_name", "cwd", "prompt", "session_key", "model", "resume_session_id", "ctx",
-    "ephemeral", "effort", "multi_agent", "plan_mode", "chat_id", "entrypoint",
+    "ephemeral", "effort", "multi_agent", "plan_mode", "chat_id", "entrypoint", "env",
 }
 GROK_CARD_KEYS = {
     "project_name", "cwd", "prompt", "session_key", "model", "resume_session_id", "ctx",
-    "ephemeral", "effort", "plan_mode", "multi_agent", "entrypoint",
+    "ephemeral", "effort", "plan_mode", "multi_agent", "entrypoint", "env",
 }
 
 # provider -> (continuity field, result key, model)

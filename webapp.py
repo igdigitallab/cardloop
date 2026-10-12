@@ -7693,11 +7693,13 @@ async def _run_card(
             # Spec-029 item 3: request structured output only when STRUCTURED_CARDS=1.
             _card_output_fmt = _CARD_OUTPUT_SCHEMA if STRUCTURED_CARDS else None
             if not spec.is_default:
+                # The project's env reaches an adapter too (Codex always; Grok under GROK_ACCESS=full).
                 _card_gen = run_engine(
                     project_name=name, cwd=effective_cwd, prompt=prompt,
                     session_key=session_key, model=model, **{spec.resume_kwarg: None},
                     ctx=ctx, ephemeral=True, effort=None, plan_mode=False,
                     multi_agent=False, entrypoint="card",
+                    env={**(project_secrets or {}), "CARDLOOP_RUN_MODE": "card"},
                 )
             else:
                 _card_gen = run_engine(
@@ -14522,7 +14524,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                 session_key=session_key, model=model, **{spec.resume_kwarg: resume_id},
                 ctx=ctx, ephemeral=False, effort=_q_effort,
                 multi_agent=bool(_q_ultracode), plan_mode=_q_plan_mode,
-                chat_id=_resolved_chat_id, entrypoint="chat",
+                chat_id=_resolved_chat_id, entrypoint="chat", env=project_secrets,
             )
         else:
             _queue_gen = run_engine(
@@ -15511,7 +15513,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 **{_spec.resume_kwarg: resume_sid},
                 ctx=ctx, ephemeral=False, effort=_effort_override,
                 plan_mode=_plan_mode, multi_agent=_ultracode,
-                chat_id=_active_chat_id_for_run, entrypoint="chat",
+                chat_id=_active_chat_id_for_run, entrypoint="chat", env=project_secrets,
             )
         else:
             _engine_gen = run_engine(

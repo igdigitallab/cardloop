@@ -1390,6 +1390,39 @@ def _crude(command: str) -> "Optional[Finding]":
 
 
 # ───────────────────────────────────────── public API ──────────────────────────────────────────
+def compile_extra_patterns(raw: str) -> "list[re.Pattern]":
+    """DENY_COMMANDS_EXTRA: operator-supplied regexes (comma or newline separated), each matched
+    against the full command. An invalid regex is skipped, never raises."""
+    patterns: "list[re.Pattern]" = []
+    for line in re.split(r"[\n,]", raw or ""):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            patterns.append(re.compile(line))
+        except re.error:
+            continue
+    return patterns
+
+
+def deny_verdict(command: str, extra: "list[re.Pattern]") -> "Optional[tuple[str, str]]":
+    """``(rule_id, reason)`` for a command the guard denies: a hard-coded shape, else one of the
+    operator's ``extra`` patterns. None = allowed. Never raises. The one verdict behind BOTH the
+    Claude engine's in-process hook and the command hook Grok turns run (tools/grok_guard_hook.py)."""
+    try:
+        found = classify_command(command)
+        if found is not None:
+            return found.rule, found.reason
+        if isinstance(command, str):
+            for pattern in extra:
+                if pattern.search(command):
+                    return ("extra-pattern",
+                            f"blocked by an operator-defined DENY_COMMANDS_EXTRA pattern ({pattern.pattern!r})")
+    except Exception:
+        return None
+    return None
+
+
 def classify_command(command: str) -> "Optional[Finding]":
     """The deny verdict for one Bash command: a ``Finding(rule, reason)`` or None. Never raises."""
     try:

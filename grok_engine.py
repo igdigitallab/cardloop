@@ -17,6 +17,10 @@ How a turn runs (spec-095 §5.1 + the §10 corrections):
 * Every turn runs under a CUSTOM sandbox profile (``GROK_SANDBOX=cardloop``, generated in the
   cockpit's own ``GROK_HOME``). Only a custom profile fails closed; a built-in one that cannot be
   applied silently runs unsandboxed. ``--sandbox off`` does not exist in this module.
+* ``GROK_ACCESS=full`` replaces the two bullets above with the rights a Claude turn has (see
+  ``full_access``): no sandbox, the cockpit's own environment plus the project's, and the guards a
+  Claude Bash call runs (the deny list + the operator's Claude PreToolUse hooks) as one command hook.
+  The isolated mode stays the default and the rollback.
 * Subscription auth only: the account must be an OIDC login with the data-retention opt-out set,
   re-verified against what the agent itself reports on ``authenticate``. An API key is never
   passed and never accepted.
@@ -32,6 +36,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -42,6 +47,7 @@ import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Callable, NamedTuple
 
+import adapter_env
 import fsutil
 import grok_jsonl
 import runtime_secrets as _rs
@@ -121,6 +127,11 @@ _ENV_ALLOW = (
     "http_proxy", "https_proxy", "no_proxy", "all_proxy",
 )
 _ENV_ALLOW_PREFIXES = ("LC_",)
+# Full access: what a Grok child never inherits from the cockpit or a project. Every GROK_* variable (the
+# engine sets its own: a parent GROK_SANDBOX or GROK_MODEL would change the turn) and the xAI API-key
+# names (a key in any environment must not switch a subscription turn to API billing).
+_FULL_DROP_PREFIXES = ("GROK_",)
+_FULL_DROP_NAMES = ("XAI_API_KEY",)
 
 # D4 defaults. `~` = $HOME. Literal entries that do not exist are DROPPED at spawn (C7: Grok
 # materialises a missing `deny` path as an empty read-only file on the host). Never add the
@@ -220,6 +231,17 @@ def grok_enabled() -> bool:
     return _truthy(os.getenv("GROK_ENABLED", "false"))
 
 
+def full_access() -> bool:
+    """GROK_ACCESS=full: a Grok turn gets the rights a Claude turn has. No sandbox (the secret safe, ~/.ssh,
+    git push, sudo, writes anywhere), the cockpit's own environment (its secrets are already out of
+    os.environ, runtime_secrets) plus the project's `secrets.env` and media vars, the Bash deny list and the
+    operator's Claude PreToolUse hooks before every shell call (tools/grok_guard_hook.py), and $HOME/CLAUDE.md
+    like a Codex turn. The D3 switches stay: Grok's own Claude-hook import silently skips a hook whose command
+    is a quoted path (measured), so the hook script runs those hooks itself. Anything else - unset,
+    `isolated`, a typo - is the spec-095 sandbox."""
+    return os.getenv("GROK_ACCESS", "isolated").strip().lower() == "full"
+
+
 def data_dir(ctx: dict | None = None) -> Path:
     """The cockpit data dir: ctx["DATA"], else the convention modules.py/accounts.py use."""
     d = (ctx or {}).get("DATA")
@@ -260,9 +282,27 @@ def _canary_dir(ctx: dict | None = None) -> Path:
 # ------------------------------------------------------------------------------------------
 
 def child_env(home: Path, *, sandbox: bool = True, parent: "dict | None" = None,
-              profile: str = SANDBOX_PROFILE) -> dict[str, str]:
-    """The complete environment of a Grok child: allowlisted parent vars + the D3 block."""
+              profile: str = SANDBOX_PROFILE, full: "bool | None" = None,
+              extra: "dict | None" = None) -> dict[str, str]:
+    """The complete environment of a Grok child.
+
+    Isolated (the default): allowlisted parent vars + the D3 block, under `profile`; `extra` is ignored.
+    Full access (`full`, default `full_access()`): the whole parent environment - what a Claude turn's
+    child inherits - plus `extra` (the project's env), minus `_FULL_DROP_*`, plus the D3 block, and no
+    sandbox variable at all."""
     src = os.environ if parent is None else parent
+    if full is None:
+        full = full_access()
+    if full:
+        merged = {**src, **(extra or {})}
+        env = {k: v for k, v in merged.items()
+               if isinstance(v, str) and not k.startswith(_FULL_DROP_PREFIXES) and k not in _FULL_DROP_NAMES}
+        env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+        env.setdefault("HOME", os.path.expanduser("~"))
+        env.setdefault("TERM", "dumb")
+        env.update(D3_ENV)
+        env["GROK_HOME"] = str(home)
+        return env
     env: dict[str, str] = {}
     for key in _ENV_ALLOW:
         if key in src and src[key] != "":
@@ -687,34 +727,81 @@ def _agents_dir() -> str:
     return str(Path.home() / ".agents")
 
 
-def _config_toml() -> str:
-    return (
+# Full access: the guards of a Claude Bash call as a Grok command hook. `run_terminal_command` is Grok's
+# shell tool (measured), `Bash` the Claude spelling. The timeout leaves room for the operator's own hooks
+# the script runs after the deny list (each capped at 60 s by the script).
+_GUARD_HOOK_MATCHER = "run_terminal_command|Bash"
+_GUARD_HOOK_TIMEOUT_SEC = 90
+
+
+def _guard_hook_command(ctx: dict | None = None) -> str:
+    """tools/grok_guard_hook.py under the cockpit's own interpreter, auditing into `<data>/audit` like the
+    in-process hook of a Claude turn (engine.audit)."""
+    return " ".join(shlex.quote(a) for a in (sys.executable, str(_REPO / "tools" / "grok_guard_hook.py"),
+                                              "--audit-dir", str(data_dir(ctx) / "audit")))
+
+
+def _guard_hooks(command: str) -> dict:
+    """The `hooks` table of a full-access config.toml, as tomllib reads it back."""
+    return {"PreToolUse": [{"matcher": _GUARD_HOOK_MATCHER,
+                            "hooks": [{"type": "command", "command": command,
+                                       "timeout": _GUARD_HOOK_TIMEOUT_SEC}]}]}
+
+
+def _config_toml(full: bool = False, hook_command: str | None = None) -> str:
+    if full:
+        shell = (
+            "# Full access (GROK_ACCESS=full): the model's shell inherits the whole agent env, as a\n"
+            "# Claude turn's does (the project's secrets.env included).\n"
+            "[shell_environment_policy]\n"
+            'inherit = "all"\n')
+    else:
+        shell = (
+            "# Defence in depth for the model's own shell: tool subprocesses inherit a small core set\n"
+            "# (PATH, HOME...) with *KEY*/*SECRET*/*TOKEN* names dropped, not the whole agent env.\n"
+            "[shell_environment_policy]\n"
+            'inherit = "core"\n')
+    text = (
         "# Generated by Cardloop (grok_engine.ensure_home).\n"
         "[cli]\n"
         "auto_update = false\n"
         "\n"
-        "# Defence in depth for the model's own shell: tool subprocesses inherit a small core set\n"
-        "# (PATH, HOME...) with *KEY*/*SECRET*/*TOKEN* names dropped, not the whole agent env.\n"
-        "[shell_environment_policy]\n"
-        'inherit = "core"\n'
+        + shell +
         "\n"
         "[skills]\n"
         f"ignore = [{_toml_str(_agents_dir())}]\n"
         f"disabled = [{', '.join(_toml_str(n) for n in _SKILLS_DISABLED)}]\n"
     )
+    if full:
+        text += (
+            "\n"
+            "# The guards of a Claude Bash call: the deny list + the operator's Claude PreToolUse hooks.\n"
+            "[[hooks.PreToolUse]]\n"
+            f"matcher = {_toml_str(_GUARD_HOOK_MATCHER)}\n"
+            "  [[hooks.PreToolUse.hooks]]\n"
+            '  type = "command"\n'
+            f"  command = {_toml_str(hook_command or _guard_hook_command())}\n"
+            f"  timeout = {_GUARD_HOOK_TIMEOUT_SEC}\n"
+        )
+    return text
 
 
-def _config_ok(path: Path) -> bool:
+def _config_ok(path: Path, full: bool = False, hook_command: str | None = None) -> bool:
+    """The config.toml on disk is the one this mode generates: the isolated keys, or the full-access ones
+    with exactly our guard hook (any other hook, or a missing one, means rewrite)."""
     try:
         cfg = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):
         return False
     skills = cfg.get("skills", {})
+    forbidden = [k for k in _CONFIG_FORBIDDEN if not (full and k == "hooks")]
+    hooks_ok = (cfg.get("hooks") == _guard_hooks(hook_command or _guard_hook_command())) if full else True
     return (cfg.get("cli", {}).get("auto_update") is False
-            and cfg.get("shell_environment_policy", {}).get("inherit") == "core"
+            and cfg.get("shell_environment_policy", {}).get("inherit") == ("all" if full else "core")
             and skills.get("ignore") == [_agents_dir()]
             and skills.get("disabled") == list(_SKILLS_DISABLED)
-            and not any(k in cfg for k in _CONFIG_FORBIDDEN))
+            and hooks_ok
+            and not any(k in cfg for k in forbidden))
 
 
 def ensure_home(ctx: dict | None = None, *, bin_path: str | None = None, cwd: str | None = None) -> dict:
@@ -755,8 +842,9 @@ def ensure_home(ctx: dict | None = None, *, bin_path: str | None = None, cwd: st
         _workspace_profiles[profile] = root
     variants = {name: _workspace_deny(deny, root, stores) for name, root in _workspace_profiles.items()}
     rewrote = _atomic_write(home / "sandbox.toml", _sandbox_toml(deny, variants))
-    if not _config_ok(home / "config.toml"):
-        _atomic_write(home / "config.toml", _config_toml(), 0o600)
+    full, hook_command = full_access(), _guard_hook_command(ctx)
+    if not _config_ok(home / "config.toml", full, hook_command):
+        _atomic_write(home / "config.toml", _config_toml(full, hook_command), 0o600)
         rewrote = True
     if rewrote:
         _log(f"home {home}: sandbox profile {SANDBOX_PROFILE!r} written, deny={len(deny)} "
@@ -1277,7 +1365,8 @@ async def _probe_provider() -> dict:
     problem = _auth_problem(facts, home) or _account_pin_problem(facts)
     if problem:
         return fail(problem, version=version)
-    if not shutil.which("bwrap", path=env.get("PATH")):
+    full = full_access()
+    if not full and not shutil.which("bwrap", path=env.get("PATH")):
         return fail("bubblewrap (bwrap) is required for the Grok sandbox and was not found on PATH",
                     version=version)
     try:
@@ -1290,6 +1379,12 @@ async def _probe_provider() -> dict:
         return fail(f"`grok models` says Grok is not signed in with grok.com ({first})", version=version)
     if not models:
         return fail("`grok models` listed no models", version=version)
+    if full:
+        # No sandbox to prove: the denial probe would read the canary and call that a failure.
+        _sandbox_verdict.update(state="off", detail="GROK_ACCESS=full")
+        _log(f"provider_info: available version={version} models={len(models)} access=full (no sandbox)")
+        return _info(True, True, None, models=models, version=version, warnings=warnings,
+                     sandbox={"profile": "off", "access": "full"})
     state, detail = await _ensure_sandbox_probe(binary, version, info, home)
     _sandbox_verdict.update(state=state, detail=detail)
     if state != "ok":
@@ -1500,12 +1595,20 @@ def _project_rules(cwd: str) -> str | None:
     return text
 
 
-def _instructions(project_name: str, cwd: str, *, multi_agent: bool) -> str:
+def _instructions(project_name: str, cwd: str, *, multi_agent: bool, full: bool = False,
+                  media: str = "") -> str:
     lines = [
         "You are the Grok engine inside Cardloop.",
         f"The selected project is {project_name!r} and its working directory is {cwd!r}.",
         "Follow the project's own rules below when they exist, and do not copy them into another file.",
     ]
+    if full:
+        # Full access: the operator's global rules (credentials, deploy, infra routes) bind this turn as
+        # they bind a Claude or Codex one; the model can read the file, so it is pointed at, not inlined.
+        lines.append("Before taking task actions, read the durable global rules at $HOME/CLAUDE.md completely "
+                     "and follow them in place.")
+    if media:
+        lines.append(media)
     if multi_agent:
         lines.append(
             "Use subagents when independent parallel work materially improves the result, "
@@ -1609,8 +1712,11 @@ def map_tool(name: str, raw_input) -> tuple[str, dict]:
 # isolation tripwire: what the AGENT says it loaded, whatever the reason
 # ------------------------------------------------------------------------------------------
 
-def _isolation_signal(msg: dict) -> str | None:
+def _isolation_signal(msg: dict, *, hooks_granted: bool = False) -> str | None:
     """A reason to refuse the turn when a wire notification reports an MCP server or a hook.
+
+    `hooks_granted` (full access): a hook is no longer foreign there - the guard hook runs before every
+    shell call - so only an MCP server trips it.
 
     v1 grants a Grok turn NO MCP server (session/new sends `mcpServers: []`) and has no hooks, so
     anything of the kind comes from config the engine did not choose: a project's `.mcp.json` /
@@ -1631,7 +1737,7 @@ def _isolation_signal(msg: dict) -> str | None:
             return f"the agent exposes {count} MCP tool(s) — a Grok turn is granted none"
     elif method == "_x.ai/session_notification":
         update = params.get("update") if isinstance(params.get("update"), dict) else {}
-        if update.get("sessionUpdate") == "hook_execution":
+        if update.get("sessionUpdate") == "hook_execution" and not hooks_granted:
             return f"a hook ran in the Grok session ({str(update.get('event_name') or '?')[:60]}) — none is granted"
     elif method == "session/update":
         update = params.get("update") if isinstance(params.get("update"), dict) else {}
@@ -1672,8 +1778,9 @@ class _Acp:
     requests are answered on the spot (never left hanging: an unanswered permission request ends
     the turn as `cancelled`)."""
 
-    def __init__(self, proc: asyncio.subprocess.Process):
+    def __init__(self, proc: asyncio.subprocess.Process, *, hooks_granted: bool = False):
         self.proc = proc
+        self.hooks_granted = hooks_granted
         self.pgid = proc.pid  # start_new_session=True: the leader's pid is the group id
         self._next_id = 0
         self._pending: dict[int, asyncio.Future] = {}
@@ -1768,7 +1875,7 @@ class _Acp:
                 if isinstance(p.get("sessionId"), str) and isinstance(p.get("cancellationCategory"), str):
                     self.cancellation[p["sessionId"]] = p["cancellationCategory"]
             if self.isolation is None:
-                self.isolation = _isolation_signal(msg)
+                self.isolation = _isolation_signal(msg, hooks_granted=self.hooks_granted)
                 if self.isolation:
                     _log(f"isolation tripwire: {self.isolation}")
         except Exception as exc:  # pragma: no cover - defensive
@@ -2180,16 +2287,17 @@ async def run_grok_engine(
     *, project_name: str, cwd: str, prompt: str, session_key: str, model: str | None = None,
     resume_session_id: str | None = None, ctx: dict | None = None, ephemeral: bool = False,
     effort: str | None = None, plan_mode: bool = False, multi_agent: bool = False,
-    chat_id: str | None = None, entrypoint: str = "chat", **_ignored,
+    chat_id: str | None = None, entrypoint: str = "chat", env: dict | None = None, **_ignored,
 ) -> AsyncGenerator[dict, None]:
     """Run one Grok turn and yield Cardloop-normalised events (same schema as run_codex_engine).
 
     `ephemeral` is accepted for signature parity; Grok sessions are always persisted in
-    Cardloop's own GROK_HOME (they are what `resume_session_id` resumes)."""
+    Cardloop's own GROK_HOME (they are what `resume_session_id` resumes). `env` is the project's
+    environment (secrets.env + the cockpit media vars); only a full-access turn hands it down."""
     inner = _run_turn(
         project_name=project_name, cwd=cwd, prompt=prompt, session_key=session_key, model=model,
         resume_session_id=resume_session_id, ctx=ctx, effort=effort, plan_mode=plan_mode,
-        multi_agent=multi_agent, chat_id=chat_id, entrypoint=entrypoint)
+        multi_agent=multi_agent, chat_id=chat_id, entrypoint=entrypoint, project_env=env)
     try:
         async for ev in inner:
             yield ev
@@ -2204,6 +2312,7 @@ async def _run_turn(
     resume_session_id: str | None, ctx: dict | None, effort: str | None = None,
     plan_mode: bool = False, multi_agent: bool = False, chat_id: str | None = None,
     entrypoint: str = "chat", tap: "Callable[[dict], None] | None" = None, _gate: bool = True,
+    project_env: "dict | None" = None,
 ) -> AsyncGenerator[dict, None]:
     if not grok_enabled():
         yield {"type": "error", "exc": GrokUnavailableError("Grok is disabled by GROK_ENABLED=false")}
@@ -2214,7 +2323,8 @@ async def _run_turn(
         yield {"type": "error", "exc": GrokUnavailableError(
             "Grok does not support plan mode (a read-only turn cannot be enforced)")}
         return
-    if _gate and _sandbox_verdict["state"] == "failed":
+    full = full_access()
+    if _gate and not full and _sandbox_verdict["state"] == "failed":
         yield {"type": "error", "exc": GrokUnavailableError(
             f"Grok sandbox check failed — refusing to run: {_sandbox_verdict['detail']}")}
         return
@@ -2249,35 +2359,41 @@ async def _run_turn(
         trust = _trust_store_problem(home)
         if trust:
             raise GrokIsolationError(trust)
-        env = child_env(home, profile=info["profile"])
-        if not shutil.which("bwrap", path=env.get("PATH")):
-            raise GrokUnavailableError("bubblewrap (bwrap) is required for the Grok sandbox and was not found")
-        for entry in info["deny"]:
-            if not _is_glob(entry) and _is_under(cwd, entry):
-                raise GrokUnavailableError(
-                    f"project directory {cwd} is inside the sandbox deny list entry {entry}")
         if _is_under(cwd, str(home)):
             raise GrokUnavailableError(f"project directory {cwd} is inside GROK_HOME ({home})")
-        # The model's shell WRITES its project dir, so the cockpit's data dir or Grok's home may sit inside it
-        # (the cockpit's own checkout, a chat rooted at $HOME) only as REAL directories: MEASURED with the
-        # real CLI, the data dir and `.env` are then unreadable, unwritable and cannot be renamed or removed
-        # (a mount over a directory), and the CLI pins the home's parents. What the model CAN do in its
-        # workspace is re-point a SYMLINK that the cockpit follows — refused.
-        for label, where in (("the cockpit data dir", data_dir(ctx)), ("GROK_HOME", home)):
-            if _reached_through_workspace_symlink(str(where), cwd):
-                raise GrokUnavailableError(
-                    f"project directory {cwd} reaches {label} ({where}) through a symlink the model's shell "
-                    f"could re-point: replace the symlink with the real directory")
-        rules = _instructions(project_name, cwd, multi_agent=multi_agent)
+        if full:
+            # The rights a Claude turn has: no sandbox, so none of the mount checks below apply.
+            env = child_env(home, full=True, extra=adapter_env.with_tools_on_path(project_env))
+        else:
+            env = child_env(home, profile=info["profile"], full=False)
+            if not shutil.which("bwrap", path=env.get("PATH")):
+                raise GrokUnavailableError("bubblewrap (bwrap) is required for the Grok sandbox and was not found")
+            for entry in info["deny"]:
+                if not _is_glob(entry) and _is_under(cwd, entry):
+                    raise GrokUnavailableError(
+                        f"project directory {cwd} is inside the sandbox deny list entry {entry}")
+            # The model's shell WRITES its project dir, so the cockpit's data dir or Grok's home may sit inside
+            # it (the cockpit's own checkout, a chat rooted at $HOME) only as REAL directories: MEASURED with the
+            # real CLI, the data dir and `.env` are then unreadable, unwritable and cannot be renamed or removed
+            # (a mount over a directory), and the CLI pins the home's parents. What the model CAN do in its
+            # workspace is re-point a SYMLINK that the cockpit follows — refused.
+            for label, where in (("the cockpit data dir", data_dir(ctx)), ("GROK_HOME", home)):
+                if _reached_through_workspace_symlink(str(where), cwd):
+                    raise GrokUnavailableError(
+                        f"project directory {cwd} reaches {label} ({where}) through a symlink the model's shell "
+                        f"could re-point: replace the symlink with the real directory")
+        rules = _instructions(project_name, cwd, multi_agent=multi_agent, full=full,
+                              media=adapter_env.media_hint(project_env) if full else "")
         argv = [binary, "agent", "--no-leader", "stdio"]
-        _log(f"spawn {session_key} argv={argv} cwd={cwd} sandbox={info['profile']} "
-             f"deny={len(info['deny'])} resume={'yes' if resume_session_id else 'no'} "
+        _log(f"spawn {session_key} argv={argv} cwd={cwd} "
+             f"sandbox={'off access=full' if full else info['profile']} "
+             f"deny={0 if full else len(info['deny'])} resume={'yes' if resume_session_id else 'no'} "
              f"model={selected_model} effort={selected_effort} env_keys={sorted(env)}"
              + (" exposure=home_rooted" if exposure_notice(cwd) else ""))
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=STREAM_LIMIT)
-        acp = _Acp(proc)
+        acp = _Acp(proc, hooks_granted=full)
         turn._acp = acp
         if ctx is not None:
             ctx.setdefault("running", {})[session_key] = turn

@@ -40,7 +40,7 @@ CLAUDE_CHAT_KEYS = {
 }
 CODEX_CHAT_KEYS = {
     "project_name", "cwd", "prompt", "session_key", "model", "resume_thread_id", "ctx",
-    "ephemeral", "effort", "multi_agent", "plan_mode", "chat_id", "entrypoint",
+    "ephemeral", "effort", "multi_agent", "plan_mode", "chat_id", "entrypoint", "env",
 }
 CLAUDE_CARD_KEYS = {
     "project_name", "cwd", "prompt", "session_key", "model", "resume_session_id", "env",
@@ -48,8 +48,10 @@ CLAUDE_CARD_KEYS = {
 }
 CODEX_CARD_KEYS = {
     "project_name", "cwd", "prompt", "session_key", "model", "resume_thread_id", "ctx",
-    "ephemeral", "effort", "plan_mode", "multi_agent", "entrypoint",
+    "ephemeral", "effort", "plan_mode", "multi_agent", "entrypoint", "env",
 }
+# The project's secrets.env as `_secrets_read` returns it: it reaches every engine, adapters included.
+PROJECT_SECRETS = {"PROJECT_TOKEN": "tok-1"}
 
 
 # ─────────────────────────── fixtures ─────────────────────────────────────────
@@ -204,7 +206,7 @@ async def test_queue_drain_kwargs_and_writeback(fake_ctx, codex_on, provider):
     _install_engines(fake_ctx, case, calls)
 
     with patch.object(_webapp, "_spawn_bg", side_effect=lambda coro: asyncio.ensure_future(coro)), \
-         patch.object(_webapp, "_secrets_read", return_value={}), \
+         patch.object(_webapp, "_secrets_read", return_value=PROJECT_SECRETS), \
          patch.object(_webapp, "_build_agents_kwargs", return_value={}):
         assert await _webapp._chat_queue_drain_one(fake_ctx, SESSION_KEY) is True
         await asyncio.sleep(0.05)
@@ -220,6 +222,7 @@ async def test_queue_drain_kwargs_and_writeback(fake_ctx, codex_on, provider):
     assert kw["project_name"] == "myproject" and kw["session_key"] == SESSION_KEY
     assert kw["plan_mode"] is False
     assert kw["prompt"].startswith("handoff-text\n\n") and kw["prompt"].endswith("do the thing")
+    assert kw["env"]["PROJECT_TOKEN"] == "tok-1", "the project's env reaches every engine"
     if provider == "codex":
         assert kw["multi_agent"] is False and kw["entrypoint"] == "chat"
     else:
@@ -273,7 +276,7 @@ async def test_chat_post_kwargs_writeback_and_result_frame(
     _install_engines(fake_ctx, case, calls)
     client = await aiohttp_client(app)
     with patch.object(_webapp, "_build_agents_kwargs", return_value={}), \
-         patch.object(_webapp, "_secrets_read", return_value={}):
+         patch.object(_webapp, "_secrets_read", return_value=PROJECT_SECRETS):
         resp = await client.post(f"/api/projects/{PROJECT_ID}/chat",
                                  json={"prompt": "hello", "chat_id": CHAT_ID},
                                  headers=_auth(fake_ctx))
@@ -289,6 +292,7 @@ async def test_chat_post_kwargs_writeback_and_result_frame(
     assert kw["ephemeral"] is False and kw["chat_id"] == CHAT_ID
     assert kw["plan_mode"] is False
     assert kw["prompt"].endswith("hello") and "handoff-text" in kw["prompt"]
+    assert kw["env"]["PROJECT_TOKEN"] == "tok-1", "the project's env reaches every engine"
     if provider == "codex":
         assert kw["multi_agent"] is False and kw["entrypoint"] == "chat"
     else:
@@ -360,7 +364,7 @@ async def _run_card_with(fake_ctx, tmp_path, *, project_extra=None, card_extra=N
     fake_ctx["sessions"][SESSION_KEY] = "shared-chat-session"
     fake_ctx["running"][SESSION_KEY] = True
     with patch.object(_webapp, "_build_agents_kwargs", return_value={}), \
-         patch.object(_webapp, "_secrets_read", return_value={}):
+         patch.object(_webapp, "_secrets_read", return_value=PROJECT_SECRETS):
         await _webapp._run_card(fake_ctx, None, project, card, SESSION_KEY, run_mode="legacy")
     return calls
 
@@ -374,7 +378,7 @@ async def test_card_default_runs_on_claude_with_exact_kwargs(fake_ctx, tmp_path)
     assert kw["ephemeral"] is True and kw["entrypoint"] == "card"
     assert kw["resume_session_id"] is None
     assert kw["model"] == _webapp._effective_card_model({"id": "aabbcc"})
-    assert kw["env"]["CARDLOOP_RUN_MODE"] == "card"
+    assert kw["env"]["CARDLOOP_RUN_MODE"] == "card" and kw["env"]["PROJECT_TOKEN"] == "tok-1"
     assert kw["ctx"] is fake_ctx and kw["backend"] == ""
     assert fake_ctx["sessions"][SESSION_KEY] == "shared-chat-session", "cards never write sessions"
 
@@ -396,6 +400,7 @@ async def test_card_codex_runs_on_codex_with_exact_kwargs(fake_ctx, tmp_path, ho
     assert kw["resume_thread_id"] is None and kw["ephemeral"] is True
     assert kw["entrypoint"] == "card"
     assert kw["effort"] is None and kw["plan_mode"] is False and kw["multi_agent"] is False
+    assert kw["env"]["CARDLOOP_RUN_MODE"] == "card" and kw["env"]["PROJECT_TOKEN"] == "tok-1"
     assert fake_ctx["sessions"][SESSION_KEY] == "shared-chat-session"
 
 

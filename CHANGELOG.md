@@ -7,6 +7,16 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Added — Grok full access (`GROK_ACCESS=full`) and the project env for every engine
+- `GROK_ACCESS=full` gives a Grok turn the rights a Claude turn has: no sandbox (secret safe, `~/.ssh`, git push,
+  `sudo`, writes anywhere), the cockpit's environment plus the project's `secrets.env`, `$HOME/CLAUDE.md` as rules.
+  Before every shell call one command hook, `tools/grok_guard_hook.py`, runs the Bash deny list (same verdict and
+  audit line as a Claude turn) and then the operator's Claude `PreToolUse` hooks from the settings a Claude turn
+  loads. The isolated sandbox stays the default and the rollback. `make doctor` reports `Grok access`.
+- Codex and Grok turns now receive the project's environment (`secrets.env`, `COPS_PROJECT_ID`, `COPS_MEDIA_DIR`,
+  `tools/` on `PATH` + the `cockpit-img` / `cockpit-file` hint) at all three run sites, as Claude turns always did.
+  Provider API keys (`XAI_API_KEY`, `OPENAI_API_KEY`, `CODEX_API_KEY`) are never forwarded.
+
 ### Added — policy rules in Markdown (`docs/RULES.md`)
 - Declarative `block` / `warn` rules in `*.md` files (project `.claude-ops/rules/`, global `~/.claude-ops/rules/`
   or `$CARDLOOP_RULES_DIR`, plus pack directories), evaluated by one PreToolUse hook before every tool call of a

@@ -1793,17 +1793,7 @@ async def _bundle_grep_guard_hook(
 def _compile_extra_deny_patterns() -> "list[re.Pattern]":
     """DENY_COMMANDS_EXTRA: operator-supplied regexes (comma or newline separated), each matched
     against the full command. An invalid regex is skipped, never crashes startup."""
-    raw = os.environ.get("DENY_COMMANDS_EXTRA", "")
-    patterns: "list[re.Pattern]" = []
-    for line in re.split(r"[\n,]", raw):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            patterns.append(re.compile(line))
-        except re.error:
-            continue
-    return patterns
+    return _command_guard.compile_extra_patterns(os.environ.get("DENY_COMMANDS_EXTRA", ""))
 
 
 _DENY_COMMAND_PATTERNS_EXTRA = _compile_extra_deny_patterns()
@@ -1814,18 +1804,7 @@ def _classify_dangerous_command_rule(command: str) -> "tuple[str, str] | None":
     the hard-coded deny shapes (or an operator DENY_COMMANDS_EXTRA pattern), None if the command
     is fine. Never raises. Unit-tested directly (tests/test_deny_commands.py,
     tests/test_command_guard.py)."""
-    try:
-        found = _command_guard.classify_command(command)
-        if found is not None:
-            return found.rule, found.reason
-        if isinstance(command, str):
-            for extra in _DENY_COMMAND_PATTERNS_EXTRA:
-                if extra.search(command):
-                    return ("extra-pattern",
-                            f"blocked by an operator-defined DENY_COMMANDS_EXTRA pattern ({extra.pattern!r})")
-    except Exception:
-        return None
-    return None
+    return _command_guard.deny_verdict(command, _DENY_COMMAND_PATTERNS_EXTRA)
 
 
 def _classify_dangerous_command(command: str) -> "str | None":

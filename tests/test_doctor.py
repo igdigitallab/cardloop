@@ -2739,3 +2739,68 @@ def test_many_active_items_are_summarised(box):
     _opt_in(box, "alpha")
     f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
     assert "srv0" in f.value and "srv3" in f.value and "srv4" not in f.value and "(+2 more)" in f.value
+
+
+# ─────────────────────────── Grok full access (GROK_ACCESS=full) ─────────────────
+
+def _full(box):
+    """GROK_ACCESS=full in both the env doctor is handed and the process env the engine helpers read,
+    with the guard hook script present in the (scratch) repo the engine points at."""
+    box.env["GROK_ACCESS"] = "full"
+    box.mp.setenv("GROK_ACCESS", "full")
+    tools = box.engine_repo / "tools"
+    tools.mkdir(exist_ok=True)
+    script = tools / "grok_guard_hook.py"
+    script.write_text("#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+    return script
+
+
+def test_full_access_replaces_the_sandbox_facts_with_one_access_fact(box):
+    _full(box)
+    box.ensure_home()
+    facts = box.probe(proc_root=box.tmp / "noproc")
+    f = facts["Grok access"]
+    assert f.level == "ok" and "no sandbox" in f.value and "hook wired" in f.value, f
+    assert not [k for k in facts if k.startswith("Grok sandbox")]
+
+
+def test_full_access_before_the_first_turn_is_info(box):
+    _full(box)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok access"]
+    assert f.level == "info" and "not generated yet" in f.value
+
+
+def test_full_access_with_the_isolated_config_on_disk_warns_that_the_guard_is_not_wired(box):
+    box.ensure_home()                     # written while still isolated
+    _full(box)
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok access"]
+    assert f.level == "warn" and "guard hook is not wired" in f.value
+
+
+def test_full_access_without_the_hook_script_fails(box):
+    script = _full(box)
+    box.ensure_home()
+    script.unlink()
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok access"]
+    assert f.level == "fail" and "grok_guard_hook.py" in f.value
+
+
+def test_full_access_compat_is_as_strict_as_isolated(box):
+    """Full access runs the operator's Claude hooks through the guard hook script, never through Grok's own
+    Claude import (it silently skips a quoted hook command), so a Claude surface switched on is still wrong."""
+    _full(box)
+    assert compat(box).level == "ok"
+    cells = [{"vendor": "claude", "surface": "hooks", "enabled": True, "source": "env"}]
+    assert compat(box, doc=doc_with(box, externalCompat={"cells": cells})).level == "warn"
+    assert compat(box, doc=doc_with(box, hooks=[{"event": "pre_tool_use", "vendor": "claude"}])).level == "warn"
+    assert compat(box, doc=doc_with(box, mcpServers=[{"name": "mail"}])).level == "fail"
+
+
+def test_full_access_skips_the_per_project_inspect(box):
+    _full(box)
+    _fake(box)
+    _topics(box, {"k": {"project": "P", "cwd": str(_project(box, "p")), "board_provider": "grok"}})
+    f = box.probe(proc_root=box.tmp / "noproc")[LABEL]
+    assert f.level == "info" and "not checked under full access" in f.value
+    assert _proj_calls(box) == []

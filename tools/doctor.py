@@ -1161,8 +1161,31 @@ def _grok_auth(g: _Grok, secrets_out: "list | None") -> "list[Fact]":
     return [Fact("Grok auth", f"signed in{who} (oidc), coding-data retention opt-out: yes, account pinned")]
 
 
+def _grok_access(g: _Grok) -> "list[Fact]":
+    """GROK_ACCESS=full: no sandbox to judge. What matters instead is that the guards of a Claude Bash call
+    reach the turn: the guard hook in the Grok home's config.toml and the script it runs."""
+    ge = g.ge
+    name = "Grok access"
+    head = "full (GROK_ACCESS=full): no sandbox, the rights a Claude turn has"
+    script = ge._REPO / "tools" / "grok_guard_hook.py"
+    if not script.is_file():
+        return [Fact(name, f"{head}; the guard hook script {script} is missing", level="fail",
+                     remedy="restore tools/grok_guard_hook.py (git checkout) — until then neither the Bash deny list "
+                            "nor your Claude PreToolUse hooks run before a Grok shell call")]
+    cfg = g.home / "config.toml"
+    if not cfg.is_file():
+        return [Fact(name, f"{head}; {cfg} not generated yet (the next Grok turn writes it)", level="info")]
+    if not ge._config_ok(cfg, True, ge._guard_hook_command(g.ctx)):
+        return [Fact(name, f"{head}; config.toml is not the full-access one yet (the guard hook is not wired)",
+                     level="warn", remedy="the next Grok turn rewrites it (grok_engine.ensure_home); a turn that runs "
+                                          "before that has no guards")]
+    return [Fact(name, f"{head}; guard hook wired (the Bash deny list + your Claude PreToolUse hooks)")]
+
+
 def _grok_sandbox(g: _Grok) -> "list[Fact]":
     ge = g.ge
+    if ge.full_access():
+        return _grok_access(g)
     facts: "list[Fact]" = []
 
     bwrap = shutil.which("bwrap", path=g.env.get("PATH"))
@@ -1491,6 +1514,10 @@ def _grok_compat_projects(g: _Grok) -> "list[Fact]":
         return []
     if not projects:
         return [Fact(name, "no project uses Grok yet — nothing to check", level="info")]
+    if ge.full_access():
+        return [Fact(name, "not checked under full access: there is no sandbox profile to inspect a project under "
+                           "(an MCP server a project brings still refuses the turn: the engine's tripwire)",
+                     level="info")]
     if not g.binary or not g.version:
         return [Fact(name, "not checked (no usable Grok CLI)", level="info")]
     try:

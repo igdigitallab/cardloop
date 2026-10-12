@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import AsyncGenerator, Iterable
 
+import adapter_env
+
 
 PROVIDER = "codex"
 DEFAULT_CODEX_MODEL = os.getenv("CODEX_MODEL", "gpt-5.6-sol")
@@ -50,6 +52,26 @@ def _sdk():
         return AsyncCodex, ApprovalMode, Sandbox
     except Exception as exc:  # pragma: no cover - exercised in deployment failures
         raise CodexUnavailableError(f"Codex SDK is unavailable: {exc}") from exc
+
+
+# Names a Codex child never inherits from a project's env: a key there must not switch a subscription
+# turn to API billing (the account check would refuse the turn instead - still a lost turn).
+_ENV_DROP_NAMES = ("OPENAI_API_KEY", "CODEX_API_KEY")
+# The Codex shell drops *KEY*/*SECRET*/*TOKEN* names by default; a Claude turn's shell sees the
+# project's secrets.env in full, so a Codex turn does too (the cockpit's own secrets are already out of
+# os.environ: runtime_secrets).
+_SHELL_ENV_OVERRIDES = ("shell_environment_policy.ignore_default_excludes=true",)
+
+
+def _codex_config(env: "dict | None"):
+    """A CodexConfig carrying the project's env (merged over os.environ by the SDK), or None when
+    there is none - then the SDK's default client is used, unchanged."""
+    if not env:
+        return None
+    from openai_codex import CodexConfig
+    merged = {k: v for k, v in adapter_env.with_tools_on_path(env).items()
+              if isinstance(v, str) and k not in _ENV_DROP_NAMES}
+    return CodexConfig(env=merged, config_overrides=_SHELL_ENV_OVERRIDES)
 
 
 def _account_auth(account_response) -> tuple[bool, str | None, str | None]:
@@ -165,7 +187,8 @@ def _capabilities() -> dict:
     }
 
 
-def _developer_instructions(project_name: str, cwd: str, *, plan_mode: bool, multi_agent: bool) -> str:
+def _developer_instructions(project_name: str, cwd: str, *, plan_mode: bool, multi_agent: bool,
+                            media: str = "") -> str:
     instructions = [
         "You are the Codex engine inside Cardloop.",
         "Before taking task actions, read the durable global rules at $HOME/CLAUDE.md completely.",
@@ -182,6 +205,8 @@ def _developer_instructions(project_name: str, cwd: str, *, plan_mode: bool, mul
         instructions.append(
             "Use native Codex subagents when independent parallel work materially improves the result, and synthesize their findings."
         )
+    if media:
+        instructions.append(media)
     return "\n".join(instructions)
 
 
@@ -398,9 +423,10 @@ async def run_codex_engine(
     *, project_name: str, cwd: str, prompt: str, session_key: str, model: str | None = None,
     resume_thread_id: str | None = None, ctx: dict | None = None, ephemeral: bool = False,
     effort: str | None = None, plan_mode: bool = False, multi_agent: bool = False,
-    chat_id: str | None = None, entrypoint: str = "chat", **_ignored,
+    chat_id: str | None = None, entrypoint: str = "chat", env: dict | None = None, **_ignored,
 ) -> AsyncGenerator[dict, None]:
-    """Run one Codex turn and yield Cardloop-normalized events."""
+    """Run one Codex turn and yield Cardloop-normalized events. `env` is the project's environment
+    (secrets.env + the cockpit media vars), handed to the Codex process as a Claude turn gets it."""
     if not codex_enabled():
         yield {"type": "error", "exc": CodexUnavailableError("Codex is disabled by CODEX_ENABLED=false")}
         return
@@ -409,9 +435,10 @@ async def run_codex_engine(
     selected_effort = effort if effort in CODEX_REASONING_LEVELS else None
     sandbox = Sandbox.read_only if plan_mode else Sandbox.full_access
     developer_instructions = _developer_instructions(
-        project_name, cwd, plan_mode=plan_mode, multi_agent=multi_agent,
+        project_name, cwd, plan_mode=plan_mode, multi_agent=multi_agent, media=adapter_env.media_hint(env),
     )
-    codex = AsyncCodex()
+    config = _codex_config(env)
+    codex = AsyncCodex(config) if config is not None else AsyncCodex()
     turn = None
     try:
         await codex.__aenter__()

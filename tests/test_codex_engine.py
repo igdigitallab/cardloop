@@ -1,6 +1,7 @@
 """Contract tests for the isolated Codex provider adapter."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -210,3 +211,52 @@ async def test_provider_info_adds_configured_models_missing_from_live_registry(m
 
     assert [model["value"] for model in info["models"]] == ["gpt-listed", "gpt-6-astra"]
     assert info["models"][1]["reasoning_levels"] == list(codex_engine.CODEX_REASONING_LEVELS)
+
+
+class _FakeCodexWithConfig(_FakeCodex):
+    configs = []
+
+    def __init__(self, config=None):
+        super().__init__()
+        self.__class__.configs.append(config)
+
+
+@pytest.mark.asyncio
+async def test_the_project_env_reaches_the_codex_process_and_its_shell(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_ENABLED", "true")
+    _FakeCodexWithConfig.instances.clear()
+    _FakeCodexWithConfig.configs.clear()
+    _FakeCodexWithConfig.notifications = _adapter_notifications()
+    monkeypatch.setattr(
+        codex_engine, "_sdk",
+        lambda: (_FakeCodexWithConfig, SimpleNamespace(deny_all="deny_all"),
+                 SimpleNamespace(full_access="full", read_only="read")),
+    )
+    ctx = {"running": {}, "DATA": tmp_path}
+    env = {"TELEGRAM_BOT_TOKEN": "tg-tok", "OPENAI_API_KEY": "sk-proj", "COPS_MEDIA_DIR": str(tmp_path / "m")}
+    events = [e async for e in codex_engine.run_codex_engine(
+        project_name="demo", cwd=str(tmp_path), prompt="go", session_key="chat:demo", ctx=ctx, env=env)]
+    assert events[-1]["type"] == "result"
+    (config,) = _FakeCodexWithConfig.configs
+    assert config.env["TELEGRAM_BOT_TOKEN"] == "tg-tok"
+    assert "OPENAI_API_KEY" not in config.env            # never a reason to bill an API key
+    assert config.env["PATH"].split(os.pathsep)[0] == codex_engine.adapter_env.TOOLS_DIR
+    assert "shell_environment_policy.ignore_default_excludes=true" in config.config_overrides
+    assert "cockpit-img" in _FakeCodexWithConfig.instances[-1].started["developer_instructions"]
+
+
+@pytest.mark.asyncio
+async def test_without_a_project_env_the_default_client_is_used(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_ENABLED", "true")
+    _FakeCodexWithConfig.configs.clear()
+    _FakeCodexWithConfig.notifications = _adapter_notifications()
+    monkeypatch.setattr(
+        codex_engine, "_sdk",
+        lambda: (_FakeCodexWithConfig, SimpleNamespace(deny_all="deny_all"),
+                 SimpleNamespace(full_access="full", read_only="read")),
+    )
+    for env in (None, {}):       # no project env, or an empty one (a project without secrets.env)
+        [e async for e in codex_engine.run_codex_engine(
+            project_name="demo", cwd=str(tmp_path), prompt="go", session_key="chat:demo",
+            ctx={"running": {}, "DATA": tmp_path}, env=env)]
+    assert _FakeCodexWithConfig.configs == [None, None]
