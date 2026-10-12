@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import fnmatch
 import hashlib
 import json
 import os
@@ -76,6 +77,7 @@ STDERR_RING_BYTES = 4096
 RULES_MAX_BYTES = 24 * 1024
 REGISTRY_MAX_BYTES = 8 * 1024 * 1024   # topics.json (the project registry) is read for the secret-store deny entries
 PROJECT_DENY_MAX = 256                 # registered projects whose secret stores are listed (a bwrap argv is finite)
+STORE_WALK_MAX = 2000                  # entries looked at per secret store when deciding whether to split it
 AUTH_MAX_BYTES = 256 * 1024    # a real auth.json is < 4 KiB; the model's shell can write the file, so it is capped
 LIMIT_ERROR_MAX_CHARS = 8000
 
@@ -257,7 +259,8 @@ def _canary_dir(ctx: dict | None = None) -> Path:
 # child environment (D3)
 # ------------------------------------------------------------------------------------------
 
-def child_env(home: Path, *, sandbox: bool = True, parent: "dict | None" = None) -> dict[str, str]:
+def child_env(home: Path, *, sandbox: bool = True, parent: "dict | None" = None,
+              profile: str = SANDBOX_PROFILE) -> dict[str, str]:
     """The complete environment of a Grok child: allowlisted parent vars + the D3 block."""
     src = os.environ if parent is None else parent
     env: dict[str, str] = {}
@@ -273,7 +276,7 @@ def child_env(home: Path, *, sandbox: bool = True, parent: "dict | None" = None)
     env.update(D3_ENV)
     env["GROK_HOME"] = str(home)
     if sandbox:
-        env["GROK_SANDBOX"] = SANDBOX_PROFILE
+        env["GROK_SANDBOX"] = profile
     return env
 
 
@@ -571,6 +574,81 @@ def _prune_nested(deny: list[str]) -> list[str]:
     return kept
 
 
+# Workspaces whose turns run under a profile of their own (`_workspace_deny`): profile name -> real cwd. Never
+# shrinks within a process — the CLI reads sandbox.toml at ITS startup, after the spawn has returned, so another
+# writer (the availability probe, a turn in a different project) must keep every variant a starting turn may name.
+_workspace_profiles: dict[str, str] = {}
+
+
+def _workspace_globs(deny: list[str]) -> list[str]:
+    """The name patterns of the `**/<name>` entries: the CLI expands them inside the workspace only."""
+    return [e[3:] for e in deny if e.startswith("**/") and "/" not in e[3:] and e[3:]]
+
+
+def _holds_glob_match(path: str, patterns: list[str]) -> bool:
+    """A name under `path` (links not followed) matches one of the patterns. Past STORE_WALK_MAX entries the answer
+    is no: the store stays one entry, and if it does hold a match the CLI refuses to start — closed, as before."""
+    seen = 0
+    for _root, dirs, files in os.walk(path, followlinks=False):
+        for name in dirs + files:
+            seen += 1
+            if seen > STORE_WALK_MAX:
+                return False
+            if any(fnmatch.fnmatchcase(name, p) for p in patterns):
+                return True
+    return False
+
+
+_UNSAFE_NAME_RE = re.compile(r"[\x00-\x1f\x7f*?\[\]{}\\]")
+
+
+def _split_store(path: str, patterns: list[str]) -> list[str]:
+    """`path`'s entries, one deny entry each, descending into the subdirectories that hold a match. A link is left
+    out: the store is in the model-writable workspace, and build_deny would follow a link to wherever it points.
+    A name the CLI would read as a glob (or one sandbox.toml cannot hold) keeps `path` whole: listed, it could stop
+    the CLI or the profile write for EVERY workspace, while a whole store only fails this one, as before."""
+    out: list[str] = []
+    try:
+        children = sorted(os.scandir(path), key=lambda d: d.name)
+    except OSError:
+        return [path]
+    if any(_UNSAFE_NAME_RE.search(child.name) for child in children):
+        return [path]
+    for child in children:
+        if child.is_symlink():
+            continue
+        if child.is_dir() and _holds_glob_match(child.path, patterns):
+            out.extend(_split_store(child.path, patterns))
+        else:
+            out.append(child.path)
+    return out
+
+
+def _workspace_deny(deny: list[str], cwd: str, stores: list[str]) -> list[str]:
+    """The deny list for a turn rooted at `cwd`.
+
+    MEASURED with the real CLI (2026-10-12): a project secret-store DIRECTORY on the list, inside the workspace, with
+    a file in it that a `**/` glob also matches (`.claude-ops/secrets/secrets.env`) — bwrap binds the directory, then
+    cannot create the glob match's mount point inside it ("Can't create file ...: Read-only file system") and the CLI
+    exits 1 before the handshake: every turn of that project, or of a chat rooted above it, failed. A literal FILE
+    entry that a glob matches as well starts fine, so inside the workspace such a store is listed entry by entry.
+    Outside the workspace the globs do not expand and the store stays one directory entry (a mount over a file is
+    detached when the owner renames a new file over it — see `_project_secret_paths`)."""
+    patterns = _workspace_globs(deny)
+    if not patterns:
+        return deny
+    root = os.path.realpath(cwd)
+    out: list[str] = []
+    for entry in deny:
+        if (entry in stores and os.path.isdir(entry) and not os.path.islink(entry)
+                and os.path.realpath(entry) != root and _is_under(entry, root)
+                and _holds_glob_match(entry, patterns)):
+            out.extend(_split_store(entry, patterns))
+        else:
+            out.append(entry)
+    return out
+
+
 def _atomic_write(path: Path, text: str, mode: int = 0o600) -> bool:
     """Write `text` to `path` unless it already holds exactly that. True if rewritten. An unchanged file
     is still tightened to `mode`: skipping the write must not leave a pre-existing 0644 file readable."""
@@ -584,15 +662,12 @@ def _atomic_write(path: Path, text: str, mode: int = 0o600) -> bool:
     return True
 
 
-def _sandbox_toml(deny: list[str]) -> str:
-    lines = [
-        "# Generated by Cardloop (grok_engine.ensure_home) on every turn — edits are overwritten.",
-        f"[profiles.{SANDBOX_PROFILE}]",
-        'extends = "workspace"',
-        "deny = [",
-    ]
-    lines.extend(f"  {_toml_str(e)}," for e in deny)
-    lines.append("]")
+def _sandbox_toml(deny: list[str], variants: "dict[str, list[str]] | None" = None) -> str:
+    lines = ["# Generated by Cardloop (grok_engine.ensure_home) on every turn — edits are overwritten."]
+    for name, entries in [(SANDBOX_PROFILE, deny), *sorted((variants or {}).items())]:
+        lines += [f"[profiles.{name}]", 'extends = "workspace"', "deny = ["]
+        lines.extend(f"  {_toml_str(e)}," for e in entries)
+        lines.append("]")
     return "\n".join(lines) + "\n"
 
 
@@ -642,8 +717,11 @@ def _config_ok(path: Path) -> bool:
             and not any(k in cfg for k in _CONFIG_FORBIDDEN))
 
 
-def ensure_home(ctx: dict | None = None, *, bin_path: str | None = None) -> dict:
-    """Create/refresh Cardloop's Grok home. Returns {home, profile, deny, skipped}.
+def ensure_home(ctx: dict | None = None, *, bin_path: str | None = None, cwd: str | None = None) -> dict:
+    """Create/refresh Cardloop's Grok home. Returns {home, profile, deny, skipped, project_deny}.
+
+    `profile` is the one a turn rooted at `cwd` must run under: the shared `cardloop`, or a variant whose deny list
+    splits a secret store inside that workspace (`_workspace_deny`). `deny` is always the shared list.
 
     A symlinked GROK_HOME is refused (Grok itself refuses to apply a sandbox over one, and it
     would let a retarget redirect where login and sessions land).
@@ -669,7 +747,14 @@ def ensure_home(ctx: dict | None = None, *, bin_path: str | None = None) -> dict
         secret.write_text("CANARY-" + uuid.uuid4().hex, encoding="utf-8")
         os.chmod(secret, 0o600)
     deny, skipped = build_deny(home, ctx, bin_path=bin_path)
-    rewrote = _atomic_write(home / "sandbox.toml", _sandbox_toml(deny))
+    stores = _project_secret_paths(ctx)
+    profile = SANDBOX_PROFILE
+    if cwd is not None and _workspace_deny(deny, cwd, stores) != deny:
+        root = os.path.realpath(cwd)
+        profile = f"{SANDBOX_PROFILE}-{hashlib.sha256(root.encode()).hexdigest()[:12]}"
+        _workspace_profiles[profile] = root
+    variants = {name: _workspace_deny(deny, root, stores) for name, root in _workspace_profiles.items()}
+    rewrote = _atomic_write(home / "sandbox.toml", _sandbox_toml(deny, variants))
     if not _config_ok(home / "config.toml"):
         _atomic_write(home / "config.toml", _config_toml(), 0o600)
         rewrote = True
@@ -679,8 +764,8 @@ def ensure_home(ctx: dict | None = None, *, bin_path: str | None = None) -> dict
     sweep_foreign_layers(home)
     # the entries that follow the project registry (and the model-writable project dirs): not part of the
     # probe's fingerprint, or every `.env` created in any project would cost a model turn and could flap the row
-    project_deny = [e for e in _project_secret_paths(ctx) if e in deny]
-    return {"home": home, "profile": SANDBOX_PROFILE, "deny": deny, "skipped": skipped,
+    project_deny = [e for e in stores if e in deny]
+    return {"home": home, "profile": profile, "deny": deny, "skipped": skipped,
             "project_deny": project_deny}
 
 
@@ -1063,6 +1148,7 @@ def mark_unavailable(reason: str) -> None:
 def reset_cache() -> None:
     _registry_cache.update(ts=0.0, data=None)
     _sandbox_verdict.update(state="unknown", detail="")
+    _workspace_profiles.clear()
 
 
 _VERSION_RE = re.compile(r"^grok\s+(\d+\.\d+\.\d+)\b")
@@ -2154,7 +2240,7 @@ async def _run_turn(
         binary = grok_bin()
         if not binary:
             raise GrokUnavailableError("Grok CLI not found (GROK_BIN / PATH / ~/.grok/bin)")
-        info = ensure_home(ctx, bin_path=binary)
+        info = ensure_home(ctx, bin_path=binary, cwd=cwd)
         home = info["home"]
         facts = read_auth_facts(home)
         problem = _auth_problem(facts, home, ctx) or _account_pin_problem(facts, ctx)
@@ -2163,7 +2249,7 @@ async def _run_turn(
         trust = _trust_store_problem(home)
         if trust:
             raise GrokIsolationError(trust)
-        env = child_env(home)
+        env = child_env(home, profile=info["profile"])
         if not shutil.which("bwrap", path=env.get("PATH")):
             raise GrokUnavailableError("bubblewrap (bwrap) is required for the Grok sandbox and was not found")
         for entry in info["deny"]:
@@ -2184,7 +2270,7 @@ async def _run_turn(
                     f"could re-point: replace the symlink with the real directory")
         rules = _instructions(project_name, cwd, multi_agent=multi_agent)
         argv = [binary, "agent", "--no-leader", "stdio"]
-        _log(f"spawn {session_key} argv={argv} cwd={cwd} sandbox={SANDBOX_PROFILE} "
+        _log(f"spawn {session_key} argv={argv} cwd={cwd} sandbox={info['profile']} "
              f"deny={len(info['deny'])} resume={'yes' if resume_session_id else 'no'} "
              f"model={selected_model} effort={selected_effort} env_keys={sorted(env)}"
              + (" exposure=home_rooted" if exposure_notice(cwd) else ""))

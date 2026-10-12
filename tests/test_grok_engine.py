@@ -2834,6 +2834,113 @@ async def test_a_project_still_runs_with_its_own_secret_stores_on_the_deny_list(
     assert str(env.cwd / ".claude-ops" / "secrets") in grok_engine.ensure_home(env.ctx)["deny"]
 
 
+def _profiles(env) -> dict:
+    return tomllib.loads((env.home / "sandbox.toml").read_text())["profiles"]
+
+
+def _store(d: Path, *files: str) -> Path:
+    s = d / ".claude-ops" / "secrets"
+    s.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        (s / f).parent.mkdir(parents=True, exist_ok=True)
+        (s / f).write_text("K=v")
+    return s
+
+
+def test_a_store_holding_a_glob_match_inside_the_workspace_is_split_in_a_profile_of_its_own(env, monkeypatch):
+    # MEASURED with the real CLI (vk chat, 2026-10-12): the directory entry for the turn's OWN store plus the CLI's
+    # `**/secrets.env` match inside it made bwrap exit 1 before the handshake ("Can't create file
+    # .../.claude-ops/secrets/secrets.env: Read-only file system") — every turn of that project failed. A literal file
+    # entry that the glob also matches starts fine, so inside the workspace the store is listed file by file.
+    monkeypatch.setenv("GROK_SANDBOX_DENY", f"{env.secret_dir},**/secrets.env")
+    other = env.tmp / "proj-b"
+    mine = _store(env.cwd, "secrets.env", "notes.txt", "sub/deep.txt", "inner/secrets.env", "inner/keep.txt")
+    theirs = _store(other, "secrets.env")
+    _register_projects(env, A=env.cwd, B=other)
+    info = grok_engine.ensure_home(env.ctx, cwd=str(env.cwd))
+    assert info["profile"] != grok_engine.SANDBOX_PROFILE
+    profiles = _profiles(env)
+    base, variant = profiles[grok_engine.SANDBOX_PROFILE]["deny"], profiles[info["profile"]]["deny"]
+    assert str(mine) in base and str(theirs) in base                    # every other workspace: unchanged
+    assert info["deny"] == base
+    assert str(mine) not in variant
+    assert {str(mine / "secrets.env"), str(mine / "notes.txt"), str(mine / "sub")} <= set(variant)
+    assert str(mine / "inner") not in variant                           # a subdirectory holding a match is split too
+    assert {str(mine / "inner" / "secrets.env"), str(mine / "inner" / "keep.txt")} <= set(variant)
+    assert str(theirs) in variant                                       # a store outside this workspace stays whole
+    assert "**/secrets.env" in variant
+    # a workspace with no such conflict keeps the shared profile
+    plain = env.tmp / "proj-c"
+    plain.mkdir()
+    assert grok_engine.ensure_home(env.ctx, cwd=str(plain))["profile"] == grok_engine.SANDBOX_PROFILE
+
+
+def test_a_store_without_a_glob_match_stays_one_directory_entry(env, monkeypatch):
+    monkeypatch.setenv("GROK_SANDBOX_DENY", f"{env.secret_dir},**/secrets.env")
+    _store(env.cwd, "tax-returns.pdf")
+    _register_projects(env, A=env.cwd)
+    assert grok_engine.ensure_home(env.ctx, cwd=str(env.cwd))["profile"] == grok_engine.SANDBOX_PROFILE
+
+
+def test_a_parent_rooted_chat_splits_every_store_below_it(env, monkeypatch):
+    monkeypatch.setenv("GROK_SANDBOX_DENY", f"{env.secret_dir},**/secrets.env")
+    parent = env.tmp / "projects"
+    a, b = parent / "a", parent / "b"
+    sa, sb = _store(a, "secrets.env"), _store(b, "only-a-doc.txt")
+    parent.mkdir(exist_ok=True)
+    _register_projects(env, A=a, B=b)
+    info = grok_engine.ensure_home(env.ctx, cwd=str(parent))
+    variant = _profiles(env)[info["profile"]]["deny"]
+    assert str(sa) not in variant and str(sa / "secrets.env") in variant
+    assert str(sb) in variant                                            # no match inside: one entry, as before
+
+
+def test_a_symlink_planted_in_a_split_store_is_not_followed(env, monkeypatch):
+    # the store sits in the model-writable workspace: a link in it must not become a deny entry (build_deny resolves
+    # links, and a link to $HOME there would refuse every later turn)
+    monkeypatch.setenv("GROK_SANDBOX_DENY", f"{env.secret_dir},**/secrets.env")
+    mine = _store(env.cwd, "secrets.env")
+    (mine / "home").symlink_to(env.fake_home)
+    _register_projects(env, A=env.cwd)
+    info = grok_engine.ensure_home(env.ctx, cwd=str(env.cwd))
+    variant = _profiles(env)[info["profile"]]["deny"]
+    assert not any(e.startswith(str(mine / "home")) for e in variant) and str(env.fake_home) not in variant
+
+
+@pytest.mark.parametrize("name", ["a*b", "x\ny", "brace{1}", "back\\slash"])
+def test_a_name_the_cli_would_read_as_a_glob_or_cannot_hold_keeps_the_store_whole(env, monkeypatch, name):
+    # The model writes these names in its own workspace. Listed as an entry, `*`/`{}`/`\\` become a glob the CLI may
+    # refuse to start on and a control character makes the profile unwritable — for EVERY workspace, since all
+    # variants share sandbox.toml. Kept as one directory entry, the failure stays in this workspace.
+    monkeypatch.setenv("GROK_SANDBOX_DENY", f"{env.secret_dir},**/secrets.env")
+    mine = _store(env.cwd, "secrets.env")
+    (mine / name).write_text("x")
+    _register_projects(env, A=env.cwd)
+    info = grok_engine.ensure_home(env.ctx, cwd=str(env.cwd))
+    assert info["profile"] == grok_engine.SANDBOX_PROFILE and str(mine) in _profiles(env)[info["profile"]]["deny"]
+
+
+def test_a_variant_profile_survives_a_later_rewrite_without_a_workspace(env, monkeypatch):
+    # The CLI reads sandbox.toml once, at its own startup, AFTER the spawn returns — the availability probe or
+    # another project's turn may rewrite the file in between. A variant once written stays in every later write.
+    monkeypatch.setenv("GROK_SANDBOX_DENY", f"{env.secret_dir},**/secrets.env")
+    _store(env.cwd, "secrets.env")
+    _register_projects(env, A=env.cwd)
+    name = grok_engine.ensure_home(env.ctx, cwd=str(env.cwd))["profile"]
+    grok_engine.ensure_home(env.ctx)
+    assert name in _profiles(env)
+
+
+async def test_the_turn_runs_under_its_workspace_profile(env, monkeypatch):
+    monkeypatch.setenv("GROK_SANDBOX_DENY", f"{env.secret_dir},**/secrets.env")
+    _store(env.cwd, "secrets.env")
+    _register_projects(env, A=env.cwd)
+    events = await env.run()
+    assert types(events)[-1] == "result", last_error(events) if "error" in types(events) else types(events)
+    name = env.dump("env")["GROK_SANDBOX"]
+    assert name != grok_engine.SANDBOX_PROFILE and name in _profiles(env)
+
+
 def test_a_project_nested_inside_another_does_not_nest_deny_entries(env):
     outer, inner = env.tmp / "outer", env.tmp / "outer" / "inner"
     inner.mkdir(parents=True)

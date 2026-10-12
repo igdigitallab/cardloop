@@ -1404,6 +1404,17 @@ def test_profile_value_names_the_listed_paths_missing_on_this_host(box, monkeypa
     assert f.level == "ok" and "1 listed path(s) missing" in f.value
 
 
+def test_profile_with_per_workspace_variants_is_ok(box):
+    # a workspace whose secret store holds a glob match runs under a variant profile written NEXT TO `cardloop`
+    # (grok_engine._workspace_deny); doctor runs in another process and cannot rebuild those, the shared one decides
+    info = box.ensure_home()
+    path = box.home / "sandbox.toml"
+    path.write_text(path.read_text() + '[profiles.cardloop-0123456789ab]\nextends = "workspace"\ndeny = []\n')
+    f = box.probe(proc_root=box.tmp / "noproc")["Grok sandbox (profile)"]
+    assert f.level == "ok", f.value
+    assert f"{len(info['deny'])} deny entries" in f.value and "1 per-workspace variant" in f.value
+
+
 def test_profile_that_differs_from_what_the_engine_would_write_warns(box):
     box.ensure_home()
     other = box.tmp / "other-secret"

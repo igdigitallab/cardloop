@@ -1220,10 +1220,18 @@ def _grok_profile_fact(g: _Grok, deny: "list[str]", skipped: "list[str]") -> Fac
         return Fact(name, f"profile '{ge.SANDBOX_PROFILE}' (extends workspace), {len(deny)} deny entries{gap}")
     cfg = _read_toml(path)
     try:
-        n = len(cfg["profiles"][ge.SANDBOX_PROFILE]["deny"])
+        on_disk_deny = cfg["profiles"][ge.SANDBOX_PROFILE]["deny"]
+        n = len(on_disk_deny)
     except (TypeError, KeyError):
         return Fact(name, f"{path} is unreadable or has no [profiles.{ge.SANDBOX_PROFILE}]", level="warn",
                     remedy="rewritten by the engine on the next turn")
+    if on_disk_deny == deny:
+        # the rest of the file is per-workspace variants (grok_engine._workspace_deny), built by the cockpit's
+        # process for the workspaces it ran: doctor cannot rebuild them, the shared profile is what it can judge
+        extra = len(cfg["profiles"]) - 1
+        gap = f", {len(skipped)} listed path(s) missing on this host and skipped" if skipped else ""
+        return Fact(name, f"profile '{ge.SANDBOX_PROFILE}' (extends workspace), {len(deny)} deny entries{gap}, "
+                          f"{extra} per-workspace variant(s)")
     return Fact(name, f"{n} deny entries on disk, the engine would write {len(deny)} now (GROK_SANDBOX_DENY, "
                       "$HOME or the CLI path changed since the last turn)", level="warn",
                 remedy="rewritten on the next turn; the cached sandbox probe is judged against the NEW list "

@@ -2333,7 +2333,25 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         seedCursor(liveRes.cursor)
         lastAppliedSeqRef.current = Math.max(lastAppliedSeqRef.current, liveRes.cursor)
       } else {
-        setMessages([...histMsgs, ...boardRows])
+        // A turn that ENDED IN AN ERROR is in no provider's history: the error never is, and a chat
+        // whose first turn failed has no session at all (a Grok chat right after a switch), so its
+        // prompt is missing too. The server keeps the finished turn's buffer for a few minutes —
+        // rebuild that exchange from it, or every re-hydrate (the post-turn reconcile, a tab switch,
+        // a reload) blanks the message and the error out.
+        const failed = liveRes.chat_id && liveRes.chat_id === effectiveChatId && !liveAnswerInHistory
+          ? [...liveRes.events].reverse().find(e => e['type'] === 'error')
+          : undefined
+        const failedTail: ChatMessage[] = failed
+          ? [
+              ...(matchingUserIndex < 0 && livePrompt ? [makeUserMsg(liveRes.prompt ?? livePrompt)] : []),
+              {
+                ...makeAssistantMsg(), streaming: false,
+                error: String(failed['error'] || 'unknown error')
+                  + (failed['terminal_reason'] ? ` (${String(failed['terminal_reason'])})` : ''),
+              },
+            ]
+          : []
+        setMessages([...histMsgs, ...failedTail, ...boardRows])
         // Idle snapshot: future live events must still dedup against the replayed cursor.
         lastAppliedSeqRef.current = Math.max(lastAppliedSeqRef.current, liveRes.cursor || 0)
       }
@@ -3134,6 +3152,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // network / client eviction / server restart), the turn may have finished on the server
     // in the background with its answer only in history — we recover it in finally. (chopped-reply bug)
     let gotResult = false
+    // An `error` frame is a clean end too: the server finished the turn and said why. Re-hydrating
+    // after it replaces the error and the just-sent message with history, which for a chat whose
+    // FIRST turn failed (no provider session yet, e.g. a Grok chat right after a switch) is empty.
+    let gotError = false
     // spec-071 stall watchdog: with server heartbeats every ~20s, prolonged byte-silence means
     // the socket died without a FIN/RST (tunnel drop / mobile background kill). The hung fetch
     // would otherwise never settle — streamingRef stays true and gates EVERY recovery path,
@@ -3180,6 +3202,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           } else if (evt.type === 'result' || evt.type === 'done' || evt.type === 'error') {
             setRun(null)
           }
+          if (evt.type === 'error') gotError = true
           if (evt.type === 'result') {
             gotResult = true
             const evtAny = evt as unknown as Record<string, unknown>
@@ -3417,7 +3440,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         // ac.signal.aborted distinguishes an INTENTIONAL abort (reset / session-change / unmount /
         // remount cleanup) — where recovery is unwanted — from an EXTERNAL drop (network / eviction /
         // restart), where it is exactly what's needed. A watchdog abort counts as external. (spec-071)
-        if (!gotResult && (watchdogTripped || !ac.signal.aborted)) hydrateFromServer(() => false)
+        if (!gotResult && !gotError && (watchdogTripped || !ac.signal.aborted)) hydrateFromServer(() => false)
         // Spec-041 A2: drain via shared helper (also called from bus/poll paths).
         drainQueue()
         // Ensure compaction indicator is cleared when the turn ends (covers error/abort paths).

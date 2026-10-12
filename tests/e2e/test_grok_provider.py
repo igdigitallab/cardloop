@@ -107,6 +107,16 @@ def test_a_failed_grok_turn_is_a_visible_error(e2e_grok_server, grok_page):
     watch_text(page, "e2e scripted grok failure")
     send_chat(page, "this will fail")
     wait_seen(page, "e2e scripted grok failure")
+    # ... and it STAYS. An error ends the turn without a `result`, which the chat used to read as a
+    # cut-off stream and re-hydrate from history; a Grok chat whose first turn failed has no session,
+    # so that history is empty and the message and the error both vanished (vk chat, 2026-10-12).
+    page.wait_for_timeout(3500)
+    expect(page.locator(".chat-msg:has-text('e2e scripted grok failure')").first).to_be_visible()
+    expect(page.locator(".chat-msg-user:has-text('this will fail')").first).to_be_visible()
+    # A reload rebuilds the exchange from the server's retained turn buffer, not from the canvas.
+    page.reload()
+    expect(page.locator(".chat-msg:has-text('e2e scripted grok failure')").first).to_be_visible(timeout=15_000)
+    expect(page.locator(".chat-msg-user:has-text('this will fail')").first).to_be_visible()
 
 
 # ── (b) no opt-in anywhere: choosing Grok in the picker is the consent ──────────────────────────────────────────────────────
