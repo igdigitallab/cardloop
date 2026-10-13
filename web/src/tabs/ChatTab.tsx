@@ -7,7 +7,8 @@ import { api, apiErrorMessage } from '../api'
 import { PromptPicker } from '../components/PromptPicker'
 import { SkillPicker } from '../components/SkillPicker'
 import { ToolBlock } from '../components/ToolBlock'
-import { OptionPicker, parseOptionsBlock } from '../components/OptionPicker'
+import { OptionPicker } from '../components/OptionPicker'
+import { isVideoSrc, layoutMessage } from '../lib/messageLayout'
 import { SessionSelector } from '../components/SessionSelector'
 import { UsageBadge } from '../components/UsageBadge'
 import { LoadMeter } from '../components/LoadMeter'
@@ -636,17 +637,12 @@ function boardEventToMsg(b: ActivityEventBoard): ChatMessage {
 // ─── Spec-038: inline image/video renderer + full-screen lightbox ────────────
 
 /** Returns true if the URL points to a video file (by extension). */
-function _isVideoSrc(src: string): boolean {
-  const ext = src.split('?')[0].split('.').pop()?.toLowerCase() ?? ''
-  return ['mp4', 'webm', 'mov', 'ogg', 'ogv'].includes(ext)
-}
-
 /** Custom img renderer for ReactMarkdown: detects video by extension and renders
  *  either a thumbnail <img> or a <video> preview; click opens the Lightbox. */
 function ChatImage({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
   const [open, setOpen] = useState(false)
   if (!src) return null
-  const isVideo = _isVideoSrc(src)
+  const isVideo = isVideoSrc(src)
   return (
     <>
       {isVideo ? (
@@ -724,53 +720,6 @@ function ChatLink({ href, children, node: _node, ...rest }: React.AnchorHTMLAttr
 
 const _mdComponents = { ...mdComponents, img: ChatImage, code: ChatCode, a: ChatLink }
 const _chatRemarkPlugins = [remarkGfm, remarkFileRefs]
-
-const _IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico|svg)$/i
-
-interface ParsedAttachment {
-  url: string
-  name: string
-  kind: 'image' | 'video' | 'file'
-}
-
-/** Split a user prompt into prose + uploaded-file references.
- *  The composer appends "attached file: <abs path>" lines on send; those lines persist
- *  verbatim in the transcript, so this also reconstructs inline previews after a reload.
- *  The servable URL is derived from the basename — the upload-serve route reads DATA/inbox
- *  by filename (project id only gates auth), so the current projectId is fine. */
-function parseAttachedFiles(text: string, projectId: string): { body: string; files: ParsedAttachment[] } {
-  const files: ParsedAttachment[] = []
-  const bodyLines: string[] = []
-  for (const line of text.split('\n')) {
-    const m = /^attached file:\s*(.+\S)\s*$/.exec(line)
-    if (m) {
-      const raw = m[1]
-      // Two marker shapes share this line:
-      //  • a ready URL path — agent file-drop (cockpit-file / cockpit-img) prints
-      //    "/api/projects/<id>/media/<f>"; use it verbatim.
-      //  • an absolute fs path — operator uploads append the local path; its basename maps
-      //    to the /upload/ serve route (reads DATA/inbox by filename; project id gates auth).
-      // A servable URL is an /api/ route (agent file-drop prints /api/projects/<id>/media/<f>)
-      // or an http(s) URL. An operator upload appends an ABSOLUTE fs path (/home/.../data/inbox/…)
-      // which ALSO starts with '/', so we must match '/api/' — NOT a bare leading slash — otherwise
-      // the abs path is used verbatim as <img src> and 404s (the "broken image" bug).
-      const isUrlPath = raw.startsWith('/api/') || /^https?:\/\//i.test(raw)
-      const seg = raw.split(/[/\\?#]/).filter(Boolean).pop() || raw
-      let name = seg
-      try { name = decodeURIComponent(seg) } catch { /* keep raw segment */ }
-      // Stored media files are prefixed "<unix_ts>_" for uniqueness — hide it in the label.
-      const display = name.replace(/^\d{9,}_/, '')
-      const url = isUrlPath
-        ? raw
-        : `/api/projects/${encodeURIComponent(projectId)}/upload/${encodeURIComponent(seg)}`
-      const kind = _isVideoSrc(name) ? 'video' : _IMG_EXT_RE.test(name) ? 'image' : 'file'
-      files.push({ url, name: display, kind })
-    } else {
-      bodyLines.push(line)
-    }
-  }
-  return { body: bodyLines.join('\n').trim(), files }
-}
 
 // ─── Message-action icons (small, icon-only — Gemini/Perplexity style) ─────────
 const IconCopy = () => (
@@ -4040,15 +3989,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
    */
   function renderFragmentContent(msg: ChatMessage, idx: number) {
     const isLastAssistant = msg.role === 'assistant' && idx === lastAssistantIdx
-    const parsedOpts =
-      msg.role === 'assistant' && msg.text && !msg.streaming
-        ? parseOptionsBlock(msg.text)
-        : null
+    const layout = msg.text ? layoutMessage(msg.text, msg.role, msg.streaming, projectId) : null
+    const pickerOptions = layout?.options ?? null
     // Durable "already answered" signal for the picker: if a later user message matches
     // one of the options, this block was already chosen (see OptionPicker usage above).
-    const answeredOptValue: string | null = parsedOpts
+    const answeredOptValue: string | null = pickerOptions
       ? (() => {
-          const vals = new Set(parsedOpts.options.map(o => o.value.trim()))
+          const vals = new Set(pickerOptions.map(o => o.value.trim()))
           for (let j = idx + 1; j < messages.length; j++) {
             const mj = messages[j]
             if (mj.role === 'user' && vals.has((mj.text || '').trim())) return (mj.text || '').trim()
@@ -4056,10 +4003,6 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           return null
         })()
       : null
-    const attach =
-      msg.text && (msg.role === 'user' || (msg.role === 'assistant' && !msg.streaming))
-        ? parseAttachedFiles(msg.text, projectId)
-        : null
 
     return (
       <>
@@ -4076,47 +4019,36 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             liveTool={msg.streaming ? msg.tools[msg.tools.length - 1] : null}
           />
         )}
-        {/* Option picker: when message ends with ```options block, split rendering */}
-        {parsedOpts ? (
-          <>
-            {parsedOpts.prefix && (
-              <div className="chat-msg-body markdown-wrap">
-                <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{parsedOpts.prefix}</ReactMarkdown>
-              </div>
-            )}
-            <OptionPicker
-              options={parsedOpts.options}
-              isActive={isLastAssistant && !run}
-              onSelect={(value) => sendMessage(value)}
-              answeredValue={answeredOptValue}
-            />
-          </>
-        ) : attach && attach.files.length > 0 ? (
-          <>
-            {attach.body && (
-              <div className="chat-msg-body markdown-wrap">
-                <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{attach.body}</ReactMarkdown>
-              </div>
-            )}
-            <div className="chat-msg-attachments">
-              {attach.files.map((f, i) => (
-                f.kind === 'file'
-                  ? <a key={i} className="chat-att-file chat-att-download" href={f.url}
-                       download={f.name} target="_blank" rel="noopener noreferrer"
-                       title={`Download ${f.name}`}>
-                      <span aria-hidden="true">📎</span>
-                      <span className="chat-att-name">{f.name}</span>
-                      <span className="chat-att-dl" aria-hidden="true">⤓</span>
-                    </a>
-                  : <ChatImage key={i} src={f.url} alt={f.name} />
-              ))}
-            </div>
-          </>
-        ) : msg.text ? (
+        {/* Body, then the file cards pulled out of its `attached file:` lines, then the
+            trailing ```options picker — any of the three may be absent. */}
+        {layout?.body && (
           <div className="chat-msg-body markdown-wrap">
-            <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{msg.text}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{layout.body}</ReactMarkdown>
           </div>
-        ) : null}
+        )}
+        {layout && layout.files.length > 0 && (
+          <div className="chat-msg-attachments">
+            {layout.files.map((f, i) => (
+              f.kind === 'file'
+                ? <a key={i} className="chat-att-file chat-att-download" href={f.url}
+                     download={f.name} target="_blank" rel="noopener noreferrer"
+                     title={`Download ${f.name}`}>
+                    <span aria-hidden="true">📎</span>
+                    <span className="chat-att-name">{f.name}</span>
+                    <span className="chat-att-dl" aria-hidden="true">⤓</span>
+                  </a>
+                : <ChatImage key={i} src={f.url} alt={f.name} />
+            ))}
+          </div>
+        )}
+        {pickerOptions && (
+          <OptionPicker
+            options={pickerOptions}
+            isActive={isLastAssistant && !run}
+            onSelect={(value) => sendMessage(value)}
+            answeredValue={answeredOptValue}
+          />
+        )}
         {msg.error && (() => {
           // Spec-039: detect 200K context-wall errors and render a prominent card
           // with a one-click reset button.

@@ -17,6 +17,9 @@ Script selection is a marker substring in the prompt (checked in order below):
   "e2e:paths" -> a reply naming files in prose and in `code` (tests clickable paths in chat)
   "e2e:mermaid" -> a reply with two ```mermaid blocks, one with a $$math$$ label (tests that
                  mermaid + katex + dompurify render in the shipped bundle)
+  "e2e:filedrop" -> drops a PNG and a PDF into COPS_MEDIA_DIR the way tools/cockpit-file does and
+                 replies with their `attached file:` lines AND a trailing ```options picker (tests
+                 that both become cards next to the picker, not dead text)
   "e2e:hold"  -> one delta, then the turn stays alive (running) for a long stretch
                  (tests composer/run-indicator state while a turn is genuinely in
                  flight — e.g. that Stop stays reachable)
@@ -48,7 +51,9 @@ import asyncio
 import json
 import os
 import re
+import struct
 import uuid
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator
@@ -108,6 +113,15 @@ def _append_transcript(cwd: str, sid: str, prompt: str, reply_text: str,
             f.write("\n".join(lines) + "\n")
     except Exception:
         pass
+
+
+def _one_pixel_png() -> bytes:
+    """A valid 1x1 RGBA PNG, built rather than pasted so its CRCs are right."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(b"\x00\x00\x80\xff\xff")) + chunk(b"IEND", b""))
 
 
 async def run_engine(
@@ -195,6 +209,26 @@ async def run_engine(
             "  Operator->>Cockpit: send\n"
             "  Cockpit-->>Operator: render\n"
             "```\n"
+        )
+        yield {"type": "text_delta", "text": text}
+        yield {"type": "text", "text": text}
+        _append_transcript(cwd, sid, prompt, text)
+        yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
+        return
+
+    if "e2e:filedrop" in prompt:
+        # The shape of a real agent reply that handed over two documents: file lines in the
+        # middle, a picker at the end (135 of 260 such replies did that, 2026-10-13).
+        media = Path((env or {})["COPS_MEDIA_DIR"])
+        pid = (env or {})["COPS_PROJECT_ID"]
+        (media / "1791912799_License.png").write_bytes(_one_pixel_png())
+        (media / "1791912799_Statement.pdf").write_bytes(b"%PDF-1.4\n%e2e\n")
+        text = (
+            "Upload these two:\n\n"
+            f"attached file: /api/projects/{pid}/media/1791912799_License.png\n"
+            f"attached file: /api/projects/{pid}/media/1791912799_Statement.pdf\n\n"
+            "Then pick one:\n\n"
+            "```options\nFix the domain myself\nDo it through the browser\n```"
         )
         yield {"type": "text_delta", "text": text}
         yield {"type": "text", "text": text}

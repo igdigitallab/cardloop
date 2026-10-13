@@ -7,6 +7,15 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Fixed — files an agent hands over in a reply that ends with a picker
+- An `attached file: /api/projects/<id>/media/<f>` line (`cockpit-file` / `cockpit-img`) in a reply that also
+  ended with an ```` ```options ```` picker rendered as plain text glued into one line, with no download link —
+  135 of 260 agent replies that handed over a file in the last 60 days. Such a reply now shows its prose, then the
+  file cards, then the picker. A file line indented under a list item is also recognised, and one inside a fenced
+  code block is left as text.
+- An image or video opened full-screen has a download button next to close; before, a picture card could only be
+  viewed.
+
 ### Added — Grok full access (`GROK_ACCESS=full`) and the project env for every engine
 - `GROK_ACCESS=full` gives a Grok turn the rights a Claude turn has: no sandbox (secret safe, `~/.ssh`, git push,
   `sudo`, writes anywhere), the cockpit's environment plus the project's `secrets.env`, `$HOME/CLAUDE.md` as rules.

@@ -122,9 +122,26 @@ export function Lightbox({ src, alt = '', svg, video, onClose }: Props) {
     )
   }
 
+  // A picture an agent hands over is often a document to keep (a license scan), not just to look at.
+  // Same-origin media honours `download`; a cross-origin URL ignores it, so it opens in a new tab
+  // instead of navigating the cockpit away.
+  const downloadName = src && !svg
+    ? (() => {
+        const seg = src.split(/[?#]/)[0].split('/').pop() || ''
+        let name = seg
+        try { name = decodeURIComponent(seg) } catch { /* keep raw segment */ }
+        return name.replace(/^\d{9,}_/, '')
+      })()
+    : null
+
   return createPortal(
     <div className="lightbox-overlay" role="dialog" aria-modal="true" onClick={onClose}>
       <button className="lightbox-close" onClick={onClose} aria-label="Close">✕</button>
+      {downloadName !== null && (
+        <a className="lightbox-download" href={src} download={downloadName} target="_blank"
+           rel="noopener noreferrer" onClick={e => e.stopPropagation()}
+           aria-label="Download" title="Download">⤓</a>
+      )}
       {zoomable && (
         <div className="lightbox-zoom-ctrls" onClick={e => e.stopPropagation()}>
           <button onClick={() => zoomBy(1 / 1.3)} aria-label="Zoom out">−</button>
