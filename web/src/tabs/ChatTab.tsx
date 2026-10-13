@@ -1668,6 +1668,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // snapshot in the same Promise.all. In that case the transcript is canonical;
   // ignore the stale turn's remaining bus frames until its run_end arrives.
   const hydratedCompletedTurnRef = useRef<boolean>(false)
+  // Id of the assistant placeholder our latest send opened, until the bus's run_start for that
+  // turn claims it. The run_start can arrive after the end of the request has already closed the
+  // placeholder (a turn with no text, or an error), and "user bubble + OPEN placeholder" alone
+  // then reads as a foreign run that draws the prompt a second time.
+  const ownPlaceholderIdRef = useRef<string | null>(null)
   // Last time ANY activity-bus event reached this tab. The /live poll reads it to notice a
   // stream that died silently (see BUS_SILENCE_REPAIR_MS in sync()).
   const lastBusEventAtRef = useRef<number>(Date.now())
@@ -2665,8 +2670,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         // user+assistant pair; the run_start mirrored back over the bus must not duplicate it.
         const tail = prev.slice(-2)
         const isOptimisticOwn = !isBg && tail.length === 2 && tail[0].role === 'user' &&
-          tail[0].text === evt.prompt && tail[1].role === 'assistant' && !!tail[1].streaming
-        if (isOptimisticOwn) return prev
+          tail[0].text === evt.prompt && tail[1].role === 'assistant' &&
+          (!!tail[1].streaming || tail[1].id === ownPlaceholderIdRef.current)
+        if (isOptimisticOwn) {
+          ownPlaceholderIdRef.current = null
+          return prev
+        }
         // spec-088: our own QUEUED message being drained. The queued ack stripped the
         // assistant half and left a lone user bubble marked queued:true, so the shape above
         // does not match and the bubble used to be rendered a second time (both visible
@@ -3087,6 +3096,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
     const userMsg = makeUserMsg(fullPrompt)
     const assistantMsg = makeAssistantMsg()
+    ownPlaceholderIdRef.current = assistantMsg.id
     // Sending a message is an intentional action — re-pin to bottom regardless of scroll position.
     pinnedRef.current = true
     setShowNewMsgPill(false)

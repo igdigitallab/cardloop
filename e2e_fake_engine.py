@@ -11,6 +11,8 @@ process end to end without depending on the Claude Agent SDK or a subscription.
 Script selection is a marker substring in the prompt (checked in order below):
   "e2e:error" -> a single error event, no result (tests error rendering)
   "e2e:tool"  -> one Bash-shaped tool event + text + result (tests tool-row rendering)
+  "e2e:toolonly" -> one Bash-shaped tool event + result and NO text (a turn the bus has to open
+                 and close on its own: tests the run_start bookkeeping when the bus lags)
   "e2e:slow"  -> two text_delta events separated by a long silent gap (tests
                  mid-run reload / re-attach; the gap is what the heartbeat pump in
                  webapp.py's chat stream is designed to survive)
@@ -154,6 +156,13 @@ async def run_engine(
 
     if "e2e:error" in prompt:
         yield {"type": "error", "exc": RuntimeError("e2e scripted failure")}
+        return
+
+    if "e2e:toolonly" in prompt:
+        tool_call = {"name": "Bash", "input": {"command": "echo toolonly", "description": "e2e tool-only turn"}}
+        yield {"type": "tool", **tool_call}
+        _append_transcript(cwd, sid, prompt, "", tool_calls=[tool_call])
+        yield {"type": "result", "session_id": sid, "cost_usd": 0.0}
         return
 
     if "e2e:tool" in prompt:

@@ -47,7 +47,7 @@ E2E_PROJECT_IDS.append("e2e-health")
 E2E_PROJECT_IDS.append("e2e-filedrop")
 
 # The bus-lag race scenario (test_bus_lag_no_duplicate.py).
-E2E_PROJECT_IDS += ["e2e-buslag", "e2e-buslag-multi"]
+E2E_PROJECT_IDS += ["e2e-buslag", "e2e-buslag-multi", "e2e-buslag-error", "e2e-buslag-toolonly"]
 
 
 def _free_port() -> int:

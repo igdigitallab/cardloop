@@ -13,6 +13,9 @@ Versions follow semver-like conventions (0.x while the project is under active d
   started cockpit: 3 of 4 runs), the reply was drawn a second time until the history reconcile about
   1.2 s later. The chat request's final-text repair now records what it drew, like its other branches,
   and only touches the open bubble once the bus has drawn every tool before that block.
+- The same race at the start of a turn: when the bus announced the turn only after the chat request
+  had ended (a turn with no text — an error, or tools only), the cockpit took it for someone else's run
+  and drew the prompt, and the error, a second time. It now recognises the turn it sent itself.
 
 ### Fixed — files an agent hands over in a reply that ends with a picker
 - An `attached file: /api/projects/<id>/media/<f>` line (`cockpit-file` / `cockpit-img`) in a reply that also

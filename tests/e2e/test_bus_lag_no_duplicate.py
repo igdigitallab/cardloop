@@ -123,3 +123,57 @@ def test_text_blocks_split_by_tools_stay_put_while_the_bus_lags(logged_in_page):
     for b in blocks:
         assert seen[b]["max"] == 1, f"{b} was on screen {seen[b]['max']} times at once"
         assert not seen[b]["vanished"], f"{b} disappeared after it was shown"
+
+
+# A turn with no text gives the POST stream nothing to record, so the end of the request closes the
+# optimistic placeholder while the bus's run_start for that same turn is still on its way.
+_COUNT = """
+([selector, text]) => {
+  window.__max = window.__max || {};
+  const key = selector + '|' + text;
+  window.__max[key] = 0;
+  const tick = () => {
+    const n = [...document.querySelectorAll(selector)].filter(e => (e.textContent || '').includes(text)).length;
+    window.__max[key] = Math.max(window.__max[key], n);
+  };
+  new MutationObserver(tick).observe(document.body, { subtree: true, childList: true, characterData: true });
+}
+"""
+
+
+def _count(page, selector: str, text: str) -> None:
+    page.evaluate(_COUNT, [selector, text])
+
+
+def _max(page, selector: str, text: str) -> int:
+    return page.evaluate("k => window.__max[k]", f"{selector}|{text}")
+
+
+def test_a_failed_turn_shows_its_prompt_and_error_once_while_the_bus_lags(logged_in_page):
+    page = logged_in_page
+    lag_ms = 1000
+    _lagged_chat(page, "e2e-buslag-error", lag_ms)
+    _count(page, ".chat-msg-user", "e2e:error")
+    _count(page, ".chat-msg-error", "e2e scripted failure")
+    send_chat(page, "e2e:error")
+
+    page.wait_for_selector(".chat-msg-error", timeout=30_000)
+    page.wait_for_timeout(lag_ms + 4000)
+
+    assert _max(page, ".chat-msg-user", "e2e:error") == 1, "the prompt was on screen twice"
+    assert _max(page, ".chat-msg-error", "e2e scripted failure") == 1, "the error was on screen twice"
+
+
+def test_a_tool_only_turn_shows_its_prompt_and_tool_once_while_the_bus_lags(logged_in_page):
+    page = logged_in_page
+    lag_ms = 1000
+    _lagged_chat(page, "e2e-buslag-toolonly", lag_ms)
+    _count(page, ".chat-msg-user", "e2e:toolonly")
+    _count(page, ".chat-tool-cmd", "echo toolonly")
+    send_chat(page, "e2e:toolonly")
+
+    page.wait_for_selector(".chat-tool-cmd:has-text('echo toolonly')", timeout=30_000)
+    page.wait_for_timeout(lag_ms + 4000)
+
+    assert _max(page, ".chat-msg-user", "e2e:toolonly") == 1, "the prompt was on screen twice"
+    assert _max(page, ".chat-tool-cmd", "echo toolonly") == 1, "the tool row was on screen twice"
