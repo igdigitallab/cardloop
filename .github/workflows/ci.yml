@@ -80,6 +80,10 @@ jobs:
         working-directory: web
         run: npm run lint
 
+      - name: Unit tests (node:test)
+        working-directory: web
+        run: npm test
+
       - name: Build
         working-directory: web
         run: npm run build

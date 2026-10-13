@@ -25,7 +25,7 @@
   should add a regression test that fails without the fix. This is the project's test policy, and
   the [PR template](.github/PULL_REQUEST_TEMPLATE.md) asks for it.
 - **CI must be green:** backend tests on Python 3.11 and 3.12, `ruff check .`, and the frontend's
-  `npm run lint` + `npm run build` all run on every pull request (see
+  `npm run lint` + `npm test` + `npm run build` all run on every pull request (see
   [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Static analysis (CodeQL) runs on every
   push and pull request too.
 - **Coding standard:** Python is linted by `ruff` (rule set in [`ruff.toml`](ruff.toml)); the
@@ -83,6 +83,15 @@ the optional Codex provider flag is on, so CI sets `CODEX_ENABLED=true`; if you 
 `.env`, do the same. Opt-in suites (browser e2e,
 model-alias probes) are described in [CLAUDE.md](CLAUDE.md#operations).
 
+Frontend logic tests (`web/src/**/*.test.ts(x)`, Node's built-in runner, under a second):
+
+```bash
+cd web && npm test
+```
+
+`web/scripts/node-tests.mjs` bundles every such file with esbuild and runs them with
+`node --test`; a new test file is picked up by its name alone. CI runs it too.
+
 ### Grok provider tests
 
 The default run needs **nothing** from Grok: no binary, no login, no network. The engine tests drive
@@ -127,6 +136,7 @@ into the issue.
 ```bash
 cd web
 npm run lint      # ESLint check
+npm test          # node:test unit tests (src/**/*.test.ts)
 npm run format    # Prettier format
 npm run build     # Production build → web/dist/
 ```
