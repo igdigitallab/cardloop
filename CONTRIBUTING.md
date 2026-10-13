@@ -25,7 +25,8 @@
   should add a regression test that fails without the fix. This is the project's test policy, and
   the [PR template](.github/PULL_REQUEST_TEMPLATE.md) asks for it.
 - **CI must be green:** backend tests on Python 3.11 and 3.12, `ruff check .`, and the frontend's
-  `npm run lint` + `npm test` + `npm run build` all run on every pull request (see
+  `npm run lint` + `npm test` + `npm run build` and the browser e2e suite (`tests/e2e`) all run
+  on every pull request (see
   [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Static analysis (CodeQL) runs on every
   push and pull request too.
 - **Coding standard:** Python is linted by `ruff` (rule set in [`ruff.toml`](ruff.toml)); the
@@ -80,7 +81,7 @@ make test
 CI runs the same command (`venv/bin/python -m pytest tests/ -q`) on Python 3.11 and 3.12. One
 provider-routing test (`test_codex_chat_routes_thread_without_touching_claude_session`) assumes
 the optional Codex provider flag is on, so CI sets `CODEX_ENABLED=true`; if you run without a
-`.env`, do the same. Opt-in suites (browser e2e,
+`.env`, do the same. Opt-in suites (browser e2e — which CI also runs, in its own job —
 model-alias probes) are described in [CLAUDE.md](CLAUDE.md#operations).
 
 Frontend logic tests (`web/src/**/*.test.ts(x)`, Node's built-in runner, under a second):
