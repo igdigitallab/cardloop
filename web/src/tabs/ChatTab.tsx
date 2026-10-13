@@ -3134,6 +3134,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         throw new Error(errorTextFromBody(errText))
       }
 
+      // Seq of the latest tool frame on this stream: a 'text' after it closes a NEW block (see
+      // the canonical-final repair below).
+      let lastPostToolSeq = -1
       await readSseStream(
         res.body,
         (line) => {
@@ -3141,6 +3144,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           lastByteAt = Date.now()
           const evt = parseSseLine(line)
           if (!evt) return
+          const frameSeq = (evt as unknown as { seq?: number }).seq
+          if (evt.type === 'tool' && typeof frameSeq === 'number') lastPostToolSeq = frameSeq
+          const toolSeqBefore = lastPostToolSeq
 
           const now = Date.now()
           if (evt.type === 'text_delta' || evt.type === 'text') {
@@ -3310,8 +3316,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 // text in order. Only repair an already-open pure-text bubble; never
                 // create/split bubbles here, so tool ordering and bus dedup semantics for the
                 // common (bus-healthy) path remain unchanged.
+                // The repair CONSUMES the frame's seq like every branch above. It used not to:
+                // when this stream outran the bus, the end of the request closed the repaired
+                // bubble, and the bus's own deltas for the same block, arriving after, opened a
+                // second bubble with the same text (visible until the completion reconcile;
+                // tests/e2e/test_bus_lag_no_duplicate.py). And it only repairs once the bus has
+                // drawn every tool before this block — until then the open bubble is the
+                // PREVIOUS block's.
                 const last = prev[prev.length - 1]
-                return last?.role === 'assistant' && last.streaming && last.tools.length === 0
+                return last?.role === 'assistant' && last.streaming && last.tools.length === 0 &&
+                  lastAppliedSeqRef.current >= toolSeqBefore && applySeq()
                   ? reconcileFinalText(prev, evt.text)
                   : prev
               }

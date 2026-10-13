@@ -21,11 +21,7 @@ _BUBBLE = ".chat-msg-assistant"
 def _assert_cards_and_picker(page):
     pdf = page.locator(f"{_BUBBLE} a.chat-att-download")
     pdf.first.wait_for(timeout=30_000)
-    # The live bubble and the transcript-hydrated one can overlap for a moment as the turn ends.
-    page.wait_for_function(
-        "document.querySelectorAll('.chat-msg-assistant a.chat-att-download').length === 1",
-        timeout=15_000,
-    )
+    assert pdf.count() == 1  # was 2 on a cold first turn: see test_bus_lag_no_duplicate.py
     href = pdf.first.get_attribute("href")
     assert href.startswith("/api/projects/") and href.endswith("/media/1791912799_Statement.pdf"), href
     assert pdf.first.get_attribute("download") == "Statement.pdf"

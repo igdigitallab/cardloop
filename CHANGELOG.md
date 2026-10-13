@@ -7,6 +7,13 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Fixed — a finished reply no longer shows twice for a moment
+- Every turn reaches the browser on two connections, the activity bus and the chat request, with
+  nothing ordering them. When the chat request finished first (always on the first turn of a freshly
+  started cockpit: 3 of 4 runs), the reply was drawn a second time until the history reconcile about
+  1.2 s later. The chat request's final-text repair now records what it drew, like its other branches,
+  and only touches the open bubble once the bus has drawn every tool before that block.
+
 ### Fixed — files an agent hands over in a reply that ends with a picker
 - An `attached file: /api/projects/<id>/media/<f>` line (`cockpit-file` / `cockpit-img`) in a reply that also
   ended with an ```` ```options ```` picker rendered as plain text glued into one line, with no download link —
