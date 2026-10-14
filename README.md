@@ -121,6 +121,8 @@ Three things make Cardloop different from the dozen other agent kanbans:
 ## Quickstart
 
 > **Setup time: ~3 minutes** — clone, run `install.sh`, `claude login`, set a password.
+>
+> **Rather have it installed for you?** IG Digital Lab, the team behind Cardloop, sets it up on a server you own: the server, Linux, agents, skills, the live browser and phone access. On-site around Sacramento, remote anywhere in the US: [igdigi.com/services/local-ai-setup](https://igdigi.com/services/local-ai-setup).
 
 **Prerequisites**
 
