@@ -10636,11 +10636,12 @@ async def api_project_media(req: web.Request) -> web.Response:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     content_type = _MEDIA_CONTENT_TYPES.get(ext)
     # spec-038: images/video render inline (known type → no attachment header). Card 2efd6a:
-    # ANY other file the agent drops via cockpit-file is served as a download — octet-stream +
-    # Content-Disposition: attachment — so the browser saves it to the computer / phone.
+    # ANY other file the agent drops via cockpit-file is served as a download — its real type +
+    # Content-Disposition: attachment — so the browser saves it to the computer / phone. The real
+    # type matters on Android: octet-stream makes the phone save `report.pdf` as `report.bin`.
     inline_media = content_type is not None
     if content_type is None:
-        content_type = "application/octet-stream"
+        content_type = _fs_browser.download_mime(filename)
 
     DATA: Path = ctx["DATA"]
     media_dir = DATA / "chat-media" / project["id"]
@@ -10660,10 +10661,10 @@ async def api_project_media(req: web.Request) -> web.Response:
 
     _headers = {"Content-Type": content_type}
     if not inline_media:
-        # filename already passed the traversal guard (no / \ ..); strip quotes/newlines
-        # defensively before placing it in the header.
-        _safe = filename.replace('"', "").replace("\r", "").replace("\n", "")
-        _headers["Content-Disposition"] = f'attachment; filename="{_safe}"'
+        # filename already passed the traversal guard (no / \ ..); the helper keeps quotes and
+        # control characters out of the header.
+        _headers["Content-Disposition"] = _fs_browser.attachment_disposition(filename)
+        _headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
     return web.FileResponse(target, headers=_headers)
 
 

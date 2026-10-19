@@ -162,10 +162,18 @@ async def test_media_route_rejects_traversal_for_video(
 async def test_media_route_serves_arbitrary_file_as_download(
     aiohttp_client, media_app, media_ctx
 ):
-    """An extension not in the inline-media map (pdf/zip/avi/…) is now served as a download:
-    HTTP 200, Content-Type application/octet-stream, Content-Disposition: attachment.
-    (Replaces the old 415 behaviour — agents drop arbitrary files via cockpit-file.)"""
-    for filename in ("1000000000_report.pdf", "1000000000_bundle.zip", "1000000000_clip.avi"):
+    """An extension not in the inline-media map (pdf/zip/avi/…) is served as a download:
+    HTTP 200, the file's REAL type, `Content-Disposition: attachment; filename="…"`.
+    (Replaces the old 415 behaviour — agents drop arbitrary files via cockpit-file.) The real
+    type is load-bearing: as octet-stream the Android app saved `report.pdf` as `report.bin`."""
+    cases = {
+        "1000000000_report.pdf": "application/pdf",
+        "1000000000_bundle.zip": "application/zip",
+        "1000000000_app.apk": "application/vnd.android.package-archive",
+        "1000000000_page.html": "application/octet-stream",   # markup never gets its own type
+        "1000000000_blob": "application/octet-stream",
+    }
+    for filename, mime in cases.items():
         _place_file(media_ctx, filename, content=b"fake-bytes")
         client = await aiohttp_client(media_app)
         resp = await client.get(
@@ -173,10 +181,9 @@ async def test_media_route_serves_arbitrary_file_as_download(
             headers=_auth(media_ctx),
         )
         assert resp.status == 200, f"Expected 200 for {filename}, got {resp.status}"
-        assert resp.headers.get("Content-Type") == "application/octet-stream"
-        cd = resp.headers.get("Content-Disposition", "")
-        assert cd.startswith("attachment;"), f"Expected attachment disposition, got {cd!r}"
-        assert filename in cd
+        assert resp.headers.get("Content-Type") == mime, filename
+        assert resp.headers.get("Content-Disposition") == f'attachment; filename="{filename}"'
+        assert resp.headers.get("Content-Security-Policy", "").startswith("sandbox")
 
 
 async def test_media_route_image_stays_inline_no_attachment(

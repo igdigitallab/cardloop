@@ -4,9 +4,11 @@ The policy is the security boundary of the Files tab now that it can leave a pro
 so the tests pin the refusals, not just the happy path.
 """
 import os
+import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 
@@ -405,15 +407,51 @@ def test_raw_serves_previews_inline_with_the_headers_that_keep_them_harmless(wor
 
 def test_raw_forces_a_download_for_everything_it_does_not_preview(world):
     r = roots_for(world)
-    for name in ("page.html", "notes.md", "script.py", "blob.bin", "evil.svgz"):
+    cases = {"page.html": "application/octet-stream", "notes.md": "text/markdown",
+             "script.py": "text/x-python", "blob.bin": "application/octet-stream",
+             "evil.svgz": "application/octet-stream", "data.xml": "application/octet-stream"}
+    for name, want in cases.items():
         _bytes_file(world["scratch"], name, b"<script>alert(1)</script>")
         _, mime, h = fb.open_raw(str(world["scratch"] / name), r)
-        assert mime == "application/octet-stream", name
-        assert h["Content-Disposition"].startswith("attachment; filename*=UTF-8''"), name
+        assert mime == want, name
+        assert h["Content-Disposition"] == f'attachment; filename="{name}"', name
         assert "sandbox" in h["Content-Security-Policy"]
     png = _bytes_file(world["scratch"], "a.png")
     _, mime, h = fb.open_raw(str(png), r, download=True)
-    assert mime == "application/octet-stream" and h["Content-Disposition"].startswith("attachment")
+    assert mime == "image/png" and h["Content-Disposition"] == 'attachment; filename="a.png"'
+    assert "sandbox" in h["Content-Security-Policy"]
+
+
+# Android's own parser (URLUtil.parseContentDisposition, API 34): the ONLY header form it reads.
+# Anything else and it names the file after the URL — `/api/fs/raw?…` became `raw.bin`.
+_ANDROID_CD = re.compile(r'attachment;\s*filename\s*=\s*("?)([^"]*)\1\s*$', re.IGNORECASE)
+
+
+def test_attachment_disposition_is_readable_by_android_for_plain_names():
+    for name in ("report.pdf", "1792449905_dltest-report.pdf", "my report; v2.tar.gz", "a=b.txt"):
+        m = _ANDROID_CD.search(fb.attachment_disposition(name))
+        assert m and m.group(2) == name, name
+
+
+def test_attachment_disposition_encodes_what_cannot_travel_plain():
+    for name in ("Отчёт за октябрь.pdf", 'my "report"\n; x=1.txt', "tab\there.csv", "back\\slash.txt"):
+        h = fb.attachment_disposition(name)
+        assert "\n" not in h and "\r" not in h and "\t" not in h, name
+        fallback = re.search(r'filename="([^"]*)"', h).group(1)
+        assert fallback.isascii() and fallback.strip(), name
+        assert unquote(h.split("filename*=UTF-8''", 1)[1]) == name, name
+    assert re.search(r'filename="([^"]*)"', fb.attachment_disposition("Отчёт.pdf")).group(1) == "download.pdf"
+
+
+def test_download_mime_is_the_real_type_except_for_markup():
+    assert fb.download_mime("a.pdf") == "application/pdf"
+    assert fb.download_mime("a.DOCX").endswith("wordprocessingml.document")
+    assert fb.download_mime("cardloop-1.4.apk") == "application/vnd.android.package-archive"
+    for name in ("a.html", "a.HTM", "a.svg", "a.xhtml", "a.xml", "noext", "a.tgz", "a.unknownext"):
+        assert fb.download_mime(name) == "application/octet-stream", name
+    # a compressed file is its compression to a downloader (Android: x-tar made `x.tar.gz` `x.tar`)
+    assert fb.download_mime("logs.tar.gz") == "application/gzip"
+    assert fb.download_mime("dump.sql.xz") == "application/x-xz"
 
 
 def test_raw_filenames_are_quoted_and_cannot_inject_headers(world):

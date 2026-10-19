@@ -9,9 +9,11 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.webkit.CookieManager;
+import android.webkit.MimeTypeMap;
 import android.webkit.URLUtil;
 import android.webkit.WebView;
 import android.widget.Toast;
+import java.util.Locale;
 
 /**
  * Everything that should leave the app.
@@ -80,13 +82,15 @@ final class ExternalLinks {
             openExternally(activity, uri);   // someone else's file — someone else's browser
             return;
         }
-        String filename = URLUtil.guessFileName(url, contentDisposition, mimeType);
+        String filename = DownloadNames.fromContentDisposition(contentDisposition);
+        if (filename == null) filename = URLUtil.guessFileName(url, contentDisposition, mimeType);
+        String type = mimeFor(filename, mimeType);
         try {
             DownloadManager.Request request = new DownloadManager.Request(uri);
             String cookie = CookieManager.getInstance().getCookie(url);
             if (cookie != null) request.addRequestHeader("Cookie", cookie);
             if (userAgent != null) request.addRequestHeader("User-Agent", userAgent);
-            request.setMimeType(mimeType);
+            request.setMimeType(type);
             request.setTitle(filename);
             request.setDescription("Cardloop");
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
@@ -108,6 +112,27 @@ final class ExternalLinks {
         } catch (Exception e) {
             toast(activity, "Download failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * The type to hand DownloadManager for ``filename``: the one Android itself pairs with the
+     * extension, whatever the server said.
+     *
+     * Android reconciles a download's name with its type, and the type wins: `report.pdf` handed
+     * over as application/octet-stream came out as `report.bin`, which no app on the phone
+     * opens. Agreeing with Android's own table keeps the name and lets the finished-download
+     * notification open the file in the right app. An extension Android does not know gets
+     * octet-stream rather than the server's guess, so there is no type of its own to rename the
+     * file towards; only a name with no extension at all takes the server's type.
+     */
+    static String mimeFor(String filename, String serverType) {
+        int dot = filename.lastIndexOf('.');
+        if (dot > 0 && dot < filename.length() - 1) {
+            String ext = filename.substring(dot + 1).toLowerCase(Locale.ROOT);
+            String known = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+            return known != null ? known : "application/octet-stream";
+        }
+        return serverType != null && !serverType.isEmpty() ? serverType : "application/octet-stream";
     }
 
     /** A target=_blank / window.open destination: our own origin loads here, the rest leaves. */

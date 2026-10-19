@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import stat
@@ -493,6 +494,50 @@ _PREVIEW: dict[str, tuple[str, str]] = {
 }
 
 
+# Markup a browser renders (and runs scripts in) keeps octet-stream even as an attachment: the
+# attachment header already stops it rendering, this is the second lock on that door.
+_RENDERABLE_MIMES = frozenset({"text/html", "text/xml", "application/xml", "text/xsl"})
+_COMPRESSED_MIMES = {"gzip": (".gz", "application/gzip"), "bzip2": (".bz2", "application/x-bzip2"),
+                     "xz": (".xz", "application/x-xz")}
+
+
+def download_mime(name: str) -> str:
+    """Content-Type for a file handed over as an attachment.
+
+    The file's real type, not a blanket octet-stream. Android's downloader
+    (`URLUtil.guessFileName`, used by the Cardloop app and WebView browsers) swaps an extension
+    that disagrees with the response type for the type's own one, so `report.pdf` served as
+    octet-stream lands on the phone as `report.bin` and nothing there will open it.
+    """
+    mime, encoding = mimetypes.guess_type(name, strict=False)
+    if encoding:
+        # `x.tar.gz` is a gzip file to a downloader, not a tar (Android measured: application/x-tar
+        # turns it into `x.tar`). `.tgz` stays octet-stream: as gzip Android would save `x.gz`.
+        ext, enc_mime = _COMPRESSED_MIMES.get(encoding, ("", ""))
+        return enc_mime if ext and name.lower().endswith(ext) else "application/octet-stream"
+    if not mime or mime in _RENDERABLE_MIMES or mime.endswith("+xml"):
+        return "application/octet-stream"
+    return mime
+
+
+def attachment_disposition(name: str) -> str:
+    """`Content-Disposition: attachment` naming the file in a form every downloader reads.
+
+    A plain `filename="…"` whenever the name allows it: Android's URLUtil (API 34 measured)
+    understands exactly `attachment; filename="…"` and nothing else, `filename*` included, and
+    falls back to the URL — `/api/fs/raw?…` saved as `raw.bin`. A name that cannot travel
+    plain gets an ASCII stand-in plus the RFC 5987 form that browsers prefer.
+    """
+    plain = "".join(ch for ch in name if " " <= ch <= "~" and ch not in '"\\')
+    if plain == name:
+        return f'attachment; filename="{name}"'
+    stem, dot, ext = plain.rpartition(".")
+    if not dot:
+        stem, ext = plain, ""
+    fallback = (stem.strip() or "download") + dot + ext
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
 def preview_kind(p: Path) -> Optional[str]:
     """image | pdf | video | audio for the types the explorer can show, else None."""
     hit = _PREVIEW.get(p.suffix.lower())
@@ -502,10 +547,10 @@ def preview_kind(p: Path) -> Optional[str]:
 def open_raw(path: str, roots: Roots, download: bool = False) -> tuple[Path, str, dict]:
     """Resolve a file for streaming. Returns (path, mime, response headers).
 
-    Only the previewable types are ever served inline; everything else is a forced download as
-    octet-stream. The headers matter as much as the policy: an SVG opened by URL would run its
-    scripts on the cockpit's origin with the operator's cookie, so images and media carry
-    `Content-Security-Policy: sandbox`. A PDF cannot (Chrome refuses to render a PDF under a
+    Only the previewable types are ever served inline; everything else is a forced download
+    (`download_mime`, `attachment_disposition`). The headers matter as much as the policy: an
+    SVG opened by URL would run its scripts on the cockpit's origin with the operator's cookie,
+    so images and media carry `Content-Security-Policy: sandbox`. A PDF cannot (Chrome refuses to render a PDF under a
     sandbox CSP), and the cockpit's blanket `X-Frame-Options: DENY` would stop it being framed,
     so it gets SAMEORIGIN instead; a PDF's own scripts run in the browser's PDF viewer, not on
     our origin.
@@ -522,7 +567,7 @@ def open_raw(path: str, roots: Roots, download: bool = False) -> tuple[Path, str
     kind = preview_kind(p)
     headers = {"Cache-Control": "private, no-cache"}
     inline = kind is not None and not download
-    mime = _PREVIEW[p.suffix.lower()][1] if inline else "application/octet-stream"
+    mime = _PREVIEW[p.suffix.lower()][1] if inline else download_mime(p.name)
     if inline:
         headers["Content-Disposition"] = "inline"
         if kind == "pdf":
@@ -530,7 +575,7 @@ def open_raw(path: str, roots: Roots, download: bool = False) -> tuple[Path, str
         else:
             headers["Content-Security-Policy"] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; media-src 'self'"
     else:
-        headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(p.name)}"
+        headers["Content-Disposition"] = attachment_disposition(p.name)
         headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
     return p, mime, headers
 
