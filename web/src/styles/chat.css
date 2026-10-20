@@ -2317,6 +2317,32 @@
   line-height: 1.45;
 }
 
+/* Context reset between two sessions, reached by scrolling back (lib/historyPaging). */
+.chat-session-break { margin: 14px 16px 10px; }
+.chat-session-break-line { margin: 0 0 4px; }
+.chat-session-break-line span { text-transform: none; }
+.chat-session-break-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: var(--text3, #888);
+  font-size: 11.5px;
+  text-align: center;
+}
+.chat-session-break-handoff {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  font-size: 12.5px;
+  color: var(--text2);
+  max-height: 360px;
+  overflow: auto;
+}
+
 /* Handoff card: dimmed summary carried over from the previous session (A1 feature). */
 .chat-handoff-card {
   margin: 20px 16px 8px;

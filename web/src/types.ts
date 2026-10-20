@@ -779,6 +779,29 @@ export interface SessionHistoryResponse {
   last_turn_at?: number | null
   /** Cache-hit % of the last assistant turn: round(cache_read / (cache_read + input_tokens) * 100). null if no usage. */
   last_cache_hit_pct?: number | null
+  /** The session this one continued from after a context reset. Sent only when the page holds
+   *  the session's first message (or the chat has no session yet); null = nothing above it. */
+  prev_session?: PrevSession | null
+}
+
+/** A chat session's predecessor across a context reset (GET session-history `prev_session`). */
+export interface PrevSession {
+  session_id: string
+  /** What reset the context: auto-rotation, ↺ by hand, "New session"; null when recognised from
+   *  an older session's handoff rather than recorded at the reset. */
+  trigger: 'auto' | 'manual' | 'new' | null
+  /** Unix seconds of the reset, when recorded. */
+  at: number | null
+  /** Context size that triggered an auto-rotation. */
+  context_tokens: number | null
+  /** Whether the new session started from a handoff summary. */
+  carried: boolean
+  /** That summary, as the new session received it. */
+  handoff: string | null
+  /** The previous session's title, if it has one. */
+  label: string | null
+  /** False once the previous transcript is gone from disk (CLI retention). */
+  available: boolean
 }
 
 /** Per-turn cost metrics stamped onto assistant messages when result event arrives. */
@@ -794,7 +817,7 @@ export interface TurnMetrics {
 
 export interface ChatMessage {
   id: string
-  role: 'user' | 'assistant' | 'board' | 'model_fallback' | 'runtime'
+  role: 'user' | 'assistant' | 'board' | 'model_fallback' | 'runtime' | 'session_break'
   /** Accumulated text content */
   text: string
   /** Tool calls that happened during this turn */
@@ -807,6 +830,11 @@ export interface ChatMessage {
   uuid?: string
   /** History messages only: position in the whole feed (HistoryMessage.idx). */
   idx?: number
+  /** Scroll-back rows only: the session the row was read from. */
+  sid?: string
+  /** role === 'session_break': the reset between `prev` and the session after it (`next`,
+   *  null while that session has no id yet). */
+  sessionBreak?: { prev: PrevSession; next: string | null }
   /** Error message if the turn ended with an error */
   error?: string
   /** Unix timestamp (ms) when the message was created / result arrived */

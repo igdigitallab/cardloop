@@ -29,6 +29,7 @@ import {
   HistoryMessage,
   Project,
   SessionHistoryResponse,
+  PrevSession,
   RichTool,
   TurnMetrics,
   ActivityEventSubagent,
@@ -50,7 +51,10 @@ import { playChime } from '../lib/chime'
 import { t } from '../i18n'
 import { setAppBusy } from '../lib/appBusy'
 import { isLocalCliCommand } from '../localCommands'
-import { OLDER_PAGE, OLDER_TRIGGER_PX, olderAfterHydrate, olderCursor, sinceFor } from '../lib/historyPaging'
+import {
+  OLDER_PAGE, OLDER_TRIGGER_PX, breakReason, breakRow, continuesAfterReset, nextOlder, olderAfterHydrate,
+  sinceFor,
+} from '../lib/historyPaging'
 import { Modal, ModalHead } from '../components/Modal'
 import { Paperclip, ClipboardList, Wrench, Clock, Square, Pencil, Trash2, File, Image, Flame, Snowflake, Plus } from 'lucide-react'
 
@@ -754,6 +758,34 @@ const _chatRemarkPlugins = [remarkGfm, remarkFileRefs]
 // was scrolled back (520 messages: ~160 ms per key, measured in the scroll-back e2e).
 const ChatMarkdown = memo(function ChatMarkdown({ text }: { text: string }) {
   return <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{text}</ReactMarkdown>
+})
+
+// Where scrolling back crosses a context reset: the session above ended here, the one below began
+// with a fresh context — carrying a handoff summary, or nothing.
+const SessionBreakRow = memo(function SessionBreakRow({ prev }: { prev: PrevSession }) {
+  const [open, setOpen] = useState(false)
+  const when = prev.at != null ? fmtStamp(Math.round(prev.at * 1000)) : null
+  return (
+    <div className="chat-session-break" data-prev-session={prev.session_id}>
+      <div className="chat-day-sep chat-session-break-line">
+        <span>New session{when ? ` · ${when}` : ''}</span>
+      </div>
+      <div className="chat-session-break-body">
+        <span>
+          {breakReason(prev)} · {prev.carried ? 'context reset, handoff summary carried over' : 'context reset, nothing carried over'}
+          {!prev.available && ' · the earlier transcript is no longer on disk'}
+        </span>
+        {prev.handoff && (
+          <button className="chat-board-event-btn" onClick={() => setOpen(o => !o)} aria-expanded={open}>
+            {open ? 'Hide handoff' : 'Show handoff'}
+          </button>
+        )}
+      </div>
+      {open && prev.handoff && (
+        <div className="chat-session-break-handoff"><ChatMarkdown text={prev.handoff} /></div>
+      )}
+    </div>
+  )
 })
 
 // ─── Message-action icons (small, icon-only — Gemini/Perplexity style) ─────────
@@ -1517,6 +1549,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // Session and first position of the last hydrated window — the cursor for the next page.
   const historySessionRef = useRef<string | null>(null)
   const windowStartRef = useRef<number | null>(null)
+  // `prev_session` of every session whose first message the feed has reached ('' = the chat has
+  // no session yet): where scrolling back crosses a context reset.
+  const prevOfRef = useRef<Map<string, PrevSession | null>>(new Map())
+  const prevOf = useCallback((sid: string | null) => prevOfRef.current.get(sid ?? ''), [])
   const loadingOlderRef = useRef(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   // Feed geometry captured right before a page is prepended, so the view stays on the same message.
@@ -2093,39 +2129,55 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // scroll-back pages that no longer sit directly above it.
   const adoptHistoryWindow = useCallback((res: SessionHistoryResponse) => {
     const sid = res.session_id ?? null
-    const first = res.messages.length ? res.messages[0].idx : undefined
+    // An empty window starts at the session's first message.
+    const first = res.messages.length ? res.messages[0].idx : 0
     const start = typeof first === 'number' ? first : null
-    const same = sid != null && sid === historySessionRef.current
+    if (start === 0) prevOfRef.current.set(sid ?? '', res.prev_session ?? null)
+    const same = (sid != null && sid === historySessionRef.current)
+      || continuesAfterReset(olderRef.current, historySessionRef.current, res.prev_session)
     historySessionRef.current = sid
     windowStartRef.current = start
     const kept = olderAfterHydrate(olderRef.current, start, same)
     if (kept !== olderRef.current) setOlder(kept)
   }, [setOlder])
 
-  // Fetch the page above everything shown and prepend it (scrolling back through a long session).
+  // Fetch what sits above everything shown and prepend it: the next page of the topmost session,
+  // or — past a session's first message — the session it continued from, under a reset marker.
   const loadOlder = useCallback(() => {
-    const before = olderCursor(olderRef.current, windowStartRef.current)
-    const sid = historySessionRef.current
-    if (loadingOlderRef.current || before == null || !sid) return
+    if (loadingOlderRef.current) return
+    const step = nextOlder(olderRef.current, historySessionRef.current, windowStartRef.current, prevOf)
+    if (!step) return
+    const sid = step.kind === 'page' ? step.sid : step.prev.session_id
+    const windowSid = historySessionRef.current
+    const topBefore = olderRef.current[0]?.id
     loadingOlderRef.current = true
     setLoadingOlder(true)
-    api.sessionHistory(projectId, sid, undefined, undefined, { before, limit: OLDER_PAGE })
+    const req = step.kind === 'prev' && !step.prev.available
+      ? Promise.resolve(null)
+      : api.sessionHistory(projectId, sid, undefined, undefined,
+        step.kind === 'page' ? { before: step.before, limit: OLDER_PAGE } : { limit: OLDER_PAGE })
+    req
       .then(res => {
-        // A hydrate may have switched the session or moved the boundary while this was in flight.
-        if (historySessionRef.current !== sid || res.session_id !== sid) return
-        if (olderCursor(olderRef.current, windowStartRef.current) !== before) return
-        const page = histToMessages(res.messages)
-        if (!page.length) return
+        // A hydrate may have switched the session or replaced the pages while this was in flight.
+        if (historySessionRef.current !== windowSid || olderRef.current[0]?.id !== topBefore) return
+        if (res && res.session_id !== sid) return
+        if (res && (!res.messages.length || res.messages[0].idx === 0)) {
+          prevOfRef.current.set(sid, res.prev_session ?? null)
+        }
+        const page = res ? histToMessages(res.messages, sid !== windowSid ? sid : undefined)
+          .map(row => ({ ...row, sid })) : []
+        const rows = step.kind === 'prev' ? [...page, breakRow(step.from, step.prev)] : page
+        if (!rows.length) return
         const feed = feedRef.current
         olderAnchorRef.current = feed ? { height: feed.scrollHeight, top: feed.scrollTop } : null
-        setOlder([...page, ...olderRef.current])
+        setOlder([...rows, ...olderRef.current])
       })
       .catch(() => { /* the next scroll near the top retries */ })
       .finally(() => {
         loadingOlderRef.current = false
         setLoadingOlder(false)
       })
-  }, [projectId, setOlder])
+  }, [projectId, setOlder, prevOf])
 
   // Keep the viewport on the same message when a page lands above it.
   useLayoutEffect(() => {
@@ -2135,6 +2187,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     olderAnchorRef.current = null
     feed.scrollTop = anchor.top + (feed.scrollHeight - anchor.height)
   }, [olderMsgs])
+
+  // A feed too short to scroll never fires the scroll that loads what is above it — the usual
+  // case right after a context reset, when the new session holds a message or two. Fill it.
+  // A hidden tab has no height and is left alone.
+  useEffect(() => {
+    const feed = feedRef.current
+    if (!feed || feed.clientHeight === 0 || loadingOlder) return
+    if (feed.scrollHeight <= feed.clientHeight + 8) loadOlder()
+  }, [olderMsgs, messages, loadingOlder, loadOlder])
 
   // Stick-to-bottom: auto-scroll only when the user is pinned (within SCROLL_PIN_THRESHOLD of bottom).
   // When unpinned (user scrolled up), new content does NOT jump the viewport — instead the pill
@@ -2209,12 +2270,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // Tick timers removed from ChatTab — now owned by RunStatusBar and CacheCountdownBadge
   // child components. This prevents the message list from re-rendering every second.
 
-  function histToMessages(items: HistoryMessage[]): ChatMessage[] {
+  function histToMessages(items: HistoryMessage[], otherSession?: string): ChatMessage[] {
     const out: ChatMessage[] = []
+    const prefix = otherSession ? `hist-${otherSession.slice(0, 12)}-` : 'hist-'
     items.forEach((m, i) => {
       const msg: ChatMessage = {
-        // The feed position keeps an id stable across hydrates and unique across pages.
-        id: `hist-${m.idx ?? i}`, role: m.role, text: m.text, tools: m.tools, streaming: false,
+        // The feed position keeps an id stable across hydrates and unique across pages; rows of an
+        // earlier session (scrolled back past a reset) carry its id so positions cannot collide.
+        id: `${prefix}${m.idx ?? i}`, role: m.role, text: m.text, tools: m.tools, streaming: false,
         ...(m.idx != null ? { idx: m.idx } : {}),
         ...(m.uuid ? { uuid: m.uuid } : {}),
         ...(m.ts != null ? { ts: m.ts } : {}),
@@ -4602,16 +4665,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             </div>
           </div>
         )}
-        {!rotating && messages.length === 0 && !pendingHandoff && (
+        {!rotating && feedMessages.length === 0 && !pendingHandoff && (
           <div className="chat-empty">
             <div className="chat-empty-icon">💬</div>
             <p>{t['chat.empty_hint']}<br />{t['chat.empty_session_hint']}</p>
-          </div>
-        )}
-        {!rotating && messages.length === 0 && pendingHandoff && (
-          <div className="chat-handoff-card">
-            <div className="chat-handoff-card-header">↩ Carried over from previous session</div>
-            <div className="chat-handoff-card-body">{pendingHandoff}</div>
           </div>
         )}
 
@@ -4621,6 +4678,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           </div>
         )}
         {feedMessages.map((msg, idx) => {
+          if (msg.role === 'session_break' && msg.sessionBreak) {
+            return <SessionBreakRow key={msg.id} prev={msg.sessionBreak.prev} />
+          }
           // Model fallback strip — slim system row shown when backend silently degrades the model.
           // Live-only (not replayed from history); disappears on reload.
           if (msg.role === 'model_fallback' && msg.modelFallback) {
@@ -4839,6 +4899,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           const showColdDivider = (
             msg.ts != null &&
             prevMsg?.ts != null &&
+            prevMsg.role !== 'session_break' &&  // a new session starts cold anyway; the marker says so
             (msg.ts - prevMsg.ts) > CACHE_TTL_MS
           )
           // spec-088: full date above the first message of a new calendar day.
@@ -4889,6 +4950,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             </div>
           )
         })}
+        {/* The summary the next turn will start from — below whatever earlier session is shown. */}
+        {!rotating && messages.length === 0 && pendingHandoff && (
+          <div className="chat-handoff-card">
+            <div className="chat-handoff-card-header">↩ Carried over from previous session</div>
+            <div className="chat-handoff-card-body">{pendingHandoff}</div>
+          </div>
+        )}
 
         <div ref={bottomRef} />
         {/* Stick-to-bottom pill: visible only when user has scrolled up and new messages arrive. */}

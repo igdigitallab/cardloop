@@ -52,6 +52,9 @@ E2E_PROJECT_IDS += ["e2e-buslag", "e2e-buslag-multi", "e2e-buslag-error", "e2e-b
 # Scrolling a long session back past the last 100 messages (test_history_scrollback.py).
 E2E_PROJECT_IDS.append("e2e-history")
 
+# Scrolling back across a context reset into the session before (test_history_session_reset.py).
+E2E_PROJECT_IDS += ["e2e-reset", "e2e-reset-old"]
+
 
 def _free_port() -> int:
     """Binds to port 0 to let the OS pick a free one, then releases it. Small
