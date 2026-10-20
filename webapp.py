@@ -73,6 +73,7 @@ import autopilot as _autopilot
 # spec-074: global search index (SQLite FTS5 over transcripts/timeline/boards)
 import search as _search
 import transcript_stats as _transcript_stats
+import history_index as _history_index
 import codex_engine as _codex
 import grok_engine as _grok
 import grok_history as _grok_history
@@ -13076,20 +13077,122 @@ _HISTORY_SINCE_MAX = 2000
 _HISTORY_PAGE_MAX = 500
 
 
+def _history_line_msg(o: dict) -> "dict | None":
+    """The chat-feed message one transcript line yields, or None: user(str) = a human reply,
+    user(list) = a tool result (skipped), assistant(list) = text/tool_use blocks, a queued_command
+    attachment = a steered message; everything else is noise. `ts` = epoch ms from the line's ISO
+    "timestamp" (None if absent) — rendered next to each message's copy/save actions (spec-022
+    parity for history). Depends on the line alone: history_index runs it when it indexes a line
+    and again when it reads the line back for a page."""
+    try:
+        return _history_line_msg_unsafe(o)
+    except Exception:
+        return None
+
+
+def _history_line_msg_unsafe(o: dict) -> "dict | None":
+    t = o.get("type")
+    m = o.get("message")
+    # spec-086: a mid-turn steered message never lands as a user line — the CLI
+    # records it as a queued_command attachment at enqueue time (plus queue-operation
+    # bookkeeping). Without this branch the operator's OWN injected message vanishes
+    # from the feed the moment the live buffer expires (300 s) or the page reloads.
+    # No double-render risk: a message the CLI dequeues immediately (queue drained
+    # into a fresh turn) gets a real user line and never a queued_command attachment.
+    if t == "attachment":
+        _att = o.get("attachment") or {}
+        if _att.get("type") == "queued_command":
+            # _display_prompt: an auto-continue wake or a raw <task-notification>
+            # block can in principle land here too (steered mid-turn) — same
+            # noise class as an ordinary user line, same cleanup.
+            _steered = _display_prompt(_att.get("prompt") or "")
+            if _steered:
+                return ({"role": "user", "text": _steered, "tools": [],
+                             "uuid": o.get("uuid"), "steered": True,
+                             "ts": _iso_to_ms(o.get("timestamp"))})
+        return None
+    if not isinstance(m, dict):
+        return None
+    if t == "user":
+        # A user-role line carrying isMeta=true was written by the harness, not the
+        # operator: the CLI's image-downscale notice ("[Image: original 828x8240,
+        # displayed at 201x2000. Multiply coordinates by 4.12 ...]" after Read on a
+        # tall PNG), "Continue from where you left off.", Stop-hook feedback,
+        # <local-command-caveat>, malformed-tool-call notices, scheduler-injected
+        # prompts. The feed rendered every one of them as the operator's own bubble
+        # ("who uploaded that image?"). Structural check, no text matching: a scan of
+        # 2412 transcripts found 112 isMeta user lines, all harness-generated, zero
+        # typed by a human. Note that "[Request interrupted by user]" is NOT covered
+        # here — it arrives as a content LIST and is already skipped below.
+        #
+        # ONE exception: a cross-session delivery from another agent also carries
+        # isMeta (see _CROSS_AGENT_MSG_RE). That is real content — a teammate's
+        # verbatim report — and this feed is the only place it is ever visible.
+        # Dropping it also starved the rotation handoff digest, which runs through
+        # this same function at limit=1000, so the loss compounded into the next
+        # session's inherited context.
+        c = m.get("content")
+        if o.get("isMeta") is True and not (
+                isinstance(c, str) and _CROSS_AGENT_MSG_RE.search(c)):
+            return None
+        if isinstance(c, str):
+            # _display_prompt: drops a synthetic auto-continue wake whole (never
+            # operator-typed) and strips any embedded SDK service XML block —
+            # see _display_prompt's docstring for both classes of noise.
+            cleaned = _display_prompt(c)
+            if cleaned:
+                # spec-073: uuid = the file-checkpoint anchor for rewind_files.
+                return ({"role": "user", "text": cleaned, "tools": [],
+                             "uuid": o.get("uuid"),
+                             "ts": _iso_to_ms(o.get("timestamp"))})
+        # content-list on user = tool_result → skip (not a human reply)
+    elif t == "assistant":
+        c = m.get("content")
+        if not isinstance(c, list):
+            return None
+        text_parts, tools = [], []
+        for b in c:
+            if not isinstance(b, dict):
+                return None
+            if b.get("type") == "text" and (b.get("text") or "").strip():
+                text_parts.append(b["text"])
+            elif b.get("type") == "tool_use":
+                inp = b.get("input") or {}
+                tool_name = b.get("name", "?")
+                tools.append(_format_tool(tool_name, inp if isinstance(inp, dict) else {}))
+        if text_parts or tools:
+            return ({"role": "assistant", "text": "\n".join(text_parts), "tools": tools,
+                         "ts": _iso_to_ms(o.get("timestamp"))})
+    return None
+
+
 def _session_history(jsonl_path: Path, limit: int = 100,
                      around_uuid: "str | None" = None,
                      around_ts: "int | None" = None,
                      before: "int | None" = None,
                      since: "int | None" = None) -> list[dict]:
-    """Parses an SDK session transcript → feed [{role, text, tools, ts, idx}].
-    user(str)=human reply; user(list)=tool_result, skip.
-    assistant(list)=text/tool_use blocks. Other types — noise.
-    `ts` = epoch ms from the line's ISO "timestamp" (None if absent) — the cockpit
-    renders it next to each message's copy/save actions (spec-022 parity for history).
+    """A session transcript as chat-feed messages [{role, text, tools, ts, idx}] (see
+    _history_line_msg for what a message is).
     `idx` = the message's position in the whole feed. A transcript is append-only, so it never
     changes and works as a paging cursor: `before=N` is the `limit` messages ending just above
     message N (scrolling back), `since=N` is message N to the end (the live window of a chat
-    that has pages loaded above it)."""
+    that has pages loaded above it). Otherwise the window is the tail, or centred on an anchor
+    (see _window_history).
+    Served from history_index, which remembers where every message's line starts, so a page reads
+    only its own lines and a grown transcript is not re-parsed from byte 0."""
+    msgs = _history_index.window(jsonl_path, _history_line_msg, limit=limit, before=before,
+                                 since=since, since_max=_HISTORY_SINCE_MAX,
+                                 around_uuid=around_uuid, around_ts=around_ts)
+    return msgs if msgs is not None else []
+
+
+def _session_history_scan(jsonl_path: Path, limit: int = 100,
+                          around_uuid: "str | None" = None,
+                          around_ts: "int | None" = None,
+                          before: "int | None" = None,
+                          since: "int | None" = None) -> list[dict]:
+    """_session_history by parsing the whole file, no index — the reference the index is tested
+    against."""
     msgs: list[dict] = []
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as f:
@@ -13101,79 +13204,11 @@ def _session_history(jsonl_path: Path, limit: int = 100,
                     o = json.loads(line)
                 except Exception:
                     continue
-                t = o.get("type")
-                m = o.get("message")
-                # spec-086: a mid-turn steered message never lands as a user line — the CLI
-                # records it as a queued_command attachment at enqueue time (plus queue-operation
-                # bookkeeping). Without this branch the operator's OWN injected message vanishes
-                # from the feed the moment the live buffer expires (300 s) or the page reloads.
-                # No double-render risk: a message the CLI dequeues immediately (queue drained
-                # into a fresh turn) gets a real user line and never a queued_command attachment.
-                if t == "attachment":
-                    _att = o.get("attachment") or {}
-                    if _att.get("type") == "queued_command":
-                        # _display_prompt: an auto-continue wake or a raw <task-notification>
-                        # block can in principle land here too (steered mid-turn) — same
-                        # noise class as an ordinary user line, same cleanup.
-                        _steered = _display_prompt(_att.get("prompt") or "")
-                        if _steered:
-                            msgs.append({"role": "user", "text": _steered, "tools": [],
-                                         "uuid": o.get("uuid"), "steered": True,
-                                         "ts": _iso_to_ms(o.get("timestamp"))})
-                    continue
-                if not isinstance(m, dict):
-                    continue
-                if t == "user":
-                    # A user-role line carrying isMeta=true was written by the harness, not the
-                    # operator: the CLI's image-downscale notice ("[Image: original 828x8240,
-                    # displayed at 201x2000. Multiply coordinates by 4.12 ...]" after Read on a
-                    # tall PNG), "Continue from where you left off.", Stop-hook feedback,
-                    # <local-command-caveat>, malformed-tool-call notices, scheduler-injected
-                    # prompts. The feed rendered every one of them as the operator's own bubble
-                    # ("who uploaded that image?"). Structural check, no text matching: a scan of
-                    # 2412 transcripts found 112 isMeta user lines, all harness-generated, zero
-                    # typed by a human. Note that "[Request interrupted by user]" is NOT covered
-                    # here — it arrives as a content LIST and is already skipped below.
-                    #
-                    # ONE exception: a cross-session delivery from another agent also carries
-                    # isMeta (see _CROSS_AGENT_MSG_RE). That is real content — a teammate's
-                    # verbatim report — and this feed is the only place it is ever visible.
-                    # Dropping it also starved the rotation handoff digest, which runs through
-                    # this same function at limit=1000, so the loss compounded into the next
-                    # session's inherited context.
-                    c = m.get("content")
-                    if o.get("isMeta") is True and not (
-                            isinstance(c, str) and _CROSS_AGENT_MSG_RE.search(c)):
-                        continue
-                    if isinstance(c, str):
-                        # _display_prompt: drops a synthetic auto-continue wake whole (never
-                        # operator-typed) and strips any embedded SDK service XML block —
-                        # see _display_prompt's docstring for both classes of noise.
-                        cleaned = _display_prompt(c)
-                        if cleaned:
-                            # spec-073: uuid = the file-checkpoint anchor for rewind_files.
-                            msgs.append({"role": "user", "text": cleaned, "tools": [],
-                                         "uuid": o.get("uuid"),
-                                         "ts": _iso_to_ms(o.get("timestamp"))})
-                    # content-list on user = tool_result → skip (not a human reply)
-                elif t == "assistant":
-                    c = m.get("content")
-                    if not isinstance(c, list):
-                        continue
-                    text_parts, tools = [], []
-                    for b in c:
-                        if not isinstance(b, dict):
-                            continue
-                        if b.get("type") == "text" and (b.get("text") or "").strip():
-                            text_parts.append(b["text"])
-                        elif b.get("type") == "tool_use":
-                            inp = b.get("input") or {}
-                            tool_name = b.get("name", "?")
-                            tools.append(_format_tool(tool_name, inp if isinstance(inp, dict) else {}))
-                    if text_parts or tools:
-                        msgs.append({"role": "assistant", "text": "\n".join(text_parts), "tools": tools,
-                                     "ts": _iso_to_ms(o.get("timestamp"))})
-    except Exception:
+                if isinstance(o, dict):
+                    m = _history_line_msg(o)
+                    if m is not None:
+                        msgs.append(m)
+    except OSError:
         pass
     for i, m in enumerate(msgs):
         m["idx"] = i
