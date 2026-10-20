@@ -120,7 +120,7 @@ async def test_history_claude_branches(aiohttp_client, fake_ctx, app, tmp_path, 
     client = await aiohttp_client(app)
     resp = await client.get(f"/api/projects/{PROJECT_ID}/session-history", headers=_auth(fake_ctx))
     assert await resp.json() == {"messages": [], "session_id": None, "context_tokens": 0,
-                                 "last_cache_hit_pct": None}
+                                 "last_cache_hit_pct": None, "prev_session": None}
     resp = await client.get(f"/api/projects/{PROJECT_ID}/session-history?session_id=abc",
                             headers=_auth(fake_ctx))
     assert await resp.json() == {"messages": [], "session_id": "abc"}

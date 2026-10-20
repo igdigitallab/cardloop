@@ -74,6 +74,7 @@ import autopilot as _autopilot
 import search as _search
 import transcript_stats as _transcript_stats
 import history_index as _history_index
+import session_links as _session_links
 import codex_engine as _codex
 import grok_engine as _grok
 import grok_history as _grok_history
@@ -12844,6 +12845,9 @@ async def api_project_set_session(req: web.Request) -> web.Response:
             _ss_active = _find_chat(_ss_data.get(project["id"]) or {})
             if _ss_active is not None:
                 _session_provider = _chat_provider(_ss_active)
+                if _session_provider == "claude" and _ss_active.get("session_id"):
+                    _ss_active["rotated_from"] = _rotation_mark(
+                        _ss_active["session_id"], "new", None, False)
                 # Each provider clears ITS OWN continuity id (Claude's session_id, Codex's
                 # thread, Grok's session) — never another provider's.
                 _ss_active[providers.get(_session_provider).continuity_field] = None
@@ -12922,6 +12926,8 @@ async def api_project_set_session(req: web.Request) -> web.Response:
                 return _active_chat_changed_response()
             if _sr_active is not None:
                 _sr_active["session_id"] = session_id
+                # An existing session was picked: it has its own past, not the reset's.
+                _sr_active.pop("rotated_from", None)
                 _save_chats(ctx, _sr_data)
         ctx["sessions"][_sk] = session_id
         ctx["save_sessions"]()
@@ -13220,6 +13226,198 @@ def _session_history_scan(jsonl_path: Path, limit: int = 100,
     return _window_history(msgs, limit, around_uuid, around_ts)
 
 
+# ── A chat's feed across a context reset (session_links) ─────────────────────
+# A reset (↺, auto-rotation, "New session") clears the chat's session id and the next turn starts
+# a session the SDK names only once it answers. The reset leaves a mark on the chat; the write-back
+# of that first turn turns it into a link new → old, which session-history hands the client when
+# it reaches the first message, so the feed can carry on into the session before.
+
+_HANDOFF_PREAMBLE = (
+    "The previous session was rotated to stay lean. Summary of where we left off below.\n"
+    "Continue this work if the new message relates to it; ignore this block if starting "
+    "something unrelated.\n\n"
+)
+_PRIOR_SUMMARY_RE = re.compile(r"<prior-session-summary>\s*(.*?)\s*</prior-session-summary>", re.DOTALL)
+# How many transcripts, newest first, are checked when recognising an older session's predecessor.
+_PREV_INFER_CANDIDATES = 16
+_prev_infer_miss: set[str] = set()
+
+
+def _rotation_mark(session_id: str, trigger: str, context_tokens: "int | None",
+                   handoff: bool) -> dict:
+    return {"session_id": session_id, "at": time.time(), "trigger": trigger,
+            "context_tokens": context_tokens, "handoff": bool(handoff)}
+
+
+def _bind_rotation(ctx: dict, chat: dict, new_sid: "str | None", fresh: bool) -> None:
+    """At a Claude turn's write-back, with the chat record about to be saved: the first session a
+    reset chat starts is linked to the one the reset ended, and the mark is gone, so it can never
+    attach to a later session. A resumed turn (not `fresh`) leaves the mark alone."""
+    mark = chat.get("rotated_from")
+    if not isinstance(mark, dict) or not fresh or not new_sid:
+        return
+    chat.pop("rotated_from", None)
+    prev = mark.get("session_id")
+    if not prev or prev == new_sid:
+        return
+    try:
+        _session_links.put(ctx["DATA"], new_sid, {
+            "prev": prev, "trigger": mark.get("trigger"), "at": mark.get("at"),
+            "context_tokens": mark.get("context_tokens"), "handoff": bool(mark.get("handoff")),
+            "inferred": False})
+        print(f"[session] link {new_sid[:8]} <- {prev[:8]} ({mark.get('trigger')})")
+    except Exception as exc:
+        print(f"[session] link {new_sid[:8]} <- {prev[:8]} not saved: {exc!r}")
+
+
+def _session_handoff_text(jsonl: Path) -> "str | None":
+    """The rotation summary a session was started with (its first prompt's
+    <prior-session-summary> block, without the fixed preamble), or None."""
+    o = _history_index.first_user_line(jsonl, _history_line_msg)
+    c = ((o or {}).get("message") or {}).get("content")
+    if isinstance(c, list):
+        c = "\n".join(b.get("text") or "" for b in c
+                      if isinstance(b, dict) and b.get("type") == "text")
+    m = _PRIOR_SUMMARY_RE.search(c) if isinstance(c, str) else None
+    if not m:
+        return None
+    text = m.group(1)
+    pre = _HANDOFF_PREAMBLE.strip()
+    return text[len(pre):].lstrip() if text.startswith(pre) else text
+
+
+_LAST_INSTRUCTION = "Last instruction (operator): "
+_WHERE_STOPPED = "Where we stopped (agent's last message):\n"
+_UNANSWERED = "\n⚠️ The agent never answered"
+# Transcripts last written this long before a session began are not considered its predecessor.
+_PREV_INFER_MAX_GAP_MS = 14 * 86_400_000
+
+
+def _handoff_quotes(handoff: str) -> "tuple[str, str]":
+    """The predecessor's last prompt and last reply as the handoff quotes them ("" if absent)."""
+    said = replied = ""
+    i = handoff.rfind(_LAST_INSTRUCTION)
+    if i >= 0:
+        said = handoff[i + len(_LAST_INSTRUCTION):]
+        for stop in ("\n" + _WHERE_STOPPED, _UNANSWERED):
+            j = said.find(stop)
+            if j >= 0:
+                said = said[:j]
+    j = handoff.rfind(_WHERE_STOPPED)
+    if j >= 0:
+        replied = handoff[j + len(_WHERE_STOPPED):].strip()
+    return said, replied
+
+
+def _handoff_quoted(full: str, quoted: str, cap: int) -> bool:
+    """Does the handoff's `quoted` text quote `full`? Today's form is _handoff_verbatim; handoffs
+    built before it cut a plain head (1000-1200 chars), which only a prefix test recognises."""
+    if not quoted or not full:
+        return False
+    return _handoff_verbatim(full, cap) == quoted or (len(quoted) >= 40 and full.startswith(quoted))
+
+
+def _transcript_tail(p: Path, messages: bool) -> "tuple[int | None, dict | None, dict | None]":
+    """(timestamp of the last timed line, last user message, last assistant message) — the two
+    messages only when `messages`, each the last one with text. Read from the end of the file.
+    A transcript's mtime cannot stand in for the first: the CLI appends untimed bookkeeping
+    (last-prompt, mode) to a session hours after its last turn."""
+    last_ts = user = agent = None
+    for o in _history_index.scan_back(p, max_bytes=(16 << 20) if messages else (1 << 20)):
+        if last_ts is None:
+            last_ts = _iso_to_ms(o.get("timestamp"))
+            if last_ts is not None and not messages:
+                break
+        if messages:
+            m = _history_line_msg(o)
+            if m is not None and (m.get("text") or "").strip():
+                if m["role"] == "user" and user is None:
+                    user = m
+                elif m["role"] == "assistant" and agent is None:
+                    agent = m
+            if last_ts is not None and user is not None and agent is not None:
+                break
+    return last_ts, user, agent
+
+
+def _infer_prev_session(sessions_dir: Path, sid: str, jsonl: Path, handoff: str) -> "dict | None":
+    """The session a handoff was built from, for a session older than the links file.
+
+    The handoff quotes its source: "Last instruction (operator): <its last prompt>" and
+    "Where we stopped (agent's last message):\n<its last reply>" (see _build_handoff). The source
+    stopped before this session began, so the transcripts whose last timed line is before then
+    are checked, latest first. A short last prompt ("да") also needs the reply to match."""
+    if sid in _prev_infer_miss:
+        return None
+    said, replied = _handoff_quotes(handoff)
+    first = _history_index.first_user_line(jsonl, _history_line_msg)
+    start_ms = _iso_to_ms((first or {}).get("timestamp"))
+    if start_ms is None or not said:
+        _prev_infer_miss.add(sid)
+        return None
+    recent = []
+    for p in sessions_dir.glob("*.jsonl"):
+        if p.stem == sid:
+            continue
+        try:
+            mt = p.stat().st_mtime * 1000
+        except OSError:
+            continue
+        if mt >= start_ms - _PREV_INFER_MAX_GAP_MS:  # a file is never last written before it ended
+            recent.append((abs(mt - start_ms), p))
+    recent.sort(key=lambda x: x[0])
+    ended = []
+    for _d, p in recent[:400]:
+        ts, _u, _a = _transcript_tail(p, messages=False)
+        if ts is not None and ts <= start_ms + 120_000:
+            ended.append((ts, p))
+    ended.sort(key=lambda x: x[0], reverse=True)
+    for _ts, p in ended[:_PREV_INFER_CANDIDATES]:
+        _ts2, u, a = _transcript_tail(p, messages=True)
+        if u is None or not _handoff_quoted(u["text"].strip(), said, _HANDOFF_LAST_USER_CHARS):
+            continue
+        reply_ok = a is not None and _handoff_quoted(a["text"].strip(), replied,
+                                                     _HANDOFF_LAST_AGENT_CHARS)
+        if not reply_ok and len(said) < 40:
+            continue
+        return {"prev": p.stem, "trigger": None, "at": None, "context_tokens": None,
+                "handoff": True, "inferred": True}
+    _prev_infer_miss.add(sid)
+    return None
+
+
+def _prev_session_payload(ctx: dict, sessions_dir: Path, rec: dict,
+                          handoff: "str | None") -> "dict | None":
+    prev = rec.get("prev") or rec.get("session_id")
+    if not prev or prev != Path(prev).name or prev in (".", ".."):
+        return None
+    return {
+        "session_id": prev,
+        "trigger": rec.get("trigger"),
+        "at": rec.get("at"),
+        "context_tokens": rec.get("context_tokens"),
+        "carried": bool(handoff) or bool(rec.get("handoff")),
+        "handoff": handoff,
+        "label": _load_session_labels(ctx).get(prev),
+        "available": (sessions_dir / f"{prev}.jsonl").is_file(),
+    }
+
+
+def _prev_session_info(ctx: dict, cwd: str, sid: str) -> "dict | None":
+    """What the feed shows above a session's first message: the session it continued from
+    (recorded, or recognised from its handoff), or None. Blocking IO — call from an executor."""
+    d = _sdk_sessions_dir(cwd)
+    jsonl = d / f"{sid}.jsonl"
+    rec = _session_links.get(ctx["DATA"], sid)
+    handoff = _session_handoff_text(jsonl)
+    if rec is None and handoff is not None:
+        rec = _infer_prev_session(d, sid, jsonl, handoff)
+        if rec is not None:
+            _session_links.put(ctx["DATA"], sid, rec)
+            print(f"[session] link {sid[:8]} <- {rec['prev'][:8]} (recognised from its handoff)")
+    return _prev_session_payload(ctx, d, rec, handoff) if rec is not None else None
+
+
 def _window_history(msgs: list[dict], limit: int,
                     around_uuid: "str | None" = None,
                     around_ts: "int | None" = None) -> list[dict]:
@@ -13339,9 +13537,14 @@ async def api_project_session_history(req: web.Request) -> web.Response:
            or _active_chat_session_id(ctx, project["id"])
            or ctx["sessions"].get(session_key))
     if not sid:
+        # A chat just reset has no session yet; the one the reset ended is still above it.
+        _mark = (active_chat or {}).get("rotated_from")
+        prev_session = (_prev_session_payload(ctx, _sdk_sessions_dir(project["cwd"]), _mark, None)
+                        if isinstance(_mark, dict) else None)
         # Spec-043 C: explicit context_tokens:0 so the frontend can distinguish
         # "fresh session (known zero)" from "no data yet (null/missing)".
-        return web.json_response({"messages": [], "session_id": None, "context_tokens": 0, "last_cache_hit_pct": None})
+        return web.json_response({"messages": [], "session_id": None, "context_tokens": 0,
+                                  "last_cache_hit_pct": None, "prev_session": prev_session})
     # Sanitise (basename-only)
     if sid != Path(sid).name or sid in (".", ".."):
         return web.json_response({"error": "invalid session_id"}, status=400)
@@ -13369,17 +13572,21 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     before, since = _int_arg("before"), _int_arg("since")
     limit = min(max(_int_arg("limit") or 100, 1), _HISTORY_PAGE_MAX)
 
-    # Both read the whole transcript (hundreds of MB for a long session): off the event loop.
+    # Both read the transcript (hundreds of MB for a long session): off the event loop. The
+    # session before this one is looked up only once the feed reaches this one's first message.
     def _read():
-        return (_session_last_turn(jsonl),
-                _session_history(jsonl, limit=limit, around_uuid=around_uuid, around_ts=around_ts,
-                                 before=before, since=since))
+        msgs = _session_history(jsonl, limit=limit, around_uuid=around_uuid, around_ts=around_ts,
+                                before=before, since=since)
+        prev = (_prev_session_info(ctx, project["cwd"], sid)
+                if not msgs or msgs[0].get("idx") == 0 else None)
+        return _session_last_turn(jsonl), msgs, prev
 
-    (context_tokens, last_turn_at_ms, last_cache_hit_pct), messages = \
+    (context_tokens, last_turn_at_ms, last_cache_hit_pct), messages, prev_session = \
         await asyncio.get_running_loop().run_in_executor(None, _read)
     return web.json_response({
         "messages": messages,
         "session_id": sid,
+        "prev_session": prev_session,
         "context_tokens": context_tokens,
         "context_window": CONTEXT_WINDOW,
         "context_warn_at": CONTEXT_WARN_AT,
@@ -14535,6 +14742,9 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                     )
                                     if _wc is not None:
                                         _wc[spec.continuity_field] = _new_id
+                                        if spec.is_default:
+                                            _bind_rotation(ctx, _wc, _new_id,
+                                                           fresh=resume_id is None)
                                         # spec-092 P2: the engine answered — only now is the
                                         # handoff proven delivered (same rule as the direct
                                         # path; clearing at injection time would lose it on a
@@ -15606,6 +15816,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                     )
                                     if _cb_chat is not None:
                                         _cb_chat[_spec.continuity_field] = _new_id
+                                        if _spec.is_default:
+                                            _bind_rotation(ctx, _cb_chat, _new_id,
+                                                           fresh=resume_sid is None)
                                         # spec-092 P2: the engine answered and returned an
                                         # id — that, and nothing earlier, is proof the
                                         # handoff was actually delivered. Now it can go.
@@ -16376,6 +16589,12 @@ async def _rotate_session_core(ctx: dict, project: dict, session_key: str, do_ha
                         for _c in _fresh_entry.get("chats", []):
                             if _c["id"] == _fresh_active_id:
                                 _c["session_id"] = None
+                                # The feed carries on into the ended session above the next
+                                # one: _bind_rotation links them once the next one is named.
+                                _ended = _active_chat_sid or effective_sid
+                                if _ended:
+                                    _c["rotated_from"] = _rotation_mark(
+                                        _ended, trigger, context_tokens, stored)
                                 break
                     _save_chats(ctx, _fresh)
             except Exception as _cl_exc:
@@ -16638,9 +16857,7 @@ def _inject_pending_handoff(ctx: dict, session_key: str, prompt: str,
     ctx.get("save_handoff", lambda: None)()
     effective = (
         "<prior-session-summary>\n"
-        "The previous session was rotated to stay lean. Summary of where we left off below.\n"
-        "Continue this work if the new message relates to it; ignore this block if starting "
-        "something unrelated.\n\n"
+        f"{_HANDOFF_PREAMBLE}"
         f"{pending_summary}\n"
         "</prior-session-summary>\n\n"
         f"{prompt}"

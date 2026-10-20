@@ -204,3 +204,16 @@ def test_a_same_size_rewrite_with_a_new_mtime_is_indexed_again(tmp_path):
     _write(p, [_user(1), msg])
     os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
     assert [m["text"] for m in _webapp._session_history(p)] == ["q1", "q7"]
+
+
+def test_scan_back_yields_complete_lines_last_first_within_its_budget(tmp_path):
+    p = tmp_path / "s.jsonl"
+    rows = [{"i": i, "pad": "x" * (200_000 if i == 3 else 50)} for i in range(30)]
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows) + '{"i": "unterminated', encoding="utf-8")
+    assert [o["i"] for o in hix.scan_back(p)] == list(range(29, -1, -1))
+    # A budget stops early and never yields a line that starts before it.
+    near = [o["i"] for o in hix.scan_back(p, max_bytes=2_000)]
+    assert 5 <= len(near) < 30 and near == list(range(29, 29 - len(near), -1))
+    short_of_long_line = [o["i"] for o in hix.scan_back(p, max_bytes=100_000)]
+    assert short_of_long_line == list(range(29, 3, -1))
+    assert list(hix.scan_back(tmp_path / "missing.jsonl")) == []

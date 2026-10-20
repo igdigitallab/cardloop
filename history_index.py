@@ -289,3 +289,31 @@ def first_user_line(path: "str | Path", parse: Parse) -> "dict | None":
         _drop(key)
         return None
     return o
+
+
+def scan_back(path: "str | Path", max_bytes: int = 16 << 20):
+    """The decoded JSON objects of a file's lines, last line first, reading at most `max_bytes`
+    from the end (a line that starts further back is never yielded). For questions about the end
+    of a transcript — when did it stop, what was said last — without indexing all of it."""
+    try:
+        f = open(str(path), "rb")
+    except OSError:
+        return
+    with f:
+        try:
+            pos = f.seek(0, os.SEEK_END)
+        except OSError:
+            return
+        end, step, carry = pos, 1 << 16, b""
+        while pos > 0 and end - pos < max_bytes:
+            n = min(step, pos)
+            pos -= n
+            f.seek(pos)
+            pieces = (f.read(n) + carry).split(b"\n")
+            # The first piece may begin mid-line unless the read reached the start of the file.
+            carry = pieces.pop(0) if pos > 0 else b""
+            for raw in reversed(pieces):
+                o = _decode(raw)
+                if o is not None:
+                    yield o
+            step = min(step * 2, 1 << 22)
