@@ -7,6 +7,7 @@ Does NOT import bot.py directly (re-import would create a second instance).
 """
 
 import asyncio
+import concurrent.futures
 import contextlib
 import csv
 import dataclasses
@@ -71,6 +72,7 @@ import autopilot as _autopilot
 
 # spec-074: global search index (SQLite FTS5 over transcripts/timeline/boards)
 import search as _search
+import transcript_stats as _transcript_stats
 import codex_engine as _codex
 import grok_engine as _grok
 import grok_history as _grok_history
@@ -12652,77 +12654,37 @@ def _session_preview(jsonl_path: Path) -> str:
     return "(untitled)"
 
 
-def _session_message_count(jsonl_path: Path) -> int:
-    """Count user+assistant message records in a session jsonl (spec-042 label).
-
-    Cheap full-file scan; used only by the sessions-list endpoint (≤30 sessions).
-    Tolerant of malformed lines — best-effort, never raises."""
-    count = 0
-    try:
-        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                msg = obj.get("message", {})
-                if isinstance(msg, dict) and msg.get("role") in ("user", "assistant"):
-                    count += 1
-    except Exception:
-        pass
-    return count
+# Session-list stats run on their own single thread: a cold load asks every open tab for its list at
+# once, and a cache-cold list reads every byte of up to 30 transcripts. On the default executor those
+# jobs would queue the active chat's history behind them.
+_TRANSCRIPT_STATS_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="transcript-stats")
 
 
-def _session_context_tokens(jsonl_path: Path) -> int:
-    """Return the context token count from the LAST assistant message with usage data.
+def _claude_session_rows(sdk_dir: Path, limit: int = 30) -> list[dict]:
+    """The `limit` newest transcripts in `sdk_dir`, newest first, with their list stats.
 
-    Reads the transcript .jsonl and sums input_tokens + cache_read_input_tokens +
-    cache_creation_input_tokens from the usage object on the last assistant turn.
-    Reads from the end (last 64 KB) for efficiency.
-    Returns 0 if no usage found or on any error.
-    """
-    try:
-        last_usage: dict | None = None
-        chunk_size = 65536
-        with open(jsonl_path, "rb") as fh:
-            fh.seek(0, 2)  # seek to end
-            file_size = fh.tell()
-            read_start = max(0, file_size - chunk_size)
-            fh.seek(read_start)
-            raw = fh.read()
-        # Decode and split into lines; first line may be partial — skip it if we seeked mid-file
-        text = raw.decode("utf-8", errors="replace")
-        lines = text.splitlines()
-        if read_start > 0 and lines:
-            lines = lines[1:]  # drop potentially partial first line
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            msg = obj.get("message", {})
-            if not isinstance(msg, dict):
-                continue
-            if msg.get("role") != "assistant":
-                continue
-            usage = msg.get("usage")
-            if isinstance(usage, dict):
-                last_usage = usage
-        if last_usage is None:
-            return 0
-        return (
-            (last_usage.get("input_tokens") or 0)
-            + (last_usage.get("cache_read_input_tokens") or 0)
-            + (last_usage.get("cache_creation_input_tokens") or 0)
-        )
-    except Exception:
-        return 0
+    Picks by mtime BEFORE reading anything: stats need a pass over the whole file, and a project
+    keeps every transcript it ever had. Blocking IO — run in `_TRANSCRIPT_STATS_POOL`."""
+    files = []
+    for f in sdk_dir.glob("*.jsonl"):
+        try:
+            mtime = f.stat().st_mtime
+        except OSError:
+            mtime = 0
+        files.append((mtime, f))
+    files.sort(key=lambda mf: mf[0], reverse=True)
+    rows = []
+    for mtime, f in files[:limit]:
+        st = _transcript_stats.stats(f)
+        rows.append({
+            "session_id": f.stem,
+            "last_used": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+            "preview": _session_preview(f),
+            "message_count": st["message_count"],
+            "context_tokens": st["context_tokens"],
+        })
+    return rows
 
 
 async def api_project_sessions(req: web.Request) -> web.Response:
@@ -12787,31 +12749,20 @@ async def api_project_sessions(req: web.Request) -> web.Response:
 
     labels = _load_session_labels(ctx)
 
-    sessions = []
     try:
-        for f in sdk_dir.glob("*.jsonl"):
-            sid = f.stem
-            try:
-                mtime = f.stat().st_mtime
-            except Exception:
-                mtime = 0
-            last_used = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
-            preview = _session_preview(f)
-            sessions.append({
-                "session_id": sid,
-                "last_used": last_used,
-                "preview": preview,
-                "is_active": sid == active_sid,
-                "label": labels.get(sid) or None,
-                "message_count": _session_message_count(f),
-                "context_tokens": _session_context_tokens(f),
-            })
+        rows = await asyncio.get_running_loop().run_in_executor(
+            _TRANSCRIPT_STATS_POOL, _claude_session_rows, sdk_dir)
     except Exception:
-        pass
-
-    sessions.sort(key=lambda s: s["last_used"], reverse=True)
-    if len(sessions) > 30:
-        sessions = sessions[:30]
+        rows = []
+    sessions = [{
+        "session_id": r["session_id"],
+        "last_used": r["last_used"],
+        "preview": r["preview"],
+        "is_active": r["session_id"] == active_sid,
+        "label": labels.get(r["session_id"]) or None,
+        "message_count": r["message_count"],
+        "context_tokens": r["context_tokens"],
+    } for r in rows]
 
     return web.json_response({"sessions": sessions})
 
@@ -13258,81 +13209,11 @@ def _session_context_tokens(jsonl_path: Path) -> int:
 
 
 def _session_last_turn(jsonl_path: Path) -> "tuple[int, int | None, int | None]":
-    """Single-pass scan of a session transcript returning data from the last assistant turn.
-
-    Returns:
-        (context_tokens, last_turn_at_ms, last_cache_hit_pct)
-
-        context_tokens   — prompt tokens of the last assistant turn
-                           (input + cache_read + cache_creation); 0 if absent.
-        last_turn_at_ms  — unix milliseconds of the last assistant line's "timestamp"
-                           field (ISO-8601). Falls back to the file's mtime if the
-                           field is absent or unparseable. None if no assistant turn.
-        last_cache_hit_pct — cache hit % for the last assistant turn per the formula:
-                             round(cache_read / (cache_read + input_tokens) * 100).
-                             Note: cache_creation is NOT included in the ratio (it is
-                             the write side, not the read side). None if no usage.
-    """
-    context_tokens = 0
-    last_turn_at_ms: "int | None" = None
-    last_cache_hit_pct: "int | None" = None
-    try:
-        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line or '"assistant"' not in line:
-                    continue
-                try:
-                    o = json.loads(line)
-                except Exception:
-                    continue
-                if o.get("type") != "assistant":
-                    continue
-                # Context tokens (input + cache_read + cache_creation)
-                u = (o.get("message") or {}).get("usage") or {}
-                pt = (u.get("input_tokens", 0)
-                      + u.get("cache_read_input_tokens", 0)
-                      + u.get("cache_creation_input_tokens", 0))
-                if pt:
-                    context_tokens = pt
-                # Timestamp → epoch ms
-                ts_raw = o.get("timestamp")
-                ts_ms: "int | None" = None
-                if ts_raw:
-                    try:
-                        # Handle trailing Z (not supported by fromisoformat before 3.11)
-                        ts_str = ts_raw.rstrip("Z").replace("Z", "+00:00")
-                        if ts_str.endswith("+00:00") or "+" in ts_str[10:] or ts_str.count("-") > 2:
-                            from datetime import datetime, timezone
-                            dt = datetime.fromisoformat(ts_str)
-                            if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=timezone.utc)
-                            ts_ms = int(dt.timestamp() * 1000)
-                        else:
-                            from datetime import datetime, timezone
-                            dt = datetime.fromisoformat(ts_str).replace(tzinfo=timezone.utc)
-                            ts_ms = int(dt.timestamp() * 1000)
-                    except Exception:
-                        ts_ms = None
-                last_turn_at_ms = ts_ms
-                # Cache hit % — mirror bot.py formula (cache_read / (cache_read + input_tokens))
-                # cache_creation is the write side (not counted in hit ratio)
-                cache_read = u.get("cache_read_input_tokens", 0) or 0
-                input_fresh = u.get("input_tokens", 0) or 0
-                ratio_pt = cache_read + input_fresh
-                if ratio_pt > 0:
-                    last_cache_hit_pct = round(cache_read / ratio_pt * 100)
-                else:
-                    last_cache_hit_pct = None
-    except Exception:
-        pass
-    # If we found an assistant turn but no parseable timestamp, fall back to file mtime
-    if last_turn_at_ms is None and last_cache_hit_pct is not None:
-        try:
-            last_turn_at_ms = int(jsonl_path.stat().st_mtime * 1000)
-        except Exception:
-            pass
-    return context_tokens, last_turn_at_ms, last_cache_hit_pct
+    """(context_tokens, last_turn_at_ms, last_cache_hit_pct) of a session transcript's last
+    assistant turn — see `transcript_stats.stats` for each field. Cached per file and resumed
+    from the last read line, so a growing transcript is not re-parsed from byte 0."""
+    st = _transcript_stats.stats(jsonl_path)
+    return st["context_tokens"], st["last_turn_at_ms"], st["last_cache_hit_pct"]
 
 
 async def api_project_session_history(req: web.Request) -> web.Response:
@@ -13422,9 +13303,15 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     except (TypeError, ValueError):
         around_ts = None
 
-    context_tokens, last_turn_at_ms, last_cache_hit_pct = _session_last_turn(jsonl)
+    # Both read the whole transcript (hundreds of MB for a long session): off the event loop.
+    def _read():
+        return (_session_last_turn(jsonl),
+                _session_history(jsonl, around_uuid=around_uuid, around_ts=around_ts))
+
+    (context_tokens, last_turn_at_ms, last_cache_hit_pct), messages = \
+        await asyncio.get_running_loop().run_in_executor(None, _read)
     return web.json_response({
-        "messages": _session_history(jsonl, around_uuid=around_uuid, around_ts=around_ts),
+        "messages": messages,
         "session_id": sid,
         "context_tokens": context_tokens,
         "context_window": CONTEXT_WINDOW,
