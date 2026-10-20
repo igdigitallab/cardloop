@@ -53,7 +53,10 @@ E2E_PROJECT_IDS += ["e2e-buslag", "e2e-buslag-multi", "e2e-buslag-error", "e2e-b
 E2E_PROJECT_IDS.append("e2e-history")
 
 # Scrolling back across a context reset into the session before (test_history_session_reset.py).
-E2E_PROJECT_IDS += ["e2e-reset", "e2e-reset-old"]
+E2E_PROJECT_IDS += ["e2e-reset", "e2e-older-session"]
+
+# Project tabs mount on first open (test_lazy_project_tabs.py); these get turns sent to them.
+E2E_PROJECT_IDS += ["e2e-lazy-probe", "e2e-lazy-busy"]
 
 
 def _free_port() -> int:

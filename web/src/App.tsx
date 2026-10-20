@@ -111,6 +111,21 @@ export default function App() {
   const [projectsLoading, setProjectsLoading] = useState(false)
   const [openIds, setOpenIds] = useState<string[]>(() => readStringList(LS_OPEN))
   const [activeId, setActiveId] = useState<string | null>(() => readString(LS_ACTIVE))
+  // Project tabs this page has shown. A tab mounts its ProjectView the first time it is opened and
+  // keeps it from then on (streams, scroll, drafts survive a switch); one never opened costs no
+  // requests — a cold load with a dozen saved tabs used to fetch every one of them (~280 requests).
+  // Busy/unread badges come from the global activity stream, not from the views.
+  const [mountedIds, setMountedIds] = useState<Set<string>>(() => new Set())
+  useEffect(() => {
+    if (!activeId) return
+    setMountedIds(prev => (prev.has(activeId) ? prev : new Set(prev).add(activeId)))
+  }, [activeId])
+  useEffect(() => {
+    setMountedIds(prev => {
+      const next = new Set([...prev].filter(id => openIds.includes(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [openIds])
   const [sidebarOrder, setSidebarOrder] = useState<string[]>(() => readSidebarOrder())
   const { unreadBySession, incrementUnread, clearUnreadForSession, resetUnread } = useUnreadTracker()
   // Browser notifications: opt-in desktop alerts for background run completions (notifications A)
@@ -1172,11 +1187,12 @@ export default function App() {
           </div>
         )}
 
-        {/* All open ProjectViews — always mounted, inactive ones are hidden */}
+        {/* Open ProjectViews: mounted once first shown (mountedIds), hidden while inactive */}
         {openProjects.map(p => {
           const splitId = splitPairs[p.id]
           const splitProject = splitId ? projects.find(x => x.id === splitId) : undefined
           const isActive = p.id === activeId && activeId !== GLOBAL_FILES_ID && activeId !== TERMINAL_ID
+          if (!isActive && !mountedIds.has(p.id)) return null
           return (
             <div
               key={p.id}

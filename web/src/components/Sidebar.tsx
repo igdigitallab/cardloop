@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Project, ProjectGroups, SearchHit } from '../types'
 import { api } from '../api'
 import { ProjectAvatar } from './ProjectAvatar'
@@ -222,11 +222,15 @@ export function Sidebar({
     } catch { /* ignore */ }
   }, [])
 
+  // Refetch when the set of projects (or their grouping) changes — not on every project-list poll,
+  // which hands over a new array whenever a git badge moves (5 refetches of each on a cold load).
+  const projectsShape = useMemo(
+    () => projects.map(p => `${p.id}:${p.group ?? ''}`).join('|'), [projects])
   useEffect(() => {
     loadGroups()
     loadArchived()
     loadTrash()
-  }, [loadGroups, loadArchived, loadTrash, projects])
+  }, [loadGroups, loadArchived, loadTrash, projectsShape])
 
   // Focus rename input when rename starts
   useEffect(() => {

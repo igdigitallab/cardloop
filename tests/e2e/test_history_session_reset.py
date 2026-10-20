@@ -127,7 +127,7 @@ def test_a_reset_made_in_the_cockpit_keeps_the_old_session_above_the_new_one(log
 
 def test_an_older_session_finds_its_predecessor_and_shows_the_handoff(logged_in_page, e2e_server):
     page = logged_in_page
-    sdk, pid = _sessions_dir(e2e_server, "e2e-reset-old")
+    sdk, pid = _sessions_dir(e2e_server, "e2e-older-session")
     prev_sid = "e2e-reset-prev-0000-4000-8000-000000000002"
     new_sid = "e2e-reset-next-0000-4000-8000-000000000003"
     t0 = datetime(2026, 10, 2, tzinfo=timezone.utc)
@@ -149,7 +149,7 @@ def test_an_older_session_finds_its_predecessor_and_shows_the_handoff(logged_in_
 
     page.reload()
     page.wait_for_selector(".project-item", timeout=10_000)
-    open_project(page, "e2e-reset-old")
+    open_project(page, "e2e-older-session")
     page.wait_for_selector(".chat-session-break", timeout=10_000)
     page.wait_for_selector("text=old-q-0000", timeout=10_000)
     order = _feed_order(page)
