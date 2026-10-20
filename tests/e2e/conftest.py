@@ -49,6 +49,9 @@ E2E_PROJECT_IDS.append("e2e-filedrop")
 # The bus-lag race scenario (test_bus_lag_no_duplicate.py).
 E2E_PROJECT_IDS += ["e2e-buslag", "e2e-buslag-multi", "e2e-buslag-error", "e2e-buslag-toolonly"]
 
+# Scrolling a long session back past the last 100 messages (test_history_scrollback.py).
+E2E_PROJECT_IDS.append("e2e-history")
+
 
 def _free_port() -> int:
     """Binds to port 0 to let the OS pick a free one, then releases it. Small

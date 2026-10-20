@@ -506,12 +506,18 @@ export const api = {
   // `continuity` (spec-095) names ONE thread of a non-default provider — a Codex thread or a
   // Grok session — by provider + its own resume id; `continuityQuery` owns the wire names so no
   // call site spells `codex_thread_id` / `grok_session_id` itself. Claude's id is `sessionId`.
+  // `page` pages a Claude feed by message position (HistoryMessage.idx): `before` = the `limit`
+  // messages just above that one (scrolling back), `since` = that message to the end.
   sessionHistory: (id: string, sessionId?: string, anchor?: { uuid?: string; ts?: number },
-                   continuity?: { provider?: string; id?: string | null }) => {
+                   continuity?: { provider?: string; id?: string | null },
+                   page?: { before?: number; since?: number; limit?: number }) => {
     const p = new URLSearchParams()
     if (sessionId) p.set('session_id', sessionId)
     if (anchor?.uuid) p.set('around_uuid', anchor.uuid)
     if (anchor?.ts) p.set('around_ts', String(Math.round(anchor.ts)))
+    if (page?.before != null) p.set('before', String(page.before))
+    if (page?.since != null) p.set('since', String(page.since))
+    if (page?.limit != null) p.set('limit', String(page.limit))
     for (const [k, v] of Object.entries(continuityQuery(continuity?.provider, continuity?.id))) p.set(k, v)
     const qs = p.toString()
     return apiFetch<import('./types').SessionHistoryResponse>(

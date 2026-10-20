@@ -13069,14 +13069,27 @@ def _iso_to_ms(ts_raw: "str | None") -> "int | None":
         return None
 
 
+# Paging the feed: `since` returns everything from one message on, so a chat that has scrolled
+# back keeps ONE contiguous range instead of a last-100 window that slides away from the pages
+# above it. Past this many messages it degrades to the tail and the client drops its pages.
+_HISTORY_SINCE_MAX = 2000
+_HISTORY_PAGE_MAX = 500
+
+
 def _session_history(jsonl_path: Path, limit: int = 100,
                      around_uuid: "str | None" = None,
-                     around_ts: "int | None" = None) -> list[dict]:
-    """Parses an SDK session transcript → feed [{role, text, tools, ts}].
+                     around_ts: "int | None" = None,
+                     before: "int | None" = None,
+                     since: "int | None" = None) -> list[dict]:
+    """Parses an SDK session transcript → feed [{role, text, tools, ts, idx}].
     user(str)=human reply; user(list)=tool_result, skip.
     assistant(list)=text/tool_use blocks. Other types — noise.
     `ts` = epoch ms from the line's ISO "timestamp" (None if absent) — the cockpit
-    renders it next to each message's copy/save actions (spec-022 parity for history)."""
+    renders it next to each message's copy/save actions (spec-022 parity for history).
+    `idx` = the message's position in the whole feed. A transcript is append-only, so it never
+    changes and works as a paging cursor: `before=N` is the `limit` messages ending just above
+    message N (scrolling back), `since=N` is message N to the end (the live window of a chat
+    that has pages loaded above it)."""
     msgs: list[dict] = []
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as f:
@@ -13162,6 +13175,13 @@ def _session_history(jsonl_path: Path, limit: int = 100,
                                      "ts": _iso_to_ms(o.get("timestamp"))})
     except Exception:
         pass
+    for i, m in enumerate(msgs):
+        m["idx"] = i
+    if before is not None:
+        end = max(0, min(before, len(msgs)))
+        return msgs[max(0, end - limit):end]
+    if since is not None and 0 <= since <= len(msgs) and len(msgs) - since <= _HISTORY_SINCE_MAX:
+        return msgs[since:]
     return _window_history(msgs, limit, around_uuid, around_ts)
 
 
@@ -13303,10 +13323,22 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     except (TypeError, ValueError):
         around_ts = None
 
+    # Paging (see _session_history): a malformed cursor is ignored, like a missed anchor.
+    def _int_arg(name: str) -> "int | None":
+        try:
+            v = int(req.rel_url.query.get(name, ""))
+        except (TypeError, ValueError):
+            return None
+        return v if v >= 0 else None
+
+    before, since = _int_arg("before"), _int_arg("since")
+    limit = min(max(_int_arg("limit") or 100, 1), _HISTORY_PAGE_MAX)
+
     # Both read the whole transcript (hundreds of MB for a long session): off the event loop.
     def _read():
         return (_session_last_turn(jsonl),
-                _session_history(jsonl, around_uuid=around_uuid, around_ts=around_ts))
+                _session_history(jsonl, limit=limit, around_uuid=around_uuid, around_ts=around_ts,
+                                 before=before, since=since))
 
     (context_tokens, last_turn_at_ms, last_cache_hit_pct), messages = \
         await asyncio.get_running_loop().run_in_executor(None, _read)

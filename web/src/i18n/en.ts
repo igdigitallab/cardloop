@@ -336,6 +336,7 @@ export const en = {
   'chat.status_card_running': 'card running',
   'chat.status_bg_running': 'background run',
   'chat.bg_run_label': 'while you were away',
+  'chat.loading_older': 'Loading earlier messages…',
   'chat.rewind_title': 'Rewind files to before this message',
   'chat.rewind_confirm': 'Restore all files touched by the agent to their state BEFORE this message? Chat history is kept; only files are rewound.',
   'chat.rewind_done': 'Files rewound',

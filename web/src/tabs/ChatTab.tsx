@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import React, { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Lightbox } from '../components/Lightbox'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -28,6 +28,7 @@ import {
   ChatToolCall,
   HistoryMessage,
   Project,
+  SessionHistoryResponse,
   RichTool,
   TurnMetrics,
   ActivityEventSubagent,
@@ -49,6 +50,7 @@ import { playChime } from '../lib/chime'
 import { t } from '../i18n'
 import { setAppBusy } from '../lib/appBusy'
 import { isLocalCliCommand } from '../localCommands'
+import { OLDER_PAGE, OLDER_TRIGGER_PX, olderAfterHydrate, olderCursor, sinceFor } from '../lib/historyPaging'
 import { Modal, ModalHead } from '../components/Modal'
 import { Paperclip, ClipboardList, Wrench, Clock, Square, Pencil, Trash2, File, Image, Flame, Snowflake, Plus } from 'lucide-react'
 
@@ -341,13 +343,39 @@ function fmtHHMM(ts: number): string {
  *  locale ("1 сент. HH:MM"); earlier year → "Sep 1, 2025 HH:MM". The old "DD.MM" form did
  *  not read as a date at a glance (spec-088). Full locale date/time is on the hover title. */
 function fmtStamp(ts: number): string {
-  const d = new Date(ts)
   const now = new Date()
+  const today = now.toDateString()
+  if (today !== _stampDay) { _stampDay = today; _stampCache.clear() }
+  const hit = _stampCache.get(ts)
+  if (hit !== undefined) return hit
+  const d = new Date(ts)
   const hhmm = fmtHHMM(ts)
-  if (sameLocalDay(ts, now.getTime())) return hhmm
-  const opts: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'short' }
-  if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric'
-  return `${d.toLocaleDateString(undefined, opts)} ${hhmm}`
+  let out = hhmm
+  if (!sameLocalDay(ts, now.getTime())) {
+    const opts: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'short' }
+    if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric'
+    out = `${d.toLocaleDateString(undefined, opts)} ${hhmm}`
+  }
+  _stampCache.set(ts, out)
+  return out
+}
+
+// Stamps are formatted on EVERY render of the feed (each composer keystroke, each streamed delta),
+// and toLocale*String builds a new Intl formatter per call: on a scrolled-back feed of 520
+// messages that was 63 % of the time a keystroke took. A message's time never changes, so both
+// strings are cached; fmtStamp's cache is dropped when the day rolls over ("today" changes).
+let _stampDay = ''
+const _stampCache = new Map<number, string>()
+const _fullStampCache = new Map<number, string>()
+
+/** `new Date(ts).toLocaleString()`, cached (the hover title of a message's time). */
+function fmtFullStamp(ts: number): string {
+  let out = _fullStampCache.get(ts)
+  if (out === undefined) {
+    out = new Date(ts).toLocaleString()
+    _fullStampCache.set(ts, out)
+  }
+  return out
 }
 
 function sameLocalDay(a: number, b: number): boolean {
@@ -720,6 +748,13 @@ function ChatLink({ href, children, node: _node, ...rest }: React.AnchorHTMLAttr
 
 const _mdComponents = { ...mdComponents, img: ChatImage, code: ChatCode, a: ChatLink }
 const _chatRemarkPlugins = [remarkGfm, remarkFileRefs]
+
+// One message body, memoised on its text. The feed re-renders on every composer keystroke and
+// every streamed delta; re-parsing every unchanged body each time froze typing once a long session
+// was scrolled back (520 messages: ~160 ms per key, measured in the scroll-back e2e).
+const ChatMarkdown = memo(function ChatMarkdown({ text }: { text: string }) {
+  return <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{text}</ReactMarkdown>
+})
 
 // ─── Message-action icons (small, icon-only — Gemini/Perplexity style) ─────────
 const IconCopy = () => (
@@ -1471,6 +1506,21 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   useEffect(() => { effectiveChatIdRef.current = effectiveChatId }, [effectiveChatId])
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  // Scroll-back pages above the hydrated window (lib/historyPaging). Kept apart from `messages`
+  // because every hydrate replaces `messages` wholesale; the feed renders older + messages.
+  const [olderMsgs, setOlderMsgs] = useState<ChatMessage[]>([])
+  const olderRef = useRef<ChatMessage[]>([])
+  const setOlder = useCallback((next: ChatMessage[]) => {
+    olderRef.current = next
+    setOlderMsgs(next)
+  }, [])
+  // Session and first position of the last hydrated window — the cursor for the next page.
+  const historySessionRef = useRef<string | null>(null)
+  const windowStartRef = useRef<number | null>(null)
+  const loadingOlderRef = useRef(false)
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  // Feed geometry captured right before a page is prepended, so the view stays on the same message.
+  const olderAnchorRef = useRef<{ height: number; top: number } | null>(null)
   const [pendingHandoff, setPendingHandoff] = useState<string | null>(null)
   const [contextTokens, setContextTokens] = useState<number | null>(null)
   const [contextWindow, setContextWindow] = useState<number>(1_000_000)
@@ -2039,6 +2089,53 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
   useEffect(() => { refreshPlanPrompt() }, [refreshPlanPrompt])
 
+  // Record a freshly hydrated history window: its session and first position, and drop the
+  // scroll-back pages that no longer sit directly above it.
+  const adoptHistoryWindow = useCallback((res: SessionHistoryResponse) => {
+    const sid = res.session_id ?? null
+    const first = res.messages.length ? res.messages[0].idx : undefined
+    const start = typeof first === 'number' ? first : null
+    const same = sid != null && sid === historySessionRef.current
+    historySessionRef.current = sid
+    windowStartRef.current = start
+    const kept = olderAfterHydrate(olderRef.current, start, same)
+    if (kept !== olderRef.current) setOlder(kept)
+  }, [setOlder])
+
+  // Fetch the page above everything shown and prepend it (scrolling back through a long session).
+  const loadOlder = useCallback(() => {
+    const before = olderCursor(olderRef.current, windowStartRef.current)
+    const sid = historySessionRef.current
+    if (loadingOlderRef.current || before == null || !sid) return
+    loadingOlderRef.current = true
+    setLoadingOlder(true)
+    api.sessionHistory(projectId, sid, undefined, undefined, { before, limit: OLDER_PAGE })
+      .then(res => {
+        // A hydrate may have switched the session or moved the boundary while this was in flight.
+        if (historySessionRef.current !== sid || res.session_id !== sid) return
+        if (olderCursor(olderRef.current, windowStartRef.current) !== before) return
+        const page = histToMessages(res.messages)
+        if (!page.length) return
+        const feed = feedRef.current
+        olderAnchorRef.current = feed ? { height: feed.scrollHeight, top: feed.scrollTop } : null
+        setOlder([...page, ...olderRef.current])
+      })
+      .catch(() => { /* the next scroll near the top retries */ })
+      .finally(() => {
+        loadingOlderRef.current = false
+        setLoadingOlder(false)
+      })
+  }, [projectId, setOlder])
+
+  // Keep the viewport on the same message when a page lands above it.
+  useLayoutEffect(() => {
+    const anchor = olderAnchorRef.current
+    const feed = feedRef.current
+    if (!anchor || !feed) return
+    olderAnchorRef.current = null
+    feed.scrollTop = anchor.top + (feed.scrollHeight - anchor.height)
+  }, [olderMsgs])
+
   // Stick-to-bottom: auto-scroll only when the user is pinned (within SCROLL_PIN_THRESHOLD of bottom).
   // When unpinned (user scrolled up), new content does NOT jump the viewport — instead the pill
   // appears. The user clicking the pill re-pins and scrolls to bottom.
@@ -2060,7 +2157,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     const nowPinned = distFromBottom <= SCROLL_PIN_THRESHOLD
     pinnedRef.current = nowPinned
     if (nowPinned) setShowNewMsgPill(false)
-  }, [])
+    if (feed.scrollTop < OLDER_TRIGGER_PX) loadOlder()
+  }, [loadOlder])
 
   useEffect(() => {
     if (pinnedRef.current) {
@@ -2115,7 +2213,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     const out: ChatMessage[] = []
     items.forEach((m, i) => {
       const msg: ChatMessage = {
-        id: `hist-${i}`, role: m.role, text: m.text, tools: m.tools, streaming: false,
+        // The feed position keeps an id stable across hydrates and unique across pages.
+        id: `hist-${m.idx ?? i}`, role: m.role, text: m.text, tools: m.tools, streaming: false,
+        ...(m.idx != null ? { idx: m.idx } : {}),
         ...(m.uuid ? { uuid: m.uuid } : {}),
         ...(m.ts != null ? { ts: m.ts } : {}),
       }
@@ -2146,8 +2246,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // even when ctx["sessions"] lags (e.g. right after a service restart). The ref is
     // always fresh at call time — no stale closure risk.
     const sessionId = activeSessionIdRef.current ?? undefined
+    // With scroll-back pages loaded, ask for everything after them so the window cannot slide
+    // away and leave a gap (lib/historyPaging).
+    const since = sinceFor(olderRef.current)
     return Promise.all([
-      api.sessionHistory(projectId, sessionId),
+      api.sessionHistory(projectId, sessionId, undefined, undefined, since != null ? { since } : undefined),
       api.chatQueue(projectId).catch(() => ({ items: [] as Array<{ id: string; text: string; created_at: number }> })),
       // Spec-035 L3: /live replaces /running — returns running state + turn history + started_at
       api.projectLive(projectId).catch(() => ({ running: false, turn_id: null, started_at: null, model: null, cost_usd: null, prompt: '', cursor: -1, events: [] as Array<Record<string, unknown>>, board_events: [], pending_handoff: null as string | null, chat_id: null as string | null })),
@@ -2158,6 +2261,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // message jumps ABOVE the previous answer. streamingRef is a live ref (not the closed-over
       // value), so this reflects the state at apply time, closing the race. (message-order bug)
       if (isCancelled() || streamingRef.current) return
+      adoptHistoryWindow(histRes)
       setQueueItems(queueRes.items)
       setContextTokens(histRes.context_tokens != null ? histRes.context_tokens : null)
       if (histRes.context_window != null && histRes.context_window > 0) setContextWindow(histRes.context_window)
@@ -2320,7 +2424,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // canvas before it hydrates, so keeping it is the same as the old reset there.
       if (!isCancelled()) setError('')
     })
-  }, [projectId, effectiveChatId, seedCursor])
+  }, [projectId, effectiveChatId, seedCursor, adoptHistoryWindow])
 
   // spec-071: verify-then-hydrate after a live-rendered turn completes. The completion hydrate
   // was removed (72043ee) to stop flicker, but dropped bus events / broken replay could leave
@@ -2349,6 +2453,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // would stay blank until the next event. Drop it here, synchronously.
     streamingRef.current = false
     setMessages([])
+    setOlder([])
     // hist-N ids restart at 0 per chat, so a stale expanded id could otherwise match
     // an unrelated bubble in the next chat — clear alongside the message list.
     setExpandedToolGroups(new Set())
@@ -2935,6 +3040,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const handleSessionChange = useCallback(() => {
     abortRef.current?.abort()
     setMessages([])
+    setOlder([])
     setStreaming(false)
     setError('')
     setRun(null)
@@ -2951,9 +3057,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // Session change means the backend already updated ctx["sessions"]; omit the
     // session_id param so we always read the freshly-activated session from the server.
     api.sessionHistory(projectId)
-      .then(res => { setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens != null ? res.context_tokens : null); if (res.context_window != null && res.context_window > 0) setContextWindow(res.context_window); if (res.context_warn_at != null && res.context_warn_at > 0) setContextWarnAt(res.context_warn_at); if (res.context_warn_red != null && res.context_warn_red > 0) setContextWarnRed(res.context_warn_red); if (res.context_rotate_at != null && res.context_rotate_at > 0) setContextRotateAt(res.context_rotate_at) })
+      .then(res => { adoptHistoryWindow(res); setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens != null ? res.context_tokens : null); if (res.context_window != null && res.context_window > 0) setContextWindow(res.context_window); if (res.context_warn_at != null && res.context_warn_at > 0) setContextWarnAt(res.context_warn_at); if (res.context_warn_red != null && res.context_warn_red > 0) setContextWarnRed(res.context_warn_red); if (res.context_rotate_at != null && res.context_rotate_at > 0) setContextRotateAt(res.context_rotate_at) })
       .catch(() => setMessages([]))
-  }, [projectId])
+  }, [projectId, adoptHistoryWindow, setOlder])
 
   async function uploadFile(file: File): Promise<{ path: string; url?: string }> {
     const form = new FormData()
@@ -3874,6 +3980,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     setRotatingKind(handoff ? 'handoff' : 'blank')
     // Immediately clear the stale session view so the UI is visibly responsive.
     setMessages([])
+    setOlder([])
     setContextTokens(0)
     setPrevContextTokens(null)
     try {
@@ -3995,7 +4102,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // Option picker: only the LAST assistant message in the transcript gets an interactive
   // picker; older ones render as static (already-answered or stale). Hoisted out of the
   // render loop below — it no longer needs recomputing once per fragment.
-  const lastAssistantIdx = messages.reduceRight(
+  // What the feed renders: scroll-back pages, then the hydrated window (+ live turn). Indexes in
+  // the render loop below are positions in THIS array.
+  const feedMessages = useMemo(
+    () => (olderMsgs.length ? [...olderMsgs, ...messages] : messages), [olderMsgs, messages])
+  const lastAssistantIdx = feedMessages.reduceRight(
     (found, m, i) => (found === -1 && m.role === 'assistant' ? i : found),
     -1,
   )
@@ -4020,8 +4131,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     const answeredOptValue: string | null = pickerOptions
       ? (() => {
           const vals = new Set(pickerOptions.map(o => o.value.trim()))
-          for (let j = idx + 1; j < messages.length; j++) {
-            const mj = messages[j]
+          for (let j = idx + 1; j < feedMessages.length; j++) {
+            const mj = feedMessages[j]
             if (mj.role === 'user' && vals.has((mj.text || '').trim())) return (mj.text || '').trim()
           }
           return null
@@ -4047,7 +4158,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             trailing ```options picker — any of the three may be absent. */}
         {layout?.body && (
           <div className="chat-msg-body markdown-wrap">
-            <ReactMarkdown remarkPlugins={_chatRemarkPlugins} components={_mdComponents}>{layout.body}</ReactMarkdown>
+            <ChatMarkdown text={layout.body} />
           </div>
         )}
         {layout && layout.files.length > 0 && (
@@ -4504,7 +4615,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           </div>
         )}
 
-        {messages.map((msg, idx) => {
+        {loadingOlder && (
+          <div className="chat-day-sep chat-older-loading" style={{ margin: 0, justifyContent: 'center' }}>
+            <span>{t['chat.loading_older']}</span>
+          </div>
+        )}
+        {feedMessages.map((msg, idx) => {
           // Model fallback strip — slim system row shown when backend silently degrades the model.
           // Live-only (not replayed from history); disappears on reload.
           if (msg.role === 'model_fallback' && msg.modelFallback) {
@@ -4653,11 +4769,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           // fragment of a run renders; the rest were already folded in below and bail
           // out here. A user/board/model_fallback message always ends a run.
           if (msg.role === 'assistant') {
-            const isRunStart = idx === 0 || messages[idx - 1].role !== 'assistant'
+            const isRunStart = idx === 0 || feedMessages[idx - 1].role !== 'assistant'
             if (!isRunStart) return null
             let end = idx
-            while (end + 1 < messages.length && messages[end + 1].role === 'assistant') end++
-            const groupMsgs = messages.slice(idx, end + 1)
+            while (end + 1 < feedMessages.length && feedMessages[end + 1].role === 'assistant') end++
+            const groupMsgs = feedMessages.slice(idx, end + 1)
             // Drop fragments that would render nothing (mirrors the old single-message
             // isEmpty skip) — but keep them for the bgRun/timestamp aggregation below.
             const visible: { msg: ChatMessage; fidx: number }[] = []
@@ -4679,7 +4795,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             // spec-088: a day separator above the group when it starts a new calendar day
             // (an autonomous run that landed overnight, or the first answer after a long gap).
             const groupStartTs = groupMsgs.find(f => f.ts != null)?.ts
-            const groupDayLabel = daySepLabel(messages, idx, groupStartTs)
+            const groupDayLabel = daySepLabel(feedMessages, idx, groupStartTs)
             return (
               <React.Fragment key={msg.id}>
               {groupDayLabel && (
@@ -4698,7 +4814,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 {(groupTs != null || (!lastFrag.streaming && groupCopyText)) && (
                   <div className="msg-meta">
                     {groupTs != null && (
-                      <span className="msg-time" title={new Date(groupTs).toLocaleString()}>
+                      <span className="msg-time" title={fmtFullStamp(groupTs)}>
                         {fmtStamp(groupTs)}
                       </span>
                     )}
@@ -4719,14 +4835,14 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           // From here on only role === 'user' remains (assistant/board/model_fallback
           // all returned above).
           // Spec-022/033: cold-start divider — gap between prev assistant turn end and this user msg
-          const prevMsg = idx > 0 ? messages[idx - 1] : null
+          const prevMsg = idx > 0 ? feedMessages[idx - 1] : null
           const showColdDivider = (
             msg.ts != null &&
             prevMsg?.ts != null &&
             (msg.ts - prevMsg.ts) > CACHE_TTL_MS
           )
           // spec-088: full date above the first message of a new calendar day.
-          const userDayLabel = daySepLabel(messages, idx, msg.ts)
+          const userDayLabel = daySepLabel(feedMessages, idx, msg.ts)
 
           return (
             <div key={msg.id}>
@@ -4756,7 +4872,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 {(msg.ts != null || (msg.uuid && canRewindFiles)) && (
                   <div className="msg-meta">
                     {msg.ts != null && (
-                      <span className="msg-time" title={new Date(msg.ts).toLocaleString()}>
+                      <span className="msg-time" title={fmtFullStamp(msg.ts)}>
                         {fmtStamp(msg.ts)}
                       </span>
                     )}

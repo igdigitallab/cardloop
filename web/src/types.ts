@@ -758,6 +758,8 @@ export interface HistoryMessage {
   uuid?: string | null
   /** epoch ms from the transcript line's ISO timestamp — rendered next to the copy/save actions. */
   ts?: number | null
+  /** Position in the whole Claude feed; never changes (append-only), so it is the paging cursor. */
+  idx?: number
 }
 
 /** Response shape for GET /api/projects/{id}/session-history */
@@ -803,6 +805,8 @@ export interface ChatMessage {
   bgRun?: boolean
   /** spec-073: transcript uuid (user messages from history) — enables the file-rewind action. */
   uuid?: string
+  /** History messages only: position in the whole feed (HistoryMessage.idx). */
+  idx?: number
   /** Error message if the turn ended with an error */
   error?: string
   /** Unix timestamp (ms) when the message was created / result arrived */
