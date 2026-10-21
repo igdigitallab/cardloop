@@ -22,6 +22,7 @@ from typing import AsyncGenerator
 from claude_agent_sdk import (
     AgentDefinition,
     AssistantMessage,
+    CLIConnectionError,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookMatcher,
@@ -825,9 +826,32 @@ class _LiveEntry:
     # spec-071: asyncio.Task consuming the SDK stream while no engine turn is active.
     # None until started; paused (cancelled) for the duration of each turn.
     drain_task: object = None
+    # Set by the drain when the CLI process died between turns; see _live_client_gone.
+    gone: str = ""
 
 
 _live_clients: "dict[str, _LiveEntry]" = {}  # session_key -> _LiveEntry
+
+
+def _live_client_gone(entry: "_LiveEntry") -> "str | None":
+    """Why this entry's CLI can no longer take a turn, or None when it can (or we cannot tell).
+
+    A CLI killed while idle (a sibling agent's `pkill -f` matching its `--resume <id>` argv, an
+    OOM kill) stays registered; the next prompt is then written into a dead pipe and the
+    operator gets "Cannot write to terminated process (exit code: 143)" with the message lost
+    (gov-contracts, 2026-10-20). The exit code is read where the SDK itself reads it before a
+    write; anything but an int (SDK internals renamed, a test double) counts as alive."""
+    if entry.gone:
+        return entry.gone
+    try:
+        code = entry.client._transport._process.returncode
+    except Exception:
+        return None
+    if isinstance(code, int) and not isinstance(code, bool):
+        return f"CLI process exited (code {code})"
+    return None
+
+
 # Spec-021 Phase 4 / spec-042: one-shot handoff summaries pending injection into the next turn after rotation.
 # {session_key: summary_text}. Cleared immediately after injection so it fires exactly once.
 # spec-042: persisted to HANDOFF_F (data/handoff.json) so summaries survive service restarts.
@@ -2228,6 +2252,12 @@ async def _get_or_create_live_client(
                                        memory_mode=memory_mode, account=account, backend=backend)
 
     existing = registry.get(session_key)
+    _gone = _live_client_gone(existing) if existing is not None else None
+    if _gone:
+        # A dead CLI takes its sub-agents with it, so the live-subagent pin does not apply.
+        print(f"[live-client] {session_key}: {_gone} — evicting and reconnecting")
+        await _evict_live_client(session_key, ctx)
+        existing = None
     if existing is not None:
         if existing.fingerprint != fingerprint and not _session_has_live_subagents(session_key):
             print(f"[live-client] fingerprint changed for {session_key} — evicting and reconnecting")
@@ -2611,6 +2641,10 @@ async def _drain_between_turns(entry: "_LiveEntry", ctx: "dict | None") -> None:
                 _bg_run_cb(session_key, "end")
             except Exception:
                 pass
+        # Only a dead process marks the entry gone: a reader that stopped on anything else
+        # leaves a live CLI, and reconnecting it would SIGTERM its background sub-agents.
+        if isinstance(exc, (ProcessError, CLIConnectionError)):
+            entry.gone = f"CLI process died between turns ({exc!r})"
         print(f"[live-drain] {session_key}: reader stopped ({exc!r})")
 
 

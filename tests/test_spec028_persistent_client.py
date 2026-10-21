@@ -491,3 +491,108 @@ async def test_model_switch_evicts_and_reconnects(tmp_path):
     if entry and entry.idle_task and not entry.idle_task.done():
         entry.idle_task.cancel()
         await asyncio.sleep(0)
+
+
+# ─────────────── A CLI that died BETWEEN turns is replaced, not handed the next prompt ───────────
+
+
+async def _one_turn(ctx, tmp_path, prompt, key="chat:dead"):
+    events = []
+    async for ev in bot.run_engine(project_name="proj", cwd=str(tmp_path), prompt=prompt,
+                                   session_key=key, model="sonnet", ctx=ctx, ephemeral=False):
+        events.append(ev)
+    return events
+
+
+def _cancel_idle(ctx, key="chat:dead"):
+    entry = ctx["live_clients"].get(key)
+    if entry and entry.idle_task and not entry.idle_task.done():
+        entry.idle_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_cli_that_exited_between_turns_is_replaced_before_the_next_prompt(tmp_path):
+    """2026-10-20, gov-contracts: another chat's `pkill -f "4f2ee070"` SIGTERMed this chat's
+    idle CLI (its argv carries `--resume <session id>`). The dead client stayed registered, the
+    next message was written into it and the operator got "Cannot write to terminated process
+    (exit code: 143)" with the message lost. An exited CLI must be swapped for a fresh one."""
+    first = _make_live_client([[_make_result_message()]])
+    second = _make_live_client([[_make_result_message()]])
+    made = []
+
+    def _factory(options):
+        made.append(first if not made else second)
+        return made[-1]
+
+    ctx = _make_ctx()
+    with patch.object(engine, "PERSISTENT_CLIENT", True), \
+         patch.object(engine, "ClaudeSDKClient", side_effect=_factory), \
+         patch.object(engine, "audit", lambda *a: None):
+        assert not [e for e in await _one_turn(ctx, tmp_path, "turn 1") if e.get("type") == "error"]
+        first._transport._process.returncode = 143  # killed while idle
+        events = await _one_turn(ctx, tmp_path, "turn 2")
+    _cancel_idle(ctx)
+
+    assert made == [first, second]
+    assert not [e for e in events if e.get("type") == "error"]
+    assert ctx["live_clients"]["chat:dead"].client is second
+    first.disconnect.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_live_cli_is_still_reused_when_the_process_probe_is_unreadable(tmp_path):
+    """The probe reads SDK internals; anything but an int exit code means "alive"."""
+    first = _make_live_client([[_make_result_message()], [_make_result_message()]])
+    made = []
+
+    def _factory(options):
+        made.append(first)
+        return first
+
+    ctx = _make_ctx()
+    with patch.object(engine, "PERSISTENT_CLIENT", True), \
+         patch.object(engine, "ClaudeSDKClient", side_effect=_factory), \
+         patch.object(engine, "audit", lambda *a: None):
+        await _one_turn(ctx, tmp_path, "turn 1")
+        first._transport._process.returncode = None  # still running
+        await _one_turn(ctx, tmp_path, "turn 2")
+    _cancel_idle(ctx)
+
+    assert len(made) == 1
+
+
+@pytest.mark.asyncio
+async def test_drain_reader_killed_by_the_cli_dying_marks_the_entry_gone():
+    """The between-turns reader is the first to see the CLI die; it records that, so the next
+    turn reconnects even if the exit code is not readable."""
+    from claude_agent_sdk import ProcessError
+
+    client = MagicMock()
+
+    async def _dies():
+        raise ProcessError("Command failed with exit code 143", exit_code=143)
+        yield  # pragma: no cover - makes this an async generator
+
+    client.receive_messages = _dies
+    entry = engine._LiveEntry(client=client, fingerprint="f", last_used=0.0, idle_task=None,
+                              session_key="chat:dead")
+    await engine._drain_between_turns(entry, None)
+    assert "143" in entry.gone
+    assert engine._live_client_gone(entry)
+
+
+@pytest.mark.asyncio
+async def test_drain_reader_stopping_for_another_reason_does_not_mark_the_entry_gone():
+    client = MagicMock()
+
+    async def _breaks():
+        raise ValueError("unparseable message")
+        yield  # pragma: no cover
+
+    client.receive_messages = _breaks
+    client._transport._process.returncode = None
+    entry = engine._LiveEntry(client=client, fingerprint="f", last_used=0.0, idle_task=None,
+                              session_key="chat:alive")
+    await engine._drain_between_turns(entry, None)
+    assert entry.gone == ""
+    assert engine._live_client_gone(entry) is None

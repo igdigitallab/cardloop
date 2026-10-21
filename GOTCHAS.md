@@ -216,6 +216,13 @@ Projects are registered in `data/registry.json` (gitignored) or auto-scanned fro
   "killed", notification suppressed) — always handle BOTH message types.
 - Test fakes: `MagicMock(spec=AssistantMessage)` MUST set `parent_tool_use_id = None`, or the
   spec-071 chat-lane filter silently skips the fake (truthy Mock attribute).
+- **A CLI can die while idle and stay registered.** Every live CLI's argv carries
+  `--resume <session id>` plus ~10 KB of system prompt, so a sibling agent's `pkill -f <word>`
+  (2026-10-20: `pkill -f "4f2ee070"` from another chat) or an OOM kill takes it out between
+  turns. Before the fix the next prompt was written into the dead pipe: "Cannot write to
+  terminated process (exit code: 143)", message lost. `_live_client_gone` (exit code, or the
+  drain's `gone` mark on `ProcessError`/`CLIConnectionError` only — any other reader error
+  leaves a live CLI whose sub-agents a reconnect would kill) makes the next turn reconnect.
 
 ## spec-088: background work visibility (2026-09-01 incident)
 
