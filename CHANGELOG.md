@@ -7,6 +7,15 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Changed — Claude Agent SDK 0.2.176 (bundled Claude Code CLI 2.1.316)
+- The SDK floor moves from 0.2.164 (CLI 2.1.292) to 0.2.176. The bundled CLI now runs every current model
+  by alias (Fable 5.1, Sonnet 5.5, Opus 5.5, Haiku 5.5 — `tools/verify_model_aliases.py` green), so the
+  `CLAUDE_CLI_PATH` override to a standalone CLI is no longer needed. Upstream CLI changes that matter here:
+  lower memory in long SDK turns that run many sub-agents (the parent no longer holds each sub-agent's tool
+  results until the turn ends), shell commands no longer left running when the CLI exits on its own, Bash
+  hooks now also gate commands started by the Monitor tool, and `CLAUDE_CODE_SUBAGENT_EFFORT` sets the
+  sub-agents' effort separately from the session's.
+
 ### Fixed — a finished reply no longer shows twice for a moment
 - Every turn reaches the browser on two connections, the activity bus and the chat request, with
   nothing ordering them. When the chat request finished first (always on the first turn of a freshly
