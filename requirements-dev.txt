@@ -5,9 +5,9 @@ pytest-aiohttp>=1.0
 # E2E smoke suite (spec-072, tests/e2e/, opt-in via `-m e2e`) — real browser driving
 # a real cockpit subprocess + a scripted fake engine (e2e_fake_engine.py).
 # After installing: `venv/bin/python -m playwright install chromium` (one-time).
-playwright==1.64.0  # 1.64.1 + runner image 20261021: CI e2e test_bus_lag tool-only fails; unpin once cause found
+playwright==1.64.1  # 1.64.1 + runner image 20261021: CI e2e test_bus_lag tool-only fails; unpin once cause found
 pytest-playwright>=0.7
 
 # Linter run by CI (rule set: ruff.toml). Pinned exactly so a rule change cannot turn CI red
 # unannounced; Dependabot proposes bumps.
-ruff==0.16.6
+ruff==0.17.3
