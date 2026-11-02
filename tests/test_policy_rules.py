@@ -256,7 +256,8 @@ def test_b6_multiedit_conditions_must_hold_on_the_same_edit(env):
 
 
 @pytest.mark.parametrize("event,tool,expected", [
-    ("bash", "Bash", True), ("bash", "PowerShell", True), ("bash", "Write", False),
+    ("bash", "Bash", True), ("bash", "PowerShell", True), ("bash", "Monitor", True),
+    ("bash", "Write", False),
     ("file", "Write", True), ("file", "Edit", True), ("file", "MultiEdit", True),
     ("file", "NotebookEdit", True), ("file", "Bash", False), ("file", "Read", False),
     ("mcp", "mcp__mail__send", True), ("mcp", "Bash", False),
@@ -266,6 +267,17 @@ def test_b7_event_scoping(env, event, tool, expected):
     put(env.g, "ev", f"event: {event}\naction: block\ntool_matcher: .")
     rs = pr.load_ruleset(None)
     assert bool(fire(rs, tool, {"command": "x", "file_path": "/x"})) is expected
+
+
+def test_b7b_a_bash_rule_cannot_be_bypassed_through_monitor(env):
+    """Monitor runs a shell command; the policy hook (no matcher) sees tool_name "Monitor", so a
+    `bash` rule that only knew Bash/PowerShell let `git push --force` through one tool over."""
+    put(env.g, "no-force", "event: bash\naction: block\npattern: git\\s+push\\s+--force")
+    rs = pr.load_ruleset(None)
+    cmd = "until test -f /tmp/ok; do sleep 5; done; git push --force origin master"
+    assert names(fire(rs, "Monitor", {"command": cmd, "description": "d", "timeout_ms": 5000})) == ["no-force"]
+    assert not fire(rs, "Monitor", {"command": "tail -f /tmp/log", "description": "d"})
+    assert pr.short_input("Monitor", {"command": cmd, "description": "d"}) == cmd
 
 
 def test_b8_tool_matcher_is_a_regex_on_the_tool_name(env):

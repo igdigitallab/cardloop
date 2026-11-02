@@ -17,6 +17,14 @@ Subsystem-level gotchas. Turn-1 safety guards (Auth, Restart/cgroup) live in CLA
 - **Front-state hygiene.** Don't reset `activeId === '__global__'` in cleanup; a mounted tab uses `display:none`; `busActiveRef` is restored from `GET /api/projects/{id}/running` on ChatTab mount; the TASKS.md write is skipped if the file changed externally.
 
 ### Security
+- **Monitor is a shell — any list of "shell tools" must name it** (measured live on CLI 2.1.316,
+  2026-11-02). Monitor takes `{"command": ...}` and runs it like Bash. Since CLI 2.1.314 a
+  `matcher="Bash"` hook (ours: `_bundle_grep_guard_hook`, `_dangerous_command_guard_hook`, the
+  operator's `guard-self-lifecycle.sh`) is called for a Monitor command with `tool_name`
+  rewritten to `"Bash"`, and may deny/ask but not allow/rewrite it. A hook WITHOUT a matcher
+  (`policy_rules`) sees `tool_name: "Monitor"`, so `policy_rules.BASH_TOOLS` and the autopilot
+  director's denylist carry it explicitly — before that, a `bash` block rule and the "plan-only"
+  director were one tool name away from a shell. Allowlists (`tools:` in a role) are unaffected.
 - **`can_use_tool` is SHADOWED under `bypassPermissions`** (the SDK says so out loud:
   `CanUseToolShadowedWarning`, `types._get_can_use_tool_shadowed_warning`). A gated turn — plan
   mode or spec-082 ask mode — must connect with `permission_mode="plan"` / `"default"`, never

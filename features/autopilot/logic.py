@@ -555,7 +555,10 @@ DIRECTOR_SCHEMA: dict = {
 # The director runs PLAN-ONLY. These tools are hard-blocked at the engine level
 # (not merely discouraged by the prompt) so a director turn physically cannot edit
 # code, write files, or run shell commands. It keeps read tools + structured output.
-DIRECTOR_DISALLOWED_TOOLS: list = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]
+# Monitor is a shell too (it runs any `command`), so "no Bash" alone left the shell open.
+DIRECTOR_DISALLOWED_TOOLS: list = [
+    "Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "Monitor", "PowerShell",
+]
 
 
 def director_model() -> str:

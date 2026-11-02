@@ -16,6 +16,15 @@ Versions follow semver-like conventions (0.x while the project is under active d
   hooks now also gate commands started by the Monitor tool, and `CLAUDE_CODE_SUBAGENT_EFFORT` sets the
   sub-agents' effort separately from the session's.
 
+### Fixed — a policy rule or the plan-only director could be sidestepped through Monitor
+- Monitor runs an arbitrary shell command. Since CLI 2.1.314 a `matcher="Bash"` hook is called for it
+  with the tool name rewritten to `Bash`, so the built-in guards already saw it — but the policy-rules
+  hook has no matcher and receives `Monitor` (measured live), so a `bash` block rule did not apply to
+  the same command run through Monitor. `bash` rules now cover Monitor; the autopilot director's
+  denylist adds Monitor and PowerShell; the ask-mode prompt shows a Monitor command instead of JSON.
+- The test suite no longer appends to the real `data/audit` log (about 500 lines a month from
+  made-up projects such as `proj`, which made 479 of 486 "native auto-compact" entries fake).
+
 ### Fixed — a finished reply no longer shows twice for a moment
 - Every turn reaches the browser on two connections, the activity bus and the chat request, with
   nothing ordering them. When the chat request finished first (always on the first turn of a freshly

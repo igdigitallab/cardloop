@@ -212,6 +212,10 @@ def test_preview_is_redacted_and_truncated():
     long = engine._ask_tool_preview("Write", {"file_path": "/tmp/a", "content": "z" * 50_000})
     assert len(long) <= engine._ASK_PREVIEW_CHARS
     assert engine._ask_tool_preview("WebFetch", {"url": "https://example.com"}) == "https://example.com"
+    # Monitor is a shell: the operator decides from the command, not from a JSON dump.
+    mon = engine._ask_tool_preview("Monitor", {"command": "git push origin master", "description": "push",
+                                               "timeout_ms": 5000})
+    assert mon.startswith("git push origin master")
 
 
 # ─────────────────────── 3. decision store + endpoints ────────────────────────

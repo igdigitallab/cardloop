@@ -66,7 +66,7 @@ make the file invalid — a typo must not silently weaken a rule.
 
 | Key | Values |
 |-----|--------|
-| `event` | `bash` = Bash/PowerShell; `file` = Write, Edit, MultiEdit, NotebookEdit; `mcp` = tools named `mcp__*`; `all` = every tool (use `tool_matcher` to narrow it, e.g. `^Read$` for reads) |
+| `event` | `bash` = Bash/PowerShell/Monitor (Monitor runs a shell command too; a `tool_matcher` of `^Bash$` leaves it out); `file` = Write, Edit, MultiEdit, NotebookEdit; `mcp` = tools named `mcp__*`; `all` = every tool (use `tool_matcher` to narrow it, e.g. `^Read$` for reads) |
 | `tool_matcher` | regex searched in the tool name — anchor it (`^(Write\|Edit)$`), `Write` alone also matches `NotebookWrite` |
 | `pattern` | regex matched against the call's primary text: the command for Bash; file path and content for file tools; tool name plus the whole input as JSON for everything else |
 | `conditions[].field` | `tool_name`, `command`, `file_path`, `content` (Write `content` / Edit `new_string` / NotebookEdit `new_source` — never the text an Edit removes), or `tool_input.<key>` (dotted path, list index allowed: `tool_input.to.0`; non-string values are matched as JSON) |

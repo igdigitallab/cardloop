@@ -92,7 +92,11 @@ VALID_EVENTS = ("bash", "file", "mcp", "all")
 VALID_ACTIONS = ("block", "warn")
 VALID_OPERATORS = ("regex_match", "contains", "equals", "not_contains", "starts_with", "ends_with")
 BASE_FIELDS = ("tool_name", "command", "file_path", "content")
-BASH_TOOLS = frozenset({"Bash", "PowerShell"})
+# Monitor runs an arbitrary shell command too (`{"command": ...}`). Since CLI 2.1.314 a
+# matcher="Bash" hook is called for it with tool_name rewritten to "Bash", but THIS hook has no
+# matcher and sees tool_name "Monitor" (measured live) — without it here a `bash` rule was a
+# one-word bypass: put the command in Monitor instead of Bash.
+BASH_TOOLS = frozenset({"Bash", "PowerShell", "Monitor"})
 FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 _RULE_KEYS = frozenset({"name", "enabled", "event", "tool_matcher", "conditions", "pattern", "action"})

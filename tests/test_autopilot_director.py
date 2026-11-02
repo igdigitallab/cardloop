@@ -690,5 +690,5 @@ async def test_director_is_engine_blocked_from_mutating_tools(tmp_path):
         await _ap_director._run_director(ctx, project)
 
     extra = captured.get("disallowed_tools_extra") or []
-    for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"):
+    for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "Monitor"):
         assert tool in extra, f"director must be blocked from {tool}"

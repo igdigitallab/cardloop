@@ -1328,7 +1328,7 @@ def _ask_tool_preview(tool_name: str, tool_input: "dict | None") -> str:
     decision: the command for Bash, the path for a write, the URL for a fetch."""
     inp = tool_input if isinstance(tool_input, dict) else {}
     try:
-        if tool_name == "Bash":
+        if tool_name in ("Bash", "Monitor"):   # Monitor runs a shell command too
             body = str(inp.get("command") or "")
             desc = str(inp.get("description") or "")
             preview = body + (f"\n\n# {desc}" if desc else "")

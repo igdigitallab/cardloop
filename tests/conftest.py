@@ -43,6 +43,22 @@ os.environ["SDK_UPDATE_CHECK"] = "0"
 import pytest
 
 
+@pytest.fixture(scope="session")
+def _suite_audit_dir(tmp_path_factory) -> Path:
+    return tmp_path_factory.mktemp("audit")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_engine_audit(_suite_audit_dir, monkeypatch):
+    """engine.audit() appends to the REAL data/audit/ log, and tests that fire a hook with a
+    made-up project ("proj", "myproject", "t") wrote ~500 lines a month into the operator's
+    permanent trail: 479 of the 486 "native auto-compact" entries there were one test. Every
+    test now writes into a throw-away dir; tests that assert on the log still swap
+    AUDIT_DIR themselves, which overrides this."""
+    import engine
+    monkeypatch.setattr(engine, "AUDIT_DIR", _suite_audit_dir)
+
+
 @pytest.fixture
 def tmp_cwd(tmp_path: Path) -> Path:
     """Temporary directory — simulates a project cwd."""
