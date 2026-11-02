@@ -34,6 +34,9 @@ os.environ.pop("GROK_ENABLED", None)
 # Same leak for GROK_ACCESS (read live by grok_engine.full_access()): the suite pins the isolated
 # default; the tests of full access set it with monkeypatch.
 os.environ.pop("GROK_ACCESS", None)
+# Same leak for the CLI's auto-compact window: webapp derives CONTEXT_WINDOW from it at import, and
+# an agent shell inside the cockpit inherits the service's value. Its tests pass the env explicitly.
+os.environ.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
 
 # The SDK release watch is the one component that would reach the network from a test.
 # Force it off for the whole suite; the tests that exercise it flip _SDK_CHECK_ENABLED

@@ -887,6 +887,7 @@ export const en = {
   'search.peek_empty': 'This conversation is empty',
   'search.peek_you': 'You',
   'search.peek_agent': 'Agent',
+  'search.peek_compact': 'Context compacted — summary',
 
   // ── spec-082 D: QuickKeys (mobile terminal key bar) ───────────────────────────
   'quickkeys.esc': 'Esc',

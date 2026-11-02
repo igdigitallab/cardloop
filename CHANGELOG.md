@@ -16,6 +16,17 @@ Versions follow semver-like conventions (0.x while the project is under active d
   hooks now also gate commands started by the Monitor tool, and `CLAUDE_CODE_SUBAGENT_EFFORT` sets the
   sub-agents' effort separately from the session's.
 
+### Changed — native compaction at ~467K, shown as a divider instead of an operator message
+- The Claude Code CLI compacts a 1M-context conversation only at ~967K, so in practice it never
+  did (2 compactions in 40 days). `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (passed through from the
+  service env; documented in `.env.example`) lets it compact in place — same session, a summary
+  by the session's own model, recent messages kept — at a chosen size, e.g. `500k` → ~467K. The
+  context meter now measures against that window unless `CONTEXT_WINDOW` is set.
+- A compaction's summary used to appear in the chat as a 13K-character message from the operator,
+  and a `/compact` added a raw `<local-command-stdout>Compacted` bubble. The feed now shows a
+  "Context compacted" divider with the summary one click away, and neither line is taken for the
+  operator's last instruction or a session's first prompt.
+
 ### Fixed — a policy rule or the plan-only director could be sidestepped through Monitor
 - Monitor runs an arbitrary shell command. Since CLI 2.1.314 a `matcher="Bash"` hook is called for it
   with the tool name rewritten to `Bash`, so the built-in guards already saw it — but the policy-rules

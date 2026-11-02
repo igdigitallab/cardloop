@@ -751,7 +751,8 @@ export type ChatSSEEvent =
 export type ChatToolCall = RichTool
 
 export interface HistoryMessage {
-  role: 'user' | 'assistant'
+  /** 'compact' = a native compaction's summary (CLI auto-compact or /compact) — same session. */
+  role: 'user' | 'assistant' | 'compact'
   text: string
   tools: RichTool[]
   /** spec-073: transcript uuid of a user message — the file-checkpoint anchor for rewind. */
@@ -817,7 +818,7 @@ export interface TurnMetrics {
 
 export interface ChatMessage {
   id: string
-  role: 'user' | 'assistant' | 'board' | 'model_fallback' | 'runtime' | 'session_break'
+  role: 'user' | 'assistant' | 'board' | 'model_fallback' | 'runtime' | 'session_break' | 'compact'
   /** Accumulated text content */
   text: string
   /** Tool calls that happened during this turn */

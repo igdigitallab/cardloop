@@ -110,7 +110,8 @@ export function SessionPeek({ target, onClose, onOpenProject }: Props) {
               className={`session-peek-msg session-peek-${m.role}${i === anchorIdx ? ' session-peek-hit' : ''}`}
             >
               <div className="session-peek-role">
-                {m.role === 'user' ? t['search.peek_you'] : t['search.peek_agent']}
+                {m.role === 'user' ? t['search.peek_you']
+                  : m.role === 'compact' ? t['search.peek_compact'] : t['search.peek_agent']}
                 {m.ts != null && (
                   <span className="session-peek-ts">{new Date(m.ts).toLocaleString()}</span>
                 )}

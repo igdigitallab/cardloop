@@ -76,6 +76,7 @@ def _is_prompt_line(o: dict) -> bool:
     """A user line with string content that the harness did not write (isMeta)."""
     m = o.get("message")
     return (o.get("type") == "user" and o.get("isMeta") is not True
+            and o.get("isCompactSummary") is not True   # a native compaction's summary
             and isinstance(m, dict) and isinstance(m.get("content"), str))
 
 

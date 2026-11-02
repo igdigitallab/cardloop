@@ -55,6 +55,9 @@ E2E_PROJECT_IDS.append("e2e-history")
 # Scrolling back across a context reset into the session before (test_history_session_reset.py).
 E2E_PROJECT_IDS += ["e2e-reset", "e2e-older-session"]
 
+# A native compaction in the feed: a divider, not an operator bubble (test_history_compaction.py).
+E2E_PROJECT_IDS.append("e2e-compact")
+
 # Project tabs mount on first open (test_lazy_project_tabs.py); these get turns sent to them.
 E2E_PROJECT_IDS += ["e2e-lazy-probe", "e2e-lazy-busy"]
 

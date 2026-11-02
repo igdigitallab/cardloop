@@ -788,6 +788,33 @@ const SessionBreakRow = memo(function SessionBreakRow({ prev }: { prev: PrevSess
   )
 })
 
+// A native compaction (the CLI's auto-compact or a /compact): the SAME session goes on from a
+// summary the model wrote. The transcript stores that summary as a user line, so without this row
+// it read as a 13K-character message from the operator. Shaped like a session break on purpose —
+// the summary is what the agent now remembers, so it stays one click away.
+const CompactRow = memo(function CompactRow({ summary, ts }: { summary: string; ts?: number }) {
+  const [open, setOpen] = useState(false)
+  const when = ts != null ? fmtStamp(ts) : null
+  return (
+    <div className="chat-session-break chat-compact-row">
+      <div className="chat-day-sep chat-session-break-line">
+        <span>Context compacted{when ? ` · ${when}` : ''}</span>
+      </div>
+      <div className="chat-session-break-body">
+        <span>same session · earlier messages replaced by the model's summary</span>
+        {summary && (
+          <button className="chat-board-event-btn" onClick={() => setOpen(o => !o)} aria-expanded={open}>
+            {open ? 'Hide summary' : 'Show summary'}
+          </button>
+        )}
+      </div>
+      {open && summary && (
+        <div className="chat-session-break-handoff"><ChatMarkdown text={summary} /></div>
+      )}
+    </div>
+  )
+})
+
 // ─── Message-action icons (small, icon-only — Gemini/Perplexity style) ─────────
 const IconCopy = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -4680,6 +4707,9 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         {feedMessages.map((msg, idx) => {
           if (msg.role === 'session_break' && msg.sessionBreak) {
             return <SessionBreakRow key={msg.id} prev={msg.sessionBreak.prev} />
+          }
+          if (msg.role === 'compact') {
+            return <CompactRow key={msg.id} summary={msg.text} ts={msg.ts} />
           }
           // Model fallback strip — slim system row shown when backend silently degrades the model.
           // Live-only (not replayed from history); disappears on reload.

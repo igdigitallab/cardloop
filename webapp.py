@@ -134,7 +134,32 @@ _AUTO_RESUME_MAX = int(os.environ.get("AUTO_RESUME_MAX", "3"))
 # CONTEXT_WINDOW: the real model context window in tokens.
 # Defaults to 1 000 000 (Opus 4.8 on Claude Max subscription — confirmed via get_context_usage()).
 # Override via env if the window ever changes.
-CONTEXT_WINDOW = int(os.environ.get("CONTEXT_WINDOW", "1000000"))
+_MODEL_CONTEXT_WINDOW = 1_000_000
+
+
+def _parse_token_count(raw: "str | None") -> "int | None":
+    """`500k` / `1M` / `500000` -> tokens, read the way the CLI reads
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW (k = 1,000, M = 1,000,000); anything else -> None."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmM]?)\s*", raw or "")
+    if not m:
+        return None
+    n = int(float(m.group(1)) * {"": 1, "k": 1_000, "m": 1_000_000}[m.group(2).lower()])
+    return n if n > 0 else None
+
+
+def _context_window_from_env(env) -> int:
+    """The window the meter divides by. CLAUDE_CODE_AUTO_COMPACT_WINDOW is read by the CLI itself
+    (the cockpit only passes the service env through): with 500k the CLI compacts at ~467K and
+    get_context_usage() reports maxTokens 500000 (measured, CLI 2.1.316), so a meter still out of
+    1M would sit below half and never show that a compaction is coming. An explicit
+    CONTEXT_WINDOW wins; the CLI never raises a window past the model's own."""
+    if env.get("CONTEXT_WINDOW"):
+        return int(env["CONTEXT_WINDOW"])
+    w = _parse_token_count(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"))
+    return min(w, _MODEL_CONTEXT_WINDOW) if w else _MODEL_CONTEXT_WINDOW
+
+
+CONTEXT_WINDOW = _context_window_from_env(os.environ)
 # ── Cost-management thresholds (DECOUPLED from the hard model window above) ──────────────────────
 # These are NOT about running out of context — they are about RE-BILL COST on the tail.  A
 # persistent session re-bills its WHOLE prompt as cache_read every turn; a healthy session sits
@@ -13096,9 +13121,32 @@ def _history_line_msg(o: dict) -> "dict | None":
         return None
 
 
+# The CLI's own stdout for a `/compact` it ran (`<local-command-stdout>Compacted …`). It lands
+# as a plain user line right after the summary; the compact row already says the same thing.
+_COMPACT_STDOUT_RE = re.compile(
+    r"^\s*<local-command-stdout>\s*Compacted\b[^<]*</local-command-stdout>\s*$", re.IGNORECASE)
+
+
+def _compact_summary_msg(o: dict) -> "dict | None":
+    """A native compaction's summary line (`isCompactSummary`) as a `compact` feed row.
+
+    The CLI writes the summary as a `type:user` line (~13K chars, "This session is being
+    continued…"). Without this it rendered as the operator's own bubble and fed the rotation
+    digest as operator text. The row keeps the summary (minus service blocks) for the
+    collapsible divider; `_transcript_tail` and the index's role filter skip it."""
+    c = (o.get("message") or {}).get("content")
+    if isinstance(c, list):
+        c = "\n".join(b.get("text") or "" for b in c
+                      if isinstance(b, dict) and b.get("type") == "text")
+    return {"role": "compact", "text": _strip_service_blocks(c) if isinstance(c, str) else "",
+            "tools": [], "uuid": o.get("uuid"), "ts": _iso_to_ms(o.get("timestamp"))}
+
+
 def _history_line_msg_unsafe(o: dict) -> "dict | None":
     t = o.get("type")
     m = o.get("message")
+    if t == "user" and o.get("isCompactSummary") is True:
+        return _compact_summary_msg(o)
     # spec-086: a mid-turn steered message never lands as a user line — the CLI
     # records it as a queued_command attachment at enqueue time (plus queue-operation
     # bookkeeping). Without this branch the operator's OWN injected message vanishes
@@ -13142,6 +13190,8 @@ def _history_line_msg_unsafe(o: dict) -> "dict | None":
                 isinstance(c, str) and _CROSS_AGENT_MSG_RE.search(c)):
             return None
         if isinstance(c, str):
+            if _COMPACT_STDOUT_RE.match(c):
+                return None
             # _display_prompt: drops a synthetic auto-continue wake whole (never
             # operator-typed) and strips any embedded SDK service XML block —
             # see _display_prompt's docstring for both classes of noise.
