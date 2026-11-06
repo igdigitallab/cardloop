@@ -7,6 +7,15 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Changed — a dropped connection no longer reads as a dead agent
+- When a chat's live stream breaks on the client side (a phone that slept or switched networks), the
+  bubble used to finalise with the browser's own "network error" — while the server, which only logged
+  "client disconnected, task continues in background", kept writing the answer. The operator re-asked a
+  question whose reply was already done. The bubble now says the connection was lost and the agent is
+  still working; the finished reply replaces it on its own once the connection is back (unchanged
+  recovery: the /live poll and the activity stream). A TypeError from the cockpit's own code keeps its
+  real text. e2e: a proxy resets every connection mid-turn; the reply still lands, with no error left.
+
 ### Fixed — Reset session no longer shows an older session while the handoff builds
 - Clicking ↺ Reset emptied the feed but left the paging cursor on the ended session's window, so the
   "fill a short feed" effect paged up into that session's earlier messages — or across into the session

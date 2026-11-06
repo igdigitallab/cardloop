@@ -61,6 +61,9 @@ E2E_PROJECT_IDS.append("e2e-compact")
 # Project tabs mount on first open (test_lazy_project_tabs.py); these get turns sent to them.
 E2E_PROJECT_IDS += ["e2e-lazy-probe", "e2e-lazy-busy"]
 
+# The connection drops mid-turn; the reply still arrives (test_chat_connection_drop.py).
+E2E_PROJECT_IDS.append("e2e-netdrop")
+
 
 def _free_port() -> int:
     """Binds to port 0 to let the OS pick a free one, then releases it. Small

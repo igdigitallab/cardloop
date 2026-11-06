@@ -55,6 +55,7 @@ import {
   OLDER_PAGE, OLDER_TRIGGER_PX, breakReason, breakRow, continuesAfterReset, nextOlder, olderAfterHydrate,
   sinceFor,
 } from '../lib/historyPaging'
+import { streamErrorText } from '../lib/streamErrors'
 import { Modal, ModalHead } from '../components/Modal'
 import { Paperclip, ClipboardList, Wrench, Clock, Square, Pencil, Trash2, File, Image, Flame, Snowflake, Plus } from 'lucide-react'
 
@@ -3579,7 +3580,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         if (err instanceof Error && err.name === 'AbortError') return
         if (abortRef.current?.signal.aborted) return
         if (effectiveChatIdRef.current !== sendChatId) return
-        const msg = err instanceof Error ? err.message : String(err)
+        // A dropped connection is not a dead turn — say so (lib/streamErrors).
+        const msg = streamErrorText(err)
         setError(msg)
         setMessages(prev => finalizeStreaming(prev, msg))
       }
