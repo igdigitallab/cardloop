@@ -90,6 +90,24 @@ def test_version_behind_update_available(monkeypatch):
     assert info["can_self_update"] is True
 
 
+def test_version_latest_is_only_a_tag_head_lacks(monkeypatch):
+    """`latest` labels the Update button, so it must be a tag this checkout does not
+    already contain — otherwise a box past v0.18.0 is offered "Update v0.18.0"."""
+    calls = []
+    fake = _fake_git({"behind": (0, "4"), "tags": (0, "")})
+
+    def _spy(here, *args, timeout=5.0):
+        calls.append(args)
+        return fake(here, *args, timeout=timeout)
+
+    monkeypatch.setattr(_webapp, "_git", _spy)
+    info = _webapp._version_info(ROOT)
+    tag_call = next(a for a in calls if a[0] == "tag")
+    assert "--no-merged" in tag_call and tag_call[tag_call.index("--no-merged") + 1] == "HEAD"
+    assert info["update_available"] is True
+    assert info["latest"] is None
+
+
 def test_version_dirty_blocks_self_update(monkeypatch):
     monkeypatch.setattr(_webapp, "_git", _fake_git({"behind": (0, "2"), "status": (0, " M webapp.py")}))
     monkeypatch.setattr(_webapp.shutil, "which", lambda _: "/usr/bin/systemctl")

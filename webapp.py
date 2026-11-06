@@ -3632,7 +3632,10 @@ def _version_info(here: Path) -> dict:
         rc, out = _git(here, "rev-list", "--count", f"HEAD..origin/{branch}")
         if rc == 0 and out.isdigit():
             behind = int(out)
-        rc, out = _git(here, "tag", "--sort=-v:refname", "--merged", f"origin/{branch}")
+        # Only a tag this checkout does NOT already contain is news: without
+        # --no-merged, a box 57 commits past v0.18.0 offered "Update v0.18.0".
+        rc, out = _git(here, "tag", "--sort=-v:refname", "--merged", f"origin/{branch}",
+                       "--no-merged", "HEAD")
         if rc == 0 and out:
             latest = next((ln.strip() for ln in out.splitlines() if ln.strip()), None)
 

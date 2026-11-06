@@ -1,29 +1,27 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api'
-import type { SdkVersionInfo, VersionInfo } from '../types'
+import type { VersionInfo } from '../types'
 
 /**
  * Sidebar-footer version badge (spec-047 workstream A; daily-recheck spec-062).
- * Shows the running version; when a newer version exists on origin it turns into
- * an Update affordance. Clicking Update (with confirm) POSTs /api/update — the
- * detached updater applies + restarts via restart-self.sh, and the existing
+ * Shows the running version and nothing else until origin has something this
+ * checkout lacks — only then an Update button appears (or "update blocked" with
+ * the reason, when the install can't self-update). There is deliberately no
+ * "up to date" pill and no SDK row: a client reads the version, and a control
+ * that does nothing is noise. Clicking Update (with confirm) POSTs /api/update —
+ * the detached updater applies + restarts via restart-self.sh, and the existing
  * SSE reconnect-on-wake brings the cockpit back on the new version.
  *
- * Discovery is pull-based and deliberately quiet: a forced network re-check runs
- * at most ONCE PER DAY (on mount and when the tab regains focus, gated by a
- * localStorage timestamp) so a busy dev day where master moves many times does
- * not nag the operator. The manual "up to date" pill always forces a fresh
- * check, ungated. When an un-acknowledged update first appears, a small accent
- * dot pulses on the Update button — noticeable without a toast.
- *
- * Under the badge sits a second, independent row: a newer `claude-agent-sdk` on
- * PyPI. It is deliberately NOT a button — upgrading the SDK means rebuilding the
- * venv and re-running verify_model_aliases.py, so the row hands over the exact
- * command instead of pretending it is one click. The daily background watch in
- * webapp.py sends the push/toast; this row is the passive reminder.
+ * Discovery is pull-based and quiet: every POLL_MS the badge re-reads the cheap
+ * local-git state (the server refreshes `git fetch` in the background on its own
+ * 30-min throttle), and a forced network re-check runs at most ONCE PER DAY. When
+ * an un-acknowledged update first appears, a small accent dot pulses on the
+ * Update button — noticeable without a toast. The SDK release watch lives on in
+ * webapp.py (doctor line, inbox note) — it is a maintainer concern, not a badge.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000
+const POLL_MS = 30 * 60 * 1000   // re-read local git state; a push shows up within ~1h
 const LS_LAST_CHECK = 'cardloop:version:lastAutoCheck'  // wall-clock of last forced check
 const LS_SEEN_TARGET = 'cardloop:version:seenTarget'     // update target the dot was last shown for
 
@@ -32,23 +30,15 @@ function targetSig(info: VersionInfo): string {
   return info.latest || `behind:${info.behind}`
 }
 
-/** The exact upgrade command — pinned to the version we are actually announcing. */
-function sdkUpgradeCmd(sdk: SdkVersionInfo): string {
-  return `venv/bin/pip install -U '${sdk.name}==${sdk.latest}'`
-}
-
 export function VersionBadge() {
   const [info, setInfo] = useState<VersionInfo | null>(null)
-  const [checking, setChecking] = useState(false)
   const [updating, setUpdating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
-  const [sdkCopied, setSdkCopied] = useState(false)
   const startVerRef = useRef<string>('')   // version we were on when Update was clicked
 
   const load = useCallback(async (check?: boolean) => {
     try {
-      if (check) setChecking(true)
       const v = await api.version(check)
       setInfo(v)
       if (v.update_status?.state === 'failed') setError(v.update_status.detail)
@@ -60,7 +50,6 @@ export function VersionBadge() {
         setIsNew(false)
       }
     } catch { /* offline — keep last known */ }
-    finally { if (check) setChecking(false) }
   }, [])
 
   // Force a fresh network check at most once per day; otherwise just read the
@@ -80,7 +69,7 @@ export function VersionBadge() {
     maybeDailyCheck()
     const onVis = () => { if (document.visibilityState === 'visible') maybeDailyCheck() }
     document.addEventListener('visibilitychange', onVis)
-    const t = window.setInterval(maybeDailyCheck, DAY_MS)
+    const t = window.setInterval(maybeDailyCheck, POLL_MS)
     return () => { document.removeEventListener('visibilitychange', onVis); window.clearInterval(t) }
   }, [maybeDailyCheck])
 
@@ -124,7 +113,7 @@ export function VersionBadge() {
 
   async function onUpdate() {
     if (!info?.update_available) return
-    const target = info.latest && info.latest !== info.current ? info.latest : `${info.behind} new commit(s)`
+    const target = info.latest || `${info.behind} new commit(s)`
     if (!window.confirm(`Update Cardloop to ${target}?\n\nThe cockpit will restart and reconnect automatically.`)) return
     // She's acting on this update — stop pulsing and remember we surfaced it.
     localStorage.setItem(LS_SEEN_TARGET, targetSig(info))
@@ -144,25 +133,6 @@ export function VersionBadge() {
     }
   }
 
-  // Manual "Check for updates" — always forces a fresh fetch and resets the
-  // daily timer so the next auto-check is measured from this point.
-  function onManualCheck() {
-    localStorage.setItem(LS_LAST_CHECK, String(Date.now()))
-    load(true)
-  }
-
-  // Hands over the exact upgrade command. Copy can reject (insecure origin, denied
-  // permission) — swallow it; the command is visible in the title either way.
-  async function onCopySdkCmd() {
-    const sdk = info?.sdk
-    if (!sdk?.latest) return
-    try {
-      await navigator.clipboard.writeText(sdkUpgradeCmd(sdk))
-      setSdkCopied(true)
-      window.setTimeout(() => setSdkCopied(false), 1500)
-    } catch { /* clipboard unavailable — the title attribute still shows it */ }
-  }
-
   if (!info) return null
 
   if (updating) {
@@ -174,10 +144,11 @@ export function VersionBadge() {
   }
 
   const ver = info.current.replace(/^v/, '')
-  const sdk = info.sdk
+  // Something new on origin that this install can't apply by itself (dirty tree,
+  // no systemd) — say so, or the update would stay invisible forever.
+  const blocked = !info.update_available && info.behind > 0 && !!info.reason
 
   return (
-    <>
     <div className="version-badge">
       <span className="version-badge-name" title={`channel: ${info.channel}`}>
         Cardloop&nbsp;<span className="version-badge-ver">v{ver}</span>
@@ -187,42 +158,18 @@ export function VersionBadge() {
         <button
           className={`version-update-btn${isNew ? ' version-update-btn--new' : ''}`}
           onClick={onUpdate}
-          title={`Update to ${info.latest || 'latest'}`}
+          title={info.latest ? `Update to ${info.latest}` : `${info.behind} new commit(s) on ${info.channel}`}
         >
           {isNew && <span className="version-new-dot" aria-hidden="true" />}
           ⬆ Update{info.latest ? ` ${info.latest}` : ''}
         </button>
-      ) : info.can_self_update ? (
-        <button
-          className="version-check-btn"
-          onClick={onManualCheck}
-          disabled={checking}
-          title="Check for updates"
-        >
-          {checking ? '…' : 'up to date'}
-        </button>
-      ) : (
+      ) : blocked ? (
         <span className="version-check-btn version-check-btn--disabled" title={info.reason || ''}>
-          {info.reason ? 'self-update off' : 'up to date'}
+          update blocked
         </span>
-      )}
+      ) : null}
 
       {error && <span className="version-error" title={error}>update failed</span>}
     </div>
-
-    {sdk?.update_available && (
-      <div className="version-sdk" title={sdkUpgradeCmd(sdk)}>
-        <span className="version-sdk-msg">
-          SDK <span className="version-sdk-ver">{sdk.installed}</span>
-          {' → '}
-          <span className="version-sdk-ver version-sdk-ver--new">{sdk.latest}</span>
-        </span>
-        <button className="version-sdk-copy" onClick={onCopySdkCmd}
-          title={`Copy: ${sdkUpgradeCmd(sdk)}`}>
-          {sdkCopied ? 'copied' : 'copy cmd'}
-        </button>
-      </div>
-    )}
-    </>
   )
 }

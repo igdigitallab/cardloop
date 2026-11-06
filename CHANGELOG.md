@@ -7,6 +7,16 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Changed — the sidebar version badge shows only the version until there is an update
+- No more "up to date" pill and no SDK release row (`SDK 0.2.176 → 0.2.178` + copy cmd): a client reads
+  the version and nothing else. The Update button appears only when origin has commits this checkout
+  lacks; an install that can't self-update (dirty tree, no systemd) shows "update blocked" with the
+  reason instead of hiding the update. The badge re-reads local git state every 30 min, so a push shows
+  up within about an hour without a reload. The SDK release watch itself (doctor, inbox note) is unchanged.
+- Fixed: the Update button named the newest tag reachable from origin even when the checkout already
+  contained it — a box 57 commits past v0.18.0 was offered "Update v0.18.0". `latest` is now only a tag
+  HEAD does not have.
+
 ### Changed — Claude Agent SDK 0.2.176 (bundled Claude Code CLI 2.1.316)
 - The SDK floor moves from 0.2.164 (CLI 2.1.292) to 0.2.176. The bundled CLI now runs every current model
   by alias (Fable 5.1, Sonnet 5.5, Opus 5.5, Haiku 5.5 — `tools/verify_model_aliases.py` green), so the
