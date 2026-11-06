@@ -7,6 +7,14 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Fixed — Reset session no longer shows an older session while the handoff builds
+- Clicking ↺ Reset emptied the feed but left the paging cursor on the ended session's window, so the
+  "fill a short feed" effect paged up into that session's earlier messages — or across into the session
+  before it — until the reset finished. With a handoff that takes several seconds, the operator's
+  conversation was replaced by an older one. Clearing the feed now also forgets the window (one
+  `clearFeed()` for reset, session switch and chat switch). e2e: a reset clicked in an open chat whose
+  session has a predecessor never shows the predecessor, and ends with the ended session above the marker.
+
 ### Changed — the sidebar version badge shows only the version until there is an update
 - No more "up to date" pill and no SDK release row (`SDK 0.2.176 → 0.2.178` + copy cmd): a client reads
   the version and nothing else. The Update button appears only when origin has commits this checkout

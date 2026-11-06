@@ -53,7 +53,7 @@ E2E_PROJECT_IDS += ["e2e-buslag", "e2e-buslag-multi", "e2e-buslag-error", "e2e-b
 E2E_PROJECT_IDS.append("e2e-history")
 
 # Scrolling back across a context reset into the session before (test_history_session_reset.py).
-E2E_PROJECT_IDS += ["e2e-reset", "e2e-older-session"]
+E2E_PROJECT_IDS += ["e2e-reset", "e2e-older-session", "e2e-reset-click"]
 
 # A native compaction in the feed: a divider, not an operator bubble (test_history_compaction.py).
 E2E_PROJECT_IDS.append("e2e-compact")

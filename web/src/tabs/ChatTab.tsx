@@ -1582,6 +1582,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   const prevOf = useCallback((sid: string | null) => prevOfRef.current.get(sid ?? ''), [])
   const loadingOlderRef = useRef(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
+  // Empty the feed AND forget the window it showed. Clearing only the rows left the refs on the
+  // old session's window, so the fill-a-short-feed effect below read the emptied feed as that
+  // window and paged up into its earlier messages — or across into the session BEFORE it — until
+  // the next hydrate landed: a Reset with handoff showed an older session for as long as the
+  // summary took to build. With no known window, nextOlder() fetches nothing.
+  const clearFeed = useCallback(() => {
+    setMessages([])
+    setOlder([])
+    historySessionRef.current = null
+    windowStartRef.current = null
+  }, [setOlder])
   // Feed geometry captured right before a page is prepended, so the view stays on the same message.
   const olderAnchorRef = useRef<{ height: number; top: number } | null>(null)
   const [pendingHandoff, setPendingHandoff] = useState<string | null>(null)
@@ -2542,8 +2553,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     // hydrateFromServer checks it at the bottom of this effect — and the freshly opened chat
     // would stay blank until the next event. Drop it here, synchronously.
     streamingRef.current = false
-    setMessages([])
-    setOlder([])
+    clearFeed()
     // hist-N ids restart at 0 per chat, so a stale expanded id could otherwise match
     // an unrelated bubble in the next chat — clear alongside the message list.
     setExpandedToolGroups(new Set())
@@ -3129,8 +3139,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
 
   const handleSessionChange = useCallback(() => {
     abortRef.current?.abort()
-    setMessages([])
-    setOlder([])
+    clearFeed()
     setStreaming(false)
     setError('')
     setRun(null)
@@ -3149,7 +3158,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     api.sessionHistory(projectId)
       .then(res => { adoptHistoryWindow(res); setMessages(histToMessages(res.messages)); setContextTokens(res.context_tokens != null ? res.context_tokens : null); if (res.context_window != null && res.context_window > 0) setContextWindow(res.context_window); if (res.context_warn_at != null && res.context_warn_at > 0) setContextWarnAt(res.context_warn_at); if (res.context_warn_red != null && res.context_warn_red > 0) setContextWarnRed(res.context_warn_red); if (res.context_rotate_at != null && res.context_rotate_at > 0) setContextRotateAt(res.context_rotate_at) })
       .catch(() => setMessages([]))
-  }, [projectId, adoptHistoryWindow, setOlder])
+  }, [projectId, adoptHistoryWindow, clearFeed])
 
   async function uploadFile(file: File): Promise<{ path: string; url?: string }> {
     const form = new FormData()
@@ -4069,8 +4078,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
     setRotating(true)
     setRotatingKind(handoff ? 'handoff' : 'blank')
     // Immediately clear the stale session view so the UI is visibly responsive.
-    setMessages([])
-    setOlder([])
+    clearFeed()
     setContextTokens(0)
     setPrevContextTokens(null)
     try {

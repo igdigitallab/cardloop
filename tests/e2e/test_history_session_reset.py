@@ -160,3 +160,51 @@ def test_an_older_session_finds_its_predecessor_and_shows_the_handoff(logged_in_
     assert "prior-session-summary" not in page.locator(".chat-feed").inner_text()
     marker.get_by_role("button", name="Show handoff").click()
     page.wait_for_selector(".chat-session-break-handoff >> text=Scroll-back across resets.", timeout=5_000)
+
+
+def test_reset_clicked_in_an_open_chat_never_shows_an_older_session(logged_in_page, e2e_server):
+    """Clicking ↺ Reset empties the feed while the handoff builds. The emptied feed used to keep
+    the ended session's window as its paging cursor, so the fill-a-short-feed effect read it as
+    that window and paged into the session BEFORE it: for as long as the summary took, the
+    operator's conversation was replaced by an older one. The ended session itself has a
+    predecessor here — that is the one that must never appear."""
+    page = logged_in_page
+    sdk, pid = _sessions_dir(e2e_server, "e2e-reset-click")
+    older = "e2e-click-old1-0000-4000-8000-000000000004"
+    ended = "e2e-click-cur1-0000-4000-8000-000000000005"
+    _write(sdk / f"{older}.jsonl", [(f"older-q-{i:04d}", f"older-a-{i:04d}") for i in range(40)],
+           datetime(2026, 10, 1, tzinfo=timezone.utc))
+    # Shorter than one page, so the ended session's window starts at its first message.
+    _write(sdk / f"{ended}.jsonl", [(f"cur-q-{i:04d}", f"cur-a-{i:04d}") for i in range(20)],
+           datetime(2026, 10, 3, tzinfo=timezone.utc))
+    links = e2e_server["app_dir"] / "data" / "session_links.json"
+    known = json.loads(links.read_text()) if links.exists() else {}
+    known[ended] = {"prev": older, "trigger": "manual", "at": 1790000000.0,
+                    "context_tokens": None, "handoff": False, "inferred": False}
+    links.write_text(json.dumps(known))
+    base = e2e_server["base_url"]
+    open_project(page, "e2e-reset-click")
+    assert page.request.post(f"{base}/api/projects/{pid}/session",
+                             data={"action": "resume", "session_id": ended}).ok
+    page.reload()
+    page.wait_for_selector(".project-item", timeout=10_000)
+    open_project(page, "e2e-reset-click")
+    page.wait_for_selector("text=cur-q-0019", timeout=10_000)
+
+    order_js = """() => [...document.querySelectorAll(
+            '.chat-feed .chat-msg.chat-msg-user, .chat-feed .chat-session-break')]
+        .filter(e => e.offsetParent)
+        .map(e => e.classList.contains('chat-session-break') ? 'BREAK:' + e.dataset.prevSession
+             : ((e.textContent || '').match(/(older|cur)-q-\\d{4}/) || ['?'])[0])"""
+    page.click(".chat-session-reset:visible")
+    page.get_by_role("button", name="New session + handoff").click()
+    seen = []
+    for _ in range(200):  # the handoff path takes a few seconds; poll through all of it
+        page.wait_for_timeout(100)
+        seen.append(page.evaluate(order_js))
+        if seen[-1] and seen[-1][-1] == f"BREAK:{ended}":
+            break
+    shown_older = [o for o in seen if any(x.startswith("older-q") for x in o)]
+    assert not shown_older, f"{len(shown_older)} of {len(seen)} polls showed the older session"
+    # Once the reset lands, the ended session sits above the reset marker, whole.
+    assert seen[-1] == [f"cur-q-{i:04d}" for i in range(20)] + [f"BREAK:{ended}"], seen[-1]
