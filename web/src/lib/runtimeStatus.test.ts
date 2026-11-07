@@ -121,6 +121,18 @@ test('pill: a 5-hour window that already reset says nothing about now — no num
   assert.equal(runtimeStats(row, NOW).pct, '—')
 })
 
+test('pill: an account with NO 5-hour window at all leads with the weekly one', () => {
+  // Max 20x became Ultra on 2026-10-30 and verified accounts lost the 5-hour limit: the usage
+  // API answers `five_hour: null` and the inference headers carry only the weekly window.
+  const row = mainRow({ seven_day: win(0.16, 500_000), seven_day_fable: win(0.99, 500_000) })
+  assert.equal(leadWindow(row, NOW)?.key, 'seven_day')
+  assert.equal(runtimeStats(row, NOW).pct, '16%')
+  // Only a MISSING short window falls back — a present one that has reset still says nothing.
+  assert.equal(leadWindow(mainRow({ five_hour: win(0.5, -10), seven_day: win(0.16, 500_000) }), NOW), null)
+  // A per-model bucket never stands in for the plan's own windows.
+  assert.equal(leadWindow(mainRow({ seven_day_fable: win(0.4, 500_000) }), NOW), null)
+})
+
 test('limits: multi-account block feeds each row; an aged inactive reading is stale', () => {
   const usage: UsageLimits = {
     limits: { five_hour: win(0.22) }, now: NOW, account: 'main',

@@ -427,6 +427,13 @@ export function chatIsPinned(chat: Pick<Chat, 'provider' | 'account' | 'backend'
  *  `primary` is its short window. The weekly and per-model buckets live in the dropdown. */
 const PILL_KEY: Record<string, string> = { claude: 'five_hour', codex: 'primary' }
 
+/** The pill's window when the short one does not exist at all. Max 20x became Ultra on
+ *  2026-10-30 and verified accounts lost the 5-hour limit: the usage API answers
+ *  `five_hour: null` and the inference headers carry only the weekly window, so without this
+ *  the pill would read "—" forever on a healthy subscription. Only a MISSING short window
+ *  falls back — a present one whose reset has passed still shows nothing. */
+const PILL_FALLBACK_KEY: Record<string, string> = { claude: 'seven_day' }
+
 /** Windows whose rejection actually blocks a turn. Not the per-model buckets (Fable, Opus —
  *  they only bite when that model runs) and not Codex `credits` (the prepaid wallet, reported
  *  "rejected" whenever it is empty, also on a healthy subscription). */
@@ -463,7 +470,8 @@ export function leadWindow(row: RuntimeRow, now: number): Lead | null {
     const d = live(k)
     if (d && d.status === 'rejected') return { key: k, d }
   }
-  const key = PILL_KEY[row.provider]
+  const short = PILL_KEY[row.provider]
+  const key = short && !row.windows[short] ? PILL_FALLBACK_KEY[row.provider] : short
   const d = key ? live(key) : null
   return d ? { key, d } : null
 }

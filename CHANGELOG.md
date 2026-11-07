@@ -7,6 +7,14 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Fixed — the usage pill went blank on accounts with no 5-hour limit
+- Anthropic renamed Max 20x to Ultra on 2026-10-30 and dropped the 5-hour limit for verified accounts:
+  `/api/oauth/usage` now answers `five_hour: null` (no `session` row in `limits[]`) and the inference
+  rate-limit headers carry only the weekly window. The pill was wired to the 5-hour window alone, so it
+  read "—" on a healthy subscription. When an account has no short window at all, the pill now leads with
+  the weekly one (`M 16% — 2d 20h`, tooltip says "weekly window"); a 5-hour window that is present but has
+  reset still shows nothing, and a per-model bucket (Fable) never stands in.
+
 ### Changed — a dropped connection no longer reads as a dead agent
 - When a chat's live stream breaks on the client side (a phone that slept or switched networks), the
   bubble used to finalise with the browser's own "network error" — while the server, which only logged
