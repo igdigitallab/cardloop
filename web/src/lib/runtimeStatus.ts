@@ -267,10 +267,18 @@ function assignTags(rows: { key: string; seed: string; fixed: boolean }[]): Reco
 // ─── Rows ────────────────────────────────────────────────────────────────────
 
 /** Build the unified runtime list from the two halves of the snapshot. */
+/** Why a per-token Claude install shows no bar (`/api/usage` → `billing`). */
+const BILLING_NOTE: Record<string, string> = {
+  api_key: 'API key — billed per token, no plan limits',
+  bedrock: 'Amazon Bedrock — billed per token, no plan limits',
+  vertex: 'Google Vertex — billed per token, no plan limits',
+}
+
 export function buildRuntimeRows(providers: AgentProviderInfo[], usage: UsageLimits | null): RuntimeRow[] {
   const now = usage?.now ?? Date.now() / 1000
   const rows: Omit<RuntimeRow, 'tag'>[] = []
   const seeds: { key: string; seed: string; fixed: boolean }[] = []
+  const perToken = !!usage?.billing && usage.billing !== 'subscription'
   for (const p of providers) {
     const defaultModel = p.models.find(m => m.default)?.value || p.models[0]?.value
     if (p.provider === 'claude') {
@@ -289,7 +297,11 @@ export function buildRuntimeRows(providers: AgentProviderInfo[], usage: UsageLim
           account: a.id, backend: '', available: p.available && a.available,
           reason: !p.available ? (p.error || 'Claude is not available')
             : a.available ? undefined : (a.reason || 'this subscription cannot run'),
-          hasQuota: true, windows: windows && Object.keys(windows).length ? windows : null,
+          // An API key / cloud provider bills per token: the plan windows do not apply, and an
+          // empty bar would read as "limits not read yet" forever.
+          hasQuota: !perToken,
+          ...(perToken ? { limitsNote: BILLING_NOTE[usage!.billing!] || 'billed per token, no plan limits' } : {}),
+          windows: !perToken && windows && Object.keys(windows).length ? windows : null,
           ts, stale: !a.active && ts != null && now - ts > CLAUDE_STALE_AFTER_SEC,
           isGlobalDefault: !!a.active, defaultModel,
         })
@@ -422,23 +434,56 @@ export function chatIsPinned(chat: Pick<Chat, 'provider' | 'account' | 'backend'
 
 // ─── Lead window ─────────────────────────────────────────────────────────────
 
-/** The pill's window: the SHORT one, always — the operator reads the pill as "how much of
- *  this 5-hour window is gone and when does it roll over" (decision 2026-09-22). Codex's
- *  `primary` is its short window. The weekly and per-model buckets live in the dropdown. */
-const PILL_KEY: Record<string, string> = { claude: 'five_hour', codex: 'primary' }
+/** The pill's window: the SHORTEST window the plan actually has — the operator reads the pill
+ *  as "how much of this window is gone and when does it roll over" (decision 2026-09-22).
+ *  Plans differ: Pro/Max have a 5-hour + a weekly window, Ultra (Max 20x renamed 2026-10-30)
+ *  has only the weekly one, a future plan may report a kind this build has never seen. So no
+ *  key is assumed: every window says what it gates (`scope`, from the server or inferred from
+ *  the key) and how long it lasts (`period`). Mirrors webapp.py `_lead_plan_window`.
+ *  Codex keeps its fixed `primary` (short) / `secondary` (weekly) pair. */
+const PILL_KEY: Record<string, string> = { codex: 'primary' }
 
-/** The pill's window when the short one does not exist at all. Max 20x became Ultra on
- *  2026-10-30 and verified accounts lost the 5-hour limit: the usage API answers
- *  `five_hour: null` and the inference headers carry only the weekly window, so without this
- *  the pill would read "—" forever on a healthy subscription. Only a MISSING short window
- *  falls back — a present one whose reset has passed still shows nothing. */
-const PILL_FALLBACK_KEY: Record<string, string> = { claude: 'seven_day' }
+const KNOWN_PERIOD: Record<string, number> = { five_hour: 5 * 3600, seven_day: 7 * 86400 }
 
-/** Windows whose rejection actually blocks a turn. Not the per-model buckets (Fable, Opus —
- *  they only bite when that model runs) and not Codex `credits` (the prepaid wallet, reported
- *  "rejected" whenever it is empty, also on a healthy subscription). */
+/** plan | model | credits — the server's tag first, else inferred from the key. */
+export function windowScope(key: string, d: UsageLimitRow | undefined): 'plan' | 'model' | 'credits' {
+  if (d?.scope) return d.scope
+  if (key === 'overage' || key === 'seven_day_overage_included') return 'credits'
+  if (key in KNOWN_PERIOD) return 'plan'
+  return key.startsWith('seven_day_') ? 'model' : 'plan'
+}
+
+function windowPeriod(key: string, d: UsageLimitRow): number {
+  if (d.period && d.period > 0) return d.period
+  return KNOWN_PERIOD[key] ?? (key.startsWith('seven_day_') ? 7 * 86400 : Infinity)
+}
+
+export interface Lead { key: string; d: UsageLimitRow }
+
+/** The Claude plan window that matters now: a spent one first (the one that resets LAST —
+ *  the account stays cut off until then), else the shortest window the plan has, even if
+ *  its reset already passed (it rolled over; the caller decides what a past reset means).
+ *  Per-model buckets and credits never lead. */
+export function leadPlanWindow(windows: Record<string, UsageLimitRow> | null | undefined, now: number): Lead | null {
+  if (!windows) return null
+  const plan = Object.entries(windows)
+    .filter(([k, d]) => d && windowScope(k, d) === 'plan')
+    .map(([key, d]) => ({ key, d }))
+  if (!plan.length) return null
+  const spent = plan.filter(w => w.d.status === 'rejected' && !(w.d.resets_at != null && w.d.resets_at <= now))
+  if (spent.length) {
+    return spent.reduce((a, b) => ((b.d.resets_at ?? Infinity) > (a.d.resets_at ?? Infinity) ? b : a))
+  }
+  return plan.reduce((a, b) => {
+    const pa = windowPeriod(a.key, a.d), pb = windowPeriod(b.key, b.d)
+    if (pb !== pa) return pb < pa ? b : a
+    return (b.d.resets_at ?? Infinity) < (a.d.resets_at ?? Infinity) ? b : a
+  })
+}
+
+/** Windows whose rejection actually blocks a Codex turn. Not Codex `credits` (the prepaid
+ *  wallet, reported "rejected" whenever it is empty, also on a healthy subscription). */
 const BLOCKING_KEYS: Record<string, string[]> = {
-  claude: ['five_hour', 'seven_day'],
   codex: ['primary', 'secondary'],
 }
 
@@ -452,9 +497,7 @@ export function windowKeys(row: RuntimeRow): string[] {
   return [...known, ...rest].filter(k => row.windows![k])
 }
 
-export interface Lead { key: string; d: UsageLimitRow }
-
-/** What the pill shows: the short window — unless another window has actually cut the
+/** What the pill shows: the plan's short window — unless another window has actually cut the
  *  runtime off, which then leads (a green "3%" on a subscription whose weekly limit is spent
  *  would be the lie this pill exists to prevent). A window whose reset has passed has rolled
  *  over and says nothing about now. */
@@ -466,12 +509,15 @@ export function leadWindow(row: RuntimeRow, now: number): Lead | null {
     const d = row.windows![k]
     return d && !(d.resets_at != null && d.resets_at <= now) ? d : null
   }
+  if (row.provider === 'claude') {
+    const lead = leadPlanWindow(row.windows, now)
+    return lead && live(lead.key) ? lead : null
+  }
   for (const k of BLOCKING_KEYS[row.provider] || []) {
     const d = live(k)
     if (d && d.status === 'rejected') return { key: k, d }
   }
-  const short = PILL_KEY[row.provider]
-  const key = short && !row.windows[short] ? PILL_FALLBACK_KEY[row.provider] : short
+  const key = PILL_KEY[row.provider]
   const d = key ? live(key) : null
   return d ? { key, d } : null
 }

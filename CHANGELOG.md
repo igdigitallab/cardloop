@@ -7,13 +7,21 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
-### Fixed — the usage pill went blank on accounts with no 5-hour limit
+### Changed — subscription limits adapt to the plan instead of assuming a 5-hour window
 - Anthropic renamed Max 20x to Ultra on 2026-10-30 and dropped the 5-hour limit for verified accounts:
-  `/api/oauth/usage` now answers `five_hour: null` (no `session` row in `limits[]`) and the inference
-  rate-limit headers carry only the weekly window. The pill was wired to the 5-hour window alone, so it
-  read "—" on a healthy subscription. When an account has no short window at all, the pill now leads with
-  the weekly one (`M 16% — 2d 20h`, tooltip says "weekly window"); a 5-hour window that is present but has
-  reset still shows nothing, and a per-model bucket (Fable) never stands in.
+  `/api/oauth/usage` now answers `five_hour: null` and the inference rate-limit headers carry only the
+  weekly window. The pill read "—" on a healthy subscription, and "run after reset" waited for a window
+  the account does not have. Nothing assumes a `five_hour` key any more:
+  - every window in `/api/usage` says what it gates (`scope`: plan / model / credits) and how long it
+    lasts (`period`); a window at 100 % is `rejected`; an unknown `limits[]` kind is kept, not dropped,
+    and `session` / `weekly_all` fill in if the top-level fields ever disappear;
+  - one rule picks the window that matters (`_lead_plan_window` / `leadPlanWindow`): a spent plan window
+    first (the one that resets last), else the shortest window the plan has. The pill, "run after reset",
+    auto-resume after a rate limit, the reset time in notifications and the per-turn utilization all use
+    it — so a spent weekly limit is no longer hidden behind a fresh 5-hour window on Pro/Max either;
+  - the reset time names the day when it is not today ("Mon 13:00", not a bare "13:00");
+  - an API-key / Bedrock / Vertex install says "billed per token, no plan limits" instead of an endless
+    "limits not read yet" (`billing` in `/api/usage`).
 
 ### Changed — a dropped connection no longer reads as a dead agent
 - When a chat's live stream breaks on the client side (a phone that slept or switched networks), the

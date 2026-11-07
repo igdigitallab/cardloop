@@ -227,7 +227,7 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `GET` | `/api/ui-state` | cookie | `api_ui_state_get` | → {state: {...}} — cockpit layout for this user. |
 | `PUT` | `/api/ui-state` | cookie | `api_ui_state_put` | {state: {...}} — save layout. Body is an opaque |
 | `POST` | `/api/update` | cookie | `api_update` | — |
-| `GET` | `/api/usage` | cookie | `api_usage` | Subscription usage — 5h and 7-day limits with utilisation 0–1 and `resets_at`. Source: `GET https://api.anthropic.com/api/oauth/usage` (cached 60s).… |
+| `GET` | `/api/usage` | cookie | `api_usage` | Subscription usage — whatever windows the plan has (`five_hour` and `seven_day` on Pro/Max; Ultra has no `five_hour`; an unknown `limits[]` kind keep… |
 | `GET` | `/api/usage/dashboard` | cookie | `api_usage_dashboard` | Token/turn dashboard (`?days=30\|all`, `?models=`). `providers.claude` / `providers.codex` as before, and \*\*`providers.grok` only while `GROK_ENABLED=…` |
 | `GET` | `/api/usage/export.csv` | cookie | `api_usage_export` | — |
 | `GET` | `/api/usage/ledger` | cookie | `api_usage_ledger` | — |

@@ -71,6 +71,12 @@ export interface UsageDashboard {
 
 export interface UsageLimitRow {
   status: string; resets_at: number | null; utilization: number | null; ts: number; label?: string
+  /** What the window gates: `plan` = every turn (5-hour, weekly, any new kind), `model` = one
+   *  model's bucket (Opus, Fable), `credits` = the pay-as-you-go wallet. Absent on old payloads
+   *  and the passive snapshot — then inferred from the key (`windowScope`). */
+  scope?: 'plan' | 'model' | 'credits'
+  /** Window length in seconds when known; picks the SHORTEST window a plan has. */
+  period?: number | null
 }
 // Codex reports limits only while a turn is running, so `ts` is when the snapshot
 // arrived — the badge dims an old one rather than passing it off as live.
@@ -88,6 +94,9 @@ export interface UsageLimits {
   account?: string
   /** Present only once a second subscription is registered — otherwise null. */
   accounts?: AccountRow[] | null
+  /** How Claude turns are paid: only `subscription` has plan windows; `api_key`, `bedrock`
+   *  and `vertex` bill per token. Absent on an older server = subscription. */
+  billing?: 'subscription' | 'api_key' | 'bedrock' | 'vertex'
 }
 
 /** One selectable Claude subscription. `limits` may be null for an inactive account whose

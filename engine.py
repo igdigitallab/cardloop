@@ -812,6 +812,23 @@ costs = {}                         # session_key -> last cost usd
 running = {}                       # session_key -> ClaudeSDKClient (for /stop)
 rate_limits = {}                   # rate_limit_type -> {status, resets_at, utilization, ts} (passive)
 
+
+def _rate_limit_event(info) -> dict:
+    """SDK RateLimitInfo → the engine's `rate_limit` event. `windows` is the CLI's
+    `unifiedWindows`: every window the plan's inference headers carry ({five_hour, seven_day}
+    on Pro/Max, {seven_day} on Ultra), each with its utilization — the plan-agnostic part,
+    and it arrives with every turn, so it does not depend on the 429-prone usage endpoint."""
+    raw = getattr(info, "raw", None) or {}
+    windows = raw.get("unifiedWindows")
+    return {
+        "type": "rate_limit",
+        "rate_limit_type": info.rate_limit_type,
+        "status": info.status,
+        "resets_at": info.resets_at,
+        "utilization": info.utilization,
+        "windows": windows if isinstance(windows, dict) else None,
+    }
+
 # ── Spec-028 Phase 2: live-client registry ────────────────────────────────────────────────────
 # Only populated when PERSISTENT_CLIENT=1; empty (and dormant) otherwise.
 
@@ -3088,7 +3105,7 @@ def _forget_dead_session(ctx: "dict | None", session_key: str, dead_sid: str) ->
 #   {"type": "text",       "text": str}                        — text block from model response
 #   {"type": "result",     "session_id": str|None,
 #                          "cost_usd": float|None}             — final ResultMessage
-#   {"type": "rate_limit", "rate_limit_type": str, ...}        — RateLimitEvent (passive)
+#   {"type": "rate_limit", "rate_limit_type": str, "windows": {key: {utilization, resetsAt, status}}|None, ...} — RateLimitEvent (passive)
 #   {"type": "error",      "exc": BaseException}               — exception from SDK
 #
 # IMPORTANT — running[session_key]:
@@ -3680,14 +3697,7 @@ async def run_engine(  # type: ignore[return]
                 except Exception:
                     pass  # never let a malformed partial event break the turn
             elif isinstance(msg, RateLimitEvent):
-                i = msg.rate_limit_info
-                yield {
-                    "type": "rate_limit",
-                    "rate_limit_type": i.rate_limit_type,
-                    "status": i.status,
-                    "resets_at": i.resets_at,
-                    "utilization": i.utilization,
-                }
+                yield _rate_limit_event(msg.rate_limit_info)
             elif isinstance(msg, ResultMessage):
                 # Spec-043 C: commit the best (max) pt seen from AssistantMessages this turn.
                 # _turn_max_pt is None only when NO AssistantMessage had a usage object at all

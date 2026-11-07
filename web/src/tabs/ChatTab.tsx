@@ -16,7 +16,7 @@ import { RuntimeTagChip } from '../components/RuntimeTag'
 import {
   useRuntimeProviders, useGlobalAccountId, buildRuntimeRows, effectiveRuntimeKey,
   inheritedRuntimeKey, chatIsPinned, publishCurrentChat, clearCurrentChat, claimCurrentChat,
-  unusableAccounts,
+  unusableAccounts, leadPlanWindow,
   type RuntimeRow,
 } from '../lib/runtimeStatus'
 import { decodeFileRef, FILE_REF_PREFIX, looksLikeFileRef, remarkFileRefs, stripLineSuffix } from '../lib/fileRefs'
@@ -2088,12 +2088,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       let toastMsg: string = t['chat.defer_after_reset_toast_plain']
       try {
         const usage = await api.usage()
-        const fiveH = usage.limits['five_hour']
-        if (fiveH?.resets_at) {
-          const d = new Date(fiveH.resets_at * 1000)
+        // The same window the server waits for — the 5-hour one on Pro/Max, the weekly one on
+        // a plan without it — so the toast never names a reset that is not the one that counts.
+        const lead = leadPlanWindow(usage.limits, usage.now)
+        if (lead?.d.resets_at) {
+          const d = new Date(lead.d.resets_at * 1000)
           const hh = String(d.getHours()).padStart(2, '0')
           const mm = String(d.getMinutes()).padStart(2, '0')
-          toastMsg = t['chat.defer_after_reset_toast'].replace('{time}', `${hh}:${mm}`)
+          const day = d.toDateString() === new Date().toDateString()
+            ? '' : `${d.toLocaleDateString(undefined, { weekday: 'short' })} `
+          toastMsg = t['chat.defer_after_reset_toast'].replace('{time}', `${day}${hh}:${mm}`)
         }
       } catch { /* usage unavailable — use plain message */ }
       setDeferToast(toastMsg)

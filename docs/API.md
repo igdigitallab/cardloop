@@ -254,7 +254,7 @@ Global — `data/settings.json` (mtime hot-reload, wired into runtime: scan inte
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/api/usage/dashboard` | Token/turn dashboard (`?days=30\|all`, `?models=`). `providers.claude` / `providers.codex` as before, and **`providers.grok` only while `GROK_ENABLED=true`**: `{turns, input, output, cached, reasoning, notional_usd, by_model:{<model>:{turns,input,output}}, limits:null, local_counters:{five_hour:{turns,tokens}, seven_day:{turns,tokens}}, last_limit_error:{ts,text}\|null}`. `input` already INCLUDES `cached`; `notional_usd` is the API-list-price equivalent of the tokens, never spend (no cost key exists in the block); `limits` is always `null` because Grok reports none; `by_model` is a record (Codex's is an array). Built from the engine's own ledger `<DATA>/grok_usage.jsonl` | Yes |
-| `GET` | `/api/usage` | Subscription usage — 5h and 7-day limits with utilisation 0–1 and `resets_at`. Source: `GET https://api.anthropic.com/api/oauth/usage` (cached 60s). Falls back to passive `RateLimitEvent` snapshot if oauth endpoint fails. Also returns `account` (active account id) and, once a second account is registered, `accounts[]` with each one's own limits (`null` when that account's token is stale) | Yes |
+| `GET` | `/api/usage` | Subscription usage — whatever windows the plan has (`five_hour` and `seven_day` on Pro/Max; Ultra has no `five_hour`; an unknown `limits[]` kind keeps its own key), each `{status, utilization 0–1, resets_at, ts, scope: plan\|model\|credits, period: seconds\|null, label?}`; `status` is `rejected` at 100 %. `billing` = `subscription`\|`api_key`\|`bedrock`\|`vertex` (only `subscription` has plan windows). Source: `GET https://api.anthropic.com/api/oauth/usage` (cached 60s). Falls back to passive `RateLimitEvent` snapshot if oauth endpoint fails. Also returns `account` (active account id) and, once a second account is registered, `accounts[]` with each one's own limits (`null` when that account's token is stale) | Yes |
 
 ---
 
@@ -387,7 +387,7 @@ Records are persisted in `data/deferred.json` (survives restarts).
 
 **Status lifecycle:** `pending` → `fired` (started) or `cancelled` (via DELETE) or `failed` (project busy after max attempts or execution error).
 
-**fire_on_reset behaviour:** At poll time the `five_hour` limit is checked via the OAuth usage cache.
+**fire_on_reset behaviour:** At poll time the plan's lead window is checked via the OAuth usage cache (`_lead_plan_window`: a spent plan window that resets last, else the shortest window the plan has — `five_hour` on Pro/Max, `seven_day` on Ultra; per-model buckets never count).
 - If `utilization < DEFERRED_FREE_THRESHOLD` (default 0.10): fires immediately.
 - Otherwise: fires when `time.time() >= resets_at + jitter` (jitter 30–90 s, stable per record).
 

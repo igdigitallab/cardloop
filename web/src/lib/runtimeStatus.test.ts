@@ -12,7 +12,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  buildRuntimeRows, effectiveRuntimeKey, fallbackRuntimeRow, inheritedRuntimeKey, chatIsPinned, leadWindow,
+  buildRuntimeRows, effectiveRuntimeKey, fallbackRuntimeRow, inheritedRuntimeKey, chatIsPinned, leadWindow, leadPlanWindow,
   globalDefaultAccount, unusableAccounts, publishCurrentChat, claimCurrentChat, clearCurrentChat,
   getRuntimeSnapshot, serverNow, windowKeys, type CurrentChat,
 } from './runtimeStatus'
@@ -131,6 +131,40 @@ test('pill: an account with NO 5-hour window at all leads with the weekly one', 
   assert.equal(leadWindow(mainRow({ five_hour: win(0.5, -10), seven_day: win(0.16, 500_000) }), NOW), null)
   // A per-model bucket never stands in for the plan's own windows.
   assert.equal(leadWindow(mainRow({ seven_day_fable: win(0.4, 500_000) }), NOW), null)
+})
+
+test('pill: a plan window this build has never heard of is used, by its period', () => {
+  const daily: UsageLimitRow = { ...win(0.3, 20_000), scope: 'plan', period: 86400, label: 'Daily all' }
+  const monthly: UsageLimitRow = { ...win(0.7, 900_000), scope: 'plan', period: 30 * 86400, label: 'Monthly all' }
+  assert.equal(leadWindow(mainRow({ seven_day: win(0.16, 500_000), daily_all: daily }), NOW)?.key, 'daily_all')
+  assert.equal(leadWindow(mainRow({ monthly_all: monthly }), NOW)?.key, 'monthly_all')
+  assert.equal(leadWindow(mainRow({ five_hour: win(0.1), monthly_all: monthly }), NOW)?.key, 'five_hour')
+  // The server's own tag wins over the key: a model-scoped bucket never leads.
+  assert.equal(leadWindow(mainRow({ odd_bucket: { ...win(0.9, 500_000), scope: 'model' } }), NOW), null)
+})
+
+test('pill: a spent plan window leads — the one that resets LAST keeps the account cut off', () => {
+  const row = mainRow({
+    five_hour: win(1.0, 3000, 'rejected'),
+    seven_day: win(1.0, 400_000, 'rejected'),
+  })
+  assert.equal(leadWindow(row, NOW)?.key, 'seven_day')
+})
+
+test('billing: an API-key install shows no bar and says why', () => {
+  const rows = buildRuntimeRows([claude([{ id: 'main', label: 'Main', active: true }])], {
+    limits: {}, now: NOW, account: 'main', accounts: null, billing: 'api_key',
+  })
+  assert.equal(rows[0].hasQuota, false)
+  const s = runtimeStats(rows[0], NOW)
+  assert.equal(s.pct, '—')
+  assert.match(s.title, /API key/)
+})
+
+test('reset target: the same window the pill leads with, for any plan', () => {
+  assert.equal(leadPlanWindow({ five_hour: win(0.5), seven_day: win(0.2, 500_000) }, NOW)?.key, 'five_hour')
+  assert.equal(leadPlanWindow({ seven_day: win(0.2, 500_000) }, NOW)?.key, 'seven_day')
+  assert.equal(leadPlanWindow({}, NOW), null)
 })
 
 test('limits: multi-account block feeds each row; an aged inactive reading is stale', () => {

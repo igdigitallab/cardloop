@@ -8963,17 +8963,124 @@ def _iso_to_unix(s):
         return None
 
 
-def _norm_window(d):
+# Plans differ in which windows they have at all: Pro/Max carry a 5-hour and a weekly one,
+# Ultra (Max 20x renamed 2026-10-30) lost the 5-hour window for verified accounts, others may
+# report windows this build has never seen. So every window says what it gates (`scope`):
+#   plan    — gates every turn (the 5-hour, the weekly, any unknown limits[] kind)
+#   model   — a per-model weekly bucket; bites only when that model runs (Opus, Sonnet, Fable)
+#   credits — the pay-as-you-go wallet, not a window
+# and how long it lasts (`period`, seconds; None when unknown). Nothing downstream may assume a
+# particular key exists — `_lead_plan_window` picks the one that matters.
+_WINDOW_PERIOD = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
+_LIMITS_KIND_KEY = {"session": "five_hour", "weekly_all": "seven_day"}
+_GROUP_PERIOD = {"session": 5 * 3600, "daily": 86400, "weekly": 7 * 86400, "monthly": 30 * 86400}
+
+
+def _window_scope(key: str, entry: "dict | None" = None) -> str:
+    """plan | model | credits — the entry's own tag first, else inferred from the key
+    (the passive SDK snapshot in ctx["rate_limits"] carries no tag)."""
+    tagged = entry.get("scope") if isinstance(entry, dict) else None
+    if tagged in ("plan", "model", "credits"):
+        return tagged
+    if key in ("overage", "seven_day_overage_included"):
+        return "credits"
+    if key in _WINDOW_PERIOD:
+        return "plan"
+    if key.startswith("seven_day_"):
+        return "model"
+    return "plan"
+
+
+def _window_period(key: str, entry: "dict | None" = None) -> "int | None":
+    tagged = entry.get("period") if isinstance(entry, dict) else None
+    if isinstance(tagged, (int, float)) and tagged > 0:
+        return int(tagged)
+    if key in _WINDOW_PERIOD:
+        return _WINDOW_PERIOD[key]
+    return 7 * 86400 if key.startswith("seven_day_") else None
+
+
+def _window_row(key: str, util_pct, resets_at, now: float, label: "str | None" = None,
+                scope: "str | None" = None, period: "int | None" = None) -> dict:
+    util = (util_pct / 100.0) if isinstance(util_pct, (int, float)) else None
+    row = {
+        # The usage API has no per-window status; a window at 100 % is spent, and saying
+        # "allowed" there would let a free 5-hour window hide a weekly limit that cuts off.
+        "status": "rejected" if util is not None and util >= 1.0 else "allowed",
+        "resets_at": resets_at,
+        "utilization": util,
+        "ts": now,
+        "scope": scope or _window_scope(key),
+        "period": period if period is not None else _window_period(key),
+    }
+    if label:
+        row["label"] = label
+    return row
+
+
+def _norm_window(d, key: str = "five_hour"):
     """OAuth window {utilization:0-100, resets_at:ISO} → frontend format {utilization:0-1, resets_at:unix}."""
     if not isinstance(d, dict):
         return None
-    util = d.get("utilization")
-    return {
-        "status": "allowed",
-        "resets_at": _iso_to_unix(d.get("resets_at")),
-        "utilization": (util / 100.0) if isinstance(util, (int, float)) else None,
-        "ts": time.time(),
-    }
+    return _window_row(key, d.get("utilization"), _iso_to_unix(d.get("resets_at")), time.time())
+
+
+def _lead_plan_window(limits: "dict | None", now: "float | None" = None) -> "tuple[str, dict] | None":
+    """The plan window that matters right now, for ANY plan: a spent one first (the one that
+    resets LAST — the account stays cut off until then), else the shortest window the plan
+    actually has (a window whose reset passed is not spent any more). Per-model buckets and credits never lead. None when the plan reports no
+    window at all (an API key, a fetch that failed)."""
+    if not isinstance(limits, dict):
+        return None
+    now = time.time() if now is None else now
+    plan = [(k, v) for k, v in limits.items()
+            if isinstance(v, dict) and _window_scope(k, v) == "plan"]
+    if not plan:
+        return None
+    live = [(k, v) for k, v in plan if not (v.get("resets_at") and v["resets_at"] <= now)]
+    spent = [(k, v) for k, v in live if v.get("status") == "rejected"]
+    if spent:
+        return max(spent, key=lambda kv: kv[1].get("resets_at") or float("inf"))
+    # The shortest window the plan HAS, even if its reset already passed: it rolled over and
+    # the account is free again — handing the lead to the weekly one would make a deferred
+    # prompt wait days for a reset that does not matter.
+    return min(plan, key=lambda kv: (_window_period(kv[0], kv[1]) or float("inf"),
+                                     kv[1].get("resets_at") or float("inf")))
+
+
+def _record_rate_limit_event(rate_limits: dict, event: dict) -> None:
+    """Passive snapshot (ctx["rate_limits"]) from an engine `rate_limit` event: the
+    representative row, then every window the CLI saw (`windows`, utilization 0-1) — the
+    fallback when the usage endpoint answers 429 or nothing at all."""
+    now = time.time()
+    rl_type = event.get("rate_limit_type")
+    if rl_type:
+        rate_limits[rl_type] = {
+            "status": event.get("status"),
+            "resets_at": event.get("resets_at"),
+            "utilization": event.get("utilization"),
+            "ts": now,
+        }
+    for key, w in (event.get("windows") or {}).items():
+        if not isinstance(key, str) or not isinstance(w, dict):
+            continue
+        util = w.get("utilization") if isinstance(w.get("utilization"), (int, float)) else None
+        rate_limits[key] = {
+            "status": w.get("status") or ("rejected" if util is not None and util >= 1.0 else "allowed"),
+            "resets_at": w.get("resetsAt"),
+            "utilization": util,
+            "ts": now,
+        }
+
+
+def _claude_billing() -> str:
+    """How this install pays for Claude turns: the subscription's windows only mean anything
+    under `subscription`; an API key or a cloud provider bills per token and has none."""
+    if os.environ.get("CLAUDE_CODE_USE_BEDROCK", "").strip() not in ("", "0", "false"):
+        return "bedrock"
+    if os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() not in ("", "0", "false"):
+        return "vertex"
+    return "api_key" if os.environ.get("CLAUDE_AUTH_MODE", "subscription") == "api_key" else "subscription"
 
 
 async def _fetch_oauth_usage(creds_path: "str | None" = None):
@@ -9007,35 +9114,39 @@ def _build_limits_dict(raw: dict) -> dict:
     """
     limits: dict = {}
     for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
-        nv = _norm_window(raw.get(k))
+        nv = _norm_window(raw.get(k), k)
         if nv:
             limits[k] = nv
     now = time.time()
     for entry in raw.get("limits") or []:
-        if not isinstance(entry, dict) or entry.get("kind") != "weekly_scoped":
+        if not isinstance(entry, dict):
             continue
-        model_name = ((entry.get("scope") or {}).get("model") or {}).get("display_name")
-        if not model_name:
-            continue
-        key = f"seven_day_{_slugify_model_name(model_name)}"
-        if key in limits:
-            continue
-        pct = entry.get("percent")
-        limits[key] = {
-            "status": "allowed",
-            "resets_at": _iso_to_unix(entry.get("resets_at")),
-            "utilization": (pct / 100.0) if isinstance(pct, (int, float)) else None,
-            "ts": now,
-            "label": model_name,
-        }
+        kind = entry.get("kind")
+        resets_at = _iso_to_unix(entry.get("resets_at"))
+        if kind == "weekly_scoped":
+            model_name = ((entry.get("scope") or {}).get("model") or {}).get("display_name")
+            if not model_name:
+                continue
+            key = f"seven_day_{_slugify_model_name(model_name)}"
+            if key not in limits:
+                limits[key] = _window_row(key, entry.get("percent"), resets_at, now,
+                                          label=model_name, scope="model", period=7 * 86400)
+        elif kind in _LIMITS_KIND_KEY:
+            # The array repeats the top-level windows; it only fills in when those are absent.
+            key = _LIMITS_KIND_KEY[kind]
+            if key not in limits:
+                limits[key] = _window_row(key, entry.get("percent"), resets_at, now)
+        elif isinstance(kind, str) and kind:
+            # A kind this build has never seen: Anthropic lists only limits that apply to the
+            # account, so it gates turns — show it rather than drop it.
+            key = _slugify_model_name(kind)
+            if key not in limits:
+                limits[key] = _window_row(key, entry.get("percent"), resets_at, now,
+                                          label=kind.replace("_", " ").capitalize(), scope="plan",
+                                          period=_GROUP_PERIOD.get(entry.get("group")))
     eu = raw.get("extra_usage")
     if isinstance(eu, dict) and eu.get("is_enabled") and eu.get("utilization") is not None:
-        limits["overage"] = {
-            "status": "allowed",
-            "resets_at": None,
-            "utilization": eu["utilization"] / 100.0,
-            "ts": now,
-        }
+        limits["overage"] = _window_row("overage", eu["utilization"], None, now, scope="credits")
     return limits
 
 
@@ -9105,7 +9216,8 @@ async def api_usage(req: web.Request) -> web.Response:
             accounts_block.append(row)
 
     return web.json_response({"limits": cached, "codex": codex_limits, "now": time.time(),
-                              "account": active, "accounts": accounts_block})
+                              "account": active, "accounts": accounts_block,
+                              "billing": _claude_billing()})
 
 
 # ── Multi-subscription accounts ────────────────────────────────────────────────────────────────
@@ -9926,18 +10038,18 @@ def _get_resets_at_display(ctx: dict) -> str:
     try:
         from zoneinfo import ZoneInfo
         tz = ZoneInfo(os.environ.get("OPERATOR_TZ", "UTC"))
-        # First try the passive rate_limits dict (populated by any recent run_engine call)
-        rate_limits = ctx.get("rate_limits") or {}
-        resets_at = None
-        for _rl_type in ("five_hour", "seven_day"):
-            entry = rate_limits.get(_rl_type)
-            if entry and entry.get("resets_at"):
-                resets_at = entry["resets_at"]
-                break
-        if resets_at is None:
+        # The oauth reading when fresh, else the passive snapshot from the last run's events.
+        fresh = _usage_cache.get("data")
+        if not fresh or (time.time() - _usage_cache.get("ts", 0)) > _USAGE_TTL:
+            fresh = None
+        lead = _lead_plan_window(fresh) or _lead_plan_window(ctx.get("rate_limits") or {})
+        resets_at = lead[1].get("resets_at") if lead else None
+        if not resets_at:
             return ""
         dt = datetime.fromtimestamp(float(resets_at), tz=tz)
-        return dt.strftime("%H:%M")
+        # A weekly window resets days away — a bare "21:00" would read as tonight.
+        same_day = dt.date() == datetime.now(tz).date()
+        return dt.strftime("%H:%M" if same_day else "%a %H:%M")
     except Exception:
         return ""
 
@@ -10143,7 +10255,11 @@ async def _deferred_loop(ctx: dict) -> None:
                     reset_unknown = False
                     try:
                         usage = await _get_cached_usage_data(ctx)
-                        limit = usage.get("five_hour")
+                        # The window that blocks or will block — the 5-hour one on Pro/Max,
+                        # the weekly one on a plan without it, a spent weekly over a fresh
+                        # 5-hour window. Never assume a particular key exists.
+                        lead = _lead_plan_window(usage)
+                        limit = lead[1] if lead else None
                         if limit is None:
                             reset_unknown = True
                         else:
@@ -15906,9 +16022,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 _utilization: float | None = None
                 _cached = _usage_cache.get("data")
                 if _cached and (time.time() - _usage_cache.get("ts", 0)) <= _USAGE_TTL:
-                    # pick five_hour window utilization as the primary signal
-                    _w = (_cached.get("five_hour") or {})
-                    _utilization = _w.get("utilization") if isinstance(_w, dict) else None
+                    # the plan window that matters now — not every plan has a 5-hour one
+                    _lead = _lead_plan_window(_cached)
+                    _utilization = _lead[1].get("utilization") if _lead else None
                 # Context early-warning: upward crossing of CONTEXT_WARN_AT (once per session).
                 # Only fires in the warn zone (>= CONTEXT_WARN_AT).
                 _ctx_warn = False
@@ -15958,14 +16074,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
                 exc = event.get("exc")
                 await _send(_error_event_payload(exc))
             elif etype == "rate_limit":
-                rl_type = event.get("rate_limit_type")
-                if rl_type:
-                    ctx["rate_limits"][rl_type] = {
-                        "status": event.get("status"),
-                        "resets_at": event.get("resets_at"),
-                        "utilization": event.get("utilization"),
-                        "ts": time.time(),
-                    }
+                _record_rate_limit_event(ctx["rate_limits"], event)
                 await _send({"type": "rate_limit", "status": event.get("status", "")})
             elif etype == "subagent":
                 # Forward sub-agent lifecycle events as-is; cockpit UI display: Phase C.

@@ -698,9 +698,9 @@ export const en = {
   'chat.defer_submitting': 'Queueing...',
   'chat.defer_queued': 'Deferred run queued',
   'chat.defer_after_reset_btn': '⏱ After reset',
-  'chat.defer_after_reset_title': 'Queue this prompt to run after the 5-hour window resets',
+  'chat.defer_after_reset_title': 'Queue this prompt to run after your usage limit resets',
   'chat.defer_after_reset_toast': 'Will run after reset (~{time})',
-  'chat.defer_after_reset_toast_plain': 'Will run after the 5-hour window resets',
+  'chat.defer_after_reset_toast_plain': 'Will run after your usage limit resets',
   'chat.defer_pending_chip_title': 'Pending deferred runs — click to manage',
   'chat.defer_pending_cancel': 'Cancel',
   'chat.defer_pending_no_items': 'No pending deferred runs',
@@ -711,7 +711,7 @@ export const en = {
   'chat.defer_split_arrow_title': 'Schedule at a specific time (modal)',
 
   // Board card: defer-after-reset action
-  'board.card_defer_title': 'Queue this card to run after the 5-hour window resets',
+  'board.card_defer_title': 'Queue this card to run after your usage limit resets',
   'board.card_defer_aria': 'Queue after reset',
   'board.card_defer_toast': 'Will run after reset',
   'board.card_defer_title_queued': 'Cancel scheduled run (queued for after reset)',
