@@ -14,6 +14,12 @@ Versions follow semver-like conventions (0.x while the project is under active d
 - Static labels, the built-in `reviewer-security` role pin and the pricing table follow: Fable 5.2 is
   20 % cheaper than 5.1 ($8 / $40 per MTok, cache read $0.20, 5-minute cache write $10).
 
+### Fixed — the disk runway no longer extrapolates a fill that has stopped
+- A one-off fill spread over a few hours (worktrees, CI copies, an emulator image) was cut in two by a
+  day boundary whenever the current time fell inside those hours, and the two halves outvoted the flat
+  newest day: the meter said "filling 4.4 GiB/day, full in ~4 days" on a disk that had not moved for two
+  days. The runway is now extrapolated only while the newest day itself fills the disk.
+
 ### Changed — subscription limits adapt to the plan instead of assuming a 5-hour window
 - Anthropic renamed Max 20x to Ultra on 2026-10-30 and dropped the 5-hour limit for verified accounts:
   `/api/oauth/usage` now answers `five_hour: null` and the inference rate-limit headers carry only the

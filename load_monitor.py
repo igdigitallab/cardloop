@@ -506,7 +506,19 @@ def disk_trend(points: "list[tuple[float, int]]", now: float) -> "dict[str, Any]
     recent = max(0.0, segs[0][2]) if (segs[0][0], segs[0][1]) == (0, 1) else 0.0
     if not any(r >= noise for _a, _b, r in segs):
         return {"per_day": 0.0, "recent_per_day": recent, "base_days": segs[-1][1]}
-    kept = [(b, r) for _a, b, r in segs if r > -noise]
+    # A rate is only extrapolated while the disk is STILL filling: the newest segment has to fill on
+    # its own. Flat means whatever filled the disk earlier has stopped; a newest segment that FREED
+    # space cannot show a fill either, and right after a cleanup the runway is the least urgent it
+    # gets. Without this, a one-off fill spread over hours lands in TWO segments whenever `now` falls
+    # inside those hours of the day (the boundary cuts it) and outvotes the newest day — measured on
+    # ops 2026-11-09: 26 GiB written over one afternoon read "4-8 GiB/day, full in 4 days" every
+    # afternoon on a disk that had not moved for two days (and a 4 GiB cleanup that evening, dropped
+    # as a cleanup, let the two halves vote again). Older cleanups are still dropped below, so they
+    # never hide a fill that is still going on. Known residue: during the first day after such a
+    # fill it still reads as a rate — two filling days and a flat one look alike at day resolution.
+    if segs[0][2] < noise:
+        return {"per_day": 0.0, "recent_per_day": recent, "base_days": segs[-1][1]}
+    kept =[(b, r) for _a, b, r in segs if r > -noise]
     if len(kept) < 2:
         return None
     rates = sorted(r for _b, r in kept)

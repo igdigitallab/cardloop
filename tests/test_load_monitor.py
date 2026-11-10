@@ -978,3 +978,58 @@ def test_a_runway_that_disappears_hands_back_to_the_static_rule(t, monkeypatch):
         wall.t += 5.0
     assert _lvl(snap["signals"], "disk") == "warn"                    # the static warn remains; the crit is not held
     assert not any(k.endswith(":runway") for k in m._trackers)
+
+
+# ───────────── 2026-11-09: a one-off fill spread over hours straddles a day boundary ─────────────
+
+def _ramp_history(ramps, start, end, free0_gib, every=600.0):
+    """Free-space history that only moves inside `ramps` = [(t_start, hours, gib_written)], linearly."""
+    pts, tt = [], start
+    while tt <= end:
+        written = sum(g * min(1.0, max(0.0, (tt - t0) / (h * H))) for t0, h, g in ramps)
+        pts.append((tt, int((free0_gib - written) * GB)))
+        tt += every
+    return pts
+
+
+def test_a_fill_that_stopped_a_day_ago_is_not_extrapolated():
+    # Measured on ops: 26 GiB written over 6 h one afternoon (worktrees + CI copies + an emulator image),
+    # flat ever since. Whenever `now` fell inside that afternoon's hours, the day boundary cut the ramp
+    # into two filling segments that outvoted the flat newest day: "4 GiB/day, full in 4 days" on a disk
+    # that had not moved for two days. Sweep every sample time from one full flat day after the ramp on.
+    t_ramp = 10 * DAY + 14 * H
+    series = _ramp_history([(t_ramp, 6.0, 26.0)], t_ramp - 2.5 * DAY, t_ramp + 3.2 * DAY, 40.0)
+    checked = worst = 0
+    for i, (now, _f) in enumerate(series):
+        if now < t_ramp + 6 * H + DAY + H:                      # the newest whole day must be after the ramp
+            continue
+        pts = [(t, f) for t, f in series[:i + 1] if t >= now - 4 * DAY]
+        checked += 1
+        worst = max(worst, (lm.disk_trend(pts, now) or {}).get("per_day", 0.0))
+    assert checked > 200
+    assert worst < lm._DISK_NOISE_PER_DAY
+    # ...and a cleanup in the newest day (4 GiB freed, as on ops that evening) does not let the two halves
+    # of the old ramp vote again: a segment that freed space is dropped, it must not hand the vote back.
+    now = t_ramp + 2 * DAY + 2 * H
+    freed = [(t, f + (4 * GB if t >= now - 45 * 60 else 0)) for t, f in series if now - 4 * DAY <= t <= now]
+    assert (lm.disk_trend(freed, now) or {}).get("per_day", 0.0) < lm._DISK_NOISE_PER_DAY
+    now = t_ramp + DAY + 16 * H                                  # inside the ramp's hours, the day after next
+    tr = lm.disk_trend([(t, f) for t, f in series if now - 4 * DAY <= t <= now], now)
+    s = next(x for x in lm.evaluate({"disk": {"free": 14 * GB, "total": 295 * GB, "trend": tr}}) if x["id"] == "disk")
+    assert "filling" not in s["text"]
+
+
+def test_a_daily_fill_with_the_same_afternoon_shape_still_reads_as_a_rate():
+    # Positive control for the rule above: the same 6-hour afternoon ramp, but EVERY day (5 GiB each).
+    # The newest whole day always contains one ramp, so the rate holds at every moment of the day.
+    t0 = 10 * DAY + 14 * H
+    ramps = [(t0 + k * DAY, 6.0, 5.0) for k in range(-4, 4)]
+    series = _ramp_history(ramps, t0 - 3.5 * DAY, t0 + 3.2 * DAY, 60.0)
+    rates = []
+    for i, (now, _f) in enumerate(series):
+        if now < t0 + 6 * H:
+            continue
+        pts = [(t, f) for t, f in series[:i + 1] if t >= now - 4 * DAY]
+        rates.append((lm.disk_trend(pts, now) or {}).get("per_day", 0.0) / GB)
+    assert len(rates) > 200
+    assert min(rates) == pytest.approx(5.0, rel=0.05) and max(rates) == pytest.approx(5.0, rel=0.05)
