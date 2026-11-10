@@ -426,7 +426,7 @@ def test_h4_three_reviewers_on_three_different_model_tiers(builtin_roles):
         "reviewer-quality": builtin_roles["reviewer-quality"].model,
     }
     assert models["reviewer-logic"] == "claude-opus-5-5"
-    assert models["reviewer-security"] == "claude-fable-5-1"
+    assert models["reviewer-security"] == "claude-fable-5-2"
     assert models["reviewer-quality"] == "claude-sonnet-5-5"
     assert len(set(models.values())) == 3
 

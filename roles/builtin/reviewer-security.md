@@ -4,7 +4,7 @@ description: Security reviewer, read-only. NOT the default pass — reviewer-log
 enabled: true
 tools: [Read, Grep, Glob, Bash, WebFetch, WebSearch]
 disallowedTools: [Write, Edit, NotebookEdit]
-model: claude-fable-5-1
+model: claude-fable-5-2
 effort: xhigh
 maxTurns: 30
 color: red

@@ -9799,7 +9799,7 @@ async def api_search_reindex(req: web.Request) -> web.Response:
 _MODELS_URL = "https://api.anthropic.com/v1/models?limit=50"
 # Alias → static fallback label. Order is load-bearing (matches web/src/lib/models.ts).
 _MODEL_FAMILIES: list[tuple[str, str]] = [
-    ("fable", "Fable 5.1"),
+    ("fable", "Fable 5.2"),
     ("sonnet", "Sonnet 5.5"),
     ("opus", "Opus 5.5"),
     ("haiku", "Haiku 5.5"),

@@ -20,7 +20,10 @@ from __future__ import annotations
 # model id -> {input, output, cache_read, cache_write} in USD per million tokens.
 PRICING: dict[str, dict[str, float]] = {
     # Fable / Mythos — Anthropic's most capable class. cache_read is 0.025x base input on the
-    # 5.1 line (a published per-model exception), 0.1x on 5 — not a typo, check the table.
+    # 5.1 and 5.2 lines (a published per-model exception), 0.1x on 5 — not a typo, check the table.
+    # 5.2 (2026-11-09) is 20% CHEAPER than the 5.1 it replaced.
+    "claude-fable-5-2":  {"input":  8.00, "output": 40.00, "cache_read": 0.20, "cache_write": 10.00},
+    "claude-mythos-5-2": {"input":  8.00, "output": 40.00, "cache_read": 0.20, "cache_write": 10.00},
     "claude-fable-5-1":  {"input": 10.00, "output": 50.00, "cache_read": 0.25, "cache_write": 12.50},
     "claude-mythos-5-1": {"input": 10.00, "output": 50.00, "cache_read": 0.25, "cache_write": 12.50},
     "claude-fable-5":    {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
@@ -103,7 +106,7 @@ def get_pricing(model: str | None) -> dict[str, float] | None:
             return PRICING[key]
     m = model.lower()
     if "fable" in m or "mythos" in m:
-        return PRICING["claude-fable-5-1"]
+        return PRICING["claude-fable-5-2"]
     if "opus" in m:
         return PRICING["claude-opus-5-5"]
     if "sonnet" in m:

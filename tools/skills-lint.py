@@ -59,7 +59,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from token_estimate import approx_tokens  # noqa: E402
 
-# current lineup (2026-10): Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5. Anything naming an
+# current lineup (2026-11): Fable 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5. Anything naming an
 # older generation in a skill file is a stale reference to something that no longer runs.
 _STALE_MODEL_RE = re.compile(
     r"\bclaude-3(?:-[a-z0-9]+)*\b"

@@ -7,6 +7,13 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Changed — Fable 5.2
+- `claude-agent-sdk` floor 0.2.180: its bundled CLI 2.1.321 resolves the `fable` alias to
+  `claude-fable-5-2` (released 2026-11-09). On 0.2.176 the alias still ran Fable 5.1 while
+  `/v1/models` already listed 5.2. Opus, Sonnet and Haiku stay on 5.5.
+- Static labels, the built-in `reviewer-security` role pin and the pricing table follow: Fable 5.2 is
+  20 % cheaper than 5.1 ($8 / $40 per MTok, cache read $0.20, 5-minute cache write $10).
+
 ### Changed — subscription limits adapt to the plan instead of assuming a 5-hour window
 - Anthropic renamed Max 20x to Ultra on 2026-10-30 and dropped the 5-hour limit for verified accounts:
   `/api/oauth/usage` now answers `five_hour: null` and the inference rate-limit headers carry only the
