@@ -403,6 +403,10 @@ def load_projects(data_dir: Path) -> "dict[str, ProjectInfo]":
     reached by typed alias."""
     topics = load_json(data_dir / "topics.json", {})
     out: "dict[str, ProjectInfo]" = {}
+    # `"private": true` on a topic keeps that project OUT of the digest entirely (personal
+    # therapy sessions must never be summarised into the vault journal or the Telegram
+    # report). Its cwd is also remembered so the registry fallback below cannot re-add it.
+    private_cwds: "set[str]" = set()
     if isinstance(topics, dict):
         for pid, t in topics.items():
             if not isinstance(t, dict):
@@ -410,12 +414,15 @@ def load_projects(data_dir: Path) -> "dict[str, ProjectInfo]":
             cwd = t.get("cwd")
             if not cwd:
                 continue
+            if t.get("private"):
+                private_cwds.add(cwd)
+                continue
             out[pid] = ProjectInfo(
                 project_id=pid, cwd=cwd, label=t.get("project") or pid,
                 model=t.get("model") or "", source="topic",
             )
     registry = load_json(data_dir / "registry.json", {})
-    known_cwds = {p.cwd for p in out.values()}
+    known_cwds = {p.cwd for p in out.values()} | private_cwds
     if isinstance(registry, dict):
         for alias, rel in registry.items():
             if alias in out or not isinstance(rel, str):

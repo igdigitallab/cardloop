@@ -483,3 +483,24 @@ def test_telegram_message_over_limit_drops_whole_bullets_not_tags():
     assert len(msg) <= dj.TG_TEXT_LIMIT
     assert msg.count("<b>") == msg.count("</b>")
     assert "<b>p0</b>" in msg  # the day's headline survives; open threads go first
+
+
+def test_load_projects_skips_private_topics_and_blocks_registry_readd(tmp_path):
+    """A topic marked "private": true never reaches the digest — not via topics.json,
+    and not via a registry alias that resolves to the same cwd."""
+    import json
+    home = Path.home()
+    (tmp_path / "topics.json").write_text(json.dumps({
+        "shop": {"cwd": str(home / "projects" / "shop"), "project": "Shop"},
+        "psy": {"cwd": str(home / "projects" / "psy"), "project": "Psy", "private": True},
+    }), encoding="utf-8")
+    (tmp_path / "registry.json").write_text(json.dumps({
+        "psy-alias": "projects/psy",
+        "other": "projects/other",
+    }), encoding="utf-8")
+    got = dj.load_projects(tmp_path)
+    assert "shop" in got
+    assert "psy" not in got
+    assert "psy-alias" not in got
+    assert all(p.cwd != str(home / "projects" / "psy") for p in got.values())
+    assert "other" in got
