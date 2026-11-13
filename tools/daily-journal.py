@@ -17,12 +17,19 @@ Data sources (all read-only, all local to this host):
   4. `git log` in each project cwd                   — commits shipped that day
   5. TASKS.md / DONE.md per project cwd              — board cards closed that day
   6. docs/internal/specs/*.md (+ ~/vault/01-Projects/*/specs/*.md) mtimes
+  7. optional: `<vault>/YYYY-MM-DD<suffix>.md` — the operator's own notes for the day
+     (default suffix `-notes`; `--notes-suffix` / $JOURNAL_NOTES_SUFFIX). Printed
+     VERBATIM, by code, in a section above the generated chronology and in the
+     Telegram ping; the model only ever sees them as context. No file, or an empty
+     one -> the output is byte-for-byte what it was without this input.
 
 Safety:
   - Never overwrites a hand-written vault note: a generated note always
     carries frontmatter `generated: cardloop-daily-journal`; a file at the
     primary path that lacks that marker is left untouched and the note is
     written to `YYYY-MM-DD-cardloop.md` instead (see `choose_note_path`).
+  - The notes file is read-only for this tool: it is never created, edited or deleted,
+    and a file carrying our own `generated:` marker is never read back as notes.
   - The model call is read-only (no tools, one turn) and hard-timed out
     (`--model-timeout`, default 180s) so a hung SDK call cannot wedge a cron.
   - `ANTHROPIC_API_KEY` is popped before the model call — this tool always
@@ -34,6 +41,7 @@ Usage:
     venv/bin/python tools/daily-journal.py --date 2026-08-30
     venv/bin/python tools/daily-journal.py --days 7          # backfill last 7 days
     venv/bin/python tools/daily-journal.py --dry-run --no-model --date 2026-08-30
+    venv/bin/python tools/daily-journal.py --notes-suffix=-notes   # operator-notes file suffix (note the `=`)
 
 Exit code 1 (with a `[daily-journal]`-prefixed message on stderr) on any
 day that fails to generate; 0 otherwise.
@@ -578,6 +586,135 @@ def read_vault_specs_touched(start_utc: datetime, end_utc: datetime) -> "list[st
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Operator notes (source #7, optional) — the operator's own words for the day, written
+# by another system into `<journal dir>/YYYY-MM-DD<suffix>.md`. READ-ONLY here: this tool
+# never creates, edits or deletes that file, and the model never rewrites a note — the
+# section is assembled by code, line for line, in time order.
+# ─────────────────────────────────────────────────────────────────────────────
+
+NOTES_SUFFIX_DEFAULT = "-notes"
+NOTES_FILE_MAX_BYTES = 1_000_000      # a day's notes are a few KB; never slurp a runaway file
+NOTES_HEADING_DEFAULT = "Operator notes"   # the model localizes it; --no-model / failure keep this
+NOTES_HEADING_MAX_CHARS = 80
+NOTES_HEADING_PREFIX = "NOTES_HEADING:"
+NOTES_DIGEST_CHAR_BUDGET = 20_000     # notes given to the model as context (file keeps them all)
+
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(?:.*?\n)?---[ \t]*(?:\n|\Z)", re.DOTALL)
+_HIDDEN_COMMENT_RE = re.compile(r"[ \t]*<!--.*?-->", re.DOTALL)
+_NOTE_TIME_RE = re.compile(r"^\s*(?:[-*+]\s+)?(\d{1,2}):(\d{2})(?!\d)")
+_NOTE_BULLET_RE = re.compile(r"^\s*[-*+]\s+")
+_NOTES_HEADING_LINE_RE = re.compile(
+    rf"\A\s*{re.escape(NOTES_HEADING_PREFIX)}[ \t]*(.*?)[ \t]*(?:\n|\Z)")
+
+
+@dataclass
+class DayNote:
+    """One note: its first line plus any indented continuation lines, all verbatim."""
+    lines: "list[str]"
+    sort_minute: int  # minute of the day from the `HH:MM` prefix; an untimed line inherits its predecessor's
+
+
+def resolve_notes_suffix(cli_value: "str | None") -> str:
+    """The notes-file suffix: the CLI flag wins (an explicit empty value switches notes
+    off), then $JOURNAL_NOTES_SUFFIX, then the default."""
+    if cli_value is not None:
+        return cli_value.strip()
+    return (os.environ.get("JOURNAL_NOTES_SUFFIX") or "").strip() or NOTES_SUFFIX_DEFAULT
+
+
+def notes_file_path(vault_dir: Path, day: date, suffix: str) -> "Path | None":
+    """`<vault_dir>/YYYY-MM-DD<suffix>.md`, or None for a suffix that cannot name a sibling
+    file (empty — that would be the journal itself — or one that climbs or nests a path)."""
+    if not suffix or "/" in suffix or "\\" in suffix or ".." in suffix:
+        return None
+    return vault_dir / f"{day.isoformat()}{suffix}.md"
+
+
+def parse_day_notes(text: str) -> "list[DayNote]":
+    """Notes from a notes file's text: frontmatter and hidden `<!-- -->` comments removed,
+    blank lines dropped, everything else kept verbatim (trailing whitespace aside) and
+    stable-sorted by its `HH:MM` prefix. An indented line continues the previous note."""
+    text = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    text = _FRONTMATTER_RE.sub("", text, count=1)
+    text = _HIDDEN_COMMENT_RE.sub("", text)
+    notes: "list[DayNote]" = []
+    minute = -1
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        if line[0] in " \t" and notes:
+            notes[-1].lines.append(line)
+            continue
+        m = _NOTE_TIME_RE.match(line)
+        if m and int(m.group(1)) < 24 and int(m.group(2)) < 60:
+            minute = int(m.group(1)) * 60 + int(m.group(2))
+        notes.append(DayNote(lines=[line], sort_minute=minute))
+    notes.sort(key=lambda n: n.sort_minute)  # stable: equal minutes keep file order
+    return notes
+
+
+def read_day_notes(vault_dir: Path, day: date, suffix: str) -> "list[DayNote]":
+    """The day's notes, or [] when there is no (usable) notes file. Never writes, and
+    never raises: a broken notes file must not cost the day its journal."""
+    path = notes_file_path(vault_dir, day, suffix)
+    if path is None:
+        if suffix:
+            print(f"{LOG_PREFIX} notes ignored: invalid suffix {suffix!r}", file=sys.stderr)
+        return []
+    try:
+        if not path.is_file():
+            return []
+        with open(path, "rb") as f:
+            raw = f.read(NOTES_FILE_MAX_BYTES + 1)
+        if len(raw) > NOTES_FILE_MAX_BYTES:
+            print(f"{LOG_PREFIX} {path.name}: larger than {NOTES_FILE_MAX_BYTES} bytes, "
+                  f"only the start is read", file=sys.stderr)
+        text = raw[:NOTES_FILE_MAX_BYTES].decode("utf-8", errors="replace")
+        if is_generated_note(text.lstrip("\ufeff")):
+            return []  # our own output (e.g. a suffix pointed at the journal) is never "notes"
+        return parse_day_notes(text)
+    except Exception as e:  # noqa: BLE001 — notes are optional input
+        print(f"{LOG_PREFIX} could not read notes file {path}: {e}", file=sys.stderr)
+        return []
+
+
+def render_notes_section(notes: "list[DayNote]", heading: str) -> str:
+    """The journal-file section: a heading, then every note line verbatim."""
+    return f"## {heading or NOTES_HEADING_DEFAULT}\n\n" + "\n".join(
+        ln for n in notes for ln in n.lines)
+
+
+def render_digest_notes(notes: "list[DayNote]") -> "list[str]":
+    """Digest lines carrying the notes to the model as context, bounded by
+    NOTES_DIGEST_CHAR_BUDGET (the earliest notes win; the rest are counted, not shown)."""
+    rows: "list[str]" = []
+    used = 0
+    for n in notes:
+        row = "\n".join("  " + ln for ln in n.lines)[:NOTES_DIGEST_CHAR_BUDGET]
+        if rows and used + len(row) + 1 > NOTES_DIGEST_CHAR_BUDGET:
+            break
+        rows.append(row)
+        used += len(row) + 1
+    head = (f"OPERATOR NOTES ({len(notes)} — the operator's own words; the script prints them "
+            f"verbatim, so use as context only and do not repeat them):")
+    out = [head] + rows
+    if len(rows) < len(notes):
+        out.append(f"  (+{len(notes) - len(rows)} more notes omitted to fit the budget)")
+    return out
+
+
+def split_notes_heading(body: str) -> "tuple[str, str]":
+    """(heading, body) — peels the `NOTES_HEADING: ...` first line the model was asked for.
+    ("", body) when it is absent; a mangled heading falls back to the caller's default."""
+    m = _NOTES_HEADING_LINE_RE.match(body)
+    if not m:
+        return "", body
+    heading = re.sub(r"[#<>`*_\"]+", "", m.group(1)).strip()[:NOTES_HEADING_MAX_CHARS].strip()
+    return heading, body[m.end():].lstrip("\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Gather + render
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -717,7 +854,8 @@ def truncate_blocks(blocks: "list[str]", max_chars: int) -> "tuple[list[str], in
     return kept, dropped
 
 
-def render_digest(g: dict, tz_name: str) -> "tuple[str, DayNumbers]":
+def render_digest(g: dict, tz_name: str,
+                  notes: "list[DayNote] | None" = None) -> "tuple[str, DayNumbers]":
     day: date = g["day"]
     projects: "dict[str, ProjectDay]" = g["projects"]
     numbers = compute_numbers(g, tz_name)
@@ -743,6 +881,10 @@ def render_digest(g: dict, tz_name: str) -> "tuple[str, DayNumbers]":
         f"cost_usd={numbers.cost_usd if numbers.cost_usd is not None else 'n/a'}"
     )
     parts.append("")
+
+    if notes:  # context for the model only — the note section itself is built by code
+        parts.extend(render_digest_notes(notes))
+        parts.append("")
 
     for pd in sorted(projects.values(), key=lambda p: (p.turns[0].ts_ms if p.turns else 0)):
         if not (pd.commits or pd.done_cards or pd.specs_touched or pd.run_outcomes):
@@ -794,14 +936,17 @@ def render_digest(g: dict, tz_name: str) -> "tuple[str, DayNumbers]":
     return digest, numbers
 
 
-def build_index_summary(projects: "dict[str, ProjectDay]") -> str:
+def build_index_summary(projects: "dict[str, ProjectDay]", notes_count: int = 0) -> str:
+    notes_bit = f"notes: {notes_count}" if notes_count else ""
     if not projects:
-        return "no recorded activity"
+        return ", ".join(["no recorded activity"] + ([notes_bit] if notes_bit else []))
     top = max(projects.values(), key=lambda p: (len(p.turns) + len(p.commits) * 3))
     commits_total = sum(len(p.commits) for p in projects.values())
     bits = [f"busiest: {top.label}"]
     if commits_total:
         bits.append(f"{commits_total} commit{'s' if commits_total != 1 else ''}")
+    if notes_bit:
+        bits.append(notes_bit)
     return ", ".join(bits)
 
 
@@ -891,10 +1036,15 @@ def render_frontmatter(day: date, numbers: DayNumbers) -> str:
     )
 
 
-def compose_note(day: date, numbers: DayNumbers, body: str) -> str:
+def compose_note(day: date, numbers: DayNumbers, body: str, notes_section: str = "") -> str:
+    """`notes_section` (the operator's own notes, already rendered) goes right under the
+    title, ahead of the generated chronology; empty = the note is exactly what it always was."""
     weekday = day.strftime("%A")
     title = f"# {day.isoformat()} ({weekday})"
-    return render_frontmatter(day, numbers) + "\n" + title + "\n\n" + body.strip() + "\n"
+    content = body.strip()
+    if notes_section:
+        content = notes_section.strip() + "\n\n" + content
+    return render_frontmatter(day, numbers) + "\n" + title + "\n\n" + content + "\n"
 
 
 def write_note_atomic(path: Path, text: str) -> None:
@@ -908,7 +1058,7 @@ def write_note_atomic(path: Path, text: str) -> None:
 # Model call (Haiku, subscription) + digest-only fallback body
 # ─────────────────────────────────────────────────────────────────────────────
 
-NOTE_INSTRUCTIONS = """You will be given an EVIDENCE DIGEST of everything the operator did today \
+NOTE_RULES = """You will be given an EVIDENCE DIGEST of everything the operator did today \
 across every project in his Cardloop cockpit (an aiohttp UI over Claude Agent SDK sessions).
 
 Write ONLY the note BODY below, entirely in {lang} — translate every section heading into \
@@ -950,7 +1100,19 @@ that whole section. Keep the total output under 550 lines. Output ONLY the note 
 preamble such as "Here is the note", no code fence around the whole output, no title, no \
 frontmatter.
 
-EVIDENCE DIGEST:
+"""
+DIGEST_LABEL = "EVIDENCE DIGEST:\n"
+NOTE_INSTRUCTIONS = NOTE_RULES + DIGEST_LABEL
+
+# Appended (before the digest) ONLY on a day that has operator notes — a day without them
+# sends the model exactly the prompt it always did.
+NOTES_ADDENDUM = """The digest also carries "OPERATOR NOTES": the operator's own words for the day. The \
+script prints them verbatim in a section of its own above your body, so never quote, paraphrase \
+or list them and do not add a section for them — treat them purely as context for the day. That \
+section's heading is localized too, so the ONE exception to "output ONLY the note body" is this: \
+begin your output with a single line `NOTES_HEADING: <the phrase "Operator notes" translated into \
+{lang}>`, then a blank line, then the body.
+
 """
 
 
@@ -1058,6 +1220,9 @@ def render_fallback_body(g: dict, numbers: DayNumbers, tz_name: str) -> str:
 
 TG_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
 TG_TEXT_LIMIT = 3500          # Telegram hard limit is 4096; leave room for markup
+TG_NOTES_MAX_ITEMS = 10       # operator notes shown in the ping; the rest become "+N more"
+TG_NOTES_CHAR_BUDGET = 1500   # ...and at most this many characters of them
+TG_NOTE_ITEM_CHARS = 300      # one long note is clipped (raw text, before escaping)
 
 
 def _cli_path() -> "str | None":
@@ -1114,14 +1279,42 @@ def extract_open_threads(body: str) -> "list[str]":
     return sections[-1][:6] if len(sections) > 1 else []
 
 
+def _tg_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _tg_html(text: str) -> str:
     """Escape for Telegram HTML, then re-apply **bold** as <b>."""
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", _tg_escape(text))
+
+
+def _tg_note_text(note: DayNote) -> str:
+    """One note as a single ping line: list marker dropped, continuation lines joined,
+    clipped to TG_NOTE_ITEM_CHARS. The words themselves are not touched."""
+    first, *rest = note.lines
+    text = " ".join([_NOTE_BULLET_RE.sub("", first, count=1).strip()] + [ln.strip() for ln in rest])
+    if len(text) > TG_NOTE_ITEM_CHARS:
+        text = text[:TG_NOTE_ITEM_CHARS - 1].rstrip() + "\u2026"
+    return text
+
+
+def _tg_notes_rows(notes: "list[DayNote]") -> "tuple[list[str], int]":
+    """(rows to show, how many notes are left out) under the item and character caps."""
+    rows: "list[str]" = []
+    used = 0
+    for n in notes:
+        text = _tg_note_text(n)
+        if len(rows) >= TG_NOTES_MAX_ITEMS or (rows and used + len(text) > TG_NOTES_CHAR_BUDGET):
+            break
+        rows.append(text)
+        used += len(text) + 3
+    return rows, len(notes) - len(rows)
 
 
 def build_telegram_message(day: date, numbers: DayNumbers, body: str,
-                            note_path: Path, public_url: str, warning: str = "") -> str:
+                            note_path: Path, public_url: str, warning: str = "",
+                            notes: "list[DayNote] | None" = None,
+                            notes_heading: str = "") -> str:
     hours, minutes = divmod(max(numbers.active_minutes, 0), 60)
     active = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
     head = (f"\U0001F4D4 <b>{day.isoformat()} ({day.strftime('%A')})</b>\n"
@@ -1141,8 +1334,16 @@ def build_telegram_message(day: date, numbers: DayNumbers, body: str,
     if public_url:
         tail += f'\n<a href="{public_url}">cockpit</a>'
 
+    note_rows, notes_hidden = _tg_notes_rows(notes) if notes else ([], 0)
+    notes_title = f"\U0001F4DD <b>{_tg_escape(notes_heading or NOTES_HEADING_DEFAULT)}</b>\n"
+
     def assemble() -> str:
         blocks = [head]
+        if note_rows:  # the operator's own words come first, as in the journal file
+            shown = ["\u2022 " + _tg_escape(t) for t in note_rows]
+            if notes_hidden:
+                shown.append(f"\u2026 +{notes_hidden} more")
+            blocks.append(notes_title + "\n".join(shown))
         if done:
             blocks.append("\n".join(done))
         if still_open:
@@ -1150,16 +1351,22 @@ def build_telegram_message(day: date, numbers: DayNumbers, body: str,
         return "\n\n".join(blocks + [tail])
 
     # Over the limit: drop whole bullets (open threads first), never slice the
-    # text — a cut through a <b> tag makes Telegram reject the entire message.
+    # text — a cut through a <b> tag makes Telegram reject the entire message. Notes go
+    # last, and one of them always stays.
     msg = assemble()
-    while len(msg) > TG_TEXT_LIMIT and (done or still_open):
-        (still_open or done).pop()
+    while len(msg) > TG_TEXT_LIMIT and (done or still_open or len(note_rows) > 1):
+        if still_open or done:
+            (still_open or done).pop()
+        else:
+            note_rows.pop()
+            notes_hidden += 1
         msg = assemble()
     return msg
 
 
 def notify_telegram(day: date, numbers: DayNumbers, body: str, note_path: Path,
-                     repo_root: Path, warning: str = "") -> None:
+                     repo_root: Path, warning: str = "",
+                     notes: "list[DayNote] | None" = None, notes_heading: str = "") -> None:
     """Best-effort ping; never fails the journal run."""
     token = os.environ.get("JOURNAL_TG_BOT_TOKEN") or _dotenv_value(repo_root, "BOT_TOKEN")
     chat = (os.environ.get("JOURNAL_TG_CHAT_ID")
@@ -1174,7 +1381,8 @@ def notify_telegram(day: date, numbers: DayNumbers, body: str, note_path: Path,
         "chat_id": chat,
         "parse_mode": "HTML",
         "disable_web_page_preview": "true",
-        "text": build_telegram_message(day, numbers, body, note_path, public_url, warning),
+        "text": build_telegram_message(day, numbers, body, note_path, public_url, warning,
+                                       notes, notes_heading),
     }).encode()
     try:
         with urlopen(TG_SEND_URL.format(token=token), data=payload, timeout=20) as r:
@@ -1199,6 +1407,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--vault-dir", default=None,
                     help="output dir (default: $JOURNAL_DIR or $HOME/vault/Journal)")
     p.add_argument("--tz", default=None, help="IANA timezone (default: $JOURNAL_TZ or America/Los_Angeles)")
+    p.add_argument("--notes-suffix", default=None,
+                    help="suffix of the operator's notes file next to the journal: "
+                         "<vault-dir>/YYYY-MM-DD<suffix>.md, read-only and optional "
+                         f"(default: $JOURNAL_NOTES_SUFFIX or {NOTES_SUFFIX_DEFAULT!r}; "
+                         "an empty value switches notes off)")
     p.add_argument("--dry-run", action="store_true",
                     help="print the digest and the note to stdout; write nothing")
     p.add_argument("--no-model", action="store_true",
@@ -1220,19 +1433,30 @@ def _process_one_day(day: date, tz_name: str, data_dir: Path, vault_dir: Path,
     the prose, not the whole day; the False keeps the cron's exit code red."""
     print(f"{LOG_PREFIX} gathering {day.isoformat()} ({tz_name}) from {data_dir} ...")
     gathered = gather_day(day, tz_name, data_dir)
-    digest, numbers = render_digest(gathered, tz_name)
+    # Optional input: the operator's own notes for the day. [] (no file / empty file) leaves
+    # every output below exactly as it was before notes existed.
+    notes = read_day_notes(vault_dir, day, resolve_notes_suffix(getattr(args, "notes_suffix", None)))
+    digest, numbers = render_digest(gathered, tz_name, notes)
     print(
         f"{LOG_PREFIX} {day.isoformat()}: {numbers.projects_count} project(s), "
         f"{numbers.turns} turn(s), digest {len(digest)} chars"
+        + (f", {len(notes)} operator note(s)" if notes else "")
     )
 
     warning = ""
+    notes_heading = NOTES_HEADING_DEFAULT
     if args.no_model:
         body = render_fallback_body(gathered, numbers, tz_name)
     else:
-        prompt = NOTE_INSTRUCTIONS.format(lang=lang) + digest
+        prompt = NOTE_RULES.format(lang=lang)
+        if notes:
+            prompt += NOTES_ADDENDUM.format(lang=lang)
+        prompt += DIGEST_LABEL + digest
         try:
             body = call_model(prompt, args.model, args.model_timeout)
+            if notes:  # the model localizes the notes heading; the notes themselves are not its to touch
+                heading, body = split_notes_heading(body)
+                notes_heading = heading or notes_heading
         except Exception as e:  # noqa: BLE001 — fall back to the digest-only note
             print(f"{LOG_PREFIX} model call FAILED for {day.isoformat()}: {e}", file=sys.stderr)
             warning = f"model call failed ({str(e)[:160]}) — digest-only note"
@@ -1242,7 +1466,8 @@ def _process_one_day(day: date, tz_name: str, data_dir: Path, vault_dir: Path,
                   f"falling back to the digest-only note", file=sys.stderr)
             body = render_fallback_body(gathered, numbers, tz_name)
 
-    note = compose_note(day, numbers, body)
+    notes_section = render_notes_section(notes, notes_heading) if notes else ""
+    note = compose_note(day, numbers, body, notes_section)
 
     if args.dry_run:
         print(f"{LOG_PREFIX} ── digest: {day.isoformat()} ──")
@@ -1255,7 +1480,7 @@ def _process_one_day(day: date, tz_name: str, data_dir: Path, vault_dir: Path,
     note_path, used_fallback_path = choose_note_path(vault_dir, day)
     write_note_atomic(note_path, note)
 
-    summary = build_index_summary(gathered["projects"])
+    summary = build_index_summary(gathered["projects"], len(notes))
     if used_fallback_path:
         summary += f" (hand-written note kept at {day.isoformat()}.md — see [[{note_path.stem}]])"
     line = render_index_line(day, summary, numbers.sessions, numbers.projects_count)
@@ -1265,8 +1490,9 @@ def _process_one_day(day: date, tz_name: str, data_dir: Path, vault_dir: Path,
     print(f"{LOG_PREFIX} wrote {note_path}")
 
     if getattr(args, "notify_telegram", False):
+        extra = {"notes": notes, "notes_heading": notes_heading} if notes else {}
         notify_telegram(day, numbers, body, note_path, Path(__file__).resolve().parent.parent,
-                        warning)
+                        warning, **extra)
     return not warning
 
 

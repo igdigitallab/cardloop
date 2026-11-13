@@ -245,8 +245,18 @@ always carries `generated: cardloop-daily-journal` frontmatter, and a file at th
 lacks the marker (i.e. one you wrote by hand) is never overwritten — the note goes to
 `YYYY-MM-DD-cardloop.md` instead. Configure the destination and timezone with `JOURNAL_DIR` /
 `JOURNAL_TZ` in `.env` (defaults: `$HOME/vault/Journal`, `America/Los_Angeles`); the note's
-language follows `RESPONSE_LANGUAGE`. For a daily cron, source the vars it needs and log to a
-file, e.g.:
+language follows `RESPONSE_LANGUAGE`.
+
+Your own words can join it. If another tool drops a notes file next to the journal —
+`YYYY-MM-DD-notes.md`: optional frontmatter, then lines like `- HH:MM · source · text`, optionally
+ending in a hidden `<!-- id -->` comment — the journal reads it (never writes, edits or deletes it)
+and prints the lines verbatim, in time order, in a section above the generated chronology, as a
+separate block of the Telegram ping (capped, with `+N more`), and as `notes: N` in `_index.md`.
+The model sees them only as context and only localizes the section heading. The suffix is
+`--notes-suffix=-notes` (the `=` matters for a dash-leading value) or `JOURNAL_NOTES_SUFFIX`; an
+empty `--notes-suffix=` switches notes off. No file, or an empty one, changes nothing.
+
+For a daily cron, source the vars it needs and log to a file, e.g.:
 
 ```cron
 30 3 * * * RESPONSE_LANGUAGE=$(grep -m1 '^RESPONSE_LANGUAGE=' /path/to/cardloop/.env | cut -d= -f2-) /path/to/cardloop/venv/bin/python /path/to/cardloop/tools/daily-journal.py --data-dir /path/to/cardloop/data >> $HOME/logs/daily-journal.log 2>&1
