@@ -32,7 +32,7 @@ This module must stay importable from `board.py`, so it never imports `webapp`.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping
 
 import codex_engine
@@ -162,8 +162,19 @@ def register(spec: ProviderSpec) -> ProviderSpec:
             if getattr(other, attr) == getattr(spec, attr):
                 raise ValueError(
                     f"provider {spec.name!r} reuses {attr}={getattr(spec, attr)!r} of {other.name!r}")
+    # spec-098: every provider's capability row also carries the forget flags (delete_session /
+    # forget_turn), merged here once so no provider needs a branch of its own.
+    spec = replace(spec, capabilities=_with_forget_caps(spec.name, spec.capabilities))
     _REGISTRY[spec.name] = spec
     return spec
+
+
+def _with_forget_caps(name: str, base: "Callable[[], dict]") -> "Callable[[], dict]":
+    def caps() -> dict:
+        import forget  # lazy: forget never imports providers, but the adapters load on demand
+        forget._load_adapters()
+        return {**base(), **forget.capabilities(name)}
+    return caps
 
 
 def get(name: str) -> ProviderSpec:

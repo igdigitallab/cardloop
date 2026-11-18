@@ -69,3 +69,18 @@ def put(data_dir: "str | os.PathLike[str]", session_id: str, rec: dict) -> None:
         data[session_id] = rec
         fsutil.atomic_write(path, json.dumps(data, ensure_ascii=False, indent=1))
         _MEM.pop(path, None)
+
+
+def remove_session(data_dir: "str | os.PathLike[str]", session_id: str) -> int:
+    """spec-098: drop every record that names `session_id` (its own entry, and the entries of
+    successors whose `prev` it is). Returns how many were removed."""
+    path = _path(data_dir)
+    with _LOCK:
+        data = dict(_load(path))
+        keep = {k: v for k, v in data.items()
+                if k != session_id and not (isinstance(v, dict) and v.get("prev") == session_id)}
+        gone = len(data) - len(keep)
+        if gone:
+            fsutil.atomic_write(path, json.dumps(keep, ensure_ascii=False, indent=1))
+            _MEM.pop(path, None)
+    return gone
