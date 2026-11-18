@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import AsyncGenerator
@@ -1161,12 +1162,18 @@ def _is_destructive(cmd: str) -> bool:
     return any(p in low for p in _DESTRUCTIVE)
 
 
+# spec-098: every writer of the audit log and the forget purge (which rewrites a month file via
+# tmp + rename) take this lock, so an append can never land on the inode a rewrite is replacing.
+# All writers live in the cockpit process; a threading lock covers the loop and executor threads.
+AUDIT_LOCK = threading.Lock()
+
+
 def audit(project: str, kind: str, text: str):
     """Appends to data/audit/audit-YYYY-MM.log — permanent trail of full-auto bot actions on prod."""
     try:
         AUDIT_DIR.mkdir(exist_ok=True)
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-        with open(AUDIT_DIR / f"audit-{time.strftime('%Y-%m')}.log", "a", encoding="utf-8") as f:
+        with AUDIT_LOCK, open(AUDIT_DIR / f"audit-{time.strftime('%Y-%m')}.log", "a", encoding="utf-8") as f:
             f.write(f"{ts} [{project}] {kind}: {text}\n")
     except Exception:
         pass

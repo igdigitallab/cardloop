@@ -24,6 +24,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback as _tb
 import unicodedata
@@ -2142,6 +2143,9 @@ _TIMELINE_DATA_DIR: "Path | None" = None   # DATA/timeline/ — set in start()
 _TIMELINE_TOPICS: "dict | None" = None     # ref to ctx["topics"] — for session_key→cwd lookup
 _TIMELINE_MAX_SIZE = 5 * 1024 * 1024       # 5 MB — rotation threshold
 _TIMELINE_TEXT_LIMIT = 2000                # chars — text field truncation limit
+# spec-098: held by every timeline append (rotation + write) and by the forget purge while it
+# rewrites a timeline file via tmp + rename, so no append is lost to the replaced inode.
+_TIMELINE_LOCK = threading.Lock()
 
 
 def _timeline_init(ctx: dict) -> None:
@@ -2257,16 +2261,17 @@ def _timeline_append(session_key: str, event: dict) -> None:
             else:
                 record[k] = v
         line = json.dumps(record, ensure_ascii=False) + "\n"
-        # Rotation: if the file already exists and is > 5MB — rename to .1
-        try:
-            if path.exists() and path.stat().st_size > _TIMELINE_MAX_SIZE:
-                backup = path.with_suffix(".jsonl.1")
-                path.rename(backup)
-        except Exception:
-            pass
-        # Append
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line)
+        with _TIMELINE_LOCK:
+            # Rotation: if the file already exists and is > 5MB — rename to .1
+            try:
+                if path.exists() and path.stat().st_size > _TIMELINE_MAX_SIZE:
+                    backup = path.with_suffix(".jsonl.1")
+                    path.rename(backup)
+            except Exception:
+                pass
+            # Append
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
     except Exception:
         pass  # never break a run
 
