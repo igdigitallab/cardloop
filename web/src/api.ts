@@ -492,6 +492,22 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // spec-098: delete a whole session everywhere. dry_run -> plan + plan_token; else execute.
+  // Failures throw like apiFetch (status + body {error, code}); see lib/forget.ts for the mapping.
+  deleteSession: (
+    id: string, provider: string, sid: string,
+    body:
+      | { dry_run: true }
+      | { dry_run: false; plan_token: string; also_delete?: { provider: string; session_id: string }[] },
+  ) =>
+    apiFetch<
+      | { ok: true; plan_token: string; plan: import('./lib/forget').ForgetPlan }
+      | { ok: true; deleted: Record<string, number>; also_deleted: { provider: string; session_id: string }[]; residue: string }
+    >(
+      `/api/projects/${id}/sessions/${encodeURIComponent(provider)}/${encodeURIComponent(sid)}/delete`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    ),
+
   // #2: manual label for any session (empty = remove)
   setSessionLabel: (id: string, sid: string, label: string) =>
     apiFetch<{ ok: boolean; session_id: string; label: string | null }>(

@@ -2504,3 +2504,24 @@
 }
 .chat-file-ref:hover { text-decoration-style: solid; color: var(--accent-h); }
 a.chat-file-ref { color: inherit; font-family: var(--mono); font-size: 0.92em; }
+
+/* ── spec-098 Forget dialog ──────────────────────────────────────── */
+.session-delete-btn:hover:not(:disabled) { color: var(--red); }
+.forget-dialog { display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow-y: auto; }
+.forget-loading { color: var(--text3); font-size: 12px; }
+.forget-title { font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.forget-sub { font-size: 11px; color: var(--text3); }
+.forget-note { font-size: 12px; color: var(--text2); margin-top: 4px; }
+.forget-sec-h { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+.forget-list { margin: 0; padding-left: 16px; font-size: 12px; color: var(--text2); display: flex; flex-direction: column; gap: 2px; }
+.forget-limits { color: var(--text3); }
+.forget-warn { color: var(--text); border-left: 2px solid var(--red); padding-left: 10px; list-style: none; }
+.forget-kind { font-size: 10px; color: var(--text3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0 4px; margin-right: 4px; }
+.forget-lineage { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: var(--text2); cursor: pointer; padding: 2px 0; }
+.forget-diary { font-size: 12px; color: var(--text2); }
+.forget-error { font-size: 12px; color: var(--red); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.forget-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.forget-actions .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+@media (max-width: 768px) {
+  .forget-actions button { min-height: 40px; }
+}

@@ -219,3 +219,24 @@ export type UsageFilter = 'all' | Provider
 export function usageSectionVisible(filter: UsageFilter, section: Provider): boolean {
   return filter === 'all' || filter === section
 }
+
+/** spec-098: capability rows as `GET /api/agent-providers` returns them (structural, so this leaf
+ *  module needs no import). The registry store is `useRuntimeProviders()` in runtimeStatus.ts. */
+export interface CapabilityRow { provider: string; capabilities?: Record<string, boolean> }
+
+function hasCapability(rows: readonly CapabilityRow[] | null | undefined, provider: unknown, cap: string): boolean {
+  const name = normalizeProvider(provider)
+  const row = (rows ?? []).find(r => r.provider === name)
+  return row?.capabilities?.[cap] === true
+}
+
+/** Can the provider's whole session be deleted ("Forget")? A missing row or flag is NO. A session
+ *  row without a provider field is Claude's. */
+export function canDeleteSession(rows: readonly CapabilityRow[] | null | undefined, provider?: unknown): boolean {
+  return hasCapability(rows, provider, 'delete_session')
+}
+
+/** Can a single turn be forgotten (spec-098 B)? Same rules. */
+export function canForgetTurn(rows: readonly CapabilityRow[] | null | undefined, provider?: unknown): boolean {
+  return hasCapability(rows, provider, 'forget_turn')
+}
