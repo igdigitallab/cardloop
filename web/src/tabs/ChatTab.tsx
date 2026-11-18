@@ -3059,11 +3059,15 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       // was THIS chat's session, clear the feed exactly like after a Reset.
       setSessionReloadKey(k => k + 1)
       const mine = chats.find(c => c.id === effectiveChatId)
-      const ids = mine ? PROVIDER_IDS.map(p => (mine as unknown as Record<string, string | null | undefined>)[continuityField(p) ?? '']) : []
+      const fields = PROVIDER_IDS.map(p => continuityField(p)).filter((f): f is string => !!f)
+      const ids = mine ? fields.map(f => (mine as unknown as Record<string, string | null | undefined>)[f]) : []
       if (deletedChatSession(evt, effectiveChatId, ids)) {
         clearFeed()
         activeSessionIdRef.current = null
-        if (effectiveChatId) setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, session_id: null, codex_thread_id: null, grok_session_id: null } : c))
+        if (effectiveChatId) {
+          const cleared = Object.fromEntries(fields.map(f => [f, null]))
+          setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, ...cleared } : c))
+        }
         setContextTokens(null)
         setPrevContextTokens(null)
         setContextWarnFromBackend(false)
