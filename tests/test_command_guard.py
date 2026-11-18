@@ -877,4 +877,4 @@ def test_hook_never_raises_on_garbage():
 def test_run_engine_registers_the_one_hook_and_tells_it_the_project():
     src = (ROOT / "engine.py").read_text()
     assert "hooks=[_bundle_grep_guard_hook, _dangerous_command_guard_hook]" in src
-    assert "_guard_remember_project(cwd, project_name)" in src
+    assert "_guard_remember_project(cwd, project_name, session_key)" in src
