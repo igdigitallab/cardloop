@@ -16,6 +16,7 @@ from webapp import (
     _get_board_lock,
     _new_card_id,
     _bus_publish,
+    _stamp_run,
 )
 
 from features.autopilot import logic as _autopilot
@@ -141,8 +142,10 @@ async def _run_director(ctx: dict, project: dict) -> dict:
 
     ok = False
     result_payload: dict = {}
+    _dir_sid = None   # spec-098: session the director turn minted (run_end stamp)
 
     try:
+        _stamp_run(director_session_key, f"director:{project_id}")   # spec-098: run-id stamping
         # ── Publish run_start so live-trace shows the director ────────────────
         _bus_publish(director_session_key, {
             "kind": "run_start",
@@ -179,6 +182,7 @@ async def _run_director(ctx: dict, project: dict) -> dict:
             etype = event["type"]
             if etype == "result":
                 structured = event.get("structured_output")
+                _dir_sid = event.get("session_id") or _dir_sid
             elif etype == "error":
                 raise event["exc"]
             # text/text_delta/tool events are silently consumed — the director
@@ -254,6 +258,8 @@ async def _run_director(ctx: dict, project: dict) -> dict:
             "kind": "run_end",
             "outcome": "ok" if ok else "fail",
             "run_id": f"director:{project_id}",
+            "session_id": _dir_sid,
+            "provider": "claude",
         })
         ctx["running"].pop(director_session_key, None)
 
