@@ -1168,13 +1168,45 @@ def _is_destructive(cmd: str) -> bool:
 AUDIT_LOCK = threading.Lock()
 
 
-def audit(project: str, kind: str, text: str):
-    """Appends to data/audit/audit-YYYY-MM.log — permanent trail of full-auto bot actions on prod."""
+# spec-098 run-id stamping: the run currently (or last) executing per session_key. A module dict, not
+# a contextvar: hook callbacks of a persistent client and post-run_end sub-agent output run outside the
+# run's task. Set at run start at every run site; never cleared at run end.
+_CURRENT_RUN: dict[str, str] = {}
+
+
+def set_current_run(session_key, run_id) -> None:
+    """Remember `run_id` as the current run of `session_key` (until the next run start)."""
+    if session_key and run_id:
+        _CURRENT_RUN[str(session_key)] = str(run_id)
+
+
+def current_run(session_key) -> "str | None":
+    """The run id last set for `session_key`, or None when unknown."""
+    if not session_key:
+        return None
+    return _CURRENT_RUN.get(str(session_key))
+
+
+# Both audit line forms: `ts [Project] KIND: text` and `ts [Project] KIND run=<id>: text`.
+AUDIT_LINE_RE = re.compile(r"^(\S+) \[(.*?)\] ([A-Z_]+)(?: run=(\S+))?: (.*)$")
+
+
+def parse_audit_line(line: str):
+    """-> (ts, project, kind, run_id|None, text) or None when the line is not an audit line."""
+    m = AUDIT_LINE_RE.match(line.rstrip("\n"))
+    return m.groups() if m else None
+
+
+def audit(project: str, kind: str, text: str, session_key=None):
+    """Appends to data/audit/audit-YYYY-MM.log — permanent trail of full-auto bot actions on prod.
+    With a session_key whose run id is known the line carries `run=<id>` (spec-098)."""
     try:
         AUDIT_DIR.mkdir(exist_ok=True)
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        rid = current_run(session_key)
+        run_tok = f" run={rid}" if rid else ""
         with AUDIT_LOCK, open(AUDIT_DIR / f"audit-{time.strftime('%Y-%m')}.log", "a", encoding="utf-8") as f:
-            f.write(f"{ts} [{project}] {kind}: {text}\n")
+            f.write(f"{ts} [{project}] {kind}{run_tok}: {text}\n")
     except Exception:
         pass
 
@@ -1748,7 +1780,7 @@ def _make_post_tool_use_hook(project_name: str, session_key: str, agent_model_lo
 
             status = "err" if is_err else "ok"
             audit_text = f"{tool_name} {status} {output_str}"
-            audit(project_name, "RESULT", audit_text)
+            audit(project_name, "RESULT", audit_text, session_key=session_key)
 
             # Also publish to timeline via the webapp bus (only available post-init).
             try:
@@ -1965,7 +1997,7 @@ def _make_pre_compact_hook(project_name: str, session_key: str):
                 if isinstance(hook_input, dict)
                 else getattr(hook_input, "trigger", "auto")
             )
-            audit(project_name, "COMPACT", f"native auto-compact trigger={trigger}")
+            audit(project_name, "COMPACT", f"native auto-compact trigger={trigger}", session_key=session_key)
 
             # Publish to the cockpit activity bus / SSE so the UI can show a toast.
             try:
