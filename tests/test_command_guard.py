@@ -782,7 +782,7 @@ def test_extra_deny_patterns_still_apply(monkeypatch):
 @pytest.fixture
 def audit_log(monkeypatch):
     calls = []
-    monkeypatch.setattr(engine, "audit", lambda project, kind, text: calls.append((project, kind, text)))
+    monkeypatch.setattr(engine, "audit", lambda project, kind, text, session_key=None: calls.append((project, kind, text)))
     monkeypatch.setattr(engine, "_GUARD_PROJECTS", {})
     return calls
 

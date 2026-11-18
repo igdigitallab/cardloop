@@ -1054,7 +1054,7 @@ async def _captured_options(cwd):
     import engine
     with patch.object(engine, "ClaudeSDKClient", _FakeClient), \
             patch.object(engine, "running", {}), \
-            patch.object(engine, "audit", lambda *a: None):
+            patch.object(engine, "audit", lambda *a, **k: None):
         async for _ in bot.run_engine(project_name="t", cwd=cwd, prompt="hi", session_key="pr:t", model="sonnet"):
             pass
     return _FakeClient.captured
@@ -1085,7 +1085,7 @@ async def test_i3_the_wired_hook_reads_the_trust_opt_in_from_the_runs_ctx(env):
     ctx = {"topics": {"1:1": {"cwd": env.cwd, "project": "t"}}}
     with patch.object(engine, "ClaudeSDKClient", _FakeClient), \
             patch.object(engine, "running", {}), \
-            patch.object(engine, "audit", lambda *a: None):
+            patch.object(engine, "audit", lambda *a, **k: None):
         async for _ in bot.run_engine(project_name="t", cwd=env.cwd, prompt="hi", session_key="pr:t3",
                                       model="sonnet", ctx=ctx):
             pass
@@ -1103,7 +1103,7 @@ async def test_i2_the_wired_hook_audits_through_the_engines_audit_function(env):
     audited = []
     with patch.object(engine, "ClaudeSDKClient", _FakeClient), \
             patch.object(engine, "running", {}), \
-            patch.object(engine, "audit", lambda *a: audited.append(a)):
+            patch.object(engine, "audit", lambda *a, **k: audited.append(a)):
         async for _ in bot.run_engine(project_name="t", cwd=env.cwd, prompt="hi", session_key="pr:t2", model="sonnet"):
             pass
         hook = _FakeClient.captured.hooks["PreToolUse"][1].hooks[0]

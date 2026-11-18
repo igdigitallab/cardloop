@@ -110,7 +110,7 @@ async def test_live_client_reused_across_turns(tmp_path):
 
     with patch.object(engine, "PERSISTENT_CLIENT", True), \
          patch.object(engine, "ClaudeSDKClient", return_value=live_client), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
 
         # Turn 1
         events1 = []
@@ -196,7 +196,7 @@ async def test_running_placeholder_and_interrupt_guard(tmp_path):
 
     with patch.object(engine, "PERSISTENT_CLIENT", True), \
          patch.object(engine, "ClaudeSDKClient", return_value=live_client), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
 
         # run_engine should replace the True placeholder with the real client.
         async for _ in bot.run_engine(
@@ -260,7 +260,7 @@ async def test_dead_client_evicted_and_fresh_on_next_turn(tmp_path):
 
     with patch.object(engine, "PERSISTENT_CLIENT", True), \
          patch.object(engine, "ClaudeSDKClient", side_effect=_factory), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
 
         # Turn 1 — dead client, should yield an error event and evict.
         events1 = []
@@ -346,7 +346,7 @@ async def test_flag_off_uses_fresh_client_each_turn(tmp_path):
 
     with patch.object(engine, "PERSISTENT_CLIENT", False), \
          patch.object(engine, "ClaudeSDKClient", return_value=fresh_client), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
 
         async for _ in bot.run_engine(
             project_name="proj",
@@ -394,7 +394,7 @@ async def test_ephemeral_never_stores_live_client(tmp_path):
 
     with patch.object(engine, "PERSISTENT_CLIENT", True), \
          patch.object(engine, "ClaudeSDKClient", return_value=fresh_client), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
 
         async for _ in bot.run_engine(
             project_name="proj",
@@ -444,7 +444,7 @@ async def test_model_switch_evicts_and_reconnects(tmp_path):
 
     with patch.object(engine, "PERSISTENT_CLIENT", True), \
          patch.object(engine, "ClaudeSDKClient", side_effect=_factory), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
 
         # Turn 1 with sonnet
         async for _ in bot.run_engine(
@@ -527,7 +527,7 @@ async def test_cli_that_exited_between_turns_is_replaced_before_the_next_prompt(
     ctx = _make_ctx()
     with patch.object(engine, "PERSISTENT_CLIENT", True), \
          patch.object(engine, "ClaudeSDKClient", side_effect=_factory), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         assert not [e for e in await _one_turn(ctx, tmp_path, "turn 1") if e.get("type") == "error"]
         first._transport._process.returncode = 143  # killed while idle
         events = await _one_turn(ctx, tmp_path, "turn 2")
@@ -552,7 +552,7 @@ async def test_a_live_cli_is_still_reused_when_the_process_probe_is_unreadable(t
     ctx = _make_ctx()
     with patch.object(engine, "PERSISTENT_CLIENT", True), \
          patch.object(engine, "ClaudeSDKClient", side_effect=_factory), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         await _one_turn(ctx, tmp_path, "turn 1")
         first._transport._process.returncode = None  # still running
         await _one_turn(ctx, tmp_path, "turn 2")

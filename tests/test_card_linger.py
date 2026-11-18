@@ -81,7 +81,7 @@ async def _run(events, response_msgs, late_msgs, monitor_updates):
     with patch.object(engine, "ClaudeSDKClient",
                       _make_client(events, response_msgs=response_msgs, late_msgs=late_msgs)), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None), \
+         patch.object(engine, "audit", lambda *a, **k: None), \
          patch.object(engine, "_monitor_update_cb", _mu):
         out = []
         async for ev in bot.run_engine(project_name="t", cwd="/tmp", prompt="hi",
