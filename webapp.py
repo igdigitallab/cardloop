@@ -76,6 +76,7 @@ import search as _search
 import transcript_stats as _transcript_stats
 import history_index as _history_index
 import session_links as _session_links
+import session_lineage as _session_lineage   # spec-098: delivered-handoff lineage rows
 import codex_engine as _codex
 import grok_engine as _grok
 import grok_history as _grok_history
@@ -12496,7 +12497,8 @@ def _handoff_is_stale(armed: dict, provider: str, backend: str) -> bool:
             or str(armed.get("for_backend") or "") != (backend or ""))
 
 
-def _pop_delivered_handoff(chat: dict, delivered: "dict | None") -> bool:
+def _pop_delivered_handoff(chat: dict, delivered: "dict | None", *, data_dir=None,
+                           to_provider: "str | None" = None, to_session: "str | None" = None) -> bool:
     """Clear the chat's armed `runtime_handoff` iff it is the block a turn actually DELIVERED
     (same `created_at` stamp and text); True when it was cleared.
 
@@ -12511,8 +12513,31 @@ def _pop_delivered_handoff(chat: dict, delivered: "dict | None") -> bool:
             and stored.get("created_at") == delivered.get("created_at")
             and stored.get("text") == delivered.get("text")):
         chat.pop("runtime_handoff", None)
+        # spec-098: the delivered block is a COPY of the source session's text inside the target
+        # session — remember it so "forget" can warn about (and offer to delete) the successor.
+        if data_dir is not None and to_session and stored.get("from_session"):
+            _session_lineage.record(
+                data_dir, kind=stored.get("lineage_kind") or "runtime_handoff",
+                from_provider=stored.get("from_provider"), from_session=stored.get("from_session"),
+                to_provider=to_provider, to_session=to_session)
         return True
     return False
+
+
+def _handoff_source_ids(chat: dict) -> dict:
+    """spec-098: which provider session a runtime handoff was written FROM. The picker has already
+    flipped the chat, so the engine being left is the one (other than the current provider) that
+    still holds a continuity id. Ambiguous or none -> {} (the residue scan covers it)."""
+    try:
+        cur = _chat_provider(chat)
+        found = [(sp.name, chat.get(sp.continuity_field)) for sp in providers.specs()
+                 if sp.name != cur and chat.get(sp.continuity_field)]
+        if len(found) == 1:
+            return {"lineage_kind": "runtime_handoff", "from_provider": found[0][0],
+                    "from_session": found[0][1]}
+    except Exception:
+        pass
+    return {}
 
 
 def _drop_runtime_handoff(ctx: dict, project: dict, chat_id: "str | None") -> None:
@@ -12630,6 +12655,7 @@ async def api_project_chat_handoff(req: web.Request) -> web.Response:
                 "to_label": to_label,
                 "for_provider": _chat_provider(chat),
                 "for_backend": str(chat.get("backend") or ""),
+                **_handoff_source_ids(chat),
             }
             if _chat_provider(chat) == "grok":
                 print(f"[grok] {session_key}: handoff armed for Grok "
@@ -13471,6 +13497,9 @@ def _bind_rotation(ctx: dict, chat: dict, new_sid: "str | None", fresh: bool) ->
     if not prev or prev == new_sid:
         return
     try:
+        if mark.get("handoff"):
+            _session_lineage.record(ctx["DATA"], kind="rotate", from_provider="claude",
+                                    from_session=prev, to_provider="claude", to_session=new_sid)
         _session_links.put(ctx["DATA"], new_sid, {
             "prev": prev, "trigger": mark.get("trigger"), "at": mark.get("at"),
             "context_tokens": mark.get("context_tokens"), "handoff": bool(mark.get("handoff")),
@@ -14967,7 +14996,8 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
                                         # Only a block THIS turn carried: one kept for the
                                         # chat's other runtime (above), or armed since the
                                         # drain began, is still waiting for its own turn.
-                                        if _q_handoff_sent and _pop_delivered_handoff(_wc, _q_armed):
+                                        if _q_handoff_sent and _pop_delivered_handoff(
+                            _wc, _q_armed, data_dir=ctx["DATA"], to_provider=spec.name, to_session=_new_id):
                                             print(f"[handoff] {session_key}: delivered on a "
                                                   f"queued turn, cleared")
                                         _save_chats(ctx, _wd)
@@ -16042,7 +16072,9 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                         # spec-092 P2: the engine answered and returned an
                                         # id — that, and nothing earlier, is proof the
                                         # handoff was actually delivered. Now it can go.
-                                        if _pop_delivered_handoff(_cb_chat, _delivered_handoff):
+                                        if _pop_delivered_handoff(
+                                                _cb_chat, _delivered_handoff, data_dir=ctx["DATA"],
+                                                to_provider=_spec.name, to_session=_new_id):
                                             print(f"[handoff] {session_key}: delivered, cleared")
                                         _save_chats(ctx, _cb_data)
                                         _wrote_back = True
@@ -16659,6 +16691,7 @@ async def _rotate_adapter_chat(ctx: dict, project: dict, session_key: str, do_ha
                     "from_label": f"{spec.label} (previous session)",
                     "to_label": f"{spec.label} (new session)",
                     "for_provider": spec.name, "for_backend": str(target.get("backend") or ""),
+                    "lineage_kind": "rotate", "from_provider": spec.name, "from_session": session_id,
                 }
             _save_chats(ctx, fresh)
     stored = bool(text)
