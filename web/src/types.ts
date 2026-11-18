@@ -630,6 +630,8 @@ export interface SessionInfo {
   message_count?: number | null
   /** Context token count (input + cache) from the last assistant turn in the session. */
   context_tokens?: number | null
+  /** spec-098: engine of the row; absent = claude (only Codex/Grok rows carry it). */
+  provider?: string
 }
 
 // ─── C1: Chat SSE events ───────────────────────────────────────────────────
@@ -1122,10 +1124,32 @@ export type ActivityEvent =
   | ActivityEventBoard
   | ActivityEventAutoRotated
   | ActivityEventSessionRotated
+  | ActivityEventSessionDeleted
+  | ActivityEventForgetResidue
   | ActivityEventPlanReady
   | ActivityEventPlanDecided
   | ActivityEventToolReady
   | ActivityEventToolDecided
+
+// spec-098: a whole session was deleted (every window refetches its list; the chat clears if it was
+// the chat's own session). Emitted with persist=false.
+export interface ActivityEventSessionDeleted {
+  kind: 'session_deleted'
+  provider: string
+  session_id: string
+  project_id: string
+  chat_ids: string[]
+}
+
+// spec-098: result of the post-delete residue scan (paths only, never text).
+export interface ActivityEventForgetResidue {
+  kind: 'forget_residue'
+  provider: string
+  session_id: string
+  clean: boolean
+  hits: { path: string; store?: string }[]
+  truncated?: boolean
+}
 
 export interface VersionInfo {
   current: string

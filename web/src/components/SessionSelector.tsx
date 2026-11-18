@@ -12,6 +12,9 @@ import { createPortal } from 'react-dom'
 import { api } from '../api'
 import { SessionInfo } from '../types'
 import { Modal, ModalHead } from './Modal'
+import { ForgetDialog } from './ForgetDialog'
+import { useRuntimeProviders } from '../lib/runtimeStatus'
+import { canDeleteSession } from '../lib/providers'
 
 interface Props {
   projectId: string
@@ -29,6 +32,8 @@ interface Props {
    * only refreshes on mount or when the dropdown is opened).
    */
   reloadSignal?: number
+  /** spec-098: short status text after a delete (the parent owns the toast slot). */
+  onToast?: (text: string) => void
 }
 
 /** Format ISO datetime as absolute clock string for session labels. */
@@ -74,7 +79,10 @@ function fmtCtx(n: number): string {
 /** Anchor width used when clamping the dropdown to avoid right-edge overflow. */
 const DROPDOWN_ANCHOR_WIDTH = 360
 
-export function SessionSelector({ projectId, onSessionChange, onRequestReset, reloadSignal }: Props) {
+export function SessionSelector({ projectId, onSessionChange, onRequestReset, reloadSignal, onToast }: Props) {
+  // spec-098: capability comes from the shared registry store (no second fetch of the endpoint).
+  const providerRows = useRuntimeProviders()
+  const [forgetTarget, setForgetTarget] = useState<SessionInfo | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -298,6 +306,15 @@ export function SessionSelector({ projectId, onSessionChange, onRequestReset, re
             title="Rename session"
             aria-label="Rename session"
           >✎</button>
+          {canDeleteSession(providerRows, s.provider) && (
+            <button
+              className="session-rename-btn session-delete-btn"
+              onClick={e => { e.stopPropagation(); setForgetTarget(s); setOpen(false) }}
+              disabled={busy}
+              title="Delete session"
+              aria-label="Delete session"
+            >🗑</button>
+          )}
         </div>
       ))}
       {sessions.length === 0 && (
@@ -333,6 +350,23 @@ export function SessionSelector({ projectId, onSessionChange, onRequestReset, re
           {dropdown}
         </>,
         document.body
+      )}
+
+      {forgetTarget && (
+        <ForgetDialog
+          projectId={projectId}
+          provider={forgetTarget.provider || 'claude'}
+          sessionId={forgetTarget.session_id}
+          fallbackTitle={forgetTarget.label || forgetTarget.preview}
+          onClose={() => setForgetTarget(null)}
+          onDeleted={({ alsoDeleted }) => {
+            setForgetTarget(null)
+            onToast?.(alsoDeleted > 0 ? `Session deleted (+${alsoDeleted} linked)` : 'Session deleted')
+            // Immediate local refresh; the session_deleted bus event refreshes every other window.
+            loadSessions()
+            onSessionChange()
+          }}
+        />
       )}
 
       {/* Rename modal */}

@@ -44,8 +44,9 @@ import { MonitorsPanel } from '../components/MonitorsPanel'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
 import {
-  isAdapterProvider, providerLabel, providerUnavailableReason, selectableProviders,
+  PROVIDER_IDS, continuityField, isAdapterProvider, providerLabel, providerUnavailableReason, selectableProviders,
 } from '../lib/providers'
+import { deletedChatSession, residueMessage } from '../lib/forget'
 import { errorTextFromBody, refusalReason } from '../lib/refusal'
 import { playChime } from '../lib/chime'
 import { t } from '../i18n'
@@ -1841,6 +1842,12 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // Bumped whenever the session is reset/rotated so the SessionSelector refetches its list and
   // relabels (its button otherwise keeps showing the now-closed session until the dropdown is opened).
   const [sessionReloadKey, setSessionReloadKey] = useState(0)
+  // spec-098: status line after a session delete / the residue scan (own slot, 6 s).
+  const [forgetToast, setForgetToast] = useState<string | null>(null)
+  const showForgetToast = useCallback((text: string) => {
+    setForgetToast(text)
+    setTimeout(() => setForgetToast(cur => (cur === text ? null : cur)), 6000)
+  }, [])
   // spec-042: unified reset-confirm modal (replaces direct no-confirm handleRotate calls)
   const [resetModalOpen, setResetModalOpen] = useState(false)
   // Spec-039: toast shown when native auto-compact fires (kind:"compact" bus event)
@@ -3046,6 +3053,29 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         let cancelled = false
         hydrateFromServer(() => cancelled)
       }
+
+    } else if (evt.kind === 'session_deleted') {
+      // spec-098: a whole session was deleted (from any window). Refetch the list everywhere; if it
+      // was THIS chat's session, clear the feed exactly like after a Reset.
+      setSessionReloadKey(k => k + 1)
+      const mine = chats.find(c => c.id === effectiveChatId)
+      const ids = mine ? PROVIDER_IDS.map(p => (mine as unknown as Record<string, string | null | undefined>)[continuityField(p) ?? '']) : []
+      if (deletedChatSession(evt, effectiveChatId, ids)) {
+        clearFeed()
+        activeSessionIdRef.current = null
+        if (effectiveChatId) setChats(prev => prev.map(c => c.id === effectiveChatId ? { ...c, session_id: null, codex_thread_id: null, grok_session_id: null } : c))
+        setContextTokens(null)
+        setPrevContextTokens(null)
+        setContextWarnFromBackend(false)
+        setWarnDismissedAtTokens(null)
+        setLastCacheHitPct(null)
+        setLastFreshTokens(null)
+        let cancelled = false
+        hydrateFromServer(() => cancelled)
+      }
+
+    } else if (evt.kind === 'forget_residue') {
+      showForgetToast(residueMessage(evt.clean, evt.hits, evt.truncated))
 
     } else if (evt.kind === 'rate_limit_prompt') {
       // spec-051: limit hit, project policy is "ask" → surface the Yes/No prompt.
@@ -4517,6 +4547,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             onSessionChange={handleSessionChange}
             onRequestReset={() => setResetModalOpen(true)}
             reloadSignal={sessionReloadKey}
+            onToast={showForgetToast}
           />
         </div>
         {/* Right group: context health + cache badge + model + think + collapse.
@@ -6011,6 +6042,18 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           fontSize: 13, zIndex: 9999,
         }}>
           ↺ {rotateToast}
+        </div>
+      )}
+
+      {/* spec-098: session deleted / residue-scan result */}
+      {forgetToast && (
+        <div style={{
+          position: 'fixed', bottom: 24, right: 24,
+          padding: '10px 18px', background: 'var(--bg-card)',
+          border: '1px solid var(--border2)', borderRadius: 8,
+          fontSize: 13, zIndex: 9999, maxWidth: 'min(520px, calc(100vw - 48px))',
+        }}>
+          🗑 {forgetToast}
         </div>
       )}
 
