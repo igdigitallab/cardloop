@@ -802,6 +802,25 @@ def _monitor_update(session_key: str, delta: dict, only_existing: bool = False) 
         pass
 
 
+def _stamp_run(session_key: str, run_id: str) -> None:
+    """spec-098: make `run_id` the current run of `session_key` — every timeline and audit line
+    written for it from now on carries the id. Called at EVERY run start. engine is imported
+    lazily (it is a late-bound sibling; webapp must not import it at module scope)."""
+    try:
+        import engine as _eng
+        _eng.set_current_run(session_key, run_id)
+    except Exception:
+        pass
+
+
+def _current_run_id(session_key: str) -> "str | None":
+    try:
+        import engine as _eng
+        return _eng.current_run(session_key)
+    except Exception:
+        return None
+
+
 # ─────────── spec-063 Stage 2a: autonomous background runs (drain-surfaced) ───────────
 # The engine drain observes autonomous CLI turns (native task-notification wake-ups) and
 # surfaces them here as first-class runs: a bg-marked live turn + kind:run_start/run_end
@@ -833,6 +852,7 @@ def _bg_run_event(session_key: str, phase: str, text: "str | None" = None) -> No
         if phase == "start":
             run_id = _uuid.uuid4().hex[:6]
             _bg_run_ids[session_key] = run_id
+            _stamp_run(session_key, run_id)
             _bg_run_started[session_key] = time.monotonic()
             # Clobber guard: never steal the live buffer from an operator turn that is
             # starting concurrently (running flag set / non-bg turn already open).
@@ -863,9 +883,14 @@ def _bg_run_event(session_key: str, phase: str, text: "str | None" = None) -> No
             _bg_run_started.pop(session_key, None)
             preview = _bg_run_preview.pop(session_key, "")
             # spec-088: tag BEFORE finishing so the run_end carries the turn's next seq.
+            try:
+                _bg_sid = ((_WEBAPP_CTX or {}).get("sessions") or {}).get(session_key)
+            except Exception:
+                _bg_sid = None
             _end_ev = _live_turn_append(session_key, {
                 "kind": "run_end", "source": "bg", "outcome": "ok",
-                "run_id": run_id, "preview": preview[:200]})
+                "run_id": run_id, "preview": preview[:200],
+                "session_id": _bg_sid, "provider": "claude"})
             if _bg_run_buffered.pop(session_key, False):
                 _live_turn_finish(session_key, "done")
             _bus_publish(session_key, _end_ev)
@@ -2253,6 +2278,10 @@ def _timeline_append(session_key: str, event: dict) -> None:
             return
         # Build record: add ts, truncate text, exclude env
         record: dict = {"ts": time.time(), "session_key": session_key}
+        if "run_id" not in event:
+            _rid = _current_run_id(session_key)   # spec-098: stamp the run (explicit run_id wins)
+            if _rid:
+                record["run_id"] = _rid
         for k, v in event.items():
             if k == "env":
                 continue  # env — secrets, never in timeline
@@ -7607,6 +7636,7 @@ async def _run_card(
     _card_backend = str((project or {}).get("backend") or "")
     spec = providers.get(provider)
     run_engine = spec.engine(ctx)
+    _card_run_sid: "str | None" = None   # spec-098: the session the run minted (run_end stamp)
     cwd = project["cwd"]
     name = project["name"]
     # Card 43665f: model resolution — card override → board_card_model setting → sonnet.
@@ -7686,6 +7716,7 @@ async def _run_card(
 
             # Live buffer for hydration (with the prompt, so a client that missed
             # the bus run_start reconstructs the user bubble instead of a '…').
+            _stamp_run(session_key, card_id)
             _live_turn_create(session_key, model, prompt)
             # Publish run start to the bus (activity-stream subscribers will see it live).
             # spec-088: seq-tagged so a reconnecting client replays the bracket.
@@ -7778,6 +7809,7 @@ async def _run_card(
                     _bus_publish(session_key, _live_ev, persist=True)
                 elif etype == "result":
                     _card_last_result_event = event  # Phase D: capture for auto-resume
+                    _card_run_sid = spec.result_id(event) or _card_run_sid
                     await _note_send(spec, ctx, spec.result_id(event), prompt)
                     # A card runs with nobody watching, which is exactly where a silent
                     # downgrade costs the most — and until now cards had no alert path at all.
@@ -7881,6 +7913,7 @@ async def _run_card(
             "outcome": "ok" if ok else "fail",
             "run_id": card_id,
             "provider": provider,
+            "session_id": _card_run_sid,
         }))
         # spec-052 Phase 2: the run OUTCOME is surfaced as the card's move
         # (→ Review/Failed) board_event from _move_card_after_run — we deliberately
@@ -10150,6 +10183,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
         agents_kwargs = _build_agents_kwargs(ctx, agents_config)
 
         # Live buffer (with prompt) so a hydrating client rebuilds the user bubble.
+        _stamp_run(session_key, record["id"])
         _live_turn_create(session_key, model, prompt)
         _bus_publish(session_key, _live_turn_append(session_key, {  # spec-088: seq-tagged
             "kind": "run_start",
@@ -10160,6 +10194,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
 
         # Phase D: use record's resume_session_id if present (preserves interrupted context)
         resume_sid = record.get("resume_session_id") or ctx["sessions"].get(session_key)
+        _def_run_sid = resume_sid
 
         answer_parts: list = []
         # ephemeral=False: deferred runs share the project's session (same as the chat path).
@@ -10198,12 +10233,13 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
                 if event.get("session_id"):
                     ctx["sessions"][session_key] = event["session_id"]
                     ctx["save_sessions"]()
+                    _def_run_sid = event["session_id"]
                 _live_turn_append(session_key, event)
             elif etype == "error":
                 raise event["exc"]
 
         _live_turn_finish(session_key, "done")
-        _bus_publish(session_key, _live_turn_append(session_key, {"kind": "run_end", "outcome": "ok", "run_id": record["id"]}))  # spec-088: seq-tagged
+        _bus_publish(session_key, _live_turn_append(session_key, {"kind": "run_end", "outcome": "ok", "run_id": record["id"], "session_id": _def_run_sid, "provider": "claude"}))  # spec-088: seq-tagged
 
         result_text = "\n".join(answer_parts).strip()
         if rec:
@@ -10231,7 +10267,7 @@ async def _execute_deferred(ctx: dict, record: dict) -> None:
 
     except Exception as e:
         _live_turn_finish(session_key, "error")
-        _bus_publish(session_key, _live_turn_append(session_key, {"kind": "run_end", "outcome": "fail", "run_id": record["id"]}))  # spec-088: seq-tagged
+        _bus_publish(session_key, _live_turn_append(session_key, {"kind": "run_end", "outcome": "fail", "run_id": record["id"], "session_id": locals().get("_def_run_sid"), "provider": "claude"}))  # spec-088: seq-tagged
         if rec:
             rec["status"] = "failed"
             rec["error"] = str(e)[:200]
@@ -14482,6 +14518,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         provider = _pin_rt["provider"]
     _q_refusal = ""
     resume_id: "str | None" = None
+    _q_run_sid: "str | None" = None   # spec-098: session the run used/minted (run_end stamp)
     outcome = "fail"
     _q_final_ctx_tokens: "int | None" = None  # captured from the result event for post-turn auto-rotate
     try:
@@ -14793,6 +14830,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # A queued message (typed while busy) or an auto-continue wake can be the first turn of a
         # fresh post-rotation session — it needs the handoff exactly as a direct chat turn does.
         resume_id = await _live_resume_id(spec, ctx, session_key, cwd, resume_id)
+        _q_run_sid = resume_id
         effective_prompt = prompt
         try:
             # A pending rotation summary is Claude's, so only a Claude run may consume it. This
@@ -14843,6 +14881,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # reconnects mid-turn replays this run_start instead of never seeing it: a bare
         # _bus_publish() event carries no seq and is therefore invisible to the ?since=
         # replay in api_project_activity_stream, which filters turn["events"] by seq.
+        _stamp_run(session_key, run_id)
         _run_start_ev = _live_turn_append(session_key, {
             "kind": "run_start",
             "source": "chat",
@@ -14897,6 +14936,8 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             elif etype == "result":
                 _q_final_ctx_tokens = event.get("context_tokens") or None
                 _new_id = spec.result_id(event)
+                if _new_id:
+                    _q_run_sid = _new_id
                 await _note_send(spec, ctx, _new_id, effective_prompt)
                 if _new_id:
                     # Write the new session_id back to THIS chat's entry in chats.json (mirroring
@@ -14955,7 +14996,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
         # Seq-tag run_end too (see run_start above) — the turn dict is still in _live_turns
         # (drop is scheduled _LIVE_TURN_RETAIN_SEC later), so appending here is safe and
         # makes the completion signal replayable across a reconnect.
-        _run_end_ev = _live_turn_append(session_key, {"kind": "run_end", "source": "chat", "outcome": "ok", "run_id": run_id, "provider": provider, **_cid})
+        _run_end_ev = _live_turn_append(session_key, {"kind": "run_end", "source": "chat", "outcome": "ok", "run_id": run_id, "provider": provider, "session_id": _q_run_sid, **_cid})
         _bus_publish(session_key, _run_end_ev)
 
     except Exception as e:
@@ -14966,7 +15007,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
             _refusal_ev = _live_turn_append(session_key, _error_event_payload(e))
             _bus_publish(session_key, ({**_refusal_ev, **_cid} if _cid else _refusal_ev), persist=False)
         _live_turn_finish(session_key, "error")
-        _run_end_ev = _live_turn_append(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id, "provider": locals().get("provider", "claude"), **_cid})
+        _run_end_ev = _live_turn_append(session_key, {"kind": "run_end", "source": "chat", "outcome": "fail", "run_id": run_id, "provider": locals().get("provider", "claude"), "session_id": _q_run_sid, **_cid})
         _bus_publish(session_key, _run_end_ev)
 
     finally:
@@ -15671,6 +15712,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
         _live_turn_obj["chat_id"] = _req_chat_id
     # Generate a short run id so the bus run_start/run_end pair is correlated.
     _chat_run_id = _uuid.uuid4().hex[:6]
+    _chat_run_sid: "str | None" = None   # spec-098: session the run used/minted (run_end stamp)
     # Publish run_start to the activity bus so other tabs (and recovery after stream drop)
     # can reconstruct the in-flight turn without requiring a hard refresh.
     # chat_id is injected so peer chat tabs in the same project can filter out foreign runs.
@@ -15680,6 +15722,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     # only replays turn["events"] filtered by seq, so an un-tagged run_start is invisible to
     # a reconnect and any recovery gated on it (e.g. the frontend's hydratedCompletedTurnRef
     # reset) stays stuck until the operator reloads the page.
+    _stamp_run(session_key, _chat_run_id)
     _run_start_ev = _live_turn_append(session_key, {
         "kind": "run_start",
         "source": "chat",
@@ -15758,6 +15801,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
         resume_sid = (_chat_resume_id if _chat_resume_id is not None
                       else (ctx["sessions"].get(session_key) if _spec.is_default else None))
         resume_sid = await _live_resume_id(_spec, ctx, session_key, cwd, resume_sid)
+        _chat_run_sid = resume_sid
         # Project secrets are injected into the agent's env (values only in-process, not in the API).
         # secret: references are resolved against the built-in store; TG vars are merged after (they win).
         project_secrets = await _resolve_secret_refs(_secrets_read(cwd))
@@ -15968,6 +16012,8 @@ async def api_project_chat(req: web.Request) -> web.Response:
                                  persist=False)
                     await _send(_stale_ev)
                 _new_id = _spec.result_id(event)
+                if _new_id:
+                    _chat_run_sid = _new_id
                 await _note_send(_spec, ctx, _new_id, effective_prompt)
                 # The public result frame names the id under the record field its provider
                 # persists it in; every other provider's field is present and null.
@@ -16172,6 +16218,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
             "outcome": "ok" if _chat_run_ok else "fail",
             "run_id": _chat_run_id,
             "provider": _provider_for_run,
+            "session_id": _chat_run_sid,
             **({"chat_id": _active_chat_id_for_run} if _active_chat_id_for_run else {}),
         })
         _bus_publish(session_key, _run_end_ev, persist=True)
