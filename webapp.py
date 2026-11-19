@@ -13088,15 +13088,21 @@ class _ForgetState:
                 if dropped and callable(ctx.get("save_sessions")):
                     ctx["save_sessions"]()
 
-    def find_handoffs(self, windows: "list[str]", session_id: "str | None" = None) -> "list[dict]":
+    def find_handoffs(self, windows: "list[str]", session_id: "str | None" = None,
+                      since: "float | None" = None) -> "list[dict]":
         """Armed (undelivered) runtime_handoffs built from the session about to go: by the source
-        session the handoff records, else by its text carrying the content's strings. Ids only."""
+        session the handoff records, else by its text carrying the content's strings. Ids only.
+        `since` (forget from here): a handoff of this session counts by its source only when it was
+        built at or after the cut; an older one holds only kept turns."""
         out: list = []
         for pid, entry in _load_chats(self.ctx).items():
             for chat in (entry.get("chats", []) if isinstance(entry, dict) else []):
                 rh = chat.get("runtime_handoff") if isinstance(chat, dict) else None
                 text = rh.get("text") if isinstance(rh, dict) else None
                 from_me = bool(session_id) and isinstance(rh, dict) and rh.get("from_session") == session_id
+                if from_me and since is not None:
+                    made = rh.get("created_at")
+                    from_me = not isinstance(made, (int, float)) or made >= since - 2.0
                 if from_me or (isinstance(text, str) and windows and any(w in text for w in windows)):
                     out.append({"project_id": pid, "chat_id": chat.get("id"),
                                 "created_at": rh.get("created_at")})
@@ -13152,6 +13158,19 @@ class _ForgetState:
         if labels.pop(session_id, None) is not None:
             _save_session_labels(self.ctx, labels)
         _session_links.remove_session(self.ctx["DATA"], session_id)
+
+    def transcript_cut(self, path: str) -> None:
+        """A transcript shrank under the feed's caches (forget from here): drop them."""
+        if not path:
+            return
+        try:
+            _history_index._drop(str(path))
+        except Exception:  # noqa: BLE001 - a cache; it also rebuilds on the size change
+            pass
+        try:
+            _transcript_stats._CACHE.pop(str(path), None)
+        except Exception:  # noqa: BLE001
+            pass
 
     def clear_runtime(self, session_key: str, other_keys: "list[str]") -> None:
         for k in {session_key, *[x for x in other_keys if x]}:
@@ -13209,7 +13228,9 @@ def _forget_audit_names(ctx: dict, keys: "set[str]") -> "set[str]":
     return out
 
 
-def _forget_lineage(ctx: dict, provider: str, session_id: str) -> "list[dict]":
+def _forget_lineage(ctx: dict, provider: str, session_id: str, with_ts: bool = False) -> "list[dict]":
+    """Sessions that inherited a summary of this one. `with_ts` adds when the handoff happened
+    (forget from here offers only the ones made at or after the cut)."""
     labels = _load_session_labels(ctx)
     out: list = []
     seen: set = set()
@@ -13221,23 +13242,30 @@ def _forget_lineage(ctx: dict, provider: str, session_id: str) -> "list[dict]":
         for sid, rec in (links.items() if isinstance(links, dict) else []):
             if isinstance(rec, dict) and rec.get("prev") == session_id:
                 seen.add(("claude", sid))
-                out.append({"provider": "claude", "session_id": sid, "kind": "rotate",
-                            "title": str(labels.get(sid) or "")})
+                row = {"provider": "claude", "session_id": sid, "kind": "rotate",
+                       "title": str(labels.get(sid) or "")}
+                if with_ts and isinstance(rec.get("at"), (int, float)):
+                    row["ts"] = float(rec["at"])
+                out.append(row)
     for row in _forget.lineage_rows(Path(ctx["DATA"])):
         if row.get("from_session") == session_id and row.get("from_provider") == provider:
             key = (row.get("to_provider"), row.get("to_session"))
             if key not in seen and key[0] and key[1]:
                 seen.add(key)
-                out.append({"provider": key[0], "session_id": key[1],
-                            "kind": str(row.get("kind") or "runtime_handoff"),
-                            "title": str(labels.get(key[1]) or "")})
+                item = {"provider": key[0], "session_id": key[1],
+                        "kind": str(row.get("kind") or "runtime_handoff"),
+                        "title": str(labels.get(key[1]) or "")}
+                if with_ts and isinstance(row.get("ts"), (int, float)):
+                    item["ts"] = float(row["ts"])
+                out.append(item)
     return out
 
 
 async def _forget_one(ctx: dict, project: dict, adapter, session_id: str,
-                      expect_token: "str | None") -> "tuple[dict, _forget.Plan, set]":
+                      expect_token: "str | None", build=None) -> "tuple[dict, _forget.Plan, set]":
     """Reserve -> quiesce -> recompute plan -> execute for ONE session. Returns (counts, plan,
-    keys). Raises forget.ForgetError for every refusal, with nothing touched."""
+    keys). Raises forget.ForgetError for every refusal, with nothing touched. `build(env, keys,
+    bound) -> Plan` replaces the whole-session plan (forget from here); it runs in an executor."""
     env = _forget_env(ctx)
     loop = asyncio.get_running_loop()
     state = env.state
@@ -13273,12 +13301,15 @@ async def _forget_one(ctx: dict, project: dict, adapter, session_id: str,
             await asyncio.sleep(0.5)
         if reason:
             raise _forget.ForgetError(409, getattr(adapter, "busy_code", "writer"), reason)
-        lineage = _forget_lineage(ctx, adapter.name, session_id)
-        files = _forget_timeline_files(ctx, project, keys)
-        plan = await loop.run_in_executor(
-            None, lambda: _forget.build_plan(env, adapter, ctx, project, session_id, timeline_files=files,
-                                             session_key=own_key, bound=bound, lineage=lineage,
-                                             audit_names=_forget_audit_names(ctx, keys)))
+        if build is not None:
+            plan = await loop.run_in_executor(None, lambda: build(env, keys, bound))
+        else:
+            lineage = _forget_lineage(ctx, adapter.name, session_id)
+            files = _forget_timeline_files(ctx, project, keys)
+            plan = await loop.run_in_executor(
+                None, lambda: _forget.build_plan(env, adapter, ctx, project, session_id, timeline_files=files,
+                                                 session_key=own_key, bound=bound, lineage=lineage,
+                                                 audit_names=_forget_audit_names(ctx, keys)))
         if expect_token is not None and plan.token != expect_token:
             raise _forget.ForgetError(409, "changed", "the session changed since the preview - reopen the dialog")
         counts = await _forget.execute_plan(env, adapter, ctx, plan)
@@ -13388,6 +13419,148 @@ async def api_session_delete(req: web.Request) -> web.Response:
         raise
     except Exception as exc:  # noqa: BLE001
         logging.exception("[forget] failed")
+        return _forget_err(500, "failed", f"forget failed ({type(exc).__name__}); it resumes at the next start")
+
+
+_ANCHOR_UUID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")   # compared to a uuid field, never a path
+
+
+def _forget_cut_builder(ctx: dict, project: dict, adapter, chat_id: str, session_id: str, anchor: str):
+    """`build(env, keys, bound)` for _forget_one: the cut plan, or the whole-session plan when the
+    anchor sits in the session's first turn (cut 0 is action A; the restored prompt rides along)."""
+    own_key = project.get("session_key") or project.get("tg_thread", "")
+
+    def build(env, keys, bound):
+        files = _forget_timeline_files(ctx, project, keys)
+        names = _forget_audit_names(ctx, keys)
+        cp = _forget.build_cut_plan(env, adapter, ctx, project, session_id, anchor, chat_id=chat_id,
+                                    timeline_files=files, session_key=own_key, bound=bound,
+                                    lineage=_forget_lineage(ctx, adapter.name, session_id, with_ts=True),
+                                    audit_names=names)
+        if int((cp.art.extra or {}).get("cut", -1)) != 0:
+            return cp
+        ap = _forget.build_plan(env, adapter, ctx, project, session_id, timeline_files=files,
+                                session_key=own_key, bound=bound,
+                                lineage=_forget_lineage(ctx, adapter.name, session_id), audit_names=names)
+        ap.restored_prompt, ap.chat_id = cp.restored_prompt, chat_id
+        return ap
+    return build
+
+
+async def api_chat_forget(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/chats/{chat_id}/forget — spec-098 B, "forget from here".
+
+    Body (JSON only): {"anchor_uuid", "dry_run": true} -> plan + plan_token;
+    {"anchor_uuid", "dry_run": false, "plan_token", "also_delete": [...]} -> cut. The chat's CURRENT
+    session is cut at the turn holding the anchor; the session id stays."""
+    ctx = req.app["ctx"]
+    if not _forget.forget_enabled():
+        return _forget_err(404, "disabled", "forget is turned off (FORGET_ENABLED=0)")
+    if (req.content_type or "").split(";")[0].strip().lower() != "application/json":
+        return _forget_err(415, "bad_request", "this endpoint takes application/json only")
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return _forget_err(404, "not_found", "project not found")
+    chat_id = req.match_info["chat_id"]
+    try:
+        body = await req.json()
+    except Exception:  # noqa: BLE001
+        return _forget_err(400, "bad_request", "bad request")
+    if not isinstance(body, dict):
+        return _forget_err(400, "bad_request", "bad request")
+    anchor = body.get("anchor_uuid")
+    if not isinstance(anchor, str) or not _ANCHOR_UUID_RE.match(anchor):
+        return _forget_err(400, "bad_request", "anchor_uuid required")
+    chat = _find_chat(_load_chats(ctx).get(project["id"]) or {}, chat_id) if chat_id else None
+    if chat is None or chat.get("id") != chat_id:
+        return _forget_err(404, "not_found", "chat not found")
+    provider = _chat_provider(chat)
+    _forget._load_adapters()
+    adapter = _forget.adapter(provider)
+    if adapter is None or not getattr(adapter, "can_forget_turn", False):
+        return _forget_err(400, "no_capability", f"{provider} turns cannot be forgotten here")
+    session_id = chat.get(providers.get(provider).continuity_field)
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+        return _forget_err(400, "predecessor", "this chat has no current session")
+    build = _forget_cut_builder(ctx, project, adapter, chat_id, session_id, anchor)
+    loop = asyncio.get_running_loop()
+    try:
+        if body.get("dry_run") is not False:
+            env = _forget_env(ctx)
+            own_key = project.get("session_key") or project.get("tg_thread", "")
+            bound = env.state.bound(provider, session_id)
+            keys = {own_key, *[b["session_key"] for b in bound]}
+            plan = await loop.run_in_executor(None, lambda: build(env, keys, bound))
+            if plan.mode == "cut":
+                view = _forget.plan_view_cut(plan)
+            else:
+                view = _forget.plan_view(plan)
+                view.update({"chat_id": chat_id, "whole_session": True,
+                             "restored_prompt": plan.restored_prompt})
+            return web.json_response({"ok": True, "plan_token": plan.token, "plan": view})
+        token = body.get("plan_token")
+        if not isinstance(token, str) or not token:
+            return _forget_err(400, "bad_request", "plan_token required")
+        also = body.get("also_delete") or []
+        if not isinstance(also, list) or not all(
+                isinstance(a, dict) and isinstance(a.get("provider"), str)
+                and isinstance(a.get("session_id"), str) for a in also):
+            return _forget_err(400, "bad_request", "bad also_delete")
+        allowed = {(x["provider"], x["session_id"]) for x in _forget_lineage(ctx, provider, session_id)}
+        also_pairs = []
+        for a in also:
+            pair = (a["provider"], a["session_id"])
+            ad2 = _forget.adapter(pair[0])
+            if pair not in allowed or ad2 is None or not ad2.can_delete_session:
+                return _forget_err(400, "bad_request", "also_delete may only list sessions the preview showed as lineage")
+            also_pairs.append((ad2, pair[1]))
+        counts, plan, keys = await _forget_one(ctx, project, adapter, session_id, token, build=build)
+        whole = plan.mode != "cut"
+        chat_ids = [b["chat_id"] for b in plan.bound if b.get("chat_id")]
+        for k in sorted(keys | {plan.session_key}):
+            if whole:
+                ev = {"kind": "session_deleted", "provider": plan.provider, "session_id": plan.session_id,
+                      "project_id": project["id"], "chat_ids": chat_ids}
+            else:
+                ev = {"kind": "chat_forgotten", "provider": plan.provider, "session_id": plan.session_id,
+                      "project_id": project["id"], "chat_id": chat_id, "cut_ts": plan.art.first_ts}
+            _bus_publish(k, ev, persist=False)
+        _spawn_bg(_forget.finish_with_residue(_forget_env(ctx), adapter, ctx, plan))
+        also_done: list = []
+        also_failed: list = []
+        for ad2, sid2 in also_pairs:
+            try:
+                _c2, plan2, keys2 = await _forget_one(ctx, project, ad2, sid2, None)
+            except _forget.SimulatedCrash:
+                raise
+            except _forget.ForgetError as exc:
+                also_failed.append({"provider": ad2.name, "session_id": sid2, "error": exc.message})
+                continue
+            except Exception as exc:  # noqa: BLE001 - its pending record resumes at the next start
+                logging.exception("[forget] also_delete failed")
+                also_failed.append({"provider": ad2.name, "session_id": sid2,
+                                    "error": f"failed ({type(exc).__name__}); it resumes at the next start"})
+                continue
+            for k in sorted(keys2 | {plan2.session_key}):
+                _bus_publish(k, {"kind": "session_deleted", "provider": plan2.provider,
+                                 "session_id": plan2.session_id, "project_id": project["id"],
+                                 "chat_ids": [b["chat_id"] for b in plan2.bound if b.get("chat_id")]},
+                             persist=False)
+            _spawn_bg(_forget.finish_with_residue(_forget_env(ctx), ad2, ctx, plan2))
+            also_done.append({"provider": ad2.name, "session_id": sid2})
+        return web.json_response({"ok": True, "forgotten": {
+            "turns": len(plan.run_ids) if not whole else plan.held.turns,
+            "files": counts.get("files", 0), "timeline_lines": counts.get("timeline_lines", 0),
+            "audit_lines": counts.get("audit_lines", 0), "search_rows": counts.get("search_rows", 0),
+            "media": counts.get("media", 0)},
+            "restored_prompt": plan.restored_prompt, "whole_session": whole,
+            "also_deleted": also_done, "also_failed": also_failed, "residue": "scanning"})
+    except _forget.ForgetError as exc:
+        return _forget_err(exc.status, exc.code, exc.message)
+    except _forget.SimulatedCrash:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("[forget] forget-from-here failed")
         return _forget_err(500, "failed", f"forget failed ({type(exc).__name__}); it resumes at the next start")
 
 
@@ -14093,6 +14266,20 @@ def _session_last_turn(jsonl_path: Path) -> "tuple[int, int | None, int | None]"
     return st["context_tokens"], st["last_turn_at_ms"], st["last_cache_hit_pct"]
 
 
+def _forget_from_ms(ctx: dict, session_id: str) -> "int | None":
+    """spec-098 B: the earliest turn mark's start of a session (epoch ms). A turn before it has no
+    mark and cannot be forgotten on its own; None = nothing in the session can."""
+    if not _forget.forget_enabled():
+        return None
+    try:
+        import turn_marks as _tm
+        starts = [float(r["ts_start"]) for r in _tm.read(Path(ctx["DATA"]), session_id)
+                  if "offset" in r and isinstance(r.get("ts_start"), (int, float))]
+    except Exception:  # noqa: BLE001 - a missing mark file is the common case
+        return None
+    return int(min(starts) * 1000) if starts else None
+
+
 async def api_project_session_history(req: web.Request) -> web.Response:
     """GET /api/projects/{id}/session-history?session_id=<opt.> — feed for active (or specified) session."""
     ctx = req.app["ctx"]
@@ -14210,6 +14397,7 @@ async def api_project_session_history(req: web.Request) -> web.Response:
     return web.json_response({
         "messages": messages,
         "session_id": sid,
+        "forget_from_ms": _forget_from_ms(ctx, sid),
         "prev_session": prev_session,
         "context_tokens": context_tokens,
         "context_window": CONTEXT_WINDOW,
@@ -20669,6 +20857,7 @@ async def start(ctx: dict) -> None:
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
         app.router.add_post("/api/projects/{id}/sessions/{sid}/label", api_project_session_label)
         app.router.add_post("/api/projects/{id}/sessions/{provider}/{session_id}/delete", api_session_delete)
+        app.router.add_post("/api/projects/{id}/chats/{chat_id}/forget", api_chat_forget)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)
         app.router.add_get("/api/projects/{id}/session-history", api_project_session_history)
         # Spec-037: multi-chat per project

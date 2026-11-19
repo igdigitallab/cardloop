@@ -1,4 +1,4 @@
-"""spec-098 Forget: the Claude adapter (whole-session delete).
+"""spec-098 Forget: the Claude adapter (whole-session delete and "forget from here").
 
 Owns every file Claude keeps for one session: the transcript `~/.claude/projects/<slug>/<sid>.jsonl`
 and its `<sid>/` directory (subagents, tool-results, workflows), `file-history/<sid>`,
@@ -9,16 +9,19 @@ Paths come from `Path.home()` (tests point HOME at a tmp dir). Registered with `
 from __future__ import annotations
 
 import calendar
+import hashlib
 import json
 import os
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 import forget
-from forget import ContentItem, SessionArtifacts
+import turn_marks
+from forget import ContentItem, ForgetError, SessionArtifacts
 
 _SID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{7,63}$")
 _MAX_LINE = 64 << 20                 # a transcript line above this is skipped, never parsed
@@ -135,10 +138,105 @@ def _items_from_record(r: dict) -> Iterator[ContentItem]:
                 yield ContentItem("assistant", text, ts, uuid=uuid)
 
 
+# ── forget from here (P4): shared helpers ───────────────────────────────────────────────────────
+_SNAPSHOT_TAG = b'"file-history-snapshot"'
+_MIN_NAME = 6                        # a shorter artifact name is too common to look up as text
+_HOLD_IN_MEMORY = 64 << 20           # the cut suffix above this is held in an unnamed temp file
+NO_MARK_TEXT = ("This reply was made before forgetting was available (or its start was not recorded), "
+                "so it cannot be cut out on its own. Delete the whole session instead.")
+END_SLACK_SEC = 2.0
+
+
+def _history_line_goes(r: dict, session_id: str, min_ts_ms: "float | None") -> bool:
+    if r.get("sessionId") != session_id:
+        return False
+    if min_ts_ms is None:
+        return True
+    ts = r.get("timestamp")
+    return isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts >= min_ts_ms
+
+
+def _precise_ts(s: Any) -> "float | None":
+    """An ISO transcript timestamp as epoch seconds WITH its milliseconds (a turn boundary is a
+    question of a second or less)."""
+    if not isinstance(s, str) or len(s) < 19:
+        return None
+    try:
+        from datetime import datetime, timezone
+        d = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.timestamp()
+
+
+def _is_prompt_line(r: dict) -> bool:
+    """A turn start the operator side wrote: a user line with string content that the harness did
+    not write (isMeta) and that is not a native compaction summary."""
+    m = r.get("message")
+    return (r.get("type") == "user" and r.get("isMeta") is not True
+            and r.get("isCompactSummary") is not True
+            and isinstance(m, dict) and isinstance(m.get("content"), str))
+
+
+def _lines_from(path: Path, start: int, end: int) -> Iterator["tuple[int, bytes]"]:
+    """(offset, raw line) of every line that starts in [start, end), streamed."""
+    with open(path, "rb") as f:
+        f.seek(start)
+        off = start
+        while off < end:
+            raw = f.readline()
+            if not raw:
+                break
+            yield off, raw
+            off += len(raw)
+
+
+def _decode(raw: bytes) -> "dict | None":
+    if len(raw) > _MAX_LINE:
+        return None
+    try:
+        r = json.loads(raw)
+    except ValueError:
+        return None
+    return r if isinstance(r, dict) else None
+
+
+def _snapshot_backups(r: dict) -> "set[str]":
+    snap = r.get("snapshot") if isinstance(r.get("snapshot"), dict) else {}
+    out: set = set()
+    for v in (snap.get("trackedFileBackups") or {}).values():
+        if isinstance(v, dict) and isinstance(v.get("backupFileName"), str) and v["backupFileName"]:
+            out.add(v["backupFileName"])
+    return out
+
+
+def _last_line_parses(path: Path, size: int) -> bool:
+    """The kept prefix still ends in a whole JSON line (what the CLI resumes from)."""
+    if size == 0:
+        return True
+    with open(path, "rb") as f:
+        back = min(size, 1 << 20)
+        f.seek(size - back)
+        tail = f.read(back)
+    if not tail.endswith(b"\n"):
+        return False
+    body = tail[:-1]
+    nl = body.rfind(b"\n")
+    if nl < 0 and back < size:
+        return True              # one line longer than 1 MB: its end is a newline, good enough
+    try:
+        json.loads(body[nl + 1:])
+        return True
+    except ValueError:
+        return False
+
+
 class ClaudeAdapter:
     name = "claude"
     can_delete_session = True
-    can_forget_turn = False            # phase P4
+    can_forget_turn = True             # P4: truncate at a turn mark (see locate_cut)
 
     # ── locate ──────────────────────────────────────────────────────────────────────────────
     def locate(self, ctx: Mapping[str, Any], project: Mapping[str, Any],
@@ -340,10 +438,11 @@ class ClaudeAdapter:
         return {"files": files, "history_lines": removed}
 
     @staticmethod
-    def _rewrite_history(path: Path, session_id: str) -> int:
-        """Drop the session's lines from a history.jsonl (atomic tmp + rename). Other CLIs append to
-        it concurrently: the old inode stays open across the rename and whatever was appended to it
-        after our read is copied onto the new file, so no other session's line is lost."""
+    def _rewrite_history(path: Path, session_id: str, min_ts_ms: "float | None" = None) -> int:
+        """Drop the session's lines from a history.jsonl (atomic tmp + rename); with `min_ts_ms`
+        only its lines from that time on (forget from here). Other CLIs append to it concurrently:
+        the old inode stays open across the rename and whatever was appended to it after our read
+        is copied onto the new file, so no other session's line is lost."""
         try:
             src = open(path, "rb")
         except OSError:
@@ -359,7 +458,7 @@ class ClaudeAdapter:
                 except ValueError:
                     keep.append(raw)
                     continue
-                if isinstance(r, dict) and r.get("sessionId") == session_id:
+                if isinstance(r, dict) and _history_line_goes(r, session_id, min_ts_ms):
                     gone += 1
                 else:
                     keep.append(raw)
@@ -396,6 +495,319 @@ class ClaudeAdapter:
     def residue_roots(self, ctx: Mapping[str, Any]) -> "list[Path]":
         base = _home() / ".claude"
         return [base / "file-history", base / "session-env", base / "debug", base / "history.jsonl"]
+
+    # ── forget from here (P4) ───────────────────────────────────────────────────────────────
+    def locate_cut(self, ctx: Mapping[str, Any], project: Mapping[str, Any], session_id: str,
+                   anchor_uuid: str) -> "tuple[SessionArtifacts, str]":
+        """The turn that holds `anchor_uuid` and every later one. -> (artifacts, restored prompt).
+
+        The cut is the turn mark R with the greatest offset <= the anchor's line: the transcript's
+        size when R's prompt was about to reach the CLI, i.e. byte for byte the prefix the CLI
+        resumed from at that moment. The anchor must really be inside R (a later run that left no
+        mark would otherwise drag R, a turn the operator did not pick, into the cut). Raises
+        ForgetError: 404 unknown session, 400 `predecessor` (not in this session), 400 `no_mark`."""
+        art = self.locate(ctx, project, session_id)
+        if art is None:
+            raise ForgetError(404, "not_found", "session not found")
+        transcript = Path(art.extra["transcript"])
+        sdir = Path(art.extra["session_dir"])
+        try:
+            size = transcript.stat().st_size
+        except OSError:
+            raise ForgetError(404, "not_found", "session not found") from None
+        rows = turn_marks.read(Path(ctx["DATA"]), session_id)
+        starts = [r for r in rows if r.get("run_id") and isinstance(r.get("offset"), int)
+                  and not isinstance(r.get("offset"), bool) and 0 <= r["offset"] <= size]
+        ends: dict = {}
+        for r in rows:
+            if r.get("run_id") and isinstance(r.get("ts_end"), (int, float)):
+                ends[str(r["run_id"])] = float(r["ts_end"])
+        needle = anchor_uuid.encode()
+        anchor_off: "int | None" = None
+        anchor: dict = {}
+        for off, raw in _lines_from(transcript, 0, size):
+            if needle in raw:
+                r = _decode(raw)
+                if r is not None and r.get("uuid") == anchor_uuid:
+                    anchor_off, anchor = off, r
+                    break
+        if anchor_off is None:
+            raise ForgetError(400, "predecessor", "that message is not part of this chat's current session")
+        cands = [r for r in starts if r["offset"] <= anchor_off]
+        if not cands:
+            raise ForgetError(400, "no_mark", NO_MARK_TEXT)
+        cut = max(r["offset"] for r in cands)
+        owner = max((r for r in cands if r["offset"] == cut), key=lambda r: float(r.get("ts_start") or 0))
+        a_ts = _precise_ts(anchor.get("timestamp"))
+        end = ends.get(str(owner["run_id"]))
+        if end is not None and a_ts is not None:
+            inside = a_ts <= end + END_SLACK_SEC
+        else:
+            starts_before = 0
+            for _off, raw in _lines_from(transcript, cut, anchor_off):
+                if b'"user"' in raw:
+                    r = _decode(raw)
+                    if r is not None and _is_prompt_line(r):
+                        starts_before += 1
+            inside = starts_before == 0 if _is_prompt_line(anchor) else starts_before <= 1
+        if not inside:
+            raise ForgetError(400, "no_mark", NO_MARK_TEXT)
+        if cut > 0:
+            with open(transcript, "rb") as f:
+                f.seek(cut - 1)
+                if f.read(1) != b"\n":
+                    raise ForgetError(400, "no_mark", NO_MARK_TEXT)
+        dropped = sorted({str(r["run_id"]) for r in starts if r["offset"] >= cut})
+        prev_end = max((ends.get(str(r["run_id"])) or 0.0 for r in starts if r["offset"] < cut), default=0.0)
+
+        # the suffix: what goes, the tool calls that own sub-agents, the backups it snapshotted
+        tool_ids: set = set()
+        suffix_backups: set = set()
+        restored = ""
+        found_prompt = False
+        last_ts: "float | None" = None
+        h = hashlib.sha256()
+        for _off, raw in _lines_from(transcript, cut, size):
+            h.update(raw)
+            r = _decode(raw)
+            if r is None:
+                continue
+            ts = _precise_ts(r.get("timestamp"))
+            if ts is not None:
+                last_ts = ts if last_ts is None else max(last_ts, ts)
+            if r.get("type") == "assistant":
+                content = (r.get("message") or {}).get("content") if isinstance(r.get("message"), dict) else None
+                for b in content if isinstance(content, list) else []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
+                        tool_ids.add(str(b["id"]))
+            elif _SNAPSHOT_TAG in raw:
+                suffix_backups |= _snapshot_backups(r)
+            if not found_prompt and _is_prompt_line(r):
+                found_prompt = True
+                restored = str(r["message"]["content"])
+        # the prefix: only what decides which shared artifacts stay
+        prefix_backups: set = set()
+        prefix_lines = 0
+        for _off, raw in _lines_from(transcript, 0, cut):
+            prefix_lines += 1
+            if _SNAPSHOT_TAG in raw:
+                r = _decode(raw)
+                if r is not None:
+                    prefix_backups |= _snapshot_backups(r)
+
+        paths: list = []
+        sub_dir = sdir / "subagents"
+        sub_drop: list = []
+        sub_keep: list = []
+        if sub_dir.is_dir():
+            for sub in sorted(sub_dir.glob("*.jsonl")):
+                meta = sub.with_name(sub.name[:-len(".jsonl")] + ".meta.json")
+                owner_tool = None
+                try:
+                    owner_tool = json.loads(meta.read_text(encoding="utf-8")).get("toolUseId")
+                except (OSError, ValueError, AttributeError):
+                    pass
+                if owner_tool and str(owner_tool) in tool_ids:
+                    sub_drop.append(sub)
+                    paths.append(sub)
+                    if meta.exists():
+                        paths.append(meta)
+                else:
+                    sub_keep.append(sub)    # no owner, or owned by a kept turn: stays
+        # tool-results / workflow files the dropped content names and the kept content does not
+        named: dict = {}
+        tr = sdir / "tool-results"
+        if tr.is_dir():
+            for f in sorted(tr.iterdir()):
+                if len(f.name) >= _MIN_NAME:
+                    named.setdefault(f.name, []).append(f)
+        wf = sdir / "workflows"
+        if wf.is_dir():
+            for f in sorted(wf.iterdir()):
+                if f.name.startswith("wf_"):
+                    key = f.stem if f.suffix == ".json" else f.name
+                    if len(key) >= _MIN_NAME:
+                        named.setdefault(key, []).append(f)
+        if named:
+            names = list(named)
+            used = forget.find_in_range(transcript, cut, size, names)
+            for sub in sub_drop:
+                used |= forget.find_in_range(sub, 0, None, names)
+            kept = forget.find_in_range(transcript, 0, cut, sorted(used))
+            for sub in sub_keep:
+                kept |= forget.find_in_range(sub, 0, None, sorted(used - kept))
+            for n in sorted(used - kept):
+                paths.extend(named[n])
+        # file-history backups only the dropped turns snapshotted (per account dir)
+        seen_real: set = set()
+        for b in sorted(suffix_backups - prefix_backups):
+            if "/" in b or b.startswith("."):
+                continue
+            for cfg in _config_dirs():
+                fp = cfg / "file-history" / session_id / b
+                try:
+                    real = fp.resolve()
+                except OSError:
+                    continue
+                if real in seen_real or not fp.is_file():
+                    continue
+                seen_real.add(real)
+                paths.append(fp)
+        ts_start = float(owner.get("ts_start") or 0.0) or None
+        first_ts = ts_start if ts_start is not None else a_ts
+        last = max([x for x in [last_ts, first_ts, *[ends.get(d) for d in dropped]] if x is not None], default=None)
+        extra = {
+            "mode": "cut", "transcript": str(transcript), "session_dir": str(sdir), "cut": cut,
+            "orig_size": size, "suffix_sha": h.hexdigest(), "dropped_runs": dropped,
+            "prefix_lines": prefix_lines, "prev_end": prev_end or None,
+            "history_files": list(art.extra.get("history_files") or []),
+            "history_cut_ms": (first_ts * 1000.0 - END_SLACK_SEC * 1000.0) if first_ts else None,
+            "residue_dirs": list(art.extra.get("residue_dirs") or []),
+            "sub_files": [str(x) for x in sub_drop],
+        }
+        cut_art = SessionArtifacts(provider="claude", session_id=session_id, cwd=art.cwd, title=art.title,
+                                   paths=paths, first_ts=first_ts, last_ts=last, extra=extra)
+        return cut_art, restored
+
+    def cut_fingerprint(self, art: SessionArtifacts) -> str:
+        e = art.extra or {}
+        return f"cut={e.get('cut')}:{','.join(e.get('dropped_runs') or [])}"
+
+    def read_cut_content(self, art: SessionArtifacts) -> Iterator[ContentItem]:
+        e = art.extra or {}
+        t = Path(e["transcript"])
+        for _off, raw in _lines_from(t, int(e["cut"]), int(e["orig_size"])):
+            r = _decode(raw)
+            if r is not None:
+                yield from _items_from_record(r)
+        for p in art.paths:
+            p = Path(p)
+            if p.name.endswith(".jsonl"):
+                for r in _iter_lines(p):
+                    yield from _items_from_record(r)
+            elif p.parent.name in ("tool-results", "workflows") and p.is_file():
+                try:
+                    with open(p, "rb") as f:
+                        for _ in range(_TOOL_RESULT_CHUNKS):
+                            chunk = f.read(_TOOL_RESULT_CHUNK)
+                            if not chunk:
+                                break
+                            yield ContentItem("tool_result", chunk.decode("utf-8", "replace"))
+                except OSError:
+                    continue
+
+    def cut(self, ctx: Mapping[str, Any], art: SessionArtifacts) -> dict:
+        """Step 4 of B, idempotent: truncate the transcript at the cut, then remove the dropped
+        turns' artifacts. Truncates ONLY when the file is exactly what the plan measured (size and
+        suffix hash); already cut = skip; anything else = 409 `changed`, nothing touched."""
+        e = art.extra or {}
+        t = Path(e["transcript"])
+        cut, orig = int(e["cut"]), int(e["orig_size"])
+        try:
+            size = t.stat().st_size
+        except OSError:
+            raise ForgetError(500, "failed", "the transcript vanished during the forget") from None
+        cut_bytes = 0
+        if size != cut:
+            if size != orig or self._suffix_sha(t, cut, orig) != e.get("suffix_sha"):
+                raise ForgetError(409, "changed", "the session changed during the forget - nothing was cut")
+            if cut > 0:
+                with open(t, "rb") as f:
+                    f.seek(cut - 1)
+                    if f.read(1) != b"\n":
+                        raise ForgetError(500, "failed", "the turn boundary is not a line end - nothing was cut")
+            held = self._hold(t, cut, orig)
+            try:
+                with open(t, "r+b") as f:
+                    os.truncate(f.fileno(), cut)
+                    f.flush()
+                    os.fsync(f.fileno())
+                if t.stat().st_size != cut or not _last_line_parses(t, cut):
+                    raise OSError("verify after truncate failed")
+            except OSError as exc:
+                self._restore(t, cut, held)
+                raise ForgetError(500, "failed", f"the cut could not be verified and was undone ({exc})") from None
+            finally:
+                held.close()
+            cut_bytes = orig - cut
+        files = 0
+        for p in art.paths:
+            p = Path(p)
+            try:
+                if p.is_symlink() or p.is_file():
+                    p.unlink()
+                    files += 1
+                elif p.is_dir():
+                    n, _sz = forget._tree_size([p])
+                    shutil.rmtree(p)
+                    files += n
+            except FileNotFoundError:
+                continue
+        removed = 0
+        for hf in e.get("history_files") or []:
+            removed += self._rewrite_history(Path(hf), art.session_id, e.get("history_cut_ms"))
+        return {"files": files, "bytes_cut": cut_bytes, "history_lines": removed}
+
+    @staticmethod
+    def _suffix_sha(t: Path, cut: int, end: int) -> str:
+        h = hashlib.sha256()
+        with open(t, "rb") as f:
+            f.seek(cut)
+            left = end - cut
+            while left > 0:
+                chunk = f.read(min(left, 1 << 20))
+                if not chunk:
+                    break
+                h.update(chunk)
+                left -= len(chunk)
+        return h.hexdigest()
+
+    @staticmethod
+    def _hold(t: Path, cut: int, end: int):
+        """The suffix about to be cut, kept until the cut verifies (in memory, or an unnamed temp
+        file above 64 MB: an inode with no name that vanishes on close)."""
+        holder = tempfile.SpooledTemporaryFile(max_size=_HOLD_IN_MEMORY)
+        with open(t, "rb") as f:
+            f.seek(cut)
+            left = end - cut
+            while left > 0:
+                chunk = f.read(min(left, 1 << 20))
+                if not chunk:
+                    break
+                holder.write(chunk)
+                left -= len(chunk)
+        holder.seek(0)
+        return holder
+
+    @staticmethod
+    def _restore(t: Path, cut: int, held) -> None:
+        try:
+            held.seek(0)
+            with open(t, "r+b") as f:
+                f.truncate(cut)
+                f.seek(cut)
+                shutil.copyfileobj(held, f)
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError:
+            pass
+
+    def verify_cut(self, ctx: Mapping[str, Any], art: SessionArtifacts) -> "list[str]":
+        e = art.extra or {}
+        t = Path(e["transcript"])
+        left: list = []
+        try:
+            if t.stat().st_size != int(e["cut"]):
+                left.append(str(t))
+        except OSError:
+            left.append(str(t))
+        left += [str(p) for p in art.paths if Path(p).exists() or Path(p).is_symlink()]
+        for hf in e.get("history_files") or []:
+            for r in _iter_lines(Path(hf)):
+                if _history_line_goes(r, art.session_id, e.get("history_cut_ms")):
+                    left.append(hf)
+                    break
+        return left
 
 
 forget.register_adapter(ClaudeAdapter())

@@ -597,7 +597,7 @@ def select_audit_lines(path: Path, *, known_runs: "set[str]",
 
 
 def purge_search(db_path: Path, *, transcript_paths: "list[str]", session_id: str,
-                 reindex_paths: "list[str]") -> dict:
+                 reindex_paths: "list[str]", drop_hits: bool = True) -> dict:
     """search.db, one transaction under secure-delete (blocking; run it in an executor and under
     the cockpit's search lock).
 
@@ -629,8 +629,9 @@ def purge_search(db_path: Path, *, transcript_paths: "list[str]", session_id: st
                     out["rows"] += len(rids)
                 for p in list(transcript_paths) + list(reindex_paths):
                     conn.execute("DELETE FROM file_state WHERE path = ?", (p,))
-                cur = conn.execute("DELETE FROM doc_hits WHERE source = 'chat' AND ref = ?", (session_id,))
-                out["hits"] = max(cur.rowcount, 0)
+                if drop_hits:     # B keeps the session, so its retrieval telemetry stays (no text)
+                    cur = conn.execute("DELETE FROM doc_hits WHERE source = 'chat' AND ref = ?", (session_id,))
+                    out["hits"] = max(cur.rowcount, 0)
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -734,6 +735,132 @@ def plan_media(data_dir: Path, held: Held, roots: "list[Path]", exclude_prefix: 
     return sorted(v for k, v in cands.items() if k not in keep)
 
 
+
+# ───────────────────────────── forget from here (B): range search + run-id selection ───────────
+_FIND_PASSES = 8
+
+
+def _find_python(path: Path, start: int, end: "int | None", needles: "list[str]") -> "set[str]":
+    left = {n: n.encode("utf-8", "replace") for n in needles if n}
+    found: set = set()
+    if not left:
+        return found
+    over = max(len(b) for b in left.values()) - 1
+    try:
+        f = open(path, "rb")
+    except OSError:
+        return found
+    with f:
+        f.seek(start)
+        pos, prev = start, b""
+        while left:
+            want = (1 << 23) if end is None else min(1 << 23, end - pos)
+            if want <= 0:
+                break
+            chunk = f.read(want)
+            if not chunk:
+                break
+            buf = prev + chunk
+            for n, b in list(left.items()):
+                if b in buf:
+                    found.add(n)
+                    del left[n]
+            prev = buf[-over:] if over > 0 else b""
+            pos += len(chunk)
+    return found
+
+
+def find_in_range(path: Path, start: int, end: "int | None", needles: "list[str]") -> "set[str]":
+    """Which `needles` occur inside bytes [start, end) of one file (end None = to EOF). A needle
+    never contains a newline, and the range edges are line edges, so a match never straddles them.
+
+    `rg -F -o -b` finds them in one pass at disk speed, but it reports non-overlapping matches
+    only: a needle hidden under an overlapping match of another needle would be missed. So the
+    found ones are dropped and rg runs again on the rest until a pass finds nothing new."""
+    needles = sorted({n for n in needles if n and "\n" not in n})
+    if not needles or not Path(path).is_file():
+        return set()
+    rg = _rg()
+    if rg is None:
+        return _find_python(Path(path), start, end, needles)
+    found: set = set()
+    left = list(needles)
+    for _ in range(_FIND_PASSES):
+        try:
+            res = subprocess.run([rg, "-a", "-F", "-o", "-b", "--no-filename", "--no-line-number",
+                                  "--no-messages", "--no-config", "-f", "-", "--", str(path)],
+                                 input=("\n".join(left) + "\n").encode("utf-8", "replace"),
+                                 capture_output=True, timeout=120)
+        except (subprocess.TimeoutExpired, OSError):
+            return found | _find_python(Path(path), start, end, left)
+        new: set = set()
+        for line in res.stdout.splitlines():
+            off_s, _sep, match = line.partition(b":")
+            try:
+                off = int(off_s)
+            except ValueError:
+                continue
+            if off >= start and (end is None or off < end):
+                new.add(match.decode("utf-8", "replace"))
+        new &= set(left)
+        if not new:
+            break
+        found |= new
+        left = [n for n in left if n not in found]
+        if not left:
+            break
+    return found
+
+
+def select_run_lines(path: Path, run_ids: "set[str]") -> "list[str]":
+    """Digests of the JSONL lines (timeline) stamped with one of `run_ids`. B selects ONLY by id:
+    the session-level attribution of A would take the kept turns too."""
+    out: list = []
+    if not run_ids:
+        return out
+    for raw, r in zip(*_jsonl_records(path)):
+        if r is not None and r.get("run_id") and str(r["run_id"]) in run_ids:
+            out.append(digest(raw))
+    return out
+
+
+def select_audit_runs(path: Path, run_ids: "set[str]", project_names: "set[str] | None") -> "list[str]":
+    """Audit lines carrying `run=<id>` of one of `run_ids`, of the project's own `[Project]` labels."""
+    try:
+        raw_lines = path.read_bytes().splitlines(keepends=True)
+    except OSError:
+        return []
+    names = {n for n in (project_names or set()) if n}
+    out: list = []
+    for raw in raw_lines:
+        m = AUDIT_RE.match(raw.decode("utf-8", "replace").rstrip("\n"))
+        if not m:
+            continue
+        _ts, project, _kind, rid, _text = m.groups()
+        if rid and rid in run_ids and (not names or project in names):
+            out.append(digest(raw))
+    return out
+
+
+def purge_usage_cut(db_path: Path, transcript_path: str, prefix_lines: int, removed: "list[str]") -> int:
+    """usage.db after a cut: the transcript's line cursor goes back to the kept line count (the
+    scanner resumes by line number, so a stale count would skip the next turns), removed sub-agent
+    files lose their cursor rows. Token rows stay (no text; the spend happened)."""
+    if not Path(db_path).exists():
+        return 0
+    conn = sqlite3.connect(str(db_path), timeout=30)
+    try:
+        n = conn.execute("UPDATE processed_files SET lines = ?, mtime = 0 WHERE path = ?",
+                         (int(prefix_lines), transcript_path)).rowcount
+        for p in removed:
+            n += conn.execute("DELETE FROM processed_files WHERE path = ?", (p,)).rowcount
+        conn.commit()
+        return max(n, 0)
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        conn.close()
+
 # ───────────────────────────── residue scan (decision 5) ───────────────────────────────────────
 # ───────────────────────────── stores found while building (not in the spec's inventory) ───────────
 # chat-trace.jsonl (120-char previews of every operator message), deferred.json (prompts of fired
@@ -764,8 +891,12 @@ def _chat_ok(chat_id: Any, chat_ids: "set[str]") -> bool:
 
 
 def select_trace_lines(path: Path, *, keys: "set[str]", chat_ids: "set[str]",
-                       first_ts: "float | None", last_ts: "float | None") -> "list[str]":
-    """chat-trace lines of the session: its session_key(s), its chat(s), inside its time span."""
+                       first_ts: "float | None", last_ts: "float | None",
+                       margin: float = EXTRA_MARGIN_SEC,
+                       previews: "tuple[set[str], float] | None" = None) -> "list[str]":
+    """chat-trace lines of the session: its session_key(s), its chat(s), inside its time span.
+    `previews` = (collapsed prompt prefixes, earliest ts): a line before the span whose preview is
+    one of those prompts also goes (a message queued while the previous, kept turn ran)."""
     out: list = []
     try:
         raw_lines = path.read_bytes().splitlines(keepends=True)
@@ -776,9 +907,14 @@ def select_trace_lines(path: Path, *, keys: "set[str]", chat_ids: "set[str]",
             r = json.loads(raw)
         except ValueError:
             continue
-        if (isinstance(r, dict) and r.get("session_key") in keys
-                and _chat_ok(r.get("chat_id"), chat_ids) and _within(r.get("ts"), first_ts, last_ts)):
+        if not (isinstance(r, dict) and r.get("session_key") in keys and _chat_ok(r.get("chat_id"), chat_ids)):
+            continue
+        if _within(r.get("ts"), first_ts, last_ts, margin):
             out.append(digest(raw))
+        elif previews and isinstance(r.get("preview"), str) and _within(r.get("ts"), previews[1], last_ts, margin):
+            pv = collapse(r["preview"]).rstrip("…")
+            if len(pv) >= 20 and any(p.startswith(pv) or pv.startswith(p) for p in previews[0]):
+                out.append(digest(raw))
     return out
 
 
@@ -801,7 +937,8 @@ def _iso_epoch(v: Any) -> "float | None":
 
 def select_deferred(data_dir: Path, *, keys: "set[str]",
                     prompts: "list[tuple[float | None, frozenset]]",
-                    first_ts: "float | None" = None, last_ts: "float | None" = None) -> "list[str]":
+                    first_ts: "float | None" = None, last_ts: "float | None" = None,
+                    margin: float = EXTRA_MARGIN_SEC) -> "list[str]":
     """Ids of deferred.json records that already ran (status != pending) with one of the session's
     prompts in one of its session_keys AND fired inside the session's time span (the same short
     prompt deferred in another session of the chat is not this one's). A pending record is future
@@ -816,7 +953,7 @@ def select_deferred(data_dir: Path, *, keys: "set[str]",
         if not isinstance(r, dict) or r.get("status") == "pending" or r.get("session_key") not in keys:
             continue
         when = _iso_epoch(r.get("fired_at")) or _iso_epoch(r.get("created"))
-        if not _within(when, first_ts, last_ts):
+        if not _within(when, first_ts, last_ts, margin):
             continue
         text = r.get("prompt")
         if isinstance(text, str) and text and (digest(collapse(text)) in pk
@@ -843,7 +980,8 @@ def _plan_file_ok(path: str, home: Path) -> bool:
 
 
 def select_plans(data_dir: Path, home: Path, *, keys: "set[str]", chat_ids: "set[str]",
-                 first_ts: "float | None", last_ts: "float | None") -> "tuple[list[str], list[str]]":
+                 first_ts: "float | None", last_ts: "float | None",
+                 margin: float = EXTRA_MARGIN_SEC) -> "tuple[list[str], list[str]]":
     """Plan-approval sidecars (data/plans/<id>.json) made during the session, and the plan files
     they point at. -> (sidecar ids, plan file paths)."""
     ids: list = []
@@ -860,7 +998,7 @@ def select_plans(data_dir: Path, home: Path, *, keys: "set[str]", chat_ids: "set
             continue
         if not isinstance(r, dict) or r.get("session_key") not in keys:
             continue
-        if not (_chat_ok(r.get("chat_id"), chat_ids) and _within(r.get("created_at"), first_ts, last_ts)):
+        if not (_chat_ok(r.get("chat_id"), chat_ids) and _within(r.get("created_at"), first_ts, last_ts, margin)):
             continue
         ids.append(f.stem)
         pf = r.get("plan_file_path")
@@ -1070,6 +1208,8 @@ def write_inbox_note(data_dir: Path, provider: str, session_id: str, result: dic
              + ("clean" if result.get("clean") else f"found {len(result.get('hits', []))} place(s)"
                 + (" (scan hit its time budget)" if result.get("truncated") else ""))]
     lines += [f"  {h['store']}: {h['path']}" for h in result.get("hits", [])]
+    if isinstance(result.get("note"), str) and result["note"]:
+        lines.append(result["note"])
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return p
 
@@ -1124,6 +1264,9 @@ class Plan:
     handoffs: "list[dict]" = field(default_factory=list)   # armed runtime_handoffs built from the content
     extra: dict = field(default_factory=dict)               # stores found while building (step 5b)
     search_checkpoint: str = ""                              # set by execute: "busy" = WAL not truncated
+    mode: str = "session"                                    # "session" (A) | "cut" (B, forget from here)
+    chat_id: str = ""                                        # B: the chat whose session is cut
+    restored_prompt: str = ""                                # B: back to the composer (never journaled)
 
     def record(self) -> dict:
         """The pending-journal form: ids, paths, digests. No conversation text."""
@@ -1137,7 +1280,7 @@ class Plan:
                     "extra": a.extra},
             "run_ids": self.run_ids, "timeline": self.timeline, "audit": self.audit,
             "media": self.media, "bound": self.bound, "handoffs": self.handoffs,
-            "extra": self.extra,
+            "extra": self.extra, "mode": self.mode, "chat_id": self.chat_id,
         }
 
 
@@ -1293,6 +1436,140 @@ def plan_view(plan: Plan) -> dict:
     }
 
 
+# ───────────────────────────── forget from here (B): plan ──────────────────────────────────────
+CUT_LOOKBACK_SEC = 60.0      # extra-store lines between the last kept turn's end and the cut's start
+
+
+def compute_cut_token(provider: str, session_id: str, cut: int, run_ids: "list[str]") -> str:
+    h = hashlib.sha256()
+    for part in (provider, session_id, f"cut={int(cut)}", ",".join(sorted(run_ids))):
+        h.update(part.encode("utf-8", "replace") + b"\0")
+    return h.hexdigest()
+
+
+class _PromptTap:
+    """Pass-through over adapter content that keeps the collapsed prefixes of the prompts seen
+    (in memory only), so the chat-trace previews of the dropped turns can be recognised."""
+
+    def __init__(self, items: "Iterator[ContentItem]"):
+        self._items = items
+        self.prefixes: set = set()
+
+    def __iter__(self):
+        for it in self._items:
+            if it.kind == "prompt" and it.text:
+                c = collapse(it.text)
+                if len(c) >= 20:
+                    self.prefixes.add(c[:200])
+            yield it
+
+
+def build_cut_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Mapping[str, Any],
+                   session_id: str, anchor_uuid: str, *, chat_id: str, timeline_files: "list[Path]",
+                   session_key: str, bound: "list[dict] | None" = None,
+                   lineage: "list[dict] | None" = None, audit_names: "set[str] | None" = None) -> Plan:
+    """Dry run of B (blocking: run it in an executor). The adapter finds the cut and what goes; every
+    cockpit store is selected by the dropped run ids or the dropped span, never by the session as a
+    whole (that would take the kept turns too)."""
+    locate = getattr(adapter, "locate_cut", None)
+    if not callable(locate) or not getattr(adapter, "can_forget_turn", False):
+        raise ForgetError(400, "no_capability", f"{adapter.name} turns cannot be forgotten here")
+    art, restored_raw = locate(ctx, project, session_id, anchor_uuid)
+    e = art.extra
+    dropped = set(e.get("dropped_runs") or [])
+    tap = _PromptTap(adapter.read_cut_content(art))
+    held = collect_held(iter(tap), seed=session_id, prompt_norm=env.prompt_norm)
+    held.turns = len(dropped)
+    transcript = Path(e["transcript"])
+    cut = int(e["cut"])
+    if held.windows and cut > 0:
+        # a string the kept turns also hold is not a leftover of the cut: the scan must not report it
+        kept = find_in_range(transcript, 0, cut, held.windows)
+        held.windows = [w for w in held.windows if w not in kept]
+    timeline: dict = {}
+    for tp in sorted({Path(x) for x in timeline_files}, key=str):
+        digs = select_run_lines(tp, dropped)
+        if digs:
+            timeline[str(tp)] = digs
+    names = set(audit_names or ()) | {str(project.get("name") or ""), str(project.get("id") or "")}
+    names.discard("")
+    audit: dict = {}
+    audit_dir = Path(env.data_dir) / "audit"
+    now = time.time()
+    months = audit_months(art.first_ts, max(now, art.last_ts or now))
+    if audit_dir.is_dir() and dropped:
+        for af in sorted(audit_dir.glob("audit-*.log")):
+            if months is not None and af.stem[len("audit-"):] not in months:
+                continue
+            digs = select_audit_runs(af, dropped, names)
+            if digs:
+                audit[str(af)] = digs
+    # media named in the dropped turns: not in the kept prefix, not in the prompt going back to the
+    # composer (its attachments go back with it), not in another session of the project
+    media: list = []
+    if held.media:
+        restored_names = {m.group(2) for m in _MEDIA_RE.finditer(restored_raw or "")}
+        cand = [(pid, n) for pid, n in held.media if n not in restored_names]
+        in_prefix = find_in_range(transcript, 0, cut, [n for _pid, n in cand]) if cut > 0 else set()
+        sub = Held(media=[(pid, n) for pid, n in cand if n not in in_prefix])
+        sibling = getattr(adapter, "sibling_roots", None)
+        roots = sibling(ctx, art) if callable(sibling) else []
+        media = plan_media(env.data_dir, sub, roots, session_id) if sub.media else []
+    files, size = _tree_size(list(art.paths))
+    size += max(0, int(e.get("orig_size") or 0) - cut)
+    chat_ids = {str(chat_id)} if chat_id else set()
+    keys = {session_key, *[b.get("session_key") for b in (bound or [])]} - {"", None}
+    first = float(art.first_ts or now)
+    prev_end = e.get("prev_end")
+    lower = first - 2.0
+    if isinstance(prev_end, (int, float)) and prev_end and prev_end < lower:
+        lower = max(float(prev_end), first - CUT_LOOKBACK_SEC)
+    upper = now + 60.0
+    trace = {}
+    for name in TRACE_FILES:
+        tp = Path(env.data_dir) / name
+        digs = select_trace_lines(tp, keys=keys, chat_ids=chat_ids, first_ts=lower, last_ts=upper, margin=0.0,
+                                  previews=(tap.prefixes, lower - 3600.0) if tap.prefixes else None)
+        if digs:
+            trace[str(tp)] = digs
+    home = Path(env.home) if env.home else Path.home()
+    plan_ids, plan_files = select_plans(env.data_dir, home, keys=keys, chat_ids=chat_ids,
+                                        first_ts=lower, last_ts=upper, margin=0.0)
+    rot_finder = getattr(env.state, "find_pending_rotate_handoffs", None)
+    finder = getattr(env.state, "find_handoffs", None)
+    handoffs = finder(held.windows, session_id=session_id, since=first) if callable(finder) else []
+    extra = {
+        "trace": trace,
+        "deferred": select_deferred(env.data_dir, keys=keys, prompts=held.prompts,
+                                    first_ts=lower, last_ts=upper, margin=0.0),
+        "plans": plan_ids, "plan_files": plan_files,
+        "rotate_handoffs": rot_finder(keys, held.windows) if callable(rot_finder) and held.windows else [],
+    }
+    lin = [x for x in (lineage or []) if not isinstance(x.get("ts"), (int, float)) or x["ts"] >= first - 2.0]
+    norm = env.prompt_norm or (lambda x: x)
+    restored = norm(restored_raw) if restored_raw else ""
+    run_ids = sorted(dropped)
+    return Plan(
+        provider=adapter.name, session_id=session_id, project_id=str(project.get("id", "")),
+        cwd=str(project.get("cwd", art.cwd)), session_key=session_key, art=art, held=held,
+        run_ids=run_ids, timeline=timeline, audit=audit, unattributed=0, media=media,
+        token=compute_cut_token(adapter.name, session_id, cut, run_ids),
+        files=files, bytes=size, bound=list(bound or []),
+        active_chats=[b["chat_id"] for b in (bound or []) if b.get("chat_id")],
+        lineage=lin, diary_days=_diary_days(art.first_ts, art.last_ts, env.home),
+        handoffs=handoffs, extra=extra, mode="cut", chat_id=str(chat_id or ""),
+        restored_prompt=restored if isinstance(restored, str) else "")
+
+
+def plan_view_cut(plan: Plan) -> dict:
+    """The dry-run body of endpoint B (contract P4)."""
+    v = plan_view(plan)
+    v["warnings"] = [w for w in v["warnings"] if not w.startswith("This is the current session")]
+    v.update({"chat_id": plan.chat_id, "whole_session": False, "turns": len(plan.run_ids),
+              "restored_prompt": plan.restored_prompt})
+    return v
+
+
 # ───────────────────────────── execute / resume ────────────────────────────────────────────────
 def pending_dir(data_dir: Path) -> Path:
     return Path(data_dir) / PENDING_DIR
@@ -1422,6 +1699,127 @@ async def _run_steps(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], rec: 
     return counts
 
 
+async def _run_cut_steps(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], rec: dict) -> dict:
+    """Steps 4-10 for B. Idempotent from the pending record alone. The session stays: no unbind, no
+    label/link/lineage removal; only the dropped turns' traces go."""
+    loop = asyncio.get_running_loop()
+    art = _art_from_record(rec)
+    e = art.extra
+    sid = rec["session_id"]
+    dropped = set(rec.get("run_ids") or [])
+    counts = {"turns": len(dropped), "files": 0, "timeline_lines": 0, "audit_lines": 0,
+              "search_rows": 0, "media": 0}
+    # 4. cut the transcript, remove the dropped turns' artifacts, verify
+    res = await loop.run_in_executor(None, adapter.cut, ctx, art)
+    counts["files"] = int((res or {}).get("files", 0))
+    left = await loop.run_in_executor(None, adapter.verify_cut, ctx, art)
+    if left:
+        raise ForgetError(500, "failed", f"{len(left)} path(s) survived the cut: " + ", ".join(left[:3]))
+    st = env.state
+    if st is not None and hasattr(st, "transcript_cut"):
+        st.transcript_cut(e.get("transcript") or "")
+    _after_step(4)
+    # 5. armed handoffs built from the dropped turns, the runtime rings of the chat
+    if st is not None and rec.get("handoffs") and hasattr(st, "drop_handoffs"):
+        await st.drop_handoffs(rec["handoffs"])
+    if st is not None and hasattr(st, "clear_runtime"):
+        st.clear_runtime(rec.get("session_key", ""), [b.get("session_key") for b in rec.get("bound", [])])
+    _after_step(5)
+    # 5b. chat-trace, fired deferred prompts, plan sidecars + files, the pending rotate handoff
+    ex = rec.get("extra") or {}
+    for path, digs in (ex.get("trace") or {}).items():
+        counts["trace_lines"] = counts.get("trace_lines", 0) + await loop.run_in_executor(
+            None, purge_lines_by_digest, Path(path), digs, env.trace_lock)
+    counts["deferred"] = purge_deferred(Path(env.data_dir), list(ex.get("deferred") or []), env.deferred_lock)
+    counts["plans"] = await loop.run_in_executor(
+        None, purge_plans, Path(env.data_dir), Path(env.home) if env.home else Path.home(),
+        list(ex.get("plans") or []), list(ex.get("plan_files") or []))
+    if st is not None and ex.get("rotate_handoffs") and hasattr(st, "drop_pending_rotate_handoffs"):
+        st.drop_pending_rotate_handoffs(ex["rotate_handoffs"])
+    # 6. chat-media
+    media_root = (Path(env.data_dir) / "chat-media").resolve()
+    for m in rec.get("media", []):
+        try:
+            mp = Path(m).resolve()
+            if media_root in mp.parents and mp.is_file():
+                mp.unlink()
+                counts["media"] += 1
+        except OSError:
+            pass
+    _after_step(6)
+    # 7. timeline + audit lines of the dropped runs (file pairs, as in A: a rotation in between)
+    pairs: dict = {}
+    for path, digs in (rec.get("timeline") or {}).items():
+        live = path[:-2] if path.endswith(".1") else path
+        pairs.setdefault(live, set()).update(digs)
+    for live, digs in sorted(pairs.items()):
+        for path in (live, live + ".1"):
+            counts["timeline_lines"] += await loop.run_in_executor(
+                None, purge_lines_by_digest, Path(path), digs, env.timeline_lock)
+    for path, digs in (rec.get("audit") or {}).items():
+        counts["audit_lines"] += await loop.run_in_executor(
+            None, purge_lines_by_digest, Path(path), digs, env.audit_lock)
+    _after_step(7)
+    # 8. search.db: the transcript (and removed sub-agent files) are re-indexed from scratch, so the
+    # cut's rows go and the kept ones come back from the cut file; the session's telemetry stays
+    tl_paths = sorted({p for p in (rec.get("timeline") or {})} | _live_timeline_paths(rec))
+    transcripts = [str(e.get("transcript"))] + [str(x) for x in e.get("sub_files") or []]
+    lock = env.search_lock() if env.search_lock else None
+    db = Path(env.data_dir) / "search.db"
+
+    async def _search() -> dict:
+        return await loop.run_in_executor(
+            None, lambda: purge_search(db, transcript_paths=transcripts, session_id=sid,
+                                       reindex_paths=tl_paths, drop_hits=False))
+
+    if lock is not None:
+        async with lock:
+            sres = await _search()
+    else:
+        sres = await _search()
+    counts["search_rows"] = sres["rows"]
+    counts["search_checkpoint"] = sres.get("checkpoint")
+    _after_step(8)
+    # 9. usage.db line cursor
+    await loop.run_in_executor(None, purge_usage_cut, Path(env.data_dir) / "usage.db",
+                               str(e.get("transcript")), int(e.get("prefix_lines") or 0),
+                               [str(x) for x in e.get("sub_files") or []])
+    _after_step(9)
+    # 10. the dropped runs' turn marks, the pending record
+    await loop.run_in_executor(None, drop_mark_runs, Path(env.data_dir), sid, dropped)
+    try:
+        (pending_dir(env.data_dir) / f"{rec['token']}.json").unlink()
+    except OSError:
+        pass
+    return counts
+
+
+def drop_mark_runs(data_dir: Path, session_id: str, run_ids: "set[str]") -> int:
+    """Rewrite the session's turn-mark file without the rows of `run_ids` (start AND end rows)."""
+    import turn_marks as _tm
+    path = turn_marks_path(data_dir, session_id)
+    if not run_ids or not path.exists():
+        return 0
+    with _tm._LOCK:
+        try:
+            raw_lines = path.read_bytes().splitlines(keepends=True)
+        except OSError:
+            return 0
+        keep: list = []
+        for raw in raw_lines:
+            try:
+                r = json.loads(raw)
+            except ValueError:
+                keep.append(raw)
+                continue
+            if not (isinstance(r, dict) and str(r.get("run_id")) in run_ids):
+                keep.append(raw if raw.endswith(b"\n") else raw + b"\n")
+        gone = len(raw_lines) - len(keep)
+        if gone:
+            _atomic_replace_lines(path, keep)
+    return gone
+
+
 def _live_timeline_paths(rec: dict) -> "set[str]":
     """The live (non-`.1`) timeline files whose rows must be rebuilt when any sibling changed."""
     out: set = set()
@@ -1438,6 +1836,10 @@ async def execute_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], pla
     rec["unattributed"] = plan.unattributed
     _write_pending(env.data_dir, rec)        # 3
     _after_step(3)
+    if plan.mode == "cut":
+        counts = await _run_cut_steps(env, adapter, ctx, rec)
+        plan.search_checkpoint = str(counts.get("search_checkpoint") or "")
+        return counts
     counts = await _run_steps(env, adapter, ctx, rec, plan.held)
     counts["unattributed"] = plan.unattributed
     plan.search_checkpoint = str(counts.get("search_checkpoint") or "")
@@ -1474,7 +1876,26 @@ async def resume_pending(ctx: Mapping[str, Any]) -> "list[str]":
                 for k in keys:
                     running[k] = True
                     taken.append(k)
-            await _run_steps(env, adapter_, ctx, rec, None)
+            if rec.get("mode") == "cut":
+                try:
+                    await _run_cut_steps(env, adapter_, ctx, rec)
+                except ForgetError as exc:
+                    if exc.code != "changed":
+                        raise
+                    # the transcript is neither the measured file nor the cut one (a turn ran after a
+                    # crash): cutting now could take that turn too. Give up loudly, never guess.
+                    print(f"[forget] resume of {p.name} abandoned: {exc.message}")
+                    try:
+                        write_inbox_note(env.data_dir, rec["provider"], rec["session_id"], {
+                            "clean": False, "hits": [], "truncated": True, "checked": False,
+                            "note": "forget from here could not be finished after a restart: the session "
+                                    "changed. Run it again from the chat."})
+                    except OSError:
+                        pass
+                    p.unlink(missing_ok=True)
+                    continue
+            else:
+                await _run_steps(env, adapter_, ctx, rec, None)
             done.append(rec["token"])
         except Exception as exc:   # noqa: BLE001 - a bad record must not stop the others or the startup
             print(f"[forget] resume of {p.name} failed: {exc!r}")
