@@ -8,7 +8,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { providerLabel } from '../lib/providers'
 import {
-  ForgetPlan, alsoDeletePayload, diaryLine, forgetErrorView, lineageKey, summaryLine,
+  ForgetPlan, ForgetTurnPlan, ForgetTurnResult, alsoDeletePayload, diaryLine, forgetErrorView, lineageKey, summaryLine,
 } from '../lib/forget'
 import { Modal, ModalHead } from './Modal'
 
@@ -16,6 +16,11 @@ interface Props {
   projectId: string
   provider: string
   sessionId: string
+  /** spec-098 P4: "Forget from here" mode - one chat's turns from an anchor user row on, instead of
+   *  the whole session. Absent = the delete-session dialog, unchanged. */
+  turn?: { chatId: string; anchorUuid: string }
+  /** Turn mode: called after a successful forget (the caller closes the dialog). */
+  onForgotten?: (res: ForgetTurnResult) => void
   /** Display name when the plan has no title yet (the list row's label / preview). */
   fallbackTitle?: string
   onClose: () => void
@@ -25,9 +30,9 @@ interface Props {
 
 type Phase = 'planning' | 'ready' | 'deleting'
 
-export function ForgetDialog({ projectId, provider, sessionId, fallbackTitle, onClose, onDeleted }: Props) {
+export function ForgetDialog({ projectId, provider, sessionId, turn, onForgotten, fallbackTitle, onClose, onDeleted }: Props) {
   const [phase, setPhase] = useState<Phase>('planning')
-  const [plan, setPlan] = useState<ForgetPlan | null>(null)
+  const [plan, setPlan] = useState<ForgetPlan | ForgetTurnPlan | null>(null)
   const [token, setToken] = useState('')
   const [checked, setChecked] = useState<Set<string>>(new Set())
   const [error, setError] = useState<{ message: string; replan: boolean } | null>(null)
@@ -37,7 +42,9 @@ export function ForgetDialog({ projectId, provider, sessionId, fallbackTitle, on
     setError(null)
     setPlan(null)
     try {
-      const res = await api.deleteSession(projectId, provider, sessionId, { dry_run: true })
+      const res = turn
+        ? await api.forgetFromHere(projectId, turn.chatId, { anchor_uuid: turn.anchorUuid, dry_run: true })
+        : await api.deleteSession(projectId, provider, sessionId, { dry_run: true })
       if (!('plan' in res)) throw new Error('unexpected response')
       setPlan(res.plan)
       setToken(res.plan_token)
@@ -47,7 +54,7 @@ export function ForgetDialog({ projectId, provider, sessionId, fallbackTitle, on
       setError(errView(e))
       setPhase('ready')
     }
-  }, [projectId, provider, sessionId])
+  }, [projectId, provider, sessionId, turn?.chatId, turn?.anchorUuid]) // eslint-disable-line react-hooks/exhaustive-deps -- `turn` is rebuilt per render; its two fields are the identity
 
   useEffect(() => { loadPlan() }, [loadPlan])
 
@@ -57,6 +64,14 @@ export function ForgetDialog({ projectId, provider, sessionId, fallbackTitle, on
     setError(null)
     try {
       const also = alsoDeletePayload(plan.lineage, checked)
+      if (turn) {
+        const done = await api.forgetFromHere(projectId, turn.chatId, {
+          anchor_uuid: turn.anchorUuid, dry_run: false, plan_token: token, ...(also.length ? { also_delete: also } : {}),
+        })
+        if (!('forgotten' in done)) throw new Error('unexpected response')
+        onForgotten?.(done)
+        return
+      }
       const res = await api.deleteSession(projectId, provider, sessionId, {
         dry_run: false, plan_token: token, ...(also.length ? { also_delete: also } : {}),
       })
@@ -77,25 +92,39 @@ export function ForgetDialog({ projectId, provider, sessionId, fallbackTitle, on
 
   const busy = phase !== 'ready'
   const stale = !!error?.replan
-  const title = plan?.title || fallbackTitle || sessionId.slice(0, 8) + '…'
+  const title = (plan && 'title' in plan ? plan.title : '') || fallbackTitle || sessionId.slice(0, 8) + '…'
+  const turnPlan = plan && 'restored_prompt' in plan ? plan : null
   const diary = plan ? diaryLine(plan.diary_days) : null
 
   return (
     <Modal onClose={busy && phase === 'deleting' ? () => { /* a purge in flight cannot be cancelled */ } : onClose}>
-      <ModalHead title="Delete session forever" onClose={onClose} />
+      <ModalHead title={turn ? 'Forget from here' : 'Delete session forever'} onClose={onClose} />
       <div className="run-modal-body forget-dialog">
         {phase === 'planning' && <div className="forget-loading">Checking what would be deleted…</div>}
 
         {plan && (
           <>
             <div className="forget-what">
-              <div className="forget-title" title={title}>{title}</div>
+              {!turnPlan && <div className="forget-title" title={title}>{title}</div>}
               <div className="forget-sub">{providerLabel(plan.provider)} · {summaryLine(plan)}</div>
               <div className="forget-note">
-                Removes the transcript and everything the cockpit stored about it: timeline, audit,
-                search index, uploads. It cannot be undone.
+                {turnPlan
+                  ? 'Removes this turn and every later turn of this chat — prompts, replies, tool calls — and everything the cockpit stored about them: timeline, audit, search index, uploads. It cannot be undone.'
+                  : 'Removes the transcript and everything the cockpit stored about it: timeline, audit, search index, uploads. It cannot be undone.'}
               </div>
+              {turnPlan?.whole_session && (
+                <div className="forget-note forget-whole">
+                  This is the first turn: the whole session is deleted; the chat starts fresh.
+                </div>
+              )}
             </div>
+
+            {turnPlan && turnPlan.restored_prompt && (
+              <div className="forget-sec">
+                <div className="forget-sec-h">Goes back to the composer</div>
+                <div className="forget-prompt">{turnPlan.restored_prompt}</div>
+              </div>
+            )}
 
             {plan.warnings.length > 0 && (
               <ul className="forget-list forget-warn">
@@ -165,7 +194,7 @@ export function ForgetDialog({ projectId, provider, sessionId, fallbackTitle, on
             onKeyDown={e => { if (e.key === 'Enter') e.preventDefault() }}
             onClick={confirm}
           >
-            {phase === 'deleting' ? 'Deleting…' : 'Delete forever'}
+            {phase === 'deleting' ? (turn ? 'Forgetting…' : 'Deleting…') : (turn ? 'Forget forever' : 'Delete forever')}
           </button>
         </div>
       </div>
