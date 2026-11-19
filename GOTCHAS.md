@@ -328,3 +328,22 @@ To inspect the profile by hand: `secret get cloak-manager-token`, then
 - **`agents_config.skills` / `SKILLS_DEFAULT_ALLOW` = список РАЗРЕШЕНИЙ, не фильтр загрузки.** SDK (`subprocess_cli.py::_apply_skills_defaults`) превращает `options.skills` только в `--allowedTools Skill(имя)`. При `bypassPermissions` это ничего не меняет: сессия видит ВСЕ установленные скиллы. Проверено 2026-10-20: `--allowedTools "Skill(song)"` → в списке 179 записей, включая `sumi:*`. Тезис «core-26 грузится, остальные ~57 нет» из `docs/internal/skills-audit/08-skill-guide.md` неверен, поправка стоит в начале того файла.
 - **Список скиллов режется по бюджету ≈1 % окна.** Сверх него записи остаются без описания (Claude не может по ним роутить). Поэтому пакеты design/video/marketing вынесены из `~/.claude/skills` в `~/.claude/skill-packs/` и подключены симлинками в `.claude/skills` тех проектов, которые их заказывают в `topics.json` (rightforms-app, cardloop, ai-video-editing, marketing). Проверка размера списка: `printf 'count the skill entries' | claude -p --model haiku --max-turns 1 --permission-mode bypassPermissions --setting-sources user,project` из нужного cwd. Было 179 → стало 49 (дом) / 80 (rightforms-app с пакетом).
 - **Внешний CLI кокпита (`CLAUDE_CLI_PATH=~/.npm-global/bin/claude`) обновлять ТОЛЬКО так:** `npm i -g --prefix ~/.npm-global @anthropic-ai/claude-code@<ver>` и затем `node ~/.npm-global/lib/node_modules/@anthropic-ai/claude-code/install.cjs` (npm ≥ 11 блокирует postinstall, без второго шага бинарника нет и `claude` падает с «native binary not installed»). Голый `claude update` или `npm i -g` при активном nvm ставят копию в `~/.nvm/.../bin`, которую PATH не видит: так кокпит 2 недели сидел на 2.1.293 при «обновлённой» 2.1.304. Пока бинарник не установлен, каждая сессия кокпита падает — делать в тихое окно. Фоновый авто-апдейтер CLI по той же причине не может обновиться сам (npm 12 режет postinstall) и шумит «Auto-update failed … native binary … not downloaded» на каждом старте: выключен `DISABLE_AUTOUPDATER=1` в `env` user-settings (2026-10-20); версия меняется только ручной командой выше.
+
+## spec-098 Forget: turn marks are the only safe cut points (2026-11-18)
+
+- **A turn mark is written once per run id** (`turn_marks.record` is idempotent per `run_id`, and
+  `engine` takes the id from `current_run(session_key)`, which is never cleared). A run site that
+  does not stamp a FRESH run id before calling `run_engine` therefore records no mark for its
+  turn: card runs reuse the card id, autonomous `bg` turns never pass `client.query`. "Forget
+  from here" then refuses (`no_mark`) — keep it that way. Picking the previous mark instead cuts
+  a turn the operator did not choose; `locate_cut` checks that the anchor sits inside the mark's
+  run (by its `ts_end`, else by counting turn starts) for exactly this reason.
+- **The mark must be taken BEFORE `client.query`.** The CLI writes `queue-operation enqueue` with
+  the prompt text as the first line of the turn; a mark taken after it leaves the prompt in the
+  kept prefix.
+- **A cut shrinks a file every reader assumed append-only.** `history_index`, `transcript_stats`,
+  the search indexer and the usage scanner all resume from a remembered offset/line count. They
+  rebuild on a size change, but the cut also resets their state explicitly
+  (`_ForgetState.transcript_cut`, `purge_search` dropping the transcript's `file_state`,
+  `purge_usage_cut` setting `lines` back): a file that regrows past its old size before the next
+  sweep would otherwise be read from the stale offset.

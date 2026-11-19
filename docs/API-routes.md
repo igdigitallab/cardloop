@@ -11,7 +11,7 @@
 venv/bin/python tools/gen_route_index.py
 ```
 
-201 routes on 173 paths (196 need the session cookie, 5 do not). Methods and paths are exact; the description is the first line of the handler's docstring, or the matching [API.md](API.md) row when the handler has no docstring (a dash means neither has one). Request and response shapes for the main flows are in [API.md](API.md); for the rest, the handler named in the table is the reference.
+202 routes on 174 paths (197 need the session cookie, 5 do not). Methods and paths are exact; the description is the first line of the handler's docstring, or the matching [API.md](API.md) row when the handler has no docstring (a dash means neither has one). Request and response shapes for the main flows are in [API.md](API.md); for the rest, the handler named in the table is the reference.
 
 ## Authentication
 
@@ -123,6 +123,7 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `POST` | `/api/projects/{id}/chats` | cookie | `api_project_chats_create` | {name?} → created chat entry |
 | `PATCH` | `/api/projects/{id}/chats/{chat_id}` | cookie | `api_project_chats_patch` | Rename or activate a chat, or switch its runtime — `{name?, active?, provider?, model?, backend?, account?, expected_revision?}`. The switch is valid… |
 | `DELETE` | `/api/projects/{id}/chats/{chat_id}` | cookie | `api_project_chats_delete` | Delete a non-final chat; provider threads/sessions are not deleted |
+| `POST` | `/api/projects/{id}/chats/{chat_id}/forget` | cookie | `api_chat_forget` | Forget from here — cut the chat's current session at the turn that holds the anchor (spec-098 B). |
 | `POST` | `/api/projects/{id}/chats/{chat_id}/handoff` | cookie | `api_project_chat_handoff` | Spec-092 runtime handoff — `{messages:[{role,text,tools}], from_label, to_label, commit?, text?}`. `commit` false/absent previews `{handoff:{text, ..…` |
 | `GET` | `/api/projects/{id}/claude-md` | cookie | `api_project_claude_md` | Read project `CLAUDE.md` |
 | `POST` | `/api/projects/{id}/claude-md` | cookie | `api_project_claude_md_write` | Overwrite CLAUDE.md. |

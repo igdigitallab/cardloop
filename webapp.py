@@ -13449,7 +13449,7 @@ def _forget_cut_builder(ctx: dict, project: dict, adapter, chat_id: str, session
 
 
 async def api_chat_forget(req: web.Request) -> web.Response:
-    """POST /api/projects/{id}/chats/{chat_id}/forget — spec-098 B, "forget from here".
+    """Forget from here — cut the chat's current session at the turn that holds the anchor (spec-098 B).
 
     Body (JSON only): {"anchor_uuid", "dry_run": true} -> plan + plan_token;
     {"anchor_uuid", "dry_run": false, "plan_token", "also_delete": [...]} -> cut. The chat's CURRENT
