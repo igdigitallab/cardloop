@@ -870,6 +870,7 @@ class Plan:
     lineage: "list[dict]" = field(default_factory=list)
     diary_days: "list[str]" = field(default_factory=list)
     bound: "list[dict]" = field(default_factory=list)
+    handoffs: "list[dict]" = field(default_factory=list)   # armed runtime_handoffs built from the content
 
     def record(self) -> dict:
         """The pending-journal form: ids, paths, digests. No conversation text."""
@@ -882,7 +883,7 @@ class Plan:
                     "paths": [str(p) for p in a.paths], "first_ts": a.first_ts, "last_ts": a.last_ts,
                     "extra": a.extra},
             "run_ids": self.run_ids, "timeline": self.timeline, "audit": self.audit,
-            "media": self.media, "bound": self.bound,
+            "media": self.media, "bound": self.bound, "handoffs": self.handoffs,
         }
 
 
@@ -970,6 +971,8 @@ def build_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Ma
     roots = sibling(ctx, art) if callable(sibling) else []
     media = plan_media(env.data_dir, held, roots, session_id) if held.media else []
     files, size = _tree_size(list(art.paths))
+    finder = getattr(env.state, "find_handoffs", None)
+    handoffs = finder(held.windows) if callable(finder) and held.windows else []
     return Plan(
         provider=adapter.name, session_id=session_id, project_id=str(project.get("id", "")),
         cwd=str(project.get("cwd", art.cwd)), session_key=session_key, art=art, held=held,
@@ -977,7 +980,8 @@ def build_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Ma
         token=compute_token(adapter.name, session_id, run_ids, fingerprint),
         files=files, bytes=size, bound=list(bound or []),
         active_chats=[b["chat_id"] for b in (bound or []) if b.get("chat_id")],
-        lineage=list(lineage or []), diary_days=_diary_days(art.first_ts, art.last_ts, env.home))
+        lineage=list(lineage or []), diary_days=_diary_days(art.first_ts, art.last_ts, env.home),
+        handoffs=handoffs)
 
 
 def plan_view(plan: Plan) -> dict:
@@ -1049,8 +1053,8 @@ async def _run_steps(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], rec: 
     if st is not None and hasattr(st, "drop_labels_links"):
         st.drop_labels_links(sid)
     remove_lineage(env.data_dir, sid)
-    if st is not None and held is not None and hasattr(st, "drop_handoffs"):
-        await st.drop_handoffs(held.windows)
+    if st is not None and rec.get("handoffs") and hasattr(st, "drop_handoffs"):
+        await st.drop_handoffs(rec["handoffs"])
     if st is not None and hasattr(st, "clear_runtime"):
         st.clear_runtime(rec.get("session_key", ""), [b.get("session_key") for b in rec.get("bound", [])])
     _after_step(5)

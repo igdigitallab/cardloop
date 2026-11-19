@@ -13018,18 +13018,30 @@ class _ForgetState:
                 if dropped and callable(ctx.get("save_sessions")):
                     ctx["save_sessions"]()
 
-    async def drop_handoffs(self, windows: "list[str]") -> int:
-        """Remove an armed (undelivered) runtime_handoff whose text carries the deleted content."""
-        if not windows:
+    def find_handoffs(self, windows: "list[str]") -> "list[dict]":
+        """Armed (undelivered) runtime_handoffs whose text carries the content about to go: ids only."""
+        out: list = []
+        for pid, entry in _load_chats(self.ctx).items():
+            for chat in (entry.get("chats", []) if isinstance(entry, dict) else []):
+                rh = chat.get("runtime_handoff") if isinstance(chat, dict) else None
+                text = rh.get("text") if isinstance(rh, dict) else None
+                if isinstance(text, str) and any(w in text for w in windows):
+                    out.append({"project_id": pid, "chat_id": chat.get("id"),
+                                "created_at": rh.get("created_at")})
+        return out
+
+    async def drop_handoffs(self, refs: "list[dict]") -> int:
+        if not refs:
             return 0
         n = 0
         async with _chats_lock():
             data = _load_chats(self.ctx)
-            for entry in data.values():
-                for chat in (entry.get("chats", []) if isinstance(entry, dict) else []):
+            for ref in refs:
+                entry = data.get(ref.get("project_id")) or {}
+                for chat in entry.get("chats", []):
                     rh = chat.get("runtime_handoff") if isinstance(chat, dict) else None
-                    text = rh.get("text") if isinstance(rh, dict) else None
-                    if isinstance(text, str) and any(w in text for w in windows):
+                    if (chat.get("id") == ref.get("chat_id") and isinstance(rh, dict)
+                            and rh.get("created_at") == ref.get("created_at")):
                         chat.pop("runtime_handoff", None)
                         n += 1
             if n:
