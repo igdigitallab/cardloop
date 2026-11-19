@@ -238,11 +238,15 @@ async def test_a_foreign_writer_fd_is_409_writer(client, world, monkeypatch):
         p.wait()
 
 
-async def test_a_foreign_claude_process_resuming_the_session_is_409(client, world, monkeypatch):
+async def test_a_foreign_claude_process_resuming_the_session_is_409(client, world, monkeypatch, tmp_path):
     monkeypatch.setattr(webapp.asyncio, "sleep", _fast_sleep)
     token = await dry(client)
     before = world.digest_all()
-    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "claude", "--resume", T_SID])
+    # a program NAMED claude with the session id among its arguments (the bundled CLI's shape)
+    fake = tmp_path / "bin" / "claude"
+    fake.parent.mkdir()
+    fake.symlink_to(sys.executable)
+    p = subprocess.Popen([str(fake), "-c", "import time; time.sleep(30)", "--resume", T_SID])
     try:
         r = await post(client, {"dry_run": False, "plan_token": token})
         assert r.status == 409 and (await r.json())["code"] == "writer"

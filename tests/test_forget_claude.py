@@ -183,3 +183,29 @@ def test_the_prompt_text_is_what_the_attribution_matches(world, adapter):
     key = forget.digest(forget.collapse(TEXT_PROMPT))
     assert any(key in keys for _ts, keys in held.prompts)
     assert (PID, "shot-1.png") in held.media and (PID, "shared.png") in held.media
+
+
+def test_busy_reason_sees_a_claude_cli_on_the_session_not_a_shell_that_names_it(world, adapter, tmp_path):
+    """A process counts only when its PROGRAM is claude and the id is one of its arguments. The old
+    substring test refused live deletes because of the deleting agent's own Bash command line."""
+    import os
+    import subprocess
+    import time
+    fake = tmp_path / "bin" / "claude"
+    fake.parent.mkdir()
+    os.symlink("/bin/sh", fake)
+    shell = subprocess.Popen(["/bin/bash", "-c", f"sleep 5 # ~/.claude/projects/x/{T_SID}.jsonl"])
+    try:
+        time.sleep(0.2)
+        assert adapter.busy_reason(world.ctx(), world.project(), T_SID) is None
+    finally:
+        shell.kill()
+        shell.wait()
+    cli = subprocess.Popen([str(fake), "-c", "sleep 5", "--resume", T_SID])
+    try:
+        time.sleep(0.2)
+        reason = adapter.busy_reason(world.ctx(), world.project(), T_SID)
+        assert reason and str(cli.pid) in reason
+    finally:
+        cli.kill()
+        cli.wait()

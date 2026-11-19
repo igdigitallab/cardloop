@@ -233,6 +233,19 @@ def _last_line_parses(path: Path, size: int) -> bool:
         return False
 
 
+def _claude_runs_session(argv: "list[str]", session_id: str) -> bool:
+    """Is this command line a Claude CLI on the session? The program (argv[0], or the script a
+    node runs) must be claude AND the id one of its ARGUMENTS (`--resume <sid>`, `--resume=<sid>`).
+    A shell whose script text merely mentions the id next to a `~/.claude/...` path is not one:
+    the substring test refused live deletes because of the deleting agent's own Bash command."""
+    if not argv or not session_id:
+        return False
+    head = argv[:2]
+    if not any(os.path.basename(a) == "claude" or "claude-code" in a for a in head):
+        return False
+    return any(a == session_id or a.endswith("=" + session_id) for a in argv[1:])
+
+
 class ClaudeAdapter:
     name = "claude"
     can_delete_session = True
@@ -360,10 +373,10 @@ class ClaudeAdapter:
             if pid == me:
                 continue
             try:
-                cmd = (p / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+                argv = [a.decode("utf-8", "replace") for a in (p / "cmdline").read_bytes().split(b"\0") if a]
             except OSError:
-                cmd = ""
-            if session_id in cmd and "claude" in cmd:
+                argv = []
+            if _claude_runs_session(argv, session_id):
                 return f"a claude process ({pid}) is running this session"
             try:
                 fds = list((p / "fd").iterdir())
