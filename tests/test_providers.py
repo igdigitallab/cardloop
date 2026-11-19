@@ -83,7 +83,11 @@ def test_known_map_follows_each_providers_enabled_flag_live(monkeypatch, on):
 
 
 def test_claude_capabilities_is_the_one_shared_dict():
-    assert providers.get("claude").capabilities() is providers.CLAUDE_CAPABILITIES
+    # spec-098: the row also carries the forget flags, merged on top, so it is a superset (not the
+    # same object) — every key of the shared dict is still there with the same value.
+    caps = providers.get("claude").capabilities()
+    assert {k: caps[k] for k in providers.CLAUDE_CAPABILITIES} == providers.CLAUDE_CAPABILITIES
+    assert set(caps) - set(providers.CLAUDE_CAPABILITIES) == {"delete_session", "forget_turn"}
     assert providers.CLAUDE_CAPABILITIES["ask_mode"] is True
     assert "ask_mode" not in providers.get("codex").capabilities()
 
