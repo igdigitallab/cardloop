@@ -19,6 +19,33 @@ export interface ForgetPlan {
   limits: string[]
   warnings: string[]
 }
+/** spec-098 P4: the plan of a "Forget from here" dry run (no title / active_in_chats). */
+export interface ForgetTurnPlan {
+  provider: string
+  session_id: string
+  chat_id: string
+  whole_session: boolean
+  turns: number
+  first_ts: number | null
+  last_ts: number | null
+  restored_prompt: string
+  files: number
+  bytes: number
+  side_effects: ForgetSideEffect[]
+  lineage: ForgetLineage[]
+  diary_days: string[]
+  limits: string[]
+  warnings: string[]
+}
+export interface ForgetTurnResult {
+  ok: true
+  forgotten: { turns: number; files: number; timeline_lines: number; audit_lines: number; search_rows: number; media: number }
+  restored_prompt: string
+  whole_session: boolean
+  also_deleted: { provider: string; session_id: string }[]
+  also_failed: unknown[]
+  residue: string
+}
 export interface ForgetResidueHit { path: string; store?: string }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -63,7 +90,7 @@ export function lineageKey(l: Pick<ForgetLineage, 'provider' | 'session_id'>): s
 }
 
 /** "What goes" summary line: "7 turns · 17.11 14:03 - 15:10 · 12 files, 814 KB". */
-export function summaryLine(p: ForgetPlan): string {
+export function summaryLine(p: Pick<ForgetPlan, 'turns' | 'first_ts' | 'last_ts' | 'files' | 'bytes'>): string {
   const bits = [`${p.turns} ${p.turns === 1 ? 'turn' : 'turns'}`]
   const span = formatSpan(p.first_ts, p.last_ts)
   if (span) bits.push(span)
@@ -124,4 +151,58 @@ export function deletedChatSession(
 ): boolean {
   if (chatId && Array.isArray(evt.chat_ids) && evt.chat_ids.includes(chatId)) return true
   return !!evt.session_id && ids.some(i => i === evt.session_id)
+}
+
+/** Minimal row shape the anchor rule needs (ChatMessage satisfies it). */
+export interface ForgetFeedRow { role: string; uuid?: string; ts?: number; streaming?: boolean }
+
+/** Slack between a turn mark's start and the transcript timestamp of its user row (ms). */
+export const FORGET_MARK_SLACK_MS = 5000
+
+/** "Forget from here" anchor for the assistant group starting at `groupIndex`: the uuid of the
+ *  user row that began that turn, or null when the action must not be offered. Offered only
+ *  when the group is in the chat's CURRENT session (after the last session_break), finished,
+ *  its nearest preceding user row has a uuid, and that row is not older than the session's
+ *  earliest turn mark (`forgetFromMs`; null = the server has no marks = never). */
+export function forgetAnchorFor(
+  feed: readonly ForgetFeedRow[], groupIndex: number, forgetFromMs: number | null | undefined,
+): string | null {
+  if (forgetFromMs == null || !Number.isFinite(forgetFromMs)) return null
+  const first = feed[groupIndex]
+  if (!first || first.role !== 'assistant') return null
+  // The whole assistant run must be settled: a streaming reply cannot be cut under its own run.
+  for (let i = groupIndex; i < feed.length && feed[i].role === 'assistant'; i++) {
+    if (feed[i].streaming) return null
+  }
+  // Current session only: no session_break anywhere after this group.
+  for (let i = groupIndex + 1; i < feed.length; i++) if (feed[i].role === 'session_break') return null
+  for (let i = groupIndex - 1; i >= 0; i--) {
+    const r = feed[i]
+    if (r.role === 'session_break') return null
+    if (r.role !== 'user') continue
+    if (!r.uuid || r.ts == null || r.streaming) return null
+    return r.ts >= forgetFromMs - FORGET_MARK_SLACK_MS ? r.uuid : null
+  }
+  return null
+}
+
+/** Composer text after a forget: the restored prompt, then a blank line and the draft if any. */
+export function composerAfterForget(restored: string, draft: string): string {
+  if (!restored) return draft
+  return draft.trim() ? `${restored}\n\n${draft}` : restored
+}
+
+/** Toast text for an executed turn forget. */
+export function forgottenToast(turns: number, wholeSession: boolean): string {
+  if (wholeSession) return 'Forgot the whole session'
+  return `Forgot ${turns} ${turns === 1 ? 'turn' : 'turns'}`
+}
+
+/** Does a `chat_forgotten` event concern this chat's session? */
+export function chatForgottenAffectsMe(
+  evt: { chat_id?: string; session_id?: string }, chatId: string | null | undefined,
+  sessionId: string | null | undefined,
+): boolean {
+  if (chatId && evt.chat_id === chatId) return true
+  return !!evt.session_id && evt.session_id === sessionId
 }

@@ -2519,9 +2519,14 @@ a.chat-file-ref { color: inherit; font-family: var(--mono); font-size: 0.92em; }
 .forget-kind { font-size: 10px; color: var(--text3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0 4px; margin-right: 4px; }
 .forget-lineage { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: var(--text2); cursor: pointer; padding: 2px 0; }
 .forget-diary { font-size: 12px; color: var(--text2); }
+.forget-whole { color: var(--text); }
+.forget-prompt { font-size: 12px; color: var(--text2); background: var(--bg2, transparent); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; max-height: 96px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .forget-error { font-size: 12px; color: var(--red); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .forget-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .forget-actions .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
 @media (max-width: 768px) {
   .forget-actions button { min-height: 40px; }
 }
+
+/* spec-098 P4: the destructive msg-action keeps the achromatic look until hovered. */
+.msg-act-btn--danger:hover { color: var(--red); }

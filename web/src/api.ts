@@ -508,6 +508,22 @@ export const api = {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     ),
 
+  // spec-098 P4: forget a chat's turns from an anchor (a user row's uuid) to the end of its session.
+  // dry_run -> plan + plan_token; else execute. Failures throw like apiFetch ({error, code}).
+  forgetFromHere: (
+    id: string, chatId: string,
+    body:
+      | { anchor_uuid: string; dry_run: true }
+      | { anchor_uuid: string; dry_run: false; plan_token: string; also_delete?: { provider: string; session_id: string }[] },
+  ) =>
+    apiFetch<
+      | { ok: true; plan_token: string; plan: import('./lib/forget').ForgetTurnPlan }
+      | import('./lib/forget').ForgetTurnResult
+    >(
+      `/api/projects/${id}/chats/${encodeURIComponent(chatId)}/forget`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    ),
+
   // #2: manual label for any session (empty = remove)
   setSessionLabel: (id: string, sid: string, label: string) =>
     apiFetch<{ ok: boolean; session_id: string; label: string | null }>(

@@ -49,6 +49,9 @@ E2E_PROJECT_IDS.append("e2e-filedrop")
 # spec-098: deleting a whole session from the session list (test_forget_session.py).
 E2E_PROJECT_IDS.append("e2e-forget")
 
+# spec-098 P4: Forget from here on a reply (test_forget_turn.py).
+E2E_PROJECT_IDS.append("e2e-forget-turn")
+
 # The bus-lag race scenario (test_bus_lag_no_duplicate.py).
 E2E_PROJECT_IDS += ["e2e-buslag", "e2e-buslag-multi", "e2e-buslag-error", "e2e-buslag-toolonly"]
 
