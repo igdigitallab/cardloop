@@ -197,7 +197,7 @@ async def test_pre_compact_hook_emits_audit_and_bus_event():
 
     audit_lines = []
 
-    def _fake_audit(project, kind, text):
+    def _fake_audit(project, kind, text, session_key=None):
         audit_lines.append((project, kind, text))
 
     hook_fn = engine._make_pre_compact_hook(project_name, session_key)

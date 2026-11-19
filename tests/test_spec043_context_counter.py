@@ -88,7 +88,7 @@ async def _collect_events(turn_messages):
     events = []
     with patch.object(engine, "PERSISTENT_CLIENT", True), \
          patch.object(engine, "ClaudeSDKClient", return_value=live_client), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         async for ev in bot.run_engine(
             project_name="proj",
             cwd=str(ROOT),
@@ -158,7 +158,7 @@ async def test_no_usage_turn_does_not_carry_stale_value(tmp_path):
     result_events = []
     with patch.object(engine, "PERSISTENT_CLIENT", True), \
          patch.object(engine, "ClaudeSDKClient", return_value=live_client), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         # Turn 1
         async for ev in bot.run_engine(
             project_name="proj",

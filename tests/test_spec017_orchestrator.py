@@ -248,7 +248,7 @@ async def test_run_engine_yields_subagent_started(tmp_path):
 
     with patch.object(engine, "ClaudeSDKClient", return_value=fake_client), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         events = []
         async for ev in bot.run_engine(
             project_name="test",
@@ -276,7 +276,7 @@ async def test_run_engine_yields_subagent_notification(tmp_path):
 
     with patch.object(engine, "ClaudeSDKClient", return_value=fake_client), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         events = []
         async for ev in bot.run_engine(
             project_name="test",
@@ -330,7 +330,7 @@ async def test_run_engine_passes_agents_to_opts(tmp_path):
 
     with patch.object(engine, "ClaudeSDKClient", FakeClient), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),
@@ -370,7 +370,7 @@ async def test_conductor_prompt_injected_for_fable(tmp_path):
 
     with patch.object(engine, "ClaudeSDKClient", FakeClient), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),
@@ -418,7 +418,7 @@ async def test_conductor_prompt_not_injected_for_sonnet(tmp_path):
 
     with patch.object(engine, "ClaudeSDKClient", FakeClient), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),
@@ -447,7 +447,7 @@ async def test_non_task_system_messages_still_silenced(tmp_path):
 
     with patch.object(engine, "ClaudeSDKClient", return_value=fake_client), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         events = []
         async for ev in bot.run_engine(
             project_name="test",
@@ -705,7 +705,7 @@ async def test_conductor_prompt_skipped_when_toggle_off(tmp_path):
 
     with patch.object(engine, "ClaudeSDKClient", FakeClient), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),
@@ -839,7 +839,7 @@ async def test_run_engine_passes_effort_to_opts(tmp_path):
 
     with patch.object(engine, "ClaudeSDKClient", FakeClient), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),
@@ -879,7 +879,7 @@ async def test_run_engine_system_prompt_has_exclude_dynamic_sections(tmp_path):
 
     with patch.object(engine, "ClaudeSDKClient", FakeClient), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         async for _ in bot.run_engine(
             project_name="test",
             cwd=str(tmp_path),

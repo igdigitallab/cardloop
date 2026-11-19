@@ -107,7 +107,7 @@ async def _collect_events(tmp_path, messages, model="sonnet", effort=None,
     with (
         patch.object(engine, "PERSISTENT_CLIENT", False),
         patch.object(engine, "ClaudeSDKClient", return_value=client),
-        patch.object(engine, "audit", lambda *a: None),
+        patch.object(engine, "audit", lambda *a, **k: None),
         patch.object(engine, "append_usage_ledger", side_effect=_fake_ledger),
     ):
         events = []
@@ -382,7 +382,7 @@ async def test_effort_change_triggers_live_client_eviction(tmp_path):
     with (
         patch.object(engine, "PERSISTENT_CLIENT", True),
         patch.object(engine, "ClaudeSDKClient", side_effect=_factory),
-        patch.object(engine, "audit", lambda *a: None),
+        patch.object(engine, "audit", lambda *a, **k: None),
         patch.object(engine, "append_usage_ledger", lambda *a: None),
     ):
         # Turn 1: effort=high

@@ -169,7 +169,7 @@ async def test_backend_change_triggers_live_client_eviction(tmp_path):
     with (
         patch.object(engine, "PERSISTENT_CLIENT", True),
         patch.object(engine, "ClaudeSDKClient", side_effect=_factory),
-        patch.object(engine, "audit", lambda *a: None),
+        patch.object(engine, "audit", lambda *a, **k: None),
         patch.object(engine, "append_usage_ledger", lambda *a: None),
     ):
         # Turn 1: default backend (Claude)
@@ -248,7 +248,7 @@ async def test_backend_unchanged_reuses_live_client(tmp_path):
     with (
         patch.object(engine, "PERSISTENT_CLIENT", True),
         patch.object(engine, "ClaudeSDKClient", return_value=client),
-        patch.object(engine, "audit", lambda *a: None),
+        patch.object(engine, "audit", lambda *a, **k: None),
         patch.object(engine, "append_usage_ledger", lambda *a: None),
     ):
         for prompt in ("t1", "t2"):

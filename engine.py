@@ -51,6 +51,7 @@ import accounts as _accounts              # multi-subscription switch (CLAUDE_CO
 import browser_tools as _browser_tools    # spec-065: agent browser tools (built per-run)
 import roles                              # spec-091: declarative sub-agent role registry
 import command_guard as _command_guard   # tokenizer-based classifier behind the Bash deny hook
+import turn_marks as _turn_marks         # spec-098: per-run transcript offsets for forget-from-here
 import runtime as _runtime               # spec-092: run context + which CLI binary serves a run
 import load_monitor as _load_monitor     # spec-094: shared working-set measure + eviction counter
 import runtime_secrets as _rs             # spec-096 P3b: startup snapshot of the secrets scrubbed from os.environ
@@ -1168,13 +1169,45 @@ def _is_destructive(cmd: str) -> bool:
 AUDIT_LOCK = threading.Lock()
 
 
-def audit(project: str, kind: str, text: str):
-    """Appends to data/audit/audit-YYYY-MM.log — permanent trail of full-auto bot actions on prod."""
+# spec-098 run-id stamping: the run currently (or last) executing per session_key. A module dict, not
+# a contextvar: hook callbacks of a persistent client and post-run_end sub-agent output run outside the
+# run's task. Set at run start at every run site; never cleared at run end.
+_CURRENT_RUN: dict[str, str] = {}
+
+
+def set_current_run(session_key, run_id) -> None:
+    """Remember `run_id` as the current run of `session_key` (until the next run start)."""
+    if session_key and run_id:
+        _CURRENT_RUN[str(session_key)] = str(run_id)
+
+
+def current_run(session_key) -> "str | None":
+    """The run id last set for `session_key`, or None when unknown."""
+    if not session_key:
+        return None
+    return _CURRENT_RUN.get(str(session_key))
+
+
+# Both audit line forms: `ts [Project] KIND: text` and `ts [Project] KIND run=<id>: text`.
+AUDIT_LINE_RE = re.compile(r"^(\S+) \[(.*?)\] ([A-Z_]+)(?: run=(\S+))?: (.*)$")
+
+
+def parse_audit_line(line: str):
+    """-> (ts, project, kind, run_id|None, text) or None when the line is not an audit line."""
+    m = AUDIT_LINE_RE.match(line.rstrip("\n"))
+    return m.groups() if m else None
+
+
+def audit(project: str, kind: str, text: str, session_key=None):
+    """Appends to data/audit/audit-YYYY-MM.log — permanent trail of full-auto bot actions on prod.
+    With a session_key whose run id is known the line carries `run=<id>` (spec-098)."""
     try:
         AUDIT_DIR.mkdir(exist_ok=True)
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        rid = current_run(session_key)
+        run_tok = f" run={rid}" if rid else ""
         with AUDIT_LOCK, open(AUDIT_DIR / f"audit-{time.strftime('%Y-%m')}.log", "a", encoding="utf-8") as f:
-            f.write(f"{ts} [{project}] {kind}: {text}\n")
+            f.write(f"{ts} [{project}] {kind}{run_tok}: {text}\n")
     except Exception:
         pass
 
@@ -1748,7 +1781,7 @@ def _make_post_tool_use_hook(project_name: str, session_key: str, agent_model_lo
 
             status = "err" if is_err else "ok"
             audit_text = f"{tool_name} {status} {output_str}"
-            audit(project_name, "RESULT", audit_text)
+            audit(project_name, "RESULT", audit_text, session_key=session_key)
 
             # Also publish to timeline via the webapp bus (only available post-init).
             try:
@@ -1879,12 +1912,31 @@ _GUARD_PROJECTS: "dict[str, str]" = {}
 _GUARD_PROJECTS_MAX = 512
 
 
-def _guard_remember_project(cwd, project_name: str) -> None:
+_GUARD_SESSIONS: "dict[str, str]" = {}   # cwd -> session_key of its latest run (spec-098 run= token)
+
+
+def _guard_remember_project(cwd, project_name: str, session_key: "str | None" = None) -> None:
     if not cwd or not project_name:
         return
+    if session_key:
+        if len(_GUARD_SESSIONS) >= _GUARD_PROJECTS_MAX:
+            _GUARD_SESSIONS.pop(next(iter(_GUARD_SESSIONS)), None)
+        _GUARD_SESSIONS[str(cwd).rstrip("/")] = session_key
     if len(_GUARD_PROJECTS) >= _GUARD_PROJECTS_MAX:       # card worktrees come and go
         _GUARD_PROJECTS.pop(next(iter(_GUARD_PROJECTS)), None)
     _GUARD_PROJECTS[str(cwd).rstrip("/")] = project_name
+
+
+def _guard_session_for(cwd) -> "str | None":
+    """session_key of the latest run registered for the project whose cwd contains `cwd`."""
+    if not cwd:
+        return None
+    cwd = str(cwd).rstrip("/")
+    best = ""
+    for root in _GUARD_SESSIONS:
+        if (cwd == root or cwd.startswith(root + "/")) and len(root) > len(best):
+            best = root
+    return _GUARD_SESSIONS.get(best) if best else None
 
 
 def _guard_project_for(cwd) -> str:
@@ -1926,7 +1978,8 @@ async def _dangerous_command_guard_hook(
             if hit:
                 rule, reason = hit
                 audit(_guard_project_for(hook_input.get("cwd")), "DENY",
-                      f"{rule}: {_guard_audit_command(command)}")
+                      f"{rule}: {_guard_audit_command(command)}",
+                      session_key=_guard_session_for(hook_input.get("cwd")))
                 return {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
@@ -1965,7 +2018,7 @@ def _make_pre_compact_hook(project_name: str, session_key: str):
                 if isinstance(hook_input, dict)
                 else getattr(hook_input, "trigger", "auto")
             )
-            audit(project_name, "COMPACT", f"native auto-compact trigger={trigger}")
+            audit(project_name, "COMPACT", f"native auto-compact trigger={trigger}", session_key=session_key)
 
             # Publish to the cockpit activity bus / SSE so the UI can show a toast.
             try:
@@ -3595,9 +3648,9 @@ async def run_engine(  # type: ignore[return]
         enable_file_checkpointing=FILE_CHECKPOINTS,
     )
 
-    audit(project_name, "TASK", short(prompt, 300))
+    audit(project_name, "TASK", short(prompt, 300), session_key=session_key)
     # the Bash deny hook (one module-level function) labels its audit lines from this
-    _guard_remember_project(cwd, project_name)
+    _guard_remember_project(cwd, project_name, session_key)
 
     # Spec-028 Phase 1: resolve which running-dict to use.
     # ctx is provided by call sites that have a context dict (run_agent, api_project_chat,
@@ -3616,6 +3669,19 @@ async def run_engine(  # type: ignore[return]
     # _process_messages, drained by terminal notifications.
     _inflight_deferring: "set[str]" = set()
 
+    def _mark_record(_sid: str, _offset: int) -> None:
+        """spec-098 turn mark; never breaks a run."""
+        try:
+            _rid = current_run(session_key)
+            if not (_rid and _sid):
+                return
+            _turn_marks.record(
+                (ctx["DATA"] if ctx is not None and "DATA" in ctx else DATA),
+                run_id=_rid, session_id=_sid, offset=_offset, session_key=session_key,
+                chat_id=chat_id, source=entrypoint)
+        except Exception:
+            pass
+
     # Shared inner generator: processes SDK messages and yields engine events.
     # Extracted so both the live-client branch and the `async with` branch share
     # identical event-processing logic with no duplication.
@@ -3624,6 +3690,21 @@ async def run_engine(  # type: ignore[return]
         nonlocal last_ctx_tokens, last_usage, _turn_start_ms
         _turn_start_ms = __import__("time").monotonic() * 1000
         served_model: "str | None" = None  # FIX 1: populated from SDK init SystemMessage
+        _mark_pending_new = False
+        _mark_sid = resume_session_id
+        try:
+            # spec-098: the transcript's byte size BEFORE the prompt reaches the CLI is where
+            # "forget from here" truncates. A new session (no resume id) is marked at offset 0
+            # once the init message names it.
+            if current_run(session_key):
+                if resume_session_id:
+                    _sz = _turn_marks.transcript_size(cwd, resume_session_id)
+                    if _sz is not None:
+                        _mark_record(resume_session_id, _sz)
+                else:
+                    _mark_pending_new = True
+        except Exception:
+            pass
         await client.query(prompt)
         # Spec-043 C: track the max pt seen across all AssistantMessages in this turn
         # where a usage object is actually present (not None).  Using MAX rather than
@@ -3756,6 +3837,18 @@ async def run_engine(  # type: ignore[return]
                 _tr = getattr(msg, "terminal_reason", None)
                 if _tr in ("aborted_streaming", "aborted_tools"):
                     _record_turn_abort(session_key, _tr, "clean interrupt (client.interrupt())")
+                try:
+                    _end_sid = _mark_sid or getattr(msg, "session_id", None)
+                    _end_rid = current_run(session_key)
+                    if _end_sid and _end_rid and any(
+                            r.get("run_id") == _end_rid and "offset" in r
+                            for r in _turn_marks.read(
+                                (ctx["DATA"] if ctx is not None and "DATA" in ctx else DATA), _end_sid)):
+                        _turn_marks.record_end(
+                            (ctx["DATA"] if ctx is not None and "DATA" in ctx else DATA),
+                            run_id=_end_rid, session_id=_end_sid)
+                except Exception:
+                    pass
                 yield {
                     "type": "result",
                     "session_id": getattr(msg, "session_id", None),
@@ -3895,6 +3988,15 @@ async def run_engine(  # type: ignore[return]
                     except Exception:
                         pass
                 elif msg.subtype == "init":
+                    if _mark_pending_new:
+                        _mark_pending_new = False
+                        try:
+                            _new_sid = (msg.data or {}).get("session_id") if isinstance(msg.data, dict) else None
+                            if _new_sid:
+                                _mark_sid = _new_sid
+                                _mark_record(_new_sid, 0)
+                        except Exception:
+                            pass
                     # FIX 1(a): capture the actual model the SDK initialised with.
                     # The init SystemMessage carries {"type":"system","subtype":"init","data":{...}}
                     # where data["model"] is the full model id (e.g. "claude-fable-5").

@@ -84,7 +84,7 @@ async def _run_engine_capturing(**kwargs):
     captured ClaudeAgentOptions."""
     with patch.object(engine, "ClaudeSDKClient", _FakeClient), \
          patch.object(engine, "running", {}), \
-         patch.object(engine, "audit", lambda *a: None):
+         patch.object(engine, "audit", lambda *a, **k: None):
         async for _ in bot.run_engine(**kwargs):
             pass
     return _FakeClient.captured
