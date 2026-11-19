@@ -13425,7 +13425,8 @@ async def api_session_delete(req: web.Request) -> web.Response:
 _ANCHOR_UUID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")   # compared to a uuid field, never a path
 
 
-def _forget_cut_builder(ctx: dict, project: dict, adapter, chat_id: str, session_id: str, anchor: str):
+def _forget_cut_builder(ctx: dict, project: dict, adapter, chat_id: str, session_id: str, anchor: "str | None",
+                        anchor_run_id: "str | None" = None):
     """`build(env, keys, bound)` for _forget_one: the cut plan, or the whole-session plan when the
     anchor sits in the session's first turn (cut 0 is action A; the restored prompt rides along)."""
     own_key = project.get("session_key") or project.get("tg_thread", "")
@@ -13436,7 +13437,7 @@ def _forget_cut_builder(ctx: dict, project: dict, adapter, chat_id: str, session
         cp = _forget.build_cut_plan(env, adapter, ctx, project, session_id, anchor, chat_id=chat_id,
                                     timeline_files=files, session_key=own_key, bound=bound,
                                     lineage=_forget_lineage(ctx, adapter.name, session_id, with_ts=True),
-                                    audit_names=names)
+                                    audit_names=names, anchor_run_id=anchor_run_id)
         if int((cp.art.extra or {}).get("cut", -1)) != 0:
             return cp
         ap = _forget.build_plan(env, adapter, ctx, project, session_id, timeline_files=files,
@@ -13468,9 +13469,15 @@ async def api_chat_forget(req: web.Request) -> web.Response:
         return _forget_err(400, "bad_request", "bad request")
     if not isinstance(body, dict):
         return _forget_err(400, "bad_request", "bad request")
+    # a row loaded from history names its transcript uuid; a row the feed rendered live names its run
     anchor = body.get("anchor_uuid")
-    if not isinstance(anchor, str) or not _ANCHOR_UUID_RE.match(anchor):
-        return _forget_err(400, "bad_request", "anchor_uuid required")
+    anchor_run = body.get("anchor_run_id")
+    if anchor is not None and not (isinstance(anchor, str) and _ANCHOR_UUID_RE.match(anchor)):
+        return _forget_err(400, "bad_request", "bad anchor_uuid")
+    if anchor_run is not None and not (isinstance(anchor_run, str) and _ANCHOR_UUID_RE.match(anchor_run)):
+        return _forget_err(400, "bad_request", "bad anchor_run_id")
+    if (anchor is None) == (anchor_run is None):
+        return _forget_err(400, "bad_request", "exactly one of anchor_uuid / anchor_run_id required")
     chat = _find_chat(_load_chats(ctx).get(project["id"]) or {}, chat_id) if chat_id else None
     if chat is None or chat.get("id") != chat_id:
         return _forget_err(404, "not_found", "chat not found")
@@ -13482,7 +13489,7 @@ async def api_chat_forget(req: web.Request) -> web.Response:
     session_id = chat.get(providers.get(provider).continuity_field)
     if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
         return _forget_err(400, "predecessor", "this chat has no current session")
-    build = _forget_cut_builder(ctx, project, adapter, chat_id, session_id, anchor)
+    build = _forget_cut_builder(ctx, project, adapter, chat_id, session_id, anchor, anchor_run)
     loop = asyncio.get_running_loop()
     try:
         if body.get("dry_run") is not False:

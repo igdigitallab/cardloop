@@ -1465,16 +1465,17 @@ class _PromptTap:
 
 
 def build_cut_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Mapping[str, Any],
-                   session_id: str, anchor_uuid: str, *, chat_id: str, timeline_files: "list[Path]",
+                   session_id: str, anchor_uuid: "str | None", *, chat_id: str, timeline_files: "list[Path]",
                    session_key: str, bound: "list[dict] | None" = None,
-                   lineage: "list[dict] | None" = None, audit_names: "set[str] | None" = None) -> Plan:
+                   lineage: "list[dict] | None" = None, audit_names: "set[str] | None" = None,
+                   anchor_run_id: "str | None" = None) -> Plan:
     """Dry run of B (blocking: run it in an executor). The adapter finds the cut and what goes; every
     cockpit store is selected by the dropped run ids or the dropped span, never by the session as a
     whole (that would take the kept turns too)."""
     locate = getattr(adapter, "locate_cut", None)
     if not callable(locate) or not getattr(adapter, "can_forget_turn", False):
         raise ForgetError(400, "no_capability", f"{adapter.name} turns cannot be forgotten here")
-    art, restored_raw = locate(ctx, project, session_id, anchor_uuid)
+    art, restored_raw = locate(ctx, project, session_id, anchor_uuid, anchor_run_id=anchor_run_id)
     e = art.extra
     dropped = set(e.get("dropped_runs") or [])
     tap = _PromptTap(adapter.read_cut_content(art))

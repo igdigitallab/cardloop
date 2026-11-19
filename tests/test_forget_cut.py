@@ -541,3 +541,29 @@ async def test_side_stores_lose_only_what_the_dropped_turns_made(world):
     assert [r["id"] for r in json.loads((world.data / "deferred.json").read_text())] == ["d-keep", "d-pending"]
     assert (pdir / "plankeep1.json").exists() and not (pdir / "plandrop2.json").exists()
     assert SK not in webapp._live_turns
+
+
+# ───────────────────────────── a live row anchors by its run ────────────────────────────────
+async def test_run_id_anchor_cuts_exactly_that_run(world):
+    ctx = world.ctx()
+    env = webapp._forget_env(ctx)
+    adapter = forget.adapter("claude")
+    bound = env.state.bound("claude", C_SID)
+    build = webapp._forget_cut_builder(ctx, world.project(), adapter, "c3", C_SID, None, "r3")
+    plan = await asyncio.get_running_loop().run_in_executor(None, lambda: build(env, {SK}, bound))
+    assert plan.mode == "cut" and plan.run_ids == ["r3"] and plan.art.extra["cut"] == world.cut["off3"]
+    await forget.execute_plan(env, adapter, ctx, plan)
+    assert world.cut["transcript"].read_bytes() == world.cut["t1"] + world.cut["t2"]
+    assert _raw_has(world, S3) == []
+
+
+async def test_endpoint_run_id_anchor_and_anchor_validation(client, world):
+    r = await bpost(client, {"anchor_run_id": "r2", "dry_run": True})
+    body = await r.json()
+    assert r.status == 200 and body["plan"]["turns"] == 2, body
+    r = await bpost(client, {"anchor_run_id": "nosuchrun", "dry_run": True})
+    assert r.status == 400 and (await r.json())["code"] == "no_mark"
+    r = await bpost(client, {"anchor_run_id": "r2", "anchor_uuid": "u2", "dry_run": True})
+    assert r.status == 400
+    r = await bpost(client, {"dry_run": True})
+    assert r.status == 400

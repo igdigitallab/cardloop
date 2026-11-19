@@ -498,8 +498,10 @@ class ClaudeAdapter:
 
     # ── forget from here (P4) ───────────────────────────────────────────────────────────────
     def locate_cut(self, ctx: Mapping[str, Any], project: Mapping[str, Any], session_id: str,
-                   anchor_uuid: str) -> "tuple[SessionArtifacts, str]":
-        """The turn that holds `anchor_uuid` and every later one. -> (artifacts, restored prompt).
+                   anchor_uuid: "str | None", anchor_run_id: "str | None" = None) -> "tuple[SessionArtifacts, str]":
+        """The turn that holds `anchor_uuid` (or IS run `anchor_run_id`: a row the feed rendered live
+        has no transcript uuid yet, but knows its run) and every later one.
+        -> (artifacts, restored prompt).
 
         The cut is the turn mark R with the greatest offset <= the anchor's line: the transcript's
         size when R's prompt was about to reach the CLI, i.e. byte for byte the prefix the CLI
@@ -522,36 +524,45 @@ class ClaudeAdapter:
         for r in rows:
             if r.get("run_id") and isinstance(r.get("ts_end"), (int, float)):
                 ends[str(r["run_id"])] = float(r["ts_end"])
-        needle = anchor_uuid.encode()
-        anchor_off: "int | None" = None
-        anchor: dict = {}
-        for off, raw in _lines_from(transcript, 0, size):
-            if needle in raw:
-                r = _decode(raw)
-                if r is not None and r.get("uuid") == anchor_uuid:
-                    anchor_off, anchor = off, r
-                    break
-        if anchor_off is None:
-            raise ForgetError(400, "predecessor", "that message is not part of this chat's current session")
-        cands = [r for r in starts if r["offset"] <= anchor_off]
-        if not cands:
-            raise ForgetError(400, "no_mark", NO_MARK_TEXT)
-        cut = max(r["offset"] for r in cands)
-        owner = max((r for r in cands if r["offset"] == cut), key=lambda r: float(r.get("ts_start") or 0))
-        a_ts = _precise_ts(anchor.get("timestamp"))
-        end = ends.get(str(owner["run_id"]))
-        if end is not None and a_ts is not None:
-            inside = a_ts <= end + END_SLACK_SEC
+        a_ts: "float | None" = None
+        if anchor_run_id:
+            own = [r for r in starts if str(r["run_id"]) == anchor_run_id]
+            if not own:
+                raise ForgetError(400, "no_mark", "that turn has no recorded start in this chat's current "
+                                                  "session, so it cannot be cut out on its own")
+            owner = own[0]
+            cut = int(owner["offset"])
         else:
-            starts_before = 0
-            for _off, raw in _lines_from(transcript, cut, anchor_off):
-                if b'"user"' in raw:
+            needle = str(anchor_uuid or "").encode()
+            anchor_off: "int | None" = None
+            anchor: dict = {}
+            for off, raw in _lines_from(transcript, 0, size) if needle else ():
+                if needle in raw:
                     r = _decode(raw)
-                    if r is not None and _is_prompt_line(r):
-                        starts_before += 1
-            inside = starts_before == 0 if _is_prompt_line(anchor) else starts_before <= 1
-        if not inside:
-            raise ForgetError(400, "no_mark", NO_MARK_TEXT)
+                    if r is not None and r.get("uuid") == anchor_uuid:
+                        anchor_off, anchor = off, r
+                        break
+            if anchor_off is None:
+                raise ForgetError(400, "predecessor", "that message is not part of this chat's current session")
+            cands = [r for r in starts if r["offset"] <= anchor_off]
+            if not cands:
+                raise ForgetError(400, "no_mark", NO_MARK_TEXT)
+            cut = max(r["offset"] for r in cands)
+            owner = max((r for r in cands if r["offset"] == cut), key=lambda r: float(r.get("ts_start") or 0))
+            a_ts = _precise_ts(anchor.get("timestamp"))
+            end = ends.get(str(owner["run_id"]))
+            if end is not None and a_ts is not None:
+                inside = a_ts <= end + END_SLACK_SEC
+            else:
+                starts_before = 0
+                for _off, raw in _lines_from(transcript, cut, anchor_off):
+                    if b'"user"' in raw:
+                        r = _decode(raw)
+                        if r is not None and _is_prompt_line(r):
+                            starts_before += 1
+                inside = starts_before == 0 if _is_prompt_line(anchor) else starts_before <= 1
+            if not inside:
+                raise ForgetError(400, "no_mark", NO_MARK_TEXT)
         if cut > 0:
             with open(transcript, "rb") as f:
                 f.seek(cut - 1)
