@@ -1128,6 +1128,7 @@ export type ActivityEvent =
   | ActivityEventSessionRotated
   | ActivityEventSessionDeleted
   | ActivityEventForgetResidue
+  | ActivityEventChatForgotten
   | ActivityEventPlanReady
   | ActivityEventPlanDecided
   | ActivityEventToolReady
@@ -1141,6 +1142,17 @@ export interface ActivityEventSessionDeleted {
   session_id: string
   project_id: string
   chat_ids: string[]
+}
+
+// spec-098 P4: a chat's turns were cut from its session ("Forget from here"); every window
+// showing that chat refetches its history. persist=false.
+export interface ActivityEventChatForgotten {
+  kind: 'chat_forgotten'
+  provider: string
+  session_id: string
+  project_id: string
+  chat_id: string
+  cut_ts: number
 }
 
 // spec-098: result of the post-delete residue scan (paths only, never text).

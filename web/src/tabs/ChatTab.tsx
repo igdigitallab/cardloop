@@ -44,9 +44,12 @@ import { MonitorsPanel } from '../components/MonitorsPanel'
 import { parseSseLine, readSseStream } from '../hooks/useChatStream'
 import { MODELS, modelLabel } from '../lib/models'
 import {
-  PROVIDER_IDS, continuityField, isAdapterProvider, providerLabel, providerUnavailableReason, selectableProviders,
+  PROVIDER_IDS, canForgetTurn, continuityField, isAdapterProvider, providerLabel, providerUnavailableReason, selectableProviders,
 } from '../lib/providers'
-import { deletedChatSession, residueMessage } from '../lib/forget'
+import {
+  chatForgottenAffectsMe, composerAfterForget, deletedChatSession, forgetAnchorFor, forgottenToast, residueMessage,
+} from '../lib/forget'
+import { ForgetDialog } from '../components/ForgetDialog'
 import { errorTextFromBody, refusalReason } from '../lib/refusal'
 import { playChime } from '../lib/chime'
 import { t } from '../i18n'
@@ -825,6 +828,12 @@ const IconCopy = () => (
     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
   </svg>
 )
+const IconForget = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" />
+  </svg>
+)
+
 const IconCheck = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
     strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1571,6 +1580,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // because every hydrate replaces `messages` wholesale; the feed renders older + messages.
   const [olderMsgs, setOlderMsgs] = useState<ChatMessage[]>([])
   const olderRef = useRef<ChatMessage[]>([])
+  // spec-098 P4: earliest turn-mark start (epoch ms) of the shown session; null = nothing can be
+  // forgotten from here. Refreshed by every history window we adopt.
+  const [forgetFromMs, setForgetFromMs] = useState<number | null>(null)
+  const [forgetTurn, setForgetTurn] = useState<{ anchorUuid: string } | null>(null)
   const setOlder = useCallback((next: ChatMessage[]) => {
     olderRef.current = next
     setOlderMsgs(next)
@@ -2184,6 +2197,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // scroll-back pages that no longer sit directly above it.
   const adoptHistoryWindow = useCallback((res: SessionHistoryResponse) => {
     const sid = res.session_id ?? null
+    setForgetFromMs(typeof res.forget_from_ms === 'number' ? res.forget_from_ms : null)
     // An empty window starts at the session's first message.
     const first = res.messages.length ? res.messages[0].idx : 0
     const start = typeof first === 'number' ? first : null
@@ -2543,6 +2557,16 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       if (!isCancelled()) setError('')
     })
   }, [projectId, effectiveChatId, seedCursor, adoptHistoryWindow])
+
+  // spec-098 P4: the chat's turns were cut from the transcript. Drop every row that came from
+  // the old window (scroll-back pages, live rows of the forgotten range) and read the history
+  // again - the hydrate replaces the feed with exactly what is still on disk.
+  const refetchAfterForget = useCallback(() => {
+    setOlder([])
+    historySessionRef.current = null
+    windowStartRef.current = null
+    hydrateFromServer(() => false)
+  }, [setOlder, hydrateFromServer])
 
   // spec-071: verify-then-hydrate after a live-rendered turn completes. The completion hydrate
   // was removed (72043ee) to stop flicker, but dropped bus events / broken replay could leave
@@ -3082,6 +3106,11 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         let cancelled = false
         hydrateFromServer(() => cancelled)
       }
+
+    } else if (evt.kind === 'chat_forgotten') {
+      // spec-098 P4: turns were cut from a chat's session (from any window, this one included).
+      // The window that ran the forget refetches in its own handler; this refetches the rest.
+      if (chatForgottenAffectsMe(evt, effectiveChatId, activeSessionIdRef.current)) refetchAfterForget()
 
     } else if (evt.kind === 'forget_residue') {
       pushForgetToast({ residue: residueMessage(evt.clean, evt.hits, evt.truncated) })
@@ -4940,6 +4969,10 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
             // (an autonomous run that landed overnight, or the first answer after a long gap).
             const groupStartTs = groupMsgs.find(f => f.ts != null)?.ts
             const groupDayLabel = daySepLabel(feedMessages, idx, groupStartTs)
+            // spec-098 P4: "Forget from here" - only on a settled reply of the CURRENT session whose
+            // turn the server has a mark for (see lib/forget.forgetAnchorFor).
+            const forgetAnchor = canForgetTurn(providerRegistry, activeProvider) && effectiveChatId
+              ? forgetAnchorFor(feedMessages, idx, forgetFromMs) : null
             return (
               <React.Fragment key={msg.id}>
               {groupDayLabel && (
@@ -4955,18 +4988,29 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                 ))}
                 {/* One meta-row for the whole turn: timestamp of the last fragment +
                     copy/save acting on the concatenated text of every fragment. */}
-                {(groupTs != null || (!lastFrag.streaming && groupCopyText)) && (
+                {(groupTs != null || (!lastFrag.streaming && (groupCopyText || forgetAnchor))) && (
                   <div className="msg-meta">
                     {groupTs != null && (
                       <span className="msg-time" title={fmtFullStamp(groupTs)}>
                         {fmtStamp(groupTs)}
                       </span>
                     )}
-                    {!lastFrag.streaming && groupCopyText && (
+                    {!lastFrag.streaming && (groupCopyText || forgetAnchor) && (
                       <div className="msg-actions">
-                        <MsgCopyButton text={groupCopyText} />
+                        {groupCopyText && <MsgCopyButton text={groupCopyText} />}
                         {/* spec-052 Phase 4b: save selection / message as a Backlog card */}
-                        <SaveToBoardButton projectId={project.id} text={groupCopyText} />
+                        {groupCopyText && <SaveToBoardButton projectId={project.id} text={groupCopyText} />}
+                        {forgetAnchor && (
+                          <button
+                            className="msg-act-btn msg-act-btn--danger"
+                            data-testid="forget-from-here"
+                            onClick={() => setForgetTurn({ anchorUuid: forgetAnchor })}
+                            title="Forget from here: delete this turn and everything after it"
+                            aria-label="Forget from here"
+                          >
+                            <IconForget />
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -6052,6 +6096,24 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         }}>
           ↺ {rotateToast}
         </div>
+      )}
+
+      {forgetTurn && effectiveChatId && (
+        <ForgetDialog
+          projectId={project.id}
+          provider={activeProvider}
+          sessionId={activeSessionIdRef.current ?? ''}
+          turn={{ chatId: effectiveChatId, anchorUuid: forgetTurn.anchorUuid }}
+          onClose={() => setForgetTurn(null)}
+          onForgotten={res => {
+            setForgetTurn(null)
+            showForgetToast(forgottenToast(res.forgotten.turns, res.whole_session))
+            // Back into the composer: the prompt that started the first forgotten turn.
+            setInput(cur => composerAfterForget(res.restored_prompt, cur))
+            if (res.whole_session) activeSessionIdRef.current = null
+            refetchAfterForget()
+          }}
+        />
       )}
 
       {/* spec-098: session deleted / residue-scan result */}

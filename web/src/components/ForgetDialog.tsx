@@ -25,7 +25,7 @@ interface Props {
   fallbackTitle?: string
   onClose: () => void
   /** Called after a successful delete (dialog is closed by the caller's handler). */
-  onDeleted: (info: { alsoDeleted: number }) => void
+  onDeleted?: (info: { alsoDeleted: number }) => void
 }
 
 type Phase = 'planning' | 'ready' | 'deleting'
@@ -75,7 +75,7 @@ export function ForgetDialog({ projectId, provider, sessionId, turn, onForgotten
       const res = await api.deleteSession(projectId, provider, sessionId, {
         dry_run: false, plan_token: token, ...(also.length ? { also_delete: also } : {}),
       })
-      onDeleted({ alsoDeleted: 'also_deleted' in res ? res.also_deleted.length : 0 })
+      onDeleted?.({ alsoDeleted: 'also_deleted' in res ? res.also_deleted.length : 0 })
     } catch (e) {
       setError(errView(e))
       setPhase('ready')
