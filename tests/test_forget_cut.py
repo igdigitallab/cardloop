@@ -320,7 +320,8 @@ async def test_unfinished_run_falls_back_to_counting_turn_starts(world):
     mf.write_bytes(b"".join(j(r) for r in rows if r["run_id"] != "r3" and not ("ts_end" in r and r["run_id"] == "r2")))
     await _refused(world, "u3", "no_mark")
     _c, _e, _a, plan = await cut_plan(world, anchor="st2")    # a steered row inside r2 still maps to r2
-    assert plan.run_ids == ["r2"]
+    # r3 left no mark, but its run_end names the session after the cut: its lines go with the cut too
+    assert plan.art.extra["cut"] == world.cut["off2"] and plan.run_ids == ["r2", "r3"]
 
 
 async def test_a_mark_that_is_not_a_line_start_is_refused(world):
@@ -567,3 +568,108 @@ async def test_endpoint_run_id_anchor_and_anchor_validation(client, world):
     assert r.status == 400
     r = await bpost(client, {"dry_run": True})
     assert r.status == 400
+
+
+# ───────────────────────────── the review's findings (H1, H2, M1, M3, M4, L2) ───────────────
+async def test_h1_a_turn_after_a_crash_past_the_truncate_does_not_strand_the_rest(world):
+    """The cut is recorded in the pending record: a resume finishes the purge even though the chat
+    ran another turn (the transcript grew past the cut) before the restart."""
+    ctx, env, adapter, plan = await cut_plan(world)
+    forget._CRASH_AFTER = 4
+    with pytest.raises(forget.SimulatedCrash):
+        await forget.execute_plan(env, adapter, ctx, plan)
+    forget._CRASH_AFTER = None
+    rec = json.loads(next((world.data / "forget_pending").glob("*.json")).read_text())
+    assert rec["art"]["extra"]["truncated"] is True
+    later = j({"type": "user", "uuid": "u9", "sessionId": C_SID, "message": {"role": "user", "content": "a new turn"}})
+    with open(world.cut["transcript"], "ab") as f:
+        f.write(later)
+    forget.configure(env_factory=webapp._forget_env)
+    assert await forget.resume_pending(ctx) == [plan.token]
+    assert world.cut["transcript"].read_bytes() == world.cut["t1"] + later
+    for tok in (S2, S3):
+        assert _raw_has(world, tok) == [], tok
+
+
+async def test_h1_a_refused_cut_leaves_no_pending_record(world):
+    ctx, env, adapter, plan = await cut_plan(world)
+    with open(world.cut["transcript"], "ab") as f:
+        f.write(j({"type": "ai-title", "aiTitle": "late", "sessionId": C_SID}))
+    with pytest.raises(forget.ForgetError):
+        await forget.execute_plan(env, adapter, ctx, plan)
+    assert not list((world.data / "forget_pending").glob("*.json"))
+
+
+def _tl_line(world, off, **kw):
+    return j({"ts": world.cut["t0"] + off, "session_key": SK, **kw})
+
+
+async def test_h2_a_background_turn_after_the_cut_loses_its_lines_too(world):
+    bg_after = [_tl_line(world, 15, kind="run_start", source="bg", prompt="", run_id="bgafter1"),
+                _tl_line(world, 16, kind="text", text=f"background said {S2} again", run_id="bgafter1"),
+                _tl_line(world, 17, kind="run_end", source="bg", run_id="bgafter1", session_id=C_SID)]
+    bg_before = [_tl_line(world, 5, kind="run_start", source="bg", prompt="", run_id="bgbefore"),
+                 _tl_line(world, 6, kind="text", text="kept background text", run_id="bgbefore"),
+                 _tl_line(world, 7, kind="run_end", source="bg", run_id="bgbefore", session_id=C_SID)]
+    bg_other = [_tl_line(world, 15.5, kind="run_start", source="bg", prompt="", run_id="bgother1"),
+                _tl_line(world, 16.5, kind="run_end", source="bg", run_id="bgother1", session_id=K_SID)]
+    with open(world.timeline_path, "ab") as f:
+        f.write(b"".join(bg_after + bg_before + bg_other))
+    with open(world.audit_path, "a", encoding="utf-8") as f:
+        f.write(f"{local_iso(world.cut['t0'] + 16)} [{PID}] RESULT run=bgafter1: {S2} from the background\n")
+    await cut_it(world)
+    tl = world.timeline_path.read_bytes()
+    assert all(x not in tl for x in bg_after)
+    assert all(x in tl for x in bg_before + bg_other)
+    assert S2 not in world.audit_path.read_text(encoding="utf-8")
+
+
+async def test_m1_a_repeated_short_id_elsewhere_keeps_its_lines(world):
+    older = _tl_line(world, -50, kind="text", text="an older run that drew the same id", run_id="r2")
+    other_key = j({"ts": world.cut["t0"] + 11, "session_key": "9999:1", "kind": "text", "text": "other key", "run_id": "r3"})
+    old_audit = f"{local_iso(world.cut['t0'] - 50)} [{PID}] RESULT run=r2: older run, same id\n"
+    with open(world.timeline_path, "ab") as f:
+        f.write(older + other_key)
+    with open(world.audit_path, "a", encoding="utf-8") as f:
+        f.write(old_audit)
+    await cut_it(world)
+    tl = world.timeline_path.read_bytes()
+    assert older in tl and other_key in tl
+    assert old_audit in world.audit_path.read_text(encoding="utf-8")
+
+
+async def test_m3_kept_turns_trace_lines_stay_and_a_queued_dropped_prompt_goes(world):
+    t0 = world.cut["t0"]
+    trace = world.data / "chat-trace.jsonl"
+    kept_end = j({"ts": t0 + 2.1, "session_key": SK, "stage": "engine_end", "chat_id": "c3", "preview": P1[:120]})
+    kept_same_text = j({"ts": t0 - 30, "session_key": SK, "stage": "recv", "chat_id": "c3", "preview": P3[:120]})
+    queued_drop = j({"ts": t0 + 1.0, "session_key": SK, "stage": "queue", "chat_id": "c3", "preview": P3[:120]})
+    with open(trace, "ab") as f:
+        f.write(kept_end + kept_same_text + queued_drop)
+    await cut_it(world)
+    left = trace.read_bytes()
+    assert kept_end in left and kept_same_text in left
+    assert queued_drop not in left
+
+
+async def test_m4_a_late_notification_before_the_prompt_is_not_what_goes_back(world):
+    c = world.cut
+    note = j({"type": "user", "uuid": "n2", "timestamp": iso(c["t0"] + 9.8), "sessionId": C_SID,
+              "message": {"role": "user", "content": "<task-notification><task-id>x</task-id>"
+                                                     "<status>completed</status></task-notification>"}})
+    c["transcript"].write_bytes(c["t1"] + note + c["t2"] + c["t3"])
+    mf = world.data / "turn_marks" / f"{C_SID}.jsonl"
+    rows = [json.loads(x) for x in mf.read_text().splitlines()]
+    for r in rows:
+        if r.get("run_id") == "r3" and "offset" in r:
+            r["offset"] += len(note)
+    mf.write_bytes(b"".join(j(r) for r in rows))
+    _c, _e, _a, plan = await cut_plan(world)
+    assert plan.restored_prompt.startswith(P2_BODY)
+
+
+async def test_l2_no_forgotten_run_id_is_left_current(world):
+    import engine
+    engine.set_current_run(SK, "r3")
+    await cut_it(world)
+    assert engine.current_run(SK) is None

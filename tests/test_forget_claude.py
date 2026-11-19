@@ -24,7 +24,7 @@ def adapter():
 
 def test_it_is_registered_with_the_right_capabilities():
     a = forget.adapter("claude")
-    assert a is not None and a.name == "claude" and a.can_delete_session and not a.can_forget_turn
+    assert a is not None and a.name == "claude" and a.can_delete_session and a.can_forget_turn
 
 
 def test_locate_finds_every_artifact_and_skips_unknown_ids(world, adapter):

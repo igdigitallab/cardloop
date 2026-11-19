@@ -498,10 +498,12 @@ class ClaudeAdapter:
 
     # ── forget from here (P4) ───────────────────────────────────────────────────────────────
     def locate_cut(self, ctx: Mapping[str, Any], project: Mapping[str, Any], session_id: str,
-                   anchor_uuid: "str | None", anchor_run_id: "str | None" = None) -> "tuple[SessionArtifacts, str]":
+                   anchor_uuid: "str | None", anchor_run_id: "str | None" = None
+                   ) -> "tuple[SessionArtifacts, list[tuple[float | None, str]]]":
         """The turn that holds `anchor_uuid` (or IS run `anchor_run_id`: a row the feed rendered live
         has no transcript uuid yet, but knows its run) and every later one.
-        -> (artifacts, restored prompt).
+        -> (artifacts, the first few prompt lines of the cut as (ts, text): the caller picks the one
+        that is really the operator's — a kept turn's late notification can land after the mark).
 
         The cut is the turn mark R with the greatest offset <= the anchor's line: the transcript's
         size when R's prompt was about to reach the CLI, i.e. byte for byte the prefix the CLI
@@ -570,12 +572,12 @@ class ClaudeAdapter:
                     raise ForgetError(400, "no_mark", NO_MARK_TEXT)
         dropped = sorted({str(r["run_id"]) for r in starts if r["offset"] >= cut})
         prev_end = max((ends.get(str(r["run_id"])) or 0.0 for r in starts if r["offset"] < cut), default=0.0)
+        prev_start = max((float(r.get("ts_start") or 0.0) for r in starts if r["offset"] < cut), default=0.0)
 
         # the suffix: what goes, the tool calls that own sub-agents, the backups it snapshotted
         tool_ids: set = set()
         suffix_backups: set = set()
-        restored = ""
-        found_prompt = False
+        prompts: list = []
         last_ts: "float | None" = None
         h = hashlib.sha256()
         for _off, raw in _lines_from(transcript, cut, size):
@@ -593,9 +595,8 @@ class ClaudeAdapter:
                         tool_ids.add(str(b["id"]))
             elif _SNAPSHOT_TAG in raw:
                 suffix_backups |= _snapshot_backups(r)
-            if not found_prompt and _is_prompt_line(r):
-                found_prompt = True
-                restored = str(r["message"]["content"])
+            if len(prompts) < 5 and _is_prompt_line(r):
+                prompts.append((ts, str(r["message"]["content"])))
         # the prefix: only what decides which shared artifacts stay
         prefix_backups: set = set()
         prefix_lines = 0
@@ -670,7 +671,7 @@ class ClaudeAdapter:
         extra = {
             "mode": "cut", "transcript": str(transcript), "session_dir": str(sdir), "cut": cut,
             "orig_size": size, "suffix_sha": h.hexdigest(), "dropped_runs": dropped,
-            "prefix_lines": prefix_lines, "prev_end": prev_end or None,
+            "prefix_lines": prefix_lines, "prev_end": prev_end or None, "prev_start": prev_start or None,
             "history_files": list(art.extra.get("history_files") or []),
             "history_cut_ms": (first_ts * 1000.0 - END_SLACK_SEC * 1000.0) if first_ts else None,
             "residue_dirs": list(art.extra.get("residue_dirs") or []),
@@ -678,7 +679,7 @@ class ClaudeAdapter:
         }
         cut_art = SessionArtifacts(provider="claude", session_id=session_id, cwd=art.cwd, title=art.title,
                                    paths=paths, first_ts=first_ts, last_ts=last, extra=extra)
-        return cut_art, restored
+        return cut_art, prompts
 
     def cut_fingerprint(self, art: SessionArtifacts) -> str:
         e = art.extra or {}
@@ -708,9 +709,17 @@ class ClaudeAdapter:
                     continue
 
     def cut(self, ctx: Mapping[str, Any], art: SessionArtifacts) -> dict:
-        """Step 4 of B, idempotent: truncate the transcript at the cut, then remove the dropped
-        turns' artifacts. Truncates ONLY when the file is exactly what the plan measured (size and
-        suffix hash); already cut = skip; anything else = 409 `changed`, nothing touched."""
+        """Step 4 of B in one call (the pipeline calls the two halves itself, persisting in between
+        that the truncate happened)."""
+        n = 0 if (art.extra or {}).get("truncated") else self.cut_transcript(ctx, art)
+        out = self.cut_artifacts(ctx, art)
+        out["bytes_cut"] = n
+        return out
+
+    def cut_transcript(self, ctx: Mapping[str, Any], art: SessionArtifacts) -> int:
+        """Truncate the transcript at the cut. Truncates ONLY when the file is exactly what the plan
+        measured (size and suffix hash); already cut = 0; anything else = 409 `changed`, nothing
+        touched. A cut that does not verify is undone (500). Returns the bytes cut."""
         e = art.extra or {}
         t = Path(e["transcript"])
         cut, orig = int(e["cut"]), int(e["orig_size"])
@@ -741,6 +750,11 @@ class ClaudeAdapter:
             finally:
                 held.close()
             cut_bytes = orig - cut
+        return cut_bytes
+
+    def cut_artifacts(self, ctx: Mapping[str, Any], art: SessionArtifacts) -> dict:
+        """The dropped turns' artifacts and history.jsonl lines (idempotent)."""
+        e = art.extra or {}
         files = 0
         for p in art.paths:
             p = Path(p)
@@ -757,7 +771,7 @@ class ClaudeAdapter:
         removed = 0
         for hf in e.get("history_files") or []:
             removed += self._rewrite_history(Path(hf), art.session_id, e.get("history_cut_ms"))
-        return {"files": files, "bytes_cut": cut_bytes, "history_lines": removed}
+        return {"files": files, "history_lines": removed}
 
     @staticmethod
     def _suffix_sha(t: Path, cut: int, end: int) -> str:
@@ -808,7 +822,9 @@ class ClaudeAdapter:
         t = Path(e["transcript"])
         left: list = []
         try:
-            if t.stat().st_size != int(e["cut"]):
+            size = t.stat().st_size
+            # once the truncate is recorded, a later turn may have appended (a resume after a crash)
+            if size < int(e["cut"]) or (size != int(e["cut"]) and not e.get("truncated")):
                 left.append(str(t))
         except OSError:
             left.append(str(t))

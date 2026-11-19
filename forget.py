@@ -812,20 +812,59 @@ def find_in_range(path: Path, start: int, end: "int | None", needles: "list[str]
     return found
 
 
-def select_run_lines(path: Path, run_ids: "set[str]") -> "list[str]":
+def select_run_lines(path: Path, run_ids: "set[str]", *, keys: "set[str] | None" = None,
+                     since: "float | None" = None) -> "list[str]":
     """Digests of the JSONL lines (timeline) stamped with one of `run_ids`. B selects ONLY by id:
-    the session-level attribution of A would take the kept turns too."""
+    the session-level attribution of A would take the kept turns too. Bounded by the chat's session
+    keys and the cut's start, so an older run that happened to get the same short id stays."""
     out: list = []
     if not run_ids:
         return out
     for raw, r in zip(*_jsonl_records(path)):
-        if r is not None and r.get("run_id") and str(r["run_id"]) in run_ids:
-            out.append(digest(raw))
+        if r is None or not r.get("run_id") or str(r["run_id"]) not in run_ids:
+            continue
+        if keys is not None and r.get("session_key") not in keys:
+            continue
+        if since is not None:
+            try:
+                if float(r.get("ts")) < since - 2.0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        out.append(digest(raw))
     return out
 
 
-def select_audit_runs(path: Path, run_ids: "set[str]", project_names: "set[str] | None") -> "list[str]":
-    """Audit lines carrying `run=<id>` of one of `run_ids`, of the project's own `[Project]` labels."""
+def timeline_session_runs_since(paths: "list[Path]", session_id: str, keys: "set[str]", since: float) -> "set[str]":
+    """Runs on these session keys whose `run_end` names `session_id` and that started at or after
+    `since`: the autonomous background turns of the cut range, which leave no turn mark (they start
+    inside the CLI) but whose lines are cut from the transcript all the same."""
+    ends: dict = {}
+    starts: dict = {}
+    for p in paths:
+        for r in _jsonl_records(p)[1]:
+            if not r or not r.get("run_id") or r.get("session_key") not in keys:
+                continue
+            rid = str(r["run_id"])
+            if r.get("kind") == "run_end" and r.get("session_id"):
+                ends[rid] = (str(r["session_id"]), r.get("ts"))
+            elif r.get("kind") == "run_start" and rid not in starts:
+                starts[rid] = r.get("ts")
+    out: set = set()
+    for rid, (sid, end_ts) in ends.items():
+        when = starts.get(rid, end_ts)
+        try:
+            if sid == session_id and float(when) >= since - 2.0:
+                out.add(rid)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def select_audit_runs(path: Path, run_ids: "set[str]", project_names: "set[str] | None",
+                      since: "float | None" = None) -> "list[str]":
+    """Audit lines carrying `run=<id>` of one of `run_ids`, of the project's own `[Project]` labels,
+    not older than the cut's start (the audit stamp has whole seconds in local time)."""
     try:
         raw_lines = path.read_bytes().splitlines(keepends=True)
     except OSError:
@@ -836,9 +875,14 @@ def select_audit_runs(path: Path, run_ids: "set[str]", project_names: "set[str] 
         m = AUDIT_RE.match(raw.decode("utf-8", "replace").rstrip("\n"))
         if not m:
             continue
-        _ts, project, _kind, rid, _text = m.groups()
-        if rid and rid in run_ids and (not names or project in names):
-            out.append(digest(raw))
+        ts_s, project, _kind, rid, _text = m.groups()
+        if not (rid and rid in run_ids and (not names or project in names)):
+            continue
+        if since is not None:
+            at = _audit_ts(ts_s)
+            if at is None or at < since - 2.0:
+                continue
+        out.append(digest(raw))
     return out
 
 
@@ -891,12 +935,8 @@ def _chat_ok(chat_id: Any, chat_ids: "set[str]") -> bool:
 
 
 def select_trace_lines(path: Path, *, keys: "set[str]", chat_ids: "set[str]",
-                       first_ts: "float | None", last_ts: "float | None",
-                       margin: float = EXTRA_MARGIN_SEC,
-                       previews: "tuple[set[str], float] | None" = None) -> "list[str]":
-    """chat-trace lines of the session: its session_key(s), its chat(s), inside its time span.
-    `previews` = (collapsed prompt prefixes, earliest ts): a line before the span whose preview is
-    one of those prompts also goes (a message queued while the previous, kept turn ran)."""
+                       first_ts: "float | None", last_ts: "float | None") -> "list[str]":
+    """chat-trace lines of the session: its session_key(s), its chat(s), inside its time span."""
     out: list = []
     try:
         raw_lines = path.read_bytes().splitlines(keepends=True)
@@ -907,13 +947,44 @@ def select_trace_lines(path: Path, *, keys: "set[str]", chat_ids: "set[str]",
             r = json.loads(raw)
         except ValueError:
             continue
-        if not (isinstance(r, dict) and r.get("session_key") in keys and _chat_ok(r.get("chat_id"), chat_ids)):
-            continue
-        if _within(r.get("ts"), first_ts, last_ts, margin):
+        if (isinstance(r, dict) and r.get("session_key") in keys
+                and _chat_ok(r.get("chat_id"), chat_ids) and _within(r.get("ts"), first_ts, last_ts)):
             out.append(digest(raw))
-        elif previews and isinstance(r.get("preview"), str) and _within(r.get("ts"), previews[1], last_ts, margin):
-            pv = collapse(r["preview"]).rstrip("…")
-            if len(pv) >= 20 and any(p.startswith(pv) or pv.startswith(p) for p in previews[0]):
+    return out
+
+
+_ARRIVAL_STAGES = frozenset({"recv", "queue", "steer", "steer_reject", "dedup_drop"})
+
+
+def select_cut_trace_lines(path: Path, *, keys: "set[str]", chat_id: str, first_ts: float,
+                           upper: float, prev_start: "float | None", prev_end: "float | None",
+                           prefixes: "set[str]") -> "list[str]":
+    """chat-trace lines of a cut (B), of this chat only: every line from the first dropped turn's
+    start on; before it, only a message ARRIVAL line whose preview is one of the dropped prompts and
+    that came in while the last kept turn ran or after it ended (a message queued meanwhile). A kept
+    turn's own lines (its recv before it started, its engine_end) never match."""
+    out: list = []
+    try:
+        raw_lines = path.read_bytes().splitlines(keepends=True)
+    except OSError:
+        return out
+    lo = prev_start if prev_start else (prev_end if prev_end else first_ts - CUT_LOOKBACK_SEC)
+    for raw in raw_lines:
+        try:
+            r = json.loads(raw)
+        except ValueError:
+            continue
+        if not (isinstance(r, dict) and r.get("session_key") in keys and str(r.get("chat_id") or "") == chat_id):
+            continue
+        try:
+            ts = float(r.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        if first_ts - 2.0 <= ts <= upper:
+            out.append(digest(raw))
+        elif lo < ts < first_ts - 2.0 and r.get("stage") in _ARRIVAL_STAGES and isinstance(r.get("preview"), str):
+            pv = collapse(r["preview"]).rstrip("…").strip()
+            if len(pv) >= 20 and any(p.startswith(pv) for p in prefixes):
                 out.append(digest(raw))
     return out
 
@@ -1475,9 +1546,20 @@ def build_cut_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project
     locate = getattr(adapter, "locate_cut", None)
     if not callable(locate) or not getattr(adapter, "can_forget_turn", False):
         raise ForgetError(400, "no_capability", f"{adapter.name} turns cannot be forgotten here")
-    art, restored_raw = locate(ctx, project, session_id, anchor_uuid, anchor_run_id=anchor_run_id)
+    art, prompt_lines = locate(ctx, project, session_id, anchor_uuid, anchor_run_id=anchor_run_id)
     e = art.extra
-    dropped = set(e.get("dropped_runs") or [])
+    norm = env.prompt_norm or (lambda x: x)
+    first = float(art.first_ts or time.time())
+    # the operator's prompt: the first prompt line of the cut written once the turn started that is
+    # not harness noise (a kept turn's late notification can sit between the mark and the prompt)
+    restored_raw = ""
+    for pts, text in prompt_lines:
+        if (pts is None or pts >= first - 2.0) and (norm(text) or "").strip():
+            restored_raw = text
+            break
+    keys = {session_key, *[b.get("session_key") for b in (bound or [])]} - {"", None}
+    ordered_tl = sorted({Path(x) for x in timeline_files}, key=lambda p: (p.name.endswith(".1") is False, str(p)))
+    dropped = set(e.get("dropped_runs") or []) | timeline_session_runs_since(ordered_tl, session_id, keys, first)
     tap = _PromptTap(adapter.read_cut_content(art))
     held = collect_held(iter(tap), seed=session_id, prompt_norm=env.prompt_norm)
     held.turns = len(dropped)
@@ -1488,8 +1570,8 @@ def build_cut_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project
         kept = find_in_range(transcript, 0, cut, held.windows)
         held.windows = [w for w in held.windows if w not in kept]
     timeline: dict = {}
-    for tp in sorted({Path(x) for x in timeline_files}, key=str):
-        digs = select_run_lines(tp, dropped)
+    for tp in ordered_tl:
+        digs = select_run_lines(tp, dropped, keys=keys, since=first)
         if digs:
             timeline[str(tp)] = digs
     names = set(audit_names or ()) | {str(project.get("name") or ""), str(project.get("id") or "")}
@@ -1502,7 +1584,7 @@ def build_cut_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project
         for af in sorted(audit_dir.glob("audit-*.log")):
             if months is not None and af.stem[len("audit-"):] not in months:
                 continue
-            digs = select_audit_runs(af, dropped, names)
+            digs = select_audit_runs(af, dropped, names, since=first)
             if digs:
                 audit[str(af)] = digs
     # media named in the dropped turns: not in the kept prefix, not in the prompt going back to the
@@ -1519,18 +1601,16 @@ def build_cut_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project
     files, size = _tree_size(list(art.paths))
     size += max(0, int(e.get("orig_size") or 0) - cut)
     chat_ids = {str(chat_id)} if chat_id else set()
-    keys = {session_key, *[b.get("session_key") for b in (bound or [])]} - {"", None}
-    first = float(art.first_ts or now)
     prev_end = e.get("prev_end")
     lower = first - 2.0
     if isinstance(prev_end, (int, float)) and prev_end and prev_end < lower:
-        lower = max(float(prev_end), first - CUT_LOOKBACK_SEC)
+        lower = max(float(prev_end) + 1.0, first - CUT_LOOKBACK_SEC)
     upper = now + 60.0
     trace = {}
     for name in TRACE_FILES:
         tp = Path(env.data_dir) / name
-        digs = select_trace_lines(tp, keys=keys, chat_ids=chat_ids, first_ts=lower, last_ts=upper, margin=0.0,
-                                  previews=(tap.prefixes, lower - 3600.0) if tap.prefixes else None)
+        digs = select_cut_trace_lines(tp, keys=keys, chat_id=str(chat_id or ""), first_ts=first, upper=upper,
+                                      prev_start=e.get("prev_start"), prev_end=prev_end, prefixes=tap.prefixes)
         if digs:
             trace[str(tp)] = digs
     home = Path(env.home) if env.home else Path.home()
@@ -1547,7 +1627,6 @@ def build_cut_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project
         "rotate_handoffs": rot_finder(keys, held.windows) if callable(rot_finder) and held.windows else [],
     }
     lin = [x for x in (lineage or []) if not isinstance(x.get("ts"), (int, float)) or x["ts"] >= first - 2.0]
-    norm = env.prompt_norm or (lambda x: x)
     restored = norm(restored_raw) if restored_raw else ""
     run_ids = sorted(dropped)
     return Plan(
@@ -1710,8 +1789,23 @@ async def _run_cut_steps(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], r
     dropped = set(rec.get("run_ids") or [])
     counts = {"turns": len(dropped), "files": 0, "timeline_lines": 0, "audit_lines": 0,
               "search_rows": 0, "media": 0}
-    # 4. cut the transcript, remove the dropped turns' artifacts, verify
-    res = await loop.run_in_executor(None, adapter.cut, ctx, art)
+    # 4. cut the transcript (once: recorded in the pending record, so a resume after a crash finishes
+    # the rest even when the chat ran another turn meanwhile), the dropped turns' artifacts, verify
+    if not e.get("truncated"):
+        try:
+            await loop.run_in_executor(None, adapter.cut_transcript, ctx, art)
+        except ForgetError:
+            # refused or undone before anything changed: nothing may resume this later on its own
+            try:
+                (pending_dir(env.data_dir) / f"{rec['token']}.json").unlink()
+            except OSError:
+                pass
+            raise
+        rec["art"]["extra"]["truncated"] = True
+        _write_pending(env.data_dir, rec)
+        art = _art_from_record(rec)
+        e = art.extra
+    res = await loop.run_in_executor(None, adapter.cut_artifacts, ctx, art)
     counts["files"] = int((res or {}).get("files", 0))
     left = await loop.run_in_executor(None, adapter.verify_cut, ctx, art)
     if left:

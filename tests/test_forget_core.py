@@ -461,7 +461,7 @@ def test_side_effect_scan_ignores_reads():
 
 
 def test_capabilities_follow_the_flag(monkeypatch):
-    assert forget.capabilities("claude") == {"delete_session": True, "forget_turn": False}
+    assert forget.capabilities("claude") == {"delete_session": True, "forget_turn": True}
     assert forget.capabilities("nope") == {"delete_session": False, "forget_turn": False}
     monkeypatch.setenv("FORGET_ENABLED", "0")
     assert forget.capabilities("claude") == {"delete_session": False, "forget_turn": False}
@@ -470,5 +470,5 @@ def test_capabilities_follow_the_flag(monkeypatch):
 def test_providers_rows_carry_the_forget_flags():
     import providers
     caps = providers.get("claude").capabilities()
-    assert caps["delete_session"] is True and caps["forget_turn"] is False
+    assert caps["delete_session"] is True and caps["forget_turn"] is True
     assert providers.get("codex").capabilities()["delete_session"] in (True, False)

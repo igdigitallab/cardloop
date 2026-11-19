@@ -1181,6 +1181,12 @@ def set_current_run(session_key, run_id) -> None:
         _CURRENT_RUN[str(session_key)] = str(run_id)
 
 
+def clear_current_run(session_key) -> None:
+    """Forget the current run id of `session_key` (spec-098: after its runs were forgotten)."""
+    if session_key:
+        _CURRENT_RUN.pop(str(session_key), None)
+
+
 def current_run(session_key) -> "str | None":
     """The run id last set for `session_key`, or None when unknown."""
     if not session_key:

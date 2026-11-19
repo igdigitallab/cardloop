@@ -852,7 +852,7 @@ def _bg_run_event(session_key: str, phase: str, text: "str | None" = None) -> No
     """Engine-drain callback (sync, never raises): phase ∈ start|text|end."""
     try:
         if phase == "start":
-            run_id = _uuid.uuid4().hex[:6]
+            run_id = _uuid.uuid4().hex[:12]   # spec-098: a short id repeats inside a long session
             _bg_run_ids[session_key] = run_id
             _stamp_run(session_key, run_id)
             _bg_run_started[session_key] = time.monotonic()
@@ -13178,6 +13178,11 @@ class _ForgetState:
                 continue
             _board_events_clear(k)
             _live_turns.pop(k, None)
+            try:   # lines written before the next run start must not carry a forgotten run's id
+                import engine as _eng
+                _eng.clear_current_run(k)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _forget_env(ctx: dict) -> "_forget.Env":
@@ -15112,7 +15117,7 @@ async def _chat_queue_execute(ctx: dict, session_key: str, item: dict) -> None:
     spawning this coroutine (see _chat_queue_drain_one).  This function does NOT
     reserve the lock itself — only releases it in finally.
     """
-    run_id = _uuid.uuid4().hex[:6]
+    run_id = _uuid.uuid4().hex[:12]   # spec-098: a short id repeats inside a long session
     # Multichat: route this queued run's bus events + live buffer to its origin chat tab.
     _q_chat_id = item.get("chat_id")
     _project_id = item.get("project_id")
@@ -16321,7 +16326,7 @@ async def api_project_chat(req: web.Request) -> web.Response:
     if _req_chat_id:
         _live_turn_obj["chat_id"] = _req_chat_id
     # Generate a short run id so the bus run_start/run_end pair is correlated.
-    _chat_run_id = _uuid.uuid4().hex[:6]
+    _chat_run_id = _uuid.uuid4().hex[:12]   # spec-098: a short id repeats inside a long session
     _chat_run_sid: "str | None" = None   # spec-098: session the run used/minted (run_end stamp)
     # Publish run_start to the activity bus so other tabs (and recovery after stream drop)
     # can reconstruct the in-flight turn without requiring a hard refresh.
