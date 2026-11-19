@@ -13124,7 +13124,7 @@ def _forget_lineage(ctx: dict, provider: str, session_id: str) -> "list[dict]":
 
 
 async def _forget_one(ctx: dict, project: dict, adapter, session_id: str,
-                      expect_token: "str | None") -> "tuple[dict, Any, set]":
+                      expect_token: "str | None") -> "tuple[dict, _forget.Plan, set]":
     """Reserve -> quiesce -> recompute plan -> execute for ONE session. Returns (counts, plan,
     keys). Raises forget.ForgetError for every refusal, with nothing touched."""
     env = _forget_env(ctx)
