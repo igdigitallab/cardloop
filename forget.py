@@ -122,7 +122,7 @@ ALWAYS_LIMITS: "tuple[str, ...]" = (
 
 def _load_adapters() -> None:
     """Import the provider adapters so they register themselves. One line per provider."""
-    for mod in ("forget_claude",):
+    for mod in ("forget_claude", "forget_codex", "forget_grok"):
         try:
             __import__(mod)
         except ImportError:

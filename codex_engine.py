@@ -564,3 +564,28 @@ def usage_rows(data_dir: Path, *, days: int | None = None) -> list[dict]:
     except Exception:
         return rows
     return rows
+
+
+def codex_home() -> Path:
+    """CODEX_HOME as the Codex CLI resolves it: the env var, else ``~/.codex``. This module sets
+    none, so the cockpit shares that home with the operator's own Codex (spec-098)."""
+    raw = os.environ.get("CODEX_HOME", "").strip()
+    return Path(os.path.expanduser(raw)) if raw else Path.home() / ".codex"
+
+
+async def delete_thread(thread_id: str) -> None:
+    """spec-098: ask the app-server to delete one thread (`thread/delete {threadId}`).
+
+    The SDK has typed wrappers only for fork/archive/unarchive, so this goes through the client's
+    raw request (P0, codex-cli 0.153.2). It removes the rollout, the `threads` row and the `logs`
+    rows by thread id; it leaves shell snapshots, freed SQLite pages and WAL frames behind (the
+    forget adapter sweeps those). It does NOT refuse a thread another process holds: that refusal
+    is the caller's. Raises on an app-server error (an unknown thread included)."""
+    from pydantic import BaseModel, ConfigDict
+
+    class _Raw(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+    AsyncCodex, _, _ = _sdk()
+    async with AsyncCodex() as codex:
+        await codex._client.request("thread/delete", {"threadId": thread_id}, response_model=_Raw)
