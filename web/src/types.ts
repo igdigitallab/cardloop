@@ -785,6 +785,8 @@ export interface SessionHistoryResponse {
   /** The session this one continued from after a context reset. Sent only when the page holds
    *  the session's first message (or the chat has no session yet); null = nothing above it. */
   prev_session?: PrevSession | null
+  /** spec-098 P4: earliest turn-mark start of the session, epoch ms; null = no marks (nothing can be forgotten from here). */
+  forget_from_ms?: number | null
 }
 
 /** A chat session's predecessor across a context reset (GET session-history `prev_session`). */

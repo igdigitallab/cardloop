@@ -92,3 +92,75 @@ test('capability helper: registry flag decides; missing row/flag = no; no provid
   assert.equal(canDeleteSession([], 'claude'), false)
   assert.equal(canDeleteSession(null, 'claude'), false)
 })
+
+// ── spec-098 P4: Forget from here ─────────────────────────────────────────────
+import {
+  chatForgottenAffectsMe, composerAfterForget, forgetAnchorFor, forgottenToast, ForgetFeedRow,
+} from './forget'
+
+const U = (uuid: string | undefined, ts: number | undefined, extra: Partial<ForgetFeedRow> = {}): ForgetFeedRow =>
+  ({ role: 'user', uuid, ts, ...extra })
+const A = (extra: Partial<ForgetFeedRow> = {}): ForgetFeedRow => ({ role: 'assistant', ...extra })
+const BRK: ForgetFeedRow = { role: 'session_break' }
+const MARK = 1_000_000
+
+test('anchor: the user row before the assistant group, in the current session', () => {
+  const feed = [U('u1', MARK + 1000), A(), U('u2', MARK + 5000), A(), A()]
+  assert.equal(forgetAnchorFor(feed, 1, MARK), 'u1')
+  assert.equal(forgetAnchorFor(feed, 3, MARK), 'u2')
+})
+
+test('anchor: null forget_from_ms or undefined means never', () => {
+  const feed = [U('u1', MARK), A()]
+  assert.equal(forgetAnchorFor(feed, 1, null), null)
+  assert.equal(forgetAnchorFor(feed, 1, undefined), null)
+})
+
+test('anchor: user row older than the first mark (beyond 5 s slack) is refused, within slack is ok', () => {
+  assert.equal(forgetAnchorFor([U('u1', MARK - 5000), A()], 1, MARK), 'u1')
+  assert.equal(forgetAnchorFor([U('u1', MARK - 5001), A()], 1, MARK), null)
+})
+
+test('anchor: missing uuid or ts on the user row', () => {
+  assert.equal(forgetAnchorFor([U(undefined, MARK), A()], 1, MARK), null)
+  assert.equal(forgetAnchorFor([U('u1', undefined), A()], 1, MARK), null)
+})
+
+test('anchor: groups before the last session_break are not offered, groups after are', () => {
+  const feed = [U('old', MARK), A(), BRK, U('new', MARK + 10), A()]
+  assert.equal(forgetAnchorFor(feed, 1, MARK), null)
+  assert.equal(forgetAnchorFor(feed, 4, MARK), 'new')
+})
+
+test('anchor: an assistant group right after a break with no user row has no anchor', () => {
+  assert.equal(forgetAnchorFor([U('old', MARK), BRK, A()], 2, MARK), null)
+})
+
+test('anchor: streaming rows and non-assistant indexes', () => {
+  assert.equal(forgetAnchorFor([U('u1', MARK), A({ streaming: true })], 1, MARK), null)
+  assert.equal(forgetAnchorFor([U('u1', MARK), A(), A({ streaming: true })], 1, MARK), null)
+  assert.equal(forgetAnchorFor([U('u1', MARK), A()], 0, MARK), null)
+  assert.equal(forgetAnchorFor([U('u1', MARK), A()], 7, MARK), null)
+})
+
+test('anchor: board rows between user and assistant are skipped', () => {
+  const feed = [U('u1', MARK), { role: 'board' }, A()]
+  assert.equal(forgetAnchorFor(feed, 2, MARK), 'u1')
+})
+
+test('composer after forget: empty draft, non-empty draft, no prompt', () => {
+  assert.equal(composerAfterForget('p', ''), 'p')
+  assert.equal(composerAfterForget('p', '  \n'), 'p')
+  assert.equal(composerAfterForget('p', 'draft'), 'p\n\ndraft')
+  assert.equal(composerAfterForget('', 'draft'), 'draft')
+})
+
+test('forgotten toast and chat_forgotten matching', () => {
+  assert.equal(forgottenToast(1, false), 'Forgot 1 turn')
+  assert.equal(forgottenToast(3, false), 'Forgot 3 turns')
+  assert.equal(forgottenToast(3, true), 'Forgot the whole session')
+  assert.equal(chatForgottenAffectsMe({ chat_id: 'c1' }, 'c1', 's'), true)
+  assert.equal(chatForgottenAffectsMe({ chat_id: 'c2', session_id: 's' }, 'c1', 's'), true)
+  assert.equal(chatForgottenAffectsMe({ chat_id: 'c2', session_id: 'x' }, 'c1', 's'), false)
+  assert.equal(chatForgottenAffectsMe({}, null, null), false)
+})
