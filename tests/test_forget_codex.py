@@ -115,7 +115,7 @@ def home(tmp_path, monkeypatch):
         word = KEEP if tid == OTHER else SENT
         state.execute("INSERT INTO threads VALUES (?,?,?,?,?,?,?,0)",
                       (tid, str(p), 1795000000, 1795003600, "/work/p", f"title {word}", f"first {word}"))
-        logs.execute("INSERT INTO logs (ts, feedback_log_body, thread_id) VALUES (1, ?, ?)", (f"log {word}", tid))
+        logs.execute("INSERT INTO logs (ts, feedback_log_body, thread_id) VALUES (1, ?, ?)", (("pad " * 3000) + f"log {word}", tid))
         hist.execute("INSERT INTO thread_turns VALUES (?, 't1', 'done')", (tid,))
         hist.execute("INSERT INTO thread_items VALUES (?, 't1', 'i1', ?)", (tid, json.dumps({"text": word})))
         hist.execute("INSERT INTO thread_history_projection_state VALUES (?, 1)", (tid,))
@@ -144,6 +144,7 @@ def _fake_native(home: Path):
     """What P0 measured: rollout unlinked, threads + logs rows deleted, no secure_delete, WAL left."""
     def native(tid: str) -> None:
         state = sqlite3.connect(home / "state_5.sqlite")
+        state.execute("PRAGMA secure_delete=OFF")      # the Rust sqlx build leaves freed pages (P0)
         row = state.execute("SELECT rollout_path FROM threads WHERE id=?", (tid,)).fetchone()
         if row:
             try:
@@ -154,6 +155,7 @@ def _fake_native(home: Path):
         state.commit()
         state.close()
         logs = sqlite3.connect(home / "logs_2.sqlite")
+        logs.execute("PRAGMA secure_delete=OFF")
         logs.execute("DELETE FROM logs WHERE thread_id=?", (tid,))
         logs.commit()
         logs.close()
@@ -212,7 +214,7 @@ def test_delete_leaves_no_sentinel_byte_and_keeps_the_other_thread(home, monkeyp
     art = ad.locate({}, {}, T)
     # the P0 residue pattern is reproducible here: after the native delete alone the text is still on disk
     _fake_native(home)(T)
-    assert _raw_hits(home, SENT), "fixture must leave residue after the native delete alone"
+    assert "logs_2.sqlite" in _raw_hits(home, SENT), "fixture must leave residue after the native delete alone"
     res = ad.delete({}, art)
     assert _raw_hits(home, SENT) == [], _raw_hits(home, SENT)
     assert ad.verify_gone({}, art) == []
