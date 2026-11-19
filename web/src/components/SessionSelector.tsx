@@ -77,7 +77,9 @@ function fmtCtx(n: number): string {
 }
 
 /** Anchor width used when clamping the dropdown to avoid right-edge overflow. */
-const DROPDOWN_ANCHOR_WIDTH = 360
+// The CSS max-width (.session-dropdown): the desktop width is content-driven up to it, so the clamp
+// must assume the widest case or the row buttons (✎, 🗑) slide past the right edge.
+const DROPDOWN_ANCHOR_WIDTH = 440
 
 export function SessionSelector({ projectId, onSessionChange, onRequestReset, reloadSignal, onToast }: Props) {
   // spec-098: capability comes from the shared registry store (no second fetch of the endpoint).

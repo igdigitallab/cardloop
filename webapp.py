@@ -2225,6 +2225,8 @@ def _timeline_path(session_key: str) -> "Path | None":
 _CHAT_TRACE_FILE: "Path | None" = None       # DATA/chat-trace.jsonl — set in _chat_trace_init
 _CHAT_TRACE_MAX_SIZE = 5 * 1024 * 1024       # rotate to .1 past this
 _CHAT_TRACE_PREVIEW = 120
+# spec-098: shared with the forget purge, which rewrites the trace via tmp + rename.
+_CHAT_TRACE_LOCK = threading.Lock()
 
 
 def _chat_trace_init(ctx: dict) -> None:
@@ -2260,13 +2262,14 @@ def _chat_trace(session_key: str, stage: str, *, msg_id: str = "", chat_id: "str
         for k, v in extra.items():
             if v is not None:
                 rec[k] = v
-        try:
-            if _CHAT_TRACE_FILE.exists() and _CHAT_TRACE_FILE.stat().st_size > _CHAT_TRACE_MAX_SIZE:
-                _CHAT_TRACE_FILE.rename(_CHAT_TRACE_FILE.with_suffix(".jsonl.1"))
-        except Exception:
-            pass
-        with open(_CHAT_TRACE_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with _CHAT_TRACE_LOCK:
+            try:
+                if _CHAT_TRACE_FILE.exists() and _CHAT_TRACE_FILE.stat().st_size > _CHAT_TRACE_MAX_SIZE:
+                    _CHAT_TRACE_FILE.rename(_CHAT_TRACE_FILE.with_suffix(".jsonl.1"))
+            except Exception:
+                pass
+            with open(_CHAT_TRACE_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -12742,9 +12745,7 @@ async def api_agent_providers(req: web.Request) -> web.Response:
             "models": ollama_info.get("models") or [],
             "error": ollama_info.get("error"),
         })
-    return web.json_response({
-        "default": "claude",
-        "providers": [
+    rows = [
             {
                 "provider": "claude", "enabled": True, "available": True,
                 "authenticated": True, "models": claude_models,
@@ -12760,8 +12761,15 @@ async def api_agent_providers(req: web.Request) -> web.Response:
             # already pinned to Grok keeps its record and shows as unavailable instead.
             *([{**await _grok_info(ctx), "accounts": [], "backends": []}]
               if _grok.grok_enabled() else []),
-        ],
-    })
+    ]
+    # spec-098: every row carries the forget flags (delete_session / forget_turn) from the one
+    # registry, so the UI never decides per provider name.
+    _forget._load_adapters()
+    for row in rows:
+        if isinstance(row, dict) and row.get("provider"):
+            row["capabilities"] = {**(row.get("capabilities") or {}),
+                                   **_forget.capabilities(str(row["provider"]))}
+    return web.json_response({"default": "claude", "providers": rows})
 
 
 # ─────────────────────────── C2: project sessions ───────────────────────────
@@ -13080,14 +13088,16 @@ class _ForgetState:
                 if dropped and callable(ctx.get("save_sessions")):
                     ctx["save_sessions"]()
 
-    def find_handoffs(self, windows: "list[str]") -> "list[dict]":
-        """Armed (undelivered) runtime_handoffs whose text carries the content about to go: ids only."""
+    def find_handoffs(self, windows: "list[str]", session_id: "str | None" = None) -> "list[dict]":
+        """Armed (undelivered) runtime_handoffs built from the session about to go: by the source
+        session the handoff records, else by its text carrying the content's strings. Ids only."""
         out: list = []
         for pid, entry in _load_chats(self.ctx).items():
             for chat in (entry.get("chats", []) if isinstance(entry, dict) else []):
                 rh = chat.get("runtime_handoff") if isinstance(chat, dict) else None
                 text = rh.get("text") if isinstance(rh, dict) else None
-                if isinstance(text, str) and any(w in text for w in windows):
+                from_me = bool(session_id) and isinstance(rh, dict) and rh.get("from_session") == session_id
+                if from_me or (isinstance(text, str) and windows and any(w in text for w in windows)):
                     out.append({"project_id": pid, "chat_id": chat.get("id"),
                                 "created_at": rh.get("created_at")})
         return out
@@ -13108,6 +13118,33 @@ class _ForgetState:
                         n += 1
             if n:
                 _save_chats(self.ctx, data)
+        return n
+
+    def find_pending_rotate_handoffs(self, keys: "set[str]", windows: "list[str]") -> "list[dict]":
+        """The engine's not-yet-injected rotate summaries (data/handoff.json) for these chats whose
+        text carries the content's strings: {session_key, sha} refs, no text."""
+        pend = self.ctx.get("pending_handoff")
+        if not isinstance(pend, dict):
+            return []
+        out: list = []
+        for k, text in list(pend.items()):
+            if k in keys and isinstance(text, str) and any(w in text for w in windows):
+                out.append({"session_key": k, "sha": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()})
+        return out
+
+    def drop_pending_rotate_handoffs(self, refs: "list[dict]") -> int:
+        pend = self.ctx.get("pending_handoff")
+        if not isinstance(pend, dict):
+            return 0
+        n = 0
+        for ref in refs:
+            text = pend.get(ref.get("session_key"))
+            if isinstance(text, str) and hashlib.sha256(
+                    text.encode("utf-8", "replace")).hexdigest() == ref.get("sha"):
+                pend.pop(ref["session_key"], None)
+                n += 1
+        if n and callable(self.ctx.get("save_handoff")):
+            self.ctx["save_handoff"]()
         return n
 
     def drop_labels_links(self, session_id: str) -> None:
@@ -13133,6 +13170,7 @@ def _forget_env(ctx: dict) -> "_forget.Env":
         prompt_norm=_display_prompt,
         state=_ForgetState(ctx),
         publish=lambda sk, ev: _bus_publish(sk, ev, persist=False),
+        trace_lock=_CHAT_TRACE_LOCK,
     )
 
 

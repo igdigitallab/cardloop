@@ -403,7 +403,7 @@ def select_timeline_lines(path: Path, *, session_id: str, known_runs: "set[str]"
     try:
         raw_lines = path.read_bytes().splitlines(keepends=True)
     except OSError:
-        return {"digests": [], "unattributed": 0, "runs": []}
+        return {"digests": [], "unattributed": 0, "runs": [], "chat_ids": []}
     recs: list = []
     for raw in raw_lines:
         try:
@@ -416,6 +416,7 @@ def select_timeline_lines(path: Path, *, session_id: str, known_runs: "set[str]"
         if r and r.get("kind") == "run_end" and r.get("session_id") == session_id and r.get("run_id"):
             known_runs.add(str(r["run_id"]))
     found: set = set()
+    chats: set = set()
     state: dict = {}                  # session_key -> belongs (latest run_start's verdict)
     digests: list = []
     unattributed = 0
@@ -435,6 +436,8 @@ def select_timeline_lines(path: Path, *, session_id: str, known_runs: "set[str]"
                     or _prompt_hit(prompts, digest(collapse(pn(ptxt))), r.get("ts")))
             if belongs and rid:
                 known_runs.add(rid)
+            if belongs and r.get("chat_id"):
+                chats.add(str(r["chat_id"]))
             state[sk] = belongs
         elif kind in _TL_CONV_KINDS:
             if rid:
@@ -451,7 +454,8 @@ def select_timeline_lines(path: Path, *, session_id: str, known_runs: "set[str]"
             digests.append(digest(raw))
             if rid:
                 found.add(rid)
-    return {"digests": digests, "unattributed": unattributed, "runs": sorted(found)}
+    return {"digests": digests, "unattributed": unattributed, "runs": sorted(found),
+            "chat_ids": sorted(chats)}
 
 
 def purge_lines_by_digest(path: Path, digests: "set[str] | list[str]", lock: Any) -> int:
@@ -669,14 +673,174 @@ def plan_media(data_dir: Path, held: Held, roots: "list[Path]", exclude_prefix: 
 
 
 # ───────────────────────────── residue scan (decision 5) ───────────────────────────────────────
+# ───────────────────────────── stores found while building (not in the spec's inventory) ───────────
+# chat-trace.jsonl (120-char previews of every operator message), deferred.json (prompts of fired
+# deferred turns), plans/<id>.json (+ the plan file the CLI wrote under ~/.claude/plans) and the
+# engine's pending rotate handoff (data/handoff.json). Each is selected at plan time (ids/digests
+# only, so the pending record stays text-free) and purged in step 5b.
+EXTRA_MARGIN_SEC = 300.0
+TRACE_FILES = ("chat-trace.jsonl", "chat-trace.jsonl.1")
+
+
+def _within(ts: Any, first_ts: "float | None", last_ts: "float | None",
+            margin: float = EXTRA_MARGIN_SEC) -> bool:
+    try:
+        t = float(ts)
+    except (TypeError, ValueError):
+        return False
+    if first_ts is None or last_ts is None:
+        return False
+    return first_ts - margin <= t <= max(first_ts, last_ts) + margin
+
+
+def _chat_ok(chat_id: Any, chat_ids: "set[str]") -> bool:
+    """A line tied to a chat goes only when that chat is one the session ran in; a line without a
+    chat id goes only when the session itself has no chat evidence (single-chat legacy)."""
+    if chat_id:
+        return str(chat_id) in chat_ids
+    return not chat_ids
+
+
+def select_trace_lines(path: Path, *, keys: "set[str]", chat_ids: "set[str]",
+                       first_ts: "float | None", last_ts: "float | None") -> "list[str]":
+    """chat-trace lines of the session: its session_key(s), its chat(s), inside its time span."""
+    out: list = []
+    try:
+        raw_lines = path.read_bytes().splitlines(keepends=True)
+    except OSError:
+        return out
+    for raw in raw_lines:
+        try:
+            r = json.loads(raw)
+        except ValueError:
+            continue
+        if (isinstance(r, dict) and r.get("session_key") in keys
+                and _chat_ok(r.get("chat_id"), chat_ids) and _within(r.get("ts"), first_ts, last_ts)):
+            out.append(digest(raw))
+    return out
+
+
+def _prompt_keys(prompts: "list[tuple[float | None, frozenset]]") -> "set[str]":
+    out: set = set()
+    for _ts, ks in prompts:
+        out |= set(ks)
+    return out
+
+
+def select_deferred(data_dir: Path, *, keys: "set[str]",
+                    prompts: "list[tuple[float | None, frozenset]]") -> "list[str]":
+    """Ids of deferred.json records that already ran (status != pending) with one of the session's
+    prompts in one of its session_keys. A pending record is future operator input: it stays."""
+    try:
+        recs = json.loads((Path(data_dir) / "deferred.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    pk = _prompt_keys(prompts)
+    out: list = []
+    for r in recs if isinstance(recs, list) else []:
+        if not isinstance(r, dict) or r.get("status") == "pending" or r.get("session_key") not in keys:
+            continue
+        text = r.get("prompt")
+        if isinstance(text, str) and text and (digest(collapse(text)) in pk
+                                               or digest(short(collapse(text), 300)) in pk):
+            out.append(str(r.get("id")))
+    return out
+
+
+def _plan_file_ok(path: str, home: Path) -> bool:
+    """Only a plan file the CLI itself wrote (~/.claude/plans or an account's plans dir)."""
+    try:
+        rp = Path(path).resolve()
+    except (OSError, ValueError):
+        return False
+    roots = [home / ".claude" / "plans"] + sorted((home / ".claude-accounts").glob("*/plans"))
+    for root in roots:
+        try:
+            if rp.parent == root.resolve() and rp.suffix == ".md" and rp.is_file():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def select_plans(data_dir: Path, home: Path, *, keys: "set[str]", chat_ids: "set[str]",
+                 first_ts: "float | None", last_ts: "float | None") -> "tuple[list[str], list[str]]":
+    """Plan-approval sidecars (data/plans/<id>.json) made during the session, and the plan files
+    they point at. -> (sidecar ids, plan file paths)."""
+    ids: list = []
+    files: list = []
+    pdir = Path(data_dir) / "plans"
+    try:
+        entries = sorted(pdir.glob("*.json"))
+    except OSError:
+        return ids, files
+    for f in entries:
+        try:
+            r = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(r, dict) or r.get("session_key") not in keys:
+            continue
+        if not (_chat_ok(r.get("chat_id"), chat_ids) and _within(r.get("created_at"), first_ts, last_ts)):
+            continue
+        ids.append(f.stem)
+        pf = r.get("plan_file_path")
+        if isinstance(pf, str) and pf and _plan_file_ok(pf, home):
+            files.append(pf)
+    return ids, files
+
+
+def purge_deferred(data_dir: Path, ids: "list[str]", lock: Any) -> int:
+    if not ids:
+        return 0
+    want = set(ids)
+    p = Path(data_dir) / "deferred.json"
+    with lock:
+        try:
+            recs = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        if not isinstance(recs, list):
+            return 0
+        keep = [r for r in recs if not (isinstance(r, dict) and str(r.get("id")) in want)]
+        gone = len(recs) - len(keep)
+        if gone:
+            tmp = p.with_name(p.name + ".forget-tmp")
+            tmp.write_text(json.dumps(keep, indent=2), encoding="utf-8")
+            os.replace(tmp, p)
+    return gone
+
+
+def purge_plans(data_dir: Path, home: Path, ids: "list[str]", files: "list[str]") -> int:
+    n = 0
+    pdir = Path(data_dir) / "plans"
+    for pid in ids:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", pid or ""):
+            continue
+        try:
+            (pdir / f"{pid}.json").unlink()
+            n += 1
+        except OSError:
+            pass
+    for pf in files:
+        if _plan_file_ok(pf, home):          # re-checked: the record is not trusted blindly
+            try:
+                Path(pf).unlink()
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
 def default_residue_roots(data_dir: Path, home: "Path | None" = None) -> "list[Path]":
     """Broad roots every provider's leftovers could hide in (the adapter adds its own)."""
     home = Path(home) if home else Path.home()
-    roots: list = [home / ".claude" / "history.jsonl", Path(data_dir), home / ".gemini" / "antigravity-cli"]
+    roots: list = [home / ".claude" / "history.jsonl", home / ".claude" / "plans", Path(data_dir),
+                   home / ".gemini" / "antigravity-cli"]
     acc = home / ".claude-accounts"
     if acc.is_dir():
         for d in sorted(acc.iterdir()):
-            for sub in ("file-history", "session-env", "history.jsonl"):
+            for sub in ("file-history", "session-env", "history.jsonl", "plans"):
                 roots.append(d / sub)
     journal = os.environ.get("FORGET_JOURNAL_DIR") or os.environ.get("JOURNAL_DIR") or str(home / "vault" / "Journal")
     roots.append(Path(journal))
@@ -839,6 +1003,8 @@ class Env:
     state: Any = None
     publish: "Callable[[str, dict], None] | None" = None
     home: "Path | None" = None
+    trace_lock: Any = field(default_factory=threading.Lock)
+    deferred_lock: Any = field(default_factory=threading.Lock)
 
 
 _CONFIG: dict = {}
@@ -871,6 +1037,7 @@ class Plan:
     diary_days: "list[str]" = field(default_factory=list)
     bound: "list[dict]" = field(default_factory=list)
     handoffs: "list[dict]" = field(default_factory=list)   # armed runtime_handoffs built from the content
+    extra: dict = field(default_factory=dict)               # stores found while building (step 5b)
 
     def record(self) -> dict:
         """The pending-journal form: ids, paths, digests. No conversation text."""
@@ -884,6 +1051,7 @@ class Plan:
                     "extra": a.extra},
             "run_ids": self.run_ids, "timeline": self.timeline, "audit": self.audit,
             "media": self.media, "bound": self.bound, "handoffs": self.handoffs,
+            "extra": self.extra,
         }
 
 
@@ -947,12 +1115,17 @@ def build_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Ma
     unattributed = 0
     # `.1` before the live file: a run_start that rotated away still tags its later lines
     ordered = sorted({Path(p) for p in timeline_files}, key=lambda p: (p.name.endswith(".1") is False, str(p)))
+    chat_ids: set = {str(b["chat_id"]) for b in (bound or []) if b.get("chat_id")}
     for tp in ordered:
         sel = select_timeline_lines(tp, session_id=session_id, known_runs=known,
                                     prompts=held.prompts, prompt_norm=env.prompt_norm)
         unattributed += sel["unattributed"]
+        chat_ids |= set(sel.get("chat_ids") or [])
         if sel["digests"]:
             timeline[str(tp)] = sel["digests"]
+    for m in _read_jsonl_dicts(turn_marks_path(env.data_dir, session_id)):
+        if m.get("chat_id"):
+            chat_ids.add(str(m["chat_id"]))
     audit: dict = {}
     audit_dir = Path(env.data_dir) / "audit"
     months = audit_months(art.first_ts, art.last_ts)
@@ -972,7 +1145,24 @@ def build_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Ma
     media = plan_media(env.data_dir, held, roots, session_id) if held.media else []
     files, size = _tree_size(list(art.paths))
     finder = getattr(env.state, "find_handoffs", None)
-    handoffs = finder(held.windows) if callable(finder) and held.windows else []
+    handoffs = finder(held.windows, session_id=session_id) if callable(finder) else []
+    keys = {session_key, *[b.get("session_key") for b in (bound or [])]} - {"", None}
+    home = Path(env.home) if env.home else Path.home()
+    trace = {}
+    for name in TRACE_FILES:
+        tp = Path(env.data_dir) / name
+        digs = select_trace_lines(tp, keys=keys, chat_ids=chat_ids, first_ts=art.first_ts, last_ts=art.last_ts)
+        if digs:
+            trace[str(tp)] = digs
+    plan_ids, plan_files = select_plans(env.data_dir, home, keys=keys, chat_ids=chat_ids,
+                                        first_ts=art.first_ts, last_ts=art.last_ts)
+    rot_finder = getattr(env.state, "find_pending_rotate_handoffs", None)
+    extra = {
+        "trace": trace,
+        "deferred": select_deferred(env.data_dir, keys=keys, prompts=held.prompts),
+        "plans": plan_ids, "plan_files": plan_files,
+        "rotate_handoffs": rot_finder(keys, held.windows) if callable(rot_finder) and held.windows else [],
+    }
     return Plan(
         provider=adapter.name, session_id=session_id, project_id=str(project.get("id", "")),
         cwd=str(project.get("cwd", art.cwd)), session_key=session_key, art=art, held=held,
@@ -981,7 +1171,7 @@ def build_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Ma
         files=files, bytes=size, bound=list(bound or []),
         active_chats=[b["chat_id"] for b in (bound or []) if b.get("chat_id")],
         lineage=list(lineage or []), diary_days=_diary_days(art.first_ts, art.last_ts, env.home),
-        handoffs=handoffs)
+        handoffs=handoffs, extra=extra)
 
 
 def plan_view(plan: Plan) -> dict:
@@ -1058,6 +1248,19 @@ async def _run_steps(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], rec: 
     if st is not None and hasattr(st, "clear_runtime"):
         st.clear_runtime(rec.get("session_key", ""), [b.get("session_key") for b in rec.get("bound", [])])
     _after_step(5)
+    # 5b. stores found while building: chat-trace, fired deferred prompts, plan sidecars + plan files,
+    # the engine's pending rotate handoff
+    ex = rec.get("extra") or {}
+    for path, digs in (ex.get("trace") or {}).items():
+        counts["trace_lines"] = counts.get("trace_lines", 0) + await loop.run_in_executor(
+            None, purge_lines_by_digest, Path(path), digs, env.trace_lock)
+    # on the loop thread on purpose: the cockpit's deferred.json writers are synchronous loop code
+    counts["deferred"] = purge_deferred(Path(env.data_dir), list(ex.get("deferred") or []), env.deferred_lock)
+    counts["plans"] = await loop.run_in_executor(
+        None, purge_plans, Path(env.data_dir), Path(env.home) if env.home else Path.home(),
+        list(ex.get("plans") or []), list(ex.get("plan_files") or []))
+    if st is not None and ex.get("rotate_handoffs") and hasattr(st, "drop_pending_rotate_handoffs"):
+        st.drop_pending_rotate_handoffs(ex["rotate_handoffs"])
     # 6. chat-media
     media_root = (Path(env.data_dir) / "chat-media").resolve()
     for m in rec.get("media", []):

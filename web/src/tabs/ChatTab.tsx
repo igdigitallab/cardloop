@@ -1842,12 +1842,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // Bumped whenever the session is reset/rotated so the SessionSelector refetches its list and
   // relabels (its button otherwise keeps showing the now-closed session until the dropdown is opened).
   const [sessionReloadKey, setSessionReloadKey] = useState(0)
-  // spec-098: status line after a session delete / the residue scan (own slot, 6 s).
-  const [forgetToast, setForgetToast] = useState<string | null>(null)
-  const showForgetToast = useCallback((text: string) => {
-    setForgetToast(text)
-    setTimeout(() => setForgetToast(cur => (cur === text ? null : cur)), 6000)
+  // spec-098: status after a session delete (`main`) and the residue scan's verdict (`residue`).
+  // Two lines of one toast: on a small store the verdict arrives over the bus BEFORE the delete
+  // request returns, and one shared line let "Session deleted" overwrite "no copies left".
+  const [forgetToast, setForgetToast] = useState<{ main?: string; residue?: string } | null>(null)
+  const forgetToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pushForgetToast = useCallback((part: { main?: string; residue?: string }) => {
+    setForgetToast(cur => ({ ...(cur ?? {}), ...part }))
+    if (forgetToastTimer.current) clearTimeout(forgetToastTimer.current)
+    forgetToastTimer.current = setTimeout(() => setForgetToast(null), 8000)
   }, [])
+  const showForgetToast = useCallback((text: string) => pushForgetToast({ main: text }), [pushForgetToast])
   // spec-042: unified reset-confirm modal (replaces direct no-confirm handleRotate calls)
   const [resetModalOpen, setResetModalOpen] = useState(false)
   // Spec-039: toast shown when native auto-compact fires (kind:"compact" bus event)
@@ -3079,7 +3084,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
       }
 
     } else if (evt.kind === 'forget_residue') {
-      showForgetToast(residueMessage(evt.clean, evt.hits, evt.truncated))
+      pushForgetToast({ residue: residueMessage(evt.clean, evt.hits, evt.truncated) })
 
     } else if (evt.kind === 'rate_limit_prompt') {
       // spec-051: limit hit, project policy is "ask" → surface the Yes/No prompt.
@@ -6057,7 +6062,8 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           border: '1px solid var(--border2)', borderRadius: 8,
           fontSize: 13, zIndex: 9999, maxWidth: 'min(520px, calc(100vw - 48px))',
         }}>
-          🗑 {forgetToast}
+          {forgetToast.main && <div>🗑 {forgetToast.main}</div>}
+          {forgetToast.residue && <div>{forgetToast.main ? '' : '🗑 '}{forgetToast.residue}</div>}
         </div>
       )}
 

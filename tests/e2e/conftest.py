@@ -46,6 +46,9 @@ E2E_PROJECT_IDS.append("e2e-health")
 # The agent file-drop + option-picker scenario (test_chat_file_drop.py).
 E2E_PROJECT_IDS.append("e2e-filedrop")
 
+# spec-098: deleting a whole session from the session list (test_forget_session.py).
+E2E_PROJECT_IDS.append("e2e-forget")
+
 # The bus-lag race scenario (test_bus_lag_no_duplicate.py).
 E2E_PROJECT_IDS += ["e2e-buslag", "e2e-buslag-multi", "e2e-buslag-error", "e2e-buslag-toolonly"]
 
