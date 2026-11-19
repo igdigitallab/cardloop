@@ -83,6 +83,7 @@ import grok_history as _grok_history
 import grok_sends as _grok_sends
 import grok_usage as _grok_usage
 import providers
+import forget as _forget
 
 # spec-075: context pack — deterministic project-state injection on fresh sessions
 import context_pack as _context_pack
@@ -13007,6 +13008,325 @@ async def api_project_session_label(req: web.Request) -> web.Response:
     return web.json_response({"ok": True, "session_id": sid, "label": label or None})
 
 
+# ─────────────────────────── spec-098 Forget: delete a session ───────────────────────────
+# The engine lives in forget.py (+ forget_<provider>.py adapters); this section is only the cockpit
+# glue: the state the pipeline needs from webapp (chat bindings, rings, labels), the Env that
+# carries our locks, and endpoint A.
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
+
+
+def _forget_err(status: int, code: str, message: str) -> web.Response:
+    return web.json_response({"error": message, "code": code}, status=status)
+
+
+class _ForgetState:
+    """The cockpit-side state a forget touches: chat bindings, the armed runtime handoff, labels,
+    links, the in-memory rings. Implements the optional `Env.state` methods of forget.py."""
+
+    def __init__(self, ctx: dict):
+        self.ctx = ctx
+
+    def _field(self, provider: str) -> str:
+        return providers.get(provider).continuity_field
+
+    def bound(self, provider: str, session_id: str) -> "list[dict]":
+        """Every chat / free chat / flat mirror entry whose continuity id is this session."""
+        ctx, f = self.ctx, self._field(provider)
+        out: list = []
+        for pid, entry in _load_chats(ctx).items():
+            if not isinstance(entry, dict):
+                continue
+            proj = _find_project_by_id_any(ctx, pid) or {}
+            sk = proj.get("session_key") or pid
+            for chat in entry.get("chats", []):
+                if isinstance(chat, dict) and chat.get(f) == session_id:
+                    out.append({"project_id": pid, "chat_id": chat.get("id"), "session_key": sk})
+        for fid, rec in _load_free_chats(ctx).items():
+            if isinstance(rec, dict) and rec.get(f) == session_id:
+                out.append({"project_id": fid, "chat_id": None, "session_key": fid})
+        if provider == "claude":
+            for sk, sid in list((ctx.get("sessions") or {}).items()):
+                if sid == session_id and not any(b["session_key"] == sk for b in out):
+                    out.append({"project_id": "", "chat_id": None, "session_key": sk})
+        return out
+
+    async def unbind(self, provider: str, session_id: str) -> None:
+        ctx, f = self.ctx, self._field(provider)
+        async with _chats_lock():
+            data = _load_chats(ctx)
+            changed = False
+            for entry in data.values():
+                for chat in (entry.get("chats", []) if isinstance(entry, dict) else []):
+                    if isinstance(chat, dict) and chat.get(f) == session_id:
+                        chat[f] = None
+                        changed = True
+            if changed:
+                _save_chats(ctx, data)
+            free = _load_free_chats(ctx)
+            fchanged = False
+            for rec in free.values():
+                if isinstance(rec, dict) and rec.get(f) == session_id:
+                    rec[f] = None
+                    fchanged = True
+            if fchanged:
+                _save_free_chats(ctx, free)
+        if provider == "claude":
+            sess = ctx.get("sessions")
+            if isinstance(sess, dict):
+                dropped = [k for k, v in sess.items() if v == session_id]
+                for k in dropped:
+                    sess.pop(k, None)
+                if dropped and callable(ctx.get("save_sessions")):
+                    ctx["save_sessions"]()
+
+    def find_handoffs(self, windows: "list[str]") -> "list[dict]":
+        """Armed (undelivered) runtime_handoffs whose text carries the content about to go: ids only."""
+        out: list = []
+        for pid, entry in _load_chats(self.ctx).items():
+            for chat in (entry.get("chats", []) if isinstance(entry, dict) else []):
+                rh = chat.get("runtime_handoff") if isinstance(chat, dict) else None
+                text = rh.get("text") if isinstance(rh, dict) else None
+                if isinstance(text, str) and any(w in text for w in windows):
+                    out.append({"project_id": pid, "chat_id": chat.get("id"),
+                                "created_at": rh.get("created_at")})
+        return out
+
+    async def drop_handoffs(self, refs: "list[dict]") -> int:
+        if not refs:
+            return 0
+        n = 0
+        async with _chats_lock():
+            data = _load_chats(self.ctx)
+            for ref in refs:
+                entry = data.get(ref.get("project_id")) or {}
+                for chat in entry.get("chats", []):
+                    rh = chat.get("runtime_handoff") if isinstance(chat, dict) else None
+                    if (chat.get("id") == ref.get("chat_id") and isinstance(rh, dict)
+                            and rh.get("created_at") == ref.get("created_at")):
+                        chat.pop("runtime_handoff", None)
+                        n += 1
+            if n:
+                _save_chats(self.ctx, data)
+        return n
+
+    def drop_labels_links(self, session_id: str) -> None:
+        labels = _load_session_labels(self.ctx)
+        if labels.pop(session_id, None) is not None:
+            _save_session_labels(self.ctx, labels)
+        _session_links.remove_session(self.ctx["DATA"], session_id)
+
+    def clear_runtime(self, session_key: str, other_keys: "list[str]") -> None:
+        for k in {session_key, *[x for x in other_keys if x]}:
+            if not k:
+                continue
+            _board_events_clear(k)
+            _live_turns.pop(k, None)
+
+
+def _forget_env(ctx: dict) -> "_forget.Env":
+    return _forget.Env(
+        data_dir=Path(ctx["DATA"]),
+        timeline_lock=_TIMELINE_LOCK,
+        audit_lock=_audit_lock(),
+        search_lock=_get_search_lock,
+        prompt_norm=_display_prompt,
+        state=_ForgetState(ctx),
+        publish=lambda sk, ev: _bus_publish(sk, ev, persist=False),
+    )
+
+
+def _audit_lock():
+    try:
+        import engine as _engine_mod
+        return _engine_mod.AUDIT_LOCK
+    except Exception:  # noqa: BLE001 - tests without engine importable
+        return threading.Lock()
+
+
+def _forget_timeline_files(ctx: dict, project: dict, keys: "set[str]") -> "list[Path]":
+    base = Path(ctx["DATA"]) / "timeline"
+    names = {f"{_timeline_slug_from_cwd(project.get('cwd') or '')}.jsonl"}
+    topics = ctx.get("topics") or {}
+    for k in keys:
+        if k not in topics:
+            safe = k.replace("/", "-").replace(":", "-")
+            names.add(f"{safe or '_unknown'}.jsonl")
+    out: list = []
+    for n in sorted(names):
+        for p in (base / n, base / (n + ".1")):
+            if p.exists():
+                out.append(p)
+    return out
+
+
+def _forget_lineage(ctx: dict, provider: str, session_id: str) -> "list[dict]":
+    labels = _load_session_labels(ctx)
+    out: list = []
+    seen: set = set()
+    if provider == "claude":
+        try:
+            links = json.loads((Path(ctx["DATA"]) / "session_links.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            links = {}
+        for sid, rec in (links.items() if isinstance(links, dict) else []):
+            if isinstance(rec, dict) and rec.get("prev") == session_id:
+                seen.add(("claude", sid))
+                out.append({"provider": "claude", "session_id": sid, "kind": "rotate",
+                            "title": str(labels.get(sid) or "")})
+    for row in _forget.lineage_rows(Path(ctx["DATA"])):
+        if row.get("from_session") == session_id and row.get("from_provider") == provider:
+            key = (row.get("to_provider"), row.get("to_session"))
+            if key not in seen and key[0] and key[1]:
+                seen.add(key)
+                out.append({"provider": key[0], "session_id": key[1],
+                            "kind": str(row.get("kind") or "runtime_handoff"),
+                            "title": str(labels.get(key[1]) or "")})
+    return out
+
+
+async def _forget_one(ctx: dict, project: dict, adapter, session_id: str,
+                      expect_token: "str | None") -> "tuple[dict, _forget.Plan, set]":
+    """Reserve -> quiesce -> recompute plan -> execute for ONE session. Returns (counts, plan,
+    keys). Raises forget.ForgetError for every refusal, with nothing touched."""
+    env = _forget_env(ctx)
+    loop = asyncio.get_running_loop()
+    state = env.state
+    own_key = project.get("session_key") or project.get("tg_thread", "")
+    # SYNC up to the reservation: nothing awaits between reading the bindings and taking the slots
+    bound = state.bound(adapter.name, session_id)
+    keys = {own_key, *[b["session_key"] for b in bound]}
+    keys.discard("")
+    taken: list = []
+    for k in sorted(keys):
+        if ctx["running"].get(k) is not None:
+            for t in taken:
+                ctx["running"].pop(t, None)
+            raise _forget.ForgetError(409, "busy", "a turn is running in a chat that uses this session")
+        ctx["running"][k] = True
+        taken.append(k)
+    try:
+        for k in sorted(keys):
+            if _bg_turn_active(k):
+                raise _forget.ForgetError(409, "busy", "a background turn owns this chat's session")
+            if _has_live_agent_monitors(k):
+                raise _forget.ForgetError(409, "subagents",
+                                          "background sub-agents are still running for this session")
+        evict = ctx.get("evict_live_client")
+        if evict is not None:
+            for k in sorted(keys):
+                await evict(k, ctx)
+        reason = None
+        for attempt in range(6):
+            reason = await loop.run_in_executor(None, adapter.busy_reason, ctx, project, session_id)
+            if not reason:
+                break
+            await asyncio.sleep(0.5)
+        if reason:
+            raise _forget.ForgetError(409, getattr(adapter, "busy_code", "writer"), reason)
+        lineage = _forget_lineage(ctx, adapter.name, session_id)
+        files = _forget_timeline_files(ctx, project, keys)
+        plan = await loop.run_in_executor(
+            None, lambda: _forget.build_plan(env, adapter, ctx, project, session_id, timeline_files=files,
+                                             session_key=own_key, bound=bound, lineage=lineage))
+        if expect_token is not None and plan.token != expect_token:
+            raise _forget.ForgetError(409, "changed", "the session changed since the preview - reopen the dialog")
+        counts = await _forget.execute_plan(env, adapter, ctx, plan)
+        return counts, plan, keys
+    finally:
+        for t in taken:
+            ctx["running"].pop(t, None)
+
+
+async def api_session_delete(req: web.Request) -> web.Response:
+    """POST /api/projects/{id}/sessions/{provider}/{session_id}/delete
+
+    Body (JSON only): {"dry_run": true} -> the plan + plan_token;
+    {"dry_run": false, "plan_token", "also_delete": [{provider, session_id}]} -> purge."""
+    ctx = req.app["ctx"]
+    if not _forget.forget_enabled():
+        return _forget_err(404, "disabled", "forget is turned off (FORGET_ENABLED=0)")
+    if (req.content_type or "").split(";")[0].strip().lower() != "application/json":
+        return _forget_err(415, "bad_request", "this endpoint takes application/json only")
+    project = _find_project_by_id(ctx, req.match_info["id"])
+    if project is None:
+        return _forget_err(404, "not_found", "project not found")
+    provider = req.match_info["provider"]
+    session_id = req.match_info["session_id"]
+    _forget._load_adapters()
+    adapter = _forget.adapter(provider)
+    if adapter is None or not adapter.can_delete_session:
+        return _forget_err(400, "no_capability", f"{provider} sessions cannot be deleted here")
+    if not _SESSION_ID_RE.match(session_id):
+        return _forget_err(400, "bad_request", "bad session id")
+    try:
+        body = await req.json()
+    except Exception:  # noqa: BLE001
+        return _forget_err(400, "bad_request", "bad request")
+    if not isinstance(body, dict):
+        return _forget_err(400, "bad_request", "bad request")
+    loop = asyncio.get_running_loop()
+    try:
+        if body.get("dry_run") is not False:
+            env = _forget_env(ctx)
+            own_key = project.get("session_key") or project.get("tg_thread", "")
+            bound = env.state.bound(provider, session_id)
+            keys = {own_key, *[b["session_key"] for b in bound]}
+            files = _forget_timeline_files(ctx, project, keys)
+            lineage = _forget_lineage(ctx, provider, session_id)
+            plan = await loop.run_in_executor(
+                None, lambda: _forget.build_plan(env, adapter, ctx, project, session_id, timeline_files=files,
+                                                 session_key=own_key, bound=bound, lineage=lineage))
+            return web.json_response({"ok": True, "plan_token": plan.token, "plan": _forget.plan_view(plan)})
+        token = body.get("plan_token")
+        if not isinstance(token, str) or not token:
+            return _forget_err(400, "bad_request", "plan_token required")
+        also = body.get("also_delete") or []
+        if not isinstance(also, list) or not all(
+                isinstance(a, dict) and isinstance(a.get("provider"), str)
+                and isinstance(a.get("session_id"), str) for a in also):
+            return _forget_err(400, "bad_request", "bad also_delete")
+        allowed = {(x["provider"], x["session_id"]) for x in _forget_lineage(ctx, provider, session_id)}
+        also_pairs = []
+        for a in also:
+            pair = (a["provider"], a["session_id"])
+            ad2 = _forget.adapter(pair[0])
+            if pair not in allowed or ad2 is None or not ad2.can_delete_session:
+                return _forget_err(400, "bad_request", "also_delete may only list sessions the preview showed as lineage")
+            also_pairs.append((ad2, pair[1]))
+        counts, plan, keys = await _forget_one(ctx, project, adapter, session_id, token)
+        done_plans = [(adapter, plan, keys)]
+        also_done: list = []
+        for ad2, sid2 in also_pairs:
+            try:
+                _c2, plan2, keys2 = await _forget_one(ctx, project, ad2, sid2, None)
+            except _forget.ForgetError as exc:
+                print(f"[forget] also_delete {ad2.name}/{sid2[:8]} refused: {exc.message}")
+                continue
+            done_plans.append((ad2, plan2, keys2))
+            also_done.append({"provider": ad2.name, "session_id": sid2})
+        for ad, pl, ks in done_plans:
+            chat_ids = [b["chat_id"] for b in pl.bound if b.get("chat_id")]
+            for k in sorted(ks | {pl.session_key}):
+                _bus_publish(k, {"kind": "session_deleted", "provider": pl.provider,
+                                 "session_id": pl.session_id, "project_id": project["id"],
+                                 "chat_ids": chat_ids}, persist=False)
+            _spawn_bg(_forget.finish_with_residue(_forget_env(ctx), ad, ctx, pl))
+        return web.json_response({"ok": True, "deleted": {
+            "files": counts["files"], "timeline_lines": counts["timeline_lines"],
+            "audit_lines": counts["audit_lines"], "search_rows": counts["search_rows"],
+            "media": counts["media"], "unattributed": counts["unattributed"]},
+            "also_deleted": also_done, "residue": "scanning"})
+    except _forget.ForgetError as exc:
+        return _forget_err(exc.status, exc.code, exc.message)
+    except _forget.SimulatedCrash:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("[forget] failed")
+        return _forget_err(500, "failed", f"forget failed ({type(exc).__name__}); it resumes at the next start")
+
+
+
 def _active_chat_changed_response() -> web.Response:
     """The chat a session switch validated against is no longer the active one's provider (the
     runtime picker ran between the validation and the write): nothing is written."""
@@ -20092,6 +20412,7 @@ async def start(ctx: dict) -> None:
         _chat_trace_init(ctx)
         # Chat message queue: initialise persistence and reload surviving items (DATA/chat-queue.json)
         _chat_queue_init(ctx)
+        _forget.configure(env_factory=_forget_env)   # spec-098: resume interrupted forgets
         _settings_init(ctx)
         _ui_state_init(ctx)
         # Spec-012 Ph0: initialise paths to scan_state + dismissed_incidents files
@@ -20282,6 +20603,7 @@ async def start(ctx: dict) -> None:
         # C2: project session management
         app.router.add_get("/api/projects/{id}/sessions", api_project_sessions)
         app.router.add_post("/api/projects/{id}/sessions/{sid}/label", api_project_session_label)
+        app.router.add_post("/api/projects/{id}/sessions/{provider}/{session_id}/delete", api_session_delete)
         app.router.add_post("/api/projects/{id}/session", api_project_set_session)
         app.router.add_get("/api/projects/{id}/session-history", api_project_session_history)
         # Spec-037: multi-chat per project
@@ -20415,6 +20737,7 @@ async def start(ctx: dict) -> None:
         await site.start()
         _runner = runner  # stored for stop() to call runner.cleanup()
         print(f"[webapp] listening on {web_host}:{port}")
+        _STARTUP_BG_TASKS.append(_spawn_bg(_forget.resume_pending(ctx)))   # spec-098
 
         # Background incident scanner: log_cmd → cards in Failed
         _STARTUP_BG_TASKS.append(_spawn_bg(_error_scanner_loop(ctx)))
