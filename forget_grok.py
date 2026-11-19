@@ -100,6 +100,50 @@ def _ro(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=_BUSY_SEC)
 
 
+def _same_dir(a: Any, b: Any) -> bool:
+    if not a or not b:
+        return False
+    try:
+        return os.path.realpath(str(a).rstrip("/") or "/") == os.path.realpath(str(b).rstrip("/") or "/")
+    except (OSError, ValueError):
+        return False
+
+
+def _jsonl_has_session(path: Path, sid: str) -> bool:
+    """The rewrite's own predicate: a line of THIS session (`session_id == sid`), not any line that
+    merely quotes the id (another session's prompt about it)."""
+    needle = sid.encode()
+    try:
+        with open(path, "rb") as f:
+            for line in f:
+                if needle in line and len(line) <= _LINE_CAP:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and row.get("session_id") == sid:
+                        return True
+    except OSError:
+        return False
+    return False
+
+
+def _search_rows_left(db: Path, sid: str) -> "int | None":
+    """Rows the sweep would delete (non-FTS tables with a session_id column); None = cannot tell."""
+    try:
+        with _ro(db) as conn:
+            n = 0
+            for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+                if table.startswith("sqlite_") or "_fts" in table:
+                    continue
+                cols = [r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')]
+                if "session_id" in cols:
+                    n += conn.execute(f'SELECT count(*) FROM "{table}" WHERE session_id = ?', (sid,)).fetchone()[0]
+            return n
+    except sqlite3.Error:
+        return None
+
+
 def _search_row(home: Path, sid: str) -> "tuple | None":
     db = home / "sessions" / _SEARCH_DB
     if not _is_reg(db):
@@ -266,13 +310,19 @@ class GrokAdapter:
             return None
         data = _data(ctx)
         proj_cwd = str((project or {}).get("cwd") or "")
-        dirs = _session_dirs(home, session_id, proj_cwd if os.path.isabs(proj_cwd) else "")
+        if not os.path.isabs(proj_cwd):
+            return None
+        # sessions/ and its search index are shared by every project: only a session whose recorded
+        # cwd is THIS project's can be deleted from this project's list
+        dirs = [d for d in _session_dirs(home, session_id, proj_cwd) if _same_dir(_group_cwd(d), proj_cwd)]
         row = _search_row(home, session_id)
+        if row is not None and not _same_dir(row[0], proj_cwd):
+            row = None
+        if not dirs and row is None:
+            return None
         sent = data / "grok_sent" / session_id
         bind = data / "grok_sessions" / session_id
         extras = [p for p in (sent, bind) if os.path.lexists(p)]
-        if not dirs and row is None and not extras:
-            return None
         paths: "list[Path]" = list(dirs) + extras
         cwd = (_group_cwd(dirs[0]) if dirs else "") or (row[0] if row else "") or proj_cwd
         title, first, last = "", None, None
@@ -382,6 +432,11 @@ class GrokAdapter:
                 res["leftovers"].append(f"{d}: {exc}")
         # 2. prompt_history.jsonl of every group the session lived in
         groups = {d.parent for d in dirs}
+        for c in art.extra.get("cwds") or []:
+            try:
+                groups.update(grok_history._group_dirs(sessions, sessions_real, c))
+            except (ValueError, OSError, grok_history.GrokHistoryError):
+                pass
         for g in sorted(groups):
             if _is_dir(g) and grok_history._inside(g, sessions_real):
                 n, problem = _rewrite_jsonl(g / "prompt_history.jsonl", sid, sessions_real)
@@ -423,17 +478,21 @@ class GrokAdapter:
             f = data / sub / sid
             if os.path.lexists(f):
                 left.append(str(f))
-        needle = sid.encode()
+        # The sweep's own predicates: a prompt_history line whose session_id is this one, a search
+        # row keyed by it. A raw id substring also hit OTHER sessions that merely mention the id and
+        # left the purge stuck after the session dir was gone; bytes in free pages are the residue
+        # scan's business, and a busy index is not a failure.
         sessions = home / "sessions"
         if _is_dir(sessions):
             for g in sorted(os.listdir(sessions)):
                 ph = sessions / g / "prompt_history.jsonl"
-                if _is_reg(ph) and _file_has(ph, needle):
-                    left.append(f"{ph} (still names the session)")
-            for name in (_SEARCH_DB, _SEARCH_DB + "-wal"):
-                p = sessions / name
-                if _is_reg(p) and _file_has(p, needle):
-                    left.append(f"{p} (still names the session)")
+                if _is_reg(ph) and _jsonl_has_session(ph, sid):
+                    left.append(f"{ph} (a line of the session is still there)")
+            db = sessions / _SEARCH_DB
+            if _is_reg(db):
+                n = _search_rows_left(db, sid)
+                if n:
+                    left.append(f"{db} ({n} row(s) of the session are still there)")
         return left
 
     def residue_roots(self, ctx: Mapping[str, Any]) -> "list[Path]":

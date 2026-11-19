@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import fcntl
 import os
 import re
 import shutil
@@ -379,31 +380,40 @@ def remove_lineage(data_dir: Path, session_id: str) -> int:
 
 
 # ───────────────────────────── cockpit-store purges (small, injectable) ────────────────────────
-def _prompt_hit(prompts: "list[tuple[float | None, frozenset]]", key_hash: str, ts: "float | None") -> bool:
-    for pts, keys in prompts:
-        if key_hash in keys and (pts is None or ts is None or abs(ts - pts) <= ATTRIBUTION_WINDOW_SEC):
-            return True
-    return False
+def _prompt_match(prompts: "list[tuple[float | None, frozenset]]", keys_to_try: "list[str]",
+                  ts: "float | None", consumed: "set[int]") -> bool:
+    """Decision 8, one-to-one: the line's prompt matches the CLOSEST unconsumed session prompt with the
+    same text within ATTRIBUTION_WINDOW_SEC, and consumes it. A prompt (or a line) without a time
+    never matches: "any time" would adopt every run of any chat that ever typed "ok"."""
+    if ts is None:
+        return False
+    try:
+        ts = float(ts)
+    except (TypeError, ValueError):
+        return False
+    best: "tuple[float, int] | None" = None
+    for i, (pts, keys) in enumerate(prompts):
+        if i in consumed or pts is None:
+            continue
+        if any(k in keys for k in keys_to_try):
+            d = abs(ts - pts)
+            if d <= ATTRIBUTION_WINDOW_SEC and (best is None or d < best[0]):
+                best = (d, i)
+    if best is None:
+        return False
+    consumed.add(best[1])
+    return True
 
 
 _TL_CONV_KINDS = frozenset({"run_start", "run_end", "text", "tool_result", "steer", "error"})
 _TL_LINEAGE_KINDS = frozenset({"runtime_handoff", "session_rotated"})
 
 
-def select_timeline_lines(path: Path, *, session_id: str, known_runs: "set[str]",
-                          prompts: "list[tuple[float | None, frozenset]]",
-                          prompt_norm: "Callable[[str], str] | None" = None) -> dict:
-    """Which lines of one timeline file belong to the session (read-only).
-
-    Returns {"digests": [...], "unattributed": n, "runs": [run ids found]}. `known_runs` is
-    extended in place with every run id the file proves belongs to the session. Decision 8: a
-    `run_start` matches by prompt + 120 s; every other id-less line of that session_key goes with
-    the latest `run_start` before it."""
-    pn = prompt_norm or (lambda s: s)
+def _jsonl_records(path: Path) -> "tuple[list[bytes], list[dict | None]]":
     try:
-        raw_lines = path.read_bytes().splitlines(keepends=True)
+        raw_lines = Path(path).read_bytes().splitlines(keepends=True)
     except OSError:
-        return {"digests": [], "unattributed": 0, "runs": [], "chat_ids": []}
+        return [], []
     recs: list = []
     for raw in raw_lines:
         try:
@@ -411,13 +421,47 @@ def select_timeline_lines(path: Path, *, session_id: str, known_runs: "set[str]"
         except ValueError:
             r = None
         recs.append(r if isinstance(r, dict) else None)
-    # pass 1: runs that name the session outright
-    for r in recs:
-        if r and r.get("kind") == "run_end" and r.get("session_id") == session_id and r.get("run_id"):
-            known_runs.add(str(r["run_id"]))
+    return raw_lines, recs
+
+
+def timeline_run_sessions(paths: "list[Path]") -> "dict[str, str]":
+    """Pass 1 over EVERY timeline file: run id -> the session its `run_end` names. A run whose end
+    names another session is that session's, whatever its prompt looks like."""
+    out: dict = {}
+    for p in paths:
+        for r in _jsonl_records(p)[1]:
+            if r and r.get("kind") == "run_end" and r.get("run_id") and r.get("session_id"):
+                out[str(r["run_id"])] = str(r["session_id"])
+    return out
+
+
+def select_timeline_lines(path: Path, *, session_id: str, known_runs: "set[str]",
+                          prompts: "list[tuple[float | None, frozenset]]",
+                          prompt_norm: "Callable[[str], str] | None" = None,
+                          shared: "dict | None" = None) -> dict:
+    """Which lines of one timeline file belong to the session (read-only).
+
+    Returns {"digests", "unattributed", "runs", "chat_ids"}. `known_runs` is extended in place.
+    `shared` carries state ACROSS the files of one plan (call `.1` first, then the live file):
+    `run_sessions` (pass 1 over all files), the per-session_key verdict of the latest run_start
+    (so a run that rotated into `.1` still tags its id-less lines in the live file) and the set of
+    consumed prompts. A stamped run_start belongs by its id; the decision-8 prompt match is only
+    for a run the timeline cannot place (no run_end naming a session — pre-stamping runs)."""
+    pn = prompt_norm or (lambda s: s)
+    shared = shared if shared is not None else {}
+    raw_lines, recs = _jsonl_records(path)
+    if not raw_lines:
+        return {"digests": [], "unattributed": 0, "runs": [], "chat_ids": []}
+    run_sessions = shared.get("run_sessions")
+    if run_sessions is None:
+        run_sessions = timeline_run_sessions([path])
+    for rid, sid in run_sessions.items():
+        if sid == session_id:
+            known_runs.add(rid)
+    state: dict = shared.setdefault("state", {})
+    consumed: set = shared.setdefault("consumed", set())
     found: set = set()
     chats: set = set()
-    state: dict = {}                  # session_key -> belongs (latest run_start's verdict)
     digests: list = []
     unattributed = 0
     for raw, r in zip(raw_lines, recs):
@@ -428,14 +472,16 @@ def select_timeline_lines(path: Path, *, session_id: str, known_runs: "set[str]"
         rid = str(r["run_id"]) if r.get("run_id") else None
         belongs: "bool | None"
         if kind == "run_start":
-            belongs = rid in known_runs if rid else False
-            if not belongs:
+            if rid and rid in known_runs:
+                belongs = True
+            elif rid and rid in run_sessions:
+                belongs = False                  # its run_end names another session
+            else:
                 ptxt = r.get("prompt") or ""
-                belongs = bool(ptxt) and (
-                    _prompt_hit(prompts, digest(collapse(ptxt)), r.get("ts"))
-                    or _prompt_hit(prompts, digest(collapse(pn(ptxt))), r.get("ts")))
-            if belongs and rid:
-                known_runs.add(rid)
+                keys = [digest(collapse(ptxt)), digest(collapse(pn(ptxt)))] if ptxt else []
+                belongs = bool(keys) and _prompt_match(prompts, keys, r.get("ts"), consumed)
+                if belongs and rid:
+                    known_runs.add(rid)
             if belongs and r.get("chat_id"):
                 chats.add(str(r["chat_id"]))
             state[sk] = belongs
@@ -466,13 +512,22 @@ def purge_lines_by_digest(path: Path, digests: "set[str] | list[str]", lock: Any
         return 0
     with lock:
         try:
-            raw_lines = path.read_bytes().splitlines(keepends=True)
+            src = open(path, "rb")
         except OSError:
             return 0
-        keep = [raw for raw in raw_lines if digest(raw) not in want]
-        gone = len(raw_lines) - len(keep)
-        if gone:
-            _atomic_replace_lines(path, keep)
+        with src:
+            # A writer in ANOTHER process (the Grok guard hook appends DENY lines to the audit month)
+            # cannot take the in-process lock: it takes flock on the file and re-checks the inode
+            # after it gets it, so it never appends to the inode this rewrite replaces.
+            try:
+                fcntl.flock(src.fileno(), fcntl.LOCK_EX)
+            except OSError:
+                pass
+            raw_lines = src.read().splitlines(keepends=True)
+            keep = [raw for raw in raw_lines if digest(raw) not in want]
+            gone = len(raw_lines) - len(keep)
+            if gone:
+                _atomic_replace_lines(path, keep)
     return gone
 
 
@@ -502,14 +557,19 @@ def audit_months(first_ts: "float | None", last_ts: "float | None") -> "list[str
 
 
 def select_audit_lines(path: Path, *, known_runs: "set[str]",
-                       prompts: "list[tuple[float | None, frozenset]]") -> dict:
-    """Audit lines of the session: by `run=` token, else decision 8 (TASK == short(prompt, 300)
-    within 120 s of a session prompt, then that `[Project]`'s RESULT/DENY/COMPACT lines until its
-    next TASK). Read-only; returns {"digests": [...], "unattributed": n}."""
+                       prompts: "list[tuple[float | None, frozenset]]",
+                       project_names: "set[str] | None" = None,
+                       consumed: "set[int] | None" = None) -> dict:
+    """Audit lines of the session: by `run=` token, else decision 8 (an id-less TASK equal to
+    short(prompt, 300) within 120 s of an unconsumed session prompt, then that `[Project]`'s
+    RESULT/DENY/COMPACT lines until its next TASK). The month file is global, so a line of any
+    other `[Project]` is never touched. Read-only; returns {"digests": [...], "unattributed": n}."""
     try:
         raw_lines = path.read_bytes().splitlines(keepends=True)
     except OSError:
         return {"digests": [], "unattributed": 0}
+    names = {n for n in (project_names or set()) if n}
+    consumed = consumed if consumed is not None else set()
     state: dict = {}
     digests: list = []
     unattributed = 0
@@ -518,12 +578,14 @@ def select_audit_lines(path: Path, *, known_runs: "set[str]",
         if not m:
             continue
         ts_s, project, kind, rid, text = m.groups()
+        if names and project not in names:
+            continue
         belongs: "bool | None"
         if rid:
             belongs = rid in known_runs
             state[project] = belongs
         elif kind == "TASK":
-            belongs = _prompt_hit(prompts, digest(collapse(text)), _audit_ts(ts_s))
+            belongs = _prompt_match(prompts, [digest(collapse(text))], _audit_ts(ts_s), consumed)
             state[project] = belongs
         else:
             belongs = state.get(project)
@@ -727,10 +789,23 @@ def _prompt_keys(prompts: "list[tuple[float | None, frozenset]]") -> "set[str]":
     return out
 
 
+def _iso_epoch(v: Any) -> "float | None":
+    if not isinstance(v, str) or not v:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def select_deferred(data_dir: Path, *, keys: "set[str]",
-                    prompts: "list[tuple[float | None, frozenset]]") -> "list[str]":
+                    prompts: "list[tuple[float | None, frozenset]]",
+                    first_ts: "float | None" = None, last_ts: "float | None" = None) -> "list[str]":
     """Ids of deferred.json records that already ran (status != pending) with one of the session's
-    prompts in one of its session_keys. A pending record is future operator input: it stays."""
+    prompts in one of its session_keys AND fired inside the session's time span (the same short
+    prompt deferred in another session of the chat is not this one's). A pending record is future
+    operator input: it stays."""
     try:
         recs = json.loads((Path(data_dir) / "deferred.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -740,6 +815,9 @@ def select_deferred(data_dir: Path, *, keys: "set[str]",
     for r in recs if isinstance(recs, list) else []:
         if not isinstance(r, dict) or r.get("status") == "pending" or r.get("session_key") not in keys:
             continue
+        when = _iso_epoch(r.get("fired_at")) or _iso_epoch(r.get("created"))
+        if not _within(when, first_ts, last_ts):
+            continue
         text = r.get("prompt")
         if isinstance(text, str) and text and (digest(collapse(text)) in pk
                                                or digest(short(collapse(text), 300)) in pk):
@@ -748,15 +826,16 @@ def select_deferred(data_dir: Path, *, keys: "set[str]",
 
 
 def _plan_file_ok(path: str, home: Path) -> bool:
-    """Only a plan file the CLI itself wrote (~/.claude/plans or an account's plans dir)."""
-    try:
-        rp = Path(path).resolve()
-    except (OSError, ValueError):
+    """Only a plan file the CLI itself wrote: a regular `.md` directly in ~/.claude/plans or an
+    account's plans dir. Neither the file nor its dir may be a symlink (a symlinked plans dir would
+    make its target deletable), and the parent is compared WITHOUT resolving."""
+    p = Path(path)
+    if not p.is_absolute() or p.suffix != ".md" or p.is_symlink() or not p.is_file():
         return False
     roots = [home / ".claude" / "plans"] + sorted((home / ".claude-accounts").glob("*/plans"))
     for root in roots:
         try:
-            if rp.parent == root.resolve() and rp.suffix == ".md" and rp.is_file():
+            if p.parent == root and not root.is_symlink() and root.is_dir():
                 return True
         except OSError:
             continue
@@ -861,7 +940,7 @@ def _classify_hit(path: str, data_dir: Path, home: Path) -> str:
 def _fts_phrases(windows: "list[str]", limit: int = 8) -> "list[str]":
     out: list = []
     for w in windows:
-        toks = re.findall(r"[A-Za-z0-9]{2,}", w)
+        toks = re.findall(r"\w{2,}", w)          # \w is unicode: Cyrillic content is checked too
         if len(toks) >= 4:
             out.append(" ".join(toks[1:5]))     # skip the first token: a window may start mid-word
         if len(out) >= limit:
@@ -959,6 +1038,8 @@ async def residue_scan(data_dir: Path, windows: "list[str]", roots: "list[Path]"
                     proc.communicate("\n".join(windows).encode("utf-8")),
                     timeout=max(0.1, deadline - time.monotonic()))
                 found = [ln for ln in out.decode("utf-8", "replace").splitlines() if ln]
+                if proc.returncode not in (0, 1):    # 2 = an error: what it did not read is unknown
+                    truncated = True
             except asyncio.TimeoutError:
                 truncated = True
                 try:
@@ -974,7 +1055,11 @@ async def residue_scan(data_dir: Path, windows: "list[str]", roots: "list[Path]"
             hits.append({"path": p, "store": _classify_hit(p, data_dir, home)})
         if len(found) > 200:
             truncated = True
-    return {"clean": not hits and not truncated, "hits": hits, "truncated": truncated}
+    # Nothing to look for (every piece of the content was too short to be distinctive) is NOT a
+    # clean result: the scan simply could not check. `checked: False` tells the dialog to say so.
+    checked = bool(windows)
+    return {"clean": checked and not hits and not truncated, "hits": hits, "truncated": truncated,
+            "checked": checked}
 
 
 def write_inbox_note(data_dir: Path, provider: str, session_id: str, result: dict) -> Path:
@@ -1038,6 +1123,7 @@ class Plan:
     bound: "list[dict]" = field(default_factory=list)
     handoffs: "list[dict]" = field(default_factory=list)   # armed runtime_handoffs built from the content
     extra: dict = field(default_factory=dict)               # stores found while building (step 5b)
+    search_checkpoint: str = ""                              # set by execute: "busy" = WAL not truncated
 
     def record(self) -> dict:
         """The pending-journal form: ids, paths, digests. No conversation text."""
@@ -1103,7 +1189,8 @@ def compute_token(provider: str, session_id: str, run_ids: "list[str]", fingerpr
 
 def build_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Mapping[str, Any],
                session_id: str, *, timeline_files: "list[Path]", session_key: str,
-               bound: "list[dict] | None" = None, lineage: "list[dict] | None" = None) -> Plan:
+               bound: "list[dict] | None" = None, lineage: "list[dict] | None" = None,
+               audit_names: "set[str] | None" = None) -> Plan:
     """Dry-run computation (blocking: run it in an executor). Reads the session, derives the
     held strings, resolves exactly which timeline/audit lines belong to it."""
     art = adapter.locate(ctx, project, session_id)
@@ -1116,9 +1203,10 @@ def build_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Ma
     # `.1` before the live file: a run_start that rotated away still tags its later lines
     ordered = sorted({Path(p) for p in timeline_files}, key=lambda p: (p.name.endswith(".1") is False, str(p)))
     chat_ids: set = {str(b["chat_id"]) for b in (bound or []) if b.get("chat_id")}
+    shared: dict = {"run_sessions": timeline_run_sessions(ordered)}
     for tp in ordered:
         sel = select_timeline_lines(tp, session_id=session_id, known_runs=known,
-                                    prompts=held.prompts, prompt_norm=env.prompt_norm)
+                                    prompts=held.prompts, prompt_norm=env.prompt_norm, shared=shared)
         unattributed += sel["unattributed"]
         chat_ids |= set(sel.get("chat_ids") or [])
         if sel["digests"]:
@@ -1128,12 +1216,18 @@ def build_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Ma
             chat_ids.add(str(m["chat_id"]))
     audit: dict = {}
     audit_dir = Path(env.data_dir) / "audit"
+    # the `[Project]` label the engine writes is the project's name (topics `project`); the month file
+    # is shared by every project, so only these labels are ever considered
+    names = set(audit_names or ()) | {str(project.get("name") or ""), str(project.get("id") or "")}
+    names.discard("")
+    audit_consumed: set = set()
     months = audit_months(art.first_ts, art.last_ts)
     if audit_dir.is_dir():
         for af in sorted(audit_dir.glob("audit-*.log")):
             if months is not None and af.stem[len("audit-"):] not in months:
                 continue
-            sel = select_audit_lines(af, known_runs=known, prompts=held.prompts)
+            sel = select_audit_lines(af, known_runs=known, prompts=held.prompts,
+                                     project_names=names, consumed=audit_consumed)
             unattributed += sel["unattributed"]
             if sel["digests"]:
                 audit[str(af)] = sel["digests"]
@@ -1159,7 +1253,8 @@ def build_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], project: Ma
     rot_finder = getattr(env.state, "find_pending_rotate_handoffs", None)
     extra = {
         "trace": trace,
-        "deferred": select_deferred(env.data_dir, keys=keys, prompts=held.prompts),
+        "deferred": select_deferred(env.data_dir, keys=keys, prompts=held.prompts,
+                                    first_ts=art.first_ts, last_ts=art.last_ts),
         "plans": plan_ids, "plan_files": plan_files,
         "rotate_handoffs": rot_finder(keys, held.windows) if callable(rot_finder) and held.windows else [],
     }
@@ -1184,6 +1279,11 @@ def plan_view(plan: Plan) -> dict:
                         "the residue scan after the delete looks for what is left.")
     if plan.active_chats:
         warnings.append("This is the current session of an open chat; the chat starts fresh.")
+    kept = [k for k in (plan.art.extra or {}).get("kept_copies") or [] if isinstance(k, dict)]
+    if kept:
+        warnings.append(f"{len(kept)} forked thread(s) copied from this one stay: a fork is an independent "
+                        "thread (often your own), so it is not deleted with its source; the residue scan "
+                        "will show where its copy of the text lives.")
     return {
         "provider": plan.provider, "session_id": plan.session_id, "title": plan.art.title,
         "turns": plan.held.turns, "first_ts": plan.art.first_ts, "last_ts": plan.art.last_ts,
@@ -1272,10 +1372,17 @@ async def _run_steps(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], rec: 
         except OSError:
             pass
     _after_step(6)
-    # 7. timeline + audit
+    # 7. timeline + audit. Digests are exact line hashes, so each file PAIR (live + `.1`) is purged
+    # with the union of its digests: a rotation between the plan and this step moves the session's
+    # lines from the live file into `.1`, and a path-keyed purge would miss them.
+    pairs: dict = {}
     for path, digs in (rec.get("timeline") or {}).items():
-        counts["timeline_lines"] += await loop.run_in_executor(
-            None, purge_lines_by_digest, Path(path), digs, env.timeline_lock)
+        live = path[:-2] if path.endswith(".1") else path
+        pairs.setdefault(live, set()).update(digs)
+    for live, digs in sorted(pairs.items()):
+        for path in (live, live + ".1"):
+            counts["timeline_lines"] += await loop.run_in_executor(
+                None, purge_lines_by_digest, Path(path), digs, env.timeline_lock)
     for path, digs in (rec.get("audit") or {}).items():
         counts["audit_lines"] += await loop.run_in_executor(
             None, purge_lines_by_digest, Path(path), digs, env.audit_lock)
@@ -1296,6 +1403,7 @@ async def _run_steps(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], rec: 
     else:
         sres = await _search()
     counts["search_rows"] = sres["rows"]
+    counts["search_checkpoint"] = sres.get("checkpoint")
     _after_step(8)
     # 9. usage.db
     if transcripts:
@@ -1332,6 +1440,7 @@ async def execute_plan(env: Env, adapter: "Adapter", ctx: Mapping[str, Any], pla
     _after_step(3)
     counts = await _run_steps(env, adapter, ctx, rec, plan.held)
     counts["unattributed"] = plan.unattributed
+    plan.search_checkpoint = str(counts.get("search_checkpoint") or "")
     return counts
 
 
@@ -1346,16 +1455,33 @@ async def resume_pending(ctx: Mapping[str, Any]) -> "list[str]":
     if not d.is_dir():
         return done
     _load_adapters()
+    running = ctx.get("running") if isinstance(ctx.get("running"), dict) else None
     for p in sorted(d.glob("*.json")):
+        taken: list = []
         try:
             rec = json.loads(p.read_text(encoding="utf-8"))
             adapter_ = _ADAPTERS.get(rec["provider"])
             if adapter_ is None:
                 continue
+            # The same guard a live forget takes: a turn that starts on the still-bound session while
+            # the resume runs would re-create its files and lose them to step 4. Reserve the chats'
+            # slots synchronously; a busy chat waits for the next start.
+            keys = sorted({rec.get("session_key") or "", *[b.get("session_key") or "" for b in rec.get("bound") or []]} - {""})
+            if running is not None:
+                if any(running.get(k) is not None for k in keys):
+                    print(f"[forget] resume of {p.name} postponed: a chat that uses the session is busy")
+                    continue
+                for k in keys:
+                    running[k] = True
+                    taken.append(k)
             await _run_steps(env, adapter_, ctx, rec, None)
             done.append(rec["token"])
         except Exception as exc:   # noqa: BLE001 - a bad record must not stop the others or the startup
             print(f"[forget] resume of {p.name} failed: {exc!r}")
+        finally:
+            if running is not None:
+                for k in taken:
+                    running.pop(k, None)
     return done
 
 
@@ -1366,6 +1492,11 @@ async def finish_with_residue(env: Env, adapter: "Adapter", ctx: Mapping[str, An
     seen: set = set()
     roots = [r for r in roots if not (str(r) in seen or seen.add(str(r)))]
     result = await residue_scan(env.data_dir, plan.held.windows, roots, home=env.home)
+    if plan.search_checkpoint == "busy":
+        # the index WAL could not be truncated: deleted rows may still sit in its bytes, which the
+        # SQL check cannot see — never call that clean
+        result["truncated"] = True
+        result["clean"] = False
     try:
         write_inbox_note(env.data_dir, plan.provider, plan.session_id, result)
     except OSError:
@@ -1373,7 +1504,8 @@ async def finish_with_residue(env: Env, adapter: "Adapter", ctx: Mapping[str, An
     if env.publish is not None:
         env.publish(plan.session_key, {
             "kind": "forget_residue", "provider": plan.provider, "session_id": plan.session_id,
-            "clean": result["clean"], "hits": result["hits"], "truncated": result["truncated"]})
+            "clean": result["clean"], "hits": result["hits"], "truncated": result["truncated"],
+            "checked": result.get("checked", True)})
     return result
 
 

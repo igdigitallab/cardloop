@@ -43,10 +43,12 @@ def _seed(w: World) -> dict:
                           "preview": "another project"},
     }
     trace.write_bytes(b"".join(j(r) for r in rows.values()))
+    from datetime import datetime, timezone
+    inside = datetime.fromtimestamp(t0 + 1, tz=timezone.utc).isoformat().replace("+00:00", "Z")
     (d / "deferred.json").write_text(json.dumps([
-        {"id": "def-fired-mine", "session_key": LOOP_KEY, "prompt": TEXT_PROMPT, "status": "fired"},
-        {"id": "def-pending-mine", "session_key": LOOP_KEY, "prompt": TEXT_PROMPT, "status": "pending"},
-        {"id": "def-fired-other", "session_key": LOOP_KEY, "prompt": K_PROMPT, "status": "fired"},
+        {"id": "def-fired-mine", "session_key": LOOP_KEY, "prompt": TEXT_PROMPT, "status": "fired", "fired_at": inside},
+        {"id": "def-pending-mine", "session_key": LOOP_KEY, "prompt": TEXT_PROMPT, "status": "pending", "created": inside},
+        {"id": "def-fired-other", "session_key": LOOP_KEY, "prompt": K_PROMPT, "status": "fired", "fired_at": inside},
     ], indent=2))
     plans_home = h / ".claude" / "plans"
     plans_home.mkdir(parents=True, exist_ok=True)
@@ -126,3 +128,38 @@ async def test_armed_runtime_handoff_matched_by_its_recorded_source_session(worl
     (world.data / "chats.json").write_text(json.dumps(chats))
     ctx2, env, adapter, plan = await plan_for(world, ctx=ctx)
     assert {"project_id": "proj", "chat_id": "cX", "created_at": 123.0} in plan.handoffs
+
+
+async def test_same_prompt_deferred_outside_the_session_span_stays(world):
+    """Review G10: a fired deferred record with the same text in another (earlier) session of the
+    chat is not this session's."""
+    _seed(world)
+    recs = json.loads((world.data / "deferred.json").read_text())
+    for r in recs:
+        r["fired_at"] = "2026-11-18T10:00:00Z"
+    recs.append({"id": "def-fired-long-ago", "session_key": LOOP_KEY, "prompt": TEXT_PROMPT,
+                 "status": "fired", "fired_at": "2020-01-01T00:00:00Z"})
+    from datetime import datetime, timezone
+    inside = datetime.fromtimestamp(world.t0 + 1, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    for r in recs[:3]:
+        r["fired_at"] = inside
+    (world.data / "deferred.json").write_text(json.dumps(recs))
+    await forget_it(world)
+    ids = [r["id"] for r in json.loads((world.data / "deferred.json").read_text())]
+    assert ids == ["def-pending-mine", "def-fired-other", "def-fired-long-ago"]
+
+
+async def test_a_symlinked_plans_dir_is_never_a_delete_root(world):
+    _seed(world)
+    real = world.tmp / "operator-notes"
+    real.mkdir()
+    (real / "keep.md").write_text("operator's own")
+    plans = world.home / ".claude" / "plans"
+    import shutil
+    shutil.rmtree(plans)
+    plans.symlink_to(real)
+    rec = json.loads((world.data / "plans" / "aaaa1111.json").read_text())
+    rec["plan_file_path"] = str(plans / "keep.md")
+    (world.data / "plans" / "aaaa1111.json").write_text(json.dumps(rec))
+    await forget_it(world)
+    assert (real / "keep.md").read_text() == "operator's own"

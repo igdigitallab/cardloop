@@ -380,7 +380,7 @@ async def test_planted_copy_in_an_unlisted_file_is_reported_with_its_path(world)
 async def test_clean_world_reports_clean(world):
     ctx, env, adapter, plan, _c = await forget_it(world)
     res = await forget.finish_with_residue(env, adapter, ctx, plan)
-    assert res == {"clean": True, "hits": [], "truncated": False}
+    assert res == {"clean": True, "hits": [], "truncated": False, "checked": True}
 
 
 async def test_python_fallback_when_rg_is_missing(world, monkeypatch):

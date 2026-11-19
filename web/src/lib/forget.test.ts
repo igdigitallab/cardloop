@@ -66,6 +66,9 @@ test('residue toast: clean, hits capped at 3, truncated marker', () => {
   assert.equal(residueMessage(false, h), 'Deleted — still found in: a, b, c, …')
   assert.equal(residueMessage(false, h.slice(0, 2)), 'Deleted — still found in: a, b')
   assert.equal(residueMessage(false, h.slice(0, 1), true), 'Deleted — still found in: a, …')
+  // not clean with nothing found = the check did not run to the end: never shown as clean
+  assert.equal(residueMessage(false, [], true), 'Deleted — the check for leftover copies could not finish')
+  assert.equal(residueMessage(false, []), 'Deleted — the check for leftover copies could not finish')
 })
 
 test('session_deleted: matches by chat id or by any continuity id', () => {

@@ -25,6 +25,7 @@ like the in-process hook.
     grok_guard_hook.py [--audit-dir DIR]
 """
 import json
+import fcntl
 import os
 import re
 import signal
@@ -51,8 +52,23 @@ def _audit(audit_dir: "str | None", cwd, rule: str, command: str) -> None:
         project = os.path.basename(str(cwd or "").rstrip("/")) or "unknown"
         path = Path(audit_dir)
         path.mkdir(exist_ok=True)
-        with open(path / f"audit-{time.strftime('%Y-%m')}.log", "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{project}] DENY: {rule}: {one} (grok)\n")
+        month = path / f"audit-{time.strftime('%Y-%m')}.log"
+        line = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{project}] DENY: {rule}: {one} (grok)\n"
+        # The cockpit's forget purge rewrites a month file via tmp + rename under flock: take the
+        # lock, and if the file was replaced while we waited, append to the new one instead.
+        for _ in range(3):
+            with open(month, "a", encoding="utf-8") as f:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                except OSError:
+                    pass
+                try:
+                    same = os.fstat(f.fileno()).st_ino == os.stat(month).st_ino
+                except OSError:
+                    same = False
+                if same:
+                    f.write(line)
+                    break
     except Exception:
         pass
 

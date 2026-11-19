@@ -136,22 +136,36 @@ def _edges(home: Path) -> "dict[str, set[str]]":
 
 
 def _family(home: Path, tid: str, rollouts: "dict[str, list[Path]]") -> "tuple[list[str], list[str], list[str]]":
-    """(all thread ids incl. tid, spawn children, forks), transitive."""
+    """(thread ids that go: tid + its spawn children, transitive; spawn children; forks that STAY).
+
+    A spawn child is the thread's own sub-agent and dies with it. A fork is an independent thread —
+    typically the operator's own (`codex fork` in a terminal on a thread seen in the cockpit) that
+    he keeps working in — so it is never deleted with its source; the plan names it instead."""
     edges = _edges(home)
     links = _links(rollouts)
     seen = [tid]
     children: "list[str]" = []
-    forks: "list[str]" = []
     queue = [tid]
     while queue and len(seen) < _FAMILY_CAP:
         cur = queue.pop(0)
-        for kid in sorted(edges.get(cur, set()) | links.get(cur, set())):
+        for kid in sorted(edges.get(cur, set())):
             if kid in seen or not _TID_RE.match(kid):
                 continue
             seen.append(kid)
             queue.append(kid)
-            (children if kid in edges.get(cur, set()) else forks).append(kid)
+            children.append(kid)
+    forks = sorted({k for t in seen for k in links.get(t, set())
+                    if k not in seen and _TID_RE.match(k)})
     return seen, children, forks
+
+
+def _same_dir(a: Any, b: Any) -> bool:
+    if not a or not b:
+        return False
+    try:
+        return os.path.realpath(str(a).rstrip("/") or "/") == os.path.realpath(str(b).rstrip("/") or "/")
+    except (OSError, ValueError):
+        return False
 
 
 def _snapshots(home: Path, tids: "list[str]") -> "list[Path]":
@@ -252,6 +266,58 @@ def _quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _sweep_plan(conn: sqlite3.Connection) -> "list[tuple[str, str, bool]]":
+    """(table, column, is_like) pairs whose value names a thread: the sweep and verify share it."""
+    plan: "list[tuple[str, str, bool]]" = []
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({_quote(table)})")]
+        for c in _ID_COLUMNS:
+            if c in cols:
+                plan.append((table, c, False))
+        if table == "threads" and "id" in cols:
+            plan.append((table, "id", False))
+        if "rollout_path" in cols and table != "threads":
+            plan.append((table, "rollout_path", True))
+    return plan
+
+
+def _count_rows(path: Path, tids: "list[str]") -> int:
+    if not tids:
+        return 0
+    try:
+        with _ro(path) as conn:
+            n = 0
+            marks = ",".join("?" for _ in tids)
+            for table, col, like in _sweep_plan(conn):
+                if like:
+                    for t in tids:
+                        n += conn.execute(f"SELECT count(*) FROM {_quote(table)} WHERE {_quote(col)} LIKE ?",
+                                          (f"%{t}%",)).fetchone()[0]
+                else:
+                    n += conn.execute(f"SELECT count(*) FROM {_quote(table)} WHERE {_quote(col)} IN ({marks})",
+                                      tuple(tids)).fetchone()[0]
+            return n
+    except sqlite3.Error:
+        return 0
+
+
+def _jsonl_names(path: Path, key: str, ids: "set[str]") -> bool:
+    needles = [i.encode() for i in ids]
+    try:
+        with open(path, "rb") as f:
+            for line in f:
+                if len(line) <= _LINE_CAP and any(n in line for n in needles):
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and row.get(key) in ids:
+                        return True
+    except OSError:
+        return False
+    return False
+
+
 def _sweep_db(path: Path, tids: "list[str]") -> "tuple[int, str | None]":
     """Delete every row naming one of `tids` in one db: ONE transaction, secure_delete on.
     Returns (rows removed, problem). A busy db changes nothing and is reported, never raised."""
@@ -261,16 +327,7 @@ def _sweep_db(path: Path, tids: "list[str]") -> "tuple[int, str | None]":
         return 0, f"{path.name}: cannot open ({exc})"
     try:
         conn.execute("PRAGMA secure_delete=ON")
-        plan: "list[tuple[str, str, bool]]" = []
-        for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
-            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({_quote(table)})")]
-            for c in _ID_COLUMNS:
-                if c in cols:
-                    plan.append((table, c, False))
-            if table == "threads" and "id" in cols:
-                plan.append((table, "id", False))
-            if "rollout_path" in cols and table != "threads":
-                plan.append((table, "rollout_path", True))
+        plan = _sweep_plan(conn)
         if not plan:
             return 0, None
         removed = 0
@@ -403,7 +460,9 @@ class CodexAdapter:
                         "FROM threads WHERE id = ?", (session_id,)).fetchone()
             except sqlite3.Error:
                 row = None
-        if row is None and session_id not in rollouts:
+        # ~/.codex is shared with the operator's own Codex and `opinion`: only a thread of THIS
+        # project (its recorded cwd is the project's) can be deleted from this project's list
+        if row is None or not _same_dir(row[0], (project or {}).get("cwd")):
             return None
         tids, children, forks = _family(home, session_id, rollouts)
         paths: "list[Path]" = []
@@ -426,7 +485,8 @@ class CodexAdapter:
         return SessionArtifacts(
             provider="codex", session_id=session_id, cwd=cwd, title=title, paths=paths,
             first_ts=first, last_ts=last,
-            extra={"home": str(home), "threads": tids, "children": children, "forks": forks})
+            extra={"home": str(home), "threads": tids, "children": children, "forks": forks,
+                   "kept_copies": [{"kind": "fork", "id": f} for f in forks]})
 
     # -- busy ---------------------------------------------------------------------------------
     def busy_reason(self, ctx: Mapping[str, Any], project: Mapping[str, Any], session_id: str) -> "str | None":
@@ -589,14 +649,20 @@ class CodexAdapter:
             left.extend(str(p) for p in rollouts.get(t, []))
         left.extend(str(p) for p in art.paths if os.path.lexists(p) and str(p) not in left)
         left.extend(str(p) for p in _snapshots(home, tids))
-        needles = [t.encode() for t in tids]
-        targets = []
+        # The same predicates the sweep used: rows whose id COLUMNS name a thread, jsonl lines whose
+        # id FIELD does. A raw-bytes test also hit other threads' rows that merely mention the id (a
+        # prompt "look at thread …", the app-server's own log line of the delete) and left the
+        # purge stuck after the rollout was already gone. Bytes left in free pages / WAL are the
+        # residue scan's business (reported, not a failure).
+        idset = set(tids)
         for db in _dbs(home):
-            targets.extend([db, db.with_name(db.name + "-wal")])
-        targets.extend([home / "history.jsonl", home / "session_index.jsonl"])
-        for p in targets:
-            if p.is_file() and _file_has(p, needles):
-                left.append(f"{p} (still names the thread)")
+            n = _count_rows(db, tids)
+            if n:
+                left.append(f"{db} ({n} row(s) still name the thread)")
+        for name, key in (("history.jsonl", "session_id"), ("session_index.jsonl", "id")):
+            p = home / name
+            if p.is_file() and _jsonl_names(p, key, idset):
+                left.append(f"{p} (a line of the thread is still there)")
         return left
 
     def residue_roots(self, ctx: Mapping[str, Any]) -> "list[Path]":

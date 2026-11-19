@@ -132,7 +132,10 @@ def test_locate(env):
     assert GrokAdapter().locate(env["ctx"], env["project"], "01a30000-0000-7000-8000-0000000000ff") is None
     assert GrokAdapter().locate(env["ctx"], env["project"], "../../x") is None
     # found even when the project's cwd is not the one the session lives under
-    assert GrokAdapter().locate(env["ctx"], {"cwd": "/somewhere/else"}, S1).cwd == CWD
+    # sessions/ is shared by every project: another project's list cannot reach this session (review G2)
+    assert GrokAdapter().locate(env["ctx"], {"cwd": "/somewhere/else"}, S1) is None
+    assert GrokAdapter().locate(env["ctx"], {"cwd": CWD2}, S1) is None
+    assert GrokAdapter().locate(env["ctx"], {}, S1) is None
 
 
 def test_delete_leaves_no_sentinel_byte_and_keeps_the_others(env):
@@ -279,3 +282,35 @@ def test_text_left_by_groks_own_delete_is_vacuumed_out(env):
     art = ad.locate(env["ctx"], env["project"], S1)
     ad.delete(env["ctx"], art)
     assert _raw_hits(env["home"], SENT) == []
+
+
+def test_another_session_quoting_the_id_does_not_block_verify(env):
+    """Review G1: S2's prompt and S3's search row mention S1's id; neither is S1's, and verify must
+    not report S1 as still present (that left the purge stuck after the dir was gone)."""
+    g1 = env["home"] / "sessions" / urllib.parse.quote(CWD, safe="")
+    with open(g1 / "prompt_history.jsonl", "a") as f:
+        f.write(json.dumps({"timestamp": 9, "session_id": S2, "prompt": f"what happened in {S1}?"}) + "\n")
+    db = sqlite3.connect(env["home"] / "sessions" / "session_search.sqlite")
+    db.execute("UPDATE session_docs SET content = content || ? WHERE session_id = ?", (f" see {S1}", S3))
+    db.commit()
+    db.close()
+    ad = GrokAdapter()
+    art = ad.locate(env["ctx"], env["project"], S1)
+    ad.delete(env["ctx"], art)
+    assert ad.verify_gone(env["ctx"], art) == []
+    lines = [json.loads(x) for x in (g1 / "prompt_history.jsonl").read_text().splitlines()]
+    assert [r["session_id"] for r in lines] == [S2, S2]
+
+
+def test_prompt_history_is_swept_even_when_the_session_dir_is_already_gone(env):
+    """Review G7: Grok's own delete (or an earlier partial forget) removed the dir; the verbatim
+    prompts in the shared prompt_history still go."""
+    import shutil
+    g1 = env["home"] / "sessions" / urllib.parse.quote(CWD, safe="")
+    shutil.rmtree(g1 / S1)
+    ad = GrokAdapter()
+    art = ad.locate(env["ctx"], env["project"], S1)       # found by its search row
+    assert art is not None
+    ad.delete(env["ctx"], art)
+    assert SENT not in (g1 / "prompt_history.jsonl").read_text()
+    assert ad.verify_gone(env["ctx"], art) == []

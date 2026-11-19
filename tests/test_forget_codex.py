@@ -17,6 +17,7 @@ from forget_codex import CodexAdapter
 
 SENT = "ZEBRA-SENTINEL-4471"       # only in the session that gets deleted
 KEEP = "OTTER-KEEPSAKE-9902"       # only in the session that stays
+FORK_KEEP = "FORKED-BY-OPERATOR-4417"  # the operator's own fork of T: an independent thread, it stays
 
 T = "01a20000-0000-7000-8000-000000000001"       # target thread
 CHILD = "01a20000-0000-7000-8000-000000000002"   # sub-agent of T
@@ -108,11 +109,11 @@ def home(tmp_path, monkeypatch):
     rolls = {
         T: _rollout(h, T, text=SENT),
         CHILD: _rollout(h, CHILD, text=SENT, meta={"parent_thread_id": T}, archived=True),
-        FORK: _rollout(h, FORK, text=SENT, meta={"forked_from_id": T}),
+        FORK: _rollout(h, FORK, text=FORK_KEEP, meta={"forked_from_id": T}),
         OTHER: _rollout(h, OTHER, text=KEEP),
     }
     for tid, p in rolls.items():
-        word = KEEP if tid == OTHER else SENT
+        word = KEEP if tid == OTHER else (FORK_KEEP if tid == FORK else SENT)
         state.execute("INSERT INTO threads VALUES (?,?,?,?,?,?,?,0)",
                       (tid, str(p), 1795000000, 1795003600, "/work/p", f"title {word}", f"first {word}"))
         logs.execute("INSERT INTO logs (ts, feedback_log_body, thread_id) VALUES (1, ?, ?)", (("pad " * 3000) + f"log {word}", tid))
@@ -135,7 +136,7 @@ def home(tmp_path, monkeypatch):
         "".join(json.dumps({"session_id": t, "ts": 1, "text": f"hist {SENT if t != OTHER else KEEP}"}) + "\n"
                 for t in (T, OTHER, CHILD)))
     (h / "session_index.jsonl").write_text(
-        "".join(json.dumps({"id": t, "thread_name": f"n {SENT if t != OTHER else KEEP}"}) + "\n"
+        "".join(json.dumps({"id": t, "thread_name": f"n {SENT if t not in (OTHER, FORK) else KEEP}"}) + "\n"
                 for t in (OTHER, T, FORK, T)))
     return h
 
@@ -196,11 +197,11 @@ def test_capability_follows_codex_enabled(monkeypatch):
 def test_locate_finds_the_whole_family(home):
     art = CodexAdapter().locate({}, {"cwd": "/work/p"}, T)
     assert art and art.provider == "codex" and art.cwd == "/work/p"
-    assert set(art.extra["threads"]) == {T, CHILD, FORK}
+    assert set(art.extra["threads"]) == {T, CHILD}                 # a fork is NOT deleted with its source
     assert art.extra["children"] == [CHILD] and art.extra["forks"] == [FORK]
     names = {p.name for p in art.paths}
     assert any(n.endswith(f"{CHILD}.jsonl") for n in names)       # the archived child's rollout
-    assert any(n.startswith(FORK) for n in names)                  # shell snapshots
+    assert not any(FORK in n for n in names)                       # nothing of the fork is planned
     assert not any(OTHER in n for n in names)
     assert art.first_ts == 1795000000.0 and SENT in art.title
     assert json.dumps(art.extra).count(SENT) == 0                  # extra carries no text
@@ -211,19 +212,19 @@ def test_locate_finds_the_whole_family(home):
 def test_delete_leaves_no_sentinel_byte_and_keeps_the_other_thread(home, monkeypatch):
     monkeypatch.setattr(forget_codex, "_native_delete", _fake_native(home))
     ad = CodexAdapter()
-    art = ad.locate({}, {}, T)
+    art = ad.locate({}, {"cwd": "/work/p"}, T)
     # the P0 residue pattern is reproducible here: after the native delete alone the text is still on disk
     _fake_native(home)(T)
     assert "logs_2.sqlite" in _raw_hits(home, SENT), "fixture must leave residue after the native delete alone"
     res = ad.delete({}, art)
     assert _raw_hits(home, SENT) == [], _raw_hits(home, SENT)
     assert ad.verify_gone({}, art) == []
-    assert res["leftovers"] == [] and res["lines"] == 5 and res["files"] >= 3
+    assert res["leftovers"] == [] and res["lines"] == 4 and res["files"] >= 2
     assert {"state_5.sqlite", "logs_2.sqlite", "thread_history_1.sqlite"} <= set(res["compacted"])
     # the unrelated thread is intact in every store
     assert OTHER in (home / "history.jsonl").read_text()
     assert KEEP in (home / "history.jsonl").read_text()
-    assert [json.loads(x)["id"] for x in (home / "session_index.jsonl").read_text().splitlines()] == [OTHER]
+    assert [json.loads(x)["id"] for x in (home / "session_index.jsonl").read_text().splitlines()] == [OTHER, FORK]
     for db, sql in (("state_5", "SELECT count(*) FROM threads WHERE id=?"),
                     ("logs_2", "SELECT count(*) FROM logs WHERE thread_id=?"),
                     ("thread_history_1", "SELECT count(*) FROM thread_items WHERE thread_id=?"),
@@ -249,9 +250,9 @@ def test_native_failure_is_reported_and_the_hand_sweep_still_runs(home, monkeypa
         raise RuntimeError("thread not found")
     monkeypatch.setattr(forget_codex, "_native_delete", boom)
     ad = CodexAdapter()
-    art = ad.locate({}, {}, T)
+    art = ad.locate({}, {"cwd": "/work/p"}, T)
     res = ad.delete({}, art)
-    assert len(res["native_errors"]) == 3
+    assert len(res["native_errors"]) == 2
     assert _raw_hits(home, SENT) == []                             # rollouts + rows swept by hand
 
 
@@ -288,7 +289,7 @@ def test_node_wrapper_counts_as_codex(home, tmp_path):
 def test_locked_database_is_a_leftover_not_a_failure(home, monkeypatch):
     monkeypatch.setattr(forget_codex, "_native_delete", _fake_native(home))
     ad = CodexAdapter()
-    art = ad.locate({}, {}, T)
+    art = ad.locate({}, {"cwd": "/work/p"}, T)
     blocker = sqlite3.connect(home / "memories_1.sqlite", isolation_level=None)
     blocker.execute("BEGIN IMMEDIATE")
     try:
@@ -309,7 +310,7 @@ def test_symlinked_rollout_is_refused_and_the_target_survives(home, tmp_path, mo
     outside = tmp_path / "outside.txt"
     outside.write_text("precious")
     ad = CodexAdapter()
-    art = ad.locate({}, {}, T)
+    art = ad.locate({}, {"cwd": "/work/p"}, T)
     link = home / "sessions" / "2026" / "11" / "18" / "rollout-2026-11-18T10-00-00-evil.jsonl"
     link.symlink_to(outside)
     art.paths.append(link)
@@ -330,18 +331,18 @@ def test_symlinked_history_file_is_not_replaced(home, tmp_path, monkeypatch):
     (home / "history.jsonl").symlink_to(real)
     before = real.read_bytes()
     ad = CodexAdapter()
-    res = ad.delete({}, ad.locate({}, {}, T))
+    res = ad.delete({}, ad.locate({}, {"cwd": "/work/p"}, T))
     assert real.read_bytes() == before and (home / "history.jsonl").is_symlink()
     assert any(x.startswith("history.jsonl") for x in res["leftovers"])
 
 
 def test_read_content_streams_every_kind(home):
     ad = CodexAdapter()
-    items = list(ad.read_content(ad.locate({}, {}, T)))
+    items = list(ad.read_content(ad.locate({}, {"cwd": "/work/p"}, T)))
     kinds = {i.kind for i in items}
     assert {"prompt", "assistant", "tool_use", "tool_result"} <= kinds
     prompts = [i for i in items if i.kind == "prompt"]
-    assert len(prompts) == 3 and all(SENT in i.text for i in prompts)
+    assert len(prompts) == 2 and all(SENT in i.text for i in prompts)   # T + its sub-agent; the fork is not read
     tool = next(i for i in items if i.kind == "tool_use")
     assert tool.tool == "shell" and tool.tool_input["cmd"] == f"echo {SENT}" and tool.ts
     assert next(i for i in items if i.kind == "tool_result").text == f"out {SENT}"
@@ -349,3 +350,36 @@ def test_read_content_streams_every_kind(home):
 
 def test_residue_root_is_the_codex_home(home):
     assert CodexAdapter().residue_roots({}) == [home]
+
+
+def test_a_thread_of_another_directory_is_not_this_projects(home):
+    """~/.codex is shared with the operator's own Codex: a thread whose cwd is not the project's is
+    invisible to this project's delete (404), even with a valid id."""
+    assert CodexAdapter().locate({}, {"cwd": "/somewhere/else"}, T) is None
+    assert CodexAdapter().locate({}, {}, T) is None
+
+
+def test_the_operators_fork_survives_byte_identical(home, monkeypatch):
+    monkeypatch.setattr(forget_codex, "_native_delete", _fake_native(home))
+    fork_files = {p: p.read_bytes() for p in home.rglob("*") if FORK in p.name}
+    ad = CodexAdapter()
+    art = ad.locate({}, {"cwd": "/work/p"}, T)
+    ad.delete({}, art)
+    assert ad.verify_gone({}, art) == []
+    for p, b in fork_files.items():
+        assert p.read_bytes() == b
+    assert _count(home, "state_5", "SELECT count(*) FROM threads WHERE id=?", FORK) == 1
+
+
+def test_another_thread_quoting_the_id_does_not_block_verify(home, monkeypatch):
+    """F8: a row of ANOTHER thread that merely mentions the id is not the thread's row."""
+    monkeypatch.setattr(forget_codex, "_native_delete", _fake_native(home))
+    c = sqlite3.connect(home / "logs_2.sqlite")
+    c.execute("INSERT INTO logs (ts, feedback_log_body, thread_id) VALUES (2, ?, ?)", (f"look at thread {T}", OTHER))
+    c.commit()
+    c.close()
+    ad = CodexAdapter()
+    art = ad.locate({}, {"cwd": "/work/p"}, T)
+    ad.delete({}, art)
+    assert ad.verify_gone({}, art) == []
+    assert _count(home, "logs_2", "SELECT count(*) FROM logs WHERE thread_id=?", OTHER) == 2

@@ -4328,7 +4328,7 @@ async def api_project_delete(req: web.Request) -> web.Response:
         audit_dir = ctx["DATA"] / "audit"
         audit_dir.mkdir(exist_ok=True)
         ts_str = time.strftime("%Y-%m-%dT%H:%M:%S")
-        with open(audit_dir / f"audit-{time.strftime('%Y-%m')}.log", "a", encoding="utf-8") as f:
+        with _audit_lock(), open(audit_dir / f"audit-{time.strftime('%Y-%m')}.log", "a", encoding="utf-8") as f:
             f.write(f"{ts_str} [{project_name}] DELETE⚠️: id={pid} cwd={cwd} trash={trash_dest}\n")
     except Exception as e:
         print(f"[delete] WARNING: audit write failed: {e}")
@@ -13198,6 +13198,17 @@ def _forget_timeline_files(ctx: dict, project: dict, keys: "set[str]") -> "list[
     return out
 
 
+def _forget_audit_names(ctx: dict, keys: "set[str]") -> "set[str]":
+    """The `[Project]` labels the engine wrote for these session keys (topics `project`)."""
+    topics = ctx.get("topics") or {}
+    out: set = set()
+    for k in keys:
+        t = topics.get(k) if isinstance(topics, dict) else None
+        if isinstance(t, dict) and t.get("project"):
+            out.add(str(t["project"]))
+    return out
+
+
 def _forget_lineage(ctx: dict, provider: str, session_id: str) -> "list[dict]":
     labels = _load_session_labels(ctx)
     out: list = []
@@ -13266,7 +13277,8 @@ async def _forget_one(ctx: dict, project: dict, adapter, session_id: str,
         files = _forget_timeline_files(ctx, project, keys)
         plan = await loop.run_in_executor(
             None, lambda: _forget.build_plan(env, adapter, ctx, project, session_id, timeline_files=files,
-                                             session_key=own_key, bound=bound, lineage=lineage))
+                                             session_key=own_key, bound=bound, lineage=lineage,
+                                             audit_names=_forget_audit_names(ctx, keys)))
         if expect_token is not None and plan.token != expect_token:
             raise _forget.ForgetError(409, "changed", "the session changed since the preview - reopen the dialog")
         counts = await _forget.execute_plan(env, adapter, ctx, plan)
@@ -13314,7 +13326,8 @@ async def api_session_delete(req: web.Request) -> web.Response:
             lineage = _forget_lineage(ctx, provider, session_id)
             plan = await loop.run_in_executor(
                 None, lambda: _forget.build_plan(env, adapter, ctx, project, session_id, timeline_files=files,
-                                                 session_key=own_key, bound=bound, lineage=lineage))
+                                                 session_key=own_key, bound=bound, lineage=lineage,
+                                             audit_names=_forget_audit_names(ctx, keys)))
             return web.json_response({"ok": True, "plan_token": plan.token, "plan": _forget.plan_view(plan)})
         token = body.get("plan_token")
         if not isinstance(token, str) or not token:
@@ -13333,28 +13346,42 @@ async def api_session_delete(req: web.Request) -> web.Response:
                 return _forget_err(400, "bad_request", "also_delete may only list sessions the preview showed as lineage")
             also_pairs.append((ad2, pair[1]))
         counts, plan, keys = await _forget_one(ctx, project, adapter, session_id, token)
-        done_plans = [(adapter, plan, keys)]
-        also_done: list = []
-        for ad2, sid2 in also_pairs:
-            try:
-                _c2, plan2, keys2 = await _forget_one(ctx, project, ad2, sid2, None)
-            except _forget.ForgetError as exc:
-                print(f"[forget] also_delete {ad2.name}/{sid2[:8]} refused: {exc.message}")
-                continue
-            done_plans.append((ad2, plan2, keys2))
-            also_done.append({"provider": ad2.name, "session_id": sid2})
-        for ad, pl, ks in done_plans:
+
+        def _announce(ad, pl, ks) -> None:
+            """Every window refetches; the residue scan runs after the response."""
             chat_ids = [b["chat_id"] for b in pl.bound if b.get("chat_id")]
             for k in sorted(ks | {pl.session_key}):
                 _bus_publish(k, {"kind": "session_deleted", "provider": pl.provider,
                                  "session_id": pl.session_id, "project_id": project["id"],
                                  "chat_ids": chat_ids}, persist=False)
             _spawn_bg(_forget.finish_with_residue(_forget_env(ctx), ad, ctx, pl))
+
+        # The primary delete is DONE from here on: it is announced before any linked session is
+        # tried, and a linked session that fails or is refused is reported, never turned into a 500.
+        _announce(adapter, plan, keys)
+        also_done: list = []
+        also_failed: list = []
+        for ad2, sid2 in also_pairs:
+            try:
+                _c2, plan2, keys2 = await _forget_one(ctx, project, ad2, sid2, None)
+            except _forget.SimulatedCrash:
+                raise
+            except _forget.ForgetError as exc:
+                print(f"[forget] also_delete {ad2.name}/{sid2[:8]} refused: {exc.message}")
+                also_failed.append({"provider": ad2.name, "session_id": sid2, "error": exc.message})
+                continue
+            except Exception as exc:  # noqa: BLE001 - its pending record resumes at the next start
+                logging.exception("[forget] also_delete failed")
+                also_failed.append({"provider": ad2.name, "session_id": sid2,
+                                    "error": f"failed ({type(exc).__name__}); it resumes at the next start"})
+                continue
+            _announce(ad2, plan2, keys2)
+            also_done.append({"provider": ad2.name, "session_id": sid2})
         return web.json_response({"ok": True, "deleted": {
             "files": counts["files"], "timeline_lines": counts["timeline_lines"],
             "audit_lines": counts["audit_lines"], "search_rows": counts["search_rows"],
             "media": counts["media"], "unattributed": counts["unattributed"]},
-            "also_deleted": also_done, "residue": "scanning"})
+            "also_deleted": also_done, "also_failed": also_failed, "residue": "scanning"})
     except _forget.ForgetError as exc:
         return _forget_err(exc.status, exc.code, exc.message)
     except _forget.SimulatedCrash:

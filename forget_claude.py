@@ -214,12 +214,24 @@ class ClaudeAdapter:
 
     @staticmethod
     def _history_has(path: Path, session_id: str) -> bool:
+        """Does a history.jsonl hold a line OF this session? The same predicate the rewrite uses: a
+        raw substring test also hit another session's prompt that merely quotes the id ("claude
+        --resume <id>"), so verify failed after the transcript was gone and the purge stuck."""
         needle = session_id.encode()
         try:
             with open(path, "rb") as f:
-                return any(needle in raw for raw in f)
+                for raw in f:
+                    if needle not in raw:
+                        continue
+                    try:
+                        r = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if isinstance(r, dict) and r.get("sessionId") == session_id:
+                        return True
         except OSError:
             return False
+        return False
 
     def fingerprint(self, art: SessionArtifacts) -> str:
         e = art.extra or {}
@@ -329,14 +341,16 @@ class ClaudeAdapter:
 
     @staticmethod
     def _rewrite_history(path: Path, session_id: str) -> int:
-        """Drop the session's lines from a history.jsonl. Other CLIs append to it concurrently,
-        so the rewrite repeats until the file did not grow while it was being written."""
-        for _ in range(6):
-            try:
-                before = path.stat().st_size
-                data = path.read_bytes()
-            except OSError:
-                return 0
+        """Drop the session's lines from a history.jsonl (atomic tmp + rename). Other CLIs append to
+        it concurrently: the old inode stays open across the rename and whatever was appended to it
+        after our read is copied onto the new file, so no other session's line is lost."""
+        try:
+            src = open(path, "rb")
+        except OSError:
+            return 0
+        tmp = path.with_name(path.name + ".forget-tmp")
+        with src:
+            data = src.read()
             keep: list = []
             gone = 0
             for raw in data.splitlines(keepends=True):
@@ -351,17 +365,19 @@ class ClaudeAdapter:
                     keep.append(raw)
             if not gone:
                 return 0
-            tmp = path.with_name(path.name + ".forget-tmp")
             try:
                 with open(tmp, "wb") as f:
                     f.writelines(keep)
                     f.flush()
                     os.fsync(f.fileno())
-                os.chmod(tmp, path.stat().st_mode & 0o777)
-                if path.stat().st_size != before:
-                    tmp.unlink()
-                    continue
+                os.chmod(tmp, os.fstat(src.fileno()).st_mode & 0o777)
                 os.replace(tmp, path)
+                # lines appended to the old inode between our read and the rename
+                src.seek(len(data))
+                tail = src.read()
+                if tail:
+                    with open(path, "ab") as f:
+                        f.write(tail)
                 return gone
             except OSError:
                 try:
@@ -369,7 +385,6 @@ class ClaudeAdapter:
                 except OSError:
                     pass
                 return 0
-        return 0
 
     def verify_gone(self, ctx: Mapping[str, Any], art: SessionArtifacts) -> "list[str]":
         left = [str(p) for p in art.paths if Path(p).exists() or Path(p).is_symlink()]

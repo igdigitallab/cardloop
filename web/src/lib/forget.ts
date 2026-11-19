@@ -109,6 +109,9 @@ export function forgetErrorView(status: number | undefined, code: string | undef
 export function residueMessage(clean: boolean, hits: readonly ForgetResidueHit[] | null | undefined, truncated?: boolean): string {
   const list = hits ?? []
   if (clean && list.length === 0) return 'Deleted — no copies left'
+  // not clean and nothing found = the check could not run or finish (nothing distinctive to look
+  // for, the time budget ran out, the index was busy): say that, never imply a clean result
+  if (list.length === 0) return 'Deleted — the check for leftover copies could not finish'
   const shown = list.slice(0, 3).map(h => h.path)
   const more = list.length > 3 || truncated ? ', …' : ''
   return `Deleted — still found in: ${shown.join(', ')}${more}`
