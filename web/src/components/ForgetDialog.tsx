@@ -8,7 +8,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { providerLabel } from '../lib/providers'
 import {
-  ForgetPlan, ForgetTurnPlan, ForgetTurnResult, alsoDeletePayload, diaryLine, forgetErrorView, lineageKey, summaryLine,
+  ForgetAnchor, ForgetPlan, ForgetTurnPlan, ForgetTurnResult, alsoDeletePayload, anchorBody, anchorKey, diaryLine,
+  forgetErrorView, lineageKey, summaryLine,
 } from '../lib/forget'
 import { Modal, ModalHead } from './Modal'
 
@@ -18,7 +19,7 @@ interface Props {
   sessionId: string
   /** spec-098 P4: "Forget from here" mode - one chat's turns from an anchor user row on, instead of
    *  the whole session. Absent = the delete-session dialog, unchanged. */
-  turn?: { chatId: string; anchorUuid: string }
+  turn?: { chatId: string; anchor: ForgetAnchor }
   /** Turn mode: called after a successful forget (the caller closes the dialog). */
   onForgotten?: (res: ForgetTurnResult) => void
   /** Display name when the plan has no title yet (the list row's label / preview). */
@@ -43,7 +44,7 @@ export function ForgetDialog({ projectId, provider, sessionId, turn, onForgotten
     setPlan(null)
     try {
       const res = turn
-        ? await api.forgetFromHere(projectId, turn.chatId, { anchor_uuid: turn.anchorUuid, dry_run: true })
+        ? await api.forgetFromHere(projectId, turn.chatId, { ...anchorBody(turn.anchor), dry_run: true })
         : await api.deleteSession(projectId, provider, sessionId, { dry_run: true })
       if (!('plan' in res)) throw new Error('unexpected response')
       setPlan(res.plan)
@@ -54,7 +55,7 @@ export function ForgetDialog({ projectId, provider, sessionId, turn, onForgotten
       setError(errView(e))
       setPhase('ready')
     }
-  }, [projectId, provider, sessionId, turn?.chatId, turn?.anchorUuid]) // eslint-disable-line react-hooks/exhaustive-deps -- `turn` is rebuilt per render; its two fields are the identity
+  }, [projectId, provider, sessionId, turn?.chatId, turn ? anchorKey(turn.anchor) : '']) // eslint-disable-line react-hooks/exhaustive-deps -- `turn` is rebuilt per render; chat + anchor key are the identity
 
   useEffect(() => { loadPlan() }, [loadPlan])
 
@@ -66,7 +67,7 @@ export function ForgetDialog({ projectId, provider, sessionId, turn, onForgotten
       const also = alsoDeletePayload(plan.lineage, checked)
       if (turn) {
         const done = await api.forgetFromHere(projectId, turn.chatId, {
-          anchor_uuid: turn.anchorUuid, dry_run: false, plan_token: token, ...(also.length ? { also_delete: also } : {}),
+          ...anchorBody(turn.anchor), dry_run: false, plan_token: token, ...(also.length ? { also_delete: also } : {}),
         })
         if (!('forgotten' in done)) throw new Error('unexpected response')
         onForgotten?.(done)

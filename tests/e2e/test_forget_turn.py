@@ -69,7 +69,10 @@ def test_forget_from_here_cuts_the_turn_everywhere(logged_in_page, e2e_server):
     t0 = datetime.now(timezone.utc) - timedelta(minutes=30)
 
     open_project(page, PROJECT)
-    chats = page.request.get(f"{e2e_server['base_url']}/api/projects/{PROJECT}/chats").json()
+    # the API names a project by its folder's basename, not by its topics key
+    topics = json.loads((e2e_server["app_dir"] / "data" / "topics.json").read_text())
+    api_id = Path(topics[PROJECT]["cwd"]).name
+    chats = page.request.get(f"{e2e_server['base_url']}/api/projects/{api_id}/chats").json()
     chat_id = chats.get("active") or chats["chats"][0]["id"]
 
     path, body, offsets = _seed(e2e_server, sid, [

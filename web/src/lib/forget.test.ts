@@ -95,7 +95,7 @@ test('capability helper: registry flag decides; missing row/flag = no; no provid
 
 // ── spec-098 P4: Forget from here ─────────────────────────────────────────────
 import {
-  chatForgottenAffectsMe, composerAfterForget, forgetAnchorFor, forgottenToast, ForgetFeedRow,
+  anchorBody, anchorKey, chatForgottenAffectsMe, composerAfterForget, forgetAnchorFor, forgottenToast, ForgetFeedRow,
 } from './forget'
 
 const U = (uuid: string | undefined, ts: number | undefined, extra: Partial<ForgetFeedRow> = {}): ForgetFeedRow =>
@@ -106,19 +106,19 @@ const MARK = 1_000_000
 
 test('anchor: the user row before the assistant group, in the current session', () => {
   const feed = [U('u1', MARK + 1000), A(), U('u2', MARK + 5000), A(), A()]
-  assert.equal(forgetAnchorFor(feed, 1, MARK), 'u1')
-  assert.equal(forgetAnchorFor(feed, 3, MARK), 'u2')
+  assert.deepEqual(forgetAnchorFor(feed, 1, MARK), { uuid: 'u1' })
+  assert.deepEqual(forgetAnchorFor(feed, 3, MARK), { uuid: 'u2' })
 })
 
 test('anchor: null forget_from_ms or undefined means never', () => {
   const feed = [U('u1', MARK), A()]
-  assert.equal(forgetAnchorFor(feed, 1, null), null)
+  assert.deepEqual(forgetAnchorFor(feed, 1, null), null)
   assert.equal(forgetAnchorFor(feed, 1, undefined), null)
 })
 
 test('anchor: user row older than the first mark (beyond 5 s slack) is refused, within slack is ok', () => {
-  assert.equal(forgetAnchorFor([U('u1', MARK - 5000), A()], 1, MARK), 'u1')
-  assert.equal(forgetAnchorFor([U('u1', MARK - 5001), A()], 1, MARK), null)
+  assert.deepEqual(forgetAnchorFor([U('u1', MARK - 5000), A()], 1, MARK), { uuid: 'u1' })
+  assert.deepEqual(forgetAnchorFor([U('u1', MARK - 5001), A()], 1, MARK), null)
 })
 
 test('anchor: missing uuid or ts on the user row', () => {
@@ -129,11 +129,11 @@ test('anchor: missing uuid or ts on the user row', () => {
 test('anchor: groups before the last session_break are not offered, groups after are', () => {
   const feed = [U('old', MARK), A(), BRK, U('new', MARK + 10), A()]
   assert.equal(forgetAnchorFor(feed, 1, MARK), null)
-  assert.equal(forgetAnchorFor(feed, 4, MARK), 'new')
+  assert.deepEqual(forgetAnchorFor(feed, 4, MARK), { uuid: 'new' })
 })
 
 test('anchor: an assistant group right after a break with no user row has no anchor', () => {
-  assert.equal(forgetAnchorFor([U('old', MARK), BRK, A()], 2, MARK), null)
+  assert.deepEqual(forgetAnchorFor([U('old', MARK), BRK, A()], 2, MARK), null)
 })
 
 test('anchor: streaming rows and non-assistant indexes', () => {
@@ -145,7 +145,7 @@ test('anchor: streaming rows and non-assistant indexes', () => {
 
 test('anchor: board rows between user and assistant are skipped', () => {
   const feed = [U('u1', MARK), { role: 'board' }, A()]
-  assert.equal(forgetAnchorFor(feed, 2, MARK), 'u1')
+  assert.deepEqual(forgetAnchorFor(feed, 2, MARK), { uuid: 'u1' })
 })
 
 test('composer after forget: empty draft, non-empty draft, no prompt', () => {
@@ -163,4 +163,28 @@ test('forgotten toast and chat_forgotten matching', () => {
   assert.equal(chatForgottenAffectsMe({ chat_id: 'c2', session_id: 's' }, 'c1', 's'), true)
   assert.equal(chatForgottenAffectsMe({ chat_id: 'c2', session_id: 'x' }, 'c1', 's'), false)
   assert.equal(chatForgottenAffectsMe({}, null, null), false)
+})
+
+test('anchor: a live-rendered group names its own run, even with no marks loaded yet', () => {
+  const feed = [U(undefined, MARK, { runId: 'r9' }), A({ runId: 'r9' })]
+  assert.deepEqual(forgetAnchorFor(feed, 1, null), { runId: 'r9' })
+})
+
+test('anchor: a live user row without uuid lends its run to an untagged group', () => {
+  assert.deepEqual(forgetAnchorFor([U(undefined, MARK, { runId: 'r7' }), A()], 1, null), { runId: 'r7' })
+})
+
+test('anchor: a background run is never offered (it has no turn mark)', () => {
+  assert.equal(forgetAnchorFor([U('u1', MARK + 10), A({ bgRun: true, runId: 'bg1' })], 1, MARK), null)
+})
+
+test('anchor: the group run wins over an older history row before it', () => {
+  // a hidden-bubble run right after a history turn: anchoring on u1 would take the turn before it
+  assert.deepEqual(forgetAnchorFor([U('u1', MARK + 10), A({ runId: 'r5' })], 1, MARK), { runId: 'r5' })
+})
+
+test('anchorBody / anchorKey', () => {
+  assert.deepEqual(anchorBody({ uuid: 'a' }), { anchor_uuid: 'a' })
+  assert.deepEqual(anchorBody({ runId: 'b' }), { anchor_run_id: 'b' })
+  assert.notEqual(anchorKey({ uuid: 'x' }), anchorKey({ runId: 'x' }))
 })

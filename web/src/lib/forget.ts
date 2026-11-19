@@ -154,20 +154,26 @@ export function deletedChatSession(
 }
 
 /** Minimal row shape the anchor rule needs (ChatMessage satisfies it). */
-export interface ForgetFeedRow { role: string; uuid?: string; ts?: number; streaming?: boolean }
+export interface ForgetFeedRow {
+  role: string; uuid?: string; ts?: number; streaming?: boolean; runId?: string; bgRun?: boolean
+}
+
+/** What a "Forget from here" request names: a history row's transcript uuid, or the run of a row
+ *  the feed rendered live (it has no uuid until the next history read). */
+export type ForgetAnchor = { uuid: string } | { runId: string }
 
 /** Slack between a turn mark's start and the transcript timestamp of its user row (ms). */
 export const FORGET_MARK_SLACK_MS = 5000
 
-/** "Forget from here" anchor for the assistant group starting at `groupIndex`: the uuid of the
- *  user row that began that turn, or null when the action must not be offered. Offered only
- *  when the group is in the chat's CURRENT session (after the last session_break), finished,
- *  its nearest preceding user row has a uuid, and that row is not older than the session's
- *  earliest turn mark (`forgetFromMs`; null = the server has no marks = never). */
+/** "Forget from here" anchor for the assistant group starting at `groupIndex`, or null when the
+ *  action must not be offered. Only for a settled group of the chat's CURRENT session (no
+ *  session_break after it). A group rendered live names its own run (exact: the server cuts at
+ *  that run's mark). Otherwise the nearest preceding user row: its uuid when it is not older than
+ *  the session's earliest turn mark (`forgetFromMs`; null = the server has no marks), else its run
+ *  if it was rendered live. */
 export function forgetAnchorFor(
   feed: readonly ForgetFeedRow[], groupIndex: number, forgetFromMs: number | null | undefined,
-): string | null {
-  if (forgetFromMs == null || !Number.isFinite(forgetFromMs)) return null
+): ForgetAnchor | null {
   const first = feed[groupIndex]
   if (!first || first.role !== 'assistant') return null
   // The whole assistant run must be settled: a streaming reply cannot be cut under its own run.
@@ -176,14 +182,32 @@ export function forgetAnchorFor(
   }
   // Current session only: no session_break anywhere after this group.
   for (let i = groupIndex + 1; i < feed.length; i++) if (feed[i].role === 'session_break') return null
+  // An autonomous background turn starts inside the CLI, not at a prompt the cockpit sent, so it has
+  // no turn mark: its reply cannot be cut out on its own (and anchoring on the turn before it would
+  // take a turn the operator did not pick).
+  if (first.bgRun) return null
+  if (first.runId) return { runId: first.runId }
   for (let i = groupIndex - 1; i >= 0; i--) {
     const r = feed[i]
     if (r.role === 'session_break') return null
     if (r.role !== 'user') continue
-    if (!r.uuid || r.ts == null || r.streaming) return null
-    return r.ts >= forgetFromMs - FORGET_MARK_SLACK_MS ? r.uuid : null
+    if (r.streaming) return null
+    if (r.uuid && r.ts != null && forgetFromMs != null && Number.isFinite(forgetFromMs)
+        && r.ts >= forgetFromMs - FORGET_MARK_SLACK_MS) return { uuid: r.uuid }
+    if (!r.uuid && r.runId) return { runId: r.runId }
+    return null
   }
   return null
+}
+
+/** The request body fields of an anchor. */
+export function anchorBody(a: ForgetAnchor): { anchor_uuid: string } | { anchor_run_id: string } {
+  return 'uuid' in a ? { anchor_uuid: a.uuid } : { anchor_run_id: a.runId }
+}
+
+/** Stable identity of an anchor (React dependency lists). */
+export function anchorKey(a: ForgetAnchor): string {
+  return 'uuid' in a ? `u:${a.uuid}` : `r:${a.runId}`
 }
 
 /** Composer text after a forget: the restored prompt, then a blank line and the draft if any. */

@@ -512,9 +512,9 @@ export const api = {
   // dry_run -> plan + plan_token; else execute. Failures throw like apiFetch ({error, code}).
   forgetFromHere: (
     id: string, chatId: string,
-    body:
-      | { anchor_uuid: string; dry_run: true }
-      | { anchor_uuid: string; dry_run: false; plan_token: string; also_delete?: { provider: string; session_id: string }[] },
+    body: ({ anchor_uuid: string } | { anchor_run_id: string }) & (
+      | { dry_run: true }
+      | { dry_run: false; plan_token: string; also_delete?: { provider: string; session_id: string }[] }),
   ) =>
     apiFetch<
       | { ok: true; plan_token: string; plan: import('./lib/forget').ForgetTurnPlan }

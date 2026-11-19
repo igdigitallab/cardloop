@@ -833,6 +833,9 @@ export interface ChatMessage {
   bgRun?: boolean
   /** spec-073: transcript uuid (user messages from history) — enables the file-rewind action. */
   uuid?: string
+  /** spec-098 P4: the run a LIVE-rendered row belongs to (its run_start's run_id). A live row has no
+   *  transcript uuid until the next history read; "Forget from here" anchors by this instead. */
+  runId?: string
   /** History messages only: position in the whole feed (HistoryMessage.idx). */
   idx?: number
   /** Scroll-back rows only: the session the row was read from. */

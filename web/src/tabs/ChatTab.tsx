@@ -47,7 +47,8 @@ import {
   PROVIDER_IDS, canForgetTurn, continuityField, isAdapterProvider, providerLabel, providerUnavailableReason, selectableProviders,
 } from '../lib/providers'
 import {
-  chatForgottenAffectsMe, composerAfterForget, deletedChatSession, forgetAnchorFor, forgottenToast, residueMessage,
+  ForgetAnchor, chatForgottenAffectsMe, composerAfterForget, deletedChatSession, forgetAnchorFor, forgottenToast,
+  residueMessage,
 } from '../lib/forget'
 import { ForgetDialog } from '../components/ForgetDialog'
 import { errorTextFromBody, refusalReason } from '../lib/refusal'
@@ -1583,7 +1584,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
   // spec-098 P4: earliest turn-mark start (epoch ms) of the shown session; null = nothing can be
   // forgotten from here. Refreshed by every history window we adopt.
   const [forgetFromMs, setForgetFromMs] = useState<number | null>(null)
-  const [forgetTurn, setForgetTurn] = useState<{ anchorUuid: string } | null>(null)
+  const [forgetTurn, setForgetTurn] = useState<{ anchor: ForgetAnchor } | null>(null)
   const setOlder = useCallback((next: ChatMessage[]) => {
     olderRef.current = next
     setOlderMsgs(next)
@@ -2918,9 +2919,13 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         const isOptimisticOwn = !isBg && tail.length === 2 && tail[0].role === 'user' &&
           tail[0].text === evt.prompt && tail[1].role === 'assistant' &&
           (!!tail[1].streaming || tail[1].id === ownPlaceholderIdRef.current)
+        // spec-098 P4: the rows learn their run (a live row has no transcript uuid to anchor
+        // "Forget from here" on until the next history read).
+        const rid = typeof evt.run_id === 'string' && evt.run_id ? evt.run_id : undefined
         if (isOptimisticOwn) {
           ownPlaceholderIdRef.current = null
-          return prev
+          if (!rid) return prev
+          return [...prev.slice(0, -2), { ...tail[0], runId: rid }, { ...tail[1], runId: rid }]
         }
         // spec-088: our own QUEUED message being drained. The queued ack stripped the
         // assistant half and left a lone user bubble marked queued:true, so the shape above
@@ -2930,15 +2935,17 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
         const isOwnQueued = !isBg && !!lone && lone.role === 'user' && !!lone.queued &&
           lone.text === evt.prompt
         if (isOwnQueued) {
-          const assistantMsg: ChatMessage = { ...makeAssistantMsg() }
-          return [...prev.slice(0, -1), { ...lone, queued: false }, assistantMsg]
+          const assistantMsg: ChatMessage = { ...makeAssistantMsg(), ...(rid ? { runId: rid } : {}) }
+          return [...prev.slice(0, -1), { ...lone, queued: false, ...(rid ? { runId: rid } : {}) }, assistantMsg]
         }
         // Foreign/background run: heal any dangling open bubble, then open the new turn.
         const fin = finalizeStreaming(prev)
-        const assistantMsg: ChatMessage = { ...makeAssistantMsg(), ...(isBg ? { bgRun: true } : {}) }
+        const assistantMsg: ChatMessage = {
+          ...makeAssistantMsg(), ...(isBg ? { bgRun: true } : {}), ...(rid ? { runId: rid } : {}),
+        }
         if (hideUserBubble) return [...fin, assistantMsg]  // 🌙 no user-visible prompt to show
         const prefix = evt.source === 'card' ? '🗂 card: ' : evt.source === 'tg' ? '📱 TG: ' : ''
-        return [...fin, makeUserMsg(prefix + evt.prompt), assistantMsg]
+        return [...fin, { ...makeUserMsg(prefix + evt.prompt), ...(rid ? { runId: rid } : {}) }, assistantMsg]
       })
       setRun({ startedAt: now, lastEventAt: now, currentTool: null, source: isBg ? 'bg' : 'card' })
 
@@ -5004,7 +5011,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
                           <button
                             className="msg-act-btn msg-act-btn--danger"
                             data-testid="forget-from-here"
-                            onClick={() => setForgetTurn({ anchorUuid: forgetAnchor })}
+                            onClick={() => setForgetTurn({ anchor: forgetAnchor })}
                             title="Forget from here: delete this turn and everything after it"
                             aria-label="Forget from here"
                           >
@@ -6103,7 +6110,7 @@ export function ChatTab({ project, onProjectsReload, isActive, collapsed, onTogg
           projectId={project.id}
           provider={activeProvider}
           sessionId={activeSessionIdRef.current ?? ''}
-          turn={{ chatId: effectiveChatId, anchorUuid: forgetTurn.anchorUuid }}
+          turn={{ chatId: effectiveChatId, anchor: forgetTurn.anchor }}
           onClose={() => setForgetTurn(null)}
           onForgotten={res => {
             setForgetTurn(null)
